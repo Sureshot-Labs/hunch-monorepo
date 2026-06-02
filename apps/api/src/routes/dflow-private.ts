@@ -43,6 +43,9 @@ import {
   computeEmbeddedSolanaTransactionDigest,
   createEmbeddedSolanaSponsorshipIntent,
   readEmbeddedSolanaSponsorshipIntent,
+  reserveEmbeddedSolanaSponsorshipBudget,
+  type EmbeddedSolanaSponsorshipLimits,
+  type EmbeddedSolanaSponsorshipMode,
 } from "../services/embedded-solana-sponsorship.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import {
@@ -116,6 +119,9 @@ type DflowSponsorConfig = {
   enabled: boolean;
   sponsorKeypair: Keypair | null;
   sponsorAddress: string | null;
+  sponsorshipMode: EmbeddedSolanaSponsorshipMode;
+  sponsorshipLimits: EmbeddedSolanaSponsorshipLimits;
+  decision: DflowSponsorshipDecision;
 };
 
 type DflowSponsoredValidationResult = {
@@ -124,6 +130,59 @@ type DflowSponsoredValidationResult = {
   estimatedSponsorLamports: bigint;
   systemCreateLamports: bigint;
 };
+
+type DflowSponsorshipDecision = {
+  policyAllows: boolean;
+  actualSponsorAllowed: boolean;
+  reasons: string[];
+};
+
+type DflowOrderQueryParams = {
+  inputMint: string;
+  outputMint: string;
+  amount: string;
+  slippageBps?: number;
+  platformFeeBps?: number;
+  platformFeeScale?: number;
+  platformFeeMode?: "inputMint" | "outputMint";
+  feeAccount?: string;
+};
+
+type DflowOrderRequestResult =
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; payload: unknown };
+
+type DflowOrderRequester = (inputs: {
+  sponsored: boolean;
+  query: Record<string, string | number | boolean | undefined>;
+}) => Promise<DflowOrderRequestResult>;
+
+type DflowSponsorshipOrderLogger = {
+  warn: (obj: unknown, msg: string) => void;
+};
+
+type DflowSponsoredOrderFallbackReason =
+  | "missing_transaction"
+  | "blockhash_refresh_failed"
+  | "validation_failed"
+  | "budget_failed"
+  | "intent_create_failed"
+  | "sponsorship_error";
+
+type DflowSponsoredOrderFinalizeResult =
+  | { ok: true; payload: unknown; sponsored: true }
+  | {
+      ok: true;
+      payload: unknown;
+      sponsored: false;
+      fallbackReason: DflowSponsoredOrderFallbackReason;
+    }
+  | {
+      ok: false;
+      status: number;
+      payload: unknown;
+      fallbackReason: DflowSponsoredOrderFallbackReason;
+    };
 
 function isSolanaWallet(address: string): boolean {
   return !address.startsWith("0x");
@@ -170,13 +229,49 @@ function resolveDflowSponsorKeypair(): Keypair | null {
   return keypair;
 }
 
+export function resolveDflowActualSponsorshipDecision(inputs: {
+  embeddedSolanaSponsorship: boolean;
+  dflowFlowEnabled: boolean;
+  mode: EmbeddedSolanaSponsorshipMode;
+  observeCanSponsor: boolean;
+}): DflowSponsorshipDecision {
+  const reasons: string[] = [];
+  if (!inputs.embeddedSolanaSponsorship) reasons.push("sponsorship_disabled");
+  if (!inputs.dflowFlowEnabled) reasons.push("flow_dflow_disabled");
+  if (inputs.mode === "observe" && !inputs.observeCanSponsor) {
+    reasons.push("observe_mode_log_only");
+  }
+  const policyAllows =
+    inputs.embeddedSolanaSponsorship === true &&
+    inputs.dflowFlowEnabled === true;
+  return {
+    policyAllows,
+    actualSponsorAllowed:
+      policyAllows &&
+      (inputs.mode === "enforce" || inputs.observeCanSponsor === true),
+    reasons,
+  };
+}
+
 async function resolveDflowSponsorConfig(): Promise<DflowSponsorConfig> {
   const policy = await resolveAuthAccessPolicy(pool);
-  const enabled =
-    policy.effective.embeddedSolanaSponsorship === true &&
-    policy.effective.embeddedSolanaSponsorshipFlows.dflow === true;
-  if (!enabled) {
-    return { enabled: false, sponsorKeypair: null, sponsorAddress: null };
+  const decision = resolveDflowActualSponsorshipDecision({
+    embeddedSolanaSponsorship:
+      policy.effective.embeddedSolanaSponsorship === true,
+    dflowFlowEnabled:
+      policy.effective.embeddedSolanaSponsorshipFlows.dflow === true,
+    mode: policy.effective.embeddedSolanaSponsorshipMode,
+    observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+  });
+  if (!decision.actualSponsorAllowed) {
+    return {
+      enabled: false,
+      sponsorKeypair: null,
+      sponsorAddress: null,
+      sponsorshipMode: policy.effective.embeddedSolanaSponsorshipMode,
+      sponsorshipLimits: policy.effective.embeddedSolanaSponsorshipLimits,
+      decision,
+    };
   }
 
   const sponsorKeypair = resolveDflowSponsorKeypair();
@@ -187,6 +282,9 @@ async function resolveDflowSponsorConfig(): Promise<DflowSponsorConfig> {
     enabled: true,
     sponsorKeypair,
     sponsorAddress: sponsorKeypair.publicKey.toBase58(),
+    sponsorshipMode: policy.effective.embeddedSolanaSponsorshipMode,
+    sponsorshipLimits: policy.effective.embeddedSolanaSponsorshipLimits,
+    decision,
   };
 }
 
@@ -264,6 +362,350 @@ function getDflowSponsoredFeeParams(inputs: {
   return { platformFeeBps: feeBps, platformFeeMode, feeAccount };
 }
 
+function getDflowUserFundedFeeParams(
+  query: DflowOrderQueryParams,
+): Record<string, string | number> {
+  return {
+    ...(query.platformFeeBps != null
+      ? { platformFeeBps: query.platformFeeBps }
+      : {}),
+    ...(query.platformFeeScale != null
+      ? { platformFeeScale: query.platformFeeScale }
+      : {}),
+    ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
+    ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
+  };
+}
+
+export function buildDflowOrderRequestQuery(inputs: {
+  query: DflowOrderQueryParams;
+  userPublicKey: string;
+  sponsored: boolean;
+  sponsorAddress?: string | null;
+}): Record<string, string | number | boolean | undefined> {
+  const query = inputs.query;
+  const sponsorAddress = inputs.sponsorAddress?.trim() || null;
+  return {
+    inputMint: query.inputMint,
+    outputMint: query.outputMint,
+    amount: query.amount,
+    userPublicKey: inputs.userPublicKey,
+    ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
+    ...(inputs.sponsored
+      ? getDflowSponsoredFeeParams({
+          inputMint: query.inputMint,
+          outputMint: query.outputMint,
+        })
+      : getDflowUserFundedFeeParams(query)),
+    ...(inputs.sponsored && sponsorAddress
+      ? {
+          sponsor: sponsorAddress,
+          outcomeAccountRentRecipient: sponsorAddress,
+          ...(query.outputMint !== env.solanaUsdcMint
+            ? { outputCloseAuthority: sponsorAddress }
+            : {}),
+        }
+      : {}),
+  };
+}
+
+async function requestDflowOrder(inputs: {
+  query: DflowOrderQueryParams;
+  userPublicKey: string;
+  sponsored: boolean;
+  sponsorAddress?: string | null;
+  requester?: DflowOrderRequester;
+}): Promise<DflowOrderRequestResult> {
+  const orderQuery = buildDflowOrderRequestQuery({
+    query: inputs.query,
+    userPublicKey: inputs.userPublicKey,
+    sponsored: inputs.sponsored,
+    sponsorAddress: inputs.sponsorAddress,
+  });
+  if (inputs.requester) {
+    return inputs.requester({ sponsored: inputs.sponsored, query: orderQuery });
+  }
+  return dflowRequest({
+    baseUrl: env.dflowQuoteBase,
+    timeoutMs: 15_000,
+    method: "GET",
+    requestPath: "/order",
+    apiKey: env.dflowApiKey,
+    query: orderQuery,
+  });
+}
+
+function stripDflowSponsorshipFields(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  const record = { ...(payload as Record<string, unknown>) };
+  delete record.hunchSponsorshipIntentId;
+  delete record.hunchSponsoredDflow;
+  delete record.hunchSponsorAddress;
+  return record;
+}
+
+async function fallbackToUserFundedDflowOrder(inputs: {
+  query: DflowOrderQueryParams;
+  userPublicKey: string;
+  reason: DflowSponsoredOrderFallbackReason;
+  requester: DflowOrderRequester;
+}): Promise<DflowSponsoredOrderFinalizeResult> {
+  const fallback = await requestDflowOrder({
+    query: inputs.query,
+    userPublicKey: inputs.userPublicKey,
+    sponsored: false,
+    requester: inputs.requester,
+  });
+  return fallback.ok
+    ? {
+        ok: true,
+        payload: stripDflowSponsorshipFields(fallback.payload),
+        sponsored: false,
+        fallbackReason: inputs.reason,
+      }
+    : {
+        ok: false,
+        status: fallback.status,
+        payload: fallback.payload,
+        fallbackReason: inputs.reason,
+      };
+}
+
+export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
+  payload: unknown;
+  query: DflowOrderQueryParams;
+  userId: string;
+  walletAddress: string;
+  userPublicKey: string;
+  sponsorAddress: string;
+  sponsorshipMarketState: DflowSponsorshipMarketState;
+  sponsorshipLimits: EmbeddedSolanaSponsorshipLimits;
+  sponsorshipMode: EmbeddedSolanaSponsorshipMode;
+  requester: DflowOrderRequester;
+  logger: DflowSponsorshipOrderLogger;
+  refreshTransaction?: (transaction: string) => Promise<string>;
+  computeMessageDigest?: (transaction: string) => string | null;
+  analyzeTransaction?: typeof analyzeEmbeddedSolanaTransaction;
+  validateSponsoredAnalysis?: typeof validateDflowSponsoredAnalysis;
+  reserveBudget?: typeof reserveEmbeddedSolanaSponsorshipBudget;
+  createIntent?: typeof createEmbeddedSolanaSponsorshipIntent;
+  upsertLedger?: typeof upsertSolanaSponsorshipLedger;
+  now?: () => Date;
+}): Promise<DflowSponsoredOrderFinalizeResult> {
+  const payloadRecord =
+    inputs.payload &&
+    typeof inputs.payload === "object" &&
+    !Array.isArray(inputs.payload)
+      ? ({ ...(inputs.payload as Record<string, unknown>) } as Record<
+          string,
+          unknown
+        >)
+      : null;
+  const transactionKey = payloadRecord
+    ? (["transaction", "swapTransaction", "swap_transaction"].find(
+        (key) => typeof payloadRecord[key] === "string",
+      ) ?? null)
+    : null;
+  let transaction = transactionKey ? String(payloadRecord?.[transactionKey]) : null;
+  if (!payloadRecord || !transaction) {
+    return fallbackToUserFundedDflowOrder({
+      query: inputs.query,
+      userPublicKey: inputs.userPublicKey,
+      reason: "missing_transaction",
+      requester: inputs.requester,
+    });
+  }
+
+  try {
+    transaction = await (inputs.refreshTransaction ??
+      refreshUnsignedSolanaTransactionBlockhash)(transaction);
+    payloadRecord[transactionKey ?? "transaction"] = transaction;
+  } catch (error) {
+    inputs.logger.warn(
+      { error, userId: inputs.userId, walletAddress: inputs.walletAddress },
+      "DFlow sponsored order blockhash refresh failed",
+    );
+    return fallbackToUserFundedDflowOrder({
+      query: inputs.query,
+      userPublicKey: inputs.userPublicKey,
+      reason: "blockhash_refresh_failed",
+      requester: inputs.requester,
+    });
+  }
+
+  try {
+    const maxSystemCreateLamports =
+      extractNonNegativeLamportsFromRecord(payloadRecord, [
+        "initPredictionMarketCost",
+        "init_prediction_market_cost",
+        "initPredictionMarketCostLamports",
+      ]) ?? "0";
+    const messageDigest = (inputs.computeMessageDigest ??
+      computeEmbeddedSolanaMessageDigest)(transaction);
+    const expectedAtaCreateCount =
+      inputs.query.outputMint !== env.solanaUsdcMint ? 1 : 0;
+    const expectedDflowOutcomeRentLamports =
+      expectedAtaCreateCount > 0
+        ? DFLOW_SPONSORED_ATA_RENT_LAMPORTS.toString()
+        : "0";
+    const sponsorshipMetadata = {
+      inputMint: inputs.query.inputMint,
+      outputMint: inputs.query.outputMint,
+      amount: inputs.query.amount,
+      marketIds: inputs.sponsorshipMarketState.marketIds,
+      marketInitialized: true,
+      maxSystemCreateLamports: "0",
+      allowAtaCreation: expectedAtaCreateCount > 0,
+      maxAtaCreateCount: expectedAtaCreateCount,
+      expectedDflowOutcomeRentLamports,
+      messageDigest,
+      sponsorAddress: inputs.sponsorAddress,
+      hunchSponsoredDflow: true,
+    };
+    const analysis = (inputs.analyzeTransaction ??
+      analyzeEmbeddedSolanaTransaction)({
+      signer: inputs.userPublicKey,
+      transaction,
+      includeRaw: false,
+    });
+    const validation =
+      messageDigest != null
+        ? (inputs.validateSponsoredAnalysis ?? validateDflowSponsoredAnalysis)({
+            analysis,
+            userWalletAddress: inputs.userPublicKey,
+            sponsorAddress: inputs.sponsorAddress,
+            metadata: sponsorshipMetadata,
+            requireUserSignatureSlot: true,
+          })
+        : null;
+    if (
+      inputs.sponsorshipMarketState.marketInitialized !== true ||
+      !messageDigest ||
+      maxSystemCreateLamports !== "0" ||
+      validation?.valid !== true
+    ) {
+      inputs.logger.warn(
+        {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          validationReasons: validation?.reasons ?? [],
+          maxSystemCreateLamports,
+        },
+        "DFlow order response was not eligible for sponsorship",
+      );
+      return fallbackToUserFundedDflowOrder({
+        query: inputs.query,
+        userPublicKey: inputs.userPublicKey,
+        reason: "validation_failed",
+        requester: inputs.requester,
+      });
+    }
+
+    const budget = await (inputs.reserveBudget ??
+      reserveEmbeddedSolanaSponsorshipBudget)({
+      flow: "dflow",
+      walletAddress: inputs.userPublicKey,
+      estimatedLamports: validation.estimatedSponsorLamports.toString(),
+      limits: inputs.sponsorshipLimits,
+      requireRedis: inputs.sponsorshipMode === "enforce",
+    });
+    if (!budget.ok) {
+      inputs.logger.warn(
+        {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          reasons: budget.reasons,
+        },
+        "DFlow sponsorship budget reservation failed",
+      );
+      return fallbackToUserFundedDflowOrder({
+        query: inputs.query,
+        userPublicKey: inputs.userPublicKey,
+        reason: "budget_failed",
+        requester: inputs.requester,
+      });
+    }
+
+    const intent = await (inputs.createIntent ??
+      createEmbeddedSolanaSponsorshipIntent)({
+      flow: "dflow",
+      userId: inputs.userId,
+      signer: inputs.userPublicKey,
+      transaction,
+      metadata: {
+        ...sponsorshipMetadata,
+        budgetReserved: true,
+        budgetEstimatedLamports: validation.estimatedSponsorLamports.toString(),
+        budgetReservedAt: (inputs.now ?? (() => new Date()))().toISOString(),
+      },
+    });
+    if (!intent) {
+      inputs.logger.warn(
+        { userId: inputs.userId, walletAddress: inputs.walletAddress },
+        "DFlow sponsorship intent creation failed",
+      );
+      return fallbackToUserFundedDflowOrder({
+        query: inputs.query,
+        userPublicKey: inputs.userPublicKey,
+        reason: "intent_create_failed",
+        requester: inputs.requester,
+      });
+    }
+
+    payloadRecord.hunchSponsorshipIntentId = intent.id;
+    payloadRecord.hunchSponsoredDflow = true;
+    payloadRecord.hunchSponsorAddress = inputs.sponsorAddress;
+
+    const estimatedNonFeeLamports =
+      validation.estimatedSponsorLamports > SOLANA_TX_FEE_LAMPORTS
+        ? validation.estimatedSponsorLamports - SOLANA_TX_FEE_LAMPORTS
+        : BigInt(0);
+    await (inputs.upsertLedger ?? upsertSolanaSponsorshipLedger)({
+      userId: inputs.userId,
+      walletAddress: inputs.walletAddress,
+      sponsorAddress: inputs.sponsorAddress,
+      intentId: intent.id,
+      status: "intent_created",
+      inputMint: inputs.query.inputMint,
+      outputMint: inputs.query.outputMint,
+      amountRaw: inputs.query.amount,
+      marketId: inputs.sponsorshipMarketState.marketIds[0] ?? null,
+      messageDigest,
+      transactionDigest: intent.transactionDigest,
+      estimatedSponsorLamports: validation.estimatedSponsorLamports.toString(),
+      rentLamports:
+        estimatedNonFeeLamports > BigInt(0)
+          ? estimatedNonFeeLamports.toString()
+          : null,
+      rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+      metadata: {
+        marketIds: inputs.sponsorshipMarketState.marketIds,
+        maxSystemCreateLamports: "0",
+        maxAtaCreateCount: expectedAtaCreateCount,
+        expectedDflowOutcomeRentLamports,
+        budgetReserved: true,
+        budgetEstimatedLamports: validation.estimatedSponsorLamports.toString(),
+        blockhashRefreshed: true,
+      },
+    });
+
+    return { ok: true, payload: payloadRecord, sponsored: true };
+  } catch (error) {
+    inputs.logger.warn(
+      { error, userId: inputs.userId, walletAddress: inputs.walletAddress },
+      "Failed to create DFlow Solana sponsorship intent",
+    );
+    return fallbackToUserFundedDflowOrder({
+      query: inputs.query,
+      userPublicKey: inputs.userPublicKey,
+      reason: "sponsorship_error",
+      requester: inputs.requester,
+    });
+  }
+}
+
 function validateDflowSponsoredAnalysis(inputs: {
   analysis: ReturnType<typeof analyzeEmbeddedSolanaTransaction>;
   userWalletAddress: string;
@@ -279,8 +721,14 @@ function validateDflowSponsoredAnalysis(inputs: {
   const maxSponsorLamports = getMaxSponsorLamports();
   const ataRentLamports =
     BigInt(analysis.ataCreateCount) * DFLOW_SPONSORED_ATA_RENT_LAMPORTS;
+  const expectedDflowOutcomeRentLamports =
+    getIntentMetadataBigInt(inputs.metadata, "expectedDflowOutcomeRentLamports") ??
+    BigInt(0);
   const estimatedSponsorLamports =
-    SOLANA_TX_FEE_LAMPORTS + systemCreateLamports + ataRentLamports;
+    SOLANA_TX_FEE_LAMPORTS +
+    systemCreateLamports +
+    ataRentLamports +
+    expectedDflowOutcomeRentLamports;
 
   if (!analysis.ok) reasons.push("malformed_transaction");
   if (analysis.usesAddressLookupTables) reasons.push("address_lookup_tables");
@@ -546,6 +994,9 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       "Market is not initialized for gasless DFlow trading yet.",
     );
   }
+  if (getIntentMetadataBoolean(intent.metadata, "budgetReserved") !== true) {
+    throw new Error("DFlow sponsorship budget was not reserved");
+  }
 
   const sponsorKeypair = sponsorConfig.sponsorKeypair;
   const sponsorAddress = sponsorKeypair.publicKey.toBase58();
@@ -613,9 +1064,12 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     typeof intent.metadata.marketIds[0] === "string"
       ? intent.metadata.marketIds[0]
       : null;
-  const systemCreateLamports = validation.systemCreateLamports;
   const estimatedSponsorLamports =
     validation.estimatedSponsorLamports.toString();
+  const estimatedNonFeeLamports =
+    validation.estimatedSponsorLamports > SOLANA_TX_FEE_LAMPORTS
+      ? validation.estimatedSponsorLamports - SOLANA_TX_FEE_LAMPORTS
+      : BigInt(0);
 
   await upsertSolanaSponsorshipLedger({
     userId: inputs.userId,
@@ -631,8 +1085,10 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     transactionDigest,
     estimatedSponsorLamports,
     rentLamports:
-      systemCreateLamports > BigInt(0) ? systemCreateLamports.toString() : null,
-    rentStatus: systemCreateLamports > BigInt(0) ? "locked" : "unknown",
+      estimatedNonFeeLamports > BigInt(0)
+        ? estimatedNonFeeLamports.toString()
+        : null,
+    rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
     metadata: {
       signerAddresses,
       programIds: analysis.programIds,
@@ -672,8 +1128,8 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       ),
       estimatedSponsorLamports,
       rentLamports:
-        systemCreateLamports > BigInt(0)
-          ? systemCreateLamports.toString()
+        estimatedNonFeeLamports > BigInt(0)
+          ? estimatedNonFeeLamports.toString()
           : null,
       rentStatus: "unknown",
       error: error instanceof Error ? error.message : String(error),
@@ -698,8 +1154,10 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     txSignature: signature,
     estimatedSponsorLamports,
     rentLamports:
-      systemCreateLamports > BigInt(0) ? systemCreateLamports.toString() : null,
-    rentStatus: systemCreateLamports > BigInt(0) ? "locked" : "unknown",
+      estimatedNonFeeLamports > BigInt(0)
+        ? estimatedNonFeeLamports.toString()
+        : null,
+    rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
     metadata: { submittedAt: new Date().toISOString() },
   });
 
@@ -1365,15 +1823,35 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       let sponsorshipMarketState: DflowSponsorshipMarketState | null = null;
       let dflowSponsoredOrder = false;
       let dflowSponsorAddress: string | null = null;
+      let dflowSponsorshipConfig: DflowSponsorConfig | null = null;
       try {
         sponsorshipMarketState = await resolveDflowSponsorshipMarketState(
           query.inputMint,
           query.outputMint,
         );
         const sponsorshipConfig = await resolveDflowSponsorConfig();
+        dflowSponsorshipConfig = sponsorshipConfig;
         dflowSponsoredOrder =
           sponsorshipConfig.enabled &&
           sponsorshipMarketState?.marketInitialized === true;
+        if (
+          !dflowSponsoredOrder &&
+          sponsorshipConfig.decision.policyAllows &&
+          sponsorshipConfig.sponsorshipMode === "observe" &&
+          !env.embeddedSolanaSponsorshipObserveCanSponsor &&
+          sponsorshipMarketState?.marketInitialized === true
+        ) {
+          app.log.info(
+            {
+              userId: user.id,
+              walletAddress,
+              inputMint: query.inputMint,
+              outputMint: query.outputMint,
+              reasons: sponsorshipConfig.decision.reasons,
+            },
+            "DFlow sponsorship observe candidate",
+          );
+        }
         dflowSponsorAddress = dflowSponsoredOrder
           ? sponsorshipConfig.sponsorAddress
           : null;
@@ -1386,53 +1864,26 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "DFlow sponsorship is misconfigured" });
       }
 
-      const feeParams = dflowSponsoredOrder
-        ? getDflowSponsoredFeeParams({
-            inputMint: query.inputMint,
-            outputMint: query.outputMint,
-          })
-        : {
-            ...(query.platformFeeBps != null
-              ? { platformFeeBps: query.platformFeeBps }
-              : {}),
-            ...(query.platformFeeScale != null
-              ? { platformFeeScale: query.platformFeeScale }
-              : {}),
-            ...(query.platformFeeMode
-              ? { platformFeeMode: query.platformFeeMode }
-              : {}),
-            ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
-          };
+      const orderQuery: DflowOrderQueryParams = {
+        inputMint: query.inputMint,
+        outputMint: query.outputMint,
+        amount: query.amount,
+        ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
+        ...(query.platformFeeBps != null
+          ? { platformFeeBps: query.platformFeeBps }
+          : {}),
+        ...(query.platformFeeScale != null
+          ? { platformFeeScale: query.platformFeeScale }
+          : {}),
+        ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
+        ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
+      };
 
-      const upstream = await dflowRequest({
-        baseUrl: env.dflowQuoteBase,
-        timeoutMs: 15_000,
-        method: "GET",
-        requestPath: "/order",
-        apiKey: env.dflowApiKey,
-        query: {
-          inputMint: query.inputMint,
-          outputMint: query.outputMint,
-          amount: query.amount,
-          userPublicKey,
-          ...(query.slippageBps != null
-            ? { slippageBps: query.slippageBps }
-            : {}),
-          ...feeParams,
-          ...(dflowSponsoredOrder && dflowSponsorAddress
-            ? {
-                sponsor: dflowSponsorAddress,
-                outcomeAccountRentRecipient: dflowSponsorAddress,
-                ...(query.outputMint !== env.solanaUsdcMint
-                  ? { outputCloseAuthority: dflowSponsorAddress }
-                  : {}),
-              }
-            : {}),
-        },
-      });
-
-      if (!upstream.ok) {
-        if (isDflowRouteNotFound(upstream.payload)) {
+      const sendDflowOrderFailure = (failed: {
+        status: number;
+        payload: unknown;
+      }) => {
+        if (isDflowRouteNotFound(failed.payload)) {
           void markDflowRouteUnavailable([
             query.inputMint,
             query.outputMint,
@@ -1440,150 +1891,55 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
           );
         }
-        const userMessage = formatDflowUserMessage(upstream.payload);
+        const userMessage = formatDflowUserMessage(failed.payload);
         reply.code(502);
         return reply.send({
           error: userMessage ?? "DFlow order failed",
-          status: upstream.status,
-          message: extractDflowErrorMessage(upstream.payload),
-          payload: upstream.payload,
+          status: failed.status,
+          message: extractDflowErrorMessage(failed.payload),
+          payload: failed.payload,
         });
+      };
+
+      const requestOrder: DflowOrderRequester = ({ sponsored }) =>
+        requestDflowOrder({
+          query: orderQuery,
+          userPublicKey,
+          sponsored,
+          sponsorAddress: dflowSponsorAddress,
+        });
+
+      const upstream = await requestOrder({ sponsored: dflowSponsoredOrder, query: {} });
+      if (!upstream.ok) {
+        return sendDflowOrderFailure(upstream);
       }
 
-      const payloadRecord =
-        upstream.payload &&
-        typeof upstream.payload === "object" &&
-        !Array.isArray(upstream.payload)
-          ? ({ ...(upstream.payload as Record<string, unknown>) } as Record<
-              string,
-              unknown
-            >)
-          : null;
-      if (payloadRecord) {
-        const transactionKey = [
-          "transaction",
-          "swapTransaction",
-          "swap_transaction",
-        ].find((key) => typeof payloadRecord[key] === "string");
-        let transaction = transactionKey
-          ? String(payloadRecord[transactionKey])
-          : null;
-        if (transaction) {
-          try {
-            if (dflowSponsoredOrder && dflowSponsorAddress) {
-              transaction =
-                await refreshUnsignedSolanaTransactionBlockhash(transaction);
-              payloadRecord[transactionKey ?? "transaction"] = transaction;
-            }
-            const maxSystemCreateLamports =
-              extractNonNegativeLamportsFromRecord(payloadRecord, [
-                "initPredictionMarketCost",
-                "init_prediction_market_cost",
-                "initPredictionMarketCostLamports",
-              ]) ?? "0";
-            const messageDigest =
-              computeEmbeddedSolanaMessageDigest(transaction);
-            const expectedAtaCreateCount =
-              query.outputMint !== env.solanaUsdcMint ? 1 : 0;
-            const sponsorshipMetadata = {
-              inputMint: query.inputMint,
-              outputMint: query.outputMint,
-              amount: query.amount,
-              marketIds: sponsorshipMarketState?.marketIds ?? [],
-              marketInitialized: true,
-              maxSystemCreateLamports: "0",
-              allowAtaCreation: expectedAtaCreateCount > 0,
-              maxAtaCreateCount: expectedAtaCreateCount,
-              messageDigest,
-              sponsorAddress: dflowSponsorAddress,
-              hunchSponsoredDflow: true,
-            };
-            const analysis = analyzeEmbeddedSolanaTransaction({
-              signer: userPublicKey,
-              transaction,
-              includeRaw: false,
-            });
-            const validation =
-              dflowSponsorAddress && messageDigest
-                ? validateDflowSponsoredAnalysis({
-                    analysis,
-                    userWalletAddress: userPublicKey,
-                    sponsorAddress: dflowSponsorAddress,
-                    metadata: sponsorshipMetadata,
-                    requireUserSignatureSlot: true,
-                  })
-                : null;
-            if (
-              dflowSponsoredOrder &&
-              dflowSponsorAddress &&
-              sponsorshipMarketState?.marketInitialized === true &&
-              messageDigest &&
-              maxSystemCreateLamports === "0" &&
-              validation?.valid === true
-            ) {
-              const intent = await createEmbeddedSolanaSponsorshipIntent({
-                flow: "dflow",
-                userId: user.id,
-                signer: userPublicKey,
-                transaction,
-                metadata: sponsorshipMetadata,
-              });
-              if (intent) {
-                payloadRecord.hunchSponsorshipIntentId = intent.id;
-                payloadRecord.hunchSponsoredDflow = true;
-                payloadRecord.hunchSponsorAddress = dflowSponsorAddress;
-                await upsertSolanaSponsorshipLedger({
-                  userId: user.id,
-                  walletAddress,
-                  sponsorAddress: dflowSponsorAddress,
-                  intentId: intent.id,
-                  status: "intent_created",
-                  inputMint: query.inputMint,
-                  outputMint: query.outputMint,
-                  amountRaw: query.amount,
-                  marketId: sponsorshipMarketState.marketIds[0] ?? null,
-                  messageDigest,
-                  transactionDigest: intent.transactionDigest,
-                  estimatedSponsorLamports:
-                    validation.estimatedSponsorLamports.toString(),
-                  rentLamports:
-                    validation.systemCreateLamports > BigInt(0)
-                      ? validation.systemCreateLamports.toString()
-                      : null,
-                  rentStatus:
-                    validation.systemCreateLamports > BigInt(0)
-                      ? "locked"
-                      : "unknown",
-                  metadata: {
-                    marketIds: sponsorshipMarketState.marketIds,
-                    maxSystemCreateLamports: "0",
-                    maxAtaCreateCount: expectedAtaCreateCount,
-                    blockhashRefreshed: true,
-                  },
-                });
-              }
-            } else if (dflowSponsoredOrder) {
-              app.log.warn(
-                {
-                  userId: user.id,
-                  walletAddress,
-                  validationReasons: validation?.reasons ?? [],
-                  maxSystemCreateLamports,
-                },
-                "DFlow order response was not eligible for sponsorship",
-              );
-            }
-          } catch (error) {
-            app.log.warn(
-              { error, userId: user.id, walletAddress },
-              "Failed to create DFlow Solana sponsorship intent",
-            );
-          }
+      if (dflowSponsoredOrder && dflowSponsorAddress && dflowSponsorshipConfig) {
+        const finalized = await finalizeDflowSponsoredOrderOrFallback({
+          payload: upstream.payload,
+          query: orderQuery,
+          userId: user.id,
+          walletAddress,
+          userPublicKey,
+          sponsorAddress: dflowSponsorAddress,
+          sponsorshipMarketState: sponsorshipMarketState ?? {
+            marketIds: [],
+            marketInitialized: false,
+          },
+          sponsorshipLimits: dflowSponsorshipConfig.sponsorshipLimits,
+          sponsorshipMode: dflowSponsorshipConfig.sponsorshipMode,
+          requester: requestOrder,
+          logger: app.log,
+        });
+        if (!finalized.ok) {
+          return sendDflowOrderFailure(finalized);
         }
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(finalized.payload);
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(payloadRecord ?? upstream.payload);
+      return reply.send(upstream.payload);
     },
   );
 

@@ -72,13 +72,13 @@ export async function upsertSolanaSponsorshipLedger(inputs: {
         status = case
           when coalesce(
             array_position(
-              array['created', 'intent_created', 'user_signed', 'failed', 'submitted', 'confirmed'],
+              array['created', 'intent_created', 'user_signed', 'submitted', 'failed', 'confirmed'],
               excluded.status
             ),
             0
           ) >= coalesce(
             array_position(
-              array['created', 'intent_created', 'user_signed', 'failed', 'submitted', 'confirmed'],
+              array['created', 'intent_created', 'user_signed', 'submitted', 'failed', 'confirmed'],
               solana_sponsorship_ledger.status
             ),
             0
@@ -99,7 +99,7 @@ export async function upsertSolanaSponsorshipLedger(inputs: {
         rent_lamports = coalesce(excluded.rent_lamports, solana_sponsorship_ledger.rent_lamports),
         rent_status = coalesce(excluded.rent_status, solana_sponsorship_ledger.rent_status),
         error = case
-          when solana_sponsorship_ledger.status in ('submitted', 'confirmed')
+          when solana_sponsorship_ledger.status = 'confirmed'
             and excluded.status = 'failed'
             then solana_sponsorship_ledger.error
           else coalesce(excluded.error, solana_sponsorship_ledger.error)

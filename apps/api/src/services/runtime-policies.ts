@@ -44,6 +44,7 @@ export type EmbeddedSolanaSponsorshipFlowLimitPolicy = {
 };
 
 export type EmbeddedSolanaSponsorshipLimitsPolicy = {
+  dflow: EmbeddedSolanaSponsorshipFlowLimitPolicy;
   across: EmbeddedSolanaSponsorshipFlowLimitPolicy;
   directTransfer: EmbeddedSolanaSponsorshipFlowLimitPolicy;
   debridge: EmbeddedSolanaSponsorshipFlowLimitPolicy;
@@ -953,6 +954,7 @@ const embeddedSolanaSponsorshipFlowLimitSchema = z
   .partial();
 const embeddedSolanaSponsorshipLimitsSchema = z
   .object({
+    dflow: embeddedSolanaSponsorshipFlowLimitSchema,
     across: embeddedSolanaSponsorshipFlowLimitSchema,
     directTransfer: embeddedSolanaSponsorshipFlowLimitSchema,
     debridge: embeddedSolanaSponsorshipFlowLimitSchema,
@@ -1136,6 +1138,11 @@ function getDefaults(): IntelPolicyMap {
         debridge: false,
       },
       embeddedSolanaSponsorshipLimits: {
+        dflow: {
+          maxPerHour: 10,
+          maxPerDay: 50,
+          maxLamportsPerWalletPerDay: 10_000_000,
+        },
         across: {
           maxPerHour: 5,
           maxPerDay: 20,
@@ -2231,6 +2238,7 @@ function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
       debridge: Boolean(policy.embeddedSolanaSponsorshipFlows?.debridge),
     },
     embeddedSolanaSponsorshipLimits: {
+      dflow: normalizeLimit("dflow"),
       across: normalizeLimit("across"),
       directTransfer: normalizeLimit("directTransfer"),
       debridge: normalizeLimit("debridge"),

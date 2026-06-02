@@ -50,6 +50,7 @@ export type DflowSponsorRentAccountInfo = {
   lamports: bigint;
   tokenProgramId: string | null;
   tokenOwner: string | null;
+  closeAuthority: string | null;
   tokenAmount: bigint | null;
   mint: string | null;
 };
@@ -190,8 +191,17 @@ function evaluateCandidate(inputs: {
       lamports: bigint;
       tokenProgramId: string;
       mint: string | null;
+      tokenOwner: string | null;
+      closeAuthority: string | null;
     }
-  | { eligible: false; account: string; reason: string; lamports: bigint } {
+  | {
+      eligible: false;
+      account: string;
+      reason: string;
+      lamports: bigint;
+      tokenOwner?: string | null;
+      closeAuthority?: string | null;
+    } {
   if (!inputs.info.exists) {
     return {
       eligible: false,
@@ -206,6 +216,8 @@ function evaluateCandidate(inputs: {
       account: inputs.account,
       reason: "no_lamports",
       lamports: 0n,
+      tokenOwner: inputs.info.tokenOwner,
+      closeAuthority: inputs.info.closeAuthority,
     };
   }
   if (
@@ -217,14 +229,8 @@ function evaluateCandidate(inputs: {
       account: inputs.account,
       reason: "not_token_account",
       lamports: inputs.info.lamports,
-    };
-  }
-  if (inputs.info.tokenOwner !== inputs.sponsorAddress) {
-    return {
-      eligible: false,
-      account: inputs.account,
-      reason: "token_owner_not_sponsor",
-      lamports: inputs.info.lamports,
+      tokenOwner: inputs.info.tokenOwner,
+      closeAuthority: inputs.info.closeAuthority,
     };
   }
   if (inputs.info.tokenAmount !== 0n) {
@@ -233,6 +239,21 @@ function evaluateCandidate(inputs: {
       account: inputs.account,
       reason: "token_balance_not_zero",
       lamports: inputs.info.lamports,
+      tokenOwner: inputs.info.tokenOwner,
+      closeAuthority: inputs.info.closeAuthority,
+    };
+  }
+  if (
+    inputs.info.tokenOwner !== inputs.sponsorAddress &&
+    inputs.info.closeAuthority !== inputs.sponsorAddress
+  ) {
+    return {
+      eligible: false,
+      account: inputs.account,
+      reason: "token_owner_or_close_authority_not_sponsor",
+      lamports: inputs.info.lamports,
+      tokenOwner: inputs.info.tokenOwner,
+      closeAuthority: inputs.info.closeAuthority,
     };
   }
   return {
@@ -241,6 +262,8 @@ function evaluateCandidate(inputs: {
     lamports: inputs.info.lamports,
     tokenProgramId: inputs.info.tokenProgramId,
     mint: inputs.info.mint,
+    tokenOwner: inputs.info.tokenOwner,
+    closeAuthority: inputs.info.closeAuthority,
   };
 }
 
@@ -306,6 +329,7 @@ async function fetchOnchainTokenAccountInfo(
       lamports: 0n,
       tokenProgramId: null,
       tokenOwner: null,
+      closeAuthority: null,
       tokenAmount: null,
       mint: null,
     };
@@ -320,6 +344,7 @@ async function fetchOnchainTokenAccountInfo(
       lamports: BigInt(value.lamports),
       tokenProgramId,
       tokenOwner: null,
+      closeAuthority: null,
       tokenAmount: null,
       mint: null,
     };
@@ -336,6 +361,7 @@ async function fetchOnchainTokenAccountInfo(
     lamports: BigInt(value.lamports),
     tokenProgramId,
     tokenOwner: getString(info?.owner),
+    closeAuthority: getString(info?.closeAuthority),
     tokenAmount: amount,
     mint: getString(info?.mint),
   };
@@ -526,6 +552,8 @@ function rowReclaimMetadata(inputs: {
       tokenProgramId:
         evaluation?.eligible === true ? evaluation.tokenProgramId : null,
       mint: evaluation?.eligible === true ? evaluation.mint : null,
+      tokenOwner: evaluation?.tokenOwner ?? null,
+      closeAuthority: evaluation?.closeAuthority ?? null,
       closeStatus: closeResult?.status ?? previousCloseStatus ?? null,
       closeSignature: closeResult?.signature ?? previousCloseSignature ?? null,
       closeError: closeResult?.error ?? getString(previous?.closeError),

@@ -624,6 +624,8 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     walletAddress: inputs.senderAddress,
     estimatedLamports: validation.analysis.estimatedSponsorLamports,
     limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
+    requireRedis:
+      authAccessPolicy.effective.embeddedSolanaSponsorshipMode === "enforce",
   });
   if (!budget.ok) {
     inputs.logger.warn(
@@ -1947,6 +1949,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                       limits:
                         authAccessPolicy.effective
                           .embeddedSolanaSponsorshipLimits,
+                      requireRedis:
+                        authAccessPolicy.effective
+                          .embeddedSolanaSponsorshipMode === "enforce",
                     })
                   : { ok: false, reasons: validation.reasons };
                 if (validation.ok && budget.ok) {

@@ -63,6 +63,7 @@ function tokenAccountInfo(inputs: {
   lamports?: bigint;
   tokenProgramId?: string | null;
   tokenOwner?: string | null;
+  closeAuthority?: string | null;
   tokenAmount?: bigint | null;
 }): DflowSponsorRentAccountInfo {
   return {
@@ -72,6 +73,8 @@ function tokenAccountInfo(inputs: {
     tokenProgramId:
       inputs.tokenProgramId === undefined ? TOKEN_PROGRAM : inputs.tokenProgramId,
     tokenOwner: inputs.tokenOwner === undefined ? SPONSOR : inputs.tokenOwner,
+    closeAuthority:
+      inputs.closeAuthority === undefined ? null : inputs.closeAuthority,
     tokenAmount: inputs.tokenAmount === undefined ? 0n : inputs.tokenAmount,
     mint: "Mint11111111111111111111111111111111111111",
   };
@@ -84,6 +87,7 @@ function missingAccount(account: string): DflowSponsorRentAccountInfo {
     lamports: 0n,
     tokenProgramId: null,
     tokenOwner: null,
+    closeAuthority: null,
     tokenAmount: null,
     mint: null,
   };
@@ -179,6 +183,58 @@ await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async 
   assert.equal(db.updates.length, 2);
   assert.equal(db.updates[0]?.[2], "returned");
   assert.equal(db.updates[1]?.[2], "returned");
+});
+
+await test("closes empty user-owned token account when sponsor is close authority", async () => {
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000010",
+      metadata: metadata(["closeAuthorityAccount"]),
+    }),
+  ];
+  const db = fakePool(rows);
+  const summary = await reclaimSolanaSponsorshipRentAccounts(
+    db.pool as never,
+    {
+      dryRun: false,
+      limit: 10,
+      minAgeSec: 0,
+      fetchAccount: async (account) =>
+        tokenAccountInfo({
+          account,
+          tokenOwner: "UserOwner",
+          closeAuthority: SPONSOR,
+        }),
+      closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => ({
+        accountResults: new Map(
+          accounts.map((entry) => [
+            entry.account,
+            {
+              status: "closed" as const,
+              signature: "closeByAuthoritySig",
+              reclaimedLamports: entry.lamports,
+            },
+          ]),
+        ),
+        closeTransactions: [
+          {
+            signature: "closeByAuthoritySig",
+            accounts: accounts.map((entry) => entry.account),
+            feeLamports: "5000",
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(summary.closed, 1);
+  assert.equal(summary.reclaimedLamports, "2039280");
+  assert.equal(db.updates[0]?.[2], "returned");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[3]));
+  const candidate = metadataUpdate.sponsorshipRentReclaim.candidates[0];
+  assert.equal(candidate.tokenOwner, "UserOwner");
+  assert.equal(candidate.closeAuthority, SPONSOR);
+  assert.equal(candidate.closeStatus, "closed");
 });
 
 await test("preserves close audit when a later pass sees account already closed", async () => {
@@ -288,7 +344,7 @@ await test("skips non-empty, wrong-owner, missing, and non-token accounts", asyn
     candidates.map((entry: { reason: string | null }) => entry.reason),
     [
       "token_balance_not_zero",
-      "token_owner_not_sponsor",
+      "token_owner_or_close_authority_not_sponsor",
       "account_missing_or_already_closed",
       "not_token_account",
     ],

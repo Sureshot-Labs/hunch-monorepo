@@ -17,6 +17,8 @@ type Logger = {
 
 type SponsorshipLedgerRow = {
   user_id: string;
+  venue: "kalshi" | "bridge" | "wallet";
+  flow: "dflow" | "across" | "directTransfer" | "debridge";
   intent_id: string | null;
   wallet_address: string | null;
   sponsor_address: string | null;
@@ -227,6 +229,8 @@ async function fetchSubmittedSponsorshipRows(
     `
       select
         user_id,
+        venue,
+        flow,
         intent_id,
         wallet_address,
         sponsor_address,
@@ -239,7 +243,7 @@ async function fetchSubmittedSponsorshipRows(
         tx_signature,
         estimated_sponsor_lamports::text as estimated_sponsor_lamports
       from solana_sponsorship_ledger
-      where flow = 'dflow'
+      where flow in ('dflow', 'across', 'directTransfer', 'debridge')
         and status = 'submitted'
         and tx_signature is not null
         and updated_at <= now() - ($1::int * interval '1 second')
@@ -299,6 +303,10 @@ async function reconcileOneSponsorshipRow(
   row: SponsorshipLedgerRow,
   options: ReconcileSolanaSponsorshipOptions,
 ): Promise<{ confirmed: boolean; skipped: boolean }> {
+  if (row.flow !== "dflow") {
+    return reconcileOneGenericSponsorshipRow(row, options);
+  }
+
   const submitSignature = row.tx_signature?.trim();
   const sponsorAddress = row.sponsor_address?.trim();
   const intentId = row.intent_id?.trim();
@@ -361,6 +369,68 @@ async function reconcileOneSponsorshipRow(
   }
 
   return { confirmed: result.complete, skipped: !result.complete };
+}
+
+async function reconcileOneGenericSponsorshipRow(
+  row: SponsorshipLedgerRow,
+  options: ReconcileSolanaSponsorshipOptions,
+): Promise<{ confirmed: boolean; skipped: boolean }> {
+  const signature = row.tx_signature?.trim();
+  const intentId = row.intent_id?.trim();
+  const walletAddress = row.wallet_address?.trim();
+  if (!signature || !intentId || !walletAddress) {
+    return { confirmed: false, skipped: true };
+  }
+
+  const fetchTransaction =
+    options.fetchTransaction ??
+    ((txSignature: string) =>
+      fetchSolanaFinalizedTransactionBalanceDeltas({
+        rpcUrls: env.solanaRpcUrls,
+        timeoutMs: env.solanaRpcTimeoutMs,
+        signature: txSignature,
+      }));
+  const tx = await fetchTransaction(signature);
+  if (!tx) return { confirmed: false, skipped: true };
+
+  const failed = tx.err != null;
+  if (!options.dryRun) {
+    await upsertSolanaSponsorshipLedger({
+      userId: row.user_id,
+      venue: row.venue,
+      flow: row.flow,
+      status: failed ? "failed" : "confirmed",
+      intentId,
+      walletAddress,
+      sponsorAddress: row.sponsor_address,
+      marketId: row.market_id,
+      inputMint: row.input_mint,
+      outputMint: row.output_mint,
+      amountRaw: row.amount_raw,
+      messageDigest: row.message_digest,
+      transactionDigest: row.transaction_digest,
+      txSignature: signature,
+      estimatedSponsorLamports: row.estimated_sponsor_lamports ?? "0",
+      error: failed ? JSON.stringify(tx.err) : null,
+      metadata: {
+        genericSponsorshipReconciliation: {
+          reconciledAt: new Date().toISOString(),
+          signature: tx.signature,
+          slot: tx.slot,
+          blockTime: tx.blockTime,
+          err: tx.err ?? null,
+          feePayer: tx.feePayer,
+          feeLamports: tx.feeLamports.toString(),
+          accountDeltas: tx.accountDeltas.map((entry) => ({
+            account: entry.account,
+            deltaLamports: entry.deltaLamports.toString(),
+          })),
+        },
+      },
+    });
+  }
+
+  return { confirmed: !failed, skipped: false };
 }
 
 export async function reconcileSolanaSponsorshipLedger(

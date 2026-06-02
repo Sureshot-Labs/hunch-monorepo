@@ -52,12 +52,12 @@ assert.match(
 
 assert.match(
   dflowPrivate,
-  /const feeParams = dflowSponsoredOrder[\s\S]*?getDflowSponsoredFeeParams/,
+  /export function buildDflowOrderRequestQuery[\s\S]*?inputs\.sponsored[\s\S]*?getDflowSponsoredFeeParams/,
   "sponsored DFlow orders must use backend-owned fee params",
 );
 assert.match(
   dflowPrivate,
-  /maxSystemCreateLamports === "0"[\s\S]*?validation\?\.valid === true/,
+  /maxSystemCreateLamports !== "0"[\s\S]*?validation\?\.valid !== true/,
   "sponsored DFlow intent creation must reject market-init rent and failed validation",
 );
 
@@ -83,8 +83,28 @@ assert.doesNotMatch(
 
 assert.match(
   bridgeRoute,
-  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?void inputs;\s*return null;/,
-  "deBridge sponsorship intent creation must stay disabled",
+  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?isPositiveIntegerString\(inputs\.payload\.fixFee\)[\s\S]*?isPositiveIntegerString\(inputs\.payload\.protocolFee\)/,
+  "deBridge sponsorship intent creation must reject positive native/provider fees",
+);
+assert.match(
+  bridgeRoute,
+  /embeddedSolanaSponsorshipFlows\.debridge !== true/,
+  "deBridge sponsorship intent creation must require the Access policy flow flag",
+);
+assert.match(
+  bridgeRoute,
+  /const allowedProgramIds = env\.debridgeSolanaAllowedProgramIds;[\s\S]*?if \(!allowedProgramIds\.length\) return null;/,
+  "deBridge sponsorship intent creation must require an explicit program allowlist",
+);
+assert.match(
+  bridgeRoute,
+  /validateEmbeddedSolanaSponsorshipIntentCandidate\(\{[\s\S]*?flow: "debridge"/,
+  "deBridge sponsorship intent creation must use the Solana sponsorship analyzer",
+);
+assert.match(
+  bridgeRoute,
+  /reserveEmbeddedSolanaSponsorshipBudget\(\{[\s\S]*?flow: "debridge"/,
+  "deBridge sponsorship intent creation must reserve budget before creating an intent",
 );
 
 console.log("[dflow-sponsorship-hardening-tests] ok");

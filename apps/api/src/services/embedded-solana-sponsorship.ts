@@ -39,7 +39,7 @@ export type EmbeddedSolanaSponsorshipFlowLimit = {
 };
 
 export type EmbeddedSolanaSponsorshipLimits = Record<
-  "across" | "directTransfer" | "debridge",
+  EmbeddedSolanaSponsorshipFlow,
   EmbeddedSolanaSponsorshipFlowLimit
 >;
 
@@ -163,6 +163,63 @@ const sponsorshipBudgetMemory = new Map<
   string,
   { count: number; lamports: bigint; expiresAt: number }
 >();
+
+const RESERVE_SPONSORSHIP_BUDGET_SCRIPT = `
+local function decode(raw)
+  if not raw then
+    return { count = 0, lamports = 0 }
+  end
+  local ok, parsed = pcall(cjson.decode, raw)
+  if not ok or type(parsed) ~= "table" then
+    return { count = 0, lamports = 0 }
+  end
+  local count = tonumber(parsed["count"]) or 0
+  local lamports = tonumber(parsed["lamports"]) or 0
+  if count < 0 then count = 0 end
+  if lamports < 0 then lamports = 0 end
+  return { count = math.floor(count), lamports = math.floor(lamports) }
+end
+
+local hour = decode(redis.call("GET", KEYS[1]))
+local day = decode(redis.call("GET", KEYS[2]))
+local max_hour = tonumber(ARGV[1]) or 0
+local max_day = tonumber(ARGV[2]) or 0
+local max_lamports = tonumber(ARGV[3]) or 0
+local estimated = tonumber(ARGV[4]) or 0
+local hour_ttl = tonumber(ARGV[5]) or 3600
+local day_ttl = tonumber(ARGV[6]) or 86400
+local reasons = {}
+
+if max_hour <= 0 or hour.count + 1 > max_hour then
+  table.insert(reasons, "sponsorship_hour_budget_exceeded")
+end
+if max_day <= 0 or day.count + 1 > max_day then
+  table.insert(reasons, "sponsorship_day_budget_exceeded")
+end
+if max_lamports <= 0 or day.lamports + estimated > max_lamports then
+  table.insert(reasons, "sponsorship_lamport_budget_exceeded")
+end
+
+if #reasons > 0 then
+  local result = { "0" }
+  for _, reason in ipairs(reasons) do
+    table.insert(result, reason)
+  end
+  return result
+end
+
+local next_hour = cjson.encode({
+  count = hour.count + 1,
+  lamports = tostring(hour.lamports + estimated)
+})
+local next_day = cjson.encode({
+  count = day.count + 1,
+  lamports = tostring(day.lamports + estimated)
+})
+redis.call("SET", KEYS[1], next_hour, "EX", hour_ttl)
+redis.call("SET", KEYS[2], next_day, "EX", day_ttl)
+return { "1" }
+`;
 
 function normalizeSolanaAddress(value: string): string {
   return value.trim();
@@ -570,84 +627,65 @@ function sponsorshipBudgetKey(inputs: {
   ].join(":");
 }
 
-function parseBudgetSnapshot(raw: string | null): {
-  count: number;
-  lamports: bigint;
-} {
-  if (!raw) return { count: 0, lamports: BigInt(0) };
-  try {
-    const parsed = JSON.parse(raw) as { count?: unknown; lamports?: unknown };
-    const count =
-      typeof parsed.count === "number" && Number.isFinite(parsed.count)
-        ? Math.max(0, Math.trunc(parsed.count))
-        : 0;
-    const lamports =
-      typeof parsed.lamports === "string" && /^\d+$/.test(parsed.lamports)
-        ? BigInt(parsed.lamports)
-        : BigInt(0);
-    return { count, lamports };
-  } catch {
-    return { count: 0, lamports: BigInt(0) };
-  }
-}
-
-async function readBudgetSnapshot(key: string): Promise<{
-  count: number;
-  lamports: bigint;
-}> {
-  try {
-    const redis = await getRedis();
-    if (redis) return parseBudgetSnapshot(await redis.get(key));
-  } catch {
-    // Memory fallback below keeps local/tests usable if Redis is unavailable.
-  }
+function reserveMemorySponsorshipBudget(inputs: {
+  hourKey: string;
+  dayKey: string;
+  estimatedLamports: bigint;
+  limit: EmbeddedSolanaSponsorshipFlowLimit;
+}): { ok: boolean; reasons: string[] } {
   pruneExpiredBudgets();
-  const snapshot = sponsorshipBudgetMemory.get(key);
-  return snapshot
-    ? { count: snapshot.count, lamports: snapshot.lamports }
-    : { count: 0, lamports: BigInt(0) };
-}
-
-async function writeBudgetSnapshot(inputs: {
-  key: string;
-  count: number;
-  lamports: bigint;
-  ttlMs: number;
-}): Promise<void> {
-  const payload = JSON.stringify({
-    count: inputs.count,
-    lamports: inputs.lamports.toString(),
-  });
-  try {
-    const redis = await getRedis();
-    if (redis) {
-      await redis.set(inputs.key, payload, {
-        EX: Math.ceil(inputs.ttlMs / 1000),
-      });
-      return;
-    }
-  } catch {
-    // Memory fallback below keeps local/tests usable if Redis is unavailable.
+  const hour = sponsorshipBudgetMemory.get(inputs.hourKey) ?? {
+    count: 0,
+    lamports: BigInt(0),
+    expiresAt: Date.now() + budgetWindowTtlMs("hour"),
+  };
+  const day = sponsorshipBudgetMemory.get(inputs.dayKey) ?? {
+    count: 0,
+    lamports: BigInt(0),
+    expiresAt: Date.now() + budgetWindowTtlMs("day"),
+  };
+  const reasons: string[] = [];
+  if (inputs.limit.maxPerHour <= 0 || hour.count + 1 > inputs.limit.maxPerHour) {
+    reasons.push("sponsorship_hour_budget_exceeded");
   }
-  sponsorshipBudgetMemory.set(inputs.key, {
-    count: inputs.count,
-    lamports: inputs.lamports,
-    expiresAt: Date.now() + inputs.ttlMs,
+  if (inputs.limit.maxPerDay <= 0 || day.count + 1 > inputs.limit.maxPerDay) {
+    reasons.push("sponsorship_day_budget_exceeded");
+  }
+  if (
+    inputs.limit.maxLamportsPerWalletPerDay <= 0 ||
+    day.lamports + inputs.estimatedLamports >
+      BigInt(inputs.limit.maxLamportsPerWalletPerDay)
+  ) {
+    reasons.push("sponsorship_lamport_budget_exceeded");
+  }
+  if (reasons.length) return { ok: false, reasons };
+
+  sponsorshipBudgetMemory.set(inputs.hourKey, {
+    count: hour.count + 1,
+    lamports: hour.lamports + inputs.estimatedLamports,
+    expiresAt: hour.expiresAt,
   });
+  sponsorshipBudgetMemory.set(inputs.dayKey, {
+    count: day.count + 1,
+    lamports: day.lamports + inputs.estimatedLamports,
+    expiresAt: day.expiresAt,
+  });
+  return { ok: true, reasons: [] };
 }
 
 export async function reserveEmbeddedSolanaSponsorshipBudget(inputs: {
-  flow: "across" | "directTransfer" | "debridge";
+  flow: EmbeddedSolanaSponsorshipFlow;
   walletAddress: string;
   estimatedLamports: string | number | bigint;
   limits: EmbeddedSolanaSponsorshipLimits;
+  requireRedis?: boolean;
 }): Promise<{ ok: boolean; reasons: string[] }> {
   const limit = inputs.limits[inputs.flow];
+  if (!limit) return { ok: false, reasons: ["sponsorship_budget_missing"] };
   const estimatedLamports =
     typeof inputs.estimatedLamports === "bigint"
       ? inputs.estimatedLamports
       : BigInt(String(inputs.estimatedLamports));
-  const reasons: string[] = [];
   const now = new Date();
   const hourKey = sponsorshipBudgetKey({
     flow: inputs.flow,
@@ -661,40 +699,45 @@ export async function reserveEmbeddedSolanaSponsorshipBudget(inputs: {
     window: "day",
     now,
   });
-  const [hour, day] = await Promise.all([
-    readBudgetSnapshot(hourKey),
-    readBudgetSnapshot(dayKey),
-  ]);
-  if (limit.maxPerHour <= 0 || hour.count + 1 > limit.maxPerHour) {
-    reasons.push("sponsorship_hour_budget_exceeded");
-  }
-  if (limit.maxPerDay <= 0 || day.count + 1 > limit.maxPerDay) {
-    reasons.push("sponsorship_day_budget_exceeded");
-  }
-  if (
-    limit.maxLamportsPerWalletPerDay <= 0 ||
-    day.lamports + estimatedLamports >
-      BigInt(limit.maxLamportsPerWalletPerDay)
-  ) {
-    reasons.push("sponsorship_lamport_budget_exceeded");
-  }
-  if (reasons.length) return { ok: false, reasons };
 
-  await Promise.all([
-    writeBudgetSnapshot({
-      key: hourKey,
-      count: hour.count + 1,
-      lamports: hour.lamports + estimatedLamports,
-      ttlMs: budgetWindowTtlMs("hour"),
-    }),
-    writeBudgetSnapshot({
-      key: dayKey,
-      count: day.count + 1,
-      lamports: day.lamports + estimatedLamports,
-      ttlMs: budgetWindowTtlMs("day"),
-    }),
-  ]);
-  return { ok: true, reasons: [] };
+  try {
+    const redis = await getRedis();
+    if (redis) {
+      const result = await redis.eval(RESERVE_SPONSORSHIP_BUDGET_SCRIPT, {
+        keys: [hourKey, dayKey],
+        arguments: [
+          String(limit.maxPerHour),
+          String(limit.maxPerDay),
+          String(limit.maxLamportsPerWalletPerDay),
+          estimatedLamports.toString(),
+          String(Math.ceil(budgetWindowTtlMs("hour") / 1000)),
+          String(Math.ceil(budgetWindowTtlMs("day") / 1000)),
+        ],
+      });
+      if (Array.isArray(result)) {
+        const [status, ...reasons] = result.map((entry) => String(entry));
+        return status === "1"
+          ? { ok: true, reasons: [] }
+          : { ok: false, reasons };
+      }
+      return { ok: false, reasons: ["sponsorship_budget_unavailable"] };
+    }
+  } catch {
+    if (inputs.requireRedis) {
+      return { ok: false, reasons: ["sponsorship_budget_unavailable"] };
+    }
+  }
+
+  if (inputs.requireRedis) {
+    return { ok: false, reasons: ["sponsorship_budget_unavailable"] };
+  }
+
+  return reserveMemorySponsorshipBudget({
+    hourKey,
+    dayKey,
+    estimatedLamports,
+    limit,
+  });
 }
 
 function getBigIntMetadata(
@@ -1115,10 +1158,11 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
   const hasHardDeny = enforce.reasons.some(
     isEmbeddedSolanaSponsorshipHardDenyReason,
   );
+  const observeCanSponsor = env.embeddedSolanaSponsorshipObserveCanSponsor;
   const actualSponsor =
     inputs.enabled && !hasHardDeny
       ? inputs.mode === "observe"
-        ? inputs.legacyWouldSponsor
+        ? observeCanSponsor && inputs.legacyWouldSponsor
         : enforceWouldSponsor
       : false;
 

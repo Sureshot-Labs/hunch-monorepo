@@ -24,7 +24,7 @@ import {
 } from "../services/embedded-execution-singleflight.js";
 import {
   executeEmbeddedSolanaSignTransactionRequests,
-  executeEmbeddedSolanaTransactionRequests,
+  executeEmbeddedSolanaTransactionRequestsDetailed,
   prepareEmbeddedSolanaSignTransactionRequests,
   prepareEmbeddedSolanaTransactionRequests,
   resolveEmbeddedSolanaWalletContext,
@@ -49,6 +49,8 @@ type EmbeddedSolanaPreparedCacheEntry = {
 type RouteLogger = {
   warn: (obj: object, message?: string) => void;
 };
+
+type SolanaSponsorshipFlow = "dflow" | "across" | "directTransfer" | "debridge";
 
 const embeddedSolanaPreparedMemory = new Map<
   string,
@@ -163,6 +165,64 @@ async function readCachedEmbeddedSolanaPreparedRequests(inputs: {
     return null;
   }
   return memoryEntry.requests;
+}
+
+function getSolanaSponsorshipVenue(
+  flow: SolanaSponsorshipFlow | null | undefined,
+): "kalshi" | "bridge" | "wallet" | null {
+  if (flow === "dflow") return "kalshi";
+  if (flow === "across" || flow === "debridge") return "bridge";
+  if (flow === "directTransfer") return "wallet";
+  return null;
+}
+
+function isSolanaSponsorshipFlow(
+  value: string | null | undefined,
+): value is SolanaSponsorshipFlow {
+  return (
+    value === "dflow" ||
+    value === "across" ||
+    value === "directTransfer" ||
+    value === "debridge"
+  );
+}
+
+async function markSubmittedSolanaSponsorshipRequest(inputs: {
+  userId: string;
+  signer: string;
+  request: EmbeddedPrivyAuthorizationRequest;
+  signature: string;
+  transactionId: string | null;
+  caip2: string | null;
+}): Promise<void> {
+  const sponsorship = inputs.request.solanaSponsorship;
+  if (!sponsorship?.actualSponsor || !sponsorship.sponsorshipIntentId) return;
+  if (!isSolanaSponsorshipFlow(sponsorship.flow)) return;
+  const venue = getSolanaSponsorshipVenue(sponsorship.flow);
+  if (!venue) return;
+
+  await upsertSolanaSponsorshipLedger({
+    userId: inputs.userId,
+    venue,
+    flow: sponsorship.flow,
+    status: "submitted",
+    intentId: sponsorship.sponsorshipIntentId,
+    walletAddress: inputs.signer,
+    transactionDigest: sponsorship.transactionDigest,
+    txSignature: inputs.signature,
+    estimatedSponsorLamports: sponsorship.estimatedSponsorLamports,
+    metadata: {
+      requestId: inputs.request.id,
+      label: inputs.request.label,
+      submittedAt: new Date().toISOString(),
+      actualSponsor: true,
+      requestedSponsor: sponsorship.requestedSponsor,
+      enforceWouldSponsor: sponsorship.enforceWouldSponsor,
+      reasons: sponsorship.reasons,
+      ...(inputs.transactionId ? { privyTransactionId: inputs.transactionId } : {}),
+      ...(inputs.caip2 ? { caip2: inputs.caip2 } : {}),
+    },
+  });
 }
 
 export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
@@ -365,6 +425,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: context.signer,
           estimatedLamports: validation.analysis.estimatedSponsorLamports,
           limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
+          requireRedis:
+            authAccessPolicy.effective.embeddedSolanaSponsorshipMode ===
+            "enforce",
         });
         if (!budget.ok) {
           reply.header("Content-Type", "application/json; charset=utf-8");
@@ -548,14 +611,24 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana authorization expired. Refresh quote and try again.",
               );
             }
-            const signatures = await executeEmbeddedSolanaTransactionRequests({
+            const results = await executeEmbeddedSolanaTransactionRequestsDetailed({
               requests,
               signatures: request.body.signedRequests,
+              onResult: async (result) => {
+                await markSubmittedSolanaSponsorshipRequest({
+                  userId: user.id,
+                  signer: context.signer,
+                  request: result.request,
+                  signature: result.signature,
+                  transactionId: result.transactionId,
+                  caip2: result.caip2,
+                });
+              },
             });
             return {
               ok: true,
               signer: context.signer,
-              signatures,
+              signatures: results.map((result) => result.signature),
             };
           },
         });

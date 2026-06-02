@@ -350,6 +350,16 @@ export type EmbeddedPrivyAuthorizationRequest = {
   id: string;
   label: string;
   input: WalletApiRequestSignatureInput;
+  solanaSponsorship?: {
+    sponsorshipIntentId: string | null;
+    flow: string | null;
+    transactionDigest: string | null;
+    estimatedSponsorLamports: string;
+    actualSponsor: boolean;
+    requestedSponsor: boolean;
+    enforceWouldSponsor: boolean;
+    reasons: string[];
+  };
 };
 
 export type EmbeddedPrivyAuthorizationSignature = {
@@ -508,6 +518,34 @@ function parsePrivySolanaSignatureResponse(
   throw new Error(
     "Privy wallet response did not include a Solana transaction signature.",
   );
+}
+
+function parsePrivySolanaSignatureResult(
+  payload: Record<string, unknown>,
+): {
+  signature: string;
+  transactionId: string | null;
+  caip2: string | null;
+} {
+  const data =
+    payload && typeof payload.data === "object" && payload.data !== null
+      ? (payload.data as Record<string, unknown>)
+      : null;
+  const transactionId =
+    typeof data?.transaction_id === "string" && data.transaction_id.trim()
+      ? data.transaction_id.trim()
+      : typeof data?.transactionId === "string" && data.transactionId.trim()
+        ? data.transactionId.trim()
+        : null;
+  const caip2 =
+    typeof data?.caip2 === "string" && data.caip2.trim()
+      ? data.caip2.trim()
+      : null;
+  return {
+    signature: parsePrivySolanaSignatureResponse(payload),
+    transactionId,
+    caip2,
+  };
 }
 
 function parsePrivySolanaSignedTransactionResponse(
@@ -905,16 +943,28 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
       inputs.onAuditLogError?.(error);
     }
 
-    requests.push(
-      buildEmbeddedSolanaSignAndSendRequest({
-        context: inputs.context,
-        transaction,
-        executionKey: inputs.executionKey,
-        embeddedSolanaSponsorshipEnabled,
-        sponsorBalanceLamports,
-        sponsorOverride: evaluation.actualSponsor,
-      }),
-    );
+    const request = buildEmbeddedSolanaSignAndSendRequest({
+      context: inputs.context,
+      transaction,
+      executionKey: inputs.executionKey,
+      embeddedSolanaSponsorshipEnabled,
+      sponsorBalanceLamports,
+      sponsorOverride: evaluation.actualSponsor,
+    });
+    if (transaction.sponsorshipIntentId?.trim()) {
+      request.solanaSponsorship = {
+        sponsorshipIntentId: transaction.sponsorshipIntentId.trim(),
+        flow: evaluation.flow,
+        transactionDigest: evaluation.analysis.digest,
+        estimatedSponsorLamports:
+          evaluation.analysis.estimatedSponsorLamports,
+        actualSponsor: evaluation.actualSponsor,
+        requestedSponsor: evaluation.requestedSponsor,
+        enforceWouldSponsor: evaluation.enforceWouldSponsor,
+        reasons: evaluation.reasons,
+      };
+    }
+    requests.push(request);
   }
 
   return requests;
@@ -938,7 +988,33 @@ export async function executeEmbeddedSolanaTransactionRequests(inputs: {
   requests: EmbeddedPrivyAuthorizationRequest[];
   signatures: EmbeddedPrivyAuthorizationSignature[];
 }): Promise<string[]> {
-  const transactionSignatures: string[] = [];
+  const results = await executeEmbeddedSolanaTransactionRequestsDetailed(inputs);
+  return results.map((result) => result.signature);
+}
+
+export async function executeEmbeddedSolanaTransactionRequestsDetailed(inputs: {
+  requests: EmbeddedPrivyAuthorizationRequest[];
+  signatures: EmbeddedPrivyAuthorizationSignature[];
+  onResult?: (result: {
+    request: EmbeddedPrivyAuthorizationRequest;
+    signature: string;
+    transactionId: string | null;
+    caip2: string | null;
+  }) => void | Promise<void>;
+}): Promise<
+  Array<{
+    request: EmbeddedPrivyAuthorizationRequest;
+    signature: string;
+    transactionId: string | null;
+    caip2: string | null;
+  }>
+> {
+  const results: Array<{
+    request: EmbeddedPrivyAuthorizationRequest;
+    signature: string;
+    transactionId: string | null;
+    caip2: string | null;
+  }> = [];
   for (const request of inputs.requests) {
     const authorizationSignature = findAuthorizationSignature(
       inputs.signatures,
@@ -948,9 +1024,12 @@ export async function executeEmbeddedSolanaTransactionRequests(inputs: {
       request,
       authorizationSignature,
     );
-    transactionSignatures.push(parsePrivySolanaSignatureResponse(payload));
+    const parsed = parsePrivySolanaSignatureResult(payload);
+    const result = { request, ...parsed };
+    await inputs.onResult?.(result);
+    results.push(result);
   }
-  return transactionSignatures;
+  return results;
 }
 
 export async function executeEmbeddedSolanaSignTransactionRequests(inputs: {
