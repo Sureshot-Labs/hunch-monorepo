@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import {
+  buildDflowOrderRequestQuery,
   finalizeDflowSponsoredOrderOrFallback,
   resolveDflowActualSponsorshipDecision,
 } from "./routes/dflow-private.js";
@@ -285,6 +286,27 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "sponsored redemption request uses DFlow sponsor rent params and does not forward purpose",
+    run: () => {
+      const query = buildDflowOrderRequestQuery({
+        query: {
+          inputMint: "OutcomeMint11111111111111111111111111111111",
+          outputMint: USDC_MINT,
+          amount: "1000000",
+          purpose: "redeem",
+        },
+        userPublicKey: WALLET,
+        sponsored: true,
+        sponsorAddress: SPONSOR,
+      });
+
+      assert.equal(query.sponsor, SPONSOR);
+      assert.equal(query.outcomeAccountRentRecipient, SPONSOR);
+      assert.equal(query.outputCloseAuthority, undefined);
+      assert.equal(query.purpose, undefined);
+    },
+  },
+  {
     name: "successful sponsored order returns sponsorship fields and no fallback",
     run: async () => {
       const requests: boolean[] = [];
@@ -311,6 +333,35 @@ const tests: TestCase[] = [
         hunchSponsorAddress: SPONSOR,
       });
       assert.equal(ledgerWrites.length, 1);
+    },
+  },
+  {
+    name: "successful sponsored redemption records purpose in sponsorship ledger metadata",
+    run: async () => {
+      const ledgerWrites: Array<Record<string, unknown>> = [];
+      const result = await finalizeDflowSponsoredOrderOrFallback(
+        baseFinalizeInputs({
+          query: {
+            inputMint: "OutcomeMint11111111111111111111111111111111",
+            outputMint: USDC_MINT,
+            amount: "1000000",
+            purpose: "redeem",
+          },
+          upsertLedger: async (input: Record<string, unknown>) => {
+            ledgerWrites.push(input);
+          },
+        }),
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(result.sponsored, true);
+      assert.equal(ledgerWrites.length, 1);
+      const metadata = ledgerWrites[0]?.metadata as
+        | Record<string, unknown>
+        | undefined;
+      assert.equal(metadata?.purpose, "redeem");
+      assert.equal(metadata?.maxAtaCreateCount, 0);
+      assert.equal(metadata?.expectedDflowOutcomeRentLamports, "0");
     },
   },
 ];

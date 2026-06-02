@@ -53,6 +53,23 @@ import {
 import { resolveEmbeddedSolanaWalletContext } from "../services/embedded-solana.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import {
+  KalshiLossReclaimLedgerDurabilityError,
+  submitKalshiLossRentReclaim,
+} from "../services/kalshi-loss-rent-reclaim.js";
+import {
+  DFLOW_PREDICTION_PROGRAM_ID,
+  DFLOW_PROGRAM_ID,
+  SOLANA_ASSOCIATED_TOKEN_PROGRAM_ID,
+  SOLANA_COMPUTE_BUDGET_PROGRAM_ID,
+  SOLANA_LEGACY_MEMO_PROGRAM_ID,
+  SOLANA_MEMO_PROGRAM_ID,
+  SOLANA_SYSTEM_PROGRAM_ID,
+  SOLANA_TOKEN_2022_PROGRAM_ID,
+  SOLANA_TOKEN_PROGRAM_ID,
+  normalizeSolanaPublicKey,
+  resolveHunchSolanaSponsorKeypair,
+} from "../services/solana-sponsorship-primitives.js";
+import {
   dflowExecutionBodySchema,
   dflowOrderQuerySchema,
   dflowOrderStatusQuerySchema,
@@ -86,26 +103,14 @@ type DflowSponsorshipMarketState = {
   marketInitialized: boolean;
 };
 
-const COMPUTE_BUDGET_PROGRAM_ID =
-  "ComputeBudget111111111111111111111111111111";
-const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
-const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-const ASSOCIATED_TOKEN_PROGRAM_ID =
-  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
-const LEGACY_MEMO_PROGRAM_ID = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
-const DFLOW_PROGRAM_ID = "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH";
-const DFLOW_PREDICTION_PROGRAM_ID =
-  "pReDicTmksnPfkfiz33ndSdbe2dY43KYPg4U2dbvHvb";
 const DFLOW_SPONSORED_ALLOWED_PROGRAMS = new Set([
-  COMPUTE_BUDGET_PROGRAM_ID,
-  SYSTEM_PROGRAM_ID,
-  TOKEN_PROGRAM_ID,
-  TOKEN_2022_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
-  MEMO_PROGRAM_ID,
-  LEGACY_MEMO_PROGRAM_ID,
+  SOLANA_COMPUTE_BUDGET_PROGRAM_ID,
+  SOLANA_SYSTEM_PROGRAM_ID,
+  SOLANA_TOKEN_PROGRAM_ID,
+  SOLANA_TOKEN_2022_PROGRAM_ID,
+  SOLANA_ASSOCIATED_TOKEN_PROGRAM_ID,
+  SOLANA_MEMO_PROGRAM_ID,
+  SOLANA_LEGACY_MEMO_PROGRAM_ID,
   DFLOW_PROGRAM_ID,
   DFLOW_PREDICTION_PROGRAM_ID,
 ]);
@@ -142,10 +147,34 @@ type DflowSponsorshipDecision = {
   reasons: string[];
 };
 
+type DflowOrderPurpose = "trade" | "redeem";
+
+class DflowSponsoredSubmitLedgerDurabilityError extends Error {
+  cause: unknown;
+  signature: string;
+  sponsorshipIntentId: string;
+  transactionDigest: string;
+
+  constructor(inputs: {
+    signature: string;
+    sponsorshipIntentId: string;
+    transactionDigest: string;
+    cause: unknown;
+  }) {
+    super("DFlow sponsored transaction submitted but ledger update failed.");
+    this.name = "DflowSponsoredSubmitLedgerDurabilityError";
+    this.signature = inputs.signature;
+    this.sponsorshipIntentId = inputs.sponsorshipIntentId;
+    this.transactionDigest = inputs.transactionDigest;
+    this.cause = inputs.cause;
+  }
+}
+
 type DflowOrderQueryParams = {
   inputMint: string;
   outputMint: string;
   amount: string;
+  purpose?: DflowOrderPurpose;
   slippageBps?: number;
   platformFeeBps?: number;
   platformFeeScale?: number;
@@ -197,41 +226,8 @@ function encodeBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
 }
 
-function loadSolanaKeypairFromSecret(raw: string): Keypair {
-  const trimmed = raw.trim();
-  if (!trimmed) throw new Error("Missing HUNCH_SOLANA_SPONSOR_SECRET_KEY");
-  if (trimmed.startsWith("[")) {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (
-      !Array.isArray(parsed) ||
-      parsed.some(
-        (entry) =>
-          typeof entry !== "number" ||
-          !Number.isInteger(entry) ||
-          entry < 0 ||
-          entry > 255,
-      )
-    ) {
-      throw new Error("Invalid HUNCH_SOLANA_SPONSOR_SECRET_KEY array");
-    }
-    return Keypair.fromSecretKey(Uint8Array.from(parsed));
-  }
-  return Keypair.fromSecretKey(bs58.decode(trimmed));
-}
-
 function resolveDflowSponsorKeypair(): Keypair | null {
-  if (!env.hunchSolanaSponsorSecretKey) return null;
-  const keypair = loadSolanaKeypairFromSecret(env.hunchSolanaSponsorSecretKey);
-  const derivedAddress = keypair.publicKey.toBase58();
-  if (
-    env.hunchSolanaSponsorAddress &&
-    derivedAddress !== env.hunchSolanaSponsorAddress
-  ) {
-    throw new Error(
-      "HUNCH_SOLANA_SPONSOR_ADDRESS does not match HUNCH_SOLANA_SPONSOR_SECRET_KEY",
-    );
-  }
-  return keypair;
+  return resolveHunchSolanaSponsorKeypair();
 }
 
 export function resolveDflowActualSponsorshipDecision(inputs: {
@@ -388,6 +384,7 @@ export function buildDflowOrderRequestQuery(inputs: {
     inputMint: query.inputMint,
     outputMint: query.outputMint,
     amount: query.amount,
+    ...(query.purpose ? { purpose: query.purpose } : {}),
     userPublicKey: inputs.userPublicKey,
     ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
     ...(inputs.sponsored
@@ -507,7 +504,9 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
         (key) => typeof payloadRecord[key] === "string",
       ) ?? null)
     : null;
-  let transaction = transactionKey ? String(payloadRecord?.[transactionKey]) : null;
+  let transaction = transactionKey
+    ? String(payloadRecord?.[transactionKey])
+    : null;
   if (!payloadRecord || !transaction) {
     return fallbackToUserFundedDflowOrder({
       query: inputs.query,
@@ -517,10 +516,12 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
     });
   }
 
-  let budgetReservation: EmbeddedSolanaSponsorshipBudgetReservation | null = null;
+  let budgetReservation: EmbeddedSolanaSponsorshipBudgetReservation | null =
+    null;
   try {
-    transaction = await (inputs.refreshTransaction ??
-      refreshUnsignedSolanaTransactionBlockhash)(transaction);
+    transaction = await (
+      inputs.refreshTransaction ?? refreshUnsignedSolanaTransactionBlockhash
+    )(transaction);
     payloadRecord[transactionKey ?? "transaction"] = transaction;
   } catch (error) {
     inputs.logger.warn(
@@ -542,15 +543,14 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
         "init_prediction_market_cost",
         "initPredictionMarketCostLamports",
       ]) ?? "0";
-    const messageDigest = (inputs.computeMessageDigest ??
-      computeEmbeddedSolanaMessageDigest)(transaction);
+    const messageDigest = (
+      inputs.computeMessageDigest ?? computeEmbeddedSolanaMessageDigest
+    )(transaction);
     const expectedAtaCreateCount =
       inputs.query.outputMint !== env.solanaUsdcMint ? 1 : 0;
-    const expectedDflowOutcomeRentLamports =
-      expectedAtaCreateCount > 0
-        ? DFLOW_SPONSORED_ATA_RENT_LAMPORTS.toString()
-        : "0";
+    const expectedDflowOutcomeRentLamports = "0";
     const sponsorshipMetadata = {
+      purpose: inputs.query.purpose ?? "trade",
       inputMint: inputs.query.inputMint,
       outputMint: inputs.query.outputMint,
       amount: inputs.query.amount,
@@ -564,8 +564,9 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
       sponsorAddress: inputs.sponsorAddress,
       hunchSponsoredDflow: true,
     };
-    const analysis = (inputs.analyzeTransaction ??
-      analyzeEmbeddedSolanaTransaction)({
+    const analysis = (
+      inputs.analyzeTransaction ?? analyzeEmbeddedSolanaTransaction
+    )({
       signer: inputs.userPublicKey,
       transaction,
       includeRaw: false,
@@ -603,16 +604,19 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
       });
     }
 
-    const budget = await (inputs.reserveBudget ??
-      reserveEmbeddedSolanaSponsorshipBudget)({
+    const requireDurableSponsorship =
+      shouldRequireEmbeddedSolanaSponsorshipRedis({
+        mode: inputs.sponsorshipMode,
+        observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+      });
+    const budget = await (
+      inputs.reserveBudget ?? reserveEmbeddedSolanaSponsorshipBudget
+    )({
       flow: "dflow",
       walletAddress: inputs.userPublicKey,
       estimatedLamports: validation.estimatedSponsorLamports.toString(),
       limits: inputs.sponsorshipLimits,
-      requireRedis: shouldRequireEmbeddedSolanaSponsorshipRedis({
-        mode: inputs.sponsorshipMode,
-        observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
-      }),
+      requireRedis: requireDurableSponsorship,
     });
     if (!budget.ok) {
       inputs.logger.warn(
@@ -632,12 +636,14 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
     }
     budgetReservation = budget.reservation ?? null;
 
-    const intent = await (inputs.createIntent ??
-      createEmbeddedSolanaSponsorshipIntent)({
+    const intent = await (
+      inputs.createIntent ?? createEmbeddedSolanaSponsorshipIntent
+    )({
       flow: "dflow",
       userId: inputs.userId,
       signer: inputs.userPublicKey,
       transaction,
+      requireDurable: requireDurableSponsorship,
       metadata: {
         ...sponsorshipMetadata,
         budgetReserved: true,
@@ -689,6 +695,7 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
             : null,
         rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
         metadata: {
+          purpose: inputs.query.purpose ?? "trade",
           marketIds: inputs.sponsorshipMarketState.marketIds,
           maxSystemCreateLamports: "0",
           maxAtaCreateCount: expectedAtaCreateCount,
@@ -737,8 +744,10 @@ function validateDflowSponsoredAnalysis(inputs: {
   const ataRentLamports =
     BigInt(analysis.ataCreateCount) * DFLOW_SPONSORED_ATA_RENT_LAMPORTS;
   const expectedDflowOutcomeRentLamports =
-    getIntentMetadataBigInt(inputs.metadata, "expectedDflowOutcomeRentLamports") ??
-    BigInt(0);
+    getIntentMetadataBigInt(
+      inputs.metadata,
+      "expectedDflowOutcomeRentLamports",
+    ) ?? BigInt(0);
   const signatureFeeLamports =
     SOLANA_TX_FEE_LAMPORTS * BigInt(Math.max(1, analysis.signatureCount));
   const estimatedSponsorLamports =
@@ -832,7 +841,9 @@ function validateDflowSponsoredAnalysis(inputs: {
   };
 }
 
-function getSignedTransactionSignerAddresses(tx: VersionedTransaction): string[] {
+function getSignedTransactionSignerAddresses(
+  tx: VersionedTransaction,
+): string[] {
   return tx.message.staticAccountKeys
     .slice(0, tx.message.header.numRequiredSignatures)
     .map((key) => key.toBase58());
@@ -842,15 +853,16 @@ function signerHasNonZeroSignature(
   tx: VersionedTransaction,
   signerAddress: string,
 ): boolean {
-  const signerIndex = getSignedTransactionSignerAddresses(tx).indexOf(
-    signerAddress,
-  );
+  const signerIndex =
+    getSignedTransactionSignerAddresses(tx).indexOf(signerAddress);
   if (signerIndex < 0) return false;
   const signature = tx.signatures[signerIndex];
   return Boolean(signature?.some((byte) => byte !== 0));
 }
 
-function getVersionedTransactionSignature(tx: VersionedTransaction): string | null {
+function getVersionedTransactionSignature(
+  tx: VersionedTransaction,
+): string | null {
   const signature = tx.signatures[0];
   if (!signature || !signature.some((byte) => byte !== 0)) return null;
   return bs58.encode(Buffer.from(signature));
@@ -865,7 +877,9 @@ function hasAnyNonZeroSignature(tx: VersionedTransaction): boolean {
 async function refreshUnsignedSolanaTransactionBlockhash(
   transaction: string,
 ): Promise<string> {
-  const tx = VersionedTransaction.deserialize(Buffer.from(transaction, "base64"));
+  const tx = VersionedTransaction.deserialize(
+    Buffer.from(transaction, "base64"),
+  );
   if (hasAnyNonZeroSignature(tx)) {
     throw new Error("Cannot refresh blockhash on a pre-signed transaction");
   }
@@ -1012,12 +1026,8 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
   if (intent.signer !== inputs.walletAddress) {
     throw new Error("DFlow sponsorship intent wallet mismatch");
   }
-  if (
-    getIntentMetadataBoolean(intent.metadata, "marketInitialized") !== true
-  ) {
-    throw new Error(
-      "Market is not initialized for gasless DFlow trading yet.",
-    );
+  if (getIntentMetadataBoolean(intent.metadata, "marketInitialized") !== true) {
+    throw new Error("Market is not initialized for gasless DFlow trading yet.");
   }
   if (getIntentMetadataBoolean(intent.metadata, "budgetReserved") !== true) {
     throw new Error("DFlow sponsorship budget was not reserved");
@@ -1095,9 +1105,8 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
 
   tx.sign([sponsorKeypair]);
   const sponsoredTransaction = encodeBase64(tx.serialize());
-  const sponsoredTransactionDigest = computeEmbeddedSolanaTransactionDigest(
-    sponsoredTransaction,
-  );
+  const sponsoredTransactionDigest =
+    computeEmbeddedSolanaTransactionDigest(sponsoredTransaction);
   const expectedSignature = getVersionedTransactionSignature(tx);
   if (!sponsoredTransactionDigest || !expectedSignature) {
     throw new Error("DFlow sponsored transaction could not be signed");
@@ -1139,7 +1148,10 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       signedTransaction: sponsoredTransaction,
       skipPreflight: false,
       maxRetries: Math.min(
-        Math.max(Math.trunc(inputs.maxRetries ?? DFLOW_SPONSORED_MAX_RETRIES), 0),
+        Math.max(
+          Math.trunc(inputs.maxRetries ?? DFLOW_SPONSORED_MAX_RETRIES),
+          0,
+        ),
         DFLOW_SPONSORED_MAX_RETRIES,
       ),
     });
@@ -1203,6 +1215,12 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
           },
           "DFlow sponsored transaction broadcast succeeded but ledger submit update failed",
         );
+        throw new DflowSponsoredSubmitLedgerDurabilityError({
+          cause: error,
+          signature,
+          sponsorshipIntentId: intent.id,
+          transactionDigest: sponsoredTransactionDigest,
+        });
       }
     }
   }
@@ -1212,6 +1230,7 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
 
 async function markDflowMarketInitializedByMint(inputs: {
   outcomeMint: string;
+  marketId?: string | null;
   signature: string;
 }): Promise<number> {
   const prefixedMint = `sol:${inputs.outcomeMint}`;
@@ -1224,8 +1243,9 @@ async function markDflowMarketInitializedByMint(inputs: {
         metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
           'dflowPreinitializedAt', now(),
           'dflowPreinitSignature', $3
-        )
+      )
       where venue = 'kalshi'
+        and ($4::text is null or id = $4)
         and (
           token_yes = $1
           or token_no = $1
@@ -1233,13 +1253,99 @@ async function markDflowMarketInitializedByMint(inputs: {
           or token_no = $2
         )
     `,
-    [prefixedMint, inputs.outcomeMint, inputs.signature],
+    [
+      prefixedMint,
+      inputs.outcomeMint,
+      inputs.signature,
+      inputs.marketId ?? null,
+    ],
   );
   return result.rowCount ?? 0;
 }
 
+type DflowPredictionMarketInitCandidate =
+  | { ok: true; marketId: string }
+  | { ok: false; status: number; error: string; marketIds?: string[] };
+
+async function resolveDflowPredictionMarketInitCandidate(
+  outcomeMint: string,
+): Promise<DflowPredictionMarketInitCandidate> {
+  const trimmed = outcomeMint.trim();
+  const rawMint = normalizeSolanaPublicKey(
+    trimmed.startsWith("sol:") ? trimmed.slice(4) : trimmed,
+  );
+  if (!rawMint) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Outcome mint must be a valid Solana address",
+    };
+  }
+  const prefixedMint = `sol:${rawMint}`;
+  const { rows } = await pool.query<{
+    market_id: string;
+    is_initialized: boolean | null;
+  }>(
+    `
+      with candidate_markets as (
+        select m.id as market_id, m.is_initialized
+        from unified_markets m
+        where m.venue = 'kalshi'
+          and (
+            m.token_yes = any($1::text[])
+            or m.token_no = any($1::text[])
+          )
+        union
+        select m.id as market_id, m.is_initialized
+        from unified_market_tokens t
+        join unified_markets m
+          on m.id = t.market_id
+        where m.venue = 'kalshi'
+          and t.token_id = any($1::text[])
+      )
+      select distinct market_id, is_initialized
+      from candidate_markets
+      order by market_id
+    `,
+    [[rawMint, prefixedMint]],
+  );
+  if (rows.length === 0) {
+    return {
+      ok: false,
+      status: 404,
+      error: "Outcome mint is not mapped to a Hunch Kalshi market",
+    };
+  }
+  if (rows.length > 1) {
+    return {
+      ok: false,
+      status: 409,
+      error: "Outcome mint maps to multiple Hunch Kalshi markets",
+      marketIds: rows.map((row) => row.market_id),
+    };
+  }
+  const row = rows[0];
+  if (!row) {
+    return {
+      ok: false,
+      status: 404,
+      error: "Outcome mint is not mapped to a Hunch Kalshi market",
+    };
+  }
+  if (row?.is_initialized === true) {
+    return {
+      ok: false,
+      status: 409,
+      error: "DFlow prediction market is already initialized",
+      marketIds: [row.market_id],
+    };
+  }
+  return { ok: true, marketId: row.market_id };
+}
+
 async function initializeDflowPredictionMarket(inputs: {
   outcomeMint: string;
+  marketId: string;
   maxRetries?: number;
 }): Promise<{
   signature: string;
@@ -1283,7 +1389,9 @@ async function initializeDflowPredictionMarket(inputs: {
       ])
     : null;
   if (!transaction) {
-    throw new Error("DFlow prediction market init response missing transaction");
+    throw new Error(
+      "DFlow prediction market init response missing transaction",
+    );
   }
 
   const analysis = analyzeEmbeddedSolanaTransaction({
@@ -1310,14 +1418,20 @@ async function initializeDflowPredictionMarket(inputs: {
     );
   }
 
-  const tx = VersionedTransaction.deserialize(Buffer.from(transaction, "base64"));
+  const tx = VersionedTransaction.deserialize(
+    Buffer.from(transaction, "base64"),
+  );
   const signerAddresses = getSignedTransactionSignerAddresses(tx);
-  if (signerAddresses.length !== 1 || !signerAddresses.includes(sponsorAddress)) {
+  if (
+    signerAddresses.length !== 1 ||
+    !signerAddresses.includes(sponsorAddress)
+  ) {
     throw new Error("DFlow prediction market init missing sponsor signer");
   }
   tx.sign([sponsorKeypair]);
   const signedTransaction = encodeBase64(tx.serialize());
-  const transactionDigest = computeEmbeddedSolanaTransactionDigest(signedTransaction);
+  const transactionDigest =
+    computeEmbeddedSolanaTransactionDigest(signedTransaction);
   const expectedSignature = getVersionedTransactionSignature(tx);
   if (!transactionDigest || !expectedSignature) {
     throw new Error("DFlow prediction market init could not be signed");
@@ -1336,6 +1450,7 @@ async function initializeDflowPredictionMarket(inputs: {
     sponsorAddress,
     intentId,
     status: "user_signed",
+    marketId: inputs.marketId,
     outputMint: inputs.outcomeMint,
     transactionDigest,
     txSignature: expectedSignature,
@@ -1347,6 +1462,7 @@ async function initializeDflowPredictionMarket(inputs: {
     rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
     metadata: {
       adminPredictionMarketInit: true,
+      marketId: inputs.marketId,
       outcomeMint: inputs.outcomeMint,
       programIds: analysis.programIds,
       systemCreateLamports: analysis.systemCreateLamports,
@@ -1362,7 +1478,10 @@ async function initializeDflowPredictionMarket(inputs: {
       signedTransaction,
       skipPreflight: false,
       maxRetries: Math.min(
-        Math.max(Math.trunc(inputs.maxRetries ?? DFLOW_SPONSORED_MAX_RETRIES), 0),
+        Math.max(
+          Math.trunc(inputs.maxRetries ?? DFLOW_SPONSORED_MAX_RETRIES),
+          0,
+        ),
         DFLOW_SPONSORED_MAX_RETRIES,
       ),
     });
@@ -1373,6 +1492,7 @@ async function initializeDflowPredictionMarket(inputs: {
       sponsorAddress,
       intentId,
       status: "failed",
+      marketId: inputs.marketId,
       outputMint: inputs.outcomeMint,
       transactionDigest,
       txSignature: expectedSignature,
@@ -1381,6 +1501,7 @@ async function initializeDflowPredictionMarket(inputs: {
       error: error instanceof Error ? error.message : String(error),
       metadata: {
         adminPredictionMarketInit: true,
+        marketId: inputs.marketId,
         outcomeMint: inputs.outcomeMint,
       },
     });
@@ -1393,6 +1514,7 @@ async function initializeDflowPredictionMarket(inputs: {
     sponsorAddress,
     intentId,
     status: "submitted",
+    marketId: inputs.marketId,
     outputMint: inputs.outcomeMint,
     transactionDigest,
     txSignature: signature,
@@ -1404,6 +1526,7 @@ async function initializeDflowPredictionMarket(inputs: {
     rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
     metadata: {
       adminPredictionMarketInit: true,
+      marketId: inputs.marketId,
       outcomeMint: inputs.outcomeMint,
       submittedAt: new Date().toISOString(),
     },
@@ -1419,6 +1542,7 @@ async function initializeDflowPredictionMarket(inputs: {
     confirmation.status === "fulfilled"
       ? await markDflowMarketInitializedByMint({
           outcomeMint: inputs.outcomeMint,
+          marketId: inputs.marketId,
           signature,
         })
       : 0;
@@ -2014,7 +2138,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         inputMint: query.inputMint,
         outputMint: query.outputMint,
         amount: query.amount,
-        ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
+        purpose: query.purpose ?? "trade",
+        ...(query.slippageBps != null
+          ? { slippageBps: query.slippageBps }
+          : {}),
       };
 
       const sendDflowOrderFailure = (failed: {
@@ -2055,7 +2182,11 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         return sendDflowOrderFailure(upstream);
       }
 
-      if (dflowSponsoredOrder && dflowSponsorAddress && dflowSponsorshipConfig) {
+      if (
+        dflowSponsoredOrder &&
+        dflowSponsorAddress &&
+        dflowSponsorshipConfig
+      ) {
         const finalized = await finalizeDflowSponsoredOrderOrFallback({
           payload: upstream.payload,
           query: orderQuery,
@@ -2370,8 +2501,19 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             reasons: decision.reasons,
           });
         }
+        const candidate = await resolveDflowPredictionMarketInitCandidate(
+          request.body.outcomeMint,
+        );
+        if (!candidate.ok) {
+          reply.code(candidate.status);
+          return reply.send({
+            error: candidate.error,
+            ...(candidate.marketIds ? { marketIds: candidate.marketIds } : {}),
+          });
+        }
         const result = await initializeDflowPredictionMarket({
           outcomeMint: request.body.outcomeMint,
+          marketId: candidate.marketId,
           maxRetries: request.body.maxRetries,
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -2503,6 +2645,20 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           signature: result.signature,
         });
       } catch (error) {
+        if (error instanceof DflowSponsoredSubmitLedgerDurabilityError) {
+          app.log.error(
+            { error, userId: user.id, walletAddress },
+            "DFlow sponsored submit ledger durability failed",
+          );
+          reply.code(500);
+          return reply.send({
+            error: "sponsorship_ledger_not_durable",
+            message: error.message,
+            signature: error.signature,
+            sponsorshipIntentId: error.sponsorshipIntentId,
+            transactionDigest: error.transactionDigest,
+          });
+        }
         app.log.error(
           { error, userId: user.id, walletAddress },
           "DFlow sponsored submit failed",
@@ -2620,6 +2776,79 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(500);
         return reply.send({
           error: "Failed to store DFlow execution",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/loss-reclaim/sponsored-submit",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: dflowSponsoredSubmitBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!isSolanaWallet(walletAddress)) {
+        reply.code(400);
+        return reply.send({
+          error: "Kalshi loss reclaim requires a Solana wallet address",
+        });
+      }
+
+      try {
+        await resolveEmbeddedSolanaWalletContext({
+          user,
+          signer: walletAddress,
+        });
+      } catch {
+        reply.code(400);
+        return reply.send({
+          error:
+            "Kalshi loss reclaim requires an embedded Solana Trading Wallet",
+        });
+      }
+
+      try {
+        const result = await submitKalshiLossRentReclaim({
+          userId: user.id,
+          walletAddress,
+          sponsorshipIntentId: request.body.sponsorshipIntentId,
+          signedTransaction: request.body.signedTransaction,
+          maxRetries: request.body.maxRetries,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
+      } catch (error) {
+        if (error instanceof KalshiLossReclaimLedgerDurabilityError) {
+          app.log.error(
+            { error, userId: user.id, walletAddress },
+            "Kalshi loss reclaim ledger durability failed",
+          );
+          reply.code(500);
+          return reply.send({
+            error: "sponsorship_ledger_not_durable",
+            message: error.message,
+            signature: error.signature,
+            sponsorshipIntentId: error.sponsorshipIntentId,
+          });
+        }
+        app.log.error(
+          { error, userId: user.id, walletAddress },
+          "Kalshi loss reclaim sponsored submit failed",
+        );
+        reply.code(502);
+        return reply.send({
+          error:
+            error instanceof Error && error.message
+              ? error.message
+              : "Kalshi loss reclaim submit failed",
         });
       }
     },

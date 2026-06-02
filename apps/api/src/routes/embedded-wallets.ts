@@ -54,6 +54,10 @@ type RouteLogger = {
 
 type SolanaSponsorshipFlow = "dflow" | "across" | "directTransfer" | "debridge";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 class EmbeddedSolanaSponsorshipLedgerDurabilityError extends Error {
   cause: unknown;
   requestId: string;
@@ -218,6 +222,41 @@ function isSolanaSponsorshipFlow(
   );
 }
 
+function cachedSolanaRequestUsesPrivySponsor(
+  request: EmbeddedPrivyAuthorizationRequest,
+): boolean {
+  return isRecord(request.input.body) && request.input.body.sponsor === true;
+}
+
+async function assertCachedEmbeddedSolanaSponsorPolicy(
+  requests: EmbeddedPrivyAuthorizationRequest[],
+): Promise<void> {
+  const sponsoredRequests = requests.filter(
+    cachedSolanaRequestUsesPrivySponsor,
+  );
+  if (!sponsoredRequests.length) return;
+
+  const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+  const sponsorshipEnabled =
+    authAccessPolicy.effective.embeddedSolanaSponsorship === true;
+  const observeCanSponsor =
+    authAccessPolicy.effective.embeddedSolanaSponsorshipMode === "enforce" ||
+    env.embeddedSolanaSponsorshipObserveCanSponsor === true;
+  for (const request of sponsoredRequests) {
+    const flow = request.solanaSponsorship?.flow ?? null;
+    if (
+      !sponsorshipEnabled ||
+      !observeCanSponsor ||
+      !isSolanaSponsorshipFlow(flow) ||
+      authAccessPolicy.effective.embeddedSolanaSponsorshipFlows[flow] !== true
+    ) {
+      throw new Error(
+        "Solana sponsorship is disabled. Refresh quote and try again.",
+      );
+    }
+  }
+}
+
 async function markSubmittedSolanaSponsorshipRequest(inputs: {
   userId: string;
   signer: string;
@@ -250,7 +289,9 @@ async function markSubmittedSolanaSponsorshipRequest(inputs: {
       requestedSponsor: sponsorship.requestedSponsor,
       enforceWouldSponsor: sponsorship.enforceWouldSponsor,
       reasons: sponsorship.reasons,
-      ...(inputs.transactionId ? { privyTransactionId: inputs.transactionId } : {}),
+      ...(inputs.transactionId
+        ? { privyTransactionId: inputs.transactionId }
+        : {}),
       ...(inputs.caip2 ? { caip2: inputs.caip2 } : {}),
     },
   });
@@ -451,15 +492,17 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        const requireDurableSponsorship =
+          shouldRequireEmbeddedSolanaSponsorshipRedis({
+            mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+            observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+          });
         const budget = await reserveEmbeddedSolanaSponsorshipBudget({
           flow: "directTransfer",
           walletAddress: context.signer,
           estimatedLamports: validation.analysis.estimatedSponsorLamports,
           limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
-          requireRedis: shouldRequireEmbeddedSolanaSponsorshipRedis({
-            mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
-            observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
-          }),
+          requireRedis: requireDurableSponsorship,
         });
         if (!budget.ok) {
           reply.header("Content-Type", "application/json; charset=utf-8");
@@ -475,6 +518,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           signer: context.signer,
           transaction: request.body.transaction,
+          requireDurable: requireDurableSponsorship,
           metadata,
         });
         if (!intent) {
@@ -652,45 +696,47 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana authorization expired. Refresh quote and try again.",
               );
             }
-            const results = await executeEmbeddedSolanaTransactionRequestsDetailed({
-              requests,
-              signatures: request.body.signedRequests,
-              onResult: async (result) => {
-                try {
-                  await markSubmittedSolanaSponsorshipRequest({
-                    userId: user.id,
-                    signer: context.signer,
-                    request: result.request,
-                    signature: result.signature,
-                    transactionId: result.transactionId,
-                    caip2: result.caip2,
-                  });
-                } catch (error) {
-                  const sponsorshipIntentId =
-                    result.request.solanaSponsorship?.sponsorshipIntentId ??
-                    null;
-                  app.log.error(
-                    {
-                      error,
+            await assertCachedEmbeddedSolanaSponsorPolicy(requests);
+            const results =
+              await executeEmbeddedSolanaTransactionRequestsDetailed({
+                requests,
+                signatures: request.body.signedRequests,
+                onResult: async (result) => {
+                  try {
+                    await markSubmittedSolanaSponsorshipRequest({
                       userId: user.id,
                       signer: context.signer,
+                      request: result.request,
+                      signature: result.signature,
+                      transactionId: result.transactionId,
+                      caip2: result.caip2,
+                    });
+                  } catch (error) {
+                    const sponsorshipIntentId =
+                      result.request.solanaSponsorship?.sponsorshipIntentId ??
+                      null;
+                    app.log.error(
+                      {
+                        error,
+                        userId: user.id,
+                        signer: context.signer,
+                        requestId: result.request.id,
+                        signature: result.signature,
+                        transactionId: result.transactionId,
+                        sponsorshipIntentId,
+                      },
+                      "Embedded Solana sponsored transaction submitted but ledger update failed",
+                    );
+                    throw new EmbeddedSolanaSponsorshipLedgerDurabilityError({
+                      cause: error,
                       requestId: result.request.id,
                       signature: result.signature,
                       transactionId: result.transactionId,
                       sponsorshipIntentId,
-                    },
-                    "Embedded Solana sponsored transaction submitted but ledger update failed",
-                  );
-                  throw new EmbeddedSolanaSponsorshipLedgerDurabilityError({
-                    cause: error,
-                    requestId: result.request.id,
-                    signature: result.signature,
-                    transactionId: result.transactionId,
-                    sponsorshipIntentId,
-                  });
-                }
-              },
-            });
+                    });
+                  }
+                },
+              });
             return {
               ok: true,
               signer: context.signer,

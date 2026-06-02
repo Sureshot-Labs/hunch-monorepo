@@ -63,6 +63,10 @@ import {
   validateEmbeddedSolanaSponsorshipIntentCandidate,
 } from "../services/embedded-solana-sponsorship.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
+import {
+  hasPositiveSponsorFeeLike,
+  parseSolanaPublicKeyList,
+} from "../services/solana-sponsorship-primitives.js";
 import { upsertSolanaSponsorshipLedger } from "../services/solana-sponsorship-ledger.js";
 
 type DebridgeChain = {
@@ -541,18 +545,6 @@ function readStringField(payload: Record<string, unknown>, field: string) {
   return typeof value === "string" ? value : null;
 }
 
-function isPositiveIntegerLike(value: unknown): boolean {
-  if (typeof value === "bigint") return value > BigInt(0);
-  if (typeof value === "number") {
-    return Number.isSafeInteger(value) && value > 0;
-  }
-  return (
-    typeof value === "string" &&
-    /^\d+$/.test(value.trim()) &&
-    BigInt(value.trim()) > BigInt(0)
-  );
-}
-
 async function createDebridgeSolanaSponsorshipIntent(inputs: {
   userId: string;
   bridgeOrderId: string | null;
@@ -576,10 +568,7 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   ) {
     return null;
   }
-  if (
-    isPositiveIntegerLike(inputs.payload.fixFee) ||
-    isPositiveIntegerLike(inputs.payload.protocolFee)
-  ) {
+  if (hasPositiveSponsorFeeLike(inputs.payload)) {
     return null;
   }
 
@@ -590,7 +579,18 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   ) {
     return null;
   }
-  const allowedProgramIds = env.debridgeSolanaAllowedProgramIds;
+  let allowedProgramIds: string[];
+  try {
+    allowedProgramIds = parseSolanaPublicKeyList(
+      env.debridgeSolanaAllowedProgramIds,
+    );
+  } catch (error) {
+    inputs.logger.warn(
+      { error, configuredProgramIds: env.debridgeSolanaAllowedProgramIds },
+      "Skipping deBridge Solana sponsorship due to invalid program allowlist",
+    );
+    return null;
+  }
   if (!allowedProgramIds.length) return null;
 
   const metadata = {
@@ -625,19 +625,26 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     return null;
   }
 
+  const requireDurableSponsorship = shouldRequireEmbeddedSolanaSponsorshipRedis(
+    {
+      mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+      observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+    },
+  );
   const budget = await reserveEmbeddedSolanaSponsorshipBudget({
     flow: "debridge",
     walletAddress: inputs.senderAddress,
     estimatedLamports: validation.analysis.estimatedSponsorLamports,
     limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
-    requireRedis: shouldRequireEmbeddedSolanaSponsorshipRedis({
-      mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
-      observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
-    }),
+    requireRedis: requireDurableSponsorship,
   });
   if (!budget.ok) {
     inputs.logger.warn(
-      { userId: inputs.userId, bridgeOrderId: inputs.bridgeOrderId, reasons: budget.reasons },
+      {
+        userId: inputs.userId,
+        bridgeOrderId: inputs.bridgeOrderId,
+        reasons: budget.reasons,
+      },
       "Skipping deBridge Solana sponsorship intent due to budget",
     );
     return null;
@@ -648,6 +655,7 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     userId: inputs.userId,
     signer: inputs.senderAddress,
     transaction: inputs.payload.tx.data,
+    requireDurable: requireDurableSponsorship,
     metadata,
   });
   if (!intent) {
@@ -1293,8 +1301,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         status,
         srcChainId: row.src_chain_id,
         dstChainId: row.dst_chain_id,
-        bridgeOrderId:
-          provider === "across" ? row.id : (row.order_id ?? null),
+        bridgeOrderId: provider === "across" ? row.id : (row.order_id ?? null),
         txHash,
       }),
       app.log,
@@ -1938,13 +1945,13 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             try {
               const authAccessPolicy = await resolveAuthAccessPolicy(pool);
               const metadata = {
-                  bridgeOrderId,
-                  srcChainId: body.srcChainId,
-                  dstChainId: body.dstChainId,
-                  srcToken: body.srcToken,
-                  dstToken: body.dstToken,
-                  amountIn: body.amountIn,
-                  maxSystemCreateLamports: "0",
+                bridgeOrderId,
+                srcChainId: body.srcChainId,
+                dstChainId: body.dstChainId,
+                srcToken: body.srcToken,
+                dstToken: body.dstToken,
+                amountIn: body.amountIn,
+                maxSystemCreateLamports: "0",
               };
               if (
                 authAccessPolicy.effective.embeddedSolanaSponsorship === true &&
@@ -1959,6 +1966,13 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     transaction: normalizedPayload.tx.data,
                     metadata,
                   });
+                const requireDurableAcrossSponsorship =
+                  shouldRequireEmbeddedSolanaSponsorshipRedis({
+                    mode: authAccessPolicy.effective
+                      .embeddedSolanaSponsorshipMode,
+                    observeCanSponsor:
+                      env.embeddedSolanaSponsorshipObserveCanSponsor,
+                  });
                 const budget = validation.ok
                   ? await reserveEmbeddedSolanaSponsorshipBudget({
                       flow: "across",
@@ -1968,13 +1982,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                       limits:
                         authAccessPolicy.effective
                           .embeddedSolanaSponsorshipLimits,
-                      requireRedis:
-                        shouldRequireEmbeddedSolanaSponsorshipRedis({
-                          mode: authAccessPolicy.effective
-                            .embeddedSolanaSponsorshipMode,
-                          observeCanSponsor:
-                            env.embeddedSolanaSponsorshipObserveCanSponsor,
-                        }),
+                      requireRedis: requireDurableAcrossSponsorship,
                     })
                   : { ok: false, reasons: validation.reasons };
                 if (validation.ok && budget.ok) {
@@ -1983,6 +1991,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     userId: user.id,
                     signer: addresses.senderAddress,
                     transaction: normalizedPayload.tx.data,
+                    requireDurable: requireDurableAcrossSponsorship,
                     metadata,
                   });
                   if (intent) {

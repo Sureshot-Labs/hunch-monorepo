@@ -5,14 +5,8 @@ import {
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  Transaction,
-} from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import type { Pool } from "@hunch/infra";
-import bs58 from "bs58";
 
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
@@ -20,6 +14,7 @@ import {
   fetchSolanaFinalizedTransactionBalanceDeltas,
   waitForSolanaSignatureConfirmation,
 } from "./solana-rpc.js";
+import { resolveHunchSolanaSponsorKeypair } from "./solana-sponsorship-primitives.js";
 
 type Logger = {
   info?: (obj: unknown, msg?: string) => void;
@@ -77,7 +72,10 @@ export type DflowSponsorRentCloseResult = {
 };
 
 type DflowSponsorRentCloseAccountResult =
-  DflowSponsorRentCloseResult["accountResults"] extends Map<string, infer Result>
+  DflowSponsorRentCloseResult["accountResults"] extends Map<
+    string,
+    infer Result
+  >
     ? Result
     : never;
 
@@ -109,41 +107,8 @@ const TOKEN_PROGRAM_IDS = new Set([
   TOKEN_2022_PROGRAM_ID.toBase58(),
 ]);
 
-function loadSolanaKeypairFromSecret(raw: string): Keypair {
-  const trimmed = raw.trim();
-  if (!trimmed) throw new Error("Missing HUNCH_SOLANA_SPONSOR_SECRET_KEY");
-  if (trimmed.startsWith("[")) {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (
-      !Array.isArray(parsed) ||
-      parsed.some(
-        (entry) =>
-          typeof entry !== "number" ||
-          !Number.isInteger(entry) ||
-          entry < 0 ||
-          entry > 255,
-      )
-    ) {
-      throw new Error("Invalid HUNCH_SOLANA_SPONSOR_SECRET_KEY array");
-    }
-    return Keypair.fromSecretKey(Uint8Array.from(parsed));
-  }
-  return Keypair.fromSecretKey(bs58.decode(trimmed));
-}
-
 function resolveSponsorKeypair(): Keypair | null {
-  if (!env.hunchSolanaSponsorSecretKey) return null;
-  const keypair = loadSolanaKeypairFromSecret(env.hunchSolanaSponsorSecretKey);
-  const derivedAddress = keypair.publicKey.toBase58();
-  if (
-    env.hunchSolanaSponsorAddress &&
-    env.hunchSolanaSponsorAddress !== derivedAddress
-  ) {
-    throw new Error(
-      "HUNCH_SOLANA_SPONSOR_ADDRESS does not match HUNCH_SOLANA_SPONSOR_SECRET_KEY",
-    );
-  }
-  return keypair;
+  return resolveHunchSolanaSponsorKeypair();
 }
 
 function getString(value: unknown): string | null {
@@ -301,7 +266,7 @@ async function fetchReclaimRows(
         metadata
       from solana_sponsorship_ledger
       where flow = 'dflow'
-        and status = 'confirmed'
+        and status in ('confirmed', 'failed')
         and (
           rent_status in ('lost', 'locked')
           or (
@@ -336,7 +301,7 @@ async function claimReclaimRows(
           jsonb_build_object('claimId', $2::text, 'claimedAt', now())
         )
       where id = any($1::uuid[])
-        and status = 'confirmed'
+        and status in ('confirmed', 'failed')
         and (
           metadata #>> '{sponsorshipRentReclaimClaim,claimId}' is null
           or updated_at <= now() - interval '10 minutes'
@@ -462,7 +427,11 @@ async function sendCloseAccountBatch(inputs: {
 }
 
 async function closeOnchainTokenAccounts(
-  accounts: Array<{ account: string; lamports: bigint; tokenProgramId: string }>,
+  accounts: Array<{
+    account: string;
+    lamports: bigint;
+    tokenProgramId: string;
+  }>,
 ): Promise<DflowSponsorRentCloseResult> {
   const sponsorKeypair = resolveSponsorKeypair();
   if (!sponsorKeypair) {
@@ -498,9 +467,7 @@ async function closeOnchainTokenAccounts(
         commitment: "finalized",
       });
       if (confirmation.status !== "fulfilled") {
-        throw new Error(
-          `close_account_confirmation_${confirmation.status}`,
-        );
+        throw new Error(`close_account_confirmation_${confirmation.status}`);
       }
       const metadata = await fetchSolanaFinalizedTransactionBalanceDeltas({
         rpcUrls: env.solanaRpcUrls,
@@ -635,7 +602,9 @@ function calculateNetActualSponsorLamportsAfterReclaim(inputs: {
   return net > 0n ? net : 0n;
 }
 
-function sumRentReclaimCloseFeeLamports(metadata: Record<string, unknown>): bigint {
+function sumRentReclaimCloseFeeLamports(
+  metadata: Record<string, unknown>,
+): bigint {
   const reclaim = isRecord(metadata.sponsorshipRentReclaim)
     ? metadata.sponsorshipRentReclaim
     : null;
@@ -665,7 +634,9 @@ function attachRentReclaimAccountingMetadata(inputs: {
     sponsorshipRentReclaim: {
       ...inputs.metadata.sponsorshipRentReclaim,
       grossActualSponsorLamports: previousActual.toString(),
-      closeFeeLamports: sumRentReclaimCloseFeeLamports(inputs.metadata).toString(),
+      closeFeeLamports: sumRentReclaimCloseFeeLamports(
+        inputs.metadata,
+      ).toString(),
       netActualSponsorLamports: netActual.toString(),
     },
   };
@@ -676,7 +647,9 @@ function buildAccountOwnerRows(
 ): Map<string, string> {
   const owners = new Map<string, string>();
   for (const row of rows) {
-    for (const account of extractDflowRentReclaimCandidateAccounts(row.metadata)) {
+    for (const account of extractDflowRentReclaimCandidateAccounts(
+      row.metadata,
+    )) {
       if (!owners.has(account)) owners.set(account, row.id);
     }
   }
@@ -692,7 +665,9 @@ function filterCloseResultsForRow(inputs: {
   if (!closeResults) return null;
 
   const accountResults = new Map<string, DflowSponsorRentCloseAccountResult>();
-  for (const account of extractDflowRentReclaimCandidateAccounts(inputs.row.metadata)) {
+  for (const account of extractDflowRentReclaimCandidateAccounts(
+    inputs.row.metadata,
+  )) {
     if (inputs.accountOwnerRows.get(account) !== inputs.row.id) continue;
     const result = closeResults.accountResults.get(account);
     if (result) accountResults.set(account, result);
@@ -738,7 +713,7 @@ async function updateReclaimRow(
         actual_sponsor_lamports = coalesce($4::numeric, actual_sponsor_lamports),
         metadata = metadata || $5::jsonb
       where id = $1
-        and status = 'confirmed'
+        and status in ('confirmed', 'failed')
         and rent_status in ('locked', 'lost', 'returned')
     `,
     [
@@ -824,8 +799,10 @@ export async function reclaimSolanaSponsorshipRentAccounts(
   const eligible = Array.from(evaluations.values()).filter(
     (
       evaluation,
-    ): evaluation is Extract<ReturnType<typeof evaluateCandidate>, { eligible: true }> =>
-      evaluation.eligible,
+    ): evaluation is Extract<
+      ReturnType<typeof evaluateCandidate>,
+      { eligible: true }
+    > => evaluation.eligible,
   );
   const closeAccounts = options.closeAccounts ?? closeOnchainTokenAccounts;
   let closeResults: DflowSponsorRentCloseResult | null = null;

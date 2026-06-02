@@ -116,8 +116,7 @@ const ASSOCIATED_TOKEN_PROGRAM_ID_BASE58 =
   ASSOCIATED_TOKEN_PROGRAM_ID.toBase58();
 const TOKEN_PROGRAM_ID_BASE58 = TOKEN_PROGRAM_ID.toBase58();
 const TOKEN_2022_PROGRAM_ID_BASE58 = TOKEN_2022_PROGRAM_ID.toBase58();
-const COMPUTE_BUDGET_PROGRAM_ID =
-  "ComputeBudget111111111111111111111111111111";
+const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
 const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 const LEGACY_MEMO_PROGRAM_ID = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
 const DFLOW_PROGRAM_ID = "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH";
@@ -136,26 +135,28 @@ const BASE_ALLOWED_PROGRAMS = new Set([
   LEGACY_MEMO_PROGRAM_ID,
 ]);
 
-const FLOW_ALLOWED_PROGRAMS: Record<EmbeddedSolanaSponsorshipFlow, Set<string>> =
-  {
-    dflow: new Set([
-      ...BASE_ALLOWED_PROGRAMS,
-      DFLOW_PROGRAM_ID,
-      DFLOW_PREDICTION_PROGRAM_ID,
-    ]),
-    across: new Set([
-      ...BASE_ALLOWED_PROGRAMS,
-      ACROSS_SOLANA_SPOKE_POOL_PROGRAM_ID,
-    ]),
-    directTransfer: new Set([
-      COMPUTE_BUDGET_PROGRAM_ID,
-      TOKEN_PROGRAM_ID_BASE58,
-      TOKEN_2022_PROGRAM_ID_BASE58,
-      MEMO_PROGRAM_ID,
-      LEGACY_MEMO_PROGRAM_ID,
-    ]),
-    debridge: new Set([...BASE_ALLOWED_PROGRAMS]),
-  };
+const FLOW_ALLOWED_PROGRAMS: Record<
+  EmbeddedSolanaSponsorshipFlow,
+  Set<string>
+> = {
+  dflow: new Set([
+    ...BASE_ALLOWED_PROGRAMS,
+    DFLOW_PROGRAM_ID,
+    DFLOW_PREDICTION_PROGRAM_ID,
+  ]),
+  across: new Set([
+    ...BASE_ALLOWED_PROGRAMS,
+    ACROSS_SOLANA_SPOKE_POOL_PROGRAM_ID,
+  ]),
+  directTransfer: new Set([
+    COMPUTE_BUDGET_PROGRAM_ID,
+    TOKEN_PROGRAM_ID_BASE58,
+    TOKEN_2022_PROGRAM_ID_BASE58,
+    MEMO_PROGRAM_ID,
+    LEGACY_MEMO_PROGRAM_ID,
+  ]),
+  debridge: new Set([...BASE_ALLOWED_PROGRAMS]),
+};
 
 const sponsorshipIntentMemory = new Map<
   string,
@@ -274,7 +275,9 @@ function normalizeSolanaAddress(value: string): string {
   return value.trim();
 }
 
-function parseSolanaPublicKey(value: string | null | undefined): PublicKey | null {
+function parseSolanaPublicKey(
+  value: string | null | undefined,
+): PublicKey | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
   try {
@@ -378,7 +381,8 @@ function getSystemCreateLamports(
   signer: string,
 ): bigint {
   const txInstruction = buildTransactionInstruction(tx, instruction);
-  if (!txInstruction?.programId.equals(SystemProgram.programId)) return BigInt(0);
+  if (!txInstruction?.programId.equals(SystemProgram.programId))
+    return BigInt(0);
   const feePayer = tx.message.staticAccountKeys[0]?.toBase58() ?? null;
   const blockedSources = new Set([signer, feePayer].filter(Boolean));
 
@@ -579,7 +583,9 @@ function pruneExpiredIntents(now = Date.now()): void {
   }
 }
 
-function parseIntent(raw: string | null): EmbeddedSolanaSponsorshipIntent | null {
+function parseIntent(
+  raw: string | null,
+): EmbeddedSolanaSponsorshipIntent | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as EmbeddedSolanaSponsorshipIntent;
@@ -599,6 +605,7 @@ export async function createEmbeddedSolanaSponsorshipIntent(inputs: {
   transaction: string;
   metadata?: Record<string, unknown>;
   ttlSec?: number;
+  requireDurable?: boolean;
 }): Promise<EmbeddedSolanaSponsorshipIntent | null> {
   const digest = computeEmbeddedSolanaTransactionDigest(inputs.transaction);
   if (!digest) return null;
@@ -626,8 +633,17 @@ export async function createEmbeddedSolanaSponsorshipIntent(inputs: {
       await redis.set(getIntentRedisKey(intent.id), JSON.stringify(intent), {
         EX: ttlSec,
       });
+      return intent;
+    }
+    if (inputs.requireDurable) {
+      sponsorshipIntentMemory.delete(intent.id);
+      return null;
     }
   } catch {
+    if (inputs.requireDurable) {
+      sponsorshipIntentMemory.delete(intent.id);
+      return null;
+    }
     // Memory fallback is enough for same-process local testing. In prod, a Redis
     // outage makes intents best-effort and enforce mode will fail closed later.
   }
@@ -706,7 +722,10 @@ function reserveMemorySponsorshipBudget(inputs: {
     expiresAt: Date.now() + budgetWindowTtlMs("day"),
   };
   const reasons: string[] = [];
-  if (inputs.limit.maxPerHour <= 0 || hour.count + 1 > inputs.limit.maxPerHour) {
+  if (
+    inputs.limit.maxPerHour <= 0 ||
+    hour.count + 1 > inputs.limit.maxPerHour
+  ) {
     reasons.push("sponsorship_hour_budget_exceeded");
   }
   if (inputs.limit.maxPerDay <= 0 || day.count + 1 > inputs.limit.maxPerDay) {
@@ -1002,7 +1021,12 @@ function getExpectedDirectTransferRecipientTokenAccount(inputs: {
       ? TOKEN_2022_PROGRAM_ID
       : TOKEN_PROGRAM_ID;
   try {
-    return getAssociatedTokenAddressSync(mint, recipient, false, tokenProgram).toBase58();
+    return getAssociatedTokenAddressSync(
+      mint,
+      recipient,
+      false,
+      tokenProgram,
+    ).toBase58();
   } catch {
     return null;
   }
@@ -1079,13 +1103,23 @@ function validateIntent(inputs: {
 
   const expiresAt = new Date(intent.expiresAt).getTime();
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-    return { status: "expired", flow: intent.flow, reasons: ["expired_intent"] };
+    return {
+      status: "expired",
+      flow: intent.flow,
+      reasons: ["expired_intent"],
+    };
   }
   if (intent.userId !== inputs.userId) reasons.push("intent_user_mismatch");
-  if (normalizeSolanaAddress(intent.signer) !== normalizeSolanaAddress(inputs.signer)) {
+  if (
+    normalizeSolanaAddress(intent.signer) !==
+    normalizeSolanaAddress(inputs.signer)
+  ) {
     reasons.push("intent_signer_mismatch");
   }
-  if (!inputs.analysis.digest || intent.transactionDigest !== inputs.analysis.digest) {
+  if (
+    !inputs.analysis.digest ||
+    intent.transactionDigest !== inputs.analysis.digest
+  ) {
     reasons.push("intent_digest_mismatch");
   }
 
@@ -1157,8 +1191,10 @@ function evaluateEnforceAllowed(inputs: {
   if (!inputs.flows[flow]) reasons.push(`flow_${flow}_disabled`);
   if (flow === "directTransfer") {
     if (
-      getBooleanMetadata(inputs.intent?.metadata, "directTransferSponsorshipEligible") !==
-      true
+      getBooleanMetadata(
+        inputs.intent?.metadata,
+        "directTransferSponsorshipEligible",
+      ) !== true
     ) {
       reasons.push("direct_transfer_not_eligible");
     }
@@ -1215,15 +1251,17 @@ function evaluateEnforceAllowed(inputs: {
   }
   if (
     flow === "debridge" &&
-    getBooleanMetadata(inputs.intent?.metadata, "debridgeSponsorshipEligible") !==
-      true
+    getBooleanMetadata(
+      inputs.intent?.metadata,
+      "debridgeSponsorshipEligible",
+    ) !== true
   ) {
     reasons.push("debridge_not_eligible");
   }
   if (
     flow === "debridge" &&
-    getStringArrayMetadata(inputs.intent?.metadata, "allowedProgramIds").length ===
-      0
+    getStringArrayMetadata(inputs.intent?.metadata, "allowedProgramIds")
+      .length === 0
   ) {
     reasons.push("debridge_program_allowlist_missing");
   }
@@ -1374,7 +1412,11 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
         ? "missing"
         : "not_required",
     verdict:
-      inputs.mode === "observe" ? "observe" : enforce.allowed ? "allow" : "deny",
+      inputs.mode === "observe"
+        ? "observe"
+        : enforce.allowed
+          ? "allow"
+          : "deny",
     reasons: enforce.reasons,
     analysis,
   };

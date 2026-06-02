@@ -4,6 +4,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import {
+  hasPositiveSponsorFeeLike,
+  parseSolanaPublicKeyList,
+} from "./services/solana-sponsorship-primitives.js";
+
 function readApiSourceFile(...parts: string[]): string {
   return readFileSync(path.join(import.meta.dirname, ...parts), "utf8");
 }
@@ -133,9 +138,38 @@ assert.doesNotMatch(
   "prediction-market init schema must not expose skipPreflight",
 );
 
+assert.equal(
+  hasPositiveSponsorFeeLike({
+    tx: { kind: "solana", data: "tx" },
+    estimation: { fees: { protocolFee: "1" } },
+  }),
+  true,
+  "deBridge fee detection must reject nested positive provider fees",
+);
+assert.equal(
+  hasPositiveSponsorFeeLike({
+    tx: { kind: "solana", data: "tx" },
+    affiliateFeeRecipient: "11111111111111111111111111111111",
+  }),
+  false,
+  "deBridge fee detection must not reject fee recipient addresses",
+);
+assert.deepEqual(
+  parseSolanaPublicKeyList([
+    "11111111111111111111111111111111",
+    "11111111111111111111111111111111",
+  ]),
+  ["11111111111111111111111111111111"],
+  "deBridge allowlist parsing must validate and dedupe program IDs",
+);
+assert.throws(
+  () => parseSolanaPublicKeyList(["not-a-program-id"]),
+  /valid Solana address/,
+  "deBridge allowlist parsing must reject invalid program IDs",
+);
 assert.match(
   bridgeRoute,
-  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?isPositiveIntegerLike\(inputs\.payload\.fixFee\)[\s\S]*?isPositiveIntegerLike\(inputs\.payload\.protocolFee\)/,
+  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?hasPositiveSponsorFeeLike\(inputs\.payload\)/,
   "deBridge sponsorship intent creation must reject positive native/provider fees",
 );
 assert.match(
@@ -145,7 +179,7 @@ assert.match(
 );
 assert.match(
   bridgeRoute,
-  /const allowedProgramIds = env\.debridgeSolanaAllowedProgramIds;[\s\S]*?if \(!allowedProgramIds\.length\) return null;/,
+  /parseSolanaPublicKeyList\([\s\S]*?env\.debridgeSolanaAllowedProgramIds[\s\S]*?if \(!allowedProgramIds\.length\) return null;/,
   "deBridge sponsorship intent creation must require an explicit program allowlist",
 );
 assert.match(
@@ -202,6 +236,26 @@ assert.match(
   embeddedWalletsRoute,
   /EmbeddedSolanaSponsorshipLedgerDurabilityError[\s\S]*?requestId[\s\S]*?signature/,
   "embedded Solana ledger durability errors must include request id and signature",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /assertCachedEmbeddedSolanaSponsorPolicy\(requests\)/,
+  "embedded Solana execute must re-check sponsorship policy for cached sponsor requests",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /createEmbeddedSolanaSponsorshipIntent\(\{[\s\S]*?requireDurable:\s*requireDurableSponsorship/,
+  "direct-transfer sponsorship intent creation must require durable Redis when policy requires it",
+);
+assert.match(
+  dflowPrivate,
+  /resolveDflowPredictionMarketInitCandidate[\s\S]*?Outcome mint maps to multiple Hunch Kalshi markets/,
+  "admin DFlow market init must pre-validate unique Hunch Kalshi market mapping",
+);
+assert.match(
+  dflowPrivate,
+  /sponsorship_ledger_not_durable[\s\S]*?signature:\s*error\.signature/,
+  "DFlow sponsored submit must surface post-broadcast ledger durability failures",
 );
 
 assert.match(

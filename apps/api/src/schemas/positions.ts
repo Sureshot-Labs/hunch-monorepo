@@ -104,4 +104,9 @@ export const positionVisibilitySchema = z.object({
   walletAddress: z.string().min(1),
   tokenId: z.string().min(1),
   hidden: zBoolish,
+  attemptLossRentReclaim: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
+  tokenAccount: z.string().min(1).optional(),
 });

@@ -236,7 +236,15 @@ Rent reclaim is separately gated by
 `HUNCH_SOLANA_SPONSOR_RENT_RECLAIM_ENABLED=false` by default. Sponsorship
 reconciliation can run without reclaiming/closing rent accounts. Only enable
 rent reclaim after reviewing sponsor close-account behavior and confirming the
-worker has the intended sponsorship secret scope.
+worker has the intended sponsorship secret scope. In production, keep
+`HUNCH_SOLANA_SPONSOR_SECRET_KEY` out of `finance-worker` unless rent reclaim is
+enabled for that worker; read-only reconciliation does not need sponsor signing
+authority.
+
+For deBridge Solana-source sponsorship, `DEBRIDGE_SOLANA_ALLOWED_PROGRAM_IDS`
+must be a comma-separated list of valid Solana program IDs. Sponsorship is
+skipped if the allowlist is empty/invalid or if the provider payload contains
+any positive top-level or nested fee-like field.
 
 ## Policy Separation
 

@@ -25,6 +25,7 @@ export const dflowOrderQuerySchema = z.object({
   inputMint: zRequiredString("inputMint is required"),
   outputMint: zRequiredString("outputMint is required"),
   amount: zRequiredString("amount is required"),
+  purpose: z.enum(["trade", "redeem"]).optional(),
   userPublicKey: z.string().optional(),
   slippageBps: z.coerce.number().int().min(0).max(10000).optional(),
   platformFeeBps: z.coerce.number().int().min(0).max(10000).optional(),

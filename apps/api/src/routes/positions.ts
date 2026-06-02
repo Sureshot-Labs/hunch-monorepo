@@ -15,6 +15,8 @@ import {
 } from "../repos/positions-repo.js";
 import { fetchMarketsByTokenIds as fetchMarketRowsByTokenIds } from "../repos/unified-read.js";
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
+import { resolveEmbeddedSolanaWalletContext } from "../services/embedded-solana.js";
+import { prepareKalshiLossRentReclaim } from "../services/kalshi-loss-rent-reclaim.js";
 import {
   prefetchPolymarketOwnerBalancesForWallets,
   syncPositionsForUserWallet,
@@ -434,8 +436,53 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Position not found" });
         }
 
+        let lossRentReclaim:
+          | Awaited<ReturnType<typeof prepareKalshiLossRentReclaim>>
+          | undefined;
+        if (
+          body.hidden &&
+          body.attemptLossRentReclaim &&
+          body.venue === "kalshi"
+        ) {
+          try {
+            await resolveEmbeddedSolanaWalletContext({
+              user,
+              signer: body.walletAddress,
+            });
+          } catch {
+            lossRentReclaim = {
+              eligible: false,
+              reason: "embedded_wallet_required",
+            };
+          }
+          if (!lossRentReclaim) {
+            try {
+              lossRentReclaim = await prepareKalshiLossRentReclaim({
+                pool,
+                userId: user.id,
+                walletAddress: body.walletAddress,
+                tokenId: body.tokenId,
+                tokenAccount: body.tokenAccount,
+              });
+            } catch (error) {
+              app.log.warn(
+                { error, userId: user.id, body },
+                "Failed to prepare Kalshi loss rent reclaim after hiding position",
+              );
+              lossRentReclaim = {
+                eligible: false,
+                reason: "reclaim_prepare_failed",
+              };
+            }
+          }
+        }
+
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ ok: true, hidden: body.hidden });
+        return reply.send({
+          ok: true,
+          hidden: body.hidden,
+          ...(lossRentReclaim ? { lossRentReclaim } : {}),
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, body },
