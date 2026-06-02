@@ -75,10 +75,12 @@ await test("maps admin role permissions conservatively", () => {
   assert.equal(adminHasPermission("sadmin", "admin:manage"), true);
   assert.equal(adminHasPermission("admin", "users:write"), true);
   assert.equal(adminHasPermission("admin", "admin:manage"), false);
+  assert.equal(adminHasPermission("admin", "sponsorship:write"), true);
   assert.equal(adminHasPermission("viewer", "users:read"), true);
   assert.equal(adminHasPermission("viewer", "users:write"), false);
   assert.equal(adminHasPermission("viewer", "finance:read"), true);
   assert.equal(adminHasPermission("viewer", "finance:write"), false);
+  assert.equal(adminHasPermission("viewer", "sponsorship:write"), false);
   assert.equal(adminHasPermission("analyst", "analytics:read"), false);
   assert.equal(adminHasPermission("analyst", "intel:read"), false);
   assert.equal(adminHasPermission("analyst", "users:read"), false);

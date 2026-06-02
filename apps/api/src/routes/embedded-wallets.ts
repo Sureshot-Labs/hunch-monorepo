@@ -632,14 +632,31 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               requests,
               signatures: request.body.signedRequests,
               onResult: async (result) => {
-                await markSubmittedSolanaSponsorshipRequest({
-                  userId: user.id,
-                  signer: context.signer,
-                  request: result.request,
-                  signature: result.signature,
-                  transactionId: result.transactionId,
-                  caip2: result.caip2,
-                });
+                try {
+                  await markSubmittedSolanaSponsorshipRequest({
+                    userId: user.id,
+                    signer: context.signer,
+                    request: result.request,
+                    signature: result.signature,
+                    transactionId: result.transactionId,
+                    caip2: result.caip2,
+                  });
+                } catch (error) {
+                  app.log.warn(
+                    {
+                      error,
+                      userId: user.id,
+                      signer: context.signer,
+                      requestId: result.request.id,
+                      signature: result.signature,
+                      transactionId: result.transactionId,
+                      sponsorshipIntentId:
+                        result.request.solanaSponsorship?.sponsorshipIntentId ??
+                        null,
+                    },
+                    "Embedded Solana sponsored transaction submitted but ledger update failed",
+                  );
+                }
               },
             });
             return {

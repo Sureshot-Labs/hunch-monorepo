@@ -50,6 +50,7 @@ import {
   type EmbeddedSolanaSponsorshipLimits,
   type EmbeddedSolanaSponsorshipMode,
 } from "../services/embedded-solana-sponsorship.js";
+import { resolveEmbeddedSolanaWalletContext } from "../services/embedded-solana.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import {
   dflowExecutionBodySchema,
@@ -880,7 +881,7 @@ async function refreshUnsignedSolanaTransactionBlockhash(
 }
 
 async function upsertSolanaSponsorshipLedger(inputs: {
-  userId: string;
+  userId: string | null;
   walletAddress: string;
   sponsorAddress: string;
   intentId: string;
@@ -931,13 +932,13 @@ async function upsertSolanaSponsorshipLedger(inputs: {
         status = case
           when coalesce(
             array_position(
-              array['created', 'intent_created', 'user_signed', 'failed', 'submitted', 'confirmed'],
+              array['created', 'intent_created', 'user_signed', 'submitted', 'failed', 'confirmed'],
               excluded.status
             ),
             0
           ) >= coalesce(
             array_position(
-              array['created', 'intent_created', 'user_signed', 'failed', 'submitted', 'confirmed'],
+              array['created', 'intent_created', 'user_signed', 'submitted', 'failed', 'confirmed'],
               solana_sponsorship_ledger.status
             ),
             0
@@ -954,7 +955,7 @@ async function upsertSolanaSponsorshipLedger(inputs: {
         rent_lamports = coalesce(excluded.rent_lamports, solana_sponsorship_ledger.rent_lamports),
         rent_status = coalesce(excluded.rent_status, solana_sponsorship_ledger.rent_status),
         error = case
-          when solana_sponsorship_ledger.status in ('submitted', 'confirmed')
+          when solana_sponsorship_ledger.status = 'confirmed'
             and excluded.status = 'failed'
             then solana_sponsorship_ledger.error
           else coalesce(excluded.error, solana_sponsorship_ledger.error)
@@ -1316,15 +1317,96 @@ async function initializeDflowPredictionMarket(inputs: {
   }
   tx.sign([sponsorKeypair]);
   const signedTransaction = encodeBase64(tx.serialize());
-  const signature = await sendSolanaRawTransaction({
-    rpcUrls: env.solanaRpcUrls,
-    timeoutMs: env.solanaRpcTimeoutMs,
-    signedTransaction,
-    skipPreflight: false,
-    maxRetries: Math.min(
-      Math.max(Math.trunc(inputs.maxRetries ?? DFLOW_SPONSORED_MAX_RETRIES), 0),
-      DFLOW_SPONSORED_MAX_RETRIES,
-    ),
+  const transactionDigest = computeEmbeddedSolanaTransactionDigest(signedTransaction);
+  const expectedSignature = getVersionedTransactionSignature(tx);
+  if (!transactionDigest || !expectedSignature) {
+    throw new Error("DFlow prediction market init could not be signed");
+  }
+  const intentId = `admin-preinit:${inputs.outcomeMint}:${transactionDigest.slice(0, 32)}`;
+  const estimatedSponsorLamports =
+    validation.estimatedSponsorLamports.toString();
+  const estimatedNonFeeLamports =
+    validation.estimatedSponsorLamports > validation.estimatedFeeLamports
+      ? validation.estimatedSponsorLamports - validation.estimatedFeeLamports
+      : BigInt(0);
+
+  await upsertSolanaSponsorshipLedger({
+    userId: null,
+    walletAddress: sponsorAddress,
+    sponsorAddress,
+    intentId,
+    status: "user_signed",
+    outputMint: inputs.outcomeMint,
+    transactionDigest,
+    txSignature: expectedSignature,
+    estimatedSponsorLamports,
+    rentLamports:
+      estimatedNonFeeLamports > BigInt(0)
+        ? estimatedNonFeeLamports.toString()
+        : null,
+    rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+    metadata: {
+      adminPredictionMarketInit: true,
+      outcomeMint: inputs.outcomeMint,
+      programIds: analysis.programIds,
+      systemCreateLamports: analysis.systemCreateLamports,
+      sponsorSignedAt: new Date().toISOString(),
+    },
+  });
+
+  let signature: string;
+  try {
+    signature = await sendSolanaRawTransaction({
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      signedTransaction,
+      skipPreflight: false,
+      maxRetries: Math.min(
+        Math.max(Math.trunc(inputs.maxRetries ?? DFLOW_SPONSORED_MAX_RETRIES), 0),
+        DFLOW_SPONSORED_MAX_RETRIES,
+      ),
+    });
+  } catch (error) {
+    await upsertSolanaSponsorshipLedger({
+      userId: null,
+      walletAddress: sponsorAddress,
+      sponsorAddress,
+      intentId,
+      status: "failed",
+      outputMint: inputs.outcomeMint,
+      transactionDigest,
+      txSignature: expectedSignature,
+      estimatedSponsorLamports,
+      rentStatus: "unknown",
+      error: error instanceof Error ? error.message : String(error),
+      metadata: {
+        adminPredictionMarketInit: true,
+        outcomeMint: inputs.outcomeMint,
+      },
+    });
+    throw error;
+  }
+
+  await upsertSolanaSponsorshipLedger({
+    userId: null,
+    walletAddress: sponsorAddress,
+    sponsorAddress,
+    intentId,
+    status: "submitted",
+    outputMint: inputs.outcomeMint,
+    transactionDigest,
+    txSignature: signature,
+    estimatedSponsorLamports,
+    rentLamports:
+      estimatedNonFeeLamports > BigInt(0)
+        ? estimatedNonFeeLamports.toString()
+        : null,
+    rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+    metadata: {
+      adminPredictionMarketInit: true,
+      outcomeMint: inputs.outcomeMint,
+      submittedAt: new Date().toISOString(),
+    },
   });
   const confirmation = await waitForSolanaSignatureConfirmation({
     rpcUrls: env.solanaRpcUrls,
@@ -1883,6 +1965,20 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         dflowSponsoredOrder =
           sponsorshipConfig.enabled &&
           sponsorshipMarketState?.marketInitialized === true;
+        if (dflowSponsoredOrder) {
+          try {
+            await resolveEmbeddedSolanaWalletContext({
+              user,
+              signer: walletAddress,
+            });
+          } catch (error) {
+            app.log.info(
+              { error, userId: user.id, walletAddress },
+              "DFlow sponsorship skipped for non-embedded Solana wallet",
+            );
+            dflowSponsoredOrder = false;
+          }
+        }
         if (
           !dflowSponsoredOrder &&
           sponsorshipConfig.decision.policyAllows &&
@@ -1951,7 +2047,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           sponsorAddress: dflowSponsorAddress,
         });
 
-      const upstream = await requestOrder({ sponsored: dflowSponsoredOrder, query: {} });
+      const upstream = await requestOrder({
+        sponsored: dflowSponsoredOrder,
+        query: {},
+      });
       if (!upstream.ok) {
         return sendDflowOrderFailure(upstream);
       }
@@ -2247,7 +2346,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
     "/admin/prediction-market-init",
     {
       preHandler: createAdminMiddleware({
-        requiredAdminPermission: "finance:write",
+        requiredAdminPermissions: ["finance:write", "sponsorship:write"],
       }),
       schema: { body: dflowPredictionMarketInitBodySchema },
     },
@@ -2255,13 +2354,19 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       if (!ensureDflowReady(reply)) return;
       try {
         const policy = await resolveAuthAccessPolicy(pool);
-        if (
-          policy.effective.embeddedSolanaSponsorship !== true ||
-          policy.effective.embeddedSolanaSponsorshipFlows.dflow !== true
-        ) {
+        const decision = resolveDflowActualSponsorshipDecision({
+          embeddedSolanaSponsorship:
+            policy.effective.embeddedSolanaSponsorship === true,
+          dflowFlowEnabled:
+            policy.effective.embeddedSolanaSponsorshipFlows.dflow === true,
+          mode: policy.effective.embeddedSolanaSponsorshipMode,
+          observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+        });
+        if (!decision.actualSponsorAllowed) {
           reply.code(403);
           return reply.send({
             error: "DFlow sponsorship is disabled",
+            reasons: decision.reasons,
           });
         }
         const result = await initializeDflowPredictionMarket({
@@ -2365,6 +2470,18 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.code(400);
         return reply.send({
           error: "DFlow submit requires a Solana wallet address",
+        });
+      }
+
+      try {
+        await resolveEmbeddedSolanaWalletContext({
+          user,
+          signer: walletAddress,
+        });
+      } catch {
+        reply.code(400);
+        return reply.send({
+          error: "DFlow sponsorship requires an embedded Solana Trading Wallet",
         });
       }
 

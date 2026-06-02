@@ -17,7 +17,7 @@ type SolanaSponsorshipLedgerFlow =
 type SolanaSponsorshipLedgerVenue = "kalshi" | "bridge" | "wallet";
 
 export async function upsertSolanaSponsorshipLedger(inputs: {
-  userId: string;
+  userId: string | null;
   venue: SolanaSponsorshipLedgerVenue;
   flow: SolanaSponsorshipLedgerFlow;
   status: SolanaSponsorshipLedgerStatus;

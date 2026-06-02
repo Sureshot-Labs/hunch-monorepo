@@ -76,6 +76,11 @@ export type DflowSponsorRentCloseResult = {
   closeTransactions: DflowSponsorRentCloseTransactions;
 };
 
+type DflowSponsorRentCloseAccountResult =
+  DflowSponsorRentCloseResult["accountResults"] extends Map<string, infer Result>
+    ? Result
+    : never;
+
 export type ReclaimSolanaSponsorshipRentOptions = {
   dryRun: boolean;
   limit: number;
@@ -630,6 +635,53 @@ function calculateNetActualSponsorLamportsAfterReclaim(inputs: {
   return net > 0n ? net : 0n;
 }
 
+function buildAccountOwnerRows(
+  rows: SponsorshipRentReclaimRow[],
+): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const row of rows) {
+    for (const account of extractDflowRentReclaimCandidateAccounts(row.metadata)) {
+      if (!owners.has(account)) owners.set(account, row.id);
+    }
+  }
+  return owners;
+}
+
+function filterCloseResultsForRow(inputs: {
+  row: SponsorshipRentReclaimRow;
+  closeResults: DflowSponsorRentCloseResult | null;
+  accountOwnerRows: Map<string, string>;
+}): DflowSponsorRentCloseResult | null {
+  const closeResults = inputs.closeResults;
+  if (!closeResults) return null;
+
+  const accountResults = new Map<string, DflowSponsorRentCloseAccountResult>();
+  for (const account of extractDflowRentReclaimCandidateAccounts(inputs.row.metadata)) {
+    if (inputs.accountOwnerRows.get(account) !== inputs.row.id) continue;
+    const result = closeResults.accountResults.get(account);
+    if (result) accountResults.set(account, result);
+  }
+
+  const closeTransactions: DflowSponsorRentCloseTransactions = [];
+  for (const closeTransaction of closeResults.closeTransactions) {
+    const ownedAccounts = closeTransaction.accounts.filter(
+      (account) => inputs.accountOwnerRows.get(account) === inputs.row.id,
+    );
+    if (!ownedAccounts.length) continue;
+    const firstOwnerRow = closeTransaction.accounts
+      .map((account) => inputs.accountOwnerRows.get(account) ?? null)
+      .find((rowId): rowId is string => Boolean(rowId));
+    closeTransactions.push({
+      signature: closeTransaction.signature,
+      accounts: ownedAccounts,
+      feeLamports:
+        firstOwnerRow === inputs.row.id ? closeTransaction.feeLamports : "0",
+    });
+  }
+
+  return { accountResults, closeTransactions };
+}
+
 async function updateReclaimRow(
   pool: Pool,
   row: SponsorshipRentReclaimRow,
@@ -694,6 +746,7 @@ export async function reclaimSolanaSponsorshipRentAccounts(
       }
     }
   }
+  const accountOwnerRows = buildAccountOwnerRows(rows);
 
   const fetchAccount = options.fetchAccount ?? fetchOnchainTokenAccountInfo;
   const evaluations = new Map<string, ReturnType<typeof evaluateCandidate>>();
@@ -796,6 +849,8 @@ export async function reclaimSolanaSponsorshipRentAccounts(
       const evaluation = evaluations.get(account);
       if (!evaluation) continue;
       if (evaluation.eligible) {
+        const ownerRowId = accountOwnerRows.get(account);
+        if (ownerRowId && ownerRowId !== row.id) continue;
         const closeResult = closeResults?.accountResults.get(account);
         if (closeResult?.status !== "closed") {
           remainingOpenLamports += evaluation.lamports;
@@ -814,11 +869,16 @@ export async function reclaimSolanaSponsorshipRentAccounts(
           : "lost";
 
     if (!options.dryRun) {
+      const rowCloseResults = filterCloseResultsForRow({
+        row,
+        closeResults,
+        accountOwnerRows,
+      });
       const metadata = rowReclaimMetadata({
         existingMetadata: row.metadata,
         candidateAccounts,
         evaluations,
-        closeResults,
+        closeResults: rowCloseResults,
         dryRun: options.dryRun,
         remainingOpenLamports,
       });

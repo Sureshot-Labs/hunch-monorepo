@@ -135,6 +135,41 @@ await test("observed buy plus sell cost matches round trip total", () => {
   assert.equal((buy + sell).toString(), "4143573");
 });
 
+await test("failed finalized DFlow transaction records sponsor spend", () => {
+  const result = calculateDflowSponsorshipReconciliation({
+    sponsorAddress: SPONSOR,
+    submitSignature: "failed-submit",
+    relatedSignatures: ["failed-submit"],
+    settlementClosed: false,
+    transactions: new Map([
+      [
+        "failed-submit",
+        tx({
+          signature: "failed-submit",
+          feePayer: SPONSOR,
+          feeLamports: 10_000n,
+          sponsorDeltaLamports: -10_000n,
+          err: { InstructionError: [1, "Custom"] },
+        }),
+      ],
+    ]),
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.actualSponsorLamports, "10000");
+  assert.equal(result.rentLamports, "0");
+  assert.equal(result.rentStatus, "returned");
+  const reconciliation = result.metadata.sponsorshipReconciliation as {
+    erroredSignatures: string[];
+    transactions: Array<{ err: unknown; feeLamports: string }>;
+  };
+  assert.deepEqual(reconciliation.erroredSignatures, ["failed-submit"]);
+  assert.equal(reconciliation.transactions[0]?.feeLamports, "10000");
+  assert.deepEqual(reconciliation.transactions[0]?.err, {
+    InstructionError: [1, "Custom"],
+  });
+});
+
 await test("missing settlement transaction leaves row submitted and unknown", () => {
   const result = calculateDflowSponsorshipReconciliation({
     sponsorAddress: SPONSOR,

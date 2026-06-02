@@ -11,11 +11,52 @@ function readApiSourceFile(...parts: string[]): string {
 const dflowPrivate = readApiSourceFile("routes", "dflow-private.ts");
 const dflowSchemas = readApiSourceFile("schemas", "dflow.ts");
 const bridgeRoute = readApiSourceFile("routes", "bridge.ts");
+const sponsorshipReconcile = readApiSourceFile(
+  "services",
+  "solana-sponsorship-reconcile.ts",
+);
+const adminRoute = readApiSourceFile("routes", "admin.ts");
+const adminAuth = readApiSourceFile("services", "admin-auth.ts");
+const secretsConfig = readFileSync(
+  path.join(import.meta.dirname, "../../../packages/config/src/secrets.ts"),
+  "utf8",
+);
+const rewardsSecretBundle =
+  /rewards:\s*\[([\s\S]*?)\],/.exec(secretsConfig)?.[1] ?? "";
+const prodCompose = readFileSync(
+  path.join(import.meta.dirname, "../../../ops/docker-compose.prod.yml"),
+  "utf8",
+);
 
 assert.match(
   dflowPrivate,
   /async function signAndBroadcastSponsoredDflowTransaction[\s\S]*?const sponsorConfig = await resolveDflowSponsorConfig\(\)/,
   "sponsored DFlow submit must re-check sponsor policy/config before signing",
+);
+assert.match(
+  dflowPrivate,
+  /\/order[\s\S]*?resolveEmbeddedSolanaWalletContext\(\{[\s\S]*?user,[\s\S]*?signer: walletAddress/,
+  "DFlow order sponsorship must require an embedded Solana wallet",
+);
+assert.match(
+  dflowPrivate,
+  /\/sponsored-submit[\s\S]*?resolveEmbeddedSolanaWalletContext\(\{[\s\S]*?user,[\s\S]*?signer: walletAddress/,
+  "sponsored DFlow submit must re-check the embedded Solana wallet",
+);
+assert.match(
+  dflowPrivate,
+  /\/admin\/prediction-market-init[\s\S]*?requiredAdminPermissions:\s*\["finance:write",\s*"sponsorship:write"\]/,
+  "admin DFlow market init must require sponsorship write permission",
+);
+assert.match(
+  dflowPrivate,
+  /\/admin\/prediction-market-init[\s\S]*?resolveDflowActualSponsorshipDecision[\s\S]*?!decision\.actualSponsorAllowed/,
+  "admin DFlow market init must respect actual sponsorship policy",
+);
+assert.match(
+  dflowPrivate,
+  /array\['created', 'intent_created', 'user_signed', 'submitted', 'failed', 'confirmed'\]/,
+  "DFlow ledger upsert must allow submitted rows to become failed after finalized tx errors",
 );
 
 assert.match(
@@ -105,6 +146,52 @@ assert.match(
   bridgeRoute,
   /reserveEmbeddedSolanaSponsorshipBudget\(\{[\s\S]*?flow: "debridge"/,
   "deBridge sponsorship intent creation must reserve budget before creating an intent",
+);
+assert.match(
+  bridgeRoute,
+  /upsertSolanaSponsorshipLedger\(\{[\s\S]*?flow: "across"[\s\S]*?\}\);\s*hunchSponsorshipIntentId = intent\.id;/,
+  "Across sponsorship intent id must be returned only after ledger durability",
+);
+assert.match(
+  sponsorshipReconcile,
+  /getBooleanMetadata\(row\.metadata, "adminPredictionMarketInit"\)[\s\S]*?isTerminalDflowSettlementStatus/,
+  "admin DFlow market-init rows must reconcile as single-transaction sponsor rows",
+);
+assert.match(
+  sponsorshipReconcile,
+  /status:\s*failed \? "failed" : "confirmed"[\s\S]*?actualSponsorLamports:\s*sponsorCost\.toString\(\)[\s\S]*?error:\s*failed \? JSON\.stringify\(tx\.err\) : null/,
+  "generic sponsorship reconciliation must account failed finalized transactions",
+);
+
+assert.match(
+  adminAuth,
+  /"sponsorship:write"/,
+  "admin roles must include an explicit sponsorship write permission",
+);
+assert.match(
+  adminRoute,
+  /authAccessSponsorshipPolicyChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)/,
+  "auth_access sponsorship policy writes must require sponsorship permission",
+);
+assert.match(
+  secretsConfig,
+  /sponsorship:\s*\[[\s\S]*?"HUNCH_SOLANA_SPONSOR_SECRET_KEY"/,
+  "sponsor secret key must live in the sponsorship secret bundle",
+);
+assert.doesNotMatch(
+  rewardsSecretBundle,
+  /HUNCH_SOLANA_SPONSOR_SECRET_KEY/,
+  "rewards secret bundle must not include the sponsor secret key",
+);
+assert.match(
+  prodCompose,
+  /HUNCH_SECRET_BUNDLES_API:-[^}\n]*\/hunch\/prod\/sponsorship/,
+  "API production secret bundles must include sponsorship secrets",
+);
+assert.doesNotMatch(
+  prodCompose,
+  /HUNCH_SECRET_BUNDLES_FINANCE_WORKER:-[^}\n]*\/hunch\/prod\/sponsorship/,
+  "finance-worker production secret bundles must not include sponsorship secrets",
 );
 
 console.log("[dflow-sponsorship-hardening-tests] ok");

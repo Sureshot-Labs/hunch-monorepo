@@ -89,7 +89,7 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-3001}
-      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_API:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards,aws-sm:/hunch/prod/ai,aws-sm:/hunch/prod/ops}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_API:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards,aws-sm:/hunch/prod/sponsorship,aws-sm:/hunch/prod/ai,aws-sm:/hunch/prod/ops}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     ports:

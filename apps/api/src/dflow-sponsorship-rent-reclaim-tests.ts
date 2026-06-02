@@ -188,8 +188,34 @@ await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async 
   assert.equal(summary.closed, 2);
   assert.equal(summary.reclaimedLamports, "4113360");
   assert.equal(db.updates.length, 2);
+  assert.equal(db.updates[0]?.[1], "0");
   assert.equal(db.updates[0]?.[2], "returned");
+  assert.equal(db.updates[0]?.[3], "20035");
+  assert.equal(db.updates[1]?.[1], "0");
   assert.equal(db.updates[1]?.[2], "returned");
+  assert.equal(db.updates[1]?.[3], "4128395");
+  const firstMetadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  assert.equal(
+    firstMetadataUpdate.sponsorshipRentReclaim.reclaimedLamports,
+    "4113360",
+  );
+  assert.deepEqual(
+    firstMetadataUpdate.sponsorshipRentReclaim.closeTransactions[0].accounts,
+    ["A", "B"],
+  );
+  assert.equal(
+    firstMetadataUpdate.sponsorshipRentReclaim.closeTransactions[0].feeLamports,
+    "5000",
+  );
+  const secondMetadataUpdate = JSON.parse(String(db.updates[1]?.[4]));
+  assert.equal(
+    secondMetadataUpdate.sponsorshipRentReclaim.reclaimedLamports,
+    "0",
+  );
+  assert.deepEqual(
+    secondMetadataUpdate.sponsorshipRentReclaim.closeTransactions,
+    [],
+  );
 });
 
 await test("closes empty user-owned token account when sponsor is close authority", async () => {

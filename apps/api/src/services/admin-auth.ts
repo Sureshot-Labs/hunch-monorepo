@@ -33,7 +33,8 @@ export type AdminPermission =
   | "intel:read"
   | "intel:write"
   | "rewards:read"
-  | "rewards:write";
+  | "rewards:write"
+  | "sponsorship:write";
 
 const ALL_ADMIN_PERMISSIONS = [
   "admin:manage",
@@ -46,6 +47,7 @@ const ALL_ADMIN_PERMISSIONS = [
   "intel:write",
   "rewards:read",
   "rewards:write",
+  "sponsorship:write",
 ] as const satisfies readonly AdminPermission[];
 
 const ADMIN_ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {

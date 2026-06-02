@@ -1985,7 +1985,6 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     transaction: normalizedPayload.tx.data,
                     metadata,
                   });
-                  hunchSponsorshipIntentId = intent?.id ?? null;
                   if (intent) {
                     try {
                       await upsertSolanaSponsorshipLedger({
@@ -2007,6 +2006,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                           programIds: validation.analysis.programIds,
                         },
                       });
+                      hunchSponsorshipIntentId = intent.id;
                     } catch (error) {
                       await releaseEmbeddedSolanaSponsorshipBudget(
                         budget.reservation,

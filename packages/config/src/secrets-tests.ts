@@ -270,6 +270,8 @@ test("bundle builder writes only allowlisted secret keys", () => {
       "DFLOW_API_KEY=dflow-secret",
       "JWT_SECRET=secret",
       "#JWT_SECRET=commented-secret",
+      "HUNCH_SOLANA_SPONSOR_ADDRESS=sponsor-address",
+      "HUNCH_SOLANA_SPONSOR_SECRET_KEY=sponsor-secret",
       "LIMITLESS_WS_SESSION=limitless-ws-secret",
       "# POLYMARKET_BUILDER_API_SECRET=commented-builder-secret",
       "POLYMARKET_BUILDER_CODE=public-code",
@@ -299,6 +301,10 @@ test("bundle builder writes only allowlisted secret keys", () => {
   assert.deepEqual(result.bundles["polymarket-builder"], [
     "POLYMARKET_RELAYER_PRIVATE_KEY",
   ]);
+  assert.deepEqual(result.bundles.sponsorship, [
+    "HUNCH_SOLANA_SPONSOR_ADDRESS",
+    "HUNCH_SOLANA_SPONSOR_SECRET_KEY",
+  ]);
   const sanitized = fs.readFileSync(result.sanitizedEnvPath, "utf8");
   assert.equal(sanitized.includes("JWT_SECRET="), false);
   assert.equal(sanitized.includes("#JWT_SECRET="), false);
@@ -306,6 +312,8 @@ test("bundle builder writes only allowlisted secret keys", () => {
   assert.equal(sanitized.includes("LIMITLESS_WS_SESSION="), false);
   assert.equal(sanitized.includes("POLYMARKET_BUILDER_API_SECRET="), false);
   assert.equal(sanitized.includes("POLYMARKET_RELAYER_PRIVATE_KEY="), false);
+  assert.equal(sanitized.includes("HUNCH_SOLANA_SPONSOR_ADDRESS="), false);
+  assert.equal(sanitized.includes("HUNCH_SOLANA_SPONSOR_SECRET_KEY="), false);
   assert.equal(sanitized.includes("POLYMARKET_BUILDER_CODE=public-code"), true);
   assert.equal(
     sanitized.includes(

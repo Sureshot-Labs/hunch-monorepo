@@ -55,6 +55,7 @@ import {
   updateAdminReferralCodePolicy,
 } from "../services/rewards.js";
 import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
+import { adminHasPermission } from "../services/admin-auth.js";
 import {
   getIntelPolicySchema,
   INTEL_POLICY_KEYS,
@@ -173,6 +174,42 @@ const ADMIN_SYSTEM_HOT_KEYS: Record<AdminSystemVenue, string> = {
   dflow: "hot:tokens:dflow",
   limitless: "hot:tokens:limitless",
 };
+
+const SOLANA_SPONSORSHIP_POLICY_FIELDS = [
+  "embeddedSolanaSponsorship",
+  "embeddedSolanaSponsorshipMode",
+  "embeddedSolanaSponsorshipFlows",
+  "embeddedSolanaSponsorshipLimits",
+] as const;
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
+function authAccessSponsorshipPolicyChanged(
+  currentPolicy: unknown,
+  nextPolicy: unknown,
+): boolean {
+  if (
+    !currentPolicy ||
+    typeof currentPolicy !== "object" ||
+    !nextPolicy ||
+    typeof nextPolicy !== "object"
+  ) {
+    return false;
+  }
+  const current = currentPolicy as Record<string, unknown>;
+  const next = nextPolicy as Record<string, unknown>;
+  return SOLANA_SPONSORSHIP_POLICY_FIELDS.some(
+    (field) => stableJson(current[field]) !== stableJson(next[field]),
+  );
+}
 const ADMIN_SYSTEM_HOT_STREAM_KEYS: Record<AdminSystemVenue, string> = {
   polymarket: "hot:tokens:stream:polymarket",
   dflow: "hot:tokens:stream:dflow",
@@ -6092,6 +6129,29 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             message: issue.message,
           })),
         });
+      }
+
+      if (key === "auth_access") {
+        const current = await resolveIntelPolicy(pool, key);
+        if (
+          authAccessSponsorshipPolicyChanged(
+            current.effective,
+            parsed.data,
+          )
+        ) {
+          const adminRole = request.adminAccount?.role;
+          if (
+            !adminRole ||
+            !adminHasPermission(adminRole, "sponsorship:write")
+          ) {
+            reply.code(403);
+            return reply.send({
+              error: "admin_permission_required",
+              message:
+                "Admin sponsorship permission required to change Solana sponsorship policy.",
+            });
+          }
+        }
       }
 
       const effectiveAt = body.effectiveAt

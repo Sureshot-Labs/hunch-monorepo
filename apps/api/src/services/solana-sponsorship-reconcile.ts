@@ -16,10 +16,10 @@ type Logger = {
 };
 
 type SponsorshipLedgerRow = {
-  user_id: string;
+  user_id: string | null;
   venue: "kalshi" | "bridge" | "wallet";
   flow: "dflow" | "across" | "directTransfer" | "debridge";
-  status: "user_signed" | "submitted";
+  status: "user_signed" | "submitted" | "failed";
   intent_id: string | null;
   wallet_address: string | null;
   sponsor_address: string | null;
@@ -31,6 +31,7 @@ type SponsorshipLedgerRow = {
   transaction_digest: string | null;
   tx_signature: string | null;
   estimated_sponsor_lamports: string | null;
+  metadata: unknown;
 };
 
 type ReconcileExecutionRow = ExecutionRow;
@@ -53,7 +54,7 @@ export type ReconcileSolanaSponsorshipSummary = {
 };
 
 type ReconciliationResult = {
-  status: "submitted" | "confirmed";
+  status: "submitted" | "confirmed" | "failed";
   actualSponsorLamports: string | null;
   rentLamports: string | null;
   rentStatus: "unknown" | "locked" | "returned" | "lost";
@@ -73,6 +74,14 @@ function getString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function getBooleanMetadata(
+  metadata: unknown,
+  key: string,
+): boolean {
+  if (!isRecord(metadata)) return false;
+  return metadata[key] === true;
 }
 
 function getSettlementRaw(raw: unknown): Record<string, unknown> | null {
@@ -183,24 +192,33 @@ export function calculateDflowSponsorshipReconciliation(inputs: {
   }, 0n);
   const currentSponsorCost = bigintMax(-sponsorDelta, 0n);
   const currentNonFeeCost = bigintMax(currentSponsorCost - sponsorPaidFees, 0n);
+  const hasObservedTransactions = transactions.length > 0;
+  const hasErroredTransactions = erroredSignatures.length > 0;
   const complete =
     missingSignatures.length === 0 &&
-    erroredSignatures.length === 0 &&
+    !hasErroredTransactions &&
     inputs.settlementClosed;
+  const failed = missingSignatures.length === 0 && hasErroredTransactions;
+  const costComplete =
+    missingSignatures.length === 0 &&
+    hasObservedTransactions &&
+    (inputs.settlementClosed || failed);
   const rentStatus =
-    missingSignatures.length > 0 || erroredSignatures.length > 0
+    missingSignatures.length > 0
       ? "unknown"
       : currentNonFeeCost === 0n
         ? "returned"
-        : inputs.settlementClosed
+        : inputs.settlementClosed && !hasErroredTransactions
           ? "lost"
           : "locked";
 
   return {
-    status: complete ? "confirmed" : "submitted",
-    actualSponsorLamports: complete ? currentSponsorCost.toString() : null,
+    status: failed ? "failed" : complete ? "confirmed" : "submitted",
+    actualSponsorLamports: costComplete
+      ? currentSponsorCost.toString()
+      : null,
     rentLamports:
-      missingSignatures.length > 0 || erroredSignatures.length > 0
+      missingSignatures.length > 0
         ? null
         : currentNonFeeCost.toString(),
     rentStatus,
@@ -247,12 +265,19 @@ async function fetchSubmittedSponsorshipRows(
         message_digest,
         transaction_digest,
         tx_signature,
-        estimated_sponsor_lamports::text as estimated_sponsor_lamports
+        estimated_sponsor_lamports::text as estimated_sponsor_lamports,
+        metadata
       from solana_sponsorship_ledger
       where flow in ('dflow', 'across', 'directTransfer', 'debridge')
         and (
-          (flow = 'dflow' and status in ('user_signed', 'submitted'))
-          or (flow <> 'dflow' and status = 'submitted' and tx_signature is not null)
+          (
+            flow = 'dflow'
+            and (
+              status in ('user_signed', 'submitted')
+              or (status = 'failed' and tx_signature is not null)
+            )
+          )
+          or (flow <> 'dflow' and status in ('submitted', 'failed') and tx_signature is not null)
         )
         and updated_at <= now() - ($1::int * interval '1 second')
       order by updated_at asc
@@ -333,7 +358,9 @@ async function reconcileOneSponsorshipRow(
     executionRaw: execution?.raw,
   });
   const settlementStatus = getSettlementStatus(execution?.raw);
-  const settlementClosed = isTerminalDflowSettlementStatus(settlementStatus);
+  const settlementClosed =
+    getBooleanMetadata(row.metadata, "adminPredictionMarketInit") ||
+    isTerminalDflowSettlementStatus(settlementStatus);
   const fetchTransaction =
     options.fetchTransaction ??
     ((signature: string) =>
@@ -432,7 +459,7 @@ async function reconcileOneGenericSponsorshipRow(
       transactionDigest: row.transaction_digest,
       txSignature: signature,
       estimatedSponsorLamports: row.estimated_sponsor_lamports ?? "0",
-      actualSponsorLamports: failed ? null : sponsorCost.toString(),
+      actualSponsorLamports: sponsorCost.toString(),
       error: failed ? JSON.stringify(tx.err) : null,
       metadata: {
         genericSponsorshipReconciliation: {
@@ -444,7 +471,7 @@ async function reconcileOneGenericSponsorshipRow(
           feePayer: tx.feePayer,
           feeLamports: tx.feeLamports.toString(),
           sponsorLamportDelta: sponsorDelta?.toString() ?? null,
-          actualSponsorLamports: failed ? null : sponsorCost.toString(),
+          actualSponsorLamports: sponsorCost.toString(),
           accountDeltas: tx.accountDeltas.map((entry) => ({
             account: entry.account,
             deltaLamports: entry.deltaLamports.toString(),

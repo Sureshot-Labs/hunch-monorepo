@@ -41,6 +41,7 @@ type BundleName =
   | "api"
   | "polymarket-builder"
   | "rewards"
+  | "sponsorship"
   | "ai"
   | "indexer-dflow"
   | "indexer-limitless"
@@ -97,7 +98,10 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_POLYGON",
     "HUNCH_REWARDS_PAYOUT_PRIVATE_KEY_BASE",
     "HUNCH_REWARDS_SOLANA_SECRET_KEY",
+  ],
+  sponsorship: [
     "HUNCH_SOLANA_SPONSOR_SECRET_KEY",
+    "HUNCH_SOLANA_SPONSOR_ADDRESS",
   ],
   ai: ["OPENROUTER_API_KEY", "XAI_API_KEY", "XAI_MANAGEMENT_API_KEY"],
   "indexer-dflow": ["DFLOW_API_KEY"],
@@ -586,6 +590,7 @@ export function buildSecretBundles(
     api: {},
     "polymarket-builder": {},
     rewards: {},
+    sponsorship: {},
     ai: {},
     "indexer-dflow": {},
     "indexer-limitless": {},
