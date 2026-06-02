@@ -215,14 +215,13 @@ function evaluateCandidate(inputs: {
       closeAuthority: inputs.info.closeAuthority,
     };
   }
-  if (
-    inputs.info.tokenOwner !== inputs.sponsorAddress &&
-    inputs.info.closeAuthority !== inputs.sponsorAddress
-  ) {
+  const effectiveCloseAuthority =
+    inputs.info.closeAuthority ?? inputs.info.tokenOwner;
+  if (effectiveCloseAuthority !== inputs.sponsorAddress) {
     return {
       eligible: false,
       account: inputs.account,
-      reason: "token_owner_or_close_authority_not_sponsor",
+      reason: "close_authority_not_sponsor",
       lamports: inputs.info.lamports,
       tokenOwner: inputs.info.tokenOwner,
       closeAuthority: inputs.info.closeAuthority,

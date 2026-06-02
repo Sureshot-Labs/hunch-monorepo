@@ -17,6 +17,7 @@ import {
 } from "./kalshi-executions.js";
 import { reconcileSolanaSponsorshipLedger } from "./solana-sponsorship-reconcile.js";
 import { reclaimSolanaSponsorshipRentAccounts } from "./solana-sponsorship-rent-reclaim.js";
+import { resolveAuthAccessPolicy } from "./runtime-policies.js";
 
 type Logger = {
   info?: (obj: unknown, msg?: string) => void;
@@ -294,13 +295,29 @@ export async function reconcileKalshiExecutions(
 
   if (env.solanaSponsorRentReclaimEnabled) {
     try {
-      const rentReclaim = await reclaimSolanaSponsorshipRentAccounts(pool, options);
-      summary.sponsorshipRentReclaimChecked = rentReclaim.checked;
-      summary.sponsorshipRentReclaimClosed = rentReclaim.closed;
-      summary.sponsorshipRentReclaimReclaimedLamports =
-        rentReclaim.reclaimedLamports;
-      summary.sponsorshipRentReclaimSkipped = rentReclaim.skipped;
-      summary.sponsorshipRentReclaimErrors = rentReclaim.errors;
+      const policy = await resolveAuthAccessPolicy(pool);
+      const sponsorshipAllowed =
+        policy.effective.embeddedSolanaSponsorship === true &&
+        policy.effective.embeddedSolanaSponsorshipFlows.dflow === true &&
+        (policy.effective.embeddedSolanaSponsorshipMode === "enforce" ||
+          env.embeddedSolanaSponsorshipObserveCanSponsor === true);
+      if (sponsorshipAllowed) {
+        const rentReclaim = await reclaimSolanaSponsorshipRentAccounts(
+          pool,
+          options,
+        );
+        summary.sponsorshipRentReclaimChecked = rentReclaim.checked;
+        summary.sponsorshipRentReclaimClosed = rentReclaim.closed;
+        summary.sponsorshipRentReclaimReclaimedLamports =
+          rentReclaim.reclaimedLamports;
+        summary.sponsorshipRentReclaimSkipped = rentReclaim.skipped;
+        summary.sponsorshipRentReclaimErrors = rentReclaim.errors;
+      } else {
+        options.logger?.warn?.(
+          {},
+          "Skipping Solana sponsorship rent reclaim because Access policy disables sponsorship",
+        );
+      }
     } catch (error) {
       summary.sponsorshipRentReclaimErrors += 1;
       options.logger?.error?.(

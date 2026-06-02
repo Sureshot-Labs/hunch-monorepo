@@ -149,6 +149,14 @@ assert.equal(
 assert.equal(
   hasPositiveSponsorFeeLike({
     tx: { kind: "solana", data: "tx" },
+    estimation: { fees: { protocolFee: "0.1", serviceFee: "1e-9" } },
+  }),
+  true,
+  "deBridge fee detection must reject decimal positive provider fees",
+);
+assert.equal(
+  hasPositiveSponsorFeeLike({
+    tx: { kind: "solana", data: "tx" },
     affiliateFeeRecipient: "11111111111111111111111111111111",
   }),
   false,
@@ -179,7 +187,7 @@ assert.match(
 );
 assert.match(
   bridgeRoute,
-  /parseSolanaPublicKeyList\([\s\S]*?env\.debridgeSolanaAllowedProgramIds[\s\S]*?if \(!allowedProgramIds\.length\) return null;/,
+  /parseSolanaPublicKeyList\([\s\S]*?env\.debridgeSolanaAllowedProgramIds[\s\S]*?if \(!allowedProgramIds\.length\)[\s\S]*?return unavailable\(\["missing_program_allowlist"\]\);/,
   "deBridge sponsorship intent creation must require an explicit program allowlist",
 );
 assert.match(
@@ -196,6 +204,11 @@ assert.match(
   bridgeRoute,
   /upsertSolanaSponsorshipLedger\(\{[\s\S]*?flow: "across"[\s\S]*?\}\);\s*hunchSponsorshipIntentId = intent\.id;/,
   "Across sponsorship intent id must be returned only after ledger durability",
+);
+assert.match(
+  bridgeRoute,
+  /hunchSponsorship[\s\S]*?requested:\s*true[\s\S]*?available:\s*false[\s\S]*?reasons/,
+  "Solana bridge orders must expose sponsorship availability and reasons",
 );
 assert.match(
   sponsorshipReconcile,
@@ -236,6 +249,16 @@ assert.match(
   embeddedWalletsRoute,
   /EmbeddedSolanaSponsorshipLedgerDurabilityError[\s\S]*?requestId[\s\S]*?signature/,
   "embedded Solana ledger durability errors must include request id and signature",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /markSubmittedSolanaSponsorshipRequestWithRetry[\s\S]*?attempt < 3/,
+  "embedded Solana sponsored submits must retry post-submit ledger writes",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /\/wallets\/embedded\/solana\/sponsorship-ledger\/repair[\s\S]*?repairSubmittedSolanaSponsorshipLedger/,
+  "embedded Solana must expose an authenticated sponsorship ledger repair endpoint",
 );
 assert.match(
   embeddedWalletsRoute,

@@ -9,6 +9,7 @@ import {
 } from "@solana/spl-token";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 
+import { pool as dbPool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { resolveAuthAccessPolicy } from "./runtime-policies.js";
@@ -279,6 +280,44 @@ async function hasPriorSponsorshipEvidence(
   return rows.length > 0;
 }
 
+async function hasExactPriorSponsorshipEvidence(
+  pool: Pool,
+  inputs: {
+    walletAddress: string;
+    marketId: string;
+    tokenId: string;
+    mint: string;
+    tokenAccount: string;
+  },
+): Promise<boolean> {
+  const tokenIds = [inputs.tokenId, inputs.mint, `sol:${inputs.mint}`];
+  const { rows } = await pool.query<{ id: string }>(
+    `
+      select id
+      from solana_sponsorship_ledger
+      where venue = 'kalshi'
+        and flow = 'dflow'
+        and lower(wallet_address) = lower($1)
+        and (
+          market_id = $2
+          or input_mint = any($3::text[])
+          or output_mint = any($3::text[])
+          or metadata->>'inputMint' = any($3::text[])
+          or metadata->>'outputMint' = any($3::text[])
+        )
+        and (
+          metadata->>'tokenAccount' = $4
+          or metadata #>> '{lossRentReclaim,tokenAccount}' = $4
+          or metadata::text like '%' || $4 || '%'
+        )
+      order by updated_at desc
+      limit 1
+    `,
+    [inputs.walletAddress, inputs.marketId, tokenIds, inputs.tokenAccount],
+  );
+  return rows.length > 0;
+}
+
 async function resolveLossReclaimPolicy(pool: Pool) {
   const policy = await resolveAuthAccessPolicy(pool);
   const requireDurable = shouldRequireEmbeddedSolanaSponsorshipRedis({
@@ -391,6 +430,19 @@ export async function prepareKalshiLossRentReclaim(inputs: {
   if (closeAuthority !== walletAddress && closeAuthority !== sponsorAddress) {
     return { eligible: false, reason: "wrong_close_authority" };
   }
+  const exactSponsorshipEvidence =
+    closeAuthority === sponsorAddress ||
+    (await hasExactPriorSponsorshipEvidence(inputs.pool, {
+      walletAddress,
+      marketId: position.market_id,
+      tokenId: position.token_id,
+      mint,
+      tokenAccount,
+    }));
+  const rentRecipient = exactSponsorshipEvidence
+    ? sponsorAddress
+    : walletAddress;
+  const sponsorRentRecipient = rentRecipient === sponsorAddress;
 
   const latest = await fetchSolanaLatestBlockhash({
     rpcUrls: env.solanaRpcUrls,
@@ -412,7 +464,7 @@ export async function prepareKalshiLossRentReclaim(inputs: {
     ),
     createCloseAccountInstruction(
       new PublicKey(tokenAccount),
-      sponsorKeypair.publicKey,
+      new PublicKey(rentRecipient),
       new PublicKey(closeAuthority),
       [],
       new PublicKey(accountInfo.tokenProgramId),
@@ -450,6 +502,8 @@ export async function prepareKalshiLossRentReclaim(inputs: {
       outcomeSide,
       resolvedOutcome,
       closeAuthority,
+      rentRecipient,
+      exactSponsorshipEvidence,
       messageDigest,
       sponsorAddress,
       budgetReserved: true,
@@ -477,12 +531,19 @@ export async function prepareKalshiLossRentReclaim(inputs: {
       transactionDigest: intent.transactionDigest,
       estimatedSponsorLamports: LOSS_RECLAIM_FEE_ESTIMATE_LAMPORTS,
       rentLamports:
-        accountInfo.lamports > 0n ? accountInfo.lamports.toString() : null,
-      rentStatus: accountInfo.lamports > 0n ? "locked" : "unknown",
+        sponsorRentRecipient && accountInfo.lamports > 0n
+          ? accountInfo.lamports.toString()
+          : null,
+      rentStatus:
+        sponsorRentRecipient && accountInfo.lamports > 0n
+          ? "locked"
+          : "unknown",
       metadata: {
         purpose: "loss_reclaim",
         tokenAccount,
         closeAuthority,
+        rentRecipient,
+        exactSponsorshipEvidence,
       },
     });
   } catch (error) {
@@ -558,6 +619,11 @@ export async function submitKalshiLossRentReclaim(inputs: {
   const tokenAccount = getIntentString(intent.metadata, "tokenAccount");
   const amount = getIntentString(intent.metadata, "amount");
   const marketId = getIntentString(intent.metadata, "marketId");
+  const rentRecipient = getIntentString(intent.metadata, "rentRecipient");
+  const policy = await resolveLossReclaimPolicy(dbPool);
+  if (!policy.enabled) {
+    throw new Error("DFlow sponsorship is disabled");
+  }
   await upsertSolanaSponsorshipLedger({
     userId: inputs.userId,
     venue: "kalshi",
@@ -576,6 +642,7 @@ export async function submitKalshiLossRentReclaim(inputs: {
     metadata: {
       purpose: "loss_reclaim",
       tokenAccount,
+      rentRecipient,
       userSignedAt: new Date().toISOString(),
     },
   });
@@ -610,6 +677,7 @@ export async function submitKalshiLossRentReclaim(inputs: {
       metadata: {
         purpose: "loss_reclaim",
         tokenAccount,
+        rentRecipient,
       },
     });
     throw error;
@@ -635,6 +703,7 @@ export async function submitKalshiLossRentReclaim(inputs: {
       metadata: {
         purpose: "loss_reclaim",
         tokenAccount,
+        rentRecipient,
         submittedAt: new Date().toISOString(),
       },
     });

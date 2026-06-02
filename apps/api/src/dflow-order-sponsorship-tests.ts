@@ -224,7 +224,10 @@ const tests: TestCase[] = [
         baseFinalizeInputs({
           requester: async ({ sponsored }: { sponsored: boolean }) => {
             requests.push(sponsored);
-            return { ok: true as const, payload: { transaction: "userFundedTx" } };
+            return {
+              ok: true as const,
+              payload: { transaction: "userFundedTx" },
+            };
           },
           validateSponsoredAnalysis: () => ({
             valid: false,
@@ -250,7 +253,10 @@ const tests: TestCase[] = [
         baseFinalizeInputs({
           requester: async ({ sponsored }: { sponsored: boolean }) => {
             requests.push(sponsored);
-            return { ok: true as const, payload: { transaction: "userFundedTx" } };
+            return {
+              ok: true as const,
+              payload: { transaction: "userFundedTx" },
+            };
           },
           createIntent: async () => null,
         }),
@@ -301,9 +307,14 @@ const tests: TestCase[] = [
       });
 
       assert.equal(query.sponsor, SPONSOR);
+      assert.equal(query.sponsorExec, true);
       assert.equal(query.outcomeAccountRentRecipient, SPONSOR);
       assert.equal(query.outputCloseAuthority, undefined);
       assert.equal(query.purpose, undefined);
+      assert.equal(query.platformFeeBps, undefined);
+      assert.equal(query.platformFeeScale, undefined);
+      assert.equal(query.platformFeeMode, undefined);
+      assert.equal(query.feeAccount, undefined);
     },
   },
   {

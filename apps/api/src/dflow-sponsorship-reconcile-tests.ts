@@ -65,7 +65,35 @@ function genericLedgerRow(overrides: Record<string, unknown> = {}) {
     tx_signature: null,
     estimated_sponsor_lamports: "5000",
     actual_sponsor_lamports: null,
+    rent_lamports: null,
     metadata: {},
+    ...overrides,
+  };
+}
+
+function lossReclaimLedgerRow(overrides: Record<string, unknown> = {}) {
+  return {
+    user_id: "10000000-0000-0000-0000-000000000001",
+    venue: "kalshi",
+    flow: "dflow",
+    status: "submitted",
+    intent_id: "solsp_loss_reclaim",
+    wallet_address: "Wallet111111111111111111111111111111111111",
+    sponsor_address: SPONSOR,
+    market_id: "kalshi:TEST",
+    input_mint: "Mint11111111111111111111111111111111111111",
+    output_mint: "Mint11111111111111111111111111111111111111",
+    amount_raw: "1",
+    message_digest: "messageDigest",
+    transaction_digest: "transactionDigest",
+    tx_signature: "loss-reclaim-submit",
+    estimated_sponsor_lamports: "5000",
+    actual_sponsor_lamports: null,
+    rent_lamports: "2039280",
+    metadata: {
+      purpose: "loss_reclaim",
+      rentRecipient: SPONSOR,
+    },
     ...overrides,
   };
 }
@@ -324,6 +352,35 @@ await test("generic intent_created rows reconcile durable metadata signature", a
   assert.equal(db.upserts.length, 1);
   assert.equal(db.upserts[0]?.txSignature, "generic-submit");
   assert.equal(db.upserts[0]?.actualSponsorLamports, "5000");
+});
+
+await test("loss_reclaim DFlow rows reconcile from submit transaction finality", async () => {
+  const db = fakeSponsorshipPool([lossReclaimLedgerRow()]);
+  const summary = await reconcileSolanaSponsorshipLedger(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    upsertLedger: async (inputs) => {
+      db.upserts.push(inputs);
+    },
+    fetchTransaction: async (signature) =>
+      tx({
+        signature,
+        feePayer: SPONSOR,
+        feeLamports: 5000n,
+        sponsorDeltaLamports: 2_034_280n,
+      }),
+  });
+
+  assert.equal(summary.checked, 1);
+  assert.equal(summary.confirmed, 1);
+  assert.equal(summary.skipped, 0);
+  assert.equal(db.upserts.length, 1);
+  assert.equal(db.upserts[0]?.status, "confirmed");
+  assert.equal(db.upserts[0]?.txSignature, "loss-reclaim-submit");
+  assert.equal(db.upserts[0]?.actualSponsorLamports, "5000");
+  assert.equal(db.upserts[0]?.rentLamports, "2039280");
+  assert.equal(db.upserts[0]?.rentStatus, "returned");
 });
 
 await test("failed rows with actual cost and reconciliation are filtered by query", async () => {

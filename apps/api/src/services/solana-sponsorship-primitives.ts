@@ -114,16 +114,24 @@ export function resolveHunchSolanaSponsorKeypair(): Keypair | null {
   return keypair;
 }
 
-export function isPositiveIntegerLike(value: unknown): boolean {
+export function isPositiveNumericLike(value: unknown): boolean {
   if (typeof value === "bigint") return value > BigInt(0);
   if (typeof value === "number") {
-    return Number.isSafeInteger(value) && value > 0;
+    return Number.isFinite(value) && value > 0;
   }
-  return (
-    typeof value === "string" &&
-    /^\d+$/.test(value.trim()) &&
-    BigInt(value.trim()) > BigInt(0)
-  );
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/^\d+$/.test(trimmed)) return BigInt(trimmed) > BigInt(0);
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed)) {
+    return false;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0;
+}
+
+export function isPositiveIntegerLike(value: unknown): boolean {
+  return isPositiveNumericLike(value);
 }
 
 function hasPositiveFeeValue(
@@ -132,7 +140,7 @@ function hasPositiveFeeValue(
   inspectAllFields: boolean,
 ): boolean {
   if (depth > 5) return false;
-  if (isPositiveIntegerLike(value)) return true;
+  if (isPositiveNumericLike(value)) return true;
   if (Array.isArray(value)) {
     return value.some((entry) =>
       hasPositiveFeeValue(entry, depth + 1, inspectAllFields),
@@ -143,7 +151,7 @@ function hasPositiveFeeValue(
   for (const [key, entry] of Object.entries(value)) {
     const keyIsFee = FEE_FIELD_RE.test(key);
     const keyIsFeeContainer = FEE_CONTAINER_RE.test(key);
-    if (keyIsFee && isPositiveIntegerLike(entry)) return true;
+    if (keyIsFee && isPositiveNumericLike(entry)) return true;
     if (
       (inspectAllFields || keyIsFee || keyIsFeeContainer) &&
       hasPositiveFeeValue(entry, depth + 1, keyIsFee || keyIsFeeContainer)

@@ -545,6 +545,13 @@ function readStringField(payload: Record<string, unknown>, field: string) {
   return typeof value === "string" ? value : null;
 }
 
+type BridgeSolanaSponsorshipAvailability = {
+  requested: boolean;
+  available: boolean;
+  reasons: string[];
+  intentId: string | null;
+};
+
 async function createDebridgeSolanaSponsorshipIntent(inputs: {
   userId: string;
   bridgeOrderId: string | null;
@@ -557,7 +564,7 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   senderAddress: string;
   recipientAddress: string;
   logger: BridgeRouteLogger;
-}): Promise<string | null> {
+}): Promise<BridgeSolanaSponsorshipAvailability | null> {
   if (
     inputs.srcChainId !== HUNCH_SOLANA_CHAIN_ID ||
     !isRecord(inputs.payload) ||
@@ -568,16 +575,26 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   ) {
     return null;
   }
+  const unavailable = (
+    reasons: string[],
+  ): BridgeSolanaSponsorshipAvailability => ({
+    requested: true,
+    available: false,
+    reasons,
+    intentId: null,
+  });
   if (hasPositiveSponsorFeeLike(inputs.payload)) {
-    return null;
+    return unavailable(["positive_provider_fee"]);
   }
 
   const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+  if (authAccessPolicy.effective.embeddedSolanaSponsorship !== true) {
+    return unavailable(["sponsorship_disabled"]);
+  }
   if (
-    authAccessPolicy.effective.embeddedSolanaSponsorship !== true ||
     authAccessPolicy.effective.embeddedSolanaSponsorshipFlows.debridge !== true
   ) {
-    return null;
+    return unavailable(["flow_debridge_disabled"]);
   }
   let allowedProgramIds: string[];
   try {
@@ -589,9 +606,10 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
       { error, configuredProgramIds: env.debridgeSolanaAllowedProgramIds },
       "Skipping deBridge Solana sponsorship due to invalid program allowlist",
     );
-    return null;
+    return unavailable(["invalid_program_allowlist"]);
   }
-  if (!allowedProgramIds.length) return null;
+  if (!allowedProgramIds.length)
+    return unavailable(["missing_program_allowlist"]);
 
   const metadata = {
     debridgeSponsorshipEligible: true,
@@ -622,7 +640,7 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
       },
       "Skipping deBridge Solana sponsorship intent",
     );
-    return null;
+    return unavailable(validation.reasons);
   }
 
   const requireDurableSponsorship = shouldRequireEmbeddedSolanaSponsorshipRedis(
@@ -647,7 +665,7 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
       },
       "Skipping deBridge Solana sponsorship intent due to budget",
     );
-    return null;
+    return unavailable(budget.reasons);
   }
 
   const intent = await createEmbeddedSolanaSponsorshipIntent({
@@ -660,7 +678,7 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   });
   if (!intent) {
     await releaseEmbeddedSolanaSponsorshipBudget(budget.reservation);
-    return null;
+    return unavailable(["intent_create_failed"]);
   }
   try {
     await upsertSolanaSponsorshipLedger({
@@ -685,7 +703,12 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     await releaseEmbeddedSolanaSponsorshipBudget(budget.reservation);
     throw error;
   }
-  return intent.id;
+  return {
+    requested: true,
+    available: true,
+    reasons: [],
+    intentId: intent.id,
+  };
 }
 
 function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
@@ -1934,6 +1957,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           );
           const bridgeOrderId = insertResult.rows[0]?.id ?? null;
           let hunchSponsorshipIntentId: string | null = null;
+          let hunchSponsorship: BridgeSolanaSponsorshipAvailability | null =
+            null;
           if (
             body.srcChainId === HUNCH_SOLANA_CHAIN_ID &&
             bridgeOrderId &&
@@ -1942,6 +1967,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             typeof normalizedPayload.tx.data === "string" &&
             normalizedPayload.tx.data.trim()
           ) {
+            hunchSponsorship = {
+              requested: true,
+              available: false,
+              reasons: [],
+              intentId: null,
+            };
             try {
               const authAccessPolicy = await resolveAuthAccessPolicy(pool);
               const metadata = {
@@ -1953,6 +1984,17 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 amountIn: body.amountIn,
                 maxSystemCreateLamports: "0",
               };
+              if (
+                authAccessPolicy.effective.embeddedSolanaSponsorship !== true
+              ) {
+                hunchSponsorship.reasons.push("sponsorship_disabled");
+              }
+              if (
+                authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
+                  .across !== true
+              ) {
+                hunchSponsorship.reasons.push("flow_across_disabled");
+              }
               if (
                 authAccessPolicy.effective.embeddedSolanaSponsorship === true &&
                 authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
@@ -2016,6 +2058,9 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                         },
                       });
                       hunchSponsorshipIntentId = intent.id;
+                      hunchSponsorship.available = true;
+                      hunchSponsorship.intentId = intent.id;
+                      hunchSponsorship.reasons = [];
                     } catch (error) {
                       await releaseEmbeddedSolanaSponsorshipBudget(
                         budget.reservation,
@@ -2026,8 +2071,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     await releaseEmbeddedSolanaSponsorshipBudget(
                       budget.reservation,
                     );
+                    hunchSponsorship.reasons.push("intent_create_failed");
                   }
                 } else {
+                  hunchSponsorship.reasons.push(
+                    ...(validation.ok ? budget.reasons : validation.reasons),
+                  );
                   app.log.warn(
                     {
                       userId: user.id,
@@ -2042,6 +2091,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 }
               }
             } catch (error) {
+              hunchSponsorship.reasons.push("intent_create_failed");
               app.log.warn(
                 { error, userId: user.id, bridgeOrderId },
                 "Failed to create Across Solana sponsorship intent",
@@ -2052,6 +2102,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             ...normalizedPayload,
             bridgeOrderId,
+            ...(hunchSponsorship ? { hunchSponsorship } : {}),
             ...(hunchSponsorshipIntentId ? { hunchSponsorshipIntentId } : {}),
           });
         }
@@ -2282,20 +2333,20 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       const bridgeOrderId = insertResult.rows[0]?.id ?? null;
-      const hunchSponsorshipIntentId =
-        await createDebridgeSolanaSponsorshipIntent({
-          userId: user.id,
-          bridgeOrderId,
-          payload: upstream.payload,
-          srcChainId: body.srcChainId,
-          dstChainId: body.dstChainId,
-          srcToken: body.srcToken,
-          dstToken: body.dstToken,
-          amountIn: body.amountIn,
-          senderAddress: addresses.senderAddress,
-          recipientAddress: addresses.recipientAddress,
-          logger: app.log,
-        });
+      const hunchSponsorship = await createDebridgeSolanaSponsorshipIntent({
+        userId: user.id,
+        bridgeOrderId,
+        payload: upstream.payload,
+        srcChainId: body.srcChainId,
+        dstChainId: body.dstChainId,
+        srcToken: body.srcToken,
+        dstToken: body.dstToken,
+        amountIn: body.amountIn,
+        senderAddress: addresses.senderAddress,
+        recipientAddress: addresses.recipientAddress,
+        logger: app.log,
+      });
+      const hunchSponsorshipIntentId = hunchSponsorship?.intentId ?? null;
       return reply.send({
         ...((isRecord(upstream.payload) ? upstream.payload : {}) as Record<
           string,
@@ -2304,6 +2355,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         provider: "debridge",
         bridgeOrderId,
         swapType,
+        ...(hunchSponsorship ? { hunchSponsorship } : {}),
         ...(hunchSponsorshipIntentId ? { hunchSponsorshipIntentId } : {}),
       });
     },

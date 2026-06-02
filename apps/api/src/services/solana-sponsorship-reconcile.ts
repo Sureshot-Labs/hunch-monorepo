@@ -32,6 +32,7 @@ type SponsorshipLedgerRow = {
   tx_signature: string | null;
   estimated_sponsor_lamports: string | null;
   actual_sponsor_lamports: string | null;
+  rent_lamports: string | null;
   metadata: unknown;
 };
 
@@ -65,7 +66,9 @@ type ReconciliationResult = {
 };
 
 function unique(values: string[]): string[] {
-  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  return Array.from(
+    new Set(values.map((value) => value.trim()).filter(Boolean)),
+  );
 }
 
 function bigintMax(value: bigint, floor: bigint): bigint {
@@ -78,10 +81,7 @@ function getString(value: unknown): string | null {
     : null;
 }
 
-function getBooleanMetadata(
-  metadata: unknown,
-  key: string,
-): boolean {
+function getBooleanMetadata(metadata: unknown, key: string): boolean {
   if (!isRecord(metadata)) return false;
   return metadata[key] === true;
 }
@@ -95,14 +95,18 @@ function getRecordValue(
   return isRecord(nested) ? nested : null;
 }
 
-function getDurableGenericSponsorshipSignature(metadata: unknown): string | null {
+function getDurableGenericSponsorshipSignature(
+  metadata: unknown,
+): string | null {
   if (!isRecord(metadata)) return null;
   return (
     getString(metadata.txSignature) ??
     getString(getRecordValue(metadata, "submission")?.signature) ??
     getString(getRecordValue(metadata, "submitted")?.signature) ??
     getString(getRecordValue(metadata, "privySubmit")?.signature) ??
-    getString(getRecordValue(metadata, "genericSponsorshipReconciliation")?.signature)
+    getString(
+      getRecordValue(metadata, "genericSponsorshipReconciliation")?.signature,
+    )
   );
 }
 
@@ -236,13 +240,9 @@ export function calculateDflowSponsorshipReconciliation(inputs: {
 
   return {
     status: failed ? "failed" : complete ? "confirmed" : "submitted",
-    actualSponsorLamports: costComplete
-      ? currentSponsorCost.toString()
-      : null,
+    actualSponsorLamports: costComplete ? currentSponsorCost.toString() : null,
     rentLamports:
-      missingSignatures.length > 0
-        ? null
-        : currentNonFeeCost.toString(),
+      missingSignatures.length > 0 ? null : currentNonFeeCost.toString(),
     rentStatus,
     complete,
     metadata: {
@@ -289,6 +289,7 @@ async function fetchSubmittedSponsorshipRows(
         tx_signature,
         estimated_sponsor_lamports::text as estimated_sponsor_lamports,
         actual_sponsor_lamports::text as actual_sponsor_lamports,
+        rent_lamports::text as rent_lamports,
         metadata
       from solana_sponsorship_ledger
       where flow in ('dflow', 'across', 'directTransfer', 'debridge')
@@ -384,6 +385,92 @@ async function fetchExecutionForSponsorshipRow(
   return rows[0] ?? null;
 }
 
+function getMetadataString(metadata: unknown, key: string): string | null {
+  if (!isRecord(metadata)) return null;
+  return getString(metadata[key]);
+}
+
+async function reconcileOneLossReclaimSponsorshipRow(
+  row: SponsorshipLedgerRow,
+  options: ReconcileSolanaSponsorshipOptions,
+): Promise<{ confirmed: boolean; skipped: boolean }> {
+  const signature = row.tx_signature?.trim();
+  const intentId = row.intent_id?.trim();
+  const walletAddress = row.wallet_address?.trim();
+  const sponsorAddress = row.sponsor_address?.trim();
+  if (!signature || !intentId || !walletAddress || !sponsorAddress) {
+    return { confirmed: false, skipped: true };
+  }
+
+  const fetchTransaction =
+    options.fetchTransaction ??
+    ((txSignature: string) =>
+      fetchSolanaFinalizedTransactionBalanceDeltas({
+        rpcUrls: env.solanaRpcUrls,
+        timeoutMs: env.solanaRpcTimeoutMs,
+        signature: txSignature,
+      }));
+  const tx = await fetchTransaction(signature);
+  if (!tx) return { confirmed: false, skipped: true };
+
+  const failed = tx.err != null;
+  const sponsorDelta =
+    tx.accountDeltas.find((entry) => entry.account === sponsorAddress)
+      ?.deltaLamports ?? 0n;
+  const sponsorCost = bigintMax(-sponsorDelta, tx.feeLamports);
+  const rentRecipient = getMetadataString(row.metadata, "rentRecipient");
+  const sponsorRentRecipient = rentRecipient === sponsorAddress;
+
+  if (!options.dryRun) {
+    const upsertLedger = options.upsertLedger ?? upsertSolanaSponsorshipLedger;
+    await upsertLedger({
+      userId: row.user_id,
+      venue: "kalshi",
+      flow: "dflow",
+      status: failed ? "failed" : "confirmed",
+      intentId,
+      walletAddress,
+      sponsorAddress,
+      marketId: row.market_id,
+      inputMint: row.input_mint,
+      outputMint: row.output_mint,
+      amountRaw: row.amount_raw,
+      messageDigest: row.message_digest,
+      transactionDigest: row.transaction_digest,
+      txSignature: signature,
+      estimatedSponsorLamports: row.estimated_sponsor_lamports ?? "0",
+      actualSponsorLamports: sponsorCost.toString(),
+      rentLamports: sponsorRentRecipient ? row.rent_lamports : null,
+      rentStatus: failed
+        ? "locked"
+        : sponsorRentRecipient
+          ? "returned"
+          : "unknown",
+      error: failed ? JSON.stringify(tx.err) : null,
+      metadata: {
+        lossReclaimReconciliation: {
+          reconciledAt: new Date().toISOString(),
+          signature: tx.signature,
+          slot: tx.slot,
+          blockTime: tx.blockTime,
+          err: tx.err ?? null,
+          feePayer: tx.feePayer,
+          feeLamports: tx.feeLamports.toString(),
+          sponsorLamportDelta: sponsorDelta.toString(),
+          actualSponsorLamports: sponsorCost.toString(),
+          rentRecipient,
+          accountDeltas: tx.accountDeltas.map((entry) => ({
+            account: entry.account,
+            deltaLamports: entry.deltaLamports.toString(),
+          })),
+        },
+      },
+    });
+  }
+
+  return { confirmed: !failed, skipped: false };
+}
+
 async function reconcileOneSponsorshipRow(
   pool: Pool,
   row: SponsorshipLedgerRow,
@@ -391,6 +478,9 @@ async function reconcileOneSponsorshipRow(
 ): Promise<{ confirmed: boolean; skipped: boolean }> {
   if (row.flow !== "dflow") {
     return reconcileOneGenericSponsorshipRow(row, options);
+  }
+  if (getMetadataString(row.metadata, "purpose") === "loss_reclaim") {
+    return reconcileOneLossReclaimSponsorshipRow(row, options);
   }
 
   const sponsorAddress = row.sponsor_address?.trim();
@@ -424,10 +514,10 @@ async function reconcileOneSponsorshipRow(
       }));
 
   const txEntries = await Promise.all(
-    relatedSignatures.map(async (signature) => [
-      signature,
-      await fetchTransaction(signature),
-    ] as const),
+    relatedSignatures.map(
+      async (signature) =>
+        [signature, await fetchTransaction(signature)] as const,
+    ),
   );
   const result = calculateDflowSponsorshipReconciliation({
     sponsorAddress,
@@ -497,7 +587,9 @@ async function reconcileOneGenericSponsorshipRow(
       : (tx.accountDeltas.find((entry) => entry.account === sponsorAddress)
           ?.deltaLamports ?? 0n);
   const sponsorCost =
-    sponsorDelta == null ? tx.feeLamports : bigintMax(-sponsorDelta, tx.feeLamports);
+    sponsorDelta == null
+      ? tx.feeLamports
+      : bigintMax(-sponsorDelta, tx.feeLamports);
   if (!options.dryRun) {
     const upsertLedger = options.upsertLedger ?? upsertSolanaSponsorshipLedger;
     await upsertLedger({

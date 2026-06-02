@@ -49,7 +49,8 @@ function row(overrides: Record<string, unknown> = {}) {
     amount_raw: "1000000",
     message_digest: null,
     transaction_digest: null,
-    tx_signature: "5HcKhfeV6CzX5uD18tyjTdRPieGdXan7S78HJvV7raw2CuqdgVaeiNNsGjbSy76nqJy6yVA1E1mxuYbQkE1EskH2",
+    tx_signature:
+      "5HcKhfeV6CzX5uD18tyjTdRPieGdXan7S78HJvV7raw2CuqdgVaeiNNsGjbSy76nqJy6yVA1E1mxuYbQkE1EskH2",
     estimated_sponsor_lamports: "5000",
     actual_sponsor_lamports: "4128395",
     rent_status: "lost",
@@ -71,7 +72,9 @@ function tokenAccountInfo(inputs: {
     exists: true,
     lamports: inputs.lamports ?? 2_039_280n,
     tokenProgramId:
-      inputs.tokenProgramId === undefined ? TOKEN_PROGRAM : inputs.tokenProgramId,
+      inputs.tokenProgramId === undefined
+        ? TOKEN_PROGRAM
+        : inputs.tokenProgramId,
     tokenOwner: inputs.tokenOwner === undefined ? SPONSOR : inputs.tokenOwner,
     closeAuthority:
       inputs.closeAuthority === undefined ? null : inputs.closeAuthority,
@@ -141,47 +144,50 @@ await test("extracts unique positive-delta candidate accounts", () => {
 
 await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async () => {
   const rows = [
-    row({ id: "00000000-0000-0000-0000-000000000001", metadata: metadata(["A", "B"]) }),
-    row({ id: "00000000-0000-0000-0000-000000000002", metadata: metadata(["A"]) }),
+    row({
+      id: "00000000-0000-0000-0000-000000000001",
+      metadata: metadata(["A", "B"]),
+    }),
+    row({
+      id: "00000000-0000-0000-0000-000000000002",
+      metadata: metadata(["A"]),
+    }),
   ];
   const db = fakePool(rows);
   const closeCalls: string[][] = [];
-  const summary = await reclaimSolanaSponsorshipRentAccounts(
-    db.pool as never,
-    {
-      dryRun: false,
-      limit: 10,
-      minAgeSec: 0,
-      fetchAccount: async (account) =>
-        tokenAccountInfo({
-          account,
-          tokenProgramId: account === "B" ? TOKEN_2022_PROGRAM : TOKEN_PROGRAM,
-          lamports: account === "B" ? 2_074_080n : 2_039_280n,
-        }),
-      closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => {
-        closeCalls.push(accounts.map((entry) => entry.account));
-        return {
-          accountResults: new Map(
-            accounts.map((entry) => [
-              entry.account,
-              {
-                status: "closed" as const,
-                signature: "closeSig",
-                reclaimedLamports: entry.lamports,
-              },
-            ]),
-          ),
-          closeTransactions: [
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) =>
+      tokenAccountInfo({
+        account,
+        tokenProgramId: account === "B" ? TOKEN_2022_PROGRAM : TOKEN_PROGRAM,
+        lamports: account === "B" ? 2_074_080n : 2_039_280n,
+      }),
+    closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => {
+      closeCalls.push(accounts.map((entry) => entry.account));
+      return {
+        accountResults: new Map(
+          accounts.map((entry) => [
+            entry.account,
             {
+              status: "closed" as const,
               signature: "closeSig",
-              accounts: accounts.map((entry) => entry.account),
-              feeLamports: "5000",
+              reclaimedLamports: entry.lamports,
             },
-          ],
-        };
-      },
+          ]),
+        ),
+        closeTransactions: [
+          {
+            signature: "closeSig",
+            accounts: accounts.map((entry) => entry.account),
+            feeLamports: "5000",
+          },
+        ],
+      };
     },
-  );
+  });
 
   assert.deepEqual(closeCalls, [["A", "B"]]);
   assert.equal(summary.checked, 2);
@@ -246,39 +252,36 @@ await test("closes empty user-owned token account when sponsor is close authorit
     }),
   ];
   const db = fakePool(rows);
-  const summary = await reclaimSolanaSponsorshipRentAccounts(
-    db.pool as never,
-    {
-      dryRun: false,
-      limit: 10,
-      minAgeSec: 0,
-      fetchAccount: async (account) =>
-        tokenAccountInfo({
-          account,
-          tokenOwner: "UserOwner",
-          closeAuthority: SPONSOR,
-        }),
-      closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => ({
-        accountResults: new Map(
-          accounts.map((entry) => [
-            entry.account,
-            {
-              status: "closed" as const,
-              signature: "closeByAuthoritySig",
-              reclaimedLamports: entry.lamports,
-            },
-          ]),
-        ),
-        closeTransactions: [
-          {
-            signature: "closeByAuthoritySig",
-            accounts: accounts.map((entry) => entry.account),
-            feeLamports: "5000",
-          },
-        ],
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) =>
+      tokenAccountInfo({
+        account,
+        tokenOwner: "UserOwner",
+        closeAuthority: SPONSOR,
       }),
-    },
-  );
+    closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => ({
+      accountResults: new Map(
+        accounts.map((entry) => [
+          entry.account,
+          {
+            status: "closed" as const,
+            signature: "closeByAuthoritySig",
+            reclaimedLamports: entry.lamports,
+          },
+        ]),
+      ),
+      closeTransactions: [
+        {
+          signature: "closeByAuthoritySig",
+          accounts: accounts.map((entry) => entry.account),
+          feeLamports: "5000",
+        },
+      ],
+    }),
+  });
 
   assert.equal(summary.closed, 1);
   assert.equal(summary.reclaimedLamports, "2039280");
@@ -328,18 +331,15 @@ await test("preserves close audit when a later pass sees account already closed"
     }),
   ];
   const db = fakePool(rows);
-  const summary = await reclaimSolanaSponsorshipRentAccounts(
-    db.pool as never,
-    {
-      dryRun: false,
-      limit: 10,
-      minAgeSec: 0,
-      fetchAccount: async (account) => missingAccount(account),
-      closeAccounts: async () => {
-        throw new Error("should not close");
-      },
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => missingAccount(account),
+    closeAccounts: async () => {
+      throw new Error("should not close");
     },
-  );
+  });
 
   assert.equal(summary.closed, 0);
   assert.equal(summary.skipped, 1);
@@ -350,7 +350,10 @@ await test("preserves close audit when a later pass sees account already closed"
   const reclaim = metadataUpdate.sponsorshipRentReclaim;
   assert.equal(reclaim.reclaimedLamports, "2039280");
   assert.equal(reclaim.closeTransactions[0].signature, "closeSig");
-  assert.equal(reclaim.candidates[0].reason, "account_missing_or_already_closed");
+  assert.equal(
+    reclaim.candidates[0].reason,
+    "account_missing_or_already_closed",
+  );
   assert.equal(reclaim.candidates[0].closeStatus, "closed");
   assert.equal(reclaim.candidates[0].closeSignature, "closeSig");
   assert.equal(reclaim.candidates[0].reclaimedLamports, "2039280");
@@ -364,27 +367,24 @@ await test("skips non-empty, wrong-owner, missing, and non-token accounts", asyn
     }),
   ];
   const db = fakePool(rows);
-  const summary = await reclaimSolanaSponsorshipRentAccounts(
-    db.pool as never,
-    {
-      dryRun: false,
-      limit: 10,
-      minAgeSec: 0,
-      fetchAccount: async (account) => {
-        if (account === "nonEmpty") {
-          return tokenAccountInfo({ account, tokenAmount: 1n });
-        }
-        if (account === "wrongOwner") {
-          return tokenAccountInfo({ account, tokenOwner: "OtherOwner" });
-        }
-        if (account === "missing") return missingAccount(account);
-        return tokenAccountInfo({ account, tokenProgramId: null });
-      },
-      closeAccounts: async () => {
-        throw new Error("should not close");
-      },
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => {
+      if (account === "nonEmpty") {
+        return tokenAccountInfo({ account, tokenAmount: 1n });
+      }
+      if (account === "wrongOwner") {
+        return tokenAccountInfo({ account, tokenOwner: "OtherOwner" });
+      }
+      if (account === "missing") return missingAccount(account);
+      return tokenAccountInfo({ account, tokenProgramId: null });
     },
-  );
+    closeAccounts: async () => {
+      throw new Error("should not close");
+    },
+  });
 
   assert.equal(summary.closed, 0);
   assert.equal(summary.skipped, 4);
@@ -397,10 +397,42 @@ await test("skips non-empty, wrong-owner, missing, and non-token accounts", asyn
     candidates.map((entry: { reason: string | null }) => entry.reason),
     [
       "token_balance_not_zero",
-      "token_owner_or_close_authority_not_sponsor",
+      "close_authority_not_sponsor",
       "account_missing_or_already_closed",
       "not_token_account",
     ],
+  );
+});
+
+await test("skips sponsor-owned token account when close authority is not sponsor", async () => {
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000011",
+      metadata: metadata(["delegatedClose"]),
+    }),
+  ];
+  const db = fakePool(rows);
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) =>
+      tokenAccountInfo({
+        account,
+        tokenOwner: SPONSOR,
+        closeAuthority: "OtherCloseAuthority",
+      }),
+    closeAccounts: async () => {
+      throw new Error("should not close");
+    },
+  });
+
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.skipped, 1);
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  assert.equal(
+    metadataUpdate.sponsorshipRentReclaim.candidates[0].reason,
+    "close_authority_not_sponsor",
   );
 });
 
@@ -408,19 +440,16 @@ await test("dry run verifies but does not close or update", async () => {
   const rows = [row()];
   const db = fakePool(rows);
   let closeCalled = false;
-  const summary = await reclaimSolanaSponsorshipRentAccounts(
-    db.pool as never,
-    {
-      dryRun: true,
-      limit: 10,
-      minAgeSec: 0,
-      fetchAccount: async (account) => tokenAccountInfo({ account }),
-      closeAccounts: async () => {
-        closeCalled = true;
-        throw new Error("should not close");
-      },
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: true,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => tokenAccountInfo({ account }),
+    closeAccounts: async () => {
+      closeCalled = true;
+      throw new Error("should not close");
     },
-  );
+  });
 
   assert.equal(closeCalled, false);
   assert.equal(summary.checked, 1);

@@ -366,6 +366,7 @@ function getDflowSponsoredFeeParams(inputs: {
 function getDflowUserFundedFeeParams(
   query: DflowOrderQueryParams,
 ): Record<string, string | number> {
+  if (query.purpose === "redeem") return {};
   return getDflowSponsoredFeeParams({
     inputMint: query.inputMint,
     outputMint: query.outputMint,
@@ -384,18 +385,20 @@ export function buildDflowOrderRequestQuery(inputs: {
     inputMint: query.inputMint,
     outputMint: query.outputMint,
     amount: query.amount,
-    ...(query.purpose ? { purpose: query.purpose } : {}),
     userPublicKey: inputs.userPublicKey,
     ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
     ...(inputs.sponsored
-      ? getDflowSponsoredFeeParams({
-          inputMint: query.inputMint,
-          outputMint: query.outputMint,
-        })
+      ? query.purpose === "redeem"
+        ? {}
+        : getDflowSponsoredFeeParams({
+            inputMint: query.inputMint,
+            outputMint: query.outputMint,
+          })
       : getDflowUserFundedFeeParams(query)),
     ...(inputs.sponsored && sponsorAddress
       ? {
           sponsor: sponsorAddress,
+          sponsorExec: true,
           outcomeAccountRentRecipient: sponsorAddress,
           ...(query.outputMint !== env.solanaUsdcMint
             ? { outputCloseAuthority: sponsorAddress }
@@ -1102,6 +1105,16 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     validation.estimatedSponsorLamports > validation.estimatedFeeLamports
       ? validation.estimatedSponsorLamports - validation.estimatedFeeLamports
       : BigInt(0);
+
+  const policy = await resolveAuthAccessPolicy(pool);
+  if (
+    policy.effective.embeddedSolanaSponsorship !== true ||
+    policy.effective.embeddedSolanaSponsorshipFlows.dflow !== true ||
+    (policy.effective.embeddedSolanaSponsorshipMode !== "enforce" &&
+      env.embeddedSolanaSponsorshipObserveCanSponsor !== true)
+  ) {
+    throw new Error("DFlow sponsorship is disabled");
+  }
 
   tx.sign([sponsorKeypair]);
   const sponsoredTransaction = encodeBase64(tx.serialize());

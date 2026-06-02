@@ -61,9 +61,18 @@ export const embeddedSolanaExecuteBodySchema =
     signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
   });
 
-export const embeddedSolanaDirectTransferSponsorshipIntentBodySchema = z.object({
-  transaction: z.string().trim().min(1),
-  mint: z.string().trim().min(1).max(80),
-  amountRaw: z.string().trim().regex(/^\d+$/),
-  recipientAddress: z.string().trim().min(32).max(64),
+export const embeddedSolanaDirectTransferSponsorshipIntentBodySchema = z.object(
+  {
+    transaction: z.string().trim().min(1),
+    mint: z.string().trim().min(1).max(80),
+    amountRaw: z.string().trim().regex(/^\d+$/),
+    recipientAddress: z.string().trim().min(32).max(64),
+  },
+);
+
+export const embeddedSolanaSponsorshipLedgerRepairBodySchema = z.object({
+  sponsorshipIntentId: z.string().trim().min(1).max(120),
+  signature: z.string().trim().min(1).max(180),
+  transactionId: z.string().trim().min(1).max(180).optional(),
+  requestId: z.string().trim().min(1).max(80).optional(),
 });
