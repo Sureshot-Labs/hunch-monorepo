@@ -83,7 +83,7 @@ assert.doesNotMatch(
 
 assert.match(
   bridgeRoute,
-  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?isPositiveIntegerString\(inputs\.payload\.fixFee\)[\s\S]*?isPositiveIntegerString\(inputs\.payload\.protocolFee\)/,
+  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?isPositiveIntegerLike\(inputs\.payload\.fixFee\)[\s\S]*?isPositiveIntegerLike\(inputs\.payload\.protocolFee\)/,
   "deBridge sponsorship intent creation must reject positive native/provider fees",
 );
 assert.match(

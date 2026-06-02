@@ -45,24 +45,42 @@ type CompiledSolanaInstruction =
   VersionedTransaction["message"]["compiledInstructions"][number];
 
 function buildPrivyIdempotencyKey(inputs: {
+  walletId: string;
+  method: "signTransaction" | "signAndSendTransaction";
+  caip2?: string | null;
   executionKey: string;
   requestId: string;
+  transactionDigest: string;
 }): string {
   const digest = createHash("sha256")
-    .update(`embedded-solana:${inputs.executionKey}:${inputs.requestId}`)
+    .update(
+      [
+        "embedded-solana",
+        inputs.walletId,
+        inputs.method,
+        inputs.caip2?.trim() || SOLANA_MAINNET_CAIP2,
+        inputs.executionKey,
+        inputs.requestId,
+        inputs.transactionDigest,
+      ].join(":"),
+    )
     .digest("hex")
     .slice(0, 32);
   return `hunch-sol-${digest}`;
 }
 
-function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
-  if (payload.startsWith("0x")) {
-    const hex = payload.slice(2);
-    if (!hex.length || hex.length % 2 !== 0) return null;
-    return Buffer.from(hex, "hex");
-  }
+function decodeBase64SolanaTransaction(payload: string): Buffer | null {
+  const trimmed = payload.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("0x")) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(trimmed)) return null;
+  if (trimmed.length % 4 === 1) return null;
   try {
-    return Buffer.from(payload, "base64");
+    const raw = Buffer.from(trimmed, "base64");
+    if (!raw.length) return null;
+    const expected = trimmed.replace(/=+$/, "");
+    const actual = raw.toString("base64").replace(/=+$/, "");
+    return expected === actual ? raw : null;
   } catch {
     return null;
   }
@@ -71,7 +89,7 @@ function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
 function deserializeEmbeddedSolanaTransaction(
   transaction: string,
 ): VersionedTransaction | null {
-  const raw = decodeSerializedSolanaTransaction(transaction.trim());
+  const raw = decodeBase64SolanaTransaction(transaction.trim());
   if (!raw) return null;
 
   try {
@@ -79,6 +97,11 @@ function deserializeEmbeddedSolanaTransaction(
   } catch {
     return null;
   }
+}
+
+function computeSolanaTransactionDigest(transaction: string): string | null {
+  const raw = decodeBase64SolanaTransaction(transaction.trim());
+  return raw ? createHash("sha256").update(raw).digest("hex") : null;
 }
 
 function getCompiledInstructionProgramId(
@@ -620,6 +643,10 @@ export function buildEmbeddedSolanaSignTransactionRequest(inputs: {
       `${inputs.transaction.label} is missing a serialized Solana transaction.`,
     );
   }
+  const transactionDigest = computeSolanaTransactionDigest(transaction);
+  if (!transactionDigest) {
+    throw new Error(`${inputs.transaction.label} is not a valid base64 Solana transaction.`);
+  }
 
   return createPrivyWalletRpcRequest({
     id: inputs.transaction.id,
@@ -627,8 +654,12 @@ export function buildEmbeddedSolanaSignTransactionRequest(inputs: {
     walletId: inputs.context.walletId,
     idempotencyKey: inputs.executionKey
       ? buildPrivyIdempotencyKey({
+          walletId: inputs.context.walletId,
+          method: "signTransaction",
+          caip2: inputs.transaction.caip2,
           executionKey: inputs.executionKey,
           requestId: inputs.transaction.id,
+          transactionDigest,
         })
       : null,
     body: {
@@ -656,6 +687,11 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
       `${inputs.transaction.label} is missing a serialized Solana transaction.`,
     );
   }
+  const caip2 = inputs.transaction.caip2?.trim() || SOLANA_MAINNET_CAIP2;
+  const transactionDigest = computeSolanaTransactionDigest(transaction);
+  if (!transactionDigest) {
+    throw new Error(`${inputs.transaction.label} is not a valid base64 Solana transaction.`);
+  }
 
   return createPrivyWalletRpcRequest({
     id: inputs.transaction.id,
@@ -663,8 +699,12 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
     walletId: inputs.context.walletId,
     idempotencyKey: inputs.executionKey
       ? buildPrivyIdempotencyKey({
+          walletId: inputs.context.walletId,
+          method: "signAndSendTransaction",
+          caip2,
           executionKey: inputs.executionKey,
           requestId: inputs.transaction.id,
+          transactionDigest,
         })
       : null,
     body: {
@@ -683,7 +723,7 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
         transaction,
         encoding: inputs.transaction.encoding ?? "base64",
       },
-      caip2: inputs.transaction.caip2?.trim() || SOLANA_MAINNET_CAIP2,
+      caip2,
     },
   });
 }

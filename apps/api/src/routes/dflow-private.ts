@@ -43,7 +43,10 @@ import {
   computeEmbeddedSolanaTransactionDigest,
   createEmbeddedSolanaSponsorshipIntent,
   readEmbeddedSolanaSponsorshipIntent,
+  releaseEmbeddedSolanaSponsorshipBudget,
   reserveEmbeddedSolanaSponsorshipBudget,
+  shouldRequireEmbeddedSolanaSponsorshipRedis,
+  type EmbeddedSolanaSponsorshipBudgetReservation,
   type EmbeddedSolanaSponsorshipLimits,
   type EmbeddedSolanaSponsorshipMode,
 } from "../services/embedded-solana-sponsorship.js";
@@ -128,6 +131,7 @@ type DflowSponsoredValidationResult = {
   valid: boolean;
   reasons: string[];
   estimatedSponsorLamports: bigint;
+  estimatedFeeLamports: bigint;
   systemCreateLamports: bigint;
 };
 
@@ -365,16 +369,10 @@ function getDflowSponsoredFeeParams(inputs: {
 function getDflowUserFundedFeeParams(
   query: DflowOrderQueryParams,
 ): Record<string, string | number> {
-  return {
-    ...(query.platformFeeBps != null
-      ? { platformFeeBps: query.platformFeeBps }
-      : {}),
-    ...(query.platformFeeScale != null
-      ? { platformFeeScale: query.platformFeeScale }
-      : {}),
-    ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
-    ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
-  };
+  return getDflowSponsoredFeeParams({
+    inputMint: query.inputMint,
+    outputMint: query.outputMint,
+  });
 }
 
 export function buildDflowOrderRequestQuery(inputs: {
@@ -518,6 +516,7 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
     });
   }
 
+  let budgetReservation: EmbeddedSolanaSponsorshipBudgetReservation | null = null;
   try {
     transaction = await (inputs.refreshTransaction ??
       refreshUnsignedSolanaTransactionBlockhash)(transaction);
@@ -609,7 +608,10 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
       walletAddress: inputs.userPublicKey,
       estimatedLamports: validation.estimatedSponsorLamports.toString(),
       limits: inputs.sponsorshipLimits,
-      requireRedis: inputs.sponsorshipMode === "enforce",
+      requireRedis: shouldRequireEmbeddedSolanaSponsorshipRedis({
+        mode: inputs.sponsorshipMode,
+        observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+      }),
     });
     if (!budget.ok) {
       inputs.logger.warn(
@@ -627,6 +629,7 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
         requester: inputs.requester,
       });
     }
+    budgetReservation = budget.reservation ?? null;
 
     const intent = await (inputs.createIntent ??
       createEmbeddedSolanaSponsorshipIntent)({
@@ -642,6 +645,8 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
       },
     });
     if (!intent) {
+      await releaseEmbeddedSolanaSponsorshipBudget(budgetReservation);
+      budgetReservation = null;
       inputs.logger.warn(
         { userId: inputs.userId, walletAddress: inputs.walletAddress },
         "DFlow sponsorship intent creation failed",
@@ -659,40 +664,49 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
     payloadRecord.hunchSponsorAddress = inputs.sponsorAddress;
 
     const estimatedNonFeeLamports =
-      validation.estimatedSponsorLamports > SOLANA_TX_FEE_LAMPORTS
-        ? validation.estimatedSponsorLamports - SOLANA_TX_FEE_LAMPORTS
+      validation.estimatedSponsorLamports > validation.estimatedFeeLamports
+        ? validation.estimatedSponsorLamports - validation.estimatedFeeLamports
         : BigInt(0);
-    await (inputs.upsertLedger ?? upsertSolanaSponsorshipLedger)({
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      sponsorAddress: inputs.sponsorAddress,
-      intentId: intent.id,
-      status: "intent_created",
-      inputMint: inputs.query.inputMint,
-      outputMint: inputs.query.outputMint,
-      amountRaw: inputs.query.amount,
-      marketId: inputs.sponsorshipMarketState.marketIds[0] ?? null,
-      messageDigest,
-      transactionDigest: intent.transactionDigest,
-      estimatedSponsorLamports: validation.estimatedSponsorLamports.toString(),
-      rentLamports:
-        estimatedNonFeeLamports > BigInt(0)
-          ? estimatedNonFeeLamports.toString()
-          : null,
-      rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
-      metadata: {
-        marketIds: inputs.sponsorshipMarketState.marketIds,
-        maxSystemCreateLamports: "0",
-        maxAtaCreateCount: expectedAtaCreateCount,
-        expectedDflowOutcomeRentLamports,
-        budgetReserved: true,
-        budgetEstimatedLamports: validation.estimatedSponsorLamports.toString(),
-        blockhashRefreshed: true,
-      },
-    });
+    try {
+      await (inputs.upsertLedger ?? upsertSolanaSponsorshipLedger)({
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        sponsorAddress: inputs.sponsorAddress,
+        intentId: intent.id,
+        status: "intent_created",
+        inputMint: inputs.query.inputMint,
+        outputMint: inputs.query.outputMint,
+        amountRaw: inputs.query.amount,
+        marketId: inputs.sponsorshipMarketState.marketIds[0] ?? null,
+        messageDigest,
+        transactionDigest: intent.transactionDigest,
+        estimatedSponsorLamports:
+          validation.estimatedSponsorLamports.toString(),
+        rentLamports:
+          estimatedNonFeeLamports > BigInt(0)
+            ? estimatedNonFeeLamports.toString()
+            : null,
+        rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+        metadata: {
+          marketIds: inputs.sponsorshipMarketState.marketIds,
+          maxSystemCreateLamports: "0",
+          maxAtaCreateCount: expectedAtaCreateCount,
+          expectedDflowOutcomeRentLamports,
+          budgetReserved: true,
+          budgetEstimatedLamports:
+            validation.estimatedSponsorLamports.toString(),
+          blockhashRefreshed: true,
+        },
+      });
+    } catch (error) {
+      await releaseEmbeddedSolanaSponsorshipBudget(budgetReservation);
+      budgetReservation = null;
+      throw error;
+    }
 
     return { ok: true, payload: payloadRecord, sponsored: true };
   } catch (error) {
+    await releaseEmbeddedSolanaSponsorshipBudget(budgetReservation);
     inputs.logger.warn(
       { error, userId: inputs.userId, walletAddress: inputs.walletAddress },
       "Failed to create DFlow Solana sponsorship intent",
@@ -724,8 +738,10 @@ function validateDflowSponsoredAnalysis(inputs: {
   const expectedDflowOutcomeRentLamports =
     getIntentMetadataBigInt(inputs.metadata, "expectedDflowOutcomeRentLamports") ??
     BigInt(0);
+  const signatureFeeLamports =
+    SOLANA_TX_FEE_LAMPORTS * BigInt(Math.max(1, analysis.signatureCount));
   const estimatedSponsorLamports =
-    SOLANA_TX_FEE_LAMPORTS +
+    signatureFeeLamports +
     systemCreateLamports +
     ataRentLamports +
     expectedDflowOutcomeRentLamports;
@@ -810,6 +826,7 @@ function validateDflowSponsoredAnalysis(inputs: {
     valid: reasons.length === 0,
     reasons,
     estimatedSponsorLamports,
+    estimatedFeeLamports: signatureFeeLamports,
     systemCreateLamports,
   };
 }
@@ -830,6 +847,12 @@ function signerHasNonZeroSignature(
   if (signerIndex < 0) return false;
   const signature = tx.signatures[signerIndex];
   return Boolean(signature?.some((byte) => byte !== 0));
+}
+
+function getVersionedTransactionSignature(tx: VersionedTransaction): string | null {
+  const signature = tx.signatures[0];
+  if (!signature || !signature.some((byte) => byte !== 0)) return null;
+  return bs58.encode(Buffer.from(signature));
 }
 
 function hasAnyNonZeroSignature(tx: VersionedTransaction): boolean {
@@ -966,6 +989,7 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
   sponsorshipIntentId: string;
   signedTransaction: string;
   maxRetries?: number;
+  logger?: Pick<DflowSponsorshipOrderLogger, "warn">;
 }): Promise<{ signature: string; sponsoredTransaction: string }> {
   const sponsorConfig = await resolveDflowSponsorConfig();
   if (
@@ -1053,9 +1077,6 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       `DFlow sponsored transaction rejected: ${validation.reasons[0]}`,
     );
   }
-  const transactionDigest = computeEmbeddedSolanaTransactionDigest(
-    inputs.signedTransaction,
-  );
   const inputMint = getIntentMetadataString(intent.metadata, "inputMint");
   const outputMint = getIntentMetadataString(intent.metadata, "outputMint");
   const amountRaw = getIntentMetadataString(intent.metadata, "amount");
@@ -1067,9 +1088,19 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
   const estimatedSponsorLamports =
     validation.estimatedSponsorLamports.toString();
   const estimatedNonFeeLamports =
-    validation.estimatedSponsorLamports > SOLANA_TX_FEE_LAMPORTS
-      ? validation.estimatedSponsorLamports - SOLANA_TX_FEE_LAMPORTS
+    validation.estimatedSponsorLamports > validation.estimatedFeeLamports
+      ? validation.estimatedSponsorLamports - validation.estimatedFeeLamports
       : BigInt(0);
+
+  tx.sign([sponsorKeypair]);
+  const sponsoredTransaction = encodeBase64(tx.serialize());
+  const sponsoredTransactionDigest = computeEmbeddedSolanaTransactionDigest(
+    sponsoredTransaction,
+  );
+  const expectedSignature = getVersionedTransactionSignature(tx);
+  if (!sponsoredTransactionDigest || !expectedSignature) {
+    throw new Error("DFlow sponsored transaction could not be signed");
+  }
 
   await upsertSolanaSponsorshipLedger({
     userId: inputs.userId,
@@ -1082,7 +1113,8 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     amountRaw,
     marketId,
     messageDigest,
-    transactionDigest,
+    transactionDigest: sponsoredTransactionDigest,
+    txSignature: expectedSignature,
     estimatedSponsorLamports,
     rentLamports:
       estimatedNonFeeLamports > BigInt(0)
@@ -1094,11 +1126,10 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       programIds: analysis.programIds,
       ataCreateCount: analysis.ataCreateCount,
       systemCreateLamports: analysis.systemCreateLamports,
+      sponsorSignedAt: new Date().toISOString(),
     },
   });
 
-  tx.sign([sponsorKeypair]);
-  const sponsoredTransaction = encodeBase64(tx.serialize());
   let signature: string;
   try {
     signature = await sendSolanaRawTransaction({
@@ -1123,9 +1154,8 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       amountRaw,
       marketId,
       messageDigest,
-      transactionDigest: computeEmbeddedSolanaTransactionDigest(
-        sponsoredTransaction,
-      ),
+      transactionDigest: sponsoredTransactionDigest,
+      txSignature: expectedSignature,
       estimatedSponsorLamports,
       rentLamports:
         estimatedNonFeeLamports > BigInt(0)
@@ -1137,29 +1167,44 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     throw error;
   }
 
-  await upsertSolanaSponsorshipLedger({
-    userId: inputs.userId,
-    walletAddress: inputs.walletAddress,
-    sponsorAddress,
-    intentId: intent.id,
-    status: "submitted",
-    inputMint,
-    outputMint,
-    amountRaw,
-    marketId,
-    messageDigest,
-    transactionDigest: computeEmbeddedSolanaTransactionDigest(
-      sponsoredTransaction,
-    ),
-    txSignature: signature,
-    estimatedSponsorLamports,
-    rentLamports:
-      estimatedNonFeeLamports > BigInt(0)
-        ? estimatedNonFeeLamports.toString()
-        : null,
-    rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
-    metadata: { submittedAt: new Date().toISOString() },
-  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await upsertSolanaSponsorshipLedger({
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        sponsorAddress,
+        intentId: intent.id,
+        status: "submitted",
+        inputMint,
+        outputMint,
+        amountRaw,
+        marketId,
+        messageDigest,
+        transactionDigest: sponsoredTransactionDigest,
+        txSignature: signature,
+        estimatedSponsorLamports,
+        rentLamports:
+          estimatedNonFeeLamports > BigInt(0)
+            ? estimatedNonFeeLamports.toString()
+            : null,
+        rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+        metadata: { submittedAt: new Date().toISOString() },
+      });
+      break;
+    } catch (error) {
+      if (attempt === 1) {
+        inputs.logger?.warn(
+          {
+            error,
+            intentId: intent.id,
+            signature,
+            transactionDigest: sponsoredTransactionDigest,
+          },
+          "DFlow sponsored transaction broadcast succeeded but ledger submit update failed",
+        );
+      }
+    }
+  }
 
   return { signature, sponsoredTransaction };
 }
@@ -1324,6 +1369,10 @@ async function resolveDflowSponsorshipMarketState(
   inputMint: string,
   outputMint: string,
 ): Promise<DflowSponsorshipMarketState | null> {
+  const inputIsUsdc = inputMint === env.solanaUsdcMint;
+  const outputIsUsdc = outputMint === env.solanaUsdcMint;
+  if (inputIsUsdc === outputIsUsdc) return null;
+
   const tokenIds = Array.from(
     new Set(
       [inputMint, outputMint]
@@ -1331,7 +1380,7 @@ async function resolveDflowSponsorshipMarketState(
         .filter((tokenId): tokenId is string => Boolean(tokenId)),
     ),
   );
-  if (!tokenIds.length) return null;
+  if (tokenIds.length !== 1) return null;
 
   const { rows } = await pool.query<{
     market_id: string;
@@ -1348,7 +1397,7 @@ async function resolveDflowSponsorshipMarketState(
     `,
     [tokenIds],
   );
-  if (!rows.length) return null;
+  if (rows.length !== 1) return null;
 
   return {
     marketIds: rows.map((row) => row.market_id),
@@ -1860,8 +1909,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           { error, userId: user.id, walletAddress },
           "Failed to resolve DFlow sponsorship configuration",
         );
-        reply.code(500);
-        return reply.send({ error: "DFlow sponsorship is misconfigured" });
+        dflowSponsorshipConfig = null;
+        dflowSponsoredOrder = false;
+        dflowSponsorAddress = null;
       }
 
       const orderQuery: DflowOrderQueryParams = {
@@ -1869,14 +1919,6 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         outputMint: query.outputMint,
         amount: query.amount,
         ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
-        ...(query.platformFeeBps != null
-          ? { platformFeeBps: query.platformFeeBps }
-          : {}),
-        ...(query.platformFeeScale != null
-          ? { platformFeeScale: query.platformFeeScale }
-          : {}),
-        ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
-        ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
       };
 
       const sendDflowOrderFailure = (failed: {
@@ -2212,6 +2254,16 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       if (!ensureDflowReady(reply)) return;
       try {
+        const policy = await resolveAuthAccessPolicy(pool);
+        if (
+          policy.effective.embeddedSolanaSponsorship !== true ||
+          policy.effective.embeddedSolanaSponsorshipFlows.dflow !== true
+        ) {
+          reply.code(403);
+          return reply.send({
+            error: "DFlow sponsorship is disabled",
+          });
+        }
         const result = await initializeDflowPredictionMarket({
           outcomeMint: request.body.outcomeMint,
           maxRetries: request.body.maxRetries,
@@ -2323,6 +2375,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           sponsorshipIntentId: request.body.sponsorshipIntentId,
           signedTransaction: request.body.signedTransaction,
           maxRetries: request.body.maxRetries,
+          logger: app.log,
         });
 
         reply.header("Content-Type", "application/json; charset=utf-8");

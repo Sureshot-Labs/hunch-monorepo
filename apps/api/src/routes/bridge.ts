@@ -57,7 +57,9 @@ import {
 } from "../services/debridge-client.js";
 import {
   createEmbeddedSolanaSponsorshipIntent,
+  releaseEmbeddedSolanaSponsorshipBudget,
   reserveEmbeddedSolanaSponsorshipBudget,
+  shouldRequireEmbeddedSolanaSponsorshipRedis,
   validateEmbeddedSolanaSponsorshipIntentCandidate,
 } from "../services/embedded-solana-sponsorship.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
@@ -539,7 +541,11 @@ function readStringField(payload: Record<string, unknown>, field: string) {
   return typeof value === "string" ? value : null;
 }
 
-function isPositiveIntegerString(value: unknown): boolean {
+function isPositiveIntegerLike(value: unknown): boolean {
+  if (typeof value === "bigint") return value > BigInt(0);
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0;
+  }
   return (
     typeof value === "string" &&
     /^\d+$/.test(value.trim()) &&
@@ -571,8 +577,8 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     return null;
   }
   if (
-    isPositiveIntegerString(inputs.payload.fixFee) ||
-    isPositiveIntegerString(inputs.payload.protocolFee)
+    isPositiveIntegerLike(inputs.payload.fixFee) ||
+    isPositiveIntegerLike(inputs.payload.protocolFee)
   ) {
     return null;
   }
@@ -624,8 +630,10 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     walletAddress: inputs.senderAddress,
     estimatedLamports: validation.analysis.estimatedSponsorLamports,
     limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
-    requireRedis:
-      authAccessPolicy.effective.embeddedSolanaSponsorshipMode === "enforce",
+    requireRedis: shouldRequireEmbeddedSolanaSponsorshipRedis({
+      mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+      observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+    }),
   });
   if (!budget.ok) {
     inputs.logger.warn(
@@ -642,36 +650,47 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
     transaction: inputs.payload.tx.data,
     metadata,
   });
-  if (!intent) return null;
-  await upsertSolanaSponsorshipLedger({
-    userId: inputs.userId,
-    venue: "bridge",
-    flow: "debridge",
-    status: "intent_created",
-    intentId: intent.id,
-    walletAddress: inputs.senderAddress,
-    inputMint: inputs.srcToken,
-    outputMint: inputs.dstToken,
-    amountRaw: inputs.amountIn,
-    transactionDigest: validation.analysis.digest,
-    estimatedSponsorLamports: validation.analysis.estimatedSponsorLamports,
-    metadata: {
-      bridgeOrderId: inputs.bridgeOrderId,
-      provider: "debridge",
-      programIds: validation.analysis.programIds,
-    },
-  });
+  if (!intent) {
+    await releaseEmbeddedSolanaSponsorshipBudget(budget.reservation);
+    return null;
+  }
+  try {
+    await upsertSolanaSponsorshipLedger({
+      userId: inputs.userId,
+      venue: "bridge",
+      flow: "debridge",
+      status: "intent_created",
+      intentId: intent.id,
+      walletAddress: inputs.senderAddress,
+      inputMint: inputs.srcToken,
+      outputMint: inputs.dstToken,
+      amountRaw: inputs.amountIn,
+      transactionDigest: validation.analysis.digest,
+      estimatedSponsorLamports: validation.analysis.estimatedSponsorLamports,
+      metadata: {
+        bridgeOrderId: inputs.bridgeOrderId,
+        provider: "debridge",
+        programIds: validation.analysis.programIds,
+      },
+    });
+  } catch (error) {
+    await releaseEmbeddedSolanaSponsorshipBudget(budget.reservation);
+    throw error;
+  }
   return intent.id;
 }
 
 function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
-  if (payload.startsWith("0x")) {
-    const hex = payload.slice(2);
-    if (!hex.length || hex.length % 2 !== 0) return null;
-    return Buffer.from(hex, "hex");
-  }
+  const trimmed = payload.trim();
+  if (!trimmed || trimmed.startsWith("0x")) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(trimmed)) return null;
+  if (trimmed.length % 4 === 1) return null;
   try {
-    return Buffer.from(payload, "base64");
+    const raw = Buffer.from(trimmed, "base64");
+    if (!raw.length) return null;
+    const expected = trimmed.replace(/=+$/, "");
+    const actual = raw.toString("base64").replace(/=+$/, "");
+    return expected === actual ? raw : null;
   } catch {
     return null;
   }
@@ -1950,8 +1969,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                         authAccessPolicy.effective
                           .embeddedSolanaSponsorshipLimits,
                       requireRedis:
-                        authAccessPolicy.effective
-                          .embeddedSolanaSponsorshipMode === "enforce",
+                        shouldRequireEmbeddedSolanaSponsorshipRedis({
+                          mode: authAccessPolicy.effective
+                            .embeddedSolanaSponsorshipMode,
+                          observeCanSponsor:
+                            env.embeddedSolanaSponsorshipObserveCanSponsor,
+                        }),
                     })
                   : { ok: false, reasons: validation.reasons };
                 if (validation.ok && budget.ok) {
@@ -1964,25 +1987,36 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   });
                   hunchSponsorshipIntentId = intent?.id ?? null;
                   if (intent) {
-                    await upsertSolanaSponsorshipLedger({
-                      userId: user.id,
-                      venue: "bridge",
-                      flow: "across",
-                      status: "intent_created",
-                      intentId: intent.id,
-                      walletAddress: addresses.senderAddress,
-                      inputMint: body.srcToken,
-                      outputMint: body.dstToken,
-                      amountRaw: body.amountIn,
-                      transactionDigest: validation.analysis.digest,
-                      estimatedSponsorLamports:
-                        validation.analysis.estimatedSponsorLamports,
-                      metadata: {
-                        bridgeOrderId,
-                        provider: "across",
-                        programIds: validation.analysis.programIds,
-                      },
-                    });
+                    try {
+                      await upsertSolanaSponsorshipLedger({
+                        userId: user.id,
+                        venue: "bridge",
+                        flow: "across",
+                        status: "intent_created",
+                        intentId: intent.id,
+                        walletAddress: addresses.senderAddress,
+                        inputMint: body.srcToken,
+                        outputMint: body.dstToken,
+                        amountRaw: body.amountIn,
+                        transactionDigest: validation.analysis.digest,
+                        estimatedSponsorLamports:
+                          validation.analysis.estimatedSponsorLamports,
+                        metadata: {
+                          bridgeOrderId,
+                          provider: "across",
+                          programIds: validation.analysis.programIds,
+                        },
+                      });
+                    } catch (error) {
+                      await releaseEmbeddedSolanaSponsorshipBudget(
+                        budget.reservation,
+                      );
+                      throw error;
+                    }
+                  } else {
+                    await releaseEmbeddedSolanaSponsorshipBudget(
+                      budget.reservation,
+                    );
                   }
                 } else {
                   app.log.warn(

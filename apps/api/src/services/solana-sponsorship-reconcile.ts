@@ -19,6 +19,7 @@ type SponsorshipLedgerRow = {
   user_id: string;
   venue: "kalshi" | "bridge" | "wallet";
   flow: "dflow" | "across" | "directTransfer" | "debridge";
+  status: "user_signed" | "submitted";
   intent_id: string | null;
   wallet_address: string | null;
   sponsor_address: string | null;
@@ -81,6 +82,10 @@ function getSettlementRaw(raw: unknown): Record<string, unknown> | null {
 
 function getSettlementStatus(raw: unknown): string | null {
   return getString(getSettlementRaw(raw)?.status);
+}
+
+function isTerminalDflowSettlementStatus(status: string | null): boolean {
+  return status === "closed" || status === "failed" || status === "no_fill";
 }
 
 function collectSettlementSignatures(raw: unknown): string[] {
@@ -231,6 +236,7 @@ async function fetchSubmittedSponsorshipRows(
         user_id,
         venue,
         flow,
+        status,
         intent_id,
         wallet_address,
         sponsor_address,
@@ -244,8 +250,10 @@ async function fetchSubmittedSponsorshipRows(
         estimated_sponsor_lamports::text as estimated_sponsor_lamports
       from solana_sponsorship_ledger
       where flow in ('dflow', 'across', 'directTransfer', 'debridge')
-        and status = 'submitted'
-        and tx_signature is not null
+        and (
+          (flow = 'dflow' and status in ('user_signed', 'submitted'))
+          or (flow <> 'dflow' and status = 'submitted' and tx_signature is not null)
+        )
         and updated_at <= now() - ($1::int * interval '1 second')
       order by updated_at asc
       limit $2
@@ -307,20 +315,25 @@ async function reconcileOneSponsorshipRow(
     return reconcileOneGenericSponsorshipRow(row, options);
   }
 
-  const submitSignature = row.tx_signature?.trim();
   const sponsorAddress = row.sponsor_address?.trim();
   const intentId = row.intent_id?.trim();
   const walletAddress = row.wallet_address?.trim();
-  if (!submitSignature || !sponsorAddress || !intentId || !walletAddress) {
+  if (!sponsorAddress || !intentId || !walletAddress) {
     return { confirmed: false, skipped: true };
   }
 
   const execution = await fetchExecutionForSponsorshipRow(pool, row);
+  const submitSignature =
+    row.tx_signature?.trim() || execution?.tx_signature?.trim() || null;
+  if (!submitSignature) {
+    return { confirmed: false, skipped: true };
+  }
   const relatedSignatures = collectDflowSponsorshipSignatures({
     submitSignature,
     executionRaw: execution?.raw,
   });
-  const settlementClosed = getSettlementStatus(execution?.raw) === "closed";
+  const settlementStatus = getSettlementStatus(execution?.raw);
+  const settlementClosed = isTerminalDflowSettlementStatus(settlementStatus);
   const fetchTransaction =
     options.fetchTransaction ??
     ((signature: string) =>
@@ -394,6 +407,14 @@ async function reconcileOneGenericSponsorshipRow(
   if (!tx) return { confirmed: false, skipped: true };
 
   const failed = tx.err != null;
+  const sponsorAddress = row.sponsor_address?.trim() || null;
+  const sponsorDelta =
+    sponsorAddress == null
+      ? null
+      : (tx.accountDeltas.find((entry) => entry.account === sponsorAddress)
+          ?.deltaLamports ?? 0n);
+  const sponsorCost =
+    sponsorDelta == null ? tx.feeLamports : bigintMax(-sponsorDelta, tx.feeLamports);
   if (!options.dryRun) {
     await upsertSolanaSponsorshipLedger({
       userId: row.user_id,
@@ -411,6 +432,7 @@ async function reconcileOneGenericSponsorshipRow(
       transactionDigest: row.transaction_digest,
       txSignature: signature,
       estimatedSponsorLamports: row.estimated_sponsor_lamports ?? "0",
+      actualSponsorLamports: failed ? null : sponsorCost.toString(),
       error: failed ? JSON.stringify(tx.err) : null,
       metadata: {
         genericSponsorshipReconciliation: {
@@ -421,6 +443,8 @@ async function reconcileOneGenericSponsorshipRow(
           err: tx.err ?? null,
           feePayer: tx.feePayer,
           feeLamports: tx.feeLamports.toString(),
+          sponsorLamportDelta: sponsorDelta?.toString() ?? null,
+          actualSponsorLamports: failed ? null : sponsorCost.toString(),
           accountDeltas: tx.accountDeltas.map((entry) => ({
             account: entry.account,
             deltaLamports: entry.deltaLamports.toString(),

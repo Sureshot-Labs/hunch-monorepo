@@ -103,6 +103,13 @@ function fakePool(rows: unknown[]) {
           return { rows };
         }
         if (sql.includes("update solana_sponsorship_ledger")) {
+          if (sql.includes("returning id")) {
+            return {
+              rows: rows.map((entry) => ({
+                id: (entry as { id: string }).id,
+              })),
+            };
+          }
           updates.push(params);
           return { rows: [] };
         }
@@ -230,7 +237,7 @@ await test("closes empty user-owned token account when sponsor is close authorit
   assert.equal(summary.closed, 1);
   assert.equal(summary.reclaimedLamports, "2039280");
   assert.equal(db.updates[0]?.[2], "returned");
-  const metadataUpdate = JSON.parse(String(db.updates[0]?.[3]));
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
   const candidate = metadataUpdate.sponsorshipRentReclaim.candidates[0];
   assert.equal(candidate.tokenOwner, "UserOwner");
   assert.equal(candidate.closeAuthority, SPONSOR);
@@ -293,7 +300,7 @@ await test("preserves close audit when a later pass sees account already closed"
   assert.equal(db.updates.length, 1);
   assert.equal(db.updates[0]?.[1], "0");
   assert.equal(db.updates[0]?.[2], "returned");
-  const metadataUpdate = JSON.parse(String(db.updates[0]?.[3]));
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
   const reclaim = metadataUpdate.sponsorshipRentReclaim;
   assert.equal(reclaim.reclaimedLamports, "2039280");
   assert.equal(reclaim.closeTransactions[0].signature, "closeSig");
@@ -338,7 +345,7 @@ await test("skips non-empty, wrong-owner, missing, and non-token accounts", asyn
   assert.equal(db.updates.length, 1);
   assert.equal(db.updates[0]?.[1], "6117840");
   assert.equal(db.updates[0]?.[2], "lost");
-  const metadataUpdate = JSON.parse(String(db.updates[0]?.[3]));
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
   const candidates = metadataUpdate.sponsorshipRentReclaim.candidates;
   assert.deepEqual(
     candidates.map((entry: { reason: string | null }) => entry.reason),

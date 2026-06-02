@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   createCloseAccountInstruction,
   TOKEN_2022_PROGRAM_ID,
@@ -298,10 +300,11 @@ async function fetchReclaimRows(
         and (
           rent_status in ('lost', 'locked')
           or (
-            rent_status = 'returned'
-            and metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}' ~ '^[0-9]+$'
-            and (metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}')::numeric > 0
-          )
+          rent_status = 'returned'
+          and metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}' ~ '^[0-9]+$'
+          and (metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}')::numeric > 0
+          and coalesce(metadata #>> '{sponsorshipRentReclaim,remainingOpenLamports}', '') <> '0'
+        )
         )
         and updated_at <= now() - ($1::int * interval '1 second')
       order by updated_at asc
@@ -310,6 +313,35 @@ async function fetchReclaimRows(
     [minAgeSec, limit],
   );
   return rows;
+}
+
+async function claimReclaimRows(
+  pool: Pool,
+  rows: SponsorshipRentReclaimRow[],
+): Promise<SponsorshipRentReclaimRow[]> {
+  if (!rows.length) return rows;
+  const claimId = randomUUID();
+  const { rows: claimed } = await pool.query<{ id: string }>(
+    `
+      update solana_sponsorship_ledger
+      set
+        updated_at = now(),
+        metadata = metadata || jsonb_build_object(
+          'sponsorshipRentReclaimClaim',
+          jsonb_build_object('claimId', $2::text, 'claimedAt', now())
+        )
+      where id = any($1::uuid[])
+        and status = 'confirmed'
+        and (
+          metadata #>> '{sponsorshipRentReclaimClaim,claimId}' is null
+          or updated_at <= now() - interval '10 minutes'
+        )
+      returning id
+    `,
+    [rows.map((row) => row.id), claimId],
+  );
+  const claimedIds = new Set(claimed.map((row) => row.id));
+  return rows.filter((row) => claimedIds.has(row.id));
 }
 
 async function fetchOnchainTokenAccountInfo(
@@ -454,12 +486,17 @@ async function closeOnchainTokenAccounts(
         sponsorKeypair,
         batch,
       });
-      await waitForSolanaSignatureConfirmation({
+      const confirmation = await waitForSolanaSignatureConfirmation({
         rpcUrls: env.solanaRpcUrls,
         signature,
         timeoutMs: env.solanaRpcTimeoutMs,
         commitment: "finalized",
       });
+      if (confirmation.status !== "fulfilled") {
+        throw new Error(
+          `close_account_confirmation_${confirmation.status}`,
+        );
+      }
       const metadata = await fetchSolanaFinalizedTransactionBalanceDeltas({
         rpcUrls: env.solanaRpcUrls,
         signature,
@@ -573,12 +610,33 @@ function rowReclaimMetadata(inputs: {
   };
 }
 
+function calculateNetActualSponsorLamportsAfterReclaim(inputs: {
+  row: SponsorshipRentReclaimRow;
+  metadata: Record<string, unknown>;
+}): bigint | null {
+  const previousActual = parseBigIntString(inputs.row.actual_sponsor_lamports);
+  if (previousActual == null) return null;
+  const reclaim = isRecord(inputs.metadata.sponsorshipRentReclaim)
+    ? inputs.metadata.sponsorshipRentReclaim
+    : null;
+  const reclaimedLamports = parseBigIntString(reclaim?.reclaimedLamports) ?? 0n;
+  const closeFeeLamports = Array.isArray(reclaim?.closeTransactions)
+    ? reclaim.closeTransactions.reduce((sum, entry) => {
+        if (!isRecord(entry)) return sum;
+        return sum + (parseBigIntString(entry.feeLamports) ?? 0n);
+      }, 0n)
+    : 0n;
+  const net = previousActual - reclaimedLamports + closeFeeLamports;
+  return net > 0n ? net : 0n;
+}
+
 async function updateReclaimRow(
   pool: Pool,
   row: SponsorshipRentReclaimRow,
   inputs: {
     rentLamports: bigint;
     rentStatus: "returned" | "lost" | "locked";
+    actualSponsorLamports: bigint | null;
     metadata: Record<string, unknown>;
   },
 ) {
@@ -589,13 +647,17 @@ async function updateReclaimRow(
         updated_at = now(),
         rent_lamports = $2::numeric,
         rent_status = $3,
-        metadata = metadata || $4::jsonb
+        actual_sponsor_lamports = coalesce($4::numeric, actual_sponsor_lamports),
+        metadata = metadata || $5::jsonb
       where id = $1
+        and status = 'confirmed'
+        and rent_status in ('locked', 'lost', 'returned')
     `,
     [
       row.id,
       inputs.rentLamports.toString(),
       inputs.rentStatus,
+      inputs.actualSponsorLamports?.toString() ?? null,
       JSON.stringify(inputs.metadata),
     ],
   );
@@ -605,10 +667,13 @@ export async function reclaimSolanaSponsorshipRentAccounts(
   pool: Pool,
   options: ReclaimSolanaSponsorshipRentOptions,
 ): Promise<ReclaimSolanaSponsorshipRentSummary> {
-  const rows = await fetchReclaimRows(pool, {
+  const fetchedRows = await fetchReclaimRows(pool, {
     limit: options.limit,
     minAgeSec: options.minAgeSec,
   });
+  const rows = options.dryRun
+    ? fetchedRows
+    : await claimReclaimRows(pool, fetchedRows);
   const summary: ReclaimSolanaSponsorshipRentSummary = {
     checked: rows.length,
     closed: 0,
@@ -749,17 +814,22 @@ export async function reclaimSolanaSponsorshipRentAccounts(
           : "lost";
 
     if (!options.dryRun) {
+      const metadata = rowReclaimMetadata({
+        existingMetadata: row.metadata,
+        candidateAccounts,
+        evaluations,
+        closeResults,
+        dryRun: options.dryRun,
+        remainingOpenLamports,
+      });
       await updateReclaimRow(pool, row, {
         rentLamports: remainingOpenLamports,
         rentStatus,
-        metadata: rowReclaimMetadata({
-          existingMetadata: row.metadata,
-          candidateAccounts,
-          evaluations,
-          closeResults,
-          dryRun: options.dryRun,
-          remainingOpenLamports,
+        actualSponsorLamports: calculateNetActualSponsorLamportsAfterReclaim({
+          row,
+          metadata,
         }),
+        metadata,
       });
     }
   }

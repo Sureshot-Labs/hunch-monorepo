@@ -33,7 +33,9 @@ import {
 import {
   createEmbeddedSolanaSponsorshipIntent,
   getEmbeddedSolanaDirectTransferAmountRaw,
+  releaseEmbeddedSolanaSponsorshipBudget,
   reserveEmbeddedSolanaSponsorshipBudget,
+  shouldRequireEmbeddedSolanaSponsorshipRedis,
   validateEmbeddedSolanaSponsorshipIntentCandidate,
 } from "../services/embedded-solana-sponsorship.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
@@ -71,11 +73,12 @@ function normalizeEvmAddress(value: string | null | undefined): string | null {
 
 function buildEmbeddedSolanaPreparedCacheKey(inputs: {
   signer: string;
+  operation: "sign" | "signAndSend";
   executionKey: string;
 }): string {
   const digest = createHash("sha256")
     .update(
-      `embedded-solana:prepared:${inputs.signer.trim()}:${inputs.executionKey.trim()}`,
+      `embedded-solana:prepared:${inputs.operation}:${inputs.signer.trim()}:${inputs.executionKey.trim()}`,
     )
     .digest("hex");
   return `embedded-solana:prepared:${digest}`;
@@ -103,6 +106,7 @@ function parseEmbeddedSolanaPreparedRequests(
 
 async function cacheEmbeddedSolanaPreparedRequests(inputs: {
   signer: string;
+  operation: "sign" | "signAndSend";
   executionKey: string | null | undefined;
   requests: EmbeddedPrivyAuthorizationRequest[];
   log: RouteLogger;
@@ -114,6 +118,7 @@ async function cacheEmbeddedSolanaPreparedRequests(inputs: {
 
   const key = buildEmbeddedSolanaPreparedCacheKey({
     signer: inputs.signer,
+    operation: inputs.operation,
     executionKey,
   });
   embeddedSolanaPreparedMemory.set(key, {
@@ -137,11 +142,13 @@ async function cacheEmbeddedSolanaPreparedRequests(inputs: {
 
 async function readCachedEmbeddedSolanaPreparedRequests(inputs: {
   signer: string;
+  operation: "sign" | "signAndSend";
   executionKey: string;
   log: RouteLogger;
 }): Promise<EmbeddedPrivyAuthorizationRequest[] | null> {
   const key = buildEmbeddedSolanaPreparedCacheKey({
     signer: inputs.signer,
+    operation: inputs.operation,
     executionKey: inputs.executionKey,
   });
 
@@ -425,9 +432,10 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: context.signer,
           estimatedLamports: validation.analysis.estimatedSponsorLamports,
           limits: authAccessPolicy.effective.embeddedSolanaSponsorshipLimits,
-          requireRedis:
-            authAccessPolicy.effective.embeddedSolanaSponsorshipMode ===
-            "enforce",
+          requireRedis: shouldRequireEmbeddedSolanaSponsorshipRedis({
+            mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+            observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+          }),
         });
         if (!budget.ok) {
           reply.header("Content-Type", "application/json; charset=utf-8");
@@ -446,6 +454,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           metadata,
         });
         if (!intent) {
+          await releaseEmbeddedSolanaSponsorshipBudget(budget.reservation);
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send({
             ok: true,
@@ -453,27 +462,33 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             reasons: ["intent_create_failed"],
           });
         }
-        await upsertSolanaSponsorshipLedger({
-          userId: user.id,
-          venue: "wallet",
-          flow: "directTransfer",
-          status: "intent_created",
-          intentId: intent.id,
-          walletAddress: context.signer,
-          inputMint: request.body.mint,
-          outputMint: request.body.mint,
-          amountRaw: request.body.amountRaw,
-          transactionDigest: validation.analysis.digest,
-          estimatedSponsorLamports: validation.analysis.estimatedSponsorLamports,
-          metadata: {
-            recipientAddress: request.body.recipientAddress,
-            analysis: {
-              programIds: validation.analysis.programIds,
-              estimatedSponsorLamports:
-                validation.analysis.estimatedSponsorLamports,
+        try {
+          await upsertSolanaSponsorshipLedger({
+            userId: user.id,
+            venue: "wallet",
+            flow: "directTransfer",
+            status: "intent_created",
+            intentId: intent.id,
+            walletAddress: context.signer,
+            inputMint: request.body.mint,
+            outputMint: request.body.mint,
+            amountRaw: request.body.amountRaw,
+            transactionDigest: validation.analysis.digest,
+            estimatedSponsorLamports:
+              validation.analysis.estimatedSponsorLamports,
+            metadata: {
+              recipientAddress: request.body.recipientAddress,
+              analysis: {
+                programIds: validation.analysis.programIds,
+                estimatedSponsorLamports:
+                  validation.analysis.estimatedSponsorLamports,
+              },
             },
-          },
-        });
+          });
+        } catch (error) {
+          await releaseEmbeddedSolanaSponsorshipBudget(budget.reservation);
+          throw error;
+        }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -544,6 +559,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         });
         await cacheEmbeddedSolanaPreparedRequests({
           signer: context.signer,
+          operation: "signAndSend",
           executionKey,
           requests,
           log: app.log,
@@ -603,6 +619,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           run: async () => {
             const requests = await readCachedEmbeddedSolanaPreparedRequests({
               signer: context.signer,
+              operation: "signAndSend",
               executionKey: request.body.executionKey,
               log: app.log,
             });
@@ -682,6 +699,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         });
         await cacheEmbeddedSolanaPreparedRequests({
           signer: context.signer,
+          operation: "sign",
           executionKey,
           requests,
           log: app.log,
@@ -741,6 +759,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           run: async () => {
             const requests = await readCachedEmbeddedSolanaPreparedRequests({
               signer: context.signer,
+              operation: "sign",
               executionKey: request.body.executionKey,
               log: app.log,
             });

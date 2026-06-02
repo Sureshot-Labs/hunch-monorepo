@@ -64,7 +64,7 @@ export async function upsertSolanaSponsorshipLedger(inputs: {
       )
       values (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+        $11, $12, $13, $14, $15, $16, $17, coalesce($18, 'unknown'), $19, $20
       )
       on conflict (intent_id) where intent_id is not null
       do update set
@@ -124,7 +124,7 @@ export async function upsertSolanaSponsorshipLedger(inputs: {
       inputs.estimatedSponsorLamports ?? "0",
       inputs.actualSponsorLamports ?? null,
       inputs.rentLamports ?? null,
-      inputs.rentStatus ?? "unknown",
+      inputs.rentStatus ?? null,
       inputs.error ?? null,
       JSON.stringify(inputs.metadata ?? {}),
     ],

@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   Keypair,
   PublicKey,
@@ -567,7 +568,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "prepare embedded solana requests does not hard reject account creation setup below SOL minimum",
+    name: "prepare embedded solana requests does not sponsor account creation without an allowed intent",
     run: async () => {
       const transaction = serializeTransaction([
         SystemProgram.createAccount({
@@ -593,7 +594,7 @@ const tests: TestCase[] = [
 
       const request = requests[0];
       assert.ok(request);
-      assert.equal(getSponsor(request), true);
+      assert.equal(getSponsor(request), false);
     },
   },
   {
@@ -634,7 +635,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "embedded solana keeps sponsorship when signer cannot pay normal fees",
+    name: "embedded solana does not sponsor low-sol transactions without an allowed intent",
     run: async () => {
       const transaction = serializeTransaction([
         new TransactionInstruction({
@@ -659,7 +660,7 @@ const tests: TestCase[] = [
 
       const request = requests[0];
       assert.ok(request);
-      assert.equal(getSponsor(request), true);
+      assert.equal(getSponsor(request), false);
     },
   },
   {
@@ -700,7 +701,7 @@ const tests: TestCase[] = [
         });
       const lowBalanceRequest = lowBalanceRequests[0];
       assert.ok(lowBalanceRequest);
-      assert.equal(getSponsor(lowBalanceRequest), true);
+      assert.equal(getSponsor(lowBalanceRequest), false);
 
       const highBalanceRequests =
         await prepareSponsoredEmbeddedSolanaTransactionRequests({
@@ -720,7 +721,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "prepare embedded solana requests allows sponsorship when balance fetch fails",
+    name: "prepare embedded solana requests does not sponsor on balance fetch failure without allowed intent",
     run: async () => {
       const transaction = serializeTransaction([
         new TransactionInstruction({
@@ -751,7 +752,7 @@ const tests: TestCase[] = [
       const request = requests[0];
       assert.ok(request);
       assert.equal(sawError, true);
-      assert.equal(getSponsor(request), true);
+      assert.equal(getSponsor(request), false);
     },
   },
   {
@@ -1134,6 +1135,77 @@ const tests: TestCase[] = [
           signer: walletContext.signer,
         }),
         "750000",
+      );
+    },
+  },
+  {
+    name: "embedded solana validation rejects hex transaction payloads",
+    run: () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 750_000n }),
+      ]);
+      const hexTransaction = `0x${Buffer.from(transaction, "base64").toString(
+        "hex",
+      )}`;
+      const validation = validateEmbeddedSolanaSponsorshipIntentCandidate({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction: hexTransaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "750000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+
+      assert.equal(validation.ok, false);
+      assert.equal(computeEmbeddedSolanaTransactionDigest(hexTransaction), null);
+    },
+  },
+  {
+    name: "direct USDC transfer candidate binds recipient wallet to destination ATA",
+    run: () => {
+      const recipient = Keypair.generate().publicKey;
+      const recipientTokenAccount = getAssociatedTokenAddressSync(
+        SOLANA_USDC_MINT,
+        recipient,
+      );
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({
+          amount: 750_000n,
+          destination: recipientTokenAccount,
+        }),
+      ]);
+      const matching = validateEmbeddedSolanaSponsorshipIntentCandidate({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "750000",
+          recipientAddress: recipient.toBase58(),
+          maxSystemCreateLamports: "0",
+        },
+      });
+      const mismatched = validateEmbeddedSolanaSponsorshipIntentCandidate({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "750000",
+          recipientAddress: Keypair.generate().publicKey.toBase58(),
+          maxSystemCreateLamports: "0",
+        },
+      });
+
+      assert.equal(matching.ok, true);
+      assert.equal(mismatched.ok, false);
+      assert.ok(
+        mismatched.reasons.includes("direct_transfer_recipient_mismatch"),
       );
     },
   },

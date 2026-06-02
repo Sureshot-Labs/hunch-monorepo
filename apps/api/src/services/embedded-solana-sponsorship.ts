@@ -4,11 +4,13 @@ import { dirname } from "node:path";
 
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddressSync,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
   type AccountMeta,
+  PublicKey,
   SystemInstruction,
   SystemProgram,
   TransactionInstruction,
@@ -164,6 +166,12 @@ const sponsorshipBudgetMemory = new Map<
   { count: number; lamports: bigint; expiresAt: number }
 >();
 
+export type EmbeddedSolanaSponsorshipBudgetReservation = {
+  hourKey: string;
+  dayKey: string;
+  estimatedLamports: string;
+};
+
 const RESERVE_SPONSORSHIP_BUDGET_SCRIPT = `
 local function decode(raw)
   if not raw then
@@ -221,20 +229,73 @@ redis.call("SET", KEYS[2], next_day, "EX", day_ttl)
 return { "1" }
 `;
 
+const RELEASE_SPONSORSHIP_BUDGET_SCRIPT = `
+local function decode(raw)
+  if not raw then
+    return { count = 0, lamports = 0 }
+  end
+  local ok, parsed = pcall(cjson.decode, raw)
+  if not ok or type(parsed) ~= "table" then
+    return { count = 0, lamports = 0 }
+  end
+  return {
+    count = tonumber(parsed.count) or 0,
+    lamports = tonumber(parsed.lamports) or 0
+  }
+end
+
+local estimated = tonumber(ARGV[1]) or 0
+local hour = decode(redis.call("GET", KEYS[1]))
+local day = decode(redis.call("GET", KEYS[2]))
+local hour_ttl = redis.call("TTL", KEYS[1])
+local day_ttl = redis.call("TTL", KEYS[2])
+
+hour.count = math.max(hour.count - 1, 0)
+hour.lamports = math.max(hour.lamports - estimated, 0)
+day.count = math.max(day.count - 1, 0)
+day.lamports = math.max(day.lamports - estimated, 0)
+
+local next_hour = cjson.encode({ count = hour.count, lamports = tostring(hour.lamports) })
+local next_day = cjson.encode({ count = day.count, lamports = tostring(day.lamports) })
+if hour_ttl and hour_ttl > 0 then
+  redis.call("SET", KEYS[1], next_hour, "EX", hour_ttl)
+else
+  redis.call("SET", KEYS[1], next_hour)
+end
+if day_ttl and day_ttl > 0 then
+  redis.call("SET", KEYS[2], next_day, "EX", day_ttl)
+else
+  redis.call("SET", KEYS[2], next_day)
+end
+return { "1" }
+`;
+
 function normalizeSolanaAddress(value: string): string {
   return value.trim();
 }
 
-function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
+function parseSolanaPublicKey(value: string | null | undefined): PublicKey | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    return new PublicKey(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function decodeBase64SolanaTransaction(payload: string): Buffer | null {
   const trimmed = payload.trim();
   if (!trimmed) return null;
-  if (trimmed.startsWith("0x")) {
-    const hex = trimmed.slice(2);
-    if (!hex.length || hex.length % 2 !== 0) return null;
-    return Buffer.from(hex, "hex");
-  }
+  if (trimmed.startsWith("0x")) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(trimmed)) return null;
+  if (trimmed.length % 4 === 1) return null;
   try {
-    return Buffer.from(trimmed, "base64");
+    const raw = Buffer.from(trimmed, "base64");
+    if (!raw.length) return null;
+    const expected = trimmed.replace(/=+$/, "");
+    const actual = raw.toString("base64").replace(/=+$/, "");
+    return expected === actual ? raw : null;
   } catch {
     return null;
   }
@@ -243,7 +304,7 @@ function decodeSerializedSolanaTransaction(payload: string): Buffer | null {
 export function computeEmbeddedSolanaTransactionDigest(
   transaction: string,
 ): string | null {
-  const raw = decodeSerializedSolanaTransaction(transaction);
+  const raw = decodeBase64SolanaTransaction(transaction);
   if (!raw) return null;
   return createHash("sha256").update(raw).digest("hex");
 }
@@ -261,7 +322,7 @@ export function computeEmbeddedSolanaMessageDigest(
 function deserializeEmbeddedSolanaTransaction(
   transaction: string,
 ): { raw: Buffer; tx: VersionedTransaction } | null {
-  const raw = decodeSerializedSolanaTransaction(transaction);
+  const raw = decodeBase64SolanaTransaction(transaction);
   if (!raw) return null;
   try {
     return { raw, tx: VersionedTransaction.deserialize(raw) };
@@ -679,7 +740,11 @@ export async function reserveEmbeddedSolanaSponsorshipBudget(inputs: {
   estimatedLamports: string | number | bigint;
   limits: EmbeddedSolanaSponsorshipLimits;
   requireRedis?: boolean;
-}): Promise<{ ok: boolean; reasons: string[] }> {
+}): Promise<{
+  ok: boolean;
+  reasons: string[];
+  reservation?: EmbeddedSolanaSponsorshipBudgetReservation;
+}> {
   const limit = inputs.limits[inputs.flow];
   if (!limit) return { ok: false, reasons: ["sponsorship_budget_missing"] };
   const estimatedLamports =
@@ -717,7 +782,15 @@ export async function reserveEmbeddedSolanaSponsorshipBudget(inputs: {
       if (Array.isArray(result)) {
         const [status, ...reasons] = result.map((entry) => String(entry));
         return status === "1"
-          ? { ok: true, reasons: [] }
+          ? {
+              ok: true,
+              reasons: [],
+              reservation: {
+                hourKey,
+                dayKey,
+                estimatedLamports: estimatedLamports.toString(),
+              },
+            }
           : { ok: false, reasons };
       }
       return { ok: false, reasons: ["sponsorship_budget_unavailable"] };
@@ -732,12 +805,60 @@ export async function reserveEmbeddedSolanaSponsorshipBudget(inputs: {
     return { ok: false, reasons: ["sponsorship_budget_unavailable"] };
   }
 
-  return reserveMemorySponsorshipBudget({
+  const result = reserveMemorySponsorshipBudget({
     hourKey,
     dayKey,
     estimatedLamports,
     limit,
   });
+  return result.ok
+    ? {
+        ...result,
+        reservation: {
+          hourKey,
+          dayKey,
+          estimatedLamports: estimatedLamports.toString(),
+        },
+      }
+    : result;
+}
+
+function releaseMemorySponsorshipBudget(
+  reservation: EmbeddedSolanaSponsorshipBudgetReservation,
+): void {
+  const estimatedLamports = BigInt(reservation.estimatedLamports);
+  const now = Date.now();
+  for (const key of [reservation.hourKey, reservation.dayKey]) {
+    const current = sponsorshipBudgetMemory.get(key);
+    if (!current || current.expiresAt <= now) continue;
+    sponsorshipBudgetMemory.set(key, {
+      count: Math.max(0, current.count - 1),
+      lamports:
+        current.lamports > estimatedLamports
+          ? current.lamports - estimatedLamports
+          : BigInt(0),
+      expiresAt: current.expiresAt,
+    });
+  }
+}
+
+export async function releaseEmbeddedSolanaSponsorshipBudget(
+  reservation: EmbeddedSolanaSponsorshipBudgetReservation | null | undefined,
+): Promise<void> {
+  if (!reservation) return;
+  try {
+    const redis = await getRedis();
+    if (redis) {
+      await redis.eval(RELEASE_SPONSORSHIP_BUDGET_SCRIPT, {
+        keys: [reservation.hourKey, reservation.dayKey],
+        arguments: [reservation.estimatedLamports],
+      });
+      return;
+    }
+  } catch {
+    // Memory fallback still keeps local QA budget state coherent.
+  }
+  releaseMemorySponsorshipBudget(reservation);
 }
 
 function getBigIntMetadata(
@@ -861,6 +982,45 @@ function getDirectUsdcTransferInstruction(inputs: {
     : null;
 }
 
+function getDirectTransferDestinationTokenAccount(inputs: {
+  analysis: EmbeddedSolanaTransactionAnalysis;
+  signer: string;
+}): string | null {
+  const instruction = getDirectUsdcTransferInstruction(inputs);
+  return instruction?.accountAddresses[2] ?? null;
+}
+
+function getExpectedDirectTransferRecipientTokenAccount(inputs: {
+  recipientAddress: string;
+  tokenProgramId: string | null | undefined;
+}): string | null {
+  const recipient = parseSolanaPublicKey(inputs.recipientAddress);
+  const mint = parseSolanaPublicKey(env.solanaUsdcMint);
+  if (!recipient || !mint) return null;
+  const tokenProgram =
+    inputs.tokenProgramId === TOKEN_2022_PROGRAM_ID_BASE58
+      ? TOKEN_2022_PROGRAM_ID
+      : TOKEN_PROGRAM_ID;
+  try {
+    return getAssociatedTokenAddressSync(mint, recipient, false, tokenProgram).toBase58();
+  } catch {
+    return null;
+  }
+}
+
+export function getEmbeddedSolanaDirectTransferRecipientTokenAccount(inputs: {
+  analysis: EmbeddedSolanaTransactionAnalysis;
+  signer: string;
+  recipientAddress: string;
+}): string | null {
+  const instruction = getDirectUsdcTransferInstruction(inputs);
+  if (!instruction) return null;
+  return getExpectedDirectTransferRecipientTokenAccount({
+    recipientAddress: inputs.recipientAddress,
+    tokenProgramId: instruction.programId,
+  });
+}
+
 export function getEmbeddedSolanaDirectTransferAmountRaw(inputs: {
   analysis: EmbeddedSolanaTransactionAnalysis;
   signer: string;
@@ -892,6 +1052,13 @@ export function isEmbeddedSolanaSponsorshipHardDenyReason(
     reason === "dflow_sponsorship_intent_required" ||
     reason === "dflow_market_not_initialized"
   );
+}
+
+export function shouldRequireEmbeddedSolanaSponsorshipRedis(inputs: {
+  mode: EmbeddedSolanaSponsorshipMode;
+  observeCanSponsor?: boolean;
+}): boolean {
+  return inputs.mode === "enforce" || inputs.observeCanSponsor === true;
 }
 
 function validateIntent(inputs: {
@@ -1013,6 +1180,31 @@ function evaluateEnforceAllowed(inputs: {
     });
     if (expectedAmountRaw && actualAmountRaw !== expectedAmountRaw) {
       reasons.push("direct_transfer_amount_mismatch");
+    }
+    const expectedRecipientAddress =
+      typeof inputs.intent?.metadata?.recipientAddress === "string"
+        ? inputs.intent.metadata.recipientAddress.trim()
+        : "";
+    if (expectedRecipientAddress) {
+      const instruction = getDirectUsdcTransferInstruction({
+        analysis: inputs.analysis,
+        signer: inputs.signer,
+      });
+      const actualDestination = getDirectTransferDestinationTokenAccount({
+        analysis: inputs.analysis,
+        signer: inputs.signer,
+      });
+      const expectedDestination = instruction
+        ? getExpectedDirectTransferRecipientTokenAccount({
+            recipientAddress: expectedRecipientAddress,
+            tokenProgramId: instruction.programId,
+          })
+        : null;
+      if (!expectedDestination) {
+        reasons.push("direct_transfer_recipient_invalid");
+      } else if (actualDestination !== expectedDestination) {
+        reasons.push("direct_transfer_recipient_mismatch");
+      }
     }
   }
   if (
@@ -1153,8 +1345,9 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
   });
   analysis.unknownProgramIds = enforce.unknownProgramIds;
 
-  const enforceWouldSponsor =
+  const canActuallySponsor =
     inputs.enabled && inputs.legacyWouldSponsor && enforce.allowed;
+  const enforceWouldSponsor = canActuallySponsor;
   const hasHardDeny = enforce.reasons.some(
     isEmbeddedSolanaSponsorshipHardDenyReason,
   );
@@ -1162,8 +1355,8 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
   const actualSponsor =
     inputs.enabled && !hasHardDeny
       ? inputs.mode === "observe"
-        ? observeCanSponsor && inputs.legacyWouldSponsor
-        : enforceWouldSponsor
+        ? observeCanSponsor && canActuallySponsor
+        : canActuallySponsor
       : false;
 
   return {
