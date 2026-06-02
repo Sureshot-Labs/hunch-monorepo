@@ -227,6 +227,17 @@ export const adminReferralCodeReferralsQuerySchema = z.object({
 
 const adminFeeLedgerSourceTypeSchema = z.enum(["order", "execution"]);
 const adminFeeLedgerRewardKindSchema = z.enum(["any", "cashback", "referral"]);
+const adminSolanaSponsorshipVenueSchema = z.enum([
+  "kalshi",
+  "bridge",
+  "wallet",
+]);
+const adminSolanaSponsorshipFlowSchema = z.enum([
+  "dflow",
+  "across",
+  "directTransfer",
+  "debridge",
+]);
 const adminUserOrderKindSchema = z.preprocess(
   (value) => (typeof value === "string" ? value.toLowerCase() : value),
   z.enum(["order", "swap"]),
@@ -268,6 +279,23 @@ export const adminFeeLedgerQuerySchema = z.object({
   referrerUserId: z.string().uuid().optional(),
   referredUserId: z.string().uuid().optional(),
   rewardKind: adminFeeLedgerRewardKindSchema.optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminSolanaSponsorshipLedgerQuerySchema = z.object({
+  q: z.string().trim().min(1).max(500).optional(),
+  venue: adminSolanaSponsorshipVenueSchema.optional(),
+  flow: adminSolanaSponsorshipFlowSchema.optional(),
+  status: z.string().trim().min(1).max(80).optional(),
+  rentStatus: z.string().trim().min(1).max(80).optional(),
+  wallet: z.string().trim().min(1).max(160).optional(),
+  sponsor: z.string().trim().min(1).max(160).optional(),
+  intentId: z.string().trim().min(1).max(220).optional(),
+  txSignature: z.string().trim().min(1).max(220).optional(),
+  userId: z.string().uuid().optional(),
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   limit: adminPageLimitSchema.optional(),

@@ -100,6 +100,7 @@ import {
   adminReferralCodeReferralsQuerySchema,
   adminReferralCodesQuerySchema,
   adminReferralCodeUpdateSchema,
+  adminSolanaSponsorshipLedgerQuerySchema,
   adminUserActiveSchema,
   adminUserAdminSchema,
   adminUserAnalyticsQuerySchema,
@@ -136,6 +137,10 @@ import {
   listAdminFeeLedgerEvents,
   listAdminFeeLedgerTreasuryRuns,
 } from "../services/admin-fee-ledger.js";
+import {
+  getAdminSolanaSponsorshipLedgerSummary,
+  listAdminSolanaSponsorshipLedgerRows,
+} from "../services/admin-solana-sponsorship-ledger.js";
 import { getAdminUserFinanceSummary } from "../services/admin-user-finance-summary.js";
 import { listAdminUsers } from "../services/admin-users-list.js";
 import {
@@ -5596,6 +5601,50 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({ ok: true, summary });
+    },
+  );
+
+  z.get(
+    "/admin/solana-sponsorship/ledger/summary",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminSolanaSponsorshipLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const summary = await getAdminSolanaSponsorshipLedgerSummary(
+        pool,
+        request.query,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({ ok: true, summary });
+    },
+  );
+
+  z.get(
+    "/admin/solana-sponsorship/ledger/rows",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "finance:read",
+      }),
+      schema: { querystring: adminSolanaSponsorshipLedgerQuerySchema },
+    },
+    async (request, reply) => {
+      const result = await listAdminSolanaSponsorshipLedgerRows(
+        pool,
+        request.query,
+      );
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send({
+        ok: true,
+        items: result.items,
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      });
     },
   );
 
