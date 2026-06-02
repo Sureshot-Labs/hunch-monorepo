@@ -2011,6 +2011,7 @@ type AdminMiddlewareOptions = AuthMiddlewareOptions & {
   minAdminRole?: AdminRole;
   requiredAdminPermission?: AdminPermission;
   requiredAdminPermissions?: AdminPermission[];
+  allowLegacyFallback?: boolean;
 };
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -2206,7 +2207,7 @@ export function createAdminMiddleware(options: AdminMiddlewareOptions = {}) {
       });
     }
 
-    if (!env.adminAuthLegacyFallback) {
+    if (!env.adminAuthLegacyFallback || options.allowLegacyFallback === false) {
       reply.code(adminSession.statusCode);
       return reply.send({
         error: adminSession.error,

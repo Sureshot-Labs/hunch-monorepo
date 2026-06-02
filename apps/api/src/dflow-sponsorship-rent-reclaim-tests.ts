@@ -190,14 +190,26 @@ await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async 
   assert.equal(db.updates.length, 2);
   assert.equal(db.updates[0]?.[1], "0");
   assert.equal(db.updates[0]?.[2], "returned");
-  assert.equal(db.updates[0]?.[3], "20035");
+  assert.equal(db.updates[0]?.[3], null);
   assert.equal(db.updates[1]?.[1], "0");
   assert.equal(db.updates[1]?.[2], "returned");
-  assert.equal(db.updates[1]?.[3], "4128395");
+  assert.equal(db.updates[1]?.[3], null);
   const firstMetadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
   assert.equal(
     firstMetadataUpdate.sponsorshipRentReclaim.reclaimedLamports,
     "4113360",
+  );
+  assert.equal(
+    firstMetadataUpdate.sponsorshipRentReclaim.grossActualSponsorLamports,
+    "4128395",
+  );
+  assert.equal(
+    firstMetadataUpdate.sponsorshipRentReclaim.closeFeeLamports,
+    "5000",
+  );
+  assert.equal(
+    firstMetadataUpdate.sponsorshipRentReclaim.netActualSponsorLamports,
+    "20035",
   );
   assert.deepEqual(
     firstMetadataUpdate.sponsorshipRentReclaim.closeTransactions[0].accounts,
@@ -211,6 +223,14 @@ await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async 
   assert.equal(
     secondMetadataUpdate.sponsorshipRentReclaim.reclaimedLamports,
     "0",
+  );
+  assert.equal(
+    secondMetadataUpdate.sponsorshipRentReclaim.grossActualSponsorLamports,
+    "4128395",
+  );
+  assert.equal(
+    secondMetadataUpdate.sponsorshipRentReclaim.netActualSponsorLamports,
+    "4128395",
   );
   assert.deepEqual(
     secondMetadataUpdate.sponsorshipRentReclaim.closeTransactions,

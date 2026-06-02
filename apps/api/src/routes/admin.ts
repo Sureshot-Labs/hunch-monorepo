@@ -6157,7 +6157,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     "/admin/intel/policies/:key",
     {
       preHandler: createAdminMiddleware({
-        requiredAdminPermission: "intel:write",
+        requiredAdminPermissions: [],
       }),
       schema: {
         params: adminIntelPolicyParamsSchema,
@@ -6180,27 +6180,44 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const adminRole = request.adminAccount?.role;
+      let sponsorshipPolicyChanged = false;
       if (key === "auth_access") {
         const current = await resolveIntelPolicy(pool, key);
-        if (
-          authAccessSponsorshipPolicyChanged(
-            current.effective,
-            parsed.data,
-          )
-        ) {
-          const adminRole = request.adminAccount?.role;
-          if (
-            !adminRole ||
-            !adminHasPermission(adminRole, "sponsorship:write")
-          ) {
-            reply.code(403);
-            return reply.send({
-              error: "admin_permission_required",
-              message:
-                "Admin sponsorship permission required to change Solana sponsorship policy.",
-            });
-          }
+        sponsorshipPolicyChanged = authAccessSponsorshipPolicyChanged(
+          current.effective,
+          parsed.data,
+        );
+      }
+      if (sponsorshipPolicyChanged) {
+        if (request.adminActor?.kind === "legacy_user") {
+          reply.code(403);
+          return reply.send({
+            error: "admin_permission_required",
+            message:
+              "Admin sponsorship permission required to change Solana sponsorship policy.",
+          });
         }
+        if (
+          !adminRole ||
+          !adminHasPermission(adminRole, "sponsorship:write")
+        ) {
+          reply.code(403);
+          return reply.send({
+            error: "admin_permission_required",
+            message:
+              "Admin sponsorship permission required to change Solana sponsorship policy.",
+          });
+        }
+      } else if (
+        request.adminActor?.kind !== "legacy_user" &&
+        (!adminRole || !adminHasPermission(adminRole, "intel:write"))
+      ) {
+        reply.code(403);
+        return reply.send({
+          error: "admin_permission_required",
+          message: "Admin intel permission required",
+        });
       }
 
       const effectiveAt = body.effectiveAt

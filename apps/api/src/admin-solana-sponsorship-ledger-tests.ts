@@ -51,6 +51,7 @@ function ledgerRow(overrides: Record<string, unknown> = {}) {
         reclaimedAt: "2026-06-02T12:10:00.000Z",
         reclaimedLamports: "100",
         remainingOpenLamports: "0",
+        netActualSponsorLamports: "777",
         closeTransactions: [
           { signature: "close-1", feeLamports: "10" },
           { signature: "close-2", feeLamports: 10 },
@@ -158,7 +159,7 @@ await test("builds bounded row filters and maps display fields", async () => {
   assert.equal(result.items[0]?.adminPredictionMarketInit, true);
   assert.equal(result.items[0]?.reclaimedLamports, "100");
   assert.equal(result.items[0]?.closeFeeLamports, "20");
-  assert.equal(result.items[0]?.netActualSponsorLamports, "920");
+  assert.equal(result.items[0]?.netActualSponsorLamports, "777");
   assert.equal(
     result.items[0]?.txSolscanUrl,
     "https://solscan.io/tx/5Sig111111111111111111111111111111111111111111111111",
@@ -201,6 +202,7 @@ await test("summary maps totals and uses defensive metadata aggregation", async 
   ]);
   assert.match(db.calls[0]?.sql ?? "", /jsonb_typeof/);
   assert.match(db.calls[0]?.sql ?? "", /sponsorshipRentReclaim/);
+  assert.match(db.calls[0]?.sql ?? "", /netActualSponsorLamports/);
   assert.deepEqual(db.calls[0]?.params, ["failed"]);
 });
 

@@ -1,5 +1,6 @@
 import type { Pool } from "@hunch/infra";
 
+import { env } from "../env.js";
 import {
   fetchFulfilledKalshiTradeExecutionsMissingFeeEvent,
   fetchPendingKalshiExecutions,
@@ -291,20 +292,22 @@ export async function reconcileKalshiExecutions(
     );
   }
 
-  try {
-    const rentReclaim = await reclaimSolanaSponsorshipRentAccounts(pool, options);
-    summary.sponsorshipRentReclaimChecked = rentReclaim.checked;
-    summary.sponsorshipRentReclaimClosed = rentReclaim.closed;
-    summary.sponsorshipRentReclaimReclaimedLamports =
-      rentReclaim.reclaimedLamports;
-    summary.sponsorshipRentReclaimSkipped = rentReclaim.skipped;
-    summary.sponsorshipRentReclaimErrors = rentReclaim.errors;
-  } catch (error) {
-    summary.sponsorshipRentReclaimErrors += 1;
-    options.logger?.error?.(
-      { error },
-      "Solana sponsorship rent reclaim batch failed",
-    );
+  if (env.solanaSponsorRentReclaimEnabled) {
+    try {
+      const rentReclaim = await reclaimSolanaSponsorshipRentAccounts(pool, options);
+      summary.sponsorshipRentReclaimChecked = rentReclaim.checked;
+      summary.sponsorshipRentReclaimClosed = rentReclaim.closed;
+      summary.sponsorshipRentReclaimReclaimedLamports =
+        rentReclaim.reclaimedLamports;
+      summary.sponsorshipRentReclaimSkipped = rentReclaim.skipped;
+      summary.sponsorshipRentReclaimErrors = rentReclaim.errors;
+    } catch (error) {
+      summary.sponsorshipRentReclaimErrors += 1;
+      options.logger?.error?.(
+        { error },
+        "Solana sponsorship rent reclaim batch failed",
+      );
+    }
   }
 
   return summary;

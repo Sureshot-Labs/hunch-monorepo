@@ -102,7 +102,11 @@ Accounting notes:
 - `reclaimedLamports` and `closeFeeLamports` are derived defensively from
   `metadata.sponsorshipRentReclaim` when present.
 - `netActualSponsorLamports` is `actualSponsorLamports - reclaimedLamports +
-  closeFeeLamports` for rows with an actual observed cost.
+  closeFeeLamports` for rows with an actual observed cost, unless
+  `metadata.sponsorshipRentReclaim.netActualSponsorLamports` is present. The
+  metadata value is the canonical post-reclaim net for reclaimed rows.
+- `actualSponsorLamports` is the gross observed sponsor cost. Rent reclaim must
+  not overwrite this column with net cost.
 - Failed finalized transactions can have nonzero `actualSponsorLamports`; do
   not hide actual spend only because status is `failed`.
 - Null actual costs are excluded from net actual cost until reconciliation
@@ -174,12 +178,13 @@ Important row fields:
 - `estimatedSponsorLamports`: reserved/estimated cost before final
   reconciliation.
 - `actualSponsorLamports`: observed cost after reconciliation. It can be null
-  for rows still awaiting final evidence.
+  for rows still awaiting final evidence. When present, it is gross cost.
 - `rentLamports`: observed non-fee/rent exposure when available.
 - `reclaimedLamports`: rent reclaim amount parsed from metadata, default `0`.
 - `closeFeeLamports`: close transaction fees parsed from metadata, default `0`.
 - `netActualSponsorLamports`: actual cost adjusted for reclaimed rent and close
-  fees, null when actual cost is still unknown.
+  fees, null when actual cost is still unknown. Prefer
+  `metadata.sponsorshipRentReclaim.netActualSponsorLamports` when present.
 - `adminPredictionMarketInit`: true when this is sponsor spend for admin market
   initialization.
 - `reconciledAt`: timestamp from DFlow or generic sponsorship reconciliation
@@ -224,6 +229,14 @@ Recommended detail view:
 
 Display lamports as SOL for human-readable totals, but keep raw lamport strings
 available in detail views for copy/paste and accounting checks.
+
+## Rent Reclaim Rollout
+
+Rent reclaim is separately gated by
+`HUNCH_SOLANA_SPONSOR_RENT_RECLAIM_ENABLED=false` by default. Sponsorship
+reconciliation can run without reclaiming/closing rent accounts. Only enable
+rent reclaim after reviewing sponsor close-account behavior and confirming the
+worker has the intended sponsorship secret scope.
 
 ## Policy Separation
 

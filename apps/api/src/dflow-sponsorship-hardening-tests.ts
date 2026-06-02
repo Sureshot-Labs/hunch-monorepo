@@ -11,10 +11,16 @@ function readApiSourceFile(...parts: string[]): string {
 const dflowPrivate = readApiSourceFile("routes", "dflow-private.ts");
 const dflowSchemas = readApiSourceFile("schemas", "dflow.ts");
 const bridgeRoute = readApiSourceFile("routes", "bridge.ts");
+const embeddedWalletsRoute = readApiSourceFile("routes", "embedded-wallets.ts");
 const sponsorshipReconcile = readApiSourceFile(
   "services",
   "solana-sponsorship-reconcile.ts",
 );
+const kalshiExecutionReconcile = readApiSourceFile(
+  "services",
+  "kalshi-execution-reconcile.ts",
+);
+const apiEnv = readApiSourceFile("env.ts");
 const adminRoute = readApiSourceFile("routes", "admin.ts");
 const adminAuth = readApiSourceFile("services", "admin-auth.ts");
 const secretsConfig = readFileSync(
@@ -47,6 +53,11 @@ assert.match(
   dflowPrivate,
   /\/admin\/prediction-market-init[\s\S]*?requiredAdminPermissions:\s*\["finance:write",\s*"sponsorship:write"\]/,
   "admin DFlow market init must require sponsorship write permission",
+);
+assert.match(
+  dflowPrivate,
+  /\/admin\/prediction-market-init[\s\S]*?allowLegacyFallback:\s*false/,
+  "admin DFlow market init must reject legacy admin fallback",
 );
 assert.match(
   dflowPrivate,
@@ -162,6 +173,36 @@ assert.match(
   /status:\s*failed \? "failed" : "confirmed"[\s\S]*?actualSponsorLamports:\s*sponsorCost\.toString\(\)[\s\S]*?error:\s*failed \? JSON\.stringify\(tx\.err\) : null/,
   "generic sponsorship reconciliation must account failed finalized transactions",
 );
+assert.match(
+  sponsorshipReconcile,
+  /status = 'failed'[\s\S]*?actual_sponsor_lamports is null[\s\S]*?genericSponsorshipReconciliation/,
+  "already-accounted generic failed sponsorship rows must not be reselected",
+);
+assert.match(
+  sponsorshipReconcile,
+  /status = 'intent_created'[\s\S]*?metadata[\s\S]*?txSignature[\s\S]*?submission,signature/,
+  "generic intent_created sponsorship rows must reconcile only with durable signature metadata",
+);
+assert.match(
+  apiEnv,
+  /HUNCH_SOLANA_SPONSOR_RENT_RECLAIM_ENABLED[\s\S]*\?\?\s*false/,
+  "Solana sponsorship rent reclaim must default off",
+);
+assert.match(
+  kalshiExecutionReconcile,
+  /env\.solanaSponsorRentReclaimEnabled[\s\S]*?reclaimSolanaSponsorshipRentAccounts/,
+  "Kalshi reconcile must gate rent reclaim behind the explicit sponsorship reclaim flag",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /sponsorship_ledger_not_durable/,
+  "embedded Solana sponsored submit must return a distinct ledger durability error",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /EmbeddedSolanaSponsorshipLedgerDurabilityError[\s\S]*?requestId[\s\S]*?signature/,
+  "embedded Solana ledger durability errors must include request id and signature",
+);
 
 assert.match(
   adminAuth,
@@ -172,6 +213,16 @@ assert.match(
   adminRoute,
   /authAccessSponsorshipPolicyChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)/,
   "auth_access sponsorship policy writes must require sponsorship permission",
+);
+assert.match(
+  adminRoute,
+  /\/admin\/intel\/policies\/:key[\s\S]*?requiredAdminPermissions:\s*\[\][\s\S]*?sponsorshipPolicyChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)[\s\S]*?adminHasPermission\(adminRole, "intel:write"\)/,
+  "auth_access sponsorship policy writes must allow sponsorship:write without broadening normal intel policy writes",
+);
+assert.match(
+  adminRoute,
+  /authAccessSponsorshipPolicyChanged[\s\S]*?request\.adminActor\?\.kind === "legacy_user"/,
+  "auth_access sponsorship policy writes must reject legacy admin fallback",
 );
 assert.match(
   secretsConfig,

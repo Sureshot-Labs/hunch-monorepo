@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
   calculateDflowSponsorshipReconciliation,
   collectDflowSponsorshipSignatures,
+  reconcileSolanaSponsorshipLedger,
 } from "./services/solana-sponsorship-reconcile.js";
 import type { SolanaFinalizedTransactionBalanceDeltas } from "./services/solana-rpc.js";
 
@@ -44,6 +45,51 @@ async function test(name: string, fn: () => void | Promise<void>) {
     console.error(`[dflow-sponsorship-reconcile-tests] failed ${name}`);
     throw error;
   }
+}
+
+function genericLedgerRow(overrides: Record<string, unknown> = {}) {
+  return {
+    user_id: "10000000-0000-0000-0000-000000000001",
+    venue: "wallet",
+    flow: "directTransfer",
+    status: "intent_created",
+    intent_id: "solsp_generic",
+    wallet_address: "Wallet111111111111111111111111111111111111",
+    sponsor_address: SPONSOR,
+    market_id: null,
+    input_mint: null,
+    output_mint: null,
+    amount_raw: null,
+    message_digest: null,
+    transaction_digest: null,
+    tx_signature: null,
+    estimated_sponsor_lamports: "5000",
+    actual_sponsor_lamports: null,
+    metadata: {},
+    ...overrides,
+  };
+}
+
+function fakeSponsorshipPool(rows: Array<Record<string, unknown>>) {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  const upserts: Array<Record<string, unknown>> = [];
+  return {
+    calls,
+    upserts,
+    pool: {
+      async query(sql: string, params?: unknown[]) {
+        calls.push({ sql, params });
+        if (/select[\s\S]*from solana_sponsorship_ledger/i.test(sql)) {
+          return { rows };
+        }
+        if (/insert into solana_sponsorship_ledger/i.test(sql)) {
+          upserts.push({ params: params ?? [] });
+          return { rows: [] };
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      },
+    },
+  };
 }
 
 await test("collects submit, fill, and revert signatures", () => {
@@ -219,6 +265,80 @@ await test("open settlement keeps final cost unset and rent locked", () => {
   assert.equal(result.actualSponsorLamports, null);
   assert.equal(result.rentLamports, "1995000");
   assert.equal(result.rentStatus, "locked");
+});
+
+await test("generic intent_created rows need durable signature metadata", async () => {
+  const db = fakeSponsorshipPool([genericLedgerRow()]);
+  let fetched = false;
+  const summary = await reconcileSolanaSponsorshipLedger(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchTransaction: async () => {
+      fetched = true;
+      return tx({
+        signature: "generic-submit",
+        feePayer: SPONSOR,
+        feeLamports: 5000n,
+        sponsorDeltaLamports: -5000n,
+      });
+    },
+  });
+
+  assert.equal(summary.checked, 1);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.confirmed, 0);
+  assert.equal(fetched, false);
+  assert.equal(db.upserts.length, 0);
+});
+
+await test("generic intent_created rows reconcile durable metadata signature", async () => {
+  const db = fakeSponsorshipPool([
+    genericLedgerRow({
+      metadata: {
+        submission: {
+          signature: "generic-submit",
+        },
+      },
+    }),
+  ]);
+  const summary = await reconcileSolanaSponsorshipLedger(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    upsertLedger: async (inputs) => {
+      db.upserts.push(inputs);
+    },
+    fetchTransaction: async (signature) =>
+      tx({
+        signature,
+        feePayer: SPONSOR,
+        feeLamports: 5000n,
+        sponsorDeltaLamports: -5000n,
+      }),
+  });
+
+  assert.equal(summary.checked, 1);
+  assert.equal(summary.confirmed, 1);
+  assert.equal(summary.skipped, 0);
+  assert.equal(db.upserts.length, 1);
+  assert.equal(db.upserts[0]?.txSignature, "generic-submit");
+  assert.equal(db.upserts[0]?.actualSponsorLamports, "5000");
+});
+
+await test("failed rows with actual cost and reconciliation are filtered by query", async () => {
+  const db = fakeSponsorshipPool([]);
+  await reconcileSolanaSponsorshipLedger(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+  });
+
+  const query = db.calls[0]?.sql ?? "";
+  assert.match(query, /status = 'failed'/);
+  assert.match(query, /actual_sponsor_lamports is null/);
+  assert.match(query, /sponsorshipReconciliation/);
+  assert.match(query, /genericSponsorshipReconciliation/);
 });
 
 console.log("[dflow-sponsorship-reconcile-tests] ok");

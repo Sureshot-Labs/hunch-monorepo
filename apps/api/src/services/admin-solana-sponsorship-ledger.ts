@@ -254,6 +254,9 @@ export function mapAdminSolanaSponsorshipLedgerRow(row: SponsorshipLedgerRow) {
   const reclaimedLamports =
     lamportString(rentReclaim?.reclaimedLamports) ?? "0";
   const closeFeeLamports = sumCloseFeeLamports(metadata);
+  const metadataNetActualLamports = lamportString(
+    rentReclaim?.netActualSponsorLamports,
+  );
   const remainingOpenLamports = lamportString(rentReclaim?.remainingOpenLamports);
   const reclaimedAt = stringValue(rentReclaim?.reclaimedAt);
   const reconciledAt =
@@ -262,7 +265,8 @@ export function mapAdminSolanaSponsorshipLedgerRow(row: SponsorshipLedgerRow) {
   const netActualSponsorLamports =
     row.actual_sponsor_lamports == null
       ? null
-      : (
+      : metadataNetActualLamports ??
+        (
           BigInt(row.actual_sponsor_lamports) -
           BigInt(reclaimedLamports) +
           BigInt(closeFeeLamports)
@@ -399,7 +403,12 @@ function summaryTotalsSql(where: string): string {
               else '[]'::jsonb
             end
           ) as close_tx(item)
-        ) as close_fee_lamports
+        ) as close_fee_lamports,
+        case
+          when l.metadata #>> '{sponsorshipRentReclaim,netActualSponsorLamports}' ~ '^[0-9]+$'
+            then (l.metadata #>> '{sponsorshipRentReclaim,netActualSponsorLamports}')::numeric
+          else null
+        end as metadata_net_actual_lamports
       from solana_sponsorship_ledger l
       left join users u on u.id = l.user_id
       ${where}
@@ -414,7 +423,10 @@ function summaryTotalsSql(where: string): string {
       coalesce(sum(
         case
           when actual_sponsor_lamports is null then 0
-          else actual_sponsor_lamports - reclaimed_lamports + close_fee_lamports
+          else coalesce(
+            metadata_net_actual_lamports,
+            actual_sponsor_lamports - reclaimed_lamports + close_fee_lamports
+          )
         end
       ), 0)::text as net_actual_sponsor_lamports
     from filtered

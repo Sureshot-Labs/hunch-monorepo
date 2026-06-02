@@ -19,7 +19,7 @@ type SponsorshipLedgerRow = {
   user_id: string | null;
   venue: "kalshi" | "bridge" | "wallet";
   flow: "dflow" | "across" | "directTransfer" | "debridge";
-  status: "user_signed" | "submitted" | "failed";
+  status: "intent_created" | "user_signed" | "submitted" | "failed";
   intent_id: string | null;
   wallet_address: string | null;
   sponsor_address: string | null;
@@ -31,6 +31,7 @@ type SponsorshipLedgerRow = {
   transaction_digest: string | null;
   tx_signature: string | null;
   estimated_sponsor_lamports: string | null;
+  actual_sponsor_lamports: string | null;
   metadata: unknown;
 };
 
@@ -41,6 +42,7 @@ export type ReconcileSolanaSponsorshipOptions = {
   limit: number;
   minAgeSec: number;
   logger?: Logger;
+  upsertLedger?: typeof upsertSolanaSponsorshipLedger;
   fetchTransaction?: (
     signature: string,
   ) => Promise<SolanaFinalizedTransactionBalanceDeltas | null>;
@@ -82,6 +84,26 @@ function getBooleanMetadata(
 ): boolean {
   if (!isRecord(metadata)) return false;
   return metadata[key] === true;
+}
+
+function getRecordValue(
+  metadata: unknown,
+  key: string,
+): Record<string, unknown> | null {
+  if (!isRecord(metadata)) return null;
+  const nested = metadata[key];
+  return isRecord(nested) ? nested : null;
+}
+
+function getDurableGenericSponsorshipSignature(metadata: unknown): string | null {
+  if (!isRecord(metadata)) return null;
+  return (
+    getString(metadata.txSignature) ??
+    getString(getRecordValue(metadata, "submission")?.signature) ??
+    getString(getRecordValue(metadata, "submitted")?.signature) ??
+    getString(getRecordValue(metadata, "privySubmit")?.signature) ??
+    getString(getRecordValue(metadata, "genericSponsorshipReconciliation")?.signature)
+  );
 }
 
 function getSettlementRaw(raw: unknown): Record<string, unknown> | null {
@@ -266,6 +288,7 @@ async function fetchSubmittedSponsorshipRows(
         transaction_digest,
         tx_signature,
         estimated_sponsor_lamports::text as estimated_sponsor_lamports,
+        actual_sponsor_lamports::text as actual_sponsor_lamports,
         metadata
       from solana_sponsorship_ledger
       where flow in ('dflow', 'across', 'directTransfer', 'debridge')
@@ -274,10 +297,40 @@ async function fetchSubmittedSponsorshipRows(
             flow = 'dflow'
             and (
               status in ('user_signed', 'submitted')
-              or (status = 'failed' and tx_signature is not null)
+              or (
+                status = 'failed'
+                and tx_signature is not null
+                and (
+                  actual_sponsor_lamports is null
+                  or metadata #> '{sponsorshipReconciliation}' is null
+                )
+              )
             )
           )
-          or (flow <> 'dflow' and status in ('submitted', 'failed') and tx_signature is not null)
+          or (
+            flow <> 'dflow'
+            and (
+              (status = 'submitted' and tx_signature is not null)
+              or (
+                status = 'failed'
+                and tx_signature is not null
+                and (
+                  actual_sponsor_lamports is null
+                  or metadata #> '{genericSponsorshipReconciliation}' is null
+                )
+              )
+              or (
+                status = 'intent_created'
+                and coalesce(
+                  metadata ->> 'txSignature',
+                  metadata #>> '{submission,signature}',
+                  metadata #>> '{submitted,signature}',
+                  metadata #>> '{privySubmit,signature}',
+                  metadata #>> '{genericSponsorshipReconciliation,signature}'
+                ) is not null
+              )
+            )
+          )
         )
         and updated_at <= now() - ($1::int * interval '1 second')
       order by updated_at asc
@@ -385,7 +438,8 @@ async function reconcileOneSponsorshipRow(
   });
 
   if (!options.dryRun) {
-    await upsertSolanaSponsorshipLedger({
+    const upsertLedger = options.upsertLedger ?? upsertSolanaSponsorshipLedger;
+    await upsertLedger({
       userId: row.user_id,
       venue: "kalshi",
       flow: "dflow",
@@ -415,7 +469,9 @@ async function reconcileOneGenericSponsorshipRow(
   row: SponsorshipLedgerRow,
   options: ReconcileSolanaSponsorshipOptions,
 ): Promise<{ confirmed: boolean; skipped: boolean }> {
-  const signature = row.tx_signature?.trim();
+  const signature =
+    row.tx_signature?.trim() ||
+    getDurableGenericSponsorshipSignature(row.metadata);
   const intentId = row.intent_id?.trim();
   const walletAddress = row.wallet_address?.trim();
   if (!signature || !intentId || !walletAddress) {
@@ -443,7 +499,8 @@ async function reconcileOneGenericSponsorshipRow(
   const sponsorCost =
     sponsorDelta == null ? tx.feeLamports : bigintMax(-sponsorDelta, tx.feeLamports);
   if (!options.dryRun) {
-    await upsertSolanaSponsorshipLedger({
+    const upsertLedger = options.upsertLedger ?? upsertSolanaSponsorshipLedger;
+    await upsertLedger({
       userId: row.user_id,
       venue: row.venue,
       flow: row.flow,

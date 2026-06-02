@@ -383,6 +383,9 @@ const embeddedSolanaSponsorshipAuditIncludeRaw =
 const embeddedSolanaSponsorshipObserveCanSponsor =
   parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_OBSERVE_CAN_SPONSOR) ??
   false;
+const solanaSponsorRentReclaimEnabled =
+  parseOptionalBool(process.env.HUNCH_SOLANA_SPONSOR_RENT_RECLAIM_ENABLED) ??
+  false;
 const hunchSolanaSponsorMaxTxLamports = optionalNonNegativeInt(
   "HUNCH_SOLANA_SPONSOR_MAX_TX_LAMPORTS",
   3_000_000,
@@ -751,6 +754,7 @@ export const env = {
   embeddedSolanaSponsorshipAuditLogPath,
   embeddedSolanaSponsorshipAuditIncludeRaw,
   embeddedSolanaSponsorshipObserveCanSponsor,
+  solanaSponsorRentReclaimEnabled,
   adminAuthEnabled,
   adminAuthLegacyFallback,
   adminAppBaseUrl,

@@ -635,6 +635,42 @@ function calculateNetActualSponsorLamportsAfterReclaim(inputs: {
   return net > 0n ? net : 0n;
 }
 
+function sumRentReclaimCloseFeeLamports(metadata: Record<string, unknown>): bigint {
+  const reclaim = isRecord(metadata.sponsorshipRentReclaim)
+    ? metadata.sponsorshipRentReclaim
+    : null;
+  return Array.isArray(reclaim?.closeTransactions)
+    ? reclaim.closeTransactions.reduce((sum, entry) => {
+        if (!isRecord(entry)) return sum;
+        return sum + (parseBigIntString(entry.feeLamports) ?? 0n);
+      }, 0n)
+    : 0n;
+}
+
+function attachRentReclaimAccountingMetadata(inputs: {
+  row: SponsorshipRentReclaimRow;
+  metadata: Record<string, unknown>;
+}): Record<string, unknown> {
+  const previousActual = parseBigIntString(inputs.row.actual_sponsor_lamports);
+  const netActual = calculateNetActualSponsorLamportsAfterReclaim(inputs);
+  if (
+    previousActual == null ||
+    netActual == null ||
+    !isRecord(inputs.metadata.sponsorshipRentReclaim)
+  ) {
+    return inputs.metadata;
+  }
+  return {
+    ...inputs.metadata,
+    sponsorshipRentReclaim: {
+      ...inputs.metadata.sponsorshipRentReclaim,
+      grossActualSponsorLamports: previousActual.toString(),
+      closeFeeLamports: sumRentReclaimCloseFeeLamports(inputs.metadata).toString(),
+      netActualSponsorLamports: netActual.toString(),
+    },
+  };
+}
+
 function buildAccountOwnerRows(
   rows: SponsorshipRentReclaimRow[],
 ): Map<string, string> {
@@ -882,14 +918,15 @@ export async function reclaimSolanaSponsorshipRentAccounts(
         dryRun: options.dryRun,
         remainingOpenLamports,
       });
+      const accountingMetadata = attachRentReclaimAccountingMetadata({
+        row,
+        metadata,
+      });
       await updateReclaimRow(pool, row, {
         rentLamports: remainingOpenLamports,
         rentStatus,
-        actualSponsorLamports: calculateNetActualSponsorLamportsAfterReclaim({
-          row,
-          metadata,
-        }),
-        metadata,
+        actualSponsorLamports: null,
+        metadata: accountingMetadata,
       });
     }
   }

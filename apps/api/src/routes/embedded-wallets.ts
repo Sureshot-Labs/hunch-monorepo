@@ -54,6 +54,30 @@ type RouteLogger = {
 
 type SolanaSponsorshipFlow = "dflow" | "across" | "directTransfer" | "debridge";
 
+class EmbeddedSolanaSponsorshipLedgerDurabilityError extends Error {
+  cause: unknown;
+  requestId: string;
+  signature: string;
+  transactionId: string | null;
+  sponsorshipIntentId: string | null;
+
+  constructor(inputs: {
+    cause: unknown;
+    requestId: string;
+    signature: string;
+    transactionId: string | null;
+    sponsorshipIntentId: string | null;
+  }) {
+    super("Sponsored Solana transaction submitted but ledger update failed.");
+    this.name = "EmbeddedSolanaSponsorshipLedgerDurabilityError";
+    this.cause = inputs.cause;
+    this.requestId = inputs.requestId;
+    this.signature = inputs.signature;
+    this.transactionId = inputs.transactionId;
+    this.sponsorshipIntentId = inputs.sponsorshipIntentId;
+  }
+}
+
 const embeddedSolanaPreparedMemory = new Map<
   string,
   EmbeddedSolanaPreparedCacheEntry
@@ -642,7 +666,10 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                     caip2: result.caip2,
                   });
                 } catch (error) {
-                  app.log.warn(
+                  const sponsorshipIntentId =
+                    result.request.solanaSponsorship?.sponsorshipIntentId ??
+                    null;
+                  app.log.error(
                     {
                       error,
                       userId: user.id,
@@ -650,12 +677,17 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                       requestId: result.request.id,
                       signature: result.signature,
                       transactionId: result.transactionId,
-                      sponsorshipIntentId:
-                        result.request.solanaSponsorship?.sponsorshipIntentId ??
-                        null,
+                      sponsorshipIntentId,
                     },
                     "Embedded Solana sponsored transaction submitted but ledger update failed",
                   );
+                  throw new EmbeddedSolanaSponsorshipLedgerDurabilityError({
+                    cause: error,
+                    requestId: result.request.id,
+                    signature: result.signature,
+                    transactionId: result.transactionId,
+                    sponsorshipIntentId,
+                  });
                 }
               },
             });
@@ -669,6 +701,30 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(result);
       } catch (error) {
+        if (error instanceof EmbeddedSolanaSponsorshipLedgerDurabilityError) {
+          app.log.error(
+            {
+              error,
+              userId: user.id,
+              executionKey: request.body.executionKey,
+              signer,
+              requestId: error.requestId,
+              signature: error.signature,
+              transactionId: error.transactionId,
+              sponsorshipIntentId: error.sponsorshipIntentId,
+            },
+            "Failed to durably record embedded Solana sponsored submit",
+          );
+          reply.code(500);
+          return reply.send({
+            error: "sponsorship_ledger_not_durable",
+            message: error.message,
+            requestId: error.requestId,
+            signature: error.signature,
+            transactionId: error.transactionId,
+            sponsorshipIntentId: error.sponsorshipIntentId,
+          });
+        }
         app.log.error(
           {
             error,

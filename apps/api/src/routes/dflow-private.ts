@@ -2347,6 +2347,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
     {
       preHandler: createAdminMiddleware({
         requiredAdminPermissions: ["finance:write", "sponsorship:write"],
+        allowLegacyFallback: false,
       }),
       schema: { body: dflowPredictionMarketInitBodySchema },
     },
