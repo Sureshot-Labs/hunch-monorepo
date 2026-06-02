@@ -23,7 +23,9 @@ import {
   runEmbeddedExecutionSingleFlight,
 } from "../services/embedded-execution-singleflight.js";
 import {
+  executeEmbeddedSolanaSignTransactionRequests,
   executeEmbeddedSolanaTransactionRequests,
+  prepareEmbeddedSolanaSignTransactionRequests,
   prepareEmbeddedSolanaTransactionRequests,
   resolveEmbeddedSolanaWalletContext,
   type EmbeddedPrivyAuthorizationRequest,
@@ -575,6 +577,135 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Failed to execute embedded Solana transactions",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/wallets/embedded/solana/sign/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: embeddedSolanaPrepareBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedSolanaWalletContext({
+          user,
+          signer,
+        });
+        const executionKey = request.body.executionKey ?? null;
+        const requests = prepareEmbeddedSolanaSignTransactionRequests({
+          context,
+          executionKey,
+          transactions: request.body.transactions,
+        });
+        await cacheEmbeddedSolanaPreparedRequests({
+          signer: context.signer,
+          executionKey,
+          requests,
+          log: app.log,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          signer: context.signer,
+          requests,
+        });
+      } catch (error) {
+        app.log.error(
+          {
+            error,
+            userId: user.id,
+            signer,
+          },
+          "Failed to prepare embedded Solana sign transaction",
+        );
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to prepare embedded Solana sign transaction",
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/wallets/embedded/solana/sign/execute",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: embeddedSolanaExecuteBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const context = await resolveEmbeddedSolanaWalletContext({
+          user,
+          signer,
+        });
+        const result = await runEmbeddedExecutionSingleFlight({
+          key: buildEmbeddedExecutionSingleFlightKey(
+            "embedded-wallets",
+            "solana-sign",
+            context.signer,
+            request.body.executionKey,
+          ),
+          run: async () => {
+            const requests = await readCachedEmbeddedSolanaPreparedRequests({
+              signer: context.signer,
+              executionKey: request.body.executionKey,
+              log: app.log,
+            });
+            if (!requests) {
+              throw new Error(
+                "Prepared Solana sign authorization expired. Refresh quote and try again.",
+              );
+            }
+            const signedTransactions =
+              await executeEmbeddedSolanaSignTransactionRequests({
+                requests,
+                signatures: request.body.signedRequests,
+              });
+            return {
+              ok: true,
+              signer: context.signer,
+              signedTransactions,
+            };
+          },
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
+      } catch (error) {
+        app.log.error(
+          {
+            error,
+            userId: user.id,
+            executionKey: request.body.executionKey,
+            signer,
+          },
+          "Failed to execute embedded Solana sign transaction",
+        );
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to execute embedded Solana sign transaction",
         });
       }
     },

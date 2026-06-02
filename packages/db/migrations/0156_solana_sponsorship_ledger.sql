@@ -55,6 +55,14 @@ create index if not exists idx_solana_sponsorship_ledger_user_created
 create index if not exists idx_solana_sponsorship_ledger_status
   on solana_sponsorship_ledger (status, updated_at);
 
+create index if not exists idx_solana_sponsorship_ledger_wallet_flow_created
+  on solana_sponsorship_ledger (wallet_address, flow, created_at desc)
+  where wallet_address is not null;
+
+create index if not exists idx_solana_sponsorship_ledger_tx_signature
+  on solana_sponsorship_ledger (tx_signature)
+  where tx_signature is not null;
+
 do $$
 begin
   alter table solana_sponsorship_ledger

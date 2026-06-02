@@ -30,6 +30,7 @@ import {
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
   fetchSolanaBalanceLamports,
+  fetchSolanaLatestBlockhash,
   fetchSolanaSignatureStatus,
   fetchSolanaTokenBalanceByOwnerAndMint,
   formatUiAmount,
@@ -104,6 +105,12 @@ const DFLOW_SPONSORED_ALLOWED_PROGRAMS = new Set([
 const SOLANA_TX_FEE_LAMPORTS = BigInt(5_000);
 const DFLOW_SPONSORED_MAX_RETRIES = 2;
 const DFLOW_SPONSORED_ATA_RENT_LAMPORTS = BigInt(2_100_000);
+
+function normalizeKalshiMarketIdForStorage(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return trimmed.includes(":") ? trimmed : `kalshi:${trimmed}`;
+}
 
 type DflowSponsorConfig = {
   enabled: boolean;
@@ -375,6 +382,30 @@ function signerHasNonZeroSignature(
   if (signerIndex < 0) return false;
   const signature = tx.signatures[signerIndex];
   return Boolean(signature?.some((byte) => byte !== 0));
+}
+
+function hasAnyNonZeroSignature(tx: VersionedTransaction): boolean {
+  return tx.signatures.some((signature) =>
+    signature.some((byte) => byte !== 0),
+  );
+}
+
+async function refreshUnsignedSolanaTransactionBlockhash(
+  transaction: string,
+): Promise<string> {
+  const tx = VersionedTransaction.deserialize(Buffer.from(transaction, "base64"));
+  if (hasAnyNonZeroSignature(tx)) {
+    throw new Error("Cannot refresh blockhash on a pre-signed transaction");
+  }
+  const latestBlockhash = await fetchSolanaLatestBlockhash({
+    rpcUrls: env.solanaRpcUrls,
+    timeoutMs: env.solanaRpcTimeoutMs,
+  });
+  if (!latestBlockhash) {
+    throw new Error("Solana RPC did not return latest blockhash");
+  }
+  tx.message.recentBlockhash = latestBlockhash.blockhash;
+  return encodeBase64(tx.serialize());
 }
 
 async function upsertSolanaSponsorshipLedger(inputs: {
@@ -1429,13 +1460,21 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             >)
           : null;
       if (payloadRecord) {
-        const transaction = extractStringFromRecord(payloadRecord, [
+        const transactionKey = [
           "transaction",
           "swapTransaction",
           "swap_transaction",
-        ]);
+        ].find((key) => typeof payloadRecord[key] === "string");
+        let transaction = transactionKey
+          ? String(payloadRecord[transactionKey])
+          : null;
         if (transaction) {
           try {
+            if (dflowSponsoredOrder && dflowSponsorAddress) {
+              transaction =
+                await refreshUnsignedSolanaTransactionBlockhash(transaction);
+              payloadRecord[transactionKey ?? "transaction"] = transaction;
+            }
             const maxSystemCreateLamports =
               extractNonNegativeLamportsFromRecord(payloadRecord, [
                 "initPredictionMarketCost",
@@ -1519,6 +1558,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
                     marketIds: sponsorshipMarketState.marketIds,
                     maxSystemCreateLamports: "0",
                     maxAtaCreateCount: expectedAtaCreateCount,
+                    blockhashRefreshed: true,
                   },
                 });
               }
@@ -1996,7 +2036,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           userId: user.id,
           walletAddress: executionWalletAddress,
           venue: "kalshi",
-          unifiedMarketId: body.marketId ?? null,
+          unifiedMarketId: normalizeKalshiMarketIdForStorage(body.marketId),
           side: body.side ?? null,
           inputMint: body.inputMint ?? null,
           outputMint: body.outputMint ?? null,

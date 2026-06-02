@@ -14,6 +14,8 @@ import {
   resolveKalshiExecutionSettlementStatus,
   type KalshiExecutionStatus,
 } from "./kalshi-executions.js";
+import { reconcileSolanaSponsorshipLedger } from "./solana-sponsorship-reconcile.js";
+import { reclaimSolanaSponsorshipRentAccounts } from "./solana-sponsorship-rent-reclaim.js";
 
 type Logger = {
   info?: (obj: unknown, msg?: string) => void;
@@ -35,6 +37,15 @@ export type ReconcileKalshiExecutionsSummary = {
   noFill: number;
   failed: number;
   feeBackfilled: number;
+  sponsorshipChecked: number;
+  sponsorshipConfirmed: number;
+  sponsorshipSkipped: number;
+  sponsorshipErrors: number;
+  sponsorshipRentReclaimChecked: number;
+  sponsorshipRentReclaimClosed: number;
+  sponsorshipRentReclaimReclaimedLamports: string;
+  sponsorshipRentReclaimSkipped: number;
+  sponsorshipRentReclaimErrors: number;
   skipped: number;
   errors: number;
   dryRun: boolean;
@@ -191,6 +202,15 @@ export async function reconcileKalshiExecutions(
     noFill: 0,
     failed: 0,
     feeBackfilled: 0,
+    sponsorshipChecked: 0,
+    sponsorshipConfirmed: 0,
+    sponsorshipSkipped: 0,
+    sponsorshipErrors: 0,
+    sponsorshipRentReclaimChecked: 0,
+    sponsorshipRentReclaimClosed: 0,
+    sponsorshipRentReclaimReclaimedLamports: "0",
+    sponsorshipRentReclaimSkipped: 0,
+    sponsorshipRentReclaimErrors: 0,
     skipped: 0,
     errors: 0,
     dryRun: options.dryRun,
@@ -255,6 +275,36 @@ export async function reconcileKalshiExecutions(
         "Kalshi fee backfill reconcile failed",
       );
     }
+  }
+
+  try {
+    const sponsorship = await reconcileSolanaSponsorshipLedger(pool, options);
+    summary.sponsorshipChecked = sponsorship.checked;
+    summary.sponsorshipConfirmed = sponsorship.confirmed;
+    summary.sponsorshipSkipped = sponsorship.skipped;
+    summary.sponsorshipErrors = sponsorship.errors;
+  } catch (error) {
+    summary.sponsorshipErrors += 1;
+    options.logger?.error?.(
+      { error },
+      "Solana sponsorship reconciliation batch failed",
+    );
+  }
+
+  try {
+    const rentReclaim = await reclaimSolanaSponsorshipRentAccounts(pool, options);
+    summary.sponsorshipRentReclaimChecked = rentReclaim.checked;
+    summary.sponsorshipRentReclaimClosed = rentReclaim.closed;
+    summary.sponsorshipRentReclaimReclaimedLamports =
+      rentReclaim.reclaimedLamports;
+    summary.sponsorshipRentReclaimSkipped = rentReclaim.skipped;
+    summary.sponsorshipRentReclaimErrors = rentReclaim.errors;
+  } catch (error) {
+    summary.sponsorshipRentReclaimErrors += 1;
+    options.logger?.error?.(
+      { error },
+      "Solana sponsorship rent reclaim batch failed",
+    );
   }
 
   return summary;

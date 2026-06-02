@@ -510,6 +510,31 @@ function parsePrivySolanaSignatureResponse(
   );
 }
 
+function parsePrivySolanaSignedTransactionResponse(
+  payload: Record<string, unknown>,
+): string {
+  const data =
+    payload && typeof payload.data === "object" && payload.data !== null
+      ? (payload.data as Record<string, unknown>)
+      : null;
+  const signedTransactionCandidates = [
+    data?.signed_transaction,
+    data?.signedTransaction,
+    data?.transaction,
+    payload.signed_transaction,
+    payload.signedTransaction,
+    payload.transaction,
+  ];
+  for (const candidate of signedTransactionCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  throw new Error(
+    "Privy wallet response did not include a signed Solana transaction.",
+  );
+}
+
 export async function resolveEmbeddedSolanaWalletContext(inputs: {
   user: User;
   signer: string;
@@ -544,6 +569,39 @@ export async function resolveEmbeddedSolanaWalletContext(inputs: {
     walletProfile,
     walletId,
   };
+}
+
+export function buildEmbeddedSolanaSignTransactionRequest(inputs: {
+  context: EmbeddedSolanaWalletContext;
+  transaction: EmbeddedSolanaTransactionSpec;
+  executionKey?: string | null;
+}): EmbeddedPrivyAuthorizationRequest {
+  const transaction = inputs.transaction.transaction.trim();
+  if (!transaction) {
+    throw new Error(
+      `${inputs.transaction.label} is missing a serialized Solana transaction.`,
+    );
+  }
+
+  return createPrivyWalletRpcRequest({
+    id: inputs.transaction.id,
+    label: inputs.transaction.label,
+    walletId: inputs.context.walletId,
+    idempotencyKey: inputs.executionKey
+      ? buildPrivyIdempotencyKey({
+          executionKey: inputs.executionKey,
+          requestId: inputs.transaction.id,
+        })
+      : null,
+    body: {
+      chain_type: "solana",
+      method: "signTransaction",
+      params: {
+        transaction,
+        encoding: inputs.transaction.encoding ?? "base64",
+      },
+    },
+  });
 }
 
 export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
@@ -862,6 +920,20 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   return requests;
 }
 
+export function prepareEmbeddedSolanaSignTransactionRequests(inputs: {
+  context: EmbeddedSolanaWalletContext;
+  transactions: EmbeddedSolanaTransactionSpec[];
+  executionKey?: string | null;
+}): EmbeddedPrivyAuthorizationRequest[] {
+  return inputs.transactions.map((transaction) =>
+    buildEmbeddedSolanaSignTransactionRequest({
+      context: inputs.context,
+      transaction,
+      executionKey: inputs.executionKey,
+    }),
+  );
+}
+
 export async function executeEmbeddedSolanaTransactionRequests(inputs: {
   requests: EmbeddedPrivyAuthorizationRequest[];
   signatures: EmbeddedPrivyAuthorizationSignature[];
@@ -879,4 +951,23 @@ export async function executeEmbeddedSolanaTransactionRequests(inputs: {
     transactionSignatures.push(parsePrivySolanaSignatureResponse(payload));
   }
   return transactionSignatures;
+}
+
+export async function executeEmbeddedSolanaSignTransactionRequests(inputs: {
+  requests: EmbeddedPrivyAuthorizationRequest[];
+  signatures: EmbeddedPrivyAuthorizationSignature[];
+}): Promise<string[]> {
+  const signedTransactions: string[] = [];
+  for (const request of inputs.requests) {
+    const authorizationSignature = findAuthorizationSignature(
+      inputs.signatures,
+      request.id,
+    );
+    const payload = await executePreparedPrivyAuthorizationRequest(
+      request,
+      authorizationSignature,
+    );
+    signedTransactions.push(parsePrivySolanaSignedTransactionResponse(payload));
+  }
+  return signedTransactions;
 }

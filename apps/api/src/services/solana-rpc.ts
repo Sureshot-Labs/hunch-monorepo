@@ -510,6 +510,105 @@ export async function fetchSolanaSignatureStatus(inputs: {
   return { status: "submitted" };
 }
 
+export type SolanaFinalizedTransactionLamportDelta = {
+  account: string;
+  preLamports: bigint;
+  postLamports: bigint;
+  deltaLamports: bigint;
+};
+
+export type SolanaFinalizedTransactionBalanceDeltas = {
+  signature: string;
+  slot: number | null;
+  blockTime: number | null;
+  err: unknown;
+  feeLamports: bigint;
+  feePayer: string | null;
+  accountDeltas: SolanaFinalizedTransactionLamportDelta[];
+};
+
+function parseLamports(value: unknown): bigint {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0n;
+  return BigInt(Math.trunc(value));
+}
+
+export async function fetchSolanaFinalizedTransactionBalanceDeltas(inputs: {
+  rpcUrls: string[];
+  signature: string;
+  timeoutMs: number;
+}): Promise<SolanaFinalizedTransactionBalanceDeltas | null> {
+  const result = await solanaRpcRequest<{
+    slot?: number;
+    blockTime?: number | null;
+    meta?: unknown;
+    transaction?: unknown;
+  } | null>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTransaction",
+    params: [
+      inputs.signature,
+      {
+        encoding: "jsonParsed",
+        commitment: "finalized",
+        maxSupportedTransactionVersion: 0,
+      },
+    ],
+  });
+
+  if (!result || !isRecord(result)) return null;
+  const transaction = result.transaction;
+  const meta = result.meta;
+  if (!isRecord(transaction) || !isRecord(meta)) return null;
+  const message = transaction.message;
+  if (!isRecord(message)) return null;
+  const accountKeysRaw = message.accountKeys;
+  if (!Array.isArray(accountKeysRaw)) return null;
+
+  const accountKeys = accountKeysRaw
+    .map((entry) => parseTransactionAccountKey(entry))
+    .filter((entry): entry is ParsedTransactionAccountKey => Boolean(entry));
+  if (accountKeys.length === 0) return null;
+
+  const preBalances = Array.isArray(meta.preBalances) ? meta.preBalances : [];
+  const postBalances = Array.isArray(meta.postBalances) ? meta.postBalances : [];
+  const accountDeltas: SolanaFinalizedTransactionLamportDelta[] = [];
+
+  for (let index = 0; index < accountKeys.length; index += 1) {
+    const account = accountKeys[index]?.pubkey;
+    if (!account) continue;
+    const preLamports = parseLamports(preBalances[index]);
+    const postLamports = parseLamports(postBalances[index]);
+    accountDeltas.push({
+      account,
+      preLamports,
+      postLamports,
+      deltaLamports: postLamports - preLamports,
+    });
+  }
+
+  const feePayer = accountKeys[0]?.pubkey ?? null;
+  const feeRaw = meta.fee;
+  const slotRaw = result.slot;
+  const blockTimeRaw = result.blockTime;
+
+  return {
+    signature: inputs.signature,
+    slot:
+      typeof slotRaw === "number" && Number.isFinite(slotRaw)
+        ? Math.trunc(slotRaw)
+        : null,
+    blockTime:
+      typeof blockTimeRaw === "number" && Number.isFinite(blockTimeRaw)
+        ? Math.trunc(blockTimeRaw)
+        : null,
+    err: meta.err ?? null,
+    feeLamports: parseLamports(feeRaw),
+    feePayer,
+    accountDeltas,
+  };
+}
+
 export async function waitForSolanaSignatureConfirmation(inputs: {
   rpcUrls: string[];
   signature: string;
