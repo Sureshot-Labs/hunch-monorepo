@@ -197,23 +197,62 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function authAccessSponsorshipPolicyChanged(
-  currentPolicy: unknown,
-  nextPolicy: unknown,
-): boolean {
-  if (
-    !currentPolicy ||
-    typeof currentPolicy !== "object" ||
-    !nextPolicy ||
-    typeof nextPolicy !== "object"
-  ) {
-    return false;
+type AuthAccessPolicyChange = {
+  nextPolicy: Record<string, unknown>;
+  sponsorshipChanged: boolean;
+  nonSponsorshipChanged: boolean;
+};
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergePolicyPayload(
+  currentPolicy: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...currentPolicy };
+  for (const [key, value] of Object.entries(payload)) {
+    if (value === undefined) continue;
+    const current = next[key];
+    if (isPlainRecord(current) && isPlainRecord(value)) {
+      next[key] = mergePolicyPayload(current, value);
+    } else {
+      next[key] = value;
+    }
   }
-  const current = currentPolicy as Record<string, unknown>;
-  const next = nextPolicy as Record<string, unknown>;
-  return SOLANA_SPONSORSHIP_POLICY_FIELDS.some(
-    (field) => stableJson(current[field]) !== stableJson(next[field]),
-  );
+  return next;
+}
+
+export function analyzeAuthAccessPolicyChange(
+  currentPolicy: unknown,
+  payload: unknown,
+): AuthAccessPolicyChange {
+  const current = isPlainRecord(currentPolicy) ? currentPolicy : {};
+  const nextPolicy = isPlainRecord(payload)
+    ? mergePolicyPayload(current, payload)
+    : { ...current };
+  const sponsorshipFields = new Set<string>(SOLANA_SPONSORSHIP_POLICY_FIELDS);
+  let sponsorshipChanged = false;
+  let nonSponsorshipChanged = false;
+  const fields = new Set([...Object.keys(current), ...Object.keys(nextPolicy)]);
+
+  for (const field of fields) {
+    if (stableJson(current[field]) === stableJson(nextPolicy[field])) {
+      continue;
+    }
+    if (sponsorshipFields.has(field)) {
+      sponsorshipChanged = true;
+    } else {
+      nonSponsorshipChanged = true;
+    }
+  }
+
+  return {
+    nextPolicy,
+    sponsorshipChanged,
+    nonSponsorshipChanged,
+  };
 }
 const ADMIN_SYSTEM_HOT_STREAM_KEYS: Record<AdminSystemVenue, string> = {
   polymarket: "hot:tokens:stream:polymarket",
@@ -6181,13 +6220,21 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const adminRole = request.adminAccount?.role;
+      let policyPayload: unknown = parsed.data;
       let sponsorshipPolicyChanged = false;
+      let nonSponsorshipPolicyChanged = key !== "auth_access";
       if (key === "auth_access") {
         const current = await resolveIntelPolicy(pool, key);
-        sponsorshipPolicyChanged = authAccessSponsorshipPolicyChanged(
+        const change = analyzeAuthAccessPolicyChange(
           current.effective,
           parsed.data,
         );
+        policyPayload = change.nextPolicy;
+        sponsorshipPolicyChanged = change.sponsorshipChanged;
+        nonSponsorshipPolicyChanged = change.nonSponsorshipChanged;
+        if (!sponsorshipPolicyChanged && !nonSponsorshipPolicyChanged) {
+          nonSponsorshipPolicyChanged = true;
+        }
       }
       if (sponsorshipPolicyChanged) {
         if (request.adminActor?.kind === "legacy_user") {
@@ -6209,7 +6256,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
               "Admin sponsorship permission required to change Solana sponsorship policy.",
           });
         }
-      } else if (
+      }
+      if (
+        nonSponsorshipPolicyChanged &&
         request.adminActor?.kind !== "legacy_user" &&
         (!adminRole || !adminHasPermission(adminRole, "intel:write"))
       ) {
@@ -6228,7 +6277,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         const row = await insertRuntimePolicy(pool, {
           policyKey: key,
           effectiveAt,
-          payload: parsed.data,
+          payload: policyPayload,
           createdBy: actorId,
         });
         const resolved = await resolveIntelPolicy(pool, key);

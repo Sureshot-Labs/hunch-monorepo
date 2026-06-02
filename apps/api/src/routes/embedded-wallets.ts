@@ -32,12 +32,16 @@ import {
   type EmbeddedPrivyAuthorizationRequest,
 } from "../services/embedded-solana.js";
 import {
+  assertEmbeddedSolanaSponsoredCachedRequestValid,
   createEmbeddedSolanaSponsorshipIntent,
+  createEmbeddedSolanaSponsorshipRepairToken,
   getEmbeddedSolanaDirectTransferAmountRaw,
   releaseEmbeddedSolanaSponsorshipBudget,
   reserveEmbeddedSolanaSponsorshipBudget,
+  resolveEmbeddedSolanaActualSponsorshipDecision,
   shouldRequireEmbeddedSolanaSponsorshipRedis,
   validateEmbeddedSolanaSponsorshipIntentCandidate,
+  verifyEmbeddedSolanaSponsorshipRepairToken,
 } from "../services/embedded-solana-sponsorship.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import { upsertSolanaSponsorshipLedger } from "../services/solana-sponsorship-ledger.js";
@@ -65,6 +69,8 @@ class EmbeddedSolanaSponsorshipLedgerDurabilityError extends Error {
   signature: string;
   transactionId: string | null;
   sponsorshipIntentId: string | null;
+  transactionDigest: string | null;
+  repairToken: string | null;
 
   constructor(inputs: {
     cause: unknown;
@@ -72,6 +78,8 @@ class EmbeddedSolanaSponsorshipLedgerDurabilityError extends Error {
     signature: string;
     transactionId: string | null;
     sponsorshipIntentId: string | null;
+    transactionDigest: string | null;
+    repairToken: string | null;
   }) {
     super("Sponsored Solana transaction submitted but ledger update failed.");
     this.name = "EmbeddedSolanaSponsorshipLedgerDurabilityError";
@@ -80,6 +88,8 @@ class EmbeddedSolanaSponsorshipLedgerDurabilityError extends Error {
     this.signature = inputs.signature;
     this.transactionId = inputs.transactionId;
     this.sponsorshipIntentId = inputs.sponsorshipIntentId;
+    this.transactionDigest = inputs.transactionDigest;
+    this.repairToken = inputs.repairToken;
   }
 }
 
@@ -229,32 +239,32 @@ function cachedSolanaRequestUsesPrivySponsor(
   return isRecord(request.input.body) && request.input.body.sponsor === true;
 }
 
-async function assertCachedEmbeddedSolanaSponsorPolicy(
-  requests: EmbeddedPrivyAuthorizationRequest[],
-): Promise<void> {
-  const sponsoredRequests = requests.filter(
+async function assertCachedEmbeddedSolanaSponsorPolicy(inputs: {
+  requests: EmbeddedPrivyAuthorizationRequest[];
+  userId: string;
+  signer: string;
+}): Promise<void> {
+  const sponsoredRequests = inputs.requests.filter(
     cachedSolanaRequestUsesPrivySponsor,
   );
   if (!sponsoredRequests.length) return;
 
   const authAccessPolicy = await resolveAuthAccessPolicy(pool);
-  const sponsorshipEnabled =
-    authAccessPolicy.effective.embeddedSolanaSponsorship === true;
-  const observeCanSponsor =
-    authAccessPolicy.effective.embeddedSolanaSponsorshipMode === "enforce" ||
-    env.embeddedSolanaSponsorshipObserveCanSponsor === true;
   for (const request of sponsoredRequests) {
-    const flow = request.solanaSponsorship?.flow ?? null;
-    if (
-      !sponsorshipEnabled ||
-      !observeCanSponsor ||
-      !isSolanaSponsorshipFlow(flow) ||
-      authAccessPolicy.effective.embeddedSolanaSponsorshipFlows[flow] !== true
-    ) {
-      throw new Error(
-        "Solana sponsorship is disabled. Refresh quote and try again.",
-      );
-    }
+    await assertEmbeddedSolanaSponsoredCachedRequestValid({
+      request,
+      userId: inputs.userId,
+      signer: inputs.signer,
+      policy: {
+        embeddedSolanaSponsorship:
+          authAccessPolicy.effective.embeddedSolanaSponsorship === true,
+        embeddedSolanaSponsorshipMode:
+          authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+        embeddedSolanaSponsorshipFlows:
+          authAccessPolicy.effective.embeddedSolanaSponsorshipFlows,
+        observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+      },
+    });
   }
 }
 
@@ -318,84 +328,70 @@ async function markSubmittedSolanaSponsorshipRequestWithRetry(
   throw lastError;
 }
 
-type SolanaSponsorshipLedgerRepairRow = {
-  venue: "kalshi" | "bridge" | "wallet";
-  flow: SolanaSponsorshipFlow;
-  wallet_address: string | null;
-  sponsor_address: string | null;
-  market_id: string | null;
-  input_mint: string | null;
-  output_mint: string | null;
-  amount_raw: string | null;
-  message_digest: string | null;
-  transaction_digest: string | null;
-  estimated_sponsor_lamports: string | null;
+type SolanaSponsorshipLedgerRepairDb = {
+  query: <T = unknown>(
+    sql: string,
+    params?: unknown[],
+  ) => Promise<{ rows: T[] }>;
 };
 
-async function repairSubmittedSolanaSponsorshipLedger(inputs: {
+export async function repairSubmittedSolanaSponsorshipLedger(inputs: {
   userId: string;
   signer: string;
   sponsorshipIntentId: string;
   signature: string;
+  transactionDigest: string;
   transactionId?: string | null;
-  requestId?: string | null;
+  requestId: string;
+  db?: SolanaSponsorshipLedgerRepairDb;
 }): Promise<boolean> {
-  const { rows } = await pool.query<SolanaSponsorshipLedgerRepairRow>(
+  const repairedSubmission = {
+    repairedAt: new Date().toISOString(),
+    signature: inputs.signature,
+    transactionDigest: inputs.transactionDigest,
+    ...(inputs.transactionId
+      ? { privyTransactionId: inputs.transactionId }
+      : {}),
+    requestId: inputs.requestId,
+  };
+  const db = inputs.db ?? pool;
+  const { rows } = await db.query<{ repaired: true }>(
     `
-      select
-        venue,
-        flow,
-        wallet_address,
-        sponsor_address,
-        market_id,
-        input_mint,
-        output_mint,
-        amount_raw,
-        message_digest,
-        transaction_digest,
-        estimated_sponsor_lamports::text as estimated_sponsor_lamports
-      from solana_sponsorship_ledger
+      update solana_sponsorship_ledger
+      set
+        updated_at = now(),
+        metadata = jsonb_set(
+          jsonb_set(metadata, '{submission,signature}', to_jsonb($5::text), true),
+          '{repairedSubmission}',
+          $6::jsonb,
+          true
+        )
       where intent_id = $1
         and user_id = $2
-        and lower(wallet_address) = lower($3)
-      limit 1
+        and wallet_address = $3
+        and transaction_digest = $4
+        and status = 'intent_created'
+        and flow in ('across', 'directTransfer', 'debridge')
+        and tx_signature is null
+        and coalesce(
+          metadata ->> 'txSignature',
+          metadata #>> '{submission,signature}',
+          metadata #>> '{submitted,signature}',
+          metadata #>> '{privySubmit,signature}',
+          metadata #>> '{genericSponsorshipReconciliation,signature}'
+        ) is null
+      returning true as repaired
     `,
-    [inputs.sponsorshipIntentId, inputs.userId, inputs.signer],
+    [
+      inputs.sponsorshipIntentId,
+      inputs.userId,
+      inputs.signer,
+      inputs.transactionDigest,
+      inputs.signature,
+      JSON.stringify(repairedSubmission),
+    ],
   );
-  const row = rows[0];
-  if (!row || !isSolanaSponsorshipFlow(row.flow)) return false;
-
-  await upsertSolanaSponsorshipLedger({
-    userId: inputs.userId,
-    venue: row.venue,
-    flow: row.flow,
-    status: "submitted",
-    intentId: inputs.sponsorshipIntentId,
-    walletAddress: row.wallet_address ?? inputs.signer,
-    sponsorAddress: row.sponsor_address,
-    marketId: row.market_id,
-    inputMint: row.input_mint,
-    outputMint: row.output_mint,
-    amountRaw: row.amount_raw,
-    messageDigest: row.message_digest,
-    transactionDigest: row.transaction_digest,
-    txSignature: inputs.signature,
-    estimatedSponsorLamports: row.estimated_sponsor_lamports ?? "0",
-    metadata: {
-      repairedSubmission: {
-        repairedAt: new Date().toISOString(),
-        signature: inputs.signature,
-        ...(inputs.transactionId
-          ? { privyTransactionId: inputs.transactionId }
-          : {}),
-        ...(inputs.requestId ? { requestId: inputs.requestId } : {}),
-      },
-      submission: {
-        signature: inputs.signature,
-      },
-    },
-  });
-  return true;
+  return rows.length > 0;
 }
 
 export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
@@ -541,16 +537,18 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           signer,
         });
         const authAccessPolicy = await resolveAuthAccessPolicy(pool);
-        const disabledReasons: string[] = [];
-        if (authAccessPolicy.effective.embeddedSolanaSponsorship !== true) {
-          disabledReasons.push("sponsorship_disabled");
-        }
-        if (
-          authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
-            .directTransfer !== true
-        ) {
-          disabledReasons.push("flow_directTransfer_disabled");
-        }
+        const sponsorshipDecision =
+          resolveEmbeddedSolanaActualSponsorshipDecision({
+            embeddedSolanaSponsorship:
+              authAccessPolicy.effective.embeddedSolanaSponsorship === true,
+            flow: "directTransfer",
+            flowEnabled:
+              authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
+                .directTransfer === true,
+            mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+            observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+          });
+        const disabledReasons = [...sponsorshipDecision.reasons];
         if (request.body.mint !== env.solanaUsdcMint) {
           disabledReasons.push("unsupported_mint");
         }
@@ -797,7 +795,11 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana authorization expired. Refresh quote and try again.",
               );
             }
-            await assertCachedEmbeddedSolanaSponsorPolicy(requests);
+            await assertCachedEmbeddedSolanaSponsorPolicy({
+              requests,
+              userId: user.id,
+              signer: context.signer,
+            });
             const results =
               await executeEmbeddedSolanaTransactionRequestsDetailed({
                 requests,
@@ -813,9 +815,23 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                       caip2: result.caip2,
                     });
                   } catch (error) {
+                    const sponsorship = result.request.solanaSponsorship;
                     const sponsorshipIntentId =
-                      result.request.solanaSponsorship?.sponsorshipIntentId ??
-                      null;
+                      sponsorship?.sponsorshipIntentId ?? null;
+                    const transactionDigest =
+                      sponsorship?.transactionDigest ?? null;
+                    const repairToken =
+                      sponsorshipIntentId && transactionDigest
+                        ? createEmbeddedSolanaSponsorshipRepairToken({
+                            userId: user.id,
+                            signer: context.signer,
+                            requestId: result.request.id,
+                            transactionId: result.transactionId,
+                            sponsorshipIntentId,
+                            signature: result.signature,
+                            transactionDigest,
+                          })
+                        : null;
                     app.log.error(
                       {
                         error,
@@ -825,6 +841,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                         signature: result.signature,
                         transactionId: result.transactionId,
                         sponsorshipIntentId,
+                        transactionDigest,
                       },
                       "Embedded Solana sponsored transaction submitted but ledger update failed",
                     );
@@ -834,6 +851,8 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                       signature: result.signature,
                       transactionId: result.transactionId,
                       sponsorshipIntentId,
+                      transactionDigest,
+                      repairToken,
                     });
                   }
                 },
@@ -859,6 +878,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               signature: error.signature,
               transactionId: error.transactionId,
               sponsorshipIntentId: error.sponsorshipIntentId,
+              transactionDigest: error.transactionDigest,
             },
             "Failed to durably record embedded Solana sponsored submit",
           );
@@ -870,6 +890,8 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             signature: error.signature,
             transactionId: error.transactionId,
             sponsorshipIntentId: error.sponsorshipIntentId,
+            transactionDigest: error.transactionDigest,
+            repairToken: error.repairToken,
           });
         }
         app.log.error(
@@ -911,13 +933,27 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           user,
           signer,
         });
+        const repairPayload = verifyEmbeddedSolanaSponsorshipRepairToken({
+          repairToken: request.body.repairToken,
+          userId: user.id,
+          signer: context.signer,
+          requestId: request.body.requestId,
+          transactionId: request.body.transactionId ?? null,
+          sponsorshipIntentId: request.body.sponsorshipIntentId,
+          signature: request.body.signature,
+        });
+        if (!repairPayload) {
+          reply.code(403);
+          return reply.send({ error: "sponsorship_repair_token_invalid" });
+        }
         const repaired = await repairSubmittedSolanaSponsorshipLedger({
           userId: user.id,
           signer: context.signer,
           sponsorshipIntentId: request.body.sponsorshipIntentId,
           signature: request.body.signature,
+          transactionDigest: repairPayload.transactionDigest,
           transactionId: request.body.transactionId ?? null,
-          requestId: request.body.requestId ?? null,
+          requestId: request.body.requestId,
         });
         if (!repaired) {
           reply.code(404);

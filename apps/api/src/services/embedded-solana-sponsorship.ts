@@ -1,9 +1,13 @@
-import { randomUUID, createHash } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
-  ASSOCIATED_TOKEN_PROGRAM_ID,
   getAssociatedTokenAddressSync,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
@@ -19,6 +23,20 @@ import {
 
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
+import {
+  DFLOW_PREDICTION_PROGRAM_ID,
+  DFLOW_PROGRAM_ID,
+  SOLANA_ACROSS_SPONSORSHIP_ALLOWED_PROGRAMS,
+  SOLANA_ASSOCIATED_TOKEN_PROGRAM_ID,
+  SOLANA_COMPUTE_BUDGET_PROGRAM_ID,
+  SOLANA_DEBRIDGE_BASE_SPONSORSHIP_ALLOWED_PROGRAMS,
+  SOLANA_DFLOW_SPONSORSHIP_ALLOWED_PROGRAMS,
+  SOLANA_DIRECT_TRANSFER_SPONSORSHIP_ALLOWED_PROGRAMS,
+  SOLANA_LEGACY_MEMO_PROGRAM_ID,
+  SOLANA_MEMO_PROGRAM_ID,
+  SOLANA_TOKEN_2022_PROGRAM_ID,
+  SOLANA_TOKEN_PROGRAM_ID,
+} from "./solana-sponsorship-primitives.js";
 
 export type EmbeddedSolanaSponsorshipFlow =
   | "dflow"
@@ -32,6 +50,12 @@ export type EmbeddedSolanaSponsorshipFlows = Record<
   EmbeddedSolanaSponsorshipFlow,
   boolean
 >;
+
+export type EmbeddedSolanaActualSponsorshipDecision = {
+  policyAllows: boolean;
+  actualSponsorAllowed: boolean;
+  reasons: string[];
+};
 
 export type EmbeddedSolanaSponsorshipFlowLimit = {
   maxPerHour: number;
@@ -108,54 +132,48 @@ export type EmbeddedSolanaSponsorshipEvaluation = {
   analysis: EmbeddedSolanaTransactionAnalysis;
 };
 
+type CachedEmbeddedSolanaSponsorshipRequest = {
+  id: string;
+  input: { body: unknown };
+  solanaSponsorship?: {
+    sponsorshipIntentId: string | null;
+    flow: string | null;
+    transactionDigest: string | null;
+    actualSponsor: boolean;
+  };
+};
+
+export type EmbeddedSolanaSponsorshipRepairTokenPayload = {
+  v: 1;
+  userId: string;
+  signer: string;
+  requestId: string;
+  transactionId: string | null;
+  sponsorshipIntentId: string;
+  signature: string;
+  transactionDigest: string;
+  expiresAt: number;
+};
+
 const INTENT_TTL_SEC = 5 * 60;
+const REPAIR_TOKEN_TTL_MS = 5 * 60 * 1000;
 const SOLANA_TX_FEE_LAMPORTS = BigInt(5_000);
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
-const SYSTEM_PROGRAM_ID = SystemProgram.programId.toBase58();
-const ASSOCIATED_TOKEN_PROGRAM_ID_BASE58 =
-  ASSOCIATED_TOKEN_PROGRAM_ID.toBase58();
-const TOKEN_PROGRAM_ID_BASE58 = TOKEN_PROGRAM_ID.toBase58();
-const TOKEN_2022_PROGRAM_ID_BASE58 = TOKEN_2022_PROGRAM_ID.toBase58();
-const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
-const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
-const LEGACY_MEMO_PROGRAM_ID = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
-const DFLOW_PROGRAM_ID = "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH";
-const DFLOW_PREDICTION_PROGRAM_ID =
-  "pReDicTmksnPfkfiz33ndSdbe2dY43KYPg4U2dbvHvb";
-export const ACROSS_SOLANA_SPOKE_POOL_PROGRAM_ID =
-  "DLv3NggMiSaef97YCkew5xKUHDh13tVGZ7tydt3ZeAru";
-
-const BASE_ALLOWED_PROGRAMS = new Set([
-  COMPUTE_BUDGET_PROGRAM_ID,
-  SYSTEM_PROGRAM_ID,
-  TOKEN_PROGRAM_ID_BASE58,
-  TOKEN_2022_PROGRAM_ID_BASE58,
-  ASSOCIATED_TOKEN_PROGRAM_ID_BASE58,
-  MEMO_PROGRAM_ID,
-  LEGACY_MEMO_PROGRAM_ID,
-]);
+const ASSOCIATED_TOKEN_PROGRAM_ID_BASE58 = SOLANA_ASSOCIATED_TOKEN_PROGRAM_ID;
+const TOKEN_PROGRAM_ID_BASE58 = SOLANA_TOKEN_PROGRAM_ID;
+const TOKEN_2022_PROGRAM_ID_BASE58 = SOLANA_TOKEN_2022_PROGRAM_ID;
+const COMPUTE_BUDGET_PROGRAM_ID = SOLANA_COMPUTE_BUDGET_PROGRAM_ID;
+const MEMO_PROGRAM_ID = SOLANA_MEMO_PROGRAM_ID;
+const LEGACY_MEMO_PROGRAM_ID = SOLANA_LEGACY_MEMO_PROGRAM_ID;
 
 const FLOW_ALLOWED_PROGRAMS: Record<
   EmbeddedSolanaSponsorshipFlow,
   Set<string>
 > = {
-  dflow: new Set([
-    ...BASE_ALLOWED_PROGRAMS,
-    DFLOW_PROGRAM_ID,
-    DFLOW_PREDICTION_PROGRAM_ID,
-  ]),
-  across: new Set([
-    ...BASE_ALLOWED_PROGRAMS,
-    ACROSS_SOLANA_SPOKE_POOL_PROGRAM_ID,
-  ]),
-  directTransfer: new Set([
-    COMPUTE_BUDGET_PROGRAM_ID,
-    TOKEN_PROGRAM_ID_BASE58,
-    TOKEN_2022_PROGRAM_ID_BASE58,
-    MEMO_PROGRAM_ID,
-    LEGACY_MEMO_PROGRAM_ID,
-  ]),
-  debridge: new Set([...BASE_ALLOWED_PROGRAMS]),
+  dflow: new Set(SOLANA_DFLOW_SPONSORSHIP_ALLOWED_PROGRAMS),
+  across: new Set(SOLANA_ACROSS_SPONSORSHIP_ALLOWED_PROGRAMS),
+  directTransfer: new Set(SOLANA_DIRECT_TRANSFER_SPONSORSHIP_ALLOWED_PROGRAMS),
+  debridge: new Set(SOLANA_DEBRIDGE_BASE_SPONSORSHIP_ALLOWED_PROGRAMS),
 };
 
 const sponsorshipIntentMemory = new Map<
@@ -166,6 +184,94 @@ const sponsorshipBudgetMemory = new Map<
   string,
   { count: number; lamports: bigint; expiresAt: number }
 >();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isEmbeddedSolanaSponsorshipFlow(
+  value: string | null | undefined,
+): value is EmbeddedSolanaSponsorshipFlow {
+  return (
+    value === "dflow" ||
+    value === "across" ||
+    value === "directTransfer" ||
+    value === "debridge"
+  );
+}
+
+function normalizeOptionalTokenString(
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed ? trimmed : null;
+}
+
+function encodeBase64Url(bytes: Uint8Array | string): string {
+  const buffer = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+  return Buffer.from(buffer)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function decodeBase64Url(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(
+    normalized.length + ((4 - (normalized.length % 4)) % 4),
+    "=",
+  );
+  try {
+    return Buffer.from(padded, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function signRepairTokenPayload(payload: string): string {
+  return encodeBase64Url(
+    createHmac("sha256", env.jwtSecret).update(payload).digest(),
+  );
+}
+
+function signaturesMatch(actual: string, expected: string): boolean {
+  const actualBytes = decodeBase64Url(actual);
+  const expectedBytes = decodeBase64Url(expected);
+  if (
+    !actualBytes ||
+    !expectedBytes ||
+    actualBytes.length !== expectedBytes.length
+  ) {
+    return false;
+  }
+  return timingSafeEqual(actualBytes, expectedBytes);
+}
+
+export function resolveEmbeddedSolanaActualSponsorshipDecision(inputs: {
+  embeddedSolanaSponsorship: boolean;
+  flow: EmbeddedSolanaSponsorshipFlow;
+  flowEnabled: boolean;
+  mode: EmbeddedSolanaSponsorshipMode;
+  observeCanSponsor: boolean;
+}): EmbeddedSolanaActualSponsorshipDecision {
+  const reasons: string[] = [];
+  if (!inputs.embeddedSolanaSponsorship) reasons.push("sponsorship_disabled");
+  if (!inputs.flowEnabled) reasons.push(`flow_${inputs.flow}_disabled`);
+  if (inputs.mode === "observe" && !inputs.observeCanSponsor) {
+    reasons.push("observe_mode_log_only");
+  }
+  const policyAllows =
+    inputs.embeddedSolanaSponsorship === true && inputs.flowEnabled === true;
+  return {
+    policyAllows,
+    actualSponsorAllowed:
+      policyAllows &&
+      (inputs.mode === "enforce" || inputs.observeCanSponsor === true),
+    reasons,
+  };
+}
 
 export type EmbeddedSolanaSponsorshipBudgetReservation = {
   hourKey: string;
@@ -320,6 +426,98 @@ export function computeEmbeddedSolanaMessageDigest(
   return createHash("sha256")
     .update(Buffer.from(decoded.tx.message.serialize()))
     .digest("hex");
+}
+
+export function createEmbeddedSolanaSponsorshipRepairToken(inputs: {
+  userId: string;
+  signer: string;
+  requestId: string;
+  transactionId?: string | null;
+  sponsorshipIntentId: string;
+  signature: string;
+  transactionDigest: string;
+  nowMs?: number;
+  ttlMs?: number;
+}): string {
+  const nowMs = Math.trunc(inputs.nowMs ?? Date.now());
+  const ttlMs = Math.max(
+    1_000,
+    Math.trunc(inputs.ttlMs ?? REPAIR_TOKEN_TTL_MS),
+  );
+  const payload: EmbeddedSolanaSponsorshipRepairTokenPayload = {
+    v: 1,
+    userId: inputs.userId.trim(),
+    signer: normalizeSolanaAddress(inputs.signer),
+    requestId: inputs.requestId.trim(),
+    transactionId: normalizeOptionalTokenString(inputs.transactionId),
+    sponsorshipIntentId: inputs.sponsorshipIntentId.trim(),
+    signature: inputs.signature.trim(),
+    transactionDigest: inputs.transactionDigest.trim(),
+    expiresAt: nowMs + ttlMs,
+  };
+  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
+  return `${encodedPayload}.${signRepairTokenPayload(encodedPayload)}`;
+}
+
+export function verifyEmbeddedSolanaSponsorshipRepairToken(inputs: {
+  repairToken: string;
+  userId: string;
+  signer: string;
+  requestId: string;
+  transactionId?: string | null;
+  sponsorshipIntentId: string;
+  signature: string;
+  nowMs?: number;
+}): EmbeddedSolanaSponsorshipRepairTokenPayload | null {
+  const [encodedPayload, signature, ...extra] = inputs.repairToken
+    .trim()
+    .split(".");
+  if (!encodedPayload || !signature || extra.length > 0) return null;
+  const expectedSignature = signRepairTokenPayload(encodedPayload);
+  if (!signaturesMatch(signature, expectedSignature)) return null;
+
+  const payloadBytes = decodeBase64Url(encodedPayload);
+  if (!payloadBytes) return null;
+  let payload: EmbeddedSolanaSponsorshipRepairTokenPayload | null;
+  try {
+    payload = JSON.parse(
+      payloadBytes.toString("utf8"),
+    ) as EmbeddedSolanaSponsorshipRepairTokenPayload | null;
+  } catch {
+    return null;
+  }
+  if (!payload || payload.v !== 1) return null;
+  if (
+    typeof payload.userId !== "string" ||
+    typeof payload.signer !== "string" ||
+    typeof payload.requestId !== "string" ||
+    !(
+      typeof payload.transactionId === "string" ||
+      payload.transactionId === null
+    ) ||
+    typeof payload.sponsorshipIntentId !== "string" ||
+    typeof payload.signature !== "string" ||
+    typeof payload.transactionDigest !== "string" ||
+    typeof payload.expiresAt !== "number"
+  ) {
+    return null;
+  }
+  if (!Number.isFinite(payload.expiresAt)) return null;
+  if (Math.trunc(inputs.nowMs ?? Date.now()) > payload.expiresAt) return null;
+
+  const expectedTransactionId = normalizeOptionalTokenString(
+    inputs.transactionId,
+  );
+  if (payload.userId !== inputs.userId.trim()) return null;
+  if (payload.signer !== normalizeSolanaAddress(inputs.signer)) return null;
+  if (payload.requestId !== inputs.requestId.trim()) return null;
+  if (payload.transactionId !== expectedTransactionId) return null;
+  if (payload.sponsorshipIntentId !== inputs.sponsorshipIntentId.trim()) {
+    return null;
+  }
+  if (payload.signature !== inputs.signature.trim()) return null;
+  if (!payload.transactionDigest.trim()) return null;
+  return payload;
 }
 
 function deserializeEmbeddedSolanaTransaction(
@@ -669,6 +867,89 @@ export async function readEmbeddedSolanaSponsorshipIntent(
 
   pruneExpiredIntents();
   return sponsorshipIntentMemory.get(trimmed) ?? null;
+}
+
+function getCachedPrivySolanaTransactionDigest(
+  request: CachedEmbeddedSolanaSponsorshipRequest,
+): string | null {
+  const body = isRecord(request.input.body) ? request.input.body : null;
+  const params = isRecord(body?.params) ? body.params : null;
+  const transaction = params?.transaction;
+  return typeof transaction === "string"
+    ? computeEmbeddedSolanaTransactionDigest(transaction)
+    : null;
+}
+
+export async function assertEmbeddedSolanaSponsoredCachedRequestValid(inputs: {
+  request: CachedEmbeddedSolanaSponsorshipRequest;
+  userId: string;
+  signer: string;
+  policy: {
+    embeddedSolanaSponsorship: boolean;
+    embeddedSolanaSponsorshipMode: EmbeddedSolanaSponsorshipMode;
+    embeddedSolanaSponsorshipFlows: EmbeddedSolanaSponsorshipFlows;
+    observeCanSponsor?: boolean;
+  };
+}): Promise<void> {
+  const sponsorship = inputs.request.solanaSponsorship;
+  const flow = sponsorship?.flow ?? null;
+  const observeCanSponsor =
+    inputs.policy.embeddedSolanaSponsorshipMode === "enforce" ||
+    inputs.policy.observeCanSponsor === true;
+  if (
+    !sponsorship?.actualSponsor ||
+    !inputs.policy.embeddedSolanaSponsorship ||
+    !observeCanSponsor ||
+    !isEmbeddedSolanaSponsorshipFlow(flow) ||
+    inputs.policy.embeddedSolanaSponsorshipFlows[flow] !== true
+  ) {
+    throw new Error(
+      "Solana sponsorship is disabled. Refresh quote and try again.",
+    );
+  }
+
+  const intentId = sponsorship.sponsorshipIntentId?.trim() ?? "";
+  if (!intentId) {
+    throw new Error(
+      "Prepared Solana sponsorship is missing an intent. Refresh quote and try again.",
+    );
+  }
+  const intent = await readEmbeddedSolanaSponsorshipIntent(intentId);
+  if (!intent) {
+    throw new Error(
+      "Prepared Solana sponsorship expired. Refresh quote and try again.",
+    );
+  }
+  const expiresAt = new Date(intent.expiresAt).getTime();
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error(
+      "Prepared Solana sponsorship expired. Refresh quote and try again.",
+    );
+  }
+  const signer = normalizeSolanaAddress(inputs.signer);
+  if (
+    intent.userId !== inputs.userId.trim() ||
+    normalizeSolanaAddress(intent.signer) !== signer ||
+    intent.flow !== flow
+  ) {
+    throw new Error(
+      "Prepared Solana sponsorship no longer matches this request. Refresh quote and try again.",
+    );
+  }
+
+  const transactionDigest = getCachedPrivySolanaTransactionDigest(
+    inputs.request,
+  );
+  if (
+    !transactionDigest ||
+    !sponsorship.transactionDigest ||
+    transactionDigest !== sponsorship.transactionDigest ||
+    transactionDigest !== intent.transactionDigest
+  ) {
+    throw new Error(
+      "Prepared Solana sponsorship transaction changed. Refresh quote and try again.",
+    );
+  }
 }
 
 function pruneExpiredBudgets(now = Date.now()): void {

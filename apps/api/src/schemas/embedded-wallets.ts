@@ -73,6 +73,7 @@ export const embeddedSolanaDirectTransferSponsorshipIntentBodySchema = z.object(
 export const embeddedSolanaSponsorshipLedgerRepairBodySchema = z.object({
   sponsorshipIntentId: z.string().trim().min(1).max(120),
   signature: z.string().trim().min(1).max(180),
+  repairToken: z.string().trim().min(1).max(2000),
   transactionId: z.string().trim().min(1).max(180).optional(),
-  requestId: z.string().trim().min(1).max(80).optional(),
+  requestId: z.string().trim().min(1).max(80),
 });

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { Pool } from "@hunch/infra";
+import bs58 from "bs58";
 import {
   createBurnInstruction,
   createCloseAccountInstruction,
@@ -578,6 +579,12 @@ function legacyTransactionHasSignature(
   );
 }
 
+function getLegacyTransactionSignature(tx: Transaction): string | null {
+  const signature = tx.signatures[0]?.signature;
+  if (!signature || signature.every((byte) => byte === 0)) return null;
+  return bs58.encode(signature);
+}
+
 export async function submitKalshiLossRentReclaim(inputs: {
   userId: string;
   walletAddress: string;
@@ -624,6 +631,16 @@ export async function submitKalshiLossRentReclaim(inputs: {
   if (!policy.enabled) {
     throw new Error("DFlow sponsorship is disabled");
   }
+
+  tx.partialSign(sponsorKeypair);
+  const sponsoredTransaction = Buffer.from(tx.serialize()).toString("base64");
+  const sponsoredTransactionDigest =
+    computeRawTransactionDigest(sponsoredTransaction);
+  const expectedSignature = getLegacyTransactionSignature(tx);
+  if (!expectedSignature) {
+    throw new Error("Loss reclaim transaction could not be signed");
+  }
+
   await upsertSolanaSponsorshipLedger({
     userId: inputs.userId,
     venue: "kalshi",
@@ -637,17 +654,17 @@ export async function submitKalshiLossRentReclaim(inputs: {
     outputMint: mint,
     amountRaw: amount,
     messageDigest,
-    transactionDigest: computeRawTransactionDigest(inputs.signedTransaction),
+    transactionDigest: sponsoredTransactionDigest,
+    txSignature: expectedSignature,
     estimatedSponsorLamports: LOSS_RECLAIM_FEE_ESTIMATE_LAMPORTS,
     metadata: {
       purpose: "loss_reclaim",
       tokenAccount,
       rentRecipient,
       userSignedAt: new Date().toISOString(),
+      sponsorSignedAt: new Date().toISOString(),
     },
   });
-  tx.partialSign(sponsorKeypair);
-  const sponsoredTransaction = Buffer.from(tx.serialize()).toString("base64");
   let signature: string;
   try {
     signature = await sendSolanaRawTransaction({
@@ -671,13 +688,15 @@ export async function submitKalshiLossRentReclaim(inputs: {
       outputMint: mint,
       amountRaw: amount,
       messageDigest,
-      transactionDigest: computeRawTransactionDigest(sponsoredTransaction),
+      transactionDigest: sponsoredTransactionDigest,
+      txSignature: expectedSignature,
       estimatedSponsorLamports: LOSS_RECLAIM_FEE_ESTIMATE_LAMPORTS,
       error: error instanceof Error ? error.message : String(error),
       metadata: {
         purpose: "loss_reclaim",
         tokenAccount,
         rentRecipient,
+        sendFailedAt: new Date().toISOString(),
       },
     });
     throw error;
@@ -697,7 +716,7 @@ export async function submitKalshiLossRentReclaim(inputs: {
       outputMint: mint,
       amountRaw: amount,
       messageDigest,
-      transactionDigest: computeRawTransactionDigest(sponsoredTransaction),
+      transactionDigest: sponsoredTransactionDigest,
       txSignature: signature,
       estimatedSponsorLamports: LOSS_RECLAIM_FEE_ESTIMATE_LAMPORTS,
       metadata: {

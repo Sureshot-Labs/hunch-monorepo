@@ -22,14 +22,18 @@ import {
 } from "./services/embedded-solana.js";
 import { env } from "./env.js";
 import {
+  assertEmbeddedSolanaSponsoredCachedRequestValid,
   analyzeEmbeddedSolanaTransaction,
   computeEmbeddedSolanaMessageDigest,
   computeEmbeddedSolanaTransactionDigest,
   createEmbeddedSolanaSponsorshipIntent,
+  createEmbeddedSolanaSponsorshipRepairToken,
   getEmbeddedSolanaDirectTransferAmountRaw,
   reserveEmbeddedSolanaSponsorshipBudget,
   validateEmbeddedSolanaSponsorshipIntentCandidate,
+  verifyEmbeddedSolanaSponsorshipRepairToken,
 } from "./services/embedded-solana-sponsorship.js";
+import { repairSubmittedSolanaSponsorshipLedger } from "./routes/embedded-wallets.js";
 
 type TestCase = {
   name: string;
@@ -135,8 +139,16 @@ function createAssociatedTokenAccountInstruction(): TransactionInstruction {
     programId: ASSOCIATED_TOKEN_PROGRAM_ID,
     keys: [
       { pubkey: signerKeypair.publicKey, isSigner: true, isWritable: true },
-      { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true },
-      { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+      {
+        pubkey: Keypair.generate().publicKey,
+        isSigner: false,
+        isWritable: true,
+      },
+      {
+        pubkey: Keypair.generate().publicKey,
+        isSigner: false,
+        isWritable: false,
+      },
       { pubkey: SOLANA_USDC_MINT, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
@@ -180,6 +192,52 @@ async function prepareSponsoredEmbeddedSolanaTransactionRequests(
   }
 }
 
+function directTransferSponsorshipPolicy() {
+  return {
+    embeddedSolanaSponsorship: true,
+    embeddedSolanaSponsorshipMode: "enforce" as const,
+    embeddedSolanaSponsorshipFlows: {
+      dflow: false,
+      across: false,
+      directTransfer: true,
+      debridge: false,
+    },
+    observeCanSponsor: false,
+  };
+}
+
+async function prepareDirectTransferSponsoredRequest(inputs: {
+  transaction: string;
+  sponsorshipIntentId: string;
+}) {
+  const requests = await prepareEmbeddedSolanaTransactionRequests({
+    context: walletContext,
+    transactions: [
+      {
+        id: "direct-usdc-transfer",
+        label: "USDC withdraw",
+        transaction: inputs.transaction,
+        sponsorshipIntentId: inputs.sponsorshipIntentId,
+      },
+    ],
+    userId: "user-id",
+    embeddedSolanaSponsorshipEnabled: true,
+    embeddedSolanaSponsorshipMode: "enforce",
+    embeddedSolanaSponsorshipFlows: {
+      dflow: false,
+      across: false,
+      directTransfer: true,
+      debridge: false,
+    },
+    fetchSponsorBalanceLamports: async () =>
+      SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+  });
+  const request = requests[0];
+  assert.ok(request);
+  assert.equal(getSponsor(request), true);
+  return request;
+}
+
 const tests: TestCase[] = [
   {
     name: "privy signTransaction omits caip2 while signAndSendTransaction includes caip2",
@@ -216,7 +274,10 @@ const tests: TestCase[] = [
         unknown
       >;
       assert.equal(signAndSendBody.method, "signAndSendTransaction");
-      assert.equal(signAndSendBody.caip2, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
+      assert.equal(
+        signAndSendBody.caip2,
+        "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      );
       assert.equal(typeof signAndSendBody.sponsor, "boolean");
     },
   },
@@ -1111,6 +1172,240 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "cached sponsored execute revalidation rejects missing intent",
+    run: async () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 1_000_000n }),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "1000000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      const request = await prepareDirectTransferSponsoredRequest({
+        transaction,
+        sponsorshipIntentId: intent.id,
+      });
+      assert.ok(request.solanaSponsorship);
+      request.solanaSponsorship.sponsorshipIntentId = "solsp_missing";
+
+      await assert.rejects(
+        () =>
+          assertEmbeddedSolanaSponsoredCachedRequestValid({
+            request,
+            userId: "user-id",
+            signer: walletContext.signer,
+            policy: directTransferSponsorshipPolicy(),
+          }),
+        /expired|missing/,
+      );
+    },
+  },
+  {
+    name: "cached sponsored execute revalidation rejects digest changes",
+    run: async () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 1_000_000n }),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "1000000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      const request = await prepareDirectTransferSponsoredRequest({
+        transaction,
+        sponsorshipIntentId: intent.id,
+      });
+      const body = request.input.body as {
+        params?: { transaction?: string };
+      };
+      assert.ok(body.params);
+      body.params.transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 2_000_000n }),
+      ]);
+
+      await assert.rejects(
+        () =>
+          assertEmbeddedSolanaSponsoredCachedRequestValid({
+            request,
+            userId: "user-id",
+            signer: walletContext.signer,
+            policy: directTransferSponsorshipPolicy(),
+          }),
+        /transaction changed/,
+      );
+    },
+  },
+  {
+    name: "cached sponsored execute revalidation checks current policy",
+    run: async () => {
+      const transaction = serializeTransaction([
+        createUsdcTransferCheckedInstruction({ amount: 1_000_000n }),
+      ]);
+      const intent = await createEmbeddedSolanaSponsorshipIntent({
+        flow: "directTransfer",
+        userId: "user-id",
+        signer: walletContext.signer,
+        transaction,
+        metadata: {
+          directTransferSponsorshipEligible: true,
+          amountRaw: "1000000",
+          maxSystemCreateLamports: "0",
+        },
+      });
+      assert.ok(intent);
+
+      const request = await prepareDirectTransferSponsoredRequest({
+        transaction,
+        sponsorshipIntentId: intent.id,
+      });
+
+      await assert.rejects(
+        () =>
+          assertEmbeddedSolanaSponsoredCachedRequestValid({
+            request,
+            userId: "user-id",
+            signer: walletContext.signer,
+            policy: {
+              ...directTransferSponsorshipPolicy(),
+              embeddedSolanaSponsorship: false,
+            },
+          }),
+        /disabled/,
+      );
+    },
+  },
+  {
+    name: "embedded solana sponsorship repair token binds submit metadata",
+    run: () => {
+      const token = createEmbeddedSolanaSponsorshipRepairToken({
+        userId: "user-id",
+        signer: walletContext.signer,
+        requestId: "direct-usdc-transfer",
+        transactionId: "privy-tx-1",
+        sponsorshipIntentId: "solsp_1",
+        signature: "sig-1",
+        transactionDigest: "digest-1",
+        nowMs: 1_000,
+        ttlMs: 5_000,
+      });
+      const verified = verifyEmbeddedSolanaSponsorshipRepairToken({
+        repairToken: token,
+        userId: "user-id",
+        signer: walletContext.signer,
+        requestId: "direct-usdc-transfer",
+        transactionId: "privy-tx-1",
+        sponsorshipIntentId: "solsp_1",
+        signature: "sig-1",
+        nowMs: 2_000,
+      });
+      assert.equal(verified?.transactionDigest, "digest-1");
+      assert.equal(
+        verifyEmbeddedSolanaSponsorshipRepairToken({
+          repairToken: token,
+          userId: "user-id",
+          signer: walletContext.signer,
+          requestId: "direct-usdc-transfer",
+          transactionId: "privy-tx-2",
+          sponsorshipIntentId: "solsp_1",
+          signature: "sig-1",
+          nowMs: 2_000,
+        }),
+        null,
+      );
+      assert.equal(
+        verifyEmbeddedSolanaSponsorshipRepairToken({
+          repairToken: token,
+          userId: "user-id",
+          signer: walletContext.signer,
+          requestId: "direct-usdc-transfer",
+          transactionId: "privy-tx-1",
+          sponsorshipIntentId: "solsp_1",
+          signature: "sig-1",
+          nowMs: 7_000,
+        }),
+        null,
+      );
+    },
+  },
+  {
+    name: "embedded solana ledger repair writes durable metadata only",
+    run: async () => {
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      const db = {
+        query: async <T>(sql: string, params?: unknown[]) => {
+          calls.push({ sql, params });
+          return { rows: [{ repaired: true } as T] };
+        },
+      };
+
+      const repaired = await repairSubmittedSolanaSponsorshipLedger({
+        userId: "user-id",
+        signer: walletContext.signer,
+        sponsorshipIntentId: "solsp_1",
+        signature: "sig-1",
+        transactionDigest: "digest-1",
+        transactionId: "privy-tx-1",
+        requestId: "direct-usdc-transfer",
+        db,
+      });
+
+      assert.equal(repaired, true);
+      const call = calls[0];
+      assert.ok(call);
+      assert.match(call.sql, /update solana_sponsorship_ledger/i);
+      assert.doesNotMatch(call.sql, /status\s*=\s*'submitted'/i);
+      assert.doesNotMatch(call.sql, /tx_signature\s*=/i);
+      assert.match(call.sql, /status = 'intent_created'/);
+      assert.match(
+        call.sql,
+        /flow in \('across', 'directTransfer', 'debridge'\)/,
+      );
+      assert.match(call.sql, /\{submission,signature\}/);
+      assert.match(call.sql, /to_jsonb\(\$5::text\)/);
+      assert.equal(call.params?.[3], "digest-1");
+      assert.equal(call.params?.[4], "sig-1");
+      const repairedSubmission = JSON.parse(String(call.params?.[5])) as {
+        requestId?: string;
+      };
+      assert.equal(repairedSubmission.requestId, "direct-usdc-transfer");
+    },
+  },
+  {
+    name: "embedded solana ledger repair returns false when no row is eligible",
+    run: async () => {
+      const repaired = await repairSubmittedSolanaSponsorshipLedger({
+        userId: "user-id",
+        signer: walletContext.signer,
+        sponsorshipIntentId: "solsp_1",
+        signature: "sig-1",
+        transactionDigest: "digest-1",
+        requestId: "direct-usdc-transfer",
+        db: {
+          query: async <T>() => ({ rows: [] as T[] }),
+        },
+      });
+
+      assert.equal(repaired, false);
+    },
+  },
+  {
     name: "direct USDC transfer candidate exposes raw amount and validates shape",
     run: () => {
       const transaction = serializeTransaction([
@@ -1160,7 +1455,10 @@ const tests: TestCase[] = [
       });
 
       assert.equal(validation.ok, false);
-      assert.equal(computeEmbeddedSolanaTransactionDigest(hexTransaction), null);
+      assert.equal(
+        computeEmbeddedSolanaTransactionDigest(hexTransaction),
+        null,
+      );
     },
   },
   {

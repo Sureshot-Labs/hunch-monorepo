@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import {
   calculateDflowSponsorshipReconciliation,
@@ -11,6 +13,10 @@ import type { SolanaFinalizedTransactionBalanceDeltas } from "./services/solana-
 
 const SPONSOR = "B2oU6ZDdb3dk4GMJepKiWiBVVzF46vuW12RcKpQ5sGTX";
 const PROD = "ProdD7SB4T5h7rwSHU6jJEUtm69rEooTzuguwndpNQc";
+
+function readApiSourceFile(...parts: string[]): string {
+  return readFileSync(path.join(import.meta.dirname, ...parts), "utf8");
+}
 
 function tx(inputs: {
   signature: string;
@@ -295,6 +301,18 @@ await test("open settlement keeps final cost unset and rent locked", () => {
   assert.equal(result.rentStatus, "locked");
 });
 
+await test("loss reclaim submit records final sponsor-signed signature before broadcast", () => {
+  const source = readApiSourceFile("services", "kalshi-loss-rent-reclaim.ts");
+  assert.match(
+    source,
+    /tx\.partialSign\(sponsorKeypair\);[\s\S]*?const sponsoredTransactionDigest =[\s\S]*?const expectedSignature = getLegacyTransactionSignature\(tx\);[\s\S]*?status: "user_signed"[\s\S]*?transactionDigest: sponsoredTransactionDigest,[\s\S]*?txSignature: expectedSignature/,
+  );
+  assert.match(
+    source,
+    /status: "failed"[\s\S]*?transactionDigest: sponsoredTransactionDigest,[\s\S]*?txSignature: expectedSignature/,
+  );
+});
+
 await test("generic intent_created rows need durable signature metadata", async () => {
   const db = fakeSponsorshipPool([genericLedgerRow()]);
   let fetched = false;
@@ -383,6 +401,73 @@ await test("loss_reclaim DFlow rows reconcile from submit transaction finality",
   assert.equal(db.upserts[0]?.rentStatus, "returned");
 });
 
+await test("user_signed loss_reclaim rows with durable signatures reconcile", async () => {
+  const db = fakeSponsorshipPool([
+    lossReclaimLedgerRow({
+      status: "user_signed",
+      tx_signature: "loss-reclaim-user-signed",
+    }),
+  ]);
+  const summary = await reconcileSolanaSponsorshipLedger(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    upsertLedger: async (inputs) => {
+      db.upserts.push(inputs);
+    },
+    fetchTransaction: async (signature) =>
+      tx({
+        signature,
+        feePayer: SPONSOR,
+        feeLamports: 5000n,
+        sponsorDeltaLamports: 2_034_280n,
+      }),
+  });
+
+  assert.equal(summary.checked, 1);
+  assert.equal(summary.confirmed, 1);
+  assert.equal(summary.skipped, 0);
+  assert.equal(db.upserts.length, 1);
+  assert.equal(db.upserts[0]?.status, "confirmed");
+  assert.equal(db.upserts[0]?.txSignature, "loss-reclaim-user-signed");
+  assert.equal(db.upserts[0]?.actualSponsorLamports, "5000");
+});
+
+await test("failed loss_reclaim rows with durable signatures record finalized errors", async () => {
+  const db = fakeSponsorshipPool([
+    lossReclaimLedgerRow({
+      status: "failed",
+      tx_signature: "loss-reclaim-failed-send",
+    }),
+  ]);
+  const summary = await reconcileSolanaSponsorshipLedger(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    upsertLedger: async (inputs) => {
+      db.upserts.push(inputs);
+    },
+    fetchTransaction: async (signature) =>
+      tx({
+        signature,
+        feePayer: SPONSOR,
+        feeLamports: 5000n,
+        sponsorDeltaLamports: -5000n,
+        err: { InstructionError: [1, "Custom"] },
+      }),
+  });
+
+  assert.equal(summary.checked, 1);
+  assert.equal(summary.confirmed, 0);
+  assert.equal(summary.skipped, 0);
+  assert.equal(db.upserts.length, 1);
+  assert.equal(db.upserts[0]?.status, "failed");
+  assert.equal(db.upserts[0]?.txSignature, "loss-reclaim-failed-send");
+  assert.equal(db.upserts[0]?.actualSponsorLamports, "5000");
+  assert.equal(db.upserts[0]?.rentStatus, "locked");
+  assert.match(String(db.upserts[0]?.error), /InstructionError/);
+});
+
 await test("failed rows with actual cost and reconciliation are filtered by query", async () => {
   const db = fakeSponsorshipPool([]);
   await reconcileSolanaSponsorshipLedger(db.pool as never, {
@@ -395,6 +480,7 @@ await test("failed rows with actual cost and reconciliation are filtered by quer
   assert.match(query, /status = 'failed'/);
   assert.match(query, /actual_sponsor_lamports is null/);
   assert.match(query, /sponsorshipReconciliation/);
+  assert.match(query, /lossReclaimReconciliation/);
   assert.match(query, /genericSponsorshipReconciliation/);
 });
 

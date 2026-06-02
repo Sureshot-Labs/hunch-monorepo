@@ -7,7 +7,10 @@ import {
   finalizeDflowSponsoredOrderOrFallback,
   resolveDflowActualSponsorshipDecision,
 } from "./routes/dflow-private.js";
-import type { EmbeddedSolanaSponsorshipLimits } from "./services/embedded-solana-sponsorship.js";
+import {
+  resolveEmbeddedSolanaActualSponsorshipDecision,
+  type EmbeddedSolanaSponsorshipLimits,
+} from "./services/embedded-solana-sponsorship.js";
 
 type TestCase = {
   name: string;
@@ -135,6 +138,57 @@ const tests: TestCase[] = [
       assert.equal(decision.policyAllows, true);
       assert.equal(decision.actualSponsorAllowed, false);
       assert.ok(decision.reasons.includes("observe_mode_log_only"));
+    },
+  },
+  {
+    name: "shared sponsorship decision disables actual direct transfer sponsorship in observe log-only mode",
+    run: () => {
+      const decision = resolveEmbeddedSolanaActualSponsorshipDecision({
+        embeddedSolanaSponsorship: true,
+        flow: "directTransfer",
+        flowEnabled: true,
+        mode: "observe",
+        observeCanSponsor: false,
+      });
+
+      assert.equal(decision.policyAllows, true);
+      assert.equal(decision.actualSponsorAllowed, false);
+      assert.deepEqual(decision.reasons, ["observe_mode_log_only"]);
+    },
+  },
+  {
+    name: "shared sponsorship decision preserves observe-can-sponsor override",
+    run: () => {
+      const decision = resolveEmbeddedSolanaActualSponsorshipDecision({
+        embeddedSolanaSponsorship: true,
+        flow: "across",
+        flowEnabled: true,
+        mode: "observe",
+        observeCanSponsor: true,
+      });
+
+      assert.equal(decision.policyAllows, true);
+      assert.equal(decision.actualSponsorAllowed, true);
+      assert.deepEqual(decision.reasons, []);
+    },
+  },
+  {
+    name: "shared sponsorship decision preserves disabled policy and flow reasons",
+    run: () => {
+      const decision = resolveEmbeddedSolanaActualSponsorshipDecision({
+        embeddedSolanaSponsorship: false,
+        flow: "debridge",
+        flowEnabled: false,
+        mode: "enforce",
+        observeCanSponsor: true,
+      });
+
+      assert.equal(decision.policyAllows, false);
+      assert.equal(decision.actualSponsorAllowed, false);
+      assert.deepEqual(decision.reasons, [
+        "sponsorship_disabled",
+        "flow_debridge_disabled",
+      ]);
     },
   },
   {
@@ -292,7 +346,53 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "sponsored redemption request uses DFlow sponsor rent params and does not forward purpose",
+    name: "sponsored buy request uses sponsor rent recipient and close authority",
+    run: () => {
+      const query = buildDflowOrderRequestQuery({
+        query: {
+          inputMint: USDC_MINT,
+          outputMint: "OutcomeMint11111111111111111111111111111111",
+          amount: "1000000",
+        },
+        userPublicKey: WALLET,
+        sponsored: true,
+        sponsorAddress: SPONSOR,
+      });
+
+      assert.equal(query.sponsor, SPONSOR);
+      assert.equal(query.sponsorExec, true);
+      assert.equal(query.outcomeAccountRentRecipient, SPONSOR);
+      assert.equal(query.outputCloseAuthority, SPONSOR);
+      assert.equal(query.rentRecipientDecision, undefined);
+      assert.equal(query.outcomeAccountRentRecipientRole, undefined);
+      assert.equal(query.outcomeAccountRentRecipientReason, undefined);
+    },
+  },
+  {
+    name: "sponsored sell request uses user rent recipient and no output close authority",
+    run: () => {
+      const query = buildDflowOrderRequestQuery({
+        query: {
+          inputMint: "OutcomeMint11111111111111111111111111111111",
+          outputMint: USDC_MINT,
+          amount: "1000000",
+        },
+        userPublicKey: WALLET,
+        sponsored: true,
+        sponsorAddress: SPONSOR,
+      });
+
+      assert.equal(query.sponsor, SPONSOR);
+      assert.equal(query.sponsorExec, true);
+      assert.equal(query.outcomeAccountRentRecipient, WALLET);
+      assert.equal(query.outputCloseAuthority, undefined);
+      assert.equal(query.rentRecipientDecision, undefined);
+      assert.equal(query.outcomeAccountRentRecipientRole, undefined);
+      assert.equal(query.outcomeAccountRentRecipientReason, undefined);
+    },
+  },
+  {
+    name: "sponsored redemption request uses user rent recipient and does not forward purpose",
     run: () => {
       const query = buildDflowOrderRequestQuery({
         query: {
@@ -308,9 +408,12 @@ const tests: TestCase[] = [
 
       assert.equal(query.sponsor, SPONSOR);
       assert.equal(query.sponsorExec, true);
-      assert.equal(query.outcomeAccountRentRecipient, SPONSOR);
+      assert.equal(query.outcomeAccountRentRecipient, WALLET);
       assert.equal(query.outputCloseAuthority, undefined);
       assert.equal(query.purpose, undefined);
+      assert.equal(query.rentRecipientDecision, undefined);
+      assert.equal(query.outcomeAccountRentRecipientRole, undefined);
+      assert.equal(query.outcomeAccountRentRecipientReason, undefined);
       assert.equal(query.platformFeeBps, undefined);
       assert.equal(query.platformFeeScale, undefined);
       assert.equal(query.platformFeeMode, undefined);
@@ -370,9 +473,76 @@ const tests: TestCase[] = [
       const metadata = ledgerWrites[0]?.metadata as
         | Record<string, unknown>
         | undefined;
+      const rentRecipientDecision = metadata?.rentRecipientDecision as
+        | Record<string, unknown>
+        | undefined;
       assert.equal(metadata?.purpose, "redeem");
       assert.equal(metadata?.maxAtaCreateCount, 0);
       assert.equal(metadata?.expectedDflowOutcomeRentLamports, "0");
+      assert.equal(ledgerWrites[0]?.rentLamports, null);
+      assert.equal(ledgerWrites[0]?.rentStatus, "unknown");
+      assert.equal(
+        rentRecipientDecision?.reason,
+        "unknown_provenance_user_recipient",
+      );
+      assert.equal(rentRecipientDecision?.outcomeAccountRentRecipient, WALLET);
+      assert.equal(
+        rentRecipientDecision?.outcomeAccountRentRecipientRole,
+        "user",
+      );
+      assert.equal(rentRecipientDecision?.outputCloseAuthority, null);
+    },
+  },
+  {
+    name: "successful sponsored buy records sponsor rent provenance and locked rent",
+    run: async () => {
+      const ledgerWrites: Array<Record<string, unknown>> = [];
+      const result = await finalizeDflowSponsoredOrderOrFallback(
+        baseFinalizeInputs({
+          query: {
+            inputMint: USDC_MINT,
+            outputMint: "OutcomeMint11111111111111111111111111111111",
+            amount: "1000000",
+          },
+          analyzeTransaction: () => ({
+            ...fakeAnalysis,
+            ataCreateCount: 1,
+          }),
+          validateSponsoredAnalysis: () => ({
+            valid: true,
+            reasons: [],
+            estimatedSponsorLamports: 2_105_000n,
+            estimatedFeeLamports: 5000n,
+            systemCreateLamports: 0n,
+          }),
+          upsertLedger: async (input: Record<string, unknown>) => {
+            ledgerWrites.push(input);
+          },
+        }),
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(result.sponsored, true);
+      assert.equal(ledgerWrites.length, 1);
+      assert.equal(ledgerWrites[0]?.rentLamports, "2100000");
+      assert.equal(ledgerWrites[0]?.rentStatus, "locked");
+      const metadata = ledgerWrites[0]?.metadata as
+        | Record<string, unknown>
+        | undefined;
+      const rentRecipientDecision = metadata?.rentRecipientDecision as
+        | Record<string, unknown>
+        | undefined;
+      assert.equal(metadata?.maxAtaCreateCount, 1);
+      assert.equal(
+        rentRecipientDecision?.reason,
+        "sponsored_buy_new_outcome_account",
+      );
+      assert.equal(rentRecipientDecision?.outcomeAccountRentRecipient, SPONSOR);
+      assert.equal(
+        rentRecipientDecision?.outcomeAccountRentRecipientRole,
+        "sponsor",
+      );
+      assert.equal(rentRecipientDecision?.outputCloseAuthority, SPONSOR);
     },
   },
 ];

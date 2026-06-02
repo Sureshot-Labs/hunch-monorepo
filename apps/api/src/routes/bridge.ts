@@ -59,6 +59,7 @@ import {
   createEmbeddedSolanaSponsorshipIntent,
   releaseEmbeddedSolanaSponsorshipBudget,
   reserveEmbeddedSolanaSponsorshipBudget,
+  resolveEmbeddedSolanaActualSponsorshipDecision,
   shouldRequireEmbeddedSolanaSponsorshipRedis,
   validateEmbeddedSolanaSponsorshipIntentCandidate,
 } from "../services/embedded-solana-sponsorship.js";
@@ -588,13 +589,18 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   }
 
   const authAccessPolicy = await resolveAuthAccessPolicy(pool);
-  if (authAccessPolicy.effective.embeddedSolanaSponsorship !== true) {
-    return unavailable(["sponsorship_disabled"]);
-  }
-  if (
-    authAccessPolicy.effective.embeddedSolanaSponsorshipFlows.debridge !== true
-  ) {
-    return unavailable(["flow_debridge_disabled"]);
+  const sponsorshipDecision = resolveEmbeddedSolanaActualSponsorshipDecision({
+    embeddedSolanaSponsorship:
+      authAccessPolicy.effective.embeddedSolanaSponsorship === true,
+    flow: "debridge",
+    flowEnabled:
+      authAccessPolicy.effective.embeddedSolanaSponsorshipFlows.debridge ===
+      true,
+    mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+    observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+  });
+  if (!sponsorshipDecision.actualSponsorAllowed) {
+    return unavailable(sponsorshipDecision.reasons);
   }
   let allowedProgramIds: string[];
   try {
@@ -1984,22 +1990,25 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                 amountIn: body.amountIn,
                 maxSystemCreateLamports: "0",
               };
-              if (
-                authAccessPolicy.effective.embeddedSolanaSponsorship !== true
-              ) {
-                hunchSponsorship.reasons.push("sponsorship_disabled");
-              }
-              if (
-                authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
-                  .across !== true
-              ) {
-                hunchSponsorship.reasons.push("flow_across_disabled");
-              }
-              if (
-                authAccessPolicy.effective.embeddedSolanaSponsorship === true &&
-                authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
-                  .across === true
-              ) {
+              const sponsorshipDecision =
+                resolveEmbeddedSolanaActualSponsorshipDecision({
+                  embeddedSolanaSponsorship:
+                    authAccessPolicy.effective
+                      .embeddedSolanaSponsorship === true,
+                  flow: "across",
+                  flowEnabled:
+                    authAccessPolicy.effective
+                      .embeddedSolanaSponsorshipFlows.across === true,
+                  mode:
+                    authAccessPolicy.effective
+                      .embeddedSolanaSponsorshipMode,
+                  observeCanSponsor:
+                    env.embeddedSolanaSponsorshipObserveCanSponsor,
+                });
+              hunchSponsorship.reasons.push(
+                ...sponsorshipDecision.reasons,
+              );
+              if (sponsorshipDecision.actualSponsorAllowed) {
                 const validation =
                   validateEmbeddedSolanaSponsorshipIntentCandidate({
                     flow: "across",

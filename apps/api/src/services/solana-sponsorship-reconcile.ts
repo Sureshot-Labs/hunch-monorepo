@@ -303,7 +303,10 @@ async function fetchSubmittedSponsorshipRows(
                 and tx_signature is not null
                 and (
                   actual_sponsor_lamports is null
-                  or metadata #> '{sponsorshipReconciliation}' is null
+                  or (
+                    metadata #> '{sponsorshipReconciliation}' is null
+                    and metadata #> '{lossReclaimReconciliation}' is null
+                  )
                 )
               )
             )

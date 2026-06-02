@@ -5,6 +5,18 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  Keypair,
+  PublicKey,
+  TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
+
+import { analyzeAuthAccessPolicyChange } from "./routes/admin.js";
+import { validateEmbeddedSolanaSponsorshipIntentCandidate } from "./services/embedded-solana-sponsorship.js";
+import {
+  SOLANA_DFLOW_SPONSORSHIP_ALLOWED_PROGRAMS,
+  SOLANA_SYSTEM_PROGRAM_ID,
   hasPositiveSponsorFeeLike,
   parseSolanaPublicKeyList,
 } from "./services/solana-sponsorship-primitives.js";
@@ -17,6 +29,10 @@ const dflowPrivate = readApiSourceFile("routes", "dflow-private.ts");
 const dflowSchemas = readApiSourceFile("schemas", "dflow.ts");
 const bridgeRoute = readApiSourceFile("routes", "bridge.ts");
 const embeddedWalletsRoute = readApiSourceFile("routes", "embedded-wallets.ts");
+const sponsorshipService = readApiSourceFile(
+  "services",
+  "embedded-solana-sponsorship.ts",
+);
 const sponsorshipReconcile = readApiSourceFile(
   "services",
   "solana-sponsorship-reconcile.ts",
@@ -175,6 +191,204 @@ assert.throws(
   /valid Solana address/,
   "deBridge allowlist parsing must reject invalid program IDs",
 );
+
+const baseAuthAccessPolicy = {
+  state: "prompt",
+  embeddedSolanaSponsorship: true,
+  embeddedSolanaSponsorshipMode: "enforce",
+  embeddedSolanaSponsorshipFlows: {
+    dflow: true,
+    across: false,
+    directTransfer: true,
+    debridge: false,
+  },
+  embeddedSolanaSponsorshipLimits: {
+    dflow: {
+      maxPerHour: 10,
+      maxPerDay: 50,
+      maxLamportsPerWalletPerDay: 10_000_000,
+    },
+    across: {
+      maxPerHour: 5,
+      maxPerDay: 20,
+      maxLamportsPerWalletPerDay: 200_000,
+    },
+    directTransfer: {
+      maxPerHour: 5,
+      maxPerDay: 20,
+      maxLamportsPerWalletPerDay: 150_000,
+      minAmountRaw: "500000",
+    },
+    debridge: {
+      maxPerHour: 3,
+      maxPerDay: 10,
+      maxLamportsPerWalletPerDay: 100_000,
+    },
+  },
+};
+
+const authAccessStateOnlyChange = analyzeAuthAccessPolicyChange(
+  baseAuthAccessPolicy,
+  { state: "required" },
+);
+assert.equal(
+  authAccessStateOnlyChange.sponsorshipChanged,
+  false,
+  "auth_access state-only updates must not require sponsorship permission",
+);
+assert.equal(
+  authAccessStateOnlyChange.nonSponsorshipChanged,
+  true,
+  "auth_access state-only updates must require intel permission",
+);
+assert.equal(
+  authAccessStateOnlyChange.nextPolicy.embeddedSolanaSponsorship,
+  true,
+  "auth_access partial updates must preserve current sponsorship fields",
+);
+
+const authAccessSponsorshipOnlyChange = analyzeAuthAccessPolicyChange(
+  baseAuthAccessPolicy,
+  { embeddedSolanaSponsorshipFlows: { debridge: true } },
+);
+assert.equal(
+  authAccessSponsorshipOnlyChange.sponsorshipChanged,
+  true,
+  "auth_access sponsorship flow updates must require sponsorship permission",
+);
+assert.equal(
+  authAccessSponsorshipOnlyChange.nonSponsorshipChanged,
+  false,
+  "auth_access sponsorship-only updates must not require intel permission",
+);
+
+const authAccessUnchangedSponsorshipPayload = analyzeAuthAccessPolicyChange(
+  baseAuthAccessPolicy,
+  { embeddedSolanaSponsorship: true },
+);
+assert.equal(
+  authAccessUnchangedSponsorshipPayload.sponsorshipChanged,
+  false,
+  "auth_access unchanged explicit sponsorship fields must not require sponsorship permission",
+);
+assert.equal(
+  authAccessUnchangedSponsorshipPayload.nonSponsorshipChanged,
+  false,
+  "auth_access unchanged explicit sponsorship fields must not require intel as a field change",
+);
+
+const authAccessMixedChange = analyzeAuthAccessPolicyChange(
+  baseAuthAccessPolicy,
+  {
+    state: "required",
+    embeddedSolanaSponsorshipMode: "observe",
+  },
+);
+assert.equal(
+  authAccessMixedChange.sponsorshipChanged,
+  true,
+  "auth_access mixed updates must require sponsorship permission",
+);
+assert.equal(
+  authAccessMixedChange.nonSponsorshipChanged,
+  true,
+  "auth_access mixed updates must require intel permission",
+);
+
+function buildSolanaSponsorshipTestTransaction(inputs: {
+  signer: Keypair;
+  programId: string;
+}): string {
+  const instruction = new TransactionInstruction({
+    programId: new PublicKey(inputs.programId),
+    keys: [],
+    data: Buffer.alloc(0),
+  });
+  const message = new TransactionMessage({
+    payerKey: inputs.signer.publicKey,
+    recentBlockhash: Keypair.generate().publicKey.toBase58(),
+    instructions: [instruction],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  tx.sign([inputs.signer]);
+  return Buffer.from(tx.serialize()).toString("base64");
+}
+
+const debridgeSigner = Keypair.generate();
+const debridgeOutOfAllowlistProgram = Keypair.generate().publicKey.toBase58();
+const debridgeOutOfAllowlistTransaction =
+  buildSolanaSponsorshipTestTransaction({
+    signer: debridgeSigner,
+    programId: debridgeOutOfAllowlistProgram,
+  });
+const debridgeNoAllowlist = validateEmbeddedSolanaSponsorshipIntentCandidate({
+  flow: "debridge",
+  userId: "user-debridge",
+  signer: debridgeSigner.publicKey.toBase58(),
+  transaction: debridgeOutOfAllowlistTransaction,
+  metadata: {
+    debridgeSponsorshipEligible: true,
+    maxSystemCreateLamports: "0",
+  },
+});
+assert.equal(
+  debridgeNoAllowlist.ok,
+  false,
+  "deBridge sponsorship candidates must fail closed without metadata allowlist",
+);
+assert.ok(
+  debridgeNoAllowlist.reasons.includes("debridge_program_allowlist_missing"),
+  "deBridge sponsorship candidates must report missing allowlist",
+);
+
+const debridgeOutOfAllowlist =
+  validateEmbeddedSolanaSponsorshipIntentCandidate({
+    flow: "debridge",
+    userId: "user-debridge",
+    signer: debridgeSigner.publicKey.toBase58(),
+    transaction: debridgeOutOfAllowlistTransaction,
+    metadata: {
+      debridgeSponsorshipEligible: true,
+      allowedProgramIds: [SOLANA_SYSTEM_PROGRAM_ID],
+      maxSystemCreateLamports: "0",
+    },
+  });
+assert.equal(
+  debridgeOutOfAllowlist.ok,
+  false,
+  "deBridge sponsorship candidates must reject programs outside metadata allowlist",
+);
+assert.ok(
+  debridgeOutOfAllowlist.reasons.includes("unknown_program"),
+  "deBridge sponsorship candidates must report out-of-allowlist programs",
+);
+assert.deepEqual(
+  debridgeOutOfAllowlist.analysis.unknownProgramIds,
+  [debridgeOutOfAllowlistProgram],
+  "deBridge sponsorship candidates must surface the out-of-allowlist program id",
+);
+
+assert.ok(
+  new Set<string>(SOLANA_DFLOW_SPONSORSHIP_ALLOWED_PROGRAMS).has(
+    "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH",
+  ),
+  "DFlow sponsorship allowlist must include the DFlow program",
+);
+assert.match(
+  sponsorshipService,
+  /export function resolveEmbeddedSolanaActualSponsorshipDecision[\s\S]*?observe_mode_log_only[\s\S]*?actualSponsorAllowed:[\s\S]*?inputs\.mode === "enforce" \|\| inputs\.observeCanSponsor === true/,
+  "shared Solana sponsorship policy must disable actual sponsorship in observe log-only mode",
+);
+assert.match(
+  dflowPrivate,
+  /resolveDflowActualSponsorshipDecision[\s\S]*?return resolveEmbeddedSolanaActualSponsorshipDecision\(\{[\s\S]*?flow:\s*"dflow"/,
+  "DFlow sponsorship policy must use the shared actual sponsorship decision helper",
+);
+assert.match(
+  embeddedWalletsRoute,
+  /direct-transfer\/sponsorship-intent[\s\S]*?resolveEmbeddedSolanaActualSponsorshipDecision\(\{[\s\S]*?flow:\s*"directTransfer"[\s\S]*?const disabledReasons = \[\.\.\.sponsorshipDecision\.reasons\][\s\S]*?if \(disabledReasons\.length\)[\s\S]*?reserveEmbeddedSolanaSponsorshipBudget\(/,
+  "direct-transfer sponsorship intent creation must return unavailable before budget reservation when actual sponsorship is disabled",
+);
 assert.match(
   bridgeRoute,
   /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?hasPositiveSponsorFeeLike\(inputs\.payload\)/,
@@ -182,7 +396,17 @@ assert.match(
 );
 assert.match(
   bridgeRoute,
-  /embeddedSolanaSponsorshipFlows\.debridge !== true/,
+  /async function createDebridgeSolanaSponsorshipIntent[\s\S]*?resolveEmbeddedSolanaActualSponsorshipDecision\(\{[\s\S]*?flow:\s*"debridge"[\s\S]*?if \(!sponsorshipDecision\.actualSponsorAllowed\) \{[\s\S]*?return unavailable\(sponsorshipDecision\.reasons\);[\s\S]*?reserveEmbeddedSolanaSponsorshipBudget\(/,
+  "deBridge sponsorship intent creation must return unavailable before budget reservation when actual sponsorship is disabled",
+);
+assert.match(
+  bridgeRoute,
+  /resolveEmbeddedSolanaActualSponsorshipDecision\(\{[\s\S]*?flow:\s*"across"[\s\S]*?hunchSponsorship\.reasons\.push\([\s\S]*?\.\.\.sponsorshipDecision\.reasons[\s\S]*?if \(sponsorshipDecision\.actualSponsorAllowed\)[\s\S]*?reserveEmbeddedSolanaSponsorshipBudget\(/,
+  "Across sponsorship intent creation must keep budget reservation behind the actual sponsorship gate",
+);
+assert.match(
+  bridgeRoute,
+  /flowEnabled:[\s\S]*?embeddedSolanaSponsorshipFlows\.debridge ===[\s\S]*?true/,
   "deBridge sponsorship intent creation must require the Access policy flow flag",
 );
 assert.match(
@@ -262,7 +486,7 @@ assert.match(
 );
 assert.match(
   embeddedWalletsRoute,
-  /assertCachedEmbeddedSolanaSponsorPolicy\(requests\)/,
+  /assertCachedEmbeddedSolanaSponsorPolicy\(\{[\s\S]*?requests,[\s\S]*?userId:\s*user\.id,[\s\S]*?signer:\s*context\.signer/,
   "embedded Solana execute must re-check sponsorship policy for cached sponsor requests",
 );
 assert.match(
@@ -288,17 +512,22 @@ assert.match(
 );
 assert.match(
   adminRoute,
-  /authAccessSponsorshipPolicyChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)/,
+  /analyzeAuthAccessPolicyChange[\s\S]*?sponsorshipPolicyChanged = change\.sponsorshipChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)/,
   "auth_access sponsorship policy writes must require sponsorship permission",
 );
 assert.match(
   adminRoute,
-  /\/admin\/intel\/policies\/:key[\s\S]*?requiredAdminPermissions:\s*\[\][\s\S]*?sponsorshipPolicyChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)[\s\S]*?adminHasPermission\(adminRole, "intel:write"\)/,
-  "auth_access sponsorship policy writes must allow sponsorship:write without broadening normal intel policy writes",
+  /\/admin\/intel\/policies\/:key[\s\S]*?requiredAdminPermissions:\s*\[\][\s\S]*?nonSponsorshipPolicyChanged = change\.nonSponsorshipChanged[\s\S]*?nonSponsorshipPolicyChanged[\s\S]*?adminHasPermission\(adminRole, "intel:write"\)/,
+  "auth_access non-sponsorship policy writes must require intel permission",
 );
 assert.match(
   adminRoute,
-  /authAccessSponsorshipPolicyChanged[\s\S]*?request\.adminActor\?\.kind === "legacy_user"/,
+  /policyPayload = change\.nextPolicy[\s\S]*?payload:\s*policyPayload/,
+  "auth_access partial policy writes must persist the merged effective payload",
+);
+assert.match(
+  adminRoute,
+  /sponsorshipPolicyChanged[\s\S]*?request\.adminActor\?\.kind === "legacy_user"/,
   "auth_access sponsorship policy writes must reject legacy admin fallback",
 );
 assert.match(

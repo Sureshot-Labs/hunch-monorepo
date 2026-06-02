@@ -45,6 +45,7 @@ import {
   readEmbeddedSolanaSponsorshipIntent,
   releaseEmbeddedSolanaSponsorshipBudget,
   reserveEmbeddedSolanaSponsorshipBudget,
+  resolveEmbeddedSolanaActualSponsorshipDecision,
   shouldRequireEmbeddedSolanaSponsorshipRedis,
   type EmbeddedSolanaSponsorshipBudgetReservation,
   type EmbeddedSolanaSponsorshipLimits,
@@ -59,13 +60,7 @@ import {
 import {
   DFLOW_PREDICTION_PROGRAM_ID,
   DFLOW_PROGRAM_ID,
-  SOLANA_ASSOCIATED_TOKEN_PROGRAM_ID,
-  SOLANA_COMPUTE_BUDGET_PROGRAM_ID,
-  SOLANA_LEGACY_MEMO_PROGRAM_ID,
-  SOLANA_MEMO_PROGRAM_ID,
-  SOLANA_SYSTEM_PROGRAM_ID,
-  SOLANA_TOKEN_2022_PROGRAM_ID,
-  SOLANA_TOKEN_PROGRAM_ID,
+  SOLANA_DFLOW_SPONSORSHIP_ALLOWED_PROGRAMS,
   normalizeSolanaPublicKey,
   resolveHunchSolanaSponsorKeypair,
 } from "../services/solana-sponsorship-primitives.js";
@@ -103,17 +98,9 @@ type DflowSponsorshipMarketState = {
   marketInitialized: boolean;
 };
 
-const DFLOW_SPONSORED_ALLOWED_PROGRAMS = new Set([
-  SOLANA_COMPUTE_BUDGET_PROGRAM_ID,
-  SOLANA_SYSTEM_PROGRAM_ID,
-  SOLANA_TOKEN_PROGRAM_ID,
-  SOLANA_TOKEN_2022_PROGRAM_ID,
-  SOLANA_ASSOCIATED_TOKEN_PROGRAM_ID,
-  SOLANA_MEMO_PROGRAM_ID,
-  SOLANA_LEGACY_MEMO_PROGRAM_ID,
-  DFLOW_PROGRAM_ID,
-  DFLOW_PREDICTION_PROGRAM_ID,
-]);
+const DFLOW_SPONSORED_ALLOWED_PROGRAMS: ReadonlySet<string> = new Set(
+  SOLANA_DFLOW_SPONSORSHIP_ALLOWED_PROGRAMS,
+);
 const SOLANA_TX_FEE_LAMPORTS = BigInt(5_000);
 const DFLOW_SPONSORED_MAX_RETRIES = 2;
 const DFLOW_SPONSORED_ATA_RENT_LAMPORTS = BigInt(2_100_000);
@@ -148,6 +135,16 @@ type DflowSponsorshipDecision = {
 };
 
 type DflowOrderPurpose = "trade" | "redeem";
+
+type DflowRentRecipientDecision = {
+  outcomeAccountRentRecipient: string | null;
+  outcomeAccountRentRecipientRole: "sponsor" | "user" | "none";
+  reason:
+    | "not_sponsored"
+    | "sponsored_buy_new_outcome_account"
+    | "unknown_provenance_user_recipient";
+  outputCloseAuthority: string | null;
+};
 
 class DflowSponsoredSubmitLedgerDurabilityError extends Error {
   cause: unknown;
@@ -236,22 +233,13 @@ export function resolveDflowActualSponsorshipDecision(inputs: {
   mode: EmbeddedSolanaSponsorshipMode;
   observeCanSponsor: boolean;
 }): DflowSponsorshipDecision {
-  const reasons: string[] = [];
-  if (!inputs.embeddedSolanaSponsorship) reasons.push("sponsorship_disabled");
-  if (!inputs.dflowFlowEnabled) reasons.push("flow_dflow_disabled");
-  if (inputs.mode === "observe" && !inputs.observeCanSponsor) {
-    reasons.push("observe_mode_log_only");
-  }
-  const policyAllows =
-    inputs.embeddedSolanaSponsorship === true &&
-    inputs.dflowFlowEnabled === true;
-  return {
-    policyAllows,
-    actualSponsorAllowed:
-      policyAllows &&
-      (inputs.mode === "enforce" || inputs.observeCanSponsor === true),
-    reasons,
-  };
+  return resolveEmbeddedSolanaActualSponsorshipDecision({
+    embeddedSolanaSponsorship: inputs.embeddedSolanaSponsorship,
+    flow: "dflow",
+    flowEnabled: inputs.dflowFlowEnabled,
+    mode: inputs.mode,
+    observeCanSponsor: inputs.observeCanSponsor,
+  });
 }
 
 async function resolveDflowSponsorConfig(): Promise<DflowSponsorConfig> {
@@ -295,6 +283,16 @@ function getIntentMetadataString(
 ): string | null {
   const value = metadata?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function getIntentMetadataRecord(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): Record<string, unknown> | null {
+  const value = metadata?.[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function getIntentMetadataBoolean(
@@ -373,6 +371,56 @@ function getDflowUserFundedFeeParams(
   });
 }
 
+function resolveDflowRentRecipientDecision(inputs: {
+  query: DflowOrderQueryParams;
+  userPublicKey: string;
+  sponsored: boolean;
+  sponsorAddress?: string | null;
+}): DflowRentRecipientDecision {
+  const sponsorAddress = inputs.sponsorAddress?.trim() || null;
+  if (!inputs.sponsored || !sponsorAddress) {
+    return {
+      outcomeAccountRentRecipient: null,
+      outcomeAccountRentRecipientRole: "none",
+      reason: "not_sponsored",
+      outputCloseAuthority: null,
+    };
+  }
+
+  const sponsoredBuy =
+    (inputs.query.purpose ?? "trade") !== "redeem" &&
+    inputs.query.inputMint === env.solanaUsdcMint &&
+    inputs.query.outputMint !== env.solanaUsdcMint;
+  if (sponsoredBuy) {
+    return {
+      outcomeAccountRentRecipient: sponsorAddress,
+      outcomeAccountRentRecipientRole: "sponsor",
+      reason: "sponsored_buy_new_outcome_account",
+      outputCloseAuthority: sponsorAddress,
+    };
+  }
+
+  return {
+    outcomeAccountRentRecipient: inputs.userPublicKey,
+    outcomeAccountRentRecipientRole: "user",
+    reason: "unknown_provenance_user_recipient",
+    outputCloseAuthority: null,
+  };
+}
+
+function shouldAttributeRentToSponsor(
+  metadata: Record<string, unknown> | undefined,
+): boolean {
+  const decision = getIntentMetadataRecord(metadata, "rentRecipientDecision");
+  const role = getIntentMetadataString(
+    decision ?? undefined,
+    "outcomeAccountRentRecipientRole",
+  );
+  if (role === "sponsor") return true;
+  if (role === "user" || role === "none") return false;
+  return true;
+}
+
 export function buildDflowOrderRequestQuery(inputs: {
   query: DflowOrderQueryParams;
   userPublicKey: string;
@@ -381,6 +429,7 @@ export function buildDflowOrderRequestQuery(inputs: {
 }): Record<string, string | number | boolean | undefined> {
   const query = inputs.query;
   const sponsorAddress = inputs.sponsorAddress?.trim() || null;
+  const rentRecipientDecision = resolveDflowRentRecipientDecision(inputs);
   return {
     inputMint: query.inputMint,
     outputMint: query.outputMint,
@@ -399,9 +448,17 @@ export function buildDflowOrderRequestQuery(inputs: {
       ? {
           sponsor: sponsorAddress,
           sponsorExec: true,
-          outcomeAccountRentRecipient: sponsorAddress,
-          ...(query.outputMint !== env.solanaUsdcMint
-            ? { outputCloseAuthority: sponsorAddress }
+          ...(rentRecipientDecision.outcomeAccountRentRecipient
+            ? {
+                outcomeAccountRentRecipient:
+                  rentRecipientDecision.outcomeAccountRentRecipient,
+              }
+            : {}),
+          ...(rentRecipientDecision.outputCloseAuthority
+            ? {
+                outputCloseAuthority:
+                  rentRecipientDecision.outputCloseAuthority,
+              }
             : {}),
         }
       : {}),
@@ -549,6 +606,12 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
     const messageDigest = (
       inputs.computeMessageDigest ?? computeEmbeddedSolanaMessageDigest
     )(transaction);
+    const rentRecipientDecision = resolveDflowRentRecipientDecision({
+      query: inputs.query,
+      userPublicKey: inputs.userPublicKey,
+      sponsored: true,
+      sponsorAddress: inputs.sponsorAddress,
+    });
     const expectedAtaCreateCount =
       inputs.query.outputMint !== env.solanaUsdcMint ? 1 : 0;
     const expectedDflowOutcomeRentLamports = "0";
@@ -566,6 +629,7 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
       messageDigest,
       sponsorAddress: inputs.sponsorAddress,
       hunchSponsoredDflow: true,
+      rentRecipientDecision,
     };
     const analysis = (
       inputs.analyzeTransaction ?? analyzeEmbeddedSolanaTransaction
@@ -677,6 +741,8 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
       validation.estimatedSponsorLamports > validation.estimatedFeeLamports
         ? validation.estimatedSponsorLamports - validation.estimatedFeeLamports
         : BigInt(0);
+    const sponsorRentRecipient =
+      rentRecipientDecision.outcomeAccountRentRecipientRole === "sponsor";
     try {
       await (inputs.upsertLedger ?? upsertSolanaSponsorshipLedger)({
         userId: inputs.userId,
@@ -693,16 +759,20 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
         estimatedSponsorLamports:
           validation.estimatedSponsorLamports.toString(),
         rentLamports:
-          estimatedNonFeeLamports > BigInt(0)
+          sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
             ? estimatedNonFeeLamports.toString()
             : null,
-        rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+        rentStatus:
+          sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
+            ? "locked"
+            : "unknown",
         metadata: {
           purpose: inputs.query.purpose ?? "trade",
           marketIds: inputs.sponsorshipMarketState.marketIds,
           maxSystemCreateLamports: "0",
           maxAtaCreateCount: expectedAtaCreateCount,
           expectedDflowOutcomeRentLamports,
+          rentRecipientDecision,
           budgetReserved: true,
           budgetEstimatedLamports:
             validation.estimatedSponsorLamports.toString(),
@@ -1105,6 +1175,11 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     validation.estimatedSponsorLamports > validation.estimatedFeeLamports
       ? validation.estimatedSponsorLamports - validation.estimatedFeeLamports
       : BigInt(0);
+  const rentRecipientDecision = getIntentMetadataRecord(
+    intent.metadata,
+    "rentRecipientDecision",
+  );
+  const sponsorRentRecipient = shouldAttributeRentToSponsor(intent.metadata);
 
   const policy = await resolveAuthAccessPolicy(pool);
   if (
@@ -1140,16 +1215,20 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     txSignature: expectedSignature,
     estimatedSponsorLamports,
     rentLamports:
-      estimatedNonFeeLamports > BigInt(0)
+      sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
         ? estimatedNonFeeLamports.toString()
         : null,
-    rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
+    rentStatus:
+      sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
+        ? "locked"
+        : "unknown",
     metadata: {
       signerAddresses,
       programIds: analysis.programIds,
       ataCreateCount: analysis.ataCreateCount,
       systemCreateLamports: analysis.systemCreateLamports,
       sponsorSignedAt: new Date().toISOString(),
+      ...(rentRecipientDecision ? { rentRecipientDecision } : {}),
     },
   });
 
@@ -1184,11 +1263,14 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       txSignature: expectedSignature,
       estimatedSponsorLamports,
       rentLamports:
-        estimatedNonFeeLamports > BigInt(0)
+        sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
           ? estimatedNonFeeLamports.toString()
           : null,
       rentStatus: "unknown",
       error: error instanceof Error ? error.message : String(error),
+      metadata: {
+        ...(rentRecipientDecision ? { rentRecipientDecision } : {}),
+      },
     });
     throw error;
   }
@@ -1210,11 +1292,17 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
         txSignature: signature,
         estimatedSponsorLamports,
         rentLamports:
-          estimatedNonFeeLamports > BigInt(0)
+          sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
             ? estimatedNonFeeLamports.toString()
             : null,
-        rentStatus: estimatedNonFeeLamports > BigInt(0) ? "locked" : "unknown",
-        metadata: { submittedAt: new Date().toISOString() },
+        rentStatus:
+          sponsorRentRecipient && estimatedNonFeeLamports > BigInt(0)
+            ? "locked"
+            : "unknown",
+        metadata: {
+          submittedAt: new Date().toISOString(),
+          ...(rentRecipientDecision ? { rentRecipientDecision } : {}),
+        },
       });
       break;
     } catch (error) {
