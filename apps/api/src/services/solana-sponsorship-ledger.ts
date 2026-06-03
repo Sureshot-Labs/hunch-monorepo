@@ -15,6 +15,12 @@ type SolanaSponsorshipLedgerFlow =
   | "debridge";
 
 type SolanaSponsorshipLedgerVenue = "kalshi" | "bridge" | "wallet";
+type SolanaSponsorshipLedgerRentStatus =
+  | "unknown"
+  | "locked"
+  | "returned"
+  | "lost"
+  | "partially_reclaimed";
 
 export async function upsertSolanaSponsorshipLedger(inputs: {
   userId: string | null;
@@ -34,7 +40,7 @@ export async function upsertSolanaSponsorshipLedger(inputs: {
   estimatedSponsorLamports?: string | null;
   actualSponsorLamports?: string | null;
   rentLamports?: string | null;
-  rentStatus?: "unknown" | "locked" | "returned" | "lost" | null;
+  rentStatus?: SolanaSponsorshipLedgerRentStatus | null;
   error?: string | null;
   metadata?: Record<string, unknown>;
 }): Promise<void> {

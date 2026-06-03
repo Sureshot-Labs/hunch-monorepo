@@ -200,15 +200,10 @@ function deriveRentReclaimState(
   rentStatus: string | null,
   latestCloseStatus: string | null,
   reclaimedLamports: string,
+  remainingLamports: string | null,
 ): string | null {
-  const hasRecoveredLamports = (lamportBigInt(reclaimedLamports) ?? 0n) > 0n;
-  if (
-    (rentStatus === "locked" || rentStatus === "lost") &&
-    latestCloseStatus === "closed" &&
-    hasRecoveredLamports
-  ) {
-    return "returned";
-  }
+  const recoveredLamports = lamportBigInt(reclaimedLamports) ?? 0n;
+  const hasRecoveredLamports = recoveredLamports > 0n;
   if (
     (rentStatus === "locked" || rentStatus === "lost") &&
     latestCloseStatus === "submitted"
@@ -220,6 +215,15 @@ function deriveRentReclaimState(
     latestCloseStatus === "failed"
   ) {
     return "close_failed";
+  }
+  if (
+    (rentStatus === "locked" || rentStatus === "lost") &&
+    (latestCloseStatus === "closed" || latestCloseStatus == null) &&
+    hasRecoveredLamports
+  ) {
+    return (lamportBigInt(remainingLamports) ?? 1n) === 0n
+      ? "returned"
+      : "partially_reclaimed";
   }
   return null;
 }
@@ -318,6 +322,9 @@ export function mapAdminSolanaSponsorshipLedgerRow(row: SponsorshipLedgerRow) {
     rentReclaim?.netActualSponsorLamports,
   );
   const remainingOpenLamports = lamportString(rentReclaim?.remainingOpenLamports);
+  const remainingSponsorLossLamports = lamportString(
+    rentReclaim?.remainingSponsorLossLamports,
+  );
   const reclaimedAt = stringValue(rentReclaim?.reclaimedAt);
   const { latestCloseStatus, latestCloseSignature } =
     latestCloseAudit(metadata);
@@ -325,6 +332,7 @@ export function mapAdminSolanaSponsorshipLedgerRow(row: SponsorshipLedgerRow) {
     row.rent_status,
     latestCloseStatus,
     reclaimedLamports,
+    remainingSponsorLossLamports ?? remainingOpenLamports ?? row.rent_lamports,
   );
   const reconciledAt =
     stringValue(dflowReconciliation?.reconciledAt) ??

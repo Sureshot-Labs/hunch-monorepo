@@ -41,6 +41,7 @@ const kalshiExecutionReconcile = readApiSourceFile(
   "services",
   "kalshi-execution-reconcile.ts",
 );
+const solanaRpcSource = readApiSourceFile("services", "solana-rpc.ts");
 const apiEnv = readApiSourceFile("env.ts");
 const adminRoute = readApiSourceFile("routes", "admin.ts");
 const adminAuth = readApiSourceFile("services", "admin-auth.ts");
@@ -100,6 +101,26 @@ assert.doesNotMatch(
   dflowPrivate,
   /signAndBroadcastSponsoredDflowTransaction\(\{[\s\S]*?skipPreflight:\s*request\.body\.skipPreflight/,
   "sponsored DFlow submit must not forward client skipPreflight",
+);
+assert.match(
+  solanaRpcSource,
+  /export function getSolanaRpcSimulationLogs[\s\S]*?sanitizeSimulationLogs/,
+  "Solana RPC errors must preserve sanitized simulation logs",
+);
+assert.match(
+  solanaRpcSource,
+  /rpc\.error\.data[\s\S]*?error\.rpcErrorData[\s\S]*?error\.simulationLogs/,
+  "Solana RPC sendTransaction failures must attach sanitized error data to thrown errors",
+);
+assert.match(
+  dflowPrivate,
+  /getSolanaRpcSimulationLogs\(error\)[\s\S]*?metadata:\s*\{[\s\S]*?submission:\s*\{[\s\S]*?simulationLogs/,
+  "failed sponsored DFlow submits must store simulation logs in ledger metadata",
+);
+assert.match(
+  dflowPrivate,
+  /DFlow sponsored submit failed[\s\S]*?getSolanaRpcSimulationLogs\(error\)[\s\S]*?reply\.send\(\{[\s\S]*?simulationLogs/,
+  "failed sponsored DFlow submit responses must expose simulation logs for local debugging",
 );
 
 assert.match(

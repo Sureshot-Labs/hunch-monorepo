@@ -37,7 +37,13 @@ type SponsorshipRentReclaimRow = {
   tx_signature: string | null;
   estimated_sponsor_lamports: string | null;
   actual_sponsor_lamports: string | null;
-  rent_status: "unknown" | "locked" | "returned" | "lost" | null;
+  rent_status:
+    | "unknown"
+    | "locked"
+    | "returned"
+    | "lost"
+    | "partially_reclaimed"
+    | null;
   metadata: unknown;
 };
 
@@ -886,7 +892,7 @@ async function updateReclaimRow(
   row: SponsorshipRentReclaimRow,
   inputs: {
     rentLamports: bigint;
-    rentStatus: "returned" | "lost" | "locked";
+    rentStatus: "returned" | "lost" | "locked" | "partially_reclaimed";
     actualSponsorLamports: bigint | null;
     metadata: Record<string, unknown>;
   },
@@ -902,7 +908,7 @@ async function updateReclaimRow(
         metadata = metadata || $5::jsonb
       where id = $1
         and status in ('confirmed', 'failed')
-        and rent_status in ('locked', 'lost', 'returned')
+        and rent_status in ('locked', 'lost', 'returned', 'partially_reclaimed')
     `,
     [
       row.id,
@@ -1136,12 +1142,16 @@ export async function reclaimSolanaSponsorshipRentAccounts(
         metadata,
         remainingSponsorLossLamports,
       });
+      const reclaimedLamports =
+        getRentReclaimReclaimedLamports(accountingMetadata);
       const rentStatus =
         remainingSponsorLossLamports === 0n
           ? "returned"
           : hasPendingRecoverableRent
             ? "locked"
-            : "lost";
+            : reclaimedLamports > 0n
+              ? "partially_reclaimed"
+              : "lost";
       await updateReclaimRow(pool, row, {
         rentLamports: remainingSponsorLossLamports,
         rentStatus,

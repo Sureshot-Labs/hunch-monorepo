@@ -270,7 +270,7 @@ async function hasPriorSponsorshipEvidence(
         )
         and (
           rent_lamports is not null
-          or rent_status in ('locked', 'lost', 'returned')
+          or rent_status in ('locked', 'lost', 'returned', 'partially_reclaimed')
           or metadata->>'hunchSponsoredDflow' = 'true'
         )
       order by updated_at desc

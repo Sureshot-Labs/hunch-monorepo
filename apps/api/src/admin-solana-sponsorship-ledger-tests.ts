@@ -306,6 +306,44 @@ await test("closed recovered close maps stale lost row to returned", () => {
   assert.equal(mapped.latestCloseSignature, "closedCloseSig");
 });
 
+await test("closed recovered close maps remaining stale lost row to partially_reclaimed", () => {
+  const mapped = mapAdminSolanaSponsorshipLedgerRow(
+    ledgerRow({
+      rent_status: "lost",
+      rent_lamports: "2079080",
+      metadata: {
+        sponsorshipRentReclaim: {
+          reclaimedAt: "2026-06-02T12:10:00.000Z",
+          reclaimedLamports: "2039280",
+          remainingOpenLamports: "2079080",
+          remainingSponsorLossLamports: "2079080",
+          candidates: [
+            {
+              account: "A",
+              closeStatus: "closed",
+              closeSignature: "closedCloseSig",
+              reclaimedLamports: "2039280",
+            },
+          ],
+          closeTransactions: [
+            {
+              signature: "closedCloseSig",
+              accounts: ["A"],
+              feeLamports: "5000",
+              status: "closed",
+              submittedAt: "2026-06-02T12:10:00.000Z",
+            },
+          ],
+        },
+      },
+    }) as never,
+  );
+
+  assert.equal(mapped.rentReclaimState, "partially_reclaimed");
+  assert.equal(mapped.latestCloseStatus, "closed");
+  assert.equal(mapped.latestCloseSignature, "closedCloseSig");
+});
+
 await test("filter builder covers sponsorship ledger fields", () => {
   const filters = buildAdminSolanaSponsorshipLedgerFilters({
     flow: "directTransfer",

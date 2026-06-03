@@ -13,6 +13,116 @@ type JsonRpcResponse<T> =
   | { jsonrpc: "2.0"; id: number; result: T }
   | { jsonrpc: "2.0"; id: number; error: JsonRpcError };
 
+const SOLANA_RPC_SIMULATION_LOG_LIMIT = 50;
+const SOLANA_RPC_SIMULATION_LOG_CHAR_LIMIT = 500;
+const SOLANA_RPC_ERROR_STRING_LIMIT = 2_000;
+const SOLANA_RPC_ERROR_OBJECT_KEY_LIMIT = 24;
+const SOLANA_RPC_ERROR_ARRAY_LIMIT = 50;
+const SOLANA_RPC_ERROR_DEPTH_LIMIT = 4;
+
+export type SolanaRpcErrorWithData = Error & {
+  rpcErrorData?: unknown;
+  simulationLogs?: string[];
+};
+
+function sanitizeRpcString(value: string, limit: number): string {
+  const trimmed = value.trim();
+  return trimmed.length > limit ? `${trimmed.slice(0, limit)}...` : trimmed;
+}
+
+function sanitizeSimulationLogs(logs: unknown): string[] | null {
+  if (!Array.isArray(logs)) return null;
+  const sanitized = logs
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) =>
+      sanitizeRpcString(entry, SOLANA_RPC_SIMULATION_LOG_CHAR_LIMIT),
+    )
+    .filter(Boolean)
+    .slice(0, SOLANA_RPC_SIMULATION_LOG_LIMIT);
+  return sanitized.length ? sanitized : null;
+}
+
+function sanitizeRpcJsonValue(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === "number" || typeof value === "boolean")
+    return value;
+  if (typeof value === "string") {
+    return sanitizeRpcString(value, SOLANA_RPC_ERROR_STRING_LIMIT);
+  }
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) {
+    if (depth >= SOLANA_RPC_ERROR_DEPTH_LIMIT) return "[truncated]";
+    return value
+      .slice(0, SOLANA_RPC_ERROR_ARRAY_LIMIT)
+      .map((entry) => sanitizeRpcJsonValue(entry, depth + 1));
+  }
+  if (isRecord(value)) {
+    if (depth >= SOLANA_RPC_ERROR_DEPTH_LIMIT) return "[truncated]";
+    const output: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value).slice(
+      0,
+      SOLANA_RPC_ERROR_OBJECT_KEY_LIMIT,
+    )) {
+      output[key] = sanitizeRpcJsonValue(nested, depth + 1);
+    }
+    return output;
+  }
+  return sanitizeRpcString(String(value), SOLANA_RPC_ERROR_STRING_LIMIT);
+}
+
+function parseJsonLikeRpcData(data: string): unknown | null {
+  try {
+    return JSON.parse(data) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function extractSolanaRpcSimulationLogs(data: unknown): string[] | null {
+  if (typeof data === "string") {
+    const parsed = parseJsonLikeRpcData(data);
+    return parsed ? extractSolanaRpcSimulationLogs(parsed) : null;
+  }
+  if (!isRecord(data)) return null;
+  return sanitizeSimulationLogs(data.logs);
+}
+
+export function sanitizeSolanaRpcErrorData(data: unknown): unknown | null {
+  if (data == null) return null;
+  if (typeof data === "string") {
+    const parsed = parseJsonLikeRpcData(data);
+    return parsed
+      ? sanitizeSolanaRpcErrorData(parsed)
+      : sanitizeRpcString(data, SOLANA_RPC_ERROR_STRING_LIMIT);
+  }
+  if (!isRecord(data)) return sanitizeRpcJsonValue(data);
+
+  const output: Record<string, unknown> = {};
+  if ("err" in data) output.err = sanitizeRpcJsonValue(data.err);
+  const logs = sanitizeSimulationLogs(data.logs);
+  if (logs) output.logs = logs;
+  if (typeof data.unitsConsumed === "number") {
+    output.unitsConsumed = data.unitsConsumed;
+  }
+  if (isRecord(data.replacementBlockhash)) {
+    output.replacementBlockhash = sanitizeRpcJsonValue(
+      data.replacementBlockhash,
+    );
+  }
+
+  if (Object.keys(output).length > 0) return output;
+  return sanitizeRpcJsonValue(data);
+}
+
+export function getSolanaRpcErrorData(error: unknown): unknown | null {
+  if (!isRecord(error) || !("rpcErrorData" in error)) return null;
+  return error.rpcErrorData ?? null;
+}
+
+export function getSolanaRpcSimulationLogs(error: unknown): string[] | null {
+  if (!isRecord(error) || !Array.isArray(error.simulationLogs)) return null;
+  return sanitizeSimulationLogs(error.simulationLogs);
+}
+
 function isSolanaMintNotFound(error: unknown): boolean {
   if (!error) return false;
   const message = error instanceof Error ? error.message : String(error);
@@ -134,7 +244,13 @@ async function solanaRpcRequest<T>(inputs: {
               : "Unknown Solana RPC error";
           const error = new Error(
             `Solana RPC ${inputs.method} error: ${message}`,
+          ) as SolanaRpcErrorWithData;
+          const rpcErrorData = sanitizeSolanaRpcErrorData(rpc.error.data);
+          const simulationLogs = extractSolanaRpcSimulationLogs(
+            rpc.error.data,
           );
+          if (rpcErrorData != null) error.rpcErrorData = rpcErrorData;
+          if (simulationLogs) error.simulationLogs = simulationLogs;
           lastError = error;
           if (/too many requests/i.test(message) && inputs.rpcUrls.length > 1) {
             continue;

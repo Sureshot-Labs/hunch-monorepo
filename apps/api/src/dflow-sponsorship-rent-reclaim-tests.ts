@@ -264,6 +264,63 @@ await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async 
   );
 });
 
+await test("marks partially_reclaimed when only some sponsor rent can close", async () => {
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000020",
+      metadata: metadata(["reclaimable", "notClosable"], {
+        currentNonFeeCostLamports: "4113360",
+      }),
+    }),
+  ];
+  const db = fakePool(rows);
+  const closeCalls: string[][] = [];
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) =>
+      account === "notClosable"
+        ? tokenAccountInfo({ account, closeAuthority: "OtherAuthority" })
+        : tokenAccountInfo({ account }),
+    closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => {
+      closeCalls.push(accounts.map((entry) => entry.account));
+      return {
+        accountResults: new Map(
+          accounts.map((entry) => [
+            entry.account,
+            {
+              status: "closed" as const,
+              signature: "partialCloseSig",
+              reclaimedLamports: entry.lamports,
+            },
+          ]),
+        ),
+        closeTransactions: [
+          {
+            signature: "partialCloseSig",
+            accounts: accounts.map((entry) => entry.account),
+            feeLamports: "5000",
+            status: "closed",
+          },
+        ],
+      };
+    },
+  });
+
+  assert.deepEqual(closeCalls, [["reclaimable"]]);
+  assert.equal(summary.closed, 1);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.reclaimedLamports, "2039280");
+  assert.equal(db.updates[0]?.[1], "2074080");
+  assert.equal(db.updates[0]?.[2], "partially_reclaimed");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  const reclaim = metadataUpdate.sponsorshipRentReclaim;
+  assert.equal(reclaim.reclaimedLamports, "2039280");
+  assert.equal(reclaim.remainingSponsorLossLamports, "2074080");
+  assert.equal(reclaim.candidates[1].reason, "close_authority_not_sponsor");
+});
+
 await test("closes empty user-owned token account when sponsor is close authority", async () => {
   const rows = [
     row({

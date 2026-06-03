@@ -34,6 +34,8 @@ import {
   fetchSolanaSignatureStatus,
   fetchSolanaTokenBalanceByOwnerAndMint,
   formatUiAmount,
+  getSolanaRpcErrorData,
+  getSolanaRpcSimulationLogs,
   sendSolanaRawTransaction,
   waitForSolanaSignatureConfirmation,
 } from "../services/solana-rpc.js";
@@ -1255,6 +1257,8 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       ),
     });
   } catch (error) {
+    const rpcErrorData = getSolanaRpcErrorData(error);
+    const simulationLogs = getSolanaRpcSimulationLogs(error);
     await upsertSolanaSponsorshipLedger({
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
@@ -1277,6 +1281,11 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
       error: error instanceof Error ? error.message : String(error),
       metadata: {
         ...(rentRecipientDecision ? { rentRecipientDecision } : {}),
+        submission: {
+          failedAt: new Date().toISOString(),
+          ...(rpcErrorData != null ? { rpcErrorData } : {}),
+          ...(simulationLogs ? { simulationLogs } : {}),
+        },
       },
     });
     throw error;
@@ -2774,12 +2783,16 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           { error, userId: user.id, walletAddress },
           "DFlow sponsored submit failed",
         );
+        const simulationLogs = getSolanaRpcSimulationLogs(error);
+        const rpcErrorData = getSolanaRpcErrorData(error);
         reply.code(502);
         return reply.send({
           error:
             error instanceof Error && error.message
               ? error.message
               : "DFlow sponsored submit failed",
+          ...(simulationLogs ? { simulationLogs } : {}),
+          ...(rpcErrorData != null ? { rpcErrorData } : {}),
         });
       }
     },
