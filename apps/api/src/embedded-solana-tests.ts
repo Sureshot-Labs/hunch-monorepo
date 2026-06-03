@@ -42,7 +42,7 @@ const SPL_TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
 );
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
-const MIN_SOL_SOURCE_BALANCE_LAMPORTS = 20_000_000n;
+const USER_TX_FEE_BUFFER_LAMPORTS = 3_000_000n;
 const SPONSOR_BASE_REQUIREMENT_LAMPORTS = 8_000_000n;
 
 function serializeTransaction(
@@ -276,7 +276,7 @@ const tests: TestCase[] = [
               },
             ],
             fetchSponsorBalanceLamports: async () =>
-              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+              USER_TX_FEE_BUFFER_LAMPORTS - 1n,
           }),
         /Add SOL to this Solana wallet for network fees and account setup/,
       );
@@ -304,7 +304,7 @@ const tests: TestCase[] = [
           },
         ],
         fetchSponsorBalanceLamports: async () =>
-          SPONSOR_BASE_REQUIREMENT_LAMPORTS,
+          USER_TX_FEE_BUFFER_LAMPORTS,
       });
 
       const request = requests[0];
@@ -313,15 +313,17 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "prepare embedded solana requests rejects native SOL source below hard minimum",
+    name: "prepare embedded solana requests rejects native SOL source below spend plus fee buffer",
     run: async () => {
+      const transferLamports = 1_000_000n;
       const transaction = serializeTransaction([
         SystemProgram.transfer({
           fromPubkey: signerKeypair.publicKey,
           toPubkey: Keypair.generate().publicKey,
-          lamports: 1_000_000,
+          lamports: Number(transferLamports),
         }),
       ]);
+      const requiredLamports = transferLamports + USER_TX_FEE_BUFFER_LAMPORTS;
 
       await assert.rejects(
         async () =>
@@ -335,22 +337,24 @@ const tests: TestCase[] = [
               },
             ],
             fetchSponsorBalanceLamports: async () =>
-              MIN_SOL_SOURCE_BALANCE_LAMPORTS - 1n,
+              requiredLamports - 1n,
           }),
-        /SOL balance is reserved for network fees/,
+        /Add SOL to this Solana wallet for network fees and account setup/,
       );
     },
   },
   {
-    name: "prepare embedded solana requests allows native SOL source at hard minimum without sponsorship",
+    name: "prepare embedded solana requests allows native SOL source at spend plus fee buffer without sponsorship",
     run: async () => {
+      const transferLamports = 1_000_000n;
       const transaction = serializeTransaction([
         SystemProgram.transfer({
           fromPubkey: signerKeypair.publicKey,
           toPubkey: Keypair.generate().publicKey,
-          lamports: 1_000_000,
+          lamports: Number(transferLamports),
         }),
       ]);
+      const requiredLamports = transferLamports + USER_TX_FEE_BUFFER_LAMPORTS;
 
       const requests = await prepareSponsoredEmbeddedSolanaTransactionRequests({
         context: walletContext,
@@ -361,8 +365,7 @@ const tests: TestCase[] = [
             transaction,
           },
         ],
-        fetchSponsorBalanceLamports: async () =>
-          MIN_SOL_SOURCE_BALANCE_LAMPORTS,
+        fetchSponsorBalanceLamports: async () => requiredLamports,
       });
 
       const request = requests[0];
@@ -371,7 +374,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "prepare embedded solana requests rejects wrapped SOL source below hard minimum",
+    name: "prepare embedded solana requests rejects wrapped SOL source below fee buffer",
     run: async () => {
       const wrappedSolAccount = Keypair.generate().publicKey;
       const transaction = serializeTransaction([
@@ -400,9 +403,9 @@ const tests: TestCase[] = [
               },
             ],
             fetchSponsorBalanceLamports: async () =>
-              MIN_SOL_SOURCE_BALANCE_LAMPORTS - 1n,
+              USER_TX_FEE_BUFFER_LAMPORTS - 1n,
           }),
-        /SOL balance is reserved for network fees/,
+        /Add SOL to this Solana wallet for network fees and account setup/,
       );
     },
   },

@@ -20,17 +20,16 @@ const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
-const EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_LAMPORTS = BigInt(20_000_000);
+const LAMPORTS_PER_SOL = BigInt(1_000_000_000);
 const EMBEDDED_SOLANA_SPONSOR_FLOOR_LAMPORTS = BigInt(3_000_000);
 const EMBEDDED_SOLANA_TX_FEE_LAMPORTS = BigInt(5_000_000);
+const EMBEDDED_SOLANA_USER_TX_FEE_BUFFER_LAMPORTS = BigInt(3_000_000);
 const EMBEDDED_SOLANA_BASE_SPONSOR_THRESHOLD_LAMPORTS =
   EMBEDDED_SOLANA_SPONSOR_FLOOR_LAMPORTS + EMBEDDED_SOLANA_TX_FEE_LAMPORTS;
-const EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_ERROR =
-  "SOL balance is reserved for network fees. Deposit more SOL to convert.";
 const EMBEDDED_SOLANA_BALANCE_VERIFICATION_ERROR =
   "Unable to verify Solana balance. Retry in a few seconds.";
-const EMBEDDED_SOLANA_SOL_REQUIRED_ERROR =
-  "Add SOL to this Solana wallet for network fees and account setup (about 0.02 SOL), then try again.";
+const EMBEDDED_SOLANA_SOL_REQUIRED_ERROR_PREFIX =
+  "Add SOL to this Solana wallet for network fees and account setup, or reduce the amount, then try again.";
 
 type CompiledSolanaInstruction =
   VersionedTransaction["message"]["compiledInstructions"][number];
@@ -126,10 +125,24 @@ function instructionTransfersNativeSolFromSignerOrFeePayer(
   instruction: CompiledSolanaInstruction,
   signer: string,
 ): boolean {
+  return (
+    instructionTransfersNativeSolLamportsFromSignerOrFeePayer(
+      tx,
+      instruction,
+      signer,
+    ) > BigInt(0)
+  );
+}
+
+function instructionTransfersNativeSolLamportsFromSignerOrFeePayer(
+  tx: VersionedTransaction,
+  instruction: CompiledSolanaInstruction,
+  signer: string,
+): bigint {
   const transactionInstruction = buildTransactionInstruction(tx, instruction);
-  if (!transactionInstruction) return false;
+  if (!transactionInstruction) return BigInt(0);
   if (!transactionInstruction.programId.equals(SystemProgram.programId)) {
-    return false;
+    return BigInt(0);
   }
 
   const feePayer = tx.message.staticAccountKeys[0]?.toBase58() ?? null;
@@ -141,25 +154,27 @@ function instructionTransfersNativeSolFromSignerOrFeePayer(
     );
     if (instructionType === "Transfer") {
       const decoded = SystemInstruction.decodeTransfer(transactionInstruction);
-      return (
-        BigInt(decoded.lamports.toString()) > BigInt(0) &&
+      const lamports = BigInt(decoded.lamports.toString());
+      return lamports > BigInt(0) &&
         blockedSources.has(decoded.fromPubkey.toBase58())
-      );
+        ? lamports
+        : BigInt(0);
     }
     if (instructionType === "TransferWithSeed") {
       const decoded = SystemInstruction.decodeTransferWithSeed(
         transactionInstruction,
       );
-      return (
-        BigInt(decoded.lamports.toString()) > BigInt(0) &&
+      const lamports = BigInt(decoded.lamports.toString());
+      return lamports > BigInt(0) &&
         blockedSources.has(decoded.fromPubkey.toBase58())
-      );
+        ? lamports
+        : BigInt(0);
     }
   } catch {
-    return false;
+    return BigInt(0);
   }
 
-  return false;
+  return BigInt(0);
 }
 
 function instructionCreatesAccountWithSignerOrFeePayerLamports(
@@ -258,6 +273,59 @@ export function getEmbeddedSolanaSponsorshipRequirementLamports(inputs: {
     );
   }
   return requiredLamports;
+}
+
+function getEmbeddedSolanaUserPaidRequirementLamports(inputs: {
+  signer: string;
+  transaction: string;
+}): bigint {
+  const tx = deserializeEmbeddedSolanaTransaction(inputs.transaction);
+  if (!tx) return EMBEDDED_SOLANA_BASE_SPONSOR_THRESHOLD_LAMPORTS;
+
+  let requiredLamports = EMBEDDED_SOLANA_USER_TX_FEE_BUFFER_LAMPORTS;
+  for (const instruction of tx.message.compiledInstructions) {
+    requiredLamports += instructionTransfersNativeSolLamportsFromSignerOrFeePayer(
+      tx,
+      instruction,
+      inputs.signer,
+    );
+    requiredLamports += instructionCreatesAccountWithSignerOrFeePayerLamports(
+      tx,
+      instruction,
+      inputs.signer,
+    );
+  }
+  return requiredLamports;
+}
+
+function formatSolLamports(lamports: bigint): string {
+  const sign = lamports < BigInt(0) ? "-" : "";
+  const absolute = lamports < BigInt(0) ? -lamports : lamports;
+  const whole = absolute / LAMPORTS_PER_SOL;
+  const fraction = absolute % LAMPORTS_PER_SOL;
+  const fractionText = fraction
+    .toString()
+    .padStart(9, "0")
+    .slice(0, 6)
+    .replace(/0+$/, "");
+  return fractionText
+    ? `${sign}${whole.toString()}.${fractionText}`
+    : `${sign}${whole.toString()}`;
+}
+
+function buildEmbeddedSolanaSolRequiredError(inputs: {
+  requiredLamports: bigint;
+  currentLamports: bigint | null;
+}): Error {
+  const currentLabel =
+    inputs.currentLamports == null
+      ? "unknown"
+      : `${formatSolLamports(inputs.currentLamports)} SOL`;
+  return new Error(
+    `${EMBEDDED_SOLANA_SOL_REQUIRED_ERROR_PREFIX} Needs at least ${formatSolLamports(
+      inputs.requiredLamports,
+    )} SOL available; current balance is ${currentLabel}.`,
+  );
 }
 
 function resolveEmbeddedSolanaSponsor(inputs: {
@@ -618,20 +686,15 @@ function hasEmbeddedSolanaNativeSourceTransaction(inputs: {
 function getEmbeddedSolanaRequiredSignerLamports(inputs: {
   context: EmbeddedSolanaWalletContext;
   transactions: EmbeddedSolanaTransactionSpec[];
-  hasNativeSolSourceTransaction: boolean;
 }): bigint {
-  let requiredLamports = inputs.hasNativeSolSourceTransaction
-    ? EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_LAMPORTS
-    : EMBEDDED_SOLANA_BASE_SPONSOR_THRESHOLD_LAMPORTS;
+  let requiredLamports = BigInt(0);
   for (const transaction of inputs.transactions) {
     const transactionRequirement =
-      getEmbeddedSolanaSponsorshipRequirementLamports({
+      getEmbeddedSolanaUserPaidRequirementLamports({
         signer: inputs.context.signer,
         transaction: transaction.transaction,
       });
-    if (transactionRequirement > requiredLamports) {
-      requiredLamports = transactionRequirement;
-    }
+    requiredLamports += transactionRequirement;
   }
   return requiredLamports;
 }
@@ -679,23 +742,32 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
     const requiredLamports = getEmbeddedSolanaRequiredSignerLamports({
       context: inputs.context,
       transactions: inputs.transactions,
-      hasNativeSolSourceTransaction,
     });
     if (
       sponsorBalanceLamports == null ||
       sponsorBalanceLamports < requiredLamports
     ) {
-      throw new Error(EMBEDDED_SOLANA_SOL_REQUIRED_ERROR);
+      throw buildEmbeddedSolanaSolRequiredError({
+        requiredLamports,
+        currentLamports: sponsorBalanceLamports,
+      });
     }
   }
 
-  if (
-    embeddedSolanaSponsorshipEnabled &&
-    hasNativeSolSourceTransaction &&
-    (sponsorBalanceLamports == null ||
-      sponsorBalanceLamports < EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_LAMPORTS)
-  ) {
-    throw new Error(EMBEDDED_SOLANA_MIN_SOL_SOURCE_BALANCE_ERROR);
+  if (embeddedSolanaSponsorshipEnabled && hasNativeSolSourceTransaction) {
+    const requiredLamports = getEmbeddedSolanaRequiredSignerLamports({
+      context: inputs.context,
+      transactions: inputs.transactions,
+    });
+    if (
+      sponsorBalanceLamports == null ||
+      sponsorBalanceLamports < requiredLamports
+    ) {
+      throw buildEmbeddedSolanaSolRequiredError({
+        requiredLamports,
+        currentLamports: sponsorBalanceLamports,
+      });
+    }
   }
 
   return inputs.transactions.map((transaction) =>

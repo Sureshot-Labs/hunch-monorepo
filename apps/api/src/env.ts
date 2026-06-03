@@ -375,6 +375,9 @@ const authAccessState = parseEnum(
 );
 const embeddedSolanaSponsorshipEnabled =
   parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_ENABLED) ?? false;
+const solanaPrefundAllowedInputMints = parseList(
+  process.env.SOLANA_PREFUND_ALLOWED_INPUT_MINTS,
+);
 const adminAuthEnabled =
   parseOptionalBool(process.env.ADMIN_AUTH_ENABLED) ?? true;
 const adminAuthLegacyFallback =
@@ -736,6 +739,13 @@ export const env = {
   ),
   authAccessState,
   embeddedSolanaSponsorshipEnabled,
+  solanaPrefundEnabled:
+    parseOptionalBool(process.env.SOLANA_PREFUND_ENABLED) ?? true,
+  solanaPrefundMaxTopUpLamports: optionalNonNegativeBigInt(
+    "SOLANA_PREFUND_MAX_TOP_UP_LAMPORTS",
+    30_000_000n,
+  ),
+  solanaPrefundAllowedInputMints,
   adminAuthEnabled,
   adminAuthLegacyFallback,
   adminAppBaseUrl,
