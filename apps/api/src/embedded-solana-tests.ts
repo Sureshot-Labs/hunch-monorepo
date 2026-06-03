@@ -18,6 +18,8 @@ import {
   shouldDisableEmbeddedSolanaSponsorshipForTransaction,
   type EmbeddedSolanaWalletContext,
 } from "./services/embedded-solana.js";
+import { env } from "./env.js";
+import { solanaPrefundRouteTestExports } from "./routes/embedded-wallets.js";
 
 type TestCase = {
   name: string;
@@ -63,6 +65,40 @@ function getSponsor(
   request: ReturnType<typeof buildEmbeddedSolanaSignAndSendRequest>,
 ) {
   return (request.input.body as { sponsor?: boolean }).sponsor;
+}
+
+function buildPrefundPayload(inputs: {
+  feePayer?: PublicKey;
+  tokenInAddress?: string;
+  tokenInAmount?: string;
+  tokenOutAddress?: string;
+  tokenOutAmount?: string;
+  txData?: string;
+}) {
+  const payer = inputs.feePayer ?? signerKeypair.publicKey;
+  const txData =
+    inputs.txData ??
+    serializeTransaction(
+      [
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ],
+      payer,
+    );
+  return {
+    tokenIn: {
+      address: inputs.tokenInAddress ?? env.solanaUsdcMint,
+      amount: inputs.tokenInAmount ?? "1000000",
+    },
+    tokenOut: {
+      address: inputs.tokenOutAddress ?? "11111111111111111111111111111111",
+      minAmount: inputs.tokenOutAmount ?? "5000000",
+    },
+    tx: { data: txData },
+  };
 }
 
 type BuildEmbeddedSolanaRequestInput = Omit<
@@ -630,6 +666,120 @@ const tests: TestCase[] = [
         /Unable to verify Solana balance/,
       );
       assert.equal(sawError, true);
+    },
+  },
+  {
+    name: "solana prefund bounds reject ready wallets and use configured top-up cap",
+    run: () => {
+      const bounds =
+        solanaPrefundRouteTestExports.resolveSolanaPrefundTopUpBounds({
+          currentSolLamports: 1_000_000n,
+          minSolLamports: 5_000_000n,
+          targetSolLamports: 10_000_000n,
+          maxTopUpLamports: 30_000_000n,
+        });
+      assert.deepEqual(bounds, {
+        minOutLamports: 4_000_000n,
+        maxOutLamports: 30_000_000n,
+      });
+
+      assert.equal(
+        solanaPrefundRouteTestExports.resolveSolanaPrefundTopUpBounds({
+          currentSolLamports: 5_000_000n,
+          minSolLamports: 5_000_000n,
+          targetSolLamports: 10_000_000n,
+          maxTopUpLamports: 30_000_000n,
+        }),
+        null,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.resolveSolanaPrefundTopUpBounds({
+            currentSolLamports: 0n,
+            minSolLamports: 5_000_000n,
+            targetSolLamports: 10_000_000n,
+            maxTopUpLamports: 3_000_000n,
+          }),
+        /maximum is below/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator accepts the selected-wallet USDC to SOL route",
+    run: () => {
+      const result =
+        solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+          payload: buildPrefundPayload({ tokenOutAmount: "9134000" }),
+          signer: walletContext.signer,
+          amountInRaw: 1_000_000n,
+          minOutLamports: 4_000_000n,
+          maxOutLamports: 30_000_000n,
+        });
+
+      assert.equal(result.estimatedOutLamports, 9_134_000n);
+      assert.deepEqual(result.requiredSigners, [walletContext.signer]);
+      assert.equal(result.feePayer, walletContext.signer);
+      assert.equal(typeof result.transactionDigest, "string");
+      assert.ok(result.txData.length > 0);
+    },
+  },
+  {
+    name: "solana prefund validator rejects dust and over-cap outputs",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({ tokenOutAmount: "1000" }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 9_000_000n,
+          }),
+        /below the required minimum/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({ tokenOutAmount: "31000000" }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /exceeds the configured top-up cap/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator rejects wrong signer and token route",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              feePayer: Keypair.generate().publicKey,
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 9_000_000n,
+          }),
+        /signer does not match/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({ tokenOutAddress: env.solanaUsdcMint }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 9_000_000n,
+          }),
+        /output token/,
+      );
     },
   },
 ];
