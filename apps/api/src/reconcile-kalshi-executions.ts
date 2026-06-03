@@ -12,6 +12,7 @@ export type { ReconcileKalshiExecutionsOptions } from "./services/kalshi-executi
 
 const DEFAULT_LIMIT = 50;
 const DEFAULT_MIN_AGE_SEC = 15;
+const DEFAULT_RENT_RECLAIM_MIN_AGE_SEC = 0;
 
 export function parseReconcileKalshiExecutionsArgs(
   args: string[] = process.argv.slice(2),
@@ -25,8 +26,12 @@ export function parseReconcileKalshiExecutionsArgs(
 
   const limitRaw = getValue("--limit");
   const minAgeRaw = getValue("--min-age-sec");
+  const rentReclaimMinAgeRaw = getValue("--rent-reclaim-min-age-sec");
   const limit = limitRaw ? Number(limitRaw) : DEFAULT_LIMIT;
   const minAgeSec = minAgeRaw ? Number(minAgeRaw) : DEFAULT_MIN_AGE_SEC;
+  const rentReclaimMinAgeSec = rentReclaimMinAgeRaw
+    ? Number(rentReclaimMinAgeRaw)
+    : DEFAULT_RENT_RECLAIM_MIN_AGE_SEC;
 
   return {
     dryRun: args.includes("--dry-run"),
@@ -36,6 +41,10 @@ export function parseReconcileKalshiExecutionsArgs(
       Number.isFinite(minAgeSec) && minAgeSec >= 0
         ? Math.trunc(minAgeSec)
         : DEFAULT_MIN_AGE_SEC,
+    rentReclaimMinAgeSec:
+      Number.isFinite(rentReclaimMinAgeSec) && rentReclaimMinAgeSec >= 0
+        ? Math.trunc(rentReclaimMinAgeSec)
+        : DEFAULT_RENT_RECLAIM_MIN_AGE_SEC,
   };
 }
 
@@ -76,6 +85,7 @@ export async function runReconcileKalshiExecutions(
       `sponsorshipRentReclaimReclaimedLamports=${summary.sponsorshipRentReclaimReclaimedLamports}`,
       `sponsorshipRentReclaimSkipped=${summary.sponsorshipRentReclaimSkipped}`,
       `sponsorshipRentReclaimErrors=${summary.sponsorshipRentReclaimErrors}`,
+      `rentReclaimMinAgeSec=${options.rentReclaimMinAgeSec}`,
       `skipped=${summary.skipped}`,
       `errors=${summary.errors}`,
       `dryRun=${options.dryRun ? 1 : 0}`,

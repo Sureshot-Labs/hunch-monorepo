@@ -56,13 +56,16 @@ export type DflowSponsorRentCloseTransactions = Array<{
   signature: string;
   accounts: string[];
   feeLamports: string | null;
+  status?: "closed" | "submitted" | "failed";
+  error?: string | null;
+  submittedAt?: string | null;
 }>;
 
 export type DflowSponsorRentCloseResult = {
   accountResults: Map<
     string,
     {
-      status: "closed" | "failed";
+      status: "closed" | "submitted" | "failed";
       signature?: string;
       reclaimedLamports?: bigint;
       error?: string;
@@ -106,6 +109,7 @@ const TOKEN_PROGRAM_IDS = new Set([
   TOKEN_PROGRAM_ID.toBase58(),
   TOKEN_2022_PROGRAM_ID.toBase58(),
 ]);
+const SUBMITTED_CLOSE_RETRY_AFTER_MS = 10 * 60 * 1000;
 
 function resolveSponsorKeypair(): Keypair | null {
   return resolveHunchSolanaSponsorKeypair();
@@ -124,6 +128,70 @@ function parseBigIntString(value: unknown): bigint | null {
   } catch {
     return null;
   }
+}
+
+function bigintMin(value: bigint, ceiling: bigint | null): bigint {
+  if (ceiling == null) return value;
+  return value < ceiling ? value : ceiling;
+}
+
+function parseTimeMs(value: unknown): number | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getRentReclaimRecord(metadata: unknown): Record<string, unknown> | null {
+  if (!isRecord(metadata)) return null;
+  const reclaim = metadata.sponsorshipRentReclaim;
+  return isRecord(reclaim) ? reclaim : null;
+}
+
+function findExistingSubmittedClose(inputs: {
+  metadata: unknown;
+  account: string;
+  nowMs: number;
+}): { signature: string; error: string | null; submittedAtMs: number } | null {
+  const reclaim = getRentReclaimRecord(inputs.metadata);
+  if (!reclaim || !Array.isArray(reclaim.candidates)) return null;
+
+  let closeSignature: string | null = null;
+  let closeError: string | null = null;
+  for (const candidate of reclaim.candidates) {
+    if (!isRecord(candidate)) continue;
+    if (getString(candidate.account) !== inputs.account) continue;
+    if (getString(candidate.closeStatus) !== "submitted") continue;
+    closeSignature = getString(candidate.closeSignature);
+    closeError = getString(candidate.closeError);
+    break;
+  }
+  if (!closeSignature) return null;
+
+  let transactionSubmittedAtMs: number | null = null;
+  if (Array.isArray(reclaim.closeTransactions)) {
+    for (const tx of reclaim.closeTransactions) {
+      if (!isRecord(tx) || getString(tx.signature) !== closeSignature) {
+        continue;
+      }
+      transactionSubmittedAtMs = parseTimeMs(tx.submittedAt);
+      closeError = getString(tx.error) ?? closeError;
+      break;
+    }
+  }
+  const submittedAtMs =
+    transactionSubmittedAtMs ?? parseTimeMs(reclaim.reclaimedAt);
+  if (
+    submittedAtMs == null ||
+    inputs.nowMs - submittedAtMs >= SUBMITTED_CLOSE_RETRY_AFTER_MS
+  ) {
+    return null;
+  }
+
+  return {
+    signature: closeSignature,
+    error: closeError,
+    submittedAtMs,
+  };
 }
 
 export function extractDflowRentReclaimCandidateAccounts(
@@ -205,16 +273,6 @@ function evaluateCandidate(inputs: {
       closeAuthority: inputs.info.closeAuthority,
     };
   }
-  if (inputs.info.tokenAmount !== 0n) {
-    return {
-      eligible: false,
-      account: inputs.account,
-      reason: "token_balance_not_zero",
-      lamports: inputs.info.lamports,
-      tokenOwner: inputs.info.tokenOwner,
-      closeAuthority: inputs.info.closeAuthority,
-    };
-  }
   const effectiveCloseAuthority =
     inputs.info.closeAuthority ?? inputs.info.tokenOwner;
   if (effectiveCloseAuthority !== inputs.sponsorAddress) {
@@ -222,6 +280,16 @@ function evaluateCandidate(inputs: {
       eligible: false,
       account: inputs.account,
       reason: "close_authority_not_sponsor",
+      lamports: inputs.info.lamports,
+      tokenOwner: inputs.info.tokenOwner,
+      closeAuthority: inputs.info.closeAuthority,
+    };
+  }
+  if (inputs.info.tokenAmount !== 0n) {
+    return {
+      eligible: false,
+      account: inputs.account,
+      reason: "token_balance_not_zero",
       lamports: inputs.info.lamports,
       tokenOwner: inputs.info.tokenOwner,
       closeAuthority: inputs.info.closeAuthority,
@@ -269,11 +337,15 @@ async function fetchReclaimRows(
         and (
           rent_status in ('lost', 'locked')
           or (
-          rent_status = 'returned'
-          and metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}' ~ '^[0-9]+$'
-          and (metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}')::numeric > 0
-          and coalesce(metadata #>> '{sponsorshipRentReclaim,remainingOpenLamports}', '') <> '0'
-        )
+            rent_status = 'returned'
+            and metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}' ~ '^[0-9]+$'
+            and (metadata #>> '{sponsorshipReconciliation,currentNonFeeCostLamports}')::numeric >
+              case
+                when metadata #>> '{sponsorshipRentReclaim,reclaimedLamports}' ~ '^[0-9]+$'
+                  then (metadata #>> '{sponsorshipRentReclaim,reclaimedLamports}')::numeric
+                else 0
+              end
+          )
         )
         and updated_at <= now() - ($1::int * interval '1 second')
       order by updated_at asc
@@ -443,7 +515,7 @@ async function closeOnchainTokenAccounts(
   const accountResults = new Map<
     string,
     {
-      status: "closed" | "failed";
+      status: "closed" | "submitted" | "failed";
       signature?: string;
       reclaimedLamports?: bigint;
       error?: string;
@@ -453,43 +525,75 @@ async function closeOnchainTokenAccounts(
 
   for (let i = 0; i < accounts.length; i += 6) {
     const batch = accounts.slice(i, i + 6);
+    let signature: string | null = null;
+    let submittedAt: string | null = null;
 
     try {
-      const signature = await sendCloseAccountBatch({
+      signature = await sendCloseAccountBatch({
         sponsorKeypair,
         batch,
       });
+      submittedAt = new Date().toISOString();
       const confirmation = await waitForSolanaSignatureConfirmation({
         rpcUrls: env.solanaRpcUrls,
         signature,
         timeoutMs: env.solanaRpcTimeoutMs,
         commitment: "finalized",
       });
-      if (confirmation.status !== "fulfilled") {
-        throw new Error(`close_account_confirmation_${confirmation.status}`);
+      if (confirmation.status === "fulfilled") {
+        const metadata = await fetchSolanaFinalizedTransactionBalanceDeltas({
+          rpcUrls: env.solanaRpcUrls,
+          signature,
+          timeoutMs: env.solanaRpcTimeoutMs,
+        }).catch(() => null);
+        closeTransactions.push({
+          signature,
+          accounts: batch.map((item) => item.account),
+          feeLamports: metadata?.feeLamports.toString() ?? null,
+          status: "closed",
+          submittedAt,
+        });
+        for (const item of batch) {
+          accountResults.set(item.account, {
+            status: "closed",
+            signature,
+            reclaimedLamports: item.lamports,
+          });
+        }
+        continue;
       }
-      const metadata = await fetchSolanaFinalizedTransactionBalanceDeltas({
-        rpcUrls: env.solanaRpcUrls,
-        signature,
-        timeoutMs: env.solanaRpcTimeoutMs,
-      }).catch(() => null);
+      const message = `close_account_confirmation_${confirmation.status}`;
       closeTransactions.push({
         signature,
         accounts: batch.map((item) => item.account),
-        feeLamports: metadata?.feeLamports.toString() ?? null,
+        feeLamports: null,
+        status: confirmation.status,
+        error: message,
+        submittedAt,
       });
       for (const item of batch) {
         accountResults.set(item.account, {
-          status: "closed",
+          status: confirmation.status,
           signature,
-          reclaimedLamports: item.lamports,
+          error: message,
         });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (signature) {
+        closeTransactions.push({
+          signature,
+          accounts: batch.map((item) => item.account),
+          feeLamports: null,
+          status: "failed",
+          error: message,
+          submittedAt,
+        });
+      }
       for (const item of batch) {
         accountResults.set(item.account, {
           status: "failed",
+          signature: signature ?? undefined,
           error: message,
         });
       }
@@ -508,13 +612,11 @@ function rowReclaimMetadata(inputs: {
   >;
   closeResults: DflowSponsorRentCloseResult | null;
   dryRun: boolean;
-  remainingOpenLamports: bigint;
+  openCandidateLamports: bigint;
 }) {
-  const existingReclaim = isRecord(inputs.existingMetadata)
-    ? inputs.existingMetadata.sponsorshipRentReclaim
-    : null;
+  const existingReclaim = getRentReclaimRecord(inputs.existingMetadata);
   const previousCandidates = new Map<string, Record<string, unknown>>();
-  if (isRecord(existingReclaim) && Array.isArray(existingReclaim.candidates)) {
+  if (existingReclaim && Array.isArray(existingReclaim.candidates)) {
     for (const candidate of existingReclaim.candidates) {
       if (!isRecord(candidate)) continue;
       const account = getString(candidate.account);
@@ -522,14 +624,22 @@ function rowReclaimMetadata(inputs: {
     }
   }
   const closeTransactionsBySignature = new Map<string, unknown>();
-  if (
-    isRecord(existingReclaim) &&
-    Array.isArray(existingReclaim.closeTransactions)
-  ) {
+  const reclaimedAtFallback =
+    parseTimeMs(existingReclaim?.reclaimedAt) != null
+      ? getString(existingReclaim?.reclaimedAt)
+      : null;
+  if (existingReclaim && Array.isArray(existingReclaim.closeTransactions)) {
     for (const tx of existingReclaim.closeTransactions) {
       if (!isRecord(tx)) continue;
       const signature = getString(tx.signature);
-      if (signature) closeTransactionsBySignature.set(signature, tx);
+      if (!signature) continue;
+      const stableTx =
+        getString(tx.status) === "submitted" &&
+        !getString(tx.submittedAt) &&
+        reclaimedAtFallback
+          ? { ...tx, submittedAt: reclaimedAtFallback }
+          : tx;
+      closeTransactionsBySignature.set(signature, stableTx);
     }
   }
   for (const tx of inputs.closeResults?.closeTransactions ?? []) {
@@ -546,10 +656,36 @@ function rowReclaimMetadata(inputs: {
     const previousReclaimedLamports = parseBigIntString(
       previous?.reclaimedLamports,
     );
+    const inferredSubmittedCloseLanded =
+      closeResult == null &&
+      evaluation?.eligible === false &&
+      evaluation.reason === "account_missing_or_already_closed" &&
+      previousCloseStatus === "submitted" &&
+      previousCloseSignature != null;
     const reclaimedLamports =
-      closeResult?.reclaimedLamports ?? previousReclaimedLamports;
+      closeResult?.reclaimedLamports ??
+      previousReclaimedLamports ??
+      (inferredSubmittedCloseLanded
+        ? parseBigIntString(previous?.lamports)
+        : null);
     if (reclaimedLamports != null && reclaimedLamports > 0n) {
       cumulativeReclaimedLamports += reclaimedLamports;
+    }
+    const closeStatus =
+      closeResult?.status ??
+      (inferredSubmittedCloseLanded ? "closed" : previousCloseStatus) ??
+      null;
+    if (inferredSubmittedCloseLanded && previousCloseSignature) {
+      const previousTransaction = closeTransactionsBySignature.get(
+        previousCloseSignature,
+      );
+      if (isRecord(previousTransaction)) {
+        closeTransactionsBySignature.set(previousCloseSignature, {
+          ...previousTransaction,
+          status: "closed",
+          error: null,
+        });
+      }
     }
 
     return {
@@ -562,9 +698,11 @@ function rowReclaimMetadata(inputs: {
       mint: evaluation?.eligible === true ? evaluation.mint : null,
       tokenOwner: evaluation?.tokenOwner ?? null,
       closeAuthority: evaluation?.closeAuthority ?? null,
-      closeStatus: closeResult?.status ?? previousCloseStatus ?? null,
+      closeStatus,
       closeSignature: closeResult?.signature ?? previousCloseSignature ?? null,
-      closeError: closeResult?.error ?? getString(previous?.closeError),
+      closeError:
+        closeResult?.error ??
+        (inferredSubmittedCloseLanded ? null : getString(previous?.closeError)),
       reclaimedLamports: reclaimedLamports?.toString?.() ?? null,
     };
   });
@@ -573,7 +711,8 @@ function rowReclaimMetadata(inputs: {
     sponsorshipRentReclaim: {
       reclaimedAt: new Date().toISOString(),
       dryRun: inputs.dryRun,
-      remainingOpenLamports: inputs.remainingOpenLamports.toString(),
+      remainingOpenLamports: inputs.openCandidateLamports.toString(),
+      openCandidateLamports: inputs.openCandidateLamports.toString(),
       reclaimedLamports: cumulativeReclaimedLamports.toString(),
       candidates,
       closeTransactions: Array.from(closeTransactionsBySignature.values()),
@@ -601,6 +740,41 @@ function calculateNetActualSponsorLamportsAfterReclaim(inputs: {
   return net > 0n ? net : 0n;
 }
 
+function getCurrentNonFeeSponsorCostLamports(metadata: unknown): bigint | null {
+  if (!isRecord(metadata)) return null;
+  const reconciliation = metadata.sponsorshipReconciliation;
+  if (!isRecord(reconciliation)) return null;
+  return parseBigIntString(reconciliation.currentNonFeeCostLamports);
+}
+
+function getRentReclaimReclaimedLamports(
+  metadata: Record<string, unknown>,
+): bigint {
+  const reclaim = isRecord(metadata.sponsorshipRentReclaim)
+    ? metadata.sponsorshipRentReclaim
+    : null;
+  return parseBigIntString(reclaim?.reclaimedLamports) ?? 0n;
+}
+
+function calculateRemainingSponsorLossLamports(inputs: {
+  row: SponsorshipRentReclaimRow;
+  metadata: Record<string, unknown>;
+  fallbackOpenLamports: bigint;
+}): bigint {
+  const grossNonFeeCost =
+    getCurrentNonFeeSponsorCostLamports(inputs.row.metadata) ??
+    inputs.fallbackOpenLamports;
+  const reclaimedLamports = getRentReclaimReclaimedLamports(inputs.metadata);
+  const remaining =
+    grossNonFeeCost > reclaimedLamports
+      ? grossNonFeeCost - reclaimedLamports
+      : 0n;
+  const actualSponsorLamports = parseBigIntString(
+    inputs.row.actual_sponsor_lamports,
+  );
+  return bigintMin(remaining, actualSponsorLamports);
+}
+
 function sumRentReclaimCloseFeeLamports(
   metadata: Record<string, unknown>,
 ): bigint {
@@ -618,6 +792,7 @@ function sumRentReclaimCloseFeeLamports(
 function attachRentReclaimAccountingMetadata(inputs: {
   row: SponsorshipRentReclaimRow;
   metadata: Record<string, unknown>;
+  remainingSponsorLossLamports: bigint;
 }): Record<string, unknown> {
   const previousActual = parseBigIntString(inputs.row.actual_sponsor_lamports);
   const netActual = calculateNetActualSponsorLamportsAfterReclaim(inputs);
@@ -637,8 +812,19 @@ function attachRentReclaimAccountingMetadata(inputs: {
         inputs.metadata,
       ).toString(),
       netActualSponsorLamports: netActual.toString(),
+      remainingOpenLamports: inputs.remainingSponsorLossLamports.toString(),
+      remainingSponsorLossLamports:
+        inputs.remainingSponsorLossLamports.toString(),
     },
   };
+}
+
+function isPendingSponsorRecoverableRent(
+  evaluation: ReturnType<typeof evaluateCandidate>,
+  closeResult: DflowSponsorRentCloseAccountResult | undefined,
+): boolean {
+  if (evaluation.eligible) return closeResult?.status !== "closed";
+  return evaluation.reason === "token_balance_not_zero";
 }
 
 function buildAccountOwnerRows(
@@ -686,6 +872,9 @@ function filterCloseResultsForRow(inputs: {
       accounts: ownedAccounts,
       feeLamports:
         firstOwnerRow === inputs.row.id ? closeTransaction.feeLamports : "0",
+      status: closeTransaction.status,
+      error: closeTransaction.error,
+      submittedAt: closeTransaction.submittedAt,
     });
   }
 
@@ -757,6 +946,7 @@ export async function reclaimSolanaSponsorshipRentAccounts(
     }
   }
   const accountOwnerRows = buildAccountOwnerRows(rows);
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
 
   const fetchAccount = options.fetchAccount ?? fetchOnchainTokenAccountInfo;
   const evaluations = new Map<string, ReturnType<typeof evaluateCandidate>>();
@@ -803,23 +993,64 @@ export async function reclaimSolanaSponsorshipRentAccounts(
       { eligible: true }
     > => evaluation.eligible,
   );
+  const nowMs = Date.now();
+  const freshSubmittedCloseResults = new Map<
+    string,
+    DflowSponsorRentCloseAccountResult
+  >();
+  for (const entry of eligible) {
+    const ownerRowId = accountOwnerRows.get(entry.account);
+    const ownerRow = ownerRowId ? rowsById.get(ownerRowId) : null;
+    const existingClose = ownerRow
+      ? findExistingSubmittedClose({
+          metadata: ownerRow.metadata,
+          account: entry.account,
+          nowMs,
+        })
+      : null;
+    if (!existingClose) continue;
+    freshSubmittedCloseResults.set(entry.account, {
+      status: "submitted",
+      signature: existingClose.signature,
+      error: existingClose.error ?? "close_account_confirmation_submitted",
+    });
+  }
+  const eligibleToClose = eligible.filter(
+    (entry) => !freshSubmittedCloseResults.has(entry.account),
+  );
   const closeAccounts = options.closeAccounts ?? closeOnchainTokenAccounts;
-  let closeResults: DflowSponsorRentCloseResult | null = null;
-  if (eligible.length > 0 && !options.dryRun) {
+  let closeResults: DflowSponsorRentCloseResult | null =
+    freshSubmittedCloseResults.size > 0
+      ? {
+          accountResults: new Map(freshSubmittedCloseResults),
+          closeTransactions: [],
+        }
+      : null;
+  if (eligibleToClose.length > 0 && !options.dryRun) {
     try {
-      closeResults = await closeAccounts(
-        eligible.map((entry) => ({
+      const submittedCloseResults = await closeAccounts(
+        eligibleToClose.map((entry) => ({
           account: entry.account,
           lamports: entry.lamports,
           tokenProgramId: entry.tokenProgramId,
         })),
       );
+      if (closeResults) {
+        for (const [account, result] of submittedCloseResults.accountResults) {
+          closeResults.accountResults.set(account, result);
+        }
+        closeResults.closeTransactions.push(
+          ...submittedCloseResults.closeTransactions,
+        );
+      } else {
+        closeResults = submittedCloseResults;
+      }
     } catch (error) {
       summary.errors += 1;
       const message = error instanceof Error ? error.message : String(error);
-      closeResults = {
+      const failedCloseResults: DflowSponsorRentCloseResult = {
         accountResults: new Map(
-          eligible.map((entry) => [
+          eligibleToClose.map((entry) => [
             entry.account,
             {
               status: "failed" as const,
@@ -829,6 +1060,13 @@ export async function reclaimSolanaSponsorshipRentAccounts(
         ),
         closeTransactions: [],
       };
+      if (closeResults) {
+        for (const [account, result] of failedCloseResults.accountResults) {
+          closeResults.accountResults.set(account, result);
+        }
+      } else {
+        closeResults = failedCloseResults;
+      }
       options.logger?.error?.(
         { error },
         "Solana sponsorship rent close failed",
@@ -856,29 +1094,21 @@ export async function reclaimSolanaSponsorshipRentAccounts(
     const candidateAccounts = extractDflowRentReclaimCandidateAccounts(
       row.metadata,
     );
-    let remainingOpenLamports = 0n;
+    let openCandidateLamports = 0n;
+    let hasPendingRecoverableRent = false;
     for (const account of candidateAccounts) {
       const evaluation = evaluations.get(account);
       if (!evaluation) continue;
-      if (evaluation.eligible) {
-        const ownerRowId = accountOwnerRows.get(account);
-        if (ownerRowId && ownerRowId !== row.id) continue;
-        const closeResult = closeResults?.accountResults.get(account);
-        if (closeResult?.status !== "closed") {
-          remainingOpenLamports += evaluation.lamports;
-        }
+      const ownerRowId = accountOwnerRows.get(account);
+      if (evaluation.eligible && ownerRowId && ownerRowId !== row.id) {
         continue;
       }
-      if (evaluation.lamports > 0n) {
-        remainingOpenLamports += evaluation.lamports;
+      const closeResult = closeResults?.accountResults.get(account);
+      if (isPendingSponsorRecoverableRent(evaluation, closeResult)) {
+        openCandidateLamports += evaluation.lamports;
+        hasPendingRecoverableRent = true;
       }
     }
-    const rentStatus =
-      remainingOpenLamports === 0n
-        ? "returned"
-        : row.rent_status === "locked"
-          ? "locked"
-          : "lost";
 
     if (!options.dryRun) {
       const rowCloseResults = filterCloseResultsForRow({
@@ -892,14 +1122,28 @@ export async function reclaimSolanaSponsorshipRentAccounts(
         evaluations,
         closeResults: rowCloseResults,
         dryRun: options.dryRun,
-        remainingOpenLamports,
+        openCandidateLamports,
       });
+      const remainingSponsorLossLamports = calculateRemainingSponsorLossLamports(
+        {
+          row,
+          metadata,
+          fallbackOpenLamports: openCandidateLamports,
+        },
+      );
       const accountingMetadata = attachRentReclaimAccountingMetadata({
         row,
         metadata,
+        remainingSponsorLossLamports,
       });
+      const rentStatus =
+        remainingSponsorLossLamports === 0n
+          ? "returned"
+          : hasPendingRecoverableRent
+            ? "locked"
+            : "lost";
       await updateReclaimRow(pool, row, {
-        rentLamports: remainingOpenLamports,
+        rentLamports: remainingSponsorLossLamports,
         rentStatus,
         actualSponsorLamports: null,
         metadata: accountingMetadata,

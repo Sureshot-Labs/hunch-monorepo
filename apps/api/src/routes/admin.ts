@@ -183,6 +183,7 @@ const ADMIN_SYSTEM_HOT_KEYS: Record<AdminSystemVenue, string> = {
 const SOLANA_SPONSORSHIP_POLICY_FIELDS = [
   "embeddedSolanaSponsorship",
   "embeddedSolanaSponsorshipMode",
+  "embeddedSolanaSponsorshipObserveCanSponsor",
   "embeddedSolanaSponsorshipFlows",
   "embeddedSolanaSponsorshipLimits",
 ] as const;
@@ -6220,7 +6221,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const adminRole = request.adminAccount?.role;
-      let policyPayload: unknown = parsed.data;
       let sponsorshipPolicyChanged = false;
       let nonSponsorshipPolicyChanged = key !== "auth_access";
       if (key === "auth_access") {
@@ -6229,25 +6229,18 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           current.effective,
           parsed.data,
         );
-        policyPayload = change.nextPolicy;
         sponsorshipPolicyChanged = change.sponsorshipChanged;
         nonSponsorshipPolicyChanged = change.nonSponsorshipChanged;
         if (!sponsorshipPolicyChanged && !nonSponsorshipPolicyChanged) {
           nonSponsorshipPolicyChanged = true;
         }
       }
+      const isLegacyAdminActor =
+        request.adminActor?.kind === "legacy_user";
       if (sponsorshipPolicyChanged) {
-        if (request.adminActor?.kind === "legacy_user") {
-          reply.code(403);
-          return reply.send({
-            error: "admin_permission_required",
-            message:
-              "Admin sponsorship permission required to change Solana sponsorship policy.",
-          });
-        }
         if (
-          !adminRole ||
-          !adminHasPermission(adminRole, "sponsorship:write")
+          !isLegacyAdminActor &&
+          (!adminRole || !adminHasPermission(adminRole, "sponsorship:write"))
         ) {
           reply.code(403);
           return reply.send({
@@ -6259,7 +6252,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
       if (
         nonSponsorshipPolicyChanged &&
-        request.adminActor?.kind !== "legacy_user" &&
+        !isLegacyAdminActor &&
         (!adminRole || !adminHasPermission(adminRole, "intel:write"))
       ) {
         reply.code(403);
@@ -6277,7 +6270,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         const row = await insertRuntimePolicy(pool, {
           policyKey: key,
           effectiveAt,
-          payload: policyPayload,
+          payload: parsed.data,
           createdBy: actorId,
         });
         const resolved = await resolveIntelPolicy(pool, key);

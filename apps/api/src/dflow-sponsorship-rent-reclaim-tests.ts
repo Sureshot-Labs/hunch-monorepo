@@ -6,6 +6,7 @@ import {
   type DflowSponsorRentAccountInfo,
   type DflowSponsorRentCloseResult,
 } from "./services/solana-sponsorship-rent-reclaim.js";
+import { parseReconcileKalshiExecutionsArgs } from "./reconcile-kalshi-executions.js";
 
 const SPONSOR = "B2oU6ZDdb3dk4GMJepKiWiBVVzF46vuW12RcKpQ5sGTX";
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -21,9 +22,13 @@ async function test(name: string, fn: () => void | Promise<void>) {
   }
 }
 
-function metadata(accounts: string[]) {
+function metadata(
+  accounts: string[],
+  inputs: { currentNonFeeCostLamports?: string } = {},
+) {
   return {
     sponsorshipReconciliation: {
+      currentNonFeeCostLamports: inputs.currentNonFeeCostLamports,
       transactions: [
         {
           nonSponsorLamportDeltas: accounts.map((account, index) => ({
@@ -140,6 +145,21 @@ await test("extracts unique positive-delta candidate accounts", () => {
     }),
     ["A"],
   );
+});
+
+await test("kalshi reconcile defaults rent reclaim to same-job age gate", () => {
+  const defaults = parseReconcileKalshiExecutionsArgs([]);
+  assert.equal(defaults.minAgeSec, 15);
+  assert.equal(defaults.rentReclaimMinAgeSec, 0);
+
+  const parsed = parseReconcileKalshiExecutionsArgs([
+    "--min-age-sec",
+    "30",
+    "--rent-reclaim-min-age-sec",
+    "7",
+  ]);
+  assert.equal(parsed.minAgeSec, 30);
+  assert.equal(parsed.rentReclaimMinAgeSec, 7);
 });
 
 await test("closes empty sponsor-owned SPL and Token-2022 accounts once", async () => {
@@ -293,6 +313,288 @@ await test("closes empty user-owned token account when sponsor is close authorit
   assert.equal(candidate.closeStatus, "closed");
 });
 
+await test("records submitted close signatures without marking reclaimed", async () => {
+  const submittedAt = "2026-06-02T12:00:00.000Z";
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000012",
+      metadata: metadata(["pendingClose"]),
+    }),
+  ];
+  const db = fakePool(rows);
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => tokenAccountInfo({ account }),
+    closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => ({
+      accountResults: new Map(
+        accounts.map((entry) => [
+          entry.account,
+          {
+            status: "submitted" as const,
+            signature: "submittedCloseSig",
+            error: "close_account_confirmation_submitted",
+          },
+        ]),
+      ),
+      closeTransactions: [
+        {
+          signature: "submittedCloseSig",
+          accounts: accounts.map((entry) => entry.account),
+          feeLamports: null,
+          status: "submitted",
+          error: "close_account_confirmation_submitted",
+          submittedAt,
+        },
+      ],
+    }),
+  });
+
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(db.updates[0]?.[1], "2039280");
+  assert.equal(db.updates[0]?.[2], "locked");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  const candidate = metadataUpdate.sponsorshipRentReclaim.candidates[0];
+  assert.equal(candidate.closeStatus, "submitted");
+  assert.equal(candidate.closeSignature, "submittedCloseSig");
+  assert.equal(candidate.reclaimedLamports, null);
+  assert.equal(
+    metadataUpdate.sponsorshipRentReclaim.closeTransactions[0].signature,
+    "submittedCloseSig",
+  );
+  assert.equal(
+    metadataUpdate.sponsorshipRentReclaim.closeTransactions[0].status,
+    "submitted",
+  );
+  assert.equal(
+    metadataUpdate.sponsorshipRentReclaim.closeTransactions[0].submittedAt,
+    submittedAt,
+  );
+});
+
+await test("skips fresh submitted close without submitting a duplicate", async () => {
+  const submittedAt = new Date().toISOString();
+  const existingMetadata = {
+    ...metadata(["freshPendingClose"]),
+    sponsorshipRentReclaim: {
+      reclaimedAt: submittedAt,
+      dryRun: false,
+      remainingOpenLamports: "2039280",
+      reclaimedLamports: "0",
+      candidates: [
+        {
+          account: "freshPendingClose",
+          eligible: true,
+          reason: null,
+          lamports: "2039280",
+          tokenProgramId: TOKEN_PROGRAM,
+          closeStatus: "submitted",
+          closeSignature: "submittedCloseSig",
+          closeError: "close_account_confirmation_submitted",
+          reclaimedLamports: null,
+        },
+      ],
+      closeTransactions: [
+        {
+          signature: "submittedCloseSig",
+          accounts: ["freshPendingClose"],
+          feeLamports: null,
+          status: "submitted",
+          error: "close_account_confirmation_submitted",
+          submittedAt,
+        },
+      ],
+    },
+  };
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000015",
+      metadata: existingMetadata,
+    }),
+  ];
+  const db = fakePool(rows);
+  let closeCalled = false;
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => tokenAccountInfo({ account }),
+    closeAccounts: async () => {
+      closeCalled = true;
+      throw new Error("should not close fresh submitted account");
+    },
+  });
+
+  assert.equal(closeCalled, false);
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(db.updates[0]?.[1], "2039280");
+  assert.equal(db.updates[0]?.[2], "locked");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  const reclaim = metadataUpdate.sponsorshipRentReclaim;
+  assert.equal(reclaim.candidates[0].closeStatus, "submitted");
+  assert.equal(reclaim.candidates[0].closeSignature, "submittedCloseSig");
+  assert.equal(reclaim.closeTransactions[0].signature, "submittedCloseSig");
+  assert.equal(reclaim.closeTransactions[0].submittedAt, submittedAt);
+});
+
+await test("stale submitted close allows a retry with a new signature", async () => {
+  const existingMetadata = {
+    ...metadata(["stalePendingClose"]),
+    sponsorshipRentReclaim: {
+      reclaimedAt: "2026-06-02T11:00:00.000Z",
+      dryRun: false,
+      remainingOpenLamports: "2039280",
+      reclaimedLamports: "0",
+      candidates: [
+        {
+          account: "stalePendingClose",
+          eligible: true,
+          reason: null,
+          lamports: "2039280",
+          tokenProgramId: TOKEN_PROGRAM,
+          closeStatus: "submitted",
+          closeSignature: "oldSubmittedCloseSig",
+          closeError: "close_account_confirmation_submitted",
+          reclaimedLamports: null,
+        },
+      ],
+      closeTransactions: [
+        {
+          signature: "oldSubmittedCloseSig",
+          accounts: ["stalePendingClose"],
+          feeLamports: null,
+          status: "submitted",
+          error: "close_account_confirmation_submitted",
+          submittedAt: "2026-06-02T11:00:00.000Z",
+        },
+      ],
+    },
+  };
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000016",
+      metadata: existingMetadata,
+    }),
+  ];
+  const db = fakePool(rows);
+  const closeCalls: string[][] = [];
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => tokenAccountInfo({ account }),
+    closeAccounts: async (accounts): Promise<DflowSponsorRentCloseResult> => {
+      closeCalls.push(accounts.map((entry) => entry.account));
+      return {
+        accountResults: new Map(
+          accounts.map((entry) => [
+            entry.account,
+            {
+              status: "submitted" as const,
+              signature: "newSubmittedCloseSig",
+              error: "close_account_confirmation_submitted",
+            },
+          ]),
+        ),
+        closeTransactions: [
+          {
+            signature: "newSubmittedCloseSig",
+            accounts: accounts.map((entry) => entry.account),
+            feeLamports: null,
+            status: "submitted",
+            error: "close_account_confirmation_submitted",
+            submittedAt: "2026-06-02T12:30:00.000Z",
+          },
+        ],
+      };
+    },
+  });
+
+  assert.deepEqual(closeCalls, [["stalePendingClose"]]);
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(db.updates[0]?.[1], "2039280");
+  assert.equal(db.updates[0]?.[2], "locked");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  const reclaim = metadataUpdate.sponsorshipRentReclaim;
+  assert.equal(reclaim.candidates[0].closeStatus, "submitted");
+  assert.equal(reclaim.candidates[0].closeSignature, "newSubmittedCloseSig");
+  assert.deepEqual(
+    reclaim.closeTransactions.map((tx: { signature: string }) => tx.signature),
+    ["oldSubmittedCloseSig", "newSubmittedCloseSig"],
+  );
+});
+
+await test("later missing account resolves prior submitted close as reclaimed", async () => {
+  const existingMetadata = {
+    ...metadata(["A"]),
+    sponsorshipRentReclaim: {
+      reclaimedAt: "2026-06-01T00:00:00.000Z",
+      dryRun: false,
+      remainingOpenLamports: "2039280",
+      reclaimedLamports: "0",
+      candidates: [
+        {
+          account: "A",
+          eligible: true,
+          reason: null,
+          lamports: "2039280",
+          tokenProgramId: TOKEN_PROGRAM,
+          mint: "Mint11111111111111111111111111111111111111",
+          closeStatus: "submitted",
+          closeSignature: "submittedCloseSig",
+          closeError: "close_account_confirmation_submitted",
+          reclaimedLamports: null,
+        },
+      ],
+      closeTransactions: [
+        {
+          signature: "submittedCloseSig",
+          accounts: ["A"],
+          feeLamports: null,
+          status: "submitted",
+          error: "close_account_confirmation_submitted",
+          submittedAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+    },
+  };
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000013",
+      metadata: existingMetadata,
+    }),
+  ];
+  const db = fakePool(rows);
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => missingAccount(account),
+    closeAccounts: async () => {
+      throw new Error("should not close");
+    },
+  });
+
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(db.updates[0]?.[1], "0");
+  assert.equal(db.updates[0]?.[2], "returned");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  const reclaim = metadataUpdate.sponsorshipRentReclaim;
+  assert.equal(reclaim.reclaimedLamports, "2039280");
+  assert.equal(reclaim.candidates[0].closeStatus, "closed");
+  assert.equal(reclaim.candidates[0].closeSignature, "submittedCloseSig");
+  assert.equal(reclaim.candidates[0].closeError, null);
+  assert.equal(reclaim.candidates[0].reclaimedLamports, "2039280");
+  assert.equal(reclaim.closeTransactions[0].status, "closed");
+  assert.equal(reclaim.closeTransactions[0].error, null);
+  assert.equal(reclaim.remainingSponsorLossLamports, "0");
+});
+
 await test("preserves close audit when a later pass sees account already closed", async () => {
   const existingMetadata = {
     ...metadata(["A"]),
@@ -359,6 +661,49 @@ await test("preserves close audit when a later pass sees account already closed"
   assert.equal(reclaim.candidates[0].reclaimedLamports, "2039280");
 });
 
+await test("does not count user system-wallet lamports as reclaimable rent", async () => {
+  const wallet = "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ";
+  const rows = [
+    row({
+      id: "00000000-0000-0000-0000-000000000014",
+      wallet_address: wallet,
+      actual_sponsor_lamports: "15101",
+      metadata: metadata([wallet], { currentNonFeeCostLamports: "5000" }),
+    }),
+  ];
+  const db = fakePool(rows);
+  const summary = await reclaimSolanaSponsorshipRentAccounts(db.pool as never, {
+    dryRun: false,
+    limit: 10,
+    minAgeSec: 0,
+    fetchAccount: async (account) => ({
+      account,
+      exists: true,
+      lamports: 7_217_242n,
+      tokenProgramId: "11111111111111111111111111111111",
+      tokenOwner: null,
+      closeAuthority: null,
+      tokenAmount: null,
+      mint: null,
+    }),
+    closeAccounts: async () => {
+      throw new Error("should not close");
+    },
+  });
+
+  assert.equal(summary.closed, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(db.updates[0]?.[1], "5000");
+  assert.equal(db.updates[0]?.[2], "lost");
+  const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  const reclaim = metadataUpdate.sponsorshipRentReclaim;
+  assert.equal(reclaim.openCandidateLamports, "0");
+  assert.equal(reclaim.remainingOpenLamports, "5000");
+  assert.equal(reclaim.remainingSponsorLossLamports, "5000");
+  assert.equal(reclaim.candidates[0].reason, "not_token_account");
+  assert.equal(reclaim.candidates[0].lamports, "7217242");
+});
+
 await test("skips non-empty, wrong-owner, missing, and non-token accounts", async () => {
   const rows = [
     row({
@@ -389,9 +734,17 @@ await test("skips non-empty, wrong-owner, missing, and non-token accounts", asyn
   assert.equal(summary.closed, 0);
   assert.equal(summary.skipped, 4);
   assert.equal(db.updates.length, 1);
-  assert.equal(db.updates[0]?.[1], "6117840");
-  assert.equal(db.updates[0]?.[2], "lost");
+  assert.equal(db.updates[0]?.[1], "2039280");
+  assert.equal(db.updates[0]?.[2], "locked");
   const metadataUpdate = JSON.parse(String(db.updates[0]?.[4]));
+  assert.equal(
+    metadataUpdate.sponsorshipRentReclaim.openCandidateLamports,
+    "2039280",
+  );
+  assert.equal(
+    metadataUpdate.sponsorshipRentReclaim.remainingSponsorLossLamports,
+    "2039280",
+  );
   const candidates = metadataUpdate.sponsorshipRentReclaim.candidates;
   assert.deepEqual(
     candidates.map((entry: { reason: string | null }) => entry.reason),

@@ -1645,6 +1645,7 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
   legacyWouldSponsor: boolean;
   enabled: boolean;
   mode: EmbeddedSolanaSponsorshipMode;
+  observeCanSponsor: boolean;
   flows: EmbeddedSolanaSponsorshipFlows;
 }): Promise<EmbeddedSolanaSponsorshipEvaluation> {
   const analysis = analyzeEmbeddedSolanaTransaction({
@@ -1670,11 +1671,10 @@ export async function resolveEmbeddedSolanaSponsorshipEvaluation(inputs: {
   const hasHardDeny = enforce.reasons.some(
     isEmbeddedSolanaSponsorshipHardDenyReason,
   );
-  const observeCanSponsor = env.embeddedSolanaSponsorshipObserveCanSponsor;
   const actualSponsor =
     inputs.enabled && !hasHardDeny
       ? inputs.mode === "observe"
-        ? observeCanSponsor && canActuallySponsor
+        ? inputs.observeCanSponsor && canActuallySponsor
         : canActuallySponsor
       : false;
 

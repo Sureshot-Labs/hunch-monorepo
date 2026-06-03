@@ -29,6 +29,7 @@ export type ReconcileKalshiExecutionsOptions = {
   dryRun: boolean;
   limit: number;
   minAgeSec: number;
+  rentReclaimMinAgeSec: number;
   logger?: Logger;
 };
 
@@ -300,11 +301,14 @@ export async function reconcileKalshiExecutions(
         policy.effective.embeddedSolanaSponsorship === true &&
         policy.effective.embeddedSolanaSponsorshipFlows.dflow === true &&
         (policy.effective.embeddedSolanaSponsorshipMode === "enforce" ||
-          env.embeddedSolanaSponsorshipObserveCanSponsor === true);
+          policy.effective.embeddedSolanaSponsorshipObserveCanSponsor === true);
       if (sponsorshipAllowed) {
         const rentReclaim = await reclaimSolanaSponsorshipRentAccounts(
           pool,
-          options,
+          {
+            ...options,
+            minAgeSec: options.rentReclaimMinAgeSec,
+          },
         );
         summary.sponsorshipRentReclaimChecked = rentReclaim.checked;
         summary.sponsorshipRentReclaimClosed = rentReclaim.closed;

@@ -116,6 +116,7 @@ type DflowSponsorConfig = {
   sponsorKeypair: Keypair | null;
   sponsorAddress: string | null;
   sponsorshipMode: EmbeddedSolanaSponsorshipMode;
+  sponsorshipObserveCanSponsor: boolean;
   sponsorshipLimits: EmbeddedSolanaSponsorshipLimits;
   decision: DflowSponsorshipDecision;
 };
@@ -250,7 +251,8 @@ async function resolveDflowSponsorConfig(): Promise<DflowSponsorConfig> {
     dflowFlowEnabled:
       policy.effective.embeddedSolanaSponsorshipFlows.dflow === true,
     mode: policy.effective.embeddedSolanaSponsorshipMode,
-    observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+    observeCanSponsor:
+      policy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
   });
   if (!decision.actualSponsorAllowed) {
     return {
@@ -258,6 +260,8 @@ async function resolveDflowSponsorConfig(): Promise<DflowSponsorConfig> {
       sponsorKeypair: null,
       sponsorAddress: null,
       sponsorshipMode: policy.effective.embeddedSolanaSponsorshipMode,
+      sponsorshipObserveCanSponsor:
+        policy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
       sponsorshipLimits: policy.effective.embeddedSolanaSponsorshipLimits,
       decision,
     };
@@ -272,6 +276,8 @@ async function resolveDflowSponsorConfig(): Promise<DflowSponsorConfig> {
     sponsorKeypair,
     sponsorAddress: sponsorKeypair.publicKey.toBase58(),
     sponsorshipMode: policy.effective.embeddedSolanaSponsorshipMode,
+    sponsorshipObserveCanSponsor:
+      policy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
     sponsorshipLimits: policy.effective.embeddedSolanaSponsorshipLimits,
     decision,
   };
@@ -539,6 +545,7 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
   sponsorshipMarketState: DflowSponsorshipMarketState;
   sponsorshipLimits: EmbeddedSolanaSponsorshipLimits;
   sponsorshipMode: EmbeddedSolanaSponsorshipMode;
+  sponsorshipObserveCanSponsor: boolean;
   requester: DflowOrderRequester;
   logger: DflowSponsorshipOrderLogger;
   refreshTransaction?: (transaction: string) => Promise<string>;
@@ -674,7 +681,7 @@ export async function finalizeDflowSponsoredOrderOrFallback(inputs: {
     const requireDurableSponsorship =
       shouldRequireEmbeddedSolanaSponsorshipRedis({
         mode: inputs.sponsorshipMode,
-        observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+        observeCanSponsor: inputs.sponsorshipObserveCanSponsor,
       });
     const budget = await (
       inputs.reserveBudget ?? reserveEmbeddedSolanaSponsorshipBudget
@@ -1186,7 +1193,7 @@ async function signAndBroadcastSponsoredDflowTransaction(inputs: {
     policy.effective.embeddedSolanaSponsorship !== true ||
     policy.effective.embeddedSolanaSponsorshipFlows.dflow !== true ||
     (policy.effective.embeddedSolanaSponsorshipMode !== "enforce" &&
-      env.embeddedSolanaSponsorshipObserveCanSponsor !== true)
+      policy.effective.embeddedSolanaSponsorshipObserveCanSponsor !== true)
   ) {
     throw new Error("DFlow sponsorship is disabled");
   }
@@ -2208,7 +2215,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           !dflowSponsoredOrder &&
           sponsorshipConfig.decision.policyAllows &&
           sponsorshipConfig.sponsorshipMode === "observe" &&
-          !env.embeddedSolanaSponsorshipObserveCanSponsor &&
+          !sponsorshipConfig.sponsorshipObserveCanSponsor &&
           sponsorshipMarketState?.marketInitialized === true
         ) {
           app.log.info(
@@ -2301,6 +2308,8 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           },
           sponsorshipLimits: dflowSponsorshipConfig.sponsorshipLimits,
           sponsorshipMode: dflowSponsorshipConfig.sponsorshipMode,
+          sponsorshipObserveCanSponsor:
+            dflowSponsorshipConfig.sponsorshipObserveCanSponsor,
           requester: requestOrder,
           logger: app.log,
         });
@@ -2593,7 +2602,8 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           dflowFlowEnabled:
             policy.effective.embeddedSolanaSponsorshipFlows.dflow === true,
           mode: policy.effective.embeddedSolanaSponsorshipMode,
-          observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+          observeCanSponsor:
+            policy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
         });
         if (!decision.actualSponsorAllowed) {
           reply.code(403);

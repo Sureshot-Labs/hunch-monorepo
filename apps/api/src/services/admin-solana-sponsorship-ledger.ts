@@ -164,6 +164,66 @@ function sumCloseFeeLamports(metadata: unknown): string {
   return total.toString();
 }
 
+function latestCloseAudit(metadata: unknown): {
+  latestCloseStatus: string | null;
+  latestCloseSignature: string | null;
+} {
+  const reclaim = recordValue(metadata, "sponsorshipRentReclaim");
+  let latestCloseStatus: string | null = null;
+  let latestCloseSignature: string | null = null;
+
+  const closeTransactions = arrayValue(reclaim, "closeTransactions");
+  for (const entry of closeTransactions) {
+    if (!isRecord(entry)) continue;
+    const signature = stringValue(entry.signature);
+    const status = stringValue(entry.status);
+    if (!signature && !status) continue;
+    latestCloseSignature = signature;
+    latestCloseStatus = status;
+  }
+
+  const candidates = arrayValue(reclaim, "candidates");
+  for (const entry of candidates) {
+    if (!isRecord(entry)) continue;
+    const signature = stringValue(entry.closeSignature);
+    const status = stringValue(entry.closeStatus);
+    if (!signature && !status) continue;
+    if (latestCloseSignature && signature !== latestCloseSignature) continue;
+    latestCloseSignature = latestCloseSignature ?? signature;
+    latestCloseStatus = latestCloseStatus ?? status;
+  }
+
+  return { latestCloseStatus, latestCloseSignature };
+}
+
+function deriveRentReclaimState(
+  rentStatus: string | null,
+  latestCloseStatus: string | null,
+  reclaimedLamports: string,
+): string | null {
+  const hasRecoveredLamports = (lamportBigInt(reclaimedLamports) ?? 0n) > 0n;
+  if (
+    (rentStatus === "locked" || rentStatus === "lost") &&
+    latestCloseStatus === "closed" &&
+    hasRecoveredLamports
+  ) {
+    return "returned";
+  }
+  if (
+    (rentStatus === "locked" || rentStatus === "lost") &&
+    latestCloseStatus === "submitted"
+  ) {
+    return "close_submitted";
+  }
+  if (
+    (rentStatus === "locked" || rentStatus === "lost") &&
+    latestCloseStatus === "failed"
+  ) {
+    return "close_failed";
+  }
+  return null;
+}
+
 function mapUser(row: LedgerUserRow) {
   if (!row.user_id) return null;
   return {
@@ -259,6 +319,13 @@ export function mapAdminSolanaSponsorshipLedgerRow(row: SponsorshipLedgerRow) {
   );
   const remainingOpenLamports = lamportString(rentReclaim?.remainingOpenLamports);
   const reclaimedAt = stringValue(rentReclaim?.reclaimedAt);
+  const { latestCloseStatus, latestCloseSignature } =
+    latestCloseAudit(metadata);
+  const rentReclaimState = deriveRentReclaimState(
+    row.rent_status,
+    latestCloseStatus,
+    reclaimedLamports,
+  );
   const reconciledAt =
     stringValue(dflowReconciliation?.reconciledAt) ??
     stringValue(genericReconciliation?.reconciledAt);
@@ -294,6 +361,9 @@ export function mapAdminSolanaSponsorshipLedgerRow(row: SponsorshipLedgerRow) {
     actualSponsorLamports: row.actual_sponsor_lamports,
     rentLamports: row.rent_lamports,
     rentStatus: row.rent_status,
+    rentReclaimState,
+    latestCloseStatus,
+    latestCloseSignature,
     error: row.error,
     metadata,
     adminPredictionMarketInit: metadata.adminPredictionMarketInit === true,

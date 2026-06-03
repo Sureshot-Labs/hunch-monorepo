@@ -792,6 +792,7 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   userId?: string | null;
   embeddedSolanaSponsorshipEnabled?: boolean;
   embeddedSolanaSponsorshipMode?: EmbeddedSolanaSponsorshipMode;
+  embeddedSolanaSponsorshipObserveCanSponsor?: boolean;
   embeddedSolanaSponsorshipFlows?: EmbeddedSolanaSponsorshipFlows;
   fetchSponsorBalanceLamports?: EmbeddedSolanaSponsorBalanceFetcher;
   onSponsorBalanceFetchError?: (error: unknown) => void;
@@ -801,6 +802,8 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
     inputs.embeddedSolanaSponsorshipEnabled === true;
   const embeddedSolanaSponsorshipMode =
     inputs.embeddedSolanaSponsorshipMode ?? "enforce";
+  const embeddedSolanaSponsorshipObserveCanSponsor =
+    inputs.embeddedSolanaSponsorshipObserveCanSponsor === true;
   const embeddedSolanaSponsorshipFlows =
     inputs.embeddedSolanaSponsorshipFlows ?? {
       dflow: false,
@@ -864,6 +867,7 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
               legacyWouldSponsor: false,
               enabled: false,
               mode: embeddedSolanaSponsorshipMode,
+              observeCanSponsor: embeddedSolanaSponsorshipObserveCanSponsor,
               flows: embeddedSolanaSponsorshipFlows,
             });
           await writeEmbeddedSolanaSponsorshipAudit({
@@ -908,6 +912,7 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
       legacyWouldSponsor: legacySponsor,
       enabled: embeddedSolanaSponsorshipEnabled,
       mode: embeddedSolanaSponsorshipMode,
+      observeCanSponsor: embeddedSolanaSponsorshipObserveCanSponsor,
       flows: embeddedSolanaSponsorshipFlows,
     });
     const hardDenyRequiresUserFunding =

@@ -84,6 +84,7 @@ function baseFinalizeInputs(overrides: Record<string, unknown> = {}) {
     },
     sponsorshipLimits: limits,
     sponsorshipMode: "enforce" as const,
+    sponsorshipObserveCanSponsor: false,
     requester: async ({ sponsored }: { sponsored: boolean }) => ({
       ok: true as const,
       payload: sponsored

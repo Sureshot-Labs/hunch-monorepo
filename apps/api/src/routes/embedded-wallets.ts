@@ -262,7 +262,9 @@ async function assertCachedEmbeddedSolanaSponsorPolicy(inputs: {
           authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
         embeddedSolanaSponsorshipFlows:
           authAccessPolicy.effective.embeddedSolanaSponsorshipFlows,
-        observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+        observeCanSponsor:
+          authAccessPolicy.effective
+            .embeddedSolanaSponsorshipObserveCanSponsor,
       },
     });
   }
@@ -546,7 +548,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               authAccessPolicy.effective.embeddedSolanaSponsorshipFlows
                 .directTransfer === true,
             mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
-            observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+            observeCanSponsor:
+              authAccessPolicy.effective
+                .embeddedSolanaSponsorshipObserveCanSponsor,
           });
         const disabledReasons = [...sponsorshipDecision.reasons];
         if (request.body.mint !== env.solanaUsdcMint) {
@@ -594,7 +598,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         const requireDurableSponsorship =
           shouldRequireEmbeddedSolanaSponsorshipRedis({
             mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
-            observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+            observeCanSponsor:
+              authAccessPolicy.effective
+                .embeddedSolanaSponsorshipObserveCanSponsor,
           });
         const budget = await reserveEmbeddedSolanaSponsorshipBudget({
           flow: "directTransfer",
@@ -709,6 +715,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             authAccessPolicy.effective.embeddedSolanaSponsorship === true,
           embeddedSolanaSponsorshipMode:
             authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
+          embeddedSolanaSponsorshipObserveCanSponsor:
+            authAccessPolicy.effective
+              .embeddedSolanaSponsorshipObserveCanSponsor,
           embeddedSolanaSponsorshipFlows:
             authAccessPolicy.effective.embeddedSolanaSponsorshipFlows,
           onSponsorBalanceFetchError: (error) => {

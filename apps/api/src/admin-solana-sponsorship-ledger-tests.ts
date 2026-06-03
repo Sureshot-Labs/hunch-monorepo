@@ -53,9 +53,9 @@ function ledgerRow(overrides: Record<string, unknown> = {}) {
         remainingOpenLamports: "0",
         netActualSponsorLamports: "777",
         closeTransactions: [
-          { signature: "close-1", feeLamports: "10" },
-          { signature: "close-2", feeLamports: 10 },
-          { signature: "close-bad", feeLamports: "bad" },
+          { signature: "close-1", feeLamports: "10", status: "closed" },
+          { signature: "close-2", feeLamports: 10, status: "closed" },
+          { signature: "close-bad", feeLamports: "bad", status: "closed" },
         ],
       },
     },
@@ -160,6 +160,9 @@ await test("builds bounded row filters and maps display fields", async () => {
   assert.equal(result.items[0]?.reclaimedLamports, "100");
   assert.equal(result.items[0]?.closeFeeLamports, "20");
   assert.equal(result.items[0]?.netActualSponsorLamports, "777");
+  assert.equal(result.items[0]?.rentReclaimState, null);
+  assert.equal(result.items[0]?.latestCloseStatus, "closed");
+  assert.equal(result.items[0]?.latestCloseSignature, "close-bad");
   assert.equal(
     result.items[0]?.txSolscanUrl,
     "https://solscan.io/tx/5Sig111111111111111111111111111111111111111111111111",
@@ -224,6 +227,83 @@ await test("metadata parsing tolerates malformed optional blocks", () => {
   assert.equal(mapped.closeFeeLamports, "0");
   assert.equal(mapped.netActualSponsorLamports, null);
   assert.equal(mapped.reconciledAt, "2026-06-02T13:00:00.000Z");
+  assert.equal(mapped.rentReclaimState, null);
+  assert.equal(mapped.latestCloseStatus, null);
+  assert.equal(mapped.latestCloseSignature, null);
+});
+
+await test("submitted close maps stale locked or lost rows to close_submitted", () => {
+  for (const rentStatus of ["locked", "lost"]) {
+    const mapped = mapAdminSolanaSponsorshipLedgerRow(
+      ledgerRow({
+        rent_status: rentStatus,
+        metadata: {
+          sponsorshipRentReclaim: {
+            reclaimedAt: "2026-06-02T12:10:00.000Z",
+            reclaimedLamports: "0",
+            remainingOpenLamports: "2039280",
+            candidates: [
+              {
+                account: "A",
+                closeStatus: "submitted",
+                closeSignature: "pendingCloseSig",
+              },
+            ],
+            closeTransactions: [
+              {
+                signature: "pendingCloseSig",
+                accounts: ["A"],
+                feeLamports: null,
+                status: "submitted",
+                error: "close_account_confirmation_submitted",
+                submittedAt: "2026-06-02T12:10:00.000Z",
+              },
+            ],
+          },
+        },
+      }) as never,
+    );
+
+    assert.equal(mapped.rentReclaimState, "close_submitted");
+    assert.equal(mapped.latestCloseStatus, "submitted");
+    assert.equal(mapped.latestCloseSignature, "pendingCloseSig");
+  }
+});
+
+await test("closed recovered close maps stale lost row to returned", () => {
+  const mapped = mapAdminSolanaSponsorshipLedgerRow(
+    ledgerRow({
+      rent_status: "lost",
+      metadata: {
+        sponsorshipRentReclaim: {
+          reclaimedAt: "2026-06-02T12:10:00.000Z",
+          reclaimedLamports: "2039280",
+          remainingOpenLamports: "0",
+          candidates: [
+            {
+              account: "A",
+              closeStatus: "closed",
+              closeSignature: "closedCloseSig",
+              reclaimedLamports: "2039280",
+            },
+          ],
+          closeTransactions: [
+            {
+              signature: "closedCloseSig",
+              accounts: ["A"],
+              feeLamports: "5000",
+              status: "closed",
+              submittedAt: "2026-06-02T12:10:00.000Z",
+            },
+          ],
+        },
+      },
+    }) as never,
+  );
+
+  assert.equal(mapped.rentReclaimState, "returned");
+  assert.equal(mapped.latestCloseStatus, "closed");
+  assert.equal(mapped.latestCloseSignature, "closedCloseSig");
 });
 
 await test("filter builder covers sponsorship ledger fields", () => {

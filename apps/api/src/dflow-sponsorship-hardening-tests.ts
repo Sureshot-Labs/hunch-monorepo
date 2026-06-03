@@ -196,6 +196,7 @@ const baseAuthAccessPolicy = {
   state: "prompt",
   embeddedSolanaSponsorship: true,
   embeddedSolanaSponsorshipMode: "enforce",
+  embeddedSolanaSponsorshipObserveCanSponsor: false,
   embeddedSolanaSponsorshipFlows: {
     dflow: true,
     across: false,
@@ -260,6 +261,21 @@ assert.equal(
   authAccessSponsorshipOnlyChange.nonSponsorshipChanged,
   false,
   "auth_access sponsorship-only updates must not require intel permission",
+);
+
+const authAccessObserveCanSponsorChange = analyzeAuthAccessPolicyChange(
+  baseAuthAccessPolicy,
+  { embeddedSolanaSponsorshipObserveCanSponsor: true },
+);
+assert.equal(
+  authAccessObserveCanSponsorChange.sponsorshipChanged,
+  true,
+  "auth_access observe-can-sponsor updates must require sponsorship permission",
+);
+assert.equal(
+  authAccessObserveCanSponsorChange.nonSponsorshipChanged,
+  false,
+  "auth_access observe-can-sponsor updates must not require intel permission",
 );
 
 const authAccessUnchangedSponsorshipPayload = analyzeAuthAccessPolicyChange(
@@ -512,8 +528,8 @@ assert.match(
 );
 assert.match(
   adminRoute,
-  /analyzeAuthAccessPolicyChange[\s\S]*?sponsorshipPolicyChanged = change\.sponsorshipChanged[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)/,
-  "auth_access sponsorship policy writes must require sponsorship permission",
+  /analyzeAuthAccessPolicyChange[\s\S]*?sponsorshipPolicyChanged = change\.sponsorshipChanged[\s\S]*?isLegacyAdminActor[\s\S]*?adminHasPermission\(adminRole, "sponsorship:write"\)/,
+  "auth_access sponsorship policy writes must require sponsorship permission for modern admin accounts",
 );
 assert.match(
   adminRoute,
@@ -522,13 +538,13 @@ assert.match(
 );
 assert.match(
   adminRoute,
-  /policyPayload = change\.nextPolicy[\s\S]*?payload:\s*policyPayload/,
-  "auth_access partial policy writes must persist the merged effective payload",
+  /analyzeAuthAccessPolicyChange[\s\S]*?nextPolicy[\s\S]*?payload:\s*parsed\.data/,
+  "auth_access partial policy writes must analyze the merged effective payload but persist the submitted override",
 );
 assert.match(
   adminRoute,
-  /sponsorshipPolicyChanged[\s\S]*?request\.adminActor\?\.kind === "legacy_user"/,
-  "auth_access sponsorship policy writes must reject legacy admin fallback",
+  /const isLegacyAdminActor[\s\S]*?kind === "legacy_user"[\s\S]*?sponsorshipPolicyChanged[\s\S]*?!isLegacyAdminActor[\s\S]*?sponsorship:write/,
+  "legacy isAdmin fallback must bypass role permissions after middleware verifies isAdmin",
 );
 assert.match(
   secretsConfig,

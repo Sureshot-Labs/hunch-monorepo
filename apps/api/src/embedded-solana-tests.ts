@@ -20,7 +20,6 @@ import {
   shouldDisableEmbeddedSolanaSponsorshipForTransaction,
   type EmbeddedSolanaWalletContext,
 } from "./services/embedded-solana.js";
-import { env } from "./env.js";
 import {
   assertEmbeddedSolanaSponsoredCachedRequestValid,
   analyzeEmbeddedSolanaTransaction,
@@ -179,17 +178,12 @@ type PrepareEmbeddedSolanaRequestsInput = Omit<
 async function prepareSponsoredEmbeddedSolanaTransactionRequests(
   inputs: PrepareEmbeddedSolanaRequestsInput,
 ) {
-  const previous = env.embeddedSolanaSponsorshipObserveCanSponsor;
-  env.embeddedSolanaSponsorshipObserveCanSponsor = true;
-  try {
-    return await prepareEmbeddedSolanaTransactionRequests({
-      ...inputs,
-      embeddedSolanaSponsorshipEnabled: true,
-      embeddedSolanaSponsorshipMode: "observe",
-    });
-  } finally {
-    env.embeddedSolanaSponsorshipObserveCanSponsor = previous;
-  }
+  return await prepareEmbeddedSolanaTransactionRequests({
+    ...inputs,
+    embeddedSolanaSponsorshipEnabled: true,
+    embeddedSolanaSponsorshipMode: "observe",
+    embeddedSolanaSponsorshipObserveCanSponsor: true,
+  });
 }
 
 function directTransferSponsorshipPolicy() {
@@ -1004,38 +998,33 @@ const tests: TestCase[] = [
       });
       assert.ok(intent);
 
-      const previous = env.embeddedSolanaSponsorshipObserveCanSponsor;
-      env.embeddedSolanaSponsorshipObserveCanSponsor = false;
-      try {
-        await assert.rejects(
-          async () =>
-            prepareEmbeddedSolanaTransactionRequests({
-              context: walletContext,
-              transactions: [
-                {
-                  id: "dflow-trade",
-                  label: "DFlow trade",
-                  transaction,
-                  sponsorshipIntentId: intent.id,
-                },
-              ],
-              userId: "user-id",
-              embeddedSolanaSponsorshipEnabled: true,
-              embeddedSolanaSponsorshipMode: "observe",
-              embeddedSolanaSponsorshipFlows: {
-                dflow: true,
-                across: true,
-                directTransfer: false,
-                debridge: false,
+      await assert.rejects(
+        async () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            context: walletContext,
+            transactions: [
+              {
+                id: "dflow-trade",
+                label: "DFlow trade",
+                transaction,
+                sponsorshipIntentId: intent.id,
               },
-              fetchSponsorBalanceLamports: async () =>
-                SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
-            }),
-          /This Kalshi market needs one-time Solana account setup/,
-        );
-      } finally {
-        env.embeddedSolanaSponsorshipObserveCanSponsor = previous;
-      }
+            ],
+            userId: "user-id",
+            embeddedSolanaSponsorshipEnabled: true,
+            embeddedSolanaSponsorshipMode: "observe",
+            embeddedSolanaSponsorshipObserveCanSponsor: false,
+            embeddedSolanaSponsorshipFlows: {
+              dflow: true,
+              across: true,
+              directTransfer: false,
+              debridge: false,
+            },
+            fetchSponsorBalanceLamports: async () =>
+              SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+          }),
+        /This Kalshi market needs one-time Solana account setup/,
+      );
     },
   },
   {
@@ -1057,37 +1046,32 @@ const tests: TestCase[] = [
       });
       assert.ok(intent);
 
-      const previous = env.embeddedSolanaSponsorshipObserveCanSponsor;
-      env.embeddedSolanaSponsorshipObserveCanSponsor = false;
-      try {
-        const requests = await prepareEmbeddedSolanaTransactionRequests({
-          context: walletContext,
-          transactions: [
-            {
-              id: "dflow-trade",
-              label: "DFlow trade",
-              transaction,
-              sponsorshipIntentId: intent.id,
-            },
-          ],
-          userId: "user-id",
-          embeddedSolanaSponsorshipEnabled: true,
-          embeddedSolanaSponsorshipMode: "observe",
-          embeddedSolanaSponsorshipFlows: {
-            dflow: true,
-            across: true,
-            directTransfer: false,
-            debridge: false,
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        context: walletContext,
+        transactions: [
+          {
+            id: "dflow-trade",
+            label: "DFlow trade",
+            transaction,
+            sponsorshipIntentId: intent.id,
           },
-          fetchSponsorBalanceLamports: async () =>
-            SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
-        });
-        const request = requests[0];
-        assert.ok(request);
-        assert.equal(getSponsor(request), false);
-      } finally {
-        env.embeddedSolanaSponsorshipObserveCanSponsor = previous;
-      }
+        ],
+        userId: "user-id",
+        embeddedSolanaSponsorshipEnabled: true,
+        embeddedSolanaSponsorshipMode: "observe",
+        embeddedSolanaSponsorshipObserveCanSponsor: false,
+        embeddedSolanaSponsorshipFlows: {
+          dflow: true,
+          across: true,
+          directTransfer: false,
+          debridge: false,
+        },
+        fetchSponsorBalanceLamports: async () =>
+          SPONSOR_BASE_REQUIREMENT_LAMPORTS - 1n,
+      });
+      const request = requests[0];
+      assert.ok(request);
+      assert.equal(getSponsor(request), false);
     },
   },
   {

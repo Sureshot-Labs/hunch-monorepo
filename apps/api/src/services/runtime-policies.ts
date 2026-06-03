@@ -54,6 +54,7 @@ export type AuthAccessPolicy = {
   state: AuthAccessState;
   embeddedSolanaSponsorship: boolean;
   embeddedSolanaSponsorshipMode: EmbeddedSolanaSponsorshipMode;
+  embeddedSolanaSponsorshipObserveCanSponsor: boolean;
   embeddedSolanaSponsorshipFlows: EmbeddedSolanaSponsorshipFlowsPolicy;
   embeddedSolanaSponsorshipLimits: EmbeddedSolanaSponsorshipLimitsPolicy;
 };
@@ -966,6 +967,7 @@ const authAccessSchema = z
     state: authAccessStateSchema,
     embeddedSolanaSponsorship: strictBoolean,
     embeddedSolanaSponsorshipMode: embeddedSolanaSponsorshipModeSchema,
+    embeddedSolanaSponsorshipObserveCanSponsor: strictBoolean,
     embeddedSolanaSponsorshipFlows: embeddedSolanaSponsorshipFlowsSchema,
     embeddedSolanaSponsorshipLimits: embeddedSolanaSponsorshipLimitsSchema,
   })
@@ -1131,6 +1133,8 @@ function getDefaults(): IntelPolicyMap {
       state: env.authAccessState,
       embeddedSolanaSponsorship: env.embeddedSolanaSponsorshipEnabled,
       embeddedSolanaSponsorshipMode: "enforce",
+      embeddedSolanaSponsorshipObserveCanSponsor:
+        env.embeddedSolanaSponsorshipObserveCanSponsor,
       embeddedSolanaSponsorshipFlows: {
         dflow: false,
         across: false,
@@ -2229,6 +2233,9 @@ function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
       ).success
         ? policy.embeddedSolanaSponsorshipMode
         : "enforce",
+    embeddedSolanaSponsorshipObserveCanSponsor: Boolean(
+      policy.embeddedSolanaSponsorshipObserveCanSponsor,
+    ),
     embeddedSolanaSponsorshipFlows: {
       dflow: Boolean(policy.embeddedSolanaSponsorshipFlows?.dflow),
       across: Boolean(policy.embeddedSolanaSponsorshipFlows?.across),

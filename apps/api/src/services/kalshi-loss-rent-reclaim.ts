@@ -323,13 +323,14 @@ async function resolveLossReclaimPolicy(pool: Pool) {
   const policy = await resolveAuthAccessPolicy(pool);
   const requireDurable = shouldRequireEmbeddedSolanaSponsorshipRedis({
     mode: policy.effective.embeddedSolanaSponsorshipMode,
-    observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+    observeCanSponsor:
+      policy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
   });
   const enabled =
     policy.effective.embeddedSolanaSponsorship === true &&
     policy.effective.embeddedSolanaSponsorshipFlows.dflow === true &&
     (policy.effective.embeddedSolanaSponsorshipMode === "enforce" ||
-      env.embeddedSolanaSponsorshipObserveCanSponsor === true);
+      policy.effective.embeddedSolanaSponsorshipObserveCanSponsor === true);
   return {
     enabled,
     requireDurable,

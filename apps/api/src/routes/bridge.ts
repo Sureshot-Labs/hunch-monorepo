@@ -597,7 +597,8 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
       authAccessPolicy.effective.embeddedSolanaSponsorshipFlows.debridge ===
       true,
     mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
-    observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+    observeCanSponsor:
+      authAccessPolicy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
   });
   if (!sponsorshipDecision.actualSponsorAllowed) {
     return unavailable(sponsorshipDecision.reasons);
@@ -652,7 +653,8 @@ async function createDebridgeSolanaSponsorshipIntent(inputs: {
   const requireDurableSponsorship = shouldRequireEmbeddedSolanaSponsorshipRedis(
     {
       mode: authAccessPolicy.effective.embeddedSolanaSponsorshipMode,
-      observeCanSponsor: env.embeddedSolanaSponsorshipObserveCanSponsor,
+      observeCanSponsor:
+        authAccessPolicy.effective.embeddedSolanaSponsorshipObserveCanSponsor,
     },
   );
   const budget = await reserveEmbeddedSolanaSponsorshipBudget({
@@ -2003,7 +2005,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     authAccessPolicy.effective
                       .embeddedSolanaSponsorshipMode,
                   observeCanSponsor:
-                    env.embeddedSolanaSponsorshipObserveCanSponsor,
+                    authAccessPolicy.effective
+                      .embeddedSolanaSponsorshipObserveCanSponsor,
                 });
               hunchSponsorship.reasons.push(
                 ...sponsorshipDecision.reasons,
@@ -2022,7 +2025,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                     mode: authAccessPolicy.effective
                       .embeddedSolanaSponsorshipMode,
                     observeCanSponsor:
-                      env.embeddedSolanaSponsorshipObserveCanSponsor,
+                      authAccessPolicy.effective
+                        .embeddedSolanaSponsorshipObserveCanSponsor,
                   });
                 const budget = validation.ok
                   ? await reserveEmbeddedSolanaSponsorshipBudget({
