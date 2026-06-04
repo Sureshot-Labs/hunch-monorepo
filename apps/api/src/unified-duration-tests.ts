@@ -20,9 +20,11 @@ import { forYouQuerySchema } from "./schemas/for-you.js";
 type FeedPayload = {
   data: Array<{
     eventId: string;
+    durationMinutes?: number | null;
     markets: Array<{
       marketId: string;
       marketTitle: string;
+      durationMinutes?: number | null;
     }>;
   }>;
 };
@@ -271,6 +273,8 @@ async function main() {
       eventPayload.data[0]?.markets.map((market) => market.marketId),
       [market5.venueMarketId],
     );
+    assert.equal(eventPayload.data[0]?.durationMinutes, 5);
+    assert.equal(eventPayload.data[0]?.markets[0]?.durationMinutes, 5);
 
     const marketResponse = await app.inject({
       method: "GET",
@@ -290,6 +294,12 @@ async function main() {
     assert.deepEqual(
       returnedMarketIds,
       [market15OtherEvent.venueMarketId, market15SameEvent.venueMarketId].sort(),
+    );
+    assert.deepEqual(
+      marketPayload.data.flatMap((row) =>
+        row.markets.map((market) => market.durationMinutes),
+      ),
+      [15, 15],
     );
 
     const multiResponse = await app.inject({

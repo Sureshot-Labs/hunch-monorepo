@@ -64,6 +64,7 @@ export type FeedMarket = {
   marketTitle: string;
   marketSlug: string | null;
   marketType?: string | null;
+  durationMinutes?: number | null;
   status?: string | null;
   tradeType?: string | null;
   marketAddress?: string | null;
@@ -100,6 +101,7 @@ export type FeedMarket = {
 export type FeedEvent = {
   eventId: string;
   eventTitle: string | null;
+  durationMinutes?: number | null;
   category: string | null;
   startTime: unknown;
   endTime: unknown;

@@ -426,6 +426,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           ),
           marketMetadata,
           marketType: market.market_type,
+          durationMinutes: market.market_duration_minutes ?? null,
           tradeType:
             market.venue === "limitless"
               ? (limitlessMeta?.tradeType ?? null)
@@ -539,6 +540,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               eventMetadata,
             ),
             eventMetadata,
+            durationMinutes: market.event_duration_minutes ?? null,
             category: market.event_category,
             startTime: market.start_date,
             endTime: market.end_date,

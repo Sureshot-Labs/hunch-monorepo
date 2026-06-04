@@ -1588,6 +1588,7 @@ export async function fetchFeedEventIds(
 export type FeedMarketRow = {
   event_id: string;
   event_title: string | null;
+  event_duration_minutes: number | null;
   category: string | null;
   start_date: unknown;
   end_date: unknown;
@@ -1605,6 +1606,7 @@ export type FeedMarketRow = {
   venue_market_id: string;
   market_title: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   market_open_time: unknown;
@@ -1848,6 +1850,7 @@ export async function fetchFeedMarkets(
     select
       e.id as event_id,
       e.title as event_title,
+      e.duration_minutes as event_duration_minutes,
       e.category,
       e.start_date,
       e.end_date,
@@ -1865,6 +1868,7 @@ export async function fetchFeedMarkets(
       m.venue_market_id,
       m.title as market_title,
       m.market_type as market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       m.open_time as market_open_time,
@@ -2127,6 +2131,7 @@ export async function fetchFeedMarketsDirect(
     select
       e.id as event_id,
       e.title as event_title,
+      e.duration_minutes as event_duration_minutes,
       e.category,
       e.start_date,
       e.end_date,
@@ -2144,6 +2149,7 @@ export async function fetchFeedMarketsDirect(
       m.venue_market_id,
       m.title as market_title,
       m.market_type as market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       m.open_time as market_open_time,
@@ -2476,6 +2482,7 @@ export type MarketDetailsRow = {
   event_title: string | null;
   event_description: string | null;
   event_category: string | null;
+  event_duration_minutes: number | null;
   start_date: unknown;
   end_date: unknown;
   event_liquidity: unknown;
@@ -2489,6 +2496,7 @@ export type MarketDetailsRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   open_time: unknown;
   close_time: unknown;
@@ -2542,6 +2550,7 @@ export async function fetchMarketDetails(
       e.title as event_title,
       e.description as event_description,
       e.category as event_category,
+      e.duration_minutes as event_duration_minutes,
       e.start_date,
       e.end_date,
       e.liquidity as event_liquidity,
@@ -2555,6 +2564,7 @@ export async function fetchMarketDetails(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       m.open_time,
       m.close_time,
@@ -2645,6 +2655,7 @@ export type EventDetailsRow = {
   event_description: string | null;
   event_category: string | null;
   event_status: string | null;
+  event_duration_minutes: number | null;
   start_date: unknown;
   end_date: unknown;
   event_volume_total: unknown;
@@ -2663,6 +2674,7 @@ export type EventDetailsRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   pm_neg_risk: boolean | null;
@@ -2736,6 +2748,7 @@ export async function fetchEventDetails(
       e.description as event_description,
       e.category as event_category,
       e.status as event_status,
+      e.duration_minutes as event_duration_minutes,
       e.start_date,
       e.end_date,
       e.volume_total as event_volume_total,
@@ -2754,6 +2767,7 @@ export async function fetchEventDetails(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       pm.neg_risk as pm_neg_risk,
@@ -2903,6 +2917,7 @@ export type MarketByTokenRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   pm_neg_risk: boolean | null;
@@ -2949,6 +2964,7 @@ export type MarketByTokenRow = {
   event_description: string | null;
   event_category: string | null;
   event_status: string | null;
+  event_duration_minutes: number | null;
   start_date: unknown;
   end_date: unknown;
   event_volume_total: unknown;
@@ -3032,6 +3048,7 @@ export async function fetchMarketsByTokenIds(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       pm.neg_risk as pm_neg_risk,
@@ -3075,6 +3092,7 @@ export async function fetchMarketsByTokenIds(
       e.description as event_description,
       e.category as event_category,
       e.status as event_status,
+      e.duration_minutes as event_duration_minutes,
       e.start_date,
       e.end_date,
       e.volume_total as event_volume_total,

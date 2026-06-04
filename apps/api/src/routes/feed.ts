@@ -209,6 +209,7 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     marketTitle: rRow.market_title ?? "",
     marketSlug: rRow.market_slug ?? null,
     marketType: rRow.market_type ?? null,
+    durationMinutes: rRow.market_duration_minutes ?? null,
     status: marketStatus,
     volume24h: rRow.volume_24h != null ? Number(rRow.volume_24h) : 0,
     volumeTotal: rRow.volume_total != null ? Number(rRow.volume_total) : 0,
@@ -276,6 +277,7 @@ function buildFeedEvent(rRow: FeedMarketRow): FeedEvent {
   return {
     eventId: String(rRow.event_id),
     eventTitle: rRow.event_title ?? null,
+    durationMinutes: rRow.event_duration_minutes ?? null,
     category: rRow.category ?? null,
     startTime: rRow.start_date,
     endTime: rRow.end_date,
