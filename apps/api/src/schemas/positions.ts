@@ -123,11 +123,11 @@ export const positionVisibilityResponseSchema = z.object({
   closeLoss: z
     .union([
       z.object({
-        skippedReason: z.string().min(1),
-      }),
-      z.object({
         skippedReason: z.literal("prepare_failed"),
         error: z.string().min(1),
+      }),
+      z.object({
+        skippedReason: z.string().min(1),
       }),
     ])
     .optional(),

@@ -66,6 +66,18 @@ assert.equal(
   }),
   staleSubmittedAt,
 );
+assert.deepEqual(
+  bridgeRouteTestExports.buildMissingSolanaSourceTxFailurePayload(),
+  {
+    status: "failed",
+    source: "rpc",
+    sourceTxStatus: null,
+    reasonCode: "source_signature_not_found",
+    staleAfterMs: 5 * 60 * 1000,
+    error:
+      "Source Solana transaction was submitted but was not found on-chain.",
+  },
+);
 
 const refunded = buildBridgeNotification({
   userId: "user-1",

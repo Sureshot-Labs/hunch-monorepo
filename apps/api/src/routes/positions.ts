@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
@@ -31,8 +31,12 @@ import {
 } from "../schemas/positions.js";
 import {
   buildKalshiLossCloseTransaction,
+  normalizeKalshiSolanaPositionMint,
   type KalshiLossCloseTransaction,
 } from "../services/kalshi-loss-close.js";
+import { resolveEmbeddedSolanaWalletContext } from "../services/embedded-solana.js";
+
+type AuthenticatedUser = NonNullable<FastifyRequest["user"]>;
 
 export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -46,6 +50,20 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
   type AllowedVenue = "polymarket" | "kalshi" | "limitless";
   const isAllowedVenue = (venue: string | undefined): venue is AllowedVenue =>
     Boolean(venue && allowedVenues.has(venue as AllowedVenue));
+  const canUseEmbeddedSolanaExecution = async (
+    user: AuthenticatedUser,
+    walletAddress: string,
+  ): Promise<boolean> => {
+    try {
+      await resolveEmbeddedSolanaWalletContext({
+        user,
+        signer: walletAddress,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const isSkippableSyncMessage = (message: string): boolean => {
     const normalized = message.toLowerCase();
     return (
@@ -457,17 +475,24 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
         if (body.hidden && body.venue === "kalshi") {
           try {
-            const closeResult = await buildKalshiLossCloseTransaction({
-              pool,
-              userId: user.id,
-              walletAddress: body.walletAddress,
-              tokenId: body.tokenId,
-              rpcUrls: env.solanaRpcUrls,
-              timeoutMs: env.solanaRpcTimeoutMs,
-            });
-            closeLossTransaction = closeResult.transaction;
-            if (!closeResult.transaction) {
-              closeLoss = { skippedReason: closeResult.skippedReason };
+            if (
+              normalizeKalshiSolanaPositionMint(body.tokenId) &&
+              !(await canUseEmbeddedSolanaExecution(user, body.walletAddress))
+            ) {
+              closeLoss = { skippedReason: "non_embedded_wallet" };
+            } else {
+              const closeResult = await buildKalshiLossCloseTransaction({
+                pool,
+                userId: user.id,
+                walletAddress: body.walletAddress,
+                tokenId: body.tokenId,
+                rpcUrls: env.solanaRpcUrls,
+                timeoutMs: env.solanaRpcTimeoutMs,
+              });
+              closeLossTransaction = closeResult.transaction;
+              if (!closeResult.transaction) {
+                closeLoss = { skippedReason: closeResult.skippedReason };
+              }
             }
           } catch (error) {
             const message =
