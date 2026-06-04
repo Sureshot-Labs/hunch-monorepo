@@ -740,7 +740,7 @@ export const env = {
   authAccessState,
   embeddedSolanaSponsorshipEnabled,
   solanaPrefundEnabled:
-    parseOptionalBool(process.env.SOLANA_PREFUND_ENABLED) ?? true,
+    parseOptionalBool(process.env.SOLANA_PREFUND_ENABLED) ?? false,
   solanaPrefundMaxTopUpLamports: optionalNonNegativeBigInt(
     "SOLANA_PREFUND_MAX_TOP_UP_LAMPORTS",
     30_000_000n,

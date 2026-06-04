@@ -29,6 +29,18 @@ const zSolanaBigintString = z
   .regex(/^\d+$/)
   .min(1)
   .max(80);
+const zSolanaReadinessBlockingReason = z
+  .enum([
+    "market_not_initialized",
+    "prefund_disabled",
+    "insufficient_usdc_for_prefund",
+  ])
+  .nullable();
+
+export const embeddedWalletErrorResponseSchema = z.object({
+  error: z.string(),
+  debug: z.unknown().optional(),
+});
 
 export const solanaPrefundOperationSchema = z.enum([
   "dflow_buy",
@@ -87,6 +99,10 @@ export const solanaReadinessBodySchema = z.object({
 export const solanaPrefundPrepareBodySchema = z.object({
   walletAddress: z.string().trim().min(1).optional(),
   operation: solanaPrefundOperationSchema,
+  marketId: z.string().trim().min(1).max(160).optional(),
+  inputMint: z.string().trim().min(1).max(120).optional(),
+  outputMint: z.string().trim().min(1).max(120).optional(),
+  amountRaw: zSolanaBigintString.optional(),
   amountInRaw: zSolanaBigintString,
   executionKey: embeddedExecutionKeySchema.optional(),
 });
@@ -95,4 +111,41 @@ export const solanaPrefundExecuteBodySchema = z.object({
   walletAddress: z.string().trim().min(1).optional(),
   executionKey: embeddedExecutionKeySchema,
   signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
+});
+
+export const solanaReadinessResponseSchema = z.object({
+  ok: z.boolean(),
+  walletAddress: z.string(),
+  operation: solanaPrefundOperationSchema,
+  solBalanceLamports: zSolanaBigintString,
+  solBalance: z.string(),
+  usdcBalanceRaw: zSolanaBigintString,
+  usdcBalance: z.string(),
+  minSolLamports: zSolanaBigintString,
+  targetSolLamports: zSolanaBigintString,
+  maxTopUpLamports: zSolanaBigintString,
+  needsPrefund: z.boolean(),
+  prefundAvailable: z.boolean(),
+  blockingReason: zSolanaReadinessBlockingReason,
+});
+
+export const solanaPrefundPrepareResponseSchema = z.object({
+  ok: z.boolean(),
+  signer: z.string(),
+  executionKey: embeddedExecutionKeySchema,
+  operation: solanaPrefundOperationSchema,
+  amountInRaw: zSolanaBigintString,
+  estimatedOutLamports: zSolanaBigintString,
+  transactionDigest: z.string(),
+  quote: z.unknown(),
+  requests: z.array(z.unknown()),
+});
+
+export const solanaPrefundExecuteResponseSchema = z.object({
+  ok: z.boolean(),
+  signer: z.string(),
+  operation: solanaPrefundOperationSchema,
+  amountInRaw: zSolanaBigintString,
+  estimatedOutLamports: zSolanaBigintString,
+  signatures: z.array(z.string()),
 });

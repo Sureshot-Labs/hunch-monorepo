@@ -3,6 +3,11 @@
 import assert from "node:assert/strict";
 
 import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import {
+  AddressLookupTableAccount,
   Keypair,
   PublicKey,
   SystemProgram,
@@ -43,28 +48,243 @@ const RECENT_BLOCKHASH = "11111111111111111111111111111111";
 const SPL_TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
 );
+const TOKEN_2022_PROGRAM_ID = new PublicKey(
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+);
 const TOKEN_SYNC_NATIVE_INSTRUCTION = 17;
+const TOKEN_TRANSFER_INSTRUCTION = 3;
+const TOKEN_CLOSE_ACCOUNT_INSTRUCTION = 9;
+const SOLANA_WRAPPED_SOL_MINT = new PublicKey(
+  "So11111111111111111111111111111111111111112",
+);
+const JUPITER_V6_PROGRAM_ID = new PublicKey(
+  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+);
+const JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR = Buffer.from(
+  "e517cb977ae3ad2a",
+  "hex",
+);
+const JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR = Buffer.from(
+  "c1209b3341d69c81",
+  "hex",
+);
 const USER_TX_FEE_BUFFER_LAMPORTS = 3_000_000n;
 const SPONSOR_BASE_REQUIREMENT_LAMPORTS = 8_000_000n;
 
 function serializeTransaction(
   instructions: TransactionInstruction[],
   payerKey = signerKeypair.publicKey,
+  addressLookupTableAccounts: AddressLookupTableAccount[] = [],
 ): string {
   const message = new TransactionMessage({
     payerKey,
     recentBlockhash: RECENT_BLOCKHASH,
     instructions,
-  }).compileToV0Message();
+  }).compileToV0Message(addressLookupTableAccounts);
   return Buffer.from(new VersionedTransaction(message).serialize()).toString(
     "base64",
   );
+}
+
+function createAddressLookupTableAccount(
+  addresses: PublicKey[],
+): AddressLookupTableAccount {
+  return new AddressLookupTableAccount({
+    key: Keypair.generate().publicKey,
+    state: {
+      deactivationSlot: BigInt("0xffffffffffffffff"),
+      lastExtendedSlot: 0,
+      lastExtendedSlotStartIndex: 0,
+      authority: undefined,
+      addresses,
+    },
+  });
 }
 
 function getSponsor(
   request: ReturnType<typeof buildEmbeddedSolanaSignAndSendRequest>,
 ) {
   return (request.input.body as { sponsor?: boolean }).sponsor;
+}
+
+function getUserUsdcAta(owner = signerKeypair.publicKey): PublicKey {
+  return getAssociatedTokenAddressSync(
+    new PublicKey(env.solanaUsdcMint),
+    owner,
+    false,
+    SPL_TOKEN_PROGRAM_ID,
+  );
+}
+
+function getUserWsolAta(owner = signerKeypair.publicKey): PublicKey {
+  return getAssociatedTokenAddressSync(
+    SOLANA_WRAPPED_SOL_MINT,
+    owner,
+    false,
+    SPL_TOKEN_PROGRAM_ID,
+  );
+}
+
+function encodeTokenTransferAmount(amount: bigint): Buffer {
+  const data = Buffer.alloc(9);
+  data[0] = TOKEN_TRANSFER_INSTRUCTION;
+  data.writeBigUInt64LE(amount, 1);
+  return data;
+}
+
+function encodeU64Le(value: bigint): Buffer {
+  const data = Buffer.alloc(8);
+  data.writeBigUInt64LE(value, 0);
+  return data;
+}
+
+function encodeJupiterSharedAccountsRouteData(inputs: {
+  amount: bigint;
+  quotedOut?: bigint;
+  discriminator?: Buffer;
+}): Buffer {
+  return Buffer.concat([
+    inputs.discriminator ?? JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR,
+    Buffer.from([1, 0, 0, 0, 0x1a, 0x64, 0, 1]),
+    encodeU64Le(inputs.amount),
+    encodeU64Le(inputs.quotedOut ?? 9_134_000n),
+    Buffer.from([50, 0, 0, 0]),
+  ]);
+}
+
+function buildUsdcDebitTransaction(inputs: {
+  amount?: bigint;
+  source?: PublicKey;
+  signer?: PublicKey;
+  programId?: PublicKey;
+} = {}): string {
+  const signer = inputs.signer ?? signerKeypair.publicKey;
+  return serializeTransaction(
+    [
+      new TransactionInstruction({
+        programId: inputs.programId ?? SPL_TOKEN_PROGRAM_ID,
+        keys: [
+          {
+            pubkey: inputs.source ?? getUserUsdcAta(signer),
+            isSigner: false,
+            isWritable: true,
+          },
+          {
+            pubkey: Keypair.generate().publicKey,
+            isSigner: false,
+            isWritable: true,
+          },
+          {
+            pubkey: signer,
+            isSigner: true,
+            isWritable: false,
+          },
+        ],
+        data: encodeTokenTransferAmount(inputs.amount ?? 1_000_000n),
+      }),
+    ],
+    signer,
+  );
+}
+
+function buildJupiterPrefundTransaction(inputs: {
+  amount?: bigint;
+  source?: PublicKey;
+  signer?: PublicKey;
+  wsolAta?: PublicKey;
+  discriminator?: Buffer;
+  ataAccount?: PublicKey;
+  includeAtaCreate?: boolean;
+  extraCloseAccount?: PublicKey;
+  addressLookupTableAccounts?: AddressLookupTableAccount[];
+} = {}): string {
+  const signer = inputs.signer ?? signerKeypair.publicKey;
+  const amount = inputs.amount ?? 1_000_000n;
+  const source = inputs.source ?? getUserUsdcAta(signer);
+  const wsolAta = inputs.wsolAta ?? getUserWsolAta(signer);
+  const discriminator =
+    inputs.discriminator ?? JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR;
+  const instructions: TransactionInstruction[] = [];
+  if (inputs.includeAtaCreate !== false) {
+    instructions.push(
+      new TransactionInstruction({
+        programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+        keys: [
+          { pubkey: signer, isSigner: true, isWritable: true },
+          {
+            pubkey: inputs.ataAccount ?? wsolAta,
+            isSigner: false,
+            isWritable: true,
+          },
+          { pubkey: signer, isSigner: false, isWritable: false },
+          { pubkey: SOLANA_WRAPPED_SOL_MINT, isSigner: false, isWritable: false },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          { pubkey: SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        ],
+        data: Buffer.from([1]),
+      }),
+    );
+  }
+
+  const isExactOut = discriminator.equals(JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR);
+  instructions.push(
+    new TransactionInstruction({
+      programId: JUPITER_V6_PROGRAM_ID,
+      keys: isExactOut
+        ? [
+            { pubkey: SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+            { pubkey: signer, isSigner: true, isWritable: false },
+            { pubkey: source, isSigner: false, isWritable: true },
+            { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true },
+            { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true },
+            { pubkey: wsolAta, isSigner: false, isWritable: true },
+            { pubkey: new PublicKey(env.solanaUsdcMint), isSigner: false, isWritable: false },
+            { pubkey: SOLANA_WRAPPED_SOL_MINT, isSigner: false, isWritable: false },
+            { pubkey: JUPITER_V6_PROGRAM_ID, isSigner: false, isWritable: false },
+          ]
+        : [
+            { pubkey: SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: signer, isSigner: true, isWritable: false },
+            { pubkey: source, isSigner: false, isWritable: true },
+            { pubkey: wsolAta, isSigner: false, isWritable: true },
+            { pubkey: JUPITER_V6_PROGRAM_ID, isSigner: false, isWritable: false },
+            { pubkey: SOLANA_WRAPPED_SOL_MINT, isSigner: false, isWritable: false },
+            { pubkey: JUPITER_V6_PROGRAM_ID, isSigner: false, isWritable: false },
+          ],
+      data: encodeJupiterSharedAccountsRouteData({ amount, discriminator }),
+    }),
+  );
+  if (inputs.extraCloseAccount) {
+    instructions.push(
+      new TransactionInstruction({
+        programId: SPL_TOKEN_PROGRAM_ID,
+        keys: [
+          { pubkey: inputs.extraCloseAccount, isSigner: false, isWritable: true },
+          { pubkey: signer, isSigner: false, isWritable: true },
+          { pubkey: signer, isSigner: true, isWritable: false },
+        ],
+        data: Buffer.from([TOKEN_CLOSE_ACCOUNT_INSTRUCTION]),
+      }),
+    );
+  }
+  instructions.push(
+    new TransactionInstruction({
+      programId: SPL_TOKEN_PROGRAM_ID,
+      keys: [
+        { pubkey: wsolAta, isSigner: false, isWritable: true },
+        { pubkey: signer, isSigner: false, isWritable: true },
+        { pubkey: signer, isSigner: true, isWritable: false },
+      ],
+      data: Buffer.from([TOKEN_CLOSE_ACCOUNT_INSTRUCTION]),
+    }),
+  );
+
+  return serializeTransaction(
+    instructions,
+    signer,
+    inputs.addressLookupTableAccounts,
+  );
 }
 
 function buildPrefundPayload(inputs: {
@@ -706,22 +926,355 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "solana prefund validator accepts the selected-wallet USDC to SOL route",
+    name: "solana prefund validator rejects arbitrary transaction payloads",
     run: () => {
-      const result =
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({ tokenOutAmount: "9134000" }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /unsupported program/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator accepts sanitized Jupiter USDC to SOL prefund shape",
+    run: () => {
+      for (const discriminator of [
+        JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR,
+        JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR,
+      ]) {
+        const validated =
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({ discriminator }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          });
+
+        assert.equal(validated.estimatedOutLamports, 9_134_000n);
+        assert.deepEqual(validated.requiredSigners, [walletContext.signer]);
+        assert.equal(validated.feePayer, walletContext.signer);
+      }
+    },
+  },
+  {
+    name: "solana prefund validator resolves address lookup tables before checking route shape",
+    run: () => {
+      const lookupTable = createAddressLookupTableAccount([
+        SPL_TOKEN_PROGRAM_ID,
+        JUPITER_V6_PROGRAM_ID,
+        SOLANA_WRAPPED_SOL_MINT,
+        SystemProgram.programId,
+        getUserUsdcAta(),
+        getUserWsolAta(),
+      ]);
+      const txData = buildJupiterPrefundTransaction({
+        discriminator: JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR,
+        addressLookupTableAccounts: [lookupTable],
+      });
+      const tx = VersionedTransaction.deserialize(Buffer.from(txData, "base64"));
+      assert.ok(tx.message.addressTableLookups.length > 0);
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData,
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /address lookup table was not resolved/,
+      );
+
+      const validated =
         solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
-          payload: buildPrefundPayload({ tokenOutAmount: "9134000" }),
+          payload: buildPrefundPayload({
+            tokenOutAmount: "9134000",
+            txData,
+          }),
           signer: walletContext.signer,
           amountInRaw: 1_000_000n,
           minOutLamports: 4_000_000n,
           maxOutLamports: 30_000_000n,
+          addressLookupTableAccounts: [lookupTable],
         });
 
-      assert.equal(result.estimatedOutLamports, 9_134_000n);
-      assert.deepEqual(result.requiredSigners, [walletContext.signer]);
-      assert.equal(result.feePayer, walletContext.signer);
-      assert.equal(typeof result.transactionDigest, "string");
-      assert.ok(result.txData.length > 0);
+      assert.equal(validated.estimatedOutLamports, 9_134_000n);
+      assert.deepEqual(validated.requiredSigners, [walletContext.signer]);
+    },
+  },
+  {
+    name: "solana prefund validator requires decoded Jupiter transaction shape",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildUsdcDebitTransaction(),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /token instruction is not allowed|allowed Jupiter prefund/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator rejects unsafe Solana transaction shapes",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: serializeTransaction([
+                SystemProgram.transfer({
+                  fromPubkey: signerKeypair.publicKey,
+                  toPubkey: Keypair.generate().publicKey,
+                  lamports: 1_000_000,
+                }),
+              ]),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /spends signer SOL/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: serializeTransaction([
+                SystemProgram.createAccount({
+                  fromPubkey: signerKeypair.publicKey,
+                  newAccountPubkey: Keypair.generate().publicKey,
+                  lamports: 1_000_000,
+                  space: 0,
+                  programId: SystemProgram.programId,
+                }),
+              ]),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /signer does not match|rent-funded accounts/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                ataAccount: Keypair.generate().publicKey,
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /associated token instruction/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                extraCloseAccount: getUserUsdcAta(),
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /multiple token close|token close does not target/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: serializeTransaction([
+                new TransactionInstruction({
+                  programId: SPL_TOKEN_PROGRAM_ID,
+                  keys: [
+                    {
+                      pubkey: Keypair.generate().publicKey,
+                      isSigner: false,
+                      isWritable: true,
+                    },
+                  ],
+                  data: Buffer.from([TOKEN_SYNC_NATIVE_INSTRUCTION]),
+                }),
+              ]),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /token instruction is not allowed/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildUsdcDebitTransaction({
+                programId: TOKEN_2022_PROGRAM_ID,
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /Token-2022/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator rejects wrong USDC account and amount",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                source: Keypair.generate().publicKey,
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /selected wallet USDC account/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({ amount: 999_999n }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /amount does not match/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator rejects malformed transaction payloads",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: "not-base64",
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /valid serialized Solana transaction/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: "0x123",
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /valid serialized Solana transaction/,
+      );
+    },
+  },
+  {
+    name: "solana prefund validator rejects extra required signers",
+    run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: serializeTransaction([
+                new TransactionInstruction({
+                  programId: SPL_TOKEN_PROGRAM_ID,
+                  keys: [
+                    {
+                      pubkey: getUserUsdcAta(),
+                      isSigner: false,
+                      isWritable: true,
+                    },
+                    {
+                      pubkey: Keypair.generate().publicKey,
+                      isSigner: false,
+                      isWritable: true,
+                    },
+                    {
+                      pubkey: signerKeypair.publicKey,
+                      isSigner: true,
+                      isWritable: false,
+                    },
+                    {
+                      pubkey: Keypair.generate().publicKey,
+                      isSigner: true,
+                      isWritable: false,
+                    },
+                  ],
+                  data: encodeTokenTransferAmount(1_000_000n),
+                }),
+              ]),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /signer does not match/,
+      );
     },
   },
   {
