@@ -1,4 +1,8 @@
-import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import {
+  deriveExactWindowDurationMinutes,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 
 import type {
   TDflowEvent,
@@ -357,6 +361,11 @@ export function mapToUnifiedEvent(
     status,
     series_key: seriesTicker ?? undefined,
     series_title: seriesTitleResolved ?? undefined,
+    duration_minutes:
+      deriveExactWindowDurationMinutes({
+        openTime: start_date,
+        closeTime: end_date,
+      }) ?? undefined,
     start_date,
     end_date,
     volume_total,
@@ -603,6 +612,11 @@ export function mapToUnifiedMarket(
     }),
     status,
     market_type: "binary",
+    duration_minutes:
+      deriveExactWindowDurationMinutes({
+        openTime: open_time,
+        closeTime: close_time,
+      }) ?? undefined,
     open_time,
     close_time,
     expiration_time,

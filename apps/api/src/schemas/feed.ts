@@ -58,6 +58,52 @@ const zCategoriesQuery = z
     return Array.from(new Set(categories)).sort();
   });
 
+const SUPPORTED_DURATION_MINUTES = [5, 15, 60] as const;
+const supportedDurationMinuteSet = new Set<number>(SUPPORTED_DURATION_MINUTES);
+
+export const zDurationMinutesQuery = z
+  .preprocess((v) => {
+    if (v == null) return undefined;
+    const values = Array.isArray(v) ? v : [v];
+    const out: number[] = [];
+    let sawValue = false;
+
+    for (const value of values) {
+      const parts = typeof value === "string" ? value.split(",") : [value];
+      for (const part of parts) {
+        if (typeof part === "number") {
+          if (!Number.isInteger(part) || part <= 0) return Number.NaN;
+          sawValue = true;
+          out.push(part);
+          continue;
+        }
+        if (typeof part !== "string") return Number.NaN;
+        const trimmed = part.trim();
+        if (!trimmed) return Number.NaN;
+        if (!/^\d+$/.test(trimmed)) return Number.NaN;
+        sawValue = true;
+        out.push(Number(trimmed));
+      }
+    }
+
+    return sawValue ? out : undefined;
+  }, z.array(z.number().int().positive()).optional())
+  .superRefine((values, ctx) => {
+    for (const value of values ?? []) {
+      if (!supportedDurationMinuteSet.has(value)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "duration_minutes must be one of 5, 15, or 60",
+        });
+        return;
+      }
+    }
+  })
+  .transform((values) => {
+    if (!values?.length) return undefined;
+    return Array.from(new Set(values)).sort((a, b) => a - b);
+  });
+
 export const feedQuerySchema = z.object({
   limit: z.coerce
     .number()
@@ -136,6 +182,7 @@ export const feedQuerySchema = z.object({
     .number()
     .optional()
     .transform((v) => (v == null ? undefined : Math.min(1, Math.max(0, v)))),
+  duration_minutes: zDurationMinutesQuery,
   end_within_hours: z.coerce
     .number()
     .int()
@@ -164,6 +211,7 @@ export const feedFacetQuerySchema = feedQuerySchema.pick({
   min_prob: true,
   max_prob: true,
   max_spread: true,
+  duration_minutes: true,
   end_within_hours: true,
   age_within_hours: true,
 });

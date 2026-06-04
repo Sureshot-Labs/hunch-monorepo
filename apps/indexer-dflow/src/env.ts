@@ -86,6 +86,21 @@ function parseCsvLowercase(v: string | undefined): string[] | undefined {
   return items.length ? items : undefined;
 }
 
+function parsePositiveIntCsv(
+  value: string | undefined,
+  fallback: number[],
+): number[] {
+  const text = value?.trim();
+  if (!text) return fallback;
+  const out: number[] = [];
+  for (const part of text.split(",")) {
+    const n = Number(part.trim());
+    if (!Number.isInteger(n) || n <= 0) continue;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out.length ? out : fallback;
+}
+
 const dflowEnabledSetting = parseOptionalBool(process.env.DFLOW_ENABLED);
 const dflowApiKey = opt("DFLOW_API_KEY");
 
@@ -322,6 +337,21 @@ const wsHotShare = clampFloat(wsHotShareRaw, {
   max: 1,
   fallback: 0.5,
 });
+const durationWsReserveDurations = parsePositiveIntCsv(
+  process.env.DURATION_WS_RESERVE_DURATIONS,
+  [5, 15, 60],
+);
+const durationWsReserveMax = clampInt(
+  parseOptionalInt(
+    process.env.DFLOW_DURATION_WS_RESERVE_MAX ??
+      process.env.DURATION_WS_RESERVE_MAX,
+  ),
+  { min: 0, max: 10_000, fallback: 200 },
+);
+const durationWsReservePrewarmSec = clampInt(
+  parseOptionalInt(process.env.DURATION_WS_RESERVE_PREWARM_SEC),
+  { min: 0, max: 24 * 60 * 60, fallback: 60 },
+);
 
 const tradesTokenLimit = clampInt(
   parseOptionalInt(process.env.DFLOW_TRADES_TOKEN_LIMIT),
@@ -443,6 +473,11 @@ export const env = {
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
   wsHotShare,
+  durationWsReserveEnabled:
+    parseOptionalBool(process.env.DURATION_WS_RESERVE_ENABLED) ?? true,
+  durationWsReserveDurations,
+  durationWsReservePrewarmSec,
+  durationWsReserveMax,
 
   // Phase 1 constraint (documented in INTEGRATIONS_PLAN.md)
   solanaUsdcMint,

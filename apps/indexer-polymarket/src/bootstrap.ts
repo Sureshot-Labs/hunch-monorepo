@@ -840,6 +840,7 @@ type PolymarketMarketRef = {
 type RefreshedPolymarketMarket = {
   eventId: string;
   market: TPolymarketMarket;
+  event?: TPolymarketEvent;
 };
 
 type RefreshMarketRefsResult = {
@@ -868,6 +869,18 @@ function collectMarketsFromEvents(
   const rowsByMarketId = new Map<string, RefreshedPolymarketMarket>();
 
   for (const event of events) {
+    const parsedEvent = (() => {
+      try {
+        return PolymarketEvent.parse(event) as TPolymarketEvent;
+      } catch (error) {
+        log.warn("Failed to parse Polymarket refreshed event", {
+          eventId: event.id,
+          error,
+        });
+        return undefined;
+      }
+    })();
+
     for (const rawMarket of event.markets) {
       const marketId = String(rawMarket.id);
       const ref = refsByMarketId.get(marketId);
@@ -876,6 +889,7 @@ function collectMarketsFromEvents(
         rowsByMarketId.set(marketId, {
           eventId: ref.eventId,
           market: PolymarketMarket.parse(rawMarket) as TPolymarketMarket,
+          event: parsedEvent,
         });
       } catch (error) {
         log.warn("Failed to parse Polymarket refreshed market from event", {
@@ -918,6 +932,27 @@ async function fetchFallbackMarketRows(
   );
 
   return rows.filter((row): row is RefreshedPolymarketMarket => row != null);
+}
+
+async function loadExistingPolymarketMarketDurations(
+  marketIds: string[],
+): Promise<Map<string, number | null>> {
+  if (!marketIds.length) return new Map();
+  const result = await pool.query<{
+    venue_market_id: string;
+    duration_minutes: number | null;
+  }>(
+    `
+      select venue_market_id, duration_minutes
+      from unified_markets
+      where venue = 'polymarket'
+        and venue_market_id = any($1::text[])
+    `,
+    [marketIds],
+  );
+  return new Map(
+    result.rows.map((row) => [row.venue_market_id, row.duration_minutes]),
+  );
 }
 
 async function refreshMarketRefs(
@@ -982,8 +1017,23 @@ async function refreshMarketRefs(
   const polymarketMarketRows = parsed.map(({ eventId, market }) =>
     mapPolymarketMarketRow(eventId, market),
   );
-  const unifiedMarketRows = parsed.map(({ eventId, market }) =>
-    mapToUnifiedMarket(market, eventId),
+  const fallbackDurationMarketIds = parsed
+    .filter((row) => !row.event)
+    .map((row) => String(row.market.id));
+  const existingDurations = fallbackDurationMarketIds.length
+    ? await timedPhase(
+        timings,
+        "refreshMarketRefs.loadExistingDurations",
+        () => loadExistingPolymarketMarketDurations(fallbackDurationMarketIds),
+        { markets: fallbackDurationMarketIds.length },
+      )
+    : new Map<string, number | null>();
+  const unifiedMarketRows = parsed.map(({ eventId, market, event }) =>
+    mapToUnifiedMarket(market, eventId, event, {
+      existingDurationMinutes: event
+        ? undefined
+        : existingDurations.get(String(market.id)),
+    }),
   );
   const eventById = new Map<string, MarketUpdateEventMetrics>(
     events.map(
@@ -1580,6 +1630,101 @@ function collectTopTokensFromRows(
   return out;
 }
 
+export function appendUniqueWsTokens(
+  target: string[],
+  tokens: ReadonlyArray<string>,
+  limit: number,
+): void {
+  const seen = new Set(target);
+  for (const tokenId of tokens) {
+    if (target.length >= limit) break;
+    if (!tokenId || seen.has(tokenId)) continue;
+    seen.add(tokenId);
+    target.push(tokenId);
+    if (target.length >= limit) break;
+  }
+}
+
+export function appendUniqueWsTokenPairs(
+  target: string[],
+  tokenPairs: ReadonlyArray<ReadonlyArray<string>>,
+  limit: number,
+): void {
+  const seen = new Set(target);
+  for (const pair of tokenPairs) {
+    const missing: string[] = [];
+    const pairSeen = new Set<string>();
+    for (const tokenId of pair) {
+      if (!tokenId || pairSeen.has(tokenId)) continue;
+      pairSeen.add(tokenId);
+      if (!seen.has(tokenId)) missing.push(tokenId);
+    }
+    if (pairSeen.size < 2) continue;
+    if (target.length + missing.length > limit) continue;
+    for (const tokenId of missing) {
+      seen.add(tokenId);
+      target.push(tokenId);
+    }
+    if (target.length >= limit) break;
+  }
+}
+
+async function fetchDurationReserveTokens(): Promise<string[]> {
+  if (!env.durationWsReserveEnabled || env.durationWsReserveMax <= 0) {
+    return [];
+  }
+
+  const limit = Math.min(env.wsSubset, env.durationWsReserveMax);
+  if (limit <= 0) return [];
+
+  const { rows } = await pool.query<{ token_ids: string[] | null }>(
+    `
+      select
+        array_agg(
+          mt.token_id
+          order by
+            case mt.outcome_side
+              when 'YES' then 0
+              when 'NO' then 1
+              else 2
+            end,
+            mt.token_id
+        ) as token_ids
+      from unified_markets m
+      join unified_market_tokens mt
+        on mt.market_id = m.id
+       and mt.venue = 'polymarket'
+      where m.venue = 'polymarket'
+        and m.status = 'ACTIVE'
+        and m.duration_minutes = any($1::int[])
+        and m.close_time is not null
+        and m.close_time > now()
+        and m.close_time <= now()
+          + make_interval(mins => m.duration_minutes)
+          + ($2::int * interval '1 second')
+        and (m.expiration_time is null or m.expiration_time > now())
+        and mt.token_id is not null
+        and mt.outcome_side in ('YES', 'NO')
+      group by m.id, m.close_time, m.duration_minutes
+      having count(distinct mt.outcome_side) = 2
+      order by
+        m.close_time asc,
+        m.duration_minutes asc,
+        m.id asc
+      limit $3
+    `,
+    [env.durationWsReserveDurations, env.durationWsReservePrewarmSec, limit],
+  );
+
+  const out: string[] = [];
+  appendUniqueWsTokenPairs(
+    out,
+    rows.map((row) => row.token_ids ?? []),
+    limit,
+  );
+  return out;
+}
+
 export async function selectHotTokenIds(): Promise<string[]> {
   const probeLimit = clampHotProbeLimit(env.wsSubset * 10);
   return fetchHotTokenIds(probeLimit);
@@ -1612,15 +1757,21 @@ export async function syncHotEventStatuses(): Promise<void> {
 
 export async function selectWsTokenIds(): Promise<string[]> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const durationTokens = await fetchDurationReserveTokens();
   const probeLimit = clampHotProbeLimit(
     Math.max(env.wsSubset * 10, hotBudget * 20),
   );
   const hotTokenIds = await fetchHotTokenIds(probeLimit);
   const hotTokens = await buildHotTokenList(hotTokenIds, hotBudget);
 
-  const seen = new Set<string>(hotTokens);
-  const remaining = Math.max(0, env.wsSubset - hotTokens.length);
-  const topTokens = await fetchTopTokens(remaining, seen);
+  const out: string[] = [];
+  appendUniqueWsTokens(out, durationTokens, env.wsSubset);
+  appendUniqueWsTokens(out, hotTokens, env.wsSubset);
 
-  return [...hotTokens, ...topTokens];
+  const seen = new Set<string>(out);
+  const remaining = Math.max(0, env.wsSubset - out.length);
+  const topTokens = await fetchTopTokens(remaining, seen);
+  appendUniqueWsTokens(out, topTokens, env.wsSubset);
+
+  return out;
 }

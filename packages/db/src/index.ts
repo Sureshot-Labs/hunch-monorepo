@@ -6,6 +6,14 @@ export type {
   UpsertUnifiedTokensResult,
 } from "./unified-repo.js";
 export {
+  deriveExactWindowDurationMinutes,
+  deriveLimitlessDurationMinutes,
+  deriveMarketDurationMinutes,
+  derivePolymarketDurationMinutes,
+  type MarketDurationInput,
+  type MarketDurationVenue,
+} from "./market-duration.js";
+export {
   upsertUnifiedEvent,
   upsertUnifiedEvents,
   upsertUnifiedMarket,

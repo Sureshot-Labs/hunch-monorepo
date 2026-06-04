@@ -133,6 +133,44 @@ test("market mapping closes inactive Polymarket child markets", () => {
   assert.equal(unified.status, "CLOSED");
 });
 
+test("market mapping preserves stored duration without event context", () => {
+  const market = {
+    id: "562010",
+    question: "Bitcoin up or down?",
+    active: true,
+    closed: false,
+    archived: false,
+    acceptingOrders: true,
+  } as unknown as TPolymarketMarket;
+
+  const unified = mapToUnifiedMarket(market, "31876", undefined, {
+    existingDurationMinutes: 5,
+  });
+  assert.equal(unified.duration_minutes, 5);
+});
+
+test("market mapping prefers event series duration over stored duration", () => {
+  const event = {
+    id: "31877",
+    title: "Bitcoin up or down?",
+    series: [{ slug: "bitcoin-up-or-down-15m" }],
+    markets: [],
+  } as unknown as TPolymarketEvent;
+  const market = {
+    id: "562011",
+    question: "Bitcoin up or down?",
+    active: true,
+    closed: false,
+    archived: false,
+    acceptingOrders: true,
+  } as unknown as TPolymarketMarket;
+
+  const unified = mapToUnifiedMarket(market, event.id, event, {
+    existingDurationMinutes: 5,
+  });
+  assert.equal(unified.duration_minutes, 15);
+});
+
 test("event backfill resolver matches live event mapping", () => {
   const event = {
     id: "1",

@@ -364,6 +364,25 @@ test("mapToUnifiedMarket maps grouped children to parent event and keeps group m
   assert.equal((unified.metadata as { groupId?: unknown }).groupId, "100");
 });
 
+test("mapToUnifiedMarket inherits grouped interval duration from parent stable slug", () => {
+  const event = makeEvent({
+    id: 10008539,
+    marketType: "group",
+    slug: "doge-price-on-jun-4-2000-utc",
+    title: "DOGE price on Jun 4, 20:00 UTC?",
+    stableSlug: "doge-1h-strikes-price",
+  } as Partial<TLimitlessMarket>);
+  const market = makeMarket({
+    id: 210761,
+    groupId: 10008539,
+    slug: "doge-above-dollar008850-on-jun-4-2000-utc-1780599615092",
+    title: "above $0.08850",
+  });
+
+  const unified = mapToUnifiedMarket(market, String(event.id), event);
+  assert.equal(unified.duration_minutes, 60);
+});
+
 test("mapToUnifiedEvent suppresses AMM liquidity in unified rows", () => {
   const event = makeEvent({
     tradeType: "amm",

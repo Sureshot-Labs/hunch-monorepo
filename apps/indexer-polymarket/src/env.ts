@@ -58,6 +58,21 @@ function parseBoolean(v: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+function parsePositiveIntCsv(
+  value: string | undefined,
+  fallback: number[],
+): number[] {
+  const text = value?.trim();
+  if (!text) return fallback;
+  const out: number[] = [];
+  for (const part of text.split(",")) {
+    const n = Number(part.trim());
+    if (!Number.isInteger(n) || n <= 0) continue;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out.length ? out : fallback;
+}
+
 function clampFloat(
   v: number | undefined,
   { min, max, fallback }: { min: number; max: number; fallback: number },
@@ -112,6 +127,21 @@ const wsSubChunkSize = clampInt(wsSubChunkSizeRaw, {
   max: 1000,
   fallback: 250,
 });
+const durationWsReserveDurations = parsePositiveIntCsv(
+  process.env.DURATION_WS_RESERVE_DURATIONS,
+  [5, 15, 60],
+);
+const durationWsReserveMax = clampInt(
+  parseOptionalInt(
+    process.env.POLYMARKET_DURATION_WS_RESERVE_MAX ??
+      process.env.DURATION_WS_RESERVE_MAX,
+  ),
+  { min: 0, max: 10_000, fallback: 200 },
+);
+const durationWsReservePrewarmSec = clampInt(
+  parseOptionalInt(process.env.DURATION_WS_RESERVE_PREWARM_SEC),
+  { min: 0, max: 24 * 60 * 60, fallback: 60 },
+);
 
 const hotLookbackMinutesRaw = parseOptionalInt(
   process.env.POLYMARKET_HOT_LOOKBACK_MIN,
@@ -301,6 +331,13 @@ export const env = {
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
   wsHotShare,
+  durationWsReserveEnabled: parseBoolean(
+    process.env.DURATION_WS_RESERVE_ENABLED,
+    true,
+  ),
+  durationWsReserveDurations,
+  durationWsReservePrewarmSec,
+  durationWsReserveMax,
   wsCustomFeatureEnabled,
   dbStatementTimeoutMs,
 };

@@ -132,11 +132,13 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
+      const durationMinutes = q.duration_minutes;
+      const durationKey = durationMinutes?.join(",") ?? "";
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
 
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `meta:categories:facets:v2:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const cacheKey = `meta:categories:facets:v3:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
       const r = await getRedis();
       const cacheTtl = Math.max(1, env.feedTtlSec);
       const cacheEnabled = env.feedTtlSec > 0;
@@ -193,6 +195,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             minProb,
             maxProb,
             maxSpread,
+            durationMinutes,
             endWithin,
             ageSince,
             nowParam,

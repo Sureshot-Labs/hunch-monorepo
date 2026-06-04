@@ -1300,10 +1300,54 @@ export async function syncHotLimitlessMarkets(): Promise<{
   return { processedMarkets };
 }
 
+async function resolveDurationReserveLimitlessMarketRows(): Promise<
+  WsMarketRefRow[]
+> {
+  if (!env.durationWsReserveEnabled || env.durationWsReserveMax <= 0) return [];
+
+  const limit = Math.min(env.wsSubset, env.durationWsReserveMax);
+  if (limit <= 0) return [];
+
+  const { rows } = await pool.query<WsMarketRefRow>(
+    `
+      select
+        m.slug,
+        nullif(m.metadata->>'address', '') as address,
+        nullif(m.metadata->>'tradeType', '') as trade_type
+      from unified_markets m
+      where m.venue = 'limitless'
+        and m.status = 'ACTIVE'
+        and m.duration_minutes = any($1::int[])
+        and m.close_time is not null
+        and m.close_time > now()
+        and m.close_time <= now()
+          + make_interval(mins => m.duration_minutes)
+          + ($2::int * interval '1 second')
+        and (m.expiration_time is null or m.expiration_time > now())
+        and (
+          (coalesce(m.metadata->>'tradeType', 'clob') = 'amm' and nullif(m.metadata->>'address', '') is not null)
+          or (coalesce(m.metadata->>'tradeType', 'clob') <> 'amm' and m.slug is not null)
+        )
+      order by
+        m.close_time asc,
+        m.duration_minutes asc,
+        m.id asc
+      limit $3
+    `,
+    [env.durationWsReserveDurations, env.durationWsReservePrewarmSec, limit],
+  );
+
+  return rows;
+}
+
 export async function resolveHotWsTargets(): Promise<WsTargets> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const durationRows = await resolveDurationReserveLimitlessMarketRows();
   const hotRows = await resolveOrderedHotLimitlessMarketRows();
-  const hotTargets = buildWsTargets(hotRows, hotBudget);
+  const hotTargets = buildWsTargets(
+    [...durationRows, ...hotRows],
+    Math.min(env.wsSubset, durationRows.length + hotBudget),
+  );
 
   const remaining = Math.max(
     0,
@@ -1330,5 +1374,5 @@ export async function resolveHotWsTargets(): Promise<WsTargets> {
     [Math.max(100, remaining * 2)],
   );
 
-  return buildWsTargets([...hotRows, ...rows], env.wsSubset);
+  return buildWsTargets([...durationRows, ...hotRows, ...rows], env.wsSubset);
 }

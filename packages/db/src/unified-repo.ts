@@ -85,6 +85,7 @@ export interface UnifiedEventRow {
   status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
   series_key?: string;
   series_title?: string;
+  duration_minutes?: number;
   start_date?: Date;
   end_date?: Date;
   volume_total?: number;
@@ -211,6 +212,7 @@ export interface UnifiedMarketRow {
   category?: string;
   status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
   market_type: string;
+  duration_minutes?: number;
   open_time?: Date;
   close_time?: Date;
   expiration_time?: Date;
@@ -248,10 +250,10 @@ export async function upsertUnifiedEvent(
   const query = `
     INSERT INTO unified_events (
       id, venue, venue_event_id, title, description, category, status,
-      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+      series_key, series_title, duration_minutes, start_date, end_date, volume_total, volume_24h, open_interest,
       liquidity, metadata, slug, image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
     )
     ON CONFLICT (venue, venue_event_id) 
     DO UPDATE SET
@@ -261,6 +263,7 @@ export async function upsertUnifiedEvent(
       status = EXCLUDED.status,
       series_key = EXCLUDED.series_key,
       series_title = EXCLUDED.series_title,
+      duration_minutes = EXCLUDED.duration_minutes,
       start_date = EXCLUDED.start_date,
       end_date = EXCLUDED.end_date,
       volume_total = EXCLUDED.volume_total,
@@ -287,6 +290,7 @@ export async function upsertUnifiedEvent(
     eventRow.status,
     eventRow.series_key,
     eventRow.series_title,
+    eventRow.duration_minutes,
     eventRow.start_date,
     eventRow.end_date,
     eventRow.volume_total,
@@ -335,6 +339,7 @@ export async function upsertUnifiedEvents(
         status unified_status,
         series_key text,
         series_title text,
+        duration_minutes integer,
         start_date timestamptz,
         end_date timestamptz,
         volume_total numeric,
@@ -359,6 +364,7 @@ export async function upsertUnifiedEvents(
          or (
           existing.title, existing.description, existing.category,
           existing.status, existing.series_key, existing.series_title,
+          existing.duration_minutes,
           existing.start_date, existing.end_date,
           existing.volume_total, existing.volume_24h, existing.open_interest,
           existing.liquidity, existing.metadata, existing.slug, existing.image,
@@ -366,6 +372,7 @@ export async function upsertUnifiedEvents(
         ) is distinct from (
           input.title, input.description, input.category,
           input.status, input.series_key, input.series_title,
+          input.duration_minutes,
           input.start_date, input.end_date,
           input.volume_total, input.volume_24h, input.open_interest,
           input.liquidity, input.metadata, input.slug, input.image,
@@ -375,12 +382,12 @@ export async function upsertUnifiedEvents(
     upserted as (
       insert into unified_events (
         id, venue, venue_event_id, title, description, category, status,
-        series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+        series_key, series_title, duration_minutes, start_date, end_date, volume_total, volume_24h, open_interest,
         liquidity, metadata, slug, image, icon, created_at, updated_at
       )
       select
         id, venue, venue_event_id, title, description, category, status,
-        series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+        series_key, series_title, duration_minutes, start_date, end_date, volume_total, volume_24h, open_interest,
         liquidity, metadata, slug, image, icon, created_at, updated_at
       from changed
       on conflict (venue, venue_event_id)
@@ -391,6 +398,7 @@ export async function upsertUnifiedEvents(
         status = excluded.status,
         series_key = excluded.series_key,
         series_title = excluded.series_title,
+        duration_minutes = excluded.duration_minutes,
         start_date = excluded.start_date,
         end_date = excluded.end_date,
         volume_total = excluded.volume_total,
@@ -407,13 +415,15 @@ export async function upsertUnifiedEvents(
       where
         (unified_events.title, unified_events.description, unified_events.category,
          unified_events.status, unified_events.series_key, unified_events.series_title,
+         unified_events.duration_minutes,
          unified_events.start_date, unified_events.end_date,
          unified_events.volume_total, unified_events.volume_24h, unified_events.open_interest,
          unified_events.liquidity, unified_events.metadata, unified_events.slug, unified_events.image, unified_events.icon,
          unified_events.created_at, unified_events.updated_at)
         is distinct from
         (excluded.title, excluded.description, excluded.category,
-         excluded.status, excluded.series_key, excluded.series_title, excluded.start_date, excluded.end_date,
+         excluded.status, excluded.series_key, excluded.series_title,
+         excluded.duration_minutes, excluded.start_date, excluded.end_date,
          excluded.volume_total, excluded.volume_24h, excluded.open_interest,
          excluded.liquidity, excluded.metadata, excluded.slug, excluded.image, excluded.icon,
          excluded.created_at, excluded.updated_at)
@@ -460,13 +470,13 @@ export async function upsertUnifiedMarket(
   const query = `
     INSERT INTO unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
-      market_type, open_time, close_time, expiration_time, best_bid, best_ask,
+      market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
       resolved_outcome_pct, slug, image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -482,6 +492,7 @@ export async function upsertUnifiedMarket(
         ELSE EXCLUDED.status
       END,
       market_type = EXCLUDED.market_type,
+      duration_minutes = EXCLUDED.duration_minutes,
       open_time = EXCLUDED.open_time,
       close_time = EXCLUDED.close_time,
       expiration_time = EXCLUDED.expiration_time,
@@ -553,6 +564,7 @@ export async function upsertUnifiedMarket(
     marketRow.category,
     marketRow.status,
     marketRow.market_type,
+    marketRow.duration_minutes,
     marketRow.open_time,
     marketRow.close_time,
     marketRow.expiration_time,
@@ -634,6 +646,7 @@ export async function upsertUnifiedMarkets(
         category text,
         status unified_status,
         market_type text,
+        duration_minutes integer,
         open_time timestamptz,
         close_time timestamptz,
         expiration_time timestamptz,
@@ -665,7 +678,7 @@ export async function upsertUnifiedMarkets(
     )
     insert into unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
-      market_type, open_time, close_time, expiration_time, best_bid, best_ask,
+      market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
@@ -673,7 +686,7 @@ export async function upsertUnifiedMarkets(
     )
     select
       id, venue, venue_market_id, event_id, title, description, category, status,
-      market_type, open_time, close_time, expiration_time, best_bid, best_ask,
+      market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
@@ -694,6 +707,7 @@ export async function upsertUnifiedMarkets(
         ELSE excluded.status
       END,
       market_type = excluded.market_type,
+      duration_minutes = excluded.duration_minutes,
       open_time = excluded.open_time,
       close_time = excluded.close_time,
       expiration_time = excluded.expiration_time,
@@ -755,6 +769,7 @@ export async function upsertUnifiedMarkets(
     where
       (unified_markets.event_id, unified_markets.title, unified_markets.description,
        unified_markets.category, unified_markets.status, unified_markets.market_type,
+       unified_markets.duration_minutes,
        unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
        unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
@@ -768,6 +783,7 @@ export async function upsertUnifiedMarkets(
       is distinct from
       (excluded.event_id, excluded.title, excluded.description,
        excluded.category, excluded.status, excluded.market_type,
+       excluded.duration_minutes,
        excluded.open_time, excluded.close_time, excluded.expiration_time,
        excluded.best_bid, excluded.best_ask, excluded.last_price,
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
@@ -793,6 +809,7 @@ export async function upsertUnifiedMarkets(
         category text,
         status unified_status,
         market_type text,
+        duration_minutes integer,
         open_time timestamptz,
         close_time timestamptz,
         expiration_time timestamptz,
@@ -836,6 +853,7 @@ export async function upsertUnifiedMarkets(
         ELSE input.status
       END,
       market_type = input.market_type,
+      duration_minutes = input.duration_minutes,
       open_time = input.open_time,
       close_time = input.close_time,
       expiration_time = input.expiration_time,
@@ -900,6 +918,7 @@ export async function upsertUnifiedMarkets(
       and (
         unified_markets.event_id, unified_markets.title, unified_markets.description,
         unified_markets.category, unified_markets.status, unified_markets.market_type,
+        unified_markets.duration_minutes,
         unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
         unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
         unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
@@ -921,6 +940,7 @@ export async function upsertUnifiedMarkets(
           ELSE input.status
         END,
         input.market_type,
+        input.duration_minutes,
         input.open_time, input.close_time, input.expiration_time,
         CASE
           WHEN unified_markets.venue = 'limitless'
@@ -1090,6 +1110,7 @@ async function filterChangedUnifiedMarketRows(
           category text,
           status unified_status,
           market_type text,
+          duration_minutes integer,
           open_time timestamptz,
           close_time timestamptz,
           expiration_time timestamptz,
@@ -1130,6 +1151,7 @@ async function filterChangedUnifiedMarketRows(
          or (
           unified_markets.event_id, unified_markets.title, unified_markets.description,
           unified_markets.category, unified_markets.status, unified_markets.market_type,
+          unified_markets.duration_minutes,
           unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
           unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
           unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
@@ -1151,6 +1173,7 @@ async function filterChangedUnifiedMarketRows(
             ELSE input.status
           END,
           input.market_type,
+          input.duration_minutes,
           input.open_time, input.close_time, input.expiration_time,
           CASE
             WHEN unified_markets.venue = 'limitless'

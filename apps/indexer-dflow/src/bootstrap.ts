@@ -718,6 +718,57 @@ async function fetchTopTickers(limit: number): Promise<string[]> {
   return out;
 }
 
+export function appendUniqueTickers(
+  target: string[],
+  tickers: ReadonlyArray<string>,
+  limit: number,
+): void {
+  const seen = new Set(target);
+  for (const ticker of tickers) {
+    if (target.length >= limit) break;
+    if (!ticker || seen.has(ticker)) continue;
+    seen.add(ticker);
+    target.push(ticker);
+    if (target.length >= limit) break;
+  }
+}
+
+async function fetchDurationReserveTickers(): Promise<string[]> {
+  if (!env.durationWsReserveEnabled || env.durationWsReserveMax <= 0) {
+    return [];
+  }
+
+  const limit = Math.min(env.wsSubset, env.durationWsReserveMax);
+  if (limit <= 0) return [];
+
+  const { rows } = await pool.query<{ venue_market_id: string | null }>(
+    `
+      select m.venue_market_id
+      from unified_markets m
+      where m.venue = 'kalshi'
+        and m.status = 'ACTIVE'
+        and m.is_initialized is true
+        and lower(coalesce(m.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+        and m.duration_minutes = any($1::int[])
+        and m.close_time is not null
+        and m.close_time > now()
+        and m.close_time <= now()
+          + make_interval(mins => m.duration_minutes)
+          + ($2::int * interval '1 second')
+        and (m.expiration_time is null or m.expiration_time > now())
+        and m.venue_market_id is not null
+      order by
+        m.close_time asc,
+        m.duration_minutes asc,
+        m.id asc
+      limit $3
+    `,
+    [env.durationWsReserveDurations, env.durationWsReservePrewarmSec, limit],
+  );
+
+  return rows.map((row) => row.venue_market_id).filter(Boolean) as string[];
+}
+
 async function fetchTradeTokenIds(): Promise<string[]> {
   const hotTokenIds = await fetchHotTokenIds(
     clampHotProbeLimit(env.tradesTokenLimit * 8),
@@ -804,14 +855,18 @@ export async function resolveHotTickersForWs(): Promise<string[]> {
   await ensureRedis();
   await pool.query("select 1");
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const durationTickers = await fetchDurationReserveTickers();
   const hotTickersAll = await fetchHotTickersOrdered();
   const hotTickers = hotTickersAll.slice(0, hotBudget);
 
-  const seen = new Set(hotTickers);
-  const remaining = Math.max(0, env.wsSubset - hotTickers.length);
+  const out: string[] = [];
+  appendUniqueTickers(out, durationTickers, env.wsSubset);
+  appendUniqueTickers(out, hotTickers, env.wsSubset);
+
+  const seen = new Set(out);
+  const remaining = Math.max(0, env.wsSubset - out.length);
   const topTickers = await fetchTopTickers(remaining);
 
-  const out = [...hotTickers];
   for (const ticker of topTickers) {
     if (seen.has(ticker)) continue;
     seen.add(ticker);

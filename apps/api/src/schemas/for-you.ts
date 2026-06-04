@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { env } from "../env.js";
 import { zVenue } from "./common.js";
+import { zDurationMinutesQuery } from "./feed.js";
 
 const zVenueQuery = z
   .preprocess((v) => {
@@ -89,6 +90,7 @@ export const forYouQuerySchema = z.object({
     .number()
     .optional()
     .transform((v) => (v == null ? undefined : Math.min(1, Math.max(0, v)))),
+  duration_minutes: zDurationMinutesQuery,
   sort: z
     .enum([
       "totalvol",

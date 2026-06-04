@@ -1,4 +1,4 @@
-export type PgParam = string | number | boolean | null | Date | string[];
+export type PgParam = string | number | boolean | null | Date | string[] | number[];
 export type PgParams = PgParam[];
 
 export type OrderHistoryRow = {

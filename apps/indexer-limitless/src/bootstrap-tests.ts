@@ -85,6 +85,22 @@ test("buildWsTargets reserves room for AMM addresses instead of starving them", 
   assert.equal(targets.slugs.length, 7);
 });
 
+test("buildWsTargets gives duration rows first claim when prepended", () => {
+  const durationRows = [
+    makeWsRow(1, { slug: "duration-a" }),
+    makeWsRow(2, { slug: "duration-b" }),
+  ];
+  const hotRows = [
+    makeWsRow(3, { slug: "duration-a" }),
+    makeWsRow(4, { slug: "hot-a" }),
+    makeWsRow(5, { slug: "top-a" }),
+  ];
+
+  const targets = buildWsTargets([...durationRows, ...hotRows], 3);
+
+  assert.deepEqual(targets.slugs, ["duration-a", "duration-b", "hot-a"]);
+});
+
 test("selectHotAmmQuoteCandidates preserves hot order and max cap", () => {
   const candidates = selectHotAmmQuoteCandidates(
     [

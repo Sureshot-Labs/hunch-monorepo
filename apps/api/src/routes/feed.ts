@@ -20,6 +20,7 @@ import {
 } from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
+  buildEventDurationExistsSql,
   buildFeedCandidateEventSearchFilter,
   buildFeedSearchResultWindow,
   fetchFavoriteFeedEventPage,
@@ -350,6 +351,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
+      const durationMinutes = q.duration_minutes;
+      const durationKey = durationMinutes?.join(",") ?? "";
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
 
@@ -365,7 +368,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v19:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v20:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -444,6 +447,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minProb,
         maxProb,
         maxSpread,
+        durationMinutes,
         endWithin,
         ageSince,
         nowParam,
@@ -660,6 +664,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
+      const durationMinutes = q.duration_minutes;
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
 
@@ -727,6 +732,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minProb,
         maxProb,
         maxSpread,
+        durationMinutes,
         endWithin,
         ageSince,
         nowParam,
@@ -941,6 +947,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = query.min_prob;
       const maxProb = query.max_prob;
       const maxSpread = query.max_spread;
+      const durationMinutes = query.duration_minutes;
       const sort = query.sort;
       const sortDir: "asc" | "desc" =
         query.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
@@ -1151,6 +1158,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         (categories?.length ?? 0) > 0 ||
         endWithin != null ||
         ageSince != null ||
+        durationMinutes != null ||
         minVol > 1e-9 ||
         minLiquidity > 0 ||
         search != null;
@@ -1200,6 +1208,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           where.push(
             `e.start_date is not null and e.start_date >= ${add(ageSince)}::timestamptz`,
           );
+        }
+        const durationExistsSql = buildEventDurationExistsSql({
+          inputs: { durationMinutes },
+          add,
+          nowParam: nowParamSql,
+        });
+        if (durationExistsSql) {
+          where.push(durationExistsSql);
         }
         if (minVol > 1e-9) {
           where.push(`${eventVolumeDisplayExpr} >= ${add(minVol)}`);
@@ -1251,6 +1267,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minProb,
         maxProb,
         maxSpread,
+        durationMinutes,
         endWithin,
         ageSince,
         nowParam,

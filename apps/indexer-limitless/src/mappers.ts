@@ -5,7 +5,11 @@ import type {
   LimitlessMarketRow,
 } from "./limitless-repo.js";
 import { resolveLimitlessGroupId } from "./grouping.js";
-import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import {
+  deriveLimitlessDurationMinutes,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 import { normalizeLimitlessPricePair } from "./price-normalization.js";
 
 export type LimitlessCategory =
@@ -222,6 +226,12 @@ const parseDate = (dateStr?: string | null): Date | null => {
   const date = new Date(dateStr);
   return isNaN(date.getTime()) ? null : date;
 };
+
+function stringValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : undefined;
+}
 
 function normalizeToken(value: string): string {
   return value
@@ -767,6 +777,12 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     title: lm.title,
     description: lm.description,
   });
+  const extra = lm as Record<string, unknown>;
+  const durationMinutes = deriveLimitlessDurationMinutes({
+    stableSlug: stringValue(extra.stableSlug),
+    slug: lm.slug,
+    title: lm.title,
+  });
 
   return {
     id: `limitless:${lm.id}`,
@@ -776,6 +792,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     description: lm.description,
     category,
     status,
+    duration_minutes: durationMinutes ?? undefined,
     start_date: parseDate(lm.createdAt) || undefined,
     end_date: expirationDate,
     volume_total: volumeTotal,
@@ -856,6 +873,19 @@ export function mapToUnifiedMarket(
     fallbackTitle: event?.title,
     fallbackDescription: event?.description,
   });
+  const extra = market as Record<string, unknown>;
+  const eventExtra = event as Record<string, unknown> | undefined;
+  const durationMinutes =
+    deriveLimitlessDurationMinutes({
+      stableSlug: stringValue(extra.stableSlug),
+      slug: market.slug,
+      title: market.title,
+    }) ??
+    deriveLimitlessDurationMinutes({
+      stableSlug: stringValue(eventExtra?.stableSlug),
+      slug: event?.slug,
+      title: event?.title,
+    });
 
   return {
     id: `limitless:${market.id}`,
@@ -867,6 +897,7 @@ export function mapToUnifiedMarket(
     category,
     status,
     market_type: market.marketType === "group" ? "group" : "binary",
+    duration_minutes: durationMinutes ?? undefined,
     open_time: parseDate(market.createdAt) || undefined,
     close_time: expirationDate,
     expiration_time: expirationDate,
