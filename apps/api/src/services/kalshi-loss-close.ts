@@ -110,6 +110,12 @@ function isResolvedLosingToken(row: KalshiTokenResolutionRow): boolean {
   return sideProbability <= 0;
 }
 
+export function isResolvedKalshiLossProof(
+  rows: KalshiTokenResolutionRow[],
+): boolean {
+  return rows.length > 0 && rows.every((row) => isResolvedLosingToken(row));
+}
+
 async function fetchKalshiLossProof(inputs: {
   pool: Pool;
   tokenId: string;
@@ -146,7 +152,7 @@ async function fetchKalshiLossProof(inputs: {
     [inputs.tokenId],
   );
 
-  return rows.some((row) => isResolvedLosingToken(row));
+  return isResolvedKalshiLossProof(rows);
 }
 
 async function hasHiddenOwnKalshiPosition(inputs: {

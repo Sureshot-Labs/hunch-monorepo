@@ -25,6 +25,7 @@ import {
 } from "./services/embedded-solana.js";
 import { env } from "./env.js";
 import { solanaPrefundRouteTestExports } from "./routes/embedded-wallets.js";
+import { isResolvedKalshiLossProof } from "./services/kalshi-loss-close.js";
 
 type TestCase = {
   name: string;
@@ -142,13 +143,17 @@ function encodeJupiterSharedAccountsRouteData(inputs: {
   amount: bigint;
   quotedOut?: bigint;
   discriminator?: Buffer;
+  slippageBps?: number;
+  prefix?: Buffer;
 }): Buffer {
+  const slippage = Buffer.alloc(4);
+  slippage.writeUInt32LE(inputs.slippageBps ?? 50, 0);
   return Buffer.concat([
     inputs.discriminator ?? JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR,
-    Buffer.from([1, 0, 0, 0, 0x1a, 0x64, 0, 1]),
+    inputs.prefix ?? Buffer.from([1, 0, 0, 0, 0x1a, 0x64, 0, 1]),
     encodeU64Le(inputs.amount),
     encodeU64Le(inputs.quotedOut ?? 9_134_000n),
-    Buffer.from([50, 0, 0, 0]),
+    slippage,
   ]);
 }
 
@@ -193,6 +198,8 @@ function buildJupiterPrefundTransaction(inputs: {
   signer?: PublicKey;
   wsolAta?: PublicKey;
   discriminator?: Buffer;
+  quotedOut?: bigint;
+  data?: Buffer;
   ataAccount?: PublicKey;
   includeAtaCreate?: boolean;
   extraCloseAccount?: PublicKey;
@@ -252,7 +259,13 @@ function buildJupiterPrefundTransaction(inputs: {
             { pubkey: SOLANA_WRAPPED_SOL_MINT, isSigner: false, isWritable: false },
             { pubkey: JUPITER_V6_PROGRAM_ID, isSigner: false, isWritable: false },
           ],
-      data: encodeJupiterSharedAccountsRouteData({ amount, discriminator }),
+      data:
+        inputs.data ??
+        encodeJupiterSharedAccountsRouteData({
+          amount,
+          quotedOut: inputs.quotedOut,
+          discriminator,
+        }),
     }),
   );
   if (inputs.extraCloseAccount) {
@@ -944,26 +957,22 @@ const tests: TestCase[] = [
   {
     name: "solana prefund validator accepts sanitized Jupiter USDC to SOL prefund shape",
     run: () => {
-      for (const discriminator of [
-        JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR,
-        JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR,
-      ]) {
-        const validated =
-          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
-            payload: buildPrefundPayload({
-              tokenOutAmount: "9134000",
-              txData: buildJupiterPrefundTransaction({ discriminator }),
-            }),
-            signer: walletContext.signer,
-            amountInRaw: 1_000_000n,
-            minOutLamports: 4_000_000n,
-            maxOutLamports: 30_000_000n,
-          });
+      const validated =
+        solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+          payload: buildPrefundPayload({
+            tokenOutAmount: "9134000",
+            txData: buildJupiterPrefundTransaction(),
+          }),
+          signer: walletContext.signer,
+          amountInRaw: 1_000_000n,
+          minOutLamports: 4_000_000n,
+          maxOutLamports: 30_000_000n,
+        });
 
-        assert.equal(validated.estimatedOutLamports, 9_134_000n);
-        assert.deepEqual(validated.requiredSigners, [walletContext.signer]);
-        assert.equal(validated.feePayer, walletContext.signer);
-      }
+      assert.equal(validated.estimatedOutLamports, 9_134_000n);
+      assert.equal(validated.decodedMinOutLamports, 9_088_330n);
+      assert.deepEqual(validated.requiredSigners, [walletContext.signer]);
+      assert.equal(validated.feePayer, walletContext.signer);
     },
   },
   {
@@ -978,7 +987,6 @@ const tests: TestCase[] = [
         getUserWsolAta(),
       ]);
       const txData = buildJupiterPrefundTransaction({
-        discriminator: JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR,
         addressLookupTableAccounts: [lookupTable],
       });
       const tx = VersionedTransaction.deserialize(Buffer.from(txData, "base64"));
@@ -1019,6 +1027,23 @@ const tests: TestCase[] = [
   {
     name: "solana prefund validator requires decoded Jupiter transaction shape",
     run: () => {
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                discriminator: JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR,
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /not an allowed route/,
+      );
+
       assert.throws(
         () =>
           solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
@@ -1195,6 +1220,41 @@ const tests: TestCase[] = [
           }),
         /amount does not match/,
       );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                data: encodeJupiterSharedAccountsRouteData({
+                  amount: 999_999n,
+                  prefix: encodeU64Le(1_000_000n),
+                }),
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /amount does not match/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({ quotedOut: 9_000_000n }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /output does not match/,
+      );
     },
   },
   {
@@ -1283,7 +1343,10 @@ const tests: TestCase[] = [
       assert.throws(
         () =>
           solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
-            payload: buildPrefundPayload({ tokenOutAmount: "1000" }),
+            payload: buildPrefundPayload({
+              tokenOutAmount: "1000",
+              txData: buildJupiterPrefundTransaction({ quotedOut: 1000n }),
+            }),
             signer: walletContext.signer,
             amountInRaw: 1_000_000n,
             minOutLamports: 4_000_000n,
@@ -1295,7 +1358,10 @@ const tests: TestCase[] = [
       assert.throws(
         () =>
           solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
-            payload: buildPrefundPayload({ tokenOutAmount: "31000000" }),
+            payload: buildPrefundPayload({
+              tokenOutAmount: "31000000",
+              txData: buildJupiterPrefundTransaction({ quotedOut: 31_000_000n }),
+            }),
             signer: walletContext.signer,
             amountInRaw: 1_000_000n,
             minOutLamports: 4_000_000n,
@@ -1332,6 +1398,97 @@ const tests: TestCase[] = [
             maxOutLamports: 9_000_000n,
           }),
         /output token/,
+      );
+    },
+  },
+  {
+    name: "solana prefund memory limiter enforces cooldown and daily cap",
+    run: () => {
+      const originalNow = Date.now;
+      let now = 1_000_000_000;
+      Date.now = () => now;
+      try {
+        solanaPrefundRouteTestExports.resetMemoryPrefundRateLimits();
+        assert.deepEqual(
+          solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
+            walletContext.signer,
+          ),
+          { limited: false, retryAfterSec: null },
+        );
+
+        solanaPrefundRouteTestExports.recordMemoryPrefundAttempt(
+          walletContext.signer,
+        );
+        assert.equal(
+          solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
+            walletContext.signer,
+          ).limited,
+          true,
+        );
+
+        now += 10 * 60 * 1000 + 1;
+        assert.equal(
+          solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
+            walletContext.signer,
+          ).limited,
+          false,
+        );
+
+        solanaPrefundRouteTestExports.recordMemoryPrefundAttempt(
+          walletContext.signer,
+        );
+        now += 10 * 60 * 1000 + 1;
+        solanaPrefundRouteTestExports.recordMemoryPrefundAttempt(
+          walletContext.signer,
+        );
+        now += 10 * 60 * 1000 + 1;
+        assert.equal(
+          solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
+            walletContext.signer,
+          ).limited,
+          true,
+        );
+      } finally {
+        Date.now = originalNow;
+        solanaPrefundRouteTestExports.resetMemoryPrefundRateLimits();
+      }
+    },
+  },
+  {
+    name: "kalshi loss close proof fails closed on unresolved, winning, missing, and conflicting mappings",
+    run: () => {
+      assert.equal(
+        isResolvedKalshiLossProof([
+          { side: "YES", resolved_outcome: "NO", resolved_outcome_pct: null },
+        ]),
+        true,
+      );
+      assert.equal(
+        isResolvedKalshiLossProof([
+          { side: "YES", resolved_outcome: "NO", resolved_outcome_pct: null },
+          { side: "YES", resolved_outcome: "NO", resolved_outcome_pct: null },
+        ]),
+        true,
+      );
+      assert.equal(isResolvedKalshiLossProof([]), false);
+      assert.equal(
+        isResolvedKalshiLossProof([
+          { side: "YES", resolved_outcome: null, resolved_outcome_pct: null },
+        ]),
+        false,
+      );
+      assert.equal(
+        isResolvedKalshiLossProof([
+          { side: "YES", resolved_outcome: "YES", resolved_outcome_pct: null },
+        ]),
+        false,
+      );
+      assert.equal(
+        isResolvedKalshiLossProof([
+          { side: "YES", resolved_outcome: "NO", resolved_outcome_pct: null },
+          { side: "YES", resolved_outcome: "YES", resolved_outcome_pct: null },
+        ]),
+        false,
       );
     },
   },

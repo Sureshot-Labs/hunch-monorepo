@@ -23,6 +23,8 @@ import {
 import { getRedis } from "../redis.js";
 import {
   positionVisibilitySchema,
+  positionVisibilityErrorResponseSchema,
+  positionVisibilityResponseSchema,
   positionsByTokenQuerySchema,
   positionsPnlSummaryQuerySchema,
   positionsQuerySchema,
@@ -413,7 +415,16 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     "/positions/hide",
     {
       preHandler: createAuthMiddleware(),
-      schema: { body: positionVisibilitySchema },
+      schema: {
+        body: positionVisibilitySchema,
+        response: {
+          200: positionVisibilityResponseSchema,
+          400: positionVisibilityErrorResponseSchema,
+          401: positionVisibilityErrorResponseSchema,
+          404: positionVisibilityErrorResponseSchema,
+          500: positionVisibilityErrorResponseSchema,
+        },
+      },
     },
     async (request, reply) => {
       const user = request.user;

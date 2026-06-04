@@ -375,6 +375,8 @@ const authAccessState = parseEnum(
 );
 const embeddedSolanaSponsorshipEnabled =
   parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_ENABLED) ?? false;
+const solanaLossCloseSponsorshipEnabled =
+  parseOptionalBool(process.env.SOLANA_LOSS_CLOSE_SPONSORSHIP_ENABLED) ?? false;
 const solanaPrefundAllowedInputMints = parseList(
   process.env.SOLANA_PREFUND_ALLOWED_INPUT_MINTS,
 );
@@ -739,6 +741,7 @@ export const env = {
   ),
   authAccessState,
   embeddedSolanaSponsorshipEnabled,
+  solanaLossCloseSponsorshipEnabled,
   solanaPrefundEnabled:
     parseOptionalBool(process.env.SOLANA_PREFUND_ENABLED) ?? false,
   solanaPrefundMaxTopUpLamports: optionalNonNegativeBigInt(

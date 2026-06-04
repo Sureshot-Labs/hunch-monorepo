@@ -25,9 +25,9 @@ import { getRedis } from "../redis.js";
 import {
   embeddedEvmExecuteBodySchema,
   embeddedEvmPrepareBodySchema,
-  embeddedWalletErrorResponseSchema,
   embeddedSolanaExecuteBodySchema,
   embeddedSolanaPrepareBodySchema,
+  solanaPrefundErrorResponseSchema,
   solanaPrefundExecuteBodySchema,
   solanaPrefundExecuteResponseSchema,
   solanaPrefundPrepareBodySchema,
@@ -81,6 +81,10 @@ const JUPITER_V6_PROGRAM_ID = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 const JUPITER_USDC_TO_SOL_PREFUND_LAYOUTS = new Map<
   string,
   {
+    dataLength: number;
+    amountInOffset: number;
+    quotedOutOffset: number;
+    slippageBpsOffset: number;
     tokenProgramPosition: number;
     transferAuthorityPosition: number;
     sourceTokenAccountPosition: number;
@@ -92,6 +96,10 @@ const JUPITER_USDC_TO_SOL_PREFUND_LAYOUTS = new Map<
   [
     "e517cb977ae3ad2a",
     {
+      dataLength: 36,
+      amountInOffset: 16,
+      quotedOutOffset: 24,
+      slippageBpsOffset: 32,
       tokenProgramPosition: 0,
       transferAuthorityPosition: 1,
       sourceTokenAccountPosition: 2,
@@ -99,21 +107,13 @@ const JUPITER_USDC_TO_SOL_PREFUND_LAYOUTS = new Map<
       destinationMintPosition: 5,
     },
   ],
-  [
-    "c1209b3341d69c81",
-    {
-      tokenProgramPosition: 0,
-      transferAuthorityPosition: 2,
-      sourceTokenAccountPosition: 3,
-      destinationTokenAccountPosition: 6,
-      sourceMintPosition: 7,
-      destinationMintPosition: 8,
-    },
-  ],
 ]);
 const ASSOCIATED_TOKEN_CREATE_IDEMPOTENT_INSTRUCTION = 1;
 const TOKEN_CLOSE_ACCOUNT_INSTRUCTION = 9;
 const SOLANA_PREFUND_ROUTE_ATTEMPTS = 4;
+const SOLANA_PREFUND_DAILY_LIMIT = 3;
+const SOLANA_PREFUND_LIMIT_TTL_SEC = 24 * 60 * 60;
+const SOLANA_PREFUND_COOLDOWN_SEC = 10 * 60;
 const SAFE_SOLANA_PREFUND_ROUTE_ERROR =
   "Unable to find a safe SOL prefund route. Retry in a few seconds.";
 
@@ -127,15 +127,20 @@ type SolanaPrefundOperation =
   | "dflow_sell"
   | "dflow_redeem"
   | "across"
-  | "debridge"
-  | "direct_transfer";
+  | "debridge";
 
 type SolanaPrefundPreparedCacheEntry = {
   expiresAt: number;
+  createdAt: number;
+  userId: string;
   signer: string;
   operation: SolanaPrefundOperation;
+  marketId?: string | null;
   amountInRaw: string;
   estimatedOutLamports: string;
+  decodedMinOutLamports: string;
+  minOutLamports: string;
+  maxOutLamports: string;
   transactionDigest: string;
   request: EmbeddedPrivyAuthorizationRequest;
   providerPayload: unknown;
@@ -191,6 +196,16 @@ const solanaPrefundPreparedMemory = new Map<
   string,
   SolanaPrefundPreparedCacheEntry
 >();
+const solanaPrefundLimitMemory = new Map<
+  string,
+  { count: number; expiresAt: number }
+>();
+const solanaPrefundCooldownMemory = new Map<string, number>();
+
+function resetMemoryPrefundRateLimits(): void {
+  solanaPrefundLimitMemory.clear();
+  solanaPrefundCooldownMemory.clear();
+}
 
 const SOLANA_PREFUND_OPERATION_FLOORS: Record<
   SolanaPrefundOperation,
@@ -201,11 +216,14 @@ const SOLANA_PREFUND_OPERATION_FLOORS: Record<
   dflow_redeem: { minSolLamports: 5_000_000n, targetSolLamports: 10_000_000n },
   across: { minSolLamports: 3_000_000n, targetSolLamports: 10_000_000n },
   debridge: { minSolLamports: 3_000_000n, targetSolLamports: 10_000_000n },
-  direct_transfer: {
-    minSolLamports: 1_000_000n,
-    targetSolLamports: 5_000_000n,
-  },
 };
+
+function isSolanaPrefundOperation(value: string): value is SolanaPrefundOperation {
+  return Object.prototype.hasOwnProperty.call(
+    SOLANA_PREFUND_OPERATION_FLOORS,
+    value,
+  );
+}
 
 function pruneExpiredEmbeddedSolanaPreparedMemory(now = Date.now()): void {
   for (const [key, entry] of embeddedSolanaPreparedMemory) {
@@ -529,34 +547,39 @@ function assertSystemInstructionDoesNotSpendSignerLamports(inputs: {
   throw new Error("deBridge prefund transaction has unsupported System instruction.");
 }
 
-function bufferContainsU64LeExactlyOnce(data: Buffer, value: bigint): boolean {
-  const needle = Buffer.alloc(8);
-  needle.writeBigUInt64LE(value, 0);
-  let count = 0;
-  for (let index = 0; index <= data.length - needle.length; index += 1) {
-    if (data.subarray(index, index + needle.length).equals(needle)) {
-      count += 1;
-    }
-  }
-  return count === 1;
-}
-
 function validateJupiterDirectUsdcToSolPrefundInstruction(inputs: {
   instruction: VersionedTransaction["message"]["compiledInstructions"][number];
   resolvedAccounts: ResolvedSolanaAccount[];
   signer: string;
   amountInRaw: bigint;
+  minOutLamports: bigint;
   expectedUsdcAta: string;
   expectedWsolAta: string;
-}): string {
+}): {
+  outputWsolAccount: string;
+  quotedOutLamports: bigint;
+  minOutLamports: bigint;
+  slippageBps: number;
+} {
   const data = Buffer.from(inputs.instruction.data);
   const discriminatorHex = data.subarray(0, 8).toString("hex");
   const layout = JUPITER_USDC_TO_SOL_PREFUND_LAYOUTS.get(discriminatorHex);
-  if (!layout || data.length < 16) {
+  if (!layout || data.length !== layout.dataLength) {
     throw new Error("deBridge prefund Jupiter instruction is not an allowed route.");
   }
-  if (!bufferContainsU64LeExactlyOnce(data, inputs.amountInRaw)) {
+  const decodedAmountInRaw = data.readBigUInt64LE(layout.amountInOffset);
+  const quotedOutLamports = data.readBigUInt64LE(layout.quotedOutOffset);
+  const slippageBps = data.readUInt32LE(layout.slippageBpsOffset);
+  if (decodedAmountInRaw !== inputs.amountInRaw) {
     throw new Error("deBridge prefund Jupiter instruction amount does not match request.");
+  }
+  if (slippageBps > 10_000) {
+    throw new Error("deBridge prefund Jupiter slippage is invalid.");
+  }
+  const decodedMinOutLamports =
+    (quotedOutLamports * BigInt(10_000 - slippageBps)) / 10_000n;
+  if (decodedMinOutLamports < inputs.minOutLamports) {
+    throw new Error("deBridge prefund Jupiter minimum output is below the required SOL amount.");
   }
 
   const account = (position: number): ResolvedSolanaAccount | null => {
@@ -597,7 +620,12 @@ function validateJupiterDirectUsdcToSolPrefundInstruction(inputs: {
     throw new Error("deBridge prefund Jupiter route output mint does not match WSOL.");
   }
 
-  return destinationTokenAccount;
+  return {
+    outputWsolAccount: destinationTokenAccount,
+    quotedOutLamports,
+    minOutLamports: decodedMinOutLamports,
+    slippageBps,
+  };
 }
 
 function validateAssociatedWsolAtaCreateIdempotent(inputs: {
@@ -680,8 +708,13 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
   transaction: VersionedTransaction;
   signer: string;
   amountInRaw: bigint;
+  minOutLamports: bigint;
   addressLookupTableAccounts?: AddressLookupTableAccount[];
-}): void {
+}): {
+  quotedOutLamports: bigint;
+  decodedMinOutLamports: bigint;
+  slippageBps: number;
+} {
   const tx = inputs.transaction;
   const resolvedAccounts = resolveTransactionAccounts({
     tx,
@@ -695,6 +728,9 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
   );
 
   let jupiterOutputWsolAccount: string | null = null;
+  let quotedOutLamports: bigint | null = null;
+  let decodedMinOutLamports: bigint | null = null;
+  let slippageBps: number | null = null;
   let createdWsolAccount: string | null = null;
   let closedWsolAccount: string | null = null;
 
@@ -769,16 +805,19 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
       if (jupiterOutputWsolAccount) {
         throw new Error("deBridge prefund transaction has multiple Jupiter swap instructions.");
       }
-      jupiterOutputWsolAccount = validateJupiterDirectUsdcToSolPrefundInstruction(
-        {
+      const decoded = validateJupiterDirectUsdcToSolPrefundInstruction({
           instruction,
           resolvedAccounts,
           signer: inputs.signer,
           amountInRaw: inputs.amountInRaw,
+          minOutLamports: inputs.minOutLamports,
           expectedUsdcAta,
           expectedWsolAta,
-        },
-      );
+      });
+      jupiterOutputWsolAccount = decoded.outputWsolAccount;
+      quotedOutLamports = decoded.quotedOutLamports;
+      decodedMinOutLamports = decoded.minOutLamports;
+      slippageBps = decoded.slippageBps;
       continue;
     }
 
@@ -797,6 +836,15 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
   if (createdWsolAccount && closedWsolAccount !== createdWsolAccount) {
     throw new Error("deBridge prefund transaction does not close the created WSOL account.");
   }
+  if (
+    quotedOutLamports == null ||
+    decodedMinOutLamports == null ||
+    slippageBps == null
+  ) {
+    throw new Error("deBridge prefund transaction does not include decoded Jupiter output.");
+  }
+
+  return { quotedOutLamports, decodedMinOutLamports, slippageBps };
 }
 
 function getAllowedSolanaPrefundInputMints(): Set<string> {
@@ -858,6 +906,7 @@ async function getSolanaPrefundReadiness(inputs: {
   operation: SolanaPrefundOperation;
   marketId?: string | null;
   prefundPolicyEnabled?: boolean;
+  log: RouteLogger;
 }): Promise<{
   floor: { minSolLamports: bigint; targetSolLamports: bigint };
   solBalanceLamports: bigint;
@@ -870,6 +919,7 @@ async function getSolanaPrefundReadiness(inputs: {
     | "market_not_initialized"
     | "prefund_disabled"
     | "insufficient_usdc_for_prefund"
+    | "prefund_rate_limited"
     | null;
 }> {
   const floor = SOLANA_PREFUND_OPERATION_FLOORS[inputs.operation];
@@ -878,6 +928,7 @@ async function getSolanaPrefundReadiness(inputs: {
     usdc,
     marketInitialized,
     prefundPolicyEnabled,
+    rateLimit,
   ] = await Promise.all([
     fetchSolanaBalanceLamports({
       rpcUrls: env.solanaRpcUrls,
@@ -896,6 +947,10 @@ async function getSolanaPrefundReadiness(inputs: {
     inputs.prefundPolicyEnabled == null
       ? resolveSolanaPrefundPolicyEnabled()
       : Promise.resolve(inputs.prefundPolicyEnabled),
+    getSolanaPrefundRateLimitState({
+      signer: inputs.walletAddress,
+      log: inputs.log,
+    }),
   ]);
 
   const usdcAmount = usdc?.amount ?? 0n;
@@ -904,11 +959,13 @@ async function getSolanaPrefundReadiness(inputs: {
   const needsPrefund =
     !marketBlocksOperation && solBalanceLamports < floor.minSolLamports;
   const prefundAvailable =
-    needsPrefund && prefundPolicyEnabled && usdcAmount > 0n;
+    needsPrefund && prefundPolicyEnabled && usdcAmount > 0n && !rateLimit.limited;
   const blockingReason = marketBlocksOperation
     ? "market_not_initialized"
     : needsPrefund && !prefundPolicyEnabled
       ? "prefund_disabled"
+      : needsPrefund && rateLimit.limited
+        ? "prefund_rate_limited"
       : needsPrefund && usdcAmount <= 0n
         ? "insufficient_usdc_for_prefund"
         : null;
@@ -935,6 +992,8 @@ function validateDebridgeSolanaPrefundPayload(inputs: {
 }): {
   txData: string;
   estimatedOutLamports: bigint;
+  decodedMinOutLamports: bigint;
+  slippageBps: number;
   transactionDigest: string;
   requiredSigners: string[];
   feePayer: string;
@@ -962,14 +1021,14 @@ function validateDebridgeSolanaPrefundPayload(inputs: {
     throw new Error("deBridge prefund output token does not match native SOL.");
   }
 
-  const estimatedOutLamports = readBridgeTokenAmountRaw(inputs.payload.tokenOut);
-  if (!estimatedOutLamports || estimatedOutLamports <= 0n) {
+  const envelopeOutLamports = readBridgeTokenAmountRaw(inputs.payload.tokenOut);
+  if (!envelopeOutLamports || envelopeOutLamports <= 0n) {
     throw new Error("deBridge prefund response did not include a SOL output amount.");
   }
-  if (estimatedOutLamports < inputs.minOutLamports) {
+  if (envelopeOutLamports < inputs.minOutLamports) {
     throw new Error("SOL prefund amount is below the required minimum.");
   }
-  if (estimatedOutLamports > inputs.maxOutLamports) {
+  if (envelopeOutLamports > inputs.maxOutLamports) {
     throw new Error("SOL prefund amount exceeds the configured top-up cap.");
   }
 
@@ -993,16 +1052,22 @@ function validateDebridgeSolanaPrefundPayload(inputs: {
     throw new Error("deBridge prefund transaction fee payer does not match selected wallet.");
   }
 
-  validateDebridgeSolanaPrefundTransactionShape({
+  const decoded = validateDebridgeSolanaPrefundTransactionShape({
     transaction: parsed.transaction,
     signer: inputs.signer,
     amountInRaw: inputs.amountInRaw,
+    minOutLamports: inputs.minOutLamports,
     addressLookupTableAccounts: inputs.addressLookupTableAccounts,
   });
+  if (decoded.quotedOutLamports !== envelopeOutLamports) {
+    throw new Error("deBridge prefund response output does not match transaction output.");
+  }
 
   return {
     txData: parsed.txData,
-    estimatedOutLamports,
+    estimatedOutLamports: decoded.quotedOutLamports,
+    decodedMinOutLamports: decoded.decodedMinOutLamports,
+    slippageBps: decoded.slippageBps,
     transactionDigest: digestSolanaTransactionPayload(parsed.txData),
     requiredSigners,
     feePayer,
@@ -1124,7 +1189,10 @@ function resolveSolanaPrefundTopUpBounds(inputs: {
 }
 
 export const solanaPrefundRouteTestExports = {
+  getMemoryPrefundRateLimitState,
+  recordMemoryPrefundAttempt,
   resolveSolanaPrefundTopUpBounds,
+  resetMemoryPrefundRateLimits,
   validateDebridgeSolanaPrefundPayload,
 };
 
@@ -1150,6 +1218,124 @@ function buildSolanaPrefundPreparedCacheKey(inputs: {
     )
     .digest("hex");
   return `solana-prefund:prepared:${digest}`;
+}
+
+function buildSolanaPrefundLimitKey(signer: string): string {
+  const digest = createHash("sha256")
+    .update(`solana-prefund:limit:${signer.trim()}`)
+    .digest("hex");
+  return `solana-prefund:limit:${digest}`;
+}
+
+function buildSolanaPrefundCooldownKey(signer: string): string {
+  const digest = createHash("sha256")
+    .update(`solana-prefund:cooldown:${signer.trim()}`)
+    .digest("hex");
+  return `solana-prefund:cooldown:${digest}`;
+}
+
+function getMemoryPrefundRateLimitState(
+  signer: string,
+): { limited: boolean; retryAfterSec: number | null } {
+  const now = Date.now();
+  const limitKey = buildSolanaPrefundLimitKey(signer);
+  const cooldownKey = buildSolanaPrefundCooldownKey(signer);
+  const cooldownExpiresAt = solanaPrefundCooldownMemory.get(cooldownKey);
+  if (cooldownExpiresAt && cooldownExpiresAt > now) {
+    return {
+      limited: true,
+      retryAfterSec: Math.ceil((cooldownExpiresAt - now) / 1000),
+    };
+  }
+  if (cooldownExpiresAt) solanaPrefundCooldownMemory.delete(cooldownKey);
+
+  const limit = solanaPrefundLimitMemory.get(limitKey);
+  if (limit && limit.expiresAt > now && limit.count >= SOLANA_PREFUND_DAILY_LIMIT) {
+    return {
+      limited: true,
+      retryAfterSec: Math.ceil((limit.expiresAt - now) / 1000),
+    };
+  }
+  if (limit && limit.expiresAt <= now) solanaPrefundLimitMemory.delete(limitKey);
+  return { limited: false, retryAfterSec: null };
+}
+
+function recordMemoryPrefundAttempt(signer: string): void {
+  const now = Date.now();
+  const limitKey = buildSolanaPrefundLimitKey(signer);
+  const cooldownKey = buildSolanaPrefundCooldownKey(signer);
+  const current = solanaPrefundLimitMemory.get(limitKey);
+  solanaPrefundLimitMemory.set(limitKey, {
+    count:
+      current && current.expiresAt > now
+        ? current.count + 1
+        : 1,
+    expiresAt:
+      current && current.expiresAt > now
+        ? current.expiresAt
+        : now + SOLANA_PREFUND_LIMIT_TTL_SEC * 1000,
+  });
+  solanaPrefundCooldownMemory.set(
+    cooldownKey,
+    now + SOLANA_PREFUND_COOLDOWN_SEC * 1000,
+  );
+}
+
+async function getSolanaPrefundRateLimitState(inputs: {
+  signer: string;
+  log: RouteLogger;
+}): Promise<{ limited: boolean; retryAfterSec: number | null }> {
+  const limitKey = buildSolanaPrefundLimitKey(inputs.signer);
+  const cooldownKey = buildSolanaPrefundCooldownKey(inputs.signer);
+  try {
+    const redis = await getRedis();
+    if (!redis) return getMemoryPrefundRateLimitState(inputs.signer);
+    const [cooldownTtl, countRaw, limitTtl] = await Promise.all([
+      redis.ttl(cooldownKey),
+      redis.get(limitKey),
+      redis.ttl(limitKey),
+    ]);
+    if (cooldownTtl > 0) return { limited: true, retryAfterSec: cooldownTtl };
+    const count = Number(countRaw ?? "0");
+    if (
+      Number.isFinite(count) &&
+      count >= SOLANA_PREFUND_DAILY_LIMIT &&
+      limitTtl > 0
+    ) {
+      return { limited: true, retryAfterSec: limitTtl };
+    }
+    return { limited: false, retryAfterSec: null };
+  } catch (error) {
+    inputs.log.warn(
+      { error, signer: inputs.signer },
+      "Failed to read Solana prefund rate limit",
+    );
+    return getMemoryPrefundRateLimitState(inputs.signer);
+  }
+}
+
+async function recordSolanaPrefundAttempt(inputs: {
+  signer: string;
+  log: RouteLogger;
+}): Promise<void> {
+  const limitKey = buildSolanaPrefundLimitKey(inputs.signer);
+  const cooldownKey = buildSolanaPrefundCooldownKey(inputs.signer);
+  try {
+    const redis = await getRedis();
+    if (!redis) {
+      recordMemoryPrefundAttempt(inputs.signer);
+      return;
+    }
+    const count = await redis.incr(limitKey);
+    if (count === 1) await redis.expire(limitKey, SOLANA_PREFUND_LIMIT_TTL_SEC);
+    await redis.set(cooldownKey, "1", { EX: SOLANA_PREFUND_COOLDOWN_SEC });
+  } catch (error) {
+    inputs.log.warn(
+      { error, signer: inputs.signer },
+      "Failed to record Solana prefund rate limit",
+    );
+    recordMemoryPrefundAttempt(inputs.signer);
+  }
 }
 
 function parseEmbeddedSolanaPreparedRequests(
@@ -1180,10 +1366,15 @@ function parseSolanaPrefundPreparedEntry(
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed) || !isRecord(parsed.request)) return null;
     if (
+      typeof parsed.userId !== "string" ||
       typeof parsed.signer !== "string" ||
       typeof parsed.operation !== "string" ||
+      !isSolanaPrefundOperation(parsed.operation) ||
       typeof parsed.amountInRaw !== "string" ||
       typeof parsed.estimatedOutLamports !== "string" ||
+      typeof parsed.decodedMinOutLamports !== "string" ||
+      typeof parsed.minOutLamports !== "string" ||
+      typeof parsed.maxOutLamports !== "string" ||
       typeof parsed.transactionDigest !== "string"
     ) {
       return null;
@@ -1350,6 +1541,9 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
 }> {
   let sponsoredCount = 0;
   const transactions: EmbeddedSolanaTransactionSpec[] = [];
+  const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+  const lossCloseSponsorshipEnabled =
+    authAccessPolicy.effective.solanaLossCloseSponsorshipEnabled === true;
 
   for (const transaction of inputs.transactions) {
     const lossCloseTokenId = parseKalshiLossCloseTransactionTokenId(
@@ -1372,6 +1566,14 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
       rpcUrls: env.solanaRpcUrls,
       timeoutMs: env.solanaRpcTimeoutMs,
     });
+
+    if (!lossCloseSponsorshipEnabled) {
+      transactions.push({
+        ...transaction,
+        sponsor: false,
+      });
+      continue;
+    }
 
     sponsoredCount += 1;
     transactions.push({
@@ -1399,10 +1601,14 @@ async function prepareSolanaPrefundRequest(inputs: {
   marketId?: string | null;
   amountInRaw: string;
   executionKey: string;
+  log: RouteLogger;
 }): Promise<{
   request: EmbeddedPrivyAuthorizationRequest;
   providerPayload: unknown;
   estimatedOutLamports: bigint;
+  decodedMinOutLamports: bigint;
+  minOutLamports: bigint;
+  maxOutLamports: bigint;
   transactionDigest: string;
 }> {
   const prefundPolicyEnabled = await resolveSolanaPrefundPolicyEnabled();
@@ -1428,11 +1634,14 @@ async function prepareSolanaPrefundRequest(inputs: {
     operation: inputs.operation,
     marketId: inputs.marketId,
     prefundPolicyEnabled,
+    log: inputs.log,
   });
   if (readiness.blockingReason) {
     throw new Error(
       readiness.blockingReason === "prefund_disabled"
         ? "Solana prefund is disabled."
+        : readiness.blockingReason === "prefund_rate_limited"
+          ? "SOL prefund is temporarily rate limited. Try again later."
         : readiness.blockingReason === "insufficient_usdc_for_prefund"
           ? "Insufficient Solana USDC for SOL prefund."
           : "Solana prefund is not available for this operation.",
@@ -1515,6 +1724,9 @@ async function prepareSolanaPrefundRequest(inputs: {
         request,
         providerPayload: upstream.payload,
         estimatedOutLamports: validated.estimatedOutLamports,
+        decodedMinOutLamports: validated.decodedMinOutLamports,
+        minOutLamports: topUpBounds.minOutLamports,
+        maxOutLamports: topUpBounds.maxOutLamports,
         transactionDigest: validated.transactionDigest,
       };
     } catch (error) {
@@ -1546,6 +1758,112 @@ async function prepareSolanaPrefundRequest(inputs: {
     : new Error("deBridge prefund order failed");
 }
 
+function parsePreparedPrefundLamports(value: string, label: string): bigint {
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`Prepared Solana prefund ${label} is invalid.`);
+  }
+  return BigInt(value);
+}
+
+function getPreparedSolanaTransactionDigest(
+  request: EmbeddedPrivyAuthorizationRequest,
+): string | null {
+  const body = request.input.body;
+  if (!isRecord(body) || !isRecord(body.params)) return null;
+  const transaction = body.params.transaction;
+  return typeof transaction === "string"
+    ? digestSolanaTransactionPayload(transaction)
+    : null;
+}
+
+async function validateSolanaPrefundPreparedEntryForExecute(inputs: {
+  user: NonNullable<FastifyRequest["user"]>;
+  signer: string;
+  entry: SolanaPrefundPreparedCacheEntry;
+  signedRequestIds: string[];
+  log: RouteLogger;
+}): Promise<void> {
+  if (inputs.entry.expiresAt <= Date.now()) {
+    throw new Error("Prepared Solana prefund expired. Refresh and try again.");
+  }
+  if (inputs.entry.userId !== inputs.user.id) {
+    throw new Error("Prepared Solana prefund does not match the authenticated user.");
+  }
+  if (inputs.entry.signer !== inputs.signer) {
+    throw new Error("Prepared Solana prefund does not match the selected wallet.");
+  }
+  if (!inputs.signedRequestIds.includes(inputs.entry.request.id)) {
+    throw new Error("Solana prefund signature does not match the prepared request.");
+  }
+  const requestDigest = getPreparedSolanaTransactionDigest(inputs.entry.request);
+  if (!requestDigest || requestDigest !== inputs.entry.transactionDigest) {
+    throw new Error("Prepared Solana prefund transaction digest changed.");
+  }
+
+  const estimatedOutLamports = parsePreparedPrefundLamports(
+    inputs.entry.estimatedOutLamports,
+    "output",
+  );
+  const decodedMinOutLamports = parsePreparedPrefundLamports(
+    inputs.entry.decodedMinOutLamports,
+    "minimum output",
+  );
+
+  const prefundPolicyEnabled = await resolveSolanaPrefundPolicyEnabled();
+  if (!prefundPolicyEnabled) {
+    throw new Error("Solana prefund is disabled.");
+  }
+  const readiness = await getSolanaPrefundReadiness({
+    walletAddress: inputs.signer,
+    operation: inputs.entry.operation,
+    marketId: inputs.entry.marketId,
+    prefundPolicyEnabled,
+    log: inputs.log,
+  });
+  if (readiness.blockingReason) {
+    throw new Error(
+      readiness.blockingReason === "prefund_disabled"
+        ? "Solana prefund is disabled."
+        : readiness.blockingReason === "prefund_rate_limited"
+          ? "SOL prefund is temporarily rate limited. Try again later."
+          : readiness.blockingReason === "insufficient_usdc_for_prefund"
+            ? "Insufficient Solana USDC for SOL prefund."
+            : "Solana prefund is not available for this operation.",
+    );
+  }
+  if (!readiness.needsPrefund) {
+    throw new Error("Solana wallet already has enough SOL for this operation.");
+  }
+  if (
+    readiness.usdcAmount <
+    parsePreparedPrefundLamports(inputs.entry.amountInRaw, "input")
+  ) {
+    throw new Error("Insufficient Solana USDC for SOL prefund.");
+  }
+  if (
+    readiness.solBalanceLamports + decodedMinOutLamports <
+    readiness.floor.minSolLamports
+  ) {
+    throw new Error("Prepared Solana prefund no longer reaches the required SOL minimum.");
+  }
+
+  const topUpBounds = resolveSolanaPrefundTopUpBounds({
+    currentSolLamports: readiness.solBalanceLamports,
+    minSolLamports: readiness.floor.minSolLamports,
+    targetSolLamports: readiness.floor.targetSolLamports,
+    maxTopUpLamports: env.solanaPrefundMaxTopUpLamports,
+  });
+  if (!topUpBounds) {
+    throw new Error("Solana wallet already has enough SOL for this operation.");
+  }
+  if (decodedMinOutLamports < topUpBounds.minOutLamports) {
+    throw new Error("Prepared Solana prefund no longer reaches the required SOL minimum.");
+  }
+  if (estimatedOutLamports > topUpBounds.maxOutLamports) {
+    throw new Error("Prepared Solana prefund amount exceeds the required top-up.");
+  }
+}
+
 export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -1557,9 +1875,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         body: solanaReadinessBodySchema,
         response: {
           200: solanaReadinessResponseSchema,
-          400: embeddedWalletErrorResponseSchema,
-          401: embeddedWalletErrorResponseSchema,
-          502: embeddedWalletErrorResponseSchema,
+          400: solanaPrefundErrorResponseSchema,
+          401: solanaPrefundErrorResponseSchema,
+          502: solanaPrefundErrorResponseSchema,
         },
       },
     },
@@ -1593,6 +1911,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           walletAddress,
           operation,
           marketId: request.body.marketId,
+          log: app.log,
         });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -1635,8 +1954,8 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         body: solanaPrefundPrepareBodySchema,
         response: {
           200: solanaPrefundPrepareResponseSchema,
-          400: embeddedWalletErrorResponseSchema,
-          401: embeddedWalletErrorResponseSchema,
+          400: solanaPrefundErrorResponseSchema,
+          401: solanaPrefundErrorResponseSchema,
         },
       },
     },
@@ -1673,13 +1992,20 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           marketId: request.body.marketId,
           amountInRaw: request.body.amountInRaw,
           executionKey,
+          log: app.log,
         });
         const entry: SolanaPrefundPreparedCacheEntry = {
           expiresAt: Date.now() + SOLANA_PREFUND_PREPARED_TTL_SEC * 1000,
+          createdAt: Date.now(),
+          userId: user.id,
           signer,
           operation: request.body.operation,
+          marketId: request.body.marketId ?? null,
           amountInRaw: request.body.amountInRaw,
           estimatedOutLamports: prepared.estimatedOutLamports.toString(),
+          decodedMinOutLamports: prepared.decodedMinOutLamports.toString(),
+          minOutLamports: prepared.minOutLamports.toString(),
+          maxOutLamports: prepared.maxOutLamports.toString(),
           transactionDigest: prepared.transactionDigest,
           request: prepared.request,
           providerPayload: prepared.providerPayload,
@@ -1715,7 +2041,6 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Failed to prepare Solana prefund",
-          ...(debug ? { debug } : {}),
         });
       }
     },
@@ -1729,8 +2054,8 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         body: solanaPrefundExecuteBodySchema,
         response: {
           200: solanaPrefundExecuteResponseSchema,
-          400: embeddedWalletErrorResponseSchema,
-          401: embeddedWalletErrorResponseSchema,
+          400: solanaPrefundErrorResponseSchema,
+          401: solanaPrefundErrorResponseSchema,
         },
       },
     },
@@ -1778,6 +2103,19 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana prefund expired. Refresh and try again.",
               );
             }
+            await validateSolanaPrefundPreparedEntryForExecute({
+              user,
+              signer,
+              entry,
+              signedRequestIds: request.body.signedRequests.map(
+                (signedRequest) => signedRequest.id,
+              ),
+              log: app.log,
+            });
+            await recordSolanaPrefundAttempt({
+              signer,
+              log: app.log,
+            });
             const signatures = await executeEmbeddedSolanaTransactionRequests({
               requests: [entry.request],
               signatures: request.body.signedRequests,

@@ -964,6 +964,7 @@ const tests: TestCase[] = [
                 state: "required",
                 embeddedSolanaSponsorship: false,
                 solanaPrefundEnabled: false,
+                solanaLossCloseSponsorshipEnabled: false,
               },
               created_by: null,
               created_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -978,6 +979,7 @@ const tests: TestCase[] = [
       assert.equal(resolved.effective.state, "required");
       assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
       assert.equal(resolved.effective.solanaPrefundEnabled, false);
+      assert.equal(resolved.effective.solanaLossCloseSponsorshipEnabled, false);
     },
   },
   {
@@ -1034,6 +1036,42 @@ const tests: TestCase[] = [
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effective.state, "required");
       assert.equal(resolved.effective.solanaPrefundEnabled, true);
+      assert.equal(
+        resolved.effective.solanaLossCloseSponsorshipEnabled,
+        env.solanaLossCloseSponsorshipEnabled,
+      );
+    },
+  },
+  {
+    name: "auth access policy accepts solana loss close sponsorship override",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000034",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "required",
+                solanaLossCloseSponsorshipEnabled: true,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.state, "required");
+      assert.equal(
+        resolved.effective.solanaPrefundEnabled,
+        env.solanaPrefundEnabled,
+      );
+      assert.equal(resolved.effective.solanaLossCloseSponsorshipEnabled, true);
     },
   },
   {
@@ -1046,7 +1084,14 @@ const tests: TestCase[] = [
       const resolved = await resolveIntelPolicy(db, "auth_access");
       assert.equal(resolved.invalidOverride, false);
       assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
-      assert.equal(resolved.effective.solanaPrefundEnabled, false);
+      assert.equal(
+        resolved.effective.solanaPrefundEnabled,
+        env.solanaPrefundEnabled,
+      );
+      assert.equal(
+        resolved.effective.solanaLossCloseSponsorshipEnabled,
+        env.solanaLossCloseSponsorshipEnabled,
+      );
     },
   },
   {
