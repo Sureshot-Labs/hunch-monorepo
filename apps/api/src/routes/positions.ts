@@ -27,6 +27,10 @@ import {
   positionsPnlSummaryQuerySchema,
   positionsQuerySchema,
 } from "../schemas/positions.js";
+import {
+  buildKalshiLossCloseTransaction,
+  type KalshiLossCloseTransaction,
+} from "../services/kalshi-loss-close.js";
 
 export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -434,8 +438,49 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Position not found" });
         }
 
+        let closeLossTransaction: KalshiLossCloseTransaction | null = null;
+        let closeLoss:
+          | { skippedReason: string; error?: never }
+          | { skippedReason: "prepare_failed"; error: string }
+          | undefined;
+
+        if (body.hidden && body.venue === "kalshi") {
+          try {
+            const closeResult = await buildKalshiLossCloseTransaction({
+              pool,
+              userId: user.id,
+              walletAddress: body.walletAddress,
+              tokenId: body.tokenId,
+              rpcUrls: env.solanaRpcUrls,
+              timeoutMs: env.solanaRpcTimeoutMs,
+            });
+            closeLossTransaction = closeResult.transaction;
+            if (!closeResult.transaction) {
+              closeLoss = { skippedReason: closeResult.skippedReason };
+            }
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "Unknown error";
+            closeLoss = { skippedReason: "prepare_failed", error: message };
+            app.log.warn(
+              {
+                error,
+                userId: user.id,
+                walletAddress: body.walletAddress,
+                tokenId: body.tokenId,
+              },
+              "Failed to prepare Kalshi loss close transaction",
+            );
+          }
+        }
+
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({ ok: true, hidden: body.hidden });
+        return reply.send({
+          ok: true,
+          hidden: body.hidden,
+          ...(closeLossTransaction ? { closeLossTransaction } : {}),
+          ...(closeLoss ? { closeLoss } : {}),
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, body },

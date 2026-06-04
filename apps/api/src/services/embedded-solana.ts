@@ -334,8 +334,8 @@ function resolveEmbeddedSolanaSponsor(inputs: {
   embeddedSolanaSponsorshipEnabled: boolean;
   sponsorBalanceLamports?: bigint | null;
 }): boolean {
-  if (inputs.transaction.sponsor === false) return false;
   if (!inputs.embeddedSolanaSponsorshipEnabled) return false;
+  if (inputs.transaction.sponsor === false) return false;
   // The client flag is advisory. Never sponsor transactions that directly
   // spend native SOL or wrap SOL, because sponsorship can otherwise become
   // the SOL source for fee-funded conversion loops.

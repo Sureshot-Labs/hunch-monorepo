@@ -54,7 +54,12 @@ import {
   prepareEmbeddedSolanaTransactionRequests,
   resolveEmbeddedSolanaWalletContext,
   type EmbeddedPrivyAuthorizationRequest,
+  type EmbeddedSolanaTransactionSpec,
 } from "../services/embedded-solana.js";
+import {
+  parseKalshiLossCloseTransactionTokenId,
+  validateKalshiLossCloseSponsoredTransaction,
+} from "../services/kalshi-loss-close.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import {
   fetchSolanaBalanceLamports,
@@ -1335,6 +1340,58 @@ async function deleteCachedSolanaPrefundPreparedRequest(inputs: {
   }
 }
 
+async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
+  user: NonNullable<FastifyRequest["user"]>;
+  signer: string;
+  transactions: EmbeddedSolanaTransactionSpec[];
+}): Promise<{
+  transactions: EmbeddedSolanaTransactionSpec[];
+  embeddedSolanaSponsorshipEnabled: boolean;
+}> {
+  let sponsoredCount = 0;
+  const transactions: EmbeddedSolanaTransactionSpec[] = [];
+
+  for (const transaction of inputs.transactions) {
+    const lossCloseTokenId = parseKalshiLossCloseTransactionTokenId(
+      transaction.id,
+    );
+    if (!lossCloseTokenId) {
+      transactions.push({
+        ...transaction,
+        sponsor: false,
+      });
+      continue;
+    }
+
+    await validateKalshiLossCloseSponsoredTransaction({
+      pool,
+      userId: inputs.user.id,
+      walletAddress: inputs.signer,
+      requestId: transaction.id,
+      transaction: transaction.transaction,
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+    });
+
+    sponsoredCount += 1;
+    transactions.push({
+      ...transaction,
+      sponsor: true,
+    });
+  }
+
+  if (sponsoredCount > 0 && sponsoredCount !== transactions.length) {
+    throw new Error(
+      "Sponsored Kalshi loss close transactions cannot be mixed with other Solana transactions.",
+    );
+  }
+
+  return {
+    transactions,
+    embeddedSolanaSponsorshipEnabled: sponsoredCount > 0,
+  };
+}
+
 async function prepareSolanaPrefundRequest(inputs: {
   user: NonNullable<FastifyRequest["user"]>;
   signer: string;
@@ -1907,11 +1964,18 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           signer,
         });
         const executionKey = request.body.executionKey ?? null;
+        const sponsorshipPolicy =
+          await applyEmbeddedSolanaBackendSponsorshipPolicy({
+            user,
+            signer: context.signer,
+            transactions: request.body.transactions,
+          });
         const requests = await prepareEmbeddedSolanaTransactionRequests({
           context,
           executionKey,
-          transactions: request.body.transactions,
-          embeddedSolanaSponsorshipEnabled: false,
+          transactions: sponsorshipPolicy.transactions,
+          embeddedSolanaSponsorshipEnabled:
+            sponsorshipPolicy.embeddedSolanaSponsorshipEnabled,
           onSponsorBalanceFetchError: (error) => {
             app.log.warn(
               { error, userId: user.id, signer: context.signer },
