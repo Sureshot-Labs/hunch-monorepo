@@ -144,16 +144,32 @@ function encodeJupiterSharedAccountsRouteData(inputs: {
   quotedOut?: bigint;
   discriminator?: Buffer;
   slippageBps?: number;
+  platformFeeBps?: number;
   prefix?: Buffer;
+  slippageEncoding?: "u16-platform-fee" | "u32";
 }): Buffer {
-  const slippage = Buffer.alloc(4);
-  slippage.writeUInt32LE(inputs.slippageBps ?? 50, 0);
+  const slippageEncoding = inputs.slippageEncoding ?? "u16-platform-fee";
+  const slippage =
+    slippageEncoding === "u32" ? Buffer.alloc(4) : Buffer.alloc(2);
+  if (slippageEncoding === "u32") {
+    slippage.writeUInt32LE(inputs.slippageBps ?? 50, 0);
+  } else {
+    slippage.writeUInt16LE(inputs.slippageBps ?? 50, 0);
+  }
+  const platformFee =
+    slippageEncoding === "u16-platform-fee"
+      ? Buffer.from([inputs.platformFeeBps ?? 0])
+      : Buffer.alloc(0);
   return Buffer.concat([
     inputs.discriminator ?? JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR,
-    inputs.prefix ?? Buffer.from([1, 0, 0, 0, 0x1a, 0x64, 0, 1]),
+    inputs.prefix ??
+      Buffer.from([
+        1, 0, 0, 0, 0x1a, 0x64, 0, 1, 0, 0, 0, 0, 0x2a, 0, 0, 0,
+      ]),
     encodeU64Le(inputs.amount),
     encodeU64Le(inputs.quotedOut ?? 9_134_000n),
     slippage,
+    platformFee,
   ]);
 }
 
@@ -1241,20 +1257,18 @@ const tests: TestCase[] = [
         /amount does not match/,
       );
 
-      assert.throws(
-        () =>
-          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
-            payload: buildPrefundPayload({
-              tokenOutAmount: "9134000",
-              txData: buildJupiterPrefundTransaction({ quotedOut: 9_000_000n }),
-            }),
-            signer: walletContext.signer,
-            amountInRaw: 1_000_000n,
-            minOutLamports: 4_000_000n,
-            maxOutLamports: 30_000_000n,
+      const validated =
+        solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+          payload: buildPrefundPayload({
+            tokenOutAmount: "9134000",
+            txData: buildJupiterPrefundTransaction({ quotedOut: 9_000_000n }),
           }),
-        /output does not match/,
-      );
+          signer: walletContext.signer,
+          amountInRaw: 1_000_000n,
+          minOutLamports: 4_000_000n,
+          maxOutLamports: 30_000_000n,
+        });
+      assert.equal(validated.estimatedOutLamports, 9_000_000n);
     },
   },
   {
@@ -1402,10 +1416,10 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "solana prefund memory limiter enforces cooldown and daily cap",
+    name: "solana prefund memory limiter enforces daily cap without a retry cooldown",
     run: () => {
       const originalNow = Date.now;
-      let now = 1_000_000_000;
+      const now = 1_000_000_000;
       Date.now = () => now;
       try {
         solanaPrefundRouteTestExports.resetMemoryPrefundRateLimits();
@@ -1423,25 +1437,14 @@ const tests: TestCase[] = [
           solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
             walletContext.signer,
           ).limited,
-          true,
-        );
-
-        now += 10 * 60 * 1000 + 1;
-        assert.equal(
-          solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
-            walletContext.signer,
-          ).limited,
           false,
         );
 
-        solanaPrefundRouteTestExports.recordMemoryPrefundAttempt(
-          walletContext.signer,
-        );
-        now += 10 * 60 * 1000 + 1;
-        solanaPrefundRouteTestExports.recordMemoryPrefundAttempt(
-          walletContext.signer,
-        );
-        now += 10 * 60 * 1000 + 1;
+        for (let attempt = 2; attempt <= 20; attempt += 1) {
+          solanaPrefundRouteTestExports.recordMemoryPrefundAttempt(
+            walletContext.signer,
+          );
+        }
         assert.equal(
           solanaPrefundRouteTestExports.getMemoryPrefundRateLimitState(
             walletContext.signer,

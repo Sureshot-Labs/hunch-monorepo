@@ -93,6 +93,7 @@ type DebridgeOrderInputs = {
 };
 
 const SOLANA_CHAIN_ID = HUNCH_SOLANA_CHAIN_ID;
+const STALE_SOLANA_SOURCE_TX_MS = 5 * 60 * 1000;
 const ETHEREUM_CHAIN_ID = "1";
 const OPTIMISM_CHAIN_ID = "10";
 const BSC_CHAIN_ID = "56";
@@ -634,6 +635,17 @@ async function fetchCrossChainSourceFailureStatus(inputs: {
   if (!receipt?.status) return null;
   const canonicalStatus = canonicalizeBridgeOrderStatus(receipt.status);
   return canonicalStatus === "failed" ? canonicalStatus : null;
+}
+
+function isStaleBridgeTimestamp(
+  value: Date | string | null | undefined,
+): boolean {
+  if (!value) return false;
+  const timestamp = value instanceof Date ? value.getTime() : Date.parse(value);
+  return (
+    Number.isFinite(timestamp) &&
+    Date.now() - timestamp >= STALE_SOLANA_SOURCE_TX_MS
+  );
 }
 
 function resolveBridgeAddresses(
@@ -1192,6 +1204,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
   const syncAcrossBridgeOrderByTx = async (inputs: {
     txHash: string;
     chainId?: string | null;
+    createdAt?: Date | string | null;
     storedStatus?: string | null;
     orderId?: string | null;
   }): Promise<{
@@ -1281,6 +1294,22 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         : null;
       if (sourceStatus === "failed") {
         const payload = { status: "failed", source: "rpc" };
+        await persistAcrossStatus("failed", payload);
+        return { status: "failed", payload, source: "rpc" };
+      }
+      if (
+        inputs.chainId?.trim() === SOLANA_CHAIN_ID &&
+        !sourceStatus &&
+        isStaleBridgeTimestamp(inputs.createdAt)
+      ) {
+        const payload = {
+          status: "failed",
+          source: "rpc",
+          sourceTxStatus: null,
+          reason: "source_signature_not_found",
+          staleAfterMs: STALE_SOLANA_SOURCE_TX_MS,
+          error: extractAcrossErrorMessage(upstream.payload),
+        };
         await persistAcrossStatus("failed", payload);
         return { status: "failed", payload, source: "rpc" };
       }
@@ -2015,17 +2044,19 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         const resolvedTxHash = txHash;
         let resolvedSwapType: BridgeSwapType | null = query.swapType ?? null;
         let resolvedChainId = query.chainId?.trim() || null;
+        let resolvedCreatedAt: Date | null = null;
         let resolvedStoredStatus: string | null = null;
 
-        if (!resolvedSwapType || !resolvedChainId) {
+        if (!resolvedSwapType || !resolvedChainId || !resolvedCreatedAt) {
           const { rows } = await pool.query<{
             swap_type: BridgeSwapType;
             src_chain_id: string;
             tx_hash_src: string | null;
+            created_at: Date | null;
             status: string | null;
           }>(
             `
-              select swap_type, src_chain_id, tx_hash_src, status
+              select swap_type, src_chain_id, tx_hash_src, created_at, status
               from bridge_orders
               where provider = 'across'
                 and tx_hash_src = $1
@@ -2037,6 +2068,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           if (rows[0]) {
             resolvedSwapType = resolvedSwapType ?? rows[0].swap_type;
             resolvedChainId = resolvedChainId ?? rows[0].src_chain_id;
+            resolvedCreatedAt = rows[0].created_at;
             resolvedStoredStatus = rows[0].status?.trim() || null;
           }
         }
@@ -2044,6 +2076,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         const synced = await syncAcrossBridgeOrderByTx({
           txHash: resolvedTxHash,
           chainId: resolvedChainId,
+          createdAt: resolvedCreatedAt,
           storedStatus: resolvedStoredStatus,
           orderId,
         });
@@ -2125,6 +2158,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           swap_type: BridgeSwapType;
           src_chain_id: string;
           tx_hash_src: string | null;
+          created_at: Date | null;
           status: string | null;
         }>(
           `
@@ -2648,6 +2682,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           src_chain_id: string;
           order_id: string | null;
           tx_hash_src: string | null;
+          created_at: Date | null;
           status: string | null;
         }>(
           `
@@ -2657,6 +2692,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               src_chain_id,
               order_id,
               tx_hash_src,
+              created_at,
               status
             from bridge_orders
             where user_id = $1
@@ -2722,6 +2758,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               await syncAcrossBridgeOrderByTx({
                 txHash: row.tx_hash_src,
                 chainId: row.src_chain_id,
+                createdAt: row.created_at,
                 storedStatus: row.status,
                 orderId: row.order_id,
               });
