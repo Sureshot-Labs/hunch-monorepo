@@ -75,6 +75,10 @@ const SOL_DECIMALS = 9;
 const DEFAULT_SOLANA_PREFUND_SLIPPAGE = 0.5;
 const COMPUTE_BUDGET_PROGRAM_ID =
   "ComputeBudget111111111111111111111111111111";
+const COMPUTE_BUDGET_SET_COMPUTE_UNIT_LIMIT = 2;
+const COMPUTE_BUDGET_SET_COMPUTE_UNIT_PRICE = 3;
+const SOLANA_PREFUND_MAX_COMPUTE_UNIT_LIMIT = 1_400_000;
+const SOLANA_PREFUND_MAX_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 100_000n;
 const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const SOLANA_WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 const JUPITER_V6_PROGRAM_ID = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
@@ -786,6 +790,44 @@ function validateSplTokenCloseAccountToSigner(inputs: {
   return closedAccount;
 }
 
+function validateSolanaPrefundComputeBudgetInstruction(
+  instruction: VersionedTransaction["message"]["compiledInstructions"][number],
+): void {
+  if (instruction.accountKeyIndexes.length > 0) {
+    throw new Error("deBridge prefund ComputeBudget instruction cannot reference accounts.");
+  }
+
+  const data = Buffer.from(instruction.data);
+  if (data.length < 1) {
+    throw new Error("deBridge prefund ComputeBudget instruction is malformed.");
+  }
+
+  const discriminator = data[0];
+  if (discriminator === COMPUTE_BUDGET_SET_COMPUTE_UNIT_LIMIT) {
+    if (data.length !== 5) {
+      throw new Error("deBridge prefund ComputeBudget limit instruction is malformed.");
+    }
+    const units = data.readUInt32LE(1);
+    if (units > SOLANA_PREFUND_MAX_COMPUTE_UNIT_LIMIT) {
+      throw new Error("deBridge prefund compute unit limit exceeds sponsor cap.");
+    }
+    return;
+  }
+
+  if (discriminator === COMPUTE_BUDGET_SET_COMPUTE_UNIT_PRICE) {
+    if (data.length !== 9) {
+      throw new Error("deBridge prefund ComputeBudget price instruction is malformed.");
+    }
+    const microLamports = data.readBigUInt64LE(1);
+    if (microLamports > SOLANA_PREFUND_MAX_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS) {
+      throw new Error("deBridge prefund compute unit price exceeds sponsor cap.");
+    }
+    return;
+  }
+
+  throw new Error("deBridge prefund ComputeBudget instruction is not allowed.");
+}
+
 function validateDebridgeSolanaPrefundTransactionShape(inputs: {
   transaction: VersionedTransaction;
   signer: string;
@@ -836,9 +878,7 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
     }
 
     if (programIdBase58 === COMPUTE_BUDGET_PROGRAM_ID) {
-      if (instruction.accountKeyIndexes.length > 0) {
-        throw new Error("deBridge prefund ComputeBudget instruction cannot reference accounts.");
-      }
+      validateSolanaPrefundComputeBudgetInstruction(instruction);
       continue;
     }
 
@@ -1540,6 +1580,27 @@ async function readCachedEmbeddedSolanaPreparedRequests(inputs: {
   return memoryEntry.requests;
 }
 
+async function deleteCachedEmbeddedSolanaPreparedRequests(inputs: {
+  signer: string;
+  executionKey: string;
+  log: RouteLogger;
+}): Promise<void> {
+  const key = buildEmbeddedSolanaPreparedCacheKey({
+    signer: inputs.signer,
+    executionKey: inputs.executionKey,
+  });
+  embeddedSolanaPreparedMemory.delete(key);
+  try {
+    const redis = await getRedis();
+    if (redis) await redis.del(key);
+  } catch (error) {
+    inputs.log.warn(
+      { error, signer: inputs.signer },
+      "Failed to delete prepared embedded Solana requests from Redis",
+    );
+  }
+}
+
 async function readCachedSolanaPrefundPreparedRequest(inputs: {
   signer: string;
   executionKey: string;
@@ -1654,6 +1715,64 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
     transactions,
     embeddedSolanaSponsorshipEnabled: sponsoredCount > 0,
   };
+}
+
+function readEmbeddedSolanaPreparedTransaction(
+  request: EmbeddedPrivyAuthorizationRequest,
+): string | null {
+  const body = isRecord(request.input.body) ? request.input.body : null;
+  const params = body && isRecord(body.params) ? body.params : null;
+  const transaction = params?.transaction;
+  return typeof transaction === "string" && transaction.trim()
+    ? transaction.trim()
+    : null;
+}
+
+function isEmbeddedSolanaPreparedRequestSponsored(
+  request: EmbeddedPrivyAuthorizationRequest,
+): boolean {
+  const body = isRecord(request.input.body) ? request.input.body : null;
+  return body?.sponsor === true;
+}
+
+async function validateEmbeddedSolanaSponsoredLossCloseAtExecute(inputs: {
+  user: NonNullable<FastifyRequest["user"]>;
+  signer: string;
+  requests: EmbeddedPrivyAuthorizationRequest[];
+}): Promise<void> {
+  const sponsoredRequests = inputs.requests.filter((request) =>
+    isEmbeddedSolanaPreparedRequestSponsored(request),
+  );
+  if (!sponsoredRequests.length) return;
+  const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+  if (authAccessPolicy.effective.solanaLossCloseSponsorshipEnabled !== true) {
+    throw new Error("Kalshi loss close sponsorship is disabled.");
+  }
+  if (sponsoredRequests.length !== inputs.requests.length) {
+    throw new Error(
+      "Sponsored Kalshi loss close transactions cannot be mixed with other Solana transactions.",
+    );
+  }
+
+  for (const request of sponsoredRequests) {
+    const lossCloseTokenId = parseKalshiLossCloseTransactionTokenId(request.id);
+    if (!lossCloseTokenId) {
+      throw new Error("Only Kalshi loss close transactions can be sponsored.");
+    }
+    const transaction = readEmbeddedSolanaPreparedTransaction(request);
+    if (!transaction) {
+      throw new Error("Kalshi loss close transaction is missing serialized transaction data.");
+    }
+    await validateKalshiLossCloseSponsoredTransaction({
+      pool,
+      userId: inputs.user.id,
+      walletAddress: inputs.signer,
+      requestId: request.id,
+      transaction,
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+    });
+  }
 }
 
 async function prepareSolanaPrefundRequest(inputs: {
@@ -2452,9 +2571,19 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana authorization expired. Refresh quote and try again.",
               );
             }
+            await validateEmbeddedSolanaSponsoredLossCloseAtExecute({
+              user,
+              signer: context.signer,
+              requests,
+            });
             const signatures = await executeEmbeddedSolanaTransactionRequests({
               requests,
               signatures: request.body.signedRequests,
+            });
+            await deleteCachedEmbeddedSolanaPreparedRequests({
+              signer: context.signer,
+              executionKey: request.body.executionKey,
+              log: app.log,
             });
             return {
               ok: true,

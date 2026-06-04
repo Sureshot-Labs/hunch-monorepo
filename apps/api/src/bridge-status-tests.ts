@@ -11,6 +11,7 @@ import {
   buildBridgeNotification,
   buildRewardNotification,
 } from "./services/notifications.js";
+import { bridgeRouteTestExports } from "./routes/bridge.js";
 
 assert.equal(canonicalizeBridgeOrderStatus("filled"), "fulfilled");
 assert.equal(canonicalizeBridgeOrderStatus("Fulfilled"), "fulfilled");
@@ -31,6 +32,40 @@ assert.equal(isTerminalBridgeOrderStatus("OrderCancelled"), false);
 
 assert.equal(getBridgeNotificationStatus("expired"), "failed");
 assert.equal(getBridgeNotificationStatus("failed"), "failed");
+
+const staleSubmittedAt = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+const recentSubmittedAt = new Date(Date.now() - 60 * 1000).toISOString();
+
+assert.equal(
+  bridgeRouteTestExports.shouldFailMissingSolanaSourceTx({
+    chainId: "7565164",
+    sourceStatus: null,
+    sourceTxSubmittedAt: recentSubmittedAt,
+  }),
+  false,
+);
+assert.equal(
+  bridgeRouteTestExports.shouldFailMissingSolanaSourceTx({
+    chainId: "7565164",
+    sourceStatus: null,
+    sourceTxSubmittedAt: staleSubmittedAt,
+  }),
+  true,
+);
+assert.equal(
+  bridgeRouteTestExports.shouldFailMissingSolanaSourceTx({
+    chainId: "7565164",
+    sourceStatus: null,
+    sourceTxSubmittedAt: null,
+  }),
+  false,
+);
+assert.equal(
+  bridgeRouteTestExports.readBridgeSourceTxSubmittedAt({
+    sourceTxSubmittedAt: staleSubmittedAt,
+  }),
+  staleSubmittedAt,
+);
 
 const refunded = buildBridgeNotification({
   userId: "user-1",

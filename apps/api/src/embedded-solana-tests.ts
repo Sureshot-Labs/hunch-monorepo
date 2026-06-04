@@ -8,6 +8,7 @@ import {
 } from "@solana/spl-token";
 import {
   AddressLookupTableAccount,
+  ComputeBudgetProgram,
   Keypair,
   PublicKey,
   SystemProgram,
@@ -69,6 +70,7 @@ const JUPITER_EXACT_OUT_ROUTE_DISCRIMINATOR = Buffer.from(
   "c1209b3341d69c81",
   "hex",
 );
+const MAX_PREFUND_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 100_000n;
 const USER_TX_FEE_BUFFER_LAMPORTS = 3_000_000n;
 const SPONSOR_BASE_REQUIREMENT_LAMPORTS = 8_000_000n;
 
@@ -137,6 +139,19 @@ function encodeU64Le(value: bigint): Buffer {
   const data = Buffer.alloc(8);
   data.writeBigUInt64LE(value, 0);
   return data;
+}
+
+function buildComputeUnitPriceInstruction(
+  microLamports: bigint,
+): TransactionInstruction {
+  const data = Buffer.alloc(9);
+  data[0] = 3;
+  data.writeBigUInt64LE(microLamports, 1);
+  return new TransactionInstruction({
+    programId: ComputeBudgetProgram.programId,
+    keys: [],
+    data,
+  });
 }
 
 function encodeJupiterSharedAccountsRouteData(inputs: {
@@ -220,6 +235,7 @@ function buildJupiterPrefundTransaction(inputs: {
   includeAtaCreate?: boolean;
   extraCloseAccount?: PublicKey;
   addressLookupTableAccounts?: AddressLookupTableAccount[];
+  computeBudgetInstructions?: TransactionInstruction[];
 } = {}): string {
   const signer = inputs.signer ?? signerKeypair.publicKey;
   const amount = inputs.amount ?? 1_000_000n;
@@ -228,6 +244,7 @@ function buildJupiterPrefundTransaction(inputs: {
   const discriminator =
     inputs.discriminator ?? JUPITER_SHARED_ACCOUNTS_ROUTE_DISCRIMINATOR;
   const instructions: TransactionInstruction[] = [];
+  instructions.push(...(inputs.computeBudgetInstructions ?? []));
   if (inputs.includeAtaCreate !== false) {
     instructions.push(
       new TransactionInstruction({
@@ -989,6 +1006,75 @@ const tests: TestCase[] = [
       assert.equal(validated.decodedMinOutLamports, 9_088_330n);
       assert.deepEqual(validated.requiredSigners, [walletContext.signer]);
       assert.equal(validated.feePayer, walletContext.signer);
+    },
+  },
+  {
+    name: "solana prefund validator caps sponsored ComputeBudget fees",
+    run: () => {
+      const validated =
+        solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+          payload: buildPrefundPayload({
+            tokenOutAmount: "9134000",
+            txData: buildJupiterPrefundTransaction({
+              computeBudgetInstructions: [
+                ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+                buildComputeUnitPriceInstruction(
+                  MAX_PREFUND_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS,
+                ),
+              ],
+            }),
+          }),
+          signer: walletContext.signer,
+          amountInRaw: 1_000_000n,
+          minOutLamports: 4_000_000n,
+          maxOutLamports: 30_000_000n,
+        });
+
+      assert.equal(validated.estimatedOutLamports, 9_134_000n);
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                computeBudgetInstructions: [
+                  buildComputeUnitPriceInstruction(
+                    MAX_PREFUND_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS + 1n,
+                  ),
+                ],
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /compute unit price exceeds/,
+      );
+
+      assert.throws(
+        () =>
+          solanaPrefundRouteTestExports.validateDebridgeSolanaPrefundPayload({
+            payload: buildPrefundPayload({
+              tokenOutAmount: "9134000",
+              txData: buildJupiterPrefundTransaction({
+                computeBudgetInstructions: [
+                  new TransactionInstruction({
+                    programId: ComputeBudgetProgram.programId,
+                    keys: [],
+                    data: Buffer.from([0]),
+                  }),
+                ],
+              }),
+            }),
+            signer: walletContext.signer,
+            amountInRaw: 1_000_000n,
+            minOutLamports: 4_000_000n,
+            maxOutLamports: 30_000_000n,
+          }),
+        /ComputeBudget instruction is not allowed/,
+      );
     },
   },
   {
