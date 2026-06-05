@@ -39,6 +39,7 @@ import {
   type RewardsManualFilterMode,
   type RewardsLeaderboardInterval,
   type RewardsLeaderboardMetric,
+  type RewardsLeaderboardAggregateRow,
   type RewardsLeaderboardRow,
   type RewardsReferralsSortBy,
   type RewardsReferralsSortDir,
@@ -298,6 +299,20 @@ function resolveTier(points: number, tiers: RewardsTier[]): RewardsTier {
     else break;
   }
   return current;
+}
+
+function resolveTierLevel(points: number, tiers: RewardsTier[]): number | null {
+  if (!Number.isFinite(points) || tiers.length === 0) return null;
+
+  let currentLevel = 1;
+  for (let index = 0; index < tiers.length; index += 1) {
+    if (points >= tiers[index].points) {
+      currentLevel = index + 1;
+      continue;
+    }
+    break;
+  }
+  return currentLevel;
 }
 
 function resolveNextTier(
@@ -1530,6 +1545,18 @@ export async function getRewardsReferrals(
   return { referrals, policy };
 }
 
+function mapRewardsLeaderboardEntry(
+  row: RewardsLeaderboardAggregateRow,
+  inputs: { userId: string; policy: RewardsPolicy },
+): RewardsLeaderboardEntry {
+  const { tierPoints: _tierPoints, ...publicRow } = row;
+  return {
+    ...publicRow,
+    level: resolveTierLevel(row.tierPoints, inputs.policy.tiers),
+    isYou: row.userId === inputs.userId,
+  };
+}
+
 export async function createRewardClaim(
   pool: DbQuery,
   inputs: {
@@ -1566,7 +1593,8 @@ export async function getRewardsLeaderboard(
     ? "exclude_all"
     : "include_all";
 
-  const [rows, me] = await Promise.all([
+  const [policy, rows, me] = await Promise.all([
+    getRewardsPolicy(pool),
     fetchRewardsLeaderboardRows(pool, {
       metric: inputs.metric,
       startAt,
@@ -1582,16 +1610,23 @@ export async function getRewardsLeaderboard(
     }),
   ]);
 
-  const entries = rows.map((row) => ({
-    ...row,
-    isYou: row.userId === inputs.userId,
-  }));
+  const entries = rows.map((row) =>
+    mapRewardsLeaderboardEntry(row, {
+      userId: inputs.userId,
+      policy,
+    }),
+  );
 
   return {
     metric: inputs.metric,
     intervalRequested: inputs.interval,
     intervalApplied,
     entries,
-    me: me ? { ...me, isYou: true } : null,
+    me: me
+      ? mapRewardsLeaderboardEntry(me, {
+          userId: inputs.userId,
+          policy,
+        })
+      : null,
   };
 }

@@ -89,11 +89,19 @@ export type RewardsLeaderboardRow = {
   userId: string;
   rank: number;
   points: number;
+  level: number | null;
   volumeUsd: number;
   pnlUsd: number;
   displayName: string | null;
   username: string | null;
   walletAddress: string | null;
+};
+
+export type RewardsLeaderboardAggregateRow = Omit<
+  RewardsLeaderboardRow,
+  "level"
+> & {
+  tierPoints: number;
 };
 
 export type RewardsManualFilterMode =
@@ -2126,6 +2134,7 @@ type RewardsLeaderboardRowDb = {
   user_id: string;
   rank: number;
   points: string | null;
+  tier_points: string | null;
   volume_usd: string | null;
   pnl_usd: string | null;
   display_name: string | null;
@@ -2135,11 +2144,12 @@ type RewardsLeaderboardRowDb = {
 
 function mapLeaderboardRow(
   row: RewardsLeaderboardRowDb,
-): RewardsLeaderboardRow {
+): RewardsLeaderboardAggregateRow {
   return {
     userId: row.user_id,
     rank: Number(row.rank ?? 0),
     points: Number(row.points ?? 0),
+    tierPoints: Number(row.tier_points ?? 0),
     volumeUsd: Number(row.volume_usd ?? 0),
     pnlUsd: Number(row.pnl_usd ?? 0),
     displayName: row.display_name ?? null,
@@ -2327,7 +2337,7 @@ export async function fetchRewardsLeaderboardRows(
     offset: number;
     manualMode: RewardsManualFilterMode;
   },
-): Promise<RewardsLeaderboardRow[]> {
+): Promise<RewardsLeaderboardAggregateRow[]> {
   if (inputs.metric === "pnl") {
     const params: PgParams = [inputs.limit, inputs.offset];
     const limitIdx = 1;
@@ -2349,19 +2359,31 @@ export async function fetchRewardsLeaderboardRows(
             pnl_usd,
             dense_rank() over (order by pnl_usd desc) as rank
           from pnl
+        ),
+        page as (
+          select *
+          from ranked
+          order by pnl_usd desc, user_id
+          limit $${limitIdx} offset $${offsetIdx}
         )
         select
           r.user_id,
           r.rank,
           coalesce(t.volume_usd, 0)::text as volume_usd,
           coalesce(t.points, 0)::text as points,
+          coalesce(tier_points.points, 0)::text as tier_points,
           r.pnl_usd::text as pnl_usd,
           u.display_name,
           u.username,
           primary_wallet.wallet_address
-        from ranked r
+        from page r
         join users u on u.id = r.user_id
         left join totals t on t.user_id = r.user_id
+        left join lateral (
+          select coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::numeric as points
+          from volume_events ve
+          where ve.user_id = r.user_id
+        ) tier_points on true
         left join lateral (
           select wallet_address
           from user_wallets
@@ -2370,7 +2392,6 @@ export async function fetchRewardsLeaderboardRows(
           limit 1
         ) primary_wallet on true
         order by r.pnl_usd desc, r.user_id
-        limit $${limitIdx} offset $${offsetIdx}
       `,
       params,
     );
@@ -2407,18 +2428,30 @@ export async function fetchRewardsLeaderboardRows(
           points,
           dense_rank() over (order by ${metricColumn} desc) as rank
         from totals
+      ),
+      page as (
+        select *
+        from ranked
+        order by ${metricColumn} desc, user_id
+        limit $${limitIdx} offset $${offsetIdx}
       )
       select
         r.user_id,
         r.rank,
         r.volume_usd::text as volume_usd,
         r.points::text as points,
+        coalesce(tier_points.points, 0)::text as tier_points,
         coalesce(p.pnl_usd, 0)::text as pnl_usd,
         u.display_name,
         u.username,
         primary_wallet.wallet_address
-      from ranked r
+      from page r
       join users u on u.id = r.user_id
+      left join lateral (
+        select coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::numeric as points
+        from volume_events ve
+        where ve.user_id = r.user_id
+      ) tier_points on true
       left join pnl p on p.user_id = r.user_id
       left join lateral (
         select wallet_address
@@ -2426,9 +2459,8 @@ export async function fetchRewardsLeaderboardRows(
         where user_id = u.id
         order by is_primary desc, created_at asc
         limit 1
-      ) primary_wallet on true
+        ) primary_wallet on true
       order by r.${metricColumn} desc, r.user_id
-      limit $${limitIdx} offset $${offsetIdx}
     `,
     params,
   );
@@ -2443,7 +2475,7 @@ export async function fetchRewardsLeaderboardMe(
     startAt: Date | null;
     manualMode: RewardsManualFilterMode;
   },
-): Promise<RewardsLeaderboardRow | null> {
+): Promise<RewardsLeaderboardAggregateRow | null> {
   const params: PgParams = [inputs.userId];
   if (inputs.startAt) {
     params.push(inputs.startAt);
@@ -2466,18 +2498,28 @@ export async function fetchRewardsLeaderboardMe(
         ${totalsWhereClause}
         group by ve.user_id
       ),
+      tier_totals as (
+        select
+          ve.user_id,
+          coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::numeric as tier_points
+        from volume_events ve
+        where ve.user_id = $1
+        group by ve.user_id
+      ),
       ${buildPnlCteSql("$1")}
       select
         u.id as user_id,
         0 as rank,
         coalesce(t.volume_usd, 0)::text as volume_usd,
         coalesce(t.points, 0)::text as points,
+        coalesce(tt.tier_points, 0)::text as tier_points,
         coalesce(p.pnl_usd, 0)::text as pnl_usd,
         u.display_name,
         u.username,
         primary_wallet.wallet_address
       from users u
       left join totals t on t.user_id = u.id
+      left join tier_totals tt on tt.user_id = u.id
       left join pnl p on p.user_id = u.id
       left join lateral (
         select wallet_address

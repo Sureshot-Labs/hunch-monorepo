@@ -14,6 +14,7 @@ import {
   attachReferralCodeForExistingUser,
   computeCashbackBreakdown,
   getReferralAttachmentStatus,
+  getRewardsLeaderboard,
   getRewardsReferrals,
   resolveEffectiveBps,
   setReferralCodeForUser,
@@ -755,6 +756,70 @@ function createUserPointsDb(seed: {
         return { rows: [{ total: seed.total }] };
       }
       throw new Error(`Unhandled SQL in user points test db: ${sql}`);
+    },
+  } as import("./db.js").DbQuery;
+}
+
+function createRewardsLeaderboardDb(seed: {
+  publicPoints: string;
+  tierPoints: string;
+  capture?: {
+    entriesSql?: string;
+    meSql?: string;
+    rankSql?: string;
+    params: unknown[][];
+  };
+}): import("./db.js").DbQuery {
+  const leaderboardRow = {
+    user_id: "user-a",
+    rank: 1,
+    points: seed.publicPoints,
+    tier_points: seed.tierPoints,
+    volume_usd: "100",
+    pnl_usd: "0",
+    display_name: "User A",
+    username: "usera",
+    wallet_address: "0xabc",
+  };
+
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      seed.capture?.params.push(Array.isArray(params) ? [...params] : []);
+
+      if (sql.includes("from rewards_policy")) {
+        return {
+          rows: [
+            {
+              id: "policy-a",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              tiers: [
+                { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
+                { tier: 1, name: "Observer", points: 500, cashbackBps: 2500 },
+                { tier: 2, name: "Seeker", points: 5000, cashbackBps: 3000 },
+              ],
+              referral_bonus: [{ minReferrals: 1, bonusBps: 500 }],
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("select count(*)::text as higher")) {
+        if (seed.capture) seed.capture.rankSql = sql;
+        return { rows: [{ higher: "0" }] };
+      }
+
+      if (sql.includes("where u.id = $1")) {
+        if (seed.capture) seed.capture.meSql = sql;
+        return { rows: [leaderboardRow] };
+      }
+
+      if (sql.includes("page as") && sql.includes("dense_rank()")) {
+        if (seed.capture) seed.capture.entriesSql = sql;
+        return { rows: [leaderboardRow] };
+      }
+
+      throw new Error(`Unhandled SQL in rewards leaderboard test db: ${sql}`);
     },
   } as import("./db.js").DbQuery;
 }
@@ -1828,6 +1893,57 @@ const tests: TestCase[] = [
       assert.doesNotMatch(capture.sql ?? "", /source_id like 'manual:%'/);
       assert.doesNotMatch(capture.sql ?? "", /source_id like 'referral-code-tier:%'/);
       assert.deepEqual(capture.params, ["user-a"]);
+    },
+  },
+  {
+    name: "leaderboard exposes level from tier points without leaking tier points",
+    run: async () => {
+      const capture: {
+        entriesSql?: string;
+        meSql?: string;
+        rankSql?: string;
+        params: unknown[][];
+      } = { params: [] };
+      const db = createRewardsLeaderboardDb({
+        publicPoints: "400",
+        tierPoints: "5500",
+        capture,
+      });
+
+      const leaderboard = await getRewardsLeaderboard(db, {
+        userId: "user-a",
+        metric: "points",
+        interval: "alltime",
+        limit: 10,
+        offset: 0,
+        excludeManual: true,
+      });
+
+      assert.equal(leaderboard.entries.length, 1);
+      const entry = leaderboard.entries[0];
+      assert.equal(entry?.points, 400);
+      assert.equal(entry?.level, 3);
+      assert.equal(
+        (entry as Record<string, unknown> | undefined)?.tierPoints,
+        undefined,
+      );
+      assert.equal(leaderboard.me?.points, 400);
+      assert.equal(leaderboard.me?.level, 3);
+      assert.equal(
+        (leaderboard.me as Record<string, unknown> | null)?.tierPoints,
+        undefined,
+      );
+      assert.match(capture.entriesSql ?? "", /source_id like 'manual:%'/);
+      assert.match(
+        capture.entriesSql ?? "",
+        /source_id like 'referral-code-tier:%'/,
+      );
+      assert.match(
+        capture.entriesSql ?? "",
+        /sum\(ve\.points_awarded\).*as points/s,
+      );
+      assert.match(capture.meSql ?? "", /sum\(ve\.points_awarded\).*as points/s);
+      assert.match(capture.rankSql ?? "", /where points > \$1/);
     },
   },
   {
