@@ -1,0 +1,30 @@
+name: Build Backend Prebuilt Image (ARM)
+
+on:
+  push:
+    branches:
+      - deploy-build-speed-test
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image archive only
+        env:
+          PLATFORM: linux/arm64
+          PREBUILT_BUILD_ONLY: "1"
+          LOCAL_IMAGE_CLEANUP: "1"
+          LOCAL_BUILDER_PRUNE: "0"
+        run: |
+          chmod +x ops/deploy-local-prebuilt.sh
+          ops/deploy-local-prebuilt.sh
