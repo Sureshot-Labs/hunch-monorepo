@@ -89,6 +89,7 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-3001}
+      HUNCH_JS_RUNTIME: ${HUNCH_API_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_API:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards,aws-sm:/hunch/prod/ai,aws-sm:/hunch/prod/ops}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
@@ -100,7 +101,8 @@ services:
       redis:
         condition: service_healthy
     command:
-      - node
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
       - packages/config/dist/run-with-secrets.js
       - apps/api/dist/server.js
 
@@ -115,6 +117,7 @@ services:
     env_file:
       - /opt/hunch/.env
     environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_POLYMARKET:-aws-sm:/hunch/prod/shared}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
@@ -124,7 +127,8 @@ services:
       redis:
         condition: service_healthy
     command:
-      - node
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
       - packages/config/dist/run-with-secrets.js
       - apps/indexer-polymarket/dist/main.js
 
@@ -139,6 +143,7 @@ services:
     env_file:
       - /opt/hunch/.env
     environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_LIMITLESS:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/indexer-limitless}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
@@ -148,7 +153,8 @@ services:
       redis:
         condition: service_healthy
     command:
-      - node
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
       - packages/config/dist/run-with-secrets.js
       - apps/indexer-limitless/dist/main.js
 
@@ -163,6 +169,7 @@ services:
     env_file:
       - /opt/hunch/.env
     environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_DFLOW:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/indexer-dflow}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
@@ -172,7 +179,8 @@ services:
       redis:
         condition: service_healthy
     command:
-      - node
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
       - packages/config/dist/run-with-secrets.js
       - apps/indexer-dflow/dist/main.js
 
@@ -187,6 +195,7 @@ services:
     env_file:
       - /opt/hunch/.env
     environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_AI_WORKER:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/ai}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
@@ -194,7 +203,8 @@ services:
       redis:
         condition: service_healthy
     command:
-      - node
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
       - packages/config/dist/run-with-secrets.js
       - apps/ai-worker/dist/main.js
 
@@ -209,6 +219,7 @@ services:
     env_file:
       - /opt/hunch/.env
     environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_FINANCE_WORKER:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
@@ -218,7 +229,8 @@ services:
       redis:
         condition: service_healthy
     command:
-      - node
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
       - packages/config/dist/run-with-secrets.js
       - apps/finance-worker/dist/main.js
 

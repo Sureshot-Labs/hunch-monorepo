@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/main.ts",
+    "dev:bun": "bun src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
+    "start:bun": "bun dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

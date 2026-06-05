@@ -1,3 +1,5 @@
+ARG BUN_VERSION=1.3.14
+
 FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
@@ -38,10 +40,20 @@ RUN pnpm --filter @hunch/config build \
   && pnpm --filter indexer-limitless... build \
   && pnpm --filter indexer-polymarket... build
 
+# Bun is a single executable. Use the official image as the binary source
+# instead of running the installer script inside the production runtime image.
+FROM oven/bun:${BUN_VERSION} AS bun-runtime
+
 FROM node:20-bookworm-slim AS runtime
 
+ARG BUN_VERSION=1.3.14
 WORKDIR /app
 ENV NODE_ENV=production
+
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+
+RUN test "$(bun --version)" = "${BUN_VERSION}" \
+  && bun --revision
 
 RUN groupadd --system --gid 10001 hunch \
   && useradd --system --uid 10001 --gid hunch --home-dir /home/hunch --create-home hunch \
@@ -52,5 +64,6 @@ COPY --chown=10001:10001 --from=builder /app/package.json /app/package.json
 COPY --chown=10001:10001 --from=builder /app/pnpm-workspace.yaml /app/pnpm-workspace.yaml
 COPY --chown=10001:10001 --from=builder /app/apps /app/apps
 COPY --chown=10001:10001 --from=builder /app/packages /app/packages
+COPY --chown=10001:10001 --from=builder /app/ops/run-js-runtime.sh /app/ops/run-js-runtime.sh
 
 USER hunch
