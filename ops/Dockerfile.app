@@ -43,14 +43,14 @@ FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY --from=builder /app/node_modules /app/node_modules
-COPY --from=builder /app/package.json /app/package.json
-COPY --from=builder /app/pnpm-workspace.yaml /app/pnpm-workspace.yaml
-COPY --from=builder /app/apps /app/apps
-COPY --from=builder /app/packages /app/packages
-
 RUN groupadd --system --gid 10001 hunch \
   && useradd --system --uid 10001 --gid hunch --home-dir /home/hunch --create-home hunch \
-  && chown -R hunch:hunch /app
+  && chown hunch:hunch /app
+
+COPY --chown=10001:10001 --from=builder /app/node_modules /app/node_modules
+COPY --chown=10001:10001 --from=builder /app/package.json /app/package.json
+COPY --chown=10001:10001 --from=builder /app/pnpm-workspace.yaml /app/pnpm-workspace.yaml
+COPY --chown=10001:10001 --from=builder /app/apps /app/apps
+COPY --chown=10001:10001 --from=builder /app/packages /app/packages
 
 USER hunch
