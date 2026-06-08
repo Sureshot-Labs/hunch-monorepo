@@ -80,6 +80,13 @@ import {
   shouldSuppressLegacySideTransitionDelta,
 } from "./services/wallet-intel-helpers.js";
 import {
+  buildInternalHunchFillActivityEvents,
+  internalHunchWalletAddressesMatch,
+  normalizeInternalHunchWalletAddress,
+  selectNewestInternalHunchFillReplayInputs,
+  shouldSuppressInternalHunchSnapshotDelta,
+} from "./services/wallet-intel-internal-hunch.js";
+import {
   MM_HEDGE_RATIO_MIN,
   MM_TWO_SIDED_MARKETS_MIN,
   buildWalletMmDiagnostics,
@@ -96,6 +103,7 @@ import {
   mapWhaleMarketToProfileMarket,
   normalizeWhaleProfile,
   parseProfileJson,
+  sortTrackerSurfaceSummaryStats,
   summarizeProfileMarkets,
 } from "./services/whale-profiles.js";
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
@@ -376,6 +384,73 @@ const tests: TestCase[] = [
         "maxOutlierRatio" in (resolved.effective as Record<string, unknown>),
         false,
       );
+    },
+  },
+  {
+    name: "wallet intel refresh policy exposes internal hunch controls",
+    run: async () => {
+      const defaults = getIntelPolicyDefaults("wallet_intel_refresh");
+      assert.equal(defaults.internalHunchEnabled, true);
+      assert.equal(defaults.internalHunchWalletLimit, 250);
+      assert.equal(defaults.internalHunchFillLookbackDays, 30);
+      assert.equal(defaults.internalHunchFillLimit, 5_000);
+
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000002",
+              policy_key: "wallet_intel_refresh",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                internalHunchEnabled: "false",
+                internalHunchWalletLimit: 0,
+                internalHunchFillLookbackDays: 7,
+                internalHunchFillLimit: 100,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "wallet_intel_refresh");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.internalHunchEnabled, false);
+      assert.equal(resolved.effective.internalHunchWalletLimit, 0);
+      assert.equal(resolved.effective.internalHunchFillLookbackDays, 7);
+      assert.equal(resolved.effective.internalHunchFillLimit, 100);
+    },
+  },
+  {
+    name: "ai whale profile policy defaults tracker sort to importance and supports rollback",
+    run: async () => {
+      const defaults = getIntelPolicyDefaults("ai_whale_profiles");
+      assert.equal(defaults.selectionMode, "hybrid");
+      assert.equal(defaults.selectionTrackerSort, "importance");
+
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000003",
+              policy_key: "ai_whale_profiles",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                selectionTrackerSort: "last_activity",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "ai_whale_profiles");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.selectionMode, "hybrid");
+      assert.equal(resolved.effective.selectionTrackerSort, "last_activity");
     },
   },
   {
@@ -821,6 +896,306 @@ const tests: TestCase[] = [
       assert.ok(lowScore >= 0 && lowScore <= 1);
       assert.ok(highScore >= 0 && highScore <= 1);
       assert.ok(highScore > lowScore);
+    },
+  },
+  {
+    name: "ai profile tracker surface uses importance ordering by default",
+    run: () => {
+      const newestTiny = createWalletActivitySummaryStats({
+        walletId: "tiny-newest",
+        lastActivityAt: new Date("2026-06-08T11:59:00.000Z"),
+        netChangeUsd: 25,
+        countsNew: 1,
+      });
+      const olderImportant = createWalletActivitySummaryStats({
+        walletId: "older-important",
+        lastActivityAt: new Date("2026-06-08T07:00:00.000Z"),
+        netChangeUsd: 150_000,
+        unusualScore: 2.5,
+        countsIncrease: 4,
+      });
+
+      assert.deepEqual(
+        sortTrackerSurfaceSummaryStats(
+          [newestTiny, olderImportant],
+          "importance",
+        ).map((row) => row.walletId),
+        ["older-important", "tiny-newest"],
+      );
+    },
+  },
+  {
+    name: "ai profile tracker surface can roll back to last activity ordering",
+    run: () => {
+      const newestTiny = createWalletActivitySummaryStats({
+        walletId: "tiny-newest",
+        lastActivityAt: new Date("2026-06-08T11:59:00.000Z"),
+        netChangeUsd: 25,
+        countsNew: 1,
+      });
+      const olderImportant = createWalletActivitySummaryStats({
+        walletId: "older-important",
+        lastActivityAt: new Date("2026-06-08T07:00:00.000Z"),
+        netChangeUsd: 150_000,
+        unusualScore: 2.5,
+        countsIncrease: 4,
+      });
+
+      assert.deepEqual(
+        sortTrackerSurfaceSummaryStats(
+          [newestTiny, olderImportant],
+          "last_activity",
+        ).map((row) => row.walletId),
+        ["tiny-newest", "older-important"],
+      );
+    },
+  },
+  {
+    name: "internal hunch fills build cumulative trade activity without user metadata",
+    run: () => {
+      const filledAt = new Date("2026-06-08T12:00:00.000Z");
+      const events = buildInternalHunchFillActivityEvents([
+        {
+          walletId: "wallet-1",
+          venue: "polymarket",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          tokenId: "token-1",
+          orderId: "order-1",
+          orderFillId: "fill-1",
+          venueFillId: "venue-fill-1",
+          venueTradeId: "trade-1",
+          fillSize: 10,
+          fillPrice: 0.42,
+          fillSide: "BUY",
+          filledAt,
+        },
+        {
+          walletId: "wallet-1",
+          venue: "polymarket",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          tokenId: "token-1",
+          orderId: "order-2",
+          orderFillId: "fill-2",
+          venueFillId: "venue-fill-2",
+          venueTradeId: "trade-2",
+          fillSize: 4,
+          fillPrice: 0.5,
+          fillSide: "SELL",
+          filledAt: new Date("2026-06-08T12:00:01.000Z"),
+        },
+      ]);
+
+      assert.equal(events.length, 2);
+      assert.equal(events[0]?.action, "BUY");
+      assert.equal(events[0]?.deltaShares, 10);
+      assert.equal(events[0]?.sizeUsd, 4.2);
+      assert.equal(events[0]?.metadata.prevShares, 0);
+      assert.equal(events[0]?.metadata.currShares, 10);
+      assert.equal(events[1]?.action, "SELL");
+      assert.equal(events[1]?.metadata.prevShares, 10);
+      assert.equal(events[1]?.metadata.currShares, 6);
+      assert.equal("userId" in (events[0]?.metadata ?? {}), false);
+    },
+  },
+  {
+    name: "internal hunch fills offset same-time activity deterministically",
+    run: () => {
+      const filledAt = new Date("2026-06-08T12:00:00.123Z");
+      const events = buildInternalHunchFillActivityEvents([
+        {
+          walletId: "wallet-1",
+          venue: "limitless",
+          marketId: "market-1",
+          outcomeSide: "NO",
+          tokenId: "token-1",
+          orderId: "order-2",
+          orderFillId: "fill-b",
+          venueFillId: null,
+          venueTradeId: null,
+          fillSize: 2,
+          fillPrice: 0.2,
+          fillSide: "BUY",
+          filledAt,
+        },
+        {
+          walletId: "wallet-1",
+          venue: "limitless",
+          marketId: "market-1",
+          outcomeSide: "NO",
+          tokenId: "token-1",
+          orderId: "order-1",
+          orderFillId: "fill-a",
+          venueFillId: null,
+          venueTradeId: null,
+          fillSize: 1,
+          fillPrice: 0.1,
+          fillSide: "BUY",
+          filledAt,
+        },
+      ]);
+
+      assert.deepEqual(
+        events.map((event) => event.metadata.orderFillId),
+        ["fill-a", "fill-b"],
+      );
+      assert.deepEqual(
+        events.map((event) => event.occurredAt),
+        ["2026-06-08T12:00:00.123000Z", "2026-06-08T12:00:00.123001Z"],
+      );
+    },
+  },
+  {
+    name: "internal hunch fills use pre-lookback shares as replay baseline",
+    run: () => {
+      const events = buildInternalHunchFillActivityEvents(
+        [
+          {
+            walletId: "wallet-1",
+            venue: "kalshi",
+            marketId: "market-1",
+            outcomeSide: "YES",
+            tokenId: "token-1",
+            orderId: "order-1",
+            orderFillId: "fill-1",
+            venueFillId: null,
+            venueTradeId: null,
+            fillSize: 3,
+            fillPrice: 0.75,
+            fillSide: "SELL",
+            filledAt: new Date("2026-06-08T12:00:00.000Z"),
+          },
+        ],
+        {
+          initialShares: [
+            {
+              walletId: "wallet-1",
+              venue: "kalshi",
+              tokenId: "token-1",
+              shares: 9,
+            },
+          ],
+        },
+      );
+
+      assert.equal(events.length, 1);
+      assert.equal(events[0]?.metadata.prevShares, 9);
+      assert.equal(events[0]?.metadata.currShares, 6);
+    },
+  },
+  {
+    name: "internal hunch fill cap selects newest fills and replays them ascending",
+    run: () => {
+      const fill = (
+        orderFillId: string,
+        filledAt: string,
+        fillSize: number,
+        fillSide: "BUY" | "SELL" = "BUY",
+      ) => ({
+        walletId: "wallet-1",
+        venue: "polymarket",
+        marketId: "market-1",
+        outcomeSide: "YES",
+        tokenId: "token-1",
+        orderId: `order-${orderFillId}`,
+        orderFillId,
+        venueFillId: null,
+        venueTradeId: null,
+        fillSize,
+        fillPrice: 0.5,
+        fillSide,
+        filledAt: new Date(filledAt),
+      });
+
+      const selected = selectNewestInternalHunchFillReplayInputs(
+        [
+          fill("fill-old", "2026-06-08T09:00:00.000Z", 10),
+          fill("fill-middle", "2026-06-08T10:00:00.000Z", 4, "SELL"),
+          fill("fill-new", "2026-06-08T11:00:00.000Z", 2, "SELL"),
+        ],
+        2,
+      );
+      assert.deepEqual(
+        selected.map((row) => row.orderFillId),
+        ["fill-middle", "fill-new"],
+      );
+
+      const events = buildInternalHunchFillActivityEvents(selected, {
+        initialShares: [
+          {
+            walletId: "wallet-1",
+            venue: "polymarket",
+            tokenId: "token-1",
+            shares: 10,
+          },
+        ],
+      });
+
+      assert.equal(events[0]?.metadata.prevShares, 10);
+      assert.equal(events[0]?.metadata.currShares, 6);
+      assert.equal(events[1]?.metadata.prevShares, 6);
+      assert.equal(events[1]?.metadata.currShares, 4);
+    },
+  },
+  {
+    name: "internal hunch wallet matching normalizes EVM casing but keeps Solana exact",
+    run: () => {
+      assert.equal(
+        normalizeInternalHunchWalletAddress(
+          "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A",
+          "polygon",
+        ),
+        "0x2dfcaa5734ca03b3917eaccb32f9b75c7675781a",
+      );
+      assert.equal(
+        internalHunchWalletAddressesMatch({
+          chain: "polygon",
+          left: "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A",
+          right: "0x2dfcaa5734ca03b3917eaccb32f9b75c7675781a",
+        }),
+        true,
+      );
+      assert.equal(
+        internalHunchWalletAddressesMatch({
+          chain: "solana",
+          left: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+          right: "f7rnppfgLzy2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "internal hunch first-import open snapshots suppress synthetic deltas",
+    run: () => {
+      assert.equal(
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource: "hunch_own_position_open",
+          hasPreviousSameKey: false,
+          prevShares: 0,
+          currShares: 2,
+        }),
+        true,
+      );
+      assert.equal(
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource: "hunch_own_position_open",
+          hasPreviousSameKey: true,
+          prevShares: 1,
+          currShares: 2,
+        }),
+        false,
+      );
+      assert.equal(
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource: "solana",
+          hasPreviousSameKey: false,
+          prevShares: 0,
+          currShares: 2,
+        }),
+        false,
+      );
     },
   },
   {
@@ -3288,10 +3663,26 @@ const tests: TestCase[] = [
           if (queryCount === 3) {
             return {
               rows: [
-                { token_id: "limitless:111", best_bid: "0.50", best_ask: "0.70" },
-                { token_id: "limitless:222", best_bid: "0.25", best_ask: "0.35" },
-                { token_id: "limitless:333", best_bid: "0.30", best_ask: "0.40" },
-                { token_id: "limitless:444", best_bid: "0.55", best_ask: "0.65" },
+                {
+                  token_id: "limitless:111",
+                  best_bid: "0.50",
+                  best_ask: "0.70",
+                },
+                {
+                  token_id: "limitless:222",
+                  best_bid: "0.25",
+                  best_ask: "0.35",
+                },
+                {
+                  token_id: "limitless:333",
+                  best_bid: "0.30",
+                  best_ask: "0.40",
+                },
+                {
+                  token_id: "limitless:444",
+                  best_bid: "0.55",
+                  best_ask: "0.65",
+                },
               ],
             };
           }
@@ -3574,10 +3965,26 @@ const tests: TestCase[] = [
           if (queryCount === 2) {
             return {
               rows: [
-                { market_id: "kalshi:market-1", token_id: "sol:mint-yes-1", side: "YES" },
-                { market_id: "kalshi:market-1", token_id: "sol:mint-no-1", side: "NO" },
-                { market_id: "kalshi:market-2", token_id: "sol:mint-yes-2", side: "YES" },
-                { market_id: "kalshi:market-2", token_id: "sol:mint-no-2", side: "NO" },
+                {
+                  market_id: "kalshi:market-1",
+                  token_id: "sol:mint-yes-1",
+                  side: "YES",
+                },
+                {
+                  market_id: "kalshi:market-1",
+                  token_id: "sol:mint-no-1",
+                  side: "NO",
+                },
+                {
+                  market_id: "kalshi:market-2",
+                  token_id: "sol:mint-yes-2",
+                  side: "YES",
+                },
+                {
+                  market_id: "kalshi:market-2",
+                  token_id: "sol:mint-no-2",
+                  side: "NO",
+                },
               ],
             };
           }

@@ -20,6 +20,7 @@ import {
   type WalletActivitySignalRow,
   type WalletActivitySignalSummary,
   type WalletActivitySummary,
+  type WalletActivitySummarySortMode,
   type WalletActivitySummaryStats,
 } from "./wallet-activity-summary.js";
 import {
@@ -1240,6 +1241,20 @@ function selectWhaleProfileRows<T extends WhaleSelectableRow>(
   return { rows: selected, pinnedCoverage };
 }
 
+export function sortTrackerSurfaceSummaryStats(
+  rows: WalletActivitySummaryStats[],
+  sortMode: Extract<
+    WalletActivitySummarySortMode,
+    "importance" | "last_activity"
+  >,
+): WalletActivitySummaryStats[] {
+  return [...rows]
+    .filter((row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt))
+    .sort((left, right) =>
+      compareWalletActivitySummaryStats(left, right, sortMode),
+    );
+}
+
 async function loadTrackerSurfaceIds(
   client: PoolClient,
   options: {
@@ -1247,6 +1262,10 @@ async function loadTrackerSurfaceIds(
     limit: number;
     minActivityUsd: number;
     minActivityShares: number;
+    sortMode: Extract<
+      WalletActivitySummarySortMode,
+      "importance" | "last_activity"
+    >;
   },
 ): Promise<string[]> {
   if (options.limit <= 0) return [];
@@ -1283,11 +1302,10 @@ async function loadTrackerSurfaceIds(
     },
   );
 
-  return Array.from(summaryStatsMap.values())
-    .filter((row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt))
-    .sort((left, right) =>
-      compareWalletActivitySummaryStats(left, right, "last_activity"),
-    )
+  return sortTrackerSurfaceSummaryStats(
+    Array.from(summaryStatsMap.values()),
+    options.sortMode,
+  )
     .slice(0, Math.max(1, Math.trunc(options.limit)))
     .map((row) => row.walletId);
 }
@@ -2455,6 +2473,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     selectionTrackerWindowHours: env.aiWhaleProfileSelectionTrackerWindowHours,
     selectionTrackerSurfaceLimit:
       env.aiWhaleProfileSelectionTrackerSurfaceLimit,
+    selectionTrackerSort: env.aiWhaleProfileSelectionTrackerSort,
     selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
     model: env.aiWhaleProfileModel,
     styleGuide: env.aiWhaleProfileStyleGuide,
@@ -2612,6 +2631,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     signalsFetchLimit,
     candidateFetchLimit,
     trackerWindowHours,
+    trackerSort: policy.selectionTrackerSort,
     signalsWindowHours,
     force: Boolean(options.force),
     dryRun: Boolean(options.dryRun),
@@ -2632,6 +2652,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             limit: trackerSurfaceLimit,
             minActivityUsd: env.walletIntelMinActivityUsd,
             minActivityShares: env.walletIntelMinActivityShares,
+            sortMode: policy.selectionTrackerSort,
           })
         : [];
     console.log("[whale-profile] tracker surface", {

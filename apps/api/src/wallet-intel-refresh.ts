@@ -49,6 +49,12 @@ import {
   type AiWhaleProfilesPolicy,
   type WalletIntelRefreshPolicy,
 } from "./services/runtime-policies.js";
+import {
+  buildInternalHunchFillActivityEvents,
+  shouldSuppressInternalHunchSnapshotDelta,
+  type InternalHunchFillActivityInput,
+  type InternalHunchFillInitialShares,
+} from "./services/wallet-intel-internal-hunch.js";
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -104,6 +110,13 @@ type TokenIndexEntry = {
   tokenId: string;
   side: "YES" | "NO";
   price: number | null;
+};
+
+type InternalHunchWalletRow = {
+  user_id: string;
+  wallet_address: string;
+  venue: Venue;
+  chain: Chain;
 };
 
 type LimitlessOrderbook = {
@@ -990,7 +1003,7 @@ async function upsertWalletActivityEvent(
     activityType: "delta" | "trade" | "holder";
     source: string | null;
     metadata: Record<string, unknown>;
-    occurredAt: Date;
+    occurredAt: Date | string;
   },
 ) {
   await client.query(
@@ -1898,6 +1911,553 @@ async function snapshotFollowedWalletPositions(
   return inserted;
 }
 
+async function loadInternalHunchWalletRows(
+  client: Queryable,
+  snapshotAt: Date,
+): Promise<InternalHunchWalletRow[]> {
+  if (
+    !walletIntelRefreshPolicy.internalHunchEnabled ||
+    walletIntelRefreshPolicy.internalHunchWalletLimit <= 0
+  ) {
+    return [];
+  }
+
+  const fillLookbackMs =
+    walletIntelRefreshPolicy.internalHunchFillLookbackDays *
+    24 *
+    60 *
+    60 *
+    1000;
+  const fillSince = new Date(snapshotAt.getTime() - fillLookbackMs);
+  const fillCandidatesEnabled =
+    walletIntelRefreshPolicy.internalHunchFillLimit > 0 &&
+    walletIntelRefreshPolicy.internalHunchFillLookbackDays > 0;
+
+  const { rows } = await client.query<InternalHunchWalletRow>(
+    `
+      with position_candidates as (
+        select
+          p.user_id,
+          case
+            when p.venue in ('polymarket', 'limitless') then lower(p.wallet_address)
+            else p.wallet_address
+          end as wallet_address,
+          p.venue,
+          max(coalesce(p.updated_at, p.last_updated_at, p.created_at)) as last_activity_at
+        from positions p
+        where p.position_scope = 'own'
+          and p.venue in ('polymarket', 'limitless', 'kalshi')
+          and p.wallet_address is not null
+          and btrim(p.wallet_address) <> ''
+          and (p.is_hidden is null or p.is_hidden = false)
+        group by
+          p.user_id,
+          case
+            when p.venue in ('polymarket', 'limitless') then lower(p.wallet_address)
+            else p.wallet_address
+          end,
+          p.venue
+      ),
+      fill_candidates as (
+        select
+          o.user_id,
+          case
+            when o.venue in ('polymarket', 'limitless')
+              then lower(coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')))
+            else coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, ''))
+          end as wallet_address,
+          o.venue,
+          max(f.filled_at) as last_activity_at
+        from order_fills f
+        join orders o on o.id = f.order_id
+        where $4::boolean
+          and o.venue in ('polymarket', 'limitless', 'kalshi')
+          and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) is not null
+          and f.fill_size > 0
+          and f.filled_at >= $2
+          and f.filled_at <= $3
+        group by
+          o.user_id,
+          case
+            when o.venue in ('polymarket', 'limitless')
+              then lower(coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')))
+            else coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, ''))
+          end,
+          o.venue
+      ),
+      candidates as (
+        select * from position_candidates
+        union all
+        select * from fill_candidates
+      )
+      select
+        c.user_id,
+        c.wallet_address,
+        c.venue::text as venue,
+        case c.venue
+          when 'polymarket' then 'polygon'
+          when 'limitless' then 'base'
+          when 'kalshi' then 'solana'
+          else null
+        end as chain
+      from candidates c
+      where c.wallet_address is not null
+      group by c.user_id, c.wallet_address, c.venue
+      having case c.venue
+        when 'polymarket' then 'polygon'
+        when 'limitless' then 'base'
+        when 'kalshi' then 'solana'
+        else null
+      end is not null
+      order by max(c.last_activity_at) desc nulls last, c.wallet_address
+      limit $1
+    `,
+    [
+      walletIntelRefreshPolicy.internalHunchWalletLimit,
+      fillSince,
+      snapshotAt,
+      fillCandidatesEnabled,
+    ],
+  );
+
+  return rows;
+}
+
+async function snapshotInternalHunchWalletPositions(
+  client: Queryable,
+  inputs: {
+    userId: string;
+    walletId: string;
+    walletAddress: string;
+    chain: Chain;
+    venue: Venue;
+    occurredAt: Date;
+  },
+): Promise<{ rows: number; marketIds: string[] }> {
+  const isSolana = inputs.chain === "solana";
+  const { rows } = await client.query<{
+    token_id: string;
+    size: string;
+    market_id: string | null;
+    outcome_side: "YES" | "NO" | null;
+    best_bid: string | null;
+    best_ask: string | null;
+    mid: string | null;
+  }>(
+    `
+      select
+        p.token_id,
+        p.size,
+        ut.market_id,
+        ut.side as outcome_side,
+        top.best_bid,
+        top.best_ask,
+        top.mid
+      from positions p
+      join unified_tokens ut
+        on ut.token_id = p.token_id
+       and ut.venue = p.venue
+      left join unified_token_top_latest top
+        on top.token_id = p.token_id
+      where p.user_id = $1
+        and p.venue = $3
+        and p.position_scope = 'own'
+        and p.wallet_address is not null
+        and (
+          ($4::boolean and p.wallet_address = $2)
+          or (not $4::boolean and lower(p.wallet_address) = lower($2))
+        )
+        and (p.is_hidden is null or p.is_hidden = false)
+        and not exists (
+          select 1
+          from positions hp
+          where hp.user_id = p.user_id
+            and hp.position_scope = 'own'
+            and hp.venue = p.venue
+            and hp.token_id = p.token_id
+            and hp.is_hidden = true
+            and (
+              hp.wallet_address is null
+              or btrim(hp.wallet_address) = ''
+              or ($4::boolean and hp.wallet_address = $2)
+              or (not $4::boolean and lower(hp.wallet_address) = lower($2))
+            )
+        )
+        and (
+          p.size > 0
+          or exists (
+            select 1
+            from order_fills f
+            join orders o on o.id = f.order_id
+            where o.user_id = p.user_id
+              and o.venue = p.venue
+              and o.token_id = p.token_id
+              and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) is not null
+              and (
+                ($4::boolean and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) = $2)
+                or (not $4::boolean and lower(coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, ''))) = lower($2))
+              )
+            limit 1
+          )
+        )
+    `,
+    [inputs.userId, inputs.walletAddress, inputs.venue, isSolana],
+  );
+
+  let inserted = 0;
+  const marketIds = new Set<string>();
+
+  for (const row of rows) {
+    if (!row.market_id) continue;
+    const rawSize = Number(row.size);
+    if (!Number.isFinite(rawSize) || rawSize < 0) continue;
+    const shares = Math.max(0, rawSize);
+    const price = resolveMidPrice(row.best_bid, row.best_ask, row.mid);
+    const sizeUsd = price != null ? Number((shares * price).toFixed(6)) : null;
+
+    await upsertWalletPositionSnapshot(client, {
+      walletId: inputs.walletId,
+      venue: inputs.venue,
+      marketId: row.market_id,
+      outcomeSide: row.outcome_side,
+      shares,
+      sizeUsd,
+      price,
+      metadata: {
+        source:
+          shares > 0 ? "hunch_own_position_open" : "hunch_own_position_closed",
+        tokenId: row.token_id,
+        size: shares,
+      },
+      snapshotAt: inputs.occurredAt,
+    });
+    marketIds.add(row.market_id);
+    inserted += 1;
+  }
+
+  return { rows: inserted, marketIds: Array.from(marketIds) };
+}
+
+async function backfillInternalHunchOrderFillActivity(
+  client: Queryable,
+  inputs: {
+    userId: string;
+    walletId: string;
+    walletAddress: string;
+    chain: Chain;
+    venue: Venue;
+    snapshotAt: Date;
+    fillLimit: number;
+  },
+): Promise<{ rows: number; selectedRows: number; marketIds: string[] }> {
+  if (
+    inputs.fillLimit <= 0 ||
+    walletIntelRefreshPolicy.internalHunchFillLookbackDays <= 0
+  ) {
+    return { rows: 0, selectedRows: 0, marketIds: [] };
+  }
+
+  const fillSince = new Date(
+    inputs.snapshotAt.getTime() -
+      walletIntelRefreshPolicy.internalHunchFillLookbackDays *
+        24 *
+        60 *
+        60 *
+        1000,
+  );
+  const isSolana = inputs.chain === "solana";
+  const { rows } = await client.query<{
+    order_fill_id: string;
+    order_id: string;
+    venue_fill_id: string | null;
+    venue_trade_id: string | null;
+    token_id: string;
+    market_id: string;
+    outcome_side: "YES" | "NO" | null;
+    fill_size: string;
+    fill_price: string;
+    fill_side: string;
+    filled_at: Date;
+  }>(
+    `
+      with selected_fills as (
+        select
+          f.id::text as order_fill_id,
+          o.id::text as order_id,
+          f.venue_fill_id,
+          f.venue_trade_id,
+          o.token_id,
+          ut.market_id,
+          ut.side as outcome_side,
+          f.fill_size,
+          f.fill_price,
+          f.fill_side,
+          f.filled_at
+        from order_fills f
+        join orders o on o.id = f.order_id
+        join unified_tokens ut
+          on ut.token_id = o.token_id
+         and ut.venue = o.venue
+        where o.user_id = $1
+          and o.venue = $3
+          and o.token_id is not null
+          and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) is not null
+          and (
+            ($4::boolean and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) = $2)
+            or (not $4::boolean and lower(coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, ''))) = lower($2))
+          )
+          and f.fill_size > 0
+          and f.filled_at >= $5
+          and f.filled_at <= $6
+          and not exists (
+            select 1
+            from positions hp
+            where hp.user_id = o.user_id
+              and hp.position_scope = 'own'
+              and hp.venue = o.venue
+              and hp.token_id = o.token_id
+              and hp.is_hidden = true
+              and (
+                hp.wallet_address is null
+                or btrim(hp.wallet_address) = ''
+                or ($4::boolean and hp.wallet_address = $2)
+                or (not $4::boolean and lower(hp.wallet_address) = lower($2))
+              )
+          )
+        order by f.filled_at desc, f.id desc
+        limit $7
+      )
+      select *
+      from selected_fills
+      order by filled_at asc, order_fill_id asc
+    `,
+    [
+      inputs.userId,
+      inputs.walletAddress,
+      inputs.venue,
+      isSolana,
+      fillSince,
+      inputs.snapshotAt,
+      inputs.fillLimit,
+    ],
+  );
+
+  const tokenIds = Array.from(new Set(rows.map((row) => row.token_id)));
+  const firstSelectedAtByToken = new Map<string, Date>();
+  for (const row of rows) {
+    const existing = firstSelectedAtByToken.get(row.token_id);
+    if (!existing || row.filled_at.getTime() < existing.getTime()) {
+      firstSelectedAtByToken.set(row.token_id, row.filled_at);
+    }
+  }
+  let initialShares: InternalHunchFillInitialShares[] = [];
+  if (tokenIds.length > 0) {
+    const cutoffTimes = tokenIds.map(
+      (tokenId) => firstSelectedAtByToken.get(tokenId) ?? fillSince,
+    );
+    const priorRows = await client.query<{
+      token_id: string;
+      shares: string;
+    }>(
+      `
+        with token_cutoffs as (
+          select *
+          from unnest($5::text[], $6::timestamptz[]) as t(token_id, cutoff_at)
+        )
+        select
+          o.token_id,
+          greatest(
+            coalesce(
+              sum(
+                case
+                  when f.fill_side = 'BUY' then f.fill_size
+                  when f.fill_side = 'SELL' then -f.fill_size
+                  else 0
+                end
+              ),
+              0
+            ),
+            0
+          ) as shares
+        from order_fills f
+        join orders o on o.id = f.order_id
+        join token_cutoffs tc on tc.token_id = o.token_id
+        where o.user_id = $1
+          and o.venue = $3
+          and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) is not null
+          and (
+            ($4::boolean and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) = $2)
+            or (not $4::boolean and lower(coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, ''))) = lower($2))
+          )
+          and f.fill_size > 0
+          and f.filled_at < tc.cutoff_at
+          and not exists (
+            select 1
+            from positions hp
+            where hp.user_id = o.user_id
+              and hp.position_scope = 'own'
+              and hp.venue = o.venue
+              and hp.token_id = o.token_id
+              and hp.is_hidden = true
+              and (
+                hp.wallet_address is null
+                or btrim(hp.wallet_address) = ''
+                or ($4::boolean and hp.wallet_address = $2)
+                or (not $4::boolean and lower(hp.wallet_address) = lower($2))
+              )
+          )
+        group by o.token_id
+      `,
+      [
+        inputs.userId,
+        inputs.walletAddress,
+        inputs.venue,
+        isSolana,
+        tokenIds,
+        cutoffTimes,
+      ],
+    );
+
+    initialShares = priorRows.rows.map((row) => ({
+      walletId: inputs.walletId,
+      venue: inputs.venue,
+      tokenId: row.token_id,
+      shares: Number(row.shares),
+    }));
+  }
+
+  const events = buildInternalHunchFillActivityEvents(
+    rows.map(
+      (row): InternalHunchFillActivityInput => ({
+        walletId: inputs.walletId,
+        venue: inputs.venue,
+        marketId: row.market_id,
+        outcomeSide: row.outcome_side,
+        tokenId: row.token_id,
+        orderId: row.order_id,
+        orderFillId: row.order_fill_id,
+        venueFillId: row.venue_fill_id,
+        venueTradeId: row.venue_trade_id,
+        fillSize: Number(row.fill_size),
+        fillPrice: Number(row.fill_price),
+        fillSide: row.fill_side,
+        filledAt: row.filled_at,
+      }),
+    ),
+    { initialShares },
+  );
+
+  const marketIds = new Set<string>();
+  for (const event of events) {
+    await upsertWalletActivityEvent(client, {
+      walletId: event.walletId,
+      venue: event.venue,
+      marketId: event.marketId,
+      outcomeSide: event.outcomeSide,
+      action: event.action,
+      deltaShares: event.deltaShares,
+      sizeUsd: event.sizeUsd,
+      price: event.price,
+      activityType: "trade",
+      source: "hunch_order_fill",
+      metadata: event.metadata,
+      occurredAt: event.occurredAt,
+    });
+    marketIds.add(event.marketId);
+  }
+
+  return {
+    rows: events.length,
+    selectedRows: rows.length,
+    marketIds: Array.from(marketIds),
+  };
+}
+
+async function collectInternalHunchWalletIntel(
+  client: Queryable,
+  inputs: {
+    snapshotAt: Date;
+    touchedWalletIds: Set<string>;
+  },
+): Promise<{
+  processed: number;
+  snapshotRows: number;
+  activityRows: number;
+  marketIds: string[];
+}> {
+  const wallets = await loadInternalHunchWalletRows(client, inputs.snapshotAt);
+  if (!wallets.length) {
+    return { processed: 0, snapshotRows: 0, activityRows: 0, marketIds: [] };
+  }
+
+  let processed = 0;
+  let snapshotRows = 0;
+  let activityRows = 0;
+  let remainingFillRows = walletIntelRefreshPolicy.internalHunchFillLimit;
+  const marketIds = new Set<string>();
+
+  for (const row of wallets) {
+    const address = normalizeAddress(row.wallet_address, row.chain);
+    if (!address) continue;
+
+    const walletId = await upsertWallet(client, {
+      address,
+      chain: row.chain,
+    });
+    await upsertWalletVenue(client, walletId, row.venue);
+
+    const snapshotResult = await snapshotInternalHunchWalletPositions(client, {
+      userId: row.user_id,
+      walletId,
+      walletAddress: address,
+      chain: row.chain,
+      venue: row.venue,
+      occurredAt: inputs.snapshotAt,
+    });
+    snapshotRows += snapshotResult.rows;
+    for (const marketId of snapshotResult.marketIds) marketIds.add(marketId);
+
+    const activityResult = await backfillInternalHunchOrderFillActivity(
+      client,
+      {
+        userId: row.user_id,
+        walletId,
+        walletAddress: address,
+        chain: row.chain,
+        venue: row.venue,
+        snapshotAt: inputs.snapshotAt,
+        fillLimit: remainingFillRows,
+      },
+    );
+    activityRows += activityResult.rows;
+    remainingFillRows = Math.max(
+      0,
+      remainingFillRows - activityResult.selectedRows,
+    );
+    for (const marketId of activityResult.marketIds) marketIds.add(marketId);
+
+    if (snapshotResult.rows > 0 || activityResult.rows > 0) {
+      inputs.touchedWalletIds.add(walletId);
+    }
+    processed += 1;
+  }
+
+  console.log("[wallets:intel:refresh] internal hunch", {
+    selected: wallets.length,
+    processed,
+    snapshotRows,
+    activityRows,
+    markets: marketIds.size,
+  });
+
+  return {
+    processed,
+    snapshotRows,
+    activityRows,
+    marketIds: Array.from(marketIds),
+  };
+}
+
 async function filterTrackableMarketIds(
   client: Queryable,
   inputs: {
@@ -2225,6 +2785,16 @@ async function applySnapshotDeltas(
         previous?.metadata ??
         {}) as Record<string, unknown>;
       const snapshotSource = parseMetadataSource(metadataBase);
+      if (
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource,
+          hasPreviousSameKey: previous != null,
+          prevShares,
+          currShares,
+        })
+      ) {
+        continue;
+      }
       const metadata = {
         ...metadataBase,
         snapshotSource,
@@ -3718,6 +4288,9 @@ async function runSnapshot(snapshotAt: Date) {
     let deltaUpdates = 0;
     let followedProcessed = 0;
     let followedRows = 0;
+    let internalProcessed = 0;
+    let internalSnapshotRows = 0;
+    let internalActivityRows = 0;
     let holderRateLimitErrors = 0;
     let holderAbortErrors = 0;
     let holderOtherErrors = 0;
@@ -3941,9 +4514,21 @@ async function runSnapshot(snapshotAt: Date) {
     followedRows += followedCollection.rowInserts;
     activityRows += followedCollection.activityRows;
 
+    const internalCollection = await collectInternalHunchWalletIntel(client, {
+      snapshotAt,
+      touchedWalletIds,
+    });
+    internalProcessed = internalCollection.processed;
+    internalSnapshotRows = internalCollection.snapshotRows;
+    internalActivityRows = internalCollection.activityRows;
+    activityRows += internalSnapshotRows + internalActivityRows;
+    const artifactMarketIds = Array.from(
+      new Set([...selectedMarketIds, ...internalCollection.marketIds]),
+    );
+
     const artifactRefresh = await refreshTouchedWalletArtifacts(client, {
       touchedWalletIds,
-      selectedMarketIds,
+      selectedMarketIds: artifactMarketIds,
       snapshotAt,
       tagIds,
     });
@@ -3957,7 +4542,7 @@ async function runSnapshot(snapshotAt: Date) {
 
     const runFinishedAt = new Date();
     console.log(
-      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors}`,
+      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors}`,
     );
   } finally {
     client.release();

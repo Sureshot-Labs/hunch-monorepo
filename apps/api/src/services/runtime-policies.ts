@@ -75,6 +75,10 @@ export type WalletIntelRefreshPolicy = {
   whaleMarketLimit: number;
   watchlistMarketLimit: number;
   followedWalletLimit: number;
+  internalHunchEnabled: boolean;
+  internalHunchWalletLimit: number;
+  internalHunchFillLookbackDays: number;
+  internalHunchFillLimit: number;
   tokenLimitPoly: number;
   tokenLimitLimitless: number;
   tokenLimitKalshi: number;
@@ -113,6 +117,7 @@ export type AiWhaleProfilesPolicy = {
   selectionSignalsLimit: number;
   selectionTrackerWindowHours: number;
   selectionTrackerSurfaceLimit: number;
+  selectionTrackerSort: "importance" | "last_activity";
   selectionSignalsWindowHours: number;
   model: string;
   styleGuide: string;
@@ -491,6 +496,10 @@ const walletIntelRefreshSchema = z
     whaleMarketLimit: nonNegativeInt,
     watchlistMarketLimit: positiveInt,
     followedWalletLimit: positiveInt,
+    internalHunchEnabled: strictBoolean,
+    internalHunchWalletLimit: nonNegativeInt,
+    internalHunchFillLookbackDays: nonNegativeInt,
+    internalHunchFillLimit: nonNegativeInt,
     tokenLimitPoly: positiveInt,
     tokenLimitLimitless: positiveInt,
     tokenLimitKalshi: positiveInt,
@@ -532,6 +541,7 @@ const aiWhaleProfilesSchema = z
     selectionSignalsLimit: nonNegativeInt,
     selectionTrackerWindowHours: positiveInt,
     selectionTrackerSurfaceLimit: positiveInt,
+    selectionTrackerSort: z.enum(["importance", "last_activity"]),
     selectionSignalsWindowHours: positiveInt,
     model: z.string().trim().min(1).max(200),
     styleGuide: z.string().trim().min(1).max(5_000),
@@ -1110,6 +1120,11 @@ function getDefaults(): IntelPolicyMap {
       whaleMarketLimit: env.walletIntelWhaleMarketLimit,
       watchlistMarketLimit: env.walletIntelWatchlistMarketLimit,
       followedWalletLimit: env.walletIntelFollowedWalletLimit,
+      internalHunchEnabled: env.walletIntelInternalHunchEnabled,
+      internalHunchWalletLimit: env.walletIntelInternalHunchWalletLimit,
+      internalHunchFillLookbackDays:
+        env.walletIntelInternalHunchFillLookbackDays,
+      internalHunchFillLimit: env.walletIntelInternalHunchFillLimit,
       tokenLimitPoly: env.walletIntelTokenLimitPoly,
       tokenLimitLimitless: env.walletIntelTokenLimitLimitless,
       tokenLimitKalshi: env.walletIntelTokenLimitKalshi,
@@ -1160,6 +1175,7 @@ function getDefaults(): IntelPolicyMap {
         env.aiWhaleProfileSelectionTrackerWindowHours,
       selectionTrackerSurfaceLimit:
         env.aiWhaleProfileSelectionTrackerSurfaceLimit,
+      selectionTrackerSort: env.aiWhaleProfileSelectionTrackerSort,
       selectionSignalsWindowHours:
         env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
@@ -1422,6 +1438,19 @@ function normalizeRefreshPolicy(
     whaleMarketLimit: Math.max(0, Math.trunc(policy.whaleMarketLimit)),
     watchlistMarketLimit: Math.max(1, Math.trunc(policy.watchlistMarketLimit)),
     followedWalletLimit: Math.max(1, Math.trunc(policy.followedWalletLimit)),
+    internalHunchEnabled: policy.internalHunchEnabled === true,
+    internalHunchWalletLimit: Math.max(
+      0,
+      Math.trunc(policy.internalHunchWalletLimit),
+    ),
+    internalHunchFillLookbackDays: Math.max(
+      0,
+      Math.trunc(policy.internalHunchFillLookbackDays),
+    ),
+    internalHunchFillLimit: Math.max(
+      0,
+      Math.trunc(policy.internalHunchFillLimit),
+    ),
     tokenLimitPoly: Math.max(1, Math.trunc(policy.tokenLimitPoly)),
     tokenLimitLimitless: Math.max(1, Math.trunc(policy.tokenLimitLimitless)),
     tokenLimitKalshi: Math.max(1, Math.trunc(policy.tokenLimitKalshi)),
@@ -1674,6 +1703,10 @@ function normalizeAiWhaleProfilesPolicy(
       1,
       1_000,
     ),
+    selectionTrackerSort:
+      policy.selectionTrackerSort === "last_activity"
+        ? "last_activity"
+        : "importance",
     selectionSignalsWindowHours: clamp(
       Math.trunc(policy.selectionSignalsWindowHours),
       1,

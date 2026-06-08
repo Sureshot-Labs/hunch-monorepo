@@ -42,6 +42,7 @@
     "ai:xai:usage": "tsx src/ai-xai-usage.ts",
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
+    "wallets:intel:internal-hunch-cleanup": "tsx src/wallet-intel-internal-hunch-cleanup.ts",
     "wallets:metrics:refresh": "tsx src/wallet-metrics-refresh.ts",
     "wallets:intel:experiments": "tsx src/wallet-intel-experiments.ts",
     "polymarket:status-refresh": "tsx src/polymarket-status-refresh.ts",

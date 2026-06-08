@@ -358,6 +358,11 @@ const aiWhaleProfileSelectionTrackerSurfaceLimit = optionalPositiveInt(
   "AI_WHALE_PROFILE_SELECTION_TRACKER_SURFACE_LIMIT",
   100,
 );
+const aiWhaleProfileSelectionTrackerSort = parseEnum(
+  process.env.AI_WHALE_PROFILE_SELECTION_TRACKER_SORT,
+  ["importance", "last_activity"] as const,
+  "importance",
+);
 const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
   "AI_WHALE_PROFILE_SELECTION_SIGNALS_WINDOW_HOURS",
   24,
@@ -584,6 +589,20 @@ const walletIntelWatchlistMarketLimit = optionalPositiveInt(
 const walletIntelFollowedWalletLimit = optionalPositiveInt(
   "WALLET_INTEL_FOLLOWED_WALLET_LIMIT",
   500,
+);
+const walletIntelInternalHunchEnabled =
+  parseOptionalBool(process.env.WALLET_INTEL_INTERNAL_HUNCH_ENABLED) ?? true;
+const walletIntelInternalHunchWalletLimit = optionalNonNegativeInt(
+  "WALLET_INTEL_INTERNAL_HUNCH_WALLET_LIMIT",
+  250,
+);
+const walletIntelInternalHunchFillLookbackDays = optionalNonNegativeInt(
+  "WALLET_INTEL_INTERNAL_HUNCH_FILL_LOOKBACK_DAYS",
+  30,
+);
+const walletIntelInternalHunchFillLimit = optionalNonNegativeInt(
+  "WALLET_INTEL_INTERNAL_HUNCH_FILL_LIMIT",
+  5_000,
 );
 const walletIntelTokenLimitPoly = optionalPositiveInt(
   "WALLET_INTEL_TOKEN_LIMIT_POLY",
@@ -821,6 +840,7 @@ export const env = {
   aiWhaleProfileSelectionSignalsLimit,
   aiWhaleProfileSelectionTrackerWindowHours,
   aiWhaleProfileSelectionTrackerSurfaceLimit,
+  aiWhaleProfileSelectionTrackerSort,
   aiWhaleProfileSelectionSignalsWindowHours,
   aiWhaleProfileModel,
   aiClusterAnalysisEnabled:
@@ -939,6 +959,10 @@ export const env = {
     1,
     2,
   ),
+  walletIntelInternalHunchEnabled,
+  walletIntelInternalHunchWalletLimit,
+  walletIntelInternalHunchFillLookbackDays,
+  walletIntelInternalHunchFillLimit,
   walletIntelTokenLimitPoly,
   walletIntelTokenLimitLimitless,
   walletIntelTokenLimitKalshi,
