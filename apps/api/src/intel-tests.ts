@@ -59,8 +59,11 @@ import {
 } from "./lib/ai-pricing.js";
 import {
   DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+  compareWalletActivitySummaryStats,
+  computeWalletActivityImportanceScore,
   computeRobustUnusualScore,
   resolveUnusualTier,
+  type WalletActivitySummaryStats,
 } from "./services/wallet-activity-summary.js";
 import { fetchEvmBalance } from "./services/polygon-rpc.js";
 import {
@@ -115,6 +118,27 @@ const testErc1155Iface = new Interface([
 const testAttributionPolicy = getIntelPolicyDefaults(
   "wallet_intel_attribution",
 );
+
+function createWalletActivitySummaryStats(
+  overrides: Partial<WalletActivitySummaryStats> = {},
+): WalletActivitySummaryStats {
+  return {
+    walletId: "00000000-0000-0000-0000-000000000001",
+    windowHours: 24,
+    lastActivityAt: new Date("2026-06-08T12:00:00.000Z"),
+    netChangeUsd: 0,
+    netChangeYesUsd: 0,
+    netChangeNoUsd: 0,
+    countsNew: 0,
+    countsExit: 0,
+    countsIncrease: 0,
+    countsReduce: 0,
+    countsFlip: 0,
+    unusualScore: null,
+    unusualTier: null,
+    ...overrides,
+  };
+}
 
 function createTestCandidateWalletRow(
   overrides: Partial<Parameters<typeof buildWalletSummaryItem>[0]> = {},
@@ -688,6 +712,166 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "activity summary importance sort balances magnitude, unusual activity, and recency",
+    run: () => {
+      const now = Date.now();
+      const hoursAgo = (hours: number) =>
+        new Date(now - hours * 60 * 60 * 1000);
+      const sortIds = (rows: WalletActivitySummaryStats[]) =>
+        [...rows]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "importance"),
+          )
+          .map((row) => row.walletId);
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "tiny-newest",
+            lastActivityAt: hoursAgo(0.05),
+            netChangeUsd: 100,
+            countsNew: 1,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "large-older",
+            lastActivityAt: hoursAgo(8),
+            netChangeUsd: 125_000,
+            countsNew: 1,
+          }),
+        ]),
+        ["large-older", "tiny-newest"],
+      );
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "normal-medium",
+            lastActivityAt: hoursAgo(2),
+            netChangeUsd: 10_000,
+            countsNew: 1,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "unusual-medium",
+            lastActivityAt: hoursAgo(2),
+            netChangeUsd: 10_000,
+            countsNew: 1,
+            unusualScore: 2.5,
+          }),
+        ]),
+        ["unusual-medium", "normal-medium"],
+      );
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "older-close",
+            lastActivityAt: hoursAgo(6),
+            netChangeUsd: 15_000,
+            countsIncrease: 2,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "newer-close",
+            lastActivityAt: hoursAgo(1),
+            netChangeUsd: 15_000,
+            countsIncrease: 2,
+          }),
+        ]),
+        ["newer-close", "older-close"],
+      );
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "00000000-0000-0000-0000-000000000002",
+            lastActivityAt: hoursAgo(3),
+            netChangeUsd: 20_000,
+            countsReduce: 1,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "00000000-0000-0000-0000-000000000001",
+            lastActivityAt: hoursAgo(3),
+            netChangeUsd: 20_000,
+            countsReduce: 1,
+          }),
+        ]),
+        [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002",
+        ],
+      );
+
+      const fixedNow = new Date("2026-06-08T12:00:00.000Z").getTime();
+      const lowScore = computeWalletActivityImportanceScore(
+        createWalletActivitySummaryStats({
+          lastActivityAt: new Date("2026-06-08T11:00:00.000Z"),
+          netChangeUsd: 100,
+        }),
+        fixedNow,
+      );
+      const highScore = computeWalletActivityImportanceScore(
+        createWalletActivitySummaryStats({
+          lastActivityAt: new Date("2026-06-08T11:00:00.000Z"),
+          netChangeUsd: 250_000,
+          unusualScore: 3,
+          countsNew: 4,
+          countsIncrease: 4,
+        }),
+        fixedNow,
+      );
+      assert.ok(lowScore >= 0 && lowScore <= 1);
+      assert.ok(highScore >= 0 && highScore <= 1);
+      assert.ok(highScore > lowScore);
+    },
+  },
+  {
+    name: "activity summary existing sort modes keep their ordering",
+    run: () => {
+      const olderLarge = createWalletActivitySummaryStats({
+        walletId: "older-large",
+        lastActivityAt: new Date("2026-06-08T08:00:00.000Z"),
+        netChangeUsd: 100_000,
+        unusualScore: 1,
+      });
+      const newerSmall = createWalletActivitySummaryStats({
+        walletId: "newer-small",
+        lastActivityAt: new Date("2026-06-08T12:00:00.000Z"),
+        netChangeUsd: 1_000,
+        unusualScore: 0.5,
+      });
+      const unusual = createWalletActivitySummaryStats({
+        walletId: "unusual",
+        lastActivityAt: new Date("2026-06-08T09:00:00.000Z"),
+        netChangeUsd: 2_000,
+        unusualScore: 2,
+      });
+
+      assert.deepEqual(
+        [olderLarge, newerSmall]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "last_activity"),
+          )
+          .map((row) => row.walletId),
+        ["newer-small", "older-large"],
+      );
+      assert.deepEqual(
+        [newerSmall, olderLarge]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "net_change_usd"),
+          )
+          .map((row) => row.walletId),
+        ["older-large", "newer-small"],
+      );
+      assert.deepEqual(
+        [newerSmall, unusual]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "unusual_score"),
+          )
+          .map((row) => row.walletId),
+        ["unusual", "newer-small"],
+      );
+    },
+  },
+  {
     name: "top label variant resolves backend headline badges deterministically",
     run: () => {
       const risingStar = resolveWalletTopLabelVariant({
@@ -821,11 +1005,13 @@ const tests: TestCase[] = [
       });
       const summary = walletActivitySummaryQuerySchema.parse({
         includeSparkline: "1",
+        sort: "importance",
       });
       const series = walletSeriesQuerySchema.parse({});
 
       assert.equal(whales.includeSparkline, true);
       assert.equal(summary.includeSparkline, true);
+      assert.equal(summary.sort, "importance");
       assert.equal(series.windowHours, undefined);
       assert.equal(series.bucketHours, undefined);
       assert.equal(series.period, "30d");

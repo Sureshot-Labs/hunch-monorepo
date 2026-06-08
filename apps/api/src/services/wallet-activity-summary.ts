@@ -200,19 +200,92 @@ export type WalletActivitySignalPageLabelFlags = {
 export type WalletActivitySummarySortMode =
   | "last_activity"
   | "net_change_usd"
-  | "unusual_score";
+  | "unusual_score"
+  | "importance";
+
+const IMPORTANCE_MAGNITUDE_USD = 250_000;
+const IMPORTANCE_UNUSUAL_SCORE_MAX = 3;
+const IMPORTANCE_ACTIVITY_COUNT_MAX = 8;
+
+function clampUnit(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function compareLastActivityDesc(
+  left: WalletActivitySummaryStats,
+  right: WalletActivitySummaryStats,
+): number {
+  const rightTime = right.lastActivityAt?.getTime() ?? 0;
+  const leftTime = left.lastActivityAt?.getTime() ?? 0;
+  return rightTime - leftTime;
+}
+
+function countSummaryActions(row: WalletActivitySummaryStats): number {
+  return (
+    Math.max(0, row.countsNew) +
+    Math.max(0, row.countsIncrease) +
+    Math.max(0, row.countsReduce) +
+    Math.max(0, row.countsExit)
+  );
+}
+
+export function computeWalletActivityImportanceScore(
+  row: WalletActivitySummaryStats,
+  nowMs = Date.now(),
+): number {
+  const magnitude = clampUnit(
+    Math.log1p(Math.abs(row.netChangeUsd)) /
+      Math.log1p(IMPORTANCE_MAGNITUDE_USD),
+  );
+  const unusual = clampUnit(
+    (row.unusualScore ?? 0) / IMPORTANCE_UNUSUAL_SCORE_MAX,
+  );
+  const actionDensity = clampUnit(
+    Math.log1p(countSummaryActions(row)) /
+      Math.log1p(IMPORTANCE_ACTIVITY_COUNT_MAX),
+  );
+  const windowHours = Number.isFinite(row.windowHours)
+    ? Math.max(1, row.windowHours)
+    : 1;
+  const activityMs = row.lastActivityAt?.getTime();
+  const ageHours =
+    activityMs != null && Number.isFinite(activityMs)
+      ? (nowMs - activityMs) / (60 * 60 * 1000)
+      : windowHours;
+  const recency = clampUnit(1 - ageHours / windowHours);
+
+  return (
+    0.45 * magnitude +
+    0.35 * unusual +
+    0.1 * actionDensity +
+    0.1 * recency
+  );
+}
 
 export function compareWalletActivitySummaryStats(
   left: WalletActivitySummaryStats,
   right: WalletActivitySummaryStats,
   sortMode: WalletActivitySummarySortMode,
 ): number {
+  if (sortMode === "importance") {
+    const nowMs = Date.now();
+    const importanceDelta =
+      computeWalletActivityImportanceScore(right, nowMs) -
+      computeWalletActivityImportanceScore(left, nowMs);
+    if (importanceDelta !== 0) return importanceDelta;
+    const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+    if (netDelta !== 0) return netDelta;
+    const timeDelta = compareLastActivityDesc(left, right);
+    if (timeDelta !== 0) return timeDelta;
+    return left.walletId.localeCompare(right.walletId);
+  }
+
   if (sortMode === "net_change_usd") {
     const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
     if (netDelta !== 0) return netDelta;
-    const rightTime = right.lastActivityAt?.getTime() ?? 0;
-    const leftTime = left.lastActivityAt?.getTime() ?? 0;
-    if (rightTime !== leftTime) return rightTime - leftTime;
+    const timeDelta = compareLastActivityDesc(left, right);
+    if (timeDelta !== 0) return timeDelta;
     return left.walletId.localeCompare(right.walletId);
   }
 
@@ -222,15 +295,13 @@ export function compareWalletActivitySummaryStats(
     if (rightScore !== leftScore) return rightScore - leftScore;
     const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
     if (netDelta !== 0) return netDelta;
-    const rightTime = right.lastActivityAt?.getTime() ?? 0;
-    const leftTime = left.lastActivityAt?.getTime() ?? 0;
-    if (rightTime !== leftTime) return rightTime - leftTime;
+    const timeDelta = compareLastActivityDesc(left, right);
+    if (timeDelta !== 0) return timeDelta;
     return left.walletId.localeCompare(right.walletId);
   }
 
-  const rightTime = right.lastActivityAt?.getTime() ?? 0;
-  const leftTime = left.lastActivityAt?.getTime() ?? 0;
-  if (rightTime !== leftTime) return rightTime - leftTime;
+  const timeDelta = compareLastActivityDesc(left, right);
+  if (timeDelta !== 0) return timeDelta;
   const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
   if (netDelta !== 0) return netDelta;
   return left.walletId.localeCompare(right.walletId);
