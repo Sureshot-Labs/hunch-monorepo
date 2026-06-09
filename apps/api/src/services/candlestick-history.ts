@@ -232,6 +232,18 @@ export function selectCandlestickSeries(inputs: {
   };
 }
 
+export function selectDbOnlyCandlestickSeries(inputs: {
+  tokenId: string | null | undefined;
+  dbCandles?: CandleValues[];
+}): CandlestickSeriesEntry {
+  const candles = inputs.dbCandles ?? [];
+  return {
+    tokenId: inputs.tokenId ?? null,
+    candles,
+    source: candles.length > 0 ? "db" : "empty",
+  };
+}
+
 export function resolveCandlestickHistorySource(
   entries: Array<CandlestickSeriesEntry | undefined>,
 ): CandlestickSource {

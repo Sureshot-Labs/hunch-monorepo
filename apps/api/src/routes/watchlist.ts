@@ -6,6 +6,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   watchlistAddBodySchema,
@@ -150,25 +151,12 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
             };
           }
 
-          let tokens: TokenPair = { yes: null, no: null };
-          if (r.venue === "polymarket" && r.clob_token_ids) {
-            try {
-              const tokenIds = JSON.parse(String(r.clob_token_ids)) as unknown;
-              if (Array.isArray(tokenIds)) {
-                tokens = {
-                  yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
-                  no: tokenIds[1] != null ? String(tokenIds[1]) : null,
-                };
-              }
-            } catch {
-              // ignore bad token id encodings
-            }
-          } else if (r.venue === "limitless" || r.venue === "kalshi") {
-            tokens = {
-              yes: r.token_yes != null ? String(r.token_yes) : null,
-              no: r.token_no != null ? String(r.token_no) : null,
-            };
-          }
+          const tokens: TokenPair = resolveMarketTokenPair({
+            venue: r.venue,
+            clobTokenIds: r.clob_token_ids,
+            tokenYes: r.token_yes,
+            tokenNo: r.token_no,
+          });
 
           eventMap[eid].markets.push({
             marketId: String(r.market_uuid),

@@ -135,4 +135,6 @@ export const positionVisibilityResponseSchema = z.object({
 
 export const positionVisibilityErrorResponseSchema = z.object({
   error: z.string(),
+  code: z.string().optional(),
+  venue: z.string().optional(),
 });

@@ -9,6 +9,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
@@ -50,6 +51,7 @@ import {
 import {
   loadDbCandlestickSeries,
   resolveCandlestickHistorySource,
+  selectDbOnlyCandlestickSeries,
   selectCandlestickSeries,
   shouldUseDbCandlestickFallback,
 } from "../services/candlestick-history.js";
@@ -192,34 +194,12 @@ function extractLimitlessMeta(
 }
 
 function resolveTokenPair(row: EventDetailsRow): TokenPair {
-  const tokens: TokenPair = {
-    yes: row.token_yes != null ? String(row.token_yes) : null,
-    no: row.token_no != null ? String(row.token_no) : null,
-  };
-
-  if ((!tokens.yes || !tokens.no) && row.clob_token_ids) {
-    const raw = row.clob_token_ids;
-    let parsed: unknown;
-    if (Array.isArray(raw)) {
-      parsed = raw;
-    } else {
-      try {
-        parsed = JSON.parse(String(raw));
-      } catch {
-        parsed = null;
-      }
-    }
-    if (Array.isArray(parsed)) {
-      if (!tokens.yes && parsed[0] != null) {
-        tokens.yes = String(parsed[0]);
-      }
-      if (!tokens.no && parsed[1] != null) {
-        tokens.no = String(parsed[1]);
-      }
-    }
-  }
-
-  return tokens;
+  return resolveMarketTokenPair({
+    venue: row.market_venue,
+    clobTokenIds: row.clob_token_ids,
+    tokenYes: row.token_yes,
+    tokenNo: row.token_no,
+  });
 }
 
 function isAcceptingOrders(row: EventDetailsRow): boolean {
@@ -523,31 +503,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               ? (pickString(marketMeta, "address") ?? null)
               : null;
 
-          // Parse token IDs based on venue
-          let tokens: TokenPair = { yes: null, no: null };
-          if (row.market_venue === "polymarket" && row.clob_token_ids) {
-            try {
-              const tokenIds = JSON.parse(
-                String(row.clob_token_ids),
-              ) as unknown;
-              if (Array.isArray(tokenIds)) {
-                tokens = {
-                  yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
-                  no: tokenIds[1] != null ? String(tokenIds[1]) : null,
-                };
-              }
-            } catch {
-              // Invalid JSON, keep tokens as null
-            }
-          } else if (
-            row.market_venue === "limitless" ||
-            row.market_venue === "kalshi"
-          ) {
-            tokens = {
-              yes: row.token_yes != null ? String(row.token_yes) : null,
-              no: row.token_no != null ? String(row.token_no) : null,
-            };
-          }
+          const tokens = resolveTokenPair(row);
           refreshTokenIds.push(...extractTokenIdsFromTokenPair(tokens));
 
           // Parse outcomes if available
@@ -1677,7 +1633,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
 
           if (
             (event.event_venue === "kalshi" ||
-              event.event_venue === "limitless") &&
+              event.event_venue === "limitless" ||
+              event.event_venue === "hyperliquid") &&
             requestedMinutes == null
           ) {
             reply.code(400);
@@ -2109,6 +2066,45 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 };
               }
 
+              if (row.market_venue === "hyperliquid") {
+                const dbSeries = await loadDbCandlestickSeries(pool, {
+                  venue: "hyperliquid",
+                  tokens: { YES: tokens.yes, NO: tokens.no },
+                  includeYes,
+                  includeNo,
+                  startTs: resolvedStartTs,
+                  endTs: resolvedEndTs,
+                  bucketMinutes: intervalInfo.normalizedMinutes,
+                });
+
+                const series: Record<string, unknown> = {};
+                if (includeYes) {
+                  series.YES = selectDbOnlyCandlestickSeries({
+                    tokenId: tokens.yes,
+                    dbCandles: dbSeries.YES?.candles,
+                  });
+                }
+                if (includeNo) {
+                  series.NO = selectDbOnlyCandlestickSeries({
+                    tokenId: tokens.no,
+                    dbCandles: dbSeries.NO?.candles,
+                  });
+                }
+
+                return {
+                  ...base,
+                  series,
+                  historySource: resolveCandlestickHistorySource([
+                    series.YES as ReturnType<
+                      typeof selectDbOnlyCandlestickSeries
+                    >,
+                    series.NO as ReturnType<
+                      typeof selectDbOnlyCandlestickSeries
+                    >,
+                  ]),
+                };
+              }
+
               return { ...base, series: {} };
             }),
           );
@@ -2372,6 +2368,94 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             tokenId,
             side: resolvedSide,
             data: history,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        if (event.event_venue === "hyperliquid") {
+          const requestedMinutes = resolveRequestedIntervalMinutes({
+            periodInterval,
+            interval,
+            fidelity,
+          });
+          if (startTs == null || endTs == null || requestedMinutes == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs, endTs, and periodInterval are required.",
+            });
+          }
+
+          const candidate = rows
+            .filter((row) => row.market_id)
+            .map((row) => ({
+              row,
+              probability: resolveYesProbability(row),
+            }))
+            .sort((a, b) => {
+              const aValue = a.probability.value;
+              const bValue = b.probability.value;
+              if (aValue == null && bValue == null) return 0;
+              if (aValue == null) return 1;
+              if (bValue == null) return -1;
+              return bValue - aValue;
+            })[0];
+          if (!candidate) {
+            reply.code(400);
+            return reply.send({
+              error: "No Hyperliquid markets available for this event.",
+            });
+          }
+
+          const intervalInfo = resolveBaseIntervalWithCap({
+            startTs,
+            endTs,
+            requestedMinutes,
+          });
+          const tokens = resolveTokenPair(candidate.row);
+          const resolvedSide = side ?? "YES";
+          const includeYes = resolvedSide === "YES";
+          const includeNo = resolvedSide === "NO";
+          const dbSeries = await loadDbCandlestickSeries(pool, {
+            venue: "hyperliquid",
+            tokens: { YES: tokens.yes, NO: tokens.no },
+            includeYes,
+            includeNo,
+            startTs,
+            endTs,
+            bucketMinutes: intervalInfo.normalizedMinutes,
+          });
+          const entry =
+            resolvedSide === "NO"
+              ? selectDbOnlyCandlestickSeries({
+                  tokenId: tokens.no,
+                  dbCandles: dbSeries.NO?.candles,
+                })
+              : selectDbOnlyCandlestickSeries({
+                  tokenId: tokens.yes,
+                  dbCandles: dbSeries.YES?.candles,
+                });
+          const tokenId = resolvedSide === "NO" ? tokens.no : tokens.yes;
+
+          const response = {
+            ok: true,
+            venue: "hyperliquid",
+            eventId: event.event_id,
+            marketId: candidate.row.market_id,
+            tokenId: tokenId ?? undefined,
+            side: resolvedSide,
+            data: formatKalshiCandlesticks(entry.candles),
           };
           const responseBody = JSON.stringify(response);
 

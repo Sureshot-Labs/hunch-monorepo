@@ -9,6 +9,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
@@ -61,6 +62,7 @@ import {
 import {
   loadDbCandlestickSeries,
   resolveCandlestickHistorySource,
+  selectDbOnlyCandlestickSeries,
   selectCandlestickSeries,
   shouldUseDbCandlestickFallback,
 } from "../services/candlestick-history.js";
@@ -386,24 +388,12 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         const clobTokenIdsRaw =
           market.clob_token_ids ?? market.pm_clob_token_ids ?? null;
 
-        // Parse token IDs based on venue
-        let tokens = { yes: null as string | null, no: null as string | null };
-        if (market.venue === "polymarket" && clobTokenIdsRaw) {
-          try {
-            const tokenIds = JSON.parse(clobTokenIdsRaw);
-            tokens = {
-              yes: tokenIds[0] || null,
-              no: tokenIds[1] || null,
-            };
-          } catch {
-            // Invalid JSON, keep tokens as null
-          }
-        } else if (market.venue === "limitless" || market.venue === "kalshi") {
-          tokens = {
-            yes: market.token_yes,
-            no: market.token_no,
-          };
-        }
+        const tokens = resolveMarketTokenPair({
+          venue: market.venue,
+          clobTokenIds: clobTokenIdsRaw,
+          tokenYes: market.token_yes,
+          tokenNo: market.token_no,
+        });
 
         // Parse outcomes if available
         let outcomes: unknown = null;
@@ -1639,6 +1629,90 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             return reply.send(responseBody);
           }
 
+          if (market.venue === "hyperliquid") {
+            if (requestedMinutes == null) {
+              reply.code(400);
+              return reply.send({
+                error: "periodInterval or interval is required.",
+              });
+            }
+
+            const intervalInfo = resolveBaseIntervalWithCap({
+              startTs: resolvedStartTs,
+              endTs: resolvedEndTs,
+              requestedMinutes,
+            });
+            const dbSeries = await loadDbCandlestickSeries(pool, {
+              venue: "hyperliquid",
+              tokens: {
+                YES: market.token_yes ?? null,
+                NO: market.token_no ?? null,
+              },
+              includeYes,
+              includeNo,
+              startTs: resolvedStartTs,
+              endTs: resolvedEndTs,
+              bucketMinutes: intervalInfo.normalizedMinutes,
+            });
+
+            const series: Record<string, unknown> = {};
+            if (includeYes) {
+              series.YES = selectDbOnlyCandlestickSeries({
+                tokenId: market.token_yes ?? null,
+                dbCandles: dbSeries.YES?.candles,
+              });
+            }
+            if (includeNo) {
+              series.NO = selectDbOnlyCandlestickSeries({
+                tokenId: market.token_no ?? null,
+                dbCandles: dbSeries.NO?.candles,
+              });
+            }
+
+            const legacySide = side ?? "YES";
+            const legacyEntry =
+              legacySide === "NO"
+                ? (series.NO as ReturnType<typeof selectDbOnlyCandlestickSeries>)
+                : (series.YES as ReturnType<typeof selectDbOnlyCandlestickSeries>);
+            const legacyTokenId =
+              legacySide === "NO" ? market.token_no : market.token_yes;
+            const historySource = resolveCandlestickHistorySource([
+              series.YES as ReturnType<typeof selectDbOnlyCandlestickSeries>,
+              series.NO as ReturnType<typeof selectDbOnlyCandlestickSeries>,
+            ]);
+
+            const response = {
+              ok: true,
+              venue: "hyperliquid",
+              marketId: market.market_id,
+              tokenId: legacyTokenId ?? undefined,
+              side: legacySide,
+              data: formatKalshiCandlesticks(legacyEntry?.candles ?? []),
+              interval: {
+                requestedMinutes: intervalInfo.requestedMinutes,
+                normalizedMinutes: intervalInfo.normalizedMinutes,
+                baseMinutes: intervalInfo.baseMinutes,
+                startTs: resolvedStartTs,
+                endTs: resolvedEndTs,
+              },
+              series,
+              historySource,
+            };
+            const responseBody = JSON.stringify(response);
+
+            if (r) {
+              await r.set(cacheKey, responseBody, { EX: 60 });
+              reply.header("x-cache", "miss");
+            }
+
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            reply.header(
+              "Cache-Control",
+              "public, max-age=60, stale-while-revalidate=120",
+            );
+            return reply.send(responseBody);
+          }
+
           reply.code(400);
           return reply.send({
             error: `Candlesticks not supported for venue ${market.venue ?? "unknown"}.`,
@@ -1863,6 +1937,75 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             tokenId,
             side: resolvedSide,
             data: history,
+          };
+          const responseBody = JSON.stringify(response);
+
+          if (r) {
+            await r.set(cacheKey, responseBody, { EX: 60 });
+            reply.header("x-cache", "miss");
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            "public, max-age=60, stale-while-revalidate=120",
+          );
+          return reply.send(responseBody);
+        }
+
+        if (market.venue === "hyperliquid") {
+          const requestedMinutes = resolveRequestedIntervalMinutes({
+            periodInterval,
+            interval,
+            fidelity,
+          });
+          if (startTs == null || endTs == null || requestedMinutes == null) {
+            reply.code(400);
+            return reply.send({
+              error: "startTs, endTs, and periodInterval are required.",
+            });
+          }
+
+          const intervalInfo = resolveBaseIntervalWithCap({
+            startTs,
+            endTs,
+            requestedMinutes,
+          });
+          const resolvedSide = side ?? "YES";
+          const includeYes = resolvedSide === "YES";
+          const includeNo = resolvedSide === "NO";
+          const dbSeries = await loadDbCandlestickSeries(pool, {
+            venue: "hyperliquid",
+            tokens: {
+              YES: market.token_yes ?? null,
+              NO: market.token_no ?? null,
+            },
+            includeYes,
+            includeNo,
+            startTs,
+            endTs,
+            bucketMinutes: intervalInfo.normalizedMinutes,
+          });
+          const entry =
+            resolvedSide === "NO"
+              ? selectDbOnlyCandlestickSeries({
+                  tokenId: market.token_no ?? null,
+                  dbCandles: dbSeries.NO?.candles,
+                })
+              : selectDbOnlyCandlestickSeries({
+                  tokenId: market.token_yes ?? null,
+                  dbCandles: dbSeries.YES?.candles,
+                });
+          const tokenId =
+            resolvedSide === "NO" ? market.token_no : market.token_yes;
+
+          const response = {
+            ok: true,
+            venue: "hyperliquid",
+            marketId: market.market_id,
+            tokenId: tokenId ?? undefined,
+            side: resolvedSide,
+            data: formatKalshiCandlesticks(entry.candles),
           };
           const responseBody = JSON.stringify(response);
 

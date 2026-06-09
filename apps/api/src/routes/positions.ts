@@ -8,6 +8,10 @@ import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
+  hasUnsupportedHyperliquidVenue,
+  sendUnsupportedVenue,
+} from "../lib/unsupported-venue.js";
+import {
   fetchPositionPnlSummaryForUserWallet,
   fetchPositionsForUserWallet,
   fetchPositionsForUserWalletByTokenIds,
@@ -179,6 +183,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venue = query.venue;
       const venues = query.venues;
+      if (hasUnsupportedHyperliquidVenue({ venue, venues })) {
+        return sendUnsupportedVenue(reply);
+      }
       const responseVenue =
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
@@ -307,6 +314,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venue = query.venue;
       const venues = query.venues;
+      if (hasUnsupportedHyperliquidVenue({ venue, venues })) {
+        return sendUnsupportedVenue(reply);
+      }
       const responseVenue =
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
@@ -370,6 +380,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venue = query.venue;
       const venues = query.venues;
+      if (hasUnsupportedHyperliquidVenue({ venue, venues })) {
+        return sendUnsupportedVenue(reply);
+      }
       const responseVenue =
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
@@ -452,6 +465,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const body = request.body;
+      if (body.venue === "hyperliquid") {
+        return sendUnsupportedVenue(reply);
+      }
+
       try {
         const updated = await setPositionHidden(pool, {
           userId: user.id,
@@ -550,6 +567,17 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
 
       const query = request.query;
       const venues = query.venues;
+      if (query.venue === "hyperliquid") {
+        return sendUnsupportedVenue(reply);
+      }
+      if (
+        hasUnsupportedHyperliquidVenue({
+          venue: query.venue,
+          venues,
+        })
+      ) {
+        return sendUnsupportedVenue(reply);
+      }
       const usingVenueList = Boolean(venues && venues.length);
       const forceSync = query.force === true;
       const startedAt = Date.now();

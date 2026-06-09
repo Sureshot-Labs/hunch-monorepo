@@ -10,6 +10,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
@@ -151,26 +152,12 @@ function vectorToBuffer(vec: Float32Array): Buffer {
 }
 
 function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
-  // Parse token IDs based on venue
-  let tokens: TokenPair = { yes: null, no: null };
-  if (rRow.venue === "polymarket" && rRow.clob_token_ids) {
-    try {
-      const tokenIds = JSON.parse(String(rRow.clob_token_ids)) as unknown;
-      if (Array.isArray(tokenIds)) {
-        tokens = {
-          yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
-          no: tokenIds[1] != null ? String(tokenIds[1]) : null,
-        };
-      }
-    } catch {
-      // Invalid JSON, keep tokens as null
-    }
-  } else if (rRow.venue === "limitless" || rRow.venue === "kalshi") {
-    tokens = {
-      yes: rRow.token_yes != null ? String(rRow.token_yes) : null,
-      no: rRow.token_no != null ? String(rRow.token_no) : null,
-    };
-  }
+  const tokens: TokenPair = resolveMarketTokenPair({
+    venue: rRow.venue,
+    clobTokenIds: rRow.clob_token_ids,
+    tokenYes: rRow.token_yes,
+    tokenNo: rRow.token_no,
+  });
 
   let outcomes: unknown = null;
   if (rRow.outcomes) {

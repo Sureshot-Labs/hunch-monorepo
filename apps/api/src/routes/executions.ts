@@ -2,6 +2,10 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import {
+  hasUnsupportedHyperliquidVenue,
+  sendUnsupportedVenue,
+} from "../lib/unsupported-venue.js";
 import { executionsQuerySchema } from "../schemas/executions.js";
 import { fetchExecutionsForUserWallet } from "../repos/executions-repo.js";
 
@@ -27,6 +31,9 @@ export const executionsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      if (hasUnsupportedHyperliquidVenue({ venue: query.venue })) {
+        return sendUnsupportedVenue(reply);
+      }
 
       try {
         const result = await fetchExecutionsForUserWallet(pool, {

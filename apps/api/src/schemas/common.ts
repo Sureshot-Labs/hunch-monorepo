@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-export const zVenue = z.enum(["polymarket", "kalshi", "limitless"]);
+export const zVenue = z.enum([
+  "polymarket",
+  "kalshi",
+  "limitless",
+  "hyperliquid",
+]);
 
 export const zEthAddress = z
   .string()

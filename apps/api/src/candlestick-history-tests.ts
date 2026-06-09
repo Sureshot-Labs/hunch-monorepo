@@ -5,6 +5,7 @@ import type { DbQuery } from "./db.js";
 import { aggregateKalshiCandlesticks } from "./lib/candlesticks.js";
 import {
   loadDbCandlestickSeries,
+  selectDbOnlyCandlestickSeries,
   selectCandlestickSeries,
   shouldUseDbCandlestickFallback,
 } from "./services/candlestick-history.js";
@@ -99,6 +100,16 @@ function fakeDb(rows: unknown[]) {
     }),
     true,
   );
+}
+
+{
+  const selected = selectDbOnlyCandlestickSeries({
+    tokenId: "hyperliquid:101:yes",
+    dbCandles: [{ t: 60, o: 0.2, h: 0.4, l: 0.1, c: 0.3 }],
+  });
+  assert.equal(selected.source, "db");
+  assert.equal(selected.fallbackReason, undefined);
+  assert.equal(selected.candles[0]?.c, 0.3);
 }
 
 {

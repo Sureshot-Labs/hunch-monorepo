@@ -2,6 +2,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import {
   parseMetadata,
   pickString,
@@ -100,28 +101,12 @@ export function mapMarketsByTokenRows(
       limitlessMeta?.venueExchange,
     );
 
-    let tokens = {
-      yes: null as string | null,
-      no: null as string | null,
-    };
-    if (row.venue === "polymarket" && row.clob_token_ids) {
-      try {
-        const parsed = JSON.parse(String(row.clob_token_ids));
-        if (Array.isArray(parsed)) {
-          tokens = {
-            yes: parsed[0] != null ? String(parsed[0]) : null,
-            no: parsed[1] != null ? String(parsed[1]) : null,
-          };
-        }
-      } catch {
-        // keep tokens as null
-      }
-    } else if (row.venue === "limitless" || row.venue === "kalshi") {
-      tokens = {
-        yes: row.token_yes != null ? String(row.token_yes) : null,
-        no: row.token_no != null ? String(row.token_no) : null,
-      };
-    }
+    const tokens = resolveMarketTokenPair({
+      venue: row.venue,
+      clobTokenIds: row.clob_token_ids,
+      tokenYes: row.token_yes,
+      tokenNo: row.token_no,
+    });
 
     let outcomes: unknown = null;
     if (row.outcomes) {

@@ -4,6 +4,10 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
+  hasUnsupportedHyperliquidVenue,
+  sendUnsupportedVenue,
+} from "../lib/unsupported-venue.js";
+import {
   fetchUnifiedMarketIdsByEventId,
   fetchUnifiedOrderById,
   fetchUnifiedOrders,
@@ -48,6 +52,9 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      if (hasUnsupportedHyperliquidVenue({ venue: query.venue })) {
+        return sendUnsupportedVenue(reply);
+      }
 
       try {
         const walletAddresses = await resolveRequestedWalletAddresses(
@@ -135,6 +142,9 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      if (hasUnsupportedHyperliquidVenue({ venue: query.venue })) {
+        return sendUnsupportedVenue(reply);
+      }
 
       try {
         const walletAddresses = await resolveRequestedWalletAddresses(

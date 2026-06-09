@@ -53,6 +53,19 @@ test("Kalshi finalized status remains non-accepting even with native flag", () =
   );
 });
 
+test("Hyperliquid remains non-accepting while trading is unsupported", () => {
+  assert.equal(
+    computeAcceptingOrders({
+      venue: "hyperliquid",
+      status: "ACTIVE",
+      closeTime: "2026-05-21T12:00:00Z",
+      expirationTime: "2026-05-21T12:00:00Z",
+      nowMs: Date.parse("2026-05-20T12:00:00Z"),
+    }),
+    false,
+  );
+});
+
 test("reads DFlow-native accepting-orders from metadata", () => {
   assert.equal(
     readDflowNativeAcceptingOrders({ dflowNativeAcceptingOrders: true }),

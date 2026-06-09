@@ -63,6 +63,7 @@ import {
   DEFAULT_PRIVY_TERMINAL_AUTH_MESSAGE,
   getPrivyTerminalAuthMessage,
 } from "../lib/privy-auth-errors.js";
+import { sendUnsupportedVenue } from "../lib/unsupported-venue.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -824,6 +825,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
       const venue = body.venue;
+      if (venue === "hyperliquid") {
+        return sendUnsupportedVenue(reply);
+      }
 
       try {
         const credentials = await AuthService.createOrUpdateVenueCredentials(

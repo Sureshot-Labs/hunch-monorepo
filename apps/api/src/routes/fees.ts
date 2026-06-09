@@ -5,6 +5,7 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { feePolicyQuerySchema } from "../schemas/fees.js";
+import { sendUnsupportedVenue } from "../lib/unsupported-venue.js";
 import { resolveLimitlessFeeShareConfig } from "../services/limitless-fee-accruals.js";
 import { resolvePolymarketFeePolicySnapshot } from "../services/polymarket-builder-fees.js";
 
@@ -44,6 +45,10 @@ export const feesRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const venue = request.query.venue;
+      if (venue === "hyperliquid") {
+        return sendUnsupportedVenue(reply);
+      }
+
       const polymarketSnapshot =
         venue === "polymarket"
           ? await resolvePolymarketFeePolicySnapshot(pool)
