@@ -102,10 +102,18 @@ export interface HyperliquidCandle {
 export interface HyperliquidParsedDescription {
   structured: boolean;
   values: Record<string, string>;
+  metadata?: Record<string, string>;
   class?: string;
   underlying?: string;
   expiry?: string;
   expiryTime?: Date;
+  deadlineTime?: Date;
+  deadlineSource?: string;
+  deadlineText?: string;
+  deadlineAssumption?: string;
+  scheduledTime?: Date;
+  scheduledSource?: string;
+  scheduledText?: string;
   targetPrice?: number;
   priceThresholds?: number[];
   period?: string;

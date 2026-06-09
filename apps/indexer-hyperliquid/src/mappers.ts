@@ -1,4 +1,9 @@
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import {
+  parseMarketTextDates,
+  resolveMarketCategory,
+  type MarketCategoryResolution,
+} from "@hunch/shared";
 import type {
   HyperliquidAssetContext,
   HyperliquidMappedSnapshot,
@@ -60,20 +65,45 @@ function parseUtcExpiry(value: string | undefined): Date | undefined {
   return Number.isFinite(timestamp) ? new Date(timestamp) : undefined;
 }
 
+function parseKeyValueSegments(raw: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*:/.test(raw)) return values;
+  for (const part of raw.split("|")) {
+    const index = part.indexOf(":");
+    if (index <= 0) continue;
+    const key = part.slice(0, index).trim();
+    const value = part
+      .slice(index + 1)
+      .trim()
+      .replace(/[.,;]+$/, "");
+    if (key) values[key] = value;
+  }
+  return values;
+}
+
+function parseEmbeddedMetadata(raw: string): Record<string, string> {
+  const match = /(?:^|\s)metadata=([^\s]+)/.exec(raw);
+  if (!match) return {};
+  return parseKeyValueSegments(match[1]);
+}
+
+function hasUsMacroDateOnlyDeadlineCue(raw: string): boolean {
+  return /\b(fed|fomc|federal reserve|cpi|bls|inflation|treasury|jobs report|payrolls|gdp|pce)\b/i.test(
+    raw,
+  );
+}
+
 export function parseHyperliquidDescription(
   description?: string | null,
 ): HyperliquidParsedDescription {
   const raw = description?.trim() ?? "";
-  const values: Record<string, string> = {};
-  if (raw.includes("|") || /^[a-zA-Z][a-zA-Z0-9_]*:/.test(raw)) {
-    for (const part of raw.split("|")) {
-      const index = part.indexOf(":");
-      if (index <= 0) continue;
-      const key = part.slice(0, index).trim();
-      const value = part.slice(index + 1).trim();
-      if (key) values[key] = value;
-    }
-  }
+  const metadata = parseEmbeddedMetadata(raw);
+  const metadataIndex = raw.indexOf("metadata=");
+  const structuredRaw = (metadataIndex >= 0 ? raw.slice(0, metadataIndex) : raw)
+    .trim()
+    .replace(/[.,;]+$/, "");
+  const structuredValues = parseKeyValueSegments(structuredRaw);
+  const values = { ...structuredValues, ...metadata };
 
   const expiry = values.expiry;
   const targetPrice = toNumber(values.targetPrice);
@@ -82,13 +112,26 @@ export function parseHyperliquidDescription(
     .map((value) => toNumber(value.trim()))
     .filter((value): value is number => typeof value === "number");
 
+  const textDates = parseMarketTextDates({
+    text: raw,
+    allowDateOnlyUsEasternDeadline: hasUsMacroDateOnlyDeadlineCue(raw),
+  });
+
   return {
     structured: Object.keys(values).length > 0,
     values,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     class: values.class,
     underlying: values.underlying,
     expiry,
     expiryTime: parseUtcExpiry(expiry),
+    deadlineTime: textDates.deadlineTime,
+    deadlineSource: textDates.deadlineSource,
+    deadlineText: textDates.deadlineText,
+    deadlineAssumption: textDates.deadlineAssumption,
+    scheduledTime: textDates.scheduledTime,
+    scheduledSource: textDates.scheduledSource,
+    scheduledText: textDates.scheduledText,
     targetPrice,
     priceThresholds:
       priceThresholds && priceThresholds.length > 0
@@ -100,11 +143,35 @@ export function parseHyperliquidDescription(
 
 export function resolveHyperliquidCategory(
   parsed: HyperliquidParsedDescription,
+  title?: string | null,
+  description?: string | null,
 ): string | undefined {
+  return resolveHyperliquidCategoryResolution(parsed, title, description)
+    .category;
+}
+
+function structuredCategoryHint(
+  parsed: HyperliquidParsedDescription,
+): string | undefined {
+  const category = parsed.metadata?.category ?? parsed.values.category;
+  if (category) return category;
   const underlying = parsed.underlying?.toUpperCase();
   if (underlying && CRYPTO_UNDERLYINGS.has(underlying)) return "crypto";
   if (parsed.class?.startsWith("price")) return "crypto";
   return undefined;
+}
+
+function resolveHyperliquidCategoryResolution(
+  parsed: HyperliquidParsedDescription,
+  title?: string | null,
+  description?: string | null,
+): MarketCategoryResolution {
+  return resolveMarketCategory({
+    metadata: parsed.metadata,
+    sourceCategory: structuredCategoryHint(parsed),
+    title,
+    description,
+  });
 }
 
 function formatExpiryForTitle(expiry?: Date): string | undefined {
@@ -134,6 +201,41 @@ function titleFromStructuredDescription(
 
 function statusFromExpiry(expiry?: Date): HyperliquidUnifiedStatus {
   return expiry && expiry.getTime() <= Date.now() ? "CLOSED" : "ACTIVE";
+}
+
+function statusForOutcome(
+  expiry: Date | undefined,
+  isFallbackOutcome: boolean,
+): HyperliquidUnifiedStatus {
+  return isFallbackOutcome ? "ARCHIVED" : statusFromExpiry(expiry);
+}
+
+function resolveEndTime(
+  parsed: HyperliquidParsedDescription,
+): Date | undefined {
+  return parsed.expiryTime ?? parsed.deadlineTime;
+}
+
+function parsePeriodMinutes(period: string | undefined): number | undefined {
+  const match = /^(\d+)(m|h|d|w)$/i.exec(period ?? "");
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  const unit = match[2].toLowerCase();
+  if (unit === "m") return value;
+  if (unit === "h") return value * 60;
+  if (unit === "d") return value * 24 * 60;
+  if (unit === "w") return value * 7 * 24 * 60;
+  return undefined;
+}
+
+function resolveDurationMinutes(
+  primary: HyperliquidParsedDescription,
+  fallback?: HyperliquidParsedDescription,
+): number | undefined {
+  return (
+    parsePeriodMinutes(primary.period) ?? parsePeriodMinutes(fallback?.period)
+  );
 }
 
 function titleFromQuestionOutcome(
@@ -249,6 +351,15 @@ function buildQuestionRefs(
   return refs;
 }
 
+function isQuestionFallbackOutcome(
+  outcomeId: string,
+  question?: HyperliquidQuestion,
+): boolean {
+  return question?.fallbackOutcome != null
+    ? parseOutcomeId(question.fallbackOutcome) === outcomeId
+    : false;
+}
+
 function questionOutcomeIds(question: HyperliquidQuestion): string[] {
   return [question.fallbackOutcome, ...(question.namedOutcomes ?? [])]
     .filter((value): value is number => typeof value === "number")
@@ -313,10 +424,31 @@ function sumDefined(values: Array<number | undefined>): number | undefined {
   return defined.reduce((sum, value) => sum + value, 0);
 }
 
-function buildMarketVolume24h(
-  assets: HyperliquidSideAsset[],
-): number | undefined {
-  return sumDefined(assets.map((asset) => toNumber(asset.context?.dayNtlVlm)));
+function maxDefined(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value != null);
+  if (defined.length === 0) return undefined;
+  return Math.max(...defined);
+}
+
+function buildMarketVolume24h(assets: HyperliquidSideAsset[]): {
+  value?: number;
+  source: string;
+} {
+  const dayBaseVolume = maxDefined(
+    assets.map((asset) => toNumber(asset.context?.dayBaseVlm)),
+  );
+  if (dayBaseVolume != null) {
+    return {
+      value: dayBaseVolume,
+      source: "max_side_dayBaseVlm_rolling_24h",
+    };
+  }
+  return {
+    value: sumDefined(
+      assets.map((asset) => toNumber(asset.context?.dayNtlVlm)),
+    ),
+    source: "sum_side_dayNtlVlm_rolling_24h",
+  };
 }
 
 function buildEventRows(
@@ -328,7 +460,13 @@ function buildEventRows(
 
   for (const question of outcomeMeta.questions ?? []) {
     const parsed = parseHyperliquidDescription(question.description);
-    const category = resolveHyperliquidCategory(parsed);
+    const categoryResolution = resolveHyperliquidCategoryResolution(
+      parsed,
+      question.name,
+      question.description,
+    );
+    const category = categoryResolution.category;
+    const endTime = resolveEndTime(parsed);
     const venueEventId = `question:${question.question}`;
     const outcomeIds = new Set(questionOutcomeIds(question));
     const volume24h = sumDefined(
@@ -345,8 +483,9 @@ function buildEventRows(
       title: question.name,
       description: question.description,
       category,
-      status: statusFromExpiry(parsed.expiryTime),
-      end_date: parsed.expiryTime,
+      status: statusFromExpiry(endTime),
+      duration_minutes: resolveDurationMinutes(parsed),
+      end_date: endTime,
       volume_24h: volume24h,
       metadata: {
         source: "outcomeMeta",
@@ -362,7 +501,10 @@ function buildEventRows(
             String,
           ),
           parsedDescription: parsed,
-          volume24hSource: "sum_market_side_dayNtlVlm_rolling",
+          categorySource: categoryResolution.categorySource,
+          categoryConfidence: categoryResolution.categoryConfidence,
+          categoryMatchedToken: categoryResolution.matchedToken,
+          volume24hSource: "sum_child_market_volume_24h",
           volumeTotalAvailable: false,
         },
         raw: question,
@@ -374,7 +516,14 @@ function buildEventRows(
     const outcomeId = parseOutcomeId(outcome.outcome);
     if (questionRefs.has(outcomeId)) continue;
     const parsed = parseHyperliquidDescription(outcome.description);
-    const category = resolveHyperliquidCategory(parsed);
+    const title = marketTitle(outcome, parsed);
+    const categoryResolution = resolveHyperliquidCategoryResolution(
+      parsed,
+      title,
+      outcome.description,
+    );
+    const category = categoryResolution.category;
+    const endTime = resolveEndTime(parsed);
     const venueEventId = `outcome:${outcomeId}`;
     const market = marketRows.find(
       (row) => row.venue_market_id === venueEventId,
@@ -383,11 +532,12 @@ function buildEventRows(
       id: hunchEventId(venueEventId),
       venue: VENUE,
       venue_event_id: venueEventId,
-      title: marketTitle(outcome, parsed),
+      title,
       description: outcome.description,
       category,
-      status: statusFromExpiry(parsed.expiryTime),
-      end_date: parsed.expiryTime,
+      status: statusFromExpiry(endTime),
+      duration_minutes: resolveDurationMinutes(parsed),
+      end_date: endTime,
       volume_24h: market?.volume_24h,
       metadata: {
         source: "outcomeMeta",
@@ -395,7 +545,10 @@ function buildEventRows(
           kind: "standaloneOutcome",
           outcomeId,
           parsedDescription: parsed,
-          volume24hSource: "sum_side_dayNtlVlm_rolling",
+          categorySource: categoryResolution.categorySource,
+          categoryConfidence: categoryResolution.categoryConfidence,
+          categoryMatchedToken: categoryResolution.matchedToken,
+          volume24hSource: "market_volume_24h",
           volumeTotalAvailable: false,
         },
         raw: outcome,
@@ -426,24 +579,41 @@ function buildMarketRows(
     const question = questionRefs.get(outcomeId);
     const outcomeParsed = parseHyperliquidDescription(outcome.description);
     const questionParsed = parseHyperliquidDescription(question?.description);
-    const parsedForExpiry = outcomeParsed.expiryTime
+    const title = marketTitle(outcome, outcomeParsed, question, questionParsed);
+    const parsedForEnd = resolveEndTime(outcomeParsed)
       ? outcomeParsed
       : questionParsed;
-    const category =
-      resolveHyperliquidCategory(outcomeParsed) ??
-      resolveHyperliquidCategory(questionParsed);
+    const endTime = resolveEndTime(parsedForEnd);
+    const outcomeCategoryResolution = resolveHyperliquidCategoryResolution(
+      outcomeParsed,
+      title,
+      outcome.description,
+    );
+    const questionCategoryResolution = question
+      ? resolveHyperliquidCategoryResolution(
+          questionParsed,
+          question.name,
+          question.description,
+        )
+      : undefined;
+    const categoryResolution = outcomeCategoryResolution.category
+      ? outcomeCategoryResolution
+      : questionCategoryResolution;
+    const category = categoryResolution?.category;
     const sideAssets = sideAssetsByOutcome(outcome, contexts);
     const yesAsset = findSide(sideAssets, "YES") ?? sideAssets[0];
     const noAsset = findSide(sideAssets, "NO") ?? sideAssets[1];
+    const isFallbackOutcome = isQuestionFallbackOutcome(outcomeId, question);
     const marketId = hunchMarketId(outcomeId);
     const venueEventId = question
       ? `question:${question.question}`
       : `outcome:${outcomeId}`;
     const yesContext = yesAsset?.context;
     const volume24h = buildMarketVolume24h(sideAssets);
-    const lastPrice =
-      toNumber(yesContext?.markPx) ?? toNumber(yesContext?.midPx);
-    const status = statusFromExpiry(parsedForExpiry.expiryTime);
+    const lastPrice = isFallbackOutcome
+      ? undefined
+      : (toNumber(yesContext?.markPx) ?? toNumber(yesContext?.midPx));
+    const status = statusForOutcome(endTime, isFallbackOutcome);
 
     outcomeRows.push({
       outcome_id: outcomeId,
@@ -454,7 +624,7 @@ function buildMarketRows(
       side_specs: outcome.sideSpecs,
       parsed_description: outcomeParsed,
       category,
-      expiration_time: parsedForExpiry.expiryTime,
+      expiration_time: endTime,
       raw: outcome,
     });
 
@@ -472,14 +642,15 @@ function buildMarketRows(
       venue: VENUE,
       venue_market_id: `outcome:${outcomeId}`,
       event_id: hunchEventId(venueEventId),
-      title: marketTitle(outcome, outcomeParsed, question, questionParsed),
+      title,
       description: outcome.description ?? question?.description,
       category,
       status,
       market_type: "binary",
-      expiration_time: parsedForExpiry.expiryTime,
+      duration_minutes: resolveDurationMinutes(outcomeParsed, questionParsed),
+      expiration_time: endTime,
       last_price: lastPrice,
-      volume_24h: volume24h,
+      volume_24h: isFallbackOutcome ? undefined : volume24h.value,
       outcomes: JSON.stringify(
         sideAssets.map((asset) => asset.sideName || asset.outcomeSide),
       ),
@@ -491,6 +662,10 @@ function buildMarketRows(
           network: "mainnet",
           outcomeId,
           questionId: question ? String(question.question) : null,
+          isFallbackOutcome,
+          hiddenReason: isFallbackOutcome
+            ? "hyperliquid_fallback_outcome"
+            : undefined,
           coinIds: sideAssets.map((asset) => asset.coin),
           sideAssets: sideAssets.map((asset) => ({
             sideIndex: asset.sideIndex,
@@ -506,8 +681,11 @@ function buildMarketRows(
           questionParsedDescription: questionParsed.structured
             ? questionParsed
             : undefined,
+          categorySource: categoryResolution?.categorySource,
+          categoryConfidence: categoryResolution?.categoryConfidence,
+          categoryMatchedToken: categoryResolution?.matchedToken,
           assetContexts: sideAssets.map((asset) => asset.context ?? null),
-          volume24hSource: "sum_side_dayNtlVlm_rolling",
+          volume24hSource: volume24h.source,
           volumeTotalAvailable: false,
           liquidityAvailable: false,
           openInterestAvailable: false,
@@ -528,11 +706,17 @@ function buildQuestionRows(
 ): HyperliquidQuestionRow[] {
   return questions.map((question) => {
     const parsed = parseHyperliquidDescription(question.description);
+    const endTime = resolveEndTime(parsed);
+    const category = resolveHyperliquidCategory(
+      parsed,
+      question.name,
+      question.description,
+    );
     return {
       question_id: String(question.question),
       title: question.name,
       description: question.description,
-      status: statusFromExpiry(parsed.expiryTime),
+      status: statusFromExpiry(endTime),
       fallback_outcome_id:
         question.fallbackOutcome != null
           ? String(question.fallbackOutcome)
@@ -543,8 +727,8 @@ function buildQuestionRows(
       ),
       outcome_ids: questionOutcomeIds(question),
       parsed_description: parsed,
-      category: resolveHyperliquidCategory(parsed),
-      expiration_time: parsed.expiryTime,
+      category,
+      expiration_time: endTime,
       raw: question,
     };
   });

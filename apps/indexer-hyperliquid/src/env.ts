@@ -81,6 +81,18 @@ export const env = {
     max: 24 * 60 * 60,
     fallback: 300,
   }),
+  syncCandleTotals:
+    parseBool(process.env.HYPERLIQUID_SYNC_CANDLE_TOTALS) ?? true,
+  candleTotalMaxMarkets: parseIntEnv("HYPERLIQUID_CANDLE_TOTAL_MAX_MARKETS", {
+    min: 0,
+    max: 5_000,
+    fallback: 250,
+  }),
+  candleTotalConcurrency: parseIntEnv("HYPERLIQUID_CANDLE_TOTAL_CONCURRENCY", {
+    min: 1,
+    max: 50,
+    fallback: 4,
+  }),
   maxTopBookSyncTokens: parseIntEnv("HYPERLIQUID_MAX_TOP_BOOK_SYNC_TOKENS", {
     min: 0,
     max: 1_000,

@@ -8,6 +8,18 @@ export {
   isRpcRateLimit,
   parseRetryAfterMs,
 } from "./errors.js";
+export {
+  parseMarketTextDates,
+  resolveMarketCategory,
+  type CanonicalMarketCategory,
+  type MarketCategory,
+  type MarketCategoryConfidence,
+  type MarketCategoryResolution,
+  type MarketCategoryResolutionInput,
+  type MarketCategorySource,
+  type MarketTextDates,
+  type MarketTextDateSource,
+} from "./market-classification.js";
 
 export type EventEnvelope<T> = {
   type: string;

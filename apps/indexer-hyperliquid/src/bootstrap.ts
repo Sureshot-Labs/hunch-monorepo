@@ -17,7 +17,9 @@ import {
   type HyperliquidBookTarget,
 } from "./market-data.js";
 import { mapHyperliquidSnapshot } from "./mappers.js";
+import { env } from "./env.js";
 import type {
+  HyperliquidCandle,
   HyperliquidMappedSnapshot,
   HyperliquidNetwork,
   HyperliquidOutcomeMetaResponse,
@@ -83,6 +85,187 @@ export async function fetchHyperliquidSnapshot(params: {
   });
 }
 
+type JsonRecord = Record<string, unknown>;
+type CandleEnrichmentStats = {
+  selected: number;
+  enriched: number;
+  empty: number;
+  failed: number;
+};
+
+function asRecord(value: unknown): JsonRecord {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonRecord)
+    : {};
+}
+
+function updateHyperliquidMetadata(
+  row: { metadata?: unknown },
+  patch: JsonRecord,
+): void {
+  const metadata = asRecord(row.metadata);
+  const hyperliquid = asRecord(metadata.hyperliquid);
+  row.metadata = {
+    ...metadata,
+    hyperliquid: {
+      ...hyperliquid,
+      ...patch,
+    },
+  };
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function candleTimestamp(
+  candle: HyperliquidCandle | undefined,
+): Date | undefined {
+  const timestamp = finiteNonNegative(candle?.t);
+  return timestamp != null ? new Date(timestamp) : undefined;
+}
+
+function sumCandleVolume(candles: HyperliquidCandle[]): number {
+  return candles.reduce(
+    (sum, candle) => sum + (finiteNonNegative(candle.v) ?? 0),
+    0,
+  );
+}
+
+function selectCandleTotalMarkets(
+  snapshot: HyperliquidMappedSnapshot,
+  maxMarkets: number,
+): HyperliquidMappedSnapshot["markets"] {
+  if (maxMarkets <= 0) return [];
+  return [...snapshot.markets]
+    .filter((market) =>
+      Boolean(
+        hyperliquidCoinFromHunchTokenId(
+          market.token_yes ?? market.token_no ?? "",
+        ),
+      ),
+    )
+    .sort((a, b) => {
+      const volume = (b.volume_24h ?? 0) - (a.volume_24h ?? 0);
+      if (volume !== 0) return volume;
+      return a.id.localeCompare(b.id);
+    })
+    .slice(0, maxMarkets);
+}
+
+function refreshEventCandleTotals(snapshot: HyperliquidMappedSnapshot): void {
+  const marketsByEvent = new Map<
+    string,
+    HyperliquidMappedSnapshot["markets"]
+  >();
+  for (const market of snapshot.markets) {
+    const markets = marketsByEvent.get(market.event_id) ?? [];
+    markets.push(market);
+    marketsByEvent.set(market.event_id, markets);
+  }
+
+  for (const event of snapshot.events) {
+    const markets = marketsByEvent.get(event.id) ?? [];
+    const volumeTotals = markets
+      .map((market) => market.volume_total)
+      .filter((value): value is number => value != null);
+    const starts = markets
+      .map((market) => market.open_time?.getTime())
+      .filter(
+        (value): value is number =>
+          typeof value === "number" && Number.isFinite(value),
+      );
+    if (volumeTotals.length > 0) {
+      event.volume_total = volumeTotals.reduce((sum, value) => sum + value, 0);
+    }
+    if (starts.length > 0) {
+      event.start_date = new Date(Math.min(...starts));
+    }
+    updateHyperliquidMetadata(event, {
+      volumeTotalAvailable: volumeTotals.length > 0,
+      volumeTotalSource:
+        volumeTotals.length > 0
+          ? "sum_child_market_candle_1d_sum_base_volume"
+          : undefined,
+      openTimeSource:
+        starts.length > 0 ? "min_child_first_available_1d_candle" : undefined,
+      openTimeConfidence: starts.length > 0 ? "best_effort" : undefined,
+    });
+  }
+}
+
+export async function enrichHyperliquidCandleTotals(params: {
+  client: HyperliquidClient;
+  snapshot: HyperliquidMappedSnapshot;
+  maxMarkets: number;
+  concurrency: number;
+  nowMs?: number;
+}): Promise<CandleEnrichmentStats> {
+  const targets = selectCandleTotalMarkets(params.snapshot, params.maxMarkets);
+  const stats: CandleEnrichmentStats = {
+    selected: targets.length,
+    enriched: 0,
+    empty: 0,
+    failed: 0,
+  };
+  const concurrency = Math.max(1, Math.trunc(params.concurrency));
+  const endTime = params.nowMs ?? Date.now();
+
+  for (const batch of chunkArray(targets, concurrency)) {
+    await Promise.all(
+      batch.map(async (market) => {
+        const coin = hyperliquidCoinFromHunchTokenId(
+          market.token_yes ?? market.token_no ?? "",
+        );
+        if (!coin) {
+          stats.empty += 1;
+          return;
+        }
+        try {
+          const candles =
+            (await params.client.fetchCandleSnapshot({
+              coin,
+              interval: "1d",
+              startTime: 0,
+              endTime,
+            })) ?? [];
+          if (candles.length === 0) {
+            stats.empty += 1;
+            return;
+          }
+          const firstActiveCandle =
+            candles.find((candle) => (finiteNonNegative(candle.v) ?? 0) > 0) ??
+            candles[0];
+          const firstCandleAt = candleTimestamp(firstActiveCandle);
+          const lastCandleAt = candleTimestamp(candles[candles.length - 1]);
+          market.volume_total = sumCandleVolume(candles);
+          if (firstCandleAt) market.open_time = firstCandleAt;
+          updateHyperliquidMetadata(market, {
+            volumeTotalAvailable: true,
+            volumeTotalSource: "candle_1d_sum_base_volume",
+            volumeTotalConfidence: "best_effort",
+            candleVolumeCoin: coin,
+            candleVolumeInterval: "1d",
+            firstCandleAt: firstCandleAt?.toISOString(),
+            lastCandleAt: lastCandleAt?.toISOString(),
+            openTimeSource: firstCandleAt
+              ? "first_available_1d_candle"
+              : undefined,
+            openTimeConfidence: firstCandleAt ? "best_effort" : undefined,
+          });
+          stats.enriched += 1;
+        } catch {
+          stats.failed += 1;
+        }
+      }),
+    );
+  }
+
+  refreshEventCandleTotals(params.snapshot);
+  return stats;
+}
+
 export async function syncHyperliquidMetadata(params: {
   client?: HyperliquidClient;
   fixtureDir?: string;
@@ -104,6 +287,21 @@ export async function syncHyperliquidMetadata(params: {
           network: params.network,
         });
       })();
+
+  if (
+    env.syncCandleTotals &&
+    !params.dryRun &&
+    params.client &&
+    !params.fixtureDir &&
+    env.candleTotalMaxMarkets > 0
+  ) {
+    await enrichHyperliquidCandleTotals({
+      client: params.client,
+      snapshot,
+      maxMarkets: env.candleTotalMaxMarkets,
+      concurrency: env.candleTotalConcurrency,
+    });
+  }
 
   if (!params.dryRun) {
     if (!params.pool) {
@@ -127,6 +325,9 @@ export async function publishHyperliquidMarketMetadata(params: {
   tsMs?: number;
 }): Promise<{ markets: number; tokens: number; failed: number }> {
   const tsMs = params.tsMs ?? Date.now();
+  const eventsById = new Map(
+    params.snapshot.events.map((event) => [event.id, event]),
+  );
   let markets = 0;
   let tokens = 0;
   let failed = 0;
@@ -137,6 +338,7 @@ export async function publishHyperliquidMarketMetadata(params: {
         const tokenIds = marketTokenIds(market);
         if (tokenIds.length === 0) return;
         try {
+          const event = eventsById.get(market.event_id);
           await publishMarketUpdate({
             redis: params.redis,
             venue: VENUE,
@@ -144,7 +346,7 @@ export async function publishHyperliquidMarketMetadata(params: {
             marketId: market.id,
             eventId: market.event_id,
             conditionId: market.condition_id ?? null,
-            volumeTotal: null,
+            volumeTotal: market.volume_total ?? null,
             volume24h: market.volume_24h ?? null,
             liquidity: null,
             openInterest: null,
@@ -153,8 +355,8 @@ export async function publishHyperliquidMarketMetadata(params: {
             acceptingOrders: null,
             resolvedOutcome: market.resolved_outcome ?? null,
             resolvedOutcomePct: market.resolved_outcome_pct ?? null,
-            eventVolumeTotal: null,
-            eventVolume24h: null,
+            eventVolumeTotal: event?.volume_total ?? null,
+            eventVolume24h: event?.volume_24h ?? null,
             eventLiquidity: null,
             eventOpenInterest: null,
             tsMs,
