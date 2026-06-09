@@ -22,6 +22,7 @@ import {
   fetchSolanaSignatureStatus,
   waitForSolanaSignatureConfirmation,
 } from "./services/solana-rpc.js";
+import { unlockPolymarketBuilderFeeAccruals } from "./services/polymarket-builder-fees.js";
 
 type ClaimRow = {
   id: string;
@@ -778,6 +779,19 @@ export async function runRewardsPayout(options: RewardsPayoutOptions) {
 
   const chainFilter = chainId ? [chainId] : supportedChains;
   return withRewardsChainLocks(pool, chainFilter, async () => {
+    if (chainFilter.includes("137")) {
+      const unlock = await unlockPolymarketBuilderFeeAccruals(pool, {
+        limit: options.limit,
+        dryRun: options.dryRun,
+        assumeRewardsChainLock: true,
+      });
+      if (unlock.considered || unlock.unlocked) {
+        console.log(
+          `Polymarket builder fee accrual unlock: considered=${unlock.considered} unlocked=${unlock.unlocked} skipped=${unlock.skipped} budgetMicro=${unlock.budgetMicro}`,
+        );
+      }
+    }
+
     const staleMinAgeSec = STALE_SUBMITTED_NO_TX_MIN_AGE_SEC;
     if (options.dryRun) {
       const stale = await fetchStaleSubmittedWithoutTxClaims(

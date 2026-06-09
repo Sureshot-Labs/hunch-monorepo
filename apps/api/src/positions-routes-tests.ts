@@ -7,6 +7,7 @@ import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { normalizeLimitlessScopedTokenId } from "./lib/limitless-token.js";
+import { positionVisibilityResponseSchema } from "./schemas/positions.js";
 import { derivePolymarketFunderAddresses } from "./services/polymarket-funder.js";
 
 type TestContext = {
@@ -29,6 +30,11 @@ function randomEmail(): string {
 function randomEvmAddress(): string {
   return `0x${crypto.randomBytes(20).toString("hex")}`;
 }
+
+const KALSHI_SOLANA_TEST_WALLET =
+  "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ";
+const KALSHI_SOLANA_TEST_TOKEN =
+  "sol:11111111111111111111111111111111";
 
 async function createTestContext(
   options: CreateTestContextOptions = {},
@@ -154,6 +160,44 @@ async function insertLimitlessPosition(
   );
 }
 
+async function insertKalshiSolanaPosition(context: TestContext): Promise<void> {
+  await pool.query(
+    `
+      insert into positions (
+        id,
+        user_id,
+        wallet_address,
+        venue,
+        position_scope,
+        token_id,
+        side,
+        size,
+        unrealized_pnl,
+        realized_pnl,
+        last_updated_at,
+        created_at,
+        updated_at
+      )
+      values (
+        gen_random_uuid(),
+        $1,
+        $2,
+        'kalshi',
+        'own',
+        $3,
+        'LONG',
+        1,
+        0,
+        0,
+        now(),
+        now(),
+        now()
+      )
+    `,
+    [context.userId, KALSHI_SOLANA_TEST_WALLET, KALSHI_SOLANA_TEST_TOKEN],
+  );
+}
+
 async function main() {
   resetAuthDbFeatureCachesForTests();
   const app = await buildApp();
@@ -171,11 +215,30 @@ async function main() {
     persistFunderAddress: false,
   });
   const limitlessContext = await createTestContext();
+  const kalshiContext = await createTestContext();
   const limitlessRawTokenId =
     "61711868900925654003691703232709639114710342992998180827784061778851356977594";
 
   try {
     await insertLimitlessPosition(limitlessContext, limitlessRawTokenId);
+    await insertKalshiSolanaPosition(kalshiContext);
+
+    const parsedPrepareFailed = positionVisibilityResponseSchema.parse({
+      ok: true,
+      hidden: true,
+      closeLoss: {
+        skippedReason: "prepare_failed",
+        error: "prepare failed",
+      },
+    });
+    assert.equal(parsedPrepareFailed.closeLoss?.skippedReason, "prepare_failed");
+    assert.equal(
+      parsedPrepareFailed.closeLoss &&
+        "error" in parsedPrepareFailed.closeLoss
+        ? parsedPrepareFailed.closeLoss.error
+        : null,
+      "prepare failed",
+    );
 
     const persistedResponse = await app.inject({
       method: "GET",
@@ -260,10 +323,29 @@ async function main() {
     assert.equal(limitlessSyncSkipPayload.venue, "limitless");
     assert.equal(limitlessSyncSkipPayload.status, "skipped");
     assert.equal(limitlessSyncSkipPayload.skippedReason, "connect_first");
+
+    const kalshiHideResponse = await app.inject({
+      method: "POST",
+      url: "/positions/hide",
+      headers: kalshiContext.authHeaders,
+      payload: {
+        venue: "kalshi",
+        walletAddress: KALSHI_SOLANA_TEST_WALLET,
+        tokenId: KALSHI_SOLANA_TEST_TOKEN,
+        hidden: true,
+      },
+    });
+    assert.equal(kalshiHideResponse.statusCode, 200);
+    assert.deepEqual(kalshiHideResponse.json(), {
+      ok: true,
+      hidden: true,
+      closeLoss: { skippedReason: "non_embedded_wallet" },
+    });
   } finally {
     await cleanup(persistedContext);
     await cleanup(derivedContext);
     await cleanup(limitlessContext);
+    await cleanup(kalshiContext);
     await app.close();
   }
 }

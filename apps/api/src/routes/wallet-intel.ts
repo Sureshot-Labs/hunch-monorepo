@@ -59,6 +59,7 @@ import {
   parseMarketOutcomes,
 } from "../services/wallet-intel-helpers.js";
 import {
+  buildWalletIntelAcceptingOrdersSql,
   buildSnapshotDeltaTrackableActivitySql,
   buildWalletIntelTrackableMarketSql,
 } from "../services/wallet-intel-market-eligibility.js";
@@ -143,6 +144,35 @@ type WalletPrivateMetaRow = {
   user_label: string | null;
   user_label_color: WalletLabelColor | null;
 };
+
+function buildHiddenOwnPositionSnapshotSuppressionSql(inputs: {
+  snapshotAlias: string;
+  walletAlias: string;
+}): string {
+  const { snapshotAlias, walletAlias } = inputs;
+  return `
+    not exists (
+      select 1
+      from positions hp
+      where hp.position_scope = 'own'
+        and coalesce(hp.is_hidden, false) = true
+        and hp.venue = ${snapshotAlias}.venue
+        and hp.token_id = ${snapshotAlias}.metadata->>'tokenId'
+        and hp.wallet_address is not null
+        and btrim(hp.wallet_address) <> ''
+        and (
+          (
+            ${walletAlias}.chain = 'solana'
+            and hp.wallet_address = ${walletAlias}.address
+          )
+          or (
+            ${walletAlias}.chain <> 'solana'
+            and lower(hp.wallet_address) = lower(${walletAlias}.address)
+          )
+        )
+    )
+  `;
+}
 
 type WalletMetricsRow = {
   period: string;
@@ -252,6 +282,7 @@ type WalletPositionRouteRow = {
   expiration_time: Date | null;
   resolved_outcome: string | null;
   resolved_outcome_pct: string | null;
+  accepting_orders: boolean | null;
   best_bid: string | null;
   best_ask: string | null;
   last_price: string | null;
@@ -290,6 +321,7 @@ type WalletPositionBaseRouteItem = {
   expirationTime: string | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
+  acceptingOrders: boolean | null;
   outcomeSide: string | null;
   shares: number | null;
   sizeUsd: number | null;
@@ -581,6 +613,7 @@ type WalletActivitySignalItem = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  acceptingOrders: boolean | null;
   category: string | null;
   action: WalletActivityTopChange["action"];
   positionSide: string | null;
@@ -643,6 +676,12 @@ type WalletOpenPositionOverlay = {
 };
 
 function normalizeAddress(address: string): string {
+  const trimmed = address.trim();
+  if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
+  return trimmed;
+}
+
+function walletAddressIdentityKey(address: string): string {
   const trimmed = address.trim();
   if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
   return trimmed;
@@ -1387,6 +1426,76 @@ function buildWalletIntelWhaleScoreSql(alias: string): string {
   `;
 }
 
+function buildWalletOwnerResolutionJoinSql(includeDetails = false): string {
+  const ownerColumns = includeDetails
+    ? `
+          w2.address as owner_address,
+          w2.label as owner_label,
+          w2.id as owner_wallet_id`
+    : `
+          w2.address as owner_address`;
+  const resolvedColumns = includeDetails
+    ? `
+          coalesce(
+            linked_owner_evm.owner_address,
+            linked_owner_exact.owner_address,
+            safe_owner.owner_address
+          ) as owner_address,
+          coalesce(
+            linked_owner_evm.owner_label,
+            linked_owner_exact.owner_label,
+            safe_owner.owner_label
+          ) as owner_label,
+          coalesce(
+            linked_owner_evm.owner_wallet_id,
+            linked_owner_exact.owner_wallet_id,
+            safe_owner.owner_wallet_id
+          ) as owner_wallet_id`
+    : `
+          coalesce(
+            linked_owner_evm.owner_address,
+            linked_owner_exact.owner_address,
+            safe_owner.owner_address
+          ) as owner_address`;
+
+  return `
+              left join lateral (
+                select${ownerColumns}
+                from wallets w2
+                where w.chain <> 'solana'
+                  and w.metadata->>'linkedOwnerAddress' ~* '^0x[0-9a-f]{40}$'
+                  and w2.chain = w.chain
+                  and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                limit 1
+              ) linked_owner_evm on true
+              left join lateral (
+                select${ownerColumns}
+                from wallets w2
+                where w.metadata->>'linkedOwnerAddress' is not null
+                  and (
+                    w.chain = 'solana'
+                    or w.metadata->>'linkedOwnerAddress' !~* '^0x[0-9a-f]{40}$'
+                  )
+                  and w2.chain = w.chain
+                  and w2.address = w.metadata->>'linkedOwnerAddress'
+                limit 1
+              ) linked_owner_exact on true
+              left join lateral (
+                select${ownerColumns}
+                from wallets w2
+                where linked_owner_evm.owner_address is null
+                  and linked_owner_exact.owner_address is null
+                  and w.metadata->>'kind' = 'safe'
+                  and w2.chain = w.chain
+                  and w2.metadata->>'kind' = 'safe_owner'
+                  and w2.metadata->>'derivedFrom' = w.address
+                limit 1
+              ) safe_owner on true
+              left join lateral (
+                select${resolvedColumns}
+              ) owner on true`;
+}
+
 function buildSlimWhaleSelectorSql(
   orderBy: string,
   includeInferred: boolean,
@@ -1425,32 +1534,15 @@ function buildSlimWhaleSelectorSql(
                 wis.two_sided_markets,
                 ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
                 owner.owner_address,
-                activity.last_activity_at,
-                activity.has_trade_activity,
-                activity.has_holder_activity${inferredSelect}
+                wis.last_activity_at,
+                null::boolean as has_trade_activity,
+                null::boolean as has_holder_activity${inferredSelect}
               from wallets w
               join wallet_tag_map tm on tm.wallet_id = w.id
                and tm.tag_id = $3::uuid
-              left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-              left join lateral (
-                select
-                  max(wah.last_occurred_at) as last_activity_at,
-                  bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
-                  bool_or(wah.activity_type = 'holder') as has_holder_activity
-                from wallet_activity_hourly wah
-                where wah.wallet_id = w.id
-                  and wah.hour_bucket >= now() - ($2::text || ' days')::interval
-              ) activity on true
-              left join lateral (
-                select w2.address as owner_address
-                from wallets w2
-                where w.metadata->>'kind' = 'safe'
-                  and w2.metadata->>'kind' = 'safe_owner'
-                  and w2.metadata->>'derivedFrom' = w.address
-                  and w2.chain = w.chain
-                limit 1
-              ) owner on true${inferredJoin}
-              where activity.last_activity_at is not null
+              join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
+              ${buildWalletOwnerResolutionJoinSql()}${inferredJoin}
+              where wis.last_activity_at >= now() - ($2::text || ' days')::interval
               order by ${orderBy}
               limit $1
             `;
@@ -1481,7 +1573,7 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                 join wallet_tag_map tm on tm.wallet_id = w.id
                  and tm.tag_id = $3::uuid
                 join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-                where wis.last_activity_at is not null
+                where wis.last_activity_at >= now() - ($4::text || ' days')::interval
                 order by
                   wis.last_activity_at desc nulls last,
                   whale_score desc nulls last,
@@ -1516,16 +1608,8 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
               from shortlist s
               join wallets w on w.id = s.id
               left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
-              left join lateral (
-                select w2.address as owner_address
-                from wallets w2
-                where w.metadata->>'kind' = 'safe'
-                  and w2.metadata->>'kind' = 'safe_owner'
-                  and w2.metadata->>'derivedFrom' = w.address
-                  and w2.chain = w.chain
-                limit 1
-              ) owner on true${inferredJoin}
-              where wis.last_activity_at is not null
+              ${buildWalletOwnerResolutionJoinSql()}${inferredJoin}
+              where wis.last_activity_at >= now() - ($4::text || ' days')::interval
               order by ${orderBy}
               limit $2
             `;
@@ -1975,6 +2059,7 @@ export function buildWalletSignalItemFromSignalRow(input: {
     closeTime: input.signalRow.closeTime,
     expirationTime: input.signalRow.expirationTime,
     resolvedOutcome: input.signalRow.resolvedOutcome,
+    acceptingOrders: input.signalRow.acceptingOrders,
     category: input.signalRow.category,
     action: input.signalRow.action,
     positionSide: input.signalRow.positionSide,
@@ -2049,6 +2134,7 @@ export function buildWalletSignalItemFromTopChange(input: {
     closeTime: input.change.closeTime ?? null,
     expirationTime: input.change.expirationTime ?? null,
     resolvedOutcome: input.change.resolvedOutcome ?? null,
+    acceptingOrders: input.change.acceptingOrders ?? null,
     category: input.change.category ?? null,
     action: input.change.action ?? null,
     positionSide: input.change.positionSide ?? null,
@@ -2118,6 +2204,7 @@ export function signalItemToTopChange(
     closeTime: item.closeTime,
     expirationTime: item.expirationTime,
     resolvedOutcome: item.resolvedOutcome,
+    acceptingOrders: item.acceptingOrders,
     outcomes: item.outcomes,
     category: item.category,
     action: item.action,
@@ -3027,18 +3114,7 @@ async function loadWalletPageStateByIds(
       from wallet_set ws
       join wallets w on w.id = ws.wallet_id
       left join wallet_follows wf on wf.wallet_id = w.id and wf.user_id = $1
-      left join lateral (
-        select
-          w2.address as owner_address,
-          w2.label as owner_label,
-          w2.id as owner_wallet_id
-        from wallets w2
-        where w.metadata->>'kind' = 'safe'
-          and w2.metadata->>'kind' = 'safe_owner'
-          and w2.metadata->>'derivedFrom' = w.address
-          and w2.chain = w.chain
-        limit 1
-      ) owner on true
+      ${buildWalletOwnerResolutionJoinSql(true)}
     `,
     [userId, walletIds],
   );
@@ -3248,6 +3324,7 @@ function mapWalletPositionBaseItems(
     resolvedOutcomePct: row.resolved_outcome_pct
       ? Number(row.resolved_outcome_pct)
       : null,
+    acceptingOrders: row.accepting_orders,
     outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
     shares: row.shares ? Number(row.shares) : null,
     sizeUsd: row.size_usd ? Number(row.size_usd) : null,
@@ -3484,8 +3561,8 @@ async function loadWhaleTopMarkets(
               and ws.venue = recent_markets.venue
           ),
           latest_positions as (
-            select distinct on (upper(coalesce(ws.outcome_side, '')))
-              upper(coalesce(ws.outcome_side, '')) as outcome_side,
+            select distinct on (ws.outcome_side)
+              ws.outcome_side,
               ws.shares,
               ws.size_usd,
               ws.price
@@ -3497,7 +3574,7 @@ async function loadWhaleTopMarkets(
               and ws.market_id = recent_markets.market_id
               and ws.shares > 0
             order by
-              upper(coalesce(ws.outcome_side, '')),
+              ws.outcome_side,
               ws.snapshot_at desc,
               ws.size_usd desc nulls last,
               ws.shares desc
@@ -5115,7 +5192,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               labelsFilter.length === 0;
             const useSnapshotWhaleShortlist =
               useSlimWhaleSelector && query.sort === "last_activity";
-            const whaleActivityOrderExpr = useSnapshotWhaleShortlist
+            const whaleActivityOrderExpr = useSlimWhaleSelector
               ? "wis.last_activity_at"
               : "activity.last_activity_at";
             const orderBy = (() => {
@@ -5160,6 +5237,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                         snapshotWhaleShortlistLimit,
                         maxScanCandidates + 1,
                         whaleTagId,
+                        query.windowDays,
                       ]
                     : [maxScanCandidates + 1, query.windowDays, whaleTagId],
                 )
@@ -5230,18 +5308,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     where wah.wallet_id = w.id
                       and wah.hour_bucket >= now() - ($3::text || ' days')::interval
                   ) activity on true
-                  left join lateral (
-                    select
-                      w2.address as owner_address,
-                      w2.label as owner_label,
-                      w2.id as owner_wallet_id
-                    from wallets w2
-                    where w.metadata->>'kind' = 'safe'
-                      and w2.metadata->>'kind' = 'safe_owner'
-                      and w2.metadata->>'derivedFrom' = w.address
-                      and w2.chain = w.chain
-                    limit 1
-                  ) owner on true
+                  ${buildWalletOwnerResolutionJoinSql(true)}
                   left join wallet_profiles wp on wp.wallet_id = w.id
                   left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
                   where ($4::text[] is null or wp.profile->'categories' ?| $4::text[])
@@ -5280,10 +5347,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
             const deduped = new Map<string, WhaleWalletItem>();
             for (const row of filteredByActivity) {
-              const dedupeKey =
-                row.isSafe && row.ownerAddress
-                  ? row.ownerAddress.toLowerCase()
-                  : row.address.toLowerCase();
+              const dedupeKey = row.ownerAddress
+                ? walletAddressIdentityKey(row.ownerAddress)
+                : walletAddressIdentityKey(row.address);
               const existing = deduped.get(dedupeKey);
               if (!existing) {
                 deduped.set(dedupeKey, row);
@@ -5474,7 +5540,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             );
             const pagedIds = pagedRows.map((row) => row.walletId);
 
-            if (useSnapshotWhaleShortlist && pagedIds.length > 0) {
+            if (useSlimWhaleSelector && pagedIds.length > 0) {
               const activityStateMap = await loadWalletActivityStateByIds(
                 client,
                 pagedIds,
@@ -7242,6 +7308,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           close_time: Date | null;
           expiration_time: Date | null;
           resolved_outcome: string | null;
+          accepting_orders: boolean | null;
           outcome_side: string | null;
           action: string | null;
           delta_shares: string | null;
@@ -7279,6 +7346,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               um.close_time,
               um.expiration_time,
               um.resolved_outcome,
+              ${buildWalletIntelAcceptingOrdersSql({
+                marketAlias: "um",
+                eventAlias: "ue",
+              })} as accepting_orders,
               wa.outcome_side,
               wa.action,
               wa.delta_shares,
@@ -7344,6 +7415,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             ? row.expiration_time.toISOString()
             : null,
           resolvedOutcome: row.resolved_outcome,
+          acceptingOrders: row.accepting_orders,
           outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
           action: row.action,
           deltaShares: row.delta_shares ? Number(row.delta_shares) : null,
@@ -7421,21 +7493,27 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       let where = "";
       let idx = 2;
       const userParam = 1;
+      let walletParam: number | null = null;
+      let venueParam: number | null = null;
+      let sinceParam: number | null = null;
 
       if (query.walletId) {
-        where += `ws.wallet_id = $${idx++}`;
+        walletParam = idx++;
+        where += `ws.wallet_id = $${walletParam}`;
         params.push(query.walletId);
       } else {
         where += `ws.wallet_id in (select wallet_id from wallet_follows where user_id = $${userParam})`;
       }
 
       if (query.venue) {
-        where += ` and ws.venue = $${idx++}`;
+        venueParam = idx++;
+        where += ` and ws.venue = $${venueParam}`;
         params.push(query.venue);
       }
 
       if (query.since) {
-        where += ` and ws.snapshot_at >= $${idx++}`;
+        sinceParam = idx++;
+        where += ` and ws.snapshot_at >= $${sinceParam}`;
         params.push(query.since);
       }
 
@@ -7443,9 +7521,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         ? "true"
         : (() => {
             const minUsdParam = idx++;
-            params.push(env.walletIntelMinPositionUsd);
+            params.push(query.minPositionUsd ?? env.walletIntelMinPositionUsd);
             const minSharesParam = idx++;
-            params.push(env.walletIntelMinPositionShares);
+            params.push(
+              query.minPositionShares ?? env.walletIntelMinPositionShares,
+            );
             return `
               (
                 case
@@ -7456,6 +7536,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               )
             `;
           })();
+      const hiddenPositionSuppressionSql =
+        buildHiddenOwnPositionSnapshotSuppressionSql({
+          snapshotAlias: "ws",
+          walletAlias: "w",
+        });
 
       params.push(query.limit + 1, query.offset);
       const limitParam = idx++;
@@ -7465,7 +7550,101 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       try {
         const latestOnly = query.latest ?? true;
         const sql = latestOnly
-          ? `
+          ? walletParam != null
+            ? `
+              with candidate_venues(venue) as (
+                ${
+                  venueParam != null
+                    ? `select $${venueParam}::text`
+                    : "values ('polymarket'), ('limitless'), ('kalshi')"
+                }
+              ),
+              latest_snapshots as (
+                select
+                  cv.venue,
+                  latest.snapshot_at
+                from candidate_venues cv
+                join lateral (
+                  select ws.snapshot_at
+                  from wallet_position_snapshots ws
+                  where ws.wallet_id = $${walletParam}::uuid
+                    and ws.venue = cv.venue
+                    ${
+                      sinceParam != null
+                        ? `and ws.snapshot_at >= $${sinceParam}::timestamptz`
+                        : ""
+                    }
+                  order by ws.snapshot_at desc
+                  limit 1
+                ) latest on true
+              )
+              select
+                ws.wallet_id,
+                w.address,
+                w.chain,
+                w.label,
+                wn.name as user_name,
+                wl.label as user_label,
+                wl.color as user_label_color,
+                wp.profile->>'label_short' as profile_label,
+                ws.venue,
+                ws.market_id,
+                um.title as market_title,
+                um.outcomes,
+                um.image as market_image,
+                um.icon as market_icon,
+                um.event_id as event_id,
+                ue.title as event_title,
+                ue.image as event_image,
+                ue.icon as event_icon,
+                um.status as market_status,
+                um.close_time,
+                um.expiration_time,
+                um.resolved_outcome,
+                um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
+                um.best_bid,
+                um.best_ask,
+                um.last_price,
+                ws.outcome_side,
+                ws.shares,
+                ws.size_usd,
+                ws.price,
+                ws.snapshot_at,
+                ws.metadata
+              from latest_snapshots ls
+              join wallet_position_snapshots ws
+                on ws.wallet_id = $${walletParam}::uuid
+               and ws.venue = ls.venue
+               and ws.snapshot_at = ls.snapshot_at
+              join wallets w on w.id = ws.wallet_id
+              left join wallet_user_labels wl
+                on wl.wallet_id = w.id
+               and wl.user_id = $${userParam}
+              left join wallet_user_names wn
+                on wn.wallet_id = w.id
+               and wn.user_id = $${userParam}
+              left join wallet_profiles wp on wp.wallet_id = w.id
+              left join unified_markets um on um.id = ws.market_id
+              left join unified_events ue on ue.id = um.event_id
+              where ${positionFilterSql}
+                and ${hiddenPositionSuppressionSql}
+                and ${buildWalletIntelTrackableMarketSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })}
+              order by
+                ws.snapshot_at desc,
+                ws.size_usd desc nulls last,
+                ws.shares desc nulls last,
+                coalesce(um.title, ws.market_id) asc
+              limit $${limitParam}
+              offset $${offsetParam}
+            `
+            : `
               with latest_snapshots as (
                 select
                   ws.wallet_id,
@@ -7499,6 +7678,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.expiration_time,
                 um.resolved_outcome,
                 um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -7524,6 +7707,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${positionFilterSql}
+                and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
                   eventAlias: "ue",
@@ -7561,6 +7745,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 um.expiration_time,
                 um.resolved_outcome,
                 um.resolved_outcome_pct::text as resolved_outcome_pct,
+                ${buildWalletIntelAcceptingOrdersSql({
+                  marketAlias: "um",
+                  eventAlias: "ue",
+                })} as accepting_orders,
                 um.best_bid,
                 um.best_ask,
                 um.last_price,
@@ -7583,6 +7771,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_events ue on ue.id = um.event_id
               where ${where}
                 and ${positionFilterSql}
+                and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
                   eventAlias: "ue",
@@ -7637,7 +7826,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       let historyWhere = `ws.wallet_id = $${walletParam}`;
       if (query.venue) {
-        historyWhere += ` and ws.venue = $${idx++}`;
+        const venueParam = idx++;
+        historyWhere += ` and ws.venue = $${venueParam}`;
         params.push(query.venue);
       }
 
@@ -7645,9 +7835,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         ? "true"
         : (() => {
             const minUsdParam = idx++;
-            params.push(env.walletIntelMinPositionUsd);
+            params.push(query.minPositionUsd ?? env.walletIntelMinPositionUsd);
             const minSharesParam = idx++;
-            params.push(env.walletIntelMinPositionShares);
+            params.push(
+              query.minPositionShares ?? env.walletIntelMinPositionShares,
+            );
             return `
               (
                 case
@@ -7658,8 +7850,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               )
             `;
           })();
+      const historyHiddenPositionSuppressionSql =
+        buildHiddenOwnPositionSnapshotSuppressionSql({
+          snapshotAlias: "tr",
+          walletAlias: "w",
+        });
 
-      let outerWhere = `where ${historyPositionFilterSql}`;
+      let outerWhere = `where ${historyPositionFilterSql}
+        and ${historyHiddenPositionSuppressionSql}`;
       if (query.since) {
         outerWhere += ` and tr.snapshot_at >= $${idx++}`;
         params.push(query.since);
@@ -7673,55 +7871,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       try {
         const rows = await client.query<WalletPositionRouteRow>(
           `
-            with candidate_rows as (
-              select
-                ws.wallet_id,
-                w.address,
-                w.chain,
-                w.label,
-                wn.name as user_name,
-                wl.label as user_label,
-                wl.color as user_label_color,
-                wp.profile->>'label_short' as profile_label,
+            with position_keys as (
+              select distinct
                 ws.venue,
                 ws.market_id,
-                um.title as market_title,
-                um.outcomes,
-                um.image as market_image,
-                um.icon as market_icon,
-                um.event_id as event_id,
-                ue.title as event_title,
-                ue.image as event_image,
-                ue.icon as event_icon,
-                um.status as market_status,
-                um.close_time,
-                um.expiration_time,
-                um.resolved_outcome,
-                um.resolved_outcome_pct::text as resolved_outcome_pct,
-                um.best_bid,
-                um.best_ask,
-                um.last_price,
-                case
-                  when upper(coalesce(ws.outcome_side::text, '')) in ('YES', 'NO')
-                    then upper(coalesce(ws.outcome_side::text, ''))
-                  else null
-                end as outcome_side,
-                ws.shares,
-                ws.size_usd,
-                ws.price,
-                ws.snapshot_at,
-                ws.metadata
+                ws.outcome_side
               from wallet_position_snapshots ws
-              join wallets w on w.id = ws.wallet_id
-              left join wallet_user_labels wl
-                on wl.wallet_id = w.id
-               and wl.user_id = $${userParam}
-              left join wallet_user_names wn
-                on wn.wallet_id = w.id
-               and wn.user_id = $${userParam}
-              left join wallet_profiles wp on wp.wallet_id = w.id
-              left join unified_markets um on um.id = ws.market_id
-              left join unified_events ue on ue.id = um.event_id
               where ${historyWhere}
                 and (
                   coalesce(ws.shares, 0) > 0
@@ -7730,7 +7885,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
                   ) > 0
                 )
-                and (
+            ),
+            market_keys as (
+              select
+                pk.venue,
+                pk.market_id,
+                pk.outcome_side,
+                coalesce(um.close_time, um.expiration_time) as terminal_at
+              from position_keys pk
+              join unified_markets um on um.id = pk.market_id
+              where (
                   um.resolved_outcome is not null
                   or upper(coalesce(um.status::text, '')) in ('CLOSED', 'SETTLED', 'ARCHIVED')
                   or (
@@ -7738,52 +7902,76 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     and coalesce(um.close_time, um.expiration_time) < now()
                   )
                 )
-                and (
-                  coalesce(um.close_time, um.expiration_time) is null
-                  or ws.snapshot_at <= coalesce(um.close_time, um.expiration_time)
-                )
             ),
             terminal_rows as (
-              select distinct on (
-                candidate_rows.venue,
-                candidate_rows.market_id,
-                coalesce(candidate_rows.outcome_side, '')
-              )
-                *
-              from candidate_rows
-              order by
-                candidate_rows.venue,
-                candidate_rows.market_id,
-                coalesce(candidate_rows.outcome_side, ''),
-                candidate_rows.snapshot_at desc
+              select
+                ws.wallet_id,
+                ws.venue,
+                ws.market_id,
+                case
+                  when ws.outcome_side in ('YES', 'NO')
+                    then ws.outcome_side
+                  else null
+                end as outcome_side,
+                ws.shares,
+                ws.size_usd,
+                ws.price,
+                ws.snapshot_at,
+                ws.metadata
+              from market_keys mk
+              join lateral (
+                select ws.*
+                from wallet_position_snapshots ws
+                where ws.wallet_id = $${walletParam}::uuid
+                  and ws.venue = mk.venue
+                  and ws.market_id = mk.market_id
+                  and ws.outcome_side = mk.outcome_side
+                  and (
+                    coalesce(ws.shares, 0) > 0
+                    or greatest(
+                      coalesce(ws.size_usd, 0),
+                      abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
+                    ) > 0
+                  )
+                  and (
+                    mk.terminal_at is null
+                    or ws.snapshot_at <= mk.terminal_at
+                  )
+                order by ws.snapshot_at desc
+                limit 1
+              ) ws on true
             )
             select
               tr.wallet_id,
-              tr.address,
-              tr.chain,
-              tr.label,
-              tr.user_name,
-              tr.user_label,
-              tr.user_label_color,
-              tr.profile_label,
+              w.address,
+              w.chain,
+              w.label,
+              wn.name as user_name,
+              wl.label as user_label,
+              wl.color as user_label_color,
+              wp.profile->>'label_short' as profile_label,
               tr.venue,
               tr.market_id,
-              tr.market_title,
-              tr.outcomes,
-              tr.market_image,
-              tr.market_icon,
-              tr.event_id,
-              tr.event_title,
-              tr.event_image,
-              tr.event_icon,
-              tr.market_status,
-              tr.close_time,
-              tr.expiration_time,
-              tr.resolved_outcome,
-              tr.resolved_outcome_pct,
-              tr.best_bid,
-              tr.best_ask,
-              tr.last_price,
+              um.title as market_title,
+              um.outcomes,
+              um.image as market_image,
+              um.icon as market_icon,
+              um.event_id as event_id,
+              ue.title as event_title,
+              ue.image as event_image,
+              ue.icon as event_icon,
+              um.status as market_status,
+              um.close_time,
+              um.expiration_time,
+              um.resolved_outcome,
+              um.resolved_outcome_pct::text as resolved_outcome_pct,
+              ${buildWalletIntelAcceptingOrdersSql({
+                marketAlias: "um",
+                eventAlias: "ue",
+              })} as accepting_orders,
+              um.best_bid,
+              um.best_ask,
+              um.last_price,
               tr.outcome_side,
               tr.shares,
               tr.size_usd,
@@ -7791,12 +7979,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tr.snapshot_at,
               tr.metadata
             from terminal_rows tr
+            join wallets w on w.id = tr.wallet_id
+            left join wallet_user_labels wl
+              on wl.wallet_id = w.id
+             and wl.user_id = $${userParam}
+            left join wallet_user_names wn
+              on wn.wallet_id = w.id
+             and wn.user_id = $${userParam}
+            left join wallet_profiles wp on wp.wallet_id = w.id
+            left join unified_markets um on um.id = tr.market_id
+            left join unified_events ue on ue.id = um.event_id
             ${outerWhere}
             order by
               tr.snapshot_at desc,
               tr.size_usd desc nulls last,
               tr.shares desc nulls last,
-              coalesce(tr.market_title, tr.market_id) asc
+              coalesce(um.title, tr.market_id) asc
             limit $${limitParam}
             offset $${offsetParam}
           `,

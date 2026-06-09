@@ -7,7 +7,9 @@ const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../.env",
 );
-config({ path: envPath, override: true });
+if (process.env.HUNCH_RUNTIME_SECRETS_LOADED !== "1") {
+  config({ path: envPath, override: true });
+}
 
 function parseOptionalInt(v: string | undefined): number | undefined {
   if (v == null || v.trim() === "") return undefined;

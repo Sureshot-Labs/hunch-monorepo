@@ -33,13 +33,15 @@ export type UnifiedOrderRow = {
 
 type FilterInputs = {
   userId: string;
-  walletAddresses: string[];
+  walletAddresses?: string[];
   venue?: string;
   status?: string | string[];
   openOnly?: boolean;
   marketId?: string;
   marketIds?: string[];
   tokenId?: string;
+  from?: Date | string;
+  to?: Date | string;
 };
 
 type FetchUnifiedOrdersInputs = FilterInputs & {
@@ -50,17 +52,33 @@ type FetchUnifiedOrdersInputs = FilterInputs & {
 
 type FilterParams = {
   params: PgParams;
+  walletIndex?: number;
   venueIndex?: number;
   statusIndex?: number;
   marketListIndex?: number;
   tokenIndex?: number;
+  fromIndex?: number;
+  toIndex?: number;
 };
 
 const buildFilterParams = (inputs: FilterInputs): FilterParams => {
-  const params: PgParams = [inputs.userId, inputs.walletAddresses];
-  let paramCount = 2;
+  const params: PgParams = [inputs.userId];
+  let paramCount = 1;
+  let walletIndex: number | undefined;
   let venueIndex: number | undefined;
   let statusIndex: number | undefined;
+
+  const walletAddresses = inputs.walletAddresses?.filter(Boolean);
+  if (walletAddresses?.length) {
+    paramCount += 1;
+    walletIndex = paramCount;
+    params.push(
+      walletAddresses.map((address) => {
+        const trimmed = address.trim();
+        return /^0x/i.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+      }),
+    );
+  }
 
   if (inputs.venue) {
     paramCount += 1;
@@ -98,21 +116,50 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.tokenId);
   }
 
-  return { params, venueIndex, statusIndex, marketListIndex, tokenIndex };
+  let fromIndex: number | undefined;
+  if (inputs.from) {
+    paramCount += 1;
+    fromIndex = paramCount;
+    params.push(
+      inputs.from instanceof Date ? inputs.from : new Date(inputs.from),
+    );
+  }
+
+  let toIndex: number | undefined;
+  if (inputs.to) {
+    paramCount += 1;
+    toIndex = paramCount;
+    params.push(inputs.to instanceof Date ? inputs.to : new Date(inputs.to));
+  }
+
+  return {
+    params,
+    walletIndex,
+    venueIndex,
+    statusIndex,
+    marketListIndex,
+    tokenIndex,
+    fromIndex,
+    toIndex,
+  };
 };
 
 const buildWhereClause = (
   alias: string,
   filterParams: FilterParams,
   includeSigner: boolean,
-  columns: { market?: string; token?: string } = {},
+  columns: { market?: string; token?: string; createdAt?: string } = {},
 ): string => {
   const normalizedWalletExpr = `case when ${alias}.wallet_address like '0x%' then lower(${alias}.wallet_address) else ${alias}.wallet_address end`;
   const normalizedSignerExpr = `case when ${alias}.signer_address like '0x%' then lower(${alias}.signer_address) else ${alias}.signer_address end`;
-  const walletClause = includeSigner
-    ? `((${alias}.wallet_address is not null and ${normalizedWalletExpr} = ANY($2::text[])) or (${alias}.signer_address is not null and ${normalizedSignerExpr} = ANY($2::text[])))`
-    : `(${alias}.wallet_address is null or ${normalizedWalletExpr} = ANY($2::text[]))`;
-  const conditions = [`${alias}.user_id = $1`, walletClause];
+  const conditions = [`${alias}.user_id = $1`];
+
+  if (filterParams.walletIndex) {
+    const walletClause = includeSigner
+      ? `((${alias}.wallet_address is not null and ${normalizedWalletExpr} = ANY($${filterParams.walletIndex}::text[])) or (${alias}.signer_address is not null and ${normalizedSignerExpr} = ANY($${filterParams.walletIndex}::text[])))`
+      : `(${alias}.wallet_address is null or ${normalizedWalletExpr} = ANY($${filterParams.walletIndex}::text[]))`;
+    conditions.push(walletClause);
+  }
 
   if (filterParams.venueIndex) {
     conditions.push(`${alias}.venue = $${filterParams.venueIndex}`);
@@ -134,8 +181,72 @@ const buildWhereClause = (
     conditions.push(`${columns.token} = $${filterParams.tokenIndex}`);
   }
 
+  if (filterParams.fromIndex && columns.createdAt) {
+    conditions.push(
+      `${columns.createdAt} >= $${filterParams.fromIndex}::timestamptz`,
+    );
+  }
+
+  if (filterParams.toIndex && columns.createdAt) {
+    conditions.push(
+      `${columns.createdAt} <= $${filterParams.toIndex}::timestamptz`,
+    );
+  }
+
   return `where ${conditions.join(" and ")}`;
 };
+
+const toNumber = (value: string | null): number | null => {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+export const mapUnifiedOrder = (row: UnifiedOrderRow) => ({
+  id: row.id,
+  kind: row.kind,
+  venue: row.venue,
+  walletAddress: row.wallet_address,
+  venueOrderId: row.venue_order_id,
+  tokenId: row.token_id,
+  side: row.side,
+  outcome: row.outcome,
+  orderType: row.order_type,
+  price: toNumber(row.price),
+  size: toNumber(row.size),
+  status: row.status,
+  filledSize: toNumber(row.filled_size),
+  averageFillPrice: toNumber(row.average_fill_price),
+  expiresAt: row.expires_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  filledAt: row.filled_at,
+  cancelledAt: row.cancelled_at,
+  unifiedMarketId: row.unified_market_id,
+  inputMint: row.input_mint,
+  outputMint: row.output_mint,
+  amountIn: toNumber(row.amount_in),
+  amountOut: toNumber(row.amount_out),
+  inputDecimals: toNumber(row.input_decimals),
+  outputDecimals: toNumber(row.output_decimals),
+  txSignature: row.tx_signature,
+});
+
+export async function fetchUnifiedMarketIdsByEventId(
+  pool: Pool,
+  eventId: string | undefined,
+): Promise<string[]> {
+  if (!eventId) return [];
+  const { rows } = await pool.query<{ id: string }>(
+    `
+      select id
+      from unified_markets
+      where event_id = $1
+    `,
+    [eventId],
+  );
+  return rows.map((row) => row.id);
+}
 
 const buildOrdersSelect = (whereClause: string): string => `
   select
@@ -236,12 +347,14 @@ export async function fetchUnifiedOrders(
   const baseOrderWhere = buildWhereClause("o", filterParams, true, {
     market: "ut.market_id",
     token: "o.token_id",
+    createdAt: "coalesce(o.posted_at, o.last_update)",
   });
   const orderWhere = inputs.openOnly
-    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size) and coalesce(o.order_type, '') not in ('FOK', 'FAK')`
+    ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size) and lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'partially_filled', 'delayed', 'unconfirmed', 'open') and not (lower(coalesce(o.venue, '')) = 'limitless' and upper(coalesce(o.order_type, '')) = 'FOK')`
     : baseOrderWhere;
   const execWhere = buildWhereClause("e", filterParams, false, {
     market: "e.unified_market_id",
+    createdAt: "e.created_at",
   });
 
   const selects: string[] = [];

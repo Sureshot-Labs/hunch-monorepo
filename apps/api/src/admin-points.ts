@@ -2,18 +2,23 @@
 
 import { randomUUID } from "node:crypto";
 import { pool } from "./db.js";
-import { insertVolumeEventsWithMultiplier } from "./services/rewards-multiplier.js";
+import {
+  HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX,
+  insertExactManualVolumeEvent,
+  isHiddenManualVolumeSourceId,
+  VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX,
+} from "./repos/rewards.js";
 
 type ScriptOptions = {
   wallet?: string;
   userId?: string;
   walletAddress?: string;
   amount?: number;
-  sourceId?: string;
   sourceType?: "order" | "execution";
   venue?: string;
   walletType?: "ethereum" | "solana";
   dryRun: boolean;
+  visible: boolean;
 };
 
 function parseArgs(): ScriptOptions {
@@ -32,7 +37,6 @@ function parseArgs(): ScriptOptions {
     userId: getValue("--user-id"),
     walletAddress: getValue("--wallet-address"),
     amount: getValue("--amount") ? Number(getValue("--amount")) : undefined,
-    sourceId: getValue("--source-id"),
     sourceType:
       sourceType === "order" || sourceType === "execution"
         ? sourceType
@@ -40,6 +44,7 @@ function parseArgs(): ScriptOptions {
     venue: getValue("--venue"),
     walletType: getValue("--wallet-type") === "solana" ? "solana" : "ethereum",
     dryRun: hasFlag("--dry-run"),
+    visible: hasFlag("--visible"),
   };
 }
 
@@ -159,7 +164,7 @@ async function main() {
       targetWallet ??
       (await fetchPrimaryWallet(user.id));
     const sourceType = options.sourceType ?? "execution";
-    const sourceId = options.sourceId?.trim() ?? `manual:${randomUUID()}`;
+    const sourceId = `${options.visible ? VISIBLE_MANUAL_VOLUME_SOURCE_PREFIX : HIDDEN_MANUAL_VOLUME_SOURCE_PREFIX}${randomUUID()}`;
     const venue = options.venue?.trim() ?? "admin";
 
     if (options.dryRun) {
@@ -173,6 +178,7 @@ async function main() {
             sourceType,
             sourceId,
             amount,
+            visible: !isHiddenManualVolumeSourceId(sourceId),
           },
           null,
           2,
@@ -181,25 +187,23 @@ async function main() {
       return;
     }
 
-    const inserted = await insertVolumeEventsWithMultiplier(pool, {
+    const inserted = await insertExactManualVolumeEvent(pool, {
       userId: user.id,
       walletAddress: walletAddress ?? null,
       venue,
       sourceType,
-      events: [
-        {
-          sourceId,
-          notionalUsd: amount,
-          createdAt: new Date(),
-        },
-      ],
+      sourceId,
+      points: amount,
+      createdAt: new Date(),
     });
 
     if (!inserted.inserted) {
       throw new Error("Volume event already exists for that source_id");
     }
 
-    console.log(`Added ${amount} points for ${user.id} (${sourceId})`);
+    console.log(
+      `Added ${amount} points for ${user.id} (${sourceId}, visible=${!isHiddenManualVolumeSourceId(sourceId)})`,
+    );
   } finally {
     await pool.end();
   }

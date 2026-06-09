@@ -1,6 +1,10 @@
 import type { PoolClient } from "pg";
 import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "../lib/usdc.js";
+import {
+  buildQualificationPointsContributionSql,
+  buildTierPointsContributionSql,
+} from "../repos/rewards.js";
 
 const OBSERVER_THRESHOLD = 500;
 
@@ -113,17 +117,34 @@ async function lockUser(client: PoolClient, userId: string): Promise<void> {
   await acquireRewardsUserAdvisoryXactLock(client, userId);
 }
 
-async function fetchUserPointsAtEvent(
+async function fetchTierPointsAtEvent(
   client: PoolClient,
   userId: string,
   eventTime: Date,
 ): Promise<number> {
   const { rows } = await client.query<{ total: string | null }>(
     `
-      select coalesce(sum(points_awarded), 0)::text as total
-      from volume_events
-      where user_id = $1
-        and created_at <= $2
+      select coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+        and ve.created_at <= $2
+    `,
+    [userId, eventTime],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
+async function fetchQualificationPointsAtEvent(
+  client: PoolClient,
+  userId: string,
+  eventTime: Date,
+): Promise<number> {
+  const { rows } = await client.query<{ total: string | null }>(
+    `
+      select coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+        and ve.created_at <= $2
     `,
     [userId, eventTime],
   );
@@ -177,11 +198,11 @@ async function fetchQualifiedReferralCountAtEvent(
     `
       with referred_points as (
         select
-          user_id,
-          coalesce(sum(points_awarded), 0)::numeric as points
-        from volume_events
-        where created_at <= $2
-        group by user_id
+          ve.user_id,
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::numeric as points
+        from volume_events ve
+        where ve.created_at <= $2
+        group by ve.user_id
       )
       select count(*)::text as total
       from referrals r
@@ -240,21 +261,30 @@ export async function resolveFeeEventSnapshotAtWrite(
   }
 
   const policy = await fetchPolicyAtEvent(client, inputs.eventTime);
-  const [referredPoints, referrerPoints] = await Promise.all([
-    fetchUserPointsAtEvent(client, inputs.userId, inputs.eventTime),
+  const [
+    referredTierPoints,
+    referredQualificationPoints,
+    referrerQualificationPoints,
+  ] = await Promise.all([
+    fetchTierPointsAtEvent(client, inputs.userId, inputs.eventTime),
+    fetchQualificationPointsAtEvent(client, inputs.userId, inputs.eventTime),
     referrerUserId
-      ? fetchUserPointsAtEvent(client, referrerUserId, inputs.eventTime)
+      ? fetchQualificationPointsAtEvent(
+          client,
+          referrerUserId,
+          inputs.eventTime,
+        )
       : Promise.resolve(0),
   ]);
 
-  const tier = resolveTier(referredPoints, policy.tiers);
+  const tier = resolveTier(referredTierPoints, policy.tiers);
   const cashbackBpsApplied = clampBps(tier.cashbackBps);
 
   let referralBpsApplied = 0;
   const hasQualifiedReferralLink = Boolean(
     referrerUserId &&
-    referredPoints >= OBSERVER_THRESHOLD &&
-    referrerPoints >= OBSERVER_THRESHOLD,
+    referredQualificationPoints >= OBSERVER_THRESHOLD &&
+    referrerQualificationPoints >= OBSERVER_THRESHOLD,
   );
   if (hasQualifiedReferralLink && referrerUserId) {
     await markReferralQualified(client, inputs.userId, inputs.eventTime);

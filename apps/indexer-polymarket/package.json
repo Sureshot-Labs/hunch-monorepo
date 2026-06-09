@@ -6,10 +6,12 @@
   "scripts": {
     "predev": "pnpm -C ../../packages/db build",
     "dev": "tsx src/main.ts",
+    "dev:bun": "pnpm -C ../../packages/db build && bun src/main.ts",
     "prestart": "pnpm -C ../../packages/db build",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "test": "node dist/mappers-tests.js",
+    "start:bun": "bun dist/main.js",
+    "test": "pnpm run build && node dist/mappers-tests.js && node dist/gammaClient-tests.js && node dist/bootstrap-tests.js",
     "category:backfill": "tsx src/category-backfill.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",

@@ -11,6 +11,8 @@ import { ZodError } from "zod";
 import { onReqEnd, onReqStart } from "./metrics.js";
 import { closeRedis } from "./redis.js";
 import { registerRoutes } from "./routes/index.js";
+import { enforceGlobalRateLimit } from "./lib/global-rate-limit.js";
+import { flushPendingMarketRefreshes } from "./lib/market-refresh.js";
 import { isRecord } from "./lib/type-guards.js";
 import { env } from "./env.js";
 
@@ -54,10 +56,14 @@ export async function buildApp() {
   app.addHook("onRequest", async (req, _reply) => {
     req._t0 = onReqStart();
   });
+  app.addHook("onRequest", async (req, reply) => {
+    await enforceGlobalRateLimit(req, reply);
+  });
   app.addHook("onResponse", async (req, _reply) => {
     if (req._t0 != null) onReqEnd(req._t0);
   });
   app.addHook("onClose", async () => {
+    await flushPendingMarketRefreshes();
     await closeRedis();
   });
 

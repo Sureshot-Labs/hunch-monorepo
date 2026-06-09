@@ -244,6 +244,158 @@ export async function fetchErc1155BalancesByOwner(inputs: {
   return output;
 }
 
+export async function fetchErc1155BalancesByOwners(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  owners: string[];
+  tokenIds: string[];
+  maxPairsPerCall?: number;
+  onRpcCall?: (() => void) | null;
+}): Promise<Map<string, Map<string, bigint>>> {
+  const owners = Array.from(
+    new Map(
+      inputs.owners.map((owner) => {
+        const checksummed = ethers.getAddress(owner);
+        return [checksummed.toLowerCase(), checksummed];
+      }),
+    ).values(),
+  );
+  const tokenIds = Array.from(
+    new Set(
+      inputs.tokenIds
+        .map((tokenId) => tokenId.trim())
+        .filter((tokenId) => /^[0-9]+$/.test(tokenId)),
+    ),
+  );
+  if (owners.length === 0 || tokenIds.length === 0) return new Map();
+
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const maxPairsPerCall = Math.max(
+    1,
+    Math.trunc(inputs.maxPairsPerCall ?? 1000),
+  );
+  const pairs: Array<{ owner: string; ownerKey: string; tokenId: string }> = [];
+  for (const owner of owners) {
+    const ownerKey = owner.toLowerCase();
+    for (const tokenId of tokenIds) {
+      pairs.push({ owner, ownerKey, tokenId });
+    }
+  }
+
+  const output = new Map<string, Map<string, bigint>>();
+  for (let i = 0; i < pairs.length; i += maxPairsPerCall) {
+    const chunk = pairs.slice(i, i + maxPairsPerCall);
+    const accounts = chunk.map((pair) => pair.owner);
+    const ids = chunk.map((pair) => BigInt(pair.tokenId));
+    const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
+      accounts,
+      ids,
+    ]);
+    inputs.onRpcCall?.();
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_call",
+      params: [{ to: contractAddress, data }, "latest"],
+    });
+
+    const decoded = erc1155Iface.decodeFunctionResult(
+      "balanceOfBatch",
+      result,
+    ) as unknown;
+    const balances = Array.isArray(decoded) ? decoded[0] : null;
+    if (!Array.isArray(balances)) {
+      throw new Error("Polygon RPC: invalid balanceOfBatch result");
+    }
+
+    for (let index = 0; index < chunk.length; index += 1) {
+      const pair = chunk[index];
+      const raw = balances[index] as unknown;
+      const value = typeof raw === "bigint" ? raw : null;
+      if (!pair || value == null) continue;
+      const ownerBalances = output.get(pair.ownerKey) ?? new Map();
+      ownerBalances.set(pair.tokenId, value);
+      output.set(pair.ownerKey, ownerBalances);
+    }
+  }
+
+  return output;
+}
+
+export async function fetchErc1155BalancesForOwnerTokenPairs(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  pairs: Array<{ owner: string; tokenId: string }>;
+  maxPairsPerCall?: number;
+  onRpcCall?: (() => void) | null;
+}): Promise<Map<string, Map<string, bigint>>> {
+  const pairs = Array.from(
+    new Map(
+      inputs.pairs.flatMap((pair) => {
+        let owner: string;
+        try {
+          owner = ethers.getAddress(pair.owner);
+        } catch {
+          return [];
+        }
+        if (owner === ethers.ZeroAddress) return [];
+        const tokenId = pair.tokenId.trim();
+        if (!/^[0-9]+$/.test(tokenId)) return [];
+        const key = `${owner.toLowerCase()}:${tokenId}`;
+        return [[key, { owner, ownerKey: owner.toLowerCase(), tokenId }]];
+      }),
+    ).values(),
+  );
+  if (pairs.length === 0) return new Map();
+
+  const contractAddress = ethers.getAddress(inputs.contractAddress);
+  const maxPairsPerCall = Math.max(
+    1,
+    Math.trunc(inputs.maxPairsPerCall ?? 1000),
+  );
+
+  const output = new Map<string, Map<string, bigint>>();
+  for (let i = 0; i < pairs.length; i += maxPairsPerCall) {
+    const chunk = pairs.slice(i, i + maxPairsPerCall);
+    const accounts = chunk.map((pair) => pair.owner);
+    const ids = chunk.map((pair) => BigInt(pair.tokenId));
+    const data = erc1155Iface.encodeFunctionData("balanceOfBatch", [
+      accounts,
+      ids,
+    ]);
+    inputs.onRpcCall?.();
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      method: "eth_call",
+      params: [{ to: contractAddress, data }, "latest"],
+    });
+
+    const decoded = erc1155Iface.decodeFunctionResult(
+      "balanceOfBatch",
+      result,
+    ) as unknown;
+    const balances = Array.isArray(decoded) ? decoded[0] : null;
+    if (!Array.isArray(balances)) {
+      throw new Error("Polygon RPC: invalid balanceOfBatch result");
+    }
+
+    for (let index = 0; index < chunk.length; index += 1) {
+      const pair = chunk[index];
+      const raw = balances[index] as unknown;
+      const value = typeof raw === "bigint" ? raw : null;
+      if (!pair || value == null) continue;
+      const ownerBalances = output.get(pair.ownerKey) ?? new Map();
+      ownerBalances.set(pair.tokenId, value);
+      output.set(pair.ownerKey, ownerBalances);
+    }
+  }
+
+  return output;
+}
+
 export async function fetchEvmCode(inputs: {
   rpcUrl: string;
   timeoutMs: number;
@@ -352,47 +504,6 @@ export async function fetchErc20Allowance(inputs: {
   const value = Array.isArray(decoded) ? decoded[0] : null;
   if (typeof value !== "bigint") {
     throw new Error("Polygon RPC: invalid allowance result");
-  }
-  return value;
-}
-
-export async function fetchPolymarketOrderHash(inputs: {
-  rpcUrl: string;
-  timeoutMs: number;
-  exchangeAddress: string;
-  order: {
-    salt: string | number | bigint;
-    maker: string;
-    signer: string;
-    taker: string;
-    tokenId: string | number | bigint;
-    makerAmount: string | number | bigint;
-    takerAmount: string | number | bigint;
-    expiration: string | number | bigint;
-    nonce: string | number | bigint;
-    feeRateBps: string | number | bigint;
-    side: number;
-    signatureType: number;
-    signature: string;
-  };
-}): Promise<string> {
-  const exchangeAddress = ethers.getAddress(inputs.exchangeAddress);
-  const data = polymarketExchangeIface.encodeFunctionData("hashOrder", [
-    inputs.order,
-  ]);
-  const result = await ethRpcRequest<string>({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    method: "eth_call",
-    params: [{ to: exchangeAddress, data }, "latest"],
-  });
-  const decoded = polymarketExchangeIface.decodeFunctionResult(
-    "hashOrder",
-    result,
-  ) as unknown;
-  const value = Array.isArray(decoded) ? decoded[0] : null;
-  if (typeof value !== "string") {
-    throw new Error("Polygon RPC: invalid hashOrder result");
   }
   return value;
 }

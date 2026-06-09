@@ -14,7 +14,9 @@ The indexer currently writes:
   `unified_tokens`, `unified_market_tokens`
 - top-of-book time series: `unified_book_top`
 - Redis live keys/channels: `top:hyperliquid:*`, `book:hyperliquid:*`,
-  `prices:hyperliquid:*`
+  `prices:hyperliquid:*`, `market_state:hyperliquid:*`,
+  `market_update:hyperliquid:*`
+- Redis indexer heartbeat: `indexer:stats:hyperliquid`
 
 The indexer does not currently write comparable liquidity, open interest,
 cumulative volume, trades, positions, orders, or venue credentials.
@@ -145,8 +147,8 @@ For a safe pre-product canary:
 4. Start with `HYPERLIQUID_SYNC_TOP_BOOKS=false` to validate metadata writes.
 5. Then enable `HYPERLIQUID_SYNC_TOP_BOOKS=true` with a small
    `HYPERLIQUID_MAX_TOP_BOOK_SYNC_TOKENS` value.
-6. Monitor row counts, `unified_book_top` write rate, Redis key counts, and API
-   feed responses.
+6. Monitor row counts, `unified_book_top` write rate, Redis key counts,
+   `indexer:stats:hyperliquid`, and API feed responses.
 
 Before first-class product exposure:
 

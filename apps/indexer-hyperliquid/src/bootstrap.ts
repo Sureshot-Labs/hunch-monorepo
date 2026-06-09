@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chunkArray } from "@hunch/shared";
+import {
+  publishMarketState,
+  publishMarketUpdate,
+  type RedisClientType,
+} from "@hunch/infra";
 import type { Pool } from "pg";
 import { HyperliquidClient } from "./hyperliquid-client.js";
 import { persistHyperliquidSnapshot } from "./hyperliquid-repo.js";
@@ -18,7 +23,8 @@ import type {
   HyperliquidOutcomeMetaResponse,
   HyperliquidSpotMetaAndAssetCtxsResponse,
 } from "./types.js";
-import type { RedisClientType } from "@hunch/infra";
+
+const VENUE = "hyperliquid";
 
 type WrappedSample<T> = {
   response: T;
@@ -107,6 +113,78 @@ export async function syncHyperliquidMetadata(params: {
   }
 
   return snapshot;
+}
+
+function marketTokenIds(market: HyperliquidMappedSnapshot["markets"][number]) {
+  return [market.token_yes, market.token_no].filter(
+    (tokenId): tokenId is string => Boolean(tokenId),
+  );
+}
+
+export async function publishHyperliquidMarketMetadata(params: {
+  redis: RedisClientType;
+  snapshot: HyperliquidMappedSnapshot;
+  tsMs?: number;
+}): Promise<{ markets: number; tokens: number; failed: number }> {
+  const tsMs = params.tsMs ?? Date.now();
+  let markets = 0;
+  let tokens = 0;
+  let failed = 0;
+
+  for (const batch of chunkArray(params.snapshot.markets, 25)) {
+    await Promise.all(
+      batch.map(async (market) => {
+        const tokenIds = marketTokenIds(market);
+        if (tokenIds.length === 0) return;
+        try {
+          await publishMarketUpdate({
+            redis: params.redis,
+            venue: VENUE,
+            tokenIds,
+            marketId: market.id,
+            eventId: market.event_id,
+            conditionId: market.condition_id ?? null,
+            volumeTotal: null,
+            volume24h: market.volume_24h ?? null,
+            liquidity: null,
+            openInterest: null,
+            lastPrice: market.last_price ?? null,
+            status: market.status ?? null,
+            acceptingOrders: null,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+            eventVolumeTotal: null,
+            eventVolume24h: null,
+            eventLiquidity: null,
+            eventOpenInterest: null,
+            tsMs,
+          });
+          await Promise.all(
+            tokenIds.map((tokenId) =>
+              publishMarketState({
+                redis: params.redis,
+                venue: VENUE,
+                tokenId,
+                market: market.id,
+                conditionId: market.condition_id ?? null,
+                eventType: "metadata_refresh",
+                status: market.status ?? null,
+                acceptingOrders: null,
+                resolvedOutcome: market.resolved_outcome ?? null,
+                tsMs,
+              }),
+            ),
+          );
+          markets += 1;
+          tokens += tokenIds.length;
+        } catch {
+          failed += 1;
+        }
+      }),
+    );
+  }
+
+  return { markets, tokens, failed };
 }
 
 async function readHotSet(params: {

@@ -4,6 +4,9 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { pool } from "./db.js";
+import { closeRedis } from "./redis.js";
+
 async function collectTestFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
@@ -53,19 +56,24 @@ if (selected.length === 0) {
   process.exit(1);
 }
 
-let passed = 0;
-for (const file of selected) {
-  const label = file.relative;
-  try {
-    console.log(`[test-runner] running ${label}`);
-    const url = `${pathToFileURL(file.absolute).href}?t=${Date.now()}`;
-    await import(url);
-    passed += 1;
-    console.log(`[test-runner] ok ${label}`);
-  } catch (error) {
-    console.error(`[test-runner] failed ${label}`);
-    throw error;
+try {
+  let passed = 0;
+  for (const file of selected) {
+    const label = file.relative;
+    try {
+      console.log(`[test-runner] running ${label}`);
+      const url = `${pathToFileURL(file.absolute).href}?t=${Date.now()}`;
+      await import(url);
+      passed += 1;
+      console.log(`[test-runner] ok ${label}`);
+    } catch (error) {
+      console.error(`[test-runner] failed ${label}`);
+      throw error;
+    }
   }
-}
 
-console.log(`[test-runner] passed ${passed}/${selected.length}`);
+  console.log(`[test-runner] passed ${passed}/${selected.length}`);
+} finally {
+  await closeRedis();
+  await pool.end();
+}

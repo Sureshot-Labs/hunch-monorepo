@@ -22,7 +22,53 @@ export const embeddedPrivyAuthorizationSignatureSchema = z.object({
   signature: z.string().trim().min(1),
 });
 
+export const embeddedPrivyAuthorizationRequestSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  label: z.string().trim().min(1).max(120),
+  input: z.object({
+    version: z.literal(1),
+    method: z.enum(["POST", "PUT", "PATCH", "DELETE"]),
+    url: z.string().trim().min(1),
+    body: z.unknown(),
+    headers: z.object({
+      "privy-app-id": z.string().trim().min(1),
+      "privy-idempotency-key": z.string().trim().min(1).optional(),
+    }),
+  }),
+});
+
 const embeddedExecutionKeySchema = z.string().trim().min(1).max(160);
+const zSolanaBigintString = z
+  .string()
+  .trim()
+  .regex(/^\d+$/)
+  .min(1)
+  .max(80);
+const zSolanaReadinessBlockingReason = z
+  .enum([
+    "market_not_initialized",
+    "prefund_disabled",
+    "insufficient_usdc_for_prefund",
+    "prefund_rate_limited",
+  ])
+  .nullable();
+
+export const embeddedWalletErrorResponseSchema = z.object({
+  error: z.string(),
+  debug: z.unknown().optional(),
+});
+
+export const solanaPrefundErrorResponseSchema = z.object({
+  error: z.string(),
+});
+
+export const solanaPrefundOperationSchema = z.enum([
+  "dflow_buy",
+  "dflow_sell",
+  "dflow_redeem",
+  "across",
+  "debridge",
+]);
 
 export const embeddedEvmPrepareBodySchema = z.object({
   chainId: z.number().int().positive(),
@@ -59,3 +105,59 @@ export const embeddedSolanaExecuteBodySchema =
     executionKey: embeddedExecutionKeySchema,
     signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
   });
+
+export const solanaReadinessBodySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  operation: solanaPrefundOperationSchema,
+  marketId: z.string().trim().min(1).max(160).optional(),
+});
+
+export const solanaPrefundPrepareBodySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  operation: solanaPrefundOperationSchema,
+  marketId: z.string().trim().min(1).max(160).optional(),
+  amountInRaw: zSolanaBigintString,
+});
+
+export const solanaPrefundExecuteBodySchema = z.object({
+  walletAddress: z.string().trim().min(1).optional(),
+  executionKey: embeddedExecutionKeySchema,
+  signedRequests: z.array(embeddedPrivyAuthorizationSignatureSchema).min(1),
+});
+
+export const solanaReadinessResponseSchema = z.object({
+  ok: z.boolean(),
+  walletAddress: z.string(),
+  operation: solanaPrefundOperationSchema,
+  solBalanceLamports: zSolanaBigintString,
+  solBalance: z.string(),
+  usdcBalanceRaw: zSolanaBigintString,
+  usdcBalance: z.string(),
+  minSolLamports: zSolanaBigintString,
+  targetSolLamports: zSolanaBigintString,
+  maxTopUpLamports: zSolanaBigintString,
+  needsPrefund: z.boolean(),
+  prefundAvailable: z.boolean(),
+  blockingReason: zSolanaReadinessBlockingReason,
+});
+
+export const solanaPrefundPrepareResponseSchema = z.object({
+  ok: z.boolean(),
+  signer: z.string(),
+  executionKey: embeddedExecutionKeySchema,
+  operation: solanaPrefundOperationSchema,
+  amountInRaw: zSolanaBigintString,
+  estimatedOutLamports: zSolanaBigintString,
+  transactionDigest: z.string(),
+  quote: z.unknown(),
+  requests: z.array(embeddedPrivyAuthorizationRequestSchema),
+});
+
+export const solanaPrefundExecuteResponseSchema = z.object({
+  ok: z.boolean(),
+  signer: z.string(),
+  operation: solanaPrefundOperationSchema,
+  amountInRaw: zSolanaBigintString,
+  estimatedOutLamports: zSolanaBigintString,
+  signatures: z.array(z.string()),
+});

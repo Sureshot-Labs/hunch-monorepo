@@ -36,6 +36,8 @@ type TestCase = {
 const ACROSS_SOLANA_SPOKE_POOL = "DLv3NggMiSaef97YCkew5xKUHDh13tVGZ7tydt3ZeAru";
 const SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const POLYGON_USDC = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
+const POLYGON_PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const SOLANA_MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
 function withAcrossEnv(
@@ -160,12 +162,24 @@ const tests: TestCase[] = [
           { ok: true, mode: "solana_source" },
         );
 
+        const solanaToPusdRoute = resolveAcrossRoute({
+          swapType: "cross_chain",
+          srcChainId: HUNCH_SOLANA_CHAIN_ID,
+          dstChainId: "137",
+          srcToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          dstToken: POLYGON_PUSD,
+        });
+        assert.equal(solanaToPusdRoute.ok, false);
+        if (!solanaToPusdRoute.ok) {
+          assert.equal(solanaToPusdRoute.code, "across_token_unsupported");
+        }
+
         assert.deepEqual(
           resolveAcrossRoute({
             swapType: "cross_chain",
             srcChainId: "8453",
             dstChainId: HUNCH_SOLANA_CHAIN_ID,
-            srcToken: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            srcToken: BASE_USDC,
             dstToken: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           }),
           { ok: true, mode: "swap_api" },
@@ -181,6 +195,40 @@ const tests: TestCase[] = [
           }),
           { ok: true, mode: "swap_api" },
         );
+
+        assert.deepEqual(
+          resolveAcrossRoute({
+            swapType: "cross_chain",
+            srcChainId: "8453",
+            dstChainId: "137",
+            srcToken: BASE_USDC,
+            dstToken: POLYGON_PUSD,
+          }),
+          { ok: true, mode: "swap_api" },
+        );
+
+        assert.deepEqual(
+          resolveAcrossRoute({
+            swapType: "cross_chain",
+            srcChainId: "137",
+            dstChainId: "8453",
+            srcToken: POLYGON_PUSD,
+            dstToken: BASE_USDC,
+          }),
+          { ok: true, mode: "swap_api" },
+        );
+
+        const nonPolygonPusdRoute = resolveAcrossRoute({
+          swapType: "cross_chain",
+          srcChainId: "8453",
+          dstChainId: "137",
+          srcToken: POLYGON_PUSD,
+          dstToken: POLYGON_USDC,
+        });
+        assert.equal(nonPolygonPusdRoute.ok, false);
+        if (!nonPolygonPusdRoute.ok) {
+          assert.equal(nonPolygonPusdRoute.code, "across_token_unsupported");
+        }
       });
     },
   },

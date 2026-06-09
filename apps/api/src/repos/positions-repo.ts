@@ -47,6 +47,38 @@ export type PositionPnlSummary = {
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
+const POSITION_TOKEN_MARKET_MATCH_SQL = `
+  select
+    token_market.market_id,
+    token_market.outcome_side
+  from (
+    select
+      ut.market_id,
+      upper(ut.side) as outcome_side
+    from unified_tokens ut
+    where ut.token_id = p.token_id
+      and ut.venue = p.venue
+    union all
+    select
+      umt.market_id,
+      upper(umt.outcome_side) as outcome_side
+    from unified_market_tokens umt
+    where umt.token_id = p.token_id
+      and umt.venue = p.venue
+  ) token_market
+  where token_market.outcome_side in ('YES', 'NO')
+`;
+
+const RESOLVED_POSITION_EXISTS_SQL = `
+  exists (
+    select 1
+    from (${POSITION_TOKEN_MARKET_MATCH_SQL}) token_market
+    join unified_markets m on m.id = token_market.market_id
+    where upper(coalesce(m.resolved_outcome, '')) in ('YES', 'NO')
+       or m.resolved_outcome_pct is not null
+  )
+`;
+
 function isEthAddress(address: string | null | undefined): address is string {
   if (!address) return false;
   return ETH_ADDRESS_RE.test(address);
@@ -242,7 +274,11 @@ export async function fetchPositionPnlSummaryForUserWallet(
     `
       select
         count(*)::text as positions_count,
-        count(*) filter (where p.side <> 'FLAT' and p.size > 0)::text as open_positions_count,
+        count(*) filter (
+          where p.side <> 'FLAT'
+            and p.size > 0
+            and not (${RESOLVED_POSITION_EXISTS_SQL})
+        )::text as open_positions_count,
         coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::text as total_pnl_all_time,
         coalesce(sum(case
           when p.side <> 'FLAT'
@@ -371,7 +407,13 @@ export async function fetchPositionsForUserWallet(
         updated_at
       from positions
       ${whereClause}
-      order by created_at desc nulls last, venue asc, token_id asc, wallet_address asc
+      order by
+        last_updated_at desc nulls last,
+        created_at desc nulls last,
+        venue asc,
+        token_id asc,
+        wallet_address asc,
+        id asc
     `,
     params,
   );
@@ -450,7 +492,13 @@ export async function fetchPositionsForUserWalletByTokenIds(
         updated_at
       from positions
       ${whereClause}
-      order by created_at desc nulls last, venue asc, token_id asc, wallet_address asc
+      order by
+        last_updated_at desc nulls last,
+        created_at desc nulls last,
+        venue asc,
+        token_id asc,
+        wallet_address asc,
+        id asc
     `,
     params,
   );
@@ -497,12 +545,40 @@ export async function setPositionHidden(
     ],
   );
 
+  if (inputs.hidden && (result.rowCount ?? 0) > 0) {
+    const notificationWalletClause = isEthAddress(inputs.walletAddress)
+      ? "lower(p.wallet_address) = lower($4)"
+      : "p.wallet_address = $4";
+
+    await pool.query(
+      `
+        update notifications n
+        set
+          read_at = coalesce(n.read_at, now()),
+          updated_at = now()
+        where n.user_id = $1
+          and n.type = 'position_resolved'
+          and n.dedupe_key in (
+            select 'position_resolved:' || p.id::text
+            from positions p
+            where p.user_id = $1
+              and p.venue = $2
+              and p.token_id = $3
+              and p.position_scope = 'own'
+              and ${notificationWalletClause}
+          )
+      `,
+      [inputs.userId, inputs.venue, inputs.tokenId, inputs.walletAddress],
+    );
+  }
+
   return result.rowCount ?? 0;
 }
 
 export type WalletTokenBalance = {
   tokenId: string;
   size: string;
+  averagePrice?: string | null;
 };
 
 type PositionScope = "own" | "followed";
@@ -522,6 +598,7 @@ async function upsertLongPositionsInTx(
 
   const tokenIds = inputs.positions.map((p) => p.tokenId);
   const sizes = inputs.positions.map((p) => p.size);
+  const averagePrices = inputs.positions.map((p) => p.averagePrice ?? null);
   const protectRecentFlatsSec =
     inputs.protectRecentFlatsSec != null &&
     Number.isFinite(inputs.protectRecentFlatsSec) &&
@@ -540,6 +617,7 @@ async function upsertLongPositionsInTx(
         token_id,
         side,
         size,
+        average_price,
         unrealized_pnl,
         realized_pnl,
         last_updated_at,
@@ -555,51 +633,46 @@ async function upsertLongPositionsInTx(
         v.token_id,
         'LONG',
         v.size::numeric,
+        v.average_price,
         0,
         0,
         now(),
         now(),
         now()
-      from unnest($5::text[], $6::text[]) as v(token_id, size)
+      from unnest($5::text[], $6::text[], $7::numeric[]) as v(token_id, size, average_price)
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
-        side = case
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'FLAT'
-            and positions.size = 0
-            and excluded.size > 0
-          then positions.side
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'LONG'
-            and positions.size > excluded.size
-            and excluded.size > 0
-          then positions.side
-          else 'LONG'
-        end,
-        size = case
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'FLAT'
-            and positions.size = 0
-            and excluded.size > 0
-          then positions.size
-          when $7::int > 0
-            and positions.last_updated_at > now() - ($7::int * interval '1 second')
-            and positions.side = 'LONG'
-            and positions.size > excluded.size
-            and excluded.size > 0
-          then positions.size
-          else excluded.size
-        end,
+        side = 'LONG',
+        size = excluded.size,
+        average_price = coalesce(excluded.average_price, positions.average_price),
         position_scope = case
           when positions.position_scope = 'own' or excluded.position_scope = 'own'
             then 'own'
           else 'followed'
         end,
-        last_updated_at = now(),
+        last_updated_at = case
+          when positions.side is distinct from 'LONG'
+            or positions.size is distinct from excluded.size
+            then now()
+          else positions.last_updated_at
+        end,
         updated_at = now()
+      where not (
+        $8::int > 0
+        and positions.last_updated_at > now() - ($8::int * interval '1 second')
+        and (
+          (
+            positions.side = 'FLAT'
+            and positions.size = 0
+            and excluded.size > 0
+          )
+          or (
+            positions.side = 'LONG'
+            and positions.size > excluded.size
+            and excluded.size > 0
+          )
+        )
+      )
     `,
     [
       inputs.userId,
@@ -608,6 +681,7 @@ async function upsertLongPositionsInTx(
       inputs.positionScope,
       tokenIds,
       sizes,
+      averagePrices,
       protectRecentFlatsSec,
     ],
   );
@@ -627,7 +701,10 @@ async function markMissingPositionsFlatInTx(
     flattenGraceSec?: number;
   },
 ): Promise<number> {
-  let whereClause = "where user_id = $1 and wallet_address = $2 and venue = $3";
+  const walletClause = isEthAddress(inputs.walletAddress)
+    ? "lower(wallet_address) = lower($2)"
+    : "wallet_address = $2";
+  let whereClause = `where user_id = $1 and ${walletClause} and venue = $3`;
   const params: PgParams = [inputs.userId, inputs.walletAddress, inputs.venue];
   let paramCount = 3;
 
@@ -656,6 +733,7 @@ async function markMissingPositionsFlatInTx(
   }
 
   whereClause += " and (side <> 'FLAT' or size <> 0)";
+  whereClause += " and not (is_hidden = true and hidden_reason = 'auto_lost')";
 
   const result = await client.query(
     `
@@ -746,43 +824,6 @@ export async function syncWalletPositionsFromTokenBalances(
   };
 }
 
-export async function autoHideResolvedLosingPositions(
-  pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    venue: Position["venue"];
-  },
-): Promise<number> {
-  const result = await pool.query(
-    `
-      update positions p
-      set
-        is_hidden = true,
-        hidden_reason = 'auto_lost',
-        hidden_at = now(),
-        updated_at = now()
-      from unified_tokens ut
-      join unified_markets m on m.id = ut.market_id
-      where p.user_id = $1
-        and p.wallet_address = $2
-        and p.venue = $3
-        and p.position_scope = 'own'
-        and p.token_id = ut.token_id
-        and ut.venue = $3
-        and (p.is_hidden is null or p.is_hidden = false)
-        and p.side <> 'FLAT'
-        and p.size > 0
-        and m.resolved_outcome is not null
-        and upper(m.resolved_outcome) in ('YES', 'NO')
-        and upper(m.resolved_outcome) <> ut.side
-    `,
-    [inputs.userId, inputs.walletAddress, inputs.venue],
-  );
-
-  return result.rowCount ?? 0;
-}
-
 export async function updatePositionMetrics(
   pool: Pool,
   inputs: {
@@ -808,10 +849,13 @@ export async function updatePositionMetrics(
     `
       update positions p
       set
-        average_price = v.average_price,
+        average_price = case
+          when v.average_price is not null then v.average_price
+          when p.size > 0 then p.average_price
+          else null
+        end,
         realized_pnl = v.realized_pnl,
         unrealized_pnl = v.unrealized_pnl,
-        last_updated_at = now(),
         updated_at = now()
       from (
         select

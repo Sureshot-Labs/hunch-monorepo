@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
 import { fetchFeedCategoryFacetRows } from "../repos/unified-read.js";
 import { getRedis } from "../redis.js";
 import {
@@ -131,11 +132,13 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
+      const durationMinutes = q.duration_minutes;
+      const durationKey = durationMinutes?.join(",") ?? "";
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
 
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `meta:categories:facets:v1:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const cacheKey = `meta:categories:facets:v3:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
       const r = await getRedis();
       const cacheTtl = Math.max(1, env.feedTtlSec);
       const cacheEnabled = env.feedTtlSec > 0;
@@ -175,33 +178,46 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             ).toISOString()
           : undefined;
 
-      const [facetRowsResult, universeRowsResult] = await Promise.all([
-        fetchFeedCategoryFacetRows(pool, {
-          minVol,
-          minLiquidity,
-          q: search,
-          view,
-          eventScope,
-          venues,
-          filter,
-          minProb,
-          maxProb,
-          maxSpread,
-          endWithin,
-          ageSince,
-          nowParam,
-          sevenDaysAgo,
-          sevenDaysFromNow,
-        }),
-        pool.query<{ category: string }>(`
-          select distinct lower(category) as category
-          from unified_events
-          where status = 'ACTIVE'
-            and category is not null
-            and btrim(category) <> ''
-          order by lower(category) asc
-        `),
-      ]);
+      let facetRowsResult: Awaited<
+        ReturnType<typeof fetchFeedCategoryFacetRows>
+      >;
+      let universeRowsResult: { rows: Array<{ category: string }> };
+      try {
+        [facetRowsResult, universeRowsResult] = await Promise.all([
+          fetchFeedCategoryFacetRows(pool, {
+            minVol,
+            minLiquidity,
+            q: search,
+            view,
+            eventScope,
+            venues,
+            filter,
+            minProb,
+            maxProb,
+            maxSpread,
+            durationMinutes,
+            endWithin,
+            ageSince,
+            nowParam,
+            sevenDaysAgo,
+            sevenDaysFromNow,
+          }),
+          pool.query<{ category: string }>(`
+            select category
+            from unified_event_active_categories
+            order by category asc
+          `),
+        ]);
+      } catch (error) {
+        if (isSearchStatementTimeout(error, search)) {
+          req.log.warn(
+            { error, q: search, view },
+            "Category facet search timed out",
+          );
+          return reply.code(504).send({ error: "Search timed out" });
+        }
+        throw error;
+      }
 
       const categoriesMap = new Map<
         string,

@@ -1,11 +1,42 @@
 import { z } from "zod";
+import {
+  ADMIN_USERS_SORT_BY_VALUES,
+  ADMIN_USERS_SORT_DIR_VALUES,
+} from "../services/admin-users-sort.js";
 
-const feePolicyVenueSchema = z.enum(["polymarket", "kalshi"]);
+const feePolicyVenueSchema = z.enum(["polymarket", "kalshi", "limitless"]);
+const adminCursorSchema = z.string().trim().min(1).max(2000);
+const adminPageLimitSchema = z.coerce.number().int().min(1).max(100);
+const adminQueryBooleanSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  return value;
+}, z.boolean());
 
 export const adminFeePolicySchema = z.object({
   venue: feePolicyVenueSchema,
   feeBps: z.coerce.number().int().min(0).max(10_000),
   feeScale: z.coerce.number().min(0).max(10_000).optional(),
+  polymarketBuilderCode: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/)
+    .optional()
+    .or(z.literal("")),
+  polymarketBuilderTakerFeeBps: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(100)
+    .optional(),
+  polymarketBuilderMakerFeeBps: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(50)
+    .optional(),
+  limitlessFeeShareBps: z.coerce.number().int().min(0).max(10_000).optional(),
   effectiveAt: z.string().datetime().optional(),
 });
 
@@ -65,6 +96,7 @@ export const adminRewardsMultiplierPolicySchema = z
   .object({
     effectiveAt: z.string().datetime().optional(),
     globalMultiplier: multiplierValueSchema,
+    globalMultiplierLabel: z.string().trim().max(120).nullable().optional(),
     referralRules: z
       .array(
         z.object({
@@ -81,7 +113,7 @@ export const adminRewardsMultiplierPolicySchema = z
         }),
       )
       .default([]),
-    notes: z.string().trim().max(2000).optional(),
+    notes: z.string().trim().max(2000).nullable().optional(),
   })
   .superRefine((value, ctx) => {
     const referralThresholds = new Set<number>();
@@ -111,7 +143,7 @@ export const adminRewardsMultiplierPolicySchema = z
 
 export const adminRewardsMultiplierOverridesQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+  limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
 
@@ -120,6 +152,7 @@ export const adminRewardsMultiplierOverrideSchema = z
     userId: z.string().uuid().optional(),
     walletAddress: z.string().trim().min(1).optional(),
     multiplier: multiplierValueSchema,
+    label: z.string().trim().max(120).nullable().optional(),
     reason: z.string().trim().max(500).optional(),
     effectiveAt: z.string().datetime().optional(),
     expiresAt: z.string().datetime().nullable().optional(),
@@ -155,10 +188,220 @@ export const adminRewardsMultiplierOverrideParamsSchema = z.object({
   userId: z.string().uuid(),
 });
 
-export const adminUsersQuerySchema = z.object({
-  q: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+export const adminReferralCodesQuerySchema = z.object({
+  q: z.string().trim().min(1).max(120).optional(),
+  policyType: z.enum(["user", "campaign"]).optional(),
+  active: adminQueryBooleanSchema.optional(),
+  usageLimit: z.enum(["limited", "unlimited"]).optional(),
+  limit: adminPageLimitSchema.optional(),
   offset: z.coerce.number().int().min(0).optional(),
+});
+
+const referralCodePolicyNumberSchema = z.coerce
+  .number()
+  .finite()
+  .min(0)
+  .optional();
+
+export const adminReferralCodeCampaignCreateSchema = z.object({
+  code: z.string().trim().min(3).max(10),
+  label: z.string().trim().min(1).max(120).optional(),
+  multiplierOverride: z.coerce.number().positive().finite().optional(),
+  visibleDropPoints: referralCodePolicyNumberSchema,
+  tierDropPoints: referralCodePolicyNumberSchema,
+  maxUses: z.coerce.number().int().positive().optional(),
+});
+
+export const adminReferralCodeParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const adminReferralCodeByCodeParamsSchema = z.object({
+  code: z.string().trim().min(1).max(120),
+});
+
+export const adminReferralCodeReferralsQuerySchema = z.object({
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+const adminFeeLedgerSourceTypeSchema = z.enum(["order", "execution"]);
+const adminFeeLedgerRewardKindSchema = z.enum(["any", "cashback", "referral"]);
+const adminUserOrderKindSchema = z.preprocess(
+  (value) => (typeof value === "string" ? value.toLowerCase() : value),
+  z.enum(["order", "swap"]),
+);
+const adminCsvStringSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .transform((value) =>
+    value
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
+
+export const adminFeeLedgerQuerySchema = z.object({
+  q: z.string().trim().min(1).max(500).optional(),
+  venue: feePolicyVenueSchema.optional(),
+  chainId: z.string().trim().min(1).max(80).optional(),
+  status: z.string().trim().min(1).max(80).optional(),
+  userId: z.string().uuid().optional(),
+  wallet: z.string().trim().min(1).max(160).optional(),
+  orderId: z.string().uuid().optional(),
+  orderHash: z.string().trim().min(1).max(200).optional(),
+  venueOrderId: z.string().trim().min(1).max(200).optional(),
+  txHash: z.string().trim().min(1).max(200).optional(),
+  builderAddress: z.string().trim().min(1).max(160).optional(),
+  destinationAddress: z.string().trim().min(1).max(160).optional(),
+  relayerTransactionId: z.string().trim().min(1).max(200).optional(),
+  feeEventId: z.string().uuid().optional(),
+  sourceId: z.string().trim().min(1).max(500).optional(),
+  sourceType: adminFeeLedgerSourceTypeSchema.optional(),
+  feeProgram: z.string().trim().min(1).max(120).optional(),
+  tokenId: z.string().trim().min(1).max(220).optional(),
+  marketId: z.string().trim().min(1).max(220).optional(),
+  referralCode: z.string().trim().min(1).max(120).optional(),
+  referralCodeId: z.string().uuid().optional(),
+  referralPolicyId: z.string().uuid().optional(),
+  referrerUserId: z.string().uuid().optional(),
+  referredUserId: z.string().uuid().optional(),
+  rewardKind: adminFeeLedgerRewardKindSchema.optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminFeeLedgerDetailParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const adminUserOrderParamsSchema = z.object({
+  id: z.string().uuid(),
+  orderId: z.string().trim().min(1).max(200),
+});
+
+export const adminUserOrdersQuerySchema = z.object({
+  venue: feePolicyVenueSchema.optional(),
+  wallet: z.string().trim().min(1).max(160).optional(),
+  wallets: adminCsvStringSchema.optional(),
+  eventId: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  marketId: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  tokenId: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  status: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
+  type: adminUserOrderKindSchema.optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminReferralCodeFeeEventsQuerySchema =
+  adminFeeLedgerQuerySchema.omit({
+    referralCode: true,
+    referralCodeId: true,
+    referralPolicyId: true,
+  });
+
+export const adminReferralCodeUpdateSchema = z.object({
+  label: z.string().trim().min(1).max(120).nullable().optional(),
+  multiplierOverride: z.coerce
+    .number()
+    .positive()
+    .finite()
+    .nullable()
+    .optional(),
+  visibleDropPoints: referralCodePolicyNumberSchema,
+  tierDropPoints: referralCodePolicyNumberSchema,
+  maxUses: z.coerce.number().int().positive().nullable().optional(),
+  deactivate: z.coerce.boolean().optional(),
+  reactivate: z.coerce.boolean().optional(),
+});
+
+export const adminUsersQuerySchema = z.object({
+  cursor: adminCursorSchema.optional(),
+  q: z.string().trim().min(1).optional(),
+  limit: adminPageLimitSchema.optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  sortBy: z.enum(ADMIN_USERS_SORT_BY_VALUES).default("createdAt"),
+  sortDir: z.enum(ADMIN_USERS_SORT_DIR_VALUES).default("desc"),
+});
+
+const adminInboundReferralResponseSchema = z.object({
+  code: z.string(),
+  policyType: z.enum(["user", "campaign"]).nullable(),
+  label: z.string().nullable(),
+  multiplierOverride: z.number().nullable(),
+  ownerUserId: z.string().nullable(),
+  referrerUserId: z.string().nullable(),
+  referrerEmail: z.string().nullable(),
+  referrerUsername: z.string().nullable(),
+  referrerDisplayName: z.string().nullable(),
+  referrerWalletAddress: z.string().nullable(),
+  attachedAt: z.string().datetime().nullable(),
+});
+
+const adminUserRowResponseSchema = z.object({
+  id: z.string(),
+  email: z.string().nullable(),
+  username: z.string().nullable(),
+  displayName: z.string().nullable(),
+  isAdmin: z.boolean(),
+  kalshiProofBypass: z.boolean(),
+  isActive: z.boolean(),
+  lastLoginAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  referralCode: z.string().nullable(),
+  walletAddress: z.string().nullable(),
+  points: z.number(),
+  tierPoints: z.number(),
+  qualificationPoints: z.number(),
+  rawPoints: z.number(),
+  feeUsdTotal: z.number(),
+  feeUsdCollected: z.number(),
+  volumeUsd: z.number(),
+  referralCount: z.number(),
+  inboundReferral: adminInboundReferralResponseSchema.nullable(),
+});
+
+export const adminUsersResponseSchema = z.object({
+  ok: z.literal(true),
+  users: z.array(adminUserRowResponseSchema),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
+});
+
+export const adminUsersErrorResponseSchema = z.object({
+  error: z.string(),
 });
 
 export const adminUserParamsSchema = z.object({
@@ -166,7 +409,50 @@ export const adminUserParamsSchema = z.object({
 });
 
 export const adminUserActivityQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: adminCursorSchema.optional(),
+  limit: adminPageLimitSchema.optional(),
+});
+
+export const adminUserAnalyticsRangeSchema = z.enum([
+  "24h",
+  "7d",
+  "30d",
+  "90d",
+  "1y",
+  "all",
+]);
+
+export const adminUserAnalyticsQuerySchema = z.object({
+  cursor: adminCursorSchema.optional(),
+  limit: adminPageLimitSchema.optional(),
+  range: adminUserAnalyticsRangeSchema.optional(),
+});
+
+const adminAnalyticsOriginSchema = z.enum(["backend", "browser"]);
+const adminAnalyticsOutcomeSchema = z.enum([
+  "action",
+  "failure",
+  "success",
+  "timeout",
+]);
+
+export const adminAnalyticsRangeQuerySchema = z.object({
+  range: adminUserAnalyticsRangeSchema.optional(),
+});
+
+export const adminAnalyticsEventsQuerySchema = z.object({
+  cursor: adminCursorSchema.optional(),
+  domain: z.string().trim().min(1).max(80).optional(),
+  eventName: z.string().trim().min(1).max(120).optional(),
+  limit: adminPageLimitSchema.optional(),
+  origin: adminAnalyticsOriginSchema.optional(),
+  outcome: adminAnalyticsOutcomeSchema.optional(),
+  q: z.string().trim().min(1).max(200).optional(),
+  range: adminUserAnalyticsRangeSchema.optional(),
+  source: z.string().trim().min(1).max(120).optional(),
+  status: z.string().trim().min(1).max(120).optional(),
+  userId: z.string().uuid().optional(),
+  venue: z.string().trim().min(1).max(120).optional(),
 });
 
 export const adminUserAdminSchema = z.object({
@@ -246,9 +532,9 @@ export const adminPointsSchema = z
     userId: z.string().uuid().optional(),
     walletAddress: z.string().min(1).optional(),
     amount: z.coerce.number().finite().positive(),
-    sourceId: z.string().min(1).optional(),
     sourceType: z.enum(["order", "execution"]).optional(),
     venue: z.string().min(1).optional(),
+    visible: z.boolean().optional(),
   })
   .superRefine((value, ctx) => {
     if (!value.userId && !value.walletAddress) {
@@ -261,9 +547,10 @@ export const adminPointsSchema = z
 
 export const adminManualPointsQuerySchema = z
   .object({
+    cursor: adminCursorSchema.optional(),
     userId: z.string().uuid().optional(),
     walletAddress: z.string().min(1).optional(),
-    limit: z.coerce.number().int().min(1).max(100).optional(),
+    limit: adminPageLimitSchema.optional(),
     offset: z.coerce.number().int().min(0).optional(),
   })
   .superRefine((value, ctx) => {
@@ -325,6 +612,11 @@ export type AdminUsersQuery = z.infer<typeof adminUsersQuerySchema>;
 export type AdminUserParams = z.infer<typeof adminUserParamsSchema>;
 export type AdminUserActivityQuery = z.infer<
   typeof adminUserActivityQuerySchema
+>;
+export type AdminUserOrdersQuery = z.infer<typeof adminUserOrdersQuerySchema>;
+export type AdminUserOrderParams = z.infer<typeof adminUserOrderParamsSchema>;
+export type AdminUserAnalyticsQuery = z.infer<
+  typeof adminUserAnalyticsQuerySchema
 >;
 export type AdminUserAdminBody = z.infer<typeof adminUserAdminSchema>;
 export type AdminUserActiveBody = z.infer<typeof adminUserActiveSchema>;

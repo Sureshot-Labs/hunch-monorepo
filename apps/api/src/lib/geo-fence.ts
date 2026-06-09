@@ -28,13 +28,20 @@ function normalizeIp(value: string): string | null {
 
   if (isIP(trimmed)) return trimmed;
 
+  if (trimmed.startsWith("[") && trimmed.includes("]")) {
+    const closeBracket = trimmed.indexOf("]");
+    const withoutBrackets = trimmed.slice(1, closeBracket);
+    if (isIP(withoutBrackets)) return withoutBrackets;
+  }
+
+  const colonCount = (trimmed.match(/:/g) ?? []).length;
   const lastColon = trimmed.lastIndexOf(":");
-  if (lastColon > 0) {
+  if (colonCount === 1 && lastColon > 0) {
     const withoutPort = trimmed.slice(0, lastColon);
     if (isIP(withoutPort)) return withoutPort;
   }
 
-  return trimmed;
+  return null;
 }
 
 function readHeader(

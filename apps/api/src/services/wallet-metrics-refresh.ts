@@ -70,7 +70,7 @@ async function loadWalletMetricsAggregateRows(
         select
           wa.wallet_id,
           wa.market_id,
-          upper(coalesce(wa.outcome_side, '')) as outcome_side,
+          wa.outcome_side,
           upper(coalesce(wa.action, '')) as action,
           coalesce(
             wa.size_usd,
@@ -141,7 +141,7 @@ async function loadWalletMetricLedgerRows(
       select
         wa.wallet_id,
         wa.market_id,
-        upper(coalesce(wa.outcome_side, '')) as outcome_side,
+        wa.outcome_side,
         wa.action,
         wa.delta_shares::text as delta_shares,
         wa.size_usd::text as size_usd,
@@ -154,7 +154,7 @@ async function loadWalletMetricLedgerRows(
       left join unified_events e on e.id = m.event_id
       where wa.wallet_id = any($1::uuid[])
         and wa.activity_type in ('delta', 'trade')
-        and upper(coalesce(wa.outcome_side, '')) in ('YES', 'NO')
+        and wa.outcome_side in ('YES', 'NO')
         and wa.occurred_at <= $2::timestamptz
         and ($3::timestamptz is null or wa.occurred_at >= $3::timestamptz)
         and ${buildSnapshotDeltaTrackableActivitySql({
@@ -165,7 +165,7 @@ async function loadWalletMetricLedgerRows(
       order by
         wa.wallet_id,
         wa.market_id,
-        upper(coalesce(wa.outcome_side, '')),
+        wa.outcome_side,
         wa.occurred_at asc,
         wa.created_at asc nulls last,
         wa.id asc

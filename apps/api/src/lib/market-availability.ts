@@ -1,10 +1,42 @@
 type ComputeAcceptingOrdersInput = {
+  venue?: string | null;
   status: string | null | undefined;
   closeTime?: unknown;
   expirationTime?: unknown;
   pmAcceptingOrders?: boolean | null;
+  dflowNativeAcceptingOrders?: boolean | null;
   nowMs?: number;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function readDflowNativeAcceptingOrders(
+  metadata: unknown,
+): boolean | null {
+  const parsed = (() => {
+    if (!metadata) return null;
+    if (isRecord(metadata)) return metadata;
+    if (typeof metadata !== "string") return null;
+    try {
+      const value = JSON.parse(metadata);
+      return isRecord(value) ? value : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!parsed) return null;
+
+  const value = parsed.dflowNativeAcceptingOrders;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return null;
+}
 
 function parseTimestampMs(value: unknown): number | null {
   if (value == null) return null;
@@ -39,6 +71,13 @@ export function computeAcceptingOrders(
     normalizedStatus == null
       ? !closedByTime
       : normalizedStatus === "ACTIVE" && !closedByTime;
+
+  const venue =
+    typeof input.venue === "string" ? input.venue.toLowerCase() : null;
+  if (venue === "kalshi") {
+    if (!activeByUnified) return false;
+    return input.dflowNativeAcceptingOrders === true;
+  }
 
   // Fail-closed override for Polymarket-specific availability.
   if (input.pmAcceptingOrders === false) return false;

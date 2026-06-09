@@ -1,5 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import type { QueryResultRow } from "pg";
+import { env } from "../env.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
 
@@ -21,6 +22,7 @@ export type FeedInputs = {
   minProb?: number;
   maxProb?: number;
   maxSpread?: number;
+  durationMinutes?: number[];
   endWithin?: string;
   ageSince?: string;
   nowParam: string;
@@ -47,6 +49,8 @@ export type FavoriteFeedEventPage = {
 
 const LIMITLESS_AMM_STALE_FALLBACK_INTERVAL = "interval '15 minutes'";
 const FEED_HEAVY_QUERY_WORK_MEM = "32MB";
+const FEED_SEARCH_PREFIX_MIN_CHARS = 3;
+const FEED_SEARCH_PREFIX_MAX_CHARS = 6;
 
 function buildLimitlessAmmFallbackAllowedExpr(
   nowParam: string,
@@ -63,6 +67,13 @@ function buildLimitlessAmmFallbackAllowedExpr(
   `;
 }
 
+function buildNativeTradableMarketSql(alias: string): string {
+  return `(
+    ${alias}.venue <> 'kalshi'
+    or lower(coalesce(${alias}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+  )`;
+}
+
 function createParamBuilder() {
   const params: PgParams = [];
   const add = (value: PgParams[number]): string => {
@@ -74,6 +85,35 @@ function createParamBuilder() {
 
 type PgParamAdder = ReturnType<typeof createParamBuilder>["add"];
 
+function buildMarketDurationSql(
+  inputs: Pick<FeedInputs, "durationMinutes">,
+  add: PgParamAdder,
+  alias = "m",
+): string | null {
+  if (!inputs.durationMinutes?.length) return null;
+  return `${alias}.duration_minutes = ANY(${add(inputs.durationMinutes)}::int[])`;
+}
+
+export function buildEventDurationExistsSql(args: {
+  inputs: Pick<FeedInputs, "durationMinutes">;
+  add: PgParamAdder;
+  nowParam: string;
+}): string | null {
+  const durationSql = buildMarketDurationSql(args.inputs, args.add, "dm");
+  if (!durationSql) return null;
+  return `exists (
+    select 1
+    from unified_markets dm
+    where dm.event_id = e.id
+      and dm.status = 'ACTIVE'
+      and (dm.expiration_time is null or dm.expiration_time > ${args.nowParam}::timestamptz)
+      and (dm.close_time is null or dm.close_time > ${args.nowParam}::timestamptz)
+      and ${buildNativeTradableMarketSql("dm")}
+      and ${buildRenderableMarketSql({ alias: "dm" })}
+      and ${durationSql}
+  )`;
+}
+
 type FeedSqlExpressions = {
   safeEventLiquidityExpr: string;
   eventVolumeDisplayExpr: string;
@@ -83,6 +123,7 @@ type FeedSqlExpressions = {
   eventOpenInterestExpr: string;
   eventVolumeSortExpr: string;
   supportedLimitlessMarketExpr: string;
+  nativeTradableMarketExpr: string;
   renderableMarketExpr: string;
   yesMidExpr: string;
 };
@@ -92,6 +133,43 @@ type FeedSearchContext = {
   searchCte: string;
   searchEventJoin: string;
   searchMarketJoin: string;
+  searchFilterExpr: string;
+  joinedRankExpr: string;
+};
+
+type FeedSearchMode = "ranked" | "membership";
+type FeedSearchProfile = "primary" | "full";
+type FeedSearchStrategy = "primary_with_fallback" | "full";
+type FeedSearchVenueFilterTarget = "event" | "market";
+
+type FeedSearchPlan = {
+  hasSearch: boolean;
+  rankMode: FeedSearchMode;
+  strategy: FeedSearchStrategy;
+  searchText: string;
+  prefixQueryText: string | null;
+};
+
+type FeedSearchEarlyFilterInputs = Pick<
+  FeedInputs,
+  "venues" | "category" | "categories" | "endWithin" | "ageSince"
+>;
+
+type FeedSearchEarlyFilterSql = {
+  eventWhere: string[];
+  marketWhere: string[];
+};
+
+export type FeedCandidateEventSearchFilter = {
+  hasSearch: boolean;
+  searchCte: string;
+  searchEventJoin: string;
+  searchFilterExpr: string;
+};
+
+export type FeedSearchResultWindow = {
+  matchLimit: number | null;
+  fallbackThreshold: number | null;
 };
 
 type FeedEventFilterInputs = Pick<
@@ -100,6 +178,7 @@ type FeedEventFilterInputs = Pick<
   | "category"
   | "categories"
   | "filter"
+  | "durationMinutes"
   | "endWithin"
   | "ageSince"
   | "sevenDaysAgo"
@@ -127,6 +206,7 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
   const marketLiquidityDisplayExpr = `
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
+  const nativeTradableMarketExpr = buildNativeTradableMarketSql("m");
   const eventOpenInterestExpr = `
     coalesce(nullif(e.open_interest, 0), nullif(sum(coalesce(m.open_interest, 0)), 0))
   `;
@@ -151,9 +231,308 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
     eventOpenInterestExpr,
     eventVolumeSortExpr,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
     yesMidExpr,
   };
+}
+
+function buildFeedSearchDocumentExpr(
+  alias: string,
+  profile: FeedSearchProfile,
+): string {
+  const primary = `
+    setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.category, '')), 'B')
+  `;
+
+  if (profile === "primary") return primary;
+
+  return `
+    setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.slug, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.category, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(${alias}.description, '')), 'D')
+  `;
+}
+
+function extractFeedSearchPrefixTerms(q?: string): string[] {
+  const terms = (q?.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(
+    (term) => term.length >= 2,
+  );
+  return Array.from(new Set(terms)).slice(0, 8);
+}
+
+function shouldUseFeedSearchPrefix(
+  q: string | undefined,
+  term: string,
+): boolean {
+  const rawTerms = q?.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return (
+    rawTerms.length === 1 &&
+    term.length >= FEED_SEARCH_PREFIX_MIN_CHARS &&
+    term.length <= FEED_SEARCH_PREFIX_MAX_CHARS &&
+    !/^\d+$/.test(term)
+  );
+}
+
+function buildFeedSearchPlan(q?: string): FeedSearchPlan {
+  const searchText = q?.trim() ?? "";
+  const prefixTerms = extractFeedSearchPrefixTerms(searchText);
+  const rawTerms = searchText.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const prefixTerm =
+    prefixTerms.length === 1 &&
+    shouldUseFeedSearchPrefix(searchText, prefixTerms[0])
+      ? prefixTerms[0]
+      : null;
+  return {
+    hasSearch: searchText.length > 0,
+    rankMode: rawTerms.length >= 2 ? "ranked" : "membership",
+    strategy: rawTerms.length <= 1 ? "primary_with_fallback" : "full",
+    searchText,
+    prefixQueryText: prefixTerm ? `${prefixTerm}:*` : null,
+  };
+}
+
+function buildFeedSearchEarlyFilterSql(args: {
+  add: PgParamAdder;
+  inputs?: FeedSearchEarlyFilterInputs;
+  venueTarget?: FeedSearchVenueFilterTarget;
+}): FeedSearchEarlyFilterSql {
+  const { add, inputs, venueTarget = "event" } = args;
+  const eventWhere: string[] = [];
+  const marketWhere: string[] = [];
+  if (!inputs) return { eventWhere, marketWhere };
+
+  if (inputs.venues?.length) {
+    const venuesParam = add(inputs.venues);
+    eventWhere.push(`e.venue = ANY(${venuesParam}::text[])`);
+    marketWhere.push(
+      `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${venuesParam}::text[])`,
+    );
+  }
+  if (inputs.categories?.length) {
+    const categoriesParam = add(inputs.categories);
+    eventWhere.push(`lower(e.category) = ANY(${categoriesParam}::text[])`);
+    marketWhere.push(`lower(e.category) = ANY(${categoriesParam}::text[])`);
+  } else if (inputs.category) {
+    const categoryParam = add(inputs.category.toLowerCase());
+    eventWhere.push(`lower(e.category) = ${categoryParam}`);
+    marketWhere.push(`lower(e.category) = ${categoryParam}`);
+  }
+  if (inputs.endWithin) {
+    const endWithinParam = add(inputs.endWithin);
+    eventWhere.push(
+      `e.end_date is not null and e.end_date <= ${endWithinParam}::timestamptz`,
+    );
+    marketWhere.push(
+      `e.end_date is not null and e.end_date <= ${endWithinParam}::timestamptz`,
+    );
+  }
+  if (inputs.ageSince) {
+    const ageSinceParam = add(inputs.ageSince);
+    eventWhere.push(
+      `e.start_date is not null and e.start_date >= ${ageSinceParam}::timestamptz`,
+    );
+    marketWhere.push(
+      `e.start_date is not null and e.start_date >= ${ageSinceParam}::timestamptz`,
+    );
+  }
+
+  return { eventWhere, marketWhere };
+}
+
+function buildFeedSearchMatchesSql(args: {
+  mode: FeedSearchMode;
+  matchLimit?: number | null;
+  fallbackThreshold?: number | null;
+  nowParam: string;
+  nowCloseParam: string;
+  primaryEventSearchDocExpr: string;
+  primaryMarketSearchDocExpr: string;
+  fullEventSearchDocExpr: string;
+  fullMarketSearchDocExpr: string;
+  renderableMarketExpr: string;
+  nativeTradableMarketExpr: string;
+  strategy: FeedSearchStrategy;
+  earlyFilters?: FeedSearchEarlyFilterSql;
+}): string {
+  const {
+    mode,
+    matchLimit = null,
+    fallbackThreshold = null,
+    nowParam,
+    nowCloseParam,
+    primaryEventSearchDocExpr,
+    primaryMarketSearchDocExpr,
+    fullEventSearchDocExpr,
+    fullMarketSearchDocExpr,
+    renderableMarketExpr,
+    nativeTradableMarketExpr,
+    strategy,
+    earlyFilters,
+  } = args;
+  const marketRankFactor = mode === "ranked" ? " * 2" : "";
+  const eventRankFactor = mode === "ranked" ? " * 2" : "";
+  const eventMembershipScore =
+    "coalesce(e.volume_total, e.open_interest, e.liquidity, 0)";
+  const marketMembershipScore =
+    "coalesce(m.volume_total, m.open_interest, m.liquidity, 0)";
+  const finalLimitClause =
+    matchLimit != null ? `limit ${Math.max(1, Math.floor(matchLimit))}` : "";
+  const fallbackRunExpr =
+    fallbackThreshold != null
+      ? `(select matched from primary_search_state) < ${Math.max(1, Math.floor(fallbackThreshold))}`
+      : "false";
+
+  const buildProfileSql = (
+    profile: FeedSearchProfile,
+    sourcePriority: 1 | 0,
+  ) => {
+    const eventSearchDocExpr =
+      profile === "primary"
+        ? primaryEventSearchDocExpr
+        : fullEventSearchDocExpr;
+    const marketSearchDocExpr =
+      profile === "primary"
+        ? primaryMarketSearchDocExpr
+        : fullMarketSearchDocExpr;
+    const profileGate =
+      profile === "full" && strategy === "primary_with_fallback"
+        ? `and ${fallbackRunExpr}`
+        : "";
+    const eventEarlyWhere = earlyFilters?.eventWhere.length
+      ? `and ${earlyFilters.eventWhere.join(" and ")}`
+      : "";
+    const marketEarlyWhere = earlyFilters?.marketWhere.length
+      ? `and ${earlyFilters.marketWhere.join(" and ")}`
+      : "";
+
+    return `
+      select id, max(rank) as rank, ${sourcePriority}::int as search_priority
+      from (
+        select
+          e.id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${eventSearchDocExpr}), sq.query)${eventRankFactor}`
+              : eventMembershipScore
+          } as rank
+        from unified_events e
+        cross join search_query sq
+        where querytree(sq.query) <> ''
+          ${profileGate}
+          and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${eventEarlyWhere}
+          and (${eventSearchDocExpr}) @@ sq.query
+        union all
+        select
+          e.id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${eventSearchDocExpr}), sq.prefix_query)`
+              : eventMembershipScore
+          } as rank
+        from unified_events e
+        cross join search_query sq
+        where sq.prefix_query is not null
+          and querytree(sq.prefix_query) <> ''
+          ${profileGate}
+          and e.status = 'ACTIVE'
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${eventEarlyWhere}
+          and (${eventSearchDocExpr}) @@ sq.prefix_query
+        union all
+        select
+          m.event_id as id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${marketSearchDocExpr}), sq.query)${marketRankFactor}`
+              : marketMembershipScore
+          } as rank
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        cross join search_query sq
+        where querytree(sq.query) <> ''
+          ${profileGate}
+          and m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${marketEarlyWhere}
+          and ${renderableMarketExpr}
+          and ${nativeTradableMarketExpr}
+          and (${marketSearchDocExpr}) @@ sq.query
+        union all
+        select
+          m.event_id as id,
+          ${
+            mode === "ranked"
+              ? `ts_rank_cd((${marketSearchDocExpr}), sq.prefix_query)`
+              : marketMembershipScore
+          } as rank
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        cross join search_query sq
+        where sq.prefix_query is not null
+          and querytree(sq.prefix_query) <> ''
+          ${profileGate}
+          and m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
+          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+          ${marketEarlyWhere}
+          and ${renderableMarketExpr}
+          and ${nativeTradableMarketExpr}
+          and (${marketSearchDocExpr}) @@ sq.prefix_query
+      ) matches
+      group by id
+      order by search_priority desc, rank desc nulls last, id
+      ${finalLimitClause}
+    `;
+  };
+
+  if (strategy === "full") {
+    return `
+      search_events as materialized (
+        ${buildProfileSql("full", 1)}
+      )
+    `;
+  }
+
+  const primarySql = buildProfileSql("primary", 1);
+  const fallbackSql = buildProfileSql("full", 0);
+  return `
+    primary_search_events as materialized (
+      ${primarySql}
+    ),
+    primary_search_state as materialized (
+      select count(*)::int as matched from primary_search_events
+    ),
+    fallback_search_events as materialized (
+      ${fallbackSql}
+    ),
+    search_events as materialized (
+      select id, rank, search_priority
+      from (
+        select id, rank, search_priority
+        from primary_search_events
+        union all
+        select f.id, f.rank, f.search_priority
+        from fallback_search_events f
+        where not exists (
+          select 1
+          from primary_search_events p
+          where p.id = f.id
+        )
+      ) merged_search_events
+      order by search_priority desc, rank desc nulls last, id
+      ${finalLimitClause}
+    )
+  `;
 }
 
 function buildFeedSearchContext(args: {
@@ -162,6 +541,12 @@ function buildFeedSearchContext(args: {
   nowParam: string;
   nowCloseParam?: string;
   renderableMarketExpr: string;
+  nativeTradableMarketExpr?: string;
+  mode?: FeedSearchMode;
+  matchLimit?: number | null;
+  fallbackThreshold?: number | null;
+  earlyFilterInputs?: FeedSearchEarlyFilterInputs;
+  venueFilterTarget?: FeedSearchVenueFilterTarget;
 }): FeedSearchContext {
   const {
     add,
@@ -169,49 +554,123 @@ function buildFeedSearchContext(args: {
     nowParam,
     nowCloseParam = nowParam,
     renderableMarketExpr,
+    nativeTradableMarketExpr = buildNativeTradableMarketSql("m"),
+    mode = "ranked",
+    matchLimit = null,
+    fallbackThreshold = null,
+    earlyFilterInputs,
+    venueFilterTarget = "event",
   } = args;
-  const hasSearch = Boolean(q);
-  const searchParam = hasSearch ? add(`%${q}%`) : null;
-  const searchCte = hasSearch
+  const plan = buildFeedSearchPlan(q);
+  const searchParam = plan.hasSearch ? add(plan.searchText) : null;
+  const prefixParam = plan.hasSearch ? add(plan.prefixQueryText) : null;
+  const primaryEventSearchDocExpr = buildFeedSearchDocumentExpr("e", "primary");
+  const primaryMarketSearchDocExpr = buildFeedSearchDocumentExpr(
+    "m",
+    "primary",
+  );
+  const fullEventSearchDocExpr = buildFeedSearchDocumentExpr("e", "full");
+  const fullMarketSearchDocExpr = buildFeedSearchDocumentExpr("m", "full");
+  const effectiveMode = mode === "ranked" ? plan.rankMode : mode;
+  const earlyFilters = plan.hasSearch
+    ? buildFeedSearchEarlyFilterSql({
+        add,
+        inputs: earlyFilterInputs,
+        venueTarget: venueFilterTarget,
+      })
+    : undefined;
+  const searchMatchesSql = plan.hasSearch
+    ? buildFeedSearchMatchesSql({
+        mode: effectiveMode,
+        matchLimit,
+        fallbackThreshold,
+        nowParam,
+        nowCloseParam,
+        primaryEventSearchDocExpr,
+        primaryMarketSearchDocExpr,
+        fullEventSearchDocExpr,
+        fullMarketSearchDocExpr,
+        renderableMarketExpr,
+        nativeTradableMarketExpr,
+        strategy: plan.strategy,
+        earlyFilters,
+      })
+    : "";
+  const searchCte = plan.hasSearch
     ? `
-      search_events as materialized (
-        select e.id
-        from unified_events e
-        where e.status = 'ACTIVE'
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and (
-            e.title ilike ${searchParam} or
-            e.description ilike ${searchParam} or
-            e.category ilike ${searchParam} or
-            e.slug ilike ${searchParam}
-          )
-        union
-        select m.event_id as id
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'
-          and e.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and ${renderableMarketExpr}
-          and (
-            m.title ilike ${searchParam} or
-            m.description ilike ${searchParam} or
-            m.category ilike ${searchParam} or
-            m.slug ilike ${searchParam}
-          )
-      )
+      search_query as materialized (
+        select
+          prepared.query,
+          prepared.prefix_query,
+          (
+            querytree(prepared.query) <> ''
+            or (prepared.prefix_query is not null and querytree(prepared.prefix_query) <> '')
+          ) as applies
+        from (
+          select
+            raw.query,
+            case
+              when querytree(raw.query) = '' then null::tsquery
+              else raw.prefix_query
+            end as prefix_query
+          from (
+            select
+              websearch_to_tsquery('english', ${searchParam}::text) as query,
+              case
+                when ${prefixParam}::text is null then null::tsquery
+                else to_tsquery('english', ${prefixParam}::text)
+              end as prefix_query
+          ) raw
+        ) prepared
+      ),
+      ${searchMatchesSql}
     `
     : "";
 
   return {
-    hasSearch,
+    hasSearch: plan.hasSearch,
     searchCte,
-    searchEventJoin: hasSearch ? "join search_events se on se.id = e.id" : "",
-    searchMarketJoin: hasSearch
-      ? "join search_events se on se.id = m.event_id"
+    searchEventJoin: plan.hasSearch
+      ? "cross join search_query sq left join search_events se on se.id = e.id"
       : "",
+    searchMarketJoin: plan.hasSearch
+      ? "cross join search_query sq left join search_events se on se.id = m.event_id"
+      : "",
+    searchFilterExpr: plan.hasSearch
+      ? "(not sq.applies or se.id is not null)"
+      : "true",
+    joinedRankExpr: plan.hasSearch
+      ? "case when sq.applies then (coalesce(se.search_priority, 0) * 1000000000000000000000000000000::numeric + coalesce(se.rank, 0)) else 0 end"
+      : "0::double precision",
+  };
+}
+
+export function buildFeedCandidateEventSearchFilter(args: {
+  add: (value: PgParams[number]) => string;
+  q?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+  matchLimit?: number | null;
+  fallbackThreshold?: number | null;
+  earlyFilterInputs?: FeedSearchEarlyFilterInputs;
+}): FeedCandidateEventSearchFilter {
+  const context = buildFeedSearchContext({
+    add: args.add,
+    q: args.q,
+    nowParam: args.nowParam,
+    nowCloseParam: args.nowCloseParam,
+    renderableMarketExpr: buildRenderableMarketSql({ alias: "m" }),
+    mode: "membership",
+    matchLimit: args.matchLimit,
+    fallbackThreshold: args.fallbackThreshold,
+    earlyFilterInputs: args.earlyFilterInputs,
+  });
+
+  return {
+    hasSearch: context.hasSearch,
+    searchCte: context.searchCte,
+    searchEventJoin: context.searchEventJoin,
+    searchFilterExpr: context.searchFilterExpr,
   };
 }
 
@@ -221,6 +680,8 @@ function buildFeedEventWhere(args: {
   nowParam: string;
   hasSearch: boolean;
   requireNamedCategory?: boolean;
+  includeSearchCondition?: boolean;
+  searchFilterExpr?: string;
 }): string[] {
   const {
     add,
@@ -228,6 +689,8 @@ function buildFeedEventWhere(args: {
     nowParam,
     hasSearch,
     requireNamedCategory = false,
+    includeSearchCondition = true,
+    searchFilterExpr = "e.id in (select id from search_events)",
   } = args;
   const where: string[] = [
     "e.status = 'ACTIVE'",
@@ -245,8 +708,16 @@ function buildFeedEventWhere(args: {
   } else if (inputs.category) {
     where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
   }
-  if (hasSearch) {
-    where.push("e.id in (select id from search_events)");
+  const durationExistsSql = buildEventDurationExistsSql({
+    inputs,
+    add,
+    nowParam,
+  });
+  if (durationExistsSql) {
+    where.push(durationExistsSql);
+  }
+  if (hasSearch && includeSearchCondition) {
+    where.push(searchFilterExpr);
   }
   if (inputs.filter === "newest") {
     where.push(`e.start_date >= ${add(inputs.sevenDaysAgo)}::timestamptz`);
@@ -354,6 +825,10 @@ function buildFeedMarketViewContext(args: {
   nowCloseParam: string;
   expressions: FeedSqlExpressions;
   requireNamedCategory?: boolean;
+  searchMode?: FeedSearchMode;
+  searchMatchLimit?: number | null;
+  searchFallbackThreshold?: number | null;
+  venueFilterTarget?: FeedSearchVenueFilterTarget;
 }) {
   const {
     add,
@@ -362,11 +837,16 @@ function buildFeedMarketViewContext(args: {
     nowCloseParam,
     expressions,
     requireNamedCategory = false,
+    searchMode = "ranked",
+    searchMatchLimit = null,
+    searchFallbackThreshold = null,
+    venueFilterTarget = "market",
   } = args;
   const {
     marketVolumeDisplayExpr,
     marketLiquidityDisplayExpr,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
     yesMidExpr,
   } = expressions;
@@ -379,9 +859,15 @@ function buildFeedMarketViewContext(args: {
     nowParam,
     nowCloseParam,
     renderableMarketExpr,
+    mode: searchMode,
+    matchLimit: searchMatchLimit,
+    fallbackThreshold: searchFallbackThreshold,
+    earlyFilterInputs: inputs,
+    venueFilterTarget,
   });
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
+  const durationSql = buildMarketDurationSql(inputs, add);
   const marketCountCte = `
     market_count as (
       select m.event_id, count(*) as market_count
@@ -390,12 +876,15 @@ function buildFeedMarketViewContext(args: {
       ${search.searchMarketJoin}
       where m.status = 'ACTIVE'
         ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
+        ${search.hasSearch ? `and ${search.searchFilterExpr}` : ""}
         and e.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${nativeTradableMarketExpr}
         and ${renderableMarketExpr}
+        ${durationSql ? `and ${durationSql}` : ""}
       group by m.event_id
     )
   `;
@@ -406,11 +895,15 @@ function buildFeedMarketViewContext(args: {
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
   ];
 
   if (requireNamedCategory) {
     where.push("e.category is not null", "btrim(e.category) <> ''");
+  }
+  if (search.hasSearch) {
+    where.push(search.searchFilterExpr);
   }
   if (marketIdsParam) {
     where.push(`m.id = ANY(${marketIdsParam}::text[])`);
@@ -437,6 +930,9 @@ function buildFeedMarketViewContext(args: {
     where.push(
       `e.start_date is not null and e.start_date >= ${add(inputs.ageSince)}::timestamptz`,
     );
+  }
+  if (durationSql) {
+    where.push(durationSql);
   }
   if (inputs.minLiquidity > 0) {
     where.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
@@ -474,6 +970,47 @@ function isSafeLocalWorkMem(value: string): boolean {
   return /^[1-9][0-9]*(kB|MB|GB)$/i.test(value);
 }
 
+function isSafeStatementTimeoutMs(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && value <= 120_000;
+}
+
+function feedSearchWorkMem(): string {
+  return `${env.feedSearchWorkMemMb}MB`;
+}
+
+function feedSearchStatementTimeoutMs(): number {
+  return env.feedSearchTimeoutMs;
+}
+
+function feedSearchResultMatchLimit(): number {
+  return env.feedSearchResultMatchLimit;
+}
+
+function feedSearchResultMatchLimitForInputs(
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+): number | null {
+  if (inputs.marketIds?.length) return null;
+  const pageAwareLimit = Math.max(inputs.limit + inputs.offset + 100, 200);
+  return Math.min(pageAwareLimit, feedSearchResultMatchLimit());
+}
+
+function feedSearchFallbackThresholdForInputs(
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+): number | null {
+  const matchLimit = feedSearchResultMatchLimitForInputs(inputs);
+  if (matchLimit == null) return null;
+  return Math.min(matchLimit, inputs.limit + inputs.offset + 25);
+}
+
+export function buildFeedSearchResultWindow(
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+): FeedSearchResultWindow {
+  return {
+    matchLimit: feedSearchResultMatchLimitForInputs(inputs),
+    fallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
+  };
+}
+
 async function queryRowsWithLocalSettings<T extends QueryResultRow>(
   pool: Pool,
   sql: string,
@@ -481,11 +1018,13 @@ async function queryRowsWithLocalSettings<T extends QueryResultRow>(
   options?: {
     useSearchHint?: boolean;
     workMem?: string | null;
+    statementTimeoutMs?: number | null;
   },
 ): Promise<T[]> {
   const useSearchHint = options?.useSearchHint ?? false;
   const workMem = options?.workMem ?? null;
-  if (!useSearchHint && !workMem) {
+  const statementTimeoutMs = options?.statementTimeoutMs ?? null;
+  if (!useSearchHint && !workMem && !statementTimeoutMs) {
     const { rows } = await pool.query<T>(sql, params);
     return rows;
   }
@@ -501,6 +1040,16 @@ async function queryRowsWithLocalSettings<T extends QueryResultRow>(
         throw new Error(`Unsafe local work_mem value: ${workMem}`);
       }
       await client.query(`SET LOCAL work_mem = '${workMem}'`);
+    }
+    if (statementTimeoutMs) {
+      if (!isSafeStatementTimeoutMs(statementTimeoutMs)) {
+        throw new Error(
+          `Unsafe local statement_timeout value: ${statementTimeoutMs}`,
+        );
+      }
+      await client.query(
+        `SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`,
+      );
     }
     const { rows } = await client.query<T>(sql, params);
     await client.query("COMMIT");
@@ -523,10 +1072,12 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   params: PgParams,
   useSearchHint: boolean,
   workMem?: string | null,
+  statementTimeoutMs?: number | null,
 ): Promise<T[]> {
   return queryRowsWithLocalSettings<T>(pool, sql, params, {
     useSearchHint,
     workMem,
+    statementTimeoutMs,
   });
 }
 
@@ -610,6 +1161,8 @@ export async function fetchFeedCategoryFacetRows(
       nowCloseParam,
       expressions,
       requireNamedCategory: true,
+      searchMode: "membership",
+      venueFilterTarget: "market",
     });
 
     const withParts: string[] = [];
@@ -640,6 +1193,8 @@ export async function fetchFeedCategoryFacetRows(
       sql,
       params,
       marketContext.hasSearch,
+      marketContext.hasSearch ? feedSearchWorkMem() : null,
+      marketContext.hasSearch ? feedSearchStatementTimeoutMs() : null,
     );
   }
 
@@ -659,6 +1214,9 @@ export async function fetchFeedCategoryFacetRows(
     q: inputs.q,
     nowParam,
     renderableMarketExpr,
+    mode: "membership",
+    earlyFilterInputs: inputs,
+    venueFilterTarget: "event",
   });
   const eventWhere = buildFeedEventWhere({
     add,
@@ -666,6 +1224,7 @@ export async function fetchFeedCategoryFacetRows(
     nowParam,
     hasSearch: search.hasSearch,
     requireNamedCategory: true,
+    searchFilterExpr: search.searchFilterExpr,
   });
   const requiresMarketJoin = requiresFeedEventMarketJoin(inputs);
 
@@ -680,6 +1239,7 @@ export async function fetchFeedCategoryFacetRows(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${buildNativeTradableMarketSql("m")}
           and ${renderableMarketExpr}
       )`,
     );
@@ -699,6 +1259,7 @@ export async function fetchFeedCategoryFacetRows(
         lower(e.category) as category,
         count(*)::int as events
       from unified_events e
+      ${search.searchEventJoin}
       where ${eventOnlyWhere.join(" and ")}
       group by e.venue, lower(e.category)
     `;
@@ -708,6 +1269,8 @@ export async function fetchFeedCategoryFacetRows(
       sql,
       params,
       search.hasSearch,
+      search.hasSearch ? feedSearchWorkMem() : null,
+      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
     );
   }
 
@@ -718,6 +1281,7 @@ export async function fetchFeedCategoryFacetRows(
     marketLiquidityDisplayExpr,
     yesMidExpr,
   });
+  const facetJoinDurationSql = buildMarketDurationSql(inputs, add);
   const withParts: string[] = [];
   if (search.searchCte) withParts.push(search.searchCte);
   withParts.push(`
@@ -727,12 +1291,15 @@ export async function fetchFeedCategoryFacetRows(
         e.venue,
         lower(e.category) as category
       from unified_events e
+      ${search.searchEventJoin}
       join unified_markets m on m.event_id = e.id
         and m.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${buildNativeTradableMarketSql("m")}
         and ${renderableMarketExpr}
+        ${facetJoinDurationSql ? `and ${facetJoinDurationSql}` : ""}
       where ${eventWhere.join(" and ")}
       group by
         e.id,
@@ -760,6 +1327,8 @@ export async function fetchFeedCategoryFacetRows(
     sql,
     params,
     search.hasSearch,
+    search.hasSearch ? feedSearchWorkMem() : null,
+    search.hasSearch ? feedSearchStatementTimeoutMs() : null,
   );
 }
 
@@ -786,12 +1355,17 @@ export async function fetchFeedEventIds(
     q: inputs.q,
     nowParam,
     renderableMarketExpr,
+    matchLimit: feedSearchResultMatchLimitForInputs(inputs),
+    fallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
+    earlyFilterInputs: inputs,
+    venueFilterTarget: "event",
   });
   const eventWhere = buildFeedEventWhere({
     add,
     inputs,
     nowParam,
     hasSearch: search.hasSearch,
+    searchFilterExpr: search.searchFilterExpr,
   });
   const filterRequiresMarketJoin = requiresFeedEventMarketJoin(inputs);
   const requiresMarketJoin =
@@ -816,6 +1390,7 @@ export async function fetchFeedEventIds(
       filtered_events as (
         select e.id
         from unified_events e
+        ${search.searchEventJoin}
         ${eventChangeWhere.length ? "where " + eventChangeWhere.join(" and ") : ""}
       )
     `);
@@ -836,7 +1411,8 @@ export async function fetchFeedEventIds(
       eventChangeSql,
       params,
       search.hasSearch,
-      FEED_HEAVY_QUERY_WORK_MEM,
+      search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
+      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
     );
   }
 
@@ -851,6 +1427,7 @@ export async function fetchFeedEventIds(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${buildNativeTradableMarketSql("m")}
           and ${renderableMarketExpr}
       )`,
     );
@@ -865,6 +1442,9 @@ export async function fetchFeedEventIds(
 
     const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
     let eventOnlyOrder = "";
+    const eventOnlySearchOrder = search.hasSearch
+      ? `${search.joinedRankExpr} desc nulls last, `
+      : "";
     if (inputs.sort === "totalvol")
       eventOnlyOrder = `(${eventVolumeDisplayExpr}) ${sortDir} nulls last, e.id`;
     else if (inputs.sort === "liquidity")
@@ -881,7 +1461,7 @@ export async function fetchFeedEventIds(
       const sevenDaysAgo = add(inputs.sevenDaysAgo);
       const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
       eventOnlyOrder = `
-        (coalesce(${eventVolumeDisplayExpr}, 0) * 0.4 +
+        ${eventOnlySearchOrder}(coalesce(${eventVolumeDisplayExpr}, 0) * 0.4 +
          coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
          case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
          case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
@@ -894,13 +1474,20 @@ export async function fetchFeedEventIds(
       select
         e.id
       from unified_events e
+      ${search.searchEventJoin}
       ${eventOnlyWhere.length ? "where " + eventOnlyWhere.join(" and ") : ""}
       ${eventOnlyOrder ? `order by ${eventOnlyOrder}` : ""}
       limit ${inputs.limit} offset ${inputs.offset}
     `;
 
-    const { rows } = await pool.query<{ id: string }>(eventOnlySql, params);
-    return rows;
+    return await queryRowsWithSearchHint<{ id: string }>(
+      pool,
+      eventOnlySql,
+      params,
+      search.hasSearch,
+      search.hasSearch ? feedSearchWorkMem() : null,
+      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+    );
   }
   const having = buildFeedEventJoinHaving({
     add,
@@ -919,6 +1506,9 @@ export async function fetchFeedEventIds(
       : "";
 
   let eventOrder = "";
+  const eventSearchOrder = search.hasSearch
+    ? `max(${search.joinedRankExpr}) desc nulls last, `
+    : "";
   if (inputs.sort === "totalvol")
     eventOrder = `(${eventVolumeSortExpr}) ${sortDir} nulls last, e.id`;
   else if (inputs.sort === "liquidity")
@@ -945,7 +1535,7 @@ export async function fetchFeedEventIds(
     const sevenDaysAgo = add(inputs.sevenDaysAgo);
     const sevenDaysFromNow = add(inputs.sevenDaysFromNow);
     eventOrder = `
-      (coalesce(${eventVolumeSortExpr}, 0) * 0.4 +
+      ${eventSearchOrder}(coalesce(${eventVolumeSortExpr}, 0) * 0.4 +
        coalesce(${eventLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= ${sevenDaysAgo}::timestamptz then 1000 else 0 end * 0.2 +
        case when e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
@@ -956,18 +1546,22 @@ export async function fetchFeedEventIds(
   const withParts: string[] = [];
   if (search.searchCte) withParts.push(search.searchCte);
   const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
+  const eventJoinDurationSql = buildMarketDurationSql(inputs, add);
 
   const eventSql = `
     ${withClause}
     select
       e.id
     from unified_events e
+    ${search.searchEventJoin}
     join unified_markets m on m.event_id = e.id
       and m.status = 'ACTIVE'
       and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
       and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
       and ${supportedLimitlessMarketExpr}
+      and ${buildNativeTradableMarketSql("m")}
       and ${renderableMarketExpr}
+      ${eventJoinDurationSql ? `and ${eventJoinDurationSql}` : ""}
     ${eventChangeJoin}
     ${tradeJoin}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
@@ -982,13 +1576,19 @@ export async function fetchFeedEventIds(
     eventSql,
     params,
     search.hasSearch,
-    inputs.sort === "change24h" ? FEED_HEAVY_QUERY_WORK_MEM : null,
+    search.hasSearch
+      ? feedSearchWorkMem()
+      : inputs.sort === "change24h"
+        ? FEED_HEAVY_QUERY_WORK_MEM
+        : null,
+    search.hasSearch ? feedSearchStatementTimeoutMs() : null,
   );
 }
 
 export type FeedMarketRow = {
   event_id: string;
   event_title: string | null;
+  event_duration_minutes: number | null;
   category: string | null;
   start_date: unknown;
   end_date: unknown;
@@ -1006,6 +1606,7 @@ export type FeedMarketRow = {
   venue_market_id: string;
   market_title: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   market_open_time: unknown;
@@ -1036,6 +1637,7 @@ export type FeedMarketRow = {
   market_category: string | null;
   market_image: string | null;
   market_icon: string | null;
+  market_metadata: unknown;
   venue_exchange: string | null;
   venue_adapter: string | null;
   market_address: string | null;
@@ -1073,6 +1675,7 @@ export async function fetchFeedMarkets(
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
   const supportedLimitlessMarketExpr = "true";
+  const nativeTradableMarketExpr = buildNativeTradableMarketSql("m");
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const eventVolumeWindowExpr = `
     coalesce(
@@ -1114,10 +1717,15 @@ export async function fetchFeedMarkets(
     `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
   ];
   if (marketIdsParam) {
     marketWhere.push(`m.id = ANY(${marketIdsParam}::text[])`);
+  }
+  const durationSql = buildMarketDurationSql(inputs, add);
+  if (durationSql) {
+    marketWhere.push(durationSql);
   }
 
   if (inputs.minLiquidity > 0) {
@@ -1188,6 +1796,7 @@ export async function fetchFeedMarkets(
           and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
           and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
           and ${supportedLimitlessMarketExpr}
+          and ${nativeTradableMarketExpr}
       )
     `);
   }
@@ -1241,6 +1850,7 @@ export async function fetchFeedMarkets(
     select
       e.id as event_id,
       e.title as event_title,
+      e.duration_minutes as event_duration_minutes,
       e.category,
       e.start_date,
       e.end_date,
@@ -1258,6 +1868,7 @@ export async function fetchFeedMarkets(
       m.venue_market_id,
       m.title as market_title,
       m.market_type as market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       m.open_time as market_open_time,
@@ -1288,6 +1899,7 @@ export async function fetchFeedMarkets(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       coalesce(m.metadata->>'venueExchange', e.metadata->>'venueExchange') as venue_exchange,
       coalesce(m.metadata->>'venueAdapter', e.metadata->>'venueAdapter') as venue_adapter,
       m.metadata->>'address' as market_address,
@@ -1360,6 +1972,9 @@ export async function fetchFeedMarketsDirect(
     nowParam,
     nowCloseParam,
     expressions,
+    searchMatchLimit: feedSearchResultMatchLimitForInputs(inputs),
+    searchFallbackThreshold: feedSearchFallbackThresholdForInputs(inputs),
+    venueFilterTarget: "market",
   });
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
@@ -1399,9 +2014,12 @@ export async function fetchFeedMarketsDirect(
     `;
     marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.sort == null || inputs.sort === "trending") {
+    const searchOrder = marketContext.hasSearch
+      ? `${marketContext.joinedRankExpr} desc nulls last, `
+      : "";
     marketOrder = `
-      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
-       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
+      ${searchOrder}(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 +
+       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
        case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
       ) ${sortDir} nulls last, m.venue_market_id
@@ -1424,13 +2042,11 @@ export async function fetchFeedMarketsDirect(
   const change24hCandidateExpr =
     inputs.sort === "change24h" ? "mc.change_24h" : "null";
 
-  const marketOrderExpr = marketOrder || "m.venue_market_id";
-  const marketCandidatesSql = `
+  const marketCandidatesInnerSql = `
     select
       m.id,
       m.event_id
       ${inputs.sort === "change24h" ? `, (${change24hCandidateExpr}) as change_24h` : ""}
-      , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
     ${marketContext.searchEventJoin}
@@ -1440,6 +2056,12 @@ export async function fetchFeedMarketsDirect(
     where ${where.join(" and ")}
     ${marketOrder ? `order by ${marketOrder}` : ""}
     limit ${limitParam} offset ${offsetParam}
+  `;
+  const marketCandidatesSql = `
+    select
+      page.*,
+      row_number() over () as ord
+    from (${marketCandidatesInnerSql}) page
   `;
 
   const marketBaseSql = `
@@ -1509,6 +2131,7 @@ export async function fetchFeedMarketsDirect(
     select
       e.id as event_id,
       e.title as event_title,
+      e.duration_minutes as event_duration_minutes,
       e.category,
       e.start_date,
       e.end_date,
@@ -1526,6 +2149,7 @@ export async function fetchFeedMarketsDirect(
       m.venue_market_id,
       m.title as market_title,
       m.market_type as market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       m.open_time as market_open_time,
@@ -1556,6 +2180,7 @@ export async function fetchFeedMarketsDirect(
       m.category as market_category,
       m.image as market_image,
       m.icon as market_icon,
+      m.metadata as market_metadata,
       coalesce(m.metadata->>'venueExchange', e.metadata->>'venueExchange') as venue_exchange,
       coalesce(m.metadata->>'venueAdapter', e.metadata->>'venueAdapter') as venue_adapter,
       m.metadata->>'address' as market_address,
@@ -1578,12 +2203,17 @@ export async function fetchFeedMarketsDirect(
     marketSql,
     params,
     {
-      workMem:
-        inputs.sort === "change24h" ||
-        inputs.sort === "trending" ||
-        inputs.sort === "trending_v2"
+      useSearchHint: marketContext.hasSearch,
+      workMem: marketContext.hasSearch
+        ? feedSearchWorkMem()
+        : inputs.sort === "change24h" ||
+            inputs.sort === "trending" ||
+            inputs.sort === "trending_v2"
           ? FEED_HEAVY_QUERY_WORK_MEM
           : null,
+      statementTimeoutMs: marketContext.hasSearch
+        ? feedSearchStatementTimeoutMs()
+        : null,
     },
   );
 }
@@ -1598,65 +2228,39 @@ export async function fetchFavoriteFeedEventPage(
 
   const { params, add } = createParamBuilder();
   const supportedLimitlessMarketExpr = "true";
+  const nativeTradableMarketExpr = buildNativeTradableMarketSql("m");
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const marketIdsParam = add(inputs.marketIds);
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
-  const hasSearch = Boolean(inputs.q);
-  const searchParam = hasSearch ? add(`%${inputs.q}%`) : null;
-  const searchCte = hasSearch
-    ? `
-      search_events as materialized (
-        select e.id
-        from unified_events e
-        where e.status = 'ACTIVE'
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and (
-            e.title ilike ${searchParam} or
-            e.description ilike ${searchParam} or
-            e.category ilike ${searchParam} or
-            e.slug ilike ${searchParam}
-          )
-        union
-        select m.event_id as id
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'
-          and e.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-          and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
-          and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
-          and ${renderableMarketExpr}
-          and (
-            m.title ilike ${searchParam} or
-            m.description ilike ${searchParam} or
-            m.category ilike ${searchParam} or
-            m.slug ilike ${searchParam}
-          )
-      )
-    `
-    : "";
-  const searchEventJoin = hasSearch
-    ? "join search_events se on se.id = e.id"
-    : "";
-  const searchMarketJoin = hasSearch
-    ? "join search_events se on se.id = m.event_id"
-    : "";
+  const search = buildFeedSearchContext({
+    add,
+    q: inputs.q,
+    nowParam,
+    nowCloseParam,
+    renderableMarketExpr,
+    earlyFilterInputs: inputs,
+    venueFilterTarget: "market",
+  });
+  const favoriteDurationSql = buildMarketDurationSql(inputs, add);
   const marketCountCte = `
     market_count as (
       select m.event_id, count(*) as market_count
       from unified_markets m
       join unified_events e on e.id = m.event_id
-      ${searchMarketJoin}
+      ${search.searchMarketJoin}
       where m.status = 'ACTIVE'
         and m.id = ANY(${marketIdsParam}::text[])
+        ${search.hasSearch ? `and ${search.searchFilterExpr}` : ""}
         and e.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
         and (m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)
         and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
         and ${supportedLimitlessMarketExpr}
+        and ${nativeTradableMarketExpr}
         and ${renderableMarketExpr}
+        ${favoriteDurationSql ? `and ${favoriteDurationSql}` : ""}
       group by m.event_id
     )
   `;
@@ -1692,8 +2296,15 @@ export async function fetchFavoriteFeedEventPage(
     `(m.close_time is null or m.close_time > ${nowCloseParam}::timestamptz)`,
     `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
     supportedLimitlessMarketExpr,
+    nativeTradableMarketExpr,
     renderableMarketExpr,
   ];
+  if (search.hasSearch) {
+    where.push(search.searchFilterExpr);
+  }
+  if (favoriteDurationSql) {
+    where.push(favoriteDurationSql);
+  }
 
   if (inputs.venues?.length) {
     where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
@@ -1766,9 +2377,12 @@ export async function fetchFavoriteFeedEventPage(
     `;
     marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.sort == null || inputs.sort === "trending") {
+    const searchOrder = search.hasSearch
+      ? `${search.joinedRankExpr} desc nulls last, `
+      : "";
     marketOrder = `
-      (coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 + 
-       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 + 
+      ${searchOrder}(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 +
+       coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3 +
        case when e.start_date >= (${nowParam}::timestamptz - interval '7 days') then 1000 else 0 end * 0.2 +
        case when e.end_date <= (${nowParam}::timestamptz + interval '7 days') then 500 else 0 end * 0.1
       ) ${sortDir} nulls last, m.venue_market_id
@@ -1807,7 +2421,7 @@ export async function fetchFavoriteFeedEventPage(
       , row_number() over (order by ${marketOrderExpr}) as ord
     from unified_markets m
     join unified_events e on e.id = m.event_id
-    ${searchEventJoin}
+    ${search.searchEventJoin}
     ${marketCountJoin}
     ${change24hCandidateJoin}
     ${tradeJoin}
@@ -1815,7 +2429,7 @@ export async function fetchFavoriteFeedEventPage(
   `;
 
   const withParts: string[] = [];
-  if (searchCte) withParts.push(searchCte);
+  if (search.searchCte) withParts.push(search.searchCte);
   if (needsMarketCount) withParts.push(marketCountCte);
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
   withParts.push(`market_candidates as (${marketCandidatesSql})`);
@@ -1841,11 +2455,18 @@ export async function fetchFavoriteFeedEventPage(
       ) as event_ids
   `;
 
-  const { rows } = await pool.query<{
+  const rows = await queryRowsWithSearchHint<{
     total_markets: number;
     total_events: number;
     event_ids: string[] | null;
-  }>(sql, params);
+  }>(
+    pool,
+    sql,
+    params,
+    search.hasSearch,
+    search.hasSearch ? feedSearchWorkMem() : null,
+    search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+  );
   const row = rows[0];
   if (!row) return { eventIds: [], totalEvents: 0, totalMarkets: 0 };
 
@@ -1861,6 +2482,7 @@ export type MarketDetailsRow = {
   event_title: string | null;
   event_description: string | null;
   event_category: string | null;
+  event_duration_minutes: number | null;
   start_date: unknown;
   end_date: unknown;
   event_liquidity: unknown;
@@ -1874,6 +2496,7 @@ export type MarketDetailsRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   open_time: unknown;
   close_time: unknown;
@@ -1927,6 +2550,7 @@ export async function fetchMarketDetails(
       e.title as event_title,
       e.description as event_description,
       e.category as event_category,
+      e.duration_minutes as event_duration_minutes,
       e.start_date,
       e.end_date,
       e.liquidity as event_liquidity,
@@ -1940,6 +2564,7 @@ export async function fetchMarketDetails(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       m.open_time,
       m.close_time,
@@ -2030,6 +2655,7 @@ export type EventDetailsRow = {
   event_description: string | null;
   event_category: string | null;
   event_status: string | null;
+  event_duration_minutes: number | null;
   start_date: unknown;
   end_date: unknown;
   event_volume_total: unknown;
@@ -2048,6 +2674,7 @@ export type EventDetailsRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   pm_neg_risk: boolean | null;
@@ -2087,17 +2714,21 @@ export type EventDetailsRow = {
 
 export type MarketSignalPricingRow = {
   market_id: string;
+  venue: string;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   close_time: unknown;
   expiration_time: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  token_yes: string | null;
+  token_no: string | null;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
   last_price: unknown;
+  market_metadata: unknown;
   resolved_outcome: string | null;
   resolved_outcome_pct: unknown;
 };
@@ -2117,6 +2748,7 @@ export async function fetchEventDetails(
       e.description as event_description,
       e.category as event_category,
       e.status as event_status,
+      e.duration_minutes as event_duration_minutes,
       e.start_date,
       e.end_date,
       e.volume_total as event_volume_total,
@@ -2135,6 +2767,7 @@ export async function fetchEventDetails(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       pm.neg_risk as pm_neg_risk,
@@ -2223,17 +2856,21 @@ export async function fetchMarketSignalPricingByIds(
   const sql = `
     SELECT
       m.id as market_id,
+      m.venue,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       m.close_time,
       m.expiration_time,
       m.best_bid,
       m.best_ask,
+      mt.token_yes,
+      mt.token_no,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
       m.last_price,
+      m.metadata as market_metadata,
       m.resolved_outcome,
       m.resolved_outcome_pct
     FROM unified_markets m
@@ -2280,6 +2917,7 @@ export type MarketByTokenRow = {
   market_title: string | null;
   market_description: string | null;
   market_type: string | null;
+  market_duration_minutes: number | null;
   market_status: string | null;
   pm_accepting_orders: boolean | null;
   pm_neg_risk: boolean | null;
@@ -2326,6 +2964,7 @@ export type MarketByTokenRow = {
   event_description: string | null;
   event_category: string | null;
   event_status: string | null;
+  event_duration_minutes: number | null;
   start_date: unknown;
   end_date: unknown;
   event_volume_total: unknown;
@@ -2409,6 +3048,7 @@ export async function fetchMarketsByTokenIds(
       m.title as market_title,
       m.description as market_description,
       m.market_type,
+      m.duration_minutes as market_duration_minutes,
       m.status as market_status,
       pm.accepting_orders as pm_accepting_orders,
       pm.neg_risk as pm_neg_risk,
@@ -2431,7 +3071,7 @@ export async function fetchMarketsByTokenIds(
       token_yes.token_id as token_yes,
       token_no.token_id as token_no,
       m.clob_token_ids,
-      m.condition_id,
+      coalesce(m.condition_id, pm.condition_id) as condition_id,
       m.market_ledger,
       m.settlement_mint,
       m.is_initialized,
@@ -2452,6 +3092,7 @@ export async function fetchMarketsByTokenIds(
       e.description as event_description,
       e.category as event_category,
       e.status as event_status,
+      e.duration_minutes as event_duration_minutes,
       e.start_date,
       e.end_date,
       e.volume_total as event_volume_total,

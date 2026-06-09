@@ -283,6 +283,134 @@ test("Kalshi public enrichment fills missing DFlow price fields from public Kals
   assert.equal(enriched.filledLastPrice, 1);
 });
 
+test("finalized DFlow markets stay settled and do not use public prices for trading", () => {
+  const mapped = mapToUnifiedMarket(
+    makeMarket({
+      ticker: "KXNBA-26-SETTLED",
+      status: "finalized",
+      result: "yes",
+      yesBid: null,
+      yesAsk: null,
+      noBid: null,
+      noAsk: null,
+    }),
+    "kalshi:KXNBA-26",
+    "Pro Basketball Champion?",
+    "sports",
+    DEFAULT_USDC_MINT,
+    false,
+  );
+
+  assert.ok(mapped);
+  assert.equal(mapped.marketRow.status, "SETTLED");
+  assert.equal(mapped.marketRow.best_bid, undefined);
+  assert.equal(mapped.marketRow.best_ask, undefined);
+  assert.equal(mapped.marketRow.resolved_outcome, "YES");
+  assert.equal(
+    (mapped.marketRow.metadata as Record<string, unknown>)
+      .dflowNativeAcceptingOrders,
+    false,
+  );
+  assert.equal(mapped.snapshot, null);
+
+  const publicEvent: KalshiPublicEventData = {
+    eventTicker: "KXNBA-26",
+    marketsByTicker: new Map([
+      [
+        "KXNBA-26-SETTLED",
+        {
+          ticker: "KXNBA-26-SETTLED",
+          bestBid: 0.99,
+          bestAsk: 1,
+          noBid: 0,
+          noAsk: 0.01,
+          lastPrice: 1,
+          volumeTotal: 100,
+          volume24h: 0,
+          openInterest: 100,
+          liquidity: 0,
+        },
+      ],
+    ]),
+  };
+
+  const enriched = applyKalshiPublicEventToMappedMarkets([mapped], publicEvent);
+  const first = enriched.mappedMarkets[0];
+  assert.ok(first);
+  assert.equal(first.marketRow.best_bid, undefined);
+  assert.equal(first.marketRow.best_ask, undefined);
+  assert.equal(first.marketRow.last_price, undefined);
+  assert.equal(first.marketRow.volume_total, 100);
+  assert.equal(first.marketRow.open_interest, 100);
+  assert.equal(first.snapshot, null);
+  assert.equal(enriched.filledBestBid, 0);
+  assert.equal(enriched.filledBestAsk, 0);
+  assert.equal(enriched.filledLastPrice, 0);
+});
+
+test("uninitialized DFlow markets are not marked accepting when initialization is required", () => {
+  const mapped = mapToUnifiedMarket(
+    makeMarket({
+      ticker: "KXNBA-26-UNINITIALIZED",
+      yesBid: 0.41,
+      yesAsk: 0.42,
+      noBid: 0.58,
+      noAsk: 0.59,
+      accounts: {
+        [DEFAULT_USDC_MINT]: {
+          isInitialized: false,
+          yesMint: "yes-uninitialized-mint",
+          noMint: "no-uninitialized-mint",
+        },
+      },
+    }),
+    "kalshi:KXNBA-26",
+    "Pro Basketball Champion?",
+    "sports",
+    DEFAULT_USDC_MINT,
+    true,
+  );
+
+  assert.ok(mapped);
+  assert.equal(
+    (mapped.marketRow.metadata as Record<string, unknown>)
+      .dflowNativeAcceptingOrders,
+    false,
+  );
+  assert.equal(mapped.marketRow.best_bid, undefined);
+  assert.equal(mapped.marketRow.best_ask, undefined);
+  assert.equal(mapped.marketRow.last_price, undefined);
+  assert.equal(mapped.snapshot, null);
+});
+
+test("terminal DFlow asks are not treated as actionable liquidity", () => {
+  const mapped = mapToUnifiedMarket(
+    makeMarket({
+      ticker: "KXNBA-26-TERMINAL",
+      yesBid: 0.99,
+      yesAsk: 1,
+      noBid: 0,
+      noAsk: 1,
+    }),
+    "kalshi:KXNBA-26",
+    "Pro Basketball Champion?",
+    "sports",
+    DEFAULT_USDC_MINT,
+    false,
+  );
+
+  assert.ok(mapped);
+  assert.equal(
+    (mapped.marketRow.metadata as Record<string, unknown>)
+      .dflowNativeAcceptingOrders,
+    false,
+  );
+  assert.equal(mapped.marketRow.best_bid, undefined);
+  assert.equal(mapped.marketRow.best_ask, undefined);
+  assert.equal(mapped.marketRow.last_price, undefined);
+  assert.equal(mapped.snapshot, null);
+});
+
 test("Kalshi public enrichment leaves unmatched markets unchanged", () => {
   const mapped = mapToUnifiedMarket(
     makeMarket({

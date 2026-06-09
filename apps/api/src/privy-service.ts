@@ -1,9 +1,7 @@
 import {
   PrivyClient,
   type AuthTokenClaims,
-  type LinkedAccountWithMetadata,
   type User,
-  type WalletWithMetadata,
 } from "@privy-io/server-auth";
 import bs58 from "bs58";
 import { env } from "./env.js";
@@ -36,15 +34,7 @@ const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const PRIVY_USER_SYNC_MAX_ATTEMPTS = 6;
 const PRIVY_USER_SYNC_RETRY_DELAY_MS = 250;
 
-type CrossAppWalletRef = {
-  address?: string | null;
-};
-
-type CrossAppAccount = LinkedAccountWithMetadata & {
-  type: "cross_app";
-  embeddedWallets?: CrossAppWalletRef[] | null;
-  smartWallets?: CrossAppWalletRef[] | null;
-};
+type UnknownRecord = Record<string, unknown>;
 
 function normalizeWalletAddress(walletType: PrivyWalletType, address: string) {
   const trimmed = address.trim();
@@ -79,16 +69,54 @@ type VerifyTokenAndGetUserOptions = {
   syncRetryDelayMs?: number;
 };
 
-function isWalletAccount(
-  account: LinkedAccountWithMetadata,
-): account is WalletWithMetadata {
-  return account.type === "wallet";
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isCrossAppAccount(
-  account: LinkedAccountWithMetadata,
-): account is CrossAppAccount {
-  return account.type === "cross_app";
+function readString(
+  record: UnknownRecord,
+  camelKey: string,
+  snakeKey?: string,
+): string | null {
+  const value = record[camelKey] ?? (snakeKey ? record[snakeKey] : undefined);
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function readBoolean(
+  record: UnknownRecord,
+  camelKey: string,
+  snakeKey?: string,
+): boolean | null {
+  const value = record[camelKey] ?? (snakeKey ? record[snakeKey] : undefined);
+  return typeof value === "boolean" ? value : null;
+}
+
+function readArray(
+  record: UnknownRecord,
+  camelKey: string,
+  snakeKey?: string,
+): unknown[] {
+  const value = record[camelKey] ?? (snakeKey ? record[snakeKey] : undefined);
+  return Array.isArray(value) ? value : [];
+}
+
+function readWalletType(record: UnknownRecord): PrivyWalletType | null {
+  const chainType = readString(record, "chainType", "chain_type");
+  return chainType === "ethereum" || chainType === "solana"
+    ? chainType
+    : null;
+}
+
+function readLinkedAccounts(privyUser: PrivyUser): unknown[] {
+  const record = privyUser as unknown as UnknownRecord;
+  return readArray(record, "linkedAccounts", "linked_accounts");
+}
+
+function readPrimaryWallet(privyUser: PrivyUser): UnknownRecord | null {
+  const wallet = (privyUser as unknown as UnknownRecord).wallet;
+  return isRecord(wallet) ? wallet : null;
 }
 
 function addWallet(
@@ -218,39 +246,54 @@ export class PrivyService {
     const out: PrivyWallet[] = [];
     const seen = new Set<string>();
 
-    for (const account of privyUser.linkedAccounts) {
-      if (isWalletAccount(account)) {
-        const chainType = account.chainType;
-        if (chainType !== "ethereum" && chainType !== "solana") continue;
-        addWallet(out, seen, chainType, account.address);
+    for (const accountRaw of readLinkedAccounts(privyUser)) {
+      if (!isRecord(accountRaw)) continue;
+      const accountType = readString(accountRaw, "type");
+      if (accountType === "wallet") {
+        const chainType = readWalletType(accountRaw);
+        const address = readString(accountRaw, "address");
+        if (!chainType || !address) continue;
+        addWallet(out, seen, chainType, address);
         continue;
       }
 
-      if (!isCrossAppAccount(account)) continue;
+      if (accountType !== "cross_app") continue;
 
-      for (const wallet of account.embeddedWallets ?? []) {
-        if (typeof wallet.address !== "string") continue;
-        const walletType = inferWalletTypeFromAddress(wallet.address);
+      for (const wallet of readArray(
+        accountRaw,
+        "embeddedWallets",
+        "embedded_wallets",
+      )) {
+        if (!isRecord(wallet)) continue;
+        const address = readString(wallet, "address");
+        if (!address) continue;
+        const walletType = inferWalletTypeFromAddress(address);
         if (!walletType) continue;
-        addWallet(out, seen, walletType, wallet.address);
+        addWallet(out, seen, walletType, address);
       }
 
-      for (const wallet of account.smartWallets ?? []) {
-        if (typeof wallet.address !== "string") continue;
-        const walletType = inferWalletTypeFromAddress(wallet.address);
+      for (const wallet of readArray(
+        accountRaw,
+        "smartWallets",
+        "smart_wallets",
+      )) {
+        if (!isRecord(wallet)) continue;
+        const address = readString(wallet, "address");
+        if (!address) continue;
+        const walletType = inferWalletTypeFromAddress(address);
         if (!walletType) continue;
-        addWallet(out, seen, walletType, wallet.address);
+        addWallet(out, seen, walletType, address);
       }
     }
 
     // Some Privy accounts expose a `user.wallet` (most recently linked wallet) which may not
     // be present in `linkedAccounts` under some configurations; include it as a fallback.
-    const primary = privyUser.wallet;
-    if (primary?.address && primary.chainType) {
-      const chainType = primary.chainType;
-      if (chainType === "ethereum" || chainType === "solana") {
-        addWallet(out, seen, chainType, primary.address, { prepend: true });
-      }
+    const primary = readPrimaryWallet(privyUser);
+    if (primary) {
+      const chainType = readWalletType(primary);
+      const address = readString(primary, "address");
+      if (chainType && address)
+        addWallet(out, seen, chainType, address, { prepend: true });
     }
 
     return out;
@@ -267,61 +310,87 @@ export class PrivyService {
     const out: PrivyWalletProfile[] = [];
     const seen = new Set<string>();
 
-    for (const account of privyUser.linkedAccounts) {
-      if (isWalletAccount(account)) {
-        const chainType = account.chainType;
-        if (chainType !== "ethereum" && chainType !== "solana") continue;
+    for (const accountRaw of readLinkedAccounts(privyUser)) {
+      if (!isRecord(accountRaw)) continue;
+      const accountType = readString(accountRaw, "type");
+      if (accountType === "wallet") {
+        const chainType = readWalletType(accountRaw);
+        const address = readString(accountRaw, "address");
+        if (!chainType || !address) continue;
+        const walletClientType = readString(
+          accountRaw,
+          "walletClientType",
+          "wallet_client_type",
+        );
+        const connectorType = readString(
+          accountRaw,
+          "connectorType",
+          "connector_type",
+        );
+        const imported = readBoolean(accountRaw, "imported");
         const source: PrivyWalletSource =
-          account.walletClientType === "privy" &&
-          account.connectorType === "embedded" &&
-          account.imported !== true
+          walletClientType === "privy" &&
+          connectorType === "embedded" &&
+          imported !== true
             ? "embedded"
             : "external";
         addWalletProfile(out, seen, {
-          address: account.address,
+          address,
           walletType: chainType,
           source,
-          walletId: account.id ?? undefined,
+          walletId: readString(accountRaw, "id") ?? undefined,
         });
         continue;
       }
 
-      if (!isCrossAppAccount(account)) continue;
+      if (accountType !== "cross_app") continue;
 
-      for (const wallet of account.embeddedWallets ?? []) {
-        if (typeof wallet.address !== "string") continue;
-        const walletType = inferWalletTypeFromAddress(wallet.address);
+      for (const wallet of readArray(
+        accountRaw,
+        "embeddedWallets",
+        "embedded_wallets",
+      )) {
+        if (!isRecord(wallet)) continue;
+        const address = readString(wallet, "address");
+        if (!address) continue;
+        const walletType = inferWalletTypeFromAddress(address);
         if (!walletType) continue;
         addWalletProfile(out, seen, {
-          address: wallet.address,
+          address,
           walletType,
           source: "embedded",
         });
       }
 
-      for (const wallet of account.smartWallets ?? []) {
-        if (typeof wallet.address !== "string") continue;
-        const walletType = inferWalletTypeFromAddress(wallet.address);
+      for (const wallet of readArray(
+        accountRaw,
+        "smartWallets",
+        "smart_wallets",
+      )) {
+        if (!isRecord(wallet)) continue;
+        const address = readString(wallet, "address");
+        if (!address) continue;
+        const walletType = inferWalletTypeFromAddress(address);
         if (!walletType) continue;
         addWalletProfile(out, seen, {
-          address: wallet.address,
+          address,
           walletType,
           source: "smart",
         });
       }
     }
 
-    const primary = privyUser.wallet;
-    if (primary?.address && primary.chainType) {
-      const chainType = primary.chainType;
-      if (chainType === "ethereum" || chainType === "solana") {
+    const primary = readPrimaryWallet(privyUser);
+    if (primary) {
+      const chainType = readWalletType(primary);
+      const address = readString(primary, "address");
+      if (chainType && address)
         addWalletProfile(out, seen, {
-          address: primary.address,
+          address,
           walletType: chainType,
           source: "unknown",
           prepend: true,
         });
-      }
     }
 
     return out;

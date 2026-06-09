@@ -345,8 +345,8 @@ export async function loadLatestWalletPositionNowMap(
           venue::text as venue,
           market_id::text as market_id,
           case
-            when upper(coalesce(outcome_side, '')) in ('YES', 'NO')
-              then upper(coalesce(outcome_side, ''))
+            when outcome_side in ('YES', 'NO')
+              then outcome_side
             else null
           end as outcome_side
         from jsonb_to_recordset($1::jsonb) as x(
@@ -395,12 +395,9 @@ export async function loadLatestWalletPositionNowMap(
        and ws.snapshot_at = l.snapshot_at
        and ws.market_id = ik.market_id
        and (
-         case
-           when upper(coalesce(ws.outcome_side, '')) in ('YES', 'NO')
-             then upper(coalesce(ws.outcome_side, ''))
-           else null
-         end
-       ) is not distinct from ik.outcome_side
+         (ik.outcome_side is null and ws.outcome_side = '')
+         or ws.outcome_side = ik.outcome_side
+       )
       left join unified_markets um on um.id = ik.market_id
     `,
     [JSON.stringify(payload)],

@@ -20,8 +20,14 @@ import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 import {
   capTreasurySweepAmountMicro,
   getRewardsTreasuryReport,
+  reserveTreasurySweepAmountMicro,
 } from "./services/rewards-treasury.js";
+import { runPolymarketBuilderSweep } from "./services/polymarket-builder-sweeps.js";
 import { waitForSolanaSignatureConfirmation } from "./services/solana-rpc.js";
+import {
+  fetchVenueFeeAccrualReserveMicro,
+  unlockVenueFeeAccruals,
+} from "./services/venue-fee-accruals.js";
 
 export type RewardsTreasurySweepOptions = {
   execute: boolean;
@@ -133,6 +139,8 @@ type PlannedSweepAction = {
   hotBalanceLeftIfApplied: string | null;
   reserveFloorNow: string | null;
   sweepableNow: string | null;
+  sweepableAfterFeeAccrualReserve: string | null;
+  feeAccrualReserve: string | null;
   shouldSweep: boolean;
   reason: string | null;
   executed: boolean;
@@ -560,6 +568,34 @@ export async function runRewardsTreasurySweep(
     ? [normalizedChainId]
     : REWARDS_CHAIN_IDS;
   return withRewardsChainLocks(pool, lockTargets, async () => {
+    const polymarketBuilderSweep = lockTargets.includes("137")
+      ? await runPolymarketBuilderSweep(pool, {
+          dryRun: options.dryRun,
+          execute: options.execute,
+        })
+      : null;
+    if (
+      polymarketBuilderSweep &&
+      polymarketBuilderSweep.status !== "disabled"
+    ) {
+      console.log(
+        `Polymarket builder sweep: status=${polymarketBuilderSweep.status} reason=${polymarketBuilderSweep.reason ?? "n/a"} amountRaw=${polymarketBuilderSweep.amountRaw ?? "0"}`,
+      );
+    }
+
+    for (const chainId of lockTargets) {
+      const unlock = await unlockVenueFeeAccruals(pool, {
+        chainId,
+        dryRun: options.dryRun,
+        assumeRewardsChainLock: true,
+      });
+      if (unlock.considered || unlock.unlocked) {
+        console.log(
+          `Venue fee accrual unlock (${chainId}): considered=${unlock.considered} unlocked=${unlock.unlocked} skipped=${unlock.skipped} budgetMicro=${unlock.budgetMicro}`,
+        );
+      }
+    }
+
     const report = await getRewardsTreasuryReport(pool, {
       chainId: normalizedChainId,
     });
@@ -569,13 +605,31 @@ export async function runRewardsTreasurySweep(
     }
 
     const minSweepMicro = env.rewardsTreasuryMinSweepMicro;
+    const feeAccrualReserveByChain = new Map<RewardsChainId, bigint>();
+    await Promise.all(
+      lockTargets.map(async (chainId) => {
+        feeAccrualReserveByChain.set(
+          chainId,
+          await fetchVenueFeeAccrualReserveMicro(pool, { chainId }),
+        );
+      }),
+    );
 
     const actions: PlannedSweepAction[] = report.chains.map((chain) => {
       const sweepableNowMicro = BigInt(chain.sweepableNowMicro);
       const reserveFloorMicro = BigInt(chain.reserveFloorMicro);
       const hotBalanceNowMicro = BigInt(chain.controlledHotBalanceMicro);
+      const normalizedActionChainId = normalizeRewardsChainId(chain.chainId);
+      const feeAccrualReserveMicro = normalizedActionChainId
+        ? (feeAccrualReserveByChain.get(normalizedActionChainId) ?? 0n)
+        : 0n;
+      const sweepableAfterFeeAccrualReserveMicro =
+        reserveTreasurySweepAmountMicro(
+          sweepableNowMicro,
+          feeAccrualReserveMicro,
+        );
       const amountMicro = capTreasurySweepAmountMicro(
-        sweepableNowMicro,
+        sweepableAfterFeeAccrualReserveMicro,
         options.maxMicro,
       );
       const hotBalanceLeftIfAppliedMicro =
@@ -588,6 +642,12 @@ export async function runRewardsTreasurySweep(
       if (!shouldSweep) {
         if (!chain.hotBalanceAvailable) {
           reason = `hot_balance_unavailable:${chain.hotBalanceError ?? "unknown"}`;
+        } else if (
+          amountMicro === 0n &&
+          sweepableNowMicro > 0n &&
+          feeAccrualReserveMicro > 0n
+        ) {
+          reason = "reserved_for_fee_accruals";
         } else if (amountMicro === 0n) {
           reason = "no_surplus";
         } else {
@@ -611,6 +671,12 @@ export async function runRewardsTreasurySweep(
         ),
         reserveFloorNow: usdcMicroToDecimalString(reserveFloorMicro),
         sweepableNow: usdcMicroToDecimalString(sweepableNowMicro),
+        sweepableAfterFeeAccrualReserve: usdcMicroToDecimalString(
+          sweepableAfterFeeAccrualReserveMicro,
+        ),
+        feeAccrualReserve: usdcMicroToDecimalString(
+          feeAccrualReserveMicro,
+        ),
         shouldSweep,
         reason,
         executed: false,
@@ -664,6 +730,10 @@ export async function runRewardsTreasurySweep(
     }
 
     let status = deriveRunStatus(actions);
+    const builderSweepFailed = polymarketBuilderSweep?.status === "failed";
+    if (builderSweepFailed) {
+      status = status === "completed" ? "partial" : "failed";
+    }
     const failedCount = actions.filter(
       (action) => action.shouldSweep && action.error != null,
     ).length;
@@ -690,6 +760,7 @@ export async function runRewardsTreasurySweep(
           liabilityMode: report.liabilityMode,
           includePending: report.includePending,
           minSweepUsd: usdcMicroToDecimalString(minSweepMicro),
+          polymarketBuilderSweep,
           actions: actions.map((action) => ({
             ...action,
             amountMicro: action.amountMicro.toString(),
@@ -706,13 +777,15 @@ export async function runRewardsTreasurySweep(
       report,
       payload: {
         report,
+        polymarketBuilderSweep,
         actions: actions.map((action) => ({
           ...action,
           amountMicro: action.amountMicro.toString(),
         })),
       },
-      error:
-        failedCount > 0
+      error: builderSweepFailed
+        ? `Polymarket builder sweep failed: ${polymarketBuilderSweep?.error ?? polymarketBuilderSweep?.reason ?? "unknown"}`
+        : failedCount > 0
           ? `${failedCount}/${attemptedCount} sweep action(s) failed`
           : unavailableHotBalanceCount > 0 && options.execute
             ? `${unavailableHotBalanceCount} chain(s) missing hot-balance prerequisites`
@@ -724,6 +797,7 @@ export async function runRewardsTreasurySweep(
 
     const result = {
       report,
+      polymarketBuilderSweep,
       actions: actions.map((action) => ({
         ...action,
         amountMicro: action.amountMicro.toString(),
@@ -733,8 +807,9 @@ export async function runRewardsTreasurySweep(
     };
 
     if (options.execute && (status === "failed" || status === "partial")) {
-      const failureMessage =
-        failedCount > 0
+      const failureMessage = builderSweepFailed
+        ? `Polymarket builder sweep failed: ${polymarketBuilderSweep?.error ?? polymarketBuilderSweep?.reason ?? "unknown"}`
+        : failedCount > 0
           ? `${failedCount}/${attemptedCount} action(s) failed`
           : `${unavailableHotBalanceCount} chain(s) missing hot-balance prerequisites`;
       throw new Error(`Treasury sweep ${status}: ${failureMessage}`);

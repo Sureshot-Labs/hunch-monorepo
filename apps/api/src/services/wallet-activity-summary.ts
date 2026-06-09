@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { env } from "../env.js";
+import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 
 type WalletActivitySummaryDbRow = {
@@ -55,6 +56,7 @@ type WalletActivitySignalRowDbRow = {
   close_time: Date | null;
   expiration_time: Date | null;
   resolved_outcome: string | null;
+  accepting_orders: boolean | null;
   outcomes: string | null;
   category: string | null;
   change_action: WalletActivityTopChange["action"];
@@ -102,6 +104,7 @@ export type WalletActivityTopChange = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  acceptingOrders: boolean | null;
   outcomes: string[] | null;
   category: string | null;
   action: "OPENED" | "CLOSED" | "INCREASED" | "REDUCED" | null;
@@ -168,6 +171,7 @@ export type WalletActivitySignalRow = {
   closeTime: Date | null;
   expirationTime: Date | null;
   resolvedOutcome: string | null;
+  acceptingOrders: boolean | null;
   outcomes: string[] | null;
   category: string | null;
   action: WalletActivityTopChange["action"];
@@ -196,19 +200,92 @@ export type WalletActivitySignalPageLabelFlags = {
 export type WalletActivitySummarySortMode =
   | "last_activity"
   | "net_change_usd"
-  | "unusual_score";
+  | "unusual_score"
+  | "importance";
+
+const IMPORTANCE_MAGNITUDE_USD = 250_000;
+const IMPORTANCE_UNUSUAL_SCORE_MAX = 3;
+const IMPORTANCE_ACTIVITY_COUNT_MAX = 8;
+
+function clampUnit(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function compareLastActivityDesc(
+  left: WalletActivitySummaryStats,
+  right: WalletActivitySummaryStats,
+): number {
+  const rightTime = right.lastActivityAt?.getTime() ?? 0;
+  const leftTime = left.lastActivityAt?.getTime() ?? 0;
+  return rightTime - leftTime;
+}
+
+function countSummaryActions(row: WalletActivitySummaryStats): number {
+  return (
+    Math.max(0, row.countsNew) +
+    Math.max(0, row.countsIncrease) +
+    Math.max(0, row.countsReduce) +
+    Math.max(0, row.countsExit)
+  );
+}
+
+export function computeWalletActivityImportanceScore(
+  row: WalletActivitySummaryStats,
+  nowMs = Date.now(),
+): number {
+  const magnitude = clampUnit(
+    Math.log1p(Math.abs(row.netChangeUsd)) /
+      Math.log1p(IMPORTANCE_MAGNITUDE_USD),
+  );
+  const unusual = clampUnit(
+    (row.unusualScore ?? 0) / IMPORTANCE_UNUSUAL_SCORE_MAX,
+  );
+  const actionDensity = clampUnit(
+    Math.log1p(countSummaryActions(row)) /
+      Math.log1p(IMPORTANCE_ACTIVITY_COUNT_MAX),
+  );
+  const windowHours = Number.isFinite(row.windowHours)
+    ? Math.max(1, row.windowHours)
+    : 1;
+  const activityMs = row.lastActivityAt?.getTime();
+  const ageHours =
+    activityMs != null && Number.isFinite(activityMs)
+      ? (nowMs - activityMs) / (60 * 60 * 1000)
+      : windowHours;
+  const recency = clampUnit(1 - ageHours / windowHours);
+
+  return (
+    0.45 * magnitude +
+    0.35 * unusual +
+    0.1 * actionDensity +
+    0.1 * recency
+  );
+}
 
 export function compareWalletActivitySummaryStats(
   left: WalletActivitySummaryStats,
   right: WalletActivitySummaryStats,
   sortMode: WalletActivitySummarySortMode,
 ): number {
+  if (sortMode === "importance") {
+    const nowMs = Date.now();
+    const importanceDelta =
+      computeWalletActivityImportanceScore(right, nowMs) -
+      computeWalletActivityImportanceScore(left, nowMs);
+    if (importanceDelta !== 0) return importanceDelta;
+    const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
+    if (netDelta !== 0) return netDelta;
+    const timeDelta = compareLastActivityDesc(left, right);
+    if (timeDelta !== 0) return timeDelta;
+    return left.walletId.localeCompare(right.walletId);
+  }
+
   if (sortMode === "net_change_usd") {
     const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
     if (netDelta !== 0) return netDelta;
-    const rightTime = right.lastActivityAt?.getTime() ?? 0;
-    const leftTime = left.lastActivityAt?.getTime() ?? 0;
-    if (rightTime !== leftTime) return rightTime - leftTime;
+    const timeDelta = compareLastActivityDesc(left, right);
+    if (timeDelta !== 0) return timeDelta;
     return left.walletId.localeCompare(right.walletId);
   }
 
@@ -218,15 +295,13 @@ export function compareWalletActivitySummaryStats(
     if (rightScore !== leftScore) return rightScore - leftScore;
     const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
     if (netDelta !== 0) return netDelta;
-    const rightTime = right.lastActivityAt?.getTime() ?? 0;
-    const leftTime = left.lastActivityAt?.getTime() ?? 0;
-    if (rightTime !== leftTime) return rightTime - leftTime;
+    const timeDelta = compareLastActivityDesc(left, right);
+    if (timeDelta !== 0) return timeDelta;
     return left.walletId.localeCompare(right.walletId);
   }
 
-  const rightTime = right.lastActivityAt?.getTime() ?? 0;
-  const leftTime = left.lastActivityAt?.getTime() ?? 0;
-  if (rightTime !== leftTime) return rightTime - leftTime;
+  const timeDelta = compareLastActivityDesc(left, right);
+  if (timeDelta !== 0) return timeDelta;
   const netDelta = Math.abs(right.netChangeUsd) - Math.abs(left.netChangeUsd);
   if (netDelta !== 0) return netDelta;
   return left.walletId.localeCompare(right.walletId);
@@ -250,6 +325,7 @@ function mapWalletActivitySignalRow(
     closeTime: row.close_time,
     expirationTime: row.expiration_time,
     resolvedOutcome: row.resolved_outcome,
+    acceptingOrders: row.accepting_orders,
     outcomes: parseMarketOutcomes(row.outcomes),
     category: row.category,
     action: row.change_action,
@@ -464,6 +540,10 @@ function parseTopChanges(raw: unknown): WalletActivityTopChange[] {
           : new Date(String(record.expirationTime)),
       resolvedOutcome:
         record.resolvedOutcome == null ? null : String(record.resolvedOutcome),
+      acceptingOrders:
+        typeof record.acceptingOrders === "boolean"
+          ? record.acceptingOrders
+          : null,
       outcomes: parseMarketOutcomes(record.outcomes),
       category: record.category == null ? null : String(record.category),
       action:
@@ -683,6 +763,10 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
       um.close_time,
       um.expiration_time,
       um.resolved_outcome,
+      ${buildWalletIntelAcceptingOrdersSql({
+        marketAlias: "um",
+        eventAlias: "ue",
+      })} as accepting_orders,
       um.outcomes,
       lower(coalesce(um.category, ue.category)) as category,
       um.best_bid,
@@ -744,6 +828,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       cr.close_time,
       cr.expiration_time,
       cr.resolved_outcome,
+      cr.accepting_orders,
       cr.outcomes,
       cr.category,
       cr.signed_delta_shares,
@@ -850,6 +935,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       sc.*,
       case
         when sc.odds is not null
+         and sc.accepting_orders = true
          and sc.odds <= $5::numeric
          and coalesce(sc.stake_usd, 0) >= $6::numeric
          and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
@@ -861,6 +947,7 @@ const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
       end as is_high_risk,
       case
         when sc.odds is not null
+         and sc.accepting_orders = true
          and sc.odds <= $5::numeric
          and coalesce(sc.stake_usd, 0) >= $6::numeric
          and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
@@ -895,6 +982,7 @@ const FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL = `,
           'closeTime', cc.close_time,
           'expirationTime', cc.expiration_time,
           'resolvedOutcome', cc.resolved_outcome,
+          'acceptingOrders', cc.accepting_orders,
           'outcomes', case when cc.outcomes is not null then cc.outcomes::jsonb else null end,
           'category', cc.category,
           'action', cc.change_action,
@@ -1017,14 +1105,14 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
       sum(coalesce(wah.signed_delta_usd, 0)) as net_change_usd,
       sum(
         case
-          when upper(coalesce(wah.outcome_side, '')) = 'YES'
+          when wah.outcome_side = 'YES'
             then coalesce(wah.signed_delta_usd, 0)
           else 0
         end
       ) as net_change_yes_usd,
       sum(
         case
-          when upper(coalesce(wah.outcome_side, '')) = 'NO'
+          when wah.outcome_side = 'NO'
             then coalesce(wah.signed_delta_usd, 0)
           else 0
         end
@@ -1075,25 +1163,25 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
   select
     cc.wallet_id,
     count(*) filter (
-      where cc.rn <= $4 and cc.signal_score >= 0.9
+      where cc.rn <= $4 and cc.accepting_orders = true and cc.signal_score >= 0.9
     )::int as critical_signals_30d,
     avg(cc.signal_score) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     )::text as avg_signal_score_30d,
     bool_or(
       coalesce(cc.idle_days, 0) >= $12::numeric
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_reactivated_after_idle,
     bool_or(
       cc.entered_late or cc.late_bucket in ('late', 'very_late')
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_late_entry,
     bool_or(
       cc.late_bucket = 'very_late'
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_very_late_entry,
     bool_or(
       cc.unusual_size
@@ -1104,7 +1192,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       )
       or cc.is_high_risk
     ) filter (
-      where cc.rn <= $4
+      where cc.rn <= $4 and cc.accepting_orders = true
     ) as has_unusual_behavior
   from classified_changes cc
   group by cc.wallet_id
@@ -1134,6 +1222,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       sc.close_time,
       sc.expiration_time,
       sc.resolved_outcome,
+      sc.accepting_orders,
       sc.outcomes,
       sc.category,
       sc.change_action,
@@ -1170,6 +1259,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
         end,
         case
           when sc.odds is not null
+           and sc.accepting_orders = true
            and sc.odds <= $5::numeric
            and coalesce(sc.stake_usd, 0) >= $6::numeric
            and ($7::numeric <= 0 or coalesce(sc.potential_payout_usd, 0) >= $7::numeric)
@@ -1181,6 +1271,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
       ], null) as reason_codes
     from classified_changes sc
     where sc.signal_type is not null
+      and sc.accepting_orders = true
       and sc.change_action in ('OPENED', 'INCREASED')
       and upper(coalesce(sc.market_status::text, '')) = 'ACTIVE'
       and nullif(btrim(coalesce(sc.resolved_outcome, '')), '') is null
@@ -1204,6 +1295,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
     sr.close_time,
     sr.expiration_time,
     sr.resolved_outcome,
+    sr.accepting_orders,
     sr.outcomes,
     sr.category,
     sr.change_action,
@@ -1309,6 +1401,10 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       um.close_time,
       um.expiration_time,
       um.resolved_outcome,
+      ${buildWalletIntelAcceptingOrdersSql({
+        marketAlias: "um",
+        eventAlias: "ue",
+      })} as accepting_orders,
       um.outcomes,
       lower(coalesce(um.category, ue.category)) as category,
       um.last_price as market_last_price
@@ -1333,6 +1429,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       e.close_time,
       e.expiration_time,
       e.resolved_outcome,
+      e.accepting_orders,
       e.outcomes,
       e.category,
       e.change_action,
@@ -1495,6 +1592,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.close_time,
       sr.expiration_time,
       sr.resolved_outcome,
+      sr.accepting_orders,
       sr.outcomes,
       sr.category,
       sr.change_action,
@@ -1509,6 +1607,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       sr.signal_score,
       case
         when sr.odds is not null
+         and sr.accepting_orders = true
          and sr.odds <= $5::numeric
          and coalesce(sr.stake_usd, 0) >= $6::numeric
          and ($7::numeric <= 0 or coalesce(sr.potential_payout_usd, 0) >= $7::numeric)
@@ -1535,6 +1634,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
         case when sr.entered_late then 'late_entry' end,
         case
           when sr.odds is not null
+           and sr.accepting_orders = true
            and sr.odds <= $5::numeric
            and coalesce(sr.stake_usd, 0) >= $6::numeric
            and ($7::numeric <= 0 or coalesce(sr.potential_payout_usd, 0) >= $7::numeric)
@@ -1561,6 +1661,8 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
     sr.close_time,
     sr.expiration_time,
     sr.resolved_outcome,
+    sr.accepting_orders,
+    sr.outcomes,
     sr.category,
     sr.change_action,
     sr.outcome_side,
@@ -1578,6 +1680,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
     sr.reason_codes
   from signal_rows sr
   where sr.signal_type is not null
+    and sr.accepting_orders = true
     and sr.change_action in ('OPENED', 'INCREASED')
     and upper(coalesce(sr.market_status::text, '')) = 'ACTIVE'
     and nullif(btrim(coalesce(sr.resolved_outcome, '')), '') is null

@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { randomUUID } from "node:crypto";
 import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -9,7 +10,13 @@ import {
   normalizeLimitlessScopedTokenId,
 } from "../lib/limitless-token.js";
 import { isRecord } from "../lib/type-guards.js";
-import { storeOrder } from "../repos/orders-repo.js";
+import {
+  expireStaleLimitlessFokOrders,
+  fetchStoredOrderWalletContext,
+  markOrderPositionDeltaApplied,
+  normalizeLimitlessFokOrderSizesForMarket,
+  storeOrder,
+} from "../repos/orders-repo.js";
 import {
   fetchErc1155BalancesByOwner,
   fetchEvmCode,
@@ -29,6 +36,8 @@ import {
 } from "../services/limitless-client.js";
 import {
   buildLimitlessRequestAuthInputs,
+  extractLimitlessPartnerAccountProfile,
+  extractLimitlessPartnerAccountProfiles,
   extractLimitlessProfile,
   loadLimitlessProfileForWallet,
   type LimitlessProfile,
@@ -40,9 +49,19 @@ import {
   createNotificationSafe,
 } from "../services/notifications.js";
 import { tryRecordReferralFirstTradeConversion } from "../services/analytics-referrals.js";
-import { applyOptimisticPositionTrade } from "../services/positions-optimistic.js";
+import {
+  applyOptimisticPositionTrade,
+  reconcileExactPositionBalance,
+} from "../services/positions-optimistic.js";
 import { recomputePositionMetricsForWallet } from "../services/positions-metrics.js";
 import { syncLimitlessHistoryForWallet } from "../services/limitless-history.js";
+import {
+  deriveLimitlessSignedOrderSize,
+  normalizeLimitlessMaybeRawAmount,
+  normalizeLimitlessRawAmount,
+} from "../services/limitless-order-normalization.js";
+import { recordLimitlessVolumeEvent } from "../services/limitless-volume-events.js";
+import { upsertLimitlessVenueShareAccrualFromOrderPayload } from "../services/limitless-fee-accruals.js";
 import {
   buildEmbeddedPersonalSignRequest,
   createEmbeddedPrivyWalletRpcRequest,
@@ -100,6 +119,79 @@ function mapLimitlessUpstreamStatus(status: number): number {
   if (status === 401 || status === 403) return 400;
   if (status >= 400 && status < 500) return status;
   return 502;
+}
+
+function isLimitlessAmbiguousAlreadyCancelledOrderMessage(
+  message: string | null | undefined,
+): boolean {
+  const normalized = message?.trim().toLowerCase() ?? "";
+  return (
+    normalized === "order not found or already canceled" ||
+    normalized === "order not found or already cancelled"
+  );
+}
+
+const LIMITLESS_FOK_UNMATCHED_REASON = "market_order_unmatched";
+const LIMITLESS_FOK_UNMATCHED_MESSAGE =
+  "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
+const LIMITLESS_CONNECT_LOCK_PREFIX = "lock:limitless:connect:";
+const LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS = [
+  100, 250, 500, 1_000,
+] as const;
+
+type LimitlessConnectResult =
+  | { ok: true; authMode: "partner_hmac"; profile: LimitlessProfile }
+  | {
+      ok: false;
+      httpStatus: number;
+      error: string;
+      status?: number;
+      payload?: unknown;
+    };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isLimitlessFokUnmatchedMessage(message: string | null): boolean {
+  return message?.toLowerCase().includes("market order unmatched") ?? false;
+}
+
+function extractLimitlessOrderIdFromMessage(
+  message: string | null,
+): string | null {
+  if (!message) return null;
+  const match = message.match(
+    /\border[_\s-]*id\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i,
+  );
+  return match?.[1] ?? null;
+}
+
+function stringifyLimitlessRawError(payload: unknown): string | null {
+  if (payload == null) return null;
+  if (typeof payload === "string") return payload;
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return null;
+  }
+}
+
+function buildLimitlessOnBehalfHeaders(
+  profile: LimitlessProfile | null | undefined,
+): Record<string, string> | undefined {
+  return profile?.id != null
+    ? { "x-on-behalf-of": String(profile.id) }
+    : undefined;
+}
+
+function buildLimitlessOnBehalfQueryPath(
+  path: string,
+  profile: LimitlessProfile | null | undefined,
+): string {
+  if (profile?.id == null) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}onBehalfOf=${encodeURIComponent(String(profile.id))}`;
 }
 
 // Legacy Limitless markets sometimes expose only exchange in /markets payload.
@@ -358,11 +450,6 @@ function normalizeLimitlessPrice(value: number | null): number | null {
   return normalized;
 }
 
-function normalizeLimitlessAmount(value: number | null): number | null {
-  if (value == null || !Number.isFinite(value) || value <= 0) return null;
-  return value >= 1_000_000 ? value / 1_000_000 : value;
-}
-
 function extractLimitlessImmediateFill(
   payload: unknown,
   side: "BUY" | "SELL",
@@ -375,14 +462,12 @@ function extractLimitlessImmediateFill(
     : null;
   if (!record) return null;
 
-  const outcomeShares = normalizeLimitlessAmount(
-    parseNumberish(
-      record.outcomeTokenAmount ??
-        record.outcome_token_amount ??
-        record.size ??
-        record.amount ??
-        record.quantity,
-    ),
+  const outcomeShares = normalizeLimitlessMaybeRawAmount(
+    record.outcomeTokenAmount ??
+      record.outcome_token_amount ??
+      record.size ??
+      record.amount ??
+      record.quantity,
   );
   const sideAmountRaw = parseNumberish(
     side === "BUY" ? record.takerAmount : record.makerAmount,
@@ -390,7 +475,7 @@ function extractLimitlessImmediateFill(
   const sideShares =
     side === "BUY" && sideAmountRaw != null && sideAmountRaw <= 1
       ? null
-      : normalizeLimitlessAmount(sideAmountRaw);
+      : normalizeLimitlessRawAmount(sideAmountRaw);
   const sharesCandidates = [outcomeShares, fallback.size, sideShares];
   const shares = sharesCandidates.find(
     (value): value is number =>
@@ -417,10 +502,10 @@ function extractLimitlessImmediateFill(
     ) ?? null;
 
   const notionalCandidates = [
-    normalizeLimitlessAmount(
-      parseNumberish(record.collateralAmount ?? record.collateral_amount),
+    normalizeLimitlessMaybeRawAmount(
+      record.collateralAmount ?? record.collateral_amount,
     ),
-    normalizeLimitlessAmount(
+    normalizeLimitlessRawAmount(
       parseNumberish(side === "BUY" ? record.makerAmount : record.takerAmount),
     ),
     unitPrice != null ? unitPrice * shares : null,
@@ -501,18 +586,12 @@ function deriveSize(
   makerAmount: number | null,
   takerAmount: number | null,
 ): number | null {
-  if (!side) return null;
-  if (orderType !== "GTC" && orderType !== "FOK") return null;
-  const shares = side === "BUY" ? takerAmount : makerAmount;
-  if (shares == null) return null;
-  const normalized = normalizeLimitlessAmount(shares);
-  if (normalized == null || !Number.isFinite(normalized) || normalized <= 0) {
-    return null;
-  }
-  if (orderType === "FOK" && side === "BUY" && shares <= 1) {
-    return null;
-  }
-  return normalized;
+  return deriveLimitlessSignedOrderSize({
+    orderType,
+    side,
+    makerAmount,
+    takerAmount,
+  });
 }
 
 function readOrderField(
@@ -1042,6 +1121,152 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     );
   };
 
+  const withLimitlessConnectAdvisoryLock = async <T>(
+    userId: string,
+    walletAddress: string,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    const lockKey = `${LIMITLESS_CONNECT_LOCK_PREFIX}${userId.trim().toLowerCase()}:${normalizeAddress(walletAddress)}`;
+    const client = await pool.connect();
+    let locked = false;
+    try {
+      await client.query("select pg_advisory_lock(hashtext($1)::bigint)", [
+        lockKey,
+      ]);
+      locked = true;
+      return await run();
+    } finally {
+      if (locked) {
+        try {
+          await client.query(
+            "select pg_advisory_unlock(hashtext($1)::bigint)",
+            [lockKey],
+          );
+        } catch (error) {
+          app.log.error(
+            { error, lockKey },
+            "Failed to release Limitless connect advisory lock",
+          );
+        }
+      }
+      client.release();
+    }
+  };
+
+  const normalizeLimitlessProfileForAccount = (inputs: {
+    profile: LimitlessProfile | null;
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): LimitlessProfile | null => {
+    if (!inputs.profile?.id) return null;
+    if (
+      inputs.profile.account &&
+      normalizeAddress(inputs.profile.account) !==
+        normalizeAddress(inputs.account)
+    ) {
+      return null;
+    }
+
+    return {
+      ...inputs.profile,
+      account: inputs.profile.account ?? inputs.account,
+      client: inputs.profile.client ?? inputs.clientType,
+    };
+  };
+
+  const lookupLimitlessPartnerAccountProfile = async (inputs: {
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<{
+    status: number;
+    message: string | null;
+    profile: LimitlessProfile | null;
+    returnedNonMatchingAccount: boolean;
+  }> => {
+    const lookup = await limitlessRequest({
+      method: "GET",
+      requestPath: `/profiles/partner-accounts?account=${encodeURIComponent(
+        inputs.account,
+      )}`,
+      auth: "partner_hmac",
+    });
+
+    if (!lookup.ok) {
+      return {
+        status: lookup.status,
+        message: extractLimitlessMessage(lookup.payload),
+        profile: null,
+        returnedNonMatchingAccount: false,
+      };
+    }
+
+    const matchingProfile = normalizeLimitlessProfileForAccount({
+      profile: extractLimitlessPartnerAccountProfile(
+        lookup.payload,
+        inputs.account,
+      ),
+      account: inputs.account,
+      clientType: inputs.clientType,
+    });
+    const requestedAccount = normalizeAddress(inputs.account);
+    const returnedNonMatchingAccount = extractLimitlessPartnerAccountProfiles(
+      lookup.payload,
+    ).some(
+      (profile) =>
+        profile.account != null &&
+        normalizeAddress(profile.account) !== requestedAccount,
+    );
+
+    return {
+      status: 200,
+      message: null,
+      profile: matchingProfile,
+      returnedNonMatchingAccount:
+        matchingProfile == null && returnedNonMatchingAccount,
+    };
+  };
+
+  const loadStoredLimitlessProfileForAccount = async (inputs: {
+    userId: string;
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<LimitlessProfile | null> => {
+    const authContext = await resolveLimitlessAuthContext(
+      inputs.userId,
+      inputs.account,
+    );
+    if (!authContext) return null;
+
+    const verification = await verifyLimitlessAuthContext({
+      authContext,
+      walletAddress: inputs.account,
+    });
+    if (!verification.ok) return null;
+
+    return normalizeLimitlessProfileForAccount({
+      profile: verification.profile ?? authContext.storedProfile,
+      account: inputs.account,
+      clientType: inputs.clientType,
+    });
+  };
+
+  const waitForStoredLimitlessProfileForAccount = async (inputs: {
+    userId: string;
+    account: string;
+    clientType: "eoa" | "base" | "etherspot";
+  }): Promise<LimitlessProfile | null> => {
+    const immediate = await loadStoredLimitlessProfileForAccount(inputs);
+    if (immediate) return immediate;
+
+    for (const delayMs of LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS) {
+      await sleep(delayMs);
+      const profile = await loadStoredLimitlessProfileForAccount(inputs);
+      if (profile) return profile;
+    }
+
+    return null;
+  };
+
   const connectLimitlessPartnerAccount = async (inputs: {
     userId: string;
     signer: string;
@@ -1049,16 +1274,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     signingMessage: string;
     signature: string;
     clientType: "eoa" | "base" | "etherspot";
-  }): Promise<
-    | { ok: true; authMode: "partner_hmac"; profile: LimitlessProfile }
-    | {
-        ok: false;
-        httpStatus: number;
-        error: string;
-        status?: number;
-        payload?: unknown;
-      }
-  > => {
+  }): Promise<LimitlessConnectResult> => {
     const checksumAccount = toChecksumAddress(inputs.account);
     if (!checksumAccount) {
       return {
@@ -1068,207 +1284,184 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       };
     }
 
-    const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
-      inputs.signingMessage,
-    );
-    const upstream = await limitlessRequest({
-      method: "POST",
-      requestPath: "/profiles/partner-accounts",
-      auth: "partner_hmac",
-      body: {
-        displayName: checksumAccount,
-      },
-      headers: {
-        "x-account": checksumAccount,
-        "x-signing-message": encodedSigningMessage,
-        "x-signature": inputs.signature,
-      },
-    });
-
-    if (!upstream.ok) {
-      if (upstream.status === 409) {
-        const upstreamExistingProfile = extractLimitlessProfile(
-          upstream.payload,
-        );
-        if (
-          upstreamExistingProfile?.id &&
-          (!upstreamExistingProfile.account ||
-            normalizeAddress(upstreamExistingProfile.account) ===
-              normalizeAddress(checksumAccount))
-        ) {
-          const recoveredProfile: LimitlessProfile = {
-            ...upstreamExistingProfile,
-            account: upstreamExistingProfile.account ?? checksumAccount,
-            client: upstreamExistingProfile.client ?? inputs.clientType,
-          };
-          try {
-            await persistLimitlessProfileForWallet({
-              userId: inputs.userId,
-              signer: inputs.signer,
-              account: recoveredProfile.account ?? checksumAccount,
-              profile: recoveredProfile,
-            });
-          } catch (error) {
-            app.log.error(
-              { error, userId: inputs.userId, signer: inputs.signer },
-              "Failed to store recovered Limitless credentials from 409 response",
-            );
-            return {
-              ok: false,
-              httpStatus: 500,
-              error: "Failed to store recovered Limitless credentials",
-            };
-          }
-
-          return {
-            ok: true,
-            authMode: "partner_hmac",
-            profile: recoveredProfile,
-          };
-        }
-
-        const existingCreds = await AuthService.getVenueCredentials(
-          inputs.userId,
-          "limitless",
-          inputs.signer,
-        );
-        const storedExistingProfile = existingCreds
-          ? extractLimitlessProfile(existingCreds.additionalData ?? null)
-          : null;
-        if (
-          storedExistingProfile?.id &&
-          (!storedExistingProfile.account ||
-            normalizeAddress(storedExistingProfile.account) ===
-              normalizeAddress(checksumAccount))
-        ) {
-          const recoveredProfile: LimitlessProfile = {
-            ...storedExistingProfile,
-            account: storedExistingProfile.account ?? checksumAccount,
-            client: storedExistingProfile.client ?? inputs.clientType,
-          };
-          try {
-            await persistLimitlessProfileForWallet({
-              userId: inputs.userId,
-              signer: inputs.signer,
-              account: recoveredProfile.account ?? checksumAccount,
-              profile: recoveredProfile,
-            });
-          } catch (error) {
-            app.log.error(
-              { error, userId: inputs.userId, signer: inputs.signer },
-              "Failed to store recovered Limitless credentials from existing mapping",
-            );
-            return {
-              ok: false,
-              httpStatus: 500,
-              error: "Failed to store recovered Limitless credentials",
-            };
-          }
-
-          return {
-            ok: true,
-            authMode: "partner_hmac",
-            profile: recoveredProfile,
-          };
-        }
-
-        const profileLookup = await limitlessRequest({
-          method: "GET",
-          requestPath: `/profiles/${checksumAccount}`,
-          auth: "partner_hmac",
+    return withLimitlessConnectAdvisoryLock(
+      inputs.userId,
+      checksumAccount,
+      async () => {
+        const storedProfile = await loadStoredLimitlessProfileForAccount({
+          userId: inputs.userId,
+          account: checksumAccount,
+          clientType: inputs.clientType,
         });
-        if (profileLookup.ok) {
-          const existingProfile = extractLimitlessProfile(
-            profileLookup.payload,
-          );
-          if (existingProfile?.id) {
-            const recoveredProfile: LimitlessProfile = {
-              ...existingProfile,
-              account: existingProfile.account ?? checksumAccount,
-              client: existingProfile.client ?? inputs.clientType,
+        if (storedProfile) {
+          return {
+            ok: true,
+            authMode: "partner_hmac",
+            profile: storedProfile,
+          };
+        }
+
+        const persistAndReturnProfile = async (
+          profile: LimitlessProfile,
+          logMessage: string,
+          clientError = "Failed to store recovered Limitless credentials",
+        ): Promise<LimitlessConnectResult> => {
+          try {
+            await persistLimitlessProfileForWallet({
+              userId: inputs.userId,
+              signer: inputs.signer,
+              account: profile.account ?? checksumAccount,
+              profile,
+            });
+          } catch (error) {
+            app.log.error(
+              { error, userId: inputs.userId, signer: inputs.signer },
+              logMessage,
+            );
+            return {
+              ok: false,
+              httpStatus: 500,
+              error: clientError,
             };
-            try {
-              await persistLimitlessProfileForWallet({
-                userId: inputs.userId,
-                signer: inputs.signer,
-                account: recoveredProfile.account ?? checksumAccount,
-                profile: recoveredProfile,
+          }
+
+          return {
+            ok: true,
+            authMode: "partner_hmac",
+            profile,
+          };
+        };
+
+        const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
+          inputs.signingMessage,
+        );
+        const upstream = await limitlessRequest({
+          method: "POST",
+          requestPath: "/profiles/partner-accounts",
+          auth: "partner_hmac",
+          body: {
+            displayName: checksumAccount,
+          },
+          headers: {
+            "x-account": checksumAccount,
+            "x-signing-message": encodedSigningMessage,
+            "x-signature": inputs.signature,
+          },
+        });
+
+        if (!upstream.ok) {
+          if (upstream.status === 409) {
+            const partnerAccountLookup =
+              await lookupLimitlessPartnerAccountProfile({
+                account: checksumAccount,
+                clientType: inputs.clientType,
               });
-            } catch (error) {
-              app.log.error(
-                { error, userId: inputs.userId, signer: inputs.signer },
-                "Failed to store recovered Limitless credentials",
+            if (partnerAccountLookup.profile) {
+              return persistAndReturnProfile(
+                partnerAccountLookup.profile,
+                "Failed to store recovered Limitless credentials from partner account lookup",
               );
+            }
+
+            const upstreamExistingProfile = normalizeLimitlessProfileForAccount(
+              {
+                profile: extractLimitlessProfile(upstream.payload),
+                account: checksumAccount,
+                clientType: inputs.clientType,
+              },
+            );
+            if (upstreamExistingProfile) {
+              return persistAndReturnProfile(
+                upstreamExistingProfile,
+                "Failed to store recovered Limitless credentials from 409 response",
+              );
+            }
+
+            const storedAfterConflict =
+              await waitForStoredLimitlessProfileForAccount({
+                userId: inputs.userId,
+                account: checksumAccount,
+                clientType: inputs.clientType,
+              });
+            if (storedAfterConflict) {
               return {
-                ok: false,
-                httpStatus: 500,
-                error: "Failed to store recovered Limitless credentials",
+                ok: true,
+                authMode: "partner_hmac",
+                profile: storedAfterConflict,
               };
             }
 
+            const upstreamMessage = extractLimitlessMessage(upstream.payload);
+            app.log.warn(
+              {
+                userId: inputs.userId,
+                signer: inputs.signer,
+                account: checksumAccount,
+                upstreamStatus: upstream.status,
+                upstreamMessage,
+                profileLookupStatus: partnerAccountLookup.status,
+                profileLookupMessage: partnerAccountLookup.message,
+                profileLookupReturnedNonMatchingAccount:
+                  partnerAccountLookup.returnedNonMatchingAccount,
+              },
+              "Limitless profile exists but profile id could not be recovered",
+            );
+
             return {
-              ok: true,
-              authMode: "partner_hmac",
-              profile: recoveredProfile,
+              ok: false,
+              httpStatus: 409,
+              error:
+                "Limitless profile already exists but profile id could not be recovered",
+              status: upstream.status,
+              payload: {
+                code: "limitless_profile_exists_unrecoverable",
+                upstream: {
+                  status: upstream.status,
+                  message: upstreamMessage,
+                },
+                profileLookup: {
+                  status: partnerAccountLookup.status,
+                  message: partnerAccountLookup.message,
+                },
+              },
             };
           }
+
+          return {
+            ok: false,
+            httpStatus:
+              upstream.status >= 400 && upstream.status < 500
+                ? upstream.status
+                : 502,
+            error: "Limitless connect failed",
+            status: upstream.status,
+            payload: upstream.payload,
+          };
         }
-      }
 
-      return {
-        ok: false,
-        httpStatus:
-          upstream.status >= 400 && upstream.status < 500
-            ? upstream.status
-            : 502,
-        error: "Limitless connect failed",
-        status: upstream.status,
-        payload: upstream.payload,
-      };
-    }
+        const profileSafe = normalizeLimitlessProfileForAccount({
+          profile: extractLimitlessProfile(upstream.payload),
+          account: checksumAccount,
+          clientType: inputs.clientType,
+        });
 
-    const profile = extractLimitlessProfile(upstream.payload);
-    const profileSafe: LimitlessProfile | null = profile
-      ? {
-          ...profile,
-          account: profile.account ?? checksumAccount,
-          client: profile.client ?? inputs.clientType,
+        if (!profileSafe?.id) {
+          return {
+            ok: false,
+            httpStatus: 502,
+            error:
+              "Limitless partner account creation did not return a profile id",
+            payload: upstream.payload,
+          };
         }
-      : { account: checksumAccount, client: inputs.clientType };
 
-    if (!profileSafe?.id) {
-      return {
-        ok: false,
-        httpStatus: 502,
-        error: "Limitless partner account creation did not return a profile id",
-        payload: upstream.payload,
-      };
-    }
-
-    try {
-      await persistLimitlessProfileForWallet({
-        userId: inputs.userId,
-        signer: inputs.signer,
-        account: profileSafe.account ?? checksumAccount,
-        profile: profileSafe,
-      });
-    } catch (error) {
-      app.log.error(
-        { error, userId: inputs.userId, signer: inputs.signer },
-        "Failed to store Limitless credentials",
-      );
-      return {
-        ok: false,
-        httpStatus: 500,
-        error: "Failed to store Limitless credentials",
-      };
-    }
-
-    return {
-      ok: true,
-      authMode: "partner_hmac",
-      profile: profileSafe,
-    };
+        return persistAndReturnProfile(
+          profileSafe,
+          "Failed to store Limitless credentials",
+          "Failed to store Limitless credentials",
+        );
+      },
+    );
   };
 
   const requireLimitlessPartnerAuth = async (inputs: {
@@ -1640,7 +1833,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               account: context.signer,
               signingMessage: request.body.signingMessage,
               signature,
-              clientType: "base",
+              clientType: "eoa",
             });
 
             if (!connectResult.ok) {
@@ -2520,6 +2713,20 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           order.feeRateBps ?? 0,
           "feeRateBps",
         );
+        const profileFeeRateBps = profile.rank?.feeRateBps;
+        if (
+          profileFeeRateBps != null &&
+          Number.isFinite(profileFeeRateBps) &&
+          profileFeeRateBps >= 0 &&
+          feeRateBps != null &&
+          feeRateBps !== Math.trunc(profileFeeRateBps)
+        ) {
+          reply.code(409);
+          return reply.send({
+            error:
+              "Limitless fee rate changed. Refresh the order and try again.",
+          });
+        }
         const sideValue = coerceOrderNumber(order.side, "side");
         const signatureType = coerceOrderNumber(
           order.signatureType,
@@ -2689,12 +2896,24 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const tokenId = normalizeLimitlessScopedTokenId(requestedRawTokenId);
+      const makerAmount = coercedMakerAmount;
+      const takerAmount = coercedTakerAmount;
+      const price = coercedPrice;
+      const size = deriveSize(
+        request.body.orderType,
+        side,
+        makerAmount,
+        takerAmount,
+      );
+      const clientOrderId = `hunch-${randomUUID()}`;
       const orderPayload = {
         order: orderForUpstream,
         orderType: request.body.orderType,
         marketSlug: request.body.marketSlug,
         ownerId,
         onBehalfOf: ownerId,
+        clientOrderId,
       };
 
       const upstream = await limitlessRequest({
@@ -2706,6 +2925,66 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       if (!upstream.ok) {
         const upstreamMessage = extractLimitlessMessage(upstream.payload);
+        if (
+          request.body.orderType === "FOK" &&
+          isLimitlessFokUnmatchedMessage(upstreamMessage)
+        ) {
+          const venueOrderId =
+            extractLimitlessOrderIdFromMessage(upstreamMessage);
+          if (venueOrderId) {
+            const now = new Date();
+            const rawError = stringifyLimitlessRawError(upstream.payload);
+            await storeOrder(pool, {
+              userId: user.id,
+              walletAddress: signer,
+              signerAddress: signer,
+              venue: "limitless",
+              venueOrderId,
+              tokenId: tokenId ?? null,
+              side,
+              orderType: request.body.orderType,
+              price,
+              size,
+              status: "expired",
+              errorMessage: LIMITLESS_FOK_UNMATCHED_MESSAGE,
+              rawError,
+              orderPayload,
+              lastUpdate: now,
+            });
+            await pool.query(
+              `
+                update orders
+                set status = 'expired',
+                    error_message = $4,
+                    raw_error = coalesce($5, raw_error),
+                    last_update = $6
+                where user_id = $1
+                  and (wallet_address = $2 or signer_address = $2)
+                  and venue = 'limitless'
+                  and venue_order_id = $3
+              `,
+              [
+                user.id,
+                signer,
+                venueOrderId,
+                LIMITLESS_FOK_UNMATCHED_MESSAGE,
+                rawError,
+                now,
+              ],
+            );
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: false,
+            reason: LIMITLESS_FOK_UNMATCHED_REASON,
+            message: LIMITLESS_FOK_UNMATCHED_MESSAGE,
+            status: "expired",
+            executionStatus: "UNMATCHED",
+            orderId: venueOrderId ?? undefined,
+            payload: upstream.payload,
+          });
+        }
         reply.code(mapLimitlessUpstreamStatus(upstream.status));
         return reply.send({
           error: "Limitless order placement failed",
@@ -2730,26 +3009,38 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const tokenId = normalizeLimitlessScopedTokenId(
-        typeof order.tokenId === "string"
-          ? order.tokenId
-          : String(order.tokenId ?? ""),
-      );
-      const makerAmount = parseNumberish(order.makerAmount);
-      const takerAmount = parseNumberish(order.takerAmount);
-      const price = parseNumberish(order.price);
-      const size = deriveSize(
-        request.body.orderType,
-        side,
-        makerAmount,
-        takerAmount,
-      );
       const status =
         (isRecord(upstream.payload) &&
           isRecord(upstream.payload.order) &&
           typeof upstream.payload.order.status === "string" &&
           upstream.payload.order.status) ||
         "submitted";
+
+      const immediateFill =
+        request.body.orderType === "FOK"
+          ? extractLimitlessImmediateFill(upstream.payload, side, {
+              price,
+              size,
+            })
+          : null;
+      const confirmedImmediateFill =
+        immediateFill != null && isLimitlessTerminalFillStatus(status)
+          ? immediateFill
+          : null;
+      const storedPrice =
+        confirmedImmediateFill && confirmedImmediateFill.shares > 0
+          ? (price ??
+            confirmedImmediateFill.notionalUsd / confirmedImmediateFill.shares)
+          : price;
+      const storedSize =
+        confirmedImmediateFill && confirmedImmediateFill.shares > 0
+          ? (size ?? confirmedImmediateFill.shares)
+          : size;
+      const confirmedFillAt = confirmedImmediateFill ? new Date() : null;
+      const storedOrderPayload = {
+        ...orderPayload,
+        _hunchUpstream: upstream.payload,
+      };
 
       const stored = await storeOrder(pool, {
         userId: user.id,
@@ -2760,13 +3051,44 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         tokenId: tokenId ?? null,
         side,
         orderType: request.body.orderType,
-        price,
-        size,
+        price: storedPrice,
+        size: storedSize,
         status,
         errorMessage: null,
         rawError: null,
-        orderPayload,
+        orderPayload: storedOrderPayload,
+        lastUpdate: confirmedFillAt,
+        filledAt: confirmedFillAt,
       });
+
+      if (confirmedFillAt) {
+        try {
+          await upsertLimitlessVenueShareAccrualFromOrderPayload(pool, {
+            orderId: stored.order.id,
+            userId: user.id,
+            walletAddress: signer,
+            signerAddress: signer,
+            venueOrderId,
+            orderHash: null,
+            tokenId: tokenId ?? null,
+            side,
+            filledAt: confirmedFillAt,
+            lastUpdate: confirmedFillAt,
+            postedAt: stored.order.posted_at,
+            payload: upstream.payload,
+          });
+        } catch (error) {
+          app.log.warn(
+            {
+              error,
+              userId: user.id,
+              walletAddress: signer,
+              venueOrderId,
+            },
+            "Limitless venue fee share accrual upsert failed",
+          );
+        }
+      }
 
       let referralFirstTrade = null;
       if (
@@ -2774,15 +3096,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         request.body.orderType === "FOK" &&
         tokenId
       ) {
-        const immediateFill = extractLimitlessImmediateFill(
-          upstream.payload,
-          side,
-          {
-            price,
-            size,
-          },
-        );
-        if (immediateFill && isLimitlessTerminalFillStatus(status)) {
+        if (confirmedImmediateFill) {
           referralFirstTrade = await tryRecordReferralFirstTradeConversion(
             pool,
             {
@@ -2797,7 +3111,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           );
         }
         let optimisticApplied = false;
-        if (immediateFill) {
+        if (confirmedImmediateFill) {
           try {
             const optimisticResult = await applyOptimisticPositionTrade(pool, {
               userId: user.id,
@@ -2805,10 +3119,15 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
               venue: "limitless",
               tokenId,
               side,
-              shares: immediateFill.shares,
-              notionalUsd: immediateFill.notionalUsd,
+              shares: confirmedImmediateFill.shares,
+              notionalUsd: confirmedImmediateFill.notionalUsd,
             });
             optimisticApplied = optimisticResult.applied;
+            if (optimisticResult.applied) {
+              await markOrderPositionDeltaApplied(pool, {
+                id: stored.order.id,
+              });
+            }
           } catch (error) {
             app.log.warn(
               {
@@ -2843,8 +3162,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           venue: "limitless",
           status,
           side,
-          size,
-          price,
+          size: storedSize,
+          price: storedPrice,
           orderId: venueOrderId,
           tokenId: tokenId ?? null,
           walletAddress: signer,
@@ -2955,7 +3274,26 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             : null;
       if (stored.kind === "stored" && fallbackNotional != null) {
         try {
-          await applyOptimisticPositionTrade(pool, {
+          await recordLimitlessVolumeEvent(pool, {
+            userId: user.id,
+            walletAddress: signer,
+            sourceId: venueOrderId,
+            notionalUsd: fallbackNotional,
+            createdAt: now,
+          });
+        } catch (error) {
+          app.log.warn(
+            {
+              error,
+              userId: user.id,
+              walletAddress: signer,
+              orderId: venueOrderId,
+            },
+            "Limitless AMM volume event insert failed",
+          );
+        }
+        try {
+          const optimisticResult = await applyOptimisticPositionTrade(pool, {
             userId: user.id,
             walletAddress: signer,
             venue: "limitless",
@@ -2964,6 +3302,9 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             shares: size,
             notionalUsd: fallbackNotional,
           });
+          if (optimisticResult.applied) {
+            await markOrderPositionDeltaApplied(pool, { id: stored.order.id });
+          }
         } catch (error) {
           app.log.warn(
             {
@@ -2976,6 +3317,45 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             "Limitless AMM optimistic position update failed",
           );
         }
+      }
+
+      try {
+        const rawTokenId = normalizeLimitlessRawTokenId(tokenId);
+        if (rawTokenId) {
+          const balanceMap = await fetchErc1155BalancesByOwner({
+            rpcUrl: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            contractAddress: env.limitlessConditionalTokensAddress,
+            owner: signer,
+            tokenIds: [rawTokenId],
+          });
+          const exactRawBalance = balanceMap.get(rawTokenId) ?? 0n;
+          const exactSize = Number(ethers.formatUnits(exactRawBalance, 6));
+          const buyStaleTolerance = Math.max(0.01, size * 0.02);
+          const likelyStaleBuyBalance =
+            side === "BUY" && exactSize + buyStaleTolerance < size;
+          if (!likelyStaleBuyBalance) {
+            await reconcileExactPositionBalance(pool, {
+              userId: user.id,
+              walletAddress: signer,
+              venue: "limitless",
+              tokenId,
+              size: exactSize,
+              averagePrice: price,
+            });
+          }
+        }
+      } catch (error) {
+        app.log.warn(
+          {
+            error,
+            userId: user.id,
+            walletAddress: signer,
+            tokenId,
+            side,
+          },
+          "Limitless AMM exact position reconciliation failed",
+        );
       }
 
       void createNotificationSafe(
@@ -3034,6 +3414,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           request.query.slug,
         )}/user-orders`,
         ...partnerAuth.requestAuth,
+        headers: buildLimitlessOnBehalfHeaders(partnerAuth.profile),
       });
 
       if (!upstream.ok) {
@@ -3080,10 +3461,74 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           status,
           errorMessage: null,
           rawError: null,
+          orderPayload: order,
         });
 
         if (result.kind === "stored") storedNew += 1;
         if (result.kind === "exists") alreadyKnown += 1;
+      }
+
+      const normalizedFokSizes = await normalizeLimitlessFokOrderSizesForMarket(
+        pool,
+        {
+          userId: user.id,
+          walletAddress: signer,
+          marketSlug: request.query.slug,
+        },
+      );
+      let historyStats: Awaited<
+        ReturnType<typeof syncLimitlessHistoryForWallet>
+      > | null = null;
+      let historyError: string | null = null;
+      let expiredStaleFok = 0;
+      let metricsError: string | null = null;
+
+      try {
+        historyStats = await syncLimitlessHistoryForWallet(pool, {
+          userId: user.id,
+          walletAddress: signer,
+          authContext: partnerAuth.authContext,
+          limit: 100,
+        });
+        expiredStaleFok = await expireStaleLimitlessFokOrders(pool, {
+          userId: user.id,
+          walletAddress: signer,
+          marketSlug: request.query.slug,
+          activeVenueOrderIds: orderIds,
+        });
+      } catch (error) {
+        historyError =
+          error instanceof Error
+            ? error.message
+            : "Limitless history sync failed.";
+        app.log.warn(
+          {
+            error,
+            userId: user.id,
+            walletAddress: signer,
+            marketSlug: request.query.slug,
+          },
+          "Limitless order history sync failed during order sync",
+        );
+      }
+
+      if (historyStats || expiredStaleFok > 0) {
+        try {
+          await recomputePositionMetricsForWallet(pool, {
+            userId: user.id,
+            walletAddress: signer,
+            venue: "limitless",
+          });
+        } catch (error) {
+          metricsError =
+            error instanceof Error
+              ? error.message
+              : "Limitless position metrics update failed.";
+          app.log.error(
+            { error, userId: user.id, walletAddress: signer },
+            "Limitless position metrics update failed during order sync",
+          );
+        }
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -3095,6 +3540,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         storedNew,
         alreadyKnown,
         skippedNoId,
+        normalizedFokSizes,
+        expiredStaleFok,
+        history: historyStats,
+        historyError,
+        metricsError,
         sampleVenueOrderIds: orderIds.slice(0, 10),
       });
     },
@@ -3134,6 +3584,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         walletAddress: string;
         status: "ok" | "error" | "skipped";
         fetched?: number;
+        nextCursor?: string | null;
         storedNew?: number;
         alreadyKnown?: number;
         skippedNoId?: number;
@@ -3203,10 +3654,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             userId: user.id,
             walletAddress: wallet,
             authContext,
-            page: query.page,
             limit: query.limit,
-            from: query.from,
-            to: query.to,
+            cursor: query.cursor,
           });
         } catch (error) {
           errors += 1;
@@ -3239,6 +3688,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           walletAddress: wallet,
           status: "ok",
           fetched: stats.fetched,
+          nextCursor: stats.nextCursor,
           storedNew: stats.storedNew,
           alreadyKnown: stats.alreadyKnown,
           skippedNoId: stats.skippedNoId,
@@ -3254,8 +3704,8 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       return reply.send({
         ok: true,
         venue: "limitless",
-        page: query.page,
         limit: query.limit,
+        cursor: query.cursor ?? null,
         results,
         summary: {
           synced,
@@ -3421,6 +3871,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         method: "GET",
         requestPath: `/orders/${request.params.orderId}`,
         ...partnerAuth.requestAuth,
+        headers: buildLimitlessOnBehalfHeaders(partnerAuth.profile),
       });
 
       if (!upstream.ok) {
@@ -3454,56 +3905,110 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
+      const storedWalletContext = await fetchStoredOrderWalletContext(pool, {
+        userId: user.id,
+        venue: "limitless",
+        venueOrderId: request.params.orderId,
+      });
+      const cancelWallet =
+        storedWalletContext?.walletAddress ??
+        storedWalletContext?.signerAddress ??
+        signer;
       const partnerAuth = await requireLimitlessPartnerAuth({
         reply,
         userId: user.id,
-        walletAddress: signer,
+        walletAddress: cancelWallet,
       });
       if (!partnerAuth) return;
 
       const upstream = await limitlessRequest({
-        method: "DELETE",
-        requestPath: `/orders/${request.params.orderId}`,
+        method: "POST",
+        requestPath: buildLimitlessOnBehalfQueryPath(
+          "/orders/cancel",
+          partnerAuth.profile,
+        ),
         ...partnerAuth.requestAuth,
+        body: { orderId: request.params.orderId },
       });
 
+      const markLocalOrderCancelled = async () =>
+        pool.query(
+          `
+            update orders
+            set status = 'cancelled',
+                cancelled_at = coalesce(cancelled_at, now()),
+                last_update = now()
+            where user_id = $1
+              and (wallet_address = $2 or signer_address = $2)
+              and venue = 'limitless'
+              and venue_order_id = $3
+              and lower(coalesce(status, '')) in (
+                'pending',
+                'submitted',
+                'live',
+                'open',
+                'partially_filled'
+              )
+          `,
+          [user.id, cancelWallet, request.params.orderId],
+        );
+
       if (!upstream.ok) {
-        reply.code(502);
+        const upstreamMessage = extractLimitlessMessage(upstream.payload);
+        if (isLimitlessAmbiguousAlreadyCancelledOrderMessage(upstreamMessage)) {
+          const cancelResult = await markLocalOrderCancelled();
+          const changed = (cancelResult.rowCount ?? 0) > 0;
+          if (changed) {
+            void createNotificationSafe(
+              pool,
+              buildOrderNotification({
+                userId: user.id,
+                venue: "limitless",
+                status: "cancelled",
+                orderId: request.params.orderId,
+                walletAddress: cancelWallet,
+              }),
+              app.log,
+            );
+          }
+
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send({
+            ok: true,
+            changed,
+            idempotent: true,
+            payload: upstream.payload,
+          });
+        }
+
+        reply.code(mapLimitlessUpstreamStatus(upstream.status));
         return reply.send({
           error: "Limitless cancel failed",
+          ...(upstreamMessage ? { message: upstreamMessage } : {}),
           status: upstream.status,
           payload: upstream.payload,
         });
       }
 
-      await pool.query(
-        `
-          update orders
-          set status = 'cancelled',
-              cancelled_at = now(),
-              last_update = now()
-          where user_id = $1
-            and (wallet_address = $2 or signer_address = $2)
-            and venue = 'limitless'
-            and venue_order_id = $3
-        `,
-        [user.id, signer, request.params.orderId],
-      );
+      const cancelResult = await markLocalOrderCancelled();
+      const changed = (cancelResult.rowCount ?? 0) > 0;
 
-      void createNotificationSafe(
-        pool,
-        buildOrderNotification({
-          userId: user.id,
-          venue: "limitless",
-          status: "cancelled",
-          orderId: request.params.orderId,
-          walletAddress: signer,
-        }),
-        app.log,
-      );
+      if (changed) {
+        void createNotificationSafe(
+          pool,
+          buildOrderNotification({
+            userId: user.id,
+            venue: "limitless",
+            status: "cancelled",
+            orderId: request.params.orderId,
+            walletAddress: cancelWallet,
+          }),
+          app.log,
+        );
+      }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({ ok: true, payload: upstream.payload });
+      return reply.send({ ok: true, changed, payload: upstream.payload });
     },
   );
 
@@ -3533,7 +4038,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const upstream = await limitlessRequest({
         method: "POST",
-        requestPath: "/orders/cancel-batch",
+        requestPath: buildLimitlessOnBehalfQueryPath(
+          "/orders/cancel-batch",
+          partnerAuth.profile,
+        ),
         ...partnerAuth.requestAuth,
         body: { orderIds: request.body.orderIds },
       });
@@ -3622,6 +4130,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
           request.params.slug,
         )}/user-orders`,
         ...requestAuth,
+        headers: buildLimitlessOnBehalfHeaders(partnerAuth.profile),
       });
       if (openOrders.ok) {
         openOrderIds = extractLimitlessOrders(openOrders.payload)
@@ -3640,7 +4149,10 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const upstream = await limitlessRequest({
         method: "DELETE",
-        requestPath: `/orders/all/${encodeURIComponent(request.params.slug)}`,
+        requestPath: buildLimitlessOnBehalfQueryPath(
+          `/orders/all/${encodeURIComponent(request.params.slug)}`,
+          partnerAuth.profile,
+        ),
         ...requestAuth,
       });
 
@@ -3724,6 +4236,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         method: "GET",
         requestPath: `/markets/${encodeURIComponent(request.query.slug)}/user-orders`,
         ...partnerAuth.requestAuth,
+        headers: buildLimitlessOnBehalfHeaders(partnerAuth.profile),
       });
 
       if (!upstream.ok) {

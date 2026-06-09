@@ -179,3 +179,10 @@ export async function subscribeToMarketStates(
 ): Promise<() => void> {
   return subscribeToChannels("market_state", tokenIds, listener);
 }
+
+export async function subscribeToMarketUpdates(
+  tokenIds: string[],
+  listener: StreamListener,
+): Promise<() => void> {
+  return subscribeToChannels("market_update", tokenIds, listener);
+}

@@ -1,10 +1,20 @@
 import { tx } from "@hunch/infra";
 import type { Pool, PoolClient } from "pg";
 import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
+import {
+  buildQualificationPointsContributionSql,
+  buildTierPointsContributionSql,
+  fetchReferralCodeMultiplierContextForUser,
+} from "../repos/rewards.js";
 
 type MultiplierQueryable = Pick<PoolClient, "query">;
 
-export type RewardsMultiplierSource = "global" | "user" | "referral" | "tier";
+export type RewardsMultiplierSource =
+  | "global"
+  | "user"
+  | "referral"
+  | "tier"
+  | "referral_code";
 
 type VolumeEventInsertInput = {
   userId: string;
@@ -19,6 +29,12 @@ type VolumeEventInsertInput = {
 export type ResolvedRewardsMultiplier = {
   multiplierApplied: number;
   multiplierSource: RewardsMultiplierSource;
+  label?: string | null;
+  referralCodeContext?: {
+    code: string;
+    label: string | null;
+    policyType: "user" | "campaign";
+  } | null;
 };
 
 type BatchInsertInput = {
@@ -79,17 +95,34 @@ function resolveRulesMaxMultiplier(
   return resolved;
 }
 
-async function fetchPointsAtEvent(
+async function fetchTierPointsAtEvent(
   client: MultiplierQueryable,
   userId: string,
   eventTime: Date,
 ): Promise<number> {
   const { rows } = await client.query<{ total: string | null }>(
     `
-      select coalesce(sum(points_awarded), 0)::text as total
-      from volume_events
-      where user_id = $1
-        and created_at <= $2
+      select coalesce(sum(${buildTierPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+        and ve.created_at <= $2
+    `,
+    [userId, eventTime],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
+async function fetchQualificationPointsAtEvent(
+  client: MultiplierQueryable,
+  userId: string,
+  eventTime: Date,
+): Promise<number> {
+  const { rows } = await client.query<{ total: string | null }>(
+    `
+      select coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::text as total
+      from volume_events ve
+      where ve.user_id = $1
+        and ve.created_at <= $2
     `,
     [userId, eventTime],
   );
@@ -100,9 +133,9 @@ async function fetchQualifiedReferralCountAtEvent(
   client: MultiplierQueryable,
   userId: string,
   eventTime: Date,
-  referrerPointsAtEvent: number,
+  referrerQualificationPointsAtEvent: number,
 ): Promise<number> {
-  if (referrerPointsAtEvent < OBSERVER_THRESHOLD) {
+  if (referrerQualificationPointsAtEvent < OBSERVER_THRESHOLD) {
     return 0;
   }
 
@@ -110,11 +143,11 @@ async function fetchQualifiedReferralCountAtEvent(
     `
       with referred_points as (
         select
-          user_id,
-          coalesce(sum(points_awarded), 0)::numeric as points
-        from volume_events
-        where created_at <= $2
-        group by user_id
+          ve.user_id,
+          coalesce(sum(${buildQualificationPointsContributionSql("ve")}), 0)::numeric as points
+        from volume_events ve
+        where ve.created_at <= $2
+        group by ve.user_id
       )
       select count(*)::text as total
       from referrals r
@@ -134,10 +167,15 @@ async function fetchUserOverrideMultiplier(
   client: MultiplierQueryable,
   userId: string,
   eventTime: Date,
-): Promise<number | null> {
-  const { rows } = await client.query<{ multiplier: string | null }>(
+): Promise<{ multiplier: number; label: string | null } | null> {
+  const { rows } = await client.query<{
+    multiplier: string | null;
+    label: string | null;
+  }>(
     `
-      select multiplier::text as multiplier
+      select
+        multiplier::text as multiplier,
+        label
       from rewards_multiplier_user_overrides
       where user_id = $1
         and effective_at <= $2
@@ -151,7 +189,10 @@ async function fetchUserOverrideMultiplier(
   if (!raw) return null;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return parsed;
+  return {
+    multiplier: parsed,
+    label: rows[0]?.label?.trim() || null,
+  };
 }
 
 export async function resolveRewardsMultiplierAtEvent(
@@ -165,19 +206,22 @@ export async function resolveRewardsMultiplierAtEvent(
   );
   if (overrideMultiplier != null) {
     return {
-      multiplierApplied: overrideMultiplier,
+      multiplierApplied: overrideMultiplier.multiplier,
       multiplierSource: "user",
+      label: overrideMultiplier.label,
     };
   }
 
   const policyRows = await client.query<{
     global_multiplier: string | null;
+    global_multiplier_label: string | null;
     referral_rules: unknown;
     tier_rules: unknown;
   }>(
     `
       select
         global_multiplier::text as global_multiplier,
+        global_multiplier_label,
         referral_rules,
         tier_rules
       from rewards_multiplier_policy
@@ -190,16 +234,15 @@ export async function resolveRewardsMultiplierAtEvent(
 
   const policy = policyRows.rows[0];
   const globalMultiplier = safePositiveNumber(policy?.global_multiplier, 1);
-  const pointsAtEvent = await fetchPointsAtEvent(
-    client,
-    inputs.userId,
-    inputs.eventTime,
-  );
+  const [tierPointsAtEvent, qualificationPointsAtEvent] = await Promise.all([
+    fetchTierPointsAtEvent(client, inputs.userId, inputs.eventTime),
+    fetchQualificationPointsAtEvent(client, inputs.userId, inputs.eventTime),
+  ]);
   const qualifiedReferrals = await fetchQualifiedReferralCountAtEvent(
     client,
     inputs.userId,
     inputs.eventTime,
-    pointsAtEvent,
+    qualificationPointsAtEvent,
   );
 
   const referralMultiplier = resolveRulesMaxMultiplier(
@@ -214,17 +257,30 @@ export async function resolveRewardsMultiplierAtEvent(
   );
   const tierMultiplier = resolveRulesMaxMultiplier(
     policy?.tier_rules ?? [],
-    pointsAtEvent,
+    tierPointsAtEvent,
     ["minPoints", "min_points"],
   );
+  const referralCodeContext = await fetchReferralCodeMultiplierContextForUser(
+    client,
+    {
+      userId: inputs.userId,
+      eventTime: inputs.eventTime,
+    },
+  );
+  const referralCodeMultiplier =
+    referralCodeContext?.multiplier_override == null
+      ? null
+      : safePositiveNumber(referralCodeContext.multiplier_override, 0);
 
   const isAllEqual =
+    referralCodeMultiplier == null &&
     Math.abs(globalMultiplier - referralMultiplier) < 1e-12 &&
     Math.abs(globalMultiplier - tierMultiplier) < 1e-12;
   if (isAllEqual) {
     return {
       multiplierApplied: globalMultiplier,
       multiplierSource: "global",
+      label: policy?.global_multiplier_label?.trim() || null,
     };
   }
 
@@ -232,22 +288,45 @@ export async function resolveRewardsMultiplierAtEvent(
     globalMultiplier,
     referralMultiplier,
     tierMultiplier,
+    referralCodeMultiplier ?? 0,
   );
+  if (
+    referralCodeMultiplier != null &&
+    Math.abs(referralCodeMultiplier - maxMultiplier) < 1e-12
+  ) {
+    const context = referralCodeContext;
+    if (!context) {
+      throw new Error("Missing referral code multiplier context");
+    }
+    return {
+      multiplierApplied: referralCodeMultiplier,
+      multiplierSource: "referral_code",
+      label: context.label?.trim() || null,
+      referralCodeContext: {
+        code: context.code,
+        label: context.label,
+        policyType: context.policy_type,
+      },
+    };
+  }
   if (Math.abs(referralMultiplier - maxMultiplier) < 1e-12) {
     return {
       multiplierApplied: referralMultiplier,
       multiplierSource: "referral",
+      label: null,
     };
   }
   if (Math.abs(tierMultiplier - maxMultiplier) < 1e-12) {
     return {
       multiplierApplied: tierMultiplier,
       multiplierSource: "tier",
+      label: null,
     };
   }
   return {
     multiplierApplied: globalMultiplier,
     multiplierSource: "global",
+    label: policy?.global_multiplier_label?.trim() || null,
   };
 }
 
@@ -301,6 +380,15 @@ export async function insertVolumeEventsWithMultiplier(
   pool: Pool,
   input: BatchInsertInput,
 ): Promise<{ inserted: number; ids: string[] }> {
+  return tx(pool, async (client) =>
+    insertVolumeEventsWithMultiplierInTx(client, input),
+  );
+}
+
+export async function insertVolumeEventsWithMultiplierInTx(
+  client: PoolClient,
+  input: BatchInsertInput,
+): Promise<{ inserted: number; ids: string[] }> {
   if (!input.events.length) return { inserted: 0, ids: [] };
 
   const sortedEvents = [...input.events].sort((a, b) => {
@@ -309,29 +397,27 @@ export async function insertVolumeEventsWithMultiplier(
     return a.sourceId.localeCompare(b.sourceId);
   });
 
-  return tx(pool, async (client) => {
-    await acquireRewardsUserAdvisoryXactLock(client, input.userId);
+  await acquireRewardsUserAdvisoryXactLock(client, input.userId);
 
-    let inserted = 0;
-    const ids: string[] = [];
-    for (const event of sortedEvents) {
-      if (!Number.isFinite(event.notionalUsd) || event.notionalUsd <= 0) {
-        continue;
-      }
-      const insertedId = await insertOneVolumeEvent(client, {
-        userId: input.userId,
-        walletAddress: input.walletAddress,
-        venue: input.venue,
-        sourceType: input.sourceType,
-        sourceId: event.sourceId,
-        notionalUsd: event.notionalUsd,
-        createdAt: event.createdAt,
-      });
-      if (insertedId) {
-        inserted += 1;
-        ids.push(insertedId);
-      }
+  let inserted = 0;
+  const ids: string[] = [];
+  for (const event of sortedEvents) {
+    if (!Number.isFinite(event.notionalUsd) || event.notionalUsd <= 0) {
+      continue;
     }
-    return { inserted, ids };
-  });
+    const insertedId = await insertOneVolumeEvent(client, {
+      userId: input.userId,
+      walletAddress: input.walletAddress,
+      venue: input.venue,
+      sourceType: input.sourceType,
+      sourceId: event.sourceId,
+      notionalUsd: event.notionalUsd,
+      createdAt: event.createdAt,
+    });
+    if (insertedId) {
+      inserted += 1;
+      ids.push(insertedId);
+    }
+  }
+  return { inserted, ids };
 }

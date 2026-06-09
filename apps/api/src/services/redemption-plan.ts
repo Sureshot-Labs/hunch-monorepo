@@ -4,6 +4,7 @@ export type RedemptionPlanReason =
   | "ready"
   | "condition_unresolved"
   | "no_redeemable_balance"
+  | "resolved_zero_payout"
   | "missing_condition_id"
   | "missing_token_id"
   | "outcome_required"
@@ -21,6 +22,8 @@ export type RedemptionPlan = {
   reasonMessage: string | null;
   targetAddress: string | null;
   data: string | null;
+  collateralTokenAddress?: string | null;
+  payoutAmountRaw?: string | null;
   conditionResolved: boolean | null;
   resolvedOutcome: RedemptionResolvedOutcome;
   resolvedOutcomePct: number | null;
@@ -62,6 +65,8 @@ export function buildReadyRedemptionPlan(inputs: {
   chainId: number;
   targetAddress: string;
   data: string;
+  collateralTokenAddress?: string | null;
+  payoutAmountRaw?: string | null;
   conditionResolved?: boolean | null;
   resolvedOutcome?: RedemptionResolvedOutcome;
   resolvedOutcomePct?: number | null;
@@ -75,6 +80,12 @@ export function buildReadyRedemptionPlan(inputs: {
     reasonMessage: null,
     targetAddress: inputs.targetAddress,
     data: inputs.data,
+    ...(inputs.collateralTokenAddress !== undefined
+      ? { collateralTokenAddress: inputs.collateralTokenAddress }
+      : {}),
+    ...(inputs.payoutAmountRaw !== undefined
+      ? { payoutAmountRaw: inputs.payoutAmountRaw }
+      : {}),
     conditionResolved: inputs.conditionResolved ?? null,
     resolvedOutcome: inputs.resolvedOutcome ?? null,
     resolvedOutcomePct: inputs.resolvedOutcomePct ?? null,

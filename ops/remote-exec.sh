@@ -10,14 +10,14 @@ Usage:
   ops/remote-exec.sh <tool> [args...]
 
 Tools:
-  polycurl         -> /app/apps/api/dist/polyclob.js
-  limitlesscurl    -> /app/apps/api/dist/limitlesscurl.js
-  dflowcurl        -> /app/apps/api/dist/dflowcurl.js
-  admin:user       -> /app/apps/api/dist/admin-user.js
-  admin:points     -> /app/apps/api/dist/admin-points.js
-  fees:collect     -> /app/apps/api/dist/collect-fees.js
-  rewards:payout   -> /app/apps/api/dist/rewards-payout.js
-  migrate          -> /app/packages/db/dist/migrate.js
+  polycurl         -> /app/apps/api/dist/polyclob.js via run-with-secrets
+  limitlesscurl    -> /app/apps/api/dist/limitlesscurl.js via run-with-secrets
+  dflowcurl        -> /app/apps/api/dist/dflowcurl.js via run-with-secrets
+  admin:user       -> /app/apps/api/dist/admin-user.js via run-with-secrets
+  admin:points     -> /app/apps/api/dist/admin-points.js via run-with-secrets
+  fees:collect     -> /app/apps/api/dist/collect-fees.js via run-with-secrets
+  rewards:payout   -> /app/apps/api/dist/rewards-payout.js via run-with-secrets
+  migrate          -> /app/packages/db/dist/migrate.js via run-with-secrets
   run -- <cmd>     -> run an arbitrary command inside hunch-api
   psql "<sql>"     -> run SQL against hunch-postgres using container env
 
@@ -43,6 +43,15 @@ quote_args() {
   printf '%s' "$out"
 }
 
+node_with_secrets() {
+  local target="$1"
+  shift || true
+  printf 'docker exec -i %s node /app/packages/config/dist/run-with-secrets.js %s%s' \
+    "${SERVICE}" \
+    "${target}" \
+    "$(quote_args "$@")"
+}
+
 run_ssh() {
   local cmd="$1"
   ssh "${REMOTE_HOST}" "${cmd}"
@@ -50,28 +59,28 @@ run_ssh() {
 
 case "${tool}" in
   polycurl)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/polyclob.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/polyclob.js "$@")"
     ;;
   limitlesscurl)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/limitlesscurl.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/limitlesscurl.js "$@")"
     ;;
   dflowcurl)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/dflowcurl.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/dflowcurl.js "$@")"
     ;;
   admin:user|admin-user)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/admin-user.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/admin-user.js "$@")"
     ;;
   admin:points|admin-points)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/admin-points.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/admin-points.js "$@")"
     ;;
   fees:collect|fees-collect)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/collect-fees.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/collect-fees.js "$@")"
     ;;
   rewards:payout|rewards-payout)
-    cmd="docker exec -i ${SERVICE} node /app/apps/api/dist/rewards-payout.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/apps/api/dist/rewards-payout.js "$@")"
     ;;
   migrate)
-    cmd="docker exec -i ${SERVICE} node /app/packages/db/dist/migrate.js$(quote_args "$@")"
+    cmd="$(node_with_secrets /app/packages/db/dist/migrate.js "$@")"
     ;;
   run)
     if [[ $# -lt 1 ]]; then

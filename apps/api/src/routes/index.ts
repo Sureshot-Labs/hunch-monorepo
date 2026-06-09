@@ -5,6 +5,7 @@ import { bridgeRoutes } from "./bridge.js";
 import { clustersRoutes } from "./clusters.js";
 import { dflowPrivateRoutes } from "./dflow-private.js";
 import { embeddedWalletRoutes } from "./embedded-wallets.js";
+import { adminAuthRoutes } from "./admin-auth.js";
 import { adminRoutes } from "./admin.js";
 import { eventRoutes } from "./events.js";
 import { executionsRoutes } from "./executions.js";
@@ -41,6 +42,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(analyticsRoutes);
   await app.register(tradePolicyRoutes);
   await app.register(clustersRoutes);
+  await app.register(adminAuthRoutes);
   await app.register(adminRoutes);
   await app.register(feesRoutes);
   await app.register(bridgeRoutes);

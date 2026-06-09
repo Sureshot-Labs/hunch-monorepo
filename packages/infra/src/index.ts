@@ -23,7 +23,50 @@ export {
   createTopTickGate,
   resolveTopTickGateOptionsFromEnv,
 } from "./top-tick-gate.js";
+export {
+  claimDuePriceRefreshTokens,
+  enqueuePriceRefreshTokens,
+  getPriceRefreshQueueBacklog,
+  getPriceRefreshQueueKey,
+  inferPriceRefreshVenue,
+  PRICE_REFRESH_QUEUE_KEYS,
+  requeuePriceRefreshTokens,
+} from "./price-refresh.js";
+export {
+  INDEXER_STATS_KEYS,
+  INDEXER_STATS_TTL_SEC,
+  updateIndexerStats,
+} from "./indexer-stats.js";
+export { buildMarketStatePayload, publishMarketState } from "./market-state.js";
+export {
+  buildMarketUpdatePayload,
+  publishMarketUpdate,
+} from "./market-update.js";
 export type { EmbedQueueItem, TopMarketCandidate } from "./ai-embed.js";
+export type {
+  MarketStatePayload,
+  MarketStateRedis,
+  PublishMarketStateInputs,
+} from "./market-state.js";
+export type {
+  MarketUpdatePayload,
+  MarketUpdateRedis,
+  PublishMarketUpdateInputs,
+} from "./market-update.js";
+export type {
+  ClaimPriceRefreshInputs,
+  EnqueuePriceRefreshInputs,
+  EnqueuePriceRefreshResult,
+  PriceRefreshRedis,
+  PriceRefreshQueueClaimSide,
+  PriceRefreshVenue,
+  RequeuePriceRefreshInputs,
+} from "./price-refresh.js";
+export type {
+  IndexerStatsPatch,
+  IndexerStatsRedis,
+  IndexerStatsVenue,
+} from "./indexer-stats.js";
 export type {
   TopTickGate,
   TopTickGateInputs,

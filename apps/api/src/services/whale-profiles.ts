@@ -20,6 +20,7 @@ import {
   type WalletActivitySignalRow,
   type WalletActivitySignalSummary,
   type WalletActivitySummary,
+  type WalletActivitySummarySortMode,
   type WalletActivitySummaryStats,
 } from "./wallet-activity-summary.js";
 import {
@@ -1240,6 +1241,20 @@ function selectWhaleProfileRows<T extends WhaleSelectableRow>(
   return { rows: selected, pinnedCoverage };
 }
 
+export function sortTrackerSurfaceSummaryStats(
+  rows: WalletActivitySummaryStats[],
+  sortMode: Extract<
+    WalletActivitySummarySortMode,
+    "importance" | "last_activity"
+  >,
+): WalletActivitySummaryStats[] {
+  return [...rows]
+    .filter((row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt))
+    .sort((left, right) =>
+      compareWalletActivitySummaryStats(left, right, sortMode),
+    );
+}
+
 async function loadTrackerSurfaceIds(
   client: PoolClient,
   options: {
@@ -1247,6 +1262,10 @@ async function loadTrackerSurfaceIds(
     limit: number;
     minActivityUsd: number;
     minActivityShares: number;
+    sortMode: Extract<
+      WalletActivitySummarySortMode,
+      "importance" | "last_activity"
+    >;
   },
 ): Promise<string[]> {
   if (options.limit <= 0) return [];
@@ -1283,11 +1302,10 @@ async function loadTrackerSurfaceIds(
     },
   );
 
-  return Array.from(summaryStatsMap.values())
-    .filter((row: WalletActivitySummaryStats) => Boolean(row.lastActivityAt))
-    .sort((left, right) =>
-      compareWalletActivitySummaryStats(left, right, "last_activity"),
-    )
+  return sortTrackerSurfaceSummaryStats(
+    Array.from(summaryStatsMap.values()),
+    options.sortMode,
+  )
     .slice(0, Math.max(1, Math.trunc(options.limit)))
     .map((row) => row.walletId);
 }
@@ -1690,10 +1708,24 @@ async function loadWhaleRowsByIds(
           w2.address as owner_address,
           w2.label as owner_label
         from wallets w2
-        where w.metadata->>'kind' = 'safe'
-          and w2.metadata->>'kind' = 'safe_owner'
-          and w2.metadata->>'derivedFrom' = w.address
-          and w2.chain = w.chain
+        where w2.chain = w.chain
+          and (
+            (
+              w.metadata->>'linkedOwnerAddress' is not null
+              and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+            )
+            or (
+              w.metadata->>'kind' = 'safe'
+              and w2.metadata->>'kind' = 'safe_owner'
+              and w2.metadata->>'derivedFrom' = w.address
+            )
+          )
+        order by case
+          when w.metadata->>'linkedOwnerAddress' is not null
+            and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+          then 0
+          else 1
+        end
         limit 1
       ) owner on true
       left join lateral (
@@ -2441,6 +2473,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     selectionTrackerWindowHours: env.aiWhaleProfileSelectionTrackerWindowHours,
     selectionTrackerSurfaceLimit:
       env.aiWhaleProfileSelectionTrackerSurfaceLimit,
+    selectionTrackerSort: env.aiWhaleProfileSelectionTrackerSort,
     selectionSignalsWindowHours: env.aiWhaleProfileSelectionSignalsWindowHours,
     model: env.aiWhaleProfileModel,
     styleGuide: env.aiWhaleProfileStyleGuide,
@@ -2598,6 +2631,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     signalsFetchLimit,
     candidateFetchLimit,
     trackerWindowHours,
+    trackerSort: policy.selectionTrackerSort,
     signalsWindowHours,
     force: Boolean(options.force),
     dryRun: Boolean(options.dryRun),
@@ -2618,6 +2652,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             limit: trackerSurfaceLimit,
             minActivityUsd: env.walletIntelMinActivityUsd,
             minActivityShares: env.walletIntelMinActivityShares,
+            sortMode: policy.selectionTrackerSort,
           })
         : [];
     console.log("[whale-profile] tracker surface", {
@@ -2794,7 +2829,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
             ws.market_id,
             ws.venue,
             ws.snapshot_at,
-            upper(coalesce(ws.outcome_side, '')) as normalized_outcome_side,
+            ws.outcome_side as normalized_outcome_side,
             ws.shares,
             ws.size_usd,
             ws.price

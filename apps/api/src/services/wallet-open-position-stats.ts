@@ -94,8 +94,8 @@ export async function loadWalletOpenPositionStatsMap(
           ws.wallet_id,
           ws.market_id,
           case
-            when upper(coalesce(ws.outcome_side, '')) in ('YES', 'NO')
-              then upper(coalesce(ws.outcome_side, ''))
+            when ws.outcome_side in ('YES', 'NO')
+              then ws.outcome_side
             else null
           end as outcome_side,
           greatest(coalesce(ws.shares, 0), 0) as shares,

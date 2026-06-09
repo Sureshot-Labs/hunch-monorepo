@@ -10,6 +10,7 @@ import {
 import { subscribeToNotifications } from "../lib/notifications-stream-manager.js";
 import { getRedisStatus } from "../redis.js";
 import {
+  buildNotificationPayload,
   buildRedemptionNotification,
   createNotificationSafe,
 } from "../services/notifications.js";
@@ -46,16 +47,7 @@ export const notificationsRoutes: FastifyPluginAsync = async (app) => {
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         ok: true,
-        items: result.rows.map((row) => ({
-          id: row.id,
-          type: row.type,
-          title: row.title,
-          body: row.body,
-          severity: row.severity,
-          data: row.data ?? null,
-          readAt: row.read_at ? row.read_at.toISOString() : null,
-          createdAt: row.created_at.toISOString(),
-        })),
+        items: result.rows.map(buildNotificationPayload),
         nextCursor: result.nextCursor,
       });
     },

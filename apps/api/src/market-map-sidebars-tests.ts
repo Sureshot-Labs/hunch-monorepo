@@ -273,8 +273,7 @@ async function insertMarketActivityMetric(params: {
   );
 }
 
-async function insertMarketActivitySnapshots(params: {
-  marketId: string;
+async function insertEventActivitySnapshots(params: {
   eventId: string;
   venue?: string;
   volumeTotal: number;
@@ -288,8 +287,7 @@ async function insertMarketActivitySnapshots(params: {
   for (const bucket of buckets) {
     await pool.query(
       `
-        insert into unified_market_activity_snapshots_1h (
-          market_id,
+        insert into unified_event_activity_snapshots_1h (
           event_id,
           venue,
           bucket,
@@ -297,36 +295,35 @@ async function insertMarketActivitySnapshots(params: {
           liquidity,
           open_interest,
           source_updated_at,
-          created_at
+          created_at,
+          updated_at
         )
         values (
           $1,
-          $2,
-          $8,
-          date_trunc('hour', now() - ($3::text || ' hours')::interval),
-          greatest($4::numeric + $5::numeric, 0),
-          case when $6::numeric is null then null else greatest($6::numeric + $7::numeric, 0) end,
+          $6,
+          date_trunc('hour', now() - ($2::text || ' hours')::interval),
+          greatest($3::numeric + $4::numeric, 0),
+          case when $5::numeric is null then null else greatest($5::numeric + $7::numeric, 0) end,
           null,
-          now() - ($3::text || ' hours')::interval,
-          now() - ($3::text || ' hours')::interval
+          now() - ($2::text || ' hours')::interval,
+          now() - ($2::text || ' hours')::interval,
+          now() - ($2::text || ' hours')::interval
         )
-        on conflict (market_id, bucket) do update
-          set event_id = excluded.event_id,
-              venue = excluded.venue,
-              volume_total = excluded.volume_total,
+        on conflict (event_id, venue, bucket) do update
+          set volume_total = excluded.volume_total,
               liquidity = excluded.liquidity,
               open_interest = excluded.open_interest,
-              source_updated_at = excluded.source_updated_at
+              source_updated_at = excluded.source_updated_at,
+              updated_at = excluded.updated_at
       `,
       [
-        params.marketId,
         params.eventId,
         bucket.hoursAgo,
         params.volumeTotal,
         bucket.volumeOffset,
         params.liquidity,
-        bucket.liquidityOffset,
         params.venue ?? "polymarket",
+        bucket.liquidityOffset,
       ],
     );
   }
@@ -485,13 +482,14 @@ async function main() {
         liquidityNow: seed.liquidityNow,
         updatedAt,
       });
-      await insertMarketActivitySnapshots({
-        marketId,
-        eventId,
-        venue: seed.venue,
-        volumeTotal: seed.volume24h,
-        liquidity: seed.liquidityNow,
-      });
+      if (seed.key !== "beta") {
+        await insertEventActivitySnapshots({
+          eventId,
+          venue: seed.venue,
+          volumeTotal: seed.volume24h,
+          liquidity: seed.liquidityNow,
+        });
+      }
       if (
         seed.volumeLast24h != null ||
         seed.liquidityNow != null ||
@@ -587,6 +585,15 @@ async function main() {
     assert.equal(
       payload.topMovers24h.some((item) => item.eventId === eventIds[4]),
       false,
+    );
+    assert.equal(payload.topMovers24h[0]?.eventId, eventIds[1]);
+    assert.equal(
+      payload.topMovers24h[0]?.activitySparklines?.volume?.points.at(-1)?.value,
+      null,
+    );
+    assert.equal(
+      payload.topMovers24h[0]?.activitySparklines?.volume?.points.at(-1)?.delta,
+      null,
     );
 
     const alpha = payload.volumeMovers24h[0];
@@ -737,8 +744,8 @@ async function main() {
       [marketIds],
     );
     await pool.query(
-      "delete from unified_market_activity_snapshots_1h where market_id = any($1::text[])",
-      [marketIds],
+      "delete from unified_event_activity_snapshots_1h where event_id = any($1::text[])",
+      [eventIds],
     );
     await pool.query("delete from unified_markets where id = any($1::text[])", [
       marketIds,

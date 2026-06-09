@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 
 import { env } from "./env.js";
 import {
+  extractLimitlessPartnerAccountProfile,
+  extractLimitlessPartnerAccountProfiles,
   loadLimitlessProfileForWallet,
   verifyLimitlessAuthContext,
   type LimitlessAuthContext,
@@ -113,6 +115,70 @@ test("loadLimitlessProfileForWallet merges stored and base profile fields", asyn
   assert.equal(profile?.id, 460208);
   assert.equal(profile?.client, "eoa");
   assert.equal(profile?.rank?.feeRateBps, 300);
+});
+
+test("extractLimitlessPartnerAccountProfile accepts direct account lookup shape", async () => {
+  const profile = extractLimitlessPartnerAccountProfile(
+    {
+      profileId: 789,
+      account: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
+    },
+    "0xd829f31579e3129a551c9ab3980efa8e5e041131",
+  );
+
+  assert.equal(profile?.id, 789);
+  assert.equal(profile?.account, "0xD829f31579e3129a551c9AB3980eFA8E5E041131");
+});
+
+test("extractLimitlessPartnerAccountProfile picks matching account from list wrappers", async () => {
+  const payload = {
+    items: [
+      {
+        profileId: 111,
+        account: "0x1111111111111111111111111111111111111111",
+      },
+      {
+        profile: {
+          id: 222,
+          walletAddress: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
+          rank: { feeRateBps: "250" },
+        },
+      },
+    ],
+  };
+
+  const profiles = extractLimitlessPartnerAccountProfiles(payload);
+  const profile = extractLimitlessPartnerAccountProfile(
+    payload,
+    "0xd829f31579e3129a551c9ab3980efa8e5e041131",
+  );
+
+  assert.equal(profiles.length, 2);
+  assert.equal(profile?.id, 222);
+  assert.equal(profile?.rank?.feeRateBps, 250);
+});
+
+test("extractLimitlessPartnerAccountProfile rejects non-matching accounts", async () => {
+  const profile = extractLimitlessPartnerAccountProfile(
+    {
+      profileId: 789,
+      account: "0x1111111111111111111111111111111111111111",
+    },
+    "0xd829f31579e3129a551c9ab3980efa8e5e041131",
+  );
+
+  assert.equal(profile, null);
+});
+
+test("extractLimitlessPartnerAccountProfile rejects lookup entries without profile id", async () => {
+  const profile = extractLimitlessPartnerAccountProfile(
+    {
+      account: "0xD829f31579e3129a551c9AB3980eFA8E5E041131",
+    },
+    "0xd829f31579e3129a551c9ab3980efa8e5e041131",
+  );
+
+  assert.equal(profile, null);
 });
 
 test("resolveLimitlessAuthContext does not upgrade legacy auth rows implicitly", async () => {

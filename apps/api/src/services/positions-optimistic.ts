@@ -30,6 +30,15 @@ export type OptimisticPositionTradeResult = {
   reason?: string;
 };
 
+export type ReconcileExactPositionBalanceInput = {
+  userId: string;
+  walletAddress: string;
+  venue: SupportedVenue;
+  tokenId: string;
+  size: number;
+  averagePrice?: number | null;
+};
+
 function parseNumber(value: string | null | undefined): number {
   if (value == null) return 0;
   const parsed = Number(value);
@@ -39,6 +48,12 @@ function parseNumber(value: string | null | undefined): number {
 function clampPositive(value: number): number | null {
   if (!Number.isFinite(value)) return null;
   if (value <= 0) return null;
+  return value;
+}
+
+function clampNonNegative(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  if (value < 0) return null;
   return value;
 }
 
@@ -236,6 +251,185 @@ async function applySell(
 }
 
 export async function applyOptimisticPositionTrade(
+  pool: Pool,
+  input: OptimisticPositionTradeInput,
+): Promise<OptimisticPositionTradeResult> {
+  return applyPositionTradeDelta(pool, input);
+}
+
+export async function applyVenueConfirmedPositionTrade(
+  pool: Pool,
+  input: OptimisticPositionTradeInput,
+): Promise<OptimisticPositionTradeResult> {
+  return applyPositionTradeDelta(pool, input);
+}
+
+export async function reconcileExactPositionBalance(
+  pool: Pool,
+  input: ReconcileExactPositionBalanceInput,
+): Promise<OptimisticPositionTradeResult> {
+  const walletAddress = input.walletAddress.trim();
+  const tokenId = input.tokenId.trim();
+  const exactSize = clampNonNegative(input.size);
+  const averagePrice =
+    input.averagePrice != null ? clampPositive(input.averagePrice) : null;
+
+  if (!walletAddress) return { applied: false, reason: "wallet_missing" };
+  if (!tokenId) return { applied: false, reason: "token_missing" };
+  if (exactSize == null) return { applied: false, reason: "size_invalid" };
+
+  const result = await tx(pool, async (client: PoolClient) => {
+    const current = await selectPositionForUpdate(client, {
+      userId: input.userId,
+      walletAddress,
+      venue: input.venue,
+      tokenId,
+    });
+
+    if (exactSize < MIN_POSITION_SIZE) {
+      if (!current) return { applied: false, reason: "position_not_found" };
+
+      const currentSize = parseNumber(current.size);
+      if (current.side === "FLAT" && currentSize <= 0) {
+        return { applied: false, reason: "position_already_flat" };
+      }
+
+      await client.query(
+        `
+          update positions
+          set
+            side = 'FLAT',
+            size = 0,
+            average_price = null,
+            last_updated_at = now(),
+            updated_at = now()
+          where id = $1
+        `,
+        [current.id],
+      );
+      return { applied: true };
+    }
+
+    if (!current) {
+      await client.query(
+        `
+          insert into positions (
+            id,
+            user_id,
+            wallet_address,
+            venue,
+            position_scope,
+            token_id,
+            side,
+            size,
+            average_price,
+            unrealized_pnl,
+            realized_pnl,
+            is_hidden,
+            hidden_reason,
+            hidden_at,
+            last_updated_at,
+            created_at,
+            updated_at
+          )
+          values (
+            gen_random_uuid(),
+            $1, $2, $3, 'own', $4, 'LONG',
+            $5, $6, 0, 0, false, null, null, now(), now(), now()
+          )
+          on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
+          do update set
+            side = 'LONG',
+            size = excluded.size,
+            average_price = coalesce(positions.average_price, excluded.average_price),
+            is_hidden = case
+              when positions.side = 'FLAT' or positions.size <= 0 then false
+              else positions.is_hidden
+            end,
+            hidden_reason = case
+              when positions.side = 'FLAT' or positions.size <= 0 then null
+              else positions.hidden_reason
+            end,
+            hidden_at = case
+              when positions.side = 'FLAT' or positions.size <= 0 then null
+              else positions.hidden_at
+            end,
+            last_updated_at = case
+              when positions.side is distinct from 'LONG'
+                or positions.size is distinct from excluded.size
+                then now()
+              else positions.last_updated_at
+            end,
+            updated_at = now()
+        `,
+        [
+          input.userId,
+          walletAddress,
+          input.venue,
+          tokenId,
+          exactSize,
+          averagePrice,
+        ],
+      );
+      return { applied: true };
+    }
+
+    await client.query(
+      `
+        update positions
+        set
+          side = 'LONG',
+          size = $2,
+          average_price = coalesce(positions.average_price, $3),
+          is_hidden = case
+            when positions.side = 'FLAT' or positions.size <= 0 then false
+            else positions.is_hidden
+          end,
+          hidden_reason = case
+            when positions.side = 'FLAT' or positions.size <= 0 then null
+            else positions.hidden_reason
+          end,
+          hidden_at = case
+            when positions.side = 'FLAT' or positions.size <= 0 then null
+            else positions.hidden_at
+          end,
+          last_updated_at = case
+            when positions.side is distinct from 'LONG'
+              or positions.size is distinct from $2
+              then now()
+            else positions.last_updated_at
+          end,
+          updated_at = now()
+        where id = $1
+      `,
+      [current.id, exactSize, averagePrice],
+    );
+
+    return { applied: true };
+  });
+
+  if (!result.applied) return result;
+
+  try {
+    await recomputePositionMetricsForWallet(pool, {
+      userId: input.userId,
+      walletAddress,
+      venue: input.venue,
+    });
+  } catch (error) {
+    console.error("Exact position metrics recompute failed", {
+      error,
+      userId: input.userId,
+      walletAddress,
+      venue: input.venue,
+      tokenId,
+    });
+  }
+
+  return result;
+}
+
+async function applyPositionTradeDelta(
   pool: Pool,
   input: OptimisticPositionTradeInput,
 ): Promise<OptimisticPositionTradeResult> {

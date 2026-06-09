@@ -16,8 +16,7 @@ import {
   WalletUnlinkNotAllowedError,
   createAuthMiddleware,
 } from "../auth.js";
-import { checkRateLimit } from "../lib/rate-limit.js";
-import { resolveSecurityClientIp } from "../lib/request-ip.js";
+import { checkRateLimitForSecurityClientIp } from "../lib/request-ip.js";
 import { normalizeWalletNameInput } from "../lib/wallet-name.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -92,13 +91,15 @@ function resolvePostSignupOnboardingRequired(user: User): boolean {
 }
 
 function buildAuthUserPayload(user: User) {
+  const legacyAdminAccessEnabled =
+    env.adminAuthEnabled && env.adminAuthLegacyFallback;
   return {
     id: user.id,
     email: user.email,
     username: user.username,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl,
-    isAdmin: user.isAdmin,
+    isAdmin: legacyAdminAccessEnabled ? user.isAdmin : false,
     isActive: user.isActive,
     isVerified: user.isVerified,
     postSignupOnboardingRequired: resolvePostSignupOnboardingRequired(user),
@@ -139,6 +140,7 @@ function buildAuthWalletPayloads(
     const isEmbeddedWallet = profile?.source === "embedded";
     const isSmartWallet = profile?.source === "smart";
     const isInternalWallet = profile?.isInternalWallet;
+    const walletName = wallet.name?.trim();
 
     return {
       id: wallet.id,
@@ -148,7 +150,7 @@ function buildAuthWalletPayloads(
       isEmbeddedWallet,
       isSmartWallet,
       isInternalWallet,
-      name: isInternalWallet ? "Trading Wallet" : wallet.name,
+      name: walletName || (isInternalWallet ? "Trading Wallet" : null),
       isPrimary: wallet.isPrimary,
       isVerified: wallet.isVerified,
       createdAt: wallet.createdAt.toISOString(),
@@ -387,23 +389,24 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const body = request.body;
 
-      const clientIp = resolveSecurityClientIp(request);
       const userAgent = readRequestUserAgent(
         request.headers as Record<string, unknown>,
       );
+      let clientIp = "unknown";
       let primaryWalletAddress = "unknown";
 
       try {
-        const canProceed = await checkRateLimit(
-          `auth:privy:${clientIp}`,
-          20,
-          60_000,
-          { onError: "fail_closed" },
-        );
-        if (!canProceed) {
+        const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+          keyPrefix: "auth:privy",
+          maxRequests: 20,
+          windowMs: 60_000,
+          onError: "fail_closed",
+        });
+        if (!rateLimit.allowed) {
           reply.code(429);
           return reply.send({ error: "Rate limit exceeded" });
         }
+        clientIp = rateLimit.clientIp;
 
         const {
           claims,
@@ -1173,7 +1176,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
   /**
    * POST /auth/polymarket/relayer-sign
-   * Returns builder auth headers for the Polymarket relayer (used by client-side relayer requests).
+   * Returns builder-HMAC auth headers for the Polymarket gasless relayer only.
+   * CLOB V2 order builder attribution must use the order builder field instead.
    */
   z.post(
     "/auth/polymarket/relayer-sign",
@@ -1362,14 +1366,13 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const clientIp = resolveSecurityClientIp(request);
-        const canProceed = await checkRateLimit(
-          `auth:wallet-nonce:${clientIp}`,
-          30,
-          60_000,
-          { onError: "fail_closed" },
-        );
-        if (!canProceed) {
+        const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+          keyPrefix: "auth:wallet-nonce",
+          maxRequests: 30,
+          windowMs: 60_000,
+          onError: "fail_closed",
+        });
+        if (!rateLimit.allowed) {
           reply.code(429);
           return reply.send({ error: "Rate limit exceeded" });
         }
@@ -1476,14 +1479,13 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const clientIp = resolveSecurityClientIp(request);
-        const canProceed = await checkRateLimit(
-          `auth:add-wallet:${clientIp}`,
-          20,
-          60_000,
-          { onError: "fail_closed" },
-        );
-        if (!canProceed) {
+        const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+          keyPrefix: "auth:add-wallet",
+          maxRequests: 20,
+          windowMs: 60_000,
+          onError: "fail_closed",
+        });
+        if (!rateLimit.allowed) {
           reply.code(429);
           return reply.send({ error: "Rate limit exceeded" });
         }
@@ -1603,14 +1605,13 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const clientIp = resolveSecurityClientIp(request);
-        const canProceed = await checkRateLimit(
-          `auth:update-wallet-name:${clientIp}`,
-          40,
-          60_000,
-          { onError: "fail_closed" },
-        );
-        if (!canProceed) {
+        const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+          keyPrefix: "auth:update-wallet-name",
+          maxRequests: 40,
+          windowMs: 60_000,
+          onError: "fail_closed",
+        });
+        if (!rateLimit.allowed) {
           reply.code(429);
           return reply.send({ error: "Rate limit exceeded" });
         }
@@ -1671,14 +1672,13 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const body = request.body;
 
       try {
-        const clientIp = resolveSecurityClientIp(request);
-        const canProceed = await checkRateLimit(
-          `auth:remove-wallet:${clientIp}`,
-          20,
-          60_000,
-          { onError: "fail_closed" },
-        );
-        if (!canProceed) {
+        const rateLimit = await checkRateLimitForSecurityClientIp(request, {
+          keyPrefix: "auth:remove-wallet",
+          maxRequests: 20,
+          windowMs: 60_000,
+          onError: "fail_closed",
+        });
+        if (!rateLimit.allowed) {
           reply.code(429);
           return reply.send({ error: "Rate limit exceeded" });
         }

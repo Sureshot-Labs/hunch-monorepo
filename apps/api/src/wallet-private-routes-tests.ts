@@ -13,12 +13,121 @@ type TestContext = {
   createdWallets: Array<{ address: string; chain: "polygon" | "solana" }>;
 };
 
+type TestWalletChain = TestContext["createdWallets"][number]["chain"];
+
 function randomEmail(): string {
   return `wallet-private-${crypto.randomUUID()}@example.com`;
 }
 
 function randomEvmAddress(): string {
   return `0x${crypto.randomBytes(20).toString("hex")}`;
+}
+
+function withMixedEvmCase(address: string): string {
+  return `0x${address.slice(2, 12).toUpperCase()}${address.slice(12)}`;
+}
+
+function randomSolanaLikeAddress(): string {
+  const alphabet =
+    "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  return Array.from(
+    { length: 44 },
+    () => alphabet[crypto.randomInt(alphabet.length)],
+  ).join("");
+}
+
+async function loadWhaleTagId(): Promise<string> {
+  const result = await pool.query<{ id: string }>(
+    "select id from wallet_tags where slug = 'whale'",
+  );
+  const id = result.rows[0]?.id;
+  assert.ok(id, "wallet_tags must include the whale system tag");
+  return id;
+}
+
+async function createWhaleFixtureWallet(
+  context: TestContext,
+  inputs: {
+    address: string;
+    chain: TestWalletChain;
+    metadata?: Record<string, unknown>;
+    volumeUsd?: number;
+  },
+): Promise<string> {
+  const walletResult = await pool.query<{ id: string }>(
+    `
+      insert into wallets (address, chain, metadata, last_seen_at)
+      values ($1, $2, $3, now())
+      on conflict (address, chain)
+      do update set
+        metadata = excluded.metadata,
+        last_seen_at = now(),
+        updated_at = now()
+      returning id
+    `,
+    [inputs.address, inputs.chain, inputs.metadata ?? null],
+  );
+  const walletId = walletResult.rows[0]?.id;
+  assert.ok(walletId);
+  context.createdWallets.push({
+    address: inputs.address,
+    chain: inputs.chain,
+  });
+
+  if (inputs.volumeUsd != null) {
+    const whaleTagId = await loadWhaleTagId();
+    await pool.query(
+      `
+        insert into wallet_tag_map (wallet_id, tag_id, source)
+        values ($1, $2, 'test')
+        on conflict (wallet_id, tag_id)
+        do nothing
+      `,
+      [walletId, whaleTagId],
+    );
+    await pool.query(
+      `
+        insert into wallet_intel_selector_snapshot (
+          wallet_id,
+          metrics_as_of,
+          metrics_volume_30d,
+          metrics_pnl_30d,
+          metrics_trades_30d,
+          last_activity_at,
+          updated_at
+        )
+        values ($1, now(), $2, 0, 1, now(), now())
+        on conflict (wallet_id)
+        do update set
+          metrics_as_of = excluded.metrics_as_of,
+          metrics_volume_30d = excluded.metrics_volume_30d,
+          metrics_pnl_30d = excluded.metrics_pnl_30d,
+          metrics_trades_30d = excluded.metrics_trades_30d,
+          last_activity_at = excluded.last_activity_at,
+          updated_at = excluded.updated_at
+      `,
+      [walletId, inputs.volumeUsd],
+    );
+    await pool.query(
+      `
+        insert into wallet_activity_hourly (
+          wallet_id,
+          venue,
+          market_id,
+          outcome_side,
+          activity_type,
+          hour_bucket,
+          last_occurred_at
+        )
+        values ($1, 'polymarket', 'wallet-private-routes-test', 'YES', 'trade', date_trunc('hour', now()), now())
+        on conflict (wallet_id, venue, market_id, outcome_side, activity_type, hour_bucket)
+        do update set last_occurred_at = excluded.last_occurred_at
+      `,
+      [walletId],
+    );
+  }
+
+  return walletId;
 }
 
 async function createTestUser(): Promise<{
@@ -354,6 +463,79 @@ async function main() {
       });
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().ok, true);
+    }
+
+    {
+      const linkedOwnerAddress = randomEvmAddress();
+      const linkedProxyAddress = randomEvmAddress();
+      await createWhaleFixtureWallet(context, {
+        address: linkedOwnerAddress,
+        chain: "polygon",
+      });
+      await createWhaleFixtureWallet(context, {
+        address: linkedProxyAddress,
+        chain: "polygon",
+        metadata: {
+          linkedOwnerAddress: withMixedEvmCase(linkedOwnerAddress),
+        },
+        volumeUsd: 999_000_000,
+      });
+
+      const safeAddress = randomEvmAddress();
+      const safeOwnerAddress = randomEvmAddress();
+      await createWhaleFixtureWallet(context, {
+        address: safeOwnerAddress,
+        chain: "polygon",
+        metadata: {
+          kind: "safe_owner",
+          derivedFrom: safeAddress,
+        },
+      });
+      await createWhaleFixtureWallet(context, {
+        address: safeAddress,
+        chain: "polygon",
+        metadata: { kind: "safe" },
+        volumeUsd: 998_000_000,
+      });
+
+      const solanaLinkedOwnerAddress = randomSolanaLikeAddress();
+      const solanaProxyAddress = randomSolanaLikeAddress();
+      await createWhaleFixtureWallet(context, {
+        address: solanaLinkedOwnerAddress.toLowerCase(),
+        chain: "solana",
+      });
+      await createWhaleFixtureWallet(context, {
+        address: solanaProxyAddress,
+        chain: "solana",
+        metadata: {
+          linkedOwnerAddress: solanaLinkedOwnerAddress,
+        },
+        volumeUsd: 997_000_000,
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/whales?limit=20&offset=0&sort=volume_30d&windowDays=30&includeSummary=false&includeAttribution=false",
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json() as {
+        ok: boolean;
+        wallets: Array<{ address: string; ownerAddress: string | null }>;
+      };
+      assert.equal(body.ok, true);
+      const byAddress = new Map<string, { ownerAddress: string | null }>(
+        body.wallets.map((wallet) => [wallet.address, wallet]),
+      );
+
+      assert.equal(
+        byAddress.get(linkedProxyAddress)?.ownerAddress,
+        linkedOwnerAddress,
+      );
+      assert.equal(
+        byAddress.get(safeAddress)?.ownerAddress,
+        safeOwnerAddress,
+      );
+      assert.equal(byAddress.get(solanaProxyAddress)?.ownerAddress, null);
     }
 
     {

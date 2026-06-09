@@ -174,17 +174,21 @@ function addMetricValues(
   target.set(key, bucketValues);
 }
 
-async function loadActivitySparklineValues(
+type ActivitySparklineValues = {
+  volumeByEvent: Map<string, Map<string, number | null>>;
+  liquidityByEvent: Map<string, Map<string, number | null>>;
+};
+
+async function loadEventActivitySparklineValues(
   pool: Pool,
   events: NormalizedSparklineEvent[],
   window: ResolvedSparklineWindow,
-): Promise<{
-  volumeByEvent: Map<string, Map<string, number | null>>;
-  liquidityByEvent: Map<string, Map<string, number | null>>;
-}> {
+): Promise<ActivitySparklineValues> {
   const volumeByEvent = new Map<string, Map<string, number | null>>();
   const liquidityByEvent = new Map<string, Map<string, number | null>>();
-  if (events.length === 0) return { volumeByEvent, liquidityByEvent };
+  if (events.length === 0) {
+    return { volumeByEvent, liquidityByEvent };
+  }
 
   const rows = await pool.query<ActivitySparklineRow>(
     `
@@ -192,21 +196,19 @@ async function loadActivitySparklineValues(
         select *
         from unnest($1::text[], $2::text[]) as es(event_id, venue)
       ),
-      market_bucket_rows as (
+      event_bucket_rows as (
         select distinct on (
           s.event_id,
           s.venue,
-          s.market_id,
           floor(extract(epoch from s.bucket) / ($5::int * 3600))::bigint
         )
           s.event_id,
           s.venue,
-          s.market_id,
           floor(extract(epoch from s.bucket) / ($5::int * 3600))::bigint as bucket_index,
           s.bucket,
           s.volume_total,
           s.liquidity
-        from unified_market_activity_snapshots_1h s
+        from unified_event_activity_snapshots_1h s
         join event_set es
           on es.event_id = s.event_id
          and es.venue = s.venue
@@ -215,7 +217,6 @@ async function loadActivitySparklineValues(
         order by
           s.event_id,
           s.venue,
-          s.market_id,
           bucket_index,
           s.bucket desc
       )
@@ -225,10 +226,9 @@ async function loadActivitySparklineValues(
         timestamptz 'epoch'
           + (bucket_index * $5::int * 3600) * interval '1 second'
             as bucket_start,
-        sum(volume_total)::text as volume_value,
-        sum(liquidity)::text as liquidity_value
-      from market_bucket_rows
-      group by event_id, venue, bucket_index
+        volume_total::text as volume_value,
+        liquidity::text as liquidity_value
+      from event_bucket_rows
       order by event_id, venue, bucket_start
     `,
     [
@@ -252,6 +252,17 @@ async function loadActivitySparklineValues(
   }
 
   return { volumeByEvent, liquidityByEvent };
+}
+
+async function loadActivitySparklineValues(
+  pool: Pool,
+  events: NormalizedSparklineEvent[],
+  window: ResolvedSparklineWindow,
+): Promise<{
+  volumeByEvent: Map<string, Map<string, number | null>>;
+  liquidityByEvent: Map<string, Map<string, number | null>>;
+}> {
+  return loadEventActivitySparklineValues(pool, events, window);
 }
 
 async function loadMovementSparklineValues(

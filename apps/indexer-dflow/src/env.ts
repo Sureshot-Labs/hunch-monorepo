@@ -6,7 +6,9 @@ const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../.env",
 );
-config({ path: envPath, override: true }); // load repo .env
+if (process.env.HUNCH_RUNTIME_SECRETS_LOADED !== "1") {
+  config({ path: envPath, override: true }); // load repo .env
+}
 
 // 🧹 Prevent pg from mixing PG* env with your connectionString
 ["PGHOST", "PGUSER", "PGPASSWORD", "PGPORT", "PGDATABASE", "PGSSLMODE"].forEach(
@@ -82,6 +84,21 @@ function parseCsvLowercase(v: string | undefined): string[] | undefined {
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
   return items.length ? items : undefined;
+}
+
+function parsePositiveIntCsv(
+  value: string | undefined,
+  fallback: number[],
+): number[] {
+  const text = value?.trim();
+  if (!text) return fallback;
+  const out: number[] = [];
+  for (const part of text.split(",")) {
+    const n = Number(part.trim());
+    if (!Number.isInteger(n) || n <= 0) continue;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out.length ? out : fallback;
 }
 
 const dflowEnabledSetting = parseOptionalBool(process.env.DFLOW_ENABLED);
@@ -269,6 +286,32 @@ const hotStreamTokensMax = clampInt(
   },
 );
 
+const priceRefreshQueueEnabled =
+  parseOptionalBool(process.env.PRICE_REFRESH_QUEUE_ENABLED) ?? true;
+const priceRefreshQueueBatch = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_BATCH),
+  { min: 1, max: 1000, fallback: 100 },
+);
+const priceRefreshQueueConsumers = clampInt(
+  parseOptionalInt(
+    process.env.DFLOW_PRICE_REFRESH_QUEUE_CONSUMERS ??
+      process.env.PRICE_REFRESH_QUEUE_CONSUMERS,
+  ),
+  { min: 1, max: 32, fallback: 2 },
+);
+const priceRefreshQueueIntervalMs = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_INTERVAL_MS),
+  { min: 1000, max: 10 * 60 * 1000, fallback: 5000 },
+);
+const priceRefreshQueueMax = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_MAX),
+  { min: 100, max: 1_000_000, fallback: 20_000 },
+);
+const priceRefreshRetryDelayMs = clampInt(
+  parseOptionalInt(process.env.PRICE_REFRESH_RETRY_DELAY_MS),
+  { min: 1000, max: 60 * 60 * 1000, fallback: 60_000 },
+);
+
 const isInitializedSetting = parseOptionalBool(
   process.env.DFLOW_IS_INITIALIZED,
 );
@@ -294,6 +337,21 @@ const wsHotShare = clampFloat(wsHotShareRaw, {
   max: 1,
   fallback: 0.5,
 });
+const durationWsReserveDurations = parsePositiveIntCsv(
+  process.env.DURATION_WS_RESERVE_DURATIONS,
+  [5, 15, 60],
+);
+const durationWsReserveMax = clampInt(
+  parseOptionalInt(
+    process.env.DFLOW_DURATION_WS_RESERVE_MAX ??
+      process.env.DURATION_WS_RESERVE_MAX,
+  ),
+  { min: 0, max: 10_000, fallback: 200 },
+);
+const durationWsReservePrewarmSec = clampInt(
+  parseOptionalInt(process.env.DURATION_WS_RESERVE_PREWARM_SEC),
+  { min: 0, max: 24 * 60 * 60, fallback: 60 },
+);
 
 const tradesTokenLimit = clampInt(
   parseOptionalInt(process.env.DFLOW_TRADES_TOKEN_LIMIT),
@@ -386,6 +444,12 @@ export const env = {
   hotTokensMax,
   hotStreamTokensTtlSec,
   hotStreamTokensMax,
+  priceRefreshQueueEnabled,
+  priceRefreshQueueBatch,
+  priceRefreshQueueConsumers,
+  priceRefreshQueueIntervalMs,
+  priceRefreshQueueMax,
+  priceRefreshRetryDelayMs,
   isInitializedSetting,
   isInitialized: isInitializedSetting,
   requireInitializedSetting,
@@ -409,6 +473,11 @@ export const env = {
   wsSubset: Number(process.env.INDEXER_WS_SUBSET ?? "200"),
   wsConcurrency: process.env.INDEXER_WS_CONCURRENCY ?? "8",
   wsHotShare,
+  durationWsReserveEnabled:
+    parseOptionalBool(process.env.DURATION_WS_RESERVE_ENABLED) ?? true,
+  durationWsReserveDurations,
+  durationWsReservePrewarmSec,
+  durationWsReserveMax,
 
   // Phase 1 constraint (documented in INTEGRATIONS_PLAN.md)
   solanaUsdcMint,

@@ -91,7 +91,15 @@ export async function fetchOrderHistoryRows(
 }
 
 export type StoreOrderResult =
-  | { kind: "exists" }
+  | {
+      kind: "exists";
+      order: {
+        id: string;
+        venue_order_id: string;
+        status: string;
+        posted_at: Date;
+      };
+    }
   | {
       kind: "stored";
       order: {
@@ -124,6 +132,7 @@ async function storeOrderInTx(
     feeAuthSig?: string | null;
     feeCollectorAddress?: string | null;
     feeDeadline?: number | null;
+    feePolicySnapshot?: unknown | null;
     orderPayload?: unknown | null;
     orderPayloadVersion?: string | null;
     postedAt?: Date | null;
@@ -147,10 +156,13 @@ async function storeOrderInTx(
     signer_address: string | null;
     price: number | null;
     size: number | null;
+    status: string;
+    posted_at: Date | null;
     order_payload: unknown | null;
     order_payload_version: string | null;
+    fee_policy_snapshot: unknown | null;
   }>(
-    `SELECT id, wallet_address, signer_address, price, size, order_payload, order_payload_version
+    `SELECT id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
      ORDER BY
@@ -203,6 +215,11 @@ async function storeOrderInTx(
       updates.push(`order_payload_version = $${paramCount}`);
       params.push(inputs.orderPayloadVersion);
     }
+    if (!existing.fee_policy_snapshot && inputs.feePolicySnapshot != null) {
+      paramCount += 1;
+      updates.push(`fee_policy_snapshot = $${paramCount}`);
+      params.push(JSON.stringify(inputs.feePolicySnapshot));
+    }
     if (updates.length) {
       paramCount += 1;
       params.push(existing.id);
@@ -211,7 +228,15 @@ async function storeOrderInTx(
         params,
       );
     }
-    return { kind: "exists" };
+    return {
+      kind: "exists",
+      order: {
+        id: existing.id,
+        venue_order_id: inputs.venueOrderId,
+        status: existing.status ?? inputs.status,
+        posted_at: existing.posted_at ?? inputs.postedAt ?? new Date(),
+      },
+    };
   }
 
   const orderType = inputs.orderType === undefined ? "GTC" : inputs.orderType;
@@ -225,12 +250,12 @@ async function storeOrderInTx(
     `INSERT INTO orders (
         id, user_id, wallet_address, signer_address, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, error_message, raw_error,
-        order_payload, order_payload_version, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline,
+        order_payload, order_payload_version, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline, fee_policy_snapshot,
         filled_at, cancelled_at, posted_at, last_update
       ) VALUES (
         gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21,
-        $22, $23, COALESCE($24, now()), COALESCE($25, now())
+        $22, $23, $24, COALESCE($25, now()), COALESCE($26, now())
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
       inputs.userId,
@@ -254,6 +279,7 @@ async function storeOrderInTx(
       inputs.feeAuthSig ?? null,
       inputs.feeCollectorAddress ?? null,
       inputs.feeDeadline ?? null,
+      inputs.feePolicySnapshot ?? null,
       inputs.filledAt ?? null,
       inputs.cancelledAt ?? null,
       inputs.postedAt ?? null,
@@ -286,6 +312,7 @@ export async function storeOrder(
     feeAuthSig?: string | null;
     feeCollectorAddress?: string | null;
     feeDeadline?: number | null;
+    feePolicySnapshot?: unknown | null;
     orderPayload?: unknown | null;
     orderPayloadVersion?: string | null;
     postedAt?: Date | null;
@@ -319,17 +346,32 @@ export async function findLimitlessHistoryMatch(
     postedAt: Date;
     windowMs?: number;
   },
-): Promise<{ id: string; postedAt: Date | null } | null> {
+): Promise<{
+  id: string;
+  venueOrderId: string | null;
+  status: string | null;
+  postedAt: Date | null;
+  positionDeltaApplied: boolean;
+} | null> {
   const windowMs = inputs.windowMs ?? 2 * 60 * 1000;
   const from = new Date(inputs.postedAt.getTime() - windowMs);
   const to = new Date(inputs.postedAt.getTime() + windowMs);
 
   const { rows } = await pool.query<{
     id: string;
+    venue_order_id: string | null;
+    status: string | null;
     posted_at: Date | null;
+    position_delta_applied: boolean;
   }>(
     `
-      select id, posted_at
+      select
+        id,
+        venue_order_id,
+        status,
+        posted_at,
+        coalesce(order_payload ? '_hunchPositionDeltaAppliedAt', false)
+          as position_delta_applied
       from orders
       where user_id = $1
         and venue = 'limitless'
@@ -337,7 +379,7 @@ export async function findLimitlessHistoryMatch(
         and side = $3
         and (wallet_address is null or wallet_address = $4 or signer_address = $4)
         and ($5::text is null or order_type is null or order_type = $5)
-        and status in ('submitted', 'open', 'pending', 'matched', 'filled')
+        and status in ('submitted', 'open', 'pending', 'matched', 'filled', 'expired')
         and (venue_order_id is null or venue_order_id not like 'history:%')
         and posted_at between $6 and $7
       order by posted_at desc nulls last
@@ -355,7 +397,41 @@ export async function findLimitlessHistoryMatch(
   );
 
   if (rows.length !== 1) return null;
-  return { id: rows[0].id, postedAt: rows[0].posted_at ?? null };
+  return {
+    id: rows[0].id,
+    venueOrderId: rows[0].venue_order_id ?? null,
+    status: rows[0].status ?? null,
+    postedAt: rows[0].posted_at ?? null,
+    positionDeltaApplied: rows[0].position_delta_applied,
+  };
+}
+
+export async function markOrderPositionDeltaApplied(
+  pool: Pool,
+  inputs: { id: string; appliedAt?: Date },
+): Promise<void> {
+  const appliedAt = (inputs.appliedAt ?? new Date()).toISOString();
+  await pool.query(
+    `
+      update orders
+      set
+        order_payload = case
+          when order_payload is null then
+            jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+          when jsonb_typeof(order_payload) = 'object' then
+            order_payload || jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+          else
+            jsonb_build_object(
+              'payload',
+              order_payload,
+              '_hunchPositionDeltaAppliedAt',
+              $2::text
+            )
+        end
+      where id = $1
+    `,
+    [inputs.id, appliedAt],
+  );
 }
 
 export async function deleteHistoryOrder(
@@ -400,10 +476,16 @@ export async function updateOrderFromHistory(
         price = coalesce($3, price),
         size = coalesce($4, size),
         filled_size = coalesce($5, filled_size),
+        average_fill_price = coalesce($3, average_fill_price),
         filled_at = coalesce($6, filled_at),
         last_update = coalesce($7, last_update),
         order_hash = coalesce($8, order_hash),
-        order_payload = coalesce(order_payload, $9)
+        order_payload = case
+          when $9::jsonb is null then order_payload
+          when order_payload is null then $9::jsonb
+          when order_payload ? 'history' then order_payload
+          else jsonb_build_object('submitted', order_payload, 'history', $9::jsonb)
+        end
       where id = $1
     `,
     [
@@ -415,9 +497,80 @@ export async function updateOrderFromHistory(
       inputs.filledAt,
       inputs.lastUpdate,
       inputs.orderHash,
-      inputs.orderPayload ?? null,
+      inputs.orderPayload == null ? null : JSON.stringify(inputs.orderPayload),
     ],
   );
+}
+
+export async function expireStaleLimitlessFokOrders(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    marketSlug: string;
+    activeVenueOrderIds: string[];
+    olderThanMs?: number;
+  },
+): Promise<number> {
+  const olderThanMs = inputs.olderThanMs ?? 2 * 60 * 1000;
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const { rowCount } = await pool.query(
+    `
+      update orders
+      set status = 'expired',
+          last_update = now()
+      where user_id = $1
+        and venue = 'limitless'
+        and order_type = 'FOK'
+        and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
+        and (wallet_address is null or wallet_address = $2 or signer_address = $2)
+        and coalesce(order_payload->>'marketSlug', '') = $3
+        and (venue_order_id is null or venue_order_id <> all($4::text[]))
+        and (venue_order_id is null or (
+          venue_order_id not like 'amm:%'
+          and venue_order_id not like 'history:%'
+        ))
+        and posted_at < $5
+    `,
+    [
+      inputs.userId,
+      inputs.walletAddress,
+      inputs.marketSlug,
+      inputs.activeVenueOrderIds,
+      cutoff,
+    ],
+  );
+
+  return rowCount ?? 0;
+}
+
+export async function normalizeLimitlessFokOrderSizesForMarket(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    marketSlug: string;
+  },
+): Promise<number> {
+  const { rowCount } = await pool.query(
+    `
+      update orders
+      set size = ((order_payload->'order'->>'makerAmount')::numeric / 1000000),
+          last_update = now()
+      where user_id = $1
+        and venue = 'limitless'
+        and order_type = 'FOK'
+        and side = 'SELL'
+        and size is not null
+        and size >= 1000
+        and (wallet_address is null or wallet_address = $2 or signer_address = $2)
+        and coalesce(order_payload->>'marketSlug', '') = $3
+        and (order_payload->'order'->>'makerAmount') ~ '^[0-9]+$'
+    `,
+    [inputs.userId, inputs.walletAddress, inputs.marketSlug],
+  );
+
+  return rowCount ?? 0;
 }
 
 export async function fetchOrdersForUser(

@@ -13,6 +13,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "dev:bun": "tsc -w -p tsconfig.build.json",
     "migrate": "tsx --tsconfig tsconfig.json src/migrate.ts",
     "test": "pnpm run build && node dist/unified-repo-tests.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

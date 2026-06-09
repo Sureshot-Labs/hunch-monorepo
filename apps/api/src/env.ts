@@ -7,7 +7,9 @@ const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../.env",
 );
-config({ path: envPath, override: true });
+if (process.env.HUNCH_RUNTIME_SECRETS_LOADED !== "1") {
+  config({ path: envPath, override: true });
+}
 
 function req(name: string) {
   const v = process.env[name];
@@ -54,6 +56,13 @@ function optionalNonNegativeNumber(name: string, fallback: number): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return n >= 0 ? n : fallback;
+}
+
+function optionalNonNegativeBigInt(name: string, fallback: bigint): bigint {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) return fallback;
+  return BigInt(raw);
 }
 
 function optionalRatio01(name: string, fallback: number): number {
@@ -349,6 +358,11 @@ const aiWhaleProfileSelectionTrackerSurfaceLimit = optionalPositiveInt(
   "AI_WHALE_PROFILE_SELECTION_TRACKER_SURFACE_LIMIT",
   100,
 );
+const aiWhaleProfileSelectionTrackerSort = parseEnum(
+  process.env.AI_WHALE_PROFILE_SELECTION_TRACKER_SORT,
+  ["importance", "last_activity"] as const,
+  "importance",
+);
 const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
   "AI_WHALE_PROFILE_SELECTION_SIGNALS_WINDOW_HOURS",
   24,
@@ -364,6 +378,28 @@ const authAccessState = parseEnum(
   ["off", "prompt", "required"] as const,
   "off",
 );
+const embeddedSolanaSponsorshipEnabled =
+  parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_ENABLED) ?? false;
+const solanaLossCloseSponsorshipEnabled =
+  parseOptionalBool(process.env.SOLANA_LOSS_CLOSE_SPONSORSHIP_ENABLED) ?? false;
+const solanaPrefundAllowedInputMints = parseList(
+  process.env.SOLANA_PREFUND_ALLOWED_INPUT_MINTS,
+);
+const adminAuthEnabled =
+  parseOptionalBool(process.env.ADMIN_AUTH_ENABLED) ?? true;
+const adminAuthLegacyFallback =
+  parseOptionalBool(process.env.ADMIN_AUTH_LEGACY_FALLBACK) ?? true;
+const adminAppBaseUrl =
+  process.env.ADMIN_APP_BASE_URL?.trim() || "https://admin.hunch.trade";
+const adminEnrollmentTtlMs = optionalPositiveInt(
+  "ADMIN_ENROLLMENT_TTL_MS",
+  72 * 60 * 60 * 1000,
+);
+const adminSessionTtlMs = optionalPositiveInt(
+  "ADMIN_SESSION_TTL_MS",
+  8 * 60 * 60 * 1000,
+);
+const adminTotpIssuer = process.env.ADMIN_TOTP_ISSUER?.trim() || "Hunch Admin";
 const aiMarketMapEnabled =
   parseOptionalBool(process.env.AI_MARKET_MAP_ENABLED) ?? false;
 const aiMarketMapTriggerMode = parseEnum(
@@ -554,6 +590,20 @@ const walletIntelFollowedWalletLimit = optionalPositiveInt(
   "WALLET_INTEL_FOLLOWED_WALLET_LIMIT",
   500,
 );
+const walletIntelInternalHunchEnabled =
+  parseOptionalBool(process.env.WALLET_INTEL_INTERNAL_HUNCH_ENABLED) ?? true;
+const walletIntelInternalHunchWalletLimit = optionalNonNegativeInt(
+  "WALLET_INTEL_INTERNAL_HUNCH_WALLET_LIMIT",
+  250,
+);
+const walletIntelInternalHunchFillLookbackDays = optionalNonNegativeInt(
+  "WALLET_INTEL_INTERNAL_HUNCH_FILL_LOOKBACK_DAYS",
+  30,
+);
+const walletIntelInternalHunchFillLimit = optionalNonNegativeInt(
+  "WALLET_INTEL_INTERNAL_HUNCH_FILL_LIMIT",
+  5_000,
+);
 const walletIntelTokenLimitPoly = optionalPositiveInt(
   "WALLET_INTEL_TOKEN_LIMIT_POLY",
   2_000,
@@ -603,7 +653,7 @@ const walletIntelSignalWeightNovelty = optionalNonNegativeNumber(
 );
 const positionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "POSITIONS_SYNC_FLATTEN_GRACE_SEC",
-  45,
+  3,
 );
 const limitlessPositionsSyncFlattenGraceSec = optionalNonNegativeInt(
   "LIMITLESS_POSITIONS_SYNC_FLATTEN_GRACE_SEC",
@@ -645,6 +695,25 @@ const POLYMARKET_COLLATERAL_ONRAMP_ADDRESS =
 const POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS =
   "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
 
+function resolvePolymarketPusdAddress(): string {
+  const explicitPusd = process.env.POLYMARKET_PUSD_ADDRESS?.trim();
+  const legacyCollateralAlias =
+    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim();
+  const resolved =
+    explicitPusd || legacyCollateralAlias || POLYMARKET_PUSD_ADDRESS;
+  if (resolved.toLowerCase() === POLYMARKET_USDCE_ADDRESS.toLowerCase()) {
+    const source = explicitPusd
+      ? "POLYMARKET_PUSD_ADDRESS"
+      : "POLYMARKET_COLLATERAL_ADDRESS";
+    throw new Error(
+      `[env] ${source} points to USDC.e; Polymarket CLOB V2 collateral must be pUSD`,
+    );
+  }
+  return resolved;
+}
+
+const polymarketPusdAddress = resolvePolymarketPusdAddress();
+
 export const env = {
   host: process.env.HOST || "0.0.0.0",
   port: Number(process.env.PORT ?? "3001"),
@@ -660,8 +729,51 @@ export const env = {
   proxySecret,
   defaultLimit: Number(process.env.API_DEFAULT_LIMIT ?? "50"),
   maxLimit: Number(process.env.API_MAX_LIMIT ?? "200"),
+  apiGlobalRateLimitEnabled:
+    parseOptionalBool(process.env.API_GLOBAL_RATE_LIMIT_ENABLED) ?? true,
+  apiGlobalRateLimitMaxRequests: optionalPositiveInt(
+    "API_GLOBAL_RATE_LIMIT_MAX_REQUESTS",
+    600,
+  ),
+  apiGlobalRateLimitWindowMs: optionalPositiveInt(
+    "API_GLOBAL_RATE_LIMIT_WINDOW_MS",
+    60_000,
+  ),
   feedTtlSec: Number(process.env.API_FEED_TTL_SEC ?? "30"), // Default 30 seconds cache for feed API
+  feedSearchWorkMemMb: optionalIntInRange(
+    "FEED_SEARCH_WORK_MEM_MB",
+    64,
+    1,
+    512,
+  ),
+  feedSearchTimeoutMs: optionalIntInRange(
+    "FEED_SEARCH_TIMEOUT_MS",
+    15_000,
+    1_000,
+    120_000,
+  ),
+  feedSearchResultMatchLimit: optionalIntInRange(
+    "FEED_SEARCH_RESULT_MATCH_LIMIT",
+    500,
+    100,
+    50_000,
+  ),
   authAccessState,
+  embeddedSolanaSponsorshipEnabled,
+  solanaLossCloseSponsorshipEnabled,
+  solanaPrefundEnabled:
+    parseOptionalBool(process.env.SOLANA_PREFUND_ENABLED) ?? false,
+  solanaPrefundMaxTopUpLamports: optionalNonNegativeBigInt(
+    "SOLANA_PREFUND_MAX_TOP_UP_LAMPORTS",
+    30_000_000n,
+  ),
+  solanaPrefundAllowedInputMints,
+  adminAuthEnabled,
+  adminAuthLegacyFallback,
+  adminAppBaseUrl,
+  adminEnrollmentTtlMs,
+  adminSessionTtlMs,
+  adminTotpIssuer,
   postSignupOnboardingEligibleAfter,
   marketMapTtlSec: optionalNonNegativeInt("API_MARKET_MAP_TTL_SEC", 10),
   walletIntelTtlSec: optionalNonNegativeInt("API_WALLET_INTEL_TTL_SEC", 30),
@@ -672,6 +784,18 @@ export const env = {
   similarMarketsCacheTtlSec: optionalNonNegativeInt(
     "API_SIMILAR_CACHE_TTL_SEC",
     300,
+  ),
+  aggMarketAppId: process.env.AGG_APP_ID?.trim() || "",
+  aggMarketBaseUrl:
+    process.env.AGG_MARKET_BASE_URL?.trim() || "https://api.agg.market",
+  aggMarketTimeoutMs: optionalPositiveInt("AGG_MARKET_TIMEOUT_MS", 5_000),
+  aggClustersCacheTtlSec: optionalNonNegativeInt(
+    "AGG_CLUSTERS_CACHE_TTL_SEC",
+    30,
+  ),
+  aggMarketAlternativesNotFoundCacheTtlSec: optionalNonNegativeInt(
+    "AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC",
+    60,
   ),
   positionsSyncCooldownSec: optionalNonNegativeInt(
     "POSITIONS_SYNC_COOLDOWN_SEC",
@@ -695,6 +819,13 @@ export const env = {
     "HOT_STREAM_MARK_INTERVAL_SEC",
     60,
   ),
+  priceRefreshQueueEnabled:
+    parseOptionalBool(process.env.PRICE_REFRESH_QUEUE_ENABLED) ?? true,
+  priceRefreshQueueMax: optionalPositiveInt("PRICE_REFRESH_QUEUE_MAX", 20_000),
+  priceRefreshEnqueueMaxPerRequest: optionalPositiveInt(
+    "PRICE_REFRESH_ENQUEUE_MAX_PER_REQUEST",
+    200,
+  ),
   openRouterKey: process.env.OPENROUTER_API_KEY?.trim() || "",
   aiWhaleProfileAutoRun,
   aiWhaleProfileLimit,
@@ -709,6 +840,7 @@ export const env = {
   aiWhaleProfileSelectionSignalsLimit,
   aiWhaleProfileSelectionTrackerWindowHours,
   aiWhaleProfileSelectionTrackerSurfaceLimit,
+  aiWhaleProfileSelectionTrackerSort,
   aiWhaleProfileSelectionSignalsWindowHours,
   aiWhaleProfileModel,
   aiClusterAnalysisEnabled:
@@ -827,6 +959,10 @@ export const env = {
     1,
     2,
   ),
+  walletIntelInternalHunchEnabled,
+  walletIntelInternalHunchWalletLimit,
+  walletIntelInternalHunchFillLookbackDays,
+  walletIntelInternalHunchFillLimit,
   walletIntelTokenLimitPoly,
   walletIntelTokenLimitLimitless,
   walletIntelTokenLimitKalshi,
@@ -1059,6 +1195,14 @@ export const env = {
   polymarketDataApiBase:
     process.env.POLYMARKET_DATA_API_BASE?.trim() ||
     "https://data-api.polymarket.com",
+  polymarketDataApiPositionsTimeoutMs: optionalPositiveInt(
+    "POLYMARKET_DATA_API_POSITIONS_TIMEOUT_MS",
+    2_000,
+  ),
+  polymarketDataApiPositionsCacheTtlMs: optionalNonNegativeInt(
+    "POLYMARKET_DATA_API_POSITIONS_CACHE_TTL_MS",
+    30_000,
+  ),
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",
   limitlessApiVersion: process.env.LIMITLESS_API_VERSION?.trim() || "v1",
@@ -1086,16 +1230,11 @@ export const env = {
     "0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6",
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
-  polymarketPusdAddress:
-    process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
-    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
-    POLYMARKET_PUSD_ADDRESS,
+  polymarketPusdAddress,
   polymarketUsdceAddress:
     process.env.POLYMARKET_USDCE_ADDRESS?.trim() || POLYMARKET_USDCE_ADDRESS,
-  polymarketUsdcAddress:
-    process.env.POLYMARKET_PUSD_ADDRESS?.trim() ||
-    process.env.POLYMARKET_COLLATERAL_ADDRESS?.trim() ||
-    POLYMARKET_PUSD_ADDRESS,
+  // Compatibility alias for older API response fields. This is pUSD for CLOB V2.
+  polymarketUsdcAddress: polymarketPusdAddress,
   polymarketExchangeAddress:
     process.env.POLYMARKET_EXCHANGE_ADDRESS?.trim() ||
     POLYMARKET_EXCHANGE_V2_ADDRESS,
@@ -1129,6 +1268,44 @@ export const env = {
 
   // Fee policy (defaults to 0 bps)
   feeBpsPolymarket: optionalNonNegativeInt("HUNCH_FEE_BPS_POLYMARKET", 0),
+  polymarketBuilderCode: process.env.POLYMARKET_BUILDER_CODE?.trim() || "",
+  polymarketBuilderAddress:
+    process.env.POLYMARKET_BUILDER_ADDRESS?.trim() || "",
+  polymarketBuilderOwnerAddress:
+    process.env.POLYMARKET_BUILDER_OWNER_ADDRESS?.trim() || "",
+  polymarketRelayerPrivateKey:
+    process.env.POLYMARKET_RELAYER_PRIVATE_KEY?.trim() || "",
+  polymarketRelayerApiKey: process.env.POLYMARKET_RELAYER_API_KEY?.trim() || "",
+  polymarketRelayerApiKeyAddress:
+    process.env.POLYMARKET_RELAYER_API_KEY_ADDRESS?.trim() || "",
+  polymarketBuilderSweepEnabled:
+    parseOptionalBool(process.env.POLYMARKET_BUILDER_SWEEP_ENABLED) ?? false,
+  polymarketBuilderSweepMinRaw: optionalNonNegativeBigInt(
+    "POLYMARKET_BUILDER_SWEEP_MIN_RAW",
+    0n,
+  ),
+  polymarketBuilderSweepMaxRaw: optionalNonNegativeBigInt(
+    "POLYMARKET_BUILDER_SWEEP_MAX_RAW",
+    0n,
+  ),
+  polymarketBuilderSweepReserveRaw: optionalNonNegativeBigInt(
+    "POLYMARKET_BUILDER_SWEEP_RESERVE_RAW",
+    0n,
+  ),
+  polymarketBuilderTakerFeeBps:
+    process.env.POLYMARKET_BUILDER_TAKER_FEE_BPS?.trim()
+      ? optionalNonNegativeInt("POLYMARKET_BUILDER_TAKER_FEE_BPS", 0)
+      : null,
+  polymarketBuilderMakerFeeBps:
+    process.env.POLYMARKET_BUILDER_MAKER_FEE_BPS?.trim()
+      ? optionalNonNegativeInt("POLYMARKET_BUILDER_MAKER_FEE_BPS", 0)
+      : null,
+  limitlessFeeShareBps: optionalIntInRange(
+    "LIMITLESS_FEE_SHARE_BPS",
+    0,
+    0,
+    10_000,
+  ),
   feeBpsKalshi: optionalNonNegativeInt("HUNCH_FEE_BPS_KALSHI", 0),
   feeScaleKalshi: optionalNonNegativeNumber("HUNCH_FEE_SCALE_KALSHI", 0),
   feePolicyTtlSec: optionalPositiveInt(
@@ -1175,6 +1352,7 @@ export const env = {
     "",
   rewardsPayoutPrivateKey:
     process.env.HUNCH_REWARDS_PAYOUT_PRIVATE_KEY?.trim() || "",
+  financePolygonHot: process.env.HUNCH_FINANCE_POLYGON_HOT?.trim() || "",
   rewardsPayoutTokenAddressPolygon:
     process.env.HUNCH_REWARDS_PAYOUT_TOKEN_ADDRESS_POLYGON?.trim() || "",
   rewardsAutoWrapUsdcePolygon:

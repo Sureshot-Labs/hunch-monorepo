@@ -56,6 +56,10 @@ function isBookTopValueEqual(a: number | null, b: number | null): boolean {
 }
 
 function setBookTopCache(tokenId: string, entry: BookTopCacheEntry): void {
+  const existing = bookTopWriteCache.get(tokenId);
+  if (existing && entry.lastWrittenAtMs < existing.lastWrittenAtMs) {
+    return;
+  }
   if (bookTopWriteCache.has(tokenId)) {
     bookTopWriteCache.delete(tokenId);
   }
@@ -110,6 +114,7 @@ export interface UnifiedEventRow {
   status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
   series_key?: string;
   series_title?: string;
+  duration_minutes?: number;
   start_date?: Date;
   end_date?: Date;
   volume_total?: number;
@@ -124,10 +129,106 @@ export interface UnifiedEventRow {
   updated_at?: Date;
 }
 
+export type UpsertUnifiedMarketsResult = {
+  inputRows: number;
+  dedupedRows: number;
+  changedRows: number;
+  skippedRows: number;
+  batches: number;
+  upsertedRows: number;
+  tokenSyncMarketCount: number;
+  timings?: {
+    filterChangedMs: number;
+    loadTokenSourcesMs: number;
+    updateMs: number;
+    insertMs: number;
+    upsertMs: number;
+    tokenSyncMs: number;
+    totalMs: number;
+  };
+};
+
+export type UpsertUnifiedEventsResult = {
+  inputRows: number;
+  dedupedRows: number;
+  changedRows: number;
+  skippedRows: number;
+  batches: number;
+  upsertedRows: number;
+};
+
+export type UpsertUnifiedTokensResult = {
+  inputRows: number;
+  dedupedRows: number;
+  changedRows: number;
+  skippedRows: number;
+  batches: number;
+  upsertedRows: number;
+};
+
 function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
   const map = new Map<string, T>();
   for (const item of items) map.set(item.id, item);
   return Array.from(map.values());
+}
+
+function compareText(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): number {
+  return (a ?? "").localeCompare(b ?? "");
+}
+
+function sortUnifiedMarketRows(rows: UnifiedMarketRow[]): UnifiedMarketRow[] {
+  return [...rows].sort((a, b) => {
+    const venue = compareText(a.venue, b.venue);
+    if (venue !== 0) return venue;
+    const venueMarketId = compareText(a.venue_market_id, b.venue_market_id);
+    if (venueMarketId !== 0) return venueMarketId;
+    return compareText(a.id, b.id);
+  });
+}
+
+function getPgErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function isTransientPgWriteConflict(error: unknown): boolean {
+  const code = getPgErrorCode(error);
+  return code === "40P01" || code === "40001";
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithPgWriteConflictRetry(
+  label: string,
+  batchSize: number,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await fn();
+      return;
+    } catch (error) {
+      if (!isTransientPgWriteConflict(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = 50 * attempt + Math.floor(Math.random() * 75);
+      console.warn(`[db] ${label} retry after transient write conflict`, {
+        attempt,
+        maxAttempts,
+        batchSize,
+        delayMs,
+        code: getPgErrorCode(error),
+      });
+      await sleep(delayMs);
+    }
+  }
 }
 
 export interface UnifiedMarketRow {
@@ -140,6 +241,7 @@ export interface UnifiedMarketRow {
   category?: string;
   status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
   market_type: string;
+  duration_minutes?: number;
   open_time?: Date;
   close_time?: Date;
   expiration_time?: Date;
@@ -177,10 +279,10 @@ export async function upsertUnifiedEvent(
   const query = `
     INSERT INTO unified_events (
       id, venue, venue_event_id, title, description, category, status,
-      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
+      series_key, series_title, duration_minutes, start_date, end_date, volume_total, volume_24h, open_interest,
       liquidity, metadata, slug, image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
     )
     ON CONFLICT (venue, venue_event_id) 
     DO UPDATE SET
@@ -190,6 +292,7 @@ export async function upsertUnifiedEvent(
       status = EXCLUDED.status,
       series_key = EXCLUDED.series_key,
       series_title = EXCLUDED.series_title,
+      duration_minutes = EXCLUDED.duration_minutes,
       start_date = EXCLUDED.start_date,
       end_date = EXCLUDED.end_date,
       volume_total = EXCLUDED.volume_total,
@@ -216,6 +319,7 @@ export async function upsertUnifiedEvent(
     eventRow.status,
     eventRow.series_key,
     eventRow.series_title,
+    eventRow.duration_minutes,
     eventRow.start_date,
     eventRow.end_date,
     eventRow.volume_total,
@@ -237,8 +341,17 @@ export async function upsertUnifiedEvent(
 export async function upsertUnifiedEvents(
   pool: Queryable,
   eventRows: UnifiedEventRow[],
-): Promise<void> {
-  if (eventRows.length === 0) return;
+): Promise<UpsertUnifiedEventsResult> {
+  if (eventRows.length === 0) {
+    return {
+      inputRows: 0,
+      dedupedRows: 0,
+      changedRows: 0,
+      skippedRows: 0,
+      batches: 0,
+      upsertedRows: 0,
+    };
+  }
 
   const rows = dedupeById(eventRows);
 
@@ -255,6 +368,7 @@ export async function upsertUnifiedEvents(
         status unified_status,
         series_key text,
         series_title text,
+        duration_minutes integer,
         start_date timestamptz,
         end_date timestamptz,
         volume_total numeric,
@@ -268,57 +382,110 @@ export async function upsertUnifiedEvents(
         created_at timestamptz,
         updated_at timestamptz
       )
-    )
-    insert into unified_events (
-      id, venue, venue_event_id, title, description, category, status,
-      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
-      liquidity, metadata, slug, image, icon, created_at, updated_at
+    ),
+    changed as (
+      select input.*
+      from input
+      left join unified_events existing
+        on existing.venue = input.venue
+       and existing.venue_event_id = input.venue_event_id
+      where existing.id is null
+         or (
+          existing.title, existing.description, existing.category,
+          existing.status, existing.series_key, existing.series_title,
+          existing.duration_minutes,
+          existing.start_date, existing.end_date,
+          existing.volume_total, existing.volume_24h, existing.open_interest,
+          existing.liquidity, existing.metadata, existing.slug, existing.image,
+          existing.icon, existing.created_at, existing.updated_at
+        ) is distinct from (
+          input.title, input.description, input.category,
+          input.status, input.series_key, input.series_title,
+          input.duration_minutes,
+          input.start_date, input.end_date,
+          input.volume_total, input.volume_24h, input.open_interest,
+          input.liquidity, input.metadata, input.slug, input.image,
+          input.icon, input.created_at, input.updated_at
+        )
+    ),
+    upserted as (
+      insert into unified_events (
+        id, venue, venue_event_id, title, description, category, status,
+        series_key, series_title, duration_minutes, start_date, end_date, volume_total, volume_24h, open_interest,
+        liquidity, metadata, slug, image, icon, created_at, updated_at
+      )
+      select
+        id, venue, venue_event_id, title, description, category, status,
+        series_key, series_title, duration_minutes, start_date, end_date, volume_total, volume_24h, open_interest,
+        liquidity, metadata, slug, image, icon, created_at, updated_at
+      from changed
+      on conflict (venue, venue_event_id)
+      do update set
+        title = excluded.title,
+        description = excluded.description,
+        category = excluded.category,
+        status = excluded.status,
+        series_key = excluded.series_key,
+        series_title = excluded.series_title,
+        duration_minutes = excluded.duration_minutes,
+        start_date = excluded.start_date,
+        end_date = excluded.end_date,
+        volume_total = excluded.volume_total,
+        volume_24h = excluded.volume_24h,
+        open_interest = excluded.open_interest,
+        liquidity = excluded.liquidity,
+        metadata = excluded.metadata,
+        slug = excluded.slug,
+        image = excluded.image,
+        icon = excluded.icon,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        updated_at_db = now()
+      where
+        (unified_events.title, unified_events.description, unified_events.category,
+         unified_events.status, unified_events.series_key, unified_events.series_title,
+         unified_events.duration_minutes,
+         unified_events.start_date, unified_events.end_date,
+         unified_events.volume_total, unified_events.volume_24h, unified_events.open_interest,
+         unified_events.liquidity, unified_events.metadata, unified_events.slug, unified_events.image, unified_events.icon,
+         unified_events.created_at, unified_events.updated_at)
+        is distinct from
+        (excluded.title, excluded.description, excluded.category,
+         excluded.status, excluded.series_key, excluded.series_title,
+         excluded.duration_minutes, excluded.start_date, excluded.end_date,
+         excluded.volume_total, excluded.volume_24h, excluded.open_interest,
+         excluded.liquidity, excluded.metadata, excluded.slug, excluded.image, excluded.icon,
+         excluded.created_at, excluded.updated_at)
+      returning 1
     )
     select
-      id, venue, venue_event_id, title, description, category, status,
-      series_key, series_title, start_date, end_date, volume_total, volume_24h, open_interest,
-      liquidity, metadata, slug, image, icon, created_at, updated_at
-    from input
-    on conflict (venue, venue_event_id)
-    do update set
-      title = excluded.title,
-      description = excluded.description,
-      category = excluded.category,
-      status = excluded.status,
-      series_key = excluded.series_key,
-      series_title = excluded.series_title,
-      start_date = excluded.start_date,
-      end_date = excluded.end_date,
-      volume_total = excluded.volume_total,
-      volume_24h = excluded.volume_24h,
-      open_interest = excluded.open_interest,
-      liquidity = excluded.liquidity,
-      metadata = excluded.metadata,
-      slug = excluded.slug,
-      image = excluded.image,
-      icon = excluded.icon,
-      created_at = excluded.created_at,
-      updated_at = excluded.updated_at,
-      updated_at_db = now()
-    where
-      (unified_events.title, unified_events.description, unified_events.category,
-       unified_events.status, unified_events.series_key, unified_events.series_title,
-       unified_events.start_date, unified_events.end_date,
-       unified_events.volume_total, unified_events.volume_24h, unified_events.open_interest,
-       unified_events.liquidity, unified_events.metadata, unified_events.slug, unified_events.image, unified_events.icon,
-       unified_events.created_at, unified_events.updated_at)
-      is distinct from
-      (excluded.title, excluded.description, excluded.category,
-       excluded.status, excluded.series_key, excluded.series_title, excluded.start_date, excluded.end_date,
-       excluded.volume_total, excluded.volume_24h, excluded.open_interest,
-       excluded.liquidity, excluded.metadata, excluded.slug, excluded.image, excluded.icon,
-       excluded.created_at, excluded.updated_at)
+      (select count(*) from input)::int as input_count,
+      (select count(*) from changed)::int as changed_count,
+      (select count(*) from upserted)::int as upserted_count
   `;
 
   const batches = chunkArray(rows, 1000);
+  let changedRows = 0;
+  let upsertedRows = 0;
   for (const batch of batches) {
-    await pool.query(query, [JSON.stringify(batch)]);
+    const result = await pool.query<{
+      input_count: number;
+      changed_count: number;
+      upserted_count: number;
+    }>(query, [JSON.stringify(batch)]);
+    const row = result.rows[0];
+    changedRows += row?.changed_count ?? batch.length;
+    upsertedRows += row?.upserted_count ?? 0;
   }
+
+  return {
+    inputRows: eventRows.length,
+    dedupedRows: rows.length,
+    changedRows,
+    skippedRows: rows.length - changedRows,
+    batches: batches.length,
+    upsertedRows,
+  };
 }
 
 export async function upsertUnifiedMarket(
@@ -332,13 +499,13 @@ export async function upsertUnifiedMarket(
   const query = `
     INSERT INTO unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
-      market_type, open_time, close_time, expiration_time, best_bid, best_ask,
+      market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
       resolved_outcome_pct, slug, image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -354,6 +521,7 @@ export async function upsertUnifiedMarket(
         ELSE EXCLUDED.status
       END,
       market_type = EXCLUDED.market_type,
+      duration_minutes = EXCLUDED.duration_minutes,
       open_time = EXCLUDED.open_time,
       close_time = EXCLUDED.close_time,
       expiration_time = EXCLUDED.expiration_time,
@@ -425,6 +593,7 @@ export async function upsertUnifiedMarket(
     marketRow.category,
     marketRow.status,
     marketRow.market_type,
+    marketRow.duration_minutes,
     marketRow.open_time,
     marketRow.close_time,
     marketRow.expiration_time,
@@ -465,12 +634,35 @@ export async function upsertUnifiedMarket(
 export async function upsertUnifiedMarkets(
   pool: Queryable,
   marketRows: UnifiedMarketRow[],
-): Promise<void> {
-  if (marketRows.length === 0) return;
+  options: { batchSize?: number; filterUnchanged?: boolean } = {},
+): Promise<UpsertUnifiedMarketsResult> {
+  const startedAt = Date.now();
+  const timings = {
+    filterChangedMs: 0,
+    loadTokenSourcesMs: 0,
+    updateMs: 0,
+    insertMs: 0,
+    upsertMs: 0,
+    tokenSyncMs: 0,
+    totalMs: 0,
+  };
 
-  const rows = dedupeById(marketRows);
+  if (marketRows.length === 0) {
+    return {
+      inputRows: 0,
+      dedupedRows: 0,
+      changedRows: 0,
+      skippedRows: 0,
+      batches: 0,
+      upsertedRows: 0,
+      tokenSyncMarketCount: 0,
+      timings,
+    };
+  }
 
-  const query = `
+  const rows = sortUnifiedMarketRows(dedupeById(marketRows));
+
+  const insertQuery = `
     with input as (
       select *
       from jsonb_to_recordset($1::jsonb) as x(
@@ -483,6 +675,7 @@ export async function upsertUnifiedMarkets(
         category text,
         status unified_status,
         market_type text,
+        duration_minutes integer,
         open_time timestamptz,
         close_time timestamptz,
         expiration_time timestamptz,
@@ -514,7 +707,7 @@ export async function upsertUnifiedMarkets(
     )
     insert into unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
-      market_type, open_time, close_time, expiration_time, best_bid, best_ask,
+      market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
@@ -522,12 +715,13 @@ export async function upsertUnifiedMarkets(
     )
     select
       id, venue, venue_market_id, event_id, title, description, category, status,
-      market_type, open_time, close_time, expiration_time, best_bid, best_ask,
+      market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
       last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
       resolved_outcome_pct, slug, image, icon, created_at, updated_at
     from input
+    order by venue, venue_market_id, id
     on conflict (venue, venue_market_id)
     do update set
       event_id = excluded.event_id,
@@ -542,6 +736,7 @@ export async function upsertUnifiedMarkets(
         ELSE excluded.status
       END,
       market_type = excluded.market_type,
+      duration_minutes = excluded.duration_minutes,
       open_time = excluded.open_time,
       close_time = excluded.close_time,
       expiration_time = excluded.expiration_time,
@@ -603,6 +798,7 @@ export async function upsertUnifiedMarkets(
     where
       (unified_markets.event_id, unified_markets.title, unified_markets.description,
        unified_markets.category, unified_markets.status, unified_markets.market_type,
+       unified_markets.duration_minutes,
        unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
        unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
@@ -616,6 +812,7 @@ export async function upsertUnifiedMarkets(
       is distinct from
       (excluded.event_id, excluded.title, excluded.description,
        excluded.category, excluded.status, excluded.market_type,
+       excluded.duration_minutes,
        excluded.open_time, excluded.close_time, excluded.expiration_time,
        excluded.best_bid, excluded.best_ask, excluded.last_price,
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
@@ -628,22 +825,450 @@ export async function upsertUnifiedMarkets(
        excluded.created_at, excluded.updated_at)
   `;
 
-  const batches = chunkArray(rows, 500);
+  const updateQuery = `
+    with input as (
+      select *
+      from jsonb_to_recordset($1::jsonb) as x(
+        id text,
+        venue text,
+        venue_market_id text,
+        event_id text,
+        title text,
+        description text,
+        category text,
+        status unified_status,
+        market_type text,
+        duration_minutes integer,
+        open_time timestamptz,
+        close_time timestamptz,
+        expiration_time timestamptz,
+        best_bid numeric,
+        best_ask numeric,
+        last_price numeric,
+        volume_total numeric,
+        volume_24h numeric,
+        open_interest numeric,
+        liquidity numeric,
+        metadata jsonb,
+        outcomes text,
+        token_yes text,
+        token_no text,
+        clob_token_ids text,
+        condition_id text,
+        market_ledger text,
+        settlement_mint text,
+        is_initialized boolean,
+        redemption_status text,
+        resolved_outcome text,
+        resolved_outcome_pct numeric,
+        slug text,
+        image text,
+        icon text,
+        created_at timestamptz,
+        updated_at timestamptz
+      )
+    )
+    update unified_markets
+    set
+      event_id = input.event_id,
+      title = input.title,
+      description = input.description,
+      category = input.category,
+      status = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+          AND input.status = 'ACTIVE'
+        THEN unified_markets.status
+        ELSE input.status
+      END,
+      market_type = input.market_type,
+      duration_minutes = input.duration_minutes,
+      open_time = input.open_time,
+      close_time = input.close_time,
+      expiration_time = input.expiration_time,
+      best_bid = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+          AND input.best_bid IS NULL
+        THEN unified_markets.best_bid
+        ELSE input.best_bid
+      END,
+      best_ask = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+          AND input.best_ask IS NULL
+        THEN unified_markets.best_ask
+        ELSE input.best_ask
+      END,
+      last_price = CASE
+        WHEN unified_markets.venue = 'limitless'
+          AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+          AND input.last_price IS NULL
+        THEN unified_markets.last_price
+        ELSE input.last_price
+      END,
+      volume_total = input.volume_total,
+      volume_24h = input.volume_24h,
+      open_interest = input.open_interest,
+      liquidity = input.liquidity,
+      metadata = input.metadata,
+      outcomes = input.outcomes,
+      token_yes = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_yes like 'sol:%'
+          AND input.token_yes like 'kalshi:%'
+        THEN unified_markets.token_yes
+        ELSE input.token_yes
+      END,
+      token_no = CASE
+        WHEN unified_markets.venue = 'kalshi'
+          AND unified_markets.token_no like 'sol:%'
+          AND input.token_no like 'kalshi:%'
+        THEN unified_markets.token_no
+        ELSE input.token_no
+      END,
+      clob_token_ids = input.clob_token_ids,
+      condition_id = input.condition_id,
+      market_ledger = COALESCE(input.market_ledger, unified_markets.market_ledger),
+      settlement_mint = COALESCE(input.settlement_mint, unified_markets.settlement_mint),
+      is_initialized = COALESCE(input.is_initialized, unified_markets.is_initialized),
+      redemption_status = COALESCE(input.redemption_status, unified_markets.redemption_status),
+      resolved_outcome = COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
+      resolved_outcome_pct = COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
+      slug = input.slug,
+      image = input.image,
+      icon = input.icon,
+      created_at = input.created_at,
+      updated_at = input.updated_at,
+      updated_at_db = now()
+    from input
+    where unified_markets.venue = input.venue
+      and unified_markets.venue_market_id = input.venue_market_id
+      and (
+        unified_markets.event_id, unified_markets.title, unified_markets.description,
+        unified_markets.category, unified_markets.status, unified_markets.market_type,
+        unified_markets.duration_minutes,
+        unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
+        unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
+        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
+        unified_markets.liquidity, unified_markets.metadata, unified_markets.outcomes, unified_markets.token_yes,
+        unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
+        unified_markets.market_ledger, unified_markets.settlement_mint,
+        unified_markets.is_initialized, unified_markets.redemption_status,
+        unified_markets.resolved_outcome, unified_markets.resolved_outcome_pct,
+        unified_markets.slug, unified_markets.image, unified_markets.icon,
+        unified_markets.created_at, unified_markets.updated_at
+      ) is distinct from (
+        input.event_id, input.title, input.description,
+        input.category,
+        CASE
+          WHEN unified_markets.venue = 'kalshi'
+            AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+            AND input.status = 'ACTIVE'
+          THEN unified_markets.status
+          ELSE input.status
+        END,
+        input.market_type,
+        input.duration_minutes,
+        input.open_time, input.close_time, input.expiration_time,
+        CASE
+          WHEN unified_markets.venue = 'limitless'
+            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+            AND input.best_bid IS NULL
+          THEN unified_markets.best_bid
+          ELSE input.best_bid
+        END,
+        CASE
+          WHEN unified_markets.venue = 'limitless'
+            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+            AND input.best_ask IS NULL
+          THEN unified_markets.best_ask
+          ELSE input.best_ask
+        END,
+        CASE
+          WHEN unified_markets.venue = 'limitless'
+            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+            AND input.last_price IS NULL
+          THEN unified_markets.last_price
+          ELSE input.last_price
+        END,
+        input.volume_total, input.volume_24h, input.open_interest,
+        input.liquidity, input.metadata, input.outcomes,
+        CASE
+          WHEN unified_markets.venue = 'kalshi'
+            AND unified_markets.token_yes like 'sol:%'
+            AND input.token_yes like 'kalshi:%'
+          THEN unified_markets.token_yes
+          ELSE input.token_yes
+        END,
+        CASE
+          WHEN unified_markets.venue = 'kalshi'
+            AND unified_markets.token_no like 'sol:%'
+            AND input.token_no like 'kalshi:%'
+          THEN unified_markets.token_no
+          ELSE input.token_no
+        END,
+        input.clob_token_ids, input.condition_id,
+        COALESCE(input.market_ledger, unified_markets.market_ledger),
+        COALESCE(input.settlement_mint, unified_markets.settlement_mint),
+        COALESCE(input.is_initialized, unified_markets.is_initialized),
+        COALESCE(input.redemption_status, unified_markets.redemption_status),
+        COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
+        COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
+        input.slug, input.image, input.icon,
+        input.created_at, input.updated_at
+      )
+  `;
+
+  const batchSize = Math.max(1, Math.trunc(options.batchSize ?? 500));
+  const batches = chunkArray(rows, batchSize);
+  let changedRows = 0;
+  let skippedRows = 0;
+  let upsertedRows = 0;
+  let tokenSyncMarketCount = 0;
+
   for (const batch of batches) {
+    const filterStartedAt = Date.now();
+    const changedBatchResult = options.filterUnchanged
+      ? await filterChangedUnifiedMarketRows(pool, batch)
+      : {
+          changedRows: batch,
+          existingChangedRows: [],
+          newRows: batch,
+        };
+    timings.filterChangedMs += Date.now() - filterStartedAt;
+    const changedBatch = changedBatchResult.changedRows;
+    changedRows += changedBatch.length;
+    skippedRows += batch.length - changedBatch.length;
+    if (changedBatch.length === 0) continue;
+
+    const loadTokenSourcesStartedAt = Date.now();
     const existingTokenSources = await loadUnifiedMarketTokenSources(
       pool,
-      batch.map((row: UnifiedMarketRow) => row.id),
+      changedBatch.map((row: UnifiedMarketRow) => row.id),
     );
-    await pool.query(query, [JSON.stringify(batch)]);
-    const changedMarketIds = batch
+    timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
+    const upsertStartedAt = Date.now();
+    if (changedBatchResult.existingChangedRows.length > 0) {
+      const updateStartedAt = Date.now();
+      await runWithPgWriteConflictRetry(
+        "updateUnifiedMarkets",
+        changedBatchResult.existingChangedRows.length,
+        async () => {
+          const result = await pool.query(updateQuery, [
+            JSON.stringify(changedBatchResult.existingChangedRows),
+          ]);
+          upsertedRows += result.rowCount ?? 0;
+        },
+      );
+      timings.updateMs += Date.now() - updateStartedAt;
+    }
+    if (changedBatchResult.newRows.length > 0) {
+      const insertStartedAt = Date.now();
+      await runWithPgWriteConflictRetry(
+        "insertUnifiedMarkets",
+        changedBatchResult.newRows.length,
+        async () => {
+          const result = await pool.query(insertQuery, [
+            JSON.stringify(changedBatchResult.newRows),
+          ]);
+          upsertedRows += result.rowCount ?? 0;
+        },
+      );
+      timings.insertMs += Date.now() - insertStartedAt;
+    }
+    timings.upsertMs += Date.now() - upsertStartedAt;
+    const changedMarketIds = changedBatch
       .filter((row: UnifiedMarketRow) =>
         shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),
       )
       .map((row: UnifiedMarketRow) => row.id);
     if (changedMarketIds.length > 0) {
+      tokenSyncMarketCount += changedMarketIds.length;
+      const tokenSyncStartedAt = Date.now();
       await syncUnifiedMarketTokens(pool, changedMarketIds);
+      timings.tokenSyncMs += Date.now() - tokenSyncStartedAt;
     }
   }
+
+  timings.totalMs = Date.now() - startedAt;
+  return {
+    inputRows: marketRows.length,
+    dedupedRows: rows.length,
+    changedRows,
+    skippedRows,
+    batches: batches.length,
+    upsertedRows,
+    tokenSyncMarketCount,
+    timings,
+  };
+}
+
+type ChangedUnifiedMarketRows = {
+  changedRows: UnifiedMarketRow[];
+  existingChangedRows: UnifiedMarketRow[];
+  newRows: UnifiedMarketRow[];
+};
+
+async function filterChangedUnifiedMarketRows(
+  pool: Queryable,
+  rows: UnifiedMarketRow[],
+): Promise<ChangedUnifiedMarketRows> {
+  if (rows.length === 0) {
+    return {
+      changedRows: [],
+      existingChangedRows: [],
+      newRows: [],
+    };
+  }
+
+  const { rows: changedRows } = await pool.query<{
+    id: string;
+    exists_in_db: boolean;
+  }>(
+    `
+      with input as (
+        select *
+        from jsonb_to_recordset($1::jsonb) as x(
+          id text,
+          venue text,
+          venue_market_id text,
+          event_id text,
+          title text,
+          description text,
+          category text,
+          status unified_status,
+          market_type text,
+          duration_minutes integer,
+          open_time timestamptz,
+          close_time timestamptz,
+          expiration_time timestamptz,
+          best_bid numeric,
+          best_ask numeric,
+          last_price numeric,
+          volume_total numeric,
+          volume_24h numeric,
+          open_interest numeric,
+          liquidity numeric,
+          metadata jsonb,
+          outcomes text,
+          token_yes text,
+          token_no text,
+          clob_token_ids text,
+          condition_id text,
+          market_ledger text,
+          settlement_mint text,
+          is_initialized boolean,
+          redemption_status text,
+          resolved_outcome text,
+          resolved_outcome_pct numeric,
+          slug text,
+          image text,
+          icon text,
+          created_at timestamptz,
+          updated_at timestamptz
+        )
+      )
+      select
+        input.id,
+        (unified_markets.id is not null) as exists_in_db
+      from input
+      left join unified_markets
+        on unified_markets.venue = input.venue
+       and unified_markets.venue_market_id = input.venue_market_id
+      where unified_markets.id is null
+         or (
+          unified_markets.event_id, unified_markets.title, unified_markets.description,
+          unified_markets.category, unified_markets.status, unified_markets.market_type,
+          unified_markets.duration_minutes,
+          unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
+          unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
+          unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
+          unified_markets.liquidity, unified_markets.metadata, unified_markets.outcomes, unified_markets.token_yes,
+          unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
+          unified_markets.market_ledger, unified_markets.settlement_mint,
+          unified_markets.is_initialized, unified_markets.redemption_status,
+          unified_markets.resolved_outcome, unified_markets.resolved_outcome_pct,
+          unified_markets.slug, unified_markets.image, unified_markets.icon,
+          unified_markets.created_at, unified_markets.updated_at
+        ) is distinct from (
+          input.event_id, input.title, input.description,
+          input.category,
+          CASE
+            WHEN unified_markets.venue = 'kalshi'
+              AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+              AND input.status = 'ACTIVE'
+            THEN unified_markets.status
+            ELSE input.status
+          END,
+          input.market_type,
+          input.duration_minutes,
+          input.open_time, input.close_time, input.expiration_time,
+          CASE
+            WHEN unified_markets.venue = 'limitless'
+              AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+              AND input.best_bid IS NULL
+            THEN unified_markets.best_bid
+            ELSE input.best_bid
+          END,
+          CASE
+            WHEN unified_markets.venue = 'limitless'
+              AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+              AND input.best_ask IS NULL
+            THEN unified_markets.best_ask
+            ELSE input.best_ask
+          END,
+          CASE
+            WHEN unified_markets.venue = 'limitless'
+              AND coalesce(input.metadata->>'tradeType', '') = 'amm'
+              AND input.last_price IS NULL
+            THEN unified_markets.last_price
+            ELSE input.last_price
+          END,
+          input.volume_total, input.volume_24h, input.open_interest,
+          input.liquidity, input.metadata, input.outcomes,
+          CASE
+            WHEN unified_markets.venue = 'kalshi'
+              AND unified_markets.token_yes like 'sol:%'
+              AND input.token_yes like 'kalshi:%'
+            THEN unified_markets.token_yes
+            ELSE input.token_yes
+          END,
+          CASE
+            WHEN unified_markets.venue = 'kalshi'
+              AND unified_markets.token_no like 'sol:%'
+              AND input.token_no like 'kalshi:%'
+            THEN unified_markets.token_no
+            ELSE input.token_no
+          END,
+          input.clob_token_ids, input.condition_id,
+          COALESCE(input.market_ledger, unified_markets.market_ledger),
+          COALESCE(input.settlement_mint, unified_markets.settlement_mint),
+          COALESCE(input.is_initialized, unified_markets.is_initialized),
+          COALESCE(input.redemption_status, unified_markets.redemption_status),
+          COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
+          COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
+          input.slug, input.image, input.icon,
+          input.created_at, input.updated_at
+        )
+      order by input.venue, input.venue_market_id, input.id
+    `,
+    [JSON.stringify(rows)],
+  );
+
+  const changedIds = new Set(changedRows.map((row) => row.id));
+  const existingChangedIds = new Set(
+    changedRows.filter((row) => row.exists_in_db).map((row) => row.id),
+  );
+  const newChangedIds = new Set(
+    changedRows.filter((row) => !row.exists_in_db).map((row) => row.id),
+  );
+
+  return {
+    changedRows: rows.filter((row) => changedIds.has(row.id)),
+    existingChangedRows: rows.filter((row) => existingChangedIds.has(row.id)),
+    newRows: rows.filter((row) => newChangedIds.has(row.id)),
+  };
 }
 
 type UnifiedMarketTokenRow = {
@@ -900,8 +1525,17 @@ export async function upsertUnifiedTokens(
     market_id: string;
     side: "YES" | "NO";
   }>,
-): Promise<void> {
-  if (tokens.length === 0) return;
+): Promise<UpsertUnifiedTokensResult> {
+  if (tokens.length === 0) {
+    return {
+      inputRows: 0,
+      dedupedRows: 0,
+      changedRows: 0,
+      skippedRows: 0,
+      batches: 0,
+      upsertedRows: 0,
+    };
+  }
 
   const byMarketSide = new Map<string, (typeof tokens)[number]>();
   for (const token of tokens) {
@@ -930,32 +1564,106 @@ export async function upsertUnifiedTokens(
       where ut.token_id = input.token_id
         and (ut.market_id, ut.side) is distinct from (input.market_id, input.side)
       returning 1
-    )
-    insert into unified_tokens(token_id, venue, market_id, side)
-    select token_id, venue, market_id, side
-    from input
-    on conflict (market_id, side) do update
-      set token_id = CASE
+    ),
+    resolved as (
+      select
+        case
+          when existing.venue = 'kalshi'
+            and existing.token_id like 'sol:%'
+            and input.token_id like 'kalshi:%'
+          then existing.token_id
+          else input.token_id
+        end as token_id,
+        case
+          when existing.venue = 'kalshi'
+            and existing.token_id like 'sol:%'
+            and input.token_id like 'kalshi:%'
+          then existing.venue
+          else input.venue
+        end as venue,
+        input.market_id,
+        input.side
+      from input
+      left join unified_tokens existing
+        on existing.market_id = input.market_id
+       and existing.side = input.side
+    ),
+    changed as (
+      select resolved.*
+      from resolved
+      left join unified_tokens existing
+        on existing.market_id = resolved.market_id
+       and existing.side = resolved.side
+      where existing.market_id is null
+         or (existing.token_id, existing.venue) is distinct from
+            (resolved.token_id, resolved.venue)
+    ),
+    upserted as (
+      insert into unified_tokens(token_id, venue, market_id, side)
+      select token_id, venue, market_id, side
+      from changed
+      on conflict (market_id, side) do update
+        set token_id = CASE
+              WHEN unified_tokens.venue = 'kalshi'
+                AND unified_tokens.token_id like 'sol:%'
+                AND excluded.token_id like 'kalshi:%'
+              THEN unified_tokens.token_id
+              ELSE excluded.token_id
+            END,
+            venue = CASE
+              WHEN unified_tokens.venue = 'kalshi'
+                AND unified_tokens.token_id like 'sol:%'
+                AND excluded.token_id like 'kalshi:%'
+              THEN unified_tokens.venue
+              ELSE excluded.venue
+            END,
+            updated_at = now()
+        where (unified_tokens.token_id, unified_tokens.venue) is distinct from (
+          CASE
             WHEN unified_tokens.venue = 'kalshi'
               AND unified_tokens.token_id like 'sol:%'
               AND excluded.token_id like 'kalshi:%'
             THEN unified_tokens.token_id
             ELSE excluded.token_id
           END,
-          venue = CASE
+          CASE
             WHEN unified_tokens.venue = 'kalshi'
               AND unified_tokens.token_id like 'sol:%'
               AND excluded.token_id like 'kalshi:%'
             THEN unified_tokens.venue
             ELSE excluded.venue
-          END,
-          updated_at = now()
+          END
+        )
+      returning 1
+    )
+    select
+      (select count(*) from input)::int as input_count,
+      (select count(*) from changed)::int as changed_count,
+      (select count(*) from upserted)::int as upserted_count
   `;
 
   const batches = chunkArray(payload, 500);
+  let changedRows = 0;
+  let upsertedRows = 0;
   for (const batch of batches) {
-    await pool.query(batchedQuery, [JSON.stringify(batch)]);
+    const result = await pool.query<{
+      input_count: number;
+      changed_count: number;
+      upserted_count: number;
+    }>(batchedQuery, [JSON.stringify(batch)]);
+    const row = result.rows[0];
+    changedRows += row?.changed_count ?? batch.length;
+    upsertedRows += row?.upserted_count ?? 0;
   }
+
+  return {
+    inputRows: tokens.length,
+    dedupedRows: rows.length,
+    changedRows,
+    skippedRows: rows.length - changedRows,
+    batches: batches.length,
+    upsertedRows,
+  };
 }
 
 export async function writeUnifiedBookTop(
@@ -965,8 +1673,6 @@ export async function writeUnifiedBookTop(
   bestAsk: number | null,
   ts: Date,
 ): Promise<void> {
-  if (bestBid == null && bestAsk == null) return;
-
   const runWrite = async (): Promise<void> => {
     const tsMs = ts.getTime();
     if (shouldSkipBookTopWrite(tokenId, bestBid, bestAsk, tsMs)) {
@@ -1054,6 +1760,122 @@ export async function writeUnifiedBookTop(
       bookTopWriteInFlight.delete(tokenId);
     }
   }
+}
+
+export async function writeUnifiedBookTops(
+  pool: Pool,
+  inputs: Array<{
+    tokenId: string;
+    bestBid: number | null;
+    bestAsk: number | null;
+    ts: Date;
+  }>,
+): Promise<number> {
+  if (inputs.length === 0) return 0;
+
+  const payload = inputs.flatMap((input) => {
+    const tsMs = input.ts.getTime();
+    if (
+      shouldSkipBookTopWrite(input.tokenId, input.bestBid, input.bestAsk, tsMs)
+    ) {
+      return [];
+    }
+
+    const mid =
+      input.bestBid != null && input.bestAsk != null
+        ? (input.bestBid + input.bestAsk) / 2
+        : null;
+    const spread =
+      input.bestBid != null && input.bestAsk != null
+        ? Math.max(0, input.bestAsk - input.bestBid)
+        : null;
+
+    return [
+      {
+        token_id: input.tokenId,
+        venue: venueFromUnifiedTokenId(input.tokenId),
+        ts: input.ts.toISOString(),
+        best_bid: input.bestBid,
+        best_ask: input.bestAsk,
+        mid,
+        spread,
+        ts_ms: tsMs,
+      },
+    ];
+  });
+
+  if (payload.length === 0) return 0;
+
+  const latestByToken = new Map<string, (typeof payload)[number]>();
+  for (const row of payload) {
+    const existing = latestByToken.get(row.token_id);
+    if (!existing || row.ts_ms >= existing.ts_ms) {
+      latestByToken.set(row.token_id, row);
+    }
+  }
+
+  await pool.query(
+    `
+      insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
+      select token_id, venue, ts, best_bid, best_ask, mid, spread
+      from jsonb_to_recordset($1::jsonb) as x(
+        token_id text,
+        venue text,
+        ts timestamptz,
+        best_bid numeric,
+        best_ask numeric,
+        mid numeric,
+        spread numeric
+      )
+      on conflict do nothing
+    `,
+    [JSON.stringify(payload)],
+  );
+
+  await pool.query(
+    `
+      insert into unified_token_top_latest (
+        token_id,
+        venue,
+        ts,
+        best_bid,
+        best_ask,
+        mid,
+        spread,
+        updated_at
+      )
+      select token_id, venue, ts, best_bid, best_ask, mid, spread, now()
+      from jsonb_to_recordset($1::jsonb) as x(
+        token_id text,
+        venue text,
+        ts timestamptz,
+        best_bid numeric,
+        best_ask numeric,
+        mid numeric,
+        spread numeric
+      )
+      on conflict (token_id) do update
+        set venue = excluded.venue,
+            ts = excluded.ts,
+            best_bid = excluded.best_bid,
+            best_ask = excluded.best_ask,
+            mid = excluded.mid,
+            spread = excluded.spread,
+            updated_at = now()
+      where excluded.ts >= unified_token_top_latest.ts
+    `,
+    [JSON.stringify(Array.from(latestByToken.values()))],
+  );
+
+  for (const row of payload) {
+    setBookTopCache(row.token_id, {
+      bestBid: row.best_bid,
+      bestAsk: row.best_ask,
+      lastWrittenAtMs: row.ts_ms,
+    });
+  }
+
+  return payload.length;
 }
 
 export async function writeUnifiedLastTrade(

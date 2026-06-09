@@ -1,4 +1,8 @@
-import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import {
+  deriveExactWindowDurationMinutes,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 
 import type {
   TDflowEvent,
@@ -172,6 +176,10 @@ function maxDate(values: Array<Date | undefined>): Date | undefined {
 function normalizeStatus(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.trim().toLowerCase();
+}
+
+function isNonTerminalAsk(value: number | undefined): boolean {
+  return value != null && value > 0 && value < 1;
 }
 
 export function mapDflowStatusToUnified(
@@ -353,6 +361,11 @@ export function mapToUnifiedEvent(
     status,
     series_key: seriesTicker ?? undefined,
     series_title: seriesTitleResolved ?? undefined,
+    duration_minutes:
+      deriveExactWindowDurationMinutes({
+        openTime: start_date,
+        closeTime: end_date,
+      }) ?? undefined,
     start_date,
     end_date,
     volume_total,
@@ -485,6 +498,13 @@ export function mapToUnifiedMarket(
     typeof account?.isInitialized === "boolean"
       ? account.isInitialized
       : undefined;
+  const initializedForTrading = !requireInitialized || isInitialized === true;
+  const dflowNativeAcceptingOrders =
+    status === "ACTIVE" &&
+    initializedForTrading &&
+    (isNonTerminalAsk(yesAsk) || isNonTerminalAsk(noAsk));
+  const tradableYesBid = dflowNativeAcceptingOrders ? yesBid : undefined;
+  const tradableYesAsk = dflowNativeAcceptingOrders ? yesAsk : undefined;
 
   const normalizedVolume24h = volume24h ?? 0;
   const normalizedLiquidity =
@@ -565,6 +585,7 @@ export function mapToUnifiedMarket(
     result,
     scalarOutcomePct,
     marketType,
+    dflowNativeAcceptingOrders,
   });
 
   const image =
@@ -591,13 +612,20 @@ export function mapToUnifiedMarket(
     }),
     status,
     market_type: "binary",
+    duration_minutes:
+      deriveExactWindowDurationMinutes({
+        openTime: open_time,
+        closeTime: close_time,
+      }) ?? undefined,
     open_time,
     close_time,
     expiration_time,
-    best_bid: yesBid,
-    best_ask: yesAsk,
+    best_bid: tradableYesBid,
+    best_ask: tradableYesAsk,
     last_price:
-      yesBid != null && yesAsk != null ? (yesBid + yesAsk) / 2 : undefined,
+      tradableYesBid != null && tradableYesAsk != null
+        ? (tradableYesBid + tradableYesAsk) / 2
+        : undefined,
     volume_total: volumeTotal,
     volume_24h: normalizedVolume24h,
     open_interest: openInterest,
@@ -626,7 +654,9 @@ export function mapToUnifiedMarket(
   ];
 
   const snapshot: DflowMarketSnapshot | null =
-    status === "ACTIVE" && (!requireInitialized || isInitialized === true)
+    status === "ACTIVE" &&
+    dflowNativeAcceptingOrders &&
+    (!requireInitialized || isInitialized === true)
       ? {
           marketId: marketRow.id,
           yesTokenId,

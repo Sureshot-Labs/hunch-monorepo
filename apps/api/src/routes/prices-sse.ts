@@ -12,6 +12,7 @@ import { markHotTokens, markStreamHotTokens } from "../lib/hot-tokens.js";
 import { pricesStreamQuerySchema } from "../schemas/prices-sse.js";
 import {
   subscribeToMarketStates,
+  subscribeToMarketUpdates,
   subscribeToPriceTicks,
 } from "../lib/prices-stream-manager.js";
 
@@ -85,6 +86,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       let sessionTimeout: NodeJS.Timeout | null = null;
       let unsubscribeTicks: (() => void) | null = null;
       let unsubscribeMarketState: (() => void) | null = null;
+      let unsubscribeMarketUpdate: (() => void) | null = null;
 
       const cleanup = () => {
         if (cleanedUp) return;
@@ -94,6 +96,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         if (sessionTimeout) clearTimeout(sessionTimeout);
         unsubscribeTicks?.();
         unsubscribeMarketState?.();
+        unsubscribeMarketUpdate?.();
         void releaseDistributedSlot(activeSlotKey, slotTtlMs);
       };
 
@@ -158,6 +161,16 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
           } catch {
             // ignore malformed cache entries
           }
+
+          try {
+            const update = await r.get(`market_update:${id}`);
+            if (update) {
+              const parsed = parseJson(update);
+              if (parsed) send("market_update", parsed);
+            }
+          } catch {
+            // ignore malformed cache entries
+          }
         }),
       );
 
@@ -186,6 +199,17 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         );
       } catch (err) {
         request.log.warn({ err }, "market-state SSE subscribe failed");
+      }
+
+      try {
+        unsubscribeMarketUpdate = await subscribeToMarketUpdates(
+          ids,
+          (payload) => {
+            send("market_update", payload);
+          },
+        );
+      } catch (err) {
+        request.log.warn({ err }, "market-update SSE subscribe failed");
       }
 
       // heartbeat so proxies don’t kill idle streams

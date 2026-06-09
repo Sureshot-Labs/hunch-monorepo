@@ -6,6 +6,25 @@ import { z } from "zod";
 
 const GammaEventsListResponse = z.array(GammaEvent);
 
+export class GammaHttpError extends Error {
+  readonly status: number;
+  readonly url: string;
+  readonly bodySnippet: string;
+
+  constructor(status: number, url: string, body: string) {
+    const snippet = body.trim().slice(0, 1000);
+    super(
+      snippet.length > 0
+        ? `Gamma ${status} ${url}: ${snippet}`
+        : `Gamma ${status} ${url}`,
+    );
+    this.name = "GammaHttpError";
+    this.status = status;
+    this.url = url;
+    this.bodySnippet = snippet;
+  }
+}
+
 export type GammaEventsQuery = {
   offset: number;
   limit: number;
@@ -23,6 +42,11 @@ export type GammaEventsQuery = {
   start_date_max?: string;
   end_date_min?: string;
   end_date_max?: string;
+};
+
+export type GammaEventsByIdsResult = {
+  events: GammaEventType[];
+  failedIds: string[];
 };
 
 function resolveEventsUrl(): string {
@@ -77,7 +101,19 @@ function setOptionalString(
   sp.set(k, v);
 }
 
-export async function fetchEventsPage(q: GammaEventsQuery) {
+function isRetriableGammaError(error: unknown): boolean {
+  if (error instanceof GammaHttpError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  return error instanceof TypeError;
+}
+
+function gammaRetryDelayMs(attempt: number): number {
+  if (env.gammaRetryBaseMs <= 0) return 0;
+  return env.gammaRetryBaseMs * Math.max(1, attempt);
+}
+
+async function fetchEventsPageOnce(q: GammaEventsQuery) {
   const url = new URL(resolveEventsUrl());
   url.searchParams.set("limit", String(q.limit));
   url.searchParams.set("offset", String(q.offset));
@@ -99,7 +135,10 @@ export async function fetchEventsPage(q: GammaEventsQuery) {
   setOptionalString(url.searchParams, "end_date_max", q.end_date_max);
 
   const r = await fetch(url, { headers: { accept: "application/json" } });
-  if (!r.ok) throw new Error(`Gamma ${r.status}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new GammaHttpError(r.status, url.toString(), body);
+  }
   const j = await r.json();
 
   let events: GammaEventType[];
@@ -112,6 +151,26 @@ export async function fetchEventsPage(q: GammaEventsQuery) {
   return { events };
 }
 
+export async function fetchEventsPage(q: GammaEventsQuery) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= env.gammaRetryAttempts; attempt += 1) {
+    try {
+      return await fetchEventsPageOnce(q);
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt >= env.gammaRetryAttempts ||
+        !isRetriableGammaError(error)
+      ) {
+        throw error;
+      }
+      const delayMs = gammaRetryDelayMs(attempt);
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 export type GammaEventsPage = {
   offset: number;
   events: GammaEventType[];
@@ -122,6 +181,7 @@ export type GammaEventPaginationOptions = {
   startOffset?: number;
   pageSize?: number;
   maxPages?: number; // 0 = unlimited
+  maxOffset?: number;
 } & Omit<GammaEventsQuery, "offset" | "limit">;
 
 // Streaming generator: yields events page-by-page to avoid loading everything into memory
@@ -131,12 +191,14 @@ export async function* iterateEventPages(
   let offset = opts.startOffset ?? 0;
   const pageSize = opts.pageSize ?? env.pageSize;
   const maxPages = opts.maxPages ?? 0;
+  const maxOffset = opts.maxOffset;
 
   const {
     label,
     startOffset: _startOffset,
     pageSize: _pageSize,
     maxPages: _maxPages,
+    maxOffset: _maxOffset,
     ...query
   } = opts;
 
@@ -147,6 +209,12 @@ export async function* iterateEventPages(
   let pages = 0;
   while (true) {
     if (maxPages > 0 && pages >= maxPages) break;
+    if (maxOffset != null && offset > maxOffset) {
+      console.log(
+        `Stopping Polymarket Gamma events${label ? ` [${label}]` : ""}: offset ${offset} exceeds configured maxOffset ${maxOffset}`,
+      );
+      break;
+    }
 
     const { events } = await fetchEventsPage({
       offset,
@@ -187,25 +255,64 @@ export async function fetchAllEvents() {
 export async function fetchEventsByIds(
   ids: Array<number | string>,
 ): Promise<GammaEventType[]> {
+  const result = await fetchEventsByIdsDetailed(ids);
+  if (result.failedIds.length > 0 && result.events.length === 0) {
+    throw new Error(
+      `Gamma event fetch failed for ${result.failedIds.length} id(s)`,
+    );
+  }
+  return result.events;
+}
+
+async function fetchEventsByIdsChunk(
+  ids: number[],
+): Promise<GammaEventsByIdsResult> {
+  if (ids.length === 0) return { events: [], failedIds: [] };
+
+  try {
+    const { events } = await fetchEventsPage({
+      offset: 0,
+      limit: ids.length,
+      id: ids,
+    });
+    return { events: events ?? [], failedIds: [] };
+  } catch {
+    if (ids.length <= 1) {
+      return { events: [], failedIds: ids.map(String) };
+    }
+
+    const splitAt = Math.ceil(ids.length / 2);
+    const left = await fetchEventsByIdsChunk(ids.slice(0, splitAt));
+    const right = await fetchEventsByIdsChunk(ids.slice(splitAt));
+    return {
+      events: [...left.events, ...right.events],
+      failedIds: [...left.failedIds, ...right.failedIds],
+    };
+  }
+}
+
+export async function fetchEventsByIdsDetailed(
+  ids: Array<number | string>,
+): Promise<GammaEventsByIdsResult> {
   const cleaned = ids
     .map((id) => Number(String(id).trim()))
     .filter((id) => Number.isFinite(id));
-  if (cleaned.length === 0) return [];
+  if (cleaned.length === 0) return { events: [], failedIds: [] };
 
-  const out: GammaEventType[] = [];
+  const eventsById = new Map<string, GammaEventType>();
+  const failedIds: string[] = [];
   const chunkSize = Math.min(env.pageSize, 200);
 
   for (let i = 0; i < cleaned.length; i += chunkSize) {
     const chunk = cleaned.slice(i, i + chunkSize);
-    const { events } = await fetchEventsPage({
-      offset: 0,
-      limit: chunk.length,
-      id: chunk,
-    });
-    out.push(...(events ?? []));
+    const result = await fetchEventsByIdsChunk(chunk);
+    for (const event of result.events) {
+      eventsById.set(String(event.id), event);
+    }
+    failedIds.push(...result.failedIds);
   }
 
-  return out;
+  return { events: Array.from(eventsById.values()), failedIds };
 }
 
 function extractFirstMarketPayload(

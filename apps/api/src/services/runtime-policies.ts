@@ -31,6 +31,9 @@ export type AuthAccessState = "off" | "prompt" | "required";
 
 export type AuthAccessPolicy = {
   state: AuthAccessState;
+  embeddedSolanaSponsorship: boolean;
+  solanaPrefundEnabled: boolean;
+  solanaLossCloseSponsorshipEnabled: boolean;
 };
 
 export type WalletIntelSignalsPolicy = {
@@ -72,6 +75,10 @@ export type WalletIntelRefreshPolicy = {
   whaleMarketLimit: number;
   watchlistMarketLimit: number;
   followedWalletLimit: number;
+  internalHunchEnabled: boolean;
+  internalHunchWalletLimit: number;
+  internalHunchFillLookbackDays: number;
+  internalHunchFillLimit: number;
   tokenLimitPoly: number;
   tokenLimitLimitless: number;
   tokenLimitKalshi: number;
@@ -110,6 +117,7 @@ export type AiWhaleProfilesPolicy = {
   selectionSignalsLimit: number;
   selectionTrackerWindowHours: number;
   selectionTrackerSurfaceLimit: number;
+  selectionTrackerSort: "importance" | "last_activity";
   selectionSignalsWindowHours: number;
   model: string;
   styleGuide: string;
@@ -149,6 +157,7 @@ export type ApiCacheWarmPolicy = {
   pollIntervalSec: number;
   requestTimeoutMs: number;
   warmFeed: boolean;
+  warmMarketMap: boolean;
   warmWalletIntel: boolean;
 };
 
@@ -487,6 +496,10 @@ const walletIntelRefreshSchema = z
     whaleMarketLimit: nonNegativeInt,
     watchlistMarketLimit: positiveInt,
     followedWalletLimit: positiveInt,
+    internalHunchEnabled: strictBoolean,
+    internalHunchWalletLimit: nonNegativeInt,
+    internalHunchFillLookbackDays: nonNegativeInt,
+    internalHunchFillLimit: nonNegativeInt,
     tokenLimitPoly: positiveInt,
     tokenLimitLimitless: positiveInt,
     tokenLimitKalshi: positiveInt,
@@ -528,6 +541,7 @@ const aiWhaleProfilesSchema = z
     selectionSignalsLimit: nonNegativeInt,
     selectionTrackerWindowHours: positiveInt,
     selectionTrackerSurfaceLimit: positiveInt,
+    selectionTrackerSort: z.enum(["importance", "last_activity"]),
     selectionSignalsWindowHours: positiveInt,
     model: z.string().trim().min(1).max(200),
     styleGuide: z.string().trim().min(1).max(5_000),
@@ -762,6 +776,7 @@ const apiCacheWarmSchema = z
     pollIntervalSec: positiveInt.max(60 * 60 * 24),
     requestTimeoutMs: positiveInt.max(60_000),
     warmFeed: strictBoolean,
+    warmMarketMap: strictBoolean,
     warmWalletIntel: strictBoolean,
   })
   .strict()
@@ -909,6 +924,9 @@ const authAccessStateSchema = z.enum(["off", "prompt", "required"]);
 const authAccessSchema = z
   .object({
     state: authAccessStateSchema,
+    embeddedSolanaSponsorship: strictBoolean,
+    solanaPrefundEnabled: strictBoolean,
+    solanaLossCloseSponsorshipEnabled: strictBoolean,
   })
   .strict()
   .partial();
@@ -1070,6 +1088,9 @@ function getDefaults(): IntelPolicyMap {
   return {
     auth_access: {
       state: env.authAccessState,
+      embeddedSolanaSponsorship: env.embeddedSolanaSponsorshipEnabled,
+      solanaPrefundEnabled: env.solanaPrefundEnabled,
+      solanaLossCloseSponsorshipEnabled: env.solanaLossCloseSponsorshipEnabled,
     },
     wallet_intel_signals: {
       maxOdds: env.walletIntelSignalMaxOdds,
@@ -1099,6 +1120,11 @@ function getDefaults(): IntelPolicyMap {
       whaleMarketLimit: env.walletIntelWhaleMarketLimit,
       watchlistMarketLimit: env.walletIntelWatchlistMarketLimit,
       followedWalletLimit: env.walletIntelFollowedWalletLimit,
+      internalHunchEnabled: env.walletIntelInternalHunchEnabled,
+      internalHunchWalletLimit: env.walletIntelInternalHunchWalletLimit,
+      internalHunchFillLookbackDays:
+        env.walletIntelInternalHunchFillLookbackDays,
+      internalHunchFillLimit: env.walletIntelInternalHunchFillLimit,
       tokenLimitPoly: env.walletIntelTokenLimitPoly,
       tokenLimitLimitless: env.walletIntelTokenLimitLimitless,
       tokenLimitKalshi: env.walletIntelTokenLimitKalshi,
@@ -1128,6 +1154,7 @@ function getDefaults(): IntelPolicyMap {
       pollIntervalSec: 30,
       requestTimeoutMs: 10_000,
       warmFeed: true,
+      warmMarketMap: true,
       warmWalletIntel: true,
     },
     ai_whale_profiles: {
@@ -1148,6 +1175,7 @@ function getDefaults(): IntelPolicyMap {
         env.aiWhaleProfileSelectionTrackerWindowHours,
       selectionTrackerSurfaceLimit:
         env.aiWhaleProfileSelectionTrackerSurfaceLimit,
+      selectionTrackerSort: env.aiWhaleProfileSelectionTrackerSort,
       selectionSignalsWindowHours:
         env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
@@ -1410,6 +1438,19 @@ function normalizeRefreshPolicy(
     whaleMarketLimit: Math.max(0, Math.trunc(policy.whaleMarketLimit)),
     watchlistMarketLimit: Math.max(1, Math.trunc(policy.watchlistMarketLimit)),
     followedWalletLimit: Math.max(1, Math.trunc(policy.followedWalletLimit)),
+    internalHunchEnabled: policy.internalHunchEnabled === true,
+    internalHunchWalletLimit: Math.max(
+      0,
+      Math.trunc(policy.internalHunchWalletLimit),
+    ),
+    internalHunchFillLookbackDays: Math.max(
+      0,
+      Math.trunc(policy.internalHunchFillLookbackDays),
+    ),
+    internalHunchFillLimit: Math.max(
+      0,
+      Math.trunc(policy.internalHunchFillLimit),
+    ),
     tokenLimitPoly: Math.max(1, Math.trunc(policy.tokenLimitPoly)),
     tokenLimitLimitless: Math.max(1, Math.trunc(policy.tokenLimitLimitless)),
     tokenLimitKalshi: Math.max(1, Math.trunc(policy.tokenLimitKalshi)),
@@ -1662,6 +1703,10 @@ function normalizeAiWhaleProfilesPolicy(
       1,
       1_000,
     ),
+    selectionTrackerSort:
+      policy.selectionTrackerSort === "last_activity"
+        ? "last_activity"
+        : "importance",
     selectionSignalsWindowHours: clamp(
       Math.trunc(policy.selectionSignalsWindowHours),
       1,
@@ -1690,6 +1735,7 @@ function normalizeApiCacheWarmPolicy(
     ),
     requestTimeoutMs: clamp(Math.trunc(policy.requestTimeoutMs), 250, 60_000),
     warmFeed: Boolean(policy.warmFeed),
+    warmMarketMap: Boolean(policy.warmMarketMap),
     warmWalletIntel: Boolean(policy.warmWalletIntel),
   };
 }
@@ -2100,6 +2146,11 @@ function normalizeAuthAccessPolicy(policy: AuthAccessPolicy): AuthAccessPolicy {
     state: authAccessStateSchema.safeParse(policy.state).success
       ? policy.state
       : "off",
+    embeddedSolanaSponsorship: Boolean(policy.embeddedSolanaSponsorship),
+    solanaPrefundEnabled: Boolean(policy.solanaPrefundEnabled),
+    solanaLossCloseSponsorshipEnabled: Boolean(
+      policy.solanaLossCloseSponsorshipEnabled,
+    ),
   };
 }
 

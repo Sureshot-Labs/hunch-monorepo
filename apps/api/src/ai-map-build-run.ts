@@ -6,9 +6,15 @@ import { RESP_TYPES } from "redis";
 import { UMAP } from "umap-js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { closeRedis } from "./redis.js";
 import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 import { buildRenderableMarketSql } from "./lib/market-renderability.js";
+import {
+  flushPendingMarketRefreshes,
+  requestMarketRefreshForMarketRefs,
+  type MarketRefreshTokenRef,
+} from "./lib/market-refresh.js";
 import {
   buildMarketMapNodeId,
   type MarketMapEventSummary,
@@ -2183,6 +2189,7 @@ async function filterCandidatesByRepresentativeQuality(params: {
       marketBestBid: selected.marketBestBid,
       marketBestAsk: selected.marketBestAsk,
       lastPrice: selected.lastPrice,
+      closeTime: selected.closeTime,
       resolvedOutcome: selected.resolvedOutcome,
       resolvedOutcomePct: selected.resolvedOutcomePct,
       yesProbability: selected.yesProbability,
@@ -2679,6 +2686,78 @@ async function storeSnapshot(
   }
 }
 
+function collectBuildRefreshRefs(result: BuildResult): {
+  eventCount: number;
+  marketIds: string[];
+  tokenRefs: MarketRefreshTokenRef[];
+} {
+  const eventKeys = new Set<string>();
+  const marketIds = new Set<string>();
+  const tokenRefByKey = new Map<string, MarketRefreshTokenRef>();
+
+  const addTokenRef = (
+    tokenId: string | null | undefined,
+    venue: string | null | undefined,
+  ) => {
+    const trimmed = tokenId?.trim();
+    if (!trimmed) return;
+    const normalizedVenue = venue?.trim().toLowerCase() || null;
+    const key = `${normalizedVenue ?? ""}:${trimmed}`;
+    if (!tokenRefByKey.has(key)) {
+      tokenRefByKey.set(key, { tokenId: trimmed, venue: normalizedVenue });
+    }
+  };
+
+  for (const events of result.byNodeEvents.values()) {
+    for (const event of events) {
+      eventKeys.add(eventVenueKey(event.eventId, event.venue));
+      if (event.representativeMarketId) {
+        marketIds.add(event.representativeMarketId);
+      }
+      addTokenRef(event.tokenYes, event.venue);
+      addTokenRef(event.tokenNo, event.venue);
+      for (const market of event.marketsPreview ?? []) {
+        marketIds.add(market.marketId);
+        addTokenRef(market.tokenYes, event.venue);
+        addTokenRef(market.tokenNo, event.venue);
+      }
+    }
+  }
+
+  return {
+    eventCount: eventKeys.size,
+    marketIds: Array.from(marketIds),
+    tokenRefs: Array.from(tokenRefByKey.values()),
+  };
+}
+
+async function enqueueBuildMarketRefreshes(result: BuildResult): Promise<void> {
+  const refs = collectBuildRefreshRefs(result);
+  if (refs.marketIds.length === 0 && refs.tokenRefs.length === 0) return;
+
+  try {
+    requestMarketRefreshForMarketRefs({
+      db: pool,
+      marketIds: refs.marketIds,
+      tokenRefs: refs.tokenRefs,
+      logLabel: "market-map-build",
+    });
+    await flushPendingMarketRefreshes();
+    console.log("[market-map] queued price refresh", {
+      eventsScanned: refs.eventCount,
+      marketsQueued: refs.marketIds.length,
+      tokenRefsQueued: refs.tokenRefs.length,
+    });
+  } catch (error) {
+    console.warn("[market-map] price refresh enqueue skipped", {
+      eventsScanned: refs.eventCount,
+      marketsQueued: refs.marketIds.length,
+      tokenRefsQueued: refs.tokenRefs.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export async function runMarketMapBuild(
   args: string[] = process.argv.slice(2),
 ): Promise<MarketMapBuildRunResult> {
@@ -2763,6 +2842,7 @@ export async function runMarketMapBuild(
     };
   }
   const redisRunId = await storeSnapshot(env.redisUrl, config, result);
+  await enqueueBuildMarketRefreshes(result);
   return {
     status: "completed",
     source: policy.source,
@@ -2791,11 +2871,13 @@ const isDirectRun = (() => {
 if (isDirectRun) {
   runMarketMapBuild()
     .then(async () => {
+      await closeRedis();
       await pool.end();
       process.exit(0);
     })
     .catch(async (error) => {
       console.error("[market-map] failed", error);
+      await closeRedis();
       await pool.end();
       process.exit(1);
     });

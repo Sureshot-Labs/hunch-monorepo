@@ -61,15 +61,6 @@ function parseNumberish(value: unknown): string | null {
   return null;
 }
 
-function parseBigInt(value: string): bigint | null {
-  try {
-    if (!/^\d+$/.test(value)) return null;
-    return BigInt(value);
-  } catch {
-    return null;
-  }
-}
-
 function normalizeRawAmountToUi(
   value: string | number | null | undefined,
   decimals: number,
@@ -123,25 +114,6 @@ function extractFeeFromObject(value: unknown): FeeExtractionResult | null {
   }
 
   return null;
-}
-
-function computeFeeFromBps(inputs: {
-  amountRaw: string;
-  decimals: number;
-  feeBps: number;
-}): string | null {
-  if (!inputs.amountRaw) return null;
-  if (!Number.isFinite(inputs.feeBps) || inputs.feeBps <= 0) return null;
-  const amountBig = parseBigInt(inputs.amountRaw);
-  if (amountBig != null) {
-    const feeRaw = (amountBig * BigInt(inputs.feeBps)) / 10_000n;
-    return formatUiAmount(feeRaw, inputs.decimals);
-  }
-
-  const amountNum = Number(inputs.amountRaw);
-  if (!Number.isFinite(amountNum)) return null;
-  const feeNum = (amountNum * inputs.feeBps) / 10_000;
-  return (feeNum / Math.pow(10, inputs.decimals)).toString();
 }
 
 function extractSettlementSignature(raw: unknown): string | null {
@@ -320,14 +292,13 @@ async function upsertKalshiFeeEventInTx(
     walletAddress: string;
     execution: ExecutionRow;
     feeAmountUsd: string;
-    txSignature: string | null;
-    status: "collected" | "failed" | "pending";
-    collectedAt: Date | null;
+    txSignature: string;
+    collectedAt: Date;
   },
 ): Promise<boolean> {
   const snapshot = await resolveFeeEventSnapshotAtWrite(client, {
     userId: inputs.userId,
-    eventTime: inputs.execution.created_at,
+    eventTime: inputs.collectedAt,
     feeUsd: inputs.feeAmountUsd,
   });
   const result = await client.query<{ id: string }>(
@@ -362,7 +333,7 @@ async function upsertKalshiFeeEventInTx(
       on conflict (user_id, source_type, source_id)
       do update set
         tx_hash = excluded.tx_hash,
-        collected_at = excluded.collected_at,
+        collected_at = coalesce(fee_events.collected_at, excluded.collected_at),
         status = excluded.status,
         updated_at = now()
       where fee_events.fee_amount = excluded.fee_amount
@@ -386,7 +357,7 @@ async function upsertKalshiFeeEventInTx(
       snapshot.liabilitySnapshotSource,
       inputs.txSignature,
       inputs.collectedAt,
-      inputs.status,
+      "collected",
     ],
   );
   if (!result.rows.length) {
@@ -526,12 +497,12 @@ export async function finalizeKalshiExecutionEffects(
     );
   }
 
-  const feeAccount = env.dflowFeeAccount?.trim() || null;
+  const feeAccount = env.dflowFeeAccount?.trim() || "";
   const feeBps = env.feeBpsKalshi;
   const feeScale = env.feeScaleKalshi;
   const hasFeeBps = Number.isFinite(feeBps) && feeBps > 0;
   const hasFeeScale = Number.isFinite(feeScale) && feeScale > 0;
-  const feeConfigActive = Boolean(feeAccount) && (hasFeeBps || hasFeeScale);
+  const feeConfigActive = feeAccount.length > 0 && (hasFeeBps || hasFeeScale);
   if (inputs.purpose !== "trade" || !feeConfigActive) {
     return { feeEventStored: false, referralFirstTrade };
   }
@@ -546,65 +517,29 @@ export async function finalizeKalshiExecutionEffects(
     return { feeEventStored: false, referralFirstTrade };
   }
 
-  const isInputUsdc = inputs.execution.input_mint === env.solanaUsdcMint;
-  const isOutputUsdc = inputs.execution.output_mint === env.solanaUsdcMint;
-  const feeDecimals = isInputUsdc
-    ? inputDecimals
-    : isOutputUsdc
-      ? outputDecimals
-      : DEFAULT_USDC_DECIMALS;
-  let feeAmountUi: string | null = null;
-
-  if (rawFee?.amountRaw) {
-    const trimmed = rawFee.amountRaw.trim();
-    if (trimmed.includes(".")) {
-      feeAmountUi = trimmed;
-    } else {
-      const feeBig = parseBigInt(trimmed);
-      if (feeBig != null) {
-        feeAmountUi = formatUiAmount(feeBig, feeDecimals);
-      } else {
-        const feeNum = Number(trimmed);
-        if (Number.isFinite(feeNum)) {
-          feeAmountUi = (feeNum / Math.pow(10, feeDecimals)).toString();
-        }
-      }
-    }
-  }
-
-  if (!feeAmountUi && hasFeeBps && !hasFeeScale) {
-    const baseAmountRaw = isInputUsdc
-      ? parseNumberish(inputs.execution.amount_in)
-      : isOutputUsdc
-        ? parseNumberish(inputs.execution.amount_out)
-        : null;
-    if (baseAmountRaw) {
-      feeAmountUi = computeFeeFromBps({
-        amountRaw: baseAmountRaw,
-        decimals: feeDecimals,
-        feeBps,
-      });
-    }
-  }
-
   const verificationSignature =
     extractSettlementSignature(inputs.execution.raw) ??
     inputs.execution.tx_signature?.trim() ??
     "";
-  const statusResult = verificationSignature
-    ? await fetchSolanaSignatureStatus({
-        rpcUrls: env.solanaRpcUrls,
-        signature: verificationSignature,
-        timeoutMs: env.solanaRpcTimeoutMs,
-      })
-    : null;
+  if (!verificationSignature) {
+    if (inputs.warnOnFeeVerificationDeferral !== false) {
+      inputs.logger?.warn?.(
+        {
+          executionId: inputs.execution.id,
+          txSignature: null,
+        },
+        "Deferring Kalshi fee event until source transaction is available",
+      );
+    }
+    return { feeEventStored: false, referralFirstTrade };
+  }
 
-  let verifiedFeeAmountUi: string | null = null;
-  if (
-    verificationSignature &&
-    feeAccount &&
-    statusResult?.status !== "fulfilled"
-  ) {
+  const statusResult = await fetchSolanaSignatureStatus({
+    rpcUrls: env.solanaRpcUrls,
+    signature: verificationSignature,
+    timeoutMs: env.solanaRpcTimeoutMs,
+  });
+  if (statusResult?.status !== "fulfilled") {
     if (inputs.warnOnFeeVerificationDeferral !== false) {
       inputs.logger?.warn?.(
         {
@@ -617,67 +552,51 @@ export async function finalizeKalshiExecutionEffects(
     }
     return { feeEventStored: false, referralFirstTrade };
   }
-  if (
-    verificationSignature &&
-    feeAccount &&
-    statusResult?.status === "fulfilled"
-  ) {
-    const delta = await fetchSolanaTokenAccountNetDelta({
-      rpcUrls: env.solanaRpcUrls,
-      signature: verificationSignature,
-      tokenAccount: feeAccount,
-      expectedMint: env.solanaUsdcMint,
-      timeoutMs: env.solanaRpcTimeoutMs,
-    });
 
-    if (delta.status === "verified") {
-      if (delta.deltaRaw <= 0n) {
-        if (inputs.warnOnFeeVerificationDeferral !== false) {
-          inputs.logger?.warn?.(
-            {
-              executionId: inputs.execution.id,
-              txSignature: verificationSignature,
-              deltaRaw: delta.deltaRaw.toString(),
-            },
-            "Skipping Kalshi fee event (non-positive verified fee delta)",
-          );
-        }
-        return { feeEventStored: false, referralFirstTrade };
-      }
-      verifiedFeeAmountUi = formatUiAmount(delta.deltaRaw, delta.decimals);
-    } else {
-      if (inputs.warnOnFeeVerificationDeferral !== false) {
-        inputs.logger?.warn?.(
-          {
-            executionId: inputs.execution.id,
-            txSignature: verificationSignature,
-            deltaStatus: delta.status,
-            mint: delta.mint ?? null,
-          },
-          "Deferring Kalshi fee event until fee-account delta is verifiable",
-        );
-      }
-      return { feeEventStored: false, referralFirstTrade };
+  const delta = await fetchSolanaTokenAccountNetDelta({
+    rpcUrls: env.solanaRpcUrls,
+    signature: verificationSignature,
+    tokenAccount: feeAccount,
+    expectedMint: env.solanaUsdcMint,
+    timeoutMs: env.solanaRpcTimeoutMs,
+  });
+
+  if (delta.status !== "verified") {
+    if (inputs.warnOnFeeVerificationDeferral !== false) {
+      inputs.logger?.warn?.(
+        {
+          executionId: inputs.execution.id,
+          txSignature: verificationSignature,
+          deltaStatus: delta.status,
+          mint: delta.mint ?? null,
+        },
+        "Deferring Kalshi fee event until fee-account delta is verifiable",
+      );
     }
-  }
-
-  const feeAmountUsd = verifiedFeeAmountUi ?? feeAmountUi;
-  const feeAmountNumber = feeAmountUsd != null ? Number(feeAmountUsd) : NaN;
-  if (
-    !Number.isFinite(feeAmountNumber) ||
-    feeAmountNumber <= 0 ||
-    !feeAmountUsd
-  ) {
     return { feeEventStored: false, referralFirstTrade };
   }
 
-  const status =
-    statusResult?.status === "fulfilled"
-      ? "collected"
-      : statusResult?.status === "failed"
-        ? "failed"
-        : "pending";
-  const collectedAt = status === "collected" ? new Date() : null;
+  if (delta.deltaRaw <= 0n) {
+    if (inputs.warnOnFeeVerificationDeferral !== false) {
+      inputs.logger?.warn?.(
+        {
+          executionId: inputs.execution.id,
+          txSignature: verificationSignature,
+          deltaRaw: delta.deltaRaw.toString(),
+        },
+        "Skipping Kalshi fee event (non-positive verified fee delta)",
+      );
+    }
+    return { feeEventStored: false, referralFirstTrade };
+  }
+
+  const feeAmountUsd = formatUiAmount(delta.deltaRaw, delta.decimals);
+  const feeAmountNumber = Number(feeAmountUsd);
+  if (!Number.isFinite(feeAmountNumber) || feeAmountNumber <= 0) {
+    return { feeEventStored: false, referralFirstTrade };
+  }
+
+  const collectedAt = new Date();
 
   return tx(pool, async (client) => {
     try {
@@ -686,8 +605,7 @@ export async function finalizeKalshiExecutionEffects(
         walletAddress,
         execution: inputs.execution,
         feeAmountUsd,
-        txSignature: verificationSignature || null,
-        status,
+        txSignature: verificationSignature,
         collectedAt,
       });
       return { feeEventStored: stored, referralFirstTrade };

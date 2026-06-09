@@ -2,6 +2,7 @@ import type { Pool } from "@hunch/infra";
 import {
   deleteHistoryOrder,
   findLimitlessHistoryMatch,
+  markOrderPositionDeltaApplied,
   storeOrder,
   updateOrderFromHistory,
 } from "../repos/orders-repo.js";
@@ -18,15 +19,23 @@ import {
   buildLimitlessRequestAuthInputs,
   type LimitlessAuthContext,
 } from "./limitless-auth.js";
+import { normalizeLimitlessHistoryAmount } from "./limitless-order-normalization.js";
 import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
+import { applyVenueConfirmedPositionTrade } from "./positions-optimistic.js";
+import { recordLimitlessVolumeEvent } from "./limitless-volume-events.js";
 
 export type LimitlessHistorySyncStats = {
   fetched: number;
+  nextCursor: string | null;
   storedNew: number;
   alreadyKnown: number;
+  positionUpdates: number;
+  positionUpdateErrors: number;
+  volumeEventsInserted: number;
+  volumeEventErrors: number;
   skippedNoId: number;
   skippedNoSide: number;
   skippedNoOutcome: number;
@@ -76,6 +85,13 @@ function extractLimitlessHistoryEntries(
   return [];
 }
 
+function extractLimitlessNextCursor(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.nextCursor !== "string") return null;
+  const cursor = payload.nextCursor.trim();
+  return cursor.length ? cursor : null;
+}
+
 function normalizeHistoryStrategy(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -118,11 +134,7 @@ function normalizeHistoryPrice(value: unknown): number | null {
 }
 
 function normalizeHistoryAmount(value: unknown): number | null {
-  const parsed = parseNumberish(value);
-  if (parsed == null) return null;
-  const normalized = parsed > 1_000_000 ? parsed / 1_000_000 : parsed;
-  if (!Number.isFinite(normalized)) return null;
-  return normalized;
+  return normalizeLimitlessHistoryAmount(value);
 }
 
 function normalizeHistorySize(
@@ -141,12 +153,63 @@ function normalizeHistorySize(
   return null;
 }
 
+function deriveHistoryNotionalUsd(inputs: {
+  collateralAmount: unknown;
+  price: number | null;
+  size: number | null;
+}): number | null {
+  const collateral = normalizeHistoryAmount(inputs.collateralAmount);
+  if (collateral != null && collateral > 0) return collateral;
+  if (
+    inputs.price != null &&
+    inputs.price > 0 &&
+    inputs.size != null &&
+    inputs.size > 0
+  ) {
+    const notional = inputs.price * inputs.size;
+    return Number.isFinite(notional) && notional > 0 ? notional : null;
+  }
+  return null;
+}
+
 function normalizeHistoryTimestamp(value: unknown): Date | null {
   const parsed = parseNumberish(value);
   if (parsed == null) return null;
   const tsMs = parsed > 1_000_000_000_000 ? parsed : parsed * 1000;
   const date = new Date(tsMs);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+async function applyConfirmedHistoryFillToPosition(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    tokenId: string;
+    side: "BUY" | "SELL";
+    price: number | null;
+    size: number | null;
+    collateralAmount: unknown;
+  },
+): Promise<boolean> {
+  if (inputs.size == null || inputs.size <= 0) return false;
+  const notionalUsd = deriveHistoryNotionalUsd({
+    collateralAmount: inputs.collateralAmount,
+    price: inputs.price,
+    size: inputs.size,
+  });
+  if (notionalUsd == null || notionalUsd <= 0) return false;
+
+  const result = await applyVenueConfirmedPositionTrade(pool, {
+    userId: inputs.userId,
+    walletAddress: inputs.walletAddress,
+    venue: "limitless",
+    tokenId: inputs.tokenId,
+    side: inputs.side,
+    shares: inputs.size,
+    notionalUsd,
+  });
+  return result.applied;
 }
 
 function extractHistoryMarketId(entry: Record<string, unknown>): string | null {
@@ -179,6 +242,16 @@ function extractHistoryTxHash(entry: Record<string, unknown>): string | null {
 }
 
 type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
+
+function shouldNotifyHistoryFill(previousStatus: string | null): boolean {
+  const normalized = previousStatus?.trim().toLowerCase();
+  return normalized !== "filled" && normalized !== "matched";
+}
+
+function normalizeLimitlessMarketContextId(marketId: string | null): string | null {
+  if (!marketId) return null;
+  return marketId.startsWith("limitless:") ? marketId : `limitless:${marketId}`;
+}
 
 function normalizeRawLimitlessTokenIdFromUnknown(
   value: unknown,
@@ -292,41 +365,55 @@ function buildHistoryVenueOrderId(
   return `history:${marketKey}:${ts}:${suffix}:${strat}`;
 }
 
+function buildHistoryVolumeSourceId(inputs: {
+  entry: Record<string, unknown>;
+  strategy: string | null;
+  tokenId: string;
+  venueOrderId: string;
+}): string {
+  const txHash = extractHistoryTxHash(inputs.entry);
+  const strategy = inputs.strategy?.trim().toLowerCase();
+  if (txHash && (strategy === "buy" || strategy === "sell")) {
+    return `amm:${txHash}:${inputs.tokenId}`;
+  }
+  return inputs.venueOrderId;
+}
+
 export async function syncLimitlessHistoryForWallet(
   pool: Pool,
   inputs: {
     userId: string;
     walletAddress: string;
     authContext: LimitlessAuthContext;
-    page: number;
     limit: number;
-    from?: string;
-    to?: string;
+    cursor?: string;
   },
 ): Promise<LimitlessHistorySyncStats> {
-  const params = new URLSearchParams({
-    page: String(inputs.page),
-    limit: String(inputs.limit),
-  });
-  if (inputs.from?.trim()) params.set("from", inputs.from.trim());
-  if (inputs.to?.trim()) params.set("to", inputs.to.trim());
+  const params = new URLSearchParams({ limit: String(inputs.limit) });
+  if (inputs.cursor?.trim()) params.set("cursor", inputs.cursor.trim());
+
+  const profileId = inputs.authContext.storedProfile?.id;
+  const headers =
+    profileId != null ? { "x-on-behalf-of": String(profileId) } : undefined;
 
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: `/portfolio/history?${params.toString()}`,
     ...buildLimitlessRequestAuthInputs(inputs.authContext),
+    headers,
   });
 
   if (!upstream.ok) {
     const message = extractLimitlessMessage(upstream.payload);
     throw new Error(
       message
-        ? `Limitless history sync failed: ${message}`
-        : "Limitless history sync failed.",
+        ? `Limitless history sync failed (${upstream.status}): ${message}`
+        : `Limitless history sync failed (${upstream.status}).`,
     );
   }
 
   const entries = extractLimitlessHistoryEntries(upstream.payload);
+  const nextCursor = extractLimitlessNextCursor(upstream.payload);
   const marketIds = new Set<string>();
   const marketSlugs = new Set<string>();
   for (const entry of entries) {
@@ -378,6 +465,10 @@ export async function syncLimitlessHistoryForWallet(
 
   let storedNew = 0;
   let alreadyKnown = 0;
+  let positionUpdates = 0;
+  let positionUpdateErrors = 0;
+  let volumeEventsInserted = 0;
+  let volumeEventErrors = 0;
   let skippedNoId = 0;
   let skippedNoSide = 0;
   let skippedNoOutcome = 0;
@@ -471,6 +562,31 @@ export async function syncLimitlessHistoryForWallet(
     );
     const orderType = normalizeHistoryOrderType(strategy);
     const orderHash = extractHistoryTxHash(entry);
+    const notionalUsd = deriveHistoryNotionalUsd({
+      collateralAmount: entry.collateralAmount ?? entry.collateral_amount,
+      price,
+      size,
+    });
+    const volumeSourceId = buildHistoryVolumeSourceId({
+      entry,
+      strategy,
+      tokenId,
+      venueOrderId,
+    });
+
+    async function recordHistoryVolumeEvent(): Promise<void> {
+      try {
+        volumeEventsInserted += await recordLimitlessVolumeEvent(pool, {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          sourceId: volumeSourceId,
+          notionalUsd,
+          createdAt: timestamp,
+        });
+      } catch {
+        volumeEventErrors += 1;
+      }
+    }
 
     if (timestamp) {
       const match = await findLimitlessHistoryMatch(pool, {
@@ -482,6 +598,8 @@ export async function syncLimitlessHistoryForWallet(
         postedAt: timestamp,
       });
       if (match) {
+        const shouldNotifyFill = shouldNotifyHistoryFill(match.status);
+        const shouldApplyPositionFill = !match.positionDeltaApplied;
         await updateOrderFromHistory(pool, {
           id: match.id,
           status: "filled",
@@ -492,25 +610,49 @@ export async function syncLimitlessHistoryForWallet(
           orderHash,
           orderPayload: entry,
         });
-        void createNotificationSafe(
-          pool,
-          buildOrderNotification({
-            userId: inputs.userId,
-            venue: "limitless",
-            status: "filled",
-            side,
-            size,
-            price,
-            orderId: venueOrderId ?? orderHash ?? null,
-            tokenId,
-            walletAddress: inputs.walletAddress,
-          }),
-        );
+        if (shouldNotifyFill) {
+          void createNotificationSafe(
+            pool,
+            buildOrderNotification({
+              userId: inputs.userId,
+              venue: "limitless",
+              status: "filled",
+              side,
+              size,
+              price,
+              orderId: match.venueOrderId ?? match.id,
+              marketId: normalizeLimitlessMarketContextId(marketId),
+              tokenId,
+              walletAddress: inputs.walletAddress,
+            }),
+          );
+        }
         await deleteHistoryOrder(pool, {
           userId: inputs.userId,
           venue: "limitless",
           venueOrderId,
         });
+        if (shouldApplyPositionFill) {
+          try {
+            const applied = await applyConfirmedHistoryFillToPosition(pool, {
+              userId: inputs.userId,
+              walletAddress: inputs.walletAddress,
+              tokenId,
+              side,
+              price,
+              size,
+              collateralAmount:
+                entry.collateralAmount ?? entry.collateral_amount,
+            });
+            if (applied) {
+              await markOrderPositionDeltaApplied(pool, { id: match.id });
+              positionUpdates += 1;
+            }
+          } catch {
+            positionUpdateErrors += 1;
+          }
+        }
+        await recordHistoryVolumeEvent();
         alreadyKnown += 1;
         continue;
       }
@@ -539,27 +681,37 @@ export async function syncLimitlessHistoryForWallet(
 
     if (result.kind === "stored") storedNew += 1;
     if (result.kind === "exists") alreadyKnown += 1;
-
-    void createNotificationSafe(
-      pool,
-      buildOrderNotification({
-        userId: inputs.userId,
-        venue: "limitless",
-        status: "filled",
-        side,
-        size,
-        price,
-        orderId: venueOrderId ?? orderHash ?? null,
-        tokenId,
-        walletAddress: inputs.walletAddress,
-      }),
-    );
+    if (result.kind === "stored") {
+      try {
+        const applied = await applyConfirmedHistoryFillToPosition(pool, {
+          userId: inputs.userId,
+          walletAddress: inputs.walletAddress,
+          tokenId,
+          side,
+          price,
+          size,
+          collateralAmount: entry.collateralAmount ?? entry.collateral_amount,
+        });
+        if (applied) {
+          await markOrderPositionDeltaApplied(pool, { id: result.order.id });
+          positionUpdates += 1;
+        }
+      } catch {
+        positionUpdateErrors += 1;
+      }
+    }
+    await recordHistoryVolumeEvent();
   }
 
   return {
     fetched: entries.length,
+    nextCursor,
     storedNew,
     alreadyKnown,
+    positionUpdates,
+    positionUpdateErrors,
+    volumeEventsInserted,
+    volumeEventErrors,
     skippedNoId,
     skippedNoSide,
     skippedNoOutcome,

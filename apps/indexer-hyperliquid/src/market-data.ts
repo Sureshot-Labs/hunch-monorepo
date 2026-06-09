@@ -1,5 +1,9 @@
 import type { Pool } from "pg";
-import type { RedisClientType } from "@hunch/infra";
+import {
+  publishMarketState,
+  publishMarketUpdate,
+  type RedisClientType,
+} from "@hunch/infra";
 import { writeUnifiedBookTop } from "@hunch/db";
 import type {
   HyperliquidBboPayload,
@@ -221,6 +225,10 @@ export async function publishHyperliquidTopTick(params: {
 }): Promise<void> {
   if (params.bestBid == null && params.bestAsk == null) return;
 
+  const lastPrice =
+    params.bestBid != null && params.bestAsk != null
+      ? (params.bestBid + params.bestAsk) / 2
+      : (params.bestBid ?? params.bestAsk ?? null);
   const tick = {
     token_id: params.tokenId,
     best_bid: params.bestBid,
@@ -246,5 +254,19 @@ export async function publishHyperliquidTopTick(params: {
       new Date(params.tsMs),
     ),
     multi.exec(),
+    publishMarketState({
+      redis: params.redis,
+      venue: VENUE,
+      tokenId: params.tokenId,
+      eventType: "top_book",
+      tsMs: params.tsMs,
+    }),
+    publishMarketUpdate({
+      redis: params.redis,
+      venue: VENUE,
+      tokenIds: [params.tokenId],
+      lastPrice,
+      tsMs: params.tsMs,
+    }),
   ]);
 }

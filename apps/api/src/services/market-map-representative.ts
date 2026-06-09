@@ -235,6 +235,13 @@ export async function selectRankedRepresentativeMarketsForEvents(
   const prefilterLimit = Math.max(limit, 10);
   const nowParam = new Date().toISOString();
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
+  const nativeAcceptingOrdersExpr = `
+    case
+      when m.venue = 'kalshi'
+        then lower(coalesce(m.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+      else coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end)
+    end
+  `;
   const eventIds = normalized.map((input) => input.eventId);
   const venues = normalized.map((input) => input.venue);
   const preferredMarketIds = normalized.map((input) => input.preferredMarketId);
@@ -287,9 +294,12 @@ export async function selectRankedRepresentativeMarketsForEvents(
       join unified_markets m
         on m.event_id = ei.event_id
        and m.venue = ei.event_venue
+      left join polymarket_markets pm
+        on m.venue = 'polymarket' and pm.id = m.venue_market_id
       where m.status = 'ACTIVE'
         and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
         and (m.close_time is null or m.close_time > $5::timestamptz)
+        and ${nativeAcceptingOrdersExpr} is true
         and ${renderableMarketExpr}
     ),
     market_base as (
@@ -325,10 +335,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
         coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
         coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
-        coalesce(
-          pm.accepting_orders,
-          case when m.status::text = 'ACTIVE' then true else false end
-        ) as accepting_orders,
+        ${nativeAcceptingOrdersExpr} as accepting_orders,
         m.resolved_outcome,
         m.resolved_outcome_pct,
         odds.yes_probability,
@@ -355,7 +362,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
               case
                 when mt.token_yes is not null
                   and mt.token_no is not null
-                  and coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
+                  and ${nativeAcceptingOrdersExpr} is true
                   and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
                   and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
                   and (m.close_time is null or m.close_time > $5::timestamptz)
@@ -383,7 +390,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
             ),
             (
               case
-                when coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end) is true
+                when ${nativeAcceptingOrdersExpr} is true
                   and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
                   and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
                   and (m.close_time is null or m.close_time > $5::timestamptz)

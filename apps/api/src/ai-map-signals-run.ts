@@ -2276,6 +2276,7 @@ export async function runMapSignals(
               marketBestBid: row.marketBestBid,
               marketBestAsk: row.marketBestAsk,
               lastPrice: row.lastPrice,
+              closeTime: row.closeTime,
               resolvedOutcome: row.resolvedOutcome,
               resolvedOutcomePct: row.resolvedOutcomePct,
               yesProbability: row.yesProbability,

@@ -4,8 +4,10 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
+  fetchUnifiedMarketIdsByEventId,
   fetchUnifiedOrderById,
   fetchUnifiedOrders,
+  mapUnifiedOrder,
 } from "../repos/unified-orders.js";
 import {
   orderIdParamsSchema,
@@ -14,71 +16,18 @@ import {
   ordersQuerySchema,
 } from "../schemas/orders.js";
 
-const toNumber = (value: string | null): number | null => {
-  if (value == null) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
-const mapUnifiedOrder = (
-  row: Awaited<ReturnType<typeof fetchUnifiedOrders>>["rows"][number],
-) => ({
-  id: row.id,
-  kind: row.kind,
-  venue: row.venue,
-  walletAddress: row.wallet_address,
-  venueOrderId: row.venue_order_id,
-  tokenId: row.token_id,
-  side: row.side,
-  outcome: row.outcome,
-  orderType: row.order_type,
-  price: toNumber(row.price),
-  size: toNumber(row.size),
-  status: row.status,
-  filledSize: toNumber(row.filled_size),
-  averageFillPrice: toNumber(row.average_fill_price),
-  expiresAt: row.expires_at,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  filledAt: row.filled_at,
-  cancelledAt: row.cancelled_at,
-  unifiedMarketId: row.unified_market_id,
-  inputMint: row.input_mint,
-  outputMint: row.output_mint,
-  amountIn: toNumber(row.amount_in),
-  amountOut: toNumber(row.amount_out),
-  inputDecimals: toNumber(row.input_decimals),
-  outputDecimals: toNumber(row.output_decimals),
-  txSignature: row.tx_signature,
-});
-
 const OPEN_ORDER_STATUSES: string[] = [
   "pending",
   "submitted",
   "live",
   "partially_filled",
   "delayed",
-  "unmatched",
+  "unconfirmed",
   "open",
 ];
 
 export const ordersRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
-
-  const resolveMarketIds = async (
-    eventId: string | undefined,
-  ): Promise<string[]> => {
-    if (!eventId) return [];
-    const { rows } = await pool.query<{ id: string }>(
-      `
-        select id
-        from unified_markets
-        where event_id = $1
-      `,
-      [eventId],
-    );
-    return rows.map((row) => row.id);
-  };
 
   /**
    * GET /orders
@@ -115,7 +64,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         const marketIds =
           query.marketId || !query.eventId
             ? []
-            : await resolveMarketIds(query.eventId);
+            : await fetchUnifiedMarketIdsByEventId(pool, query.eventId);
         if (query.eventId && !query.marketId && marketIds.length === 0) {
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send({
@@ -202,7 +151,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         const marketIds =
           query.marketId || !query.eventId
             ? []
-            : await resolveMarketIds(query.eventId);
+            : await fetchUnifiedMarketIdsByEventId(pool, query.eventId);
         if (query.eventId && !query.marketId && marketIds.length === 0) {
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send({

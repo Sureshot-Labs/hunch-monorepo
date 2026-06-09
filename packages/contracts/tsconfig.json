@@ -6,6 +6,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "types": ["node", "mocha", "chai", "hardhat"],
+    "rootDir": ".",
     "outDir": "./dist"
   },
   "include": ["./hardhat.config.ts", "./scripts", "./test", "./src"],

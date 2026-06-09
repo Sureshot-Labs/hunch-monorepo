@@ -5,10 +5,6 @@ export const eventParamsSchema = z.object({
   eventId: zRequiredString("eventId parameter is required"),
 });
 
-export const eventSeriesQuerySchema = z.object({
-  statuses: z.string().optional(),
-});
-
 const zVenueOptional = z.preprocess(
   (v) => (typeof v === "string" ? v.toLowerCase() : v),
   zVenue.optional(),
@@ -46,6 +42,12 @@ const zOptionalCsv = z.union([z.string(), z.undefined()]).transform((value) => {
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
   return list.length ? list : undefined;
+});
+
+export const eventSeriesQuerySchema = z.object({
+  statuses: z.string().optional(),
+  upcomingOnly: zOptionalBool.optional(),
+  limit: zOptionalInt.optional(),
 });
 
 export const eventSimilarQuerySchema = z.object({

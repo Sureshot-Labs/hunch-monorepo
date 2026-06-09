@@ -40,6 +40,8 @@ type NodeEventsPayload = {
         marketId: string;
         marketBestBid: number | null;
         marketBestAsk: number | null;
+        tokenYes?: string | null;
+        tokenNo?: string | null;
         yesBid: number | null;
         yesAsk: number | null;
         noBid: number | null;
@@ -52,6 +54,10 @@ type NodeEventsPayload = {
 type MarketMapPayload = {
   items: Array<{
     id: string;
+    eventsPreview?: Array<{
+      eventId: string;
+      venue: string;
+    }>;
     childrenPreview?: Array<{
       id: string;
       topSignal?: {
@@ -63,6 +69,8 @@ type MarketMapPayload = {
           marketId: string;
           marketBestBid: number | null;
           marketBestAsk: number | null;
+          tokenYes?: string | null;
+          tokenNo?: string | null;
           yesBid: number | null;
           yesAsk: number | null;
           noBid: number | null;
@@ -248,7 +256,9 @@ async function insertUnifiedMarketForSignal(params: {
   venueMarketId: string;
   eventId: string;
   title: string;
-}): Promise<void> {
+}): Promise<{ tokenYes: string; tokenNo: string }> {
+  const tokenYes = makeToken(`yes-${params.marketId}`);
+  const tokenNo = makeToken(`no-${params.marketId}`);
   await pool.query(
     `
       insert into unified_markets (
@@ -291,11 +301,12 @@ async function insertUnifiedMarketForSignal(params: {
       params.venueMarketId,
       params.eventId,
       params.title,
-      makeToken(`yes-${params.marketId}`),
-      makeToken(`no-${params.marketId}`),
+      tokenYes,
+      tokenNo,
       makeToken(`slug-${params.marketId}`),
     ],
   );
+  return { tokenYes, tokenNo };
 }
 
 async function insertUnifiedEventForSignal(params: {
@@ -438,6 +449,8 @@ async function main() {
   const suiteId = crypto.randomUUID().slice(0, 8);
   const runId = `test-market-map-run-${suiteId}`;
   const nodeId = `test-market-map-node-${suiteId}`;
+  const qualityRootNodeId = `test-market-map-quality-root-${suiteId}`;
+  const qualityNodeId = `test-market-map-quality-node-${suiteId}`;
   const signalMarketId = `market-signal-${suiteId}`;
   const signalNoteId = crypto.randomUUID();
   const signalNoteKey = `note-signal-${suiteId}`;
@@ -511,7 +524,63 @@ async function main() {
     }),
   ];
 
+  const qualityEvents: MarketMapEventSummary[] = [
+    {
+      ...buildEvent({
+        eventId: `quality-closed-a-${suiteId}`,
+        venue: "polymarket",
+        title: "Closed high volume event",
+        volume24h: 100,
+        liquidity: 500,
+        openInterest: 0,
+        score: 0.9,
+      }),
+      acceptingOrders: false,
+    },
+    {
+      ...buildEvent({
+        eventId: `quality-resolved-b-${suiteId}`,
+        venue: "polymarket",
+        title: "Resolved high volume event",
+        volume24h: 90,
+        liquidity: 400,
+        openInterest: 0,
+        score: 0.8,
+      }),
+      marketStatus: "RESOLVED",
+      resolvedOutcome: "YES",
+    },
+    buildEvent({
+      eventId: `quality-open-c-${suiteId}`,
+      venue: "polymarket",
+      title: "Open quality event C",
+      volume24h: 80,
+      liquidity: 300,
+      openInterest: 0,
+      score: 0.7,
+    }),
+    buildEvent({
+      eventId: `quality-open-d-${suiteId}`,
+      venue: "kalshi",
+      title: "Open quality event D",
+      volume24h: 70,
+      liquidity: 200,
+      openInterest: 0,
+      score: 0.6,
+    }),
+    buildEvent({
+      eventId: `quality-open-e-${suiteId}`,
+      venue: "limitless",
+      title: "Open quality event E",
+      volume24h: 60,
+      liquidity: 100,
+      openInterest: 0,
+      score: 0.5,
+    }),
+  ];
+
   const node = buildNode(nodeId, events);
+  const qualityNode = buildNode(qualityNodeId, qualityEvents);
   const rootNodeId = `test-market-map-root-${suiteId}`;
   const rootNode: MarketMapNode = {
     ...node,
@@ -533,17 +602,48 @@ async function main() {
     label: "Child node",
     labelRepresentative: "Child node",
   };
+  const qualityRootNode: MarketMapNode = {
+    ...qualityNode,
+    id: qualityRootNodeId,
+    level: 1,
+    parentId: null,
+    childIds: [qualityNodeId],
+    label: "Quality root node",
+    labelRepresentative: "Quality root node",
+    heroEventId: null,
+    heroMarketId: null,
+  };
+  const qualityChildNode: MarketMapNode = {
+    ...qualityNode,
+    id: qualityNodeId,
+    level: 2,
+    parentId: qualityRootNodeId,
+    childIds: [],
+    label: "Quality child node",
+    labelRepresentative: "Quality child node",
+  };
   const nodeKey = marketMapRunNodeKey(runId, nodeId);
   const nodeEventsKey = marketMapRunNodeEventsKey(runId, nodeId);
+  const qualityRootNodeKey = marketMapRunNodeKey(runId, qualityRootNodeId);
+  const qualityNodeKey = marketMapRunNodeKey(runId, qualityNodeId);
+  const qualityNodeEventsKey = marketMapRunNodeEventsKey(runId, qualityNodeId);
   const nodesGlobalKey = marketMapRunNodesGlobalKey(runId);
 
   try {
     await redis.set(marketMapActiveKey(), runId);
     await redis.set(nodeKey, JSON.stringify(node));
     await redis.set(nodeEventsKey, JSON.stringify(events));
+    await redis.set(qualityRootNodeKey, JSON.stringify(qualityRootNode));
+    await redis.set(qualityNodeKey, JSON.stringify(qualityChildNode));
+    await redis.set(qualityNodeEventsKey, JSON.stringify(qualityEvents));
     await redis.set(
       nodesGlobalKey,
-      JSON.stringify([rootNode, previewChildNode]),
+      JSON.stringify([
+        rootNode,
+        previewChildNode,
+        qualityRootNode,
+        qualityChildNode,
+      ]),
     );
     await insertUnifiedEventForSignal({
       eventId: `event-a-${suiteId}`,
@@ -551,7 +651,7 @@ async function main() {
       venueEventId: `venue-event-a-${suiteId}`,
       title: "Alpha event",
     });
-    await insertUnifiedMarketForSignal({
+    const signalMarketTokens = await insertUnifiedMarketForSignal({
       marketId: signalMarketId,
       venue: "polymarket",
       venueMarketId: `venue-market-signal-${suiteId}`,
@@ -698,6 +798,23 @@ async function main() {
       `event-a-${suiteId}`,
     ]);
 
+    const qualityFirstPage = await requestNodeEvents({
+      app,
+      nodeId: qualityNodeId,
+      query: { sort_by: "volume24h", sort_dir: "desc", limit: 2, offset: 0 },
+    });
+    const qualitySecondPage = await requestNodeEvents({
+      app,
+      nodeId: qualityNodeId,
+      query: { sort_by: "volume24h", sort_dir: "desc", limit: 2, offset: 2 },
+    });
+    assert.equal(qualityFirstPage.total, 3);
+    assert.deepEqual(ids(qualityFirstPage), [
+      `quality-open-c-${suiteId}`,
+      `quality-open-d-${suiteId}`,
+    ]);
+    assert.deepEqual(ids(qualitySecondPage), [`quality-open-e-${suiteId}`]);
+
     const venueFiltered = await requestNodeEvents({
       app,
       nodeId,
@@ -736,6 +853,14 @@ async function main() {
     );
     assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestBid, 0.45);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.marketBestAsk, 0.55);
+    assert.equal(
+      signaledEvent?.topSignal?.targetMarket?.tokenYes,
+      signalMarketTokens.tokenYes,
+    );
+    assert.equal(
+      signaledEvent?.topSignal?.targetMarket?.tokenNo,
+      signalMarketTokens.tokenNo,
+    );
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesBid, 0.45);
     assert.equal(signaledEvent?.topSignal?.targetMarket?.yesAsk, 0.55);
     assert.ok(
@@ -769,9 +894,35 @@ async function main() {
     assert.equal(previewSignal?.targetMarket?.marketId, signalMarketId);
     assert.equal(previewSignal?.targetMarket?.marketBestBid, 0.45);
     assert.equal(previewSignal?.targetMarket?.marketBestAsk, 0.55);
+    assert.equal(
+      previewSignal?.targetMarket?.tokenYes,
+      signalMarketTokens.tokenYes,
+    );
+    assert.equal(
+      previewSignal?.targetMarket?.tokenNo,
+      signalMarketTokens.tokenNo,
+    );
     assert.equal(previewSignals?.length, 2);
     assert.equal(previewSignals?.[0]?.title, "Alpha follow-up signal");
     assert.equal(previewSignals?.[1]?.title, "Alpha signal");
+
+    const qualityPreviewMap = await requestMarketMap({
+      app,
+      query: {
+        level: 2,
+        parent: qualityRootNodeId,
+        includeEventsPreview: true,
+        eventsPreviewLimit: 2,
+        limit: 4,
+      },
+    });
+    const qualityPreviewEvents =
+      qualityPreviewMap.items.find((item) => item.id === qualityNodeId)
+        ?.eventsPreview ?? [];
+    assert.deepEqual(
+      qualityPreviewEvents.map((event) => event.eventId),
+      [`quality-open-c-${suiteId}`, `quality-open-d-${suiteId}`],
+    );
 
     console.log("[market-map-routes-tests] ok node event sorting");
   } finally {
@@ -794,7 +945,14 @@ async function main() {
     } else {
       await redis.del(marketMapActiveKey());
     }
-    await redis.del([nodeKey, nodeEventsKey, nodesGlobalKey]);
+    await redis.del([
+      nodeKey,
+      nodeEventsKey,
+      qualityRootNodeKey,
+      qualityNodeKey,
+      qualityNodeEventsKey,
+      nodesGlobalKey,
+    ]);
     await app.close();
   }
 }

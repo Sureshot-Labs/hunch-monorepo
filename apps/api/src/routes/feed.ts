@@ -6,8 +6,13 @@ import { createAuthMiddleware } from "../auth.js";
 import { env } from "../env.js";
 import { pool } from "../db.js";
 import { getRedis, getRedisStatus } from "../redis.js";
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
+import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
 import type { FeedEvent, TokenPair } from "../server-types.js";
 import {
   feedQuerySchema,
@@ -15,6 +20,9 @@ import {
 } from "../schemas/feed.js";
 import { forYouQuerySchema } from "../schemas/for-you.js";
 import {
+  buildEventDurationExistsSql,
+  buildFeedCandidateEventSearchFilter,
+  buildFeedSearchResultWindow,
   fetchFavoriteFeedEventPage,
   fetchFeedEventIds,
   fetchFeedMarkets,
@@ -51,6 +59,48 @@ type ForYouInteractionRow = {
 };
 
 type ForYouEventFilterMode = "volume_or_liquidity" | "volume_only" | "none";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function collectFeedTokenIdsFromData(data: unknown): string[] {
+  if (!Array.isArray(data)) return [];
+
+  const tokenIds = new Set<string>();
+  for (const event of data) {
+    if (!isRecord(event) || !Array.isArray(event.markets)) continue;
+    for (const market of event.markets) {
+      if (!isRecord(market) || !isRecord(market.tokens)) continue;
+      const yes = market.tokens.yes;
+      const no = market.tokens.no;
+      if (typeof yes === "string" && yes.trim()) tokenIds.add(yes);
+      if (typeof no === "string" && no.trim()) tokenIds.add(no);
+    }
+  }
+  return Array.from(tokenIds);
+}
+
+function enqueueFeedMarketRefreshForData(data: unknown): void {
+  const tokenIds = collectFeedTokenIdsFromData(data);
+  if (!tokenIds.length) return;
+
+  void Promise.all([
+    markHotTokens({ tokenIds }),
+    requestPriceRefreshForTokens({ tokenIds }),
+  ]).catch((error) => {
+    console.warn("[feed] market refresh enqueue failed", error);
+  });
+}
+
+function enqueueFeedMarketRefreshForBody(body: string): void {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (isRecord(parsed)) enqueueFeedMarketRefreshForData(parsed.data);
+  } catch {
+    // Cache body is controlled by this route. If it is somehow invalid, skip warming.
+  }
+}
 
 function parseTimestampMs(value: unknown): number | null {
   if (value == null) return null;
@@ -143,10 +193,14 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
   const marketStatus =
     typeof rRow.market_status === "string" ? rRow.market_status : null;
   const acceptingOrders = computeAcceptingOrders({
+    venue: rRow.venue,
     status: marketStatus,
     closeTime: rRow.market_close_time,
     expirationTime: rRow.market_expiration_time,
     pmAcceptingOrders: rRow.pm_accepting_orders ?? null,
+    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+      rRow.market_metadata,
+    ),
   });
 
   return {
@@ -155,6 +209,7 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     marketTitle: rRow.market_title ?? "",
     marketSlug: rRow.market_slug ?? null,
     marketType: rRow.market_type ?? null,
+    durationMinutes: rRow.market_duration_minutes ?? null,
     status: marketStatus,
     volume24h: rRow.volume_24h != null ? Number(rRow.volume_24h) : 0,
     volumeTotal: rRow.volume_total != null ? Number(rRow.volume_total) : 0,
@@ -222,6 +277,7 @@ function buildFeedEvent(rRow: FeedMarketRow): FeedEvent {
   return {
     eventId: String(rRow.event_id),
     eventTitle: rRow.event_title ?? null,
+    durationMinutes: rRow.event_duration_minutes ?? null,
     category: rRow.category ?? null,
     startTime: rRow.start_date,
     endTime: rRow.end_date,
@@ -297,6 +353,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
+      const durationMinutes = q.duration_minutes;
+      const durationKey = durationMinutes?.join(",") ?? "";
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
 
@@ -312,7 +370,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v17:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v20:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -325,6 +383,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             .createHash("sha1")
             .update(cachedBody)
             .digest("hex")}"`;
+          enqueueFeedMarketRefreshForBody(cachedBody);
           if (req.headers["if-none-match"] === etag) {
             applyFeedCacheHeaders({
               reply,
@@ -390,6 +449,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minProb,
         maxProb,
         maxSpread,
+        durationMinutes,
         endWithin,
         ageSince,
         nowParam,
@@ -399,14 +459,25 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       let rows: FeedMarketRow[] = [];
       let eventIds: string[] = [];
-      if (view === "markets") {
-        rows = await fetchFeedMarketsDirect(pool, inputs);
-      } else {
-        const eventRows = await fetchFeedEventIds(pool, inputs);
-        eventIds = eventRows.map((row) => row.id);
-        if (eventIds.length) {
-          rows = await fetchFeedMarkets(pool, inputs, eventIds);
+      try {
+        if (view === "markets") {
+          rows = await fetchFeedMarketsDirect(pool, inputs);
+        } else {
+          const eventRows = await fetchFeedEventIds(pool, inputs);
+          eventIds = eventRows.map((row) => row.id);
+          if (eventIds.length) {
+            rows = await fetchFeedMarkets(pool, inputs, eventIds);
+          }
         }
+      } catch (error) {
+        if (isSearchStatementTimeout(error, search)) {
+          req.log.warn(
+            { error, q: search, view, sort, limit, offset },
+            "Feed search timed out",
+          );
+          return reply.code(504).send({ error: "Search timed out" });
+        }
+        throw error;
       }
 
       if (!rows.length) {
@@ -523,17 +594,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         data,
       };
 
-      if (data.length) {
-        const tokenIds: string[] = [];
-        for (const event of data) {
-          for (const market of event.markets) {
-            const tokens = market.tokens;
-            if (tokens?.yes) tokenIds.push(tokens.yes);
-            if (tokens?.no) tokenIds.push(tokens.no);
-          }
-        }
-        if (tokenIds.length) void markHotTokens({ tokenIds });
-      }
+      enqueueFeedMarketRefreshForData(data);
 
       // serialize once, hash those exact bytes for ETag, then cache/send same bytes
       const body = JSON.stringify(payload);
@@ -605,6 +666,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
       const maxSpread = q.max_spread;
+      const durationMinutes = q.duration_minutes;
       const endWithinHours = q.end_within_hours;
       const ageWithinHours = q.age_within_hours;
 
@@ -672,6 +734,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minProb,
         maxProb,
         maxSpread,
+        durationMinutes,
         endWithin,
         ageSince,
         nowParam,
@@ -754,17 +817,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         responseCount = totalEvents;
       }
 
-      if (data.length) {
-        const tokenIds: string[] = [];
-        for (const event of data) {
-          for (const market of event.markets) {
-            const tokens = market.tokens;
-            if (tokens?.yes) tokenIds.push(tokens.yes);
-            if (tokens?.no) tokenIds.push(tokens.no);
-          }
-        }
-        if (tokenIds.length) void markHotTokens({ tokenIds });
-      }
+      enqueueFeedMarketRefreshForData(data);
 
       return reply.send({
         count: responseCount,
@@ -896,6 +949,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const minProb = query.min_prob;
       const maxProb = query.max_prob;
       const maxSpread = query.max_spread;
+      const durationMinutes = query.duration_minutes;
       const sort = query.sort;
       const sortDir: "asc" | "desc" =
         query.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
@@ -1106,6 +1160,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         (categories?.length ?? 0) > 0 ||
         endWithin != null ||
         ageSince != null ||
+        durationMinutes != null ||
         minVol > 1e-9 ||
         minLiquidity > 0 ||
         search != null;
@@ -1119,7 +1174,23 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         };
         const eventIdsParam = add(candidateEventIds);
         const nowParamSql = add(nowParam);
-        const searchParam = search ? add(`%${search}%`) : null;
+        const searchWindow = buildFeedSearchResultWindow({
+          limit,
+          offset,
+        });
+        const searchFilter = buildFeedCandidateEventSearchFilter({
+          add,
+          q: search,
+          nowParam: nowParamSql,
+          matchLimit: searchWindow.matchLimit,
+          fallbackThreshold: searchWindow.fallbackThreshold,
+          earlyFilterInputs: {
+            venues,
+            categories,
+            endWithin,
+            ageSince,
+          },
+        });
         const where: string[] = [
           "e.status = 'ACTIVE'",
           `(e.end_date is null or e.end_date > ${nowParamSql}::timestamptz)`,
@@ -1140,43 +1211,30 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             `e.start_date is not null and e.start_date >= ${add(ageSince)}::timestamptz`,
           );
         }
+        const durationExistsSql = buildEventDurationExistsSql({
+          inputs: { durationMinutes },
+          add,
+          nowParam: nowParamSql,
+        });
+        if (durationExistsSql) {
+          where.push(durationExistsSql);
+        }
         if (minVol > 1e-9) {
           where.push(`${eventVolumeDisplayExpr} >= ${add(minVol)}`);
         }
         if (minLiquidity > 0) {
           where.push(`${eventLiquidityDisplayExpr} >= ${add(minLiquidity)}`);
         }
-        if (searchParam) {
-          where.push(`
-            (
-              e.id ilike ${searchParam}
-              or e.title ilike ${searchParam}
-              or e.description ilike ${searchParam}
-              or e.category ilike ${searchParam}
-              or e.slug ilike ${searchParam}
-              or exists (
-                select 1
-                from unified_markets m
-                where m.event_id = e.id
-                  and m.status = 'ACTIVE'
-                  and (m.expiration_time is null or m.expiration_time > ${nowParamSql}::timestamptz)
-                  and (m.close_time is null or m.close_time > ${nowParamSql}::timestamptz)
-                  and (
-                    m.venue_market_id::text ilike ${searchParam}
-                    or m.title ilike ${searchParam}
-                    or m.description ilike ${searchParam}
-                    or m.category ilike ${searchParam}
-                    or m.slug ilike ${searchParam}
-                  )
-              )
-            )
-          `);
+        if (searchFilter.hasSearch) {
+          where.push(searchFilter.searchFilterExpr);
         }
 
         const sql = `
+          ${searchFilter.searchCte ? `with ${searchFilter.searchCte}` : ""}
           select c.event_id
           from unnest(${eventIdsParam}::text[]) with ordinality as c(event_id, ord)
           join unified_events e on e.id = c.event_id
+          ${searchFilter.searchEventJoin}
           where ${where.join(" and ")}
           order by c.ord
         `;
@@ -1211,6 +1269,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         minProb,
         maxProb,
         maxSpread,
+        durationMinutes,
         endWithin,
         ageSince,
         nowParam,
@@ -1390,17 +1449,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         data: page,
       };
 
-      if (page.length) {
-        const tokenIds: string[] = [];
-        for (const event of page) {
-          for (const market of event.markets) {
-            const tokens = market.tokens;
-            if (tokens?.yes) tokenIds.push(tokens.yes);
-            if (tokens?.no) tokenIds.push(tokens.no);
-          }
-        }
-        if (tokenIds.length) void markHotTokens({ tokenIds });
-      }
+      enqueueFeedMarketRefreshForData(page);
 
       reply.header("Cache-Control", "no-store");
       reply.header("Content-Type", "application/json; charset=utf-8");

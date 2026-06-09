@@ -3,13 +3,20 @@ import PQueue from "p-queue";
 import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import {
   buildTopMarketsText,
+  claimDuePriceRefreshTokens,
   enqueueEmbedItems,
+  getPriceRefreshQueueBacklog,
   createTopTickGate,
+  publishMarketState,
+  publishMarketUpdate,
+  requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshQueueClaimSide,
+  type PriceRefreshRedis,
 } from "@hunch/infra";
 import {
   upsertUnifiedEvents,
-  upsertUnifiedMarkets,
+  upsertUnifiedMarkets as upsertUnifiedMarketsBase,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
   writeUnifiedLastTrade,
@@ -63,9 +70,15 @@ type MappedMarketGroup = {
   mappedMarkets: DflowMappedMarket[];
 };
 
+type MarketStatusRefreshOptions = {
+  includeSiblings?: boolean;
+  publishMarketState?: boolean;
+};
+
 const STATUS_BATCH_LIMIT = 100;
 const STATUS_POSITION_TOKEN_LIMIT = 200;
 const TRADE_MIN_SIZE = 1e-9;
+const unifiedMarketWriteQueue = new PQueue({ concurrency: 1 });
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
     void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
@@ -76,6 +89,13 @@ const topTickGate = createTopTickGate({
     });
   },
 });
+
+async function upsertDflowUnifiedMarkets(
+  rows: UnifiedMarketRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  await unifiedMarketWriteQueue.add(() => upsertUnifiedMarketsBase(pool, rows));
+}
 
 type TradeSide = "BUY" | "SELL";
 
@@ -340,8 +360,6 @@ async function publishTokenTopNow(
   bestAsk: number | null,
   tsMs: number,
 ): Promise<void> {
-  if (bestBid == null && bestAsk == null) return;
-
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
@@ -366,6 +384,39 @@ async function publishTokenTopNow(
     writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
     multi.exec(),
   ]);
+}
+
+function isDflowNativeAcceptingOrders(metadata: unknown): boolean {
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    return false;
+  }
+  return (
+    (metadata as Record<string, unknown>).dflowNativeAcceptingOrders === true
+  );
+}
+
+function isMarketTimeOpen(market: UnifiedMarketRow, nowMs: number): boolean {
+  const closeMs = market.close_time?.getTime();
+  const expirationMs = market.expiration_time?.getTime();
+  return (
+    (closeMs == null || closeMs > nowMs) &&
+    (expirationMs == null || expirationMs > nowMs)
+  );
+}
+
+function resolveDflowAcceptingOrders(
+  market: UnifiedMarketRow,
+  nowMs: number,
+): boolean {
+  return (
+    market.status === "ACTIVE" &&
+    isMarketTimeOpen(market, nowMs) &&
+    isDflowNativeAcceptingOrders(market.metadata)
+  );
 }
 
 function clampHotProbeLimit(limit: number): number {
@@ -512,15 +563,24 @@ async function fetchTokenSides(
 async function fetchLastTradeTimestamps(
   tokenIds: string[],
 ): Promise<Map<string, Date>> {
-  if (!tokenIds.length) return new Map();
+  const uniqueTokenIds = Array.from(new Set(tokenIds.filter(Boolean)));
+  if (!uniqueTokenIds.length) return new Map();
   const { rows } = await pool.query<{ token_id: string; ts: Date | null }>(
     `
-      select token_id, max(ts) as ts
-      from unified_last_trade
-      where token_id = any($1::text[])
-      group by token_id
+      with input as (
+        select distinct unnest($1::text[]) as token_id
+      )
+      select i.token_id, lt.ts
+      from input i
+      join lateral (
+        select ult.ts
+        from unified_last_trade ult
+        where ult.token_id = i.token_id
+        order by ult.ts desc
+        limit 1
+      ) lt on true
     `,
-    [tokenIds],
+    [uniqueTokenIds],
   );
   const map = new Map<string, Date>();
   for (const row of rows) {
@@ -658,6 +718,57 @@ async function fetchTopTickers(limit: number): Promise<string[]> {
   return out;
 }
 
+export function appendUniqueTickers(
+  target: string[],
+  tickers: ReadonlyArray<string>,
+  limit: number,
+): void {
+  const seen = new Set(target);
+  for (const ticker of tickers) {
+    if (target.length >= limit) break;
+    if (!ticker || seen.has(ticker)) continue;
+    seen.add(ticker);
+    target.push(ticker);
+    if (target.length >= limit) break;
+  }
+}
+
+async function fetchDurationReserveTickers(): Promise<string[]> {
+  if (!env.durationWsReserveEnabled || env.durationWsReserveMax <= 0) {
+    return [];
+  }
+
+  const limit = Math.min(env.wsSubset, env.durationWsReserveMax);
+  if (limit <= 0) return [];
+
+  const { rows } = await pool.query<{ venue_market_id: string | null }>(
+    `
+      select m.venue_market_id
+      from unified_markets m
+      where m.venue = 'kalshi'
+        and m.status = 'ACTIVE'
+        and m.is_initialized is true
+        and lower(coalesce(m.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+        and m.duration_minutes = any($1::int[])
+        and m.close_time is not null
+        and m.close_time > now()
+        and m.close_time <= now()
+          + make_interval(mins => m.duration_minutes)
+          + ($2::int * interval '1 second')
+        and (m.expiration_time is null or m.expiration_time > now())
+        and m.venue_market_id is not null
+      order by
+        m.close_time asc,
+        m.duration_minutes asc,
+        m.id asc
+      limit $3
+    `,
+    [env.durationWsReserveDurations, env.durationWsReservePrewarmSec, limit],
+  );
+
+  return rows.map((row) => row.venue_market_id).filter(Boolean) as string[];
+}
+
 async function fetchTradeTokenIds(): Promise<string[]> {
   const hotTokenIds = await fetchHotTokenIds(
     clampHotProbeLimit(env.tradesTokenLimit * 8),
@@ -744,14 +855,18 @@ export async function resolveHotTickersForWs(): Promise<string[]> {
   await ensureRedis();
   await pool.query("select 1");
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const durationTickers = await fetchDurationReserveTickers();
   const hotTickersAll = await fetchHotTickersOrdered();
   const hotTickers = hotTickersAll.slice(0, hotBudget);
 
-  const seen = new Set(hotTickers);
-  const remaining = Math.max(0, env.wsSubset - hotTickers.length);
+  const out: string[] = [];
+  appendUniqueTickers(out, durationTickers, env.wsSubset);
+  appendUniqueTickers(out, hotTickers, env.wsSubset);
+
+  const seen = new Set(out);
+  const remaining = Math.max(0, env.wsSubset - out.length);
   const topTickers = await fetchTopTickers(remaining);
 
-  const out = [...hotTickers];
   for (const ticker of topTickers) {
     if (seen.has(ticker)) continue;
     seen.add(ticker);
@@ -828,16 +943,32 @@ async function refreshHotTokenTops(): Promise<number> {
   const tokenIds = await fetchHotTokenIds(
     clampHotProbeLimit(env.wsSubset * 10),
   );
-  if (!tokenIds.length) return 0;
+  return publishTokenTopsForTokenIds(tokenIds);
+}
 
+async function publishTokenTopsForTokenIds(
+  tokenIds: string[],
+): Promise<number> {
   const { rows } = await pool.query<{
     token_id: string;
     side: "YES" | "NO";
     best_bid: number | null;
     best_ask: number | null;
+    status: UnifiedMarketRow["status"];
+    close_time: Date | null;
+    expiration_time: Date | null;
+    metadata: unknown;
   }>(
     `
-      select t.token_id, t.side, m.best_bid, m.best_ask
+      select
+        t.token_id,
+        t.side,
+        m.best_bid,
+        m.best_ask,
+        m.status,
+        m.close_time,
+        m.expiration_time,
+        m.metadata
       from unified_tokens t
       join unified_markets m on m.id = t.market_id
       where t.token_id = any($1::text[])
@@ -848,24 +979,27 @@ async function refreshHotTokenTops(): Promise<number> {
   if (!rows.length) return 0;
 
   const ts = new Date();
-  const publish = rows
-    .map((row) => {
-      const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
-      const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
-      const bestBid = row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
-      const bestAsk = row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
-      if (bestBid == null && bestAsk == null) return null;
-      return { tokenId: row.token_id, bestBid, bestAsk };
-    })
-    .filter(
-      (
-        row,
-      ): row is {
-        tokenId: string;
-        bestBid: number | null;
-        bestAsk: number | null;
-      } => Boolean(row),
+  const tsMs = ts.getTime();
+  const publish = rows.map((row) => {
+    const acceptingOrders = resolveDflowAcceptingOrders(
+      {
+        status: row.status,
+        close_time: row.close_time ?? undefined,
+        expiration_time: row.expiration_time ?? undefined,
+        metadata: row.metadata,
+      } as UnifiedMarketRow,
+      tsMs,
     );
+    if (!acceptingOrders) {
+      return { tokenId: row.token_id, bestBid: null, bestAsk: null };
+    }
+
+    const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
+    const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
+    const bestBid = row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
+    const bestAsk = row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
+    return { tokenId: row.token_id, bestBid, bestAsk };
+  });
 
   if (!publish.length) return 0;
 
@@ -879,7 +1013,99 @@ async function refreshHotTokenTops(): Promise<number> {
   return publish.length;
 }
 
-export async function syncHotMarketStatuses(): Promise<{
+async function publishDflowMarketStates(
+  markets: UnifiedMarketRow[],
+): Promise<void> {
+  if (!markets.length) return;
+
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    markets.flatMap((market) => {
+      const tokenIds = [market.token_yes, market.token_no].filter(
+        (tokenId): tokenId is string => Boolean(tokenId),
+      );
+      const acceptingOrders = resolveDflowAcceptingOrders(market, tsMs);
+      return tokenIds.map((tokenId) =>
+        q.add(async () => {
+          await publishMarketState({
+            redis,
+            venue: "kalshi",
+            tokenId,
+            market: market.condition_id ?? market.venue_market_id ?? null,
+            conditionId: market.condition_id ?? null,
+            status:
+              market.resolved_outcome || market.resolved_outcome_pct != null
+                ? "SETTLED"
+                : (market.status ?? null),
+            acceptingOrders,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            tsMs,
+          });
+          if (!acceptingOrders) {
+            await publishTokenTopNow(tokenId, null, null, tsMs);
+          }
+        }),
+      );
+    }),
+  );
+}
+
+async function publishDflowMarketUpdates(
+  markets: UnifiedMarketRow[],
+  events: UnifiedEventRow[] = [],
+): Promise<void> {
+  if (!markets.length) return;
+
+  const eventById = new Map(events.map((event) => [event.id, event]));
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    markets.flatMap((market) => {
+      const tokenIds = [market.token_yes, market.token_no].filter(
+        (tokenId): tokenId is string => Boolean(tokenId),
+      );
+      if (!tokenIds.length) return [];
+      const event = eventById.get(market.event_id);
+      const acceptingOrders = resolveDflowAcceptingOrders(market, tsMs);
+      return [
+        q.add(() =>
+          publishMarketUpdate({
+            redis,
+            venue: "kalshi",
+            tokenIds,
+            marketId: market.id,
+            eventId: market.event_id,
+            conditionId: market.condition_id ?? null,
+            volumeTotal: market.volume_total,
+            volume24h: market.volume_24h,
+            liquidity: market.liquidity,
+            openInterest: market.open_interest,
+            lastPrice: market.last_price,
+            status:
+              market.resolved_outcome || market.resolved_outcome_pct != null
+                ? "SETTLED"
+                : (market.status ?? null),
+            acceptingOrders,
+            resolvedOutcome: market.resolved_outcome ?? null,
+            resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+            eventVolumeTotal: event?.volume_total,
+            eventVolume24h: event?.volume_24h,
+            eventLiquidity: event?.liquidity,
+            eventOpenInterest: event?.open_interest,
+            tsMs,
+          }),
+        ),
+      ];
+    }),
+  );
+}
+
+async function syncMarketStatusesForTokenIds(
+  inputTokenIds: string[],
+  context: string,
+  options: MarketStatusRefreshOptions = {},
+): Promise<{
   processedMarkets: number;
 }> {
   if (!env.dflowEnabled) return { processedMarkets: 0 };
@@ -887,14 +1113,7 @@ export async function syncHotMarketStatuses(): Promise<{
   await ensureRedis();
   await pool.query("select 1");
 
-  const hotTokenIds = await fetchHotTokenIds(
-    clampHotProbeLimit(env.wsSubset * 12),
-  );
-  const positionTokenIds = await fetchPositionTokenIds();
-
-  const allTokenIds = Array.from(
-    new Set([...hotTokenIds, ...positionTokenIds]),
-  );
+  const allTokenIds = Array.from(new Set(inputTokenIds));
   let processedMarkets = 0;
   const touchedEventIds = new Set<string>();
 
@@ -930,7 +1149,7 @@ export async function syncHotMarketStatuses(): Promise<{
       );
 
       let siblingTickersFetched = 0;
-      if (initialEventIds.length) {
+      if (options.includeSiblings !== false && initialEventIds.length) {
         const siblingTickers = await fetchTickersForEventIds(initialEventIds);
         const missingSiblingTickers = siblingTickers.filter(
           (ticker) => !marketsByTicker.has(ticker),
@@ -991,7 +1210,7 @@ export async function syncHotMarketStatuses(): Promise<{
       }
 
       const mappedGroups = Array.from(mappedGroupsByEvent.values());
-      await maybeEnrichKalshiMappedMarketGroups(mappedGroups, "hot-status");
+      await maybeEnrichKalshiMappedMarketGroups(mappedGroups, context);
 
       const unifiedMarketRows: UnifiedMarketRow[] = [];
       const tokenRows: Array<{
@@ -1008,10 +1227,18 @@ export async function syncHotMarketStatuses(): Promise<{
       }
 
       if (unifiedMarketRows.length) {
-        await upsertUnifiedMarkets(pool, unifiedMarketRows);
+        await upsertDflowUnifiedMarkets(unifiedMarketRows);
       }
       if (tokenRows.length) {
         await upsertUnifiedTokens(pool, tokenRows);
+      }
+      if (options.publishMarketState) {
+        await publishDflowMarketStates(unifiedMarketRows);
+      }
+      try {
+        await publishDflowMarketUpdates(unifiedMarketRows);
+      } catch (error) {
+        log.warn("DFlow market update publish failed", { context, error });
       }
 
       if (unifiedMarketRows.length) {
@@ -1045,7 +1272,8 @@ export async function syncHotMarketStatuses(): Promise<{
       }
 
       if (siblingTickersFetched > 0) {
-        log.info("DFlow hot status sibling refresh", {
+        log.info("DFlow market status sibling refresh", {
+          context,
           initialTickers: initialTickers.length,
           siblingTickersFetched,
           totalTickers: markets.length,
@@ -1058,13 +1286,99 @@ export async function syncHotMarketStatuses(): Promise<{
     Array.from(touchedEventIds),
   );
 
-  log.info("DFlow hot status refresh complete", {
+  log.info("DFlow market status refresh complete", {
+    context,
     tokens: allTokenIds.length,
     markets: processedMarkets,
     reconciledEvents,
   });
 
   return { processedMarkets };
+}
+
+export async function syncHotMarketStatuses(): Promise<{
+  processedMarkets: number;
+}> {
+  if (!env.dflowEnabled) return { processedMarkets: 0 };
+
+  const hotTokenIds = await fetchHotTokenIds(
+    clampHotProbeLimit(env.wsSubset * 12),
+  );
+  const positionTokenIds = await fetchPositionTokenIds();
+  return syncMarketStatusesForTokenIds(
+    [...hotTokenIds, ...positionTokenIds],
+    "hot-status",
+    { includeSiblings: true },
+  );
+}
+
+export async function processPriceRefreshQueue(
+  options: {
+    side?: PriceRefreshQueueClaimSide;
+    logSuccess?: boolean;
+  } = {},
+): Promise<{
+  claimed: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+  side: PriceRefreshQueueClaimSide;
+}> {
+  const side = options.side ?? "oldest";
+  if (!env.priceRefreshQueueEnabled || !env.dflowEnabled) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
+  }
+
+  await ensureRedis();
+  const redisClient = redis as unknown as PriceRefreshRedis;
+  const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
+    venue: "dflow",
+    limit: env.priceRefreshQueueBatch,
+    side,
+  });
+  if (!tokenIds.length) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
+  }
+
+  const startedAt = Date.now();
+  let refreshed = 0;
+  let failed = 0;
+  let marketRefreshed = 0;
+  let topRefreshed = 0;
+  try {
+    const result = await syncMarketStatusesForTokenIds(
+      tokenIds,
+      "price-refresh",
+      { includeSiblings: false, publishMarketState: true },
+    );
+    marketRefreshed = result.processedMarkets;
+    topRefreshed = await publishTokenTopsForTokenIds(tokenIds);
+    refreshed = marketRefreshed + topRefreshed;
+  } catch (error) {
+    failed = tokenIds.length;
+    await requeuePriceRefreshTokens(redisClient, {
+      venue: "dflow",
+      tokenIds,
+      delayMs: env.priceRefreshRetryDelayMs,
+      maxQueueSize: env.priceRefreshQueueMax,
+    });
+    log.warn("DFlow price refresh queue failed", { error });
+  }
+
+  const backlog = await getPriceRefreshQueueBacklog(redisClient, "dflow");
+  if (options.logSuccess !== false) {
+    log.info("DFlow price refresh queue processed", {
+      side,
+      claimed: tokenIds.length,
+      refreshed,
+      marketRefreshed,
+      topRefreshed,
+      failed,
+      backlog,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+  return { claimed: tokenIds.length, refreshed, failed, backlog, side };
 }
 
 async function processEvents(
@@ -1203,10 +1517,18 @@ async function processEvents(
     await upsertUnifiedEvents(pool, unifiedEventRows);
   }
   if (unifiedMarketRows.length) {
-    await upsertUnifiedMarkets(pool, unifiedMarketRows);
+    await upsertDflowUnifiedMarkets(unifiedMarketRows);
   }
   if (tokenRows.length) {
     await upsertUnifiedTokens(pool, tokenRows);
+  }
+  try {
+    await publishDflowMarketUpdates(unifiedMarketRows, unifiedEventRows);
+  } catch (error) {
+    log.warn("DFlow market update publish failed", {
+      context: options.enrichmentContext ?? "events",
+      error,
+    });
   }
   if (unifiedMarketRows.length) {
     await reconcileKalshiEventStatuses(

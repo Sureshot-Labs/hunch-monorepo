@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 import {
+  REWARDS_CHAIN_IDS,
   normalizeRewardsChainId,
   type RewardsChainId,
 } from "../lib/rewards-chain.js";
@@ -375,6 +376,15 @@ export function capTreasurySweepAmountMicro(
   return sweepableNowMicro > maxMicro ? maxMicro : sweepableNowMicro;
 }
 
+export function reserveTreasurySweepAmountMicro(
+  sweepableNowMicro: bigint,
+  reserveMicro: bigint,
+): bigint {
+  if (sweepableNowMicro <= 0n) return 0n;
+  if (reserveMicro <= 0n) return sweepableNowMicro;
+  return max0Micro(sweepableNowMicro - reserveMicro);
+}
+
 export type RewardsTreasuryReport = {
   liabilityMode: "event_time_frozen";
   includePending: boolean;
@@ -439,6 +449,13 @@ export async function getRewardsTreasuryReport(
     ...Object.keys(liabilityByChain),
     ...Object.keys(claimsByChain),
   ]);
+  if (chainFilter) {
+    chainIds.add(chainFilter);
+  } else {
+    for (const chainId of REWARDS_CHAIN_IDS) {
+      chainIds.add(chainId);
+    }
+  }
 
   const includePending = env.rewardsTreasuryIncludePending;
   const chains: RewardsTreasuryReport["chains"] = [];
@@ -535,8 +552,8 @@ export async function getRewardsTreasuryReport(
     liabilityMode: "event_time_frozen",
     includePending,
     sources: {
-      rewardsLiabilityVenues: ["polymarket", "kalshi"],
-      excludedFeeStreams: ["bridge", "limitless"],
+      rewardsLiabilityVenues: ["polymarket", "kalshi", "limitless"],
+      excludedFeeStreams: ["bridge"],
     },
     chains,
   };

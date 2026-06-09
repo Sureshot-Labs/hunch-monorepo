@@ -5,7 +5,11 @@ import type {
   TPolymarketEvent,
   TPolymarketMarket,
 } from "./types.js";
-import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import {
+  derivePolymarketDurationMinutes,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 
 type PolymarketCategory =
   | "politics"
@@ -30,6 +34,23 @@ const s = (v: unknown): string | undefined => {
   const trimmed = v.trim();
   return trimmed.length ? trimmed : undefined;
 };
+
+function resolvePolymarketSeriesKey(
+  raw?: Record<string, unknown> | null,
+): string | undefined {
+  if (!raw) return undefined;
+  const seriesList = Array.isArray(raw.series) ? raw.series : [];
+  const series0 =
+    seriesList.length > 0 && typeof seriesList[0] === "object"
+      ? (seriesList[0] as Record<string, unknown>)
+      : null;
+  return (
+    s(series0?.slug) ??
+    s(series0?.ticker) ??
+    s(raw.seriesSlug) ??
+    s(raw.series_slug)
+  );
+}
 
 const nOrUndefined = (v: unknown): number | undefined => {
   const parsed = n(v);
@@ -549,6 +570,14 @@ export function mapTokens(
   return rows;
 }
 
+function slimPolymarketEventRaw(
+  event: TPolymarketEvent,
+): Record<string, unknown> {
+  const raw = { ...(event as Record<string, unknown>) };
+  delete raw.markets;
+  return raw;
+}
+
 // New Polymarket-specific mappers
 export function mapPolymarketEventRow(e: TPolymarketEvent) {
   return {
@@ -585,7 +614,7 @@ export function mapPolymarketEventRow(e: TPolymarketEvent) {
     liquidity_clob: n(e.liquidityClob),
     neg_risk: e.negRisk ?? false,
     comment_count: n(e.commentCount),
-    raw: e,
+    raw: slimPolymarketEventRaw(e),
   };
 }
 
@@ -915,11 +944,7 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     seriesList.length > 0 && typeof seriesList[0] === "object"
       ? (seriesList[0] as Record<string, unknown>)
       : null;
-  const seriesKey =
-    s(series0?.slug) ??
-    s(series0?.ticker) ??
-    s(extra.seriesSlug) ??
-    s(extra.series_slug);
+  const seriesKey = resolvePolymarketSeriesKey(extra);
   const seriesTitle =
     s(series0?.title) ?? s(extra.seriesTitle) ?? s(extra.series_title);
   const metadata = compactMetadata({
@@ -972,6 +997,7 @@ export function mapToUnifiedEvent(e: TPolymarketEvent): UnifiedEventRow {
     status,
     series_key: seriesKey ?? undefined,
     series_title: seriesTitle ?? undefined,
+    duration_minutes: derivePolymarketDurationMinutes(seriesKey) ?? undefined,
     start_date: e.startDate ? new Date(e.startDate) : undefined,
     end_date: e.endDate ? new Date(e.endDate) : undefined,
     volume_total: n(e.volume) ?? undefined,
@@ -991,8 +1017,12 @@ export function mapToUnifiedMarket(
   m: TPolymarketMarket,
   eventId: string,
   event?: TPolymarketEvent,
+  options: { existingDurationMinutes?: number | null } = {},
 ): UnifiedMarketRow {
   const extra = m as Record<string, unknown>;
+  const eventSeriesKey = resolvePolymarketSeriesKey(
+    event as Record<string, unknown> | undefined,
+  );
 
   // Map Polymarket status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
@@ -1092,6 +1122,10 @@ export function mapToUnifiedMarket(
     }),
     status,
     market_type: "binary", // Polymarket markets are binary
+    duration_minutes:
+      derivePolymarketDurationMinutes(eventSeriesKey) ??
+      options.existingDurationMinutes ??
+      undefined,
     open_time: m.startDate ? new Date(m.startDate) : undefined,
     close_time: m.endDate ? new Date(m.endDate) : undefined,
     expiration_time: m.endDate ? new Date(m.endDate) : undefined,

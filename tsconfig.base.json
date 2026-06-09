@@ -1,11 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "node", // use Node resolution for alias mapping
-    "baseUrl": ".", // <-- add this
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "paths": {
-      "@hunch/*": ["packages/*/src/index.ts"]
+      "@hunch/*": ["./packages/*/src/index.ts"]
     },
     "lib": ["ES2022"],
     "types": ["node"],
@@ -14,6 +13,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
+    "rootDir": ".",
     "outDir": "dist"
   }
 }

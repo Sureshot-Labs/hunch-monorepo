@@ -107,6 +107,9 @@ importers:
       '@hunch/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@hunch/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra

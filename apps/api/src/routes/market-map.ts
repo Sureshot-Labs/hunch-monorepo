@@ -3,7 +3,12 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { computeAcceptingOrders } from "../lib/market-availability.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
+import { isRecord } from "../lib/type-guards.js";
 import { getRedisStatus } from "../redis.js";
 import { fetchMarketSignalPricingByIds } from "../repos/unified-read.js";
 import {
@@ -56,6 +61,115 @@ function buildPrivateCacheControl(ttlSec: number): string {
   return ttlSec > 0
     ? `private, max-age=${ttlSec}, stale-while-revalidate=${ttlSec * 2}`
     : "no-store";
+}
+
+function readRefreshString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function addMarketMapTokenRef(
+  tokenRefs: Array<{ tokenId: string; venue: string | null }>,
+  tokenId: unknown,
+  venue: string | null,
+): void {
+  const normalized = readRefreshString(tokenId);
+  if (!normalized) return;
+  tokenRefs.push({ tokenId: normalized, venue });
+}
+
+function collectMarketMapRefreshRefs(
+  value: unknown,
+  refs: {
+    tokenRefs: Array<{ tokenId: string; venue: string | null }>;
+    marketIds: Set<string>;
+  },
+  venueHint: string | null = null,
+): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectMarketMapRefreshRefs(entry, refs, venueHint);
+    }
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  const venue = readRefreshString(value.venue) ?? venueHint;
+  addMarketMapTokenRef(refs.tokenRefs, value.tokenYes, venue);
+  addMarketMapTokenRef(refs.tokenRefs, value.tokenNo, venue);
+
+  for (const key of [
+    "marketId",
+    "representativeMarketId",
+    "heroMarketId",
+    "targetMarketId",
+  ]) {
+    const marketId = readRefreshString(value[key]);
+    if (marketId) refs.marketIds.add(marketId);
+  }
+
+  for (const key of [
+    "items",
+    "eventsPreview",
+    "marketsPreview",
+    "trendingNow",
+    "volumeMovers24h",
+    "liquidityMovers24h",
+    "topMovers24h",
+    "signalsPreview",
+    "childrenPreview",
+  ]) {
+    collectMarketMapRefreshRefs(value[key], refs, venue);
+  }
+  collectMarketMapRefreshRefs(value.targetMarket, refs, venue);
+  collectMarketMapRefreshRefs(value.node, refs, venue);
+}
+
+function scheduleMarketMapRefreshCollection(
+  logLabel: string,
+  collect: () => void,
+): void {
+  setImmediate(() => {
+    try {
+      collect();
+    } catch (error) {
+      console.warn(`[${logLabel}] market refresh collect failed`, error);
+    }
+  });
+}
+
+function requestMarketMapPayloadRefreshNow(
+  payload: unknown,
+  logLabel: string,
+): void {
+  const refs = {
+    tokenRefs: [] as Array<{ tokenId: string; venue: string | null }>,
+    marketIds: new Set<string>(),
+  };
+  collectMarketMapRefreshRefs(payload, refs);
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    tokenRefs: refs.tokenRefs,
+    marketIds: Array.from(refs.marketIds),
+    logLabel,
+  });
+}
+
+function requestMarketMapPayloadRefresh(
+  payload: unknown,
+  logLabel: string,
+): void {
+  scheduleMarketMapRefreshCollection(logLabel, () => {
+    requestMarketMapPayloadRefreshNow(payload, logLabel);
+  });
+}
+
+function requestMarketMapBodyRefresh(body: string, logLabel: string): void {
+  scheduleMarketMapRefreshCollection(logLabel, () => {
+    const payload = safeJsonParse<unknown>(body);
+    if (payload != null) requestMarketMapPayloadRefreshNow(payload, logLabel);
+  });
 }
 
 function metricForEvent(
@@ -868,12 +982,16 @@ function mergeSignalsPreviewLists(params: {
 
 function normalizeSignalTargetMarket(params: {
   marketId: string;
+  venue: string | null;
   marketStatus: string | null;
   pmAcceptingOrders: boolean | null;
+  marketMetadata: unknown;
   closeTime: unknown;
   expirationTime: unknown;
   bestBid: unknown;
   bestAsk: unknown;
+  tokenYes: string | null;
+  tokenNo: string | null;
   bestBidYes: unknown;
   bestAskYes: unknown;
   bestBidNo: unknown;
@@ -897,15 +1015,21 @@ function normalizeSignalTargetMarket(params: {
     marketBestBid: toNumber(params.bestBid),
     marketBestAsk: toNumber(params.bestAsk),
     lastPrice: toNumber(params.lastPrice),
+    tokenYes: params.tokenYes,
+    tokenNo: params.tokenNo,
     yesBid,
     yesAsk,
     noBid,
     noAsk,
     acceptingOrders: computeAcceptingOrders({
+      venue: params.venue,
       status: params.marketStatus,
       closeTime: params.closeTime,
       expirationTime: params.expirationTime,
       pmAcceptingOrders: params.pmAcceptingOrders,
+      dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+        params.marketMetadata,
+      ),
     }),
     resolvedOutcome: params.resolvedOutcome,
     resolvedOutcomePct: toNumber(params.resolvedOutcomePct),
@@ -939,12 +1063,16 @@ async function enrichSignalSummaryTargetMarkets(
       row.market_id,
       normalizeSignalTargetMarket({
         marketId: row.market_id,
+        venue: row.venue ?? null,
         marketStatus: row.market_status ?? null,
         pmAcceptingOrders: row.pm_accepting_orders ?? null,
+        marketMetadata: row.market_metadata,
         closeTime: row.close_time,
         expirationTime: row.expiration_time,
         bestBid: row.best_bid,
         bestAsk: row.best_ask,
+        tokenYes: row.token_yes ?? null,
+        tokenNo: row.token_no ?? null,
         bestBidYes: row.best_bid_yes,
         bestAskYes: row.best_ask_yes,
         bestBidNo: row.best_bid_no,
@@ -1064,6 +1192,28 @@ function incrementDropReason(
   counts[reason] += 1;
 }
 
+function getMarketMapEventDropReason(
+  event: MarketMapEventSummary,
+): MarketMapDropReason | null {
+  return getMarketMapDropReason({
+    tokenYes: event.tokenYes ?? null,
+    tokenNo: event.tokenNo ?? null,
+    acceptingOrders: event.acceptingOrders ?? null,
+    marketStatus: event.marketStatus ?? null,
+    yesBid: event.yesBid ?? null,
+    yesAsk: event.yesAsk ?? null,
+    noBid: event.noBid ?? null,
+    noAsk: event.noAsk ?? null,
+    marketBestBid: event.marketBestBid ?? null,
+    marketBestAsk: event.marketBestAsk ?? null,
+    lastPrice: event.lastPrice ?? null,
+    closeTime: event.closeTime ?? event.endTime ?? null,
+    expirationTime: null,
+    resolvedOutcome: event.resolvedOutcome ?? null,
+    resolvedOutcomePct: event.resolvedOutcomePct ?? null,
+  });
+}
+
 function filterUsableEvents(events: MarketMapEventSummary[]): {
   items: MarketMapEventSummary[];
   dropped: number;
@@ -1073,21 +1223,7 @@ function filterUsableEvents(events: MarketMapEventSummary[]): {
   const droppedReasons = emptyDropReasonCounts();
   let dropped = 0;
   for (const event of events) {
-    const reason = getMarketMapDropReason({
-      tokenYes: event.tokenYes ?? null,
-      tokenNo: event.tokenNo ?? null,
-      acceptingOrders: event.acceptingOrders ?? null,
-      marketStatus: event.marketStatus ?? null,
-      yesBid: event.yesBid ?? null,
-      yesAsk: event.yesAsk ?? null,
-      noBid: event.noBid ?? null,
-      noAsk: event.noAsk ?? null,
-      marketBestBid: event.marketBestBid ?? null,
-      marketBestAsk: event.marketBestAsk ?? null,
-      lastPrice: event.lastPrice ?? null,
-      resolvedOutcome: event.resolvedOutcome ?? null,
-      resolvedOutcomePct: event.resolvedOutcomePct ?? null,
-    });
+    const reason = getMarketMapEventDropReason(event);
     if (!reason) {
       items.push(event);
       continue;
@@ -1596,6 +1732,7 @@ function applySignalSummaryToEvents(
       ...event,
       signalCount: summary?.signalCount ?? 0,
       topSignal: summary?.topSignal ?? null,
+      signalsPreview: summary?.signalsPreview,
     };
   });
 }
@@ -1822,7 +1959,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         };
       }
       const cacheKey = [
-        "market-map:v2",
+        "market-map:v4",
         runId,
         policyCacheVersion,
         String(level),
@@ -1842,6 +1979,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         const cachedBody = await redis.get(cacheKey);
         if (cachedBody) {
           const etag = buildWeakEtag(cachedBody);
+          requestMarketMapBodyRefresh(cachedBody, "market-map");
           if (request.headers["if-none-match"] === etag) {
             reply.header("ETag", etag);
             reply.code(304);
@@ -1855,10 +1993,30 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
+      const coldBuildStartedAt = Date.now();
+      const coldPhaseTimings: Record<string, number> = {};
+      const timeColdPhase = async <T>(
+        label: string,
+        fn: () => Promise<T>,
+      ): Promise<T> => {
+        const startedAt = Date.now();
+        try {
+          return await fn();
+        } finally {
+          coldPhaseTimings[label] =
+            (coldPhaseTimings[label] ?? 0) + Date.now() - startedAt;
+        }
+      };
+      let eventsPreviewRawCount = 0;
+      let eventsPreviewDisplayedCount = 0;
+      let eventsPreviewLiveDurationMs = 0;
+
       const pipeline = redis.multi();
       pipeline.get(marketMapRunMetaKey(runId));
       pipeline.get(marketMapRunNodesGlobalKey(runId));
-      const raw = (await pipeline.exec()) as unknown as Array<string | null>;
+      const raw = (await timeColdPhase("redis.snapshot", async () =>
+        pipeline.exec(),
+      )) as unknown as Array<string | null>;
       const meta = safeJsonParse<MarketMapMeta>(raw[0]);
       let allNodes = safeJsonParse<MarketMapNode[]>(raw[1]) ?? [];
       if (!raw[1]) {
@@ -1866,19 +2024,23 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         for (const venue of effective.venuesEnabled) {
           legacy.get(marketMapRunNodesKey(runId, venue));
         }
-        const legacyRaw = (await legacy.exec()) as unknown as Array<
-          string | null
-        >;
+        const legacyRaw = (await timeColdPhase("redis.legacyNodes", async () =>
+          legacy.exec(),
+        )) as unknown as Array<string | null>;
         allNodes = legacyRaw.flatMap(
           (value) => safeJsonParse<MarketMapNode[]>(value) ?? [],
         );
       }
       if (allNodes.length > 0) {
-        const nodeSignalSummary = await loadNodeSignalSummaryByNodeId({
-          runId,
-          nodeIds: allNodes.map((node) => node.id),
-          previewLimit: 1,
-        });
+        const nodeSignalSummary = await timeColdPhase(
+          "signals.globalNodeSummary",
+          () =>
+            loadNodeSignalSummaryByNodeId({
+              runId,
+              nodeIds: allNodes.map((node) => node.id),
+              previewLimit: 1,
+            }),
+        );
         const subtreeCountByNodeId = computeNodeSignalSubtreeCounts(
           allNodes,
           nodeSignalSummary.directCountByNodeId,
@@ -1929,11 +2091,13 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
 
       const itemNodeSignalPreviewSummary =
         items.length > 0
-          ? await loadNodeSignalSummaryByNodeId({
-              runId,
-              nodeIds: items.map((node) => node.id),
-              previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
-            })
+          ? await timeColdPhase("signals.itemNodePreview", () =>
+              loadNodeSignalSummaryByNodeId({
+                runId,
+                nodeIds: items.map((node) => node.id),
+                previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
+              }),
+            )
           : {
               directCountByNodeId: new Map<string, number>(),
               signalsPreviewByNodeId: new Map<
@@ -1960,12 +2124,16 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const itemsWithLeafSignals =
         level === 3 && itemsWithNodeSignalPreview.length > 0
           ? await (async () => {
-              const leafSignalSummary = await loadLeafSignalSummaryByNodeId({
-                runId,
-                nodeIds: itemsWithNodeSignalPreview.map((node) => node.id),
-                previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
-                redis,
-              });
+              const leafSignalSummary = await timeColdPhase(
+                "signals.level3LeafSummary",
+                () =>
+                  loadLeafSignalSummaryByNodeId({
+                    runId,
+                    nodeIds: itemsWithNodeSignalPreview.map((node) => node.id),
+                    previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
+                    redis,
+                  }),
+              );
               return itemsWithNodeSignalPreview.map((node) => ({
                 ...node,
                 signalCountSubtree: Math.max(
@@ -2030,12 +2198,14 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       }
       const previewLeafSignalSummary =
         previewNodeIds.size > 0
-          ? await loadLeafSignalSummaryByNodeId({
-              runId,
-              nodeIds: Array.from(previewNodeIds),
-              previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
-              redis,
-            })
+          ? await timeColdPhase("signals.previewLeafSummary", () =>
+              loadLeafSignalSummaryByNodeId({
+                runId,
+                nodeIds: Array.from(previewNodeIds),
+                previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
+                redis,
+              }),
+            )
           : {
               countByNodeId: new Map<string, number>(),
               signalsPreviewByNodeId: new Map<
@@ -2078,12 +2248,15 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
               for (const node of itemsWithPreviewSignals) {
                 pipeline.get(marketMapRunNodeEventsKey(runId, node.id));
               }
-              const rawEvents = (await pipeline.exec()) as unknown as Array<
-                string | null
-              >;
+              const rawEvents = (await timeColdPhase(
+                "redis.eventsPreview",
+                async () => pipeline.exec(),
+              )) as unknown as Array<string | null>;
 
-              const eventsByNode = itemsWithPreviewSignals.map((_, index) =>
-                (safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? [])
+              const eventsByNode = itemsWithPreviewSignals.map((_, index) => {
+                const nodeEvents = (
+                  safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? []
+                )
                   .filter((event) =>
                     selectedVenueSet.size === 0
                       ? true
@@ -2094,44 +2267,87 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       metricForEvent(b, sizeBy) - metricForEvent(a, sizeBy) ||
                       b.score - a.score ||
                       a.eventId.localeCompare(b.eventId),
-                  )
-                  .slice(0, eventsPreviewLimit),
-              );
-              const previewEventIds = Array.from(
-                new Set(
-                  eventsByNode.flatMap((events) =>
-                    events.map((event) => event.eventId),
-                  ),
-                ),
-              );
-              const eventSignalSummaryByEventId =
-                previewEventIds.length > 0
-                  ? await loadEventSignalSummaryByEventId({
-                      runId,
-                      eventIds: previewEventIds,
-                    })
-                  : new Map();
-              const eventActivityMetricsByEventId =
-                await loadEventActivityMetricsByEventId(previewEventIds);
-              const eventsByNodeWithSignals = eventsByNode.map((events) =>
-                applyEventActivityMetricsToEvents(
-                  applySignalSummaryToEvents(
-                    events,
-                    eventSignalSummaryByEventId,
-                  ),
-                  eventActivityMetricsByEventId,
-                ),
-              );
+                  );
+                eventsPreviewRawCount += nodeEvents.length;
+                return nodeEvents;
+              });
+              const allPreviewEvents = eventsByNode.flat();
+              const canonicalPreviewEventByVenue = new Map<
+                string,
+                MarketMapEventSummary
+              >();
+              for (const event of allPreviewEvents) {
+                const key = eventVenueKey(event.eventId, event.venue);
+                if (!canonicalPreviewEventByVenue.has(key)) {
+                  canonicalPreviewEventByVenue.set(key, event);
+                }
+              }
 
-              const previewEvents = eventsByNodeWithSignals.flat();
-              let liveBundle: MarketMapLiveMarketBundle | null = null;
-              if (previewEvents.length > 0) {
+              const droppedReasons = emptyDropReasonCounts();
+              let droppedPreviewEvents = 0;
+              const selectedPreviewEventsByNode = eventsByNode.map(
+                () => [] as MarketMapEventSummary[],
+              );
+              const cursors = eventsByNode.map(() => 0);
+              const candidateBatchSize = Math.max(eventsPreviewLimit, 12);
+              let liveEnrichmentFailed = false;
+
+              while (!liveEnrichmentFailed) {
+                const candidateEntries: Array<{
+                  nodeIndex: number;
+                  event: MarketMapEventSummary;
+                }> = [];
+
+                for (
+                  let nodeIndex = 0;
+                  nodeIndex < eventsByNode.length;
+                  nodeIndex += 1
+                ) {
+                  if (
+                    selectedPreviewEventsByNode[nodeIndex].length >=
+                    eventsPreviewLimit
+                  ) {
+                    continue;
+                  }
+                  const nodeEvents = eventsByNode[nodeIndex];
+                  let taken = 0;
+                  while (
+                    cursors[nodeIndex] < nodeEvents.length &&
+                    taken < candidateBatchSize
+                  ) {
+                    candidateEntries.push({
+                      nodeIndex,
+                      event: nodeEvents[cursors[nodeIndex]],
+                    });
+                    cursors[nodeIndex] += 1;
+                    taken += 1;
+                  }
+                }
+
+                if (candidateEntries.length === 0) break;
+
+                const candidates = candidateEntries.map((entry) => entry.event);
+                const liveInputs = candidateEntries.map((entry) => {
+                  const key = eventVenueKey(
+                    entry.event.eventId,
+                    entry.event.venue,
+                  );
+                  return canonicalPreviewEventByVenue.get(key) ?? entry.event;
+                });
+                let hydratedCandidates = candidates;
+                const liveStartedAt = Date.now();
                 try {
-                  liveBundle = await loadLiveMarketDataForEvents(
-                    previewEvents,
+                  const liveBundle = await loadLiveMarketDataForEvents(
+                    liveInputs,
                     marketsPreviewLimit,
                   );
+                  hydratedCandidates = applyLiveMarketDataToEvents(
+                    candidates,
+                    liveBundle.primaryByEventVenue,
+                    liveBundle.marketsByEventVenue,
+                  );
                 } catch (error) {
+                  liveEnrichmentFailed = true;
                   skipCacheWrite = true;
                   request.log.warn(
                     {
@@ -2139,45 +2355,139 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                       level,
                       parentId,
                       nodeCount: itemsWithPreview.length,
-                      previewEventCount: previewEvents.length,
+                      previewEventCount: allPreviewEvents.length,
+                      attemptedPreviewEventCount: candidates.length,
                     },
                     "market-map events preview live market enrichment failed",
                   );
+                  break;
+                } finally {
+                  eventsPreviewLiveDurationMs += Date.now() - liveStartedAt;
                 }
+
+                for (
+                  let index = 0;
+                  index < hydratedCandidates.length;
+                  index += 1
+                ) {
+                  const entry = candidateEntries[index];
+                  const event = hydratedCandidates[index] ?? entry.event;
+                  const reason = getMarketMapEventDropReason(event);
+                  if (reason) {
+                    droppedPreviewEvents += 1;
+                    incrementDropReason(droppedReasons, reason);
+                    continue;
+                  }
+                  const selected = selectedPreviewEventsByNode[entry.nodeIndex];
+                  if (selected.length < eventsPreviewLimit) {
+                    selected.push(event);
+                  }
+                }
+
+                const needsMoreCandidates = eventsByNode.some(
+                  (nodeEvents, nodeIndex) =>
+                    selectedPreviewEventsByNode[nodeIndex].length <
+                      eventsPreviewLimit &&
+                    cursors[nodeIndex] < nodeEvents.length,
+                );
+                if (!needsMoreCandidates) break;
               }
 
-              let droppedPreviewEvents = 0;
-              const droppedReasons = emptyDropReasonCounts();
-              const previewItems = itemsWithPreviewSignals.map(
-                (node, index) => {
-                  const withLive =
-                    liveBundle == null
-                      ? eventsByNodeWithSignals[index]
-                      : applyLiveMarketDataToEvents(
-                          eventsByNodeWithSignals[index],
-                          liveBundle.primaryByEventVenue,
-                          liveBundle.marketsByEventVenue,
-                        );
-                  if (liveBundle == null) {
-                    return {
-                      ...node,
-                      eventsPreview: withLive,
-                    };
-                  }
-                  const filtered = filterUsableEvents(withLive);
-                  droppedPreviewEvents += filtered.dropped;
-                  for (const reason of Object.keys(
-                    filtered.droppedReasons,
-                  ) as MarketMapDropReason[]) {
-                    droppedReasons[reason] += filtered.droppedReasons[reason];
-                  }
-                  return {
+              const previewItemsBeforeMetadata = liveEnrichmentFailed
+                ? (() => {
+                    const filteredPreviewEvents =
+                      filterUsableEvents(allPreviewEvents);
+                    droppedPreviewEvents = filteredPreviewEvents.dropped;
+                    for (const reason of Object.keys(
+                      filteredPreviewEvents.droppedReasons,
+                    ) as MarketMapDropReason[]) {
+                      droppedReasons[reason] +=
+                        filteredPreviewEvents.droppedReasons[reason];
+                    }
+
+                    const usablePreviewEventByVenue = new Map<
+                      string,
+                      MarketMapEventSummary
+                    >();
+                    for (const event of filteredPreviewEvents.items) {
+                      usablePreviewEventByVenue.set(
+                        eventVenueKey(event.eventId, event.venue),
+                        event,
+                      );
+                    }
+
+                    return itemsWithPreviewSignals.map((node, index) => {
+                      const eventsPreview = eventsByNode[index]
+                        .map((event) =>
+                          usablePreviewEventByVenue.get(
+                            eventVenueKey(event.eventId, event.venue),
+                          ),
+                        )
+                        .filter(
+                          (event): event is MarketMapEventSummary =>
+                            event != null,
+                        )
+                        .slice(0, eventsPreviewLimit);
+                      return {
+                        ...node,
+                        eventsPreview,
+                      };
+                    });
+                  })()
+                : itemsWithPreviewSignals.map((node, index) => ({
                     ...node,
-                    eventsPreview: filtered.items,
-                  };
-                },
+                    eventsPreview: selectedPreviewEventsByNode[index],
+                  }));
+
+              const displayedPreviewEvents = previewItemsBeforeMetadata.flatMap(
+                (node) => node.eventsPreview ?? [],
               );
-              if (liveBundle != null && droppedPreviewEvents > 0) {
+              eventsPreviewDisplayedCount = displayedPreviewEvents.length;
+              const previewEventIds = Array.from(
+                new Set(displayedPreviewEvents.map((event) => event.eventId)),
+              );
+              const eventSignalSummaryByEventId =
+                previewEventIds.length > 0
+                  ? await timeColdPhase("signals.previewEvents", () =>
+                      loadEventSignalSummaryByEventId({
+                        runId,
+                        eventIds: previewEventIds,
+                      }),
+                    )
+                  : new Map();
+              const eventActivityMetricsByEventId = await timeColdPhase(
+                "metrics.previewEvents",
+                () => loadEventActivityMetricsByEventId(previewEventIds),
+              );
+              const eventsWithMetadata = applyEventActivityMetricsToEvents(
+                applySignalSummaryToEvents(
+                  displayedPreviewEvents,
+                  eventSignalSummaryByEventId,
+                ),
+                eventActivityMetricsByEventId,
+              );
+              const eventWithMetadataByVenue = new Map<
+                string,
+                MarketMapEventSummary
+              >();
+              for (const event of eventsWithMetadata) {
+                eventWithMetadataByVenue.set(
+                  eventVenueKey(event.eventId, event.venue),
+                  event,
+                );
+              }
+
+              const previewItems = previewItemsBeforeMetadata.map((node) => ({
+                ...node,
+                eventsPreview: node.eventsPreview?.map(
+                  (event) =>
+                    eventWithMetadataByVenue.get(
+                      eventVenueKey(event.eventId, event.venue),
+                    ) ?? event,
+                ),
+              }));
+
+              if (droppedPreviewEvents > 0) {
                 request.log.info(
                   {
                     level,
@@ -2223,7 +2533,30 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           perVenueMin: effective.mergePerVenueMinDefault,
         },
       };
+      requestMarketMapPayloadRefresh(payload, "market-map");
       const body = JSON.stringify(payload);
+      const coldBuildDurationMs = Date.now() - coldBuildStartedAt;
+      if (coldBuildDurationMs > 1_000 || eventsPreviewLiveDurationMs > 500) {
+        request.log.info(
+          {
+            level,
+            parentId,
+            sizeBy,
+            itemCount: itemsWithEventsPreview.length,
+            includeChildrenPreview,
+            includeEventsPreview,
+            childrenPreviewLimit,
+            eventsPreviewLimit,
+            marketsPreviewLimit,
+            eventsPreviewRawCount,
+            eventsPreviewDisplayedCount,
+            eventsPreviewLiveDurationMs,
+            coldPhaseTimings,
+            coldBuildDurationMs,
+          },
+          "market-map cold build complete",
+        );
+      }
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {
         reply.header("ETag", etag);
@@ -2341,7 +2674,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(sparklineOptions.bucketHours ?? "auto"),
       ].join(":");
       const cacheKey = [
-        "market-map:sidebars:v3",
+        "market-map:sidebars:v4",
         policyCacheVersion,
         venues.slice().sort().join(","),
         String(defaultLimit),
@@ -2357,6 +2690,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           const cachedBody = await sidebarRedis.get(cacheKey);
           if (cachedBody) {
             const etag = buildWeakEtag(cachedBody);
+            requestMarketMapBodyRefresh(cachedBody, "market-map:sidebars");
             if (request.headers["if-none-match"] === etag) {
               reply.header("ETag", etag);
               reply.code(304);
@@ -2437,8 +2771,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 liveBundle.primaryByEventVenue,
                 liveBundle.marketsByEventVenue,
               );
-        const filtered =
-          liveBundle == null ? withLive : filterUsableEvents(withLive).items;
+        const filtered = filterUsableEvents(withLive).items;
         return filtered.slice(0, limit);
       };
 
@@ -2488,6 +2821,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           ),
         };
       }
+      requestMarketMapPayloadRefresh(payload, "market-map:sidebars");
       const body = JSON.stringify(payload);
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {
@@ -2536,6 +2870,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       if (!node) {
         return reply.code(404).send({ error: "Market map node not found" });
       }
+      requestMarketMapPayloadRefresh({ node }, "market-map:node");
       return { runId, node };
     },
   );
@@ -2587,7 +2922,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         policy.effective.venuesEnabled.join(","),
       ].join(":");
       const cacheKey = [
-        "market-map:node-events:v2",
+        "market-map:node-events:v4",
         runId,
         policyCacheVersion,
         nodeId,
@@ -2603,6 +2938,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         const cachedBody = await redis.get(cacheKey);
         if (cachedBody) {
           const etag = buildWeakEtag(cachedBody);
+          requestMarketMapBodyRefresh(cachedBody, "market-map:node-events");
           if (request.headers["if-none-match"] === etag) {
             reply.header("ETag", etag);
             reply.code(304);
@@ -2634,7 +2970,41 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         sortBy,
         sortDir,
       });
-      const items = sortedEvents.slice(offset, offset + limit);
+      let sortedEventsWithLiveMarket = sortedEvents;
+      if (sortedEvents.length > 0) {
+        try {
+          const liveBundle = await loadLiveMarketDataForEvents(
+            sortedEvents,
+            marketsPreviewLimit,
+          );
+          sortedEventsWithLiveMarket = applyLiveMarketDataToEvents(
+            sortedEvents,
+            liveBundle.primaryByEventVenue,
+            liveBundle.marketsByEventVenue,
+          );
+        } catch (error) {
+          skipCacheWrite = true;
+          request.log.warn(
+            { err: error, nodeId, itemCount: sortedEvents.length },
+            "market-map node events live market enrichment failed",
+          );
+        }
+      }
+      const filteredEvents = filterUsableEvents(sortedEventsWithLiveMarket);
+      if (filteredEvents.dropped > 0) {
+        request.log.info(
+          {
+            nodeId,
+            offset,
+            limit,
+            droppedItems: filteredEvents.dropped,
+            droppedReasons: filteredEvents.droppedReasons,
+          },
+          "market-map node events quality gate dropped events",
+        );
+      }
+
+      const items = filteredEvents.items.slice(offset, offset + limit);
       const eventSignalSummaryByEventId =
         items.length > 0
           ? await loadEventSignalSummaryByEventId({
@@ -2642,7 +3012,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
               eventIds: Array.from(new Set(items.map((item) => item.eventId))),
             })
           : new Map();
-      let itemsWithLiveMarket = applySignalSummaryToEvents(
+      let itemsWithMetadata = applySignalSummaryToEvents(
         items,
         eventSignalSummaryByEventId,
       );
@@ -2650,57 +3020,21 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         await loadEventActivityMetricsByEventId(
           items.map((item) => item.eventId),
         );
-      itemsWithLiveMarket = applyEventActivityMetricsToEvents(
-        itemsWithLiveMarket,
+      itemsWithMetadata = applyEventActivityMetricsToEvents(
+        itemsWithMetadata,
         eventActivityMetricsByEventId,
       );
-      let qualityGateApplied = false;
-      if (items.length > 0) {
-        try {
-          const liveBundle = await loadLiveMarketDataForEvents(
-            itemsWithLiveMarket,
-            marketsPreviewLimit,
-          );
-          itemsWithLiveMarket = applyLiveMarketDataToEvents(
-            itemsWithLiveMarket,
-            liveBundle.primaryByEventVenue,
-            liveBundle.marketsByEventVenue,
-          );
-          qualityGateApplied = true;
-        } catch (error) {
-          skipCacheWrite = true;
-          request.log.warn(
-            { err: error, nodeId, itemCount: items.length },
-            "market-map node events live market enrichment failed",
-          );
-        }
-      }
-      if (qualityGateApplied) {
-        const filtered = filterUsableEvents(itemsWithLiveMarket);
-        itemsWithLiveMarket = filtered.items;
-        if (filtered.dropped > 0) {
-          request.log.info(
-            {
-              nodeId,
-              offset,
-              limit,
-              droppedItems: filtered.dropped,
-              droppedReasons: filtered.droppedReasons,
-            },
-            "market-map node events quality gate dropped events",
-          );
-        }
-      }
 
       const payload = {
         runId,
         node: applyVenueFilterToNode(node, selectedVenueSet),
-        total: events.length,
+        total: filteredEvents.items.length,
         offset,
         limit,
         venues: selectedVenues,
-        items: itemsWithLiveMarket,
+        items: itemsWithMetadata,
       };
+      requestMarketMapPayloadRefresh(payload, "market-map:node-events");
       const body = JSON.stringify(payload);
       const etag = buildWeakEtag(body);
       if (request.headers["if-none-match"] === etag) {

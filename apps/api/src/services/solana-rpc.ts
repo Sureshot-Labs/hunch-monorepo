@@ -417,7 +417,12 @@ export async function fetchSolanaTokenAccountInfo(inputs: {
   rpcUrls: string[];
   account: string;
   timeoutMs: number;
-}): Promise<{ mint: string; owner: string } | null> {
+}): Promise<{
+  mint: string;
+  owner: string;
+  closeAuthority: string | null;
+  programId: string;
+} | null> {
   const result = await solanaRpcRequest<{ value: unknown }>({
     rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
@@ -433,11 +438,16 @@ export async function fetchSolanaTokenAccountInfo(inputs: {
   const value = (result as { value?: unknown }).value;
   if (!isRecord(value)) return null;
 
+  const programId = value.owner;
+  if (typeof programId !== "string" || programId.trim().length === 0) {
+    return null;
+  }
+
   const data = value.data;
   if (!isRecord(data)) return null;
 
   const program = data.program;
-  if (program !== "spl-token") return null;
+  if (program !== "spl-token" && program !== "spl-token-2022") return null;
 
   const parsed = data.parsed;
   if (!isRecord(parsed)) return null;
@@ -447,10 +457,15 @@ export async function fetchSolanaTokenAccountInfo(inputs: {
 
   const mint = info.mint;
   const owner = info.owner;
+  const closeAuthorityRaw = info.closeAuthority;
   if (typeof mint !== "string" || mint.trim().length === 0) return null;
   if (typeof owner !== "string" || owner.trim().length === 0) return null;
+  const closeAuthority =
+    typeof closeAuthorityRaw === "string" && closeAuthorityRaw.trim().length > 0
+      ? closeAuthorityRaw
+      : null;
 
-  return { mint, owner };
+  return { mint, owner, closeAuthority, programId };
 }
 
 export async function fetchSolanaTokenAccountBalance(inputs: {
@@ -801,48 +816,55 @@ export async function fetchSolanaTokenAccountOwners(inputs: {
   rpcUrls: string[];
   accounts: string[];
   timeoutMs: number;
+  onRpcCall?: (() => void) | null;
 }): Promise<Record<string, string | null>> {
   if (inputs.accounts.length === 0) return {};
 
-  const result = await solanaRpcRequest<{
-    value?: Array<{ data?: unknown } | null>;
-  }>({
-    rpcUrls: inputs.rpcUrls,
-    timeoutMs: inputs.timeoutMs,
-    method: "getMultipleAccounts",
-    params: [inputs.accounts, { encoding: "jsonParsed" }],
-  });
-
-  const values = Array.isArray(result?.value) ? result.value : [];
   const owners: Record<string, string | null> = {};
+  const chunkSize = 100;
 
-  for (let i = 0; i < inputs.accounts.length; i += 1) {
-    const account = inputs.accounts[i];
-    const entry = values[i];
-    if (!entry || !isRecord(entry)) {
-      owners[account] = null;
-      continue;
-    }
-    const data = entry.data;
-    if (!isRecord(data)) {
-      owners[account] = null;
-      continue;
-    }
-    const parsed = data.parsed;
-    if (!isRecord(parsed)) {
-      owners[account] = null;
-      continue;
-    }
-    const info = parsed.info;
-    if (!isRecord(info)) {
-      owners[account] = null;
-      continue;
-    }
-    const owner = info.owner;
-    if (typeof owner === "string" && owner.trim().length > 0) {
-      owners[account] = owner;
-    } else {
-      owners[account] = null;
+  for (let offset = 0; offset < inputs.accounts.length; offset += chunkSize) {
+    const accounts = inputs.accounts.slice(offset, offset + chunkSize);
+    inputs.onRpcCall?.();
+    const result = await solanaRpcRequest<{
+      value?: Array<{ data?: unknown } | null>;
+    }>({
+      rpcUrls: inputs.rpcUrls,
+      timeoutMs: inputs.timeoutMs,
+      method: "getMultipleAccounts",
+      params: [accounts, { encoding: "jsonParsed" }],
+    });
+
+    const values = Array.isArray(result?.value) ? result.value : [];
+
+    for (let i = 0; i < accounts.length; i += 1) {
+      const account = accounts[i];
+      const entry = values[i];
+      if (!entry || !isRecord(entry)) {
+        owners[account] = null;
+        continue;
+      }
+      const data = entry.data;
+      if (!isRecord(data)) {
+        owners[account] = null;
+        continue;
+      }
+      const parsed = data.parsed;
+      if (!isRecord(parsed)) {
+        owners[account] = null;
+        continue;
+      }
+      const info = parsed.info;
+      if (!isRecord(info)) {
+        owners[account] = null;
+        continue;
+      }
+      const owner = info.owner;
+      if (typeof owner === "string" && owner.trim().length > 0) {
+        owners[account] = owner;
+      } else {
+        owners[account] = null;
+      }
     }
   }
 

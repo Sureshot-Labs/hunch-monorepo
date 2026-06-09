@@ -1,19 +1,27 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { pool } from "../db.js";
-import { getRedisStatus } from "../redis.js";
+import { getRedis, getRedisStatus } from "../redis.js";
 import {
   buildMarketSummary,
   type ClusterMarketSummary,
 } from "../services/clusters.js";
 import {
+  AggMarketHttpError,
+  createAggMarketClient,
+} from "../services/agg-market-client.js";
+import { getAggClusterListResponseCachedWithMetadata } from "../services/agg-market-clusters.js";
+import {
   resolveAiClustersPolicy,
   resolveArbitrageDefaultsPolicy,
 } from "../services/runtime-policies.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 import {
+  aggClustersQuerySchema,
   clusterParamsSchema,
   clustersQuerySchema,
 } from "../schemas/clusters.js";
+import { env } from "../env.js";
 
 const INDEX_KEY = "ai:cluster:index";
 const META_KEY = "ai:cluster:meta";
@@ -103,6 +111,7 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
     id,
     label: hash.label || "Untitled cluster",
     score: parseNumber(hash.score) ?? 0,
+    category: analysis?.category?.trim() || null,
     seedMarketId: hash.seed_market_id || null,
     marketCount: parseNumber(hash.market_count) ?? marketsPreview.length,
     venueCount:
@@ -148,6 +157,23 @@ function compareClustersBySort(
 
   if (left.score !== right.score) return right.score - left.score;
   return left.id.localeCompare(right.id);
+}
+
+function requestClusterMarketRefresh(
+  clusters: Array<{ markets: ClusterMarketSummary[] }>,
+  logLabel: string,
+): void {
+  const marketIds = new Set<string>();
+  for (const cluster of clusters) {
+    for (const market of cluster.markets) {
+      if (market.marketId) marketIds.add(market.marketId);
+    }
+  }
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    marketIds: Array.from(marketIds),
+    logLabel,
+  });
 }
 
 export const clustersRoutes: FastifyPluginAsync = async (app) => {
@@ -302,11 +328,75 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const limit = query.limit ?? defaults.limit;
+      const items = filtered.slice(0, limit);
+      requestClusterMarketRefresh(items, "clusters");
       return {
         generatedAt,
         defaults,
-        items: filtered.slice(0, limit),
+        items,
       };
+    },
+  );
+
+  z.get(
+    "/clusters/agg",
+    { schema: { querystring: aggClustersQuerySchema } },
+    async (request, reply) => {
+      if (!env.aggMarketAppId) {
+        return reply.code(503).send({ error: "AGG Market is not configured" });
+      }
+
+      try {
+        const client = createAggMarketClient({
+          appId: env.aggMarketAppId,
+          baseUrl: env.aggMarketBaseUrl,
+          timeoutMs: env.aggMarketTimeoutMs,
+        });
+        const cacheClient =
+          env.aggClustersCacheTtlSec > 0 ? await getRedis() : null;
+        const { response, cache } =
+          await getAggClusterListResponseCachedWithMetadata({
+            query: request.query,
+            client,
+            db: pool,
+            ttlSec: env.aggClustersCacheTtlSec,
+            cacheClient,
+            onCacheError: (operation, cacheError) => {
+              request.log.warn(
+                { error: cacheError, operation },
+                "AGG Market clusters Redis cache failed",
+              );
+            },
+          });
+        reply.header("x-agg-clusters-cache", cache.status);
+        reply.header("x-agg-clusters-cache-layer", cache.layer);
+        requestClusterMarketRefresh(response.items, "clusters:agg");
+        return response;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.startsWith("Unsupported AGG venues:")
+        ) {
+          return reply.code(400).send({ error: error.message });
+        }
+        if (error instanceof AggMarketHttpError) {
+          request.log.warn(
+            { status: error.status },
+            "AGG Market cluster request failed",
+          );
+          return reply
+            .code(error.status >= 500 ? 502 : 400)
+            .send({ error: "AGG Market request failed" });
+        }
+        if (error instanceof Error && error.name === "AbortError") {
+          request.log.warn("AGG Market cluster request timed out");
+          return reply
+            .code(504)
+            .send({ error: "AGG Market request timed out" });
+        }
+        request.log.error({ error }, "AGG Market cluster build failed");
+        return reply.code(500).send({ error: "Failed to build AGG clusters" });
+      }
     },
   );
 
@@ -344,11 +434,14 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         slug: string | null;
         image: string | null;
         icon: string | null;
+        market_category: string | null;
         market_type: string | null;
         best_bid: unknown;
         best_ask: unknown;
         last_price: unknown;
         volume_24h: unknown;
+        activity_volume_last_24h: unknown;
+        activity_volume_valid: unknown;
         volume_total: unknown;
         liquidity: unknown;
         open_interest: unknown;
@@ -358,6 +451,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         event_slug: string | null;
         event_image: string | null;
         event_icon: string | null;
+        event_category: string | null;
       }>(
         `
           select
@@ -368,11 +462,14 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             m.slug,
             m.image,
             m.icon,
+            m.category as market_category,
             m.market_type,
             m.best_bid,
             m.best_ask,
             m.last_price,
             m.volume_24h,
+            mam.volume_last_24h as activity_volume_last_24h,
+            mam.volume_valid as activity_volume_valid,
             m.volume_total,
             m.liquidity,
             m.open_interest,
@@ -382,10 +479,13 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
             e.slug as event_slug,
             e.image as event_image,
             e.icon as event_icon,
+            e.category as event_category,
             m.description,
             e.description as event_description
           from unified_markets m
           join unified_events e on e.id = m.event_id
+          left join unified_market_activity_metrics_24h mam
+            on mam.market_id = m.id
           where m.id = any($1::text[])
             and m.status = 'ACTIVE'
             and e.status = 'ACTIVE'
@@ -408,6 +508,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           ? ordered.filter((market) => !outlierSet.has(market.marketId))
           : ordered;
 
+      requestMarketRefreshForMarketRefs({
+        db: pool,
+        marketIds: visibleMarkets.map((market) => market.marketId),
+        logLabel: "clusters:detail",
+      });
       return { cluster, markets: visibleMarkets };
     },
   );

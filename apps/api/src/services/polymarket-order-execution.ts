@@ -1,7 +1,11 @@
 export const POLYMARKET_UNCONFIRMED_STATUS = "unconfirmed" as const;
 
 export type PolymarketUnconfirmedResolution =
-  | "matched"
+  | "unmatched"
+  | typeof POLYMARKET_UNCONFIRMED_STATUS;
+
+export type PolymarketUnconfirmedReconcileDecision =
+  | "sync_for_fill"
   | "unmatched"
   | typeof POLYMARKET_UNCONFIRMED_STATUS;
 
@@ -12,6 +16,33 @@ export type PolymarketOnchainOrderExecutionSummary = {
   isFilledOrCancelled: boolean;
   hasExecution: boolean;
 };
+
+export type PolymarketClosedReasonHint = "matched" | "cancelled" | null;
+export type PolymarketNoFillTerminalStatus = "unmatched" | "expired";
+
+export type PolymarketTerminalReconcileStatus =
+  | "matched"
+  | "cancelled"
+  | PolymarketNoFillTerminalStatus;
+
+export type PolymarketStoredFillSyncStatus =
+  | "matched"
+  | "filled"
+  | "partially_filled"
+  | typeof POLYMARKET_UNCONFIRMED_STATUS
+  | string
+  | null;
+
+function readPositiveNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
 
 export function summarizePolymarketOnchainOrderExecution(inputs: {
   makerAmount: bigint;
@@ -32,15 +63,152 @@ export function summarizePolymarketOnchainOrderExecution(inputs: {
   };
 }
 
+export function summarizePolymarketV2OnchainOrderExecution(inputs: {
+  makerAmount: bigint;
+  filled: boolean;
+  remaining: bigint;
+}): PolymarketOnchainOrderExecutionSummary {
+  const isDefaultEmptyStatus = !inputs.filled && inputs.remaining === 0n;
+  return summarizePolymarketOnchainOrderExecution({
+    makerAmount: inputs.makerAmount,
+    remaining: isDefaultEmptyStatus ? inputs.makerAmount : inputs.remaining,
+    isFilledOrCancelled: inputs.filled,
+  });
+}
+
+export function summarizePolymarketClobOrderExecution(inputs: {
+  associateTrades?: unknown[] | null;
+  sizeMatched?: number | string | null;
+  status?: string | null;
+}): {
+  hasExecution: boolean;
+  statusHint: PolymarketClosedReasonHint;
+} {
+  const status = inputs.status?.trim().toLowerCase() ?? "";
+  const statusHint: PolymarketClosedReasonHint =
+    status === "cancelled" ||
+    status === "canceled" ||
+    status === "cancelled_by_user" ||
+    status === "canceled_by_user"
+      ? "cancelled"
+      : null;
+  const hasExecution =
+    readPositiveNumber(inputs.sizeMatched) != null ||
+    Boolean(inputs.associateTrades?.length);
+  if (hasExecution) {
+    return { hasExecution: true, statusHint: statusHint ?? "matched" };
+  }
+
+  return { hasExecution: false, statusHint };
+}
+
+export function resolvePolymarketTerminalReconcileStatus(inputs: {
+  statusHint?: PolymarketClosedReasonHint;
+  hasStoredFill?: boolean;
+  storedFillKind?: "full" | "partial" | null;
+  executionSummary?: Pick<
+    PolymarketOnchainOrderExecutionSummary,
+    "hasExecution"
+  > | null;
+  noFillStatus?: PolymarketNoFillTerminalStatus | null;
+}): PolymarketTerminalReconcileStatus | null {
+  const storedFillKind =
+    inputs.storedFillKind ?? (inputs.hasStoredFill ? "full" : null);
+  if (storedFillKind === "full" || inputs.executionSummary?.hasExecution) {
+    return "matched";
+  }
+  if (storedFillKind === "partial") {
+    if (inputs.noFillStatus === "expired") return "expired";
+    if (inputs.statusHint === "cancelled" || inputs.noFillStatus) {
+      return "cancelled";
+    }
+    return null;
+  }
+  if (inputs.statusHint === "cancelled") return "cancelled";
+  return inputs.noFillStatus ?? "unmatched";
+}
+
 export function resolvePolymarketUnconfirmedStatus(
   summary: Pick<
     PolymarketOnchainOrderExecutionSummary,
     "hasExecution" | "isFilledOrCancelled"
   >,
 ): PolymarketUnconfirmedResolution {
-  if (summary.hasExecution) return "matched";
+  if (summary.hasExecution) return POLYMARKET_UNCONFIRMED_STATUS;
   if (summary.isFilledOrCancelled) return "unmatched";
   return POLYMARKET_UNCONFIRMED_STATUS;
+}
+
+export function resolvePolymarketUnconfirmedReconcileDecision(
+  summary: Pick<
+    PolymarketOnchainOrderExecutionSummary,
+    "hasExecution" | "isFilledOrCancelled"
+  >,
+): PolymarketUnconfirmedReconcileDecision {
+  if (summary.hasExecution) return "sync_for_fill";
+  return resolvePolymarketUnconfirmedStatus(summary);
+}
+
+export function resolvePolymarketStoredFillSyncStatus(inputs: {
+  currentStatus?: string | null;
+  orderType?: string | null;
+  filledSize?: number | string | null;
+  orderSize?: number | string | null;
+  cancelledAt?: Date | string | null;
+}): PolymarketStoredFillSyncStatus {
+  const currentStatus = inputs.currentStatus?.trim().toLowerCase() ?? "";
+
+  const filledSize = readPositiveNumber(inputs.filledSize);
+  if (filledSize != null) {
+    const orderType = inputs.orderType?.trim().toUpperCase() ?? "";
+    if (orderType === "FOK") return "matched";
+
+    const orderSize = readPositiveNumber(inputs.orderSize);
+    if (orderSize != null && filledSize >= orderSize) return "filled";
+
+    if (inputs.cancelledAt != null) {
+      return "cancelled";
+    }
+
+    if (
+      currentStatus === "cancelled" ||
+      currentStatus === "expired" ||
+      currentStatus === "unmatched" ||
+      currentStatus === "rejected"
+    ) {
+      return currentStatus;
+    }
+
+    return "partially_filled";
+  }
+
+  if (currentStatus === POLYMARKET_UNCONFIRMED_STATUS) {
+    return POLYMARKET_UNCONFIRMED_STATUS;
+  }
+
+  return currentStatus || null;
+}
+
+export function isPolymarketMutableNoFillStatus(
+  status: string | null | undefined,
+): boolean {
+  const currentStatus = status?.trim().toLowerCase() ?? "";
+  return [
+    "pending",
+    "submitted",
+    "live",
+    "open",
+    "delayed",
+    POLYMARKET_UNCONFIRMED_STATUS,
+  ].includes(currentStatus);
+}
+
+export function canApplyPolymarketNoFillTerminalStatus(inputs: {
+  currentStatus?: string | null;
+  hasPositiveFillRows?: boolean | null;
+}): boolean {
+  if (inputs.hasPositiveFillRows) return false;
+  return isPolymarketMutableNoFillStatus(inputs.currentStatus);
 }
 
 export function isPolymarketUnconfirmedStatus(

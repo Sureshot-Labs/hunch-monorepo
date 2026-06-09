@@ -10,6 +10,7 @@ ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 REMOTE_ARCHIVE_DIR="${REMOTE_ARCHIVE_DIR:-/tmp}"
 PLATFORM="${PLATFORM:-linux/arm64}"
 GIT_REF="${GIT_REF:-HEAD}"
+PREBUILT_BUILD_ONLY="${PREBUILT_BUILD_ONLY:-0}"
 
 GIT_SHA="${GIT_SHA:-$(git -C "${ROOT_DIR}" rev-parse --short "${GIT_REF}")}" 
 HUNCH_BACKEND_IMAGE="${HUNCH_BACKEND_IMAGE:-hunch-backend:${GIT_SHA}}"
@@ -33,34 +34,47 @@ if ! git -C "${ROOT_DIR}" diff --quiet || ! git -C "${ROOT_DIR}" diff --cached -
 fi
 
 echo "Building ${HUNCH_BACKEND_IMAGE} for ${PLATFORM}"
+build_started_at="$(date +%s)"
 docker buildx build --platform "${PLATFORM}" \
   -f "${ROOT_DIR}/ops/Dockerfile.app" \
   -t "${HUNCH_BACKEND_IMAGE}" \
   --load \
   "${ROOT_DIR}"
+build_finished_at="$(date +%s)"
+echo "Timing: Docker build completed in $((build_finished_at - build_started_at))s"
 
 echo "Saving image to ${IMAGE_ARCHIVE_PATH}"
+export_started_at="$(date +%s)"
 docker save "${HUNCH_BACKEND_IMAGE}" | gzip > "${IMAGE_ARCHIVE_PATH}"
+export_finished_at="$(date +%s)"
+image_archive_size="$(du -h "${IMAGE_ARCHIVE_PATH}" | awk '{print $1}')"
+echo "Timing: image export/compression completed in $((export_finished_at - export_started_at))s"
+echo "Image archive ready: ${IMAGE_ARCHIVE_PATH} (${image_archive_size})"
 
-echo "Creating repo archive ${ARCHIVE_PATH} from git ref ${GIT_REF}"
-git -C "${ROOT_DIR}" archive --format=tar.gz --output "${ARCHIVE_PATH}" "${GIT_REF}"
+if [[ "${PREBUILT_BUILD_ONLY}" == "1" ]]; then
+  echo "PREBUILT_BUILD_ONLY=1; skipping repo archive creation, uploads, remote deploy, and remote cleanup."
+else
 
-echo "Uploading repo archive to ${REMOTE_HOST}:${REMOTE_ARCHIVE}"
-scp "${ARCHIVE_PATH}" "${REMOTE_HOST}:${REMOTE_ARCHIVE}"
+  echo "Creating repo archive ${ARCHIVE_PATH} from git ref ${GIT_REF}"
+  git -C "${ROOT_DIR}" archive --format=tar.gz --output "${ARCHIVE_PATH}" "${GIT_REF}"
 
-echo "Uploading image archive to ${REMOTE_HOST}:${REMOTE_IMAGE_ARCHIVE}"
-scp "${IMAGE_ARCHIVE_PATH}" "${REMOTE_HOST}:${REMOTE_IMAGE_ARCHIVE}"
+  echo "Uploading repo archive to ${REMOTE_HOST}:${REMOTE_ARCHIVE}"
+  scp "${ARCHIVE_PATH}" "${REMOTE_HOST}:${REMOTE_ARCHIVE}"
 
-echo "Uploading deploy script to ${REMOTE_HOST}:${REMOTE_SCRIPT}"
-scp "${ROOT_DIR}/ops/deploy-ec2-prebuilt.sh" "${REMOTE_HOST}:${REMOTE_SCRIPT}"
+  echo "Uploading image archive to ${REMOTE_HOST}:${REMOTE_IMAGE_ARCHIVE}"
+  scp "${IMAGE_ARCHIVE_PATH}" "${REMOTE_HOST}:${REMOTE_IMAGE_ARCHIVE}"
 
-echo "Running remote deploy"
-ssh "${REMOTE_HOST}" \
-  "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' IMAGE_ARCHIVE='${REMOTE_IMAGE_ARCHIVE}' HUNCH_BACKEND_IMAGE='${HUNCH_BACKEND_IMAGE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
+  echo "Uploading deploy script to ${REMOTE_HOST}:${REMOTE_SCRIPT}"
+  scp "${ROOT_DIR}/ops/deploy-ec2-prebuilt.sh" "${REMOTE_HOST}:${REMOTE_SCRIPT}"
 
-echo "Cleaning up remote archives"
-if ! ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_IMAGE_ARCHIVE}' '${REMOTE_SCRIPT}'"; then
-  echo "Warning: remote archive cleanup failed; deploy already completed." >&2
+  echo "Running remote deploy"
+  ssh "${REMOTE_HOST}" \
+    "chmod +x '${REMOTE_SCRIPT}' && ARCHIVE='${REMOTE_ARCHIVE}' IMAGE_ARCHIVE='${REMOTE_IMAGE_ARCHIVE}' HUNCH_BACKEND_IMAGE='${HUNCH_BACKEND_IMAGE}' APP_DIR='${APP_DIR}' ENV_FILE='${ENV_FILE}' '${REMOTE_SCRIPT}'"
+
+  echo "Cleaning up remote archives"
+  if ! ssh "${REMOTE_HOST}" "rm -f '${REMOTE_ARCHIVE}' '${REMOTE_IMAGE_ARCHIVE}' '${REMOTE_SCRIPT}'"; then
+    echo "Warning: remote archive cleanup failed; deploy already completed." >&2
+  fi
 fi
 
 # Optional local cleanup (remove the image we just built).

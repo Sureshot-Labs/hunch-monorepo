@@ -2,7 +2,7 @@ import { env } from "../env.js";
 import type { ApiCacheWarmPolicy } from "./runtime-policies.js";
 import type { RedisClientType as RedisClient } from "redis";
 
-export type ApiCacheWarmGroup = "feed" | "wallet_intel";
+export type ApiCacheWarmGroup = "feed" | "market_map" | "wallet_intel";
 
 export type ApiCacheWarmTarget = {
   id: string;
@@ -61,6 +61,12 @@ export const API_CACHE_WARM_TARGETS: ApiCacheWarmTarget[] = [
     label: "Feed Change 24h",
     group: "feed",
     path: "/feed?limit=25&offset=0&sort=change24h&sort_dir=desc",
+  },
+  {
+    id: "market_map_discovery_sidebars",
+    label: "Market Map Discovery Sidebars",
+    group: "market_map",
+    path: "/market-map/sidebars?venues=polymarket,kalshi,limitless&trendingLimit=5&volumeMoversLimit=5&liquidityMoversLimit=5&topMoversLimit=5&minVolume24h=1000&volumeMoversSortBy=percent&liquidityMoversSortBy=absolute&includeVolumeSparkline=true&sparklineWindowHours=48&sparklineBucketHours=2",
   },
   {
     id: "wallet_whales_last_activity",
@@ -175,6 +181,7 @@ export function selectApiCacheWarmTargets(
 ): ApiCacheWarmTarget[] {
   return API_CACHE_WARM_TARGETS.filter((target) => {
     if (target.group === "feed") return policy.warmFeed;
+    if (target.group === "market_map") return policy.warmMarketMap;
     if (target.group === "wallet_intel") return policy.warmWalletIntel;
     return false;
   });

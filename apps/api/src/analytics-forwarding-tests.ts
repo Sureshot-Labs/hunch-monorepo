@@ -3,8 +3,10 @@
 import assert from "node:assert/strict";
 
 import type { DbQuery } from "./db.js";
+import { forwardedAnalyticsEventNameSchema } from "./schemas/analytics.js";
 import {
   collectAnalyticsEvent,
+  COLLECTED_ANALYTICS_EVENTS,
   setAnalyticsDeliveryModeForTests,
 } from "./services/analytics-forwarding.js";
 
@@ -80,6 +82,15 @@ function assertAccepted(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "collector whitelist stays aligned with public forward schema",
+    run: () => {
+      assert.deepEqual(
+        [...COLLECTED_ANALYTICS_EVENTS].sort(),
+        [...forwardedAnalyticsEventNameSchema.options].sort(),
+      );
+    },
+  },
   {
     name: "rewards claim collector keeps submit and backend terminal statuses separately",
     run: async () => {
@@ -211,6 +222,155 @@ const tests: TestCase[] = [
           ],
         );
         assert.equal(duplicateSubmit.deduped, true);
+      } finally {
+        setAnalyticsDeliveryModeForTests(null);
+      }
+    },
+  },
+  {
+    name: "monitor collector accepts expanded backend analytics event coverage",
+    run: async () => {
+      setAnalyticsDeliveryModeForTests("database");
+      const pool = createMockDbQuery();
+
+      try {
+        const browserEvents = [
+          {
+            event: "hf_wallet_connect_click",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              source: "header",
+            },
+          },
+          {
+            event: "hf_wallet_connect_completed_funnel",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              source: "header",
+              status: "completed",
+            },
+          },
+          {
+            event: "hf_wallet_link_error",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              source: "deposit",
+              status: "wallet_link_error",
+            },
+          },
+          {
+            event: "hf_market_open",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              event_id: "event-1",
+            },
+          },
+          {
+            event: "hf_event_entry_open",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              event_id: "event-1",
+              source: "home",
+            },
+          },
+        ];
+
+        for (const entry of browserEvents) {
+          const result = await collectAnalyticsEvent(pool, {
+            event: entry.event,
+            origin: "browser",
+            payload: entry.payload,
+          });
+          assertAccepted(result);
+          assert.equal(result.deduped, false);
+        }
+
+        const missingUser = await collectAnalyticsEvent(pool, {
+          event: "hf_trade_submit_no_terminal_2m",
+          origin: "browser",
+          payload: {
+            analytics_schema_version: "frontend-v1",
+            attempt_id: "order-1",
+            status: "timeout_120s",
+            venue: "polymarket",
+          },
+        });
+        assert.equal(missingUser.accepted, false);
+        assert.equal(missingUser.reason, "invalid");
+
+        const timeout = await collectAnalyticsEvent(pool, {
+          event: "hf_trade_submit_no_terminal_2m",
+          origin: "browser",
+          userId: "user-4",
+          payload: {
+            analytics_schema_version: "frontend-v1",
+            attempt_id: "order-1",
+            status: "timeout_120s",
+            venue: "polymarket",
+          },
+        });
+        assertAccepted(timeout);
+        assert.equal(timeout.deduped, false);
+        assert.equal(
+          pool.inserts.at(-1)?.dedupeKey,
+          "hf_trade_submit_no_terminal_2m:order-1",
+        );
+      } finally {
+        setAnalyticsDeliveryModeForTests(null);
+      }
+    },
+  },
+  {
+    name: "redemption collector keeps submit, success, and error statuses separately",
+    run: async () => {
+      setAnalyticsDeliveryModeForTests("database");
+      const pool = createMockDbQuery();
+
+      try {
+        const statuses = [
+          "redemption_submit",
+          "redemption_success",
+          "redemption_fail",
+        ] as const;
+        for (const status of statuses) {
+          const result = await collectAnalyticsEvent(pool, {
+            event: "hf_redemption_action",
+            origin: "browser",
+            userId: "user-3",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              source: "portfolio_positions",
+              status,
+              attempt_id: "redeem-1",
+            },
+          });
+          assertAccepted(result);
+          assert.equal(result.deduped, false);
+        }
+
+        const duplicateSuccess = await collectAnalyticsEvent(pool, {
+          event: "hf_redemption_action",
+          origin: "browser",
+          userId: "user-3",
+          payload: {
+            analytics_schema_version: "frontend-v1",
+            source: "portfolio_positions",
+            status: "redemption_success",
+            attempt_id: "redeem-1",
+          },
+        });
+        assertAccepted(duplicateSuccess);
+
+        assert.deepEqual(
+          pool.inserts.map((entry) => entry.dedupeKey),
+          [
+            "hf_redemption_action:redeem-1:redemption_submit",
+            "hf_redemption_action:redeem-1:redemption_success",
+            "hf_redemption_action:redeem-1:redemption_fail",
+            "hf_redemption_action:redeem-1:redemption_success",
+          ],
+        );
+        assert.equal(duplicateSuccess.deduped, true);
       } finally {
         setAnalyticsDeliveryModeForTests(null);
       }

@@ -4,7 +4,12 @@ import type {
   LimitlessEventRow,
   LimitlessMarketRow,
 } from "./limitless-repo.js";
-import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
+import { resolveLimitlessGroupId } from "./grouping.js";
+import {
+  deriveLimitlessDurationMinutes,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 import { normalizeLimitlessPricePair } from "./price-normalization.js";
 
 export type LimitlessCategory =
@@ -188,6 +193,17 @@ function parseMetric(
   return null;
 }
 
+// Limitless AMM liquidity is not comparable to venue orderbook liquidity.
+function parseComparableLiquidity(
+  tradeType: string | null | undefined,
+  value?: string | number | null,
+  formatted?: string | null,
+  decimals = 6,
+): number | null {
+  if (tradeType?.toLowerCase() === "amm") return null;
+  return parseMetric(value, formatted, decimals);
+}
+
 function normalizePositionIds(
   value?: Array<string | string[]> | null,
 ): string[] {
@@ -210,6 +226,12 @@ const parseDate = (dateStr?: string | null): Date | null => {
   const date = new Date(dateStr);
   return isNaN(date.getTime()) ? null : date;
 };
+
+function stringValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : undefined;
+}
 
 function normalizeToken(value: string): string {
   return value
@@ -584,6 +606,9 @@ export function mapLimitlessMarketRow(
     market.collateralToken?.decimals,
   );
   const outcomeTokens = resolveOutcomeTokens(market);
+  const groupId =
+    resolveLimitlessGroupId(market) ??
+    (eventId !== String(market.id) ? eventId : undefined);
 
   return {
     id: String(market.id),
@@ -629,7 +654,7 @@ export function mapLimitlessMarketRow(
     trade_type: market.tradeType ?? "clob",
     created_at: parseDate(market.createdAt),
     updated_at: parseDate(market.updatedAt),
-    raw: market,
+    raw: groupId ? { ...market, groupId } : market,
   };
 }
 
@@ -725,6 +750,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   const volumeTotal =
     parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ??
     undefined;
+  const tradeType = lm.tradeType ?? "clob";
   const openInterest =
     parseMetric(
       lm.openInterest,
@@ -732,7 +758,8 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
       lm.collateralToken?.decimals,
     ) ?? undefined;
   const liquidity =
-    parseMetric(
+    parseComparableLiquidity(
+      tradeType,
       lm.liquidity,
       lm.liquidityFormatted,
       lm.collateralToken?.decimals,
@@ -743,11 +770,18 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   const image = pickImage(lm);
   const icon = pickIcon(lm);
   const venueInfo = extractVenueInfo(lm);
+  const groupId = resolveLimitlessGroupId(lm);
   const category = resolveLimitlessCategory({
     categories: lm.categories,
     tags: lm.tags,
     title: lm.title,
     description: lm.description,
+  });
+  const extra = lm as Record<string, unknown>;
+  const durationMinutes = deriveLimitlessDurationMinutes({
+    stableSlug: stringValue(extra.stableSlug),
+    slug: lm.slug,
+    title: lm.title,
   });
 
   return {
@@ -758,6 +792,7 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     description: lm.description,
     category,
     status,
+    duration_minutes: durationMinutes ?? undefined,
     start_date: parseDate(lm.createdAt) || undefined,
     end_date: expirationDate,
     volume_total: volumeTotal,
@@ -765,8 +800,9 @@ export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
     open_interest: openInterest,
     liquidity,
     metadata: {
-      tradeType: lm.tradeType ?? "clob",
+      tradeType,
       marketType: lm.marketType,
+      groupId,
       address: lm.address ?? undefined,
       negRiskRequestId: lm.negRiskRequestId ?? undefined,
       negRiskMarketId: lm.negRiskMarketId ?? undefined,
@@ -794,6 +830,7 @@ export function mapToUnifiedMarket(
   const volumeTotal = market.volumeFormatted
     ? parseFloat(market.volumeFormatted)
     : undefined;
+  const tradeType = market.tradeType ?? "clob";
   const openInterest =
     parseMetric(
       market.openInterest,
@@ -801,7 +838,8 @@ export function mapToUnifiedMarket(
       market.collateralToken?.decimals,
     ) ?? undefined;
   const liquidity =
-    parseMetric(
+    parseComparableLiquidity(
+      tradeType,
       market.liquidity,
       market.liquidityFormatted,
       market.collateralToken?.decimals,
@@ -810,7 +848,6 @@ export function mapToUnifiedMarket(
     ? new Date(Number(market.expirationTimestamp))
     : undefined;
 
-  const tradeType = market.tradeType ?? "clob";
   const normalizedPrices = normalizePrices(
     [market.prices?.[0], market.prices?.[1]],
     tradeType,
@@ -823,6 +860,9 @@ export function mapToUnifiedMarket(
   const image = pickImage(market);
   const icon = pickIcon(market);
   const venueInfo = extractVenueInfo(market);
+  const groupId =
+    resolveLimitlessGroupId(market) ??
+    (event && event.marketType === "group" ? String(event.id) : undefined);
   const category = resolveLimitlessCategory({
     categories: market.categories,
     tags: market.tags,
@@ -833,6 +873,19 @@ export function mapToUnifiedMarket(
     fallbackTitle: event?.title,
     fallbackDescription: event?.description,
   });
+  const extra = market as Record<string, unknown>;
+  const eventExtra = event as Record<string, unknown> | undefined;
+  const durationMinutes =
+    deriveLimitlessDurationMinutes({
+      stableSlug: stringValue(extra.stableSlug),
+      slug: market.slug,
+      title: market.title,
+    }) ??
+    deriveLimitlessDurationMinutes({
+      stableSlug: stringValue(eventExtra?.stableSlug),
+      slug: event?.slug,
+      title: event?.title,
+    });
 
   return {
     id: `limitless:${market.id}`,
@@ -844,6 +897,7 @@ export function mapToUnifiedMarket(
     category,
     status,
     market_type: market.marketType === "group" ? "group" : "binary",
+    duration_minutes: durationMinutes ?? undefined,
     open_time: parseDate(market.createdAt) || undefined,
     close_time: expirationDate,
     expiration_time: expirationDate,
@@ -857,6 +911,7 @@ export function mapToUnifiedMarket(
     metadata: {
       tradeType,
       marketType: market.marketType,
+      groupId,
       address: market.address ?? undefined,
       negRiskRequestId: market.negRiskRequestId ?? undefined,
       negRiskMarketId:

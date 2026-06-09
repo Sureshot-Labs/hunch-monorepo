@@ -89,6 +89,8 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-3001}
+      HUNCH_JS_RUNTIME: ${HUNCH_API_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_API:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards,aws-sm:/hunch/prod/ai,aws-sm:/hunch/prod/ops}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     ports:
@@ -98,7 +100,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["node", "apps/api/dist/server.js"]
+    command:
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/api/dist/server.js
 
   indexer-polymarket:
     build:
@@ -110,6 +116,9 @@ services:
       - hunch-net
     env_file:
       - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_POLYMARKET:-aws-sm:/hunch/prod/shared}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:
@@ -118,10 +127,10 @@ services:
       redis:
         condition: service_healthy
     command:
-      [
-        "node",
-        "apps/indexer-polymarket/dist/main.js"
-      ]
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/indexer-polymarket/dist/main.js
 
   indexer-limitless:
     build:
@@ -133,6 +142,9 @@ services:
       - hunch-net
     env_file:
       - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_LIMITLESS:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/indexer-limitless}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:
@@ -141,10 +153,10 @@ services:
       redis:
         condition: service_healthy
     command:
-      [
-        "node",
-        "apps/indexer-limitless/dist/main.js"
-      ]
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/indexer-limitless/dist/main.js
 
   indexer-dflow:
     build:
@@ -156,6 +168,9 @@ services:
       - hunch-net
     env_file:
       - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_DFLOW:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/indexer-dflow}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:
@@ -164,10 +179,10 @@ services:
       redis:
         condition: service_healthy
     command:
-      [
-        "node",
-        "apps/indexer-dflow/dist/main.js"
-      ]
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/indexer-dflow/dist/main.js
 
   indexer-hyperliquid:
     build:
@@ -179,6 +194,9 @@ services:
       - hunch-net
     env_file:
       - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_HYPERLIQUID:-aws-sm:/hunch/prod/shared}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:
@@ -187,10 +205,10 @@ services:
       redis:
         condition: service_healthy
     command:
-      [
-        "node",
-        "apps/indexer-hyperliquid/dist/main.js"
-      ]
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/indexer-hyperliquid/dist/main.js
 
   ai-worker:
     build:
@@ -202,12 +220,19 @@ services:
       - hunch-net
     env_file:
       - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_AI_WORKER:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/ai}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:
       redis:
         condition: service_healthy
-    command: ["node", "apps/ai-worker/dist/main.js"]
+    command:
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/ai-worker/dist/main.js
 
   finance-worker:
     build:
@@ -219,6 +244,9 @@ services:
       - hunch-net
     env_file:
       - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_FINANCE_WORKER:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/api,aws-sm:/hunch/prod/polymarket-builder,aws-sm:/hunch/prod/rewards}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:
@@ -226,7 +254,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["node", "apps/finance-worker/dist/main.js"]
+    command:
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/finance-worker/dist/main.js
 
   nginx:
     image: nginx:1.27-alpine
@@ -235,12 +267,15 @@ services:
     networks:
       - hunch-net
       - hunch-edge
-    env_file:
-      - /opt/hunch/.env
     environment:
       NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
+      NGINX_APP_SERVER_NAME: ${NGINX_APP_SERVER_NAME:-_}
       NGINX_PROXY_READ_TIMEOUT: ${NGINX_PROXY_READ_TIMEOUT:-3600}
       NGINX_PROXY_SEND_TIMEOUT: ${NGINX_PROXY_SEND_TIMEOUT:-3600}
+      NGINX_SSL_CERT: ${NGINX_SSL_CERT:-}
+      NGINX_SSL_KEY: ${NGINX_SSL_KEY:-}
+      NGINX_APP_SSL_CERT: ${NGINX_APP_SSL_CERT:-}
+      NGINX_APP_SSL_KEY: ${NGINX_APP_SSL_KEY:-}
     ports:
       - "80:80"
       - "443:443"

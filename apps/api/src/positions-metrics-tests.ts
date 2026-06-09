@@ -2,7 +2,10 @@
 
 import assert from "node:assert/strict";
 
-import { buildLimitlessFill } from "./services/positions-metrics.js";
+import {
+  buildDflowFill,
+  buildLimitlessFill,
+} from "./services/positions-metrics.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -44,4 +47,50 @@ test("buildLimitlessFill keeps executed filled orders", () => {
   assert.ok(fill);
   assert.equal(fill?.shares, 155);
   assert.equal(fill?.usdc, 1.55);
+});
+
+test("buildDflowFill uses fulfilled settlement amounts", () => {
+  const fill = buildDflowFill({
+    side: "BUY",
+    status: "fulfilled",
+    input_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    output_mint: "3Badj8WD5B3hyQkuPnEyT93WtquC8xP186oys7ZppSkp",
+    amount_in: "800015",
+    amount_out: "1000000",
+    input_decimals: 6,
+    output_decimals: 6,
+    raw: {
+      settlement: {
+        status: "closed",
+        inAmount: "791771",
+        outAmount: "1000000",
+      },
+    },
+    created_at: new Date("2026-05-17T20:50:41Z"),
+  });
+
+  assert.ok(fill);
+  assert.equal(
+    fill?.tokenId,
+    "sol:3Badj8WD5B3hyQkuPnEyT93WtquC8xP186oys7ZppSkp",
+  );
+  assert.equal(fill?.shares, 1);
+  assert.equal(fill?.usdc, 0.791771);
+});
+
+test("buildDflowFill ignores non-terminal executions", () => {
+  const fill = buildDflowFill({
+    side: "BUY",
+    status: "submitted",
+    input_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    output_mint: "3Badj8WD5B3hyQkuPnEyT93WtquC8xP186oys7ZppSkp",
+    amount_in: "800015",
+    amount_out: "1000000",
+    input_decimals: 6,
+    output_decimals: 6,
+    raw: null,
+    created_at: new Date("2026-05-17T20:50:41Z"),
+  });
+
+  assert.equal(fill, null);
 });

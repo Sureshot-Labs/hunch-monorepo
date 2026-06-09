@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   deriveCategoryFromTags,
+  mapPolymarketEventRow,
   mapToUnifiedMarket,
   resolvePolymarketEventCategory,
   resolvePolymarketCategory,
@@ -132,6 +133,44 @@ test("market mapping closes inactive Polymarket child markets", () => {
   assert.equal(unified.status, "CLOSED");
 });
 
+test("market mapping preserves stored duration without event context", () => {
+  const market = {
+    id: "562010",
+    question: "Bitcoin up or down?",
+    active: true,
+    closed: false,
+    archived: false,
+    acceptingOrders: true,
+  } as unknown as TPolymarketMarket;
+
+  const unified = mapToUnifiedMarket(market, "31876", undefined, {
+    existingDurationMinutes: 5,
+  });
+  assert.equal(unified.duration_minutes, 5);
+});
+
+test("market mapping prefers event series duration over stored duration", () => {
+  const event = {
+    id: "31877",
+    title: "Bitcoin up or down?",
+    series: [{ slug: "bitcoin-up-or-down-15m" }],
+    markets: [],
+  } as unknown as TPolymarketEvent;
+  const market = {
+    id: "562011",
+    question: "Bitcoin up or down?",
+    active: true,
+    closed: false,
+    archived: false,
+    acceptingOrders: true,
+  } as unknown as TPolymarketMarket;
+
+  const unified = mapToUnifiedMarket(market, event.id, event, {
+    existingDurationMinutes: 5,
+  });
+  assert.equal(unified.duration_minutes, 15);
+});
+
 test("event backfill resolver matches live event mapping", () => {
   const event = {
     id: "1",
@@ -156,6 +195,31 @@ test("event backfill resolver matches live event mapping", () => {
   });
 
   assert.equal(backfillCategory, liveCategory);
+});
+
+test("Polymarket event raw omits nested markets but keeps event metadata", () => {
+  const event = {
+    id: "1",
+    title: "Will a major AI company announce a new model?",
+    description: "Science and technology event",
+    category: "science and technology",
+    tags: [{ label: "AI", slug: "ai" }],
+    series: [{ title: "AI", slug: "ai" }],
+    markets: [
+      {
+        id: "101",
+        question: "Nested market should live in polymarket_markets.raw",
+      },
+    ],
+  } as unknown as TPolymarketEvent;
+
+  const row = mapPolymarketEventRow(event);
+  const raw = row.raw as Record<string, unknown>;
+
+  assert.equal(raw.title, event.title);
+  assert.deepEqual(raw.tags, [{ label: "AI", slug: "ai" }]);
+  assert.deepEqual(raw.series, [{ title: "AI", slug: "ai" }]);
+  assert.equal("markets" in raw, false);
 });
 
 test("market backfill resolver matches live market mapping", () => {

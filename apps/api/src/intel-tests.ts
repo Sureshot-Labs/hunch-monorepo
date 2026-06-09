@@ -59,20 +59,33 @@ import {
 } from "./lib/ai-pricing.js";
 import {
   DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+  compareWalletActivitySummaryStats,
+  computeWalletActivityImportanceScore,
   computeRobustUnusualScore,
   resolveUnusualTier,
+  type WalletActivitySummaryStats,
 } from "./services/wallet-activity-summary.js";
 import { fetchEvmBalance } from "./services/polygon-rpc.js";
 import {
   fetchWalletPerformanceSeries,
   resolveSparklineBucketHours,
 } from "./services/wallet-intel-series.js";
-import { fetchMarketHolderData } from "./services/holders-core.js";
+import {
+  fetchMarketHolderData,
+  fetchMarketHolderDataBatch,
+} from "./services/holders-core.js";
 import {
   normalizeOutcomeSideForApi,
   normalizeOutcomeSideForStorage,
   shouldSuppressLegacySideTransitionDelta,
 } from "./services/wallet-intel-helpers.js";
+import {
+  buildInternalHunchFillActivityEvents,
+  internalHunchWalletAddressesMatch,
+  normalizeInternalHunchWalletAddress,
+  selectNewestInternalHunchFillReplayInputs,
+  shouldSuppressInternalHunchSnapshotDelta,
+} from "./services/wallet-intel-internal-hunch.js";
 import {
   MM_HEDGE_RATIO_MIN,
   MM_TWO_SIDED_MARKETS_MIN,
@@ -90,12 +103,14 @@ import {
   mapWhaleMarketToProfileMarket,
   normalizeWhaleProfile,
   parseProfileJson,
+  sortTrackerSurfaceSummaryStats,
   summarizeProfileMarkets,
 } from "./services/whale-profiles.js";
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
 import {
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
+  walletPositionHistoryQuerySchema,
   walletPositionsQuerySchema,
   walletSeriesQuerySchema,
   walletWhalesQuerySchema,
@@ -112,6 +127,27 @@ const testErc1155Iface = new Interface([
 const testAttributionPolicy = getIntelPolicyDefaults(
   "wallet_intel_attribution",
 );
+
+function createWalletActivitySummaryStats(
+  overrides: Partial<WalletActivitySummaryStats> = {},
+): WalletActivitySummaryStats {
+  return {
+    walletId: "00000000-0000-0000-0000-000000000001",
+    windowHours: 24,
+    lastActivityAt: new Date("2026-06-08T12:00:00.000Z"),
+    netChangeUsd: 0,
+    netChangeYesUsd: 0,
+    netChangeNoUsd: 0,
+    countsNew: 0,
+    countsExit: 0,
+    countsIncrease: 0,
+    countsReduce: 0,
+    countsFlip: 0,
+    unusualScore: null,
+    unusualTier: null,
+    ...overrides,
+  };
+}
 
 function createTestCandidateWalletRow(
   overrides: Partial<Parameters<typeof buildWalletSummaryItem>[0]> = {},
@@ -194,6 +230,7 @@ function createTestSignalRow(
     closeTime: new Date("2026-01-03T00:00:00.000Z"),
     expirationTime: null,
     resolvedOutcome: null,
+    acceptingOrders: true,
     category: "crypto",
     action: "OPENED",
     positionSide: "YES",
@@ -348,6 +385,73 @@ const tests: TestCase[] = [
         "maxOutlierRatio" in (resolved.effective as Record<string, unknown>),
         false,
       );
+    },
+  },
+  {
+    name: "wallet intel refresh policy exposes internal hunch controls",
+    run: async () => {
+      const defaults = getIntelPolicyDefaults("wallet_intel_refresh");
+      assert.equal(defaults.internalHunchEnabled, true);
+      assert.equal(defaults.internalHunchWalletLimit, 250);
+      assert.equal(defaults.internalHunchFillLookbackDays, 30);
+      assert.equal(defaults.internalHunchFillLimit, 5_000);
+
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000002",
+              policy_key: "wallet_intel_refresh",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                internalHunchEnabled: "false",
+                internalHunchWalletLimit: 0,
+                internalHunchFillLookbackDays: 7,
+                internalHunchFillLimit: 100,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "wallet_intel_refresh");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.internalHunchEnabled, false);
+      assert.equal(resolved.effective.internalHunchWalletLimit, 0);
+      assert.equal(resolved.effective.internalHunchFillLookbackDays, 7);
+      assert.equal(resolved.effective.internalHunchFillLimit, 100);
+    },
+  },
+  {
+    name: "ai whale profile policy defaults tracker sort to importance and supports rollback",
+    run: async () => {
+      const defaults = getIntelPolicyDefaults("ai_whale_profiles");
+      assert.equal(defaults.selectionMode, "hybrid");
+      assert.equal(defaults.selectionTrackerSort, "importance");
+
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000003",
+              policy_key: "ai_whale_profiles",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                selectionTrackerSort: "last_activity",
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "ai_whale_profiles");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.selectionMode, "hybrid");
+      assert.equal(resolved.effective.selectionTrackerSort, "last_activity");
     },
   },
   {
@@ -684,6 +788,466 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "activity summary importance sort balances magnitude, unusual activity, and recency",
+    run: () => {
+      const now = Date.now();
+      const hoursAgo = (hours: number) =>
+        new Date(now - hours * 60 * 60 * 1000);
+      const sortIds = (rows: WalletActivitySummaryStats[]) =>
+        [...rows]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "importance"),
+          )
+          .map((row) => row.walletId);
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "tiny-newest",
+            lastActivityAt: hoursAgo(0.05),
+            netChangeUsd: 100,
+            countsNew: 1,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "large-older",
+            lastActivityAt: hoursAgo(8),
+            netChangeUsd: 125_000,
+            countsNew: 1,
+          }),
+        ]),
+        ["large-older", "tiny-newest"],
+      );
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "normal-medium",
+            lastActivityAt: hoursAgo(2),
+            netChangeUsd: 10_000,
+            countsNew: 1,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "unusual-medium",
+            lastActivityAt: hoursAgo(2),
+            netChangeUsd: 10_000,
+            countsNew: 1,
+            unusualScore: 2.5,
+          }),
+        ]),
+        ["unusual-medium", "normal-medium"],
+      );
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "older-close",
+            lastActivityAt: hoursAgo(6),
+            netChangeUsd: 15_000,
+            countsIncrease: 2,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "newer-close",
+            lastActivityAt: hoursAgo(1),
+            netChangeUsd: 15_000,
+            countsIncrease: 2,
+          }),
+        ]),
+        ["newer-close", "older-close"],
+      );
+
+      assert.deepEqual(
+        sortIds([
+          createWalletActivitySummaryStats({
+            walletId: "00000000-0000-0000-0000-000000000002",
+            lastActivityAt: hoursAgo(3),
+            netChangeUsd: 20_000,
+            countsReduce: 1,
+          }),
+          createWalletActivitySummaryStats({
+            walletId: "00000000-0000-0000-0000-000000000001",
+            lastActivityAt: hoursAgo(3),
+            netChangeUsd: 20_000,
+            countsReduce: 1,
+          }),
+        ]),
+        [
+          "00000000-0000-0000-0000-000000000001",
+          "00000000-0000-0000-0000-000000000002",
+        ],
+      );
+
+      const fixedNow = new Date("2026-06-08T12:00:00.000Z").getTime();
+      const lowScore = computeWalletActivityImportanceScore(
+        createWalletActivitySummaryStats({
+          lastActivityAt: new Date("2026-06-08T11:00:00.000Z"),
+          netChangeUsd: 100,
+        }),
+        fixedNow,
+      );
+      const highScore = computeWalletActivityImportanceScore(
+        createWalletActivitySummaryStats({
+          lastActivityAt: new Date("2026-06-08T11:00:00.000Z"),
+          netChangeUsd: 250_000,
+          unusualScore: 3,
+          countsNew: 4,
+          countsIncrease: 4,
+        }),
+        fixedNow,
+      );
+      assert.ok(lowScore >= 0 && lowScore <= 1);
+      assert.ok(highScore >= 0 && highScore <= 1);
+      assert.ok(highScore > lowScore);
+    },
+  },
+  {
+    name: "ai profile tracker surface uses importance ordering by default",
+    run: () => {
+      const newestTiny = createWalletActivitySummaryStats({
+        walletId: "tiny-newest",
+        lastActivityAt: new Date("2026-06-08T11:59:00.000Z"),
+        netChangeUsd: 25,
+        countsNew: 1,
+      });
+      const olderImportant = createWalletActivitySummaryStats({
+        walletId: "older-important",
+        lastActivityAt: new Date("2026-06-08T07:00:00.000Z"),
+        netChangeUsd: 150_000,
+        unusualScore: 2.5,
+        countsIncrease: 4,
+      });
+
+      assert.deepEqual(
+        sortTrackerSurfaceSummaryStats(
+          [newestTiny, olderImportant],
+          "importance",
+        ).map((row) => row.walletId),
+        ["older-important", "tiny-newest"],
+      );
+    },
+  },
+  {
+    name: "ai profile tracker surface can roll back to last activity ordering",
+    run: () => {
+      const newestTiny = createWalletActivitySummaryStats({
+        walletId: "tiny-newest",
+        lastActivityAt: new Date("2026-06-08T11:59:00.000Z"),
+        netChangeUsd: 25,
+        countsNew: 1,
+      });
+      const olderImportant = createWalletActivitySummaryStats({
+        walletId: "older-important",
+        lastActivityAt: new Date("2026-06-08T07:00:00.000Z"),
+        netChangeUsd: 150_000,
+        unusualScore: 2.5,
+        countsIncrease: 4,
+      });
+
+      assert.deepEqual(
+        sortTrackerSurfaceSummaryStats(
+          [newestTiny, olderImportant],
+          "last_activity",
+        ).map((row) => row.walletId),
+        ["tiny-newest", "older-important"],
+      );
+    },
+  },
+  {
+    name: "internal hunch fills build cumulative trade activity without user metadata",
+    run: () => {
+      const filledAt = new Date("2026-06-08T12:00:00.000Z");
+      const events = buildInternalHunchFillActivityEvents([
+        {
+          walletId: "wallet-1",
+          venue: "polymarket",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          tokenId: "token-1",
+          orderId: "order-1",
+          orderFillId: "fill-1",
+          venueFillId: "venue-fill-1",
+          venueTradeId: "trade-1",
+          fillSize: 10,
+          fillPrice: 0.42,
+          fillSide: "BUY",
+          filledAt,
+        },
+        {
+          walletId: "wallet-1",
+          venue: "polymarket",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          tokenId: "token-1",
+          orderId: "order-2",
+          orderFillId: "fill-2",
+          venueFillId: "venue-fill-2",
+          venueTradeId: "trade-2",
+          fillSize: 4,
+          fillPrice: 0.5,
+          fillSide: "SELL",
+          filledAt: new Date("2026-06-08T12:00:01.000Z"),
+        },
+      ]);
+
+      assert.equal(events.length, 2);
+      assert.equal(events[0]?.action, "BUY");
+      assert.equal(events[0]?.deltaShares, 10);
+      assert.equal(events[0]?.sizeUsd, 4.2);
+      assert.equal(events[0]?.metadata.prevShares, 0);
+      assert.equal(events[0]?.metadata.currShares, 10);
+      assert.equal(events[1]?.action, "SELL");
+      assert.equal(events[1]?.metadata.prevShares, 10);
+      assert.equal(events[1]?.metadata.currShares, 6);
+      assert.equal("userId" in (events[0]?.metadata ?? {}), false);
+    },
+  },
+  {
+    name: "internal hunch fills offset same-time activity deterministically",
+    run: () => {
+      const filledAt = new Date("2026-06-08T12:00:00.123Z");
+      const events = buildInternalHunchFillActivityEvents([
+        {
+          walletId: "wallet-1",
+          venue: "limitless",
+          marketId: "market-1",
+          outcomeSide: "NO",
+          tokenId: "token-1",
+          orderId: "order-2",
+          orderFillId: "fill-b",
+          venueFillId: null,
+          venueTradeId: null,
+          fillSize: 2,
+          fillPrice: 0.2,
+          fillSide: "BUY",
+          filledAt,
+        },
+        {
+          walletId: "wallet-1",
+          venue: "limitless",
+          marketId: "market-1",
+          outcomeSide: "NO",
+          tokenId: "token-1",
+          orderId: "order-1",
+          orderFillId: "fill-a",
+          venueFillId: null,
+          venueTradeId: null,
+          fillSize: 1,
+          fillPrice: 0.1,
+          fillSide: "BUY",
+          filledAt,
+        },
+      ]);
+
+      assert.deepEqual(
+        events.map((event) => event.metadata.orderFillId),
+        ["fill-a", "fill-b"],
+      );
+      assert.deepEqual(
+        events.map((event) => event.occurredAt),
+        ["2026-06-08T12:00:00.123000Z", "2026-06-08T12:00:00.123001Z"],
+      );
+    },
+  },
+  {
+    name: "internal hunch fills use pre-lookback shares as replay baseline",
+    run: () => {
+      const events = buildInternalHunchFillActivityEvents(
+        [
+          {
+            walletId: "wallet-1",
+            venue: "kalshi",
+            marketId: "market-1",
+            outcomeSide: "YES",
+            tokenId: "token-1",
+            orderId: "order-1",
+            orderFillId: "fill-1",
+            venueFillId: null,
+            venueTradeId: null,
+            fillSize: 3,
+            fillPrice: 0.75,
+            fillSide: "SELL",
+            filledAt: new Date("2026-06-08T12:00:00.000Z"),
+          },
+        ],
+        {
+          initialShares: [
+            {
+              walletId: "wallet-1",
+              venue: "kalshi",
+              tokenId: "token-1",
+              shares: 9,
+            },
+          ],
+        },
+      );
+
+      assert.equal(events.length, 1);
+      assert.equal(events[0]?.metadata.prevShares, 9);
+      assert.equal(events[0]?.metadata.currShares, 6);
+    },
+  },
+  {
+    name: "internal hunch fill cap selects newest fills and replays them ascending",
+    run: () => {
+      const fill = (
+        orderFillId: string,
+        filledAt: string,
+        fillSize: number,
+        fillSide: "BUY" | "SELL" = "BUY",
+      ) => ({
+        walletId: "wallet-1",
+        venue: "polymarket",
+        marketId: "market-1",
+        outcomeSide: "YES",
+        tokenId: "token-1",
+        orderId: `order-${orderFillId}`,
+        orderFillId,
+        venueFillId: null,
+        venueTradeId: null,
+        fillSize,
+        fillPrice: 0.5,
+        fillSide,
+        filledAt: new Date(filledAt),
+      });
+
+      const selected = selectNewestInternalHunchFillReplayInputs(
+        [
+          fill("fill-old", "2026-06-08T09:00:00.000Z", 10),
+          fill("fill-middle", "2026-06-08T10:00:00.000Z", 4, "SELL"),
+          fill("fill-new", "2026-06-08T11:00:00.000Z", 2, "SELL"),
+        ],
+        2,
+      );
+      assert.deepEqual(
+        selected.map((row) => row.orderFillId),
+        ["fill-middle", "fill-new"],
+      );
+
+      const events = buildInternalHunchFillActivityEvents(selected, {
+        initialShares: [
+          {
+            walletId: "wallet-1",
+            venue: "polymarket",
+            tokenId: "token-1",
+            shares: 10,
+          },
+        ],
+      });
+
+      assert.equal(events[0]?.metadata.prevShares, 10);
+      assert.equal(events[0]?.metadata.currShares, 6);
+      assert.equal(events[1]?.metadata.prevShares, 6);
+      assert.equal(events[1]?.metadata.currShares, 4);
+    },
+  },
+  {
+    name: "internal hunch wallet matching normalizes EVM casing but keeps Solana exact",
+    run: () => {
+      assert.equal(
+        normalizeInternalHunchWalletAddress(
+          "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A",
+          "polygon",
+        ),
+        "0x2dfcaa5734ca03b3917eaccb32f9b75c7675781a",
+      );
+      assert.equal(
+        internalHunchWalletAddressesMatch({
+          chain: "polygon",
+          left: "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A",
+          right: "0x2dfcaa5734ca03b3917eaccb32f9b75c7675781a",
+        }),
+        true,
+      );
+      assert.equal(
+        internalHunchWalletAddressesMatch({
+          chain: "solana",
+          left: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+          right: "f7rnppfgLzy2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "internal hunch first-import open snapshots suppress synthetic deltas",
+    run: () => {
+      assert.equal(
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource: "hunch_own_position_open",
+          hasPreviousSameKey: false,
+          prevShares: 0,
+          currShares: 2,
+        }),
+        true,
+      );
+      assert.equal(
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource: "hunch_own_position_open",
+          hasPreviousSameKey: true,
+          prevShares: 1,
+          currShares: 2,
+        }),
+        false,
+      );
+      assert.equal(
+        shouldSuppressInternalHunchSnapshotDelta({
+          snapshotSource: "solana",
+          hasPreviousSameKey: false,
+          prevShares: 0,
+          currShares: 2,
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "activity summary existing sort modes keep their ordering",
+    run: () => {
+      const olderLarge = createWalletActivitySummaryStats({
+        walletId: "older-large",
+        lastActivityAt: new Date("2026-06-08T08:00:00.000Z"),
+        netChangeUsd: 100_000,
+        unusualScore: 1,
+      });
+      const newerSmall = createWalletActivitySummaryStats({
+        walletId: "newer-small",
+        lastActivityAt: new Date("2026-06-08T12:00:00.000Z"),
+        netChangeUsd: 1_000,
+        unusualScore: 0.5,
+      });
+      const unusual = createWalletActivitySummaryStats({
+        walletId: "unusual",
+        lastActivityAt: new Date("2026-06-08T09:00:00.000Z"),
+        netChangeUsd: 2_000,
+        unusualScore: 2,
+      });
+
+      assert.deepEqual(
+        [olderLarge, newerSmall]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "last_activity"),
+          )
+          .map((row) => row.walletId),
+        ["newer-small", "older-large"],
+      );
+      assert.deepEqual(
+        [newerSmall, olderLarge]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "net_change_usd"),
+          )
+          .map((row) => row.walletId),
+        ["older-large", "newer-small"],
+      );
+      assert.deepEqual(
+        [newerSmall, unusual]
+          .sort((left, right) =>
+            compareWalletActivitySummaryStats(left, right, "unusual_score"),
+          )
+          .map((row) => row.walletId),
+        ["unusual", "newer-small"],
+      );
+    },
+  },
+  {
     name: "top label variant resolves backend headline badges deterministically",
     run: () => {
       const risingStar = resolveWalletTopLabelVariant({
@@ -817,11 +1381,13 @@ const tests: TestCase[] = [
       });
       const summary = walletActivitySummaryQuerySchema.parse({
         includeSparkline: "1",
+        sort: "importance",
       });
       const series = walletSeriesQuerySchema.parse({});
 
       assert.equal(whales.includeSparkline, true);
       assert.equal(summary.includeSparkline, true);
+      assert.equal(summary.sort, "importance");
       assert.equal(series.windowHours, undefined);
       assert.equal(series.bucketHours, undefined);
       assert.equal(series.period, "30d");
@@ -958,6 +1524,9 @@ const tests: TestCase[] = [
               effective_at: new Date("2026-01-01T00:00:00.000Z"),
               payload: {
                 state: "required",
+                embeddedSolanaSponsorship: false,
+                solanaPrefundEnabled: false,
+                solanaLossCloseSponsorshipEnabled: false,
               },
               created_by: null,
               created_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -970,6 +1539,121 @@ const tests: TestCase[] = [
       assert.equal(resolved.invalidOverride, false);
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effective.state, "required");
+      assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
+      assert.equal(resolved.effective.solanaPrefundEnabled, false);
+      assert.equal(resolved.effective.solanaLossCloseSponsorshipEnabled, false);
+    },
+  },
+  {
+    name: "auth access policy accepts embedded solana sponsorship override",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000032",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "required",
+                embeddedSolanaSponsorship: true,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.state, "required");
+      assert.equal(resolved.effective.embeddedSolanaSponsorship, true);
+    },
+  },
+  {
+    name: "auth access policy accepts solana prefund override",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000033",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "required",
+                solanaPrefundEnabled: true,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.state, "required");
+      assert.equal(resolved.effective.solanaPrefundEnabled, true);
+      assert.equal(
+        resolved.effective.solanaLossCloseSponsorshipEnabled,
+        env.solanaLossCloseSponsorshipEnabled,
+      );
+    },
+  },
+  {
+    name: "auth access policy accepts solana loss close sponsorship override",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000034",
+              policy_key: "auth_access",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                state: "required",
+                solanaLossCloseSponsorshipEnabled: true,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.state, "required");
+      assert.equal(
+        resolved.effective.solanaPrefundEnabled,
+        env.solanaPrefundEnabled,
+      );
+      assert.equal(resolved.effective.solanaLossCloseSponsorshipEnabled, true);
+    },
+  },
+  {
+    name: "auth access policy defaults embedded solana sponsorship off",
+    run: async () => {
+      const db = {
+        query: async (_sql: string) => ({ rows: [] }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "auth_access");
+      assert.equal(resolved.invalidOverride, false);
+      assert.equal(resolved.effective.embeddedSolanaSponsorship, false);
+      assert.equal(
+        resolved.effective.solanaPrefundEnabled,
+        env.solanaPrefundEnabled,
+      );
+      assert.equal(
+        resolved.effective.solanaLossCloseSponsorshipEnabled,
+        env.solanaLossCloseSponsorshipEnabled,
+      );
     },
   },
   {
@@ -2470,20 +3154,42 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "wallet positions query parses includeSmall safely",
+    name: "wallet positions query parses includeSmall and display cutoffs safely",
     run: () => {
       const defaults = walletPositionsQuerySchema.parse({});
       assert.equal(defaults.includeSmall, false);
+      assert.equal(defaults.minPositionUsd, undefined);
+      assert.equal(defaults.minPositionShares, undefined);
 
       const parsedTrue = walletPositionsQuerySchema.parse({
         includeSmall: "true",
+        minPositionShares: "0.001",
+        minPositionUsd: "0.10",
       });
       assert.equal(parsedTrue.includeSmall, true);
+      assert.equal(parsedTrue.minPositionShares, 0.001);
+      assert.equal(parsedTrue.minPositionUsd, 0.1);
 
       const parsedFalse = walletPositionsQuerySchema.parse({
         includeSmall: "0",
       });
       assert.equal(parsedFalse.includeSmall, false);
+
+      assert.throws(() =>
+        walletPositionsQuerySchema.parse({
+          minPositionUsd: "-0.01",
+        }),
+      );
+
+      const parsedHistory = walletPositionHistoryQuerySchema.parse({
+        walletId: "11111111-1111-4111-8111-111111111111",
+        includeSmall: "false",
+        minPositionShares: "2",
+        minPositionUsd: "0.10",
+      });
+      assert.equal(parsedHistory.includeSmall, false);
+      assert.equal(parsedHistory.minPositionShares, 2);
+      assert.equal(parsedHistory.minPositionUsd, 0.1);
     },
   },
   {
@@ -2663,6 +3369,383 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "market holder fetch verifies Limitless Alchemy owners with Base balances",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAlchemyBaseUrl = env.alchemyBaseNftBaseUrl;
+      const originalLimitlessContract = env.limitlessConditionalTokensAddress;
+      const originalBaseRpcUrl = env.baseRpcUrl;
+      const originalBaseRpcTimeoutMs = env.baseRpcTimeoutMs;
+
+      const ownerA = "0x1111111111111111111111111111111111111111";
+      const ownerB = "0x2222222222222222222222222222222222222222";
+      const ownerC = "0x3333333333333333333333333333333333333333";
+      const balanceIface = new Interface([
+        "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+      ]);
+
+      env.alchemyBaseNftBaseUrl = "https://alchemy.example";
+      env.limitlessConditionalTokensAddress =
+        "0xc9c98965297bc527861c898329ee280632b76e18";
+      env.baseRpcUrl = "https://base-rpc.example";
+      env.baseRpcTimeoutMs = 1_000;
+
+      let alchemyCalls = 0;
+      let baseRpcCalls = 0;
+      globalThis.fetch = async (input: string | URL | Request, init) => {
+        const url = String(input);
+        if (url.includes("getOwnersForNFT")) {
+          alchemyCalls += 1;
+          const tokenId = new URL(url).searchParams.get("tokenId");
+          const owners =
+            tokenId === "111"
+              ? [
+                  { ownerAddress: ownerA },
+                  { ownerAddress: ownerB },
+                  { ownerAddress: ownerA },
+                ]
+              : [{ ownerAddress: ownerA }, { ownerAddress: ownerC }];
+          return new Response(JSON.stringify({ owners }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+
+        if (url === "https://base-rpc.example") {
+          baseRpcCalls += 1;
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            id?: number;
+            params?: Array<{ data?: string }>;
+          };
+          const data = body.params?.[0]?.data;
+          assert.ok(data);
+          const decoded = balanceIface.decodeFunctionData(
+            "balanceOfBatch",
+            data,
+          );
+          const accounts = decoded[0] as string[];
+          const ids = decoded[1] as bigint[];
+          const balances = accounts.map((account, index) => {
+            const key = `${account.toLowerCase()}:${ids[index]?.toString()}`;
+            if (key === `${ownerA.toLowerCase()}:111`) return 2_500_000n;
+            if (key === `${ownerA.toLowerCase()}:222`) return 1_750_000n;
+            if (key === `${ownerC.toLowerCase()}:222`) return 500_000n;
+            return 0n;
+          });
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id ?? 1,
+              result: balanceIface.encodeFunctionResult("balanceOfBatch", [
+                balances,
+              ]),
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        throw new Error(`unexpected fetch url: ${url}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "limitless:market-1",
+                  venue: "limitless",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:111",
+                  token_no: "limitless:222",
+                  clob_token_ids: null,
+                  best_bid: "0.60",
+                  best_ask: "0.70",
+                  last_price: "0.65",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { token_id: "limitless:111", side: "YES" },
+                { token_id: "limitless:222", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return {
+              rows: [
+                {
+                  token_id: "limitless:111",
+                  best_bid: "0.50",
+                  best_ask: "0.70",
+                },
+                {
+                  token_id: "limitless:222",
+                  best_bid: "0.25",
+                  best_ask: "0.35",
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "limitless:market-1",
+          limit: 10,
+          client: client as never,
+        });
+
+        assert.equal(alchemyCalls, 2);
+        assert.equal(baseRpcCalls, 1);
+        assert.equal(result.source, "alchemy");
+        assert.deepEqual(result.holders, [
+          { wallet: ownerA, side: "YES", shares: 2.5 },
+          { wallet: ownerA, side: "NO", shares: 1.75 },
+          { wallet: ownerC, side: "NO", shares: 0.5 },
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
+        env.limitlessConditionalTokensAddress = originalLimitlessContract;
+        env.baseRpcUrl = originalBaseRpcUrl;
+        env.baseRpcTimeoutMs = originalBaseRpcTimeoutMs;
+      }
+    },
+  },
+  {
+    name: "market holder batch verifies Limitless holders in one sparse Base balance pass",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAlchemyBaseUrl = env.alchemyBaseNftBaseUrl;
+      const originalLimitlessContract = env.limitlessConditionalTokensAddress;
+      const originalBaseRpcUrl = env.baseRpcUrl;
+      const originalBaseRpcTimeoutMs = env.baseRpcTimeoutMs;
+
+      const ownerA = "0x1111111111111111111111111111111111111111";
+      const ownerB = "0x2222222222222222222222222222222222222222";
+      const ownerC = "0x3333333333333333333333333333333333333333";
+      const ownerD = "0x4444444444444444444444444444444444444444";
+      const zeroOwner = "0x0000000000000000000000000000000000000000";
+      const balanceIface = new Interface([
+        "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+      ]);
+
+      env.alchemyBaseNftBaseUrl = "https://alchemy.example";
+      env.limitlessConditionalTokensAddress =
+        "0xc9c98965297bc527861c898329ee280632b76e18";
+      env.baseRpcUrl = "https://base-rpc.example";
+      env.baseRpcTimeoutMs = 1_000;
+
+      let alchemyCalls = 0;
+      let baseRpcCalls = 0;
+      globalThis.fetch = async (input: string | URL | Request, init) => {
+        const url = String(input);
+        if (url.includes("getOwnersForNFT")) {
+          alchemyCalls += 1;
+          const tokenId = new URL(url).searchParams.get("tokenId");
+          const ownersByToken: Record<string, unknown[]> = {
+            "111": [
+              { ownerAddress: ownerA },
+              { ownerAddress: zeroOwner },
+              { ownerAddress: ownerB },
+            ],
+            "222": [{ ownerAddress: ownerA }, { ownerAddress: ownerC }],
+            "333": [{ ownerAddress: ownerB }],
+            "444": [{ ownerAddress: zeroOwner }, { ownerAddress: ownerD }],
+          };
+          return new Response(
+            JSON.stringify({ owners: ownersByToken[tokenId ?? ""] ?? [] }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        if (url === "https://base-rpc.example") {
+          baseRpcCalls += 1;
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            id?: number;
+            params?: Array<{ data?: string }>;
+          };
+          const data = body.params?.[0]?.data;
+          assert.ok(data);
+          const decoded = balanceIface.decodeFunctionData(
+            "balanceOfBatch",
+            data,
+          );
+          const accounts = decoded[0] as string[];
+          const ids = decoded[1] as bigint[];
+          assert.equal(
+            accounts.some(
+              (account) => account.toLowerCase() === zeroOwner.toLowerCase(),
+            ),
+            false,
+          );
+          const balances = accounts.map((account, index) => {
+            const key = `${account.toLowerCase()}:${ids[index]?.toString()}`;
+            if (key === `${ownerA.toLowerCase()}:111`) return 2_500_000n;
+            if (key === `${ownerA.toLowerCase()}:222`) return 1_750_000n;
+            if (key === `${ownerB.toLowerCase()}:333`) return 3_000_000n;
+            if (key === `${ownerD.toLowerCase()}:444`) return 250_000n;
+            return 0n;
+          });
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id ?? 1,
+              result: balanceIface.encodeFunctionResult("balanceOfBatch", [
+                balances,
+              ]),
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        throw new Error(`unexpected fetch url: ${url}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "limitless:market-1",
+                  venue: "limitless",
+                  title: "Test market 1",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:111",
+                  token_no: "limitless:222",
+                  clob_token_ids: null,
+                  best_bid: "0.60",
+                  best_ask: "0.70",
+                  last_price: "0.65",
+                },
+                {
+                  id: "limitless:market-2",
+                  venue: "limitless",
+                  title: "Test market 2",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "limitless:333",
+                  token_no: "limitless:444",
+                  clob_token_ids: null,
+                  best_bid: "0.40",
+                  best_ask: "0.50",
+                  last_price: "0.45",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                {
+                  market_id: "limitless:market-1",
+                  token_id: "limitless:111",
+                  side: "YES",
+                },
+                {
+                  market_id: "limitless:market-1",
+                  token_id: "limitless:222",
+                  side: "NO",
+                },
+                {
+                  market_id: "limitless:market-2",
+                  token_id: "limitless:333",
+                  side: "YES",
+                },
+                {
+                  market_id: "limitless:market-2",
+                  token_id: "limitless:444",
+                  side: "NO",
+                },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return {
+              rows: [
+                {
+                  token_id: "limitless:111",
+                  best_bid: "0.50",
+                  best_ask: "0.70",
+                },
+                {
+                  token_id: "limitless:222",
+                  best_bid: "0.25",
+                  best_ask: "0.35",
+                },
+                {
+                  token_id: "limitless:333",
+                  best_bid: "0.30",
+                  best_ask: "0.40",
+                },
+                {
+                  token_id: "limitless:444",
+                  best_bid: "0.55",
+                  best_ask: "0.65",
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const results = await fetchMarketHolderDataBatch({
+          markets: [
+            { id: "limitless:market-1", venue: "limitless" },
+            { id: "limitless:market-2", venue: "limitless" },
+          ],
+          limit: 10,
+          client: client as never,
+          marketFetchConcurrency: 2,
+        });
+
+        assert.equal(alchemyCalls, 4);
+        assert.equal(baseRpcCalls, 1);
+        assert.equal(results[0]?.data?.source, "alchemy");
+        assert.equal(results[1]?.data?.source, "alchemy");
+        assert.deepEqual(results[0]?.data?.holders, [
+          { wallet: ownerA, side: "YES", shares: 2.5 },
+          { wallet: ownerA, side: "NO", shares: 1.75 },
+        ]);
+        assert.deepEqual(results[1]?.data?.holders, [
+          { wallet: ownerB, side: "YES", shares: 3 },
+          { wallet: ownerD, side: "NO", shares: 0.25 },
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.alchemyBaseNftBaseUrl = originalAlchemyBaseUrl;
+        env.limitlessConditionalTokensAddress = originalLimitlessContract;
+        env.baseRpcUrl = originalBaseRpcUrl;
+        env.baseRpcTimeoutMs = originalBaseRpcTimeoutMs;
+      }
+    },
+  },
+  {
     name: "market holder fetch rejects partial solana side coverage",
     run: async () => {
       const originalFetch = globalThis.fetch;
@@ -2787,6 +3870,176 @@ const tests: TestCase[] = [
           YES: "mint-yes",
           NO: "mint-no",
         });
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.solanaRpcUrls = originalSolanaRpcUrls;
+        env.solanaRpcTimeoutMs = originalSolanaRpcTimeoutMs;
+      }
+    },
+  },
+  {
+    name: "market holder batch resolves Kalshi largest accounts with one owner lookup",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalSolanaRpcUrls = env.solanaRpcUrls;
+      const originalSolanaRpcTimeoutMs = env.solanaRpcTimeoutMs;
+
+      env.solanaRpcUrls = ["https://solana.example"];
+      env.solanaRpcTimeoutMs = 1_000;
+
+      let largestCalls = 0;
+      let ownerLookupCalls = 0;
+      globalThis.fetch = async (_input, init) => {
+        const body =
+          typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        const method = body?.method;
+        const params = body?.params;
+
+        if (method === "getTokenLargestAccounts") {
+          largestCalls += 1;
+          const mint = String(params?.[0] ?? "");
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                value: [
+                  {
+                    address: `acct-${mint}`,
+                    amount: "2000",
+                    decimals: 3,
+                    uiAmountString: "2",
+                  },
+                ],
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        if (method === "getMultipleAccounts") {
+          ownerLookupCalls += 1;
+          const accounts = Array.isArray(params?.[0]) ? params[0] : [];
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                value: accounts.map((account: string) => ({
+                  data: {
+                    parsed: {
+                      info: {
+                        owner: `owner-${account}`,
+                      },
+                    },
+                  },
+                })),
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }
+
+        throw new Error(`unexpected solana rpc method: ${String(method)}`);
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "kalshi:market-1",
+                  venue: "kalshi",
+                  title: "Test market 1",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "sol:mint-yes-1",
+                  token_no: "sol:mint-no-1",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+                {
+                  id: "kalshi:market-2",
+                  venue: "kalshi",
+                  title: "Test market 2",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "sol:mint-yes-2",
+                  token_no: "sol:mint-no-2",
+                  clob_token_ids: null,
+                  best_bid: "0.35",
+                  best_ask: "0.45",
+                  last_price: "0.4",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                {
+                  market_id: "kalshi:market-1",
+                  token_id: "sol:mint-yes-1",
+                  side: "YES",
+                },
+                {
+                  market_id: "kalshi:market-1",
+                  token_id: "sol:mint-no-1",
+                  side: "NO",
+                },
+                {
+                  market_id: "kalshi:market-2",
+                  token_id: "sol:mint-yes-2",
+                  side: "YES",
+                },
+                {
+                  market_id: "kalshi:market-2",
+                  token_id: "sol:mint-no-2",
+                  side: "NO",
+                },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return { rows: [] };
+          }
+          if (queryCount === 4) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const results = await fetchMarketHolderDataBatch({
+          markets: [
+            { id: "kalshi:market-1", venue: "kalshi" },
+            { id: "kalshi:market-2", venue: "kalshi" },
+          ],
+          limit: 10,
+          client: client as never,
+          marketFetchConcurrency: 2,
+        });
+
+        assert.equal(largestCalls, 4);
+        assert.equal(ownerLookupCalls, 1);
+        assert.equal(results[0]?.data?.holders.length, 2);
+        assert.equal(results[1]?.data?.holders.length, 2);
+        assert.equal(
+          results[0]?.data?.holders[0]?.wallet,
+          "owner-acct-mint-yes-1",
+        );
       } finally {
         globalThis.fetch = originalFetch;
         env.solanaRpcUrls = originalSolanaRpcUrls;

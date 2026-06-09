@@ -67,7 +67,15 @@ export const positionsQuerySchema = z.object({
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")
     .catch(false),
+  includeMarkets: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
   force: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
+  debug: z
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")
     .catch(false),
@@ -96,4 +104,35 @@ export const positionVisibilitySchema = z.object({
   walletAddress: z.string().min(1),
   tokenId: z.string().min(1),
   hidden: zBoolish,
+});
+
+export const kalshiLossCloseTransactionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  transaction: z.string().min(1),
+  encoding: z.literal("base64"),
+  mint: z.string().min(1),
+  tokenAccount: z.string().min(1),
+  amountRaw: z.string().min(1),
+});
+
+export const positionVisibilityResponseSchema = z.object({
+  ok: z.literal(true),
+  hidden: z.boolean(),
+  closeLossTransaction: kalshiLossCloseTransactionSchema.optional(),
+  closeLoss: z
+    .union([
+      z.object({
+        skippedReason: z.literal("prepare_failed"),
+        error: z.string().min(1),
+      }),
+      z.object({
+        skippedReason: z.string().min(1),
+      }),
+    ])
+    .optional(),
+});
+
+export const positionVisibilityErrorResponseSchema = z.object({
+  error: z.string(),
 });

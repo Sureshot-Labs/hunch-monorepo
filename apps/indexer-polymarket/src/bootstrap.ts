@@ -1,7 +1,12 @@
 import { chunkArray } from "@hunch/shared";
 import { ensureRedis, redis } from "./redis.js";
 import { env } from "./env.js";
-import { fetchEventsByIds, iterateEventPages } from "./gammaClient.js";
+import {
+  fetchEventsByIds,
+  fetchEventsByIdsDetailed,
+  fetchMarketById,
+  iterateEventPages,
+} from "./gammaClient.js";
 import { postBooksOnce } from "./clobClient.js";
 import {
   mapPolymarketEventRow,
@@ -10,19 +15,37 @@ import {
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
-import { upsertUnifiedTokens, writeUnifiedBookTop } from "@hunch/db";
+import {
+  upsertUnifiedTokens,
+  writeUnifiedBookTops,
+  type UnifiedEventRow,
+  type UnifiedMarketRow,
+} from "@hunch/db";
 import {
   upsertEventsConsistently,
   upsertMarketsConsistently,
 } from "./consistentUpserts.js";
 import {
   buildTopMarketsText,
+  claimDuePriceRefreshTokens,
   enqueueEmbedItems,
+  getPriceRefreshQueueBacklog,
   isPgSetupIssue,
+  publishMarketState,
+  publishMarketUpdate,
+  requeuePriceRefreshTokens,
   type EmbedQueueItem,
+  type PriceRefreshQueueClaimSide,
+  type PriceRefreshRedis,
 } from "@hunch/infra";
 import { pool } from "./db.js";
-import { PolymarketEvent, type TPolymarketEvent } from "./types.js";
+import {
+  PolymarketEvent,
+  PolymarketMarket,
+  type TEvent,
+  type TPolymarketEvent,
+  type TPolymarketMarket,
+} from "./types.js";
 import { log } from "./log.js";
 import PQueue from "p-queue";
 import {
@@ -59,6 +82,87 @@ function bestAsk(levels: Array<{ price: string }> | undefined): number | null {
   return best;
 }
 
+function clobTokenPair(market: TPolymarketMarket): {
+  yes: string | null;
+  no: string | null;
+} {
+  const raw = market.clobTokenIds;
+  if (Array.isArray(raw)) {
+    return { yes: raw[0] ?? null, no: raw[1] ?? null };
+  }
+  if (typeof raw !== "string") return { yes: null, no: null };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return { yes: null, no: null };
+    return {
+      yes: typeof parsed[0] === "string" ? parsed[0] : null,
+      no: typeof parsed[1] === "string" ? parsed[1] : null,
+    };
+  } catch {
+    return { yes: null, no: null };
+  }
+}
+
+function publishedMarketStatus(
+  market: ReturnType<typeof mapToUnifiedMarket> | undefined,
+): string | null {
+  if (!market) return null;
+  if (market.resolved_outcome || market.resolved_outcome_pct != null) {
+    return "SETTLED";
+  }
+  return market.status ?? null;
+}
+
+type MarketUpdateEventMetrics = Pick<
+  UnifiedEventRow,
+  "volume_total" | "volume_24h" | "liquidity" | "open_interest"
+>;
+
+async function publishPolymarketMarketUpdates(
+  rows: Array<{
+    sourceMarket: TPolymarketMarket;
+    market: UnifiedMarketRow;
+    event?: MarketUpdateEventMetrics;
+  }>,
+): Promise<void> {
+  if (!rows.length) return;
+
+  const tsMs = Date.now();
+  const q = new PQueue({ concurrency: 20 });
+  await Promise.all(
+    rows.map(({ sourceMarket, market, event }) => {
+      const { yes, no } = clobTokenPair(sourceMarket);
+      return q.add(() =>
+        publishMarketUpdate({
+          redis,
+          venue: "polymarket",
+          tokenIds: [yes, no],
+          marketId: market.id,
+          eventId: market.event_id,
+          conditionId: market.condition_id ?? null,
+          volumeTotal: market.volume_total,
+          volume24h: market.volume_24h,
+          liquidity: market.liquidity,
+          openInterest: market.open_interest,
+          lastPrice: market.last_price,
+          status: publishedMarketStatus(market),
+          acceptingOrders:
+            typeof sourceMarket.acceptingOrders === "boolean"
+              ? sourceMarket.acceptingOrders
+              : null,
+          resolvedOutcome: market.resolved_outcome ?? null,
+          resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+          eventVolumeTotal: event?.volume_total,
+          eventVolume24h: event?.volume_24h,
+          eventLiquidity: event?.liquidity,
+          eventOpenInterest: event?.open_interest,
+          tsMs,
+        }),
+      );
+    }),
+  );
+}
+
 type SyncCounters = {
   processedEvents: number;
   processedMarkets: number;
@@ -68,7 +172,42 @@ type SyncCounters = {
 type ProcessResult = {
   processedEvents: number;
   processedMarkets: number;
+  timings?: Record<string, number>;
 };
+
+function createTimings(): Record<string, number> {
+  return {};
+}
+
+async function timedPhase<T>(
+  timings: Record<string, number>,
+  phase: string,
+  run: () => Promise<T>,
+  context: Record<string, unknown> = {},
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await run();
+  } finally {
+    recordPhaseDuration(timings, phase, Date.now() - startedAt, context);
+  }
+}
+
+function recordPhaseDuration(
+  timings: Record<string, number>,
+  phase: string,
+  durationMs: number,
+  context: Record<string, unknown> = {},
+): void {
+  timings[phase] = (timings[phase] ?? 0) + durationMs;
+  if (durationMs >= env.slowPhaseWarnMs) {
+    log.warn("Polymarket slow phase", {
+      phase,
+      durationMs,
+      ...context,
+    });
+  }
+}
 
 async function hasAnyPolymarketData(): Promise<boolean> {
   const { rows } = await pool.query("select 1 from polymarket_events limit 1");
@@ -96,6 +235,7 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
 
   if (!parsedEvents.length) return { processedEvents: 0, processedMarkets: 0 };
 
+  const timings = createTimings();
   const polymarketEventRows = parsedEvents.map(mapPolymarketEventRow);
   const unifiedEventRows = parsedEvents.map(mapToUnifiedEvent);
 
@@ -114,69 +254,219 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     }),
   );
 
-  await upsertEventsConsistently(pool, {
-    unified: unifiedEventRows,
-    polymarket: polymarketEventRows,
+  const eventUpsertResult = await timedPhase(
+    timings,
+    "processEvents.eventUpsert",
+    () =>
+      upsertEventsConsistently(pool, {
+        unified: unifiedEventRows,
+        polymarket: polymarketEventRows,
+      }),
+    { events: parsedEvents.length },
+  );
+  log.info("Polymarket event upsert stats", {
+    events: parsedEvents.length,
+    unifiedInputRows: eventUpsertResult.unified.inputRows,
+    unifiedDedupedRows: eventUpsertResult.unified.dedupedRows,
+    unifiedChangedRows: eventUpsertResult.unified.changedRows,
+    unifiedSkippedRows: eventUpsertResult.unified.skippedRows,
+    unifiedUpsertedRows: eventUpsertResult.unified.upsertedRows,
+    unifiedBatches: eventUpsertResult.unified.batches,
+    polymarketInputRows: eventUpsertResult.polymarket.inputRows,
+    polymarketDedupedRows: eventUpsertResult.polymarket.dedupedRows,
+    polymarketChangedRows: eventUpsertResult.polymarket.changedRows,
+    polymarketSkippedRows: eventUpsertResult.polymarket.skippedRows,
+    polymarketUpsertedRows: eventUpsertResult.polymarket.upsertedRows,
+    polymarketBatches: eventUpsertResult.polymarket.batches,
+    queueWaitMs: eventUpsertResult.timings.queueWaitMs,
+    unifiedEventsMs: eventUpsertResult.timings.unifiedEventsMs,
+    polymarketEventsMs: eventUpsertResult.timings.polymarketEventsMs,
+    writeMs: eventUpsertResult.timings.writeMs,
+    totalMs: eventUpsertResult.timings.totalMs,
+    unifiedPayloadBytes: eventUpsertResult.payloadBytes.unified,
+    polymarketPayloadBytes: eventUpsertResult.payloadBytes.polymarket,
+    totalPayloadBytes: eventUpsertResult.payloadBytes.total,
+  });
+  recordPhaseDuration(
+    timings,
+    "processEvents.eventUpsert.queueWait",
+    eventUpsertResult.timings.queueWaitMs,
+    { events: parsedEvents.length },
+  );
+  recordPhaseDuration(
+    timings,
+    "processEvents.eventUpsert.unifiedEvents",
+    eventUpsertResult.timings.unifiedEventsMs,
+    {
+      events: parsedEvents.length,
+      inputRows: eventUpsertResult.unified.inputRows,
+      changedRows: eventUpsertResult.unified.changedRows,
+      payloadBytes: eventUpsertResult.payloadBytes.unified,
+    },
+  );
+  recordPhaseDuration(
+    timings,
+    "processEvents.eventUpsert.polymarketEvents",
+    eventUpsertResult.timings.polymarketEventsMs,
+    {
+      events: parsedEvents.length,
+      inputRows: eventUpsertResult.polymarket.inputRows,
+      changedRows: eventUpsertResult.polymarket.changedRows,
+      payloadBytes: eventUpsertResult.payloadBytes.polymarket,
+    },
+  );
+
+  const marketUpsertResult = await timedPhase(
+    timings,
+    "processEvents.marketUpsert",
+    () =>
+      upsertMarketsConsistently(
+        pool,
+        {
+          unified: unifiedMarketRows,
+          polymarket: polymarketMarketRows,
+        },
+        {
+          unifiedBatchSize: env.marketUpsertBatchSize,
+        },
+      ),
+    { markets: unifiedMarketRows.length },
+  );
+  const slowProcessEventUnifiedTimings =
+    marketUpsertResult.unified.timings &&
+    marketUpsertResult.unified.timings.totalMs >= env.slowPhaseWarnMs
+      ? marketUpsertResult.unified.timings
+      : undefined;
+  log.info("Polymarket market upsert stats", {
+    markets: unifiedMarketRows.length,
+    polymarketInputRows: marketUpsertResult.polymarket.inputRows,
+    polymarketDedupedRows: marketUpsertResult.polymarket.dedupedRows,
+    polymarketChangedRows: marketUpsertResult.polymarket.changedRows,
+    polymarketSkippedRows: marketUpsertResult.polymarket.skippedRows,
+    polymarketUpsertedRows: marketUpsertResult.polymarket.upsertedRows,
+    polymarketBatches: marketUpsertResult.polymarket.batches,
+    unifiedInputRows: marketUpsertResult.unified.inputRows,
+    unifiedDedupedRows: marketUpsertResult.unified.dedupedRows,
+    unifiedChangedRows: marketUpsertResult.unified.changedRows,
+    unifiedSkippedRows: marketUpsertResult.unified.skippedRows,
+    unifiedUpsertedRows: marketUpsertResult.unified.upsertedRows,
+    unifiedBatches: marketUpsertResult.unified.batches,
+    unifiedTokenSyncMarketCount:
+      marketUpsertResult.unified.tokenSyncMarketCount,
+    ...(slowProcessEventUnifiedTimings
+      ? { unifiedTimings: slowProcessEventUnifiedTimings }
+      : {}),
   });
 
-  await upsertMarketsConsistently(pool, {
-    unified: unifiedMarketRows,
-    polymarket: polymarketMarketRows,
-  });
   if (unifiedTokenRows.length) {
-    await upsertUnifiedTokens(pool, unifiedTokenRows);
+    const tokenUpsertResult = await timedPhase(
+      timings,
+      "processEvents.tokenUpsert",
+      () => upsertUnifiedTokens(pool, unifiedTokenRows),
+      { tokens: unifiedTokenRows.length },
+    );
+    log.info("Polymarket token upsert stats", {
+      context: "processEvents",
+      tokens: unifiedTokenRows.length,
+      inputRows: tokenUpsertResult.inputRows,
+      dedupedRows: tokenUpsertResult.dedupedRows,
+      changedRows: tokenUpsertResult.changedRows,
+      skippedRows: tokenUpsertResult.skippedRows,
+      upsertedRows: tokenUpsertResult.upsertedRows,
+      batches: tokenUpsertResult.batches,
+    });
   }
 
   try {
-    const eventTitleById = new Map(
-      unifiedEventRows.map((row) => [row.id, row.title]),
+    const eventById = new Map(unifiedEventRows.map((row) => [row.id, row]));
+    const updateRows: Array<{
+      sourceMarket: TPolymarketMarket;
+      market: UnifiedMarketRow;
+      event?: UnifiedEventRow;
+    }> = [];
+    let marketIndex = 0;
+    for (const event of parsedEvents) {
+      for (const market of event.markets) {
+        const unifiedMarket = unifiedMarketRows[marketIndex];
+        if (unifiedMarket) {
+          updateRows.push({
+            sourceMarket: market,
+            market: unifiedMarket,
+            event: eventById.get(unifiedMarket.event_id),
+          });
+        }
+        marketIndex += 1;
+      }
+    }
+    await timedPhase(
+      timings,
+      "processEvents.publishMarketUpdates",
+      () => publishPolymarketMarketUpdates(updateRows),
+      { markets: updateRows.length },
     );
-    const marketsByEvent = new Map<string, typeof unifiedMarketRows>();
-    for (const row of unifiedMarketRows) {
-      const list = marketsByEvent.get(row.event_id) ?? [];
-      list.push(row);
-      marketsByEvent.set(row.event_id, list);
-    }
-    const topMarketsByEvent = new Map<string, string>();
-    for (const row of unifiedEventRows) {
-      const markets = marketsByEvent.get(row.id) ?? [];
-      const topMarkets = buildTopMarketsText(markets, row.title);
-      if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
-    }
-    const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
-      entity_type: "event",
-      event_id: row.id,
-      venue: row.venue,
-      status: row.status,
-      event_title: row.title,
-      top_markets: topMarketsByEvent.get(row.id),
-      description: row.description,
-      category: row.category,
-      updated_at: row.updated_at ?? row.created_at,
-      source: "polymarket",
-    }));
-    const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
-      entity_type: "market",
-      market_id: row.id,
-      venue: row.venue,
-      status: row.status,
-      market_title: row.title,
-      event_title: eventTitleById.get(row.event_id),
-      description: row.description,
-      category: row.category,
-      outcomes: row.outcomes,
-      market_type: row.market_type,
-      updated_at: row.updated_at ?? row.created_at,
-      source: "polymarket",
-    }));
-    await enqueueEmbedItems(redis, [...embedEvents, ...embedMarkets]);
+  } catch (error) {
+    log.warn("Polymarket market update publish failed", { error });
+  }
+
+  try {
+    await timedPhase(
+      timings,
+      "processEvents.embedEnqueue",
+      async () => {
+        const eventTitleById = new Map(
+          unifiedEventRows.map((row) => [row.id, row.title]),
+        );
+        const marketsByEvent = new Map<string, typeof unifiedMarketRows>();
+        for (const row of unifiedMarketRows) {
+          const list = marketsByEvent.get(row.event_id) ?? [];
+          list.push(row);
+          marketsByEvent.set(row.event_id, list);
+        }
+        const topMarketsByEvent = new Map<string, string>();
+        for (const row of unifiedEventRows) {
+          const markets = marketsByEvent.get(row.id) ?? [];
+          const topMarkets = buildTopMarketsText(markets, row.title);
+          if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
+        }
+        const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
+          entity_type: "event",
+          event_id: row.id,
+          venue: row.venue,
+          status: row.status,
+          event_title: row.title,
+          top_markets: topMarketsByEvent.get(row.id),
+          description: row.description,
+          category: row.category,
+          updated_at: row.updated_at ?? row.created_at,
+          source: "polymarket",
+        }));
+        const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+          entity_type: "market",
+          market_id: row.id,
+          venue: row.venue,
+          status: row.status,
+          market_title: row.title,
+          event_title: eventTitleById.get(row.event_id),
+          description: row.description,
+          category: row.category,
+          outcomes: row.outcomes,
+          market_type: row.market_type,
+          updated_at: row.updated_at ?? row.created_at,
+          source: "polymarket",
+        }));
+        await enqueueEmbedItems(redis, [...embedEvents, ...embedMarkets]);
+      },
+      { events: unifiedEventRows.length, markets: unifiedMarketRows.length },
+    );
   } catch (err) {
+    if (isPgSetupIssue(err)) throw err;
     log.warn("Polymarket embed enqueue failed", err);
   }
 
   return {
     processedEvents: parsedEvents.length,
     processedMarkets: polymarketMarketRows.length,
+    timings,
   };
 }
 
@@ -196,12 +486,14 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
   const cursorOffset = await getPolymarketEventsOffset();
   const overlap = env.overlapPages * env.pageSize;
   const startOffset = Math.max(0, cursorOffset - overlap);
+  const maxOffset = env.gammaMaxEventsOffset;
 
   log.info("Polymarket catch-up…", {
     cursorOffset,
     startOffset,
     pageSize: env.pageSize,
     overlapPages: env.overlapPages,
+    maxOffset,
   });
 
   const totals: SyncCounters = {
@@ -210,10 +502,22 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
     pages: 0,
   };
 
+  if (startOffset > maxOffset) {
+    log.warn("Polymarket catch-up skipped: cursor exceeds Gamma offset cap", {
+      cursorOffset,
+      startOffset,
+      maxOffset,
+      reason:
+        "Gamma /events rejects offsets above this cap; hot refresh and websocket sync still cover recent/active changes.",
+    });
+    return totals;
+  }
+
   for await (const page of iterateEventPages({
     label: "catch-up",
     startOffset,
     pageSize: env.pageSize,
+    maxOffset,
     order: "id",
     ascending: true,
     active: true,
@@ -320,12 +624,20 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   };
 }
 
-export async function snapshotBooks(tokenIds: string[]): Promise<void> {
-  if (tokenIds.length === 0) return;
+export async function snapshotBooks(tokenIds: string[]): Promise<{
+  requested: number;
+  failedTokenIds: string[];
+  timings: Record<string, number>;
+}> {
+  if (tokenIds.length === 0) {
+    return { requested: 0, failedTokenIds: [], timings: {} };
+  }
   await ensureRedis();
   await pool.query("select 1");
 
   const snapIds = tokenIds.slice(0, env.topBookSnapshot);
+  const failedTokenIds: string[] = [];
+  const timings = createTimings();
   log.info(`Snapshotting ${snapIds.length} top books`);
 
   const batches = chunkArray(snapIds, 20);
@@ -334,31 +646,722 @@ export async function snapshotBooks(tokenIds: string[]): Promise<void> {
     batches.map((group) =>
       q.add(async () => {
         try {
-          const books = await postBooksOnce(group);
-          for (const b of books) {
-            const bb = bestBid(b.bids);
-            const ba = bestAsk(b.asks);
-            const ts = b.timestamp ? new Date(Number(b.timestamp)) : new Date();
-            await writeUnifiedBookTop(pool, b.asset_id, bb, ba, ts);
-            await redis.set(`book:${b.asset_id}`, JSON.stringify(b), { EX: 5 });
-            await redis.set(
-              `top:${b.asset_id}`,
-              JSON.stringify({
-                token_id: b.asset_id,
-                best_bid: bb,
-                best_ask: ba,
-                ts: ts.getTime(),
-              }),
-              { EX: 60 },
-            );
-          }
+          const books = await timedPhase(
+            timings,
+            "snapshotBooks.fetchBooks",
+            () => postBooksOnce(group),
+            { tokens: group.length },
+          );
+          await timedPhase(
+            timings,
+            "snapshotBooks.persistBooks",
+            async () => {
+              const bookTops = books.map((b) => {
+                const bb = bestBid(b.bids);
+                const ba = bestAsk(b.asks);
+                const ts = b.timestamp
+                  ? new Date(Number(b.timestamp))
+                  : new Date();
+                return { book: b, bestBid: bb, bestAsk: ba, ts };
+              });
+
+              await writeUnifiedBookTops(
+                pool,
+                bookTops.map((entry) => ({
+                  tokenId: entry.book.asset_id,
+                  bestBid: entry.bestBid,
+                  bestAsk: entry.bestAsk,
+                  ts: entry.ts,
+                })),
+              );
+
+              await Promise.all(
+                bookTops.map(async (entry) => {
+                  const tickJson = JSON.stringify({
+                    token_id: entry.book.asset_id,
+                    best_bid: entry.bestBid,
+                    best_ask: entry.bestAsk,
+                    ts: entry.ts.getTime(),
+                  });
+                  await Promise.all([
+                    redis.set(
+                      `book:${entry.book.asset_id}`,
+                      JSON.stringify(entry.book),
+                      { EX: 5 },
+                    ),
+                    redis.set(`top:${entry.book.asset_id}`, tickJson, {
+                      EX: 60,
+                    }),
+                    redis.publish(`prices:${entry.book.asset_id}`, tickJson),
+                  ]);
+                }),
+              );
+            },
+            { tokens: books.length },
+          );
         } catch (e) {
           if (isPgSetupIssue(e)) throw e;
+          failedTokenIds.push(...group);
           log.warn("book snapshot failed batch", group[0], String(e));
         }
       }),
     ),
   );
+  return { requested: snapIds.length, failedTokenIds, timings };
+}
+
+async function fetchEventIdsForTokenIds(
+  tokenIds: string[],
+  limit?: number,
+): Promise<string[]> {
+  if (!tokenIds.length) return [];
+
+  const params: Array<string[] | number> = [tokenIds];
+  const limitSql =
+    limit != null
+      ? (() => {
+          params.push(Math.max(1, Math.trunc(limit)));
+          return `limit $${params.length}`;
+        })()
+      : "";
+
+  const { rows } = await pool.query<{ venue_event_id: string | null }>(
+    `
+      with requested_tokens as (
+        select token_id
+        from unnest($1::text[]) as t(token_id)
+      ),
+      token_markets as (
+        select distinct m.event_id
+        from requested_tokens rt
+        join unified_market_tokens mt
+          on mt.token_id = rt.token_id
+         and mt.venue = 'polymarket'
+        join unified_markets m
+          on m.id = mt.market_id
+         and m.venue = 'polymarket'
+        union
+        select distinct m.event_id
+        from requested_tokens rt
+        join unified_tokens t
+          on t.token_id = rt.token_id
+         and t.venue = 'polymarket'
+        join unified_markets m
+          on m.id = t.market_id
+         and m.venue = 'polymarket'
+      )
+      select distinct e.venue_event_id
+      from token_markets tm
+      join unified_events e
+        on e.id = tm.event_id
+      where e.venue = 'polymarket'
+        and e.venue_event_id is not null
+      order by e.venue_event_id
+      ${limitSql}
+    `,
+    params,
+  );
+
+  return rows
+    .map((row) => row.venue_event_id)
+    .filter((eventId): eventId is string => Boolean(eventId));
+}
+
+async function fetchMarketRefsForTokenIds(tokenIds: string[]): Promise<
+  Array<{
+    marketId: string;
+    eventId: string;
+  }>
+> {
+  if (!tokenIds.length) return [];
+
+  const { rows } = await pool.query<{
+    venue_market_id: string | null;
+    venue_event_id: string | null;
+  }>(
+    `
+      with requested_tokens as (
+        select token_id, ord::int as ord
+        from unnest($1::text[]) with ordinality as t(token_id, ord)
+      ),
+      token_markets as (
+        select rt.ord, m.venue_market_id, e.venue_event_id
+        from requested_tokens rt
+        join unified_market_tokens mt
+          on mt.token_id = rt.token_id
+         and mt.venue = 'polymarket'
+        join unified_markets m
+          on m.id = mt.market_id
+         and m.venue = 'polymarket'
+        join unified_events e
+          on e.id = m.event_id
+         and e.venue = 'polymarket'
+        union
+        select rt.ord, m.venue_market_id, e.venue_event_id
+        from requested_tokens rt
+        join unified_tokens t
+          on t.token_id = rt.token_id
+         and t.venue = 'polymarket'
+        join unified_markets m
+          on m.id = t.market_id
+         and m.venue = 'polymarket'
+        join unified_events e
+          on e.id = m.event_id
+         and e.venue = 'polymarket'
+      )
+      select distinct on (venue_market_id)
+        venue_market_id,
+        venue_event_id
+      from token_markets
+      where venue_market_id is not null
+        and venue_event_id is not null
+      order by venue_market_id, ord
+    `,
+    [tokenIds],
+  );
+
+  return rows
+    .map((row) =>
+      row.venue_market_id && row.venue_event_id
+        ? {
+            marketId: row.venue_market_id,
+            eventId: row.venue_event_id,
+          }
+        : null,
+    )
+    .filter((row): row is { marketId: string; eventId: string } => row != null);
+}
+
+type PolymarketMarketRef = {
+  marketId: string;
+  eventId: string;
+};
+
+type RefreshedPolymarketMarket = {
+  eventId: string;
+  market: TPolymarketMarket;
+  event?: TPolymarketEvent;
+};
+
+type RefreshMarketRefsResult = {
+  requestedMarkets: number;
+  refreshed: number;
+  eventsFetched: number;
+  fallbackMarketFetches: number;
+  timings: Record<string, number>;
+};
+
+function dedupeMarketRefs(refs: PolymarketMarketRef[]): PolymarketMarketRef[] {
+  const out: PolymarketMarketRef[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    if (seen.has(ref.marketId)) continue;
+    seen.add(ref.marketId);
+    out.push(ref);
+  }
+  return out;
+}
+
+function collectMarketsFromEvents(
+  events: TEvent[],
+  refsByMarketId: Map<string, PolymarketMarketRef>,
+): Map<string, RefreshedPolymarketMarket> {
+  const rowsByMarketId = new Map<string, RefreshedPolymarketMarket>();
+
+  for (const event of events) {
+    const parsedEvent = (() => {
+      try {
+        return PolymarketEvent.parse(event) as TPolymarketEvent;
+      } catch (error) {
+        log.warn("Failed to parse Polymarket refreshed event", {
+          eventId: event.id,
+          error,
+        });
+        return undefined;
+      }
+    })();
+
+    for (const rawMarket of event.markets) {
+      const marketId = String(rawMarket.id);
+      const ref = refsByMarketId.get(marketId);
+      if (!ref || rowsByMarketId.has(marketId)) continue;
+      try {
+        rowsByMarketId.set(marketId, {
+          eventId: ref.eventId,
+          market: PolymarketMarket.parse(rawMarket) as TPolymarketMarket,
+          event: parsedEvent,
+        });
+      } catch (error) {
+        log.warn("Failed to parse Polymarket refreshed market from event", {
+          eventId: event.id,
+          marketId,
+          error,
+        });
+      }
+    }
+  }
+
+  return rowsByMarketId;
+}
+
+async function fetchFallbackMarketRows(
+  refs: PolymarketMarketRef[],
+): Promise<RefreshedPolymarketMarket[]> {
+  if (!refs.length) return [];
+
+  const q = new PQueue({ concurrency: env.priceRefreshMarketConcurrency });
+  const rows = await Promise.all(
+    refs.map((ref) =>
+      q.add(async () => {
+        const market = await fetchMarketById(ref.marketId);
+        if (!market) return null;
+        try {
+          return {
+            eventId: ref.eventId,
+            market: PolymarketMarket.parse(market) as TPolymarketMarket,
+          };
+        } catch (error) {
+          log.warn("Failed to parse Polymarket refreshed market", {
+            marketId: ref.marketId,
+            error,
+          });
+          return null;
+        }
+      }),
+    ),
+  );
+
+  return rows.filter((row): row is RefreshedPolymarketMarket => row != null);
+}
+
+async function loadExistingPolymarketMarketDurations(
+  marketIds: string[],
+): Promise<Map<string, number | null>> {
+  if (!marketIds.length) return new Map();
+  const result = await pool.query<{
+    venue_market_id: string;
+    duration_minutes: number | null;
+  }>(
+    `
+      select venue_market_id, duration_minutes
+      from unified_markets
+      where venue = 'polymarket'
+        and venue_market_id = any($1::text[])
+    `,
+    [marketIds],
+  );
+  return new Map(
+    result.rows.map((row) => [row.venue_market_id, row.duration_minutes]),
+  );
+}
+
+async function refreshMarketRefs(
+  refs: PolymarketMarketRef[],
+): Promise<RefreshMarketRefsResult> {
+  const dedupedRefs = dedupeMarketRefs(refs);
+  const resultBase = {
+    requestedMarkets: dedupedRefs.length,
+    eventsFetched: 0,
+    fallbackMarketFetches: 0,
+  };
+  if (!dedupedRefs.length) {
+    return { ...resultBase, refreshed: 0, timings: {} };
+  }
+
+  const timings = createTimings();
+  const refsByMarketId = new Map(dedupedRefs.map((ref) => [ref.marketId, ref]));
+  const eventIds = Array.from(new Set(dedupedRefs.map((ref) => ref.eventId)));
+
+  const eventRefresh = await timedPhase(
+    timings,
+    "refreshMarketRefs.fetchEvents",
+    () => fetchEventsByIdsDetailed(eventIds),
+    { eventIds: eventIds.length, marketRefs: dedupedRefs.length },
+  );
+  const events = eventRefresh.events;
+  if (eventRefresh.failedIds.length) {
+    log.warn("Polymarket event batch market refresh partially failed", {
+      eventIds: eventIds.length,
+      failedEventIds: eventRefresh.failedIds.length,
+      marketRefs: dedupedRefs.length,
+    });
+  }
+
+  const rowsByMarketId = collectMarketsFromEvents(events, refsByMarketId);
+  const missingRefs = dedupedRefs.filter(
+    (ref) => !rowsByMarketId.has(ref.marketId),
+  );
+  const fallbackRows = missingRefs.length
+    ? await timedPhase(
+        timings,
+        "refreshMarketRefs.fallbackMarkets",
+        () => fetchFallbackMarketRows(missingRefs),
+        { marketRefs: missingRefs.length },
+      )
+    : [];
+  for (const row of fallbackRows) {
+    rowsByMarketId.set(String(row.market.id), row);
+  }
+
+  const parsed = Array.from(rowsByMarketId.values());
+  if (!parsed.length) {
+    return {
+      ...resultBase,
+      eventsFetched: events.length,
+      fallbackMarketFetches: missingRefs.length,
+      refreshed: 0,
+      timings,
+    };
+  }
+
+  const polymarketMarketRows = parsed.map(({ eventId, market }) =>
+    mapPolymarketMarketRow(eventId, market),
+  );
+  const fallbackDurationMarketIds = parsed
+    .filter((row) => !row.event)
+    .map((row) => String(row.market.id));
+  const existingDurations = fallbackDurationMarketIds.length
+    ? await timedPhase(
+        timings,
+        "refreshMarketRefs.loadExistingDurations",
+        () => loadExistingPolymarketMarketDurations(fallbackDurationMarketIds),
+        { markets: fallbackDurationMarketIds.length },
+      )
+    : new Map<string, number | null>();
+  const unifiedMarketRows = parsed.map(({ eventId, market, event }) =>
+    mapToUnifiedMarket(market, eventId, event, {
+      existingDurationMinutes: event
+        ? undefined
+        : existingDurations.get(String(market.id)),
+    }),
+  );
+  const eventById = new Map<string, MarketUpdateEventMetrics>(
+    events.map(
+      (event) =>
+        [
+          `polymarket:${event.id}`,
+          {
+            volume_total: parsePrice(event.volume) ?? undefined,
+            volume_24h: parsePrice(event.volume24hr) ?? undefined,
+            liquidity: parsePrice(event.liquidity) ?? undefined,
+          },
+        ] as const,
+    ),
+  );
+  const unifiedTokenRows = parsed.flatMap(({ market }) => {
+    const [yes, no] = Array.isArray(market.clobTokenIds)
+      ? market.clobTokenIds
+      : [];
+    return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
+  });
+
+  const marketUpsertResult = await timedPhase(
+    timings,
+    "refreshMarketRefs.marketUpsert",
+    () =>
+      upsertMarketsConsistently(
+        pool,
+        {
+          unified: unifiedMarketRows,
+          polymarket: polymarketMarketRows,
+        },
+        {
+          unifiedBatchSize: env.marketUpsertBatchSize,
+        },
+      ),
+    { markets: unifiedMarketRows.length },
+  );
+  const slowRefreshMarketRefsUnifiedTimings =
+    marketUpsertResult.unified.timings &&
+    marketUpsertResult.unified.timings.totalMs >= env.slowPhaseWarnMs
+      ? marketUpsertResult.unified.timings
+      : undefined;
+  log.info("Polymarket market upsert stats", {
+    context: "refreshMarketRefs",
+    markets: unifiedMarketRows.length,
+    polymarketInputRows: marketUpsertResult.polymarket.inputRows,
+    polymarketDedupedRows: marketUpsertResult.polymarket.dedupedRows,
+    polymarketChangedRows: marketUpsertResult.polymarket.changedRows,
+    polymarketSkippedRows: marketUpsertResult.polymarket.skippedRows,
+    polymarketUpsertedRows: marketUpsertResult.polymarket.upsertedRows,
+    polymarketBatches: marketUpsertResult.polymarket.batches,
+    unifiedInputRows: marketUpsertResult.unified.inputRows,
+    unifiedDedupedRows: marketUpsertResult.unified.dedupedRows,
+    unifiedChangedRows: marketUpsertResult.unified.changedRows,
+    unifiedSkippedRows: marketUpsertResult.unified.skippedRows,
+    unifiedUpsertedRows: marketUpsertResult.unified.upsertedRows,
+    unifiedBatches: marketUpsertResult.unified.batches,
+    unifiedTokenSyncMarketCount:
+      marketUpsertResult.unified.tokenSyncMarketCount,
+    ...(slowRefreshMarketRefsUnifiedTimings
+      ? { unifiedTimings: slowRefreshMarketRefsUnifiedTimings }
+      : {}),
+  });
+
+  if (unifiedTokenRows.length) {
+    const tokenUpsertResult = await timedPhase(
+      timings,
+      "refreshMarketRefs.tokenUpsert",
+      () => upsertUnifiedTokens(pool, unifiedTokenRows),
+      { tokens: unifiedTokenRows.length },
+    );
+    log.info("Polymarket token upsert stats", {
+      context: "refreshMarketRefs",
+      tokens: unifiedTokenRows.length,
+      inputRows: tokenUpsertResult.inputRows,
+      dedupedRows: tokenUpsertResult.dedupedRows,
+      changedRows: tokenUpsertResult.changedRows,
+      skippedRows: tokenUpsertResult.skippedRows,
+      upsertedRows: tokenUpsertResult.upsertedRows,
+      batches: tokenUpsertResult.batches,
+    });
+  }
+
+  const tsMs = Date.now();
+  const stateQueue = new PQueue({ concurrency: 20 });
+  await timedPhase(
+    timings,
+    "refreshMarketRefs.publishState",
+    () =>
+      Promise.all(
+        parsed.flatMap(({ market }, index) => {
+          const unifiedMarket = unifiedMarketRows[index];
+          const { yes, no } = clobTokenPair(market);
+          const tokenIds = [yes, no].filter((tokenId): tokenId is string =>
+            Boolean(tokenId),
+          );
+          return tokenIds.map((tokenId) =>
+            stateQueue.add(() =>
+              publishMarketState({
+                redis,
+                venue: "polymarket",
+                tokenId,
+                market: market.conditionId ?? null,
+                conditionId: market.conditionId ?? null,
+                status: publishedMarketStatus(unifiedMarket),
+                acceptingOrders:
+                  typeof market.acceptingOrders === "boolean"
+                    ? market.acceptingOrders
+                    : null,
+                resolvedOutcome: unifiedMarket?.resolved_outcome ?? null,
+                tsMs,
+              }),
+            ),
+          );
+        }),
+      ),
+    { markets: parsed.length },
+  );
+
+  try {
+    await timedPhase(
+      timings,
+      "refreshMarketRefs.publishMarketUpdates",
+      () =>
+        publishPolymarketMarketUpdates(
+          parsed.flatMap(({ market }, index) => {
+            const unifiedMarket = unifiedMarketRows[index];
+            return unifiedMarket
+              ? [
+                  {
+                    sourceMarket: market,
+                    market: unifiedMarket,
+                    event: eventById.get(unifiedMarket.event_id),
+                  },
+                ]
+              : [];
+          }),
+        ),
+      { markets: parsed.length },
+    );
+  } catch (error) {
+    log.warn("Polymarket market update publish failed", {
+      context: "refreshMarketRefs",
+      error,
+    });
+  }
+
+  return {
+    ...resultBase,
+    eventsFetched: events.length,
+    fallbackMarketFetches: missingRefs.length,
+    refreshed: parsed.length,
+    timings,
+  };
+}
+
+async function fetchTradableTokenIdsForSnapshot(
+  tokenIds: string[],
+): Promise<string[]> {
+  if (!tokenIds.length) return [];
+
+  const { rows } = await pool.query<{ token_id: string }>(
+    `
+      with requested_tokens as (
+        select token_id, ord::int as ord
+        from unnest($1::text[]) with ordinality as t(token_id, ord)
+      ),
+      token_markets as (
+        select rt.token_id, rt.ord, m.id as market_id, m.venue_market_id
+        from requested_tokens rt
+        join unified_market_tokens mt
+          on mt.token_id = rt.token_id
+         and mt.venue = 'polymarket'
+        join unified_markets m
+          on m.id = mt.market_id
+         and m.venue = 'polymarket'
+        where m.status = 'ACTIVE'
+        union
+        select rt.token_id, rt.ord, m.id as market_id, m.venue_market_id
+        from requested_tokens rt
+        join unified_tokens t
+          on t.token_id = rt.token_id
+         and t.venue = 'polymarket'
+        join unified_markets m
+          on m.id = t.market_id
+         and m.venue = 'polymarket'
+        where m.status = 'ACTIVE'
+      )
+      select distinct on (tm.token_id) tm.token_id
+      from token_markets tm
+      left join polymarket_markets pm
+        on pm.id = tm.venue_market_id
+      where coalesce(pm.closed, false) = false
+        and coalesce(pm.archived, false) = false
+        and coalesce(pm.enable_order_book, true) = true
+        and coalesce(pm.accepting_orders, true) = true
+      order by tm.token_id, tm.ord
+    `,
+    [tokenIds],
+  );
+
+  const requestedOrder = new Map<string, number>();
+  tokenIds.forEach((tokenId, index) => {
+    if (!requestedOrder.has(tokenId)) requestedOrder.set(tokenId, index);
+  });
+
+  return rows
+    .map((row) => row.token_id)
+    .sort(
+      (a, b) =>
+        (requestedOrder.get(a) ?? Number.MAX_SAFE_INTEGER) -
+        (requestedOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
+    );
+}
+
+export async function processPriceRefreshQueue(
+  options: {
+    side?: PriceRefreshQueueClaimSide;
+    logSuccess?: boolean;
+  } = {},
+): Promise<{
+  claimed: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+  side: PriceRefreshQueueClaimSide;
+}> {
+  const side = options.side ?? "oldest";
+  if (!env.priceRefreshQueueEnabled) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
+  }
+
+  await ensureRedis();
+  const redisClient = redis as unknown as PriceRefreshRedis;
+  const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
+    venue: "polymarket",
+    limit: env.priceRefreshQueueBatch,
+    side,
+  });
+  if (!tokenIds.length) {
+    return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
+  }
+
+  const startedAt = Date.now();
+  let refreshed = 0;
+  let failed = 0;
+  let marketRefreshed = 0;
+  let bookRefreshed = 0;
+  let skippedBookTokens = 0;
+  let marketRefs = 0;
+  let eventsFetched = 0;
+  let fallbackMarketFetches = 0;
+  let snapshotTokens = 0;
+  let refreshTimings: Record<string, number> = {};
+  let bookTimings: Record<string, number> = {};
+  const timings = createTimings();
+  try {
+    const refs = await timedPhase(
+      timings,
+      "priceRefresh.fetchMarketRefs",
+      () => fetchMarketRefsForTokenIds(tokenIds),
+      { tokens: tokenIds.length },
+    );
+    const marketResult = await refreshMarketRefs(refs);
+    marketRefs = marketResult.requestedMarkets;
+    marketRefreshed = marketResult.refreshed;
+    eventsFetched = marketResult.eventsFetched;
+    fallbackMarketFetches = marketResult.fallbackMarketFetches;
+    refreshTimings = marketResult.timings;
+
+    const snapshotTokenIds = await timedPhase(
+      timings,
+      "priceRefresh.fetchTradableSnapshotTokens",
+      () => fetchTradableTokenIdsForSnapshot(tokenIds),
+      { tokens: tokenIds.length },
+    );
+    snapshotTokens = snapshotTokenIds.length;
+    skippedBookTokens = Math.max(0, tokenIds.length - snapshotTokenIds.length);
+    if (snapshotTokenIds.length) {
+      const result = await snapshotBooks(snapshotTokenIds);
+      bookTimings = result.timings;
+      bookRefreshed = result.requested - result.failedTokenIds.length;
+      failed = result.failedTokenIds.length;
+      if (result.failedTokenIds.length) {
+        await requeuePriceRefreshTokens(redisClient, {
+          venue: "polymarket",
+          tokenIds: result.failedTokenIds,
+          delayMs: env.priceRefreshRetryDelayMs,
+          maxQueueSize: env.priceRefreshQueueMax,
+        });
+      }
+    }
+    refreshed = marketRefreshed + bookRefreshed;
+  } catch (error) {
+    failed = tokenIds.length;
+    await requeuePriceRefreshTokens(redisClient, {
+      venue: "polymarket",
+      tokenIds,
+      delayMs: env.priceRefreshRetryDelayMs,
+      maxQueueSize: env.priceRefreshQueueMax,
+    });
+    log.warn("Polymarket price refresh queue failed", { error });
+  }
+
+  const backlog = await getPriceRefreshQueueBacklog(redisClient, "polymarket");
+  if (options.logSuccess !== false) {
+    log.info("Polymarket price refresh queue processed", {
+      side,
+      claimed: tokenIds.length,
+      refreshed,
+      marketRefs,
+      marketRefreshed,
+      eventsFetched,
+      fallbackMarketFetches,
+      snapshotTokens,
+      bookRefreshed,
+      failed,
+      skippedBookTokens,
+      backlog,
+      durationMs: Date.now() - startedAt,
+      timings: {
+        ...timings,
+        ...refreshTimings,
+        ...bookTimings,
+      },
+    });
+  }
+  return { claimed: tokenIds.length, refreshed, failed, backlog, side };
 }
 
 function parseJsonStringArray(raw: unknown): string[] {
@@ -447,18 +1450,48 @@ async function fetchHotMarketsByTokenIds(
     token_ids: string[] | null;
   }>(
     `
-      with matched_markets as (
+      with requested_tokens as (
+        select token_id
+        from unnest($1::text[]) as t(token_id)
+      ),
+      matched_markets as (
         select distinct mt.market_id
-        from unified_market_tokens mt
-        where mt.venue = 'polymarket'
-          and mt.token_id = any($1::text[])
+        from requested_tokens rt
+        join unified_market_tokens mt
+          on mt.token_id = rt.token_id
+         and mt.venue = 'polymarket'
+        union
+        select distinct t.market_id
+        from requested_tokens rt
+        join unified_tokens t
+          on t.token_id = rt.token_id
+         and t.venue = 'polymarket'
+      ),
+      market_tokens as (
+        select
+          mm.market_id,
+          mt.token_id,
+          mt.outcome_side as side
+        from matched_markets mm
+        join unified_market_tokens mt
+          on mt.market_id = mm.market_id
+         and mt.venue = 'polymarket'
+        union
+        select
+          mm.market_id,
+          t.token_id,
+          t.side
+        from matched_markets mm
+        join unified_tokens t
+          on t.market_id = mm.market_id
+         and t.venue = 'polymarket'
       )
       select
         mm.market_id,
         array_agg(
           mt.token_id
           order by
-            case mt.outcome_side
+            case mt.side
               when 'YES' then 0
               when 'NO' then 1
               else 2
@@ -466,9 +1499,8 @@ async function fetchHotMarketsByTokenIds(
             mt.token_id
         ) as token_ids
       from matched_markets mm
-      join unified_market_tokens mt
+      join market_tokens mt
         on mt.market_id = mm.market_id
-       and mt.venue = 'polymarket'
       group by mm.market_id
     `,
     [tokenIds],
@@ -528,73 +1560,27 @@ async function fetchTopTokens(
 ): Promise<string[]> {
   if (limitTokens <= 0) return [];
   const limitMarkets = Math.max(100, limitTokens * 2);
-  const shortlistFactors = [5, 15, 40];
-  for (const factor of shortlistFactors) {
-    const shortlistMarkets = Math.max(limitMarkets * factor, 1_000);
-    const out = await fetchTopTokensFromShortlist(
-      shortlistMarkets,
-      limitTokens,
+  const out: string[] = [];
+
+  const sourceScanFactors = [1, 5, 15, 40];
+  for (const factor of sourceScanFactors) {
+    const scanMarkets = Math.max(limitMarkets * factor, 1_000);
+    const sourceRows = await fetchTopTokensFromSourceScan(
+      scanMarkets,
+      limitTokens - out.length,
       exclude,
     );
+    out.push(...sourceRows);
     if (out.length >= limitTokens) return out;
   }
-
-  const fallback = await fetchTopTokensFromSourceScan(
-    limitMarkets,
-    limitTokens,
-    exclude,
-  );
-  if (fallback.length < limitTokens) {
-    log.warn(
-      "Polymarket top token shortlist underfilled; broad scan fallback still short",
-      {
-        limitTokens,
-        returned: fallback.length,
-        limitMarkets,
-      },
-    );
+  if (out.length < limitTokens) {
+    log.warn("Polymarket top token source scan underfilled", {
+      limitTokens,
+      returned: out.length,
+      limitMarkets,
+    });
   }
-  return fallback;
-}
-
-async function fetchTopTokensFromShortlist(
-  shortlistMarkets: number,
-  limitTokens: number,
-  exclude: Set<string>,
-): Promise<string[]> {
-  const { rows } = await pool.query<{ clob_token_ids: unknown }>(
-    `
-      with candidate_markets as (
-        select venue_market_id
-        from unified_markets
-        where venue = 'polymarket'
-          and status = 'ACTIVE'
-          and venue_market_id is not null
-          and clob_token_ids is not null
-          and clob_token_ids <> '[]'
-        order by volume_24h desc nulls last, liquidity desc nulls last, venue_market_id
-        limit $1
-      )
-      select pm.clob_token_ids
-      from candidate_markets c
-      join polymarket_markets pm
-        on pm.id = c.venue_market_id
-      where pm.closed = false
-        and pm.archived = false
-        and pm.enable_order_book = true
-        and pm.accepting_orders = true
-        and pm.clob_token_ids is not null
-        and pm.clob_token_ids <> '[]'
-      order by
-        coalesce(pm.volume24hr_clob, 0) desc,
-        coalesce(pm.liquidity_clob, 0) desc,
-        coalesce(pm.volume24hr, 0) desc,
-        coalesce(pm.liquidity, 0) desc
-    `,
-    [shortlistMarkets],
-  );
-
-  return collectTopTokensFromRows(rows, limitTokens, exclude);
+  return out;
 }
 
 async function fetchTopTokensFromSourceScan(
@@ -616,7 +1602,8 @@ async function fetchTopTokensFromSourceScan(
         coalesce(volume24hr_clob, 0) desc,
         coalesce(liquidity_clob, 0) desc,
         coalesce(volume24hr, 0) desc,
-        coalesce(liquidity, 0) desc
+        coalesce(liquidity, 0) desc,
+        id
       limit $1
     `,
     [limitMarkets],
@@ -643,6 +1630,101 @@ function collectTopTokensFromRows(
   return out;
 }
 
+export function appendUniqueWsTokens(
+  target: string[],
+  tokens: ReadonlyArray<string>,
+  limit: number,
+): void {
+  const seen = new Set(target);
+  for (const tokenId of tokens) {
+    if (target.length >= limit) break;
+    if (!tokenId || seen.has(tokenId)) continue;
+    seen.add(tokenId);
+    target.push(tokenId);
+    if (target.length >= limit) break;
+  }
+}
+
+export function appendUniqueWsTokenPairs(
+  target: string[],
+  tokenPairs: ReadonlyArray<ReadonlyArray<string>>,
+  limit: number,
+): void {
+  const seen = new Set(target);
+  for (const pair of tokenPairs) {
+    const missing: string[] = [];
+    const pairSeen = new Set<string>();
+    for (const tokenId of pair) {
+      if (!tokenId || pairSeen.has(tokenId)) continue;
+      pairSeen.add(tokenId);
+      if (!seen.has(tokenId)) missing.push(tokenId);
+    }
+    if (pairSeen.size < 2) continue;
+    if (target.length + missing.length > limit) continue;
+    for (const tokenId of missing) {
+      seen.add(tokenId);
+      target.push(tokenId);
+    }
+    if (target.length >= limit) break;
+  }
+}
+
+async function fetchDurationReserveTokens(): Promise<string[]> {
+  if (!env.durationWsReserveEnabled || env.durationWsReserveMax <= 0) {
+    return [];
+  }
+
+  const limit = Math.min(env.wsSubset, env.durationWsReserveMax);
+  if (limit <= 0) return [];
+
+  const { rows } = await pool.query<{ token_ids: string[] | null }>(
+    `
+      select
+        array_agg(
+          mt.token_id
+          order by
+            case mt.outcome_side
+              when 'YES' then 0
+              when 'NO' then 1
+              else 2
+            end,
+            mt.token_id
+        ) as token_ids
+      from unified_markets m
+      join unified_market_tokens mt
+        on mt.market_id = m.id
+       and mt.venue = 'polymarket'
+      where m.venue = 'polymarket'
+        and m.status = 'ACTIVE'
+        and m.duration_minutes = any($1::int[])
+        and m.close_time is not null
+        and m.close_time > now()
+        and m.close_time <= now()
+          + make_interval(mins => m.duration_minutes)
+          + ($2::int * interval '1 second')
+        and (m.expiration_time is null or m.expiration_time > now())
+        and mt.token_id is not null
+        and mt.outcome_side in ('YES', 'NO')
+      group by m.id, m.close_time, m.duration_minutes
+      having count(distinct mt.outcome_side) = 2
+      order by
+        m.close_time asc,
+        m.duration_minutes asc,
+        m.id asc
+      limit $3
+    `,
+    [env.durationWsReserveDurations, env.durationWsReservePrewarmSec, limit],
+  );
+
+  const out: string[] = [];
+  appendUniqueWsTokenPairs(
+    out,
+    rows.map((row) => row.token_ids ?? []),
+    limit,
+  );
+  return out;
+}
+
 export async function selectHotTokenIds(): Promise<string[]> {
   const probeLimit = clampHotProbeLimit(env.wsSubset * 10);
   return fetchHotTokenIds(probeLimit);
@@ -652,27 +1734,7 @@ async function fetchHotEventIdsFromTokens(): Promise<string[]> {
   const probeLimit = clampHotProbeLimit(env.hotStatusMaxEvents * 10);
   const tokenIds = await fetchHotTokenIds(probeLimit);
   if (!tokenIds.length) return [];
-
-  const { rows } = await pool.query<{ venue_event_id: string | null }>(
-    `
-      select distinct e.venue_event_id
-      from unified_market_tokens mt
-      join unified_markets m
-        on m.id = mt.market_id
-      join unified_events e
-        on e.id = m.event_id
-      where mt.venue = 'polymarket'
-        and e.venue = 'polymarket'
-        and e.venue_event_id is not null
-        and mt.token_id = any($1::text[])
-      limit $2
-    `,
-    [tokenIds, env.hotStatusMaxEvents],
-  );
-
-  return rows
-    .map((row) => row.venue_event_id)
-    .filter((eventId): eventId is string => Boolean(eventId));
+  return fetchEventIdsForTokenIds(tokenIds, env.hotStatusMaxEvents);
 }
 
 export async function syncHotEventStatuses(): Promise<void> {
@@ -695,15 +1757,21 @@ export async function syncHotEventStatuses(): Promise<void> {
 
 export async function selectWsTokenIds(): Promise<string[]> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
+  const durationTokens = await fetchDurationReserveTokens();
   const probeLimit = clampHotProbeLimit(
     Math.max(env.wsSubset * 10, hotBudget * 20),
   );
   const hotTokenIds = await fetchHotTokenIds(probeLimit);
   const hotTokens = await buildHotTokenList(hotTokenIds, hotBudget);
 
-  const seen = new Set<string>(hotTokens);
-  const remaining = Math.max(0, env.wsSubset - hotTokens.length);
-  const topTokens = await fetchTopTokens(remaining, seen);
+  const out: string[] = [];
+  appendUniqueWsTokens(out, durationTokens, env.wsSubset);
+  appendUniqueWsTokens(out, hotTokens, env.wsSubset);
 
-  return [...hotTokens, ...topTokens];
+  const seen = new Set<string>(out);
+  const remaining = Math.max(0, env.wsSubset - out.length);
+  const topTokens = await fetchTopTokens(remaining, seen);
+  appendUniqueWsTokens(out, topTokens, env.wsSubset);
+
+  return out;
 }
