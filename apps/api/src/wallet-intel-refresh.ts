@@ -685,6 +685,58 @@ function parseMetadataSource(metadata: unknown): string | null {
 
 type Queryable = Pick<PoolClient, "query">;
 
+const hiddenOwnPositionSnapshotSuppressionCache = new Map<string, boolean>();
+
+function parseSnapshotMetadataTokenId(
+  metadata: Record<string, unknown>,
+): string | null {
+  const tokenId = metadata.tokenId;
+  if (typeof tokenId !== "string") return null;
+  const trimmed = tokenId.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+async function shouldSuppressHiddenOwnPositionSnapshot(
+  client: Queryable,
+  inputs: { walletId: string; venue: string; tokenId: string | null },
+): Promise<boolean> {
+  if (!inputs.tokenId) return false;
+  const cacheKey = `${inputs.walletId}:${inputs.venue}:${inputs.tokenId}`;
+  const cached = hiddenOwnPositionSnapshotSuppressionCache.get(cacheKey);
+  if (cached != null) return cached;
+
+  const result = await client.query<{ suppressed: boolean }>(
+    `
+      select exists (
+        select 1
+        from wallets w
+        join positions hp
+          on hp.position_scope = 'own'
+         and coalesce(hp.is_hidden, false) = true
+         and hp.venue = $2
+         and hp.token_id = $3
+         and hp.wallet_address is not null
+         and btrim(hp.wallet_address) <> ''
+         and (
+           (
+             w.chain = 'solana'
+             and hp.wallet_address = w.address
+           )
+           or (
+             w.chain <> 'solana'
+             and lower(hp.wallet_address) = lower(w.address)
+           )
+         )
+        where w.id = $1
+      ) as suppressed
+    `,
+    [inputs.walletId, inputs.venue, inputs.tokenId],
+  );
+  const suppressed = result.rows[0]?.suppressed === true;
+  hiddenOwnPositionSnapshotSuppressionCache.set(cacheKey, suppressed);
+  return suppressed;
+}
+
 async function hasWalletActivityBaselineSampleCountColumn(
   client: Queryable,
 ): Promise<boolean> {
@@ -931,7 +983,18 @@ async function upsertWalletPositionSnapshot(
     metadata: Record<string, unknown>;
     snapshotAt: Date;
   },
-) {
+): Promise<boolean> {
+  const tokenId = parseSnapshotMetadataTokenId(inputs.metadata);
+  if (
+    await shouldSuppressHiddenOwnPositionSnapshot(client, {
+      walletId: inputs.walletId,
+      venue: inputs.venue,
+      tokenId,
+    })
+  ) {
+    return false;
+  }
+
   await client.query(
     `
       insert into wallet_position_snapshots (
@@ -965,6 +1028,7 @@ async function upsertWalletPositionSnapshot(
       inputs.snapshotAt,
     ],
   );
+  return true;
 }
 
 async function clearSelectedMarketHolderSnapshots(
@@ -1091,7 +1155,7 @@ async function snapshotFollowedWalletHoldingsEvm(
 
       await upsertWalletVenue(client, inputs.walletId, entry.venue);
 
-      await upsertWalletPositionSnapshot(client, {
+      const snapshotInserted = await upsertWalletPositionSnapshot(client, {
         walletId: inputs.walletId,
         venue: entry.venue,
         marketId: entry.marketId,
@@ -1108,7 +1172,7 @@ async function snapshotFollowedWalletHoldingsEvm(
         snapshotAt: inputs.occurredAt,
       });
 
-      inserted += 1;
+      if (snapshotInserted) inserted += 1;
     }
     return inserted;
   };
@@ -1780,7 +1844,7 @@ async function snapshotFollowedWalletHoldingsSolana(
 
     await upsertWalletVenue(client, inputs.walletId, entry.venue);
 
-    await upsertWalletPositionSnapshot(client, {
+    const snapshotInserted = await upsertWalletPositionSnapshot(client, {
       walletId: inputs.walletId,
       venue: entry.venue,
       marketId: entry.marketId,
@@ -1797,7 +1861,7 @@ async function snapshotFollowedWalletHoldingsSolana(
       snapshotAt: inputs.occurredAt,
     });
 
-    inserted += 1;
+    if (snapshotInserted) inserted += 1;
   }
 
   return inserted;
@@ -1890,7 +1954,7 @@ async function snapshotFollowedWalletPositions(
 
     await upsertWalletVenue(client, inputs.walletId, inputs.venue);
 
-    await upsertWalletPositionSnapshot(client, {
+    const snapshotInserted = await upsertWalletPositionSnapshot(client, {
       walletId: inputs.walletId,
       venue: inputs.venue,
       marketId: row.market_id,
@@ -1905,7 +1969,7 @@ async function snapshotFollowedWalletPositions(
       },
       snapshotAt: inputs.occurredAt,
     });
-    inserted += 1;
+    if (snapshotInserted) inserted += 1;
   }
 
   return inserted;
@@ -2115,7 +2179,7 @@ async function snapshotInternalHunchWalletPositions(
     const price = resolveMidPrice(row.best_bid, row.best_ask, row.mid);
     const sizeUsd = price != null ? Number((shares * price).toFixed(6)) : null;
 
-    await upsertWalletPositionSnapshot(client, {
+    const snapshotInserted = await upsertWalletPositionSnapshot(client, {
       walletId: inputs.walletId,
       venue: inputs.venue,
       marketId: row.market_id,
@@ -2131,8 +2195,10 @@ async function snapshotInternalHunchWalletPositions(
       },
       snapshotAt: inputs.occurredAt,
     });
-    marketIds.add(row.market_id);
-    inserted += 1;
+    if (snapshotInserted) {
+      marketIds.add(row.market_id);
+      inserted += 1;
+    }
   }
 
   return { rows: inserted, marketIds: Array.from(marketIds) };
@@ -4566,6 +4632,7 @@ async function main() {
     ]);
     walletIntelRefreshPolicy = refreshPolicy.effective;
     aiWhaleProfilesPolicy = whalePolicy.effective;
+    hiddenOwnPositionSnapshotSuppressionCache.clear();
 
     const runAt = new Date();
     const baseSnapshot = bucketDate(

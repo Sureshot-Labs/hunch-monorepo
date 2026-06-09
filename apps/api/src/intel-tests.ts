@@ -110,6 +110,7 @@ import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
 import {
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
+  walletPositionHistoryQuerySchema,
   walletPositionsQuerySchema,
   walletSeriesQuerySchema,
   walletWhalesQuerySchema,
@@ -3153,20 +3154,42 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "wallet positions query parses includeSmall safely",
+    name: "wallet positions query parses includeSmall and display cutoffs safely",
     run: () => {
       const defaults = walletPositionsQuerySchema.parse({});
       assert.equal(defaults.includeSmall, false);
+      assert.equal(defaults.minPositionUsd, undefined);
+      assert.equal(defaults.minPositionShares, undefined);
 
       const parsedTrue = walletPositionsQuerySchema.parse({
         includeSmall: "true",
+        minPositionShares: "0.001",
+        minPositionUsd: "0.10",
       });
       assert.equal(parsedTrue.includeSmall, true);
+      assert.equal(parsedTrue.minPositionShares, 0.001);
+      assert.equal(parsedTrue.minPositionUsd, 0.1);
 
       const parsedFalse = walletPositionsQuerySchema.parse({
         includeSmall: "0",
       });
       assert.equal(parsedFalse.includeSmall, false);
+
+      assert.throws(() =>
+        walletPositionsQuerySchema.parse({
+          minPositionUsd: "-0.01",
+        }),
+      );
+
+      const parsedHistory = walletPositionHistoryQuerySchema.parse({
+        walletId: "11111111-1111-4111-8111-111111111111",
+        includeSmall: "false",
+        minPositionShares: "2",
+        minPositionUsd: "0.10",
+      });
+      assert.equal(parsedHistory.includeSmall, false);
+      assert.equal(parsedHistory.minPositionShares, 2);
+      assert.equal(parsedHistory.minPositionUsd, 0.1);
     },
   },
   {

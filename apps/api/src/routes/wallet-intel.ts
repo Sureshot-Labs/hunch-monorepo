@@ -145,6 +145,35 @@ type WalletPrivateMetaRow = {
   user_label_color: WalletLabelColor | null;
 };
 
+function buildHiddenOwnPositionSnapshotSuppressionSql(inputs: {
+  snapshotAlias: string;
+  walletAlias: string;
+}): string {
+  const { snapshotAlias, walletAlias } = inputs;
+  return `
+    not exists (
+      select 1
+      from positions hp
+      where hp.position_scope = 'own'
+        and coalesce(hp.is_hidden, false) = true
+        and hp.venue = ${snapshotAlias}.venue
+        and hp.token_id = ${snapshotAlias}.metadata->>'tokenId'
+        and hp.wallet_address is not null
+        and btrim(hp.wallet_address) <> ''
+        and (
+          (
+            ${walletAlias}.chain = 'solana'
+            and hp.wallet_address = ${walletAlias}.address
+          )
+          or (
+            ${walletAlias}.chain <> 'solana'
+            and lower(hp.wallet_address) = lower(${walletAlias}.address)
+          )
+        )
+    )
+  `;
+}
+
 type WalletMetricsRow = {
   period: string;
   as_of: Date;
@@ -7492,9 +7521,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         ? "true"
         : (() => {
             const minUsdParam = idx++;
-            params.push(env.walletIntelMinPositionUsd);
+            params.push(query.minPositionUsd ?? env.walletIntelMinPositionUsd);
             const minSharesParam = idx++;
-            params.push(env.walletIntelMinPositionShares);
+            params.push(
+              query.minPositionShares ?? env.walletIntelMinPositionShares,
+            );
             return `
               (
                 case
@@ -7505,6 +7536,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               )
             `;
           })();
+      const hiddenPositionSuppressionSql =
+        buildHiddenOwnPositionSnapshotSuppressionSql({
+          snapshotAlias: "ws",
+          walletAlias: "w",
+        });
 
       params.push(query.limit + 1, query.offset);
       const limitParam = idx++;
@@ -7595,6 +7631,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${positionFilterSql}
+                and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
                   eventAlias: "ue",
@@ -7670,6 +7707,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${positionFilterSql}
+                and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
                   eventAlias: "ue",
@@ -7733,6 +7771,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_events ue on ue.id = um.event_id
               where ${where}
                 and ${positionFilterSql}
+                and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
                   eventAlias: "ue",
@@ -7796,9 +7835,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         ? "true"
         : (() => {
             const minUsdParam = idx++;
-            params.push(env.walletIntelMinPositionUsd);
+            params.push(query.minPositionUsd ?? env.walletIntelMinPositionUsd);
             const minSharesParam = idx++;
-            params.push(env.walletIntelMinPositionShares);
+            params.push(
+              query.minPositionShares ?? env.walletIntelMinPositionShares,
+            );
             return `
               (
                 case
@@ -7809,8 +7850,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               )
             `;
           })();
+      const historyHiddenPositionSuppressionSql =
+        buildHiddenOwnPositionSnapshotSuppressionSql({
+          snapshotAlias: "tr",
+          walletAlias: "w",
+        });
 
-      let outerWhere = `where ${historyPositionFilterSql}`;
+      let outerWhere = `where ${historyPositionFilterSql}
+        and ${historyHiddenPositionSuppressionSql}`;
       if (query.since) {
         outerWhere += ` and tr.snapshot_at >= $${idx++}`;
         params.push(query.since);

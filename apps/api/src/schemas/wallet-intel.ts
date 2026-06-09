@@ -207,6 +207,8 @@ export const walletPositionsQuerySchema = z.object({
   since: z.string().datetime().optional(),
   latest: queryBooleanSchema.default(true),
   includeSmall: queryBooleanSchema.default(false),
+  minPositionUsd: z.coerce.number().min(0).optional(),
+  minPositionShares: z.coerce.number().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -216,6 +218,8 @@ export const walletPositionHistoryQuerySchema = z.object({
   venue: zVenue.optional(),
   since: z.string().datetime().optional(),
   includeSmall: queryBooleanSchema.default(false),
+  minPositionUsd: z.coerce.number().min(0).optional(),
+  minPositionShares: z.coerce.number().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
