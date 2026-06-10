@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { getRedis } from "../redis.js";
 import { tradesQuerySchema } from "../schemas/trades.js";
 
 type TradeRow = {
@@ -22,6 +23,235 @@ type PolymarketDataTrade = {
   timestamp?: number;
   transactionHash?: string;
 };
+
+type HyperliquidRecentTrade = {
+  coin?: string;
+  side?: string;
+  px?: string | number;
+  sz?: string | number;
+  time?: string | number;
+  hash?: string | null;
+};
+
+type HyperliquidTokenRef = {
+  tokenId: string;
+  coin: string;
+};
+
+type TradesResponse = {
+  trades: Array<{
+    tokenId: string;
+    venue: string;
+    ts: Date | string;
+    price: number;
+    size: number;
+    side: "BUY" | "SELL";
+    txHash: string | null;
+  }>;
+  pagination: {
+    total: number;
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+  };
+};
+
+type HyperliquidFetchResult = {
+  trades: TradeRow[];
+  attempted: number;
+  failed: number;
+};
+
+type FetchLike = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<{
+  ok: boolean;
+  json: () => Promise<unknown>;
+}>;
+
+const HYPERLIQUID_TOKEN_PREFIX = "hyperliquid:";
+const HYPERLIQUID_OFFICIAL_OUTCOME_ASSET_OFFSET = 100_000_000;
+
+function isHyperliquidTokenId(value: string | undefined): boolean {
+  return (
+    typeof value === "string" && value.startsWith(HYPERLIQUID_TOKEN_PREFIX)
+  );
+}
+
+function hyperliquidCoinFromHunchTokenId(tokenId: string): string | null {
+  if (!tokenId.startsWith(HYPERLIQUID_TOKEN_PREFIX)) return null;
+  const assetId = Number(tokenId.slice(HYPERLIQUID_TOKEN_PREFIX.length));
+  if (!Number.isSafeInteger(assetId)) return null;
+  const coinId = assetId - HYPERLIQUID_OFFICIAL_OUTCOME_ASSET_OFFSET;
+  if (!Number.isSafeInteger(coinId) || coinId < 0) return null;
+  return `#${coinId}`;
+}
+
+function selectHyperliquidTokenRefs(
+  tokenIds: string[],
+  maxCoins: number,
+): HyperliquidTokenRef[] {
+  const refs: HyperliquidTokenRef[] = [];
+  const seenCoins = new Set<string>();
+  const limit = Math.max(0, Math.trunc(maxCoins));
+  if (limit <= 0) return refs;
+
+  for (const tokenId of tokenIds) {
+    const coin = hyperliquidCoinFromHunchTokenId(tokenId);
+    if (!coin || seenCoins.has(coin)) continue;
+    refs.push({ tokenId, coin });
+    seenCoins.add(coin);
+    if (refs.length >= limit) break;
+  }
+
+  return refs;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function mapHyperliquidTradeRow(
+  tokenIdByCoin: Map<string, string>,
+  row: HyperliquidRecentTrade,
+): TradeRow | null {
+  const coin = typeof row.coin === "string" ? row.coin.trim() : "";
+  const tokenId = tokenIdByCoin.get(coin);
+  if (!tokenId) return null;
+
+  const price = toFiniteNumber(row.px);
+  const size = toFiniteNumber(row.sz);
+  const time = toFiniteNumber(row.time);
+  if (price == null || price < 0 || price > 1) return null;
+  if (size == null || size <= 0) return null;
+  if (time == null || time <= 0) return null;
+
+  const side = row.side === "B" ? "BUY" : row.side === "A" ? "SELL" : null;
+  if (!side) return null;
+
+  const ts = new Date(time);
+  if (Number.isNaN(ts.getTime())) return null;
+
+  return {
+    token_id: tokenId,
+    venue: "hyperliquid",
+    ts,
+    price: price.toString(),
+    size: size.toString(),
+    side,
+    tx_hash: typeof row.hash === "string" ? row.hash : null,
+  };
+}
+
+function sortTradesDesc(left: TradeRow, right: TradeRow): number {
+  const timeDelta = right.ts.getTime() - left.ts.getTime();
+  if (timeDelta !== 0) return timeDelta;
+  const tokenDelta = left.token_id.localeCompare(right.token_id);
+  if (tokenDelta !== 0) return tokenDelta;
+  return (left.tx_hash ?? "").localeCompare(right.tx_hash ?? "");
+}
+
+function toTradesResponse(
+  trades: TradeRow[],
+  limit: number,
+  offset: number,
+): TradesResponse {
+  const sorted = [...trades].sort(sortTradesDesc);
+  const page = sorted.slice(offset, offset + limit);
+
+  return {
+    trades: page.map((row) => ({
+      tokenId: row.token_id,
+      venue: row.venue,
+      ts: row.ts,
+      price: Number(row.price),
+      size: Number(row.size),
+      side: row.side,
+      txHash: row.tx_hash,
+    })),
+    pagination: {
+      total: sorted.length,
+      limit,
+      offset,
+      hasMore: offset + page.length < sorted.length,
+    },
+  };
+}
+
+function hyperliquidTradesCacheKey(
+  refs: HyperliquidTokenRef[],
+  limit: number,
+  offset: number,
+): string {
+  const coins = refs
+    .map((ref) => ref.coin)
+    .sort((left, right) => left.localeCompare(right))
+    .join(",");
+  return `trades:hyperliquid:v1:${coins}:limit:${limit}:offset:${offset}`;
+}
+
+async function fetchHyperliquidRecentTradesForTokenRefs(inputs: {
+  refs: HyperliquidTokenRef[];
+  infoUrl: string;
+  timeoutMs: number;
+  fetchFn?: FetchLike;
+}): Promise<HyperliquidFetchResult> {
+  const fetchFn = inputs.fetchFn ?? fetch;
+  const tokenIdByCoin = new Map(
+    inputs.refs.map((ref) => [ref.coin, ref.tokenId] as const),
+  );
+
+  const results = await Promise.all(
+    inputs.refs.map(async (ref) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+
+      try {
+        const response = await fetchFn(inputs.infoUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "recentTrades", coin: ref.coin }),
+          signal: controller.signal,
+        });
+        if (!response.ok) return { trades: [] as TradeRow[], failed: true };
+
+        const payload = await response.json();
+        if (!Array.isArray(payload)) {
+          return { trades: [] as TradeRow[], failed: true };
+        }
+
+        const trades = payload
+          .map((entry) =>
+            entry && typeof entry === "object"
+              ? mapHyperliquidTradeRow(
+                  tokenIdByCoin,
+                  entry as HyperliquidRecentTrade,
+                )
+              : null,
+          )
+          .filter((entry): entry is TradeRow => entry != null);
+
+        return { trades, failed: false };
+      } catch {
+        return { trades: [] as TradeRow[], failed: true };
+      } finally {
+        clearTimeout(timeout);
+      }
+    }),
+  );
+
+  return {
+    trades: results.flatMap((result) => result.trades),
+    attempted: inputs.refs.length,
+    failed: results.filter((result) => result.failed).length,
+  };
+}
 
 export const tradesRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
@@ -140,6 +370,8 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
           select token_id
           from unified_tokens
           where market_id = $1
+          order by case side when 'YES' then 0 when 'NO' then 1 else 2 end,
+                   token_id
         `,
         [marketId],
       );
@@ -154,6 +386,10 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
           join unified_markets m
             on m.id = ut.market_id
           where m.event_id = $1
+          order by coalesce(m.volume_24h, m.volume_total, 0) desc nulls last,
+                   m.id,
+                   case ut.side when 'YES' then 0 when 'NO' then 1 else 2 end,
+                   ut.token_id
         `,
         [eventId],
       );
@@ -220,6 +456,71 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
         };
       }
 
+      if (
+        tokenIds.length > 0 &&
+        tokenIds.every((tokenId) => isHyperliquidTokenId(tokenId))
+      ) {
+        const refs = selectHyperliquidTokenRefs(
+          tokenIds,
+          env.hyperliquidRecentTradesMaxCoins,
+        );
+        if (refs.length === 0) {
+          return {
+            trades: [],
+            pagination: { total: 0, limit: query.limit, offset: query.offset },
+          };
+        }
+
+        const cacheKey = hyperliquidTradesCacheKey(
+          refs,
+          query.limit,
+          query.offset,
+        );
+        let redis: Awaited<ReturnType<typeof getRedis>> = null;
+        try {
+          redis = await getRedis();
+        } catch {
+          redis = null;
+        }
+        if (redis) {
+          try {
+            const cached = await redis.get(cacheKey);
+            if (cached) {
+              return JSON.parse(cached) as TradesResponse;
+            }
+          } catch {
+            // Ignore cache failures and refresh from upstream.
+          }
+        }
+
+        const result = await fetchHyperliquidRecentTradesForTokenRefs({
+          refs,
+          infoUrl: env.hyperliquidInfoUrl,
+          timeoutMs: env.hyperliquidInfoTimeoutMs,
+        });
+        const response = toTradesResponse(
+          result.trades,
+          query.limit,
+          query.offset,
+        );
+
+        if (
+          redis &&
+          env.hyperliquidRecentTradesCacheTtlSec > 0 &&
+          result.failed < result.attempted
+        ) {
+          try {
+            await redis.set(cacheKey, JSON.stringify(response), {
+              EX: env.hyperliquidRecentTradesCacheTtlSec,
+            });
+          } catch {
+            // Cache writes are best effort; trades display should still work.
+          }
+        }
+
+        return response;
+      }
+
       if (tokenIds.length > MAX_TOKEN_IDS) {
         return {
           error: "tokenIds length exceeded",
@@ -269,4 +570,13 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
       };
     },
   );
+};
+
+export const tradesRouteTestExports = {
+  fetchHyperliquidRecentTradesForTokenRefs,
+  hyperliquidCoinFromHunchTokenId,
+  hyperliquidTradesCacheKey,
+  mapHyperliquidTradeRow,
+  selectHyperliquidTokenRefs,
+  toTradesResponse,
 };

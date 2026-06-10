@@ -57,6 +57,68 @@ function toCandle(row: DbCandlestickRow): CandleValues | null {
   };
 }
 
+function flatCandle(t: number, value: number): CandleValues {
+  return {
+    t,
+    o: value,
+    h: value,
+    l: value,
+    c: value,
+  };
+}
+
+function fillCandlesThroughEnd(
+  candles: CandleValues[],
+  endTs: number,
+  bucketMinutes: number,
+): CandleValues[] {
+  if (candles.length === 0) return [];
+
+  const bucketSeconds = Math.max(1, Math.floor(bucketMinutes)) * 60;
+  const normalizedEndTs = Math.floor(endTs);
+  const sorted = [...candles].sort((left, right) => left.t - right.t);
+  const filled: CandleValues[] = [];
+
+  for (const candle of sorted) {
+    const previous = filled[filled.length - 1];
+    if (previous) {
+      for (
+        let fillTs = previous.t + bucketSeconds;
+        fillTs < candle.t;
+        fillTs += bucketSeconds
+      ) {
+        filled.push(flatCandle(fillTs, previous.c));
+      }
+    }
+
+    const last = filled[filled.length - 1];
+    if (last && last.t === candle.t) {
+      filled[filled.length - 1] = candle;
+    } else if (!last || candle.t > last.t) {
+      filled.push(candle);
+    }
+  }
+
+  const last = filled[filled.length - 1];
+  if (!last || last.t >= normalizedEndTs) return filled;
+
+  let final = last;
+  for (
+    let fillTs = final.t + bucketSeconds;
+    fillTs <= normalizedEndTs;
+    fillTs += bucketSeconds
+  ) {
+    final = flatCandle(fillTs, final.c);
+    filled.push(final);
+  }
+
+  if (final.t < normalizedEndTs) {
+    filled.push(flatCandle(normalizedEndTs, final.c));
+  }
+
+  return filled;
+}
+
 function pushToken(
   sides: CandlestickSide[],
   tokenIds: string[],
@@ -174,6 +236,15 @@ export async function loadDbCandlestickSeries(
       };
     }
     series[side]?.candles.push(candle);
+  }
+
+  for (const entry of Object.values(series)) {
+    if (!entry) continue;
+    entry.candles = fillCandlesThroughEnd(
+      entry.candles,
+      inputs.endTs,
+      bucketMinutes,
+    );
   }
 
   return series;

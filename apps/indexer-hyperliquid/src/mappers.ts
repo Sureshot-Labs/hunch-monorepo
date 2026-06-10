@@ -179,6 +179,59 @@ function formatExpiryForTitle(expiry?: Date): string | undefined {
   return expiry.toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
+function normalizeDisplayText(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function resolutionParentheticalRegex(): RegExp {
+  return /\s*\((?=[^)]*\b(?:resolves?|resolution|settles?|settlement)\b)[^)]*\)\s*/gi;
+}
+
+function sanitizeDisplayName(value: string | null | undefined): string {
+  return normalizeDisplayText(
+    normalizeDisplayText(value).replace(resolutionParentheticalRegex(), " "),
+  );
+}
+
+function extractResolutionParentheticals(
+  value: string | null | undefined,
+): string[] {
+  const raw = normalizeDisplayText(value);
+  if (!raw) return [];
+  const matches: string[] = [];
+  for (const match of raw.matchAll(
+    /\(([^)]*\b(?:resolves?|resolution|settles?|settlement)\b[^)]*)\)/gi,
+  )) {
+    const text = normalizeDisplayText(match[1]);
+    if (text) matches.push(text);
+  }
+  return matches;
+}
+
+function descriptionWithEmbeddedResolution(
+  description: string | null | undefined,
+  sourceName: string | null | undefined,
+): string | undefined {
+  const base = normalizeDisplayText(description);
+  const additions = extractResolutionParentheticals(sourceName).filter(
+    (entry) => !base.toLowerCase().includes(entry.toLowerCase()),
+  );
+  const parts = [base, ...additions].filter(Boolean);
+  return parts.length ? parts.join("\n\n") : undefined;
+}
+
+function marketDescription(
+  outcome: HyperliquidOutcome,
+  question?: HyperliquidQuestion,
+): string | undefined {
+  if (outcome.description) {
+    return descriptionWithEmbeddedResolution(outcome.description, outcome.name);
+  }
+  const embeddedResolution = extractResolutionParentheticals(outcome.name);
+  if (embeddedResolution.length) return embeddedResolution.join("\n\n");
+  return normalizeDisplayText(question?.description) || undefined;
+}
+
 function titleFromStructuredDescription(
   outcome: HyperliquidOutcome,
   parsed: HyperliquidParsedDescription,
@@ -194,7 +247,7 @@ function titleFromStructuredDescription(
       : `Will ${parsed.underlying} be above ${parsed.targetPrice}?`;
   }
   if (outcome.description?.startsWith("index:")) {
-    return `${outcome.name} ${outcome.description}`;
+    return `${sanitizeDisplayName(outcome.name)} ${outcome.description}`;
   }
   return undefined;
 }
@@ -243,6 +296,8 @@ function titleFromQuestionOutcome(
   question: HyperliquidQuestion,
   questionParsed: HyperliquidParsedDescription,
 ): string {
+  const questionName = sanitizeDisplayName(question.name) || question.name;
+  const outcomeName = sanitizeDisplayName(outcome.name) || outcome.name;
   const indexMatch = /^index:(\d+)$/.exec(outcome.description ?? "");
   const thresholds = questionParsed.priceThresholds ?? [];
   const expiry = formatExpiryForTitle(questionParsed.expiryTime);
@@ -266,10 +321,7 @@ function titleFromQuestionOutcome(
     }
   }
 
-  if (outcome.description) {
-    return `${question.name}: ${outcome.name} (${outcome.description})`;
-  }
-  return `${question.name}: ${outcome.name}`;
+  return outcomeName || questionName;
 }
 
 function normalizeSideName(side: HyperliquidSideSpec, index: number): string {
@@ -384,7 +436,7 @@ function marketTitle(
     outcomeParsed,
   );
   if (structuredTitle) return structuredTitle;
-  return outcome.name;
+  return sanitizeDisplayName(outcome.name) || outcome.name;
 }
 
 function hunchEventId(questionOrOutcomeId: string): string {
@@ -468,6 +520,7 @@ function buildEventRows(
     const category = categoryResolution.category;
     const endTime = resolveEndTime(parsed);
     const venueEventId = `question:${question.question}`;
+    const title = sanitizeDisplayName(question.name) || question.name;
     const outcomeIds = new Set(questionOutcomeIds(question));
     const volume24h = sumDefined(
       marketRows
@@ -480,7 +533,7 @@ function buildEventRows(
       id: hunchEventId(venueEventId),
       venue: VENUE,
       venue_event_id: venueEventId,
-      title: question.name,
+      title,
       description: question.description,
       category,
       status: statusFromExpiry(endTime),
@@ -533,7 +586,7 @@ function buildEventRows(
       venue: VENUE,
       venue_event_id: venueEventId,
       title,
-      description: outcome.description,
+      description: marketDescription(outcome),
       category,
       status: statusFromExpiry(endTime),
       duration_minutes: resolveDurationMinutes(parsed),
@@ -643,7 +696,7 @@ function buildMarketRows(
       venue_market_id: `outcome:${outcomeId}`,
       event_id: hunchEventId(venueEventId),
       title,
-      description: outcome.description ?? question?.description,
+      description: marketDescription(outcome, question),
       category,
       status,
       market_type: "binary",

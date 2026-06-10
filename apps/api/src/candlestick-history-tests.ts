@@ -51,7 +51,7 @@ function fakeDb(rows: unknown[]) {
     includeYes: true,
     includeNo: true,
     startTs: 0,
-    endTs: 600,
+    endTs: 120,
     bucketMinutes: 5,
   });
 
@@ -65,6 +65,46 @@ function fakeDb(rows: unknown[]) {
     { t: 120, o: 0.4, h: 0.6, l: 0.3, c: 0.5 },
   ]);
   assert.equal(series.NO?.source, "db");
+}
+
+{
+  const { db } = fakeDb([
+    {
+      side: "YES",
+      token_id: "hyperliquid:yes",
+      t: "300",
+      open: "0.4",
+      high: "0.6",
+      low: "0.3",
+      close: "0.5",
+    },
+    {
+      side: "YES",
+      token_id: "hyperliquid:yes",
+      t: "900",
+      open: "0.7",
+      high: "0.8",
+      low: "0.6",
+      close: "0.75",
+    },
+  ]);
+
+  const series = await loadDbCandlestickSeries(db, {
+    venue: "hyperliquid",
+    tokens: { YES: "hyperliquid:yes" },
+    includeYes: true,
+    includeNo: false,
+    startTs: 0,
+    endTs: 1_100,
+    bucketMinutes: 5,
+  });
+
+  assert.deepEqual(series.YES?.candles, [
+    { t: 300, o: 0.4, h: 0.6, l: 0.3, c: 0.5 },
+    { t: 600, o: 0.5, h: 0.5, l: 0.5, c: 0.5 },
+    { t: 900, o: 0.7, h: 0.8, l: 0.6, c: 0.75 },
+    { t: 1_100, o: 0.75, h: 0.75, l: 0.75, c: 0.75 },
+  ]);
 }
 
 {

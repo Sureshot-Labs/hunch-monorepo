@@ -294,3 +294,59 @@ test("mapHyperliquidSnapshot maps side tokens for unified token writes", () => {
   assert.equal(token.market_id, "hyperliquid:outcome:5");
   assert.equal(token.side, "YES");
 });
+
+test("mapHyperliquidSnapshot keeps resolution rules out of display titles", () => {
+  const snapshot = mapHyperliquidSnapshot({
+    outcomeMeta: {
+      outcomes: [
+        {
+          outcome: 100,
+          name: "Fallback",
+          sideSpecs: [{ name: "Yes" }, { name: "No" }],
+        },
+        {
+          outcome: 101,
+          name: "Canada",
+          description: "This outcome resolves to Yes if Canada wins the Game.",
+          sideSpecs: [{ name: "Yes" }, { name: "No" }],
+        },
+        {
+          outcome: 102,
+          name: "Draw (This outcome resolves to Yes if the Game ends in a draw.)",
+          sideSpecs: [{ name: "Yes" }, { name: "No" }],
+        },
+      ],
+      questions: [
+        {
+          question: 19,
+          name: "World Cup: Canada vs Bosnia and Herzegovina",
+          description:
+            "The market resolves after the Game, provided FIFA officially declares a winner by July 19, 2026 at 23:59 UTC. metadata=category:sports",
+          fallbackOutcome: 100,
+          namedOutcomes: [101, 102],
+          settledNamedOutcomes: [],
+        },
+      ],
+    },
+  });
+
+  const canada = snapshot.markets.find(
+    (market) => market.venue_market_id === "outcome:101",
+  );
+  assert.ok(canada);
+  assert.equal(canada.title, "Canada");
+  assert.equal(
+    canada.description,
+    "This outcome resolves to Yes if Canada wins the Game.",
+  );
+
+  const draw = snapshot.markets.find(
+    (market) => market.venue_market_id === "outcome:102",
+  );
+  assert.ok(draw);
+  assert.equal(draw.title, "Draw");
+  assert.equal(
+    draw.description,
+    "This outcome resolves to Yes if the Game ends in a draw.",
+  );
+});

@@ -9,6 +9,7 @@ coverage/
 .env
 .env.*.local
 *.env.local
+.env.*.zip
 
 # Logs
 npm-debug.log*

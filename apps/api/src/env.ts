@@ -1195,6 +1195,21 @@ export const env = {
   polymarketDataApiBase:
     process.env.POLYMARKET_DATA_API_BASE?.trim() ||
     "https://data-api.polymarket.com",
+  hyperliquidInfoUrl:
+    process.env.HYPERLIQUID_INFO_URL?.trim() ||
+    "https://api.hyperliquid.xyz/info",
+  hyperliquidInfoTimeoutMs: optionalPositiveInt(
+    "HYPERLIQUID_INFO_TIMEOUT_MS",
+    8_000,
+  ),
+  hyperliquidRecentTradesCacheTtlSec: optionalPositiveInt(
+    "HYPERLIQUID_RECENT_TRADES_CACHE_TTL_SEC",
+    10,
+  ),
+  hyperliquidRecentTradesMaxCoins: optionalPositiveInt(
+    "HYPERLIQUID_RECENT_TRADES_MAX_COINS",
+    20,
+  ),
   polymarketDataApiPositionsTimeoutMs: optionalPositiveInt(
     "POLYMARKET_DATA_API_POSITIONS_TIMEOUT_MS",
     2_000,
