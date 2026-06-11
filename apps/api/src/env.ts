@@ -959,6 +959,18 @@ export const env = {
     1,
     2,
   ),
+  walletIntelFollowedPrefetchTimeoutMs: optionalPositiveInt(
+    "WALLET_INTEL_FOLLOWED_PREFETCH_TIMEOUT_MS",
+    120_000,
+  ),
+  walletIntelFollowedWalletTimeoutMs: optionalPositiveInt(
+    "WALLET_INTEL_FOLLOWED_WALLET_TIMEOUT_MS",
+    60_000,
+  ),
+  walletIntelArtifactStageTimeoutMs: optionalPositiveInt(
+    "WALLET_INTEL_ARTIFACT_STAGE_TIMEOUT_MS",
+    600_000,
+  ),
   walletIntelInternalHunchEnabled,
   walletIntelInternalHunchWalletLimit,
   walletIntelInternalHunchFillLookbackDays,
@@ -1202,6 +1214,10 @@ export const env = {
   polymarketDataApiPositionsCacheTtlMs: optionalNonNegativeInt(
     "POLYMARKET_DATA_API_POSITIONS_CACHE_TTL_MS",
     30_000,
+  ),
+  polymarketDataApiPositionsFailureCacheTtlMs: optionalNonNegativeInt(
+    "POLYMARKET_DATA_API_POSITIONS_FAILURE_CACHE_TTL_MS",
+    5 * 60_000,
   ),
   limitlessApiBase:
     process.env.LIMITLESS_API_BASE?.trim() || "https://api.limitless.exchange",

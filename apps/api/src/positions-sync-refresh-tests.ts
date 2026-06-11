@@ -4,13 +4,15 @@ import assert from "node:assert/strict";
 
 import {
   extractLimitlessTokenBalances,
+  fetchPolymarketDataApiSnapshotsForOwnersForTests,
   isLimitlessPublicPortfolioUserNotFound,
   normalizePositionRefreshTokenIds,
+  resetPolymarketDataApiSnapshotCachesForTests,
 } from "./services/positions-sync.js";
 
-function test(name: string, fn: () => void) {
+async function test(name: string, fn: () => void | Promise<void>) {
   try {
-    fn();
+    await fn();
     console.log(`ok - ${name}`);
   } catch (error) {
     console.error(`not ok - ${name}`);
@@ -18,7 +20,7 @@ function test(name: string, fn: () => void) {
   }
 }
 
-test("normalizes Polymarket refresh token candidates", () => {
+await test("normalizes Polymarket refresh token candidates", () => {
   assert.deepEqual(
     normalizePositionRefreshTokenIds("polymarket", [
       " 123 ",
@@ -33,7 +35,7 @@ test("normalizes Polymarket refresh token candidates", () => {
   );
 });
 
-test("normalizes Kalshi refresh token candidates for DFlow tokens only", () => {
+await test("normalizes Kalshi refresh token candidates for DFlow tokens only", () => {
   assert.deepEqual(
     normalizePositionRefreshTokenIds("kalshi", [
       "sol:mint-a",
@@ -45,7 +47,7 @@ test("normalizes Kalshi refresh token candidates for DFlow tokens only", () => {
   );
 });
 
-test("normalizes Limitless refresh token candidates to scoped IDs", () => {
+await test("normalizes Limitless refresh token candidates to scoped IDs", () => {
   assert.deepEqual(
     normalizePositionRefreshTokenIds("limitless", [
       "123",
@@ -57,7 +59,7 @@ test("normalizes Limitless refresh token candidates to scoped IDs", () => {
   );
 });
 
-test("extracts Limitless public portfolio CLOB and AMM balances", () => {
+await test("extracts Limitless public portfolio CLOB and AMM balances", () => {
   assert.deepEqual(
     extractLimitlessTokenBalances({
       clob: [
@@ -88,7 +90,7 @@ test("extracts Limitless public portfolio CLOB and AMM balances", () => {
   );
 });
 
-test("detects empty Limitless public portfolio responses", () => {
+await test("detects empty Limitless public portfolio responses", () => {
   assert.equal(
     isLimitlessPublicPortfolioUserNotFound({ message: "User not found" }),
     true,
@@ -104,4 +106,73 @@ test("detects empty Limitless public portfolio responses", () => {
     }),
     false,
   );
+});
+
+await test("caches aborted Polymarket Data API owner lookups as empty", async () => {
+  const owner = "0xa5ef39c3d3e10d0b270233af41cac69796b12966";
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  let calls = 0;
+  let warnings = 0;
+
+  resetPolymarketDataApiSnapshotCachesForTests();
+  globalThis.fetch = (async () => {
+    calls += 1;
+    throw new DOMException("This operation was aborted", "AbortError");
+  }) as typeof fetch;
+  console.warn = (...args: unknown[]) => {
+    if (String(args[0]).includes("Polymarket Data API")) warnings += 1;
+  };
+
+  try {
+    const first = await fetchPolymarketDataApiSnapshotsForOwnersForTests([
+      owner,
+    ]);
+    const second = await fetchPolymarketDataApiSnapshotsForOwnersForTests([
+      owner,
+    ]);
+
+    assert.equal(calls, 1);
+    assert.equal(first.get(owner)?.size, 0);
+    assert.equal(second.get(owner)?.size, 0);
+    assert.equal(warnings, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+    resetPolymarketDataApiSnapshotCachesForTests();
+  }
+});
+
+await test("caches successful Polymarket Data API owner lookups", async () => {
+  const owner = "0xa5ef39c3d3e10d0b270233af41cac69796b12966";
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+
+  resetPolymarketDataApiSnapshotCachesForTests();
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify([{ asset: "123", averagePrice: "0.42" }]),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const first = await fetchPolymarketDataApiSnapshotsForOwnersForTests([
+      owner,
+    ]);
+    const second = await fetchPolymarketDataApiSnapshotsForOwnersForTests([
+      owner,
+    ]);
+
+    assert.equal(calls, 1);
+    assert.equal(first.get(owner)?.get("123")?.averagePrice, "0.42");
+    assert.equal(second.get(owner)?.get("123")?.averagePrice, "0.42");
+  } finally {
+    globalThis.fetch = originalFetch;
+    resetPolymarketDataApiSnapshotCachesForTests();
+  }
 });

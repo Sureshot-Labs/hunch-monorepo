@@ -42,6 +42,7 @@ import {
   resolvePolymarketBuilderFeeConfig,
   upsertPolymarketBuilderFeeAccruals,
 } from "./polymarket-builder-fees.js";
+import { isAbortError } from "@hunch/shared";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 type PositionRefreshVenue = "polymarket" | "dflow" | "limitless";
@@ -505,6 +506,10 @@ const polymarketDataApiSnapshotCache = new Map<
   string,
   PolymarketDataApiCacheEntry
 >();
+const polymarketDataApiSnapshotFailureCache = new Map<
+  string,
+  PolymarketDataApiCacheEntry
+>();
 const polymarketDataApiSnapshotInflight = new Map<
   string,
   Promise<PolymarketDataApiPositionSnapshot[]>
@@ -517,6 +522,11 @@ function sweepPolymarketDataApiSnapshotCache(now: number) {
   for (const [key, entry] of polymarketDataApiSnapshotCache.entries()) {
     if (entry.expiresAt <= now) {
       polymarketDataApiSnapshotCache.delete(key);
+    }
+  }
+  for (const [key, entry] of polymarketDataApiSnapshotFailureCache.entries()) {
+    if (entry.expiresAt <= now) {
+      polymarketDataApiSnapshotFailureCache.delete(key);
     }
   }
 }
@@ -644,6 +654,12 @@ async function fetchCachedPolymarketDataApiPositionSnapshots(
       return cached.snapshots;
     }
   }
+  if (env.polymarketDataApiPositionsFailureCacheTtlMs > 0) {
+    const cachedFailure = polymarketDataApiSnapshotFailureCache.get(key);
+    if (cachedFailure && cachedFailure.expiresAt > now) {
+      return cachedFailure.snapshots;
+    }
+  }
 
   const inflight = polymarketDataApiSnapshotInflight.get(key);
   if (inflight) return inflight;
@@ -658,11 +674,37 @@ async function fetchCachedPolymarketDataApiPositionSnapshots(
       }
       return snapshots;
     })
+    .catch((error) => {
+      if (
+        isAbortError(error) &&
+        env.polymarketDataApiPositionsFailureCacheTtlMs > 0
+      ) {
+        polymarketDataApiSnapshotFailureCache.set(key, {
+          expiresAt:
+            Date.now() + env.polymarketDataApiPositionsFailureCacheTtlMs,
+          snapshots: [],
+        });
+      }
+      throw error;
+    })
     .finally(() => {
       polymarketDataApiSnapshotInflight.delete(key);
     });
   polymarketDataApiSnapshotInflight.set(key, promise);
   return promise;
+}
+
+export function resetPolymarketDataApiSnapshotCachesForTests() {
+  polymarketDataApiSnapshotCache.clear();
+  polymarketDataApiSnapshotFailureCache.clear();
+  polymarketDataApiSnapshotInflight.clear();
+  polymarketDataApiSnapshotCacheSweepAt = 0;
+}
+
+export async function fetchPolymarketDataApiSnapshotsForOwnersForTests(
+  owners: string[],
+) {
+  return fetchPolymarketDataApiSnapshotsForOwners(owners);
 }
 
 async function fetchPolymarketDataApiSnapshotsForOwners(

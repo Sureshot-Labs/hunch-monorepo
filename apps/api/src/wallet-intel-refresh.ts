@@ -77,6 +77,66 @@ type WalletIntelRefreshTelemetry = {
   limitlessPriceBackfill: WalletIntelRetryTelemetry;
 };
 
+class WalletIntelStageTimeoutError extends Error {
+  stage: string;
+  timeoutMs: number;
+  metadata: Record<string, unknown>;
+
+  constructor(
+    stage: string,
+    timeoutMs: number,
+    metadata: Record<string, unknown> = {},
+  ) {
+    super(`Wallet intel stage "${stage}" timed out after ${timeoutMs}ms`);
+    this.name = "WalletIntelStageTimeoutError";
+    this.stage = stage;
+    this.timeoutMs = timeoutMs;
+    this.metadata = metadata;
+  }
+}
+
+function isWalletIntelStageTimeoutError(
+  error: unknown,
+): error is WalletIntelStageTimeoutError {
+  return error instanceof WalletIntelStageTimeoutError;
+}
+
+function unrefTimer(timeout: ReturnType<typeof setTimeout>) {
+  if (
+    typeof timeout === "object" &&
+    timeout != null &&
+    "unref" in timeout &&
+    typeof timeout.unref === "function"
+  ) {
+    timeout.unref();
+  }
+}
+
+async function withWalletIntelDeadline<T>(
+  stage: string,
+  timeoutMs: number,
+  fn: () => Promise<T>,
+  metadata: Record<string, unknown> = {},
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fn();
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new WalletIntelStageTimeoutError(stage, timeoutMs, metadata));
+    }, timeoutMs);
+    unrefTimer(timeout);
+  });
+
+  try {
+    return await Promise.race([fn(), timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 type RetryableFailureSummary = {
   count: number;
   rateLimited: number;
@@ -1293,6 +1353,10 @@ async function collectFollowedWalletSnapshotRows(
     string,
     PrefetchedPolymarketOwnerBalances | null
   >();
+  const polymarketPrefetchTimedOutWalletIds = new Set<string>();
+  const snapshottedWalletVenueKeys = new Set<string>();
+  const walletVenueSnapshotKey = (walletId: string, venue: Venue) =>
+    `${walletId}:${venue}`;
 
   const solanaFollowedWallets = inputs.followedWallets.filter(
     (row) => row.chain === "solana",
@@ -1344,15 +1408,29 @@ async function collectFollowedWalletSnapshotRows(
       Array.from(byUser.entries()),
       inputs.followedFetchConcurrency,
       async ([userId, followedRows]) => {
+        const startedAt = Date.now();
+        console.log("[wallets:intel:refresh] followed polymarket prefetch start", {
+          userId,
+          wallets: followedRows.length,
+        });
         try {
           const prefetched = await runWithTelemetry(
             inputs.telemetry.followedPrefetchPolymarket,
             () =>
-              prefetchPolymarketOwnerBalancesForWallets(inputs.poolClient, {
-                userId,
-                walletAddresses: followedRows.map((row) => row.address),
-                trackedTokenIds: inputs.tokenIdsByVenue.polymarket,
-              }),
+              withWalletIntelDeadline(
+                "followedPolymarketPrefetch",
+                env.walletIntelFollowedPrefetchTimeoutMs,
+                () =>
+                  prefetchPolymarketOwnerBalancesForWallets(inputs.poolClient, {
+                    userId,
+                    walletAddresses: followedRows.map((row) => row.address),
+                    trackedTokenIds: inputs.tokenIdsByVenue.polymarket,
+                  }),
+                {
+                  userId,
+                  wallets: followedRows.length,
+                },
+              ),
             { countActualCall: false },
           );
           inputs.telemetry.followedPrefetchPolymarket.estimatedCalls +=
@@ -1361,10 +1439,46 @@ async function collectFollowedWalletSnapshotRows(
             prefetched.rpcCallCount;
           for (const followed of followedRows) {
             prefetchedPolymarketBalances.set(followed.wallet_id, prefetched);
+            polymarketPrefetchTimedOutWalletIds.delete(followed.wallet_id);
+          }
+          const durationMs = Date.now() - startedAt;
+          const logPayload = {
+            userId,
+            wallets: followedRows.length,
+            owners: prefetched.owners.length,
+            unionTokenIds: prefetched.unionTokenIds.length,
+            rpcCalls: prefetched.rpcCallCount,
+            durationMs,
+          };
+          if (durationMs > env.walletIntelFollowedWalletTimeoutMs) {
+            console.warn(
+              "[wallets:intel:refresh] followed polymarket prefetch slow",
+              logPayload,
+            );
+          } else {
+            console.log(
+              "[wallets:intel:refresh] followed polymarket prefetch done",
+              logPayload,
+            );
           }
         } catch (error) {
           for (const followed of followedRows) {
             prefetchedPolymarketBalances.set(followed.wallet_id, null);
+          }
+          if (isWalletIntelStageTimeoutError(error)) {
+            for (const followed of followedRows) {
+              polymarketPrefetchTimedOutWalletIds.add(followed.wallet_id);
+            }
+            console.warn(
+              "[wallets:intel:refresh] followed polymarket prefetch timed out",
+              {
+                userId,
+                wallets: followedRows.map((row) => row.address),
+                durationMs: Date.now() - startedAt,
+                timeoutMs: error.timeoutMs,
+              },
+            );
+            return;
           }
           const rpcTelemetry = readPrefetchRpcTelemetry(error);
           inputs.telemetry.followedPrefetchPolymarket.estimatedCalls +=
@@ -1405,19 +1519,53 @@ async function collectFollowedWalletSnapshotRows(
       const prefetchedPolymarket =
         prefetchedPolymarketBalances.get(followed.wallet_id) ?? null;
 
+      if (polymarketPrefetchTimedOutWalletIds.has(followed.wallet_id)) {
+        console.warn(
+          "[wallets:intel:refresh] followed polymarket wallet skipped after prefetch timeout",
+          {
+            userId: followed.user_id,
+            walletId: followed.wallet_id,
+            wallet: followed.address,
+          },
+        );
+        continue;
+      }
+
       try {
         await runWithTelemetry(
           inputs.telemetry.followedPositionsPolymarket,
           () =>
-            syncPositionsForUserWallet(inputs.poolClient, {
-              userId: followed.user_id,
-              walletAddress: followed.address,
-              venue: "polymarket",
-              positionScope: "followed",
-              prefetchedPolymarketBalances: prefetchedPolymarket,
-            }),
+            withWalletIntelDeadline(
+              "followedPolymarketPositions",
+              env.walletIntelFollowedWalletTimeoutMs,
+              () =>
+                syncPositionsForUserWallet(inputs.poolClient, {
+                  userId: followed.user_id,
+                  walletAddress: followed.address,
+                  venue: "polymarket",
+                  positionScope: "followed",
+                  prefetchedPolymarketBalances: prefetchedPolymarket,
+                }),
+              {
+                userId: followed.user_id,
+                walletId: followed.wallet_id,
+                wallet: followed.address,
+              },
+            ),
         );
       } catch (error) {
+        if (isWalletIntelStageTimeoutError(error)) {
+          console.warn(
+            "[wallets:intel:refresh] polymarket positions sync timed out",
+            {
+              userId: followed.user_id,
+              walletId: followed.wallet_id,
+              wallet: followed.address,
+              timeoutMs: error.timeoutMs,
+            },
+          );
+          continue;
+        }
         if (
           !recordRetryableFailure(
             followedPositionsPolymarketRetryable,
@@ -1432,44 +1580,51 @@ async function collectFollowedWalletSnapshotRows(
         }
       }
 
-      try {
-        const inserted = await runWithTelemetry(
-          inputs.telemetry.followedSnapshotPolygon,
-          () =>
-            snapshotFollowedWalletHoldingsEvm(client, {
-              walletId: followed.wallet_id,
-              address: normalizedFollowedAddress,
-              venue: "polymarket",
-              rpcUrl: env.polygonRpcUrl,
-              rpcTimeoutMs: env.polygonRpcTimeoutMs,
-              contractAddress: env.polymarketConditionalTokensAddress,
-              tokenIds: inputs.tokenIdsByVenue.polymarket,
-              tokenIndex: inputs.tokenIndexByVenue.polymarket,
-              occurredAt: inputs.snapshotAt,
-              prefetchedBalances:
-                prefetchedPolymarket?.balancesByOwner.get(
-                  followed.address.toLowerCase(),
-                ) ?? null,
-            }),
-        );
-        if (inserted > 0) {
-          rowInserts += inserted;
-          inputs.touchedWalletIds.add(followed.wallet_id);
-          activityRows += inserted;
-        }
-      } catch (error) {
-        if (
-          !recordRetryableFailure(
-            followedSnapshotPolygonRetryable,
-            followed.address,
-            error,
-          )
-        ) {
-          console.error(
-            "[wallets:intel:refresh] polymarket followed snapshot failed",
-            { wallet: followed.address },
-            error,
+      const snapshotKey = walletVenueSnapshotKey(
+        followed.wallet_id,
+        "polymarket",
+      );
+      if (!snapshottedWalletVenueKeys.has(snapshotKey)) {
+        snapshottedWalletVenueKeys.add(snapshotKey);
+        try {
+          const inserted = await runWithTelemetry(
+            inputs.telemetry.followedSnapshotPolygon,
+            () =>
+              snapshotFollowedWalletHoldingsEvm(client, {
+                walletId: followed.wallet_id,
+                address: normalizedFollowedAddress,
+                venue: "polymarket",
+                rpcUrl: env.polygonRpcUrl,
+                rpcTimeoutMs: env.polygonRpcTimeoutMs,
+                contractAddress: env.polymarketConditionalTokensAddress,
+                tokenIds: inputs.tokenIdsByVenue.polymarket,
+                tokenIndex: inputs.tokenIndexByVenue.polymarket,
+                occurredAt: inputs.snapshotAt,
+                prefetchedBalances:
+                  prefetchedPolymarket?.balancesByOwner.get(
+                    followed.address.toLowerCase(),
+                  ) ?? null,
+              }),
           );
+          if (inserted > 0) {
+            rowInserts += inserted;
+            inputs.touchedWalletIds.add(followed.wallet_id);
+            activityRows += inserted;
+          }
+        } catch (error) {
+          if (
+            !recordRetryableFailure(
+              followedSnapshotPolygonRetryable,
+              followed.address,
+              error,
+            )
+          ) {
+            console.error(
+              "[wallets:intel:refresh] polymarket followed snapshot failed",
+              { wallet: followed.address },
+              error,
+            );
+          }
         }
       }
 
@@ -1498,15 +1653,36 @@ async function collectFollowedWalletSnapshotRows(
         await runWithTelemetry(
           inputs.telemetry.followedPositionsLimitless,
           () =>
-            syncPositionsForUserWallet(inputs.poolClient, {
-              userId: followed.user_id,
-              walletAddress: followed.address,
-              venue: "limitless",
-              positionScope: "followed",
-            }),
+            withWalletIntelDeadline(
+              "followedLimitlessPositions",
+              env.walletIntelFollowedWalletTimeoutMs,
+              () =>
+                syncPositionsForUserWallet(inputs.poolClient, {
+                  userId: followed.user_id,
+                  walletAddress: followed.address,
+                  venue: "limitless",
+                  positionScope: "followed",
+                }),
+              {
+                userId: followed.user_id,
+                walletId: followed.wallet_id,
+                wallet: followed.address,
+              },
+            ),
         );
       } catch (error) {
-        if (isLimitlessSessionMissing(error)) {
+        if (isWalletIntelStageTimeoutError(error)) {
+          console.warn(
+            "[wallets:intel:refresh] limitless positions sync timed out",
+            {
+              userId: followed.user_id,
+              walletId: followed.wallet_id,
+              wallet: followed.address,
+              timeoutMs: error.timeoutMs,
+            },
+          );
+          continue;
+        } else if (isLimitlessSessionMissing(error)) {
           markTelemetrySkipped(inputs.telemetry.followedPositionsLimitless);
           console.info(
             "[wallets:intel:refresh] limitless positions sync skipped (no session)",
@@ -1520,40 +1696,47 @@ async function collectFollowedWalletSnapshotRows(
         }
       }
 
-      try {
-        const inserted = await runWithTelemetry(
-          inputs.telemetry.followedSnapshotBase,
-          () =>
-            snapshotFollowedWalletHoldingsEvm(client, {
-              walletId: followed.wallet_id,
-              address: normalizedFollowedAddress,
-              venue: "limitless",
-              rpcUrl: env.baseRpcUrl,
-              rpcTimeoutMs: env.baseRpcTimeoutMs,
-              contractAddress: env.limitlessConditionalTokensAddress,
-              tokenIds: inputs.tokenIdsByVenue.limitless,
-              tokenIndex: inputs.tokenIndexByVenue.limitless,
-              occurredAt: inputs.snapshotAt,
-            }),
-        );
-        if (inserted > 0) {
-          rowInserts += inserted;
-          inputs.touchedWalletIds.add(followed.wallet_id);
-          activityRows += inserted;
-        }
-      } catch (error) {
-        if (
-          !recordRetryableFailure(
-            followedSnapshotBaseRetryable,
-            followed.address,
-            error,
-          )
-        ) {
-          console.error(
-            "[wallets:intel:refresh] limitless followed snapshot failed",
-            { wallet: followed.address },
-            error,
+      const snapshotKey = walletVenueSnapshotKey(
+        followed.wallet_id,
+        "limitless",
+      );
+      if (!snapshottedWalletVenueKeys.has(snapshotKey)) {
+        snapshottedWalletVenueKeys.add(snapshotKey);
+        try {
+          const inserted = await runWithTelemetry(
+            inputs.telemetry.followedSnapshotBase,
+            () =>
+              snapshotFollowedWalletHoldingsEvm(client, {
+                walletId: followed.wallet_id,
+                address: normalizedFollowedAddress,
+                venue: "limitless",
+                rpcUrl: env.baseRpcUrl,
+                rpcTimeoutMs: env.baseRpcTimeoutMs,
+                contractAddress: env.limitlessConditionalTokensAddress,
+                tokenIds: inputs.tokenIdsByVenue.limitless,
+                tokenIndex: inputs.tokenIndexByVenue.limitless,
+                occurredAt: inputs.snapshotAt,
+              }),
           );
+          if (inserted > 0) {
+            rowInserts += inserted;
+            inputs.touchedWalletIds.add(followed.wallet_id);
+            activityRows += inserted;
+          }
+        } catch (error) {
+          if (
+            !recordRetryableFailure(
+              followedSnapshotBaseRetryable,
+              followed.address,
+              error,
+            )
+          ) {
+            console.error(
+              "[wallets:intel:refresh] limitless followed snapshot failed",
+              { wallet: followed.address },
+              error,
+            );
+          }
         }
       }
 
@@ -1574,36 +1757,64 @@ async function collectFollowedWalletSnapshotRows(
 
     if (followed.chain === "solana") {
       try {
-        await runWithTelemetry(inputs.telemetry.followedPositionsKalshi, () =>
-          syncPositionsForUserWallet(inputs.poolClient, {
-            userId: followed.user_id,
-            walletAddress: followed.address,
-            venue: "kalshi",
-            positionScope: "followed",
-            prefetchedSolanaBalances:
-              prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
-          }),
+        await runWithTelemetry(
+          inputs.telemetry.followedPositionsKalshi,
+          () =>
+            withWalletIntelDeadline(
+              "followedKalshiPositions",
+              env.walletIntelFollowedWalletTimeoutMs,
+              () =>
+                syncPositionsForUserWallet(inputs.poolClient, {
+                  userId: followed.user_id,
+                  walletAddress: followed.address,
+                  venue: "kalshi",
+                  positionScope: "followed",
+                  prefetchedSolanaBalances:
+                    prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+                }),
+              {
+                userId: followed.user_id,
+                walletId: followed.wallet_id,
+                wallet: followed.address,
+              },
+            ),
         );
       } catch (error) {
+        if (isWalletIntelStageTimeoutError(error)) {
+          console.warn(
+            "[wallets:intel:refresh] kalshi positions sync timed out",
+            {
+              userId: followed.user_id,
+              walletId: followed.wallet_id,
+              wallet: followed.address,
+              timeoutMs: error.timeoutMs,
+            },
+          );
+          continue;
+        }
         console.error(
           "[wallets:intel:refresh] kalshi positions sync failed",
           error,
         );
       }
 
-      const inserted = await snapshotFollowedWalletHoldingsSolana(client, {
-        walletId: followed.wallet_id,
-        address: followed.address,
-        tokenMints: inputs.tokenIdsByVenue.kalshi,
-        tokenIndex: inputs.tokenIndexByVenue.kalshi,
-        occurredAt: inputs.snapshotAt,
-        balances: prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
-        telemetry: inputs.telemetry.followedSnapshotSolana,
-      });
-      if (inserted > 0) {
-        rowInserts += inserted;
-        inputs.touchedWalletIds.add(followed.wallet_id);
-        activityRows += inserted;
+      const snapshotKey = walletVenueSnapshotKey(followed.wallet_id, "kalshi");
+      if (!snapshottedWalletVenueKeys.has(snapshotKey)) {
+        snapshottedWalletVenueKeys.add(snapshotKey);
+        const inserted = await snapshotFollowedWalletHoldingsSolana(client, {
+          walletId: followed.wallet_id,
+          address: followed.address,
+          tokenMints: inputs.tokenIdsByVenue.kalshi,
+          tokenIndex: inputs.tokenIndexByVenue.kalshi,
+          occurredAt: inputs.snapshotAt,
+          balances: prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+          telemetry: inputs.telemetry.followedSnapshotSolana,
+        });
+        if (inserted > 0) {
+          rowInserts += inserted;
+          inputs.touchedWalletIds.add(followed.wallet_id);
+          activityRows += inserted;
+        }
       }
 
       const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -1766,7 +1977,12 @@ async function runWalletIntelArtifactStage<T>(
     ...counts,
   });
   try {
-    const result = await fn();
+    const result = await withWalletIntelDeadline(
+      `artifact:${stage}`,
+      env.walletIntelArtifactStageTimeoutMs,
+      fn,
+      { stage, ...counts },
+    );
     console.log("[wallets:intel:refresh] artifact stage done", {
       stage,
       durationMs: Date.now() - startedAt,
@@ -1774,6 +1990,19 @@ async function runWalletIntelArtifactStage<T>(
     });
     return result;
   } catch (error) {
+    if (isWalletIntelStageTimeoutError(error)) {
+      console.error(
+        "[wallets:intel:refresh] artifact stage timed out",
+        {
+          stage,
+          durationMs: Date.now() - startedAt,
+          timeoutMs: error.timeoutMs,
+          ...counts,
+        },
+        error,
+      );
+      throw error;
+    }
     console.error(
       "[wallets:intel:refresh] artifact stage failed",
       {
