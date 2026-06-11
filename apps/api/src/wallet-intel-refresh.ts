@@ -24,6 +24,7 @@ import {
   prefetchPolymarketOwnerBalancesForWallets,
   readPrefetchRpcTelemetry,
   syncPositionsForUserWallet,
+  type PolymarketErc1155BalanceCache,
   type PrefetchedPolymarketOwnerBalances,
 } from "./services/positions-sync.js";
 import { markHotTokens } from "./lib/hot-tokens.js";
@@ -1358,6 +1359,8 @@ async function collectFollowedWalletSnapshotRows(
     string,
     PrefetchedPolymarketOwnerBalances | null
   >();
+  const polymarketPrefetchBalanceCache: PolymarketErc1155BalanceCache =
+    new Map();
   const polymarketPrefetchTimedOutWalletIds = new Set<string>();
   let followedSnapshotsSkippedAlreadyCollected = 0;
 
@@ -1428,6 +1431,7 @@ async function collectFollowedWalletSnapshotRows(
                     userId,
                     walletAddresses: followedRows.map((row) => row.address),
                     trackedTokenIds: inputs.tokenIdsByVenue.polymarket,
+                    balanceCache: polymarketPrefetchBalanceCache,
                   }),
                 {
                   userId,
@@ -1451,6 +1455,8 @@ async function collectFollowedWalletSnapshotRows(
             owners: prefetched.owners.length,
             unionTokenIds: prefetched.unionTokenIds.length,
             rpcCalls: prefetched.rpcCallCount,
+            rpcBalanceCacheHits: prefetched.rpcBalanceCacheHits ?? 0,
+            rpcBalanceCacheMisses: prefetched.rpcBalanceCacheMisses ?? 0,
             durationMs,
           };
           if (durationMs > env.walletIntelFollowedWalletTimeoutMs) {

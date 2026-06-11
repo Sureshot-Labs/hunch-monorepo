@@ -17,6 +17,7 @@ import {
 import {
   fetchErc1155BalancesByOwner,
   fetchErc1155BalancesByOwners,
+  fetchErc1155BalancesForOwnerTokenPairs,
 } from "./polygon-rpc.js";
 import { ethers } from "ethers";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
@@ -450,6 +451,9 @@ async function fetchErc1155OwnerTokenBalancesForOwners(inputs: {
   tokenIds: string[];
   maxPairsPerCall?: number;
   onRpcCall?: (() => void) | null;
+  balanceCache?: PolymarketErc1155BalanceCache | null;
+  onCacheHit?: (() => void) | null;
+  onCacheMiss?: (() => void) | null;
 }): Promise<Map<string, WalletTokenBalance[]>> {
   const owners = Array.from(
     new Map(
@@ -465,15 +469,29 @@ async function fetchErc1155OwnerTokenBalancesForOwners(inputs: {
   }
   if (owners.length === 0 || tokenIds.length === 0) return output;
 
-  const balancesByOwner = await fetchErc1155BalancesByOwners({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    contractAddress: inputs.contractAddress,
-    owners,
-    tokenIds,
-    maxPairsPerCall: inputs.maxPairsPerCall,
-    onRpcCall: inputs.onRpcCall,
-  });
+  const balancesByOwner =
+    inputs.balanceCache == null
+      ? await fetchErc1155BalancesByOwners({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          contractAddress: inputs.contractAddress,
+          owners,
+          tokenIds,
+          maxPairsPerCall: inputs.maxPairsPerCall,
+          onRpcCall: inputs.onRpcCall,
+        })
+      : await fetchErc1155BalancesByOwnersWithCache({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          contractAddress: inputs.contractAddress,
+          owners,
+          tokenIds,
+          maxPairsPerCall: inputs.maxPairsPerCall,
+          onRpcCall: inputs.onRpcCall,
+          balanceCache: inputs.balanceCache,
+          onCacheHit: inputs.onCacheHit,
+          onCacheMiss: inputs.onCacheMiss,
+        });
 
   for (const owner of owners) {
     const rawBalances = balancesByOwner.get(owner.toLowerCase()) ?? new Map();
@@ -487,6 +505,81 @@ async function fetchErc1155OwnerTokenBalancesForOwners(inputs: {
       });
     }
     output.set(owner.toLowerCase(), balances);
+  }
+
+  return output;
+}
+
+function erc1155BalanceCacheKey(inputs: {
+  contractAddress: string;
+  owner: string;
+  tokenId: string;
+}): string {
+  return [
+    ethers.getAddress(inputs.contractAddress).toLowerCase(),
+    ethers.getAddress(inputs.owner).toLowerCase(),
+    inputs.tokenId,
+  ].join(":");
+}
+
+async function fetchErc1155BalancesByOwnersWithCache(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  contractAddress: string;
+  owners: string[];
+  tokenIds: string[];
+  maxPairsPerCall?: number;
+  onRpcCall?: (() => void) | null;
+  balanceCache: PolymarketErc1155BalanceCache;
+  onCacheHit?: (() => void) | null;
+  onCacheMiss?: (() => void) | null;
+}): Promise<Map<string, Map<string, bigint>>> {
+  const output = new Map<string, Map<string, bigint>>();
+  const missingPairs: Array<{ owner: string; tokenId: string; key: string }> =
+    [];
+
+  for (const owner of inputs.owners) {
+    const ownerKey = owner.toLowerCase();
+    const ownerBalances = output.get(ownerKey) ?? new Map<string, bigint>();
+    output.set(ownerKey, ownerBalances);
+
+    for (const tokenId of inputs.tokenIds) {
+      const key = erc1155BalanceCacheKey({
+        contractAddress: inputs.contractAddress,
+        owner,
+        tokenId,
+      });
+      if (inputs.balanceCache.has(key)) {
+        inputs.onCacheHit?.();
+        ownerBalances.set(tokenId, inputs.balanceCache.get(key) ?? 0n);
+      } else {
+        inputs.onCacheMiss?.();
+        missingPairs.push({ owner, tokenId, key });
+      }
+    }
+  }
+
+  if (missingPairs.length > 0) {
+    const fetched = await fetchErc1155BalancesForOwnerTokenPairs({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      contractAddress: inputs.contractAddress,
+      pairs: missingPairs.map((pair) => ({
+        owner: pair.owner,
+        tokenId: pair.tokenId,
+      })),
+      maxPairsPerCall: inputs.maxPairsPerCall,
+      onRpcCall: inputs.onRpcCall,
+    });
+
+    for (const pair of missingPairs) {
+      const ownerKey = pair.owner.toLowerCase();
+      const value = fetched.get(ownerKey)?.get(pair.tokenId) ?? 0n;
+      inputs.balanceCache.set(pair.key, value);
+      const ownerBalances = output.get(ownerKey) ?? new Map<string, bigint>();
+      ownerBalances.set(pair.tokenId, value);
+      output.set(ownerKey, ownerBalances);
+    }
   }
 
   return output;
@@ -827,6 +920,8 @@ export type PrefetchedPolymarketOwnerBalances = {
   unionTokenIds: string[];
   rpcCallEstimate: number;
   rpcCallCount: number;
+  rpcBalanceCacheHits?: number;
+  rpcBalanceCacheMisses?: number;
   balancesByOwner: Map<string, WalletTokenBalance[]>;
   sourceCounts?: {
     dbCandidateTokenCount: number;
@@ -842,6 +937,8 @@ export type PrefetchedPolymarketOwnerBalances = {
     totalMs: number;
   };
 };
+
+export type PolymarketErc1155BalanceCache = Map<string, bigint>;
 
 type PrefetchRpcTelemetryMetadata = {
   walletIntelRpcCallCount?: number;
@@ -976,11 +1073,14 @@ export async function prefetchPolymarketOwnerBalancesForWallets(
     userId: string;
     walletAddresses: string[];
     trackedTokenIds?: string[];
+    balanceCache?: PolymarketErc1155BalanceCache | null;
   },
 ): Promise<PrefetchedPolymarketOwnerBalances> {
   const totalStartedAt = Date.now();
   let rpcCallCount = 0;
   let rpcCallEstimate = 0;
+  let rpcBalanceCacheHits = 0;
+  let rpcBalanceCacheMisses = 0;
 
   try {
     const requestedWallets = Array.from(
@@ -1055,8 +1155,15 @@ export async function prefetchPolymarketOwnerBalancesForWallets(
         owners,
         tokenIds: unionTokenIds,
         maxPairsPerCall: POLYMARKET_BALANCE_BATCH_MAX_PAIRS,
+        balanceCache: inputs.balanceCache,
         onRpcCall: () => {
           rpcCallCount += 1;
+        },
+        onCacheHit: () => {
+          rpcBalanceCacheHits += 1;
+        },
+        onCacheMiss: () => {
+          rpcBalanceCacheMisses += 1;
         },
       });
 
@@ -1081,6 +1188,8 @@ export async function prefetchPolymarketOwnerBalancesForWallets(
       unionTokenIds,
       rpcCallEstimate,
       rpcCallCount,
+      rpcBalanceCacheHits,
+      rpcBalanceCacheMisses,
       balancesByOwner,
       sourceCounts: {
         dbCandidateTokenCount: dbCandidateTokenIds.length,
