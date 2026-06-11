@@ -9,6 +9,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { isHyperliquidTradingPubliclyEnabled } from "../lib/hyperliquid-access.js";
 import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
@@ -469,6 +470,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
               market.market_metadata,
             ),
+            hyperliquidTradingEnabled: isHyperliquidTradingPubliclyEnabled(),
           }),
           negRisk:
             market.venue === "polymarket"

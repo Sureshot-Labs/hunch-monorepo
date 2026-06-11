@@ -7,6 +7,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { isHyperliquidTradingPubliclyEnabled } from "../lib/hyperliquid-access.js";
 import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { getRedisStatus } from "../redis.js";
@@ -1030,6 +1031,7 @@ function normalizeSignalTargetMarket(params: {
       dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
         params.marketMetadata,
       ),
+      hyperliquidTradingEnabled: isHyperliquidTradingPubliclyEnabled(),
     }),
     resolvedOutcome: params.resolvedOutcome,
     resolvedOutcomePct: toNumber(params.resolvedOutcomePct),

@@ -10,6 +10,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { isHyperliquidTradingPubliclyEnabled } from "../lib/hyperliquid-access.js";
 import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
@@ -188,6 +189,7 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
       rRow.market_metadata,
     ),
+    hyperliquidTradingEnabled: isHyperliquidTradingPubliclyEnabled(),
   });
 
   return {

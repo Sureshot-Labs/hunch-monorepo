@@ -1202,6 +1202,45 @@ export const env = {
     "HYPERLIQUID_INFO_TIMEOUT_MS",
     8_000,
   ),
+  hyperliquidTradingEnabled:
+    parseOptionalBool(process.env.HYPERLIQUID_TRADING_ENABLED) ?? false,
+  hyperliquidTradingAllowedUserIds: parseList(
+    process.env.HYPERLIQUID_TRADING_ALLOWED_USER_IDS,
+  ),
+  hyperliquidTradingAllowedWallets: parseList(
+    process.env.HYPERLIQUID_TRADING_ALLOWED_WALLETS,
+  ),
+  hyperliquidExchangeUrl:
+    process.env.HYPERLIQUID_EXCHANGE_URL?.trim() ||
+    "https://api.hyperliquid.xyz/exchange",
+  hyperliquidExchangeTimeoutMs: optionalPositiveInt(
+    "HYPERLIQUID_EXCHANGE_TIMEOUT_MS",
+    8_000,
+  ),
+  hyperliquidChain:
+    process.env.HYPERLIQUID_CHAIN?.trim().toLowerCase() === "testnet"
+      ? "Testnet"
+      : "Mainnet",
+  hyperliquidMinDepositUsdc: optionalNonNegativeNumber(
+    "HYPERLIQUID_MIN_DEPOSIT_USDC",
+    5,
+  ),
+  hyperliquidMinOrderNotionalUsd: optionalNonNegativeNumber(
+    "HYPERLIQUID_MIN_ORDER_NOTIONAL_USD",
+    10,
+  ),
+  hyperliquidMarketSlippageBps: optionalIntInRange(
+    "HYPERLIQUID_MARKET_SLIPPAGE_BPS",
+    500,
+    0,
+    5_000,
+  ),
+  hyperliquidBridge2Address:
+    process.env.HYPERLIQUID_BRIDGE2_ADDRESS?.trim() ||
+    "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7",
+  hyperliquidArbitrumUsdcAddress:
+    process.env.HYPERLIQUID_ARBITRUM_USDC_ADDRESS?.trim() ||
+    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
   hyperliquidRecentTradesCacheTtlSec: optionalPositiveInt(
     "HYPERLIQUID_RECENT_TRADES_CACHE_TTL_SEC",
     10,

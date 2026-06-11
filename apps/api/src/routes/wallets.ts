@@ -27,6 +27,8 @@ import {
 } from "../services/limitless-auth.js";
 import { isLimitlessPartnerHmacConfigured } from "../services/limitless-client.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
+import { fetchHyperliquidSpotState } from "../services/hyperliquid-trading.js";
+import { isHyperliquidTradingAllowed } from "../lib/hyperliquid-access.js";
 import {
   fetchPolymarketOnchainSnapshot,
   POLYGON_NATIVE_USDC_ADDRESS,
@@ -161,6 +163,8 @@ function getVenueStatusCacheKey(inputs: {
   funderUpdatedAt?: string | null;
   limitlessUpdatedAt?: string | null;
   relayerEnabled: boolean;
+  hyperliquidTradingEnabled: boolean;
+  hyperliquidTradingAllowed: boolean;
 }) {
   const funderKey = inputs.funder?.toLowerCase() ?? "none";
   const funderUpdatedAt = inputs.funderUpdatedAt ?? "none";
@@ -173,6 +177,8 @@ function getVenueStatusCacheKey(inputs: {
     funderUpdatedAt,
     limitlessUpdatedAt,
     inputs.relayerEnabled ? "relayer:1" : "relayer:0",
+    inputs.hyperliquidTradingEnabled ? "hyperliquid:1" : "hyperliquid:0",
+    inputs.hyperliquidTradingAllowed ? "hyperliquid-allowed:1" : "hyperliquid-allowed:0",
   ].join("|");
 }
 
@@ -1279,6 +1285,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
 
               const negRiskAdapterAddress =
                 env.polymarketNegRiskAdapterAddress?.trim() || "";
+              const hyperliquidTradingAllowed = isHyperliquidTradingAllowed({
+                userId: user.id,
+                walletAddress,
+              });
 
               const cacheKey = getVenueStatusCacheKey({
                 userId: user.id,
@@ -1288,6 +1298,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 funderUpdatedAt: funderUpdatedAtValue,
                 limitlessUpdatedAt: limitlessUpdatedAtValue,
                 relayerEnabled,
+                hyperliquidTradingEnabled: env.hyperliquidTradingEnabled,
+                hyperliquidTradingAllowed,
               });
 
               if (!refresh) {
@@ -1303,7 +1315,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               }
 
               const computePromise = (async () => {
-                const [polymarketStatus, limitlessStatus] =
+                const [polymarketStatus, limitlessStatus, hyperliquidStatus] =
                   await Promise.allSettled([
                     (async () => {
                       const signerCodePromise = fetchEvmCode({
@@ -1646,6 +1658,61 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         },
                       };
                     })(),
+                    (async () => {
+                      if (!hyperliquidTradingAllowed) {
+                        return {
+                          supported: false,
+                          ready: false,
+                          reasons: [
+                            env.hyperliquidTradingEnabled
+                              ? "not_allowlisted"
+                              : "trading_disabled",
+                          ],
+                          chain: "HyperCore",
+                          chainId: null,
+                          minDepositUsdc: env.hyperliquidMinDepositUsdc,
+                          minOrderNotionalUsd:
+                            env.hyperliquidMinOrderNotionalUsd,
+                          funding: {
+                            sourceChainId: 42161,
+                            sourceTokenAddress:
+                              env.hyperliquidArbitrumUsdcAddress,
+                            bridgeAddress: env.hyperliquidBridge2Address,
+                            minDepositUsdc: env.hyperliquidMinDepositUsdc,
+                          },
+                        };
+                      }
+
+                      const state =
+                        await fetchHyperliquidSpotState(walletAddress);
+                      const usdcRaw = BigInt(state.usdcBalanceRaw);
+                      const reasons: string[] = [];
+                      if (usdcRaw <= 0n) reasons.push("insufficient_usdc");
+
+                      return {
+                        supported: true,
+                        ready: reasons.length === 0,
+                        reasons,
+                        chain: "HyperCore",
+                        chainId: null,
+                        minDepositUsdc: env.hyperliquidMinDepositUsdc,
+                        minOrderNotionalUsd:
+                          env.hyperliquidMinOrderNotionalUsd,
+                        usdc: {
+                          decimals: 6,
+                          symbol: "USDC",
+                          balance: state.usdcBalance,
+                          balanceRaw: state.usdcBalanceRaw,
+                        },
+                        funding: {
+                          sourceChainId: 42161,
+                          sourceTokenAddress:
+                            env.hyperliquidArbitrumUsdcAddress,
+                          bridgeAddress: env.hyperliquidBridge2Address,
+                          minDepositUsdc: env.hyperliquidMinDepositUsdc,
+                        },
+                      };
+                    })(),
                   ]);
 
                 if (polymarketStatus.status === "fulfilled") {
@@ -1673,6 +1740,20 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                     supported: true,
                     ready: false,
                     error: "Limitless status lookup failed",
+                  };
+                }
+
+                if (hyperliquidStatus.status === "fulfilled") {
+                  response.hyperliquid = hyperliquidStatus.value;
+                } else {
+                  app.log.warn(
+                    { error: hyperliquidStatus.reason, walletAddress },
+                    "Hyperliquid venue status lookup failed",
+                  );
+                  response.hyperliquid = {
+                    supported: env.hyperliquidTradingEnabled,
+                    ready: false,
+                    error: "Hyperliquid status lookup failed",
                   };
                 }
 
@@ -1712,6 +1793,11 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                 supported: true,
                 ready: false,
                 error: "Limitless status lookup failed",
+              };
+              response.hyperliquid = {
+                supported: env.hyperliquidTradingEnabled,
+                ready: false,
+                error: "Hyperliquid status lookup failed",
               };
               response.kalshi = {
                 supported: false,
@@ -1828,6 +1914,11 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               ready: false,
               reasons: ["wallet_type_mismatch"],
             };
+            response.hyperliquid = {
+              supported: false,
+              ready: false,
+              reasons: ["wallet_type_mismatch"],
+            };
 
             return response;
           }
@@ -1838,6 +1929,11 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
             reasons: ["wallet_type_mismatch"],
           };
           response.limitless = {
+            supported: false,
+            ready: false,
+            reasons: ["wallet_type_mismatch"],
+          };
+          response.hyperliquid = {
             supported: false,
             ready: false,
             reasons: ["wallet_type_mismatch"],

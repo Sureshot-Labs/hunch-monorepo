@@ -2,6 +2,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { env } from "../env.js";
 import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import {
   parseMetadata,
@@ -126,6 +127,7 @@ export function mapMarketsByTokenRows(
       dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
         row.market_metadata,
       ),
+      hyperliquidTradingEnabled: env.hyperliquidTradingEnabled,
       nowMs: now.getTime(),
     });
     const tradeType =

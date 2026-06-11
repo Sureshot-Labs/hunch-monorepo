@@ -53,7 +53,7 @@ test("Kalshi finalized status remains non-accepting even with native flag", () =
   );
 });
 
-test("Hyperliquid remains non-accepting while trading is unsupported", () => {
+test("Hyperliquid remains non-accepting while trading flag is disabled", () => {
   assert.equal(
     computeAcceptingOrders({
       venue: "hyperliquid",
@@ -61,9 +61,23 @@ test("Hyperliquid remains non-accepting while trading is unsupported", () => {
       closeTime: "2026-05-21T12:00:00Z",
       expirationTime: "2026-05-21T12:00:00Z",
       nowMs: Date.parse("2026-05-20T12:00:00Z"),
+      hyperliquidTradingEnabled: false,
     }),
     false,
   );
+});
+
+test("Hyperliquid accepts orders only when trading flag and market are active", () => {
+  const base = {
+    venue: "hyperliquid",
+    closeTime: "2026-05-21T12:00:00Z",
+    expirationTime: "2026-05-21T12:00:00Z",
+    nowMs: Date.parse("2026-05-20T12:00:00Z"),
+    hyperliquidTradingEnabled: true,
+  };
+
+  assert.equal(computeAcceptingOrders({ ...base, status: "ACTIVE" }), true);
+  assert.equal(computeAcceptingOrders({ ...base, status: "CLOSED" }), false);
 });
 
 test("reads DFlow-native accepting-orders from metadata", () => {

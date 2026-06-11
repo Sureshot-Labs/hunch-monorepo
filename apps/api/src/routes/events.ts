@@ -9,6 +9,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { isHyperliquidTradingPubliclyEnabled } from "../lib/hyperliquid-access.js";
 import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
@@ -212,6 +213,7 @@ function isAcceptingOrders(row: EventDetailsRow): boolean {
     dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
       row.market_metadata,
     ),
+    hyperliquidTradingEnabled: isHyperliquidTradingPubliclyEnabled(),
   });
 }
 
@@ -526,6 +528,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
               row.market_metadata,
             ),
+            hyperliquidTradingEnabled: isHyperliquidTradingPubliclyEnabled(),
           });
           const liveYesBid =
             acceptingOrders && row.best_bid_yes != null

@@ -39,6 +39,7 @@ const ACROSS_SUPPORTED_TOKEN_ADDRESSES: Record<string, Set<string>> = {
     normalizeAddress(env.polymarketPusdAddress),
   ]),
   "8453": new Set(["0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"]),
+  "42161": new Set(["0xaf88d065e77c8cc2239327c5edb3a432268e5831"]),
   [HUNCH_SOLANA_CHAIN_ID]: new Set([
     "epjfwdd5aufqssqem2qn1xzybapc8g4weggkzwytdt1v",
   ]),

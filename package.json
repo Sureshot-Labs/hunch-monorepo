@@ -6,6 +6,7 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
+    "predev:bun": "pnpm -F @hunch/config run build && pnpm -F @hunch/shared run build && pnpm -F @hunch/infra run build && pnpm -F @hunch/db run build",
     "dev:bun": "turbo run dev:bun --parallel --filter=@hunch/config --filter=@hunch/db --filter=@hunch/infra --filter=@hunch/shared --filter=api --filter=ai-worker --filter=finance-worker --filter=indexer-dflow --filter=indexer-hyperliquid --filter=indexer-limitless --filter=indexer-polymarket",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",

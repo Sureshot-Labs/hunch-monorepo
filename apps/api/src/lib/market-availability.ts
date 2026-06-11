@@ -5,6 +5,7 @@ type ComputeAcceptingOrdersInput = {
   expirationTime?: unknown;
   pmAcceptingOrders?: boolean | null;
   dflowNativeAcceptingOrders?: boolean | null;
+  hyperliquidTradingEnabled?: boolean | null;
   nowMs?: number;
 };
 
@@ -75,8 +76,9 @@ export function computeAcceptingOrders(
   const venue =
     typeof input.venue === "string" ? input.venue.toLowerCase() : null;
 
-  // Hyperliquid is display-only until backend trading support is implemented.
-  if (venue === "hyperliquid") return false;
+  if (venue === "hyperliquid") {
+    return Boolean(input.hyperliquidTradingEnabled) && activeByUnified;
+  }
 
   if (venue === "kalshi") {
     if (!activeByUnified) return false;

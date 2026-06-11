@@ -38,6 +38,7 @@ const SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const POLYGON_USDC = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359";
 const POLYGON_PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const ARBITRUM_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
 const SOLANA_MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
 function withAcrossEnv(
@@ -214,6 +215,17 @@ const tests: TestCase[] = [
             dstChainId: "8453",
             srcToken: POLYGON_PUSD,
             dstToken: BASE_USDC,
+          }),
+          { ok: true, mode: "swap_api" },
+        );
+
+        assert.deepEqual(
+          resolveAcrossRoute({
+            swapType: "cross_chain",
+            srcChainId: "137",
+            dstChainId: "42161",
+            srcToken: POLYGON_USDC,
+            dstToken: ARBITRUM_USDC,
           }),
           { ok: true, mode: "swap_api" },
         );

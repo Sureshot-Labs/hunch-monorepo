@@ -44,7 +44,11 @@ import {
 } from "./polymarket-builder-fees.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
-type PositionRefreshVenue = "polymarket" | "dflow" | "limitless";
+type PositionRefreshVenue =
+  | "polymarket"
+  | "dflow"
+  | "limitless"
+  | "hyperliquid";
 const POSITION_REFRESH_STALE_MARKET_MINUTES = 15;
 const POLYMARKET_BALANCE_BATCH_MAX_PAIRS = 1000;
 const POLYMARKET_DATA_API_POSITIONS_LIMIT = 500;
@@ -262,6 +266,7 @@ function requestPositionMarketRefresh(inputs: {
     tokenIds,
     venue: refreshVenue,
   });
+  if (refreshVenue === "hyperliquid") return;
   void requestPriceRefreshForTokens({ tokenIds, venue: refreshVenue });
 }
 

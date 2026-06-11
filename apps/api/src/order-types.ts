@@ -4,7 +4,7 @@
 export interface Order {
   id: string;
   userId: string;
-  venue: "polymarket" | "kalshi" | "limitless";
+  venue: "polymarket" | "kalshi" | "limitless" | "hyperliquid";
   venueOrderId?: string;
 
   tokenId: string;
@@ -47,7 +47,7 @@ export interface Position {
   id: string;
   userId: string;
   walletAddress: string | null;
-  venue: "polymarket" | "kalshi" | "limitless";
+  venue: "polymarket" | "kalshi" | "limitless" | "hyperliquid";
   tokenId: string;
 
   side: "LONG" | "SHORT" | "FLAT";
@@ -143,7 +143,7 @@ export interface GetPositionsResponse {
 
 // Venue Order Manager Interface
 export interface VenueOrderManager {
-  venue: "polymarket" | "kalshi" | "limitless";
+  venue: "polymarket" | "kalshi" | "limitless" | "hyperliquid";
 
   // Order operations
   placeOrder(

@@ -13,6 +13,7 @@ import { feesRoutes } from "./fees.js";
 import { feedRoutes } from "./feed.js";
 import { healthRoutes } from "./health.js";
 import { holdersRoutes } from "./holders.js";
+import { hyperliquidPrivateRoutes } from "./hyperliquid-private.js";
 import { marketRoutes } from "./markets.js";
 import { marketMapRoutes } from "./market-map.js";
 import { metaRoutes } from "./meta.js";
@@ -50,6 +51,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(embeddedWalletRoutes);
   await app.register(polymarketPrivateRoutes, { prefix: "/trade/polymarket" });
   await app.register(limitlessPrivateRoutes, { prefix: "/trade/limitless" });
+  await app.register(hyperliquidPrivateRoutes, {
+    prefix: "/trade/hyperliquid",
+  });
   await app.register(dflowPrivateRoutes, { prefix: "/trade/kalshi" });
   await app.register(dflowPrivateRoutes, { prefix: "/trade/dflow" });
   await app.register(polymarketProxyRoutes);

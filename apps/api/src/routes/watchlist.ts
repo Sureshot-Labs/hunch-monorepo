@@ -1,11 +1,13 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
+import { env } from "../env.js";
 import { pool } from "../db.js";
 import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { isHyperliquidTradingPubliclyEnabled } from "../lib/hyperliquid-access.js";
 import { resolveMarketTokenPair } from "../lib/market-tokens.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -178,6 +180,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
               dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
                 r.market_metadata,
               ),
+              hyperliquidTradingEnabled: isHyperliquidTradingPubliclyEnabled(),
             }),
             tokens,
             conditionId: (r.condition_id as string | null) || null,

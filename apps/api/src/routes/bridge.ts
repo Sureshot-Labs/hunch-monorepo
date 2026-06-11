@@ -244,6 +244,18 @@ const FALLBACK_TOKEN_META: Record<
       name: "Ethereum",
     },
   },
+  "42161": {
+    "0xaf88d065e77c8cc2239327c5edb3a432268e5831": {
+      symbol: "USDC",
+      decimals: 6,
+      name: "USD Coin",
+    },
+    "0x0000000000000000000000000000000000000000": {
+      symbol: "ETH",
+      decimals: 18,
+      name: "Ethereum",
+    },
+  },
   "7565164": {
     EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: {
       symbol: "USDC",

@@ -183,9 +183,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venue = query.venue;
       const venues = query.venues;
-      if (hasUnsupportedHyperliquidVenue({ venue, venues })) {
-        return sendUnsupportedVenue(reply);
-      }
       const responseVenue =
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
@@ -314,9 +311,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venue = query.venue;
       const venues = query.venues;
-      if (hasUnsupportedHyperliquidVenue({ venue, venues })) {
-        return sendUnsupportedVenue(reply);
-      }
       const responseVenue =
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
@@ -380,9 +374,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
       const query = request.query;
       const venue = query.venue;
       const venues = query.venues;
-      if (hasUnsupportedHyperliquidVenue({ venue, venues })) {
-        return sendUnsupportedVenue(reply);
-      }
       const responseVenue =
         venue ?? (venues && venues.length === 1 ? venues[0] : undefined);
 
