@@ -673,6 +673,10 @@ function normalizeAddress(address: string, chain: Chain): string | null {
   return normalized;
 }
 
+function walletVenueSnapshotKey(walletId: string, venue: Venue) {
+  return `${walletId}:${venue}`;
+}
+
 function normalizeOnchainTokenId(
   venue: Venue,
   tokenId: string | null,
@@ -1291,6 +1295,7 @@ async function collectFollowedWalletSnapshotRows(
     telemetry: WalletIntelRefreshTelemetry;
     followedFetchConcurrency: number;
     touchedWalletIds: Set<string>;
+    snapshottedWalletVenueKeys: Set<string>;
     poolClient: typeof pool;
   },
 ): Promise<FollowedCollectionResult> {
@@ -1354,9 +1359,7 @@ async function collectFollowedWalletSnapshotRows(
     PrefetchedPolymarketOwnerBalances | null
   >();
   const polymarketPrefetchTimedOutWalletIds = new Set<string>();
-  const snapshottedWalletVenueKeys = new Set<string>();
-  const walletVenueSnapshotKey = (walletId: string, venue: Venue) =>
-    `${walletId}:${venue}`;
+  let followedSnapshotsSkippedAlreadyCollected = 0;
 
   const solanaFollowedWallets = inputs.followedWallets.filter(
     (row) => row.chain === "solana",
@@ -1584,8 +1587,8 @@ async function collectFollowedWalletSnapshotRows(
         followed.wallet_id,
         "polymarket",
       );
-      if (!snapshottedWalletVenueKeys.has(snapshotKey)) {
-        snapshottedWalletVenueKeys.add(snapshotKey);
+      if (!inputs.snapshottedWalletVenueKeys.has(snapshotKey)) {
+        inputs.snapshottedWalletVenueKeys.add(snapshotKey);
         try {
           const inserted = await runWithTelemetry(
             inputs.telemetry.followedSnapshotPolygon,
@@ -1626,6 +1629,8 @@ async function collectFollowedWalletSnapshotRows(
             );
           }
         }
+      } else {
+        followedSnapshotsSkippedAlreadyCollected += 1;
       }
 
       const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -1700,8 +1705,8 @@ async function collectFollowedWalletSnapshotRows(
         followed.wallet_id,
         "limitless",
       );
-      if (!snapshottedWalletVenueKeys.has(snapshotKey)) {
-        snapshottedWalletVenueKeys.add(snapshotKey);
+      if (!inputs.snapshottedWalletVenueKeys.has(snapshotKey)) {
+        inputs.snapshottedWalletVenueKeys.add(snapshotKey);
         try {
           const inserted = await runWithTelemetry(
             inputs.telemetry.followedSnapshotBase,
@@ -1738,6 +1743,8 @@ async function collectFollowedWalletSnapshotRows(
             );
           }
         }
+      } else {
+        followedSnapshotsSkippedAlreadyCollected += 1;
       }
 
       const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -1799,8 +1806,8 @@ async function collectFollowedWalletSnapshotRows(
       }
 
       const snapshotKey = walletVenueSnapshotKey(followed.wallet_id, "kalshi");
-      if (!snapshottedWalletVenueKeys.has(snapshotKey)) {
-        snapshottedWalletVenueKeys.add(snapshotKey);
+      if (!inputs.snapshottedWalletVenueKeys.has(snapshotKey)) {
+        inputs.snapshottedWalletVenueKeys.add(snapshotKey);
         const inserted = await snapshotFollowedWalletHoldingsSolana(client, {
           walletId: followed.wallet_id,
           address: followed.address,
@@ -1815,6 +1822,8 @@ async function collectFollowedWalletSnapshotRows(
           inputs.touchedWalletIds.add(followed.wallet_id);
           activityRows += inserted;
         }
+      } else {
+        followedSnapshotsSkippedAlreadyCollected += 1;
       }
 
       const positionsInserted = await snapshotFollowedWalletPositions(client, {
@@ -1848,6 +1857,12 @@ async function collectFollowedWalletSnapshotRows(
     "[wallets:intel:refresh] limitless followed snapshot throttled",
     followedSnapshotBaseRetryable,
   );
+  if (followedSnapshotsSkippedAlreadyCollected > 0) {
+    console.log(
+      "[wallets:intel:refresh] followed public snapshots skipped; already collected this run",
+      { skipped: followedSnapshotsSkippedAlreadyCollected },
+    );
+  }
 
   return {
     processed,
@@ -4566,6 +4581,7 @@ async function runSnapshot(snapshotAt: Date) {
     }
 
     const walletCache = new Map<string, string>();
+    const snapshottedWalletVenueKeys = new Set<string>();
     const tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>> = {
       polymarket: new Map(),
       limitless: new Map(),
@@ -4748,6 +4764,9 @@ async function runSnapshot(snapshotAt: Date) {
         await upsertHolderSide("YES", agg.yesShares);
         await upsertHolderSide("NO", agg.noShares);
 
+        snapshottedWalletVenueKeys.add(
+          walletVenueSnapshotKey(walletId, market.venue as Venue),
+        );
         touchedWalletIds.add(walletId);
         activityRows += 1;
       }
@@ -4803,6 +4822,7 @@ async function runSnapshot(snapshotAt: Date) {
       telemetry,
       followedFetchConcurrency,
       touchedWalletIds,
+      snapshottedWalletVenueKeys,
       poolClient: pool,
     });
     followedProcessed = followedCollection.processed;

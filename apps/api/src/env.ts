@@ -955,7 +955,7 @@ export const env = {
   ),
   walletIntelFollowedFetchConcurrency: optionalIntInRange(
     "WALLET_INTEL_FOLLOWED_FETCH_CONCURRENCY",
-    1,
+    2,
     1,
     2,
   ),
