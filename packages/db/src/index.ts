@@ -22,6 +22,5 @@ export {
   upsertUnifiedTokens,
   writeUnifiedBookTop,
   writeUnifiedBookTops,
-  writeUnifiedLastTrade,
 } from "./unified-repo.js";
 export { getVenueId } from "./venues-repo.js";

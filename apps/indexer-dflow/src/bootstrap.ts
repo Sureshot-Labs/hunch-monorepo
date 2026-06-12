@@ -19,8 +19,8 @@ import {
   upsertUnifiedMarkets as upsertUnifiedMarketsBase,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
-  writeUnifiedLastTrade,
 } from "@hunch/db";
+import { writeUnifiedLastTrade } from "@hunch/db/unified-repo";
 
 import { env } from "./env.js";
 import {

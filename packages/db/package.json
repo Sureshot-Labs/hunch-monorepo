@@ -9,6 +9,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./unified-repo": {
+      "import": "./dist/unified-repo.js",
+      "types": "./dist/unified-repo.d.ts"
     }
   },
   "scripts": {

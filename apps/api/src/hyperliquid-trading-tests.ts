@@ -5,6 +5,7 @@ import {
   buildHyperliquidUsdClassTransferAction,
   buildHyperliquidWithdrawAction,
   canonicalHyperliquidVenueOrderId,
+  computeHyperliquidMinExecutableOrder,
   extractHyperliquidCancelStatus,
   extractHyperliquidOrderStatus,
   hyperliquidOutcomeOrderPrecision,
@@ -141,6 +142,19 @@ test("formats Hyperliquid outcome orders with whole-share lot sizing", () => {
 
   assert.equal(action.orders[0]?.p, "0.98187");
   assert.equal(action.orders[0]?.s, "10");
+});
+
+test("sizes Hyperliquid minimum orders against reference price", () => {
+  const minimum = computeHyperliquidMinExecutableOrder({
+    orderPrice: 0.86604,
+    referencePrice: 0.80032,
+    minOrderNotionalUsd: 10,
+    sizeDecimals: 0,
+  });
+
+  assert.equal(minimum.minNotionalReferencePrice, 0.80032);
+  assert.equal(minimum.minExecutableSize, 13);
+  assert.equal(Number(minimum.minExecutableAmountUsd.toFixed(5)), 11.25852);
 });
 
 test("formats Hyperliquid outcome prices with spot decimal cap from size decimals", () => {

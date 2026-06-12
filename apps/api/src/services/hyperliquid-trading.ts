@@ -353,6 +353,42 @@ export function isHyperliquidSizeAligned(
   return Math.abs(parsed - rounded) < 1e-9;
 }
 
+export function computeHyperliquidMinExecutableOrder(input: {
+  orderPrice: number;
+  minOrderNotionalUsd: number;
+  sizeDecimals: number;
+  referencePrice?: number | null;
+}): {
+  minNotionalReferencePrice: number;
+  minExecutableSize: number;
+  minExecutableAmountUsd: number;
+} {
+  const orderPrice = normalizeFiniteNumber(input.orderPrice, "order price");
+  const minOrderNotionalUsd = normalizeFiniteNumber(
+    input.minOrderNotionalUsd,
+    "minimum notional",
+  );
+  if (!Number.isInteger(input.sizeDecimals) || input.sizeDecimals < 0) {
+    throw new Error("Invalid Hyperliquid size precision.");
+  }
+  const referencePrice =
+    input.referencePrice != null &&
+    Number.isFinite(input.referencePrice) &&
+    input.referencePrice > 0
+      ? Math.min(orderPrice, input.referencePrice)
+      : orderPrice;
+  const minExecutableSize = roundHyperliquidSizeToLot(
+    minOrderNotionalUsd / referencePrice,
+    input.sizeDecimals,
+    "ceil",
+  );
+  return {
+    minNotionalReferencePrice: referencePrice,
+    minExecutableSize,
+    minExecutableAmountUsd: minExecutableSize * orderPrice,
+  };
+}
+
 export function formatHyperliquidDecimal(
   value: string | number,
   options: { maxDecimals: number; maxSigFigs?: number; label?: string },

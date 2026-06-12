@@ -26,6 +26,7 @@ import {
   buildHyperliquidUsdClassTransferAction,
   buildHyperliquidWithdrawAction,
   canonicalHyperliquidVenueOrderId,
+  computeHyperliquidMinExecutableOrder,
   extractHyperliquidCancelStatus,
   extractHyperliquidOrderStatus,
   fetchHyperliquidSpotState,
@@ -69,6 +70,7 @@ type HyperliquidMarketForTrade = {
   best_ask_yes: string | null;
   best_bid_no: string | null;
   best_ask_no: string | null;
+  last_price: string | null;
   metadata: unknown | null;
   asset_raw: unknown | null;
 };
@@ -121,6 +123,12 @@ type HyperliquidOrderQuote = {
 type HyperliquidTokenContext = {
   marketId: string;
   outcome: string | null;
+};
+
+type HyperliquidLiveTop = {
+  bestBid: number | null;
+  bestAsk: number | null;
+  tsMs: number | null;
 };
 
 const orderBaseSchema = zod.object({
@@ -276,6 +284,7 @@ async function resolveMarketForToken(
         yes_top.best_ask::text as best_ask_yes,
         no_top.best_bid::text as best_bid_no,
         no_top.best_ask::text as best_ask_no,
+        m.last_price::text,
         m.metadata,
         asset.raw as asset_raw
       from unified_markets m
@@ -315,6 +324,63 @@ function tokenSideForMarket(
   return null;
 }
 
+function parseHyperliquidBookLevelPrice(level: unknown): number | null {
+  if (!level || typeof level !== "object") return null;
+  const value = readString(level as Record<string, unknown>, ["px", "price"]);
+  const parsed = parseNumber(value);
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
+function parseHyperliquidLiveTop(payload: unknown): HyperliquidLiveTop | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const levels = Array.isArray(record.levels) ? record.levels : null;
+  if (!levels || levels.length < 2) return null;
+  const bids = Array.isArray(levels[0]) ? levels[0] : [];
+  const asks = Array.isArray(levels[1]) ? levels[1] : [];
+  const bestBid = parseHyperliquidBookLevelPrice(bids[0]);
+  const bestAsk = parseHyperliquidBookLevelPrice(asks[0]);
+  if (bestBid == null && bestAsk == null) return null;
+  const timeRaw = readString(record, ["time", "ts", "timestamp"]);
+  const tsMs = timeRaw != null ? Number(timeRaw) : null;
+  return {
+    bestBid,
+    bestAsk,
+    tsMs: tsMs != null && Number.isFinite(tsMs) ? tsMs : null,
+  };
+}
+
+async function fetchLiveHyperliquidTop(
+  tokenId: string,
+): Promise<HyperliquidLiveTop | null> {
+  const coin = hyperliquidCoinFromHunchTokenId(tokenId);
+  const payload = await hyperliquidInfo({ type: "l2Book", coin });
+  return parseHyperliquidLiveTop(payload);
+}
+
+function applyLiveTopToMarket(
+  market: HyperliquidMarketForTrade,
+  tokenSide: "YES" | "NO",
+  liveTop: HyperliquidLiveTop,
+): HyperliquidMarketForTrade {
+  return {
+    ...market,
+    ...(tokenSide === "YES"
+      ? {
+          best_bid_yes:
+            liveTop.bestBid != null ? String(liveTop.bestBid) : null,
+          best_ask_yes:
+            liveTop.bestAsk != null ? String(liveTop.bestAsk) : null,
+        }
+      : {
+          best_bid_no:
+            liveTop.bestBid != null ? String(liveTop.bestBid) : null,
+          best_ask_no:
+            liveTop.bestAsk != null ? String(liveTop.bestAsk) : null,
+        }),
+  };
+}
+
 function resolveTopPrice(
   market: HyperliquidMarketForTrade,
   tokenSide: "YES" | "NO",
@@ -331,6 +397,44 @@ function resolveTopPrice(
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function refreshMarketOrderLiveTop(input: {
+  market: HyperliquidMarketForTrade;
+  tokenId: string;
+  tokenSide: "YES" | "NO";
+  side: HyperliquidOrderSide;
+}): Promise<HyperliquidMarketForTrade> {
+  let liveTop: HyperliquidLiveTop | null = null;
+  try {
+    liveTop = await fetchLiveHyperliquidTop(input.tokenId);
+  } catch {
+    throw new Error("Unable to refresh Hyperliquid live book for this order.");
+  }
+
+  if (!liveTop) {
+    throw new Error("Hyperliquid has no live book for this outcome.");
+  }
+
+  const refreshed = applyLiveTopToMarket(
+    input.market,
+    input.tokenSide,
+    liveTop,
+  );
+  const crossingPrice = resolveTopPrice(
+    refreshed,
+    input.tokenSide,
+    input.side,
+  );
+  if (crossingPrice == null) {
+    throw new Error(
+      input.side === "BUY"
+        ? "Hyperliquid has no live ask liquidity for this outcome."
+        : "Hyperliquid has no live bid liquidity for this outcome.",
+    );
+  }
+
+  return refreshed;
 }
 
 function readHyperliquidSizeDecimals(value: unknown): number | null {
@@ -393,6 +497,57 @@ function resolveHyperliquidOrderPrecision(
   return hyperliquidOutcomeOrderPrecision(0);
 }
 
+function readPositiveRecordNumber(
+  value: unknown,
+  keys: string[],
+): number | null {
+  if (!value || typeof value !== "object") return null;
+  const parsed = parseNumber(readString(value as Record<string, unknown>, keys));
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
+function resolveHyperliquidMinNotionalReferencePrice(
+  market: HyperliquidMarketForTrade,
+  tokenId: string,
+): number | null {
+  const fromAssetRaw = readPositiveRecordNumber(market.asset_raw, [
+    "markPx",
+    "mark_px",
+    "midPx",
+    "mid_px",
+  ]);
+  if (fromAssetRaw != null) return fromAssetRaw;
+
+  const metadata = market.metadata;
+  if (metadata && typeof metadata === "object") {
+    const record = metadata as Record<string, unknown>;
+    const hyperliquid = record.hyperliquid;
+    const assetContexts =
+      hyperliquid && typeof hyperliquid === "object"
+        ? (hyperliquid as Record<string, unknown>).assetContexts
+        : record.assetContexts;
+    const coin = hyperliquidCoinFromHunchTokenId(tokenId);
+    if (Array.isArray(assetContexts)) {
+      for (const context of assetContexts) {
+        if (!context || typeof context !== "object") continue;
+        const contextRecord = context as Record<string, unknown>;
+        const contextCoin = readString(contextRecord, ["coin"]);
+        if (contextCoin !== coin) continue;
+        const referencePrice = readPositiveRecordNumber(contextRecord, [
+          "markPx",
+          "mark_px",
+          "midPx",
+          "mid_px",
+        ]);
+        if (referencePrice != null) return referencePrice;
+      }
+    }
+  }
+
+  const fromMarket = parseNumber(market.last_price);
+  return fromMarket != null && fromMarket > 0 ? fromMarket : null;
+}
+
 function applySlippage(
   price: number,
   side: HyperliquidOrderSide,
@@ -444,6 +599,23 @@ function resolveOrderQuote(inputs: {
       label: "price",
     }),
   );
+  if (inputs.fixedPrice != null && inputs.body.orderType !== "limit") {
+    const liveCrossingPrice = resolveTopPrice(
+      inputs.market,
+      inputs.tokenSide,
+      inputs.body.side,
+    );
+    const stillCrosses =
+      liveCrossingPrice != null &&
+      (inputs.body.side === "BUY"
+        ? price >= liveCrossingPrice
+        : price <= liveCrossingPrice);
+    if (!stillCrosses) {
+      throw new Error(
+        "Hyperliquid live book moved beyond the signed market price. Refresh the quote and retry.",
+      );
+    }
+  }
 
   const explicitSize = inputs.fixedSize ?? inputs.body.size ?? null;
   const rawSize =
@@ -483,13 +655,21 @@ function resolveOrderQuote(inputs: {
   const normalizedSize =
     size != null && Number.isFinite(size) && size > 0 ? size : 0;
   const notionalUsd = price * normalizedSize;
-  const minExecutableSize = roundHyperliquidSizeToLot(
-    env.hyperliquidMinOrderNotionalUsd / price,
-    inputs.precision.sizeDecimals,
-    "ceil",
-  );
-  const minExecutableAmountUsd = minExecutableSize * price;
-  const executable = notionalUsd >= env.hyperliquidMinOrderNotionalUsd;
+  const minExecutable = computeHyperliquidMinExecutableOrder({
+    orderPrice: price,
+    minOrderNotionalUsd: env.hyperliquidMinOrderNotionalUsd,
+    sizeDecimals: inputs.precision.sizeDecimals,
+    referencePrice: resolveHyperliquidMinNotionalReferencePrice(
+      inputs.market,
+      inputs.body.tokenId,
+    ),
+  });
+  const minCheckNotionalUsd =
+    inputs.body.side === "SELL"
+      ? notionalUsd
+      : minExecutable.minNotionalReferencePrice * normalizedSize;
+  const executable =
+    minCheckNotionalUsd >= env.hyperliquidMinOrderNotionalUsd;
 
   return {
     tokenId: inputs.body.tokenId,
@@ -501,8 +681,8 @@ function resolveOrderQuote(inputs: {
     tif,
     marketId: inputs.market.id,
     minOrderNotionalUsd: env.hyperliquidMinOrderNotionalUsd,
-    minExecutableSize,
-    minExecutableAmountUsd,
+    minExecutableSize: minExecutable.minExecutableSize,
+    minExecutableAmountUsd: minExecutable.minExecutableAmountUsd,
     sizeDecimals: inputs.precision.sizeDecimals,
     priceMaxDecimals: inputs.precision.priceMaxDecimals,
     executable,
@@ -514,6 +694,12 @@ function requireExecutableOrderQuote(
   quote: HyperliquidOrderQuote,
 ): HyperliquidOrderQuote {
   if (quote.size <= 0 || !quote.executable) {
+    if (quote.side === "SELL") {
+      throw new HyperliquidOrderQuoteError(
+        `Hyperliquid sell orders must be at least $${quote.minOrderNotionalUsd.toFixed(2)} at the current sell price. Current sell value is $${quote.notionalUsd.toFixed(2)}; place a higher limit sell, wait for the bid to improve, or add to the position before selling.`,
+        quote,
+      );
+    }
     throw new HyperliquidOrderQuoteError(
       `Hyperliquid orders must be at least $${quote.minOrderNotionalUsd.toFixed(2)} after lot-size rounding. Increase amount to at least $${quote.minExecutableAmountUsd.toFixed(2)} for this market.`,
       quote,
@@ -557,12 +743,22 @@ async function resolveOrderContext(inputs: {
     throw new Error("Hyperliquid market is not accepting orders.");
   }
 
+  const marketForQuote =
+    inputs.body.orderType === "limit"
+      ? market
+      : await refreshMarketOrderLiveTop({
+          market,
+          tokenId: inputs.body.tokenId,
+          tokenSide,
+          side: inputs.body.side,
+        });
+
   const assetId = hyperliquidAssetIdFromHunchTokenId(inputs.body.tokenId);
   const precision = resolveHyperliquidOrderPrecision(
-    market,
+    marketForQuote,
     inputs.body.tokenId,
   );
-  return { signer, market, tokenSide, assetId, precision };
+  return { signer, market: marketForQuote, tokenSide, assetId, precision };
 }
 
 async function quoteOrderAction(inputs: {

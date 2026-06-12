@@ -1,8 +1,5 @@
-import {
-  upsertUnifiedTokens,
-  writeUnifiedBookTop,
-  writeUnifiedLastTrade,
-} from "@hunch/db";
+import { upsertUnifiedTokens, writeUnifiedBookTop } from "@hunch/db";
+import { writeUnifiedLastTrade } from "@hunch/db/unified-repo";
 import { createTopTickGate } from "@hunch/infra";
 import PQueue from "p-queue";
 import WebSocket from "ws";
