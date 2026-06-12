@@ -8,6 +8,11 @@ const HYPERLIQUID_CLOID_RE = /^0x[0-9a-fA-F]{32}$/;
 export type HyperliquidOrderSide = "BUY" | "SELL";
 export type HyperliquidOrderTif = "Gtc" | "Ioc";
 
+export type HyperliquidOrderPrecision = {
+  sizeDecimals: number;
+  priceMaxDecimals: number;
+};
+
 export type HyperliquidTypedData = {
   domain: {
     name: "Exchange";
@@ -48,10 +53,30 @@ export type HyperliquidCancelByCloidAction = {
   cancels: Array<{ asset: number; cloid: string }>;
 };
 
+export type HyperliquidWithdrawAction = {
+  type: "withdraw3";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: string;
+  amount: string;
+  time: number;
+  destination: string;
+};
+
+export type HyperliquidUsdClassTransferAction = {
+  type: "usdClassTransfer";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  signatureChainId: string;
+  amount: string;
+  toPerp: boolean;
+  nonce: number;
+};
+
 export type HyperliquidAction =
   | HyperliquidOrderAction
   | HyperliquidCancelAction
-  | HyperliquidCancelByCloidAction;
+  | HyperliquidCancelByCloidAction
+  | HyperliquidWithdrawAction
+  | HyperliquidUsdClassTransferAction;
 
 export type HyperliquidOrderWire = {
   a: number;
@@ -79,8 +104,31 @@ export type HyperliquidSpotState = {
   user: string;
   usdcBalanceRaw: string;
   usdcBalance: string;
+  usdcHoldRaw: string;
+  usdcHold: string;
+  usdcAvailableRaw: string;
+  usdcAvailable: string;
+  perpUsdcBalanceRaw: string;
+  perpUsdcBalance: string;
+  perpUsdcWithdrawableRaw: string;
+  perpUsdcWithdrawable: string;
   balances: HyperliquidSpotBalance[];
   raw: unknown;
+};
+
+export type HyperliquidUserSignedTypedData = {
+  domain: {
+    name: "HyperliquidSignTransaction";
+    version: "1";
+    chainId: number;
+    verifyingContract: "0x0000000000000000000000000000000000000000";
+  };
+  types: {
+    EIP712Domain: Array<{ name: string; type: string }>;
+    [primaryType: string]: Array<{ name: string; type: string }>;
+  };
+  primaryType: string;
+  message: Record<string, unknown>;
 };
 
 export type HyperliquidCanonicalOrderIdInput = {
@@ -128,6 +176,21 @@ const HYPERLIQUID_EIP712_DOMAIN_TYPES = [
   { name: "verifyingContract", type: "address" },
 ];
 
+const HYPERLIQUID_USER_SIGNING_CHAIN_ID = "0x66eee";
+const HYPERLIQUID_SPOT_MAX_DECIMALS = 8;
+const HYPERLIQUID_WITHDRAW_SIGN_TYPES = [
+  { name: "hyperliquidChain", type: "string" },
+  { name: "destination", type: "string" },
+  { name: "amount", type: "string" },
+  { name: "time", type: "uint64" },
+];
+const HYPERLIQUID_USD_CLASS_TRANSFER_SIGN_TYPES = [
+  { name: "hyperliquidChain", type: "string" },
+  { name: "amount", type: "string" },
+  { name: "toPerp", type: "bool" },
+  { name: "nonce", type: "uint64" },
+];
+
 const HYPERLIQUID_AGENT_TYPES = [
   { name: "source", type: "string" },
   { name: "connectionId", type: "bytes32" },
@@ -155,7 +218,9 @@ export function hyperliquidCoinFromAssetId(assetId: number): string {
 }
 
 export function hyperliquidCoinFromHunchTokenId(tokenId: string): string {
-  return hyperliquidCoinFromAssetId(hyperliquidAssetIdFromHunchTokenId(tokenId));
+  return hyperliquidCoinFromAssetId(
+    hyperliquidAssetIdFromHunchTokenId(tokenId),
+  );
 }
 
 export function hunchTokenIdFromHyperliquidCoin(coin: string): string | null {
@@ -240,6 +305,54 @@ function normalizeFiniteNumber(value: string | number, label: string): number {
   return parsed;
 }
 
+export function hyperliquidOutcomeOrderPrecision(
+  sizeDecimals = 0,
+): HyperliquidOrderPrecision {
+  if (
+    !Number.isInteger(sizeDecimals) ||
+    sizeDecimals < 0 ||
+    sizeDecimals > HYPERLIQUID_SPOT_MAX_DECIMALS
+  ) {
+    throw new Error("Invalid Hyperliquid size precision.");
+  }
+  return {
+    sizeDecimals,
+    priceMaxDecimals: HYPERLIQUID_SPOT_MAX_DECIMALS - sizeDecimals,
+  };
+}
+
+export function roundHyperliquidSizeToLot(
+  value: string | number,
+  sizeDecimals: number,
+  mode: "floor" | "ceil" | "nearest" = "floor",
+): number {
+  const parsed = normalizeFiniteNumber(value, "size");
+  const precision = hyperliquidOutcomeOrderPrecision(sizeDecimals);
+  const factor = 10 ** precision.sizeDecimals;
+  const scaled = parsed * factor;
+  const epsilon = 1e-9;
+  const rounded =
+    mode === "ceil"
+      ? Math.ceil(scaled - epsilon)
+      : mode === "nearest"
+        ? Math.round(scaled)
+        : Math.floor(scaled + epsilon);
+  return rounded / factor;
+}
+
+export function isHyperliquidSizeAligned(
+  value: string | number,
+  sizeDecimals: number,
+): boolean {
+  const parsed = normalizeFiniteNumber(value, "size");
+  const rounded = roundHyperliquidSizeToLot(
+    parsed,
+    sizeDecimals,
+    "nearest",
+  );
+  return Math.abs(parsed - rounded) < 1e-9;
+}
+
 export function formatHyperliquidDecimal(
   value: string | number,
   options: { maxDecimals: number; maxSigFigs?: number; label?: string },
@@ -254,7 +367,9 @@ export function formatHyperliquidDecimal(
       ? Number(parsed.toPrecision(sigFigs))
       : parsed;
   const fixed = rounded.toFixed(options.maxDecimals);
-  const stripped = fixed.replace(/\.?0+$/, "");
+  const stripped = fixed.includes(".")
+    ? fixed.replace(/0+$/, "").replace(/\.$/, "")
+    : fixed;
   if (!stripped || Number(stripped) <= 0) {
     throw new Error(`${label} is too small for Hyperliquid precision.`);
   }
@@ -289,17 +404,22 @@ export function buildHyperliquidOrderAction(inputs: {
   tif: HyperliquidOrderTif;
   reduceOnly?: boolean;
   cloid?: string | null;
+  precision?: Partial<HyperliquidOrderPrecision>;
 }): HyperliquidOrderAction {
+  const precision = {
+    priceMaxDecimals: inputs.precision?.priceMaxDecimals ?? 6,
+    sizeDecimals: inputs.precision?.sizeDecimals ?? 8,
+  };
   const wire: HyperliquidOrderWire = {
     a: inputs.assetId,
     b: inputs.side === "BUY",
     p: formatHyperliquidDecimal(inputs.price, {
-      maxDecimals: 6,
+      maxDecimals: precision.priceMaxDecimals,
       maxSigFigs: 5,
       label: "price",
     }),
     s: formatHyperliquidDecimal(inputs.size, {
-      maxDecimals: 8,
+      maxDecimals: precision.sizeDecimals,
       label: "size",
     }),
     r: Boolean(inputs.reduceOnly),
@@ -319,9 +439,16 @@ export function buildHyperliquidCancelAction(inputs: {
     if (!/^0x[0-9a-fA-F]{32}$/.test(cloid)) {
       throw new Error("Hyperliquid cancel requires a valid client order id.");
     }
-    return { type: "cancelByCloid", cancels: [{ asset: inputs.assetId, cloid }] };
+    return {
+      type: "cancelByCloid",
+      cancels: [{ asset: inputs.assetId, cloid }],
+    };
   }
-  if (inputs.oid == null || !Number.isSafeInteger(inputs.oid) || inputs.oid <= 0) {
+  if (
+    inputs.oid == null ||
+    !Number.isSafeInteger(inputs.oid) ||
+    inputs.oid <= 0
+  ) {
     throw new Error(
       "Hyperliquid cancel requires a positive numeric order id or client order id.",
     );
@@ -484,12 +611,29 @@ function actionToMsgpackValue(action: HyperliquidAction): MsgpackValue {
       })),
     };
   }
+  if (action.type === "cancelByCloid") {
+    return {
+      type: action.type,
+      cancels: action.cancels.map((cancel) => ({
+        asset: cancel.asset,
+        cloid: cancel.cloid,
+      })),
+    };
+  }
   return {
     type: action.type,
-    cancels: action.cancels.map((cancel) => ({
-      asset: cancel.asset,
-      cloid: cancel.cloid,
-    })),
+    hyperliquidChain: action.hyperliquidChain,
+    signatureChainId: action.signatureChainId,
+    amount: action.amount,
+    ...(action.type === "withdraw3"
+      ? {
+          time: action.time,
+          destination: action.destination,
+        }
+      : {
+          toPerp: action.toPerp,
+          nonce: action.nonce,
+        }),
   };
 }
 
@@ -554,7 +698,9 @@ export function buildHyperliquidTypedData(inputs: {
   };
 }
 
-export function splitHyperliquidSignature(signature: string): HyperliquidSignature {
+export function splitHyperliquidSignature(
+  signature: string,
+): HyperliquidSignature {
   const parsed = ethers.Signature.from(signature);
   const v = parsed.v < 27 ? parsed.v + 27 : parsed.v;
   return { r: parsed.r, s: parsed.s, v };
@@ -570,6 +716,102 @@ export function recoverHyperliquidSigner(
     typedData.message,
     signature,
   );
+}
+
+export function recoverHyperliquidUserSignedSigner(
+  typedData: HyperliquidUserSignedTypedData,
+  signature: string,
+): string {
+  return ethers.verifyTypedData(
+    typedData.domain,
+    { [typedData.primaryType]: typedData.types[typedData.primaryType] ?? [] },
+    typedData.message,
+    signature,
+  );
+}
+
+export function buildHyperliquidUserSignedTypedData(
+  primaryType: string,
+  payloadTypes: Array<{ name: string; type: string }>,
+  action: Record<string, unknown> & { signatureChainId: string },
+): HyperliquidUserSignedTypedData {
+  return {
+    domain: {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: Number.parseInt(action.signatureChainId, 16),
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      [primaryType]: payloadTypes,
+      EIP712Domain: HYPERLIQUID_EIP712_DOMAIN_TYPES,
+    },
+    primaryType,
+    message: action,
+  };
+}
+
+export function buildHyperliquidWithdrawAction(inputs: {
+  amount: string;
+  destination: string;
+  time: number;
+  isMainnet: boolean;
+}): {
+  action: HyperliquidWithdrawAction;
+  typedData: HyperliquidUserSignedTypedData;
+} {
+  const destination = ethers.getAddress(inputs.destination).toLowerCase();
+  const amount = formatHyperliquidDecimal(inputs.amount, {
+    maxDecimals: 6,
+    label: "withdraw amount",
+  });
+  const action: HyperliquidWithdrawAction = {
+    type: "withdraw3",
+    hyperliquidChain: inputs.isMainnet ? "Mainnet" : "Testnet",
+    signatureChainId: HYPERLIQUID_USER_SIGNING_CHAIN_ID,
+    amount,
+    time: inputs.time,
+    destination,
+  };
+  return {
+    action,
+    typedData: buildHyperliquidUserSignedTypedData(
+      "HyperliquidTransaction:Withdraw",
+      HYPERLIQUID_WITHDRAW_SIGN_TYPES,
+      action,
+    ),
+  };
+}
+
+export function buildHyperliquidUsdClassTransferAction(inputs: {
+  amount: string;
+  toPerp: boolean;
+  nonce: number;
+  isMainnet: boolean;
+}): {
+  action: HyperliquidUsdClassTransferAction;
+  typedData: HyperliquidUserSignedTypedData;
+} {
+  const amount = formatHyperliquidDecimal(inputs.amount, {
+    maxDecimals: 6,
+    label: "USDC class transfer amount",
+  });
+  const action: HyperliquidUsdClassTransferAction = {
+    type: "usdClassTransfer",
+    hyperliquidChain: inputs.isMainnet ? "Mainnet" : "Testnet",
+    signatureChainId: HYPERLIQUID_USER_SIGNING_CHAIN_ID,
+    amount,
+    toPerp: inputs.toPerp,
+    nonce: inputs.nonce,
+  };
+  return {
+    action,
+    typedData: buildHyperliquidUserSignedTypedData(
+      "HyperliquidTransaction:UsdClassTransfer",
+      HYPERLIQUID_USD_CLASS_TRANSFER_SIGN_TYPES,
+      action,
+    ),
+  };
 }
 
 async function hyperliquidPost(inputs: {
@@ -596,12 +838,13 @@ async function hyperliquidPost(inputs: {
       const message =
         payload && typeof payload === "object"
           ? ((payload as Record<string, unknown>).error ??
-              (payload as Record<string, unknown>).message ??
-              `Hyperliquid request failed (${response.status})`)
+            (payload as Record<string, unknown>).message ??
+            `Hyperliquid request failed (${response.status})`)
           : `Hyperliquid request failed (${response.status})`;
       const error = new Error(String(message));
-      (error as { responseStatus?: number; responsePayload?: unknown }).responseStatus =
-        response.status;
+      (
+        error as { responseStatus?: number; responsePayload?: unknown }
+      ).responseStatus = response.status;
       (error as { responsePayload?: unknown }).responsePayload = payload;
       throw error;
     }
@@ -644,12 +887,17 @@ export async function submitHyperliquidExchangeAction(inputs: {
       nonce: inputs.nonce,
       signature,
       ...(inputs.vaultAddress ? { vaultAddress: inputs.vaultAddress } : {}),
-      ...(inputs.expiresAfter != null ? { expiresAfter: inputs.expiresAfter } : {}),
+      ...(inputs.expiresAfter != null
+        ? { expiresAfter: inputs.expiresAfter }
+        : {}),
     },
   });
 }
 
-function decimalToUnits(value: string | number | null | undefined, decimals: number): bigint {
+function decimalToUnits(
+  value: string | number | null | undefined,
+  decimals: number,
+): bigint {
   if (value == null) return 0n;
   const raw = String(value).trim();
   if (!raw) return 0n;
@@ -658,7 +906,9 @@ function decimalToUnits(value: string | number | null | undefined, decimals: num
   const [wholeRaw, fracRaw = ""] = unsigned.split(".");
   if (!/^\d+$/.test(wholeRaw || "0") || !/^\d*$/.test(fracRaw)) return 0n;
   const whole = BigInt(wholeRaw || "0") * 10n ** BigInt(decimals);
-  const frac = BigInt((fracRaw + "0".repeat(decimals)).slice(0, decimals) || "0");
+  const frac = BigInt(
+    (fracRaw + "0".repeat(decimals)).slice(0, decimals) || "0",
+  );
   return sign * (whole + frac);
 }
 
@@ -667,15 +917,22 @@ function unitsToDecimal(value: bigint, decimals: number): string {
   const abs = value < 0n ? -value : value;
   const scale = 10n ** BigInt(decimals);
   const whole = abs / scale;
-  const frac = (abs % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
+  const frac = (abs % scale)
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
   return `${sign}${whole.toString()}${frac ? `.${frac}` : ""}`;
 }
 
-function readString(record: Record<string, unknown>, keys: string[]): string | null {
+function readString(
+  record: Record<string, unknown>,
+  keys: string[],
+): string | null {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value.trim();
-    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "number" && Number.isFinite(value))
+      return String(value);
   }
   return null;
 }
@@ -701,7 +958,9 @@ export function normalizeHyperliquidUserFills(
             : null;
       if (!side) return null;
 
-      const price = normalizeOptionalNumber(readString(record, ["px", "price"]));
+      const price = normalizeOptionalNumber(
+        readString(record, ["px", "price"]),
+      );
       const size = normalizeOptionalNumber(readString(record, ["sz", "size"]));
       if (price == null || size == null || price <= 0 || size <= 0) return null;
 
@@ -709,20 +968,27 @@ export function normalizeHyperliquidUserFills(
         readString(record, ["hash"]) ?? readString(record, ["tid", "tradeId"]);
       if (!stableFillId) return null;
 
-      const oid = normalizeHyperliquidExchangeOrderId(readString(record, ["oid"]));
+      const cloid = normalizeHyperliquidClientOrderId(
+        readString(record, ["cloid", "clientOrderId"]),
+      );
+      const oid = normalizeHyperliquidExchangeOrderId(
+        readString(record, ["oid"]),
+      );
       const timeRaw = readString(record, ["time", "timestamp"]);
       const executedAt = timeRaw != null ? new Date(Number(timeRaw)) : null;
       return {
         txSignature: `hyperliquid-fill:${stableFillId}`,
         quoteId: readString(record, ["tid", "tradeId"]),
-        venueOrderId: canonicalHyperliquidVenueOrderId({ oid }),
+        venueOrderId: canonicalHyperliquidVenueOrderId({ cloid, oid }),
         tokenId,
         side,
         price,
         size,
         notionalUsd: price * size,
         executedAt:
-          executedAt && Number.isFinite(executedAt.getTime()) ? executedAt : null,
+          executedAt && Number.isFinite(executedAt.getTime())
+            ? executedAt
+            : null,
         raw: entry,
       };
     })
@@ -733,12 +999,22 @@ export async function fetchHyperliquidSpotState(
   userAddress: string,
 ): Promise<HyperliquidSpotState> {
   const user = ethers.getAddress(userAddress).toLowerCase();
-  const payload = await hyperliquidInfo({ type: "spotClearinghouseState", user });
+  const [payload, clearinghousePayload] = await Promise.all([
+    hyperliquidInfo({ type: "spotClearinghouseState", user }),
+    hyperliquidInfo({ type: "clearinghouseState", user }),
+  ]);
   const record =
-    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>)
+      : {};
+  const clearinghouseRecord =
+    clearinghousePayload && typeof clearinghousePayload === "object"
+      ? (clearinghousePayload as Record<string, unknown>)
+      : {};
   const balancesRaw = Array.isArray(record.balances) ? record.balances : [];
 
   let usdcBalanceRaw = 0n;
+  let usdcHoldRaw = 0n;
   const balances: HyperliquidSpotBalance[] = [];
   for (const entry of balancesRaw) {
     if (!entry || typeof entry !== "object") continue;
@@ -747,9 +1023,14 @@ export async function fetchHyperliquidSpotState(
     if (!coin) continue;
     const total = readString(balance, ["total", "balance", "available"]) ?? "0";
     const hold = readString(balance, ["hold", "reserved"]);
-    const entryNtl = readString(balance, ["entryNtl", "entry_ntl", "entryNotional"]);
+    const entryNtl = readString(balance, [
+      "entryNtl",
+      "entry_ntl",
+      "entryNotional",
+    ]);
     if (coin.toUpperCase() === "USDC") {
       usdcBalanceRaw += decimalToUnits(total, 6);
+      usdcHoldRaw += decimalToUnits(hold, 6);
     }
     balances.push({
       coin,
@@ -759,13 +1040,39 @@ export async function fetchHyperliquidSpotState(
       entryNtl,
     });
   }
+  const usdcAvailableRaw =
+    usdcBalanceRaw > usdcHoldRaw ? usdcBalanceRaw - usdcHoldRaw : 0n;
+  const marginSummary =
+    clearinghouseRecord.marginSummary &&
+    typeof clearinghouseRecord.marginSummary === "object"
+      ? (clearinghouseRecord.marginSummary as Record<string, unknown>)
+      : {};
+  const perpUsdcBalanceRaw = decimalToUnits(
+    readString(marginSummary, ["accountValue", "totalRawUsd"]) ?? "0",
+    6,
+  );
+  const perpUsdcWithdrawableRaw = decimalToUnits(
+    readString(clearinghouseRecord, ["withdrawable"]) ?? "0",
+    6,
+  );
 
   return {
     user,
     usdcBalanceRaw: usdcBalanceRaw.toString(),
     usdcBalance: unitsToDecimal(usdcBalanceRaw, 6),
+    usdcHoldRaw: usdcHoldRaw.toString(),
+    usdcHold: unitsToDecimal(usdcHoldRaw, 6),
+    usdcAvailableRaw: usdcAvailableRaw.toString(),
+    usdcAvailable: unitsToDecimal(usdcAvailableRaw, 6),
+    perpUsdcBalanceRaw: perpUsdcBalanceRaw.toString(),
+    perpUsdcBalance: unitsToDecimal(perpUsdcBalanceRaw, 6),
+    perpUsdcWithdrawableRaw: perpUsdcWithdrawableRaw.toString(),
+    perpUsdcWithdrawable: unitsToDecimal(perpUsdcWithdrawableRaw, 6),
     balances,
-    raw: payload,
+    raw: {
+      spot: payload,
+      clearinghouse: clearinghousePayload,
+    },
   };
 }
 
@@ -777,14 +1084,18 @@ export function extractHyperliquidOrderStatus(payload: unknown): {
   averageFillPrice: number | null;
 } {
   const record =
-    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>)
+      : {};
   const response = record.response;
   const data =
     response && typeof response === "object"
       ? (response as Record<string, unknown>).data
       : null;
   const statuses =
-    data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).statuses)
+    data &&
+    typeof data === "object" &&
+    Array.isArray((data as Record<string, unknown>).statuses)
       ? ((data as Record<string, unknown>).statuses as unknown[])
       : [];
   const first =
@@ -834,8 +1145,12 @@ export function extractHyperliquidOrderStatus(payload: unknown): {
       status: "filled",
       venueOrderId: oid,
       errorMessage: null,
-      filledSize: normalizeOptionalNumber(readString(filled, ["totalSz", "sz"])),
-      averageFillPrice: normalizeOptionalNumber(readString(filled, ["avgPx", "px"])),
+      filledSize: normalizeOptionalNumber(
+        readString(filled, ["totalSz", "sz"]),
+      ),
+      averageFillPrice: normalizeOptionalNumber(
+        readString(filled, ["avgPx", "px"]),
+      ),
     };
   }
   return {
@@ -852,14 +1167,18 @@ export function extractHyperliquidCancelStatus(payload: unknown): {
   errorMessage: string | null;
 } {
   const record =
-    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>)
+      : {};
   const response = record.response;
   const data =
     response && typeof response === "object"
       ? (response as Record<string, unknown>).data
       : null;
   const statuses =
-    data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).statuses)
+    data &&
+    typeof data === "object" &&
+    Array.isArray((data as Record<string, unknown>).statuses)
       ? ((data as Record<string, unknown>).statuses as unknown[])
       : [];
   const first =

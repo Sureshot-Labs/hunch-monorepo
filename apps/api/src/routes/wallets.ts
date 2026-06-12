@@ -147,7 +147,10 @@ function resolvePolymarketFunderExecutionKind(
   if (candidate.source === "safe_proxy") return "safe";
   if (candidate.source === "stored") {
     if (candidate.signatureType === 3) return "deposit_wallet";
-    if (candidate.signatureType === 2 && candidate.contractKind === "SAFE_LIKE") {
+    if (
+      candidate.signatureType === 2 &&
+      candidate.contractKind === "SAFE_LIKE"
+    ) {
       return "safe";
     }
     if (candidate.signatureType === 1) return "magic";
@@ -178,7 +181,9 @@ function getVenueStatusCacheKey(inputs: {
     limitlessUpdatedAt,
     inputs.relayerEnabled ? "relayer:1" : "relayer:0",
     inputs.hyperliquidTradingEnabled ? "hyperliquid:1" : "hyperliquid:0",
-    inputs.hyperliquidTradingAllowed ? "hyperliquid-allowed:1" : "hyperliquid-allowed:0",
+    inputs.hyperliquidTradingAllowed
+      ? "hyperliquid-allowed:1"
+      : "hyperliquid-allowed:0",
   ].join("|");
 }
 
@@ -1668,6 +1673,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                               ? "not_allowlisted"
                               : "trading_disabled",
                           ],
+                          accountAddress: walletAddress.toLowerCase(),
                           chain: "HyperCore",
                           chainId: null,
                           minDepositUsdc: env.hyperliquidMinDepositUsdc,
@@ -1680,29 +1686,66 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             bridgeAddress: env.hyperliquidBridge2Address,
                             minDepositUsdc: env.hyperliquidMinDepositUsdc,
                           },
+                          withdrawal: {
+                            feeUsdc: env.hyperliquidWithdrawalFeeUsdc,
+                            estimatedDurationLabel:
+                              env.hyperliquidWithdrawalEstimatedDurationLabel,
+                            destinationChainId: 42161,
+                          },
                         };
                       }
 
-                      const state =
-                        await fetchHyperliquidSpotState(walletAddress);
-                      const usdcRaw = BigInt(state.usdcBalanceRaw);
+                      const [state, arbitrumUsdcRaw] = await Promise.all([
+                        fetchHyperliquidSpotState(walletAddress),
+                        fetchErc20BalanceOf({
+                          rpcUrl: env.arbitrumRpcUrl,
+                          timeoutMs: env.arbitrumRpcTimeoutMs,
+                          tokenAddress: env.hyperliquidArbitrumUsdcAddress,
+                          owner: walletAddress,
+                        }),
+                      ]);
                       const reasons: string[] = [];
-                      if (usdcRaw <= 0n) reasons.push("insufficient_usdc");
+                      const hypercoreAvailableRaw =
+                        BigInt(state.usdcAvailableRaw) +
+                        BigInt(state.perpUsdcWithdrawableRaw);
+                      if (hypercoreAvailableRaw <= 0n) {
+                        reasons.push("insufficient_usdc");
+                      }
 
                       return {
                         supported: true,
                         ready: reasons.length === 0,
                         reasons,
+                        accountAddress: state.user,
                         chain: "HyperCore",
                         chainId: null,
                         minDepositUsdc: env.hyperliquidMinDepositUsdc,
-                        minOrderNotionalUsd:
-                          env.hyperliquidMinOrderNotionalUsd,
+                        minOrderNotionalUsd: env.hyperliquidMinOrderNotionalUsd,
                         usdc: {
                           decimals: 6,
                           symbol: "USDC",
                           balance: state.usdcBalance,
                           balanceRaw: state.usdcBalanceRaw,
+                          hold: state.usdcHold,
+                          holdRaw: state.usdcHoldRaw,
+                          available: state.usdcAvailable,
+                          availableRaw: state.usdcAvailableRaw,
+                        },
+                        perpUsdc: {
+                          decimals: 6,
+                          symbol: "USDC",
+                          balance: state.perpUsdcBalance,
+                          balanceRaw: state.perpUsdcBalanceRaw,
+                          available: state.perpUsdcWithdrawable,
+                          availableRaw: state.perpUsdcWithdrawableRaw,
+                        },
+                        arbitrumUsdc: {
+                          chainId: 42161,
+                          tokenAddress: env.hyperliquidArbitrumUsdcAddress,
+                          decimals: 6,
+                          symbol: "USDC",
+                          balance: ethers.formatUnits(arbitrumUsdcRaw, 6),
+                          balanceRaw: arbitrumUsdcRaw.toString(),
                         },
                         funding: {
                           sourceChainId: 42161,
@@ -1710,6 +1753,12 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             env.hyperliquidArbitrumUsdcAddress,
                           bridgeAddress: env.hyperliquidBridge2Address,
                           minDepositUsdc: env.hyperliquidMinDepositUsdc,
+                        },
+                        withdrawal: {
+                          feeUsdc: env.hyperliquidWithdrawalFeeUsdc,
+                          estimatedDurationLabel:
+                            env.hyperliquidWithdrawalEstimatedDurationLabel,
+                          destinationChainId: 42161,
                         },
                       };
                     })(),

@@ -111,7 +111,10 @@ export async function storeExecution(
       )
       on conflict on constraint executions_user_id_wallet_address_venue_tx_signature_key
       do update set
-        unified_market_id = excluded.unified_market_id,
+        unified_market_id = coalesce(
+          excluded.unified_market_id,
+          executions.unified_market_id
+        ),
         side = coalesce(excluded.side, executions.side),
         outcome = coalesce(excluded.outcome, executions.outcome),
         input_mint = coalesce(excluded.input_mint, executions.input_mint),

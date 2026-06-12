@@ -23,24 +23,31 @@ import {
   buildHyperliquidCancelAction,
   buildHyperliquidOrderAction,
   buildHyperliquidTypedData,
+  buildHyperliquidUsdClassTransferAction,
+  buildHyperliquidWithdrawAction,
   canonicalHyperliquidVenueOrderId,
   extractHyperliquidCancelStatus,
   extractHyperliquidOrderStatus,
   fetchHyperliquidSpotState,
   formatHyperliquidDecimal,
+  hyperliquidOutcomeOrderPrecision,
   hyperliquidVenueOrderIdAliases,
   hunchTokenIdFromHyperliquidCoin,
   hyperliquidAssetIdFromHunchTokenId,
   hyperliquidCoinFromHunchTokenId,
   hyperliquidInfo,
+  isHyperliquidSizeAligned,
   makeHyperliquidClientOrderId,
   normalizeHyperliquidUserFills,
   normalizeHyperliquidClientOrderId,
   normalizeHyperliquidExchangeOrderId,
+  roundHyperliquidSizeToLot,
   recoverHyperliquidSigner,
+  recoverHyperliquidUserSignedSigner,
   submitHyperliquidExchangeAction,
   type HyperliquidAction,
   type HyperliquidOrderSide,
+  type HyperliquidOrderPrecision,
   type HyperliquidOrderTif,
 } from "../services/hyperliquid-trading.js";
 import {
@@ -63,6 +70,7 @@ type HyperliquidMarketForTrade = {
   best_bid_no: string | null;
   best_ask_no: string | null;
   metadata: unknown | null;
+  asset_raw: unknown | null;
 };
 
 type PreparedHyperliquidAction = {
@@ -92,6 +100,29 @@ type HyperliquidInfoOrderRow = {
   raw: unknown;
 };
 
+type HyperliquidOrderQuote = {
+  tokenId: string;
+  side: HyperliquidOrderSide;
+  orderType: "GTC" | "FAK";
+  price: number;
+  size: number;
+  notionalUsd: number;
+  tif: HyperliquidOrderTif;
+  marketId: string;
+  minOrderNotionalUsd: number;
+  minExecutableSize: number;
+  minExecutableAmountUsd: number;
+  sizeDecimals: number;
+  priceMaxDecimals: number;
+  executable: boolean;
+  reason: "lot_size_rounding" | null;
+};
+
+type HyperliquidTokenContext = {
+  marketId: string;
+  outcome: string | null;
+};
+
 const orderBaseSchema = zod.object({
   tokenId: zod.string().min(1),
   side: zod.enum(["BUY", "SELL"]),
@@ -117,12 +148,11 @@ const cancelBaseShape = {
   cloid: zod.string().min(1).optional(),
 } satisfies zod.ZodRawShape;
 
-const cancelBaseSchema = zod.object(cancelBaseShape).refine(
-  (value) => value.oid != null || value.cloid != null,
-  {
+const cancelBaseSchema = zod
+  .object(cancelBaseShape)
+  .refine((value) => value.oid != null || value.cloid != null, {
     message: "Hyperliquid cancel requires an order id or client order id.",
-  },
-);
+  });
 
 const cancelSubmitSchema = zod
   .object({
@@ -133,6 +163,26 @@ const cancelSubmitSchema = zod
   .refine((value) => value.oid != null || value.cloid != null, {
     message: "Hyperliquid cancel requires an order id or client order id.",
   });
+
+const withdrawBaseSchema = zod.object({
+  amount: zod.union([zod.string().min(1), zod.number().positive()]),
+  destination: zod.string().min(1).optional(),
+});
+
+const withdrawSubmitSchema = withdrawBaseSchema.extend({
+  nonce: zod.number().int().positive(),
+  signature: zod.string().min(1),
+});
+
+const usdClassTransferBaseSchema = zod.object({
+  amount: zod.union([zod.string().min(1), zod.number().positive()]),
+  toPerp: zod.boolean().default(false),
+});
+
+const usdClassTransferSubmitSchema = usdClassTransferBaseSchema.extend({
+  nonce: zod.number().int().positive(),
+  signature: zod.string().min(1),
+});
 
 const embeddedSignTypedDataPrepareBodySchema = zod.object({
   id: zod.string().min(1),
@@ -153,7 +203,20 @@ const embeddedSignTypedDataBodySchema =
     authorizationSignature: zod.string().min(1),
   });
 
+type HyperliquidOrderBody = zod.infer<typeof orderBaseSchema>;
+
 const localNonceByWallet = new Map<string, number>();
+
+class HyperliquidOrderQuoteError extends Error {
+  readonly code = "hyperliquid_min_lot_notional";
+  readonly responsePayload: { quote: HyperliquidOrderQuote };
+
+  constructor(message: string, quote: HyperliquidOrderQuote) {
+    super(message);
+    this.name = "HyperliquidOrderQuoteError";
+    this.responsePayload = { quote };
+  }
+}
 
 function normalizeEvmAddress(value: string): string | null {
   try {
@@ -163,7 +226,10 @@ function normalizeEvmAddress(value: string): string | null {
   }
 }
 
-function ensureTradingEnabled(input: { userId: string; walletAddress: string }) {
+function ensureTradingEnabled(input: {
+  userId: string;
+  walletAddress: string;
+}) {
   assertHyperliquidTradingAllowed(input);
 }
 
@@ -172,7 +238,10 @@ async function reserveHyperliquidNonce(
   walletAddress: string,
 ): Promise<number> {
   const normalizedWallet = walletAddress.toLowerCase();
-  const base = Math.max(Date.now(), localNonceByWallet.get(normalizedWallet) ?? 0);
+  const base = Math.max(
+    Date.now(),
+    localNonceByWallet.get(normalizedWallet) ?? 0,
+  );
   const redis = await getRedis().catch(() => null);
 
   for (let i = 0; i < 25; i += 1) {
@@ -195,22 +264,41 @@ async function resolveMarketForToken(
   const { rows } = await pool.query<HyperliquidMarketForTrade>(
     `
       select
-        id,
-        status::text,
-        close_time,
-        expiration_time,
-        token_yes,
-        token_no,
-        best_bid::text,
-        best_ask::text,
-        best_bid_yes::text,
-        best_ask_yes::text,
-        best_bid_no::text,
-        best_ask_no::text,
-        metadata
-      from unified_markets
-      where venue = 'hyperliquid'
-        and ($1 = token_yes or $1 = token_no)
+        m.id,
+        m.status::text,
+        m.close_time,
+        m.expiration_time,
+        m.token_yes,
+        m.token_no,
+        m.best_bid::text,
+        m.best_ask::text,
+        yes_top.best_bid::text as best_bid_yes,
+        yes_top.best_ask::text as best_ask_yes,
+        no_top.best_bid::text as best_bid_no,
+        no_top.best_ask::text as best_ask_no,
+        m.metadata,
+        asset.raw as asset_raw
+      from unified_markets m
+      left join hyperliquid_outcome_assets asset
+        on asset.hunch_token_id = $1
+      left join lateral (
+        select best_bid, best_ask
+        from unified_book_top
+        where token_id = m.token_yes
+          and venue = 'hyperliquid'
+        order by ts desc
+        limit 1
+      ) yes_top on true
+      left join lateral (
+        select best_bid, best_ask
+        from unified_book_top
+        where token_id = m.token_no
+          and venue = 'hyperliquid'
+        order by ts desc
+        limit 1
+      ) no_top on true
+      where m.venue = 'hyperliquid'
+        and ($1 = m.token_yes or $1 = m.token_no)
       limit 1
     `,
     [tokenId],
@@ -245,6 +333,66 @@ function resolveTopPrice(
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function readHyperliquidSizeDecimals(value: unknown): number | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const raw =
+    record.szDecimals ??
+    record.sizeDecimals ??
+    record.size_decimals ??
+    record.lotSizeDecimals;
+  const parsed =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string"
+        ? Number(raw.trim())
+        : null;
+  if (
+    parsed == null ||
+    !Number.isInteger(parsed) ||
+    parsed < 0 ||
+    parsed > 8
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function resolveHyperliquidOrderPrecision(
+  market: HyperliquidMarketForTrade,
+  tokenId: string,
+): HyperliquidOrderPrecision {
+  const fromAssetRaw = readHyperliquidSizeDecimals(market.asset_raw);
+  if (fromAssetRaw != null) {
+    return hyperliquidOutcomeOrderPrecision(fromAssetRaw);
+  }
+
+  const metadata = market.metadata;
+  if (metadata && typeof metadata === "object") {
+    const record = metadata as Record<string, unknown>;
+    const sideAssets = record.hyperliquid
+      ? (record.hyperliquid as Record<string, unknown>).sideAssets
+      : record.sideAssets;
+    if (Array.isArray(sideAssets)) {
+      const sideAsset = sideAssets.find((entry) => {
+        if (!entry || typeof entry !== "object") return false;
+        const candidate = entry as Record<string, unknown>;
+        return (
+          candidate.hunchTokenId === tokenId || candidate.tokenId === tokenId
+        );
+      });
+      const fromSideAsset = readHyperliquidSizeDecimals(sideAsset);
+      if (fromSideAsset != null) {
+        return hyperliquidOutcomeOrderPrecision(fromSideAsset);
+      }
+    }
+  }
+
+  // HIP-4 outcome assets currently trade in whole shares. If Hyperliquid
+  // exposes per-token precision later, the metadata paths above take priority.
+  return hyperliquidOutcomeOrderPrecision(0);
+}
+
 function applySlippage(
   price: number,
   side: HyperliquidOrderSide,
@@ -255,20 +403,25 @@ function applySlippage(
   return Math.min(0.99999, Math.max(0.00001, price * factor));
 }
 
-function resolveOrderMath(inputs: {
+function resolveOrderQuote(inputs: {
   market: HyperliquidMarketForTrade;
   tokenSide: "YES" | "NO";
-  body: zod.infer<typeof orderBaseSchema>;
+  body: HyperliquidOrderBody;
+  precision: HyperliquidOrderPrecision;
   fixedPrice?: number | null;
   fixedSize?: number | null;
-}): { price: number; size: number; notionalUsd: number; tif: HyperliquidOrderTif } {
+}): HyperliquidOrderQuote {
   const tif = inputs.body.orderType === "limit" ? "Gtc" : "Ioc";
-  const price =
+  const rawPrice =
     inputs.fixedPrice ??
     (inputs.body.orderType === "limit"
       ? inputs.body.price
       : (() => {
-          const top = resolveTopPrice(inputs.market, inputs.tokenSide, inputs.body.side);
+          const top = resolveTopPrice(
+            inputs.market,
+            inputs.tokenSide,
+            inputs.body.side,
+          );
           if (top == null) return null;
           return applySlippage(
             top,
@@ -276,37 +429,111 @@ function resolveOrderMath(inputs: {
             inputs.body.slippageBps ?? env.hyperliquidMarketSlippageBps,
           );
         })());
-  if (price == null || !Number.isFinite(price) || price <= 0 || price >= 1) {
+  if (
+    rawPrice == null ||
+    !Number.isFinite(rawPrice) ||
+    rawPrice <= 0 ||
+    rawPrice >= 1
+  ) {
     throw new Error("Hyperliquid market has no usable price for this order.");
   }
+  const price = Number(
+    formatHyperliquidDecimal(rawPrice, {
+      maxDecimals: inputs.precision.priceMaxDecimals,
+      maxSigFigs: 5,
+      label: "price",
+    }),
+  );
 
-  const size =
-    inputs.fixedSize ??
-    inputs.body.size ??
+  const explicitSize = inputs.fixedSize ?? inputs.body.size ?? null;
+  const rawSize =
+    explicitSize ??
     (inputs.body.amountUsd != null ? inputs.body.amountUsd / price : null);
+  const autoSized =
+    rawSize != null && inputs.fixedSize == null && inputs.body.size == null;
+  const size =
+    autoSized
+      ? roundHyperliquidSizeToLot(
+          rawSize,
+          inputs.precision.sizeDecimals,
+          "floor",
+        )
+      : rawSize;
   if (size == null || !Number.isFinite(size) || size <= 0) {
-    throw new Error("Hyperliquid order size is required.");
+    if (!autoSized) {
+      throw new Error("Hyperliquid order size is required.");
+    }
+  }
+  if (
+    size != null &&
+    Number.isFinite(size) &&
+    size > 0 &&
+    !isHyperliquidSizeAligned(size, inputs.precision.sizeDecimals)
+  ) {
+    const step = formatHyperliquidDecimal(
+      1 / 10 ** inputs.precision.sizeDecimals,
+      {
+        maxDecimals: inputs.precision.sizeDecimals,
+        label: "size step",
+      },
+    );
+    throw new Error(`Hyperliquid order size must be in ${step} share steps.`);
   }
 
-  const notionalUsd = price * size;
-  if (notionalUsd < env.hyperliquidMinOrderNotionalUsd) {
-    throw new Error(
-      `Hyperliquid orders must be at least $${env.hyperliquidMinOrderNotionalUsd.toFixed(2)}.`,
+  const normalizedSize =
+    size != null && Number.isFinite(size) && size > 0 ? size : 0;
+  const notionalUsd = price * normalizedSize;
+  const minExecutableSize = roundHyperliquidSizeToLot(
+    env.hyperliquidMinOrderNotionalUsd / price,
+    inputs.precision.sizeDecimals,
+    "ceil",
+  );
+  const minExecutableAmountUsd = minExecutableSize * price;
+  const executable = notionalUsd >= env.hyperliquidMinOrderNotionalUsd;
+
+  return {
+    tokenId: inputs.body.tokenId,
+    side: inputs.body.side,
+    orderType: tif === "Gtc" ? "GTC" : "FAK",
+    price,
+    size: normalizedSize,
+    notionalUsd,
+    tif,
+    marketId: inputs.market.id,
+    minOrderNotionalUsd: env.hyperliquidMinOrderNotionalUsd,
+    minExecutableSize,
+    minExecutableAmountUsd,
+    sizeDecimals: inputs.precision.sizeDecimals,
+    priceMaxDecimals: inputs.precision.priceMaxDecimals,
+    executable,
+    reason: executable ? null : "lot_size_rounding",
+  };
+}
+
+function requireExecutableOrderQuote(
+  quote: HyperliquidOrderQuote,
+): HyperliquidOrderQuote {
+  if (quote.size <= 0 || !quote.executable) {
+    throw new HyperliquidOrderQuoteError(
+      `Hyperliquid orders must be at least $${quote.minOrderNotionalUsd.toFixed(2)} after lot-size rounding. Increase amount to at least $${quote.minExecutableAmountUsd.toFixed(2)} for this market.`,
+      quote,
     );
   }
 
-  return { price, size, notionalUsd, tif };
+  return quote;
 }
 
-async function prepareOrderAction(inputs: {
+async function resolveOrderContext(inputs: {
   userId: string;
   walletAddress: string;
-  body: zod.infer<typeof orderBaseSchema>;
-  nonce?: number;
-  cloid?: string | null;
-  fixedPrice?: number | null;
-  fixedSize?: number | null;
-}): Promise<PreparedHyperliquidAction> {
+  body: HyperliquidOrderBody;
+}): Promise<{
+  signer: string;
+  market: HyperliquidMarketForTrade;
+  tokenSide: "YES" | "NO";
+  assetId: number;
+  precision: HyperliquidOrderPrecision;
+}> {
   const signer = normalizeEvmAddress(inputs.walletAddress);
   if (!signer) throw new Error("Hyperliquid trading requires an EVM wallet.");
   ensureTradingEnabled({ userId: inputs.userId, walletAddress: signer });
@@ -331,15 +558,54 @@ async function prepareOrderAction(inputs: {
   }
 
   const assetId = hyperliquidAssetIdFromHunchTokenId(inputs.body.tokenId);
-  const math = resolveOrderMath({
+  const precision = resolveHyperliquidOrderPrecision(
     market,
-    tokenSide,
+    inputs.body.tokenId,
+  );
+  return { signer, market, tokenSide, assetId, precision };
+}
+
+async function quoteOrderAction(inputs: {
+  userId: string;
+  walletAddress: string;
+  body: HyperliquidOrderBody;
+  fixedPrice?: number | null;
+  fixedSize?: number | null;
+}): Promise<HyperliquidOrderQuote> {
+  const context = await resolveOrderContext(inputs);
+  return resolveOrderQuote({
+    market: context.market,
+    tokenSide: context.tokenSide,
     body: inputs.body,
+    precision: context.precision,
     fixedPrice: inputs.fixedPrice,
     fixedSize: inputs.fixedSize,
   });
+}
+
+async function prepareOrderAction(inputs: {
+  userId: string;
+  walletAddress: string;
+  body: HyperliquidOrderBody;
+  nonce?: number;
+  cloid?: string | null;
+  fixedPrice?: number | null;
+  fixedSize?: number | null;
+}): Promise<PreparedHyperliquidAction> {
+  const context = await resolveOrderContext(inputs);
+  const math = requireExecutableOrderQuote(
+    resolveOrderQuote({
+      market: context.market,
+      tokenSide: context.tokenSide,
+      body: inputs.body,
+      precision: context.precision,
+      fixedPrice: inputs.fixedPrice,
+      fixedSize: inputs.fixedSize,
+    }),
+  );
   const nonce =
-    inputs.nonce ?? (await reserveHyperliquidNonce(inputs.userId, signer));
+    inputs.nonce ??
+    (await reserveHyperliquidNonce(inputs.userId, context.signer));
   const inputCloid = inputs.cloid
     ? normalizeHyperliquidClientOrderId(inputs.cloid)
     : null;
@@ -350,18 +616,19 @@ async function prepareOrderAction(inputs: {
     inputCloid ??
     makeHyperliquidClientOrderId({
       userId: inputs.userId,
-      walletAddress: signer,
+      walletAddress: context.signer,
       tokenId: inputs.body.tokenId,
       nonce,
     });
   const action = buildHyperliquidOrderAction({
-    assetId,
+    assetId: context.assetId,
     side: inputs.body.side,
     price: math.price,
     size: math.size,
     tif: math.tif,
     reduceOnly: inputs.body.reduceOnly,
     cloid,
+    precision: context.precision,
   });
   const typedData = buildHyperliquidTypedData({
     action,
@@ -376,10 +643,19 @@ async function prepareOrderAction(inputs: {
     side: inputs.body.side,
     orderType: math.tif === "Gtc" ? "GTC" : "FAK",
     cloid,
-    price: Number(formatHyperliquidDecimal(math.price, { maxDecimals: 6, maxSigFigs: 5 })),
-    size: Number(formatHyperliquidDecimal(math.size, { maxDecimals: 8 })),
+    price: Number(
+      formatHyperliquidDecimal(math.price, {
+        maxDecimals: context.precision.priceMaxDecimals,
+        maxSigFigs: 5,
+      }),
+    ),
+    size: Number(
+      formatHyperliquidDecimal(math.size, {
+        maxDecimals: context.precision.sizeDecimals,
+      }),
+    ),
     notionalUsd: math.notionalUsd,
-    marketId: market.id,
+    marketId: context.market.id,
   };
 }
 
@@ -429,8 +705,316 @@ function verifySignedPreparedAction(
 ) {
   const recovered = recoverHyperliquidSigner(prepared.typedData, signature);
   if (recovered.toLowerCase() !== walletAddress.toLowerCase()) {
-    throw new Error("Hyperliquid signature does not match the selected wallet.");
+    throw new Error(
+      "Hyperliquid signature does not match the selected wallet.",
+    );
   }
+}
+
+function normalizeHyperliquidUsdAmountRaw(value: string | number): bigint {
+  const raw = typeof value === "number" ? String(value) : value.trim();
+  if (!raw || !/^\d+(\.\d{1,6})?$/.test(raw)) {
+    throw new Error("Enter a valid Hyperliquid USDC amount.");
+  }
+  const parsed = ethers.parseUnits(raw, 6);
+  if (parsed <= 0n)
+    throw new Error("Hyperliquid USDC amount must be greater than zero.");
+  return parsed;
+}
+
+function normalizeHyperliquidNonNegativeUsdAmountRaw(
+  value: string | number,
+): bigint {
+  const raw = typeof value === "number" ? String(value) : value.trim();
+  if (!raw || !/^\d+(\.\d{1,6})?$/.test(raw)) {
+    throw new Error("Enter a valid Hyperliquid USDC amount.");
+  }
+  return ethers.parseUnits(raw, 6);
+}
+
+function hyperliquidWithdrawalFeeRaw(): bigint {
+  return normalizeHyperliquidNonNegativeUsdAmountRaw(
+    env.hyperliquidWithdrawalFeeUsdc,
+  );
+}
+
+async function prepareWithdrawAction(input: {
+  userId: string;
+  walletAddress: string;
+  amount: string | number;
+  destination?: string | null;
+  nonce?: number | null;
+}) {
+  ensureTradingEnabled({
+    userId: input.userId,
+    walletAddress: input.walletAddress,
+  });
+  const receiveAmountRaw = normalizeHyperliquidUsdAmountRaw(input.amount);
+  const receiveAmount = ethers.formatUnits(receiveAmountRaw, 6);
+  const destination = normalizeEvmAddress(
+    input.destination?.trim() || input.walletAddress,
+  );
+  if (!destination)
+    throw new Error("Enter a valid Hyperliquid withdrawal destination.");
+  if (destination.toLowerCase() !== input.walletAddress.toLowerCase()) {
+    throw new Error(
+      "HyperCore withdrawals currently support only the controlling Arbitrum wallet destination.",
+    );
+  }
+
+  const state = await fetchHyperliquidSpotState(input.walletAddress);
+  const availableRaw = BigInt(state.perpUsdcWithdrawableRaw);
+  const feeRaw = hyperliquidWithdrawalFeeRaw();
+  const totalDebitRaw = receiveAmountRaw + feeRaw;
+  if (totalDebitRaw > availableRaw) {
+    throw new Error(
+      `Insufficient available HyperCore USDC. Withdrawing ${receiveAmount} USDC requires ${ethers.formatUnits(totalDebitRaw, 6)} USDC including the $${env.hyperliquidWithdrawalFeeUsdc.toFixed(2)} withdrawal fee.`,
+    );
+  }
+
+  const nonce =
+    input.nonce ??
+    (await reserveHyperliquidNonce(input.userId, input.walletAddress));
+  const prepared = buildHyperliquidWithdrawAction({
+    amount: receiveAmount,
+    destination,
+    time: nonce,
+    isMainnet: env.hyperliquidChain !== "Testnet",
+  });
+  const feeAmount = ethers.formatUnits(feeRaw, 6);
+  const totalDebitAmount = ethers.formatUnits(totalDebitRaw, 6);
+
+  return {
+    ...prepared,
+    nonce,
+    amount: receiveAmount,
+    amountRaw: receiveAmountRaw.toString(),
+    receiveAmount,
+    receiveAmountRaw: receiveAmountRaw.toString(),
+    feeUsd: env.hyperliquidWithdrawalFeeUsdc,
+    feeAmount,
+    feeRaw: feeRaw.toString(),
+    totalDebitAmount,
+    totalDebitAmountRaw: totalDebitRaw.toString(),
+    destination,
+    availableRaw: availableRaw.toString(),
+    withdrawalFeeUsd: env.hyperliquidWithdrawalFeeUsdc,
+    estimatedDurationLabel: env.hyperliquidWithdrawalEstimatedDurationLabel,
+  };
+}
+
+async function prepareUsdClassTransferAction(input: {
+  userId: string;
+  walletAddress: string;
+  amount: string | number;
+  toPerp: boolean;
+  nonce?: number | null;
+}) {
+  ensureTradingEnabled({
+    userId: input.userId,
+    walletAddress: input.walletAddress,
+  });
+  const amountRaw = normalizeHyperliquidUsdAmountRaw(input.amount);
+  const amount = ethers.formatUnits(amountRaw, 6);
+  const state = await fetchHyperliquidSpotState(input.walletAddress);
+  const availableRaw = BigInt(
+    input.toPerp ? state.usdcAvailableRaw : state.perpUsdcWithdrawableRaw,
+  );
+  if (amountRaw > availableRaw) {
+    throw new Error("Insufficient available HyperCore USDC.");
+  }
+
+  const nonce =
+    input.nonce ??
+    (await reserveHyperliquidNonce(input.userId, input.walletAddress));
+  const prepared = buildHyperliquidUsdClassTransferAction({
+    amount,
+    toPerp: input.toPerp,
+    nonce,
+    isMainnet: env.hyperliquidChain !== "Testnet",
+  });
+
+  return {
+    ...prepared,
+    nonce,
+    amount,
+    amountRaw: amountRaw.toString(),
+    toPerp: input.toPerp,
+    availableRaw: availableRaw.toString(),
+  };
+}
+
+function verifySignedUserAction(input: {
+  typedData: ReturnType<typeof buildHyperliquidWithdrawAction>["typedData"];
+  signature: string;
+  walletAddress: string;
+}) {
+  const recovered = recoverHyperliquidUserSignedSigner(
+    input.typedData,
+    input.signature,
+  );
+  if (recovered.toLowerCase() !== input.walletAddress.toLowerCase()) {
+    throw new Error(
+      "Hyperliquid signature does not match the selected wallet.",
+    );
+  }
+}
+
+function buildHyperliquidTokenBalances(
+  state: Awaited<ReturnType<typeof fetchHyperliquidSpotState>>,
+): WalletTokenBalance[] {
+  return state.balances
+    .filter((balance) => balance.tokenId && Number(balance.total) > 0)
+    .map((balance) => ({
+      tokenId: balance.tokenId as string,
+      size: balance.total,
+      averagePrice:
+        balance.entryNtl && Number(balance.total) > 0
+          ? String(Number(balance.entryNtl) / Number(balance.total))
+          : null,
+    }));
+}
+
+function mergeHyperliquidTokenBalances(
+  liveBalances: WalletTokenBalance[],
+  executionBalances: WalletTokenBalance[],
+): WalletTokenBalance[] {
+  const merged = new Map<string, WalletTokenBalance>();
+  for (const balance of executionBalances) {
+    merged.set(balance.tokenId, balance);
+  }
+  for (const balance of liveBalances) {
+    merged.set(balance.tokenId, balance);
+  }
+  return Array.from(merged.values());
+}
+
+async function loadHyperliquidExecutionTokenBalances(input: {
+  userId: string;
+  walletAddress: string;
+}): Promise<WalletTokenBalance[]> {
+  const { rows } = await pool.query<{
+    token_id: string;
+    net_size: string | null;
+    buy_notional: string | null;
+    buy_size: string | null;
+  }>(
+    `
+      with execution_legs as (
+        select
+          output_mint as token_id,
+          coalesce(amount_out, 0) as size_delta,
+          coalesce(amount_in, 0) as buy_notional,
+          coalesce(amount_out, 0) as buy_size
+        from executions
+        where user_id = $1
+          and lower(wallet_address) = lower($2)
+          and venue = 'hyperliquid'
+          and lower(coalesce(status, '')) in ('fulfilled', 'confirmed', 'filled')
+          and side = 'BUY'
+          and output_mint like 'hyperliquid:%'
+          and output_mint <> 'hyperliquid:usdc'
+
+        union all
+
+        select
+          input_mint as token_id,
+          -coalesce(amount_in, 0) as size_delta,
+          0::numeric as buy_notional,
+          0::numeric as buy_size
+        from executions
+        where user_id = $1
+          and lower(wallet_address) = lower($2)
+          and venue = 'hyperliquid'
+          and lower(coalesce(status, '')) in ('fulfilled', 'confirmed', 'filled')
+          and side = 'SELL'
+          and input_mint like 'hyperliquid:%'
+          and input_mint <> 'hyperliquid:usdc'
+      )
+      select
+        token_id,
+        sum(size_delta) as net_size,
+        sum(buy_notional) as buy_notional,
+        sum(buy_size) as buy_size
+      from execution_legs
+      group by token_id
+      having sum(size_delta) > 0
+    `,
+    [input.userId, input.walletAddress],
+  );
+
+  return rows
+    .map((row): WalletTokenBalance | null => {
+      const size = Number(row.net_size ?? "0");
+      if (!Number.isFinite(size) || size <= 0) return null;
+      const buySize = Number(row.buy_size ?? "0");
+      const buyNotional = Number(row.buy_notional ?? "0");
+      const averagePrice =
+        Number.isFinite(buySize) &&
+        buySize > 0 &&
+        Number.isFinite(buyNotional)
+          ? String(buyNotional / buySize)
+          : null;
+      return {
+        tokenId: row.token_id,
+        size: row.net_size ?? "0",
+        averagePrice,
+      };
+    })
+    .filter((balance): balance is WalletTokenBalance => Boolean(balance));
+}
+
+async function loadHyperliquidTokenContext(
+  tokenIds: string[],
+): Promise<Map<string, HyperliquidTokenContext>> {
+  const uniqueTokenIds = Array.from(new Set(tokenIds.filter(Boolean)));
+  if (uniqueTokenIds.length === 0) return new Map();
+
+  const { rows } = await pool.query<{
+    token_id: string;
+    market_id: string;
+    side: string | null;
+  }>(
+    `
+      select token_id, market_id::text, side
+      from unified_tokens
+      where venue = 'hyperliquid'
+        and token_id = any($1::text[])
+    `,
+    [uniqueTokenIds],
+  );
+
+  return new Map(
+    rows.map((row) => [
+      row.token_id,
+      { marketId: row.market_id, outcome: row.side ?? null },
+    ]),
+  );
+}
+
+async function syncHyperliquidPositionsFromState(input: {
+  userId: string;
+  walletAddress: string;
+  state?: Awaited<ReturnType<typeof fetchHyperliquidSpotState>> | null;
+}) {
+  const liveBalances = input.state
+    ? buildHyperliquidTokenBalances(input.state)
+    : [];
+  const executionBalances = await loadHyperliquidExecutionTokenBalances({
+    userId: input.userId,
+    walletAddress: input.walletAddress,
+  });
+  return syncWalletPositionsFromTokenBalances(pool, {
+    userId: input.userId,
+    walletAddress: input.walletAddress,
+    venue: "hyperliquid",
+    positionScope: "own",
+    tokenBalances: mergeHyperliquidTokenBalances(
+      liveBalances,
+      executionBalances,
+    ),
+    tokenIdLike: "hyperliquid:%",
+  });
 }
 
 type PersistHyperliquidOrderInput = {
@@ -471,7 +1055,7 @@ async function findExistingOrder(inputs: {
         and venue = 'hyperliquid'
         and venue_order_id = any($2::text[])
         and (wallet_address = $3 or signer_address = $3)
-      order by created_at desc
+      order by coalesce(posted_at, last_update) desc nulls last, id desc
       limit 1
     `,
     [inputs.userId, inputs.venueOrderAliases, inputs.walletAddress],
@@ -509,10 +1093,29 @@ function isTerminalOrderStatus(status: string | null | undefined): boolean {
   );
 }
 
+function normalizeOrderPriceForStorage(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return null;
+  return value >= 0 && value <= 1 ? value : null;
+}
+
+function normalizeOrderSizeForStorage(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return null;
+  return value > 0 ? value : null;
+}
+
+function hasPersistableOrderAmounts(row: HyperliquidInfoOrderRow): boolean {
+  return (
+    normalizeOrderPriceForStorage(row.price) != null &&
+    normalizeOrderSizeForStorage(row.size) != null
+  );
+}
+
 async function persistHyperliquidOrder(
   inputs: PersistHyperliquidOrderInput,
 ): Promise<{ id: string; status: string }> {
   const aliases = Array.from(new Set([inputs.venueOrderId, ...inputs.aliases]));
+  const price = normalizeOrderPriceForStorage(inputs.price);
+  const size = normalizeOrderSizeForStorage(inputs.size);
   const selected = await pool.query<{
     id: string;
     status: string;
@@ -536,13 +1139,18 @@ async function persistHyperliquidOrder(
 
   const existing = selected.rows[0];
   const effectiveStatus =
-    existing && isTerminalOrderStatus(existing.status) && !isTerminalOrderStatus(inputs.status)
+    existing &&
+    isTerminalOrderStatus(existing.status) &&
+    !isTerminalOrderStatus(inputs.status)
       ? existing.status
       : inputs.status;
   const payload = mergeOrderPayload({
     previous: existing?.order_payload ?? null,
     next: inputs.orderPayload,
-    key: inputs.orderPayloadVersion === "hyperliquid_info_v1" ? "hyperliquidInfo" : "hyperliquidOrder",
+    key:
+      inputs.orderPayloadVersion === "hyperliquid_info_v1"
+        ? "hyperliquidInfo"
+        : "hyperliquidOrder",
   });
   const payloadJson = payload == null ? null : JSON.stringify(payload);
 
@@ -587,8 +1195,8 @@ async function persistHyperliquidOrder(
         inputs.tokenId,
         inputs.side,
         inputs.orderType,
-        inputs.price,
-        inputs.size,
+        price,
+        size,
         effectiveStatus,
         inputs.filledSize ?? null,
         inputs.averageFillPrice ?? null,
@@ -603,6 +1211,12 @@ async function persistHyperliquidOrder(
       ],
     );
     return rows[0] ?? { id: existing.id, status: effectiveStatus };
+  }
+
+  if (price == null || size == null) {
+    throw new Error(
+      "Cannot persist a new Hyperliquid order without valid price and size.",
+    );
   }
 
   const { rows } = await pool.query<{ id: string; status: string }>(
@@ -628,8 +1242,8 @@ async function persistHyperliquidOrder(
       inputs.tokenId,
       inputs.side,
       inputs.orderType,
-      inputs.price,
-      inputs.size,
+      price,
+      size,
       inputs.status,
       inputs.filledSize ?? 0,
       inputs.averageFillPrice ?? null,
@@ -689,7 +1303,10 @@ async function markHyperliquidOrderStatus(inputs: {
   return result.rowCount ?? 0;
 }
 
-function normalizeInfoOrderRows(payload: unknown, fallbackStatus: string): HyperliquidInfoOrderRow[] {
+function normalizeInfoOrderRows(
+  payload: unknown,
+  fallbackStatus: string,
+): HyperliquidInfoOrderRow[] {
   const rows = Array.isArray(payload) ? payload : [];
   return rows
     .map((entry): HyperliquidInfoOrderRow | null => {
@@ -733,14 +1350,20 @@ function normalizeInfoOrderRows(payload: unknown, fallbackStatus: string): Hyper
         raw: entry,
       };
     })
-    .filter((row): row is HyperliquidInfoOrderRow => Boolean(row?.venueOrderId));
+    .filter((row): row is HyperliquidInfoOrderRow =>
+      Boolean(row?.venueOrderId),
+    );
 }
 
-function readString(record: Record<string, unknown>, keys: string[]): string | null {
+function readString(
+  record: Record<string, unknown>,
+  keys: string[],
+): string | null {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value.trim();
-    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    if (typeof value === "number" && Number.isFinite(value))
+      return String(value);
   }
   return null;
 }
@@ -753,15 +1376,22 @@ function parseNumber(value: string | null): number | null {
 
 function normalizeOrderStatus(status: string): string {
   const normalized = status.toLowerCase();
-  if (normalized.includes("open") || normalized.includes("resting")) return "live";
+  if (normalized.includes("open") || normalized.includes("resting"))
+    return "live";
   if (normalized.includes("fill")) return "filled";
   if (normalized.includes("cancel")) return "cancelled";
-  if (normalized.includes("reject") || normalized.includes("error")) return "rejected";
+  if (normalized.includes("reject") || normalized.includes("error"))
+    return "rejected";
   return normalized || "submitted";
 }
 
-function normalizeErrorPayload(error: unknown): { message: string; status: number; payload?: unknown } {
-  const message = error instanceof Error ? error.message : "Hyperliquid request failed.";
+function normalizeErrorPayload(error: unknown): {
+  message: string;
+  status: number;
+  payload?: unknown;
+} {
+  const message =
+    error instanceof Error ? error.message : "Hyperliquid request failed.";
   const responseStatus =
     typeof (error as { responseStatus?: unknown })?.responseStatus === "number"
       ? ((error as { responseStatus: number }).responseStatus ?? 400)
@@ -770,8 +1400,8 @@ function normalizeErrorPayload(error: unknown): { message: string; status: numbe
   return {
     message,
     status:
-      code === "hyperliquid_trading_disabled"
-      || code === "hyperliquid_trading_not_allowed"
+      code === "hyperliquid_trading_disabled" ||
+      code === "hyperliquid_trading_not_allowed"
         ? 403
         : responseStatus != null
           ? Math.max(400, Math.min(599, responseStatus))
@@ -782,6 +1412,36 @@ function normalizeErrorPayload(error: unknown): { message: string; status: numbe
 
 export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  z.post(
+    "/order/quote",
+    { preHandler: createAuthMiddleware(), schema: { body: orderBaseSchema } },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = normalizeEvmAddress(request.walletAddress ?? "");
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const quote = await quoteOrderAction({
+          userId: user.id,
+          walletAddress,
+          body: request.body,
+        });
+        return reply.send({ ok: true, ...quote });
+      } catch (error) {
+        const normalized = normalizeErrorPayload(error);
+        reply.code(normalized.status);
+        return reply.send({
+          error: normalized.message,
+          code: (error as { code?: string })?.code,
+          payload: normalized.payload,
+        });
+      }
+    },
+  );
 
   z.post(
     "/order/prepare",
@@ -834,7 +1494,11 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           fixedPrice: request.body.preparedPrice,
           fixedSize: request.body.preparedSize,
         });
-        verifySignedPreparedAction(prepared, request.body.signature, walletAddress);
+        verifySignedPreparedAction(
+          prepared,
+          request.body.signature,
+          walletAddress,
+        );
         const cloid = normalizeHyperliquidClientOrderId(request.body.cloid);
         if (!cloid) throw new Error("Invalid Hyperliquid client order id.");
         const venueOrderId = canonicalHyperliquidVenueOrderId({ cloid });
@@ -991,7 +1655,10 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
 
   z.post(
     "/cancel",
-    { preHandler: createAuthMiddleware(), schema: { body: cancelSubmitSchema } },
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: cancelSubmitSchema },
+    },
     async (request, reply) => {
       const user = request.user;
       const walletAddress = normalizeEvmAddress(request.walletAddress ?? "");
@@ -1013,7 +1680,11 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           cloid: request.body.cloid,
           nonce: request.body.nonce,
         });
-        verifySignedPreparedAction(prepared, request.body.signature, walletAddress);
+        verifySignedPreparedAction(
+          prepared,
+          request.body.signature,
+          walletAddress,
+        );
         const exchange = await submitHyperliquidExchangeAction({
           action: prepared.action,
           nonce: prepared.nonce,
@@ -1025,7 +1696,9 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             ok: false,
             status: cancelStatus.status,
-            error: cancelStatus.errorMessage ?? "Hyperliquid rejected the cancel request.",
+            error:
+              cancelStatus.errorMessage ??
+              "Hyperliquid rejected the cancel request.",
             raw: exchange,
           });
         }
@@ -1041,7 +1714,8 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             ok: false,
             status: "stale",
-            error: "Hyperliquid cancel succeeded but no local order row matched.",
+            error:
+              "Hyperliquid cancel succeeded but no local order row matched.",
             raw: exchange,
           });
         }
@@ -1090,18 +1764,43 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           ...normalizeInfoOrderRows(historicalPayload, "submitted"),
         ];
         let stored = 0;
+        let skippedIncomplete = 0;
         for (const row of rows) {
           if (!row.venueOrderId || !row.tokenId) continue;
+          const venueOrderAliases = hyperliquidVenueOrderIdAliases({
+            cloid: row.cloid,
+            oid: row.oid,
+            venueOrderId: row.venueOrderId,
+          });
+          if (!hasPersistableOrderAmounts(row)) {
+            const existing = await findExistingOrder({
+              userId: user.id,
+              walletAddress,
+              venueOrderAliases,
+            });
+            if (!existing) {
+              skippedIncomplete += 1;
+              app.log.warn(
+                {
+                  userId: user.id,
+                  walletAddress,
+                  venueOrderId: row.venueOrderId,
+                  tokenId: row.tokenId,
+                  price: row.price,
+                  size: row.size,
+                  status: row.status,
+                },
+                "Skipping incomplete Hyperliquid order sync row",
+              );
+              continue;
+            }
+          }
           await persistHyperliquidOrder({
             userId: user.id,
             walletAddress,
             signerAddress: walletAddress,
             venueOrderId: row.venueOrderId,
-            aliases: hyperliquidVenueOrderIdAliases({
-              cloid: row.cloid,
-              oid: row.oid,
-              venueOrderId: row.venueOrderId,
-            }),
+            aliases: venueOrderAliases,
             tokenId: row.tokenId,
             side: row.side,
             orderType: "GTC",
@@ -1122,22 +1821,24 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           stored += 1;
         }
 
+        const fills = normalizeHyperliquidUserFills(fillsPayload);
+        const fillTokenContext = await loadHyperliquidTokenContext(
+          fills.map((fill) => fill.tokenId),
+        );
         let executionsStored = 0;
-        for (const fill of normalizeHyperliquidUserFills(fillsPayload)) {
+        for (const fill of fills) {
+          const tokenContext = fillTokenContext.get(fill.tokenId) ?? null;
           await storeExecution(pool, {
             userId: user.id,
             walletAddress,
             venue: "hyperliquid",
-            unifiedMarketId: null,
+            unifiedMarketId: tokenContext?.marketId ?? null,
             side: fill.side,
-            inputMint:
-              fill.side === "BUY" ? "hyperliquid:usdc" : fill.tokenId,
-            outputMint:
-              fill.side === "BUY" ? fill.tokenId : "hyperliquid:usdc",
-            amountIn:
-              fill.side === "BUY" ? fill.notionalUsd : fill.size,
-            amountOut:
-              fill.side === "BUY" ? fill.size : fill.notionalUsd,
+            outcome: tokenContext?.outcome ?? null,
+            inputMint: fill.side === "BUY" ? "hyperliquid:usdc" : fill.tokenId,
+            outputMint: fill.side === "BUY" ? fill.tokenId : "hyperliquid:usdc",
+            amountIn: fill.side === "BUY" ? fill.notionalUsd : fill.size,
+            amountOut: fill.side === "BUY" ? fill.size : fill.notionalUsd,
             inputDecimals: fill.side === "BUY" ? 6 : null,
             outputDecimals: fill.side === "BUY" ? null : 6,
             quoteId: fill.quoteId,
@@ -1151,16 +1852,53 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
           });
           executionsStored += 1;
         }
+        let positionsSynced: Awaited<
+          ReturnType<typeof syncHyperliquidPositionsFromState>
+        > | null = null;
+        let positionsSyncError: string | null = null;
+        try {
+          const state = await fetchHyperliquidSpotState(walletAddress).catch(
+            (error) => {
+              positionsSyncError =
+                error instanceof Error
+                  ? error.message
+                  : "Live Hyperliquid balance sync failed.";
+              app.log.warn(
+                { error, userId: user.id, walletAddress },
+                "Failed to fetch live Hyperliquid balances during order sync",
+              );
+              return null;
+            },
+          );
+          positionsSynced = await syncHyperliquidPositionsFromState({
+            userId: user.id,
+            walletAddress,
+            state,
+          });
+        } catch (error) {
+          positionsSyncError =
+            error instanceof Error ? error.message : "Position sync failed.";
+          app.log.warn(
+            { error, userId: user.id, walletAddress },
+            "Failed to sync Hyperliquid positions after order sync",
+          );
+        }
         return reply.send({
           ok: true,
           stored,
           scanned: rows.length,
+          skippedIncomplete,
           executionsStored,
+          positionsSynced,
+          positionsSyncError,
         });
       } catch (error) {
         const normalized = normalizeErrorPayload(error);
         reply.code(normalized.status);
-        return reply.send({ error: normalized.message, payload: normalized.payload });
+        return reply.send({
+          error: normalized.message,
+          payload: normalized.payload,
+        });
       }
     },
   );
@@ -1178,23 +1916,10 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
       try {
         ensureTradingEnabled({ userId: user.id, walletAddress });
         const state = await fetchHyperliquidSpotState(walletAddress);
-        const tokenBalances: WalletTokenBalance[] = state.balances
-          .filter((balance) => balance.tokenId && Number(balance.total) > 0)
-          .map((balance) => ({
-            tokenId: balance.tokenId as string,
-            size: balance.total,
-            averagePrice:
-              balance.entryNtl && Number(balance.total) > 0
-                ? String(Number(balance.entryNtl) / Number(balance.total))
-                : null,
-          }));
-        const result = await syncWalletPositionsFromTokenBalances(pool, {
+        const result = await syncHyperliquidPositionsFromState({
           userId: user.id,
           walletAddress,
-          venue: "hyperliquid",
-          positionScope: "own",
-          tokenBalances,
-          tokenIdLike: "hyperliquid:%",
+          state,
         });
         return reply.send({
           ok: true,
@@ -1209,7 +1934,227 @@ export const hyperliquidPrivateRoutes: FastifyPluginAsync = async (app) => {
       } catch (error) {
         const normalized = normalizeErrorPayload(error);
         reply.code(normalized.status);
-        return reply.send({ error: normalized.message, payload: normalized.payload });
+        return reply.send({
+          error: normalized.message,
+          payload: normalized.payload,
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/withdraw/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: withdrawBaseSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = normalizeEvmAddress(request.walletAddress ?? "");
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const prepared = await prepareWithdrawAction({
+          userId: user.id,
+          walletAddress,
+          amount: request.body.amount,
+          destination: request.body.destination,
+        });
+        return reply.send({ ok: true, ...prepared });
+      } catch (error) {
+        const normalized = normalizeErrorPayload(error);
+        reply.code(normalized.status);
+        return reply.send({
+          error: normalized.message,
+          code: (error as { code?: string })?.code,
+          payload: normalized.payload,
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/usd-class-transfer/prepare",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: usdClassTransferBaseSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = normalizeEvmAddress(request.walletAddress ?? "");
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const prepared = await prepareUsdClassTransferAction({
+          userId: user.id,
+          walletAddress,
+          amount: request.body.amount,
+          toPerp: request.body.toPerp,
+        });
+        return reply.send({ ok: true, ...prepared });
+      } catch (error) {
+        const normalized = normalizeErrorPayload(error);
+        reply.code(normalized.status);
+        return reply.send({
+          error: normalized.message,
+          code: (error as { code?: string })?.code,
+          payload: normalized.payload,
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/usd-class-transfer",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: usdClassTransferSubmitSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = normalizeEvmAddress(request.walletAddress ?? "");
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const prepared = await prepareUsdClassTransferAction({
+          userId: user.id,
+          walletAddress,
+          amount: request.body.amount,
+          toPerp: request.body.toPerp,
+          nonce: request.body.nonce,
+        });
+        verifySignedUserAction({
+          typedData: prepared.typedData,
+          signature: request.body.signature,
+          walletAddress,
+        });
+        const exchange = await submitHyperliquidExchangeAction({
+          action: prepared.action,
+          nonce: prepared.nonce,
+          signature: request.body.signature,
+        });
+        const state = await fetchHyperliquidSpotState(walletAddress).catch(
+          () => null,
+        );
+        return reply.send({
+          ok: true,
+          status: "submitted",
+          amount: prepared.amount,
+          amountRaw: prepared.amountRaw,
+          toPerp: prepared.toPerp,
+          usdc: state
+            ? {
+                balance: state.usdcBalance,
+                balanceRaw: state.usdcBalanceRaw,
+                available: state.usdcAvailable,
+                availableRaw: state.usdcAvailableRaw,
+                hold: state.usdcHold,
+                holdRaw: state.usdcHoldRaw,
+                decimals: 6,
+                symbol: "USDC",
+              }
+            : null,
+          perpUsdc: state
+            ? {
+                balance: state.perpUsdcBalance,
+                balanceRaw: state.perpUsdcBalanceRaw,
+                available: state.perpUsdcWithdrawable,
+                availableRaw: state.perpUsdcWithdrawableRaw,
+                decimals: 6,
+                symbol: "USDC",
+              }
+            : null,
+          raw: exchange,
+        });
+      } catch (error) {
+        const normalized = normalizeErrorPayload(error);
+        reply.code(normalized.status);
+        return reply.send({
+          error: normalized.message,
+          code: (error as { code?: string })?.code,
+          payload: normalized.payload,
+        });
+      }
+    },
+  );
+
+  z.post(
+    "/withdraw",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: withdrawSubmitSchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const walletAddress = normalizeEvmAddress(request.walletAddress ?? "");
+      if (!user || !walletAddress) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const prepared = await prepareWithdrawAction({
+          userId: user.id,
+          walletAddress,
+          amount: request.body.amount,
+          destination: request.body.destination,
+          nonce: request.body.nonce,
+        });
+        verifySignedUserAction({
+          typedData: prepared.typedData,
+          signature: request.body.signature,
+          walletAddress,
+        });
+        const exchange = await submitHyperliquidExchangeAction({
+          action: prepared.action,
+          nonce: prepared.nonce,
+          signature: request.body.signature,
+        });
+        const state = await fetchHyperliquidSpotState(walletAddress).catch(
+          () => null,
+        );
+        return reply.send({
+          ok: true,
+          status: "submitted",
+          amount: prepared.amount,
+          amountRaw: prepared.amountRaw,
+          receiveAmount: prepared.receiveAmount,
+          receiveAmountRaw: prepared.receiveAmountRaw,
+          feeUsd: prepared.feeUsd,
+          feeAmount: prepared.feeAmount,
+          feeRaw: prepared.feeRaw,
+          totalDebitAmount: prepared.totalDebitAmount,
+          totalDebitAmountRaw: prepared.totalDebitAmountRaw,
+          destination: prepared.destination,
+          withdrawalFeeUsd: prepared.withdrawalFeeUsd,
+          estimatedDurationLabel: prepared.estimatedDurationLabel,
+          usdc: state
+            ? {
+                balance: state.usdcBalance,
+                balanceRaw: state.usdcBalanceRaw,
+                available: state.usdcAvailable,
+                availableRaw: state.usdcAvailableRaw,
+                hold: state.usdcHold,
+                holdRaw: state.usdcHoldRaw,
+                decimals: 6,
+                symbol: "USDC",
+              }
+            : null,
+          raw: exchange,
+        });
+      } catch (error) {
+        const normalized = normalizeErrorPayload(error);
+        reply.code(normalized.status);
+        return reply.send({
+          error: normalized.message,
+          code: (error as { code?: string })?.code,
+          payload: normalized.payload,
+        });
       }
     },
   );

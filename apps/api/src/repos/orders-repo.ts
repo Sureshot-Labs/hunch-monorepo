@@ -77,11 +77,14 @@ export async function fetchOrderHistoryRows(
       SELECT
         id, user_id, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, average_fill_price,
-        expires_at, created_at, updated_at, filled_at, cancelled_at,
+        expires_at,
+        coalesce(posted_at, last_update) as created_at,
+        coalesce(last_update, posted_at) as updated_at,
+        filled_at, cancelled_at,
         error_message, raw_error
       FROM orders
       ${whereClause}
-      ORDER BY created_at DESC
+      ORDER BY coalesce(posted_at, last_update) DESC NULLS LAST, id DESC
       LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
     `,
     [...params, limit, offset],

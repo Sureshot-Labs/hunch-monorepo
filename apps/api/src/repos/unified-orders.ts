@@ -299,7 +299,33 @@ const buildOrdersSelect = (whereClause: string): string => `
   where o.row_rank = 1
 `;
 
-const buildExecutionsSelect = (whereClause: string): string => `
+const HYPERLIQUID_DUPLICATE_EXECUTION_FILTER = `
+  and not (
+    e.venue = 'hyperliquid'
+    and e.venue_order_id is not null
+    and exists (
+      select 1
+      from orders o
+      where o.user_id = e.user_id
+        and o.venue = e.venue
+        and o.venue_order_id = e.venue_order_id
+        and (
+          o.wallet_address is null
+          or e.wallet_address is null
+          or (
+            case when o.wallet_address like '0x%' then lower(o.wallet_address) else o.wallet_address end
+            =
+            case when e.wallet_address like '0x%' then lower(e.wallet_address) else e.wallet_address end
+          )
+        )
+    )
+  )
+`;
+
+const buildExecutionsSelect = (
+  whereClause: string,
+  options: { hideHyperliquidOrderFills?: boolean } = {},
+): string => `
   select
     e.id::text as id,
     'swap'::text as kind,
@@ -330,6 +356,11 @@ const buildExecutionsSelect = (whereClause: string): string => `
     e.tx_signature
   from executions e
   ${whereClause}
+  ${
+    options.hideHyperliquidOrderFills
+      ? HYPERLIQUID_DUPLICATE_EXECUTION_FILTER
+      : ""
+  }
 `;
 
 export async function fetchUnifiedOrders(
@@ -359,7 +390,13 @@ export async function fetchUnifiedOrders(
 
   const selects: string[] = [];
   if (includeOrders) selects.push(buildOrdersSelect(orderWhere));
-  if (includeSwaps) selects.push(buildExecutionsSelect(execWhere));
+  if (includeSwaps) {
+    selects.push(
+      buildExecutionsSelect(execWhere, {
+        hideHyperliquidOrderFills: includeOrders,
+      }),
+    );
+  }
 
   const unionSql =
     selects.length === 1 ? selects[0] : selects.join(" union all ");

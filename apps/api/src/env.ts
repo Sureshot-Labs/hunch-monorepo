@@ -1241,6 +1241,13 @@ export const env = {
     "HYPERLIQUID_MIN_ORDER_NOTIONAL_USD",
     10,
   ),
+  hyperliquidWithdrawalFeeUsdc: optionalNonNegativeNumber(
+    "HYPERLIQUID_WITHDRAWAL_FEE_USDC",
+    1,
+  ),
+  hyperliquidWithdrawalEstimatedDurationLabel:
+    process.env.HYPERLIQUID_WITHDRAWAL_ESTIMATED_DURATION_LABEL?.trim() ||
+    "Can take several hours",
   hyperliquidMarketSlippageBps: optionalIntInRange(
     "HYPERLIQUID_MARKET_SLIPPAGE_BPS",
     500,
