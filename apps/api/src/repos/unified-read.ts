@@ -158,6 +158,9 @@ type FeedSearchEarlyFilterInputs = Pick<
 type FeedSearchEarlyFilterSql = {
   eventWhere: string[];
   marketWhere: string[];
+  fallbackEventWhere: string[];
+  fallbackMarketWhere: string[];
+  hasDeferredFallbackFilters: boolean;
 };
 
 export type FeedCandidateEventSearchFilter = {
@@ -302,44 +305,82 @@ function buildFeedSearchEarlyFilterSql(args: {
   const { add, inputs, venueTarget = "event" } = args;
   const eventWhere: string[] = [];
   const marketWhere: string[] = [];
-  if (!inputs) return { eventWhere, marketWhere };
+  const fallbackEventWhere: string[] = [];
+  const fallbackMarketWhere: string[] = [];
+  let hasDeferredFallbackFilters = false;
+  if (!inputs) {
+    return {
+      eventWhere,
+      marketWhere,
+      fallbackEventWhere,
+      fallbackMarketWhere,
+      hasDeferredFallbackFilters,
+    };
+  }
+
+  const pushFilter = (
+    eventClause: string,
+    marketClause: string,
+    options?: { deferFromFallback?: boolean },
+  ) => {
+    eventWhere.push(eventClause);
+    marketWhere.push(marketClause);
+    if (!options?.deferFromFallback) {
+      fallbackEventWhere.push(eventClause);
+      fallbackMarketWhere.push(marketClause);
+    } else {
+      hasDeferredFallbackFilters = true;
+    }
+  };
 
   if (inputs.venues?.length) {
     const venuesParam = add(inputs.venues);
-    eventWhere.push(`e.venue = ANY(${venuesParam}::text[])`);
-    marketWhere.push(
+    pushFilter(
+      `e.venue = ANY(${venuesParam}::text[])`,
       `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${venuesParam}::text[])`,
     );
   }
   if (inputs.categories?.length) {
     const categoriesParam = add(inputs.categories);
-    eventWhere.push(`lower(e.category) = ANY(${categoriesParam}::text[])`);
-    marketWhere.push(`lower(e.category) = ANY(${categoriesParam}::text[])`);
+    pushFilter(
+      `lower(e.category) = ANY(${categoriesParam}::text[])`,
+      `lower(e.category) = ANY(${categoriesParam}::text[])`,
+      { deferFromFallback: true },
+    );
   } else if (inputs.category) {
     const categoryParam = add(inputs.category.toLowerCase());
-    eventWhere.push(`lower(e.category) = ${categoryParam}`);
-    marketWhere.push(`lower(e.category) = ${categoryParam}`);
+    pushFilter(
+      `lower(e.category) = ${categoryParam}`,
+      `lower(e.category) = ${categoryParam}`,
+      { deferFromFallback: true },
+    );
   }
   if (inputs.endWithin) {
     const endWithinParam = add(inputs.endWithin);
-    eventWhere.push(
+    pushFilter(
       `e.end_date is not null and e.end_date <= ${endWithinParam}::timestamptz`,
-    );
-    marketWhere.push(
       `e.end_date is not null and e.end_date <= ${endWithinParam}::timestamptz`,
     );
   }
   if (inputs.ageSince) {
     const ageSinceParam = add(inputs.ageSince);
-    eventWhere.push(
+    pushFilter(
       `e.start_date is not null and e.start_date >= ${ageSinceParam}::timestamptz`,
-    );
-    marketWhere.push(
       `e.start_date is not null and e.start_date >= ${ageSinceParam}::timestamptz`,
     );
   }
 
-  return { eventWhere, marketWhere };
+  return {
+    eventWhere,
+    marketWhere,
+    fallbackEventWhere,
+    fallbackMarketWhere,
+    hasDeferredFallbackFilters,
+  };
+}
+
+function buildFeedSearchLimitClause(limit: number | null): string {
+  return limit != null ? `limit ${limit}` : "";
 }
 
 function buildFeedSearchMatchesSql(args: {
@@ -378,8 +419,17 @@ function buildFeedSearchMatchesSql(args: {
     "coalesce(e.volume_total, e.open_interest, e.liquidity, 0)";
   const marketMembershipScore =
     "coalesce(m.volume_total, m.open_interest, m.liquidity, 0)";
-  const finalLimitClause =
-    matchLimit != null ? `limit ${Math.max(1, Math.floor(matchLimit))}` : "";
+  const finalMatchLimit =
+    matchLimit != null ? Math.max(1, Math.floor(matchLimit)) : null;
+  const fallbackMatchLimit =
+    finalMatchLimit != null &&
+    strategy === "primary_with_fallback" &&
+    earlyFilters?.hasDeferredFallbackFilters
+      ? Math.min(feedSearchResultMatchLimit(), Math.max(finalMatchLimit, 500))
+      : finalMatchLimit;
+  const finalLimitClause = buildFeedSearchLimitClause(finalMatchLimit);
+  const fallbackLimitClause = buildFeedSearchLimitClause(fallbackMatchLimit);
+  const searchEventsLimitClause = buildFeedSearchLimitClause(fallbackMatchLimit);
   const fallbackRunExpr =
     fallbackThreshold != null
       ? `(select matched from primary_search_state) < ${Math.max(1, Math.floor(fallbackThreshold))}`
@@ -388,6 +438,7 @@ function buildFeedSearchMatchesSql(args: {
   const buildProfileSql = (
     profile: FeedSearchProfile,
     sourcePriority: 1 | 0,
+    profileLimitClause: string,
   ) => {
     const eventSearchDocExpr =
       profile === "primary"
@@ -401,11 +452,19 @@ function buildFeedSearchMatchesSql(args: {
       profile === "full" && strategy === "primary_with_fallback"
         ? `and ${fallbackRunExpr}`
         : "";
-    const eventEarlyWhere = earlyFilters?.eventWhere.length
-      ? `and ${earlyFilters.eventWhere.join(" and ")}`
+    const useFallbackEarlyFilters =
+      profile === "full" && strategy === "primary_with_fallback";
+    const eventEarlyClauses = useFallbackEarlyFilters
+      ? earlyFilters?.fallbackEventWhere
+      : earlyFilters?.eventWhere;
+    const marketEarlyClauses = useFallbackEarlyFilters
+      ? earlyFilters?.fallbackMarketWhere
+      : earlyFilters?.marketWhere;
+    const eventEarlyWhere = eventEarlyClauses?.length
+      ? `and ${eventEarlyClauses.join(" and ")}`
       : "";
-    const marketEarlyWhere = earlyFilters?.marketWhere.length
-      ? `and ${earlyFilters.marketWhere.join(" and ")}`
+    const marketEarlyWhere = marketEarlyClauses?.length
+      ? `and ${marketEarlyClauses.join(" and ")}`
       : "";
 
     return `
@@ -491,20 +550,20 @@ function buildFeedSearchMatchesSql(args: {
       ) matches
       group by id
       order by search_priority desc, rank desc nulls last, id
-      ${finalLimitClause}
+      ${profileLimitClause}
     `;
   };
 
   if (strategy === "full") {
     return `
       search_events as materialized (
-        ${buildProfileSql("full", 1)}
+        ${buildProfileSql("full", 1, finalLimitClause)}
       )
     `;
   }
 
-  const primarySql = buildProfileSql("primary", 1);
-  const fallbackSql = buildProfileSql("full", 0);
+  const primarySql = buildProfileSql("primary", 1, finalLimitClause);
+  const fallbackSql = buildProfileSql("full", 0, fallbackLimitClause);
   return `
     primary_search_events as materialized (
       ${primarySql}
@@ -530,7 +589,7 @@ function buildFeedSearchMatchesSql(args: {
         )
       ) merged_search_events
       order by search_priority desc, rank desc nulls last, id
-      ${finalLimitClause}
+      ${searchEventsLimitClause}
     )
   `;
 }

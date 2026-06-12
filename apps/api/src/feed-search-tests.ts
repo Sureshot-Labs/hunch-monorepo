@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { buildFeedCandidateEventSearchFilter } from "./repos/unified-read.js";
 
 type SeededEvent = {
   id: string;
@@ -60,6 +61,14 @@ function buildQuery(
     search.set(key, String(value));
   }
   return search.toString();
+}
+
+function sectionBetween(input: string, start: string, end: string): string {
+  const startIndex = input.indexOf(start);
+  assert.notEqual(startIndex, -1, `missing SQL section start: ${start}`);
+  const endIndex = input.indexOf(end, startIndex + start.length);
+  assert.notEqual(endIndex, -1, `missing SQL section end: ${end}`);
+  return input.slice(startIndex, endIndex);
 }
 
 async function insertEvent(event: SeededEvent): Promise<void> {
@@ -127,6 +136,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         open_interest,
         outcomes,
         slug,
+        metadata,
         created_at,
         updated_at
       )
@@ -134,7 +144,12 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         $1, $2, $3, $4, $5, $6, $7, 'ACTIVE', 'binary',
         now() - interval '1 hour', $8, $9,
         0.45, 0.55, 0.5, $10, 10, $11, 50,
-        '["Yes","No"]', $12, now(), now()
+        '["Yes","No"]', $12,
+        case
+          when $2 = 'kalshi' then '{"dflowNativeAcceptingOrders":true}'::jsonb
+          else '{}'::jsonb
+        end,
+        now(), now()
       )
     `,
     [
@@ -157,15 +172,69 @@ async function insertMarket(market: SeededMarket): Promise<void> {
 async function main() {
   const app = await buildApp();
   const previousFeedTtl = env.feedTtlSec;
+  const previousFeedSearchResultMatchLimit = env.feedSearchResultMatchLimit;
   env.feedTtlSec = 0;
+  env.feedSearchResultMatchLimit = 500;
 
   const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
   const needle = `ftstest${suffix}`;
   const fallbackNeedle = `fallback${suffix}`;
   const category = `feed-search-${suffix}`;
+  const otherCategory = `${category}-other`;
   const now = Date.now();
   const seededEventIds: string[] = [];
   const seededMarketIds: string[] = [];
+  const outOfCategoryFallbackEvents: SeededEvent[] = Array.from(
+    { length: 220 },
+    (_, index) => ({
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Other category description-only fallback marker ${index}`,
+      description: `Hidden recall token ${fallbackNeedle}`,
+      category: otherCategory,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 500 + index,
+    }),
+  );
+
+  {
+    const params: unknown[] = [];
+    const add = (value: unknown) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+    const nowParam = add(new Date(now).toISOString());
+    const searchFilter = buildFeedCandidateEventSearchFilter({
+      add,
+      q: "fifa",
+      nowParam,
+      matchLimit: 200,
+      fallbackThreshold: 75,
+      earlyFilterInputs: {
+        categories: [category],
+      },
+    });
+    const primarySql = sectionBetween(
+      searchFilter.searchCte,
+      "primary_search_events as materialized",
+      "primary_search_state as materialized",
+    );
+    const fallbackSql = sectionBetween(
+      searchFilter.searchCte,
+      "fallback_search_events as materialized",
+      "search_events as materialized",
+    );
+    const searchEventsSql = searchFilter.searchCte.slice(
+      searchFilter.searchCte.indexOf("search_events as materialized"),
+    );
+    assert.match(primarySql, /lower\(e\.category\)/);
+    assert.match(primarySql, /limit 200/);
+    assert.doesNotMatch(fallbackSql, /lower\(e\.category\)/);
+    assert.match(fallbackSql, /limit 500/);
+    assert.match(searchEventsSql, /limit 500/);
+  }
 
   const events: SeededEvent[] = [
     {
@@ -270,6 +339,18 @@ async function main() {
       endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
       volumeTotal: 3,
     },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: "Description-only fallback marker outside overfetch window",
+      description: `Hidden recall token ${fallbackNeedle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 2,
+    },
+    ...outOfCategoryFallbackEvents,
   ];
 
   const markets: SeededMarket[] = [
@@ -374,6 +455,28 @@ async function main() {
       expirationTime: events[9].endDate,
       volumeTotal: 3,
     },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[10].id,
+      title: "Fallback market outside overfetch window",
+      description: `Hidden market recall token ${fallbackNeedle}`,
+      closeTime: events[10].endDate,
+      expirationTime: events[10].endDate,
+      volumeTotal: 2,
+    },
+    ...outOfCategoryFallbackEvents.map((event, index) => ({
+      id: makeId("polymarket:market"),
+      venue: "polymarket" as const,
+      venueMarketId: makeId("venue-market"),
+      eventId: event.id,
+      title: `Other category fallback market ${index}`,
+      description: `Hidden market recall token ${fallbackNeedle}`,
+      closeTime: event.endDate,
+      expirationTime: event.endDate,
+      volumeTotal: 500 + index,
+    })),
   ];
 
   try {
@@ -493,6 +596,33 @@ async function main() {
       const response = await app.inject({
         method: "GET",
         url: `/feed?${buildQuery({
+          q: fallbackNeedle,
+          view: "events",
+          categories: category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.ok(eventIds.includes(events[9].id));
+      assert.ok(
+        eventIds.includes(events[10].id),
+        "category-filtered fallback should overfetch enough global candidates before category filtering",
+      );
+      const outOfCategoryEventIds = new Set(
+        outOfCategoryFallbackEvents.map((event) => event.id),
+      );
+      assert.ok(
+        eventIds.every((eventId) => !outOfCategoryEventIds.has(eventId)),
+        "category-filtered fallback should not return out-of-category events",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
           q: "hidden recall",
           view: "events",
           category,
@@ -578,8 +708,8 @@ async function main() {
       });
       assert.equal(response.statusCode, 200);
       const payload = response.json<FeedPayload>();
-      assert.equal(payload.data[0]?.eventId, events[3].id);
-      assert.equal(payload.data[1]?.eventId, events[2].id);
+      assert.equal(payload.data[0]?.eventId, events[2].id);
+      assert.equal(payload.data[1]?.eventId, events[3].id);
     }
 
     {
@@ -602,6 +732,7 @@ async function main() {
     }
   } finally {
     env.feedTtlSec = previousFeedTtl;
+    env.feedSearchResultMatchLimit = previousFeedSearchResultMatchLimit;
     if (seededMarketIds.length > 0) {
       await pool.query(
         "delete from unified_markets where id = any($1::text[])",
