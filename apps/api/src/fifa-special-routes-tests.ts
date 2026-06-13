@@ -372,6 +372,14 @@ async function main() {
       slug: `messi-to-play-against-ronaldo-at-the-2026-world-cup-${suffix}`,
       volumeTotal: 150,
     },
+    {
+      id: id("polymarket:fifa-stage-elimination"),
+      venue: "polymarket",
+      venueEventId: id("pm-event"),
+      title: `World Cup: Paraguay Stage of Elimination ${suffix}`,
+      slug: `world-cup-paraguay-stage-of-elimination-${suffix}`,
+      volumeTotal: 145,
+    },
   ];
 
   const markets: SeedMarket[] = [
@@ -652,6 +660,33 @@ async function main() {
       slug: `will-usa-win-the-2026-fifa-world-cup-${suffix}`,
       volumeTotal: 580,
     },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[27].id,
+      title: "Champion",
+      slug: `will-paraguay-win-the-world-cup-${suffix}`,
+      volumeTotal: 140,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[27].id,
+      title: "Group Stage",
+      slug: `will-paraguay-be-eliminated-in-group-stage-stage-of-the-world-cup-${suffix}`,
+      volumeTotal: 130,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[27].id,
+      title: "Other",
+      slug: `will-paraguay-finish-in-some-other-position-in-the-world-cup-${suffix}`,
+      volumeTotal: 120,
+    },
   ];
 
   try {
@@ -795,6 +830,39 @@ async function main() {
       assert.ok(matchMarkets.includes("United States"));
       assert.ok(matchMarkets.includes("Paraguay"));
       assert.ok(matchMarkets.includes("Draw (United States vs. Paraguay)"));
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: suffix, section: "stage", venue: "polymarket" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{
+          eventId: string;
+          markets: Array<{
+            marketTitle: string | null;
+            fifa: { section: string; subtype: string; groupKey: string };
+          }>;
+        }>;
+      }>();
+      const stageMarkets = payload.data
+        .filter((event) => event.eventId === events[27].id)
+        .flatMap((event) => event.markets);
+      assert.deepEqual(
+        stageMarkets.map((market) => market.marketTitle).sort(),
+        ["Champion", "Group Stage", "Other"],
+      );
+      assert.ok(
+        stageMarkets.every(
+          (market) =>
+            market.fifa.section === "stage" &&
+            market.fifa.subtype === "stage_entity" &&
+            market.fifa.groupKey ===
+              `stage:world-cup-paraguay-stage-of-elimination-${suffix}`,
+        ),
+      );
     }
 
     {

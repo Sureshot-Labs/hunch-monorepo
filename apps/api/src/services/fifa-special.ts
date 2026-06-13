@@ -382,6 +382,7 @@ function buildFifaSectionSql(): string {
         or m.slug like '%-second-half%'
       ) then 'match_prop'
       when e.venue = 'polymarket' and e.slug like 'fifwc-%' then 'match_result'
+      when lower(coalesce(e.title, '') || ' ' || coalesce(e.slug, '')) like '%stage of elimination%' then 'stage'
       when ${text} like '%group%' then 'group'
       when ${text} ~ '(reach|advance|knockout|round of|quarterfinal|semifinal|final)' then 'stage'
       when ${text} ~ '(award|golden boot|silver boot|bronze boot|golden ball|silver ball|bronze ball|golden glove|fair play|top goalscorer|most assists|goal leader|score 5|assist)' then 'player_award'
