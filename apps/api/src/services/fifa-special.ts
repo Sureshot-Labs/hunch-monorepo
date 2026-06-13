@@ -151,6 +151,33 @@ export type FifaSpecialRow = {
   fifa_confidence: "high" | "medium" | "low";
 };
 
+type FifaMetaRow = Pick<
+  FifaSpecialRow,
+  | "event_title"
+  | "event_slug"
+  | "venue_event_id"
+  | "market_title"
+  | "market_slug"
+  | "venue_market_id"
+  | "fifa_section"
+  | "fifa_subtype"
+  | "fifa_source_rule"
+  | "fifa_confidence"
+>;
+
+type FifaCandidateRow = FifaMetaRow &
+  Pick<FifaSpecialRow, "event_id" | "market_uuid" | "venue"> & {
+    event_volume_display: unknown;
+    event_volume_24h: unknown;
+    event_liquidity_display: unknown;
+    volume_display: unknown;
+    volume_24h_display: unknown;
+    liquidity_display: unknown;
+    sort_time: unknown;
+    market_created_at: unknown;
+    search_rank: unknown;
+  };
+
 export type FifaSpecialPage = {
   rows: FifaSpecialRow[];
   total: number;
@@ -172,10 +199,85 @@ function createParamBuilder(): ParamBuilder {
   return { params, add };
 }
 
+const FIFA_SEARCH_MATCH_LIMIT = 2000;
+
+export function normalizeFifaSpecialSearchQuery(q: string | undefined): string | undefined {
+  const trimmed = q?.trim();
+  if (!trimmed) return undefined;
+  const normalized = trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized === "fifa" ||
+    normalized === "world cup" ||
+    normalized === "fifa world cup" ||
+    normalized === "2026 world cup" ||
+    normalized === "2026 fifa world cup"
+    ? undefined
+    : trimmed;
+}
+
 function buildNativeTradableMarketSql(alias: string): string {
   return `(
     ${alias}.venue <> 'kalshi'
     or lower(coalesce(${alias}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+  )`;
+}
+
+function buildLowerTextSql(parts: string[]): string {
+  return `
+    lower(
+      ${parts.map((part) => `coalesce(${part}, '')`).join(" || ' ' || ")}
+    )
+  `;
+}
+
+function buildEventTextSql(options: { includeDescription?: boolean } = {}): string {
+  return buildLowerTextSql([
+    "e.title",
+    "e.slug",
+    ...(options.includeDescription ? ["e.description"] : []),
+  ]);
+}
+
+function buildMarketTextSql(options: { includeDescription?: boolean } = {}): string {
+  return buildLowerTextSql([
+    "m.title",
+    "m.slug",
+    ...(options.includeDescription ? ["m.description"] : []),
+  ]);
+}
+
+function buildCombinedFifaTextSql(options: { includeDescription?: boolean } = {}): string {
+  return `
+    lower(
+      coalesce(e.title, '') || ' ' ||
+      coalesce(e.slug, '') || ' ' ||
+      ${
+        options.includeDescription
+          ? "coalesce(e.description, '') || ' ' ||"
+          : ""
+      }
+      coalesce(m.title, '') || ' ' ||
+      coalesce(m.slug, '')
+      ${options.includeDescription ? " || ' ' || coalesce(m.description, '')" : ""}
+    )
+  `;
+}
+
+function buildLimitlessFifaCandidateSql(): string {
+  const text = buildCombinedFifaTextSql();
+  return `(
+    lower(coalesce(e.title, '')) like '%fifa world cup%'
+    or lower(coalesce(e.slug, '')) like '%fifa-world-cup%'
+    or lower(coalesce(e.title, '')) like '%2026 fifa world cup%'
+    or lower(coalesce(e.slug, '')) like '%2026-fifa-world-cup%'
+    or (
+      ${text} like '%world cup%'
+      and ${text} !~ '(club world cup|icc|t20|cricket|rugby|esports|\\mlol\\M|league of legends|dota|counter-strike|valorant)'
+      and ${text} ~ '(golden boot|silver boot|bronze boot|golden ball|silver ball|bronze ball|golden glove|fair play|furthest advancing|nation to reach (quarterfinals|semifinals)|reach a later stage|highest[-\\s]scoring team|captain for the opening world cup match|goalkeeper to score|messi|ronaldo|neymar)'
+    )
   )`;
 }
 
@@ -242,17 +344,13 @@ function buildFifaCandidateSql(): string {
     )
     or (
       e.venue = 'limitless'
-      and (
-        lower(coalesce(e.title, '')) like '%fifa world cup%'
-        or lower(coalesce(e.slug, '')) like '%fifa-world-cup%'
-        or lower(coalesce(e.title, '')) like '%2026 fifa world cup%'
-        or lower(coalesce(e.slug, '')) like '%2026-fifa-world-cup%'
-      )
+      and ${buildLimitlessFifaCandidateSql()}
     )
   )`;
 }
 
 function buildFifaSectionSql(): string {
+  const text = buildCombinedFifaTextSql();
   return `
     case
       when e.venue = 'kalshi' and e.series_key in ('KXWCMENTION', 'KXWCOCMEX', 'KXWORLDCUPHALFTIME') then 'special'
@@ -284,11 +382,12 @@ function buildFifaSectionSql(): string {
         or m.slug like '%-second-half%'
       ) then 'match_prop'
       when e.venue = 'polymarket' and e.slug like 'fifwc-%' then 'match_result'
-      when lower(coalesce(e.title, '') || ' ' || coalesce(m.title, '') || ' ' || coalesce(e.slug, '') || ' ' || coalesce(m.slug, '')) like '%group%' then 'group'
-      when lower(coalesce(e.title, '') || ' ' || coalesce(m.title, '') || ' ' || coalesce(e.slug, '') || ' ' || coalesce(m.slug, '')) ~ '(reach|advance|knockout|round of|quarterfinal|semifinal|final)' then 'stage'
-      when lower(coalesce(e.title, '') || ' ' || coalesce(m.title, '') || ' ' || coalesce(e.slug, '') || ' ' || coalesce(m.slug, '')) ~ '(award|golden boot|golden ball|top goalscorer|most assists|goal leader|score 5|assist)' then 'player_award'
-      when lower(coalesce(e.title, '') || ' ' || coalesce(m.title, '') || ' ' || coalesce(e.slug, '') || ' ' || coalesce(m.slug, '')) ~ '(squad|\\mplay\\M)' then 'squad'
-      when lower(coalesce(e.title, '') || ' ' || coalesce(m.title, '') || ' ' || coalesce(e.slug, '') || ' ' || coalesce(m.slug, '')) ~ '(winner|champion|continent will win)' then 'winner'
+      when ${text} like '%group%' then 'group'
+      when ${text} ~ '(reach|advance|knockout|round of|quarterfinal|semifinal|final)' then 'stage'
+      when ${text} ~ '(award|golden boot|silver boot|bronze boot|golden ball|silver ball|bronze ball|golden glove|fair play|top goalscorer|most assists|goal leader|score 5|assist)' then 'player_award'
+      when e.venue = 'limitless' and ${text} ~ '(captain for the opening world cup match|goalkeeper to score|messi|ronaldo|neymar)' then 'special'
+      when ${text} ~ '(squad|\\mplay\\M)' then 'squad'
+      when ${text} ~ '(winner|champion|continent will win)' then 'winner'
       else 'special'
     end
   `;
@@ -337,13 +436,32 @@ function buildFifaSourceRuleSql(): string {
       when e.venue = 'polymarket' and e.series_key = 'soccer-fifwc' then 'polymarket_series_key'
       when e.venue = 'kalshi' and e.series_key is not null then 'kalshi_series_key'
       when e.venue = 'kalshi' and coalesce(e.metadata->>'competition', '') = 'FIFA' then 'kalshi_competition_metadata'
-      when e.venue = 'limitless' then 'limitless_exact_fifa_text'
+      when e.venue = 'limitless' and (
+        lower(coalesce(e.title, '')) like '%fifa world cup%'
+        or lower(coalesce(e.slug, '')) like '%fifa-world-cup%'
+        or lower(coalesce(e.title, '')) like '%2026 fifa world cup%'
+        or lower(coalesce(e.slug, '')) like '%2026-fifa-world-cup%'
+      ) then 'limitless_exact_fifa_text'
+      when e.venue = 'limitless' then 'limitless_world_cup_pattern'
       else 'fallback'
     end
   `;
 }
 
-function buildSearchSql(q: string | undefined, add: ParamBuilder["add"]): {
+function buildSearchDocumentExpr(alias: string): string {
+  return `
+    setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.slug, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.category, '')), 'B') ||
+    setweight(to_tsvector('english', coalesce(${alias}.description, '')), 'D')
+  `;
+}
+
+function buildSearchSql(
+  q: string | undefined,
+  add: ParamBuilder["add"],
+  nowParam: string,
+): {
   cte: string;
   join: string;
   predicate: string;
@@ -363,16 +481,12 @@ function buildSearchSql(q: string | undefined, add: ParamBuilder["add"]): {
       ? `${terms[0]}:*`
       : null;
   const prefixParam = add(prefixTerm);
-  const docExpr = `
-    setweight(to_tsvector('english', coalesce(e.title, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(e.slug, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(m.title, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(m.slug, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(e.series_title, '')), 'B') ||
-    setweight(to_tsvector('english', coalesce(e.category, '')), 'C') ||
-    setweight(to_tsvector('english', coalesce(e.description, '')), 'D') ||
-    setweight(to_tsvector('english', coalesce(m.description, '')), 'D')
-  `;
+  const searchLimitParam = add(FIFA_SEARCH_MATCH_LIMIT);
+  const rawLikeParam = add(`%${q.toLowerCase()}%`);
+  const eventDocExpr = buildSearchDocumentExpr("e");
+  const marketDocExpr = buildSearchDocumentExpr("m");
+  const eventRawExpr = buildEventTextSql({ includeDescription: true });
+  const marketRawExpr = buildMarketTextSql({ includeDescription: true });
   return {
     cte: `
       search_query as materialized (
@@ -383,16 +497,85 @@ function buildSearchSql(q: string | undefined, add: ParamBuilder["add"]): {
             else to_tsquery('english', ${prefixParam}::text)
           end as prefix_query
       )
+      ,
+      matched_search_events as materialized (
+        select id, max(rank) as search_rank
+        from (
+          select
+            e.id,
+            ts_rank_cd((${eventDocExpr}), sq.query) as rank
+          from unified_events e
+          cross join search_query sq
+          where querytree(sq.query) <> ''
+            and e.status = 'ACTIVE'
+            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and (${eventDocExpr}) @@ sq.query
+          union all
+          select
+            e.id,
+            ts_rank_cd((${eventDocExpr}), sq.prefix_query) as rank
+          from unified_events e
+          cross join search_query sq
+          where sq.prefix_query is not null
+            and querytree(sq.prefix_query) <> ''
+            and e.status = 'ACTIVE'
+            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and (${eventDocExpr}) @@ sq.prefix_query
+        ) hits
+        group by id
+        order by max(rank) desc nulls last, id
+        limit ${searchLimitParam}::int
+      )
+      ,
+      matched_search_markets as materialized (
+        select market_id, event_id, max(rank) as search_rank
+        from (
+          select
+            m.id as market_id,
+            m.event_id,
+            ts_rank_cd((${marketDocExpr}), sq.query) * 2 as rank
+          from unified_markets m
+          cross join search_query sq
+          where querytree(sq.query) <> ''
+            and m.status = 'ACTIVE'
+            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+            and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+            and (${marketDocExpr}) @@ sq.query
+          union all
+          select
+            m.id as market_id,
+            m.event_id,
+            ts_rank_cd((${marketDocExpr}), sq.prefix_query) * 2 as rank
+          from unified_markets m
+          cross join search_query sq
+          where sq.prefix_query is not null
+            and querytree(sq.prefix_query) <> ''
+            and m.status = 'ACTIVE'
+            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
+            and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+            and (${marketDocExpr}) @@ sq.prefix_query
+        ) hits
+        group by market_id, event_id
+        order by max(rank) desc nulls last, market_id
+        limit ${searchLimitParam}::int
+      )
     `,
-    join: "cross join search_query sq",
+    join: `
+      left join matched_search_events se on se.id = e.id
+      left join matched_search_markets sm on sm.market_id = m.id
+    `,
     predicate: `(
-      (querytree(sq.query) <> '' and (${docExpr}) @@ sq.query)
-      or (sq.prefix_query is not null and querytree(sq.prefix_query) <> '' and (${docExpr}) @@ sq.prefix_query)
+      se.id is not null
+      or sm.market_id is not null
+      or ${eventRawExpr} like ${rawLikeParam}::text
+      or ${marketRawExpr} like ${rawLikeParam}::text
     )`,
     rankExpr: `
       greatest(
-        case when querytree(sq.query) <> '' then ts_rank_cd((${docExpr}), sq.query) else 0 end,
-        case when sq.prefix_query is not null and querytree(sq.prefix_query) <> '' then ts_rank_cd((${docExpr}), sq.prefix_query) else 0 end
+        coalesce(se.search_rank, 0),
+        coalesce(sm.search_rank, 0),
+        case when ${eventRawExpr} like ${rawLikeParam}::text then 0.000001 else 0 end,
+        case when ${marketRawExpr} like ${rawLikeParam}::text then 0.000002 else 0 end
       )
     `,
   };
@@ -409,6 +592,7 @@ function buildBaseSql(args: {
   sectionExpr: string;
   subtypeExpr: string;
   sourceRuleExpr: string;
+  searchJoin: string;
   searchRankExpr: string;
 } {
   const { inputs, add, ignoreSections = false, ignoreVenues = false } = args;
@@ -416,7 +600,7 @@ function buildBaseSql(args: {
   const sectionExpr = buildFifaSectionSql();
   const subtypeExpr = buildFifaSubtypeSql();
   const sourceRuleExpr = buildFifaSourceRuleSql();
-  const search = buildSearchSql(inputs.q, add);
+  const search = buildSearchSql(inputs.q, add, nowParam);
   const where = [
     "e.status = 'ACTIVE'",
     "m.status = 'ACTIVE'",
@@ -442,6 +626,7 @@ function buildBaseSql(args: {
     sectionExpr,
     subtypeExpr,
     sourceRuleExpr,
+    searchJoin: search.join,
     searchRankExpr: search.rankExpr,
   };
 }
@@ -489,7 +674,7 @@ function hasMetadataFilters(inputs: FifaSpecialInputs): boolean {
   return Boolean(inputs.groupCodes?.length || inputs.teamGroupCodes?.length);
 }
 
-function rowMatchesMetadataFilters(row: FifaSpecialRow, inputs: FifaSpecialInputs): boolean {
+function rowMatchesMetadataFilters(row: FifaMetaRow, inputs: FifaSpecialInputs): boolean {
   if (!hasMetadataFilters(inputs)) return true;
   const fifa = buildFifaMeta(row, { scope: "market" });
   if (inputs.groupCodes?.length) {
@@ -509,9 +694,9 @@ function rowMatchesMetadataFilters(row: FifaSpecialRow, inputs: FifaSpecialInput
 }
 
 function paginateFilteredRows(
-  rows: FifaSpecialRow[],
+  rows: FifaCandidateRow[],
   inputs: FifaSpecialInputs,
-): { rows: FifaSpecialRow[]; total: number } {
+): { rows: FifaCandidateRow[]; total: number } {
   const filtered = rows.filter((row) => rowMatchesMetadataFilters(row, inputs));
   if (inputs.view === "markets") {
     return {
@@ -536,7 +721,86 @@ function paginateFilteredRows(
   };
 }
 
-function buildCandidateProjection(base: ReturnType<typeof buildBaseSql>): string {
+function buildCandidateKeyProjection(base: ReturnType<typeof buildBaseSql>): string {
+  return `
+    select
+      e.id as event_id,
+      e.title as event_title,
+      e.slug as event_slug,
+      e.venue_event_id,
+      e.volume_24h as event_volume_24h,
+      coalesce(nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0), nullif(e.open_interest, 0)) as event_liquidity_display,
+      coalesce(nullif(e.volume_total, 0), nullif(sum(coalesce(m.volume_total, 0)) over (partition by e.id), 0)) as event_volume_display,
+      m.id as market_uuid,
+      m.venue,
+      m.venue_market_id,
+      m.title as market_title,
+      m.slug as market_slug,
+      case when m.volume_total is not null and m.volume_total > 0 then m.volume_total else null end as volume_display,
+      coalesce(m.volume_24h, 0) as volume_24h_display,
+      coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0)) as liquidity_display,
+      coalesce(m.close_time, m.expiration_time, e.end_date) as sort_time,
+      m.created_at as market_created_at,
+      (${base.sectionExpr})::text as fifa_section,
+      (${base.subtypeExpr})::text as fifa_subtype,
+      (${base.sourceRuleExpr})::text as fifa_source_rule,
+      case
+        when e.venue in ('polymarket', 'kalshi') then 'high'
+        when e.venue = 'limitless' then 'medium'
+        else 'low'
+      end::text as fifa_confidence,
+      (${base.searchRankExpr}) as search_rank
+    from unified_events e
+    join unified_markets m on m.event_id = e.id
+    ${base.searchJoin}
+    where ${base.where.join(" and ")}
+  `;
+}
+
+function selectedMarketKeysFromJson(jsonParam: string): string {
+  return `
+    select *
+    from jsonb_to_recordset(${jsonParam}::jsonb) as k(
+      ord int,
+      market_rank int,
+      market_uuid text,
+      event_id text,
+      event_volume_display numeric,
+      event_liquidity_display numeric,
+      volume_display numeric,
+      volume_24h_display numeric,
+      liquidity_display numeric,
+      fifa_section text,
+      fifa_subtype text,
+      fifa_source_rule text,
+      fifa_confidence text,
+      search_rank numeric
+    )
+  `;
+}
+
+function serializeSelectedCandidateRows(rows: FifaCandidateRow[]): string {
+  return JSON.stringify(
+    rows.map((row, index) => ({
+      ord: index + 1,
+      market_rank: index + 1,
+      market_uuid: row.market_uuid,
+      event_id: row.event_id,
+      event_volume_display: row.event_volume_display ?? null,
+      event_liquidity_display: row.event_liquidity_display ?? null,
+      volume_display: row.volume_display ?? null,
+      volume_24h_display: row.volume_24h_display ?? null,
+      liquidity_display: row.liquidity_display ?? null,
+      fifa_section: row.fifa_section,
+      fifa_subtype: row.fifa_subtype,
+      fifa_source_rule: row.fifa_source_rule,
+      fifa_confidence: row.fifa_confidence,
+      search_rank: row.search_rank ?? null,
+    })),
+  );
+}
+
+function buildHydratedProjection(keySource: string): string {
   return `
     select
       e.id as event_id,
@@ -546,10 +810,10 @@ function buildCandidateProjection(base: ReturnType<typeof buildBaseSql>): string
       e.start_date,
       e.end_date,
       case when e.liquidity >= 9e16 then null else e.liquidity end as event_liquidity,
-      coalesce(nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0), nullif(e.open_interest, 0)) as event_liquidity_display,
+      k.event_liquidity_display as event_liquidity_display,
       e.volume_total as event_volume,
       e.volume_24h as event_volume_24h,
-      coalesce(nullif(e.volume_total, 0), nullif(sum(coalesce(m.volume_total, 0)) over (partition by e.id), 0)) as event_volume_display,
+      k.event_volume_display as event_volume_display,
       e.open_interest as event_open_interest,
       e.slug as event_slug,
       e.image as event_image,
@@ -571,10 +835,10 @@ function buildCandidateProjection(base: ReturnType<typeof buildBaseSql>): string
       m.expiration_time as market_expiration_time,
       m.volume_24h,
       m.volume_total,
-      case when m.volume_total is not null and m.volume_total > 0 then m.volume_total else null end as volume_display,
+      k.volume_display as volume_display,
       m.open_interest,
       m.liquidity,
-      coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0)) as liquidity_display,
+      k.liquidity_display as liquidity_display,
       m.best_bid,
       m.best_ask,
       yes_top.best_bid as best_bid_yes,
@@ -608,19 +872,17 @@ function buildCandidateProjection(base: ReturnType<typeof buildBaseSql>): string
       m.updated_at as last_update,
       m.created_at as market_created_at,
       coalesce(m.close_time, m.expiration_time, e.end_date) as sort_time,
-      coalesce(m.volume_24h, 0) as volume_24h_display,
-      (${base.sectionExpr})::text as fifa_section,
-      (${base.subtypeExpr})::text as fifa_subtype,
-      (${base.sourceRuleExpr})::text as fifa_source_rule,
-      case
-        when e.venue in ('polymarket', 'kalshi') then 'high'
-        when e.venue = 'limitless' then 'medium'
-        else 'low'
-      end::text as fifa_confidence,
-      (${base.searchRankExpr}) as search_rank
-    from unified_events e
-    join unified_markets m on m.event_id = e.id
-    ${base.cte ? "cross join search_query sq" : ""}
+      k.volume_24h_display as volume_24h_display,
+      k.fifa_section::text as fifa_section,
+      k.fifa_subtype::text as fifa_subtype,
+      k.fifa_source_rule::text as fifa_source_rule,
+      k.fifa_confidence::text as fifa_confidence,
+      k.search_rank as search_rank,
+      k.ord as ord,
+      coalesce(k.market_rank, 1) as market_rank
+    from ${keySource} k
+    join unified_markets m on m.id = k.market_uuid
+    join unified_events e on e.id = k.event_id
     left join polymarket_markets pm on pm.id = m.venue_market_id and m.venue = 'polymarket'
     left join unified_token_top_latest yes_top on yes_top.token_id = (
       case when m.venue = 'polymarket' and m.clob_token_ids is not null then (m.clob_token_ids::jsonb->>0) else m.token_yes end
@@ -628,7 +890,6 @@ function buildCandidateProjection(base: ReturnType<typeof buildBaseSql>): string
     left join unified_token_top_latest no_top on no_top.token_id = (
       case when m.venue = 'polymarket' and m.clob_token_ids is not null then (m.clob_token_ids::jsonb->>1) else m.token_no end
     )
-    where ${base.where.join(" and ")}
   `;
 }
 
@@ -654,7 +915,7 @@ async function fetchFacets(
       count(distinct m.id)::int as markets
     from unified_events e
     join unified_markets m on m.event_id = e.id
-    ${sectionBase.cte ? "cross join search_query sq" : ""}
+    ${sectionBase.searchJoin}
     where ${sectionBase.where.join(" and ")}
     group by section
     order by markets desc, section
@@ -674,7 +935,7 @@ async function fetchFacets(
       count(distinct m.id)::int as markets
     from unified_events e
     join unified_markets m on m.event_id = e.id
-    ${venueBase.cte ? "cross join search_query sq" : ""}
+    ${venueBase.searchJoin}
     where ${venueBase.where.join(" and ")}
     group by m.venue
     order by markets desc, venue
@@ -704,11 +965,11 @@ async function fetchMetadataFilteredFacets(
     });
     const sql = `
       with ${base.cte ? `${base.cte},` : ""}
-      candidate_markets as materialized (${buildCandidateProjection(base)})
+      candidate_markets as materialized (${buildCandidateKeyProjection(base)})
       select *
       from candidate_markets
     `;
-    const result = await pool.query<FifaSpecialRow>(sql, builder.params);
+    const result = await pool.query<FifaCandidateRow>(sql, builder.params);
     return result.rows.filter((row) => rowMatchesMetadataFilters(row, inputs));
   };
 
@@ -763,31 +1024,57 @@ async function fetchMetadataFilteredFacets(
   };
 }
 
+async function hydrateSelectedCandidateRows(
+  pool: Pool,
+  rows: FifaCandidateRow[],
+): Promise<FifaSpecialRow[]> {
+  if (rows.length === 0) return [];
+  const builder = createParamBuilder();
+  const selectedRowsParam = builder.add(serializeSelectedCandidateRows(rows));
+  const sql = `
+    with selected_market_keys as materialized (${selectedMarketKeysFromJson(selectedRowsParam)})
+    select *
+    from (${buildHydratedProjection("selected_market_keys")}) hydrated
+    order by ord, market_rank, market_uuid
+  `;
+  const result = await pool.query<FifaSpecialRow>(sql, builder.params);
+  return result.rows;
+}
+
 export async function fetchFifaSpecialPage(
   pool: Pool,
   inputs: FifaSpecialInputs,
 ): Promise<FifaSpecialPage> {
   const builder = createParamBuilder();
   const base = buildBaseSql({ inputs, add: builder.add });
-  const candidateProjection = buildCandidateProjection(base);
+  const candidateProjection = buildCandidateKeyProjection(base);
   const orderSql = buildOrderSql(inputs, inputs.view === "markets" ? "market" : "event");
   const withParts: string[] = [];
   if (base.cte) withParts.push(base.cte);
-  withParts.push(`candidate_markets as materialized (${candidateProjection})`);
+  withParts.push(`candidate_keys as materialized (${candidateProjection})`);
 
   let pageCte: string;
   let rowSelect: string;
   if (hasMetadataFilters(inputs)) {
     if (inputs.view === "markets") {
-      pageCte = "";
+      pageCte = `
+        ordered_candidate_keys as materialized (
+          select ordered.*, row_number() over () as ord, 1::int as market_rank
+          from (
+            select *
+            from candidate_keys
+            order by ${orderSql}
+          ) ordered
+        )
+      `;
       rowSelect = `
         select *
-        from candidate_markets
-        order by ${orderSql}
+        from ordered_candidate_keys
+        order by ord
       `;
     } else {
       pageCte = `
-        page_events as (
+        page_events as materialized (
           select page.*, row_number() over () as ord
           from (
             select
@@ -799,12 +1086,12 @@ export async function fetchFifaSpecialPage(
               max(coalesce(event_liquidity_display, 0)) as liquidity_display,
               min(sort_time) as sort_time,
               min(market_created_at) as created_at
-            from candidate_markets
+            from candidate_keys
             group by event_id
             order by ${orderSql}
           ) page
         ),
-        ranked_event_markets as (
+        ranked_event_markets as materialized (
           select
             c.*,
             p.ord,
@@ -812,7 +1099,7 @@ export async function fetchFifaSpecialPage(
               partition by c.event_id
               order by coalesce(c.volume_display, 0) desc, c.market_uuid
             ) as market_rank
-          from candidate_markets c
+          from candidate_keys c
           join page_events p on p.event_id = c.event_id
         )
       `;
@@ -829,24 +1116,31 @@ export async function fetchFifaSpecialPage(
     const limitParam = builder.add(inputs.limit);
     const offsetParam = builder.add(inputs.offset);
     pageCte = `
-      page_markets as (
-        select market_uuid
-        from candidate_markets
-        order by ${orderSql}
-        limit ${limitParam} offset ${offsetParam}
+      page_markets as materialized (
+        select page.*, row_number() over () as ord
+        from (
+          select market_uuid
+          from candidate_keys
+          order by ${orderSql}
+          limit ${limitParam} offset ${offsetParam}
+        ) page
+      ),
+      selected_market_keys as materialized (
+        select c.*, p.ord, 1::int as market_rank
+        from page_markets p
+        join candidate_keys c on c.market_uuid = p.market_uuid
       )
     `;
     rowSelect = `
-      select c.*
-      from page_markets p
-      join candidate_markets c on c.market_uuid = p.market_uuid
-      order by ${orderSql}
+      select *
+      from (${buildHydratedProjection("selected_market_keys")}) hydrated
+      order by ord, market_uuid
     `;
   } else {
     const limitParam = builder.add(inputs.limit);
     const offsetParam = builder.add(inputs.offset);
     pageCte = `
-      page_events as (
+      page_events as materialized (
         select page.*, row_number() over () as ord
         from (
           select *
@@ -860,14 +1154,14 @@ export async function fetchFifaSpecialPage(
               max(coalesce(event_liquidity_display, 0)) as liquidity_display,
               min(sort_time) as sort_time,
               min(market_created_at) as created_at
-            from candidate_markets
+            from candidate_keys
             group by event_id
           ) grouped_events
           order by ${orderSql}
           limit ${limitParam} offset ${offsetParam}
         ) page
       ),
-      ranked_event_markets as (
+      selected_market_keys as materialized (
         select
           c.*,
           p.ord,
@@ -875,13 +1169,13 @@ export async function fetchFifaSpecialPage(
             partition by c.event_id
             order by coalesce(c.volume_display, 0) desc, c.market_uuid
           ) as market_rank
-        from candidate_markets c
+        from candidate_keys c
         join page_events p on p.event_id = c.event_id
       )
     `;
     rowSelect = `
       select *
-      from ranked_event_markets
+      from (${buildHydratedProjection("selected_market_keys")}) hydrated
       where market_rank <= 100
       order by
         ord,
@@ -892,8 +1186,8 @@ export async function fetchFifaSpecialPage(
   if (pageCte) withParts.push(pageCte);
   const totalSql =
     inputs.view === "markets"
-      ? "select count(*)::int as total from candidate_markets"
-      : "select count(distinct event_id)::int as total from candidate_markets";
+      ? "select count(*)::int as total from candidate_keys"
+      : "select count(distinct event_id)::int as total from candidate_keys";
   const sql = `
     with ${withParts.join(",\n")}
     ${rowSelect};
@@ -902,23 +1196,26 @@ export async function fetchFifaSpecialPage(
   const countBase = buildBaseSql({ inputs, add: countBuilder.add });
   const countSql = `
     with ${countBase.cte ? `${countBase.cte},` : ""}
-    candidate_markets as materialized (${buildCandidateProjection(countBase)})
+    candidate_keys as materialized (${buildCandidateKeyProjection(countBase)})
     ${totalSql};
   `;
 
   const [rowsResult, countResult, facets] = await Promise.all([
-    pool.query<FifaSpecialRow>(sql, builder.params),
+    pool.query<FifaSpecialRow | FifaCandidateRow>(sql, builder.params),
     hasMetadataFilters(inputs)
       ? Promise.resolve({ rows: [{ total: 0 }] } as { rows: Array<{ total: number }> })
       : pool.query<{ total: number }>(countSql, countBuilder.params),
     fetchFacets(pool, inputs),
   ]);
   const filteredPage = hasMetadataFilters(inputs)
-    ? paginateFilteredRows(rowsResult.rows, inputs)
+    ? paginateFilteredRows(rowsResult.rows as FifaCandidateRow[], inputs)
     : null;
+  const rows = filteredPage
+    ? await hydrateSelectedCandidateRows(pool, filteredPage.rows)
+    : (rowsResult.rows as FifaSpecialRow[]);
 
   return {
-    rows: filteredPage?.rows ?? rowsResult.rows,
+    rows,
     total: filteredPage?.total ?? countResult.rows[0]?.total ?? 0,
     ...facets,
   };
@@ -1036,7 +1333,7 @@ function resolveGroupMarketType(value: string):
   return "unknown";
 }
 
-function resolveGroupInfo(row: FifaSpecialRow, scope: FifaMetaScope): {
+function resolveGroupInfo(row: FifaMetaRow, scope: FifaMetaScope): {
   groupCode: string | null;
   groupTeams: string[] | null;
   groupMarketType: FifaMeta["groupMarketType"];
@@ -1145,7 +1442,7 @@ function buildGroupMeta(input: {
   };
 }
 
-function parseLine(row: FifaSpecialRow): number | null {
+function parseLine(row: FifaMetaRow): number | null {
   const title = row.market_title ?? "";
   const slug = row.market_slug ?? "";
   const subtype = row.fifa_subtype;
@@ -1170,7 +1467,7 @@ function parseLine(row: FifaSpecialRow): number | null {
   return null;
 }
 
-function resolveEntity(row: FifaSpecialRow): string | null {
+function resolveEntity(row: FifaMetaRow): string | null {
   const title = row.market_title?.trim();
   if (!title) return null;
   if (row.fifa_section === "match_prop") {
@@ -1186,7 +1483,7 @@ function resolveEntity(row: FifaSpecialRow): string | null {
 }
 
 export function buildFifaMeta(
-  row: FifaSpecialRow,
+  row: FifaMetaRow,
   options: { scope?: FifaMetaScope } = {},
 ): FifaMeta {
   const scope = options.scope ?? "event";

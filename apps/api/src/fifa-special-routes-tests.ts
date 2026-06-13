@@ -324,6 +324,54 @@ async function main() {
       metadata: { seriesTags: ["Soccer"] },
       volumeTotal: 230,
     },
+    {
+      id: id("limitless:world-cup-golden-boot"),
+      venue: "limitless",
+      venueEventId: id("lim-event"),
+      title: `World Cup: Golden Boot Winner ${suffix}`,
+      slug: `world-cup-golden-boot-winner-${suffix}`,
+      volumeTotal: 190,
+    },
+    {
+      id: id("limitless:world-cup-semifinals"),
+      venue: "limitless",
+      venueEventId: id("lim-event"),
+      title: `World Cup: Nation To Reach Semifinals ${suffix}`,
+      slug: `world-cup-nation-to-reach-semifinals-${suffix}`,
+      volumeTotal: 180,
+    },
+    {
+      id: id("limitless:world-cup-group-scoring"),
+      venue: "limitless",
+      venueEventId: id("lim-event"),
+      title: `World Cup: Highest-Scoring Team in Group D ${suffix}`,
+      slug: `world-cup-highest-scoring-team-in-group-d-${suffix}`,
+      volumeTotal: 170,
+    },
+    {
+      id: id("limitless:world-cup-captain"),
+      venue: "limitless",
+      venueEventId: id("lim-event"),
+      title: `USA captain for the opening World Cup match vs Paraguay on June 13 ${suffix}`,
+      slug: `usa-captain-for-the-opening-world-cup-match-vs-paraguay-on-june-13-${suffix}`,
+      volumeTotal: 160,
+    },
+    {
+      id: id("limitless:club-world-cup"),
+      venue: "limitless",
+      venueEventId: id("lim-event"),
+      title: `Club World Cup Winner ${suffix}`,
+      slug: `club-world-cup-winner-${suffix}`,
+      volumeTotal: 950,
+    },
+    {
+      id: id("limitless:world-cup-player-special"),
+      venue: "limitless",
+      venueEventId: id("lim-event"),
+      title: `Messi to play against Ronaldo at the 2026 World Cup ${suffix}`,
+      slug: `messi-to-play-against-ronaldo-at-the-2026-world-cup-${suffix}`,
+      volumeTotal: 150,
+    },
   ];
 
   const markets: SeedMarket[] = [
@@ -508,6 +556,102 @@ async function main() {
       title: "Tie",
       volumeTotal: 230,
     },
+    {
+      id: id("lim-market"),
+      venue: "limitless",
+      venueMarketId: id("lim-venue-market"),
+      eventId: events[21].id,
+      title: "Lamine Yamal",
+      slug: `lamine-yamal-${suffix}`,
+      metadata: { tradeType: "clob", groupId: events[21].venueEventId },
+      volumeTotal: 190,
+    },
+    {
+      id: id("lim-market"),
+      venue: "limitless",
+      venueMarketId: id("lim-venue-market"),
+      eventId: events[22].id,
+      title: "Brazil",
+      slug: `brazil-${suffix}`,
+      metadata: { tradeType: "clob", groupId: events[22].venueEventId },
+      volumeTotal: 180,
+    },
+    {
+      id: id("lim-market"),
+      venue: "limitless",
+      venueMarketId: id("lim-venue-market"),
+      eventId: events[23].id,
+      title: "USA",
+      slug: `usa-${suffix}`,
+      metadata: { tradeType: "clob", groupId: events[23].venueEventId },
+      volumeTotal: 170,
+    },
+    {
+      id: id("lim-market"),
+      venue: "limitless",
+      venueMarketId: id("lim-venue-market"),
+      eventId: events[24].id,
+      title: "Christian Pulisic",
+      slug: `christian-pulisic-${suffix}`,
+      metadata: { tradeType: "clob", groupId: events[24].venueEventId },
+      volumeTotal: 160,
+    },
+    {
+      id: id("lim-market"),
+      venue: "limitless",
+      venueMarketId: id("lim-venue-market"),
+      eventId: events[25].id,
+      title: "Real Madrid",
+      slug: `real-madrid-${suffix}`,
+      metadata: { tradeType: "clob", groupId: events[25].venueEventId },
+      volumeTotal: 950,
+    },
+    {
+      id: id("lim-market"),
+      venue: "limitless",
+      venueMarketId: id("lim-venue-market"),
+      eventId: events[26].id,
+      title: "Yes",
+      slug: `yes-${suffix}`,
+      metadata: { tradeType: "clob", groupId: events[26].venueEventId },
+      volumeTotal: 150,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[0].id,
+      title: "Paraguay",
+      slug: `fifwc-usa-par-2026-06-30-paraguay-${suffix}`,
+      volumeTotal: 490,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[0].id,
+      title: "Draw (United States vs. Paraguay)",
+      slug: `fifwc-usa-par-2026-06-30-draw-${suffix}`,
+      volumeTotal: 480,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[2].id,
+      title: "Paraguay",
+      slug: `will-paraguay-win-the-2026-fifa-world-cup-${suffix}`,
+      volumeTotal: 590,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[2].id,
+      title: "USA",
+      slug: `will-usa-win-the-2026-fifa-world-cup-${suffix}`,
+      volumeTotal: 580,
+    },
   ];
 
   try {
@@ -571,8 +715,131 @@ async function main() {
       assert.ok(ids.includes(events[2].id));
       assert.ok(ids.includes(events[4].id));
       assert.ok(ids.includes(events[7].id));
+      assert.ok(ids.includes(events[21].id));
+      assert.ok(ids.includes(events[22].id));
+      assert.ok(ids.includes(events[23].id));
+      assert.ok(ids.includes(events[24].id));
+      assert.ok(ids.includes(events[26].id));
       assert.ok(!ids.includes(events[3].id), "fifa-friendly should be excluded");
       assert.ok(!ids.includes(events[8].id), "generic esports World Cup should be excluded");
+      assert.ok(!ids.includes(events[25].id), "Club World Cup should be excluded");
+    }
+
+    {
+      const baseResponse = await app.inject({
+        method: "GET",
+        url: "/special/fifa-2026?view=markets&limit=1",
+      });
+      const fifaResponse = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ view: "markets", limit: 1, q: "FIFA" })}`,
+      });
+      const worldCupResponse = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ view: "markets", limit: 1, q: "2026 World Cup" })}`,
+      });
+      assert.equal(baseResponse.statusCode, 200, baseResponse.body);
+      assert.equal(fifaResponse.statusCode, 200, fifaResponse.body);
+      assert.equal(worldCupResponse.statusCode, 200, worldCupResponse.body);
+      const basePayload = baseResponse.json<{ total: number }>();
+      const fifaPayload = fifaResponse.json<{ total: number }>();
+      const worldCupPayload = worldCupResponse.json<{ total: number }>();
+      assert.equal(fifaPayload.total, basePayload.total);
+      assert.equal(worldCupPayload.total, basePayload.total);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: "Paraguay", section: "winner", venue: "polymarket" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{ eventId: string; markets: Array<{ marketTitle: string | null }> }>;
+      }>();
+      const winnerMarkets = payload.data
+        .filter((event) => event.eventId === events[2].id)
+        .flatMap((event) => event.markets.map((market) => market.marketTitle));
+      assert.deepEqual(winnerMarkets, ["Paraguay"]);
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ limit: 50, q: "Paraguay", section: "winner", venue: "polymarket" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{ eventId: string; markets: Array<{ marketTitle: string | null }> }>;
+      }>();
+      const winnerEvent = payload.data.find((event) => event.eventId === events[2].id);
+      assert.ok(winnerEvent, "market-only query should still include the parent event");
+      assert.deepEqual(
+        winnerEvent.markets.map((market) => market.marketTitle),
+        ["Paraguay"],
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: "Paraguay", section: "match_result", venue: "polymarket" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{ eventId: string; markets: Array<{ marketTitle: string | null }> }>;
+      }>();
+      const matchMarkets = payload.data
+        .filter((event) => event.eventId === events[0].id)
+        .flatMap((event) => event.markets.map((market) => market.marketTitle));
+      assert.ok(matchMarkets.includes("United States"));
+      assert.ok(matchMarkets.includes("Paraguay"));
+      assert.ok(matchMarkets.includes("Draw (United States vs. Paraguay)"));
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: suffix, venue: "limitless" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{
+          eventId: string;
+          fifa: { section: string; sourceRule: string; groupCode: string | null; groupMarketType: string | null };
+          markets: Array<{
+            fifa: {
+              section: string;
+              groupCode: string | null;
+              groupMarketType: string | null;
+              sourceRule: string;
+            };
+          }>;
+        }>;
+      }>();
+      const ids = payload.data.map((event) => event.eventId);
+      assert.ok(ids.includes(events[7].id), "exact Limitless FIFA text should remain included");
+      assert.ok(ids.includes(events[21].id), "Limitless Golden Boot World Cup row should be included");
+      assert.ok(ids.includes(events[22].id), "Limitless semifinal World Cup row should be included");
+      assert.ok(ids.includes(events[23].id), "Limitless group-scoring World Cup row should be included");
+      assert.ok(ids.includes(events[24].id), "Limitless captain World Cup row should be included");
+      assert.ok(ids.includes(events[26].id), "Limitless player-special World Cup row should be included");
+      assert.ok(!ids.includes(events[8].id), "Limitless esports World Cup should stay excluded");
+      assert.ok(!ids.includes(events[25].id), "Limitless Club World Cup should stay excluded");
+
+      const goldenBoot = payload.data.find((event) => event.eventId === events[21].id);
+      const semifinals = payload.data.find((event) => event.eventId === events[22].id);
+      const groupScoring = payload.data.find((event) => event.eventId === events[23].id);
+      const captain = payload.data.find((event) => event.eventId === events[24].id);
+      const playerSpecial = payload.data.find((event) => event.eventId === events[26].id);
+      assert.equal(goldenBoot?.markets[0]?.fifa.section, "player_award");
+      assert.equal(goldenBoot?.markets[0]?.fifa.sourceRule, "limitless_world_cup_pattern");
+      assert.equal(semifinals?.markets[0]?.fifa.section, "stage");
+      assert.equal(groupScoring?.markets[0]?.fifa.section, "group");
+      assert.equal(groupScoring?.markets[0]?.fifa.groupCode, "D");
+      assert.equal(groupScoring?.markets[0]?.fifa.groupMarketType, "highest_scoring_team");
+      assert.equal(captain?.markets[0]?.fifa.section, "special");
+      assert.equal(playerSpecial?.markets[0]?.fifa.section, "special");
     }
 
     {

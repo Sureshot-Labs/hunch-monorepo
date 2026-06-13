@@ -13,6 +13,7 @@ import type { TokenPair } from "../server-types.js";
 import {
   buildFifaMeta,
   fetchFifaSpecialPage,
+  normalizeFifaSpecialSearchQuery,
   resolveTokenPair,
   type FifaMeta,
   type FifaSpecialInputs,
@@ -271,6 +272,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
     async (req, reply) => {
       const q = req.query;
       const view = q.view === "markets" ? "markets" : "events";
+      const searchQuery = normalizeFifaSpecialSearchQuery(q.q);
       const sort = (q.sort ?? "featured") as FifaSpecialSort;
       const sortDir: "asc" | "desc" =
         q.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
@@ -280,7 +282,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       const teamGroupCodesKey = q.team_group_code?.join(",") ?? "";
       const cacheTtl = env.feedTtlSec;
       const cacheEnabled = cacheTtl > 0;
-      const cacheKey = `special:fifa-2026:v6:${view}:${q.limit}:${q.offset}:${q.q ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
+      const cacheKey = `special:fifa-2026:v6:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -308,7 +310,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         limit: q.limit,
         offset: q.offset,
         view,
-        q: q.q,
+        q: searchQuery,
         venues: q.venue,
         sections: q.section,
         groupCodes: q.group_code,
