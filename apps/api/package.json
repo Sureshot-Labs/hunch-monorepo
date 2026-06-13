@@ -50,6 +50,7 @@
     "kalshi:series-backfill": "tsx src/kalshi-series-backfill.ts",
     "market:token-backfill": "tsx src/market-token-backfill.ts",
     "unified:duration-backfill": "tsx src/unified-duration-backfill.ts",
+    "sports:fixtures:refresh": "tsx src/sports-fixtures-refresh.ts",
     "polycurl": "tsx src/polyclob.ts",
     "dflowcurl": "tsx src/dflowcurl.ts",
     "limitlesscurl": "tsx src/limitlesscurl.ts",

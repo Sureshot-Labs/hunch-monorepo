@@ -758,6 +758,19 @@ export const env = {
     100,
     50_000,
   ),
+  sportsFixturesProvider: parseEnum(
+    process.env.SPORTS_FIXTURES_PROVIDER,
+    ["thesportsdb"] as const,
+    "thesportsdb",
+  ),
+  theSportsDbApiKey: process.env.THESPORTSDB_API_KEY?.trim() || "123",
+  sportsFixturesRefreshTtlSec: optionalPositiveInt(
+    "SPORTS_FIXTURES_REFRESH_TTL_SEC",
+    900,
+  ),
+  sportsFixturesBackgroundFillEnabled:
+    parseOptionalBool(process.env.SPORTS_FIXTURES_BACKGROUND_FILL_ENABLED) ??
+    true,
   authAccessState,
   embeddedSolanaSponsorshipEnabled,
   solanaLossCloseSponsorshipEnabled,

@@ -54,6 +54,10 @@ import {
   shouldUseDbCandlestickFallback,
 } from "../services/candlestick-history.js";
 import { polymarketClient } from "../services/polymarket-client.js";
+import {
+  fetchFifa2026SportsFixtureForEvent,
+  fillMissingSportsFixturesInBackground,
+} from "../services/sports-fixtures.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
   eventParamsSchema,
@@ -404,7 +408,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Create cache key
-      const cacheKey = `event:${eventId}`;
+      const cacheKey = `event:v3:${eventId}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for event data)
@@ -437,6 +441,38 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           firstRow.event_venue === "limitless"
             ? extractLimitlessMeta(null, eventMetadata)
             : null;
+        const sportsFixtureResult = await fetchFifa2026SportsFixtureForEvent(
+          pool,
+          {
+            eventTitle: firstRow.event_title,
+            eventSlug: firstRow.event_slug,
+            venueEventId: firstRow.venue_event_id,
+          },
+        );
+        if (
+          env.sportsFixturesBackgroundFillEnabled &&
+          r &&
+          sportsFixtureResult.fixtureKey &&
+          !sportsFixtureResult.fixture
+        ) {
+          void fillMissingSportsFixturesInBackground({
+            pool,
+            redis: {
+              set: (key, value, options) => r.set(key, value, options),
+            },
+            sport: "soccer",
+            competitionKey: "fifa_world_cup",
+            season: "2026",
+            fixtureKeys: [sportsFixtureResult.fixtureKey],
+          }).catch((error) => {
+            request.log.warn(
+              {
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Event fixture background fill failed",
+            );
+          });
+        }
 
         // Build event object
         const event = {
@@ -478,6 +514,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           negRiskMarketId: eventLimitlessMeta?.negRiskMarketId ?? null,
           negRiskAdapter: eventLimitlessMeta?.venueAdapter ?? null,
           negRiskExchange: eventLimitlessMeta?.venueExchange ?? null,
+          sportsFixture: sportsFixtureResult.fixture,
           markets: [] as Record<string, unknown>[],
         };
 

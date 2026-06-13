@@ -2538,6 +2538,7 @@ export async function fetchFavoriteFeedEventPage(
 
 export type MarketDetailsRow = {
   event_id: string;
+  venue_event_id: string | null;
   event_title: string | null;
   event_description: string | null;
   event_category: string | null;
@@ -2546,6 +2547,7 @@ export type MarketDetailsRow = {
   end_date: unknown;
   event_liquidity: unknown;
   event_volume: unknown;
+  event_slug: string | null;
   event_image: string | null;
   event_icon: string | null;
   event_metadata: unknown;
@@ -2606,6 +2608,7 @@ export async function fetchMarketDetails(
   const marketSql = `
     SELECT
       e.id as event_id,
+      e.venue_event_id,
       e.title as event_title,
       e.description as event_description,
       e.category as event_category,
@@ -2614,6 +2617,7 @@ export async function fetchMarketDetails(
       e.end_date,
       e.liquidity as event_liquidity,
       e.volume_total as event_volume,
+      e.slug as event_slug,
       e.image as event_image,
       e.icon as event_icon,
       e.metadata as event_metadata,

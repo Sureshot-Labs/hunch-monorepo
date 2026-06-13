@@ -66,6 +66,10 @@ import {
 } from "../services/candlestick-history.js";
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
 import { polymarketClient } from "../services/polymarket-client.js";
+import {
+  fetchFifa2026SportsFixtureForEvent,
+  fillMissingSportsFixturesInBackground,
+} from "../services/sports-fixtures.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
   marketAlternativesQuerySchema,
@@ -343,7 +347,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       }
 
       // Create cache key
-      const cacheKey = `market:${marketId}`;
+      const cacheKey = `market:v3:${marketId}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for market data)
@@ -382,6 +386,38 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           limitlessMeta?.venueAdapter ||
           limitlessMeta?.venueExchange,
         );
+        const sportsFixtureResult = await fetchFifa2026SportsFixtureForEvent(
+          pool,
+          {
+            eventTitle: market.event_title,
+            eventSlug: market.event_slug,
+            venueEventId: market.venue_event_id,
+          },
+        );
+        if (
+          env.sportsFixturesBackgroundFillEnabled &&
+          r &&
+          sportsFixtureResult.fixtureKey &&
+          !sportsFixtureResult.fixture
+        ) {
+          void fillMissingSportsFixturesInBackground({
+            pool,
+            redis: {
+              set: (key, value, options) => r.set(key, value, options),
+            },
+            sport: "soccer",
+            competitionKey: "fifa_world_cup",
+            season: "2026",
+            fixtureKeys: [sportsFixtureResult.fixtureKey],
+          }).catch((error) => {
+            request.log.warn(
+              {
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Market fixture background fill failed",
+            );
+          });
+        }
 
         const clobTokenIdsRaw =
           market.clob_token_ids ?? market.pm_clob_token_ids ?? null;
@@ -552,6 +588,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               market.event_volume != null ? Number(market.event_volume) : 0,
             eventImage: market.event_image || null,
             eventIcon: market.event_icon || null,
+            sportsFixture: sportsFixtureResult.fixture,
             negRiskMarketId:
               market.venue === "limitless"
                 ? (limitlessMeta?.negRiskMarketId ?? null)

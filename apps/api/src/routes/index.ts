@@ -29,6 +29,7 @@ import { polymarketProxyRoutes } from "./polymarket-proxy.js";
 import { rewardsRoutes } from "./rewards.js";
 import { signalsRoutes } from "./signals.js";
 import { solanaRoutes } from "./solana.js";
+import { specialRoutes } from "./special.js";
 import { tradePolicyRoutes } from "./trade-policies.js";
 import { walletsRoutes } from "./wallets.js";
 import { walletIntelRoutes } from "./wallet-intel.js";
@@ -57,6 +58,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(pricesSseRoutes);
   await app.register(notificationsRoutes);
   await app.register(feedRoutes);
+  await app.register(specialRoutes);
   await app.register(marketMapRoutes);
   await app.register(holdersRoutes);
   await app.register(marketRoutes);
