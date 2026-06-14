@@ -108,6 +108,14 @@ export const env = {
     max: 60 * 60,
     fallback: 60,
   }),
+  wsTargetBookMaxAgeSec: parseIntEnv(
+    "HYPERLIQUID_WS_TARGET_BOOK_MAX_AGE_SEC",
+    {
+      min: 60,
+      max: 24 * 60 * 60,
+      fallback: 15 * 60,
+    },
+  ),
   wsReconnectSec: parseIntEnv("HYPERLIQUID_WS_RECONNECT_SEC", {
     min: 1,
     max: 10 * 60,

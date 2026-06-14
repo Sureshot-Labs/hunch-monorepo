@@ -3,7 +3,6 @@ import {
   dryRunHyperliquidTopBooks,
   fetchHotHyperliquidTokenIds,
   publishHyperliquidMarketMetadata,
-  selectHyperliquidBookTargets,
   selectHyperliquidBookTargetsFromDb,
   syncHyperliquidMetadata,
   syncHyperliquidTopBooks,
@@ -147,21 +146,12 @@ async function refreshWsSubscriptions(params: {
   try {
     const { pool, redis } = await loadDbAndRedis();
     const hotTokenIds = await safeFetchHotTokenIds(redis);
-    let targets =
-      latestSnapshot != null
-        ? selectHyperliquidBookTargets({
-            snapshot: latestSnapshot,
-            hotTokenIds,
-            maxTokens: env.maxTopBookSyncTokens,
-          })
-        : [];
-    if (targets.length === 0) {
-      targets = await selectHyperliquidBookTargetsFromDb({
-        pool,
-        hotTokenIds,
-        maxTokens: env.maxTopBookSyncTokens,
-      });
-    }
+    const targets = await selectHyperliquidBookTargetsFromDb({
+      pool,
+      hotTokenIds,
+      maxTokens: env.maxTopBookSyncTokens,
+      bookMaxAgeSec: env.wsTargetBookMaxAgeSec,
+    });
     if (targets.length === 0) {
       log.warn("Hyperliquid WS refresh skipped: no bbo targets");
       await writeStats({

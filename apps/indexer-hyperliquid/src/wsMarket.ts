@@ -198,6 +198,20 @@ function sendSubscription(
   );
 }
 
+export function buildHyperliquidWsPingMessage(): string {
+  return JSON.stringify({ method: "ping" });
+}
+
+export function isHyperliquidWsPongMessage(
+  message: HyperliquidWsMessage | null,
+): boolean {
+  return message?.channel === "pong";
+}
+
+function sendHeartbeatPing(ws: WebSocket): void {
+  ws.send(buildHyperliquidWsPingMessage());
+}
+
 function resubscribeAll(ws: WebSocket, targets: HyperliquidBookTarget[]): void {
   if (ws.readyState !== WebSocket.OPEN) return;
   for (const target of targets) {
@@ -281,16 +295,16 @@ function connect(state: WsState): WebSocket | null {
     new WebSocket(state.wsUrl, { perMessageDeflate: true });
   currentWs = ws;
   activeCoins = new Set<string>();
-  let lastPongAtMs = Date.now();
-  let lastMessageAtMs = lastPongAtMs;
-  let lastResubscribeAtMs = lastPongAtMs;
+  let lastServerMessageAtMs = Date.now();
+  let lastStreamMessageAtMs = lastServerMessageAtMs;
+  let lastResubscribeAtMs = lastServerMessageAtMs;
 
   ws.on("open", () => {
     if (currentWs !== ws) return;
     const targets = currentState?.targets ?? state.targets;
     const nowMs = Date.now();
-    lastPongAtMs = nowMs;
-    lastMessageAtMs = nowMs;
+    lastServerMessageAtMs = nowMs;
+    lastStreamMessageAtMs = nowMs;
     lastResubscribeAtMs = nowMs;
     log.info("Hyperliquid WS open", {
       url: state.wsUrl,
@@ -302,7 +316,7 @@ function connect(state: WsState): WebSocket | null {
       if (currentWs !== ws || ws.readyState !== WebSocket.OPEN) return;
       const nowMs = Date.now();
       try {
-        ws.ping();
+        sendHeartbeatPing(ws);
       } catch {
         // ignore; socket may already be closing
       }
@@ -310,12 +324,12 @@ function connect(state: WsState): WebSocket | null {
       if (
         shouldCloseHyperliquidHeartbeat({
           nowMs,
-          lastPongAtMs,
+          lastPongAtMs: lastServerMessageAtMs,
           pongTimeoutMs: env.wsPongTimeoutSec * 1000,
         })
       ) {
         log.warn("Hyperliquid WS pong timeout; reconnecting", {
-          staleMs: nowMs - lastPongAtMs,
+          staleMs: nowMs - lastServerMessageAtMs,
         });
         ws.close();
         return;
@@ -324,14 +338,14 @@ function connect(state: WsState): WebSocket | null {
       if (
         shouldResubscribeHyperliquidStream({
           nowMs,
-          lastMessageAtMs,
+          lastMessageAtMs: lastStreamMessageAtMs,
           lastResubscribeAtMs,
           staleMs: env.wsResubscribeSec * 1000,
         })
       ) {
         const targets = currentState?.targets ?? state.targets;
         log.warn("Hyperliquid WS stream stale; resubscribing", {
-          staleMs: nowMs - lastMessageAtMs,
+          staleMs: nowMs - lastStreamMessageAtMs,
           targets: targets.length,
         });
         resubscribeAll(ws, targets);
@@ -342,14 +356,16 @@ function connect(state: WsState): WebSocket | null {
 
   ws.on("pong", () => {
     if (currentWs !== ws) return;
-    lastPongAtMs = Date.now();
+    lastServerMessageAtMs = Date.now();
   });
 
   ws.on("message", (raw) => {
     if (currentWs !== ws) return;
-    lastMessageAtMs = Date.now();
+    lastServerMessageAtMs = Date.now();
     const message = parseWsMessage(raw);
+    if (isHyperliquidWsPongMessage(message)) return;
     if (message?.channel !== "bbo" || !isBboPayload(message.data)) return;
+    lastStreamMessageAtMs = Date.now();
 
     const tokenId = tokenByCoin.get(message.data.coin);
     if (!tokenId) return;

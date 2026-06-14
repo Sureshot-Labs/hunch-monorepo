@@ -4,8 +4,10 @@ import type { Pool } from "pg";
 import type { RedisClientType } from "@hunch/infra";
 import WebSocket from "ws";
 import {
+  buildHyperliquidWsPingMessage,
   buildHyperliquidTokenByCoin,
   createHyperliquidTopPublisher,
+  isHyperliquidWsPongMessage,
   resetHyperliquidMarketWSForTest,
   shouldCloseHyperliquidHeartbeat,
   shouldReconnectClosedHyperliquidSocket,
@@ -345,6 +347,12 @@ test("stale and intentionally closed sockets do not schedule reconnects", () => 
 });
 
 test("heartbeat helpers detect pong timeout and stale stream resubscribe", () => {
+  assert.equal(
+    buildHyperliquidWsPingMessage(),
+    JSON.stringify({ method: "ping" }),
+  );
+  assert.equal(isHyperliquidWsPongMessage({ channel: "pong" }), true);
+  assert.equal(isHyperliquidWsPongMessage({ channel: "bbo" }), false);
   assert.equal(
     shouldCloseHyperliquidHeartbeat({
       nowMs: 70_001,

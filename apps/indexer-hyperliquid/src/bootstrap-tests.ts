@@ -40,7 +40,7 @@ test("selectHyperliquidBookTargetsFromDb preserves hot-token priority before vol
     maxTokens: 3,
   });
 
-  assert.deepEqual(calls[0], [["hyperliquid:100000070"], 3]);
+  assert.deepEqual(calls[0], [["hyperliquid:100000070"], 3, 900]);
   assert.deepEqual(targets, [
     { tokenId: "hyperliquid:100000070", coin: "#70" },
     { tokenId: "hyperliquid:100000051", coin: "#51" },

@@ -446,9 +446,14 @@ export async function selectHyperliquidBookTargetsFromDb(params: {
   pool: Pool;
   hotTokenIds?: string[];
   maxTokens: number;
+  bookMaxAgeSec?: number;
 }): Promise<HyperliquidBookTarget[]> {
   const maxTokens = Math.max(0, Math.trunc(params.maxTokens));
   if (maxTokens <= 0) return [];
+  const bookMaxAgeSec = Math.max(
+    60,
+    Math.trunc(params.bookMaxAgeSec ?? 15 * 60),
+  );
 
   const hotTokenIds = Array.from(
     new Set(
@@ -466,11 +471,23 @@ export async function selectHyperliquidBookTargetsFromDb(params: {
       with hot as (
         select token_id, ord
         from unnest($1::text[]) with ordinality as x(token_id, ord)
+      ),
+      latest_book as (
+        select distinct on (token_id)
+               token_id,
+               ts
+        from unified_book_top
+        where venue = 'hyperliquid'
+          and token_id like 'hyperliquid:%'
+          and ts >= now() - ($3::int * interval '1 second')
+          and (best_bid is not null or best_ask is not null)
+        order by token_id, ts desc
       )
       select a.hunch_token_id as token_id,
              a.coin
       from hyperliquid_outcome_assets a
       join hyperliquid_outcomes o on o.outcome_id = a.outcome_id
+      join latest_book b on b.token_id = a.hunch_token_id
       left join hot h on h.token_id = a.hunch_token_id
       where o.status = 'ACTIVE'
         and a.hunch_token_id like 'hyperliquid:%'
@@ -479,7 +496,7 @@ export async function selectHyperliquidBookTargetsFromDb(params: {
                a.hunch_token_id
       limit $2
     `,
-    [hotTokenIds, maxTokens],
+    [hotTokenIds, maxTokens, bookMaxAgeSec],
   );
 
   return rows.map((row) => ({
