@@ -31,6 +31,7 @@ import {
   fetchPolymarketOnchainSnapshot,
   POLYGON_NATIVE_USDC_ADDRESS,
 } from "../services/polymarket-onchain.js";
+import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
 import {
   walletBalancesBatchQuerySchema,
   walletBalancesQuerySchema,
@@ -193,6 +194,46 @@ function writeVenueStatusCache(key: string, value: WalletVenueStatus) {
     value,
     expiresAt: Date.now() + VENUE_STATUS_TTL_MS,
   });
+}
+
+function parseOptionalBigInt(value: unknown): bigint | null {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return BigInt(trimmed);
+}
+
+function addLockedCollateralFields<T extends Record<string, unknown>>(
+  tokenStatus: T,
+  lockedRaw: bigint,
+): T & {
+  lockedRaw: string;
+  locked: string;
+  availableAfterLockedRaw: string;
+  availableAfterLocked: string;
+} {
+  const decimals =
+    typeof tokenStatus.decimals === "number" ? tokenStatus.decimals : 6;
+  const balanceRaw = parseOptionalBigInt(tokenStatus.balanceRaw) ?? 0n;
+  const normalizedLockedRaw = lockedRaw > 0n ? lockedRaw : 0n;
+  const availableAfterLockedRaw =
+    balanceRaw > normalizedLockedRaw ? balanceRaw - normalizedLockedRaw : 0n;
+
+  return {
+    ...tokenStatus,
+    lockedRaw: normalizedLockedRaw.toString(),
+    locked: ethers.formatUnits(normalizedLockedRaw, decimals),
+    availableAfterLockedRaw: availableAfterLockedRaw.toString(),
+    availableAfterLocked: ethers.formatUnits(
+      availableAfterLockedRaw,
+      decimals,
+    ),
+  };
 }
 
 const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
@@ -1232,6 +1273,82 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
         env.polymarketBuilderApiPassphrase,
       );
 
+      type VenueCredentialInfo = Awaited<
+        ReturnType<typeof AuthService.getVenueCredentialsInfo>
+      >;
+      const venueCredentialsByWallet = new Map<
+        string,
+        {
+          polymarketCreds: VenueCredentialInfo | null;
+          limitlessCreds: VenueCredentialInfo | null;
+          error?: unknown;
+        }
+      >();
+      const evmVenueWallets = walletList.filter((wallet) => {
+        const walletType =
+          wallet.walletType ||
+          (isEvmWalletAddress(wallet.walletAddress) ? "ethereum" : "solana");
+        return (
+          walletType === "ethereum" || isEvmWalletAddress(wallet.walletAddress)
+        );
+      });
+
+      await Promise.all(
+        evmVenueWallets.map(async (wallet) => {
+          const key = normalizeWalletLookupKey(wallet.walletAddress);
+          try {
+            const [polymarketCreds, limitlessCreds] = await Promise.all([
+              AuthService.getVenueCredentialsInfo(
+                user.id,
+                "polymarket",
+                wallet.walletAddress,
+              ),
+              AuthService.getVenueCredentialsInfo(
+                user.id,
+                "limitless",
+                wallet.walletAddress,
+              ),
+            ]);
+            venueCredentialsByWallet.set(key, {
+              polymarketCreds,
+              limitlessCreds,
+            });
+          } catch (error) {
+            venueCredentialsByWallet.set(key, {
+              polymarketCreds: null,
+              limitlessCreds: null,
+              error,
+            });
+          }
+        }),
+      );
+
+      let collateralLocks = {
+        polymarket: new Map<string, bigint>(),
+        limitless: new Map<string, bigint>(),
+      };
+      try {
+        collateralLocks = await fetchOpenOrderCollateralLocks(pool, {
+          userId: user.id,
+          polymarketWallets: evmVenueWallets.map((wallet) => {
+            const creds = venueCredentialsByWallet.get(
+              normalizeWalletLookupKey(wallet.walletAddress),
+            );
+            return (
+              creds?.polymarketCreds?.funderAddress ?? wallet.walletAddress
+            );
+          }),
+          limitlessWallets: evmVenueWallets.map(
+            (wallet) => wallet.walletAddress,
+          ),
+        });
+      } catch (error) {
+        app.log.warn(
+          { error, userId: user.id },
+          "Open order collateral lock lookup failed",
+        );
+      }
+
       const results = await Promise.all(
         walletList.map(async (wallet) => {
           const walletAddress = wallet.walletAddress;
@@ -1247,18 +1364,15 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
 
           if (walletType === "ethereum" || isEvmWalletAddress(walletAddress)) {
             try {
-              const [polymarketCreds, limitlessCreds] = await Promise.all([
-                AuthService.getVenueCredentialsInfo(
-                  user.id,
-                  "polymarket",
-                  walletAddress,
-                ),
-                AuthService.getVenueCredentialsInfo(
-                  user.id,
-                  "limitless",
-                  walletAddress,
-                ),
-              ]);
+              const venueCredentials = venueCredentialsByWallet.get(
+                normalizeWalletLookupKey(walletAddress),
+              );
+              if (venueCredentials?.error) {
+                throw venueCredentials.error;
+              }
+              const polymarketCreds =
+                venueCredentials?.polymarketCreds ?? null;
+              const limitlessCreds = venueCredentials?.limitlessCreds ?? null;
               const funder = polymarketCreds?.funderAddress ?? walletAddress;
               const funderSource = polymarketCreds?.funderAddress
                 ? "credentials"
@@ -1479,6 +1593,10 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                             : {}),
                         },
                       };
+                      const pusdStatusWithLocks = addLockedCollateralFields(
+                        pusdStatus,
+                        collateralLocks.polymarket.get(funderNormalized) ?? 0n,
+                      );
 
                       const signerPusdStatus = {
                         tokenAddress: env.polymarketUsdcAddress,
@@ -1510,8 +1628,8 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                           resolvePolymarketFunderExecutionKind(funderCandidate),
                         funderIsContract,
                         relayerEnabled,
-                        pusd: pusdStatus,
-                        usdc: pusdStatus,
+                        pusd: pusdStatusWithLocks,
+                        usdc: pusdStatusWithLocks,
                         usdce: {
                           tokenAddress: env.polymarketUsdceAddress,
                           decimals: 6,
@@ -1588,6 +1706,15 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         timeoutMs: env.baseRpcTimeoutMs,
                         owner: walletAddress,
                       });
+                      const limitlessUsdcStatus = addLockedCollateralFields(
+                        {
+                          tokenAddress: env.limitlessUsdcAddress,
+                          decimals: 6,
+                          balance: ethers.formatUnits(snapshot.usdcBalance, 6),
+                          balanceRaw: snapshot.usdcBalance.toString(),
+                        },
+                        collateralLocks.limitless.get(signerNormalized) ?? 0n,
+                      );
                       if (!isLimitlessPartnerHmacConfigured()) {
                         return {
                           supported: false,
@@ -1596,15 +1723,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                           hasCredentials: false,
                           error: "Limitless is temporarily unavailable.",
                           chainId: 8453,
-                          usdc: {
-                            tokenAddress: env.limitlessUsdcAddress,
-                            decimals: 6,
-                            balance: ethers.formatUnits(
-                              snapshot.usdcBalance,
-                              6,
-                            ),
-                            balanceRaw: snapshot.usdcBalance.toString(),
-                          },
+                          usdc: limitlessUsdcStatus,
                         };
                       }
 
@@ -1638,12 +1757,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                         reasons,
                         hasCredentials,
                         chainId: 8453,
-                        usdc: {
-                          tokenAddress: env.limitlessUsdcAddress,
-                          decimals: 6,
-                          balance: ethers.formatUnits(snapshot.usdcBalance, 6),
-                          balanceRaw: snapshot.usdcBalance.toString(),
-                        },
+                        usdc: limitlessUsdcStatus,
                       };
                     })(),
                   ]);
