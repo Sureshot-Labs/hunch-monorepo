@@ -96,6 +96,7 @@ function buildMarket(row: FifaSpecialRow) {
     status: row.market_status,
     closeTime: row.market_close_time,
     expirationTime: row.market_expiration_time,
+    eventEndTime: row.end_date,
     pmAcceptingOrders: row.pm_accepting_orders ?? null,
     dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
       row.market_metadata,

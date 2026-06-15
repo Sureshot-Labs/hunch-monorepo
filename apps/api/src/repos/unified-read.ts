@@ -2820,6 +2820,7 @@ export type MarketSignalPricingRow = {
   pm_accepting_orders: boolean | null;
   close_time: unknown;
   expiration_time: unknown;
+  event_end_time: unknown;
   best_bid: unknown;
   best_ask: unknown;
   token_yes: string | null;
@@ -2962,6 +2963,7 @@ export async function fetchMarketSignalPricingByIds(
       pm.accepting_orders as pm_accepting_orders,
       m.close_time,
       m.expiration_time,
+      e.end_date as event_end_time,
       m.best_bid,
       m.best_ask,
       mt.token_yes,
@@ -3002,6 +3004,8 @@ export async function fetchMarketSignalPricingByIds(
     ) no_top on true
     LEFT JOIN polymarket_markets pm
       ON m.venue = 'polymarket' AND pm.id = m.venue_market_id
+    LEFT JOIN unified_events e
+      ON e.id = m.event_id
     WHERE m.id = any($1::text[])
   `;
 

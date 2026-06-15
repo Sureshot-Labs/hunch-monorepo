@@ -137,6 +137,7 @@ export function mapMarketsByTokenRows(
       status: row.market_status,
       closeTime: row.close_time,
       expirationTime: row.expiration_time,
+      eventEndTime: row.end_date,
       pmAcceptingOrders: row.pm_accepting_orders,
       dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
         row.market_metadata,

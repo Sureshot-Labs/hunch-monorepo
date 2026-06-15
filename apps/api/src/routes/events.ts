@@ -232,6 +232,7 @@ function isAcceptingOrders(row: EventDetailsRow): boolean {
     status: row.market_status,
     closeTime: row.close_time,
     expirationTime: row.expiration_time,
+    eventEndTime: row.end_date,
     pmAcceptingOrders: row.pm_accepting_orders,
     dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
       row.market_metadata,
@@ -603,6 +604,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             status: row.market_status,
             closeTime: row.close_time,
             expirationTime: row.expiration_time,
+            eventEndTime: row.end_date,
             pmAcceptingOrders: row.pm_accepting_orders,
             dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
               row.market_metadata,

@@ -197,6 +197,7 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     status: marketStatus,
     closeTime: rRow.market_close_time,
     expirationTime: rRow.market_expiration_time,
+    eventEndTime: rRow.end_date,
     pmAcceptingOrders: rRow.pm_accepting_orders ?? null,
     dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
       rRow.market_metadata,

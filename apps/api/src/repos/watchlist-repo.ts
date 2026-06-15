@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { buildOrderableMarketSql } from "../lib/market-availability.js";
 
 export type WatchlistRow = {
   watchlist_id: string;
@@ -52,7 +53,12 @@ export async function fetchWatchlistPage(
 ): Promise<{ rows: WatchlistRow[]; total: number }> {
   const statusFilter = input.includeInactive
     ? ""
-    : "AND m.status = 'ACTIVE' AND (m.expiration_time IS NULL OR m.expiration_time > now()) AND (m.close_time IS NULL OR m.close_time > now())";
+    : `AND ${buildOrderableMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        nowParam: "now()",
+        pmAlias: "pm",
+      })}`;
 
   const watchlistSql = `
     SELECT
@@ -110,6 +116,9 @@ export async function fetchWatchlistPage(
     SELECT COUNT(*) as total
     FROM user_watchlist w
     JOIN unified_markets m ON m.id = w.market_id
+    JOIN unified_events e ON e.id = m.event_id
+    LEFT JOIN polymarket_markets pm
+      ON pm.id = m.venue_market_id AND m.venue = 'polymarket'
     WHERE w.user_id = $1
     ${statusFilter}
   `;

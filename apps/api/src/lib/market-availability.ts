@@ -3,6 +3,7 @@ type ComputeAcceptingOrdersInput = {
   status: string | null | undefined;
   closeTime?: unknown;
   expirationTime?: unknown;
+  eventEndTime?: unknown;
   pmAcceptingOrders?: boolean | null;
   dflowNativeAcceptingOrders?: boolean | null;
   nowMs?: number;
@@ -66,14 +67,16 @@ export function computeAcceptingOrders(
 
   const closeMs = parseTimestampMs(input.closeTime);
   const expirationMs = parseTimestampMs(input.expirationTime);
-  const terminalCandidates = [closeMs, expirationMs].filter(
+  const eventEndMs = parseTimestampMs(input.eventEndTime);
+  const terminalCandidates = [closeMs, expirationMs, eventEndMs].filter(
     (value): value is number => value != null,
   );
   const terminalMs =
     terminalCandidates.length > 0 ? Math.min(...terminalCandidates) : null;
   const closedByTime =
     (closeMs != null && closeMs <= nowMs) ||
-    (expirationMs != null && expirationMs <= nowMs);
+    (expirationMs != null && expirationMs <= nowMs) ||
+    (eventEndMs != null && eventEndMs <= nowMs);
 
   const activeByUnified =
     normalizedStatus == null

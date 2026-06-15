@@ -511,6 +511,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             status: market.market_status,
             closeTime: market.close_time,
             expirationTime: market.expiration_time,
+            eventEndTime: market.end_date,
             pmAcceptingOrders: market.pm_accepting_orders,
             dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
               market.market_metadata,

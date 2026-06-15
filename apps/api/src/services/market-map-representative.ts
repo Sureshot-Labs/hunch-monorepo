@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { buildOrderableMarketSql } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 
 type SelectionRow = {
@@ -235,13 +236,12 @@ export async function selectRankedRepresentativeMarketsForEvents(
   const prefilterLimit = Math.max(limit, 10);
   const nowParam = new Date().toISOString();
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
-  const nativeAcceptingOrdersExpr = `
-    case
-      when m.venue = 'kalshi'
-        then lower(coalesce(m.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
-      else coalesce(pm.accepting_orders, case when m.status::text = 'ACTIVE' then true else false end)
-    end
-  `;
+  const orderableMarketExpr = buildOrderableMarketSql({
+    marketAlias: "m",
+    eventAlias: "e",
+    nowParam: "$5",
+    pmAlias: "pm",
+  });
   const eventIds = normalized.map((input) => input.eventId);
   const venues = normalized.map((input) => input.venue);
   const preferredMarketIds = normalized.map((input) => input.preferredMarketId);
@@ -291,15 +291,15 @@ export async function selectRankedRepresentativeMarketsForEvents(
             m.id
         ) as candidate_rank
       from event_input ei
+      join unified_events e
+        on e.id = ei.event_id
+       and e.venue = ei.event_venue
       join unified_markets m
         on m.event_id = ei.event_id
        and m.venue = ei.event_venue
       left join polymarket_markets pm
         on m.venue = 'polymarket' and pm.id = m.venue_market_id
-      where m.status = 'ACTIVE'
-        and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
-        and (m.close_time is null or m.close_time > $5::timestamptz)
-        and ${nativeAcceptingOrdersExpr} is true
+      where ${orderableMarketExpr} is true
         and ${renderableMarketExpr}
     ),
     market_base as (
@@ -335,7 +335,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
         coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
         coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
-        ${nativeAcceptingOrdersExpr} as accepting_orders,
+        ${orderableMarketExpr} as accepting_orders,
         m.resolved_outcome,
         m.resolved_outcome_pct,
         odds.yes_probability,
@@ -362,10 +362,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
               case
                 when mt.token_yes is not null
                   and mt.token_no is not null
-                  and ${nativeAcceptingOrdersExpr} is true
-                  and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
-                  and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
-                  and (m.close_time is null or m.close_time > $5::timestamptz)
+                  and ${orderableMarketExpr} is true
                   and (
                     m.resolved_outcome is null
                     or upper(m.resolved_outcome::text) not in ('YES', 'NO')
@@ -390,10 +387,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
             ),
             (
               case
-                when ${nativeAcceptingOrdersExpr} is true
-                  and upper(coalesce(m.status::text, '')) not in ('CLOSED', 'SETTLED', 'RESOLVED', 'EXPIRED', 'FINALIZED', 'CANCELLED')
-                  and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
-                  and (m.close_time is null or m.close_time > $5::timestamptz)
+                when ${orderableMarketExpr} is true
                   and (
                     m.resolved_outcome is null
                     or upper(m.resolved_outcome::text) not in ('YES', 'NO')
@@ -457,9 +451,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
             odds.yes_probability desc,
             (
               case
-                when m.status::text = 'ACTIVE'
-                  and (m.expiration_time is null or m.expiration_time > $5::timestamptz)
-                  and (m.close_time is null or m.close_time > $5::timestamptz)
+                when ${orderableMarketExpr} is true
                 then 0
                 else 1
               end
@@ -489,6 +481,9 @@ export async function selectRankedRepresentativeMarketsForEvents(
             m.id
         ) as market_rank
       from market_base m
+      join unified_events e
+        on e.id = m.input_event_id
+       and e.venue = m.input_event_venue
       cross join lateral (
         select
           case

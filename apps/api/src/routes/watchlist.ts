@@ -186,6 +186,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
                 typeof r.market_status === "string" ? r.market_status : null,
               closeTime: r.close_time,
               expirationTime: r.expiration_time,
+              eventEndTime: r.end_date,
               pmAcceptingOrders: r.pm_accepting_orders,
               dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
                 r.market_metadata,

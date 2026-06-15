@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import {
+  buildOrderableMarketSql,
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
@@ -816,6 +817,12 @@ async function loadMarketMapSidebarCandidates(params: {
   const { fromSql, filterSql, orderSql } = sidebarSqlParts(kind);
   const rankedOrderSql = sidebarRankedOrderSql(kind);
   const activePrefilterLimit = marketMapSidebarActivePrefilterLimit(limit);
+  const sidebarOrderableMarketSql = buildOrderableMarketSql({
+    marketAlias: "m",
+    eventAlias: "e",
+    nowParam: "now()",
+    pmAlias: "pm",
+  });
   const { rows } = await pool.query<MarketMapSidebarEventRow>(
     `
       with ranked_events as materialized (
@@ -853,7 +860,15 @@ async function loadMarketMapSidebarCandidates(params: {
         ${fromSql}
         where e.status = 'ACTIVE'
           and e.venue = any($1::text[])
-          and (e.end_date is null or e.end_date > now())
+          and exists (
+            select 1
+            from unified_markets m
+            left join polymarket_markets pm
+              on m.venue = 'polymarket' and pm.id = m.venue_market_id
+            where m.event_id = e.id
+              and m.venue = e.venue
+              and ${sidebarOrderableMarketSql}
+          )
           and $3::numeric >= 0
           and $4::numeric >= 0
           and $5::numeric >= 0
@@ -884,15 +899,6 @@ async function loadMarketMapSidebarCandidates(params: {
       )
       select *
       from ranked_events re
-      where exists (
-        select 1
-        from unified_markets m
-        where m.event_id = re.event_id
-          and m.venue = re.venue
-          and m.status = 'ACTIVE'
-          and (m.expiration_time is null or m.expiration_time > now())
-          and (m.close_time is null or m.close_time > now())
-      )
       order by
         ${rankedOrderSql},
         re.event_id
@@ -988,6 +994,7 @@ function normalizeSignalTargetMarket(params: {
   marketMetadata: unknown;
   closeTime: unknown;
   expirationTime: unknown;
+  eventEndTime: unknown;
   bestBid: unknown;
   bestAsk: unknown;
   tokenYes: string | null;
@@ -1026,6 +1033,7 @@ function normalizeSignalTargetMarket(params: {
       status: params.marketStatus,
       closeTime: params.closeTime,
       expirationTime: params.expirationTime,
+      eventEndTime: params.eventEndTime,
       pmAcceptingOrders: params.pmAcceptingOrders,
       dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
         params.marketMetadata,
@@ -1069,6 +1077,7 @@ async function enrichSignalSummaryTargetMarkets(
         marketMetadata: row.market_metadata,
         closeTime: row.close_time,
         expirationTime: row.expiration_time,
+        eventEndTime: row.event_end_time,
         bestBid: row.best_bid,
         bestAsk: row.best_ask,
         tokenYes: row.token_yes ?? null,
