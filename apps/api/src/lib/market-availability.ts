@@ -149,6 +149,152 @@ export function buildNativeTradableMarketSql(alias: string): string {
   )`;
 }
 
+function buildMarketTimeSql(args: {
+  marketAlias: string;
+  nowParam: string;
+  nowCloseParam?: string;
+}): string {
+  const { marketAlias: m, nowParam } = args;
+  const nowCloseParam = args.nowCloseParam ?? nowParam;
+  return `(
+    (${m}.expiration_time is null or ${m}.expiration_time > ${nowParam}::timestamptz)
+    and (${m}.close_time is null or ${m}.close_time > ${nowCloseParam}::timestamptz)
+  )`;
+}
+
+function buildActiveEventSql(eventAlias: string | undefined): string {
+  return eventAlias ? `${eventAlias}.status = 'ACTIVE'` : "true";
+}
+
+function buildEventTimeSql(args: {
+  eventAlias?: string;
+  nowParam: string;
+}): string {
+  return args.eventAlias
+    ? `(${args.eventAlias}.end_date is null or ${args.eventAlias}.end_date > ${args.nowParam}::timestamptz)`
+    : "true";
+}
+
+function buildPolymarketTerminalSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+}): string {
+  const { marketAlias: m, eventAlias: e } = args;
+  return `least(
+    coalesce(${m}.close_time, 'infinity'::timestamptz),
+    coalesce(${m}.expiration_time, 'infinity'::timestamptz)${
+      e ? `,\n    coalesce(${e}.end_date, 'infinity'::timestamptz)` : ""
+    }
+  )`;
+}
+
+function buildPolymarketFreshnessSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+  nowParam: string;
+}): string {
+  const terminalSql = buildPolymarketTerminalSql(args);
+  return `(
+    ${terminalSql} = 'infinity'::timestamptz
+    or ${terminalSql} > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL})
+  )`;
+}
+
+export function buildStrictIndexedMarketSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+}): string {
+  const { marketAlias: m } = args;
+  return `(
+    ${m}.status = 'ACTIVE'
+    and ${buildActiveEventSql(args.eventAlias)}
+    and ${buildEventTimeSql(args)}
+    and ${buildMarketTimeSql(args)}
+    and ${buildNativeTradableMarketSql(m)}
+  )`;
+}
+
+export function buildPolymarketGraceMarketSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+  nowParam: string;
+  pmAlias: string;
+}): string {
+  const { marketAlias: m, pmAlias: pm } = args;
+  const strictTimeSql = `(
+    ${buildEventTimeSql(args)}
+    and ${buildMarketTimeSql(args)}
+  )`;
+  return `(
+    ${m}.venue = 'polymarket'
+    and ${m}.status = 'ACTIVE'
+    and ${buildActiveEventSql(args.eventAlias)}
+    and ${pm}.id is not null
+    and ${pm}.accepting_orders = true
+    and coalesce(${pm}.active, true) = true
+    and coalesce(${pm}.closed, false) = false
+    and coalesce(${pm}.archived, false) = false
+    and ${buildPolymarketFreshnessSql(args)}
+    and not ${strictTimeSql}
+  )`;
+}
+
+export function buildBroadOrderableMarketSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+  pmAlias: string;
+}): string {
+  return `(
+    ${buildStrictIndexedMarketSql(args)}
+    or ${buildPolymarketGraceMarketSql(args)}
+  )`;
+}
+
+export function buildEventHasBroadOrderableMarketSql(args: {
+  eventAlias?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+  renderableMarketSql?: string;
+}): string {
+  const eventAlias = args.eventAlias ?? "e";
+  const renderable = args.renderableMarketSql
+    ? `and ${args.renderableMarketSql}`
+    : "";
+  return `(
+    exists (
+      select 1
+      from unified_markets om
+      where om.event_id = ${eventAlias}.id
+        and ${buildStrictIndexedMarketSql({
+          marketAlias: "om",
+          eventAlias,
+          nowParam: args.nowParam,
+          nowCloseParam: args.nowCloseParam,
+        })}
+        ${renderable}
+    )
+    or exists (
+      select 1
+      from unified_markets om
+      join polymarket_markets pm_om
+        on pm_om.id = om.venue_market_id
+       and om.venue = 'polymarket'
+      where om.event_id = ${eventAlias}.id
+        and ${buildPolymarketGraceMarketSql({
+          marketAlias: "om",
+          eventAlias,
+          nowParam: args.nowParam,
+          pmAlias: "pm_om",
+        })}
+        ${renderable}
+    )
+  )`;
+}
+
 export function buildOrderableMarketSql(args: {
   marketAlias: string;
   eventAlias?: string;
@@ -157,25 +303,14 @@ export function buildOrderableMarketSql(args: {
   pmAlias?: string;
 }): string {
   const { marketAlias: m, eventAlias: e, nowParam } = args;
-  const nowCloseParam = args.nowCloseParam ?? nowParam;
-  const activeEventSql = e ? `${e}.status = 'ACTIVE'` : "true";
-  const eventTimeSql = e
-    ? `(${e}.end_date is null or ${e}.end_date > ${nowParam}::timestamptz)`
-    : "true";
-  const polymarketTerminalSql = `least(
-    coalesce(${m}.close_time, 'infinity'::timestamptz),
-    coalesce(${m}.expiration_time, 'infinity'::timestamptz)${
-      e ? `,\n    coalesce(${e}.end_date, 'infinity'::timestamptz)` : ""
-    }
-  )`;
-  const polymarketFreshnessSql = `(
-    ${polymarketTerminalSql} = 'infinity'::timestamptz
-    or ${polymarketTerminalSql} > (${nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL})
-  )`;
-  const marketTimeSql = `(
-    (${m}.expiration_time is null or ${m}.expiration_time > ${nowParam}::timestamptz)
-    and (${m}.close_time is null or ${m}.close_time > ${nowCloseParam}::timestamptz)
-  )`;
+  const activeEventSql = buildActiveEventSql(e);
+  const eventTimeSql = buildEventTimeSql({ eventAlias: e, nowParam });
+  const polymarketFreshnessSql = buildPolymarketFreshnessSql({
+    marketAlias: m,
+    eventAlias: e,
+    nowParam,
+  });
+  const marketTimeSql = buildMarketTimeSql(args);
 
   return `(
     ${m}.status = 'ACTIVE'

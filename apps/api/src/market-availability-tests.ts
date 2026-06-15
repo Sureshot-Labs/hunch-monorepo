@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 
 import {
+  buildBroadOrderableMarketSql,
+  buildEventHasBroadOrderableMarketSql,
   buildOrderableMarketSql,
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
@@ -161,6 +163,36 @@ test("orderable SQL uses Polymarket accepting-orders with grace gate", () => {
   assert.match(sql, /coalesce\(pm\.closed, false\) = false/);
   assert.match(sql, /coalesce\(e\.end_date, 'infinity'::timestamptz\)/);
   assert.match(sql, /interval '6 hours'/);
+});
+
+test("broad orderable SQL keeps strict and Polymarket grace branches simple", () => {
+  const sql = buildBroadOrderableMarketSql({
+    marketAlias: "m",
+    eventAlias: "e",
+    nowParam: "$1",
+    pmAlias: "pm",
+  });
+
+  assert.match(sql, /m\.status = 'ACTIVE'/);
+  assert.match(sql, /e\.status = 'ACTIVE'/);
+  assert.match(sql, /m\.venue <> 'kalshi'/);
+  assert.match(sql, /m\.venue = 'polymarket'/);
+  assert.match(sql, /pm\.accepting_orders = true/);
+  assert.match(sql, /interval '6 hours'/);
+  assert.doesNotMatch(sql, /metadata->>'acceptingOrders'/);
+});
+
+test("event broad orderable SQL isolates Polymarket join to grace branch", () => {
+  const sql = buildEventHasBroadOrderableMarketSql({
+    eventAlias: "e",
+    nowParam: "$1",
+    renderableMarketSql: "om.id is not null",
+  });
+
+  assert.match(sql, /exists \(\s*select 1\s*from unified_markets om\s*where/s);
+  assert.match(sql, /or exists \(\s*select 1\s*from unified_markets om\s*join polymarket_markets pm_om/s);
+  assert.match(sql, /pm_om\.accepting_orders = true/);
+  assert.doesNotMatch(sql, /left join polymarket_markets/);
 });
 
 test("reads DFlow-native accepting-orders from metadata", () => {

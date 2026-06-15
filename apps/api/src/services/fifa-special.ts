@@ -1,5 +1,8 @@
 import type { Pool } from "@hunch/infra";
-import { buildOrderableMarketSql } from "../lib/market-availability.js";
+import {
+  buildBroadOrderableMarketSql,
+  buildEventHasBroadOrderableMarketSql,
+} from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams, TokenPair } from "../server-types.js";
 import type { FifaSection } from "../schemas/special.js";
@@ -323,20 +326,11 @@ function parseFifaMatchIntentQuery(q: string | undefined):
 }
 
 function buildFifaEventHasOrderableMarketSql(nowParam: string): string {
-  return `exists (
-    select 1
-    from unified_markets om
-    left join polymarket_markets pm_om
-      on pm_om.id = om.venue_market_id and om.venue = 'polymarket'
-    where om.event_id = e.id
-      and ${buildOrderableMarketSql({
-        marketAlias: "om",
-        eventAlias: "e",
-        nowParam,
-        pmAlias: "pm_om",
-      })}
-      and ${buildRenderableMarketSql({ alias: "om" })}
-  )`;
+  return buildEventHasBroadOrderableMarketSql({
+    eventAlias: "e",
+    nowParam,
+    renderableMarketSql: buildRenderableMarketSql({ alias: "om" }),
+  });
 }
 
 function buildCombinedFifaTextSql(options: { includeDescription?: boolean } = {}): string {
@@ -684,7 +678,7 @@ function buildSearchSql(
             and querytree(sq.query) <> ''
             and e.status = 'ACTIVE'
             and m.status = 'ACTIVE'
-            and ${buildOrderableMarketSql({
+            and ${buildBroadOrderableMarketSql({
               marketAlias: "m",
               eventAlias: "e",
               nowParam,
@@ -706,7 +700,7 @@ function buildSearchSql(
             and querytree(sq.prefix_query) <> ''
             and e.status = 'ACTIVE'
             and m.status = 'ACTIVE'
-            and ${buildOrderableMarketSql({
+            and ${buildBroadOrderableMarketSql({
               marketAlias: "m",
               eventAlias: "e",
               nowParam,
@@ -729,7 +723,7 @@ function buildSearchSql(
         where not sq.applies
           and e.status = 'ACTIVE'
           and m.status = 'ACTIVE'
-          and ${buildOrderableMarketSql({
+          and ${buildBroadOrderableMarketSql({
             marketAlias: "m",
             eventAlias: "e",
             nowParam,
@@ -753,7 +747,7 @@ function buildSearchSql(
         where not sq.applies
           and e.status = 'ACTIVE'
           and m.status = 'ACTIVE'
-          and ${buildOrderableMarketSql({
+          and ${buildBroadOrderableMarketSql({
             marketAlias: "m",
             eventAlias: "e",
             nowParam,
@@ -824,7 +818,7 @@ function buildBaseSql(args: {
   const sourceRuleExpr = buildFifaSourceRuleSql();
   const search = buildSearchSql(inputs.q, add, nowParam);
   const where = [
-    buildOrderableMarketSql({
+    buildBroadOrderableMarketSql({
       marketAlias: "m",
       eventAlias: "e",
       nowParam,

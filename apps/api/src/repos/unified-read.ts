@@ -1,7 +1,13 @@
 import type { Pool } from "@hunch/infra";
 import type { QueryResultRow } from "pg";
 import { env } from "../env.js";
-import { buildOrderableMarketSql } from "../lib/market-availability.js";
+import {
+  buildBroadOrderableMarketSql,
+  buildEventHasBroadOrderableMarketSql,
+  buildOrderableMarketSql,
+  buildPolymarketGraceMarketSql,
+  buildStrictIndexedMarketSql,
+} from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
 
@@ -134,22 +140,10 @@ function buildEventHasOrderableMarketSql(args: {
   nowParam: string;
   nowCloseParam?: string;
 }): string {
-  const e = args.eventAlias ?? "e";
-  return `exists (
-    select 1
-    from unified_markets om
-    left join polymarket_markets pm_om
-      on pm_om.id = om.venue_market_id and om.venue = 'polymarket'
-    where om.event_id = ${e}.id
-      and ${buildOrderableMarketSql({
-        marketAlias: "om",
-        eventAlias: e,
-        nowParam: args.nowParam,
-        nowCloseParam: args.nowCloseParam,
-        pmAlias: "pm_om",
-      })}
-      and ${buildRenderableMarketSql({ alias: "om" })}
-  )`;
+  return buildEventHasBroadOrderableMarketSql({
+    ...args,
+    renderableMarketSql: buildRenderableMarketSql({ alias: "om" }),
+  });
 }
 
 export function buildEventDurationExistsSql(args: {
@@ -159,21 +153,81 @@ export function buildEventDurationExistsSql(args: {
 }): string | null {
   const durationSql = buildMarketDurationSql(args.inputs, args.add, "dm");
   if (!durationSql) return null;
-  return `exists (
-    select 1
-    from unified_markets dm
-    left join polymarket_markets pm_dm
-      on pm_dm.id = dm.venue_market_id and dm.venue = 'polymarket'
-    where dm.event_id = e.id
-      and ${buildOrderableMarketSql({
-        marketAlias: "dm",
+  return `(
+    exists (
+      select 1
+      from unified_markets dm
+      where dm.event_id = e.id
+        and ${buildStrictIndexedMarketSql({
+          marketAlias: "dm",
+          eventAlias: "e",
+          nowParam: args.nowParam,
+        })}
+        and ${buildRenderableMarketSql({ alias: "dm" })}
+        and ${durationSql}
+    )
+    or exists (
+      select 1
+      from unified_markets dm
+      join polymarket_markets pm_dm
+        on pm_dm.id = dm.venue_market_id
+       and dm.venue = 'polymarket'
+      where dm.event_id = e.id
+        and ${buildPolymarketGraceMarketSql({
+          marketAlias: "dm",
+          eventAlias: "e",
+          nowParam: args.nowParam,
+          pmAlias: "pm_dm",
+        })}
+        and ${buildRenderableMarketSql({ alias: "dm" })}
+        and ${durationSql}
+    )
+  )`;
+}
+
+function buildBroadOrderableMarketCandidatesCte(args: {
+  cteName?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+  extraMarketSql?: string[];
+}): string {
+  const cteName = args.cteName ?? "orderable_market_candidates";
+  const extraSql = (args.extraMarketSql ?? [])
+    .filter(Boolean)
+    .map((clause) => `and ${clause}`)
+    .join("\n        ");
+  return `
+    ${cteName} as (
+      select
+        m.id as market_id,
+        m.event_id
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      where ${buildStrictIndexedMarketSql({
+        marketAlias: "m",
         eventAlias: "e",
         nowParam: args.nowParam,
-        pmAlias: "pm_dm",
+        nowCloseParam: args.nowCloseParam,
       })}
-      and ${buildRenderableMarketSql({ alias: "dm" })}
-      and ${durationSql}
-  )`;
+        ${extraSql}
+      union all
+      select
+        m.id as market_id,
+        m.event_id
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      join polymarket_markets pm_filter
+        on pm_filter.id = m.venue_market_id
+       and m.venue = 'polymarket'
+      where ${buildPolymarketGraceMarketSql({
+        marketAlias: "m",
+        eventAlias: "e",
+        nowParam: args.nowParam,
+        pmAlias: "pm_filter",
+      })}
+        ${extraSql}
+    )
+  `;
 }
 
 type FeedSqlExpressions = {
@@ -973,7 +1027,7 @@ function buildFeedMarketViewContext(args: {
       left join polymarket_markets pm_filter
         on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
       ${search.searchMarketJoin}
-      where ${buildOrderableMarketSql({
+      where ${buildBroadOrderableMarketSql({
         marketAlias: "m",
         eventAlias: "e",
         nowParam,
@@ -989,7 +1043,7 @@ function buildFeedMarketViewContext(args: {
     )
   `;
   const where: string[] = [
-    buildOrderableMarketSql({
+    buildBroadOrderableMarketSql({
       marketAlias: "m",
       eventAlias: "e",
       nowParam,
@@ -1376,6 +1430,16 @@ export async function fetchFeedCategoryFacetRows(
   const facetJoinDurationSql = buildMarketDurationSql(inputs, add);
   const withParts: string[] = [];
   if (search.searchCte) withParts.push(search.searchCte);
+  withParts.push(
+    buildBroadOrderableMarketCandidatesCte({
+      nowParam,
+      extraMarketSql: [
+        supportedLimitlessMarketExpr,
+        renderableMarketExpr,
+        facetJoinDurationSql ?? "",
+      ],
+    }),
+  );
   withParts.push(`
     filtered_events as (
       select
@@ -1384,19 +1448,9 @@ export async function fetchFeedCategoryFacetRows(
         lower(e.category) as category
       from unified_events e
       ${search.searchEventJoin}
-      join unified_markets m on m.event_id = e.id
-      left join polymarket_markets pm_filter
-        on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+      join orderable_market_candidates omc on omc.event_id = e.id
+      join unified_markets m on m.id = omc.market_id
       where ${eventWhere.join(" and ")}
-        and ${buildOrderableMarketSql({
-          marketAlias: "m",
-          eventAlias: "e",
-          nowParam,
-          pmAlias: "pm_filter",
-        })}
-        and ${supportedLimitlessMarketExpr}
-        and ${renderableMarketExpr}
-        ${facetJoinDurationSql ? `and ${facetJoinDurationSql}` : ""}
       group by
         e.id,
         e.venue,
@@ -1628,8 +1682,18 @@ export async function fetchFeedEventIds(
 
   const withParts: string[] = [];
   if (search.searchCte) withParts.push(search.searchCte);
-  const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
   const eventJoinDurationSql = buildMarketDurationSql(inputs, add);
+  withParts.push(
+    buildBroadOrderableMarketCandidatesCte({
+      nowParam,
+      extraMarketSql: [
+        supportedLimitlessMarketExpr,
+        renderableMarketExpr,
+        eventJoinDurationSql ?? "",
+      ],
+    }),
+  );
+  const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
 
   const eventSql = `
     ${withClause}
@@ -1637,21 +1701,11 @@ export async function fetchFeedEventIds(
       e.id
     from unified_events e
     ${search.searchEventJoin}
-    join unified_markets m on m.event_id = e.id
-    left join polymarket_markets pm_filter
-      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+    join orderable_market_candidates omc on omc.event_id = e.id
+    join unified_markets m on m.id = omc.market_id
     ${eventChangeJoin}
     ${tradeJoin}
     ${eventWhere.length ? "where " + eventWhere.join(" and ") : ""}
-      and ${buildOrderableMarketSql({
-        marketAlias: "m",
-        eventAlias: "e",
-        nowParam,
-        pmAlias: "pm_filter",
-      })}
-      and ${supportedLimitlessMarketExpr}
-      and ${renderableMarketExpr}
-      ${eventJoinDurationSql ? `and ${eventJoinDurationSql}` : ""}
     group by e.id, e.start_date, e.end_date, e.liquidity
     having ${having.map((clause) => `(${clause})`).join(" and ")}
     ${eventOrder ? `order by ${eventOrder}` : ""}
