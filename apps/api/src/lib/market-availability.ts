@@ -8,6 +8,9 @@ type ComputeAcceptingOrdersInput = {
   nowMs?: number;
 };
 
+export const POLYMARKET_ACCEPTING_ORDERS_GRACE_MS = 6 * 60 * 60 * 1000;
+const POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL = "interval '6 hours'";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -63,6 +66,11 @@ export function computeAcceptingOrders(
 
   const closeMs = parseTimestampMs(input.closeTime);
   const expirationMs = parseTimestampMs(input.expirationTime);
+  const terminalCandidates = [closeMs, expirationMs].filter(
+    (value): value is number => value != null,
+  );
+  const terminalMs =
+    terminalCandidates.length > 0 ? Math.min(...terminalCandidates) : null;
   const closedByTime =
     (closeMs != null && closeMs <= nowMs) ||
     (expirationMs != null && expirationMs <= nowMs);
@@ -86,8 +94,112 @@ export function computeAcceptingOrders(
   // unified status is explicitly non-active.
   if (input.pmAcceptingOrders === true) {
     if (inactiveByStatus) return false;
+    if (
+      terminalMs != null &&
+      terminalMs <= nowMs - POLYMARKET_ACCEPTING_ORDERS_GRACE_MS
+    ) {
+      return false;
+    }
     return true;
   }
 
   return activeByUnified;
+}
+
+export function buildPolymarketOrderableSql(args: {
+  marketAlias: string;
+  pmAlias?: string;
+  fallbackSql?: string;
+  freshnessSql?: string;
+}): string {
+  const { marketAlias: m, pmAlias: pm } = args;
+  const metadataAcceptingOrders = `lower(coalesce(${m}.metadata->>'acceptingOrders', 'false')) = 'true'`;
+  const freshMetadataAcceptingOrders = args.freshnessSql
+    ? `(${metadataAcceptingOrders} and ${args.freshnessSql})`
+    : metadataAcceptingOrders;
+  const fallbackSql = args.fallbackSql
+    ? `(${freshMetadataAcceptingOrders} or (${args.fallbackSql}))`
+    : freshMetadataAcceptingOrders;
+  if (!pm) return fallbackSql;
+  const freshnessSql = args.freshnessSql ? `and ${args.freshnessSql}` : "";
+
+  return `(
+    (
+      ${pm}.id is not null
+      and ${pm}.accepting_orders = true
+      and coalesce(${pm}.active, true) = true
+      and coalesce(${pm}.closed, false) = false
+      and coalesce(${pm}.archived, false) = false
+      ${freshnessSql}
+    )
+    or (
+      ${pm}.id is null
+      and ${fallbackSql}
+    )
+  )`;
+}
+
+export function buildNativeTradableMarketSql(alias: string): string {
+  return `(
+    ${alias}.venue <> 'kalshi'
+    or lower(coalesce(${alias}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+  )`;
+}
+
+export function buildOrderableMarketSql(args: {
+  marketAlias: string;
+  eventAlias?: string;
+  nowParam: string;
+  nowCloseParam?: string;
+  pmAlias?: string;
+}): string {
+  const { marketAlias: m, eventAlias: e, nowParam } = args;
+  const nowCloseParam = args.nowCloseParam ?? nowParam;
+  const activeEventSql = e ? `${e}.status = 'ACTIVE'` : "true";
+  const eventTimeSql = e
+    ? `(${e}.end_date is null or ${e}.end_date > ${nowParam}::timestamptz)`
+    : "true";
+  const polymarketTerminalSql = `least(
+    coalesce(${m}.close_time, 'infinity'::timestamptz),
+    coalesce(${m}.expiration_time, 'infinity'::timestamptz)${
+      e ? `,\n    coalesce(${e}.end_date, 'infinity'::timestamptz)` : ""
+    }
+  )`;
+  const polymarketFreshnessSql = `(
+    ${polymarketTerminalSql} = 'infinity'::timestamptz
+    or ${polymarketTerminalSql} > (${nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL})
+  )`;
+  const marketTimeSql = `(
+    (${m}.expiration_time is null or ${m}.expiration_time > ${nowParam}::timestamptz)
+    and (${m}.close_time is null or ${m}.close_time > ${nowCloseParam}::timestamptz)
+  )`;
+
+  return `(
+    ${m}.status = 'ACTIVE'
+    and (
+      (
+        ${m}.venue = 'polymarket'
+        and ${buildPolymarketOrderableSql({
+          marketAlias: m,
+          pmAlias: args.pmAlias,
+          freshnessSql: polymarketFreshnessSql,
+          fallbackSql: `(${activeEventSql} and ${eventTimeSql} and ${marketTimeSql})`,
+        })}
+      )
+      or (
+        ${m}.venue = 'kalshi'
+        and ${activeEventSql}
+        and ${eventTimeSql}
+        and ${marketTimeSql}
+        and lower(coalesce(${m}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
+      )
+      or (
+        ${m}.venue <> 'polymarket'
+        and ${m}.venue <> 'kalshi'
+        and ${activeEventSql}
+        and ${eventTimeSql}
+        and ${marketTimeSql}
+      )
+    )
+  )`;
 }

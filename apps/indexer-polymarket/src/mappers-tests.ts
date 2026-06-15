@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   deriveCategoryFromTags,
   mapPolymarketEventRow,
+  mapToUnifiedEvent,
   mapToUnifiedMarket,
   resolvePolymarketEventCategory,
   resolvePolymarketCategory,
@@ -131,6 +132,23 @@ test("market mapping closes inactive Polymarket child markets", () => {
 
   const unified = mapToUnifiedMarket(market, event.id, event);
   assert.equal(unified.status, "CLOSED");
+});
+
+test("event mapping keeps active Polymarket events open after endDate", () => {
+  const event = {
+    id: "31876",
+    title: "Netherlands vs Japan",
+    description: "A Polymarket event that can still accept orders after endDate.",
+    category: "sports",
+    active: true,
+    closed: false,
+    archived: false,
+    endDate: "2020-01-01T00:00:00.000Z",
+    markets: [],
+  } as unknown as TPolymarketEvent;
+
+  const unified = mapToUnifiedEvent(event);
+  assert.equal(unified.status, "ACTIVE");
 });
 
 test("market mapping preserves stored duration without event context", () => {

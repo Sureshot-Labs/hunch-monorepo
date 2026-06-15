@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { buildFifaSpecialSearchSqlForTest } from "./services/fifa-special.js";
 
 type Venue = "polymarket" | "kalshi" | "limitless";
 
@@ -380,6 +381,24 @@ async function main() {
       slug: `world-cup-paraguay-stage-of-elimination-${suffix}`,
       volumeTotal: 145,
     },
+    {
+      id: id("polymarket:fifa-netherlands-japan"),
+      venue: "polymarket",
+      venueEventId: id("pm-event"),
+      title: "Netherlands vs. Japan",
+      slug: `fifwc-netherlands-japan-2026-06-14-${suffix}`,
+      seriesKey: "soccer-fifwc",
+      seriesTitle: "FIFA World Cup",
+      volumeTotal: 120,
+    },
+    {
+      id: id("polymarket:fifa-group-f-champion"),
+      venue: "polymarket",
+      venueEventId: id("pm-event"),
+      title: `World Cup: Group of Champion Group F ${suffix}`,
+      slug: `world-cup-group-f-champion-${suffix}`,
+      volumeTotal: 1_000,
+    },
   ];
 
   const markets: SeedMarket[] = [
@@ -687,6 +706,24 @@ async function main() {
       slug: `will-paraguay-finish-in-some-other-position-in-the-world-cup-${suffix}`,
       volumeTotal: 120,
     },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[28].id,
+      title: "Netherlands",
+      slug: `fifwc-netherlands-japan-2026-06-14-netherlands-${suffix}`,
+      volumeTotal: 120,
+    },
+    {
+      id: id("pm-market"),
+      venue: "polymarket",
+      venueMarketId: id("pm-venue-market"),
+      eventId: events[29].id,
+      title: "Group F (Tunisia, Japan, Netherlands, Sweden)",
+      slug: `will-the-2026-fifa-world-cup-champion-be-a-nation-from-group-f-${suffix}`,
+      volumeTotal: 1_000,
+    },
   ];
 
   try {
@@ -721,6 +758,18 @@ async function main() {
       `,
       [fixtureKey, fixtureProviderId],
     );
+
+    {
+      const searchSql = buildFifaSpecialSearchSqlForTest("Netherlands Japan");
+      assert.match(searchSql.cte, /and e\.status = 'ACTIVE'/);
+      assert.match(searchSql.cte, /and m\.status = 'ACTIVE'/);
+      assert.match(searchSql.cte, /raw_search_events as materialized/);
+      assert.match(searchSql.cte, /where not sq\.applies/);
+      assert.ok(
+        !searchSql.predicate.includes(" like "),
+        "normal FIFA search predicate must not broad-scan raw LIKE",
+      );
+    }
 
     {
       const response = await app.inject({
@@ -758,6 +807,24 @@ async function main() {
       assert.ok(!ids.includes(events[3].id), "fifa-friendly should be excluded");
       assert.ok(!ids.includes(events[8].id), "generic esports World Cup should be excluded");
       assert.ok(!ids.includes(events[25].id), "Club World Cup should be excluded");
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ limit: 10, q: "Netherlands Japan", venue: "polymarket" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{ eventId: string; fifa: { section: string } }>;
+      }>();
+      const ids = payload.data.map((event) => event.eventId);
+      assert.equal(ids[0], events[28].id);
+      assert.ok(ids.includes(events[29].id));
+      assert.ok(
+        ids.indexOf(events[28].id) < ids.indexOf(events[29].id),
+        "exact match event should rank before same-team group/tournament row",
+      );
     }
 
     {

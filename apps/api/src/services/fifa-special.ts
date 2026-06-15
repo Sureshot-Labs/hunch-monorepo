@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { buildOrderableMarketSql } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams, TokenPair } from "../server-types.js";
 import type { FifaSection } from "../schemas/special.js";
@@ -176,6 +177,7 @@ type FifaCandidateRow = FifaMetaRow &
     sort_time: unknown;
     market_created_at: unknown;
     search_rank: unknown;
+    match_intent_rank: unknown;
   };
 
 export type FifaSpecialPage = {
@@ -218,13 +220,6 @@ export function normalizeFifaSpecialSearchQuery(q: string | undefined): string |
     : trimmed;
 }
 
-function buildNativeTradableMarketSql(alias: string): string {
-  return `(
-    ${alias}.venue <> 'kalshi'
-    or lower(coalesce(${alias}.metadata->>'dflowNativeAcceptingOrders', 'false')) = 'true'
-  )`;
-}
-
 function buildLowerTextSql(parts: string[]): string {
   return `
     lower(
@@ -247,6 +242,101 @@ function buildMarketTextSql(options: { includeDescription?: boolean } = {}): str
     "m.slug",
     ...(options.includeDescription ? ["m.description"] : []),
   ]);
+}
+
+function buildTeamIntentRegex(value: string): string {
+  return `(^|[^a-z0-9])${value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "[-[:space:]]+")}([^a-z0-9]|$)`;
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function teamIntentPatterns(teamKey: string): string[] {
+  const known = TEAM_TO_GROUP.get(teamKey);
+  const values = new Set<string>([
+    teamKey,
+    teamKey.replace(/-/g, " "),
+    known?.team ?? "",
+  ]);
+
+  if (teamKey === "united-states") {
+    values.add("usa");
+    values.add("us");
+    values.add("united states");
+  }
+  if (teamKey === "south-korea") {
+    values.add("korea republic");
+    values.add("republic of korea");
+    values.add("south korea");
+  }
+  if (teamKey === "turkiye") {
+    values.add("turkey");
+    values.add("turkiye");
+  }
+  if (teamKey === "congo-dr") {
+    values.add("dr congo");
+    values.add("congo dr");
+  }
+  if (teamKey === "ivory-coast") {
+    values.add("cote d ivoire");
+    values.add("ivory coast");
+  }
+
+  return Array.from(values)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map(buildTeamIntentRegex);
+}
+
+function parseFifaMatchIntentQuery(q: string | undefined):
+  | { teamARegex: string; teamBRegex: string }
+  | null {
+  const terms = q?.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  if (terms.length === 0) return null;
+
+  const matched = new Map<string, { start: number; end: number }>();
+  for (let start = 0; start < terms.length; start += 1) {
+    for (let end = start + 1; end <= Math.min(terms.length, start + 4); end += 1) {
+      const phrase = terms.slice(start, end).join(" ");
+      const key = canonicalSportsTeamKey(phrase);
+      if (!TEAM_TO_GROUP.has(key)) continue;
+      const current = matched.get(key);
+      if (!current || end - start > current.end - current.start) {
+        matched.set(key, { start, end });
+      }
+    }
+  }
+
+  const teamKeys = Array.from(matched.entries())
+    .sort((left, right) => left[1].start - right[1].start || left[1].end - right[1].end)
+    .map(([key]) => key);
+  const uniqueTeamKeys = Array.from(new Set(teamKeys));
+  if (uniqueTeamKeys.length !== 2) return null;
+
+  return {
+    teamARegex: teamIntentPatterns(uniqueTeamKeys[0]).join("|"),
+    teamBRegex: teamIntentPatterns(uniqueTeamKeys[1]).join("|"),
+  };
+}
+
+function buildFifaEventHasOrderableMarketSql(nowParam: string): string {
+  return `exists (
+    select 1
+    from unified_markets om
+    left join polymarket_markets pm_om
+      on pm_om.id = om.venue_market_id and om.venue = 'polymarket'
+    where om.event_id = e.id
+      and ${buildOrderableMarketSql({
+        marketAlias: "om",
+        eventAlias: "e",
+        nowParam,
+        pmAlias: "pm_om",
+      })}
+      and ${buildRenderableMarketSql({ alias: "om" })}
+  )`;
 }
 
 function buildCombinedFifaTextSql(options: { includeDescription?: boolean } = {}): string {
@@ -467,9 +557,16 @@ function buildSearchSql(
   join: string;
   predicate: string;
   rankExpr: string;
+  matchIntentRankExpr: string;
 } {
   if (!q) {
-    return { cte: "", join: "", predicate: "true", rankExpr: "0" };
+    return {
+      cte: "",
+      join: "",
+      predicate: "true",
+      rankExpr: "0",
+      matchIntentRankExpr: "0",
+    };
   }
 
   const searchParam = add(q);
@@ -488,15 +585,56 @@ function buildSearchSql(
   const marketDocExpr = buildSearchDocumentExpr("m");
   const eventRawExpr = buildEventTextSql({ includeDescription: true });
   const marketRawExpr = buildMarketTextSql({ includeDescription: true });
+  const matchIntent = parseFifaMatchIntentQuery(q);
+  const teamALiteral = matchIntent
+    ? sqlStringLiteral(matchIntent.teamARegex)
+    : null;
+  const teamBLiteral = matchIntent
+    ? sqlStringLiteral(matchIntent.teamBRegex)
+    : null;
+  const eventTextExpr = buildEventTextSql();
+  const combinedTextExpr = buildCombinedFifaTextSql();
+  const matchIntentRankExpr =
+    teamALiteral && teamBLiteral
+      ? `
+        case
+          when (${buildFifaSectionSql()}) in ('match_result', 'match_prop')
+            and ${eventTextExpr} ~ ${teamALiteral}::text
+            and ${eventTextExpr} ~ ${teamBLiteral}::text
+          then 100
+          when ${combinedTextExpr} ~ ${teamALiteral}::text
+            and ${combinedTextExpr} ~ ${teamBLiteral}::text
+          then 10
+          else 0
+        end
+      `
+      : "0";
   return {
     cte: `
       search_query as materialized (
         select
-          websearch_to_tsquery('english', ${searchParam}::text) as query,
-          case
-            when ${prefixParam}::text is null then null::tsquery
-            else to_tsquery('english', ${prefixParam}::text)
-          end as prefix_query
+          prepared.query,
+          prepared.prefix_query,
+          (
+            querytree(prepared.query) <> ''
+            or (prepared.prefix_query is not null and querytree(prepared.prefix_query) <> '')
+          ) as applies
+        from (
+          select
+            raw.query,
+            case
+              when querytree(raw.query) = '' then null::tsquery
+              else raw.prefix_query
+            end as prefix_query
+          from (
+            select
+              websearch_to_tsquery('english', ${searchParam}::text) as query,
+              case
+                when ${prefixParam}::text is null then null::tsquery
+                else to_tsquery('english', ${prefixParam}::text)
+              end as prefix_query
+          ) raw
+        ) prepared
       )
       ,
       matched_search_events as materialized (
@@ -507,9 +645,10 @@ function buildSearchSql(
             ts_rank_cd((${eventDocExpr}), sq.query) as rank
           from unified_events e
           cross join search_query sq
-          where querytree(sq.query) <> ''
+          where sq.applies
+            and querytree(sq.query) <> ''
             and e.status = 'ACTIVE'
-            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and ${buildFifaEventHasOrderableMarketSql(nowParam)}
             and (${eventDocExpr}) @@ sq.query
           union all
           select
@@ -518,9 +657,10 @@ function buildSearchSql(
           from unified_events e
           cross join search_query sq
           where sq.prefix_query is not null
+            and sq.applies
             and querytree(sq.prefix_query) <> ''
             and e.status = 'ACTIVE'
-            and (e.end_date is null or e.end_date > ${nowParam}::timestamptz)
+            and ${buildFifaEventHasOrderableMarketSql(nowParam)}
             and (${eventDocExpr}) @@ sq.prefix_query
         ) hits
         group by id
@@ -536,11 +676,20 @@ function buildSearchSql(
             m.event_id,
             ts_rank_cd((${marketDocExpr}), sq.query) * 2 as rank
           from unified_markets m
+          join unified_events e on e.id = m.event_id
+          left join polymarket_markets pm_search
+            on pm_search.id = m.venue_market_id and m.venue = 'polymarket'
           cross join search_query sq
-          where querytree(sq.query) <> ''
+          where sq.applies
+            and querytree(sq.query) <> ''
+            and e.status = 'ACTIVE'
             and m.status = 'ACTIVE'
-            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-            and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+            and ${buildOrderableMarketSql({
+              marketAlias: "m",
+              eventAlias: "e",
+              nowParam,
+              pmAlias: "pm_search",
+            })}
             and (${marketDocExpr}) @@ sq.query
           union all
           select
@@ -548,37 +697,108 @@ function buildSearchSql(
             m.event_id,
             ts_rank_cd((${marketDocExpr}), sq.prefix_query) * 2 as rank
           from unified_markets m
+          join unified_events e on e.id = m.event_id
+          left join polymarket_markets pm_search
+            on pm_search.id = m.venue_market_id and m.venue = 'polymarket'
           cross join search_query sq
           where sq.prefix_query is not null
+            and sq.applies
             and querytree(sq.prefix_query) <> ''
+            and e.status = 'ACTIVE'
             and m.status = 'ACTIVE'
-            and (m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)
-            and (m.close_time is null or m.close_time > ${nowParam}::timestamptz)
+            and ${buildOrderableMarketSql({
+              marketAlias: "m",
+              eventAlias: "e",
+              nowParam,
+              pmAlias: "pm_search",
+            })}
             and (${marketDocExpr}) @@ sq.prefix_query
         ) hits
         group by market_id, event_id
         order by max(rank) desc nulls last, market_id
         limit ${searchLimitParam}::int
       )
+      ,
+      raw_search_events as materialized (
+        select e.id, 0.000001::numeric as search_rank
+        from unified_events e
+        join unified_markets m on m.event_id = e.id
+        left join polymarket_markets pm_raw
+          on pm_raw.id = m.venue_market_id and m.venue = 'polymarket'
+        cross join search_query sq
+        where not sq.applies
+          and e.status = 'ACTIVE'
+          and m.status = 'ACTIVE'
+          and ${buildOrderableMarketSql({
+            marketAlias: "m",
+            eventAlias: "e",
+            nowParam,
+            pmAlias: "pm_raw",
+          })}
+          and ${buildRenderableMarketSql({ alias: "m" })}
+          and ${buildFifaCandidateSql()}
+          and ${eventRawExpr} like ${rawLikeParam}::text
+        group by e.id
+        order by e.id
+        limit ${searchLimitParam}::int
+      )
+      ,
+      raw_search_markets as materialized (
+        select m.id as market_id, m.event_id, 0.000002::numeric as search_rank
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        left join polymarket_markets pm_raw
+          on pm_raw.id = m.venue_market_id and m.venue = 'polymarket'
+        cross join search_query sq
+        where not sq.applies
+          and e.status = 'ACTIVE'
+          and m.status = 'ACTIVE'
+          and ${buildOrderableMarketSql({
+            marketAlias: "m",
+            eventAlias: "e",
+            nowParam,
+            pmAlias: "pm_raw",
+          })}
+          and ${buildRenderableMarketSql({ alias: "m" })}
+          and ${buildFifaCandidateSql()}
+          and ${marketRawExpr} like ${rawLikeParam}::text
+        order by m.id
+        limit ${searchLimitParam}::int
+      )
     `,
     join: `
       left join matched_search_events se on se.id = e.id
       left join matched_search_markets sm on sm.market_id = m.id
+      left join raw_search_events re on re.id = e.id
+      left join raw_search_markets rm on rm.market_id = m.id
     `,
     predicate: `(
       se.id is not null
       or sm.market_id is not null
-      or ${eventRawExpr} like ${rawLikeParam}::text
-      or ${marketRawExpr} like ${rawLikeParam}::text
+      or re.id is not null
+      or rm.market_id is not null
     )`,
     rankExpr: `
       greatest(
         coalesce(se.search_rank, 0),
         coalesce(sm.search_rank, 0),
-        case when ${eventRawExpr} like ${rawLikeParam}::text then 0.000001 else 0 end,
-        case when ${marketRawExpr} like ${rawLikeParam}::text then 0.000002 else 0 end
+        coalesce(re.search_rank, 0),
+        coalesce(rm.search_rank, 0)
       )
     `,
+    matchIntentRankExpr,
+  };
+}
+
+export function buildFifaSpecialSearchSqlForTest(q: string): {
+  cte: string;
+  predicate: string;
+} {
+  const builder = createParamBuilder();
+  const search = buildSearchSql(q, builder.add, "$now");
+  return {
+    cte: search.cte,
+    predicate: search.predicate,
   };
 }
 
@@ -595,6 +815,7 @@ function buildBaseSql(args: {
   sourceRuleExpr: string;
   searchJoin: string;
   searchRankExpr: string;
+  matchIntentRankExpr: string;
 } {
   const { inputs, add, ignoreSections = false, ignoreVenues = false } = args;
   const nowParam = add(inputs.nowParam);
@@ -603,12 +824,12 @@ function buildBaseSql(args: {
   const sourceRuleExpr = buildFifaSourceRuleSql();
   const search = buildSearchSql(inputs.q, add, nowParam);
   const where = [
-    "e.status = 'ACTIVE'",
-    "m.status = 'ACTIVE'",
-    `(e.end_date is null or e.end_date > ${nowParam}::timestamptz)`,
-    `(m.expiration_time is null or m.expiration_time > ${nowParam}::timestamptz)`,
-    `(m.close_time is null or m.close_time > ${nowParam}::timestamptz)`,
-    buildNativeTradableMarketSql("m"),
+    buildOrderableMarketSql({
+      marketAlias: "m",
+      eventAlias: "e",
+      nowParam,
+      pmAlias: "pm_filter",
+    }),
     buildRenderableMarketSql({ alias: "m" }),
     buildFifaCandidateSql(),
     search.predicate,
@@ -629,6 +850,7 @@ function buildBaseSql(args: {
     sourceRuleExpr,
     searchJoin: search.join,
     searchRankExpr: search.rankExpr,
+    matchIntentRankExpr: search.matchIntentRankExpr,
   };
 }
 
@@ -654,6 +876,7 @@ function buildOrderSql(inputs: FifaSpecialInputs, alias: "event" | "market") {
     return `liquidity_display ${dir} nulls last, ${alias === "event" ? "event_id" : "market_uuid"}`;
   }
   return `
+    match_intent_rank desc nulls last,
     search_rank desc nulls last,
     case ${alias === "event" ? "section" : "fifa_section"}
       when 'winner' then 90
@@ -750,9 +973,12 @@ function buildCandidateKeyProjection(base: ReturnType<typeof buildBaseSql>): str
         when e.venue = 'limitless' then 'medium'
         else 'low'
       end::text as fifa_confidence,
-      (${base.searchRankExpr}) as search_rank
+      (${base.searchRankExpr}) as search_rank,
+      (${base.matchIntentRankExpr}) as match_intent_rank
     from unified_events e
     join unified_markets m on m.event_id = e.id
+    left join polymarket_markets pm_filter
+      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
     ${base.searchJoin}
     where ${base.where.join(" and ")}
   `;
@@ -775,7 +1001,8 @@ function selectedMarketKeysFromJson(jsonParam: string): string {
       fifa_subtype text,
       fifa_source_rule text,
       fifa_confidence text,
-      search_rank numeric
+      search_rank numeric,
+      match_intent_rank numeric
     )
   `;
 }
@@ -797,6 +1024,7 @@ function serializeSelectedCandidateRows(rows: FifaCandidateRow[]): string {
       fifa_source_rule: row.fifa_source_rule,
       fifa_confidence: row.fifa_confidence,
       search_rank: row.search_rank ?? null,
+      match_intent_rank: row.match_intent_rank ?? null,
     })),
   );
 }
@@ -916,6 +1144,8 @@ async function fetchFacets(
       count(distinct m.id)::int as markets
     from unified_events e
     join unified_markets m on m.event_id = e.id
+    left join polymarket_markets pm_filter
+      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
     ${sectionBase.searchJoin}
     where ${sectionBase.where.join(" and ")}
     group by section
@@ -936,6 +1166,8 @@ async function fetchFacets(
       count(distinct m.id)::int as markets
     from unified_events e
     join unified_markets m on m.event_id = e.id
+    left join polymarket_markets pm_filter
+      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
     ${venueBase.searchJoin}
     where ${venueBase.where.join(" and ")}
     group by m.venue
@@ -1081,6 +1313,7 @@ export async function fetchFifaSpecialPage(
             select
               event_id,
               max(search_rank) as search_rank,
+              max(match_intent_rank) as match_intent_rank,
               min(fifa_section) as section,
               max(coalesce(event_volume_display, 0)) as volume_display,
               max(coalesce(event_volume_24h, 0)) as volume_24h_display,
@@ -1149,6 +1382,7 @@ export async function fetchFifaSpecialPage(
             select
               event_id,
               max(search_rank) as search_rank,
+              max(match_intent_rank) as match_intent_rank,
               min(fifa_section) as section,
               max(coalesce(event_volume_display, 0)) as volume_display,
               max(coalesce(event_volume_24h, 0)) as volume_24h_display,
