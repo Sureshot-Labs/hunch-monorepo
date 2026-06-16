@@ -6,6 +6,10 @@ import crypto from "node:crypto";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import {
+  fetchFeedEventIds,
+  fetchFeedMarketsDirect,
+} from "./repos/unified-read.js";
 
 type SeededEvent = {
   id: string;
@@ -32,6 +36,7 @@ type SeededMarket = {
   volume24h?: number;
   liquidity?: number;
   openInterest?: number;
+  durationMinutes?: number;
 };
 
 type CategoriesFacetPayload = {
@@ -98,6 +103,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
   const volume24h = market.volume24h ?? 10;
   const liquidity = market.liquidity ?? 100;
   const openInterest = market.openInterest ?? 50;
+  const durationMinutes = market.durationMinutes ?? 60;
   await pool.query(
     `
       insert into unified_markets (
@@ -110,6 +116,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         category,
         status,
         market_type,
+        duration_minutes,
         open_time,
         close_time,
         expiration_time,
@@ -128,9 +135,9 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       )
       values (
         $1, $2, $3, $4, $5, null, null, 'ACTIVE', 'binary',
-        now() - interval '1 hour', $6, $7,
-        $8, $9, $10, $11, $12, $13, $14,
-        '["Yes","No"]', $15, $16::jsonb, now(), now()
+        $6, now() - interval '1 hour', $7, $8,
+        $9, $10, $11, $12, $13, $14, $15,
+        '["Yes","No"]', $16, $17::jsonb, now(), now()
       )
     `,
     [
@@ -139,6 +146,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       market.venueMarketId,
       market.eventId,
       market.title,
+      durationMinutes,
       market.closeTime.toISOString(),
       market.expirationTime.toISOString(),
       bestBid,
@@ -154,6 +162,81 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       ),
     ],
   );
+}
+
+async function insertMarketMetricRows(markets: SeededMarket[]): Promise<void> {
+  for (const [index, market] of markets.entries()) {
+    await pool.query(
+      `
+        insert into unified_market_change_24h (
+          market_id,
+          change_24h,
+          updated_at
+        )
+        values ($1, $2, now())
+        on conflict (market_id) do update
+          set change_24h = excluded.change_24h,
+              updated_at = excluded.updated_at
+      `,
+      [market.id, (index + 1) / 100],
+    );
+    await pool.query(
+      `
+        insert into unified_market_trade_24h (
+          market_id,
+          volume_24h,
+          vwap,
+          trades,
+          updated_at
+        )
+        values ($1, $2, $3, $4, now())
+        on conflict (market_id) do update
+          set volume_24h = excluded.volume_24h,
+              vwap = excluded.vwap,
+              trades = excluded.trades,
+              updated_at = excluded.updated_at
+      `,
+      [market.id, 100 + index, 0.5, index + 1],
+    );
+  }
+}
+
+async function insertEventTradeRows(events: SeededEvent[]): Promise<void> {
+  for (const [index, event] of events.entries()) {
+    await pool.query(
+      `
+        insert into unified_event_trade_24h (
+          event_id,
+          volume_24h,
+          updated_at
+        )
+        values ($1, $2, now())
+        on conflict (event_id) do update
+          set volume_24h = excluded.volume_24h,
+              updated_at = excluded.updated_at
+      `,
+      [event.id, 200 + index],
+    );
+  }
+}
+
+async function insertEventChangeRows(events: SeededEvent[]): Promise<void> {
+  for (const [index, event] of events.entries()) {
+    await pool.query(
+      `
+        insert into unified_event_change_24h (
+          event_id,
+          change_24h,
+          updated_at
+        )
+        values ($1, $2, now())
+        on conflict (event_id) do update
+          set change_24h = excluded.change_24h,
+              updated_at = excluded.updated_at
+      `,
+      [event.id, (index + 1) / 50],
+    );
+  }
 }
 
 function buildQuery(
@@ -211,7 +294,191 @@ async function assertFacetParity(args: {
   assert.equal(distinctFeedEventCount(feedPayload), expectedEvents);
 }
 
+async function assertMarketScopeFeed(args: {
+  app: Awaited<ReturnType<typeof buildApp>>;
+  category: string;
+  eventScope: "grouped" | "single";
+  sort: string;
+  expectedEventIds: string[];
+  q?: string;
+}) {
+  const { app, category, eventScope, sort, expectedEventIds, q } = args;
+  const response = await app.inject({
+    method: "GET",
+    url: `/feed?${buildQuery({
+      view: "markets",
+      category,
+      event_scope: eventScope,
+      sort,
+      sort_dir: "desc",
+      q,
+      limit: 10,
+    })}`,
+  });
+  assert.equal(response.statusCode, 200);
+  const payload = response.json<FeedPayload>();
+  const actualEventIds = [...new Set(payload.data.map((item) => item.eventId))]
+    .sort()
+    .join(",");
+  assert.equal(actualEventIds, [...expectedEventIds].sort().join(","));
+}
+
+async function assertEventFeed(args: {
+  app: Awaited<ReturnType<typeof buildApp>>;
+  query: Record<string, string | number | undefined>;
+  expectedEventIds: string[];
+}) {
+  const { app, query, expectedEventIds } = args;
+  const response = await app.inject({
+    method: "GET",
+    url: `/feed?${buildQuery({
+      view: "events",
+      limit: 10,
+      ...query,
+    })}`,
+  });
+  assert.equal(response.statusCode, 200);
+  const payload = response.json<FeedPayload>();
+  const actualEventIds = [...new Set(payload.data.map((item) => item.eventId))]
+    .sort()
+    .join(",");
+  assert.equal(actualEventIds, [...expectedEventIds].sort().join(","));
+}
+
+async function assertDirectMarketSqlShape(): Promise<void> {
+  let capturedSql = "";
+  const fakePool = {
+    async query(sql: string) {
+      capturedSql = sql;
+      return { rows: [] };
+    },
+  } as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
+  const now = new Date("2026-06-16T12:00:00.000Z");
+
+  await fetchFeedMarketsDirect(fakePool, {
+    limit: 25,
+    offset: 0,
+    minVol: 0,
+    minLiquidity: 0,
+    view: "markets",
+    eventScope: "grouped",
+    sort: "totalvol",
+    sortDir: "desc",
+    nowParam: now.toISOString(),
+    sevenDaysAgo: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString(),
+    sevenDaysFromNow: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+      .toISOString(),
+  });
+
+  assert.match(capturedSql, /orderable_market_candidates as materialized/);
+  assert.match(
+    capturedSql,
+    /market_count as materialized \([\s\S]*from orderable_market_candidates/s,
+  );
+  assert.match(
+    capturedSql,
+    /from orderable_market_candidates omc\s+join unified_markets m on m\.id = omc\.market_id/s,
+  );
+  assert.doesNotMatch(
+    capturedSql,
+    /market_count as[\s\S]{0,300}from unified_markets m/s,
+  );
+}
+
+async function assertEventFeedSqlShape(): Promise<void> {
+  const now = new Date("2026-06-16T12:00:00.000Z");
+  const baseInputs = {
+    limit: 5,
+    offset: 0,
+    minVol: 0,
+    minLiquidity: 0,
+    view: "events",
+    sortDir: "desc",
+    nowParam: now.toISOString(),
+    sevenDaysAgo: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString(),
+    sevenDaysFromNow: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+      .toISOString(),
+  } satisfies Parameters<typeof fetchFeedEventIds>[1];
+
+  const runWithRows = async (
+    inputs: Partial<Parameters<typeof fetchFeedEventIds>[1]>,
+    rowCount: number,
+  ): Promise<string[]> => {
+    const capturedSql: string[] = [];
+    const fakePool = {
+      async query(sql: string) {
+        capturedSql.push(sql);
+        return {
+          rows: Array.from({ length: rowCount }, (_, index) => ({
+            id: `event-${index}`,
+          })),
+        };
+      },
+    } as unknown as Parameters<typeof fetchFeedEventIds>[0];
+
+    await fetchFeedEventIds(fakePool, {
+      ...baseInputs,
+      ...inputs,
+    });
+    return capturedSql;
+  };
+
+  for (const sort of [
+    undefined,
+    "trending",
+    "totalvol",
+    "liquidity",
+    "openinterest",
+    "time",
+  ]) {
+    const [sql] = await runWithRows({ sort }, baseInputs.limit);
+    assert.match(sql, /ranked_event_candidates as materialized/);
+    assert.match(sql, /valid_ranked_events as materialized/);
+    assert.match(sql, /from unified_events e/s);
+    assert.doesNotMatch(sql, /join orderable_market_candidates/s);
+  }
+
+  {
+    const [sql] = await runWithRows({ sort: "change24h" }, baseInputs.limit);
+    assert.match(sql, /from unified_event_change_24h ec/s);
+    assert.match(sql, /join unified_events e on e\.id = ec\.event_id/s);
+    assert.match(sql, /valid_ranked_events as materialized/);
+  }
+
+  {
+    const [sql] = await runWithRows({ sort: "trending_v2" }, baseInputs.limit);
+    assert.match(sql, /from unified_event_trade_24h et/s);
+    assert.match(sql, /union all/s);
+    assert.match(sql, /valid_ranked_events as materialized/);
+  }
+
+  {
+    const capturedSql: string[] = [];
+    const fakePool = {
+      async query(sql: string) {
+        capturedSql.push(sql);
+        return { rows: [] };
+      },
+    } as unknown as Parameters<typeof fetchFeedEventIds>[0];
+
+    await fetchFeedEventIds(fakePool, {
+      ...baseInputs,
+      sort: "trending",
+    });
+
+    assert.equal(capturedSql.length, 2);
+    assert.match(capturedSql[0], /ranked_event_candidates as materialized/);
+    assert.match(capturedSql[1], /select\s+e\.id[\s\S]*from unified_events e/s);
+    assert.match(capturedSql[1], /exists \(/s);
+  }
+}
+
 async function main() {
+  await assertDirectMarketSqlShape();
+  await assertEventFeedSqlShape();
+
   const app = await buildApp();
   const previousFeedTtl = env.feedTtlSec;
   env.feedTtlSec = 0;
@@ -510,6 +777,9 @@ async function main() {
       await insertMarket(market);
       seededMarketIds.push(market.id);
     }
+    await insertMarketMetricRows(markets);
+    await insertEventTradeRows(events);
+    await insertEventChangeRows(events);
     await pool.query("select refresh_unified_event_active_categories()");
 
     await assertFacetParity({
@@ -550,6 +820,71 @@ async function main() {
         polymarket: 1,
       },
     });
+
+    const alphaEventIds = [events[0].id, events[1].id, events[2].id];
+    await assertEventFeed({
+      app,
+      query: {
+        category: categoryAlpha,
+      },
+      expectedEventIds: alphaEventIds,
+    });
+    for (const sort of [
+      "trending",
+      "totalvol",
+      "liquidity",
+      "openinterest",
+      "time",
+      "change24h",
+      "trending_v2",
+    ]) {
+      await assertEventFeed({
+        app,
+        query: {
+          category: categoryAlpha,
+          sort,
+        },
+        expectedEventIds: alphaEventIds,
+      });
+    }
+    await assertEventFeed({
+      app,
+      query: {
+        category: categoryAlpha,
+        venue: "polymarket",
+        sort: "trending",
+      },
+      expectedEventIds: [events[0].id, events[2].id],
+    });
+    await assertEventFeed({
+      app,
+      query: {
+        category: categoryAlpha,
+        duration_minutes: 60,
+        sort: "totalvol",
+      },
+      expectedEventIds: alphaEventIds,
+    });
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          view: "events",
+          category: categoryAlpha,
+          sort: "trending_v2",
+          end_within_hours: 24,
+          age_within_hours: 24,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      assert.deepEqual(
+        payload.data.map((item) => item.eventId),
+        [events[0].id],
+      );
+    }
 
     {
       const facetResponse = await app.inject({
@@ -696,15 +1031,57 @@ async function main() {
         polymarket: 1,
       },
     });
+
+    for (const sort of ["trending_v2", "change24h", "totalvol"]) {
+      await assertMarketScopeFeed({
+        app,
+        category: categoryScope,
+        eventScope: "grouped",
+        sort,
+        expectedEventIds: [events[5].id],
+      });
+      await assertMarketScopeFeed({
+        app,
+        category: categoryScope,
+        eventScope: "single",
+        sort,
+        expectedEventIds: [events[6].id],
+      });
+    }
+
+    await assertMarketScopeFeed({
+      app,
+      category: categoryScope,
+      eventScope: "grouped",
+      sort: "totalvol",
+      q: `grouped ${suiteId}`,
+      expectedEventIds: [events[5].id],
+    });
   } finally {
     env.feedTtlSec = previousFeedTtl;
     if (seededMarketIds.length > 0) {
+      await pool.query(
+        "delete from unified_market_change_24h where market_id = any($1::text[])",
+        [seededMarketIds],
+      );
+      await pool.query(
+        "delete from unified_market_trade_24h where market_id = any($1::text[])",
+        [seededMarketIds],
+      );
       await pool.query(
         "delete from unified_markets where id = any($1::text[])",
         [seededMarketIds],
       );
     }
     if (seededEventIds.length > 0) {
+      await pool.query(
+        "delete from unified_event_change_24h where event_id = any($1::text[])",
+        [seededEventIds],
+      );
+      await pool.query(
+        "delete from unified_event_trade_24h where event_id = any($1::text[])",
+        [seededEventIds],
+      );
       await pool.query(
         "delete from unified_events where id = any($1::text[])",
         [seededEventIds],
