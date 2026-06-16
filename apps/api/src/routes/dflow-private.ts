@@ -27,12 +27,14 @@ import {
 } from "../services/kalshi-executions.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
-  fetchSolanaBalanceLamports,
   fetchSolanaSignatureStatus,
-  fetchSolanaTokenBalanceByOwnerAndMint,
   formatUiAmount,
   sendSolanaRawTransaction,
 } from "../services/solana-rpc.js";
+import {
+  fetchKalshiAccountBalances,
+  SOLANA_DECIMALS,
+} from "../services/venue-wallet-status.js";
 import {
   dflowExecutionBodySchema,
   dflowOrderQuerySchema,
@@ -42,8 +44,6 @@ import {
   dflowSwapBodySchema,
 } from "../schemas/dflow.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
-
-const SOL_DECIMALS = 9;
 
 type RedisMulti = {
   set: (key: string, value: string, options?: { EX?: number }) => RedisMulti;
@@ -408,22 +408,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const [solLamports, usdc] = await Promise.all([
-          fetchSolanaBalanceLamports({
-            rpcUrls: env.solanaRpcUrls,
-            timeoutMs: env.solanaRpcTimeoutMs,
-            owner: walletAddress,
-          }),
-          fetchSolanaTokenBalanceByOwnerAndMint({
-            rpcUrls: env.solanaRpcUrls,
-            timeoutMs: env.solanaRpcTimeoutMs,
-            owner: walletAddress,
-            mint: env.solanaUsdcMint,
-          }),
-        ]);
-
-        const usdcDecimals = usdc?.decimals ?? 6;
-        const usdcAmount = usdc?.amount ?? 0n;
+        const balances = await fetchKalshiAccountBalances({ walletAddress });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
@@ -432,15 +417,18 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           walletAddress,
           rpcUrl: env.solanaRpcUrl,
           sol: {
-            decimals: SOL_DECIMALS,
-            balance: formatUiAmount(solLamports, SOL_DECIMALS),
-            balanceRaw: solLamports.toString(),
+            decimals: SOLANA_DECIMALS,
+            balance: formatUiAmount(balances.solLamports, SOLANA_DECIMALS),
+            balanceRaw: balances.solLamports.toString(),
           },
           usdc: {
             mint: env.solanaUsdcMint,
-            decimals: usdcDecimals,
-            balance: formatUiAmount(usdcAmount, usdcDecimals),
-            balanceRaw: usdcAmount.toString(),
+            decimals: balances.usdcDecimals,
+            balance: formatUiAmount(
+              balances.usdcAmount,
+              balances.usdcDecimals,
+            ),
+            balanceRaw: balances.usdcAmount.toString(),
           },
         });
       } catch (error) {

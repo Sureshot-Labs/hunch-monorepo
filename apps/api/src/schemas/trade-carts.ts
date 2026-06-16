@@ -23,6 +23,11 @@ export const tradeCartItemStatusSchema = z.enum([
 
 export const tradeCartSideSchema = z.enum(["BUY", "SELL"]);
 export const tradeCartOrderTypeSchema = z.enum(["GTC", "GTD", "FAK", "FOK"]);
+export const tradeCartAllocationModeSchema = z.enum([
+  "manual",
+  "equal_notional",
+  "weighted_notional",
+]);
 
 export const uuidParamsSchema = z.object({
   cartId: z.string().uuid(),
@@ -90,6 +95,27 @@ const optionalAllocationWeight = z
     z.number().positive().nullable().optional(),
   );
 
+const zOptionalBool = z
+  .union([z.boolean(), z.string(), z.undefined()])
+  .transform((v) => v === true || v === "true")
+  .catch(false);
+
+const requiredUnsignedIntegerString = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    return value.trim();
+  },
+  z.string().regex(/^[0-9]+$/, "Expected an unsigned integer string"),
+);
+
+const requiredPositiveNumber = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    return Number(value.trim());
+  },
+  z.number().positive(),
+);
+
 export const tradeCartsListQuerySchema = z.object({
   status: tradeCartStatusSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).catch(50),
@@ -146,10 +172,32 @@ export const tradeCartItemPatchBodySchema = z
     message: "At least one field is required",
   });
 
+export const tradeCartAllocateBodySchema = z
+  .object({
+    mode: tradeCartAllocationModeSchema,
+    totalAmountRaw: optionalUnsignedIntegerString,
+    itemAmounts: z.record(z.string().uuid(), requiredUnsignedIntegerString).optional(),
+    itemWeights: z.record(z.string().uuid(), requiredPositiveNumber).optional(),
+  })
+  .strict();
+
+export const tradeCartPreflightBodySchema = z
+  .object({
+    itemIds: z.array(z.string().uuid()).min(1).optional(),
+    refresh: zOptionalBool.optional(),
+  })
+  .strict()
+  .optional()
+  .default({});
+
 export type TradeCartCreateBody = z.infer<typeof tradeCartCreateBodySchema>;
 export type TradeCartItemCreateBody = z.infer<
   typeof tradeCartItemCreateBodySchema
 >;
 export type TradeCartItemPatchBody = z.infer<
   typeof tradeCartItemPatchBodySchema
+>;
+export type TradeCartAllocateBody = z.infer<typeof tradeCartAllocateBodySchema>;
+export type TradeCartPreflightBody = z.infer<
+  typeof tradeCartPreflightBodySchema
 >;

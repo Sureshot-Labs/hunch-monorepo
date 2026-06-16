@@ -375,7 +375,7 @@ export async function patchTradeCartItem(
       orderType?: TradeCartOrderType | null;
       limitPrice?: number | null;
       amountRaw?: string | null;
-      allocationWeight?: number | null;
+      allocationWeight?: number | string | null;
       walletAddress?: string | null;
       signerAddress?: string | null;
       funderAddress?: string | null;

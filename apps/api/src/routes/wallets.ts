@@ -5,7 +5,6 @@ import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
-import { verifyProofAddress } from "../services/proof-client.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaMintDecimals,
@@ -32,6 +31,14 @@ import {
   POLYGON_NATIVE_USDC_ADDRESS,
 } from "../services/polymarket-onchain.js";
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
+import { addLockedCollateralFields } from "../services/locked-balance.js";
+import {
+  BASE_CHAIN_ID,
+  buildKalshiVenueStatus,
+  POLYGON_CHAIN_ID,
+  SOLANA_CHAIN_ID,
+  SOLANA_NATIVE_ADDRESS,
+} from "../services/venue-wallet-status.js";
 import {
   walletBalancesBatchQuerySchema,
   walletBalancesQuerySchema,
@@ -66,21 +73,16 @@ type BalanceWalletResolution = {
   source: "linked" | "derived_funder";
 };
 
-const SOLANA_CHAIN_ID = "7565164";
 const ETHEREUM_CHAIN_ID = "1";
 const OPTIMISM_CHAIN_ID = "10";
 const BSC_CHAIN_ID = "56";
-const POLYGON_CHAIN_ID = "137";
 const ARBITRUM_CHAIN_ID = "42161";
 const AVALANCHE_CHAIN_ID = "43114";
 const LINEA_CHAIN_ID = "59144";
-const BASE_CHAIN_ID = "8453";
-const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const VENUE_STATUS_TTL_MS = 15_000;
 const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
-const KALSHI_LOW_SOL_BUFFER_LAMPORTS = 2_000_000n;
 
 const DEBRIDGE_CHAIN_ID_ALIASES: Record<string, string> = {
   "100000001": "245022934", // Neon
@@ -194,46 +196,6 @@ function writeVenueStatusCache(key: string, value: WalletVenueStatus) {
     value,
     expiresAt: Date.now() + VENUE_STATUS_TTL_MS,
   });
-}
-
-function parseOptionalBigInt(value: unknown): bigint | null {
-  if (typeof value === "bigint") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return null;
-    return BigInt(Math.trunc(value));
-  }
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!/^-?\d+$/.test(trimmed)) return null;
-  return BigInt(trimmed);
-}
-
-function addLockedCollateralFields<T extends Record<string, unknown>>(
-  tokenStatus: T,
-  lockedRaw: bigint,
-): T & {
-  lockedRaw: string;
-  locked: string;
-  availableAfterLockedRaw: string;
-  availableAfterLocked: string;
-} {
-  const decimals =
-    typeof tokenStatus.decimals === "number" ? tokenStatus.decimals : 6;
-  const balanceRaw = parseOptionalBigInt(tokenStatus.balanceRaw) ?? 0n;
-  const normalizedLockedRaw = lockedRaw > 0n ? lockedRaw : 0n;
-  const availableAfterLockedRaw =
-    balanceRaw > normalizedLockedRaw ? balanceRaw - normalizedLockedRaw : 0n;
-
-  return {
-    ...tokenStatus,
-    lockedRaw: normalizedLockedRaw.toString(),
-    locked: ethers.formatUnits(normalizedLockedRaw, decimals),
-    availableAfterLockedRaw: availableAfterLockedRaw.toString(),
-    availableAfterLocked: ethers.formatUnits(
-      availableAfterLockedRaw,
-      decimals,
-    ),
-  };
 }
 
 const FALLBACK_TOKEN_META: Record<string, Record<string, TokenMeta>> = {
@@ -1839,87 +1801,12 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
 
           if (walletType === "solana") {
             try {
-              const creds = await AuthService.getVenueCredentialsInfo(
-                user.id,
-                "kalshi",
+              response.kalshi = await buildKalshiVenueStatus({
+                userId: user.id,
+                user,
                 walletAddress,
-              );
-              const [solBalance, usdcBalance] = await Promise.all([
-                fetchSolanaBalanceLamports({
-                  rpcUrls: env.solanaRpcUrls,
-                  owner: walletAddress,
-                  timeoutMs: env.solanaRpcTimeoutMs,
-                }),
-                fetchSolanaTokenBalanceByOwnerAndMint({
-                  rpcUrls: env.solanaRpcUrls,
-                  owner: walletAddress,
-                  mint: env.solanaUsdcMint,
-                  timeoutMs: env.solanaRpcTimeoutMs,
-                }),
-              ]);
-
-              const usdcAmount = usdcBalance?.amount ?? 0n;
-              const usdcDecimals = usdcBalance?.decimals ?? 6;
-              const reasons: string[] = [];
-              if (solBalance < KALSHI_LOW_SOL_BUFFER_LAMPORTS) {
-                reasons.push("low_sol_balance");
-              }
-              if (usdcAmount <= 0n) reasons.push("insufficient_usdc");
-
-              const proofBypass = user.kalshiProofBypass ? "user" : "none";
-              let proofVerified = false;
-              let proofRequiredForBuy = false;
-              let proofReason:
-                | "required"
-                | "unavailable"
-                | "disabled"
-                | "bypassed"
-                | undefined;
-
-              if (!env.kalshiProofEnabled) {
-                proofReason = "disabled";
-              } else if (proofBypass !== "none") {
-                proofReason = "bypassed";
-              } else {
-                const proofCheck = await verifyProofAddress({
-                  address: walletAddress,
-                  forceRefresh: refresh,
-                });
-                if (proofCheck.ok) {
-                  proofVerified = proofCheck.verified;
-                  if (!proofCheck.verified) {
-                    proofRequiredForBuy = true;
-                    proofReason = "required";
-                  }
-                } else {
-                  proofRequiredForBuy = true;
-                  proofReason = "unavailable";
-                }
-              }
-
-              response.kalshi = {
-                supported: true,
-                ready: reasons.length === 0,
-                reasons,
-                hasCredentials: Boolean(creds),
-                proofVerified,
-                proofRequiredForBuy,
-                proofBypass,
-                ...(proofReason ? { proofReason } : {}),
-                sol: {
-                  balance: formatUiAmount(solBalance, 9),
-                  balanceRaw: solBalance.toString(),
-                  decimals: 9,
-                  symbol: "SOL",
-                },
-                usdc: {
-                  mint: env.solanaUsdcMint,
-                  balance: formatUiAmount(usdcAmount, usdcDecimals),
-                  balanceRaw: usdcAmount.toString(),
-                  decimals: usdcDecimals,
-                  symbol: "USDC",
-                },
-              };
+                refresh,
+              });
             } catch (error) {
               app.log.warn(
                 { error, walletAddress },

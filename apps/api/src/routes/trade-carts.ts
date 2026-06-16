@@ -10,10 +10,20 @@ import {
   patchTradeCartItem,
 } from "../repos/trade-carts-repo.js";
 import {
+  allocateTradeCart,
+  TradeCartAllocationError,
+} from "../services/trade-cart-allocation.js";
+import {
+  preflightTradeCart,
+  TradeCartPreflightError,
+} from "../services/trade-cart-preflight.js";
+import {
+  tradeCartAllocateBodySchema,
   tradeCartCreateBodySchema,
   tradeCartItemCreateBodySchema,
   tradeCartItemParamsSchema,
   tradeCartItemPatchBodySchema,
+  tradeCartPreflightBodySchema,
   tradeCartsListQuerySchema,
   uuidParamsSchema,
 } from "../schemas/trade-carts.js";
@@ -232,6 +242,94 @@ export const tradeCartRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to update trade cart item" });
+      }
+    },
+  );
+
+  z.post(
+    "/trade-carts/:cartId/allocate",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { params: uuidParamsSchema, body: tradeCartAllocateBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const allocation = await allocateTradeCart(pool, {
+          userId: user.id,
+          cartId: request.params.cartId,
+          mode: request.body.mode,
+          totalAmountRaw: request.body.totalAmountRaw,
+          itemAmounts: request.body.itemAmounts,
+          itemWeights: request.body.itemWeights,
+        });
+
+        if (!allocation) {
+          reply.code(404);
+          return reply.send({ error: "Trade cart not found" });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ ok: true, ...allocation });
+      } catch (error) {
+        if (error instanceof TradeCartAllocationError) {
+          reply.code(error.statusCode);
+          return reply.send({ error: error.message });
+        }
+        app.log.error(
+          { error, userId: user.id, cartId: request.params.cartId },
+          "Failed to allocate trade cart",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to allocate trade cart" });
+      }
+    },
+  );
+
+  z.post(
+    "/trade-carts/:cartId/preflight",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { params: uuidParamsSchema, body: tradeCartPreflightBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      try {
+        const result = await preflightTradeCart(pool, {
+          userId: user.id,
+          cartId: request.params.cartId,
+          itemIds: request.body.itemIds,
+          refresh: request.body.refresh,
+        });
+
+        if (!result) {
+          reply.code(404);
+          return reply.send({ error: "Trade cart not found" });
+        }
+
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({ cart: result.cart, ...result.preflight });
+      } catch (error) {
+        if (error instanceof TradeCartPreflightError) {
+          reply.code(error.statusCode);
+          return reply.send({ error: error.message });
+        }
+        app.log.error(
+          { error, userId: user.id, cartId: request.params.cartId },
+          "Failed to preflight trade cart",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to preflight trade cart" });
       }
     },
   );
