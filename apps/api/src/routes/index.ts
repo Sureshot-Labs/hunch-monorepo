@@ -31,6 +31,7 @@ import { signalsRoutes } from "./signals.js";
 import { solanaRoutes } from "./solana.js";
 import { specialRoutes } from "./special.js";
 import { tradePolicyRoutes } from "./trade-policies.js";
+import { tradeCartRoutes } from "./trade-carts.js";
 import { walletsRoutes } from "./wallets.js";
 import { walletIntelRoutes } from "./wallet-intel.js";
 import { watchlistRoutes } from "./watchlist.js";
@@ -66,6 +67,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(executionsRoutes);
   await app.register(ordersRoutes);
   await app.register(tradesRoutes);
+  await app.register(tradeCartRoutes);
   await app.register(rewardsRoutes);
   await app.register(signalsRoutes);
   await app.register(positionsRoutes);
