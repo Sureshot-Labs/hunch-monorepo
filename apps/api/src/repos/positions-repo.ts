@@ -45,6 +45,23 @@ export type PositionPnlSummary = {
   unrealizedPnlPercentCurrent: number | null;
 };
 
+type PositionMutationLockInput = {
+  userId: string;
+  venue: Position["venue"];
+};
+
+export type PositionMetricsInput = {
+  userId: string;
+  walletAddress: string;
+  venue: Position["venue"];
+  metrics: Array<{
+    tokenId: string;
+    averagePrice: number | null;
+    realizedPnl: number;
+    unrealizedPnl: number;
+  }>;
+};
+
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 const POSITION_TOKEN_MARKET_MATCH_SQL = `
@@ -217,6 +234,91 @@ function parseNumeric(value: string | null | undefined): number {
   if (value == null) return 0;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getPgErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function isTransientPgWriteConflict(error: unknown): boolean {
+  const code = getPgErrorCode(error);
+  return code === "40P01" || code === "40001";
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithPositionWriteRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isTransientPgWriteConflict(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = 50 * attempt + Math.floor(Math.random() * 75);
+      console.warn("[positions] retry after transient write conflict", {
+        label,
+        attempt,
+        maxAttempts,
+        delayMs,
+        code: getPgErrorCode(error),
+      });
+      await sleep(delayMs);
+    }
+  }
+  throw new Error("position write retry exhausted");
+}
+
+function sortTokenIds(tokenIds: string[]): string[] {
+  return Array.from(new Set(tokenIds)).sort((a, b) => a.localeCompare(b));
+}
+
+function sortTokenBalances(
+  balances: WalletTokenBalance[],
+): WalletTokenBalance[] {
+  return [...balances].sort((a, b) => a.tokenId.localeCompare(b.tokenId));
+}
+
+function sortPositionMetrics(
+  metrics: PositionMetricsInput["metrics"],
+): PositionMetricsInput["metrics"] {
+  const byToken = new Map<string, PositionMetricsInput["metrics"][number]>();
+  for (const metric of metrics) {
+    byToken.set(metric.tokenId, metric);
+  }
+  return [...byToken.values()].sort((a, b) =>
+    a.tokenId.localeCompare(b.tokenId),
+  );
+}
+
+export async function acquirePositionMutationLock(
+  client: PoolClient,
+  inputs: PositionMutationLockInput,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `positions:${inputs.userId}:${inputs.venue}`,
+  ]);
+}
+
+export async function withPositionMutationLock<T>(
+  pool: Pool,
+  inputs: PositionMutationLockInput,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return runWithPositionWriteRetry(`positions:${inputs.venue}`, () =>
+    tx(pool, async (client: PoolClient) => {
+      await acquirePositionMutationLock(client, inputs);
+      return fn(client);
+    }),
+  );
 }
 
 function resolveVenueList(inputs: {
@@ -517,62 +619,76 @@ export async function setPositionHidden(
     reason?: string | null;
   },
 ): Promise<number> {
-  const walletClause = isEthAddress(inputs.walletAddress)
-    ? "lower(wallet_address) = lower($6)"
-    : "wallet_address = $6";
+  return withPositionMutationLock(
+    pool,
+    { userId: inputs.userId, venue: inputs.venue },
+    async (client) => {
+      const walletClause = isEthAddress(inputs.walletAddress)
+        ? "lower(wallet_address) = lower($6)"
+        : "wallet_address = $6";
 
-  const result = await pool.query(
-    `
-      update positions
-      set
-        is_hidden = $1,
-        hidden_reason = $2,
-        hidden_at = case when $1 then now() else null end,
-        updated_at = now()
-      where user_id = $3
-        and venue = $4
-        and token_id = $5
-        and position_scope = 'own'
-        and ${walletClause}
-    `,
-    [
-      inputs.hidden,
-      inputs.hidden ? (inputs.reason ?? "user") : null,
-      inputs.userId,
-      inputs.venue,
-      inputs.tokenId,
-      inputs.walletAddress,
-    ],
-  );
-
-  if (inputs.hidden && (result.rowCount ?? 0) > 0) {
-    const notificationWalletClause = isEthAddress(inputs.walletAddress)
-      ? "lower(p.wallet_address) = lower($4)"
-      : "p.wallet_address = $4";
-
-    await pool.query(
-      `
-        update notifications n
-        set
-          read_at = coalesce(n.read_at, now()),
-          updated_at = now()
-        where n.user_id = $1
-          and n.type = 'position_resolved'
-          and n.dedupe_key in (
-            select 'position_resolved:' || p.id::text
-            from positions p
-            where p.user_id = $1
-              and p.venue = $2
-              and p.token_id = $3
-              and p.position_scope = 'own'
-              and ${notificationWalletClause}
+      const result = await client.query(
+        `
+          with target as (
+            select id
+            from positions
+            where user_id = $3
+              and venue = $4
+              and token_id = $5
+              and position_scope = 'own'
+              and ${walletClause}
+            order by token_id, id
+            for update
           )
-      `,
-      [inputs.userId, inputs.venue, inputs.tokenId, inputs.walletAddress],
-    );
-  }
+          update positions p
+          set
+            is_hidden = $1,
+            hidden_reason = $2,
+            hidden_at = case when $1 then now() else null end,
+            updated_at = now()
+          from target
+          where p.id = target.id
+        `,
+        [
+          inputs.hidden,
+          inputs.hidden ? (inputs.reason ?? "user") : null,
+          inputs.userId,
+          inputs.venue,
+          inputs.tokenId,
+          inputs.walletAddress,
+        ],
+      );
 
-  return result.rowCount ?? 0;
+      if (inputs.hidden && (result.rowCount ?? 0) > 0) {
+        const notificationWalletClause = isEthAddress(inputs.walletAddress)
+          ? "lower(p.wallet_address) = lower($4)"
+          : "p.wallet_address = $4";
+
+        await client.query(
+          `
+            update notifications n
+            set
+              read_at = coalesce(n.read_at, now()),
+              updated_at = now()
+            where n.user_id = $1
+              and n.type = 'position_resolved'
+              and n.dedupe_key in (
+                select 'position_resolved:' || p.id::text
+                from positions p
+                where p.user_id = $1
+                  and p.venue = $2
+                  and p.token_id = $3
+                  and p.position_scope = 'own'
+                  and ${notificationWalletClause}
+              )
+          `,
+          [inputs.userId, inputs.venue, inputs.tokenId, inputs.walletAddress],
+        );
+      }
+
+      return result.rowCount ?? 0;
+    },
+  );
 }
 
 export type WalletTokenBalance = {
@@ -639,7 +755,11 @@ async function upsertLongPositionsInTx(
         now(),
         now(),
         now()
-      from unnest($5::text[], $6::text[], $7::numeric[]) as v(token_id, size, average_price)
+      from (
+        select token_id, size, average_price
+        from unnest($5::text[], $6::text[], $7::numeric[]) as v(token_id, size, average_price)
+        order by token_id
+      ) as v
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
         side = 'LONG',
@@ -737,13 +857,21 @@ async function markMissingPositionsFlatInTx(
 
   const result = await client.query(
     `
-      update positions
+      with target as (
+        select id
+        from positions
+        ${whereClause}
+        order by token_id, id
+        for update
+      )
+      update positions p
       set
         side = 'FLAT',
         size = 0,
         last_updated_at = now(),
         updated_at = now()
-      ${whereClause}
+      from target
+      where p.id = target.id
     `,
     params,
   );
@@ -776,7 +904,9 @@ export async function syncWalletPositionsFromTokenBalances(
     const parsed = Number(balance.size);
     return Number.isFinite(parsed) && parsed >= MIN_POSITION_SIZE;
   });
-  const heldTokenIds = filteredTokenBalances.map((b) => b.tokenId);
+  const heldTokenIds = sortTokenIds(
+    filteredTokenBalances.map((b) => b.tokenId),
+  );
 
   const { rows: knownRows } = await pool.query<{ token_id: string }>(
     `
@@ -789,32 +919,36 @@ export async function syncWalletPositionsFromTokenBalances(
   );
 
   const knownSet = new Set(knownRows.map((row) => row.token_id));
-  const knownTokenBalances = filteredTokenBalances.filter((b) =>
-    knownSet.has(b.tokenId),
+  const knownTokenBalances = sortTokenBalances(
+    filteredTokenBalances.filter((b) => knownSet.has(b.tokenId)),
   );
 
-  const result = await tx(pool, async (client: PoolClient) => {
-    const upsertedPositions = await upsertLongPositionsInTx(client, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: inputs.venue,
-      positionScope,
-      positions: knownTokenBalances,
-      protectRecentFlatsSec: inputs.protectRecentFlatsSec,
-    });
+  const result = await withPositionMutationLock(
+    pool,
+    { userId: inputs.userId, venue: inputs.venue },
+    async (client: PoolClient) => {
+      const upsertedPositions = await upsertLongPositionsInTx(client, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: inputs.venue,
+        positionScope,
+        positions: knownTokenBalances,
+        protectRecentFlatsSec: inputs.protectRecentFlatsSec,
+      });
 
-    const flattenedPositions = await markMissingPositionsFlatInTx(client, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      venue: inputs.venue,
-      positionScope,
-      heldTokenIds,
-      tokenIdLike: inputs.tokenIdLike,
-      flattenGraceSec: inputs.flattenGraceSec,
-    });
+      const flattenedPositions = await markMissingPositionsFlatInTx(client, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: inputs.venue,
+        positionScope,
+        heldTokenIds,
+        tokenIdLike: inputs.tokenIdLike,
+        flattenGraceSec: inputs.flattenGraceSec,
+      });
 
-    return { upsertedPositions, flattenedPositions };
-  });
+      return { upsertedPositions, flattenedPositions };
+    },
+  );
 
   return {
     heldTokens: heldTokenIds.length,
@@ -826,49 +960,73 @@ export async function syncWalletPositionsFromTokenBalances(
 
 export async function updatePositionMetrics(
   pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    venue: Position["venue"];
-    metrics: Array<{
-      tokenId: string;
-      averagePrice: number | null;
-      realizedPnl: number;
-      unrealizedPnl: number;
-    }>;
-  },
+  inputs: PositionMetricsInput,
 ): Promise<void> {
   if (inputs.metrics.length === 0) return;
 
-  const tokenIds = inputs.metrics.map((metric) => metric.tokenId);
-  const averagePrices = inputs.metrics.map((metric) => metric.averagePrice);
-  const realizedPnls = inputs.metrics.map((metric) => metric.realizedPnl);
-  const unrealizedPnls = inputs.metrics.map((metric) => metric.unrealizedPnl);
+  await withPositionMutationLock(
+    pool,
+    { userId: inputs.userId, venue: inputs.venue },
+    async (client) => updatePositionMetricsInTx(client, inputs),
+  );
+}
 
-  await pool.query(
+export async function updatePositionMetricsInTx(
+  client: PoolClient,
+  inputs: PositionMetricsInput,
+): Promise<void> {
+  const metrics = sortPositionMetrics(inputs.metrics);
+  if (metrics.length === 0) return;
+
+  const tokenIds = metrics.map((metric) => metric.tokenId);
+  const averagePrices = metrics.map((metric) => metric.averagePrice);
+  const realizedPnls = metrics.map((metric) => metric.realizedPnl);
+  const unrealizedPnls = metrics.map((metric) => metric.unrealizedPnl);
+
+  await client.query(
     `
+      with metric_values as (
+        select
+          token_id,
+          average_price,
+          realized_pnl,
+          unrealized_pnl
+        from unnest(
+          $1::text[],
+          $2::numeric[],
+          $3::numeric[],
+          $4::numeric[]
+        ) as v(token_id, average_price, realized_pnl, unrealized_pnl)
+        order by token_id
+      ),
+      target as (
+        select
+          p.id,
+          v.average_price,
+          v.realized_pnl,
+          v.unrealized_pnl
+        from positions p
+        join metric_values v
+          on v.token_id = p.token_id
+        where p.user_id = $5
+          and (p.wallet_address is null or p.wallet_address = $6)
+          and p.venue = $7
+          and p.position_scope = 'own'
+        order by p.token_id, p.id
+        for update of p
+      )
       update positions p
       set
         average_price = case
-          when v.average_price is not null then v.average_price
+          when target.average_price is not null then target.average_price
           when p.size > 0 then p.average_price
           else null
         end,
-        realized_pnl = v.realized_pnl,
-        unrealized_pnl = v.unrealized_pnl,
+        realized_pnl = target.realized_pnl,
+        unrealized_pnl = target.unrealized_pnl,
         updated_at = now()
-      from (
-        select
-          unnest($1::text[]) as token_id,
-          unnest($2::numeric[]) as average_price,
-          unnest($3::numeric[]) as realized_pnl,
-          unnest($4::numeric[]) as unrealized_pnl
-      ) v
-      where p.user_id = $5
-        and (p.wallet_address is null or p.wallet_address = $6)
-        and p.venue = $7
-        and p.position_scope = 'own'
-        and p.token_id = v.token_id
+      from target
+      where p.id = target.id
     `,
     [
       tokenIds,

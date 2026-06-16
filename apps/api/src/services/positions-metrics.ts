@@ -1,6 +1,9 @@
 import type { Pool } from "@hunch/infra";
 import type { PgParams } from "../server-types.js";
-import { updatePositionMetrics } from "../repos/positions-repo.js";
+import {
+  updatePositionMetricsInTx,
+  withPositionMutationLock,
+} from "../repos/positions-repo.js";
 
 const USDC_DECIMALS = 6;
 const RAW_DECIMALS = 1_000_000;
@@ -18,6 +21,8 @@ type TradeFill = {
   usdc: number;
   timestamp: Date;
 };
+
+type Queryable = Pick<Pool, "query">;
 
 function computeBuyAveragePrice(fills: TradeFill[]): number | null {
   let shares = 0;
@@ -519,10 +524,10 @@ function computeMetrics(
 }
 
 async function fetchPositionSnapshots(
-  pool: Pool,
+  db: Queryable,
   inputs: { userId: string; walletAddress: string; venue: string },
 ): Promise<PositionSnapshot[]> {
-  const { rows } = await pool.query<{ token_id: string; size: string }>(
+  const { rows } = await db.query<{ token_id: string; size: string }>(
     `
       select token_id, size
       from positions
@@ -530,6 +535,7 @@ async function fetchPositionSnapshots(
         and (wallet_address is null or wallet_address = $2)
         and venue = $3
         and position_scope = 'own'
+      order by token_id
     `,
     [inputs.userId, inputs.walletAddress, inputs.venue],
   );
@@ -541,12 +547,12 @@ async function fetchPositionSnapshots(
 }
 
 async function fetchMarksByToken(
-  pool: Pool,
+  db: Queryable,
   tokenIds: string[],
 ): Promise<Map<string, number | null>> {
   if (tokenIds.length === 0) return new Map();
 
-  const { rows } = await pool.query<MarkRow>(
+  const { rows } = await db.query<MarkRow>(
     `
       select
         mt.token_id,
@@ -589,7 +595,7 @@ async function fetchMarksByToken(
 }
 
 async function fetchPolymarketFills(
-  pool: Pool,
+  db: Queryable,
   inputs: { userId: string; walletAddress: string; tokenIds: string[] },
 ): Promise<TradeFill[]> {
   if (inputs.tokenIds.length === 0) return [];
@@ -600,7 +606,7 @@ async function fetchPolymarketFills(
     inputs.tokenIds,
   ];
 
-  const { rows } = await pool.query<{
+  const { rows } = await db.query<{
     token_id: string | null;
     side: string | null;
     status: string | null;
@@ -661,7 +667,7 @@ async function fetchPolymarketFills(
 }
 
 async function fetchDflowFills(
-  pool: Pool,
+  db: Queryable,
   inputs: { userId: string; walletAddress: string; tokenIds: string[] },
 ): Promise<TradeFill[]> {
   const mintIds = inputs.tokenIds
@@ -669,7 +675,7 @@ async function fetchDflowFills(
     .map((tokenId) => tokenId.replace(/^sol:/, ""));
   if (mintIds.length === 0) return [];
 
-  const { rows } = await pool.query<{
+  const { rows } = await db.query<{
     side: string | null;
     status: string | null;
     input_mint: string | null;
@@ -712,12 +718,12 @@ async function fetchDflowFills(
 }
 
 async function fetchLimitlessFills(
-  pool: Pool,
+  db: Queryable,
   inputs: { userId: string; walletAddress: string; tokenIds: string[] },
 ): Promise<TradeFill[]> {
   if (inputs.tokenIds.length === 0) return [];
 
-  const { rows } = await pool.query<{
+  const { rows } = await db.query<{
     token_id: string | null;
     side: string | null;
     status: string | null;
@@ -761,69 +767,76 @@ export async function recomputePositionMetricsForWallet(
     venue: "polymarket" | "kalshi" | "limitless";
   },
 ): Promise<void> {
-  const positions = await fetchPositionSnapshots(pool, inputs);
-  if (positions.length === 0) return;
+  await withPositionMutationLock(
+    pool,
+    { userId: inputs.userId, venue: inputs.venue },
+    async (client) => {
+      const positions = await fetchPositionSnapshots(client, inputs);
+      if (positions.length === 0) return;
 
-  const tokenIds = positions.map((pos) => pos.tokenId);
-  const [marks, fills] = await Promise.all([
-    fetchMarksByToken(pool, tokenIds),
-    inputs.venue === "polymarket"
-      ? fetchPolymarketFills(pool, {
-          userId: inputs.userId,
-          walletAddress: inputs.walletAddress,
-          tokenIds,
-        })
-      : inputs.venue === "limitless"
-        ? fetchLimitlessFills(pool, {
-            userId: inputs.userId,
-            walletAddress: inputs.walletAddress,
-            tokenIds,
-          })
-        : fetchDflowFills(pool, {
-            userId: inputs.userId,
-            walletAddress: inputs.walletAddress,
-            tokenIds,
-          }),
-  ]);
+      const tokenIds = positions.map((pos) => pos.tokenId);
+      const marks = await fetchMarksByToken(client, tokenIds);
+      const fills =
+        inputs.venue === "polymarket"
+          ? await fetchPolymarketFills(client, {
+              userId: inputs.userId,
+              walletAddress: inputs.walletAddress,
+              tokenIds,
+            })
+          : inputs.venue === "limitless"
+            ? await fetchLimitlessFills(client, {
+                userId: inputs.userId,
+                walletAddress: inputs.walletAddress,
+                tokenIds,
+              })
+            : await fetchDflowFills(client, {
+                userId: inputs.userId,
+                walletAddress: inputs.walletAddress,
+                tokenIds,
+              });
 
-  const fillsByToken = new Map<string, TradeFill[]>();
-  for (const fill of fills) {
-    const list = fillsByToken.get(fill.tokenId) ?? [];
-    list.push(fill);
-    fillsByToken.set(fill.tokenId, list);
-  }
+      const fillsByToken = new Map<string, TradeFill[]>();
+      for (const fill of fills) {
+        const list = fillsByToken.get(fill.tokenId) ?? [];
+        list.push(fill);
+        fillsByToken.set(fill.tokenId, list);
+      }
 
-  const metrics = positions.map((position) => {
-    const tokenFills = fillsByToken.get(position.tokenId) ?? [];
-    const markPrice = marks.get(position.tokenId) ?? null;
-    const {
-      averagePrice,
-      realizedPnl,
-      unrealizedPnl,
-      computedSize,
-      hasUnmatchedSells,
-    } = computeMetrics(tokenFills, position.size, markPrice);
-    const sizeDelta = Math.abs(position.size - computedSize);
-    const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
-    const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
-    const fallbackAveragePrice = !reliable
-      ? (computeOpenBuyAveragePrice(tokenFills, position.size) ??
-        computeBuyAveragePrice(tokenFills))
-      : null;
-    const averagePriceValue = reliable ? averagePrice : fallbackAveragePrice;
+      const metrics = positions.map((position) => {
+        const tokenFills = fillsByToken.get(position.tokenId) ?? [];
+        const markPrice = marks.get(position.tokenId) ?? null;
+        const {
+          averagePrice,
+          realizedPnl,
+          unrealizedPnl,
+          computedSize,
+          hasUnmatchedSells,
+        } = computeMetrics(tokenFills, position.size, markPrice);
+        const sizeDelta = Math.abs(position.size - computedSize);
+        const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
+        const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
+        const fallbackAveragePrice = !reliable
+          ? (computeOpenBuyAveragePrice(tokenFills, position.size) ??
+            computeBuyAveragePrice(tokenFills))
+          : null;
+        const averagePriceValue = reliable
+          ? averagePrice
+          : fallbackAveragePrice;
 
-    return {
-      tokenId: position.tokenId,
-      averagePrice: averagePriceValue,
-      realizedPnl: reliable ? realizedPnl : 0,
-      unrealizedPnl: reliable ? unrealizedPnl : 0,
-    };
-  });
+        return {
+          tokenId: position.tokenId,
+          averagePrice: averagePriceValue,
+          realizedPnl: reliable ? realizedPnl : 0,
+          unrealizedPnl: reliable ? unrealizedPnl : 0,
+        };
+      });
 
-  await updatePositionMetrics(pool, {
-    userId: inputs.userId,
-    walletAddress: inputs.walletAddress,
-    venue: inputs.venue,
-    metrics,
-  });
+      await updatePositionMetricsInTx(client, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        venue: inputs.venue,
+        metrics,
+      });
+    },
+  );
 }
