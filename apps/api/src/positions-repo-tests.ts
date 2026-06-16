@@ -63,12 +63,81 @@ async function cleanupPositionTest(
     await pool.query("delete from unified_markets where id = any($1::text[])", [
       marketIds,
     ]);
-    await pool.query(
-      "delete from unified_events where id = any($1::text[])",
-      [marketIds.map((marketId) => `event-${marketId}`)],
-    );
+    await pool.query("delete from unified_events where id = any($1::text[])", [
+      marketIds.map((marketId) => `event-${marketId}`),
+    ]);
   }
   await pool.query("delete from users where id = $1", [userId]);
+}
+
+async function insertLimitlessToken(
+  tokenId: string,
+  marketId: string,
+  side: "YES" | "NO" = "YES",
+): Promise<void> {
+  await pool.query(
+    `
+      insert into unified_tokens(token_id, venue, market_id, side)
+      values ($1, 'limitless', $2, $3)
+    `,
+    [tokenId, marketId, side],
+  );
+}
+
+async function insertLimitlessPosition(params: {
+  userId: string;
+  walletAddress: string;
+  tokenId: string;
+  size: number;
+  averagePrice: number | null;
+  realizedPnl?: number;
+  unrealizedPnl?: number;
+  lastUpdatedAt?: string;
+}): Promise<void> {
+  await pool.query(
+    `
+      insert into positions (
+        user_id,
+        wallet_address,
+        venue,
+        position_scope,
+        token_id,
+        side,
+        size,
+        average_price,
+        unrealized_pnl,
+        realized_pnl,
+        last_updated_at,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        $2,
+        'limitless',
+        'own',
+        $3,
+        'LONG',
+        $4,
+        $5,
+        $6,
+        $7,
+        $8::timestamptz,
+        now(),
+        now()
+      )
+    `,
+    [
+      params.userId,
+      params.walletAddress,
+      params.tokenId,
+      params.size,
+      params.averagePrice,
+      params.unrealizedPnl ?? 0,
+      params.realizedPnl ?? 0,
+      params.lastUpdatedAt ?? "2026-01-01T00:00:00.000Z",
+    ],
+  );
 }
 
 async function insertResolvedLimitlessMarket(params: {
@@ -549,6 +618,276 @@ await test("metrics refresh does not bump position activity time", async () => {
     assert.equal(row.rows[0]?.last_updated_at.toISOString(), oldActivityTime);
   } finally {
     await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("unsorted metrics update the matching token rows", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenA = `limitless:a-${crypto.randomUUID()}`;
+  const tokenB = `limitless:b-${crypto.randomUUID()}`;
+  const tokenC = `limitless:c-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  const tokens = [tokenA, tokenB, tokenC];
+
+  try {
+    for (const [index, tokenId] of tokens.entries()) {
+      await insertLimitlessToken(
+        tokenId,
+        `limitless-test:${crypto.randomUUID()}`,
+      );
+      await insertLimitlessPosition({
+        userId,
+        walletAddress,
+        tokenId,
+        size: index + 1,
+        averagePrice: 0.5,
+      });
+    }
+
+    await updatePositionMetrics(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      metrics: [
+        {
+          tokenId: tokenC,
+          averagePrice: 0.33,
+          realizedPnl: 3.3,
+          unrealizedPnl: 33,
+        },
+        {
+          tokenId: tokenA,
+          averagePrice: 0.11,
+          realizedPnl: 1.1,
+          unrealizedPnl: 11,
+        },
+        {
+          tokenId: tokenB,
+          averagePrice: 0.22,
+          realizedPnl: 2.2,
+          unrealizedPnl: 22,
+        },
+      ],
+    });
+
+    const { rows } = await pool.query<{
+      token_id: string;
+      average_price: string;
+      realized_pnl: string;
+      unrealized_pnl: string;
+    }>(
+      `
+        select
+          token_id,
+          average_price::text,
+          realized_pnl::text,
+          unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2
+        order by token_id
+      `,
+      [userId, walletAddress],
+    );
+
+    const byToken = new Map(rows.map((row) => [row.token_id, row]));
+    assert.equal(Number(byToken.get(tokenA)?.average_price), 0.11);
+    assert.equal(Number(byToken.get(tokenA)?.realized_pnl), 1.1);
+    assert.equal(Number(byToken.get(tokenA)?.unrealized_pnl), 11);
+    assert.equal(Number(byToken.get(tokenB)?.average_price), 0.22);
+    assert.equal(Number(byToken.get(tokenB)?.realized_pnl), 2.2);
+    assert.equal(Number(byToken.get(tokenB)?.unrealized_pnl), 22);
+    assert.equal(Number(byToken.get(tokenC)?.average_price), 0.33);
+    assert.equal(Number(byToken.get(tokenC)?.realized_pnl), 3.3);
+    assert.equal(Number(byToken.get(tokenC)?.unrealized_pnl), 33);
+  } finally {
+    await cleanupPositionTest(userId, tokens);
+  }
+});
+
+await test("concurrent metrics refreshes serialize same user venue writes", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenA = `limitless:a-${crypto.randomUUID()}`;
+  const tokenB = `limitless:b-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  const tokens = [tokenA, tokenB];
+
+  try {
+    for (const tokenId of tokens) {
+      await insertLimitlessToken(
+        tokenId,
+        `limitless-test:${crypto.randomUUID()}`,
+      );
+      await insertLimitlessPosition({
+        userId,
+        walletAddress,
+        tokenId,
+        size: 2,
+        averagePrice: 0.5,
+      });
+    }
+
+    await Promise.all([
+      updatePositionMetrics(pool, {
+        userId,
+        walletAddress,
+        venue: "limitless",
+        metrics: [
+          {
+            tokenId: tokenA,
+            averagePrice: 0.41,
+            realizedPnl: 4.1,
+            unrealizedPnl: 41,
+          },
+          {
+            tokenId: tokenB,
+            averagePrice: 0.52,
+            realizedPnl: 5.2,
+            unrealizedPnl: 52,
+          },
+        ],
+      }),
+      updatePositionMetrics(pool, {
+        userId,
+        walletAddress,
+        venue: "limitless",
+        metrics: [
+          {
+            tokenId: tokenB,
+            averagePrice: 0.52,
+            realizedPnl: 5.2,
+            unrealizedPnl: 52,
+          },
+          {
+            tokenId: tokenA,
+            averagePrice: 0.41,
+            realizedPnl: 4.1,
+            unrealizedPnl: 41,
+          },
+        ],
+      }),
+    ]);
+
+    const { rows } = await pool.query<{
+      token_id: string;
+      average_price: string;
+      realized_pnl: string;
+      unrealized_pnl: string;
+    }>(
+      `
+        select
+          token_id,
+          average_price::text,
+          realized_pnl::text,
+          unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2
+        order by token_id
+      `,
+      [userId, walletAddress],
+    );
+
+    const byToken = new Map(rows.map((row) => [row.token_id, row]));
+    assert.equal(Number(byToken.get(tokenA)?.average_price), 0.41);
+    assert.equal(Number(byToken.get(tokenA)?.realized_pnl), 4.1);
+    assert.equal(Number(byToken.get(tokenA)?.unrealized_pnl), 41);
+    assert.equal(Number(byToken.get(tokenB)?.average_price), 0.52);
+    assert.equal(Number(byToken.get(tokenB)?.realized_pnl), 5.2);
+    assert.equal(Number(byToken.get(tokenB)?.unrealized_pnl), 52);
+  } finally {
+    await cleanupPositionTest(userId, tokens);
+  }
+});
+
+await test("concurrent sync and metrics refresh leave coherent rows", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenA = `limitless:a-${crypto.randomUUID()}`;
+  const tokenB = `limitless:b-${crypto.randomUUID()}`;
+  const tokenC = `limitless:c-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  const tokens = [tokenA, tokenB, tokenC];
+
+  try {
+    for (const tokenId of tokens) {
+      await insertLimitlessToken(
+        tokenId,
+        `limitless-test:${crypto.randomUUID()}`,
+      );
+      await insertLimitlessPosition({
+        userId,
+        walletAddress,
+        tokenId,
+        size: 1,
+        averagePrice: 0.5,
+      });
+    }
+
+    await Promise.all([
+      syncWalletPositionsFromTokenBalances(pool, {
+        userId,
+        walletAddress,
+        venue: "limitless",
+        tokenBalances: [
+          { tokenId: tokenB, size: "4", averagePrice: "0.44" },
+          { tokenId: tokenA, size: "3", averagePrice: "0.33" },
+        ],
+        tokenIdLike: "limitless:%",
+        flattenGraceSec: 0,
+      }),
+      updatePositionMetrics(pool, {
+        userId,
+        walletAddress,
+        venue: "limitless",
+        metrics: [
+          {
+            tokenId: tokenB,
+            averagePrice: 0.24,
+            realizedPnl: 24,
+            unrealizedPnl: 240,
+          },
+          {
+            tokenId: tokenA,
+            averagePrice: 0.13,
+            realizedPnl: 13,
+            unrealizedPnl: 130,
+          },
+        ],
+      }),
+    ]);
+
+    const { rows } = await pool.query<{
+      token_id: string;
+      side: string;
+      size: string;
+      realized_pnl: string;
+      unrealized_pnl: string;
+    }>(
+      `
+        select
+          token_id,
+          side,
+          size::text,
+          realized_pnl::text,
+          unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2
+        order by token_id
+      `,
+      [userId, walletAddress],
+    );
+
+    const byToken = new Map(rows.map((row) => [row.token_id, row]));
+    assert.equal(byToken.get(tokenA)?.side, "LONG");
+    assert.equal(Number(byToken.get(tokenA)?.size), 3);
+    assert.equal(Number(byToken.get(tokenA)?.realized_pnl), 13);
+    assert.equal(Number(byToken.get(tokenA)?.unrealized_pnl), 130);
+    assert.equal(byToken.get(tokenB)?.side, "LONG");
+    assert.equal(Number(byToken.get(tokenB)?.size), 4);
+    assert.equal(Number(byToken.get(tokenB)?.realized_pnl), 24);
+    assert.equal(Number(byToken.get(tokenB)?.unrealized_pnl), 240);
+    assert.equal(byToken.get(tokenC)?.side, "FLAT");
+    assert.equal(Number(byToken.get(tokenC)?.size), 0);
+  } finally {
+    await cleanupPositionTest(userId, tokens);
   }
 });
 
@@ -1149,13 +1488,15 @@ await test("resolved notification insert skips position hidden after selection",
       reason: "user",
     });
 
-    const notification =
-      await createResolvedPositionNotificationIfVisible(pool, {
+    const notification = await createResolvedPositionNotificationIfVisible(
+      pool,
+      {
         userId,
         position: selectedPosition,
         resolvedOutcome: "NO",
         outcomeSide: "YES",
-      });
+      },
+    );
 
     assert.equal(notification, null);
 

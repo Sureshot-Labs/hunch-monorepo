@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "@hunch/infra";
-import { tx } from "@hunch/infra";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
+import { withPositionMutationLock } from "../repos/positions-repo.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 
 type SupportedVenue = "polymarket" | "kalshi" | "limitless";
@@ -82,6 +82,7 @@ async function selectPositionForUpdate(
         and venue = $3
         and token_id = $4
         and position_scope = 'own'
+      order by token_id, id
       for update
     `,
     [inputs.userId, inputs.walletAddress, inputs.venue, inputs.tokenId],
@@ -278,70 +279,112 @@ export async function reconcileExactPositionBalance(
   if (!tokenId) return { applied: false, reason: "token_missing" };
   if (exactSize == null) return { applied: false, reason: "size_invalid" };
 
-  const result = await tx(pool, async (client: PoolClient) => {
-    const current = await selectPositionForUpdate(client, {
-      userId: input.userId,
-      walletAddress,
-      venue: input.venue,
-      tokenId,
-    });
+  const result = await withPositionMutationLock(
+    pool,
+    { userId: input.userId, venue: input.venue },
+    async (client: PoolClient) => {
+      const current = await selectPositionForUpdate(client, {
+        userId: input.userId,
+        walletAddress,
+        venue: input.venue,
+        tokenId,
+      });
 
-    if (exactSize < MIN_POSITION_SIZE) {
-      if (!current) return { applied: false, reason: "position_not_found" };
+      if (exactSize < MIN_POSITION_SIZE) {
+        if (!current) return { applied: false, reason: "position_not_found" };
 
-      const currentSize = parseNumber(current.size);
-      if (current.side === "FLAT" && currentSize <= 0) {
-        return { applied: false, reason: "position_already_flat" };
+        const currentSize = parseNumber(current.size);
+        if (current.side === "FLAT" && currentSize <= 0) {
+          return { applied: false, reason: "position_already_flat" };
+        }
+
+        await client.query(
+          `
+            update positions
+            set
+              side = 'FLAT',
+              size = 0,
+              average_price = null,
+              last_updated_at = now(),
+              updated_at = now()
+            where id = $1
+          `,
+          [current.id],
+        );
+        return { applied: true };
+      }
+
+      if (!current) {
+        await client.query(
+          `
+            insert into positions (
+              id,
+              user_id,
+              wallet_address,
+              venue,
+              position_scope,
+              token_id,
+              side,
+              size,
+              average_price,
+              unrealized_pnl,
+              realized_pnl,
+              is_hidden,
+              hidden_reason,
+              hidden_at,
+              last_updated_at,
+              created_at,
+              updated_at
+            )
+            values (
+              gen_random_uuid(),
+              $1, $2, $3, 'own', $4, 'LONG',
+              $5, $6, 0, 0, false, null, null, now(), now(), now()
+            )
+            on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
+            do update set
+              side = 'LONG',
+              size = excluded.size,
+              average_price = coalesce(positions.average_price, excluded.average_price),
+              is_hidden = case
+                when positions.side = 'FLAT' or positions.size <= 0 then false
+                else positions.is_hidden
+              end,
+              hidden_reason = case
+                when positions.side = 'FLAT' or positions.size <= 0 then null
+                else positions.hidden_reason
+              end,
+              hidden_at = case
+                when positions.side = 'FLAT' or positions.size <= 0 then null
+                else positions.hidden_at
+              end,
+              last_updated_at = case
+                when positions.side is distinct from 'LONG'
+                  or positions.size is distinct from excluded.size
+                  then now()
+                else positions.last_updated_at
+              end,
+              updated_at = now()
+          `,
+          [
+            input.userId,
+            walletAddress,
+            input.venue,
+            tokenId,
+            exactSize,
+            averagePrice,
+          ],
+        );
+        return { applied: true };
       }
 
       await client.query(
         `
           update positions
           set
-            side = 'FLAT',
-            size = 0,
-            average_price = null,
-            last_updated_at = now(),
-            updated_at = now()
-          where id = $1
-        `,
-        [current.id],
-      );
-      return { applied: true };
-    }
-
-    if (!current) {
-      await client.query(
-        `
-          insert into positions (
-            id,
-            user_id,
-            wallet_address,
-            venue,
-            position_scope,
-            token_id,
-            side,
-            size,
-            average_price,
-            unrealized_pnl,
-            realized_pnl,
-            is_hidden,
-            hidden_reason,
-            hidden_at,
-            last_updated_at,
-            created_at,
-            updated_at
-          )
-          values (
-            gen_random_uuid(),
-            $1, $2, $3, 'own', $4, 'LONG',
-            $5, $6, 0, 0, false, null, null, now(), now(), now()
-          )
-          on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
-          do update set
             side = 'LONG',
-            size = excluded.size,
-            average_price = coalesce(positions.average_price, excluded.average_price),
+            size = $2,
+            average_price = coalesce(positions.average_price, $3),
             is_hidden = case
               when positions.side = 'FLAT' or positions.size <= 0 then false
               else positions.is_hidden
@@ -356,57 +399,19 @@ export async function reconcileExactPositionBalance(
             end,
             last_updated_at = case
               when positions.side is distinct from 'LONG'
-                or positions.size is distinct from excluded.size
+                or positions.size is distinct from $2
                 then now()
               else positions.last_updated_at
             end,
             updated_at = now()
+          where id = $1
         `,
-        [
-          input.userId,
-          walletAddress,
-          input.venue,
-          tokenId,
-          exactSize,
-          averagePrice,
-        ],
+        [current.id, exactSize, averagePrice],
       );
+
       return { applied: true };
-    }
-
-    await client.query(
-      `
-        update positions
-        set
-          side = 'LONG',
-          size = $2,
-          average_price = coalesce(positions.average_price, $3),
-          is_hidden = case
-            when positions.side = 'FLAT' or positions.size <= 0 then false
-            else positions.is_hidden
-          end,
-          hidden_reason = case
-            when positions.side = 'FLAT' or positions.size <= 0 then null
-            else positions.hidden_reason
-          end,
-          hidden_at = case
-            when positions.side = 'FLAT' or positions.size <= 0 then null
-            else positions.hidden_at
-          end,
-          last_updated_at = case
-            when positions.side is distinct from 'LONG'
-              or positions.size is distinct from $2
-              then now()
-            else positions.last_updated_at
-          end,
-          updated_at = now()
-        where id = $1
-      `,
-      [current.id, exactSize, averagePrice],
-    );
-
-    return { applied: true };
-  });
+    },
+  );
 
   if (!result.applied) return result;
 
@@ -453,12 +458,16 @@ async function applyPositionTradeDelta(
     notionalUsd,
   };
 
-  const result = await tx(pool, async (client: PoolClient) => {
-    if (tradeInput.side === "BUY") {
-      return applyBuy(client, tradeInput);
-    }
-    return applySell(client, tradeInput);
-  });
+  const result = await withPositionMutationLock(
+    pool,
+    { userId: tradeInput.userId, venue: tradeInput.venue },
+    async (client: PoolClient) => {
+      if (tradeInput.side === "BUY") {
+        return applyBuy(client, tradeInput);
+      }
+      return applySell(client, tradeInput);
+    },
+  );
 
   if (!result.applied) return result;
 
