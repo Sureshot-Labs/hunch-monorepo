@@ -66,6 +66,7 @@ import {
 } from "../services/candlestick-history.js";
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
 import { polymarketClient } from "../services/polymarket-client.js";
+import { normalizeRedemptionStatus } from "../services/redemption-status.js";
 import {
   fetchFifa2026SportsFixtureForEvent,
   fillMissingSportsFixturesInBackground,
@@ -347,7 +348,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       }
 
       // Create cache key
-      const cacheKey = `market:v3:${marketId}`;
+      const cacheKey = `market:v4:${marketId}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for market data)
@@ -451,6 +452,11 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           }
         }
 
+        const resolvedOutcomePct =
+          market.resolved_outcome_pct != null
+            ? Number(market.resolved_outcome_pct)
+            : null;
+
         const response = {
           marketId: market.market_id,
           venue: market.venue,
@@ -552,11 +558,18 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               ? Boolean(market.is_initialized)
               : null,
           redemptionStatus: market.redemption_status ?? null,
+          redemption: normalizeRedemptionStatus({
+            venue: market.venue,
+            marketStatus: market.market_status,
+            closeTime: market.close_time,
+            expirationTime: market.expiration_time,
+            eventEndTime: market.end_date,
+            rawStatus: market.redemption_status,
+            resolvedOutcome: market.resolved_outcome,
+            resolvedOutcomePct,
+          }),
           resolvedOutcome: market.resolved_outcome ?? null,
-          resolvedOutcomePct:
-            market.resolved_outcome_pct != null
-              ? Number(market.resolved_outcome_pct)
-              : null,
+          resolvedOutcomePct,
           conditionId: market.condition_id || null,
           questionId: market.pm_question_id || null,
           category: market.market_category || null,

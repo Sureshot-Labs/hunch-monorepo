@@ -1,6 +1,9 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
-import { withPositionMutationLock } from "../repos/positions-repo.js";
+import {
+  markPositionFlatByIdInTx,
+  withPositionMutationLock,
+} from "../repos/positions-repo.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 
 type SupportedVenue = "polymarket" | "kalshi" | "limitless";
@@ -298,19 +301,10 @@ export async function reconcileExactPositionBalance(
           return { applied: false, reason: "position_already_flat" };
         }
 
-        await client.query(
-          `
-            update positions
-            set
-              side = 'FLAT',
-              size = 0,
-              average_price = null,
-              last_updated_at = now(),
-              updated_at = now()
-            where id = $1
-          `,
-          [current.id],
-        );
+        await markPositionFlatByIdInTx(client, {
+          positionId: current.id,
+          clearAveragePrice: true,
+        });
         return { applied: true };
       }
 

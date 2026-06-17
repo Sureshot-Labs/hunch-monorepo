@@ -28,6 +28,7 @@ import { polymarketPrivateRoutes } from "./polymarket-private.js";
 import { polymarketProxyRoutes } from "./polymarket-proxy.js";
 import { rewardsRoutes } from "./rewards.js";
 import { signalsRoutes } from "./signals.js";
+import { sharesRoutes } from "./shares.js";
 import { solanaRoutes } from "./solana.js";
 import { specialRoutes } from "./special.js";
 import { tradePolicyRoutes } from "./trade-policies.js";
@@ -69,6 +70,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(tradesRoutes);
   await app.register(tradeCartRoutes);
   await app.register(rewardsRoutes);
+  await app.register(sharesRoutes);
   await app.register(signalsRoutes);
   await app.register(positionsRoutes);
   await app.register(walletsRoutes);

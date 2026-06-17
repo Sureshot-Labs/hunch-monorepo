@@ -10,6 +10,7 @@ import {
 } from "../lib/metadata-description.js";
 import { isRecord } from "../lib/type-guards.js";
 import type { MarketByTokenRow } from "../repos/unified-read.js";
+import { normalizeRedemptionStatus } from "./redemption-status.js";
 
 type LimitlessMeta = {
   negRiskRequestId?: string;
@@ -149,14 +150,18 @@ export function mapMarketsByTokenRows(
     const marketAddress =
       row.venue === "limitless" ? (limitlessMeta?.marketAddress ?? null) : null;
 
+    const outcomeSide =
+      row.token_id === tokens.yes
+        ? "YES"
+        : row.token_id === tokens.no
+          ? "NO"
+          : row.side;
+    const resolvedOutcomePct =
+      row.resolved_outcome_pct != null ? Number(row.resolved_outcome_pct) : null;
+
     return {
       tokenId: row.token_id,
-      side:
-        row.token_id === tokens.yes
-          ? "YES"
-          : row.token_id === tokens.no
-            ? "NO"
-            : row.side,
+      side: outcomeSide,
       market: {
         marketId: row.market_id,
         venue: row.venue,
@@ -204,11 +209,19 @@ export function mapMarketsByTokenRows(
         marketIcon: row.market_icon || null,
         marketAddress,
         redemptionStatus: row.redemption_status || null,
+        redemption: normalizeRedemptionStatus({
+          venue: row.venue,
+          marketStatus: row.market_status,
+          closeTime: row.close_time,
+          expirationTime: row.expiration_time,
+          eventEndTime: row.end_date,
+          rawStatus: row.redemption_status,
+          resolvedOutcome: row.resolved_outcome,
+          resolvedOutcomePct,
+          outcomeSide,
+        }),
         resolvedOutcome: row.resolved_outcome || null,
-        resolvedOutcomePct:
-          row.resolved_outcome_pct != null
-            ? Number(row.resolved_outcome_pct)
-            : null,
+        resolvedOutcomePct,
         acceptingOrders,
         negRisk:
           row.venue === "polymarket"

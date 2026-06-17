@@ -45,10 +45,31 @@ export type PositionPnlSummary = {
   unrealizedPnlPercentCurrent: number | null;
 };
 
+export type PositionReadScopeInput = {
+  userId: string;
+  walletAddresses: string[];
+  venue?: string;
+  venues?: string[];
+};
+
+export type ResolvedPositionReadScope = {
+  walletAddresses: string[];
+  venueList?: string[];
+};
+
+export type PositionPnlScopeInput = PositionReadScopeInput;
+export type ResolvedPositionPnlScope = ResolvedPositionReadScope;
+
 type PositionMutationLockInput = {
   userId: string;
   venue: Position["venue"];
 };
+
+const SUPPORTED_POSITION_READ_VENUES: Position["venue"][] = [
+  "polymarket",
+  "kalshi",
+  "limitless",
+];
 
 export type PositionMetricsInput = {
   userId: string;
@@ -64,36 +85,51 @@ export type PositionMetricsInput = {
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
-const POSITION_TOKEN_MARKET_MATCH_SQL = `
-  select
-    token_market.market_id,
-    token_market.outcome_side
-  from (
+const POSITION_MARKET_JOIN_SQL = `
+  left join lateral (
     select
-      ut.market_id,
-      upper(ut.side) as outcome_side
-    from unified_tokens ut
-    where ut.token_id = p.token_id
-      and ut.venue = p.venue
-    union all
-    select
-      umt.market_id,
-      upper(umt.outcome_side) as outcome_side
-    from unified_market_tokens umt
-    where umt.token_id = p.token_id
-      and umt.venue = p.venue
-  ) token_market
-  where token_market.outcome_side in ('YES', 'NO')
+      token_market.market_id,
+      token_market.outcome_side
+    from (
+      select
+        ut.market_id,
+        upper(ut.side) as outcome_side,
+        case when ut.venue = p.venue then 0 else 1 end as venue_rank,
+        ut.updated_at
+      from unified_tokens ut
+      where ut.token_id = p.token_id
+
+      union all
+
+      select
+        umt.market_id,
+        upper(umt.outcome_side) as outcome_side,
+        case when umt.venue = p.venue then 0 else 1 end as venue_rank,
+        umt.updated_at
+      from unified_market_tokens umt
+      where umt.token_id = p.token_id
+    ) token_market
+    where token_market.outcome_side in ('YES', 'NO')
+    order by
+      token_market.venue_rank asc,
+      token_market.updated_at desc nulls last,
+      token_market.market_id asc
+    limit 1
+  ) umt on true
+  left join unified_markets m
+    on m.id = umt.market_id
 `;
 
-const RESOLVED_POSITION_EXISTS_SQL = `
-  exists (
-    select 1
-    from (${POSITION_TOKEN_MARKET_MATCH_SQL}) token_market
-    join unified_markets m on m.id = token_market.market_id
-    where upper(coalesce(m.resolved_outcome, '')) in ('YES', 'NO')
-       or m.resolved_outcome_pct is not null
+const RESOLVED_MARKET_SQL = `
+  (
+    upper(coalesce(m.resolved_outcome, '')) in ('YES', 'NO')
+    or m.resolved_outcome_pct is not null
   )
+`;
+
+const MATERIALIZABLE_RESOLVED_POSITION_SQL = `
+  p.average_price is not null
+  and ${RESOLVED_MARKET_SQL}
 `;
 
 function isEthAddress(address: string | null | undefined): address is string {
@@ -324,23 +360,18 @@ export async function withPositionMutationLock<T>(
 function resolveVenueList(inputs: {
   venue?: string;
   venues?: string[];
-}): string[] | undefined {
+}): string[] {
   return inputs.venues?.length
     ? Array.from(new Set(inputs.venues))
     : inputs.venue
       ? [inputs.venue]
-      : undefined;
+      : SUPPORTED_POSITION_READ_VENUES;
 }
 
-export async function fetchPositionPnlSummaryForUserWallet(
+export async function resolvePositionReadScope(
   pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddresses: string[];
-    venue?: string;
-    venues?: string[];
-  },
-): Promise<PositionPnlSummary> {
+  inputs: PositionReadScopeInput,
+): Promise<ResolvedPositionReadScope> {
   const venueList = resolveVenueList(inputs);
   const shouldExpandFunders = !venueList || venueList.includes("polymarket");
   const walletAddresses = shouldExpandFunders
@@ -350,7 +381,20 @@ export async function fetchPositionPnlSummaryForUserWallet(
       })
     : inputs.walletAddresses;
 
-  if (walletAddresses.length === 0) {
+  return { walletAddresses, venueList };
+}
+
+export const resolvePositionPnlScope = resolvePositionReadScope;
+
+export async function fetchPositionPnlSummaryForResolvedScope(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddresses: string[];
+    venueList?: string[];
+  },
+): Promise<PositionPnlSummary> {
+  if (inputs.walletAddresses.length === 0) {
     return {
       openPositionsCount: 0,
       positionsCount: 0,
@@ -363,13 +407,13 @@ export async function fetchPositionPnlSummaryForUserWallet(
 
   let whereClause =
     "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
-  const params: PgParams = [inputs.userId, walletAddresses];
+  const params: PgParams = [inputs.userId, inputs.walletAddresses];
   let paramCount = 2;
 
-  if (venueList?.length) {
+  if (inputs.venueList?.length) {
     paramCount += 1;
     whereClause += ` and p.venue = any($${paramCount}::text[])`;
-    params.push(venueList);
+    params.push(inputs.venueList);
   }
 
   const { rows } = await pool.query<PositionPnlSummaryRow>(
@@ -379,7 +423,7 @@ export async function fetchPositionPnlSummaryForUserWallet(
         count(*) filter (
           where p.side <> 'FLAT'
             and p.size > 0
-            and not (${RESOLVED_POSITION_EXISTS_SQL})
+            and not (${RESOLVED_MARKET_SQL})
         )::text as open_positions_count,
         coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::text as total_pnl_all_time,
         coalesce(sum(case
@@ -400,21 +444,7 @@ export async function fetchPositionPnlSummaryForUserWallet(
           else 0
         end), 0)::text as unrealized_cost_basis_current
       from positions p
-      left join lateral (
-        select
-          umt.market_id,
-          umt.outcome_side
-        from unified_market_tokens umt
-        where umt.token_id = p.token_id
-          and umt.outcome_side in ('YES', 'NO')
-        order by
-          case when umt.venue = p.venue then 0 else 1 end,
-          umt.updated_at desc,
-          umt.market_id asc
-        limit 1
-      ) umt on true
-      left join unified_markets m
-        on m.id = umt.market_id
+      ${POSITION_MARKET_JOIN_SQL}
       ${whereClause}
     `,
     params,
@@ -446,6 +476,18 @@ export async function fetchPositionPnlSummaryForUserWallet(
   };
 }
 
+export async function fetchPositionPnlSummaryForUserWallet(
+  pool: Pool,
+  inputs: PositionPnlScopeInput,
+): Promise<PositionPnlSummary> {
+  const scope = await resolvePositionReadScope(pool, inputs);
+  return fetchPositionPnlSummaryForResolvedScope(pool, {
+    userId: inputs.userId,
+    walletAddresses: scope.walletAddresses,
+    venueList: scope.venueList,
+  });
+}
+
 export async function fetchPositionsForUserWallet(
   pool: Pool,
   inputs: {
@@ -457,65 +499,68 @@ export async function fetchPositionsForUserWallet(
     minSize?: number;
   },
 ): Promise<Position[]> {
-  const venueList = resolveVenueList(inputs);
-  const shouldExpandFunders = !venueList || venueList.includes("polymarket");
-  const walletAddresses = shouldExpandFunders
-    ? await expandPolymarketWallets(pool, {
-        userId: inputs.userId,
-        walletAddresses: inputs.walletAddresses,
-      })
-    : inputs.walletAddresses;
+  const { walletAddresses, venueList } = await resolvePositionReadScope(
+    pool,
+    inputs,
+  );
   if (walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and wallet_address = any($2::text[]) and position_scope = 'own'";
+    "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
   const params: PgParams = [inputs.userId, walletAddresses];
   let paramCount = 2;
 
   if (!inputs.includeHidden) {
-    whereClause += " and (is_hidden is null or is_hidden = false)";
+    whereClause += " and (p.is_hidden is null or p.is_hidden = false)";
   }
 
   if (inputs.minSize != null) {
     paramCount += 1;
-    whereClause += ` and size >= $${paramCount}`;
+    whereClause += ` and p.size >= $${paramCount}`;
     params.push(inputs.minSize);
   }
 
   if (venueList?.length) {
     paramCount += 1;
-    whereClause += ` and venue = any($${paramCount}::text[])`;
+    whereClause += ` and p.venue = any($${paramCount}::text[])`;
     params.push(venueList);
   }
 
   const { rows } = await pool.query<PositionRow>(
     `
       select
-        id,
-        user_id,
-        wallet_address,
-        venue,
-        token_id,
-        side,
-        size,
-        average_price,
-        unrealized_pnl,
-        realized_pnl,
-        is_hidden,
-        hidden_reason,
-        hidden_at,
-        last_updated_at,
-        created_at,
-        updated_at
-      from positions
+        p.id,
+        p.user_id,
+        p.wallet_address,
+        p.venue,
+        p.token_id,
+        p.side,
+        p.size,
+        p.average_price,
+        case
+          when ${RESOLVED_MARKET_SQL} then 0
+          else coalesce(p.unrealized_pnl, 0)
+        end::text as unrealized_pnl,
+        case
+          when ${RESOLVED_MARKET_SQL} then ${EFFECTIVE_PNL_SQL}
+          else coalesce(p.realized_pnl, 0)
+        end::text as realized_pnl,
+        p.is_hidden,
+        p.hidden_reason,
+        p.hidden_at,
+        p.last_updated_at,
+        p.created_at,
+        p.updated_at
+      from positions p
+      ${POSITION_MARKET_JOIN_SQL}
       ${whereClause}
       order by
-        last_updated_at desc nulls last,
-        created_at desc nulls last,
-        venue asc,
-        token_id asc,
-        wallet_address asc,
-        id asc
+        p.last_updated_at desc nulls last,
+        p.created_at desc nulls last,
+        p.venue asc,
+        p.token_id asc,
+        p.wallet_address asc,
+        p.id asc
     `,
     params,
   );
@@ -536,71 +581,74 @@ export async function fetchPositionsForUserWalletByTokenIds(
   },
 ): Promise<Position[]> {
   if (inputs.tokenIds.length === 0) return [];
-  const venueList = resolveVenueList(inputs);
+  const { walletAddresses, venueList } = await resolvePositionReadScope(
+    pool,
+    inputs,
+  );
   const tokenIds = normalizeTokenIdsForLookup(inputs.tokenIds, venueList);
   if (tokenIds.length === 0) return [];
-  const shouldExpandFunders = !venueList || venueList.includes("polymarket");
-  const walletAddresses = shouldExpandFunders
-    ? await expandPolymarketWallets(pool, {
-        userId: inputs.userId,
-        walletAddresses: inputs.walletAddresses,
-      })
-    : inputs.walletAddresses;
   if (walletAddresses.length === 0) return [];
 
   let whereClause =
-    "where user_id = $1 and wallet_address = any($2::text[]) and position_scope = 'own'";
+    "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
   const params: PgParams = [inputs.userId, walletAddresses];
   let paramCount = 2;
 
   paramCount += 1;
-  whereClause += ` and token_id = any($${paramCount}::text[])`;
+  whereClause += ` and p.token_id = any($${paramCount}::text[])`;
   params.push(tokenIds);
 
   if (!inputs.includeHidden) {
-    whereClause += " and (is_hidden is null or is_hidden = false)";
+    whereClause += " and (p.is_hidden is null or p.is_hidden = false)";
   }
 
   if (inputs.minSize != null) {
     paramCount += 1;
-    whereClause += ` and size >= $${paramCount}`;
+    whereClause += ` and p.size >= $${paramCount}`;
     params.push(inputs.minSize);
   }
 
   if (venueList?.length) {
     paramCount += 1;
-    whereClause += ` and venue = any($${paramCount}::text[])`;
+    whereClause += ` and p.venue = any($${paramCount}::text[])`;
     params.push(venueList);
   }
 
   const { rows } = await pool.query<PositionRow>(
     `
       select
-        id,
-        user_id,
-        wallet_address,
-        venue,
-        token_id,
-        side,
-        size,
-        average_price,
-        unrealized_pnl,
-        realized_pnl,
-        is_hidden,
-        hidden_reason,
-        hidden_at,
-        last_updated_at,
-        created_at,
-        updated_at
-      from positions
+        p.id,
+        p.user_id,
+        p.wallet_address,
+        p.venue,
+        p.token_id,
+        p.side,
+        p.size,
+        p.average_price,
+        case
+          when ${RESOLVED_MARKET_SQL} then 0
+          else coalesce(p.unrealized_pnl, 0)
+        end::text as unrealized_pnl,
+        case
+          when ${RESOLVED_MARKET_SQL} then ${EFFECTIVE_PNL_SQL}
+          else coalesce(p.realized_pnl, 0)
+        end::text as realized_pnl,
+        p.is_hidden,
+        p.hidden_reason,
+        p.hidden_at,
+        p.last_updated_at,
+        p.created_at,
+        p.updated_at
+      from positions p
+      ${POSITION_MARKET_JOIN_SQL}
       ${whereClause}
       order by
-        last_updated_at desc nulls last,
-        created_at desc nulls last,
-        venue asc,
-        token_id asc,
-        wallet_address asc,
-        id asc
+        p.last_updated_at desc nulls last,
+        p.created_at desc nulls last,
+        p.venue asc,
+        p.token_id asc,
+        p.wallet_address asc,
+        p.id asc
     `,
     params,
   );
@@ -619,24 +667,37 @@ export async function setPositionHidden(
     reason?: string | null;
   },
 ): Promise<number> {
+  const walletAddresses =
+    inputs.venue === "polymarket"
+      ? await expandPolymarketWallets(pool, {
+          userId: inputs.userId,
+          walletAddresses: [inputs.walletAddress],
+        })
+      : [inputs.walletAddress];
+  const exactWalletAddresses = walletAddresses.filter(
+    (walletAddress) => !isEthAddress(walletAddress),
+  );
+  const evmWalletAddresses = walletAddresses
+    .filter(isEthAddress)
+    .map((walletAddress) => walletAddress.toLowerCase());
+
   return withPositionMutationLock(
     pool,
     { userId: inputs.userId, venue: inputs.venue },
     async (client) => {
-      const walletClause = isEthAddress(inputs.walletAddress)
-        ? "lower(wallet_address) = lower($6)"
-        : "wallet_address = $6";
-
-      const result = await client.query(
+      const result = await client.query<{ id: string }>(
         `
           with target as (
             select id
-            from positions
+            from positions p
             where user_id = $3
               and venue = $4
               and token_id = $5
               and position_scope = 'own'
-              and ${walletClause}
+              and (
+                p.wallet_address = any($6::text[])
+                or lower(p.wallet_address) = any($7::text[])
+              )
             order by token_id, id
             for update
           )
@@ -648,6 +709,7 @@ export async function setPositionHidden(
             updated_at = now()
           from target
           where p.id = target.id
+          returning p.id::text as id
         `,
         [
           inputs.hidden,
@@ -655,14 +717,15 @@ export async function setPositionHidden(
           inputs.userId,
           inputs.venue,
           inputs.tokenId,
-          inputs.walletAddress,
+          exactWalletAddresses,
+          evmWalletAddresses,
         ],
       );
 
       if (inputs.hidden && (result.rowCount ?? 0) > 0) {
-        const notificationWalletClause = isEthAddress(inputs.walletAddress)
-          ? "lower(p.wallet_address) = lower($4)"
-          : "p.wallet_address = $4";
+        const dedupeKeys = result.rows.map(
+          (row) => `position_resolved:${row.id}`,
+        );
 
         await client.query(
           `
@@ -672,17 +735,9 @@ export async function setPositionHidden(
               updated_at = now()
             where n.user_id = $1
               and n.type = 'position_resolved'
-              and n.dedupe_key in (
-                select 'position_resolved:' || p.id::text
-                from positions p
-                where p.user_id = $1
-                  and p.venue = $2
-                  and p.token_id = $3
-                  and p.position_scope = 'own'
-                  and ${notificationWalletClause}
-              )
+              and n.dedupe_key = any($2::text[])
           `,
-          [inputs.userId, inputs.venue, inputs.tokenId, inputs.walletAddress],
+          [inputs.userId, dedupeKeys],
         );
       }
 
@@ -698,6 +753,50 @@ export type WalletTokenBalance = {
 };
 
 type PositionScope = "own" | "followed";
+
+export async function markPositionFlatByIdInTx(
+  client: PoolClient,
+  inputs: { positionId: string; clearAveragePrice?: boolean },
+): Promise<number> {
+  const result = await client.query(
+    `
+      with target as (
+        select
+          p.id,
+          case
+            when ${MATERIALIZABLE_RESOLVED_POSITION_SQL}
+              then ${EFFECTIVE_PNL_SQL}
+            else null
+          end as resolved_realized_pnl
+        from positions p
+        ${POSITION_MARKET_JOIN_SQL}
+        where p.id = $1
+        order by p.token_id, p.id
+        for update of p
+      )
+      update positions p
+      set
+        side = 'FLAT',
+        size = 0,
+        average_price = case
+          when $2::boolean then null
+          else p.average_price
+        end,
+        realized_pnl = coalesce(target.resolved_realized_pnl, p.realized_pnl),
+        unrealized_pnl = case
+          when target.resolved_realized_pnl is not null then 0
+          else p.unrealized_pnl
+        end,
+        last_updated_at = now(),
+        updated_at = now()
+      from target
+      where p.id = target.id
+    `,
+    [inputs.positionId, inputs.clearAveragePrice === true],
+  );
+
+  return result.rowCount ?? 0;
+}
 
 async function upsertLongPositionsInTx(
   client: PoolClient,
@@ -822,24 +921,24 @@ async function markMissingPositionsFlatInTx(
   },
 ): Promise<number> {
   const walletClause = isEthAddress(inputs.walletAddress)
-    ? "lower(wallet_address) = lower($2)"
-    : "wallet_address = $2";
-  let whereClause = `where user_id = $1 and ${walletClause} and venue = $3`;
+    ? "lower(p.wallet_address) = lower($2)"
+    : "p.wallet_address = $2";
+  let whereClause = `where p.user_id = $1 and ${walletClause} and p.venue = $3`;
   const params: PgParams = [inputs.userId, inputs.walletAddress, inputs.venue];
   let paramCount = 3;
 
   paramCount += 1;
-  whereClause += ` and position_scope = $${paramCount}`;
+  whereClause += ` and p.position_scope = $${paramCount}`;
   params.push(inputs.positionScope);
 
   if (inputs.tokenIdLike) {
     paramCount += 1;
-    whereClause += ` and token_id like $${paramCount}`;
+    whereClause += ` and p.token_id like $${paramCount}`;
     params.push(inputs.tokenIdLike);
   }
 
   paramCount += 1;
-  whereClause += ` and not (token_id = any($${paramCount}::text[]))`;
+  whereClause += ` and not (p.token_id = any($${paramCount}::text[]))`;
   params.push(inputs.heldTokenIds);
 
   if (
@@ -848,26 +947,38 @@ async function markMissingPositionsFlatInTx(
     inputs.flattenGraceSec > 0
   ) {
     paramCount += 1;
-    whereClause += ` and last_updated_at < now() - ($${paramCount} * interval '1 second')`;
+    whereClause += ` and p.last_updated_at < now() - ($${paramCount} * interval '1 second')`;
     params.push(Math.trunc(inputs.flattenGraceSec));
   }
 
-  whereClause += " and (side <> 'FLAT' or size <> 0)";
-  whereClause += " and not (is_hidden = true and hidden_reason = 'auto_lost')";
+  whereClause += " and (p.side <> 'FLAT' or p.size <> 0)";
+  whereClause += " and not (p.is_hidden = true and p.hidden_reason = 'auto_lost')";
 
   const result = await client.query(
     `
       with target as (
-        select id
-        from positions
+        select
+          p.id,
+          case
+            when ${MATERIALIZABLE_RESOLVED_POSITION_SQL}
+              then ${EFFECTIVE_PNL_SQL}
+            else null
+          end as resolved_realized_pnl
+        from positions p
+        ${POSITION_MARKET_JOIN_SQL}
         ${whereClause}
-        order by token_id, id
-        for update
+        order by p.token_id, p.id
+        for update of p
       )
       update positions p
       set
         side = 'FLAT',
         size = 0,
+        realized_pnl = coalesce(target.resolved_realized_pnl, p.realized_pnl),
+        unrealized_pnl = case
+          when target.resolved_realized_pnl is not null then 0
+          else p.unrealized_pnl
+        end,
         last_updated_at = now(),
         updated_at = now()
       from target
@@ -1004,10 +1115,12 @@ export async function updatePositionMetricsInTx(
           p.id,
           v.average_price,
           v.realized_pnl,
-          v.unrealized_pnl
+          v.unrealized_pnl,
+          (${RESOLVED_MARKET_SQL}) as resolved_position
         from positions p
         join metric_values v
           on v.token_id = p.token_id
+        ${POSITION_MARKET_JOIN_SQL}
         where p.user_id = $5
           and (p.wallet_address is null or p.wallet_address = $6)
           and p.venue = $7
@@ -1022,7 +1135,15 @@ export async function updatePositionMetricsInTx(
           when p.size > 0 then p.average_price
           else null
         end,
-        realized_pnl = target.realized_pnl,
+        realized_pnl = case
+          when p.side = 'FLAT'
+            and p.size <= 0
+            and target.resolved_position
+            and coalesce(p.realized_pnl, 0) <> 0
+            and coalesce(target.realized_pnl, 0) = 0
+            then p.realized_pnl
+          else target.realized_pnl
+        end,
         unrealized_pnl = target.unrealized_pnl,
         updated_at = now()
       from target
