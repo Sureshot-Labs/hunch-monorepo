@@ -5,7 +5,9 @@ import crypto from "node:crypto";
 
 import { pool } from "./db.js";
 import {
+  fetchPositionPnlSummaryForUserWallet,
   fetchPositionsForUserWallet,
+  fetchPositionsForUserWalletByTokenIds,
   setPositionHidden,
   syncWalletPositionsFromTokenBalances,
   updatePositionMetrics,
@@ -68,6 +70,13 @@ async function cleanupPositionTest(
     ]);
   }
   await pool.query("delete from users where id = $1", [userId]);
+}
+
+function assertClose(actual: number, expected: number, epsilon = 1e-9) {
+  assert.ok(
+    Math.abs(actual - expected) <= epsilon,
+    `expected ${actual} to be within ${epsilon} of ${expected}`,
+  );
 }
 
 async function insertLimitlessToken(
@@ -450,6 +459,98 @@ await test("position lists sort by latest real position activity", async () => {
     assert.equal(positions[1]?.tokenId, newerCreatedToken);
   } finally {
     await cleanupPositionTest(userId, [olderCreatedToken, newerCreatedToken]);
+  }
+});
+
+await test("unscoped position reads ignore non-portfolio venues", async () => {
+  const walletAddress = randomEvmAddress();
+  const supportedTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const unsupportedTokenId = `hyperliquid:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const userId = await createTestUser();
+
+  try {
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          (
+            $1,
+            $2,
+            'limitless',
+            'own',
+            $3,
+            'LONG',
+            2,
+            0.5,
+            3,
+            2,
+            now(),
+            now(),
+            now()
+          ),
+          (
+            $1,
+            $2,
+            'hyperliquid',
+            'own',
+            $4,
+            'LONG',
+            10,
+            0.5,
+            -50,
+            -99,
+            now(),
+            now(),
+            now()
+          )
+      `,
+      [userId, walletAddress, supportedTokenId, unsupportedTokenId],
+    );
+
+    const positions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.equal(positions.length, 1);
+    assert.equal(positions[0]?.venue, "limitless");
+    assert.equal(positions[0]?.tokenId, supportedTokenId);
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [supportedTokenId, unsupportedTokenId],
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.equal(byToken.length, 1);
+    assert.equal(byToken[0]?.tokenId, supportedTokenId);
+
+    const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+    });
+    assert.equal(summary.positionsCount, 1);
+    assert.equal(summary.openPositionsCount, 1);
+    assertClose(summary.realizedPnlAllTime, 2);
+    assertClose(summary.unrealizedPnlCurrent, 3);
+  } finally {
+    await cleanupPositionTest(userId, [supportedTokenId, unsupportedTokenId]);
   }
 });
 
@@ -1171,6 +1272,345 @@ await test("exact position reconciliation flattens empty AMM balance", async () 
     assert.equal(flatRow.rows[0]?.side, "FLAT");
     assert.equal(Number(flatRow.rows[0]?.size), 0);
     assert.equal(flatRow.rows[0]?.average_price, null);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("resolved open position list pnl matches summary effective pnl", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+    await insertLimitlessPosition({
+      userId,
+      walletAddress,
+      tokenId,
+      size: 2,
+      averagePrice: 0.4,
+      realizedPnl: 0.25,
+    });
+
+    const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+    });
+    assertClose(summary.realizedPnlAllTime, 1.45);
+    assertClose(summary.unrealizedPnlCurrent, 0);
+
+    const positions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.equal(positions.length, 1);
+    assertClose(positions[0]?.realizedPnl ?? 0, 1.45);
+    assertClose(positions[0]?.unrealizedPnl ?? 0, 0);
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [tokenId],
+      venue: "limitless",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.equal(byToken.length, 1);
+    assertClose(byToken[0]?.realizedPnl ?? 0, 1.45);
+    assertClose(byToken[0]?.unrealizedPnl ?? 0, 0);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId, `other-${tokenId}`], [marketId]);
+  }
+});
+
+await test("resolved winning balance sync flatten materializes payout pnl", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+    await insertLimitlessPosition({
+      userId,
+      walletAddress,
+      tokenId,
+      size: 2,
+      averagePrice: 0.4,
+      realizedPnl: 0.25,
+    });
+
+    const result = await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenBalances: [],
+      tokenIdLike: "limitless:%",
+    });
+    assert.equal(result.flattenedPositions, 1);
+
+    const flatRow = await pool.query<{
+      side: string;
+      size: string;
+      realized_pnl: string | null;
+      unrealized_pnl: string | null;
+    }>(
+      `
+        select side, size::text, realized_pnl::text, unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2 and token_id = $3
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    assert.equal(flatRow.rows[0]?.side, "FLAT");
+    assert.equal(Number(flatRow.rows[0]?.size), 0);
+    assertClose(Number(flatRow.rows[0]?.realized_pnl), 1.45);
+    assertClose(Number(flatRow.rows[0]?.unrealized_pnl), 0);
+
+    const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+    });
+    assertClose(summary.realizedPnlAllTime, 1.45);
+    assertClose(summary.unrealizedPnlCurrent, 0);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId, `other-${tokenId}`], [marketId]);
+  }
+});
+
+await test("resolved losing exact balance flatten survives post-reconcile recompute", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "NO",
+    });
+    await insertLimitlessPosition({
+      userId,
+      walletAddress,
+      tokenId,
+      size: 3,
+      averagePrice: 0.2,
+      realizedPnl: 0,
+    });
+
+    const result = await reconcileExactPositionBalance(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenId,
+      size: 0,
+      averagePrice: 0.2,
+    });
+    assert.equal(result.applied, true);
+
+    const flatRow = await pool.query<{
+      side: string;
+      size: string;
+      average_price: string | null;
+      realized_pnl: string | null;
+      unrealized_pnl: string | null;
+    }>(
+      `
+        select
+          side,
+          size::text,
+          average_price::text,
+          realized_pnl::text,
+          unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2 and token_id = $3
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    assert.equal(flatRow.rows[0]?.side, "FLAT");
+    assert.equal(Number(flatRow.rows[0]?.size), 0);
+    assert.equal(flatRow.rows[0]?.average_price, null);
+    assertClose(Number(flatRow.rows[0]?.realized_pnl), -0.6);
+    assertClose(Number(flatRow.rows[0]?.unrealized_pnl), 0);
+
+    await updatePositionMetrics(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      metrics: [
+        {
+          tokenId,
+          averagePrice: null,
+          realizedPnl: 0,
+          unrealizedPnl: 0,
+        },
+      ],
+    });
+
+    const recomputedFlatRow = await pool.query<{
+      realized_pnl: string | null;
+      unrealized_pnl: string | null;
+    }>(
+      `
+        select realized_pnl::text, unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2 and token_id = $3
+      `,
+      [userId, walletAddress, tokenId],
+    );
+    assertClose(Number(recomputedFlatRow.rows[0]?.realized_pnl), -0.6);
+    assertClose(Number(recomputedFlatRow.rows[0]?.unrealized_pnl), 0);
+
+    const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+    });
+    assertClose(summary.realizedPnlAllTime, -0.6);
+    assertClose(summary.unrealizedPnlCurrent, 0);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId, `other-${tokenId}`], [marketId]);
+  }
+});
+
+await test("unresolved balance sync flatten preserves existing raw pnl fields", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertLimitlessToken(tokenId, marketId, "YES");
+    await insertLimitlessPosition({
+      userId,
+      walletAddress,
+      tokenId,
+      size: 1.5,
+      averagePrice: 0.4,
+      realizedPnl: 0.2,
+      unrealizedPnl: 0.7,
+    });
+
+    const result = await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenBalances: [],
+      tokenIdLike: "limitless:%",
+    });
+    assert.equal(result.flattenedPositions, 1);
+
+    const flatRow = await pool.query<{
+      side: string;
+      size: string;
+      realized_pnl: string | null;
+      unrealized_pnl: string | null;
+    }>(
+      `
+        select side, size::text, realized_pnl::text, unrealized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2 and token_id = $3
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    assert.equal(flatRow.rows[0]?.side, "FLAT");
+    assert.equal(Number(flatRow.rows[0]?.size), 0);
+    assertClose(Number(flatRow.rows[0]?.realized_pnl), 0.2);
+    assertClose(Number(flatRow.rows[0]?.unrealized_pnl), 0.7);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("unresolved flat metrics refresh can replace stale realized pnl", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertLimitlessToken(tokenId, marketId);
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values (
+          $1,
+          $2,
+          'limitless',
+          'own',
+          $3,
+          'FLAT',
+          0,
+          null,
+          0,
+          2.5,
+          now(),
+          now(),
+          now()
+        )
+      `,
+      [userId, walletAddress, tokenId],
+    );
+
+    await updatePositionMetrics(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      metrics: [
+        {
+          tokenId,
+          averagePrice: null,
+          realizedPnl: 0,
+          unrealizedPnl: 0,
+        },
+      ],
+    });
+
+    const flatRow = await pool.query<{ realized_pnl: string | null }>(
+      `
+        select realized_pnl::text
+        from positions
+        where user_id = $1 and wallet_address = $2 and token_id = $3
+      `,
+      [userId, walletAddress, tokenId],
+    );
+    assertClose(Number(flatRow.rows[0]?.realized_pnl), 0);
   } finally {
     await cleanupPositionTest(userId, [tokenId]);
   }

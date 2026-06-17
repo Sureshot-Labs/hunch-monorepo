@@ -160,6 +160,48 @@ async function insertLimitlessPosition(
   );
 }
 
+async function insertPolymarketPosition(
+  context: TestContext,
+  walletAddress: string,
+  tokenId: string,
+): Promise<void> {
+  await pool.query(
+    `
+      insert into positions (
+        id,
+        user_id,
+        wallet_address,
+        venue,
+        position_scope,
+        token_id,
+        side,
+        size,
+        unrealized_pnl,
+        realized_pnl,
+        last_updated_at,
+        created_at,
+        updated_at
+      )
+      values (
+        gen_random_uuid(),
+        $1,
+        $2,
+        'polymarket',
+        'own',
+        $3,
+        'LONG',
+        1,
+        0,
+        0,
+        now(),
+        now(),
+        now()
+      )
+    `,
+    [context.userId, walletAddress, tokenId],
+  );
+}
+
 async function insertKalshiSolanaPosition(context: TestContext): Promise<void> {
   await pool.query(
     `
@@ -218,9 +260,15 @@ async function main() {
   const kalshiContext = await createTestContext();
   const limitlessRawTokenId =
     "61711868900925654003691703232709639114710342992998180827784061778851356977594";
+  const polymarketFunderTokenId = `poly-hide-${crypto.randomUUID()}`;
 
   try {
     await insertLimitlessPosition(limitlessContext, limitlessRawTokenId);
+    await insertPolymarketPosition(
+      persistedContext,
+      persistedContext.funderWallet,
+      polymarketFunderTokenId,
+    );
     await insertKalshiSolanaPosition(kalshiContext);
 
     const parsedPrepareFailed = positionVisibilityResponseSchema.parse({
@@ -287,6 +335,40 @@ async function main() {
     );
     assert.equal(persistedSyncPayload.results?.[0]?.venue, "polymarket");
     assert.equal(persistedSyncPayload.results?.[0]?.status, "ok");
+
+    const polymarketHideResponse = await app.inject({
+      method: "POST",
+      url: "/positions/hide",
+      headers: persistedContext.authHeaders,
+      payload: {
+        venue: "polymarket",
+        walletAddress: persistedContext.signerWallet,
+        tokenId: polymarketFunderTokenId,
+        hidden: true,
+      },
+    });
+    assert.equal(polymarketHideResponse.statusCode, 200);
+    assert.deepEqual(polymarketHideResponse.json(), {
+      ok: true,
+      hidden: true,
+    });
+
+    const polymarketHiddenRow = await pool.query<{ is_hidden: boolean }>(
+      `
+        select is_hidden
+        from positions
+        where user_id = $1
+          and wallet_address = $2
+          and venue = 'polymarket'
+          and token_id = $3
+      `,
+      [
+        persistedContext.userId,
+        persistedContext.funderWallet,
+        polymarketFunderTokenId,
+      ],
+    );
+    assert.equal(polymarketHiddenRow.rows[0]?.is_hidden, true);
 
     const limitlessResponse = await app.inject({
       method: "GET",
