@@ -764,7 +764,10 @@ async function main() {
       assert.match(searchSql.cte, /and e\.status = 'ACTIVE'/);
       assert.match(searchSql.cte, /and m\.status = 'ACTIVE'/);
       assert.match(searchSql.cte, /raw_search_events as materialized/);
-      assert.match(searchSql.cte, /where not sq\.applies/);
+      assert.match(searchSql.cte, /join lateral/);
+      assert.match(searchSql.cte, /raw on not sq\.applies/);
+      assert.match(searchSql.cte, /search_candidate_markets as materialized/);
+      assert.equal(searchSql.predicate, "true");
       assert.ok(
         !searchSql.predicate.includes(" like "),
         "normal FIFA search predicate must not broad-scan raw LIKE",
@@ -1078,6 +1081,23 @@ async function main() {
         payload.facets.sections.map((facet) => facet.section),
         ["group"],
       );
+      assert.ok(
+        payload.data.every((event) =>
+          event.markets.every((market) => market.fifa.groupCode === "A"),
+        ),
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/special/fifa-2026?${query({ limit: 50, sort: "featured", group_code: "a" })}`,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const payload = response.json<{
+        data: Array<{ markets: Array<{ fifa: { groupCode: string | null } }> }>;
+      }>();
+      assert.ok(payload.data.length >= 1);
       assert.ok(
         payload.data.every((event) =>
           event.markets.every((market) => market.fifa.groupCode === "A"),

@@ -714,72 +714,81 @@ function buildSearchSql(
       )
       ,
       raw_search_events as materialized (
-        select e.id, 0.000001::numeric as search_rank
-        from unified_events e
-        join unified_markets m on m.event_id = e.id
-        left join polymarket_markets pm_raw
-          on pm_raw.id = m.venue_market_id and m.venue = 'polymarket'
-        cross join search_query sq
-        where not sq.applies
-          and e.status = 'ACTIVE'
-          and m.status = 'ACTIVE'
-          and ${buildBroadOrderableMarketSql({
-            marketAlias: "m",
-            eventAlias: "e",
-            nowParam,
-            pmAlias: "pm_raw",
-          })}
-          and ${buildRenderableMarketSql({ alias: "m" })}
-          and ${buildFifaCandidateSql()}
-          and ${eventRawExpr} like ${rawLikeParam}::text
-        group by e.id
-        order by e.id
-        limit ${searchLimitParam}::int
+        select raw.id, raw.search_rank
+        from search_query sq
+        join lateral (
+          select e.id, 0.000001::double precision as search_rank
+          from unified_events e
+          join unified_markets m on m.event_id = e.id
+          left join polymarket_markets pm_raw
+            on pm_raw.id = m.venue_market_id and m.venue = 'polymarket'
+          where e.status = 'ACTIVE'
+            and m.status = 'ACTIVE'
+            and ${buildBroadOrderableMarketSql({
+              marketAlias: "m",
+              eventAlias: "e",
+              nowParam,
+              pmAlias: "pm_raw",
+            })}
+            and ${buildRenderableMarketSql({ alias: "m" })}
+            and ${buildFifaCandidateSql()}
+            and ${eventRawExpr} like ${rawLikeParam}::text
+          group by e.id
+          order by e.id
+          limit ${searchLimitParam}::int
+        ) raw on not sq.applies
       )
       ,
       raw_search_markets as materialized (
-        select m.id as market_id, m.event_id, 0.000002::numeric as search_rank
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        left join polymarket_markets pm_raw
-          on pm_raw.id = m.venue_market_id and m.venue = 'polymarket'
-        cross join search_query sq
-        where not sq.applies
-          and e.status = 'ACTIVE'
-          and m.status = 'ACTIVE'
-          and ${buildBroadOrderableMarketSql({
-            marketAlias: "m",
-            eventAlias: "e",
-            nowParam,
-            pmAlias: "pm_raw",
-          })}
-          and ${buildRenderableMarketSql({ alias: "m" })}
-          and ${buildFifaCandidateSql()}
-          and ${marketRawExpr} like ${rawLikeParam}::text
-        order by m.id
-        limit ${searchLimitParam}::int
+        select raw.market_id, raw.event_id, raw.search_rank
+        from search_query sq
+        join lateral (
+          select m.id as market_id, m.event_id, 0.000002::double precision as search_rank
+          from unified_markets m
+          join unified_events e on e.id = m.event_id
+          left join polymarket_markets pm_raw
+            on pm_raw.id = m.venue_market_id and m.venue = 'polymarket'
+          where e.status = 'ACTIVE'
+            and m.status = 'ACTIVE'
+            and ${buildBroadOrderableMarketSql({
+              marketAlias: "m",
+              eventAlias: "e",
+              nowParam,
+              pmAlias: "pm_raw",
+            })}
+            and ${buildRenderableMarketSql({ alias: "m" })}
+            and ${buildFifaCandidateSql()}
+            and ${marketRawExpr} like ${rawLikeParam}::text
+          order by m.id
+          limit ${searchLimitParam}::int
+        ) raw on not sq.applies
+      )
+      ,
+      search_candidate_markets as materialized (
+        select market_id, event_id, max(search_rank) as search_rank
+        from (
+          select m_event.id as market_id, m_event.event_id, se.search_rank::double precision as search_rank
+          from matched_search_events se
+          join unified_markets m_event on m_event.event_id = se.id
+          union all
+          select sm.market_id, sm.event_id, sm.search_rank::double precision as search_rank
+          from matched_search_markets sm
+          union all
+          select m_event.id as market_id, m_event.event_id, re.search_rank
+          from raw_search_events re
+          join unified_markets m_event on m_event.event_id = re.id
+          union all
+          select rm.market_id, rm.event_id, rm.search_rank
+          from raw_search_markets rm
+        ) hits
+        group by market_id, event_id
       )
     `,
     join: `
-      left join matched_search_events se on se.id = e.id
-      left join matched_search_markets sm on sm.market_id = m.id
-      left join raw_search_events re on re.id = e.id
-      left join raw_search_markets rm on rm.market_id = m.id
+      join search_candidate_markets sc on sc.market_id = m.id
     `,
-    predicate: `(
-      se.id is not null
-      or sm.market_id is not null
-      or re.id is not null
-      or rm.market_id is not null
-    )`,
-    rankExpr: `
-      greatest(
-        coalesce(se.search_rank, 0),
-        coalesce(sm.search_rank, 0),
-        coalesce(re.search_rank, 0),
-        coalesce(rm.search_rank, 0)
-      )
-    `,
+    predicate: "true",
+    rankExpr: "coalesce(sc.search_rank, 0)",
     matchIntentRankExpr,
   };
 }
@@ -885,6 +894,23 @@ function buildOrderSql(inputs: FifaSpecialInputs, alias: "event" | "market") {
     volume_display desc nulls last,
     sort_time asc nulls last,
     ${alias === "event" ? "event_id" : "market_uuid"}
+  `;
+}
+
+function buildGroupedEventCandidatesSql(source: string): string {
+  return `
+    select
+      event_id,
+      max(search_rank) as search_rank,
+      max(match_intent_rank) as match_intent_rank,
+      min(fifa_section) as section,
+      max(coalesce(event_volume_display, 0)) as volume_display,
+      max(coalesce(event_volume_24h, 0)) as volume_24h_display,
+      max(coalesce(event_liquidity_display, 0)) as liquidity_display,
+      min(sort_time) as sort_time,
+      min(market_created_at) as created_at
+    from ${source}
+    group by event_id
   `;
 }
 
@@ -1304,18 +1330,8 @@ export async function fetchFifaSpecialPage(
         page_events as materialized (
           select page.*, row_number() over () as ord
           from (
-            select
-              event_id,
-              max(search_rank) as search_rank,
-              max(match_intent_rank) as match_intent_rank,
-              min(fifa_section) as section,
-              max(coalesce(event_volume_display, 0)) as volume_display,
-              max(coalesce(event_volume_24h, 0)) as volume_24h_display,
-              max(coalesce(event_liquidity_display, 0)) as liquidity_display,
-              min(sort_time) as sort_time,
-              min(market_created_at) as created_at
-            from candidate_keys
-            group by event_id
+            select *
+            from (${buildGroupedEventCandidatesSql("candidate_keys")}) grouped_events
             order by ${orderSql}
           ) page
         ),
@@ -1372,20 +1388,7 @@ export async function fetchFifaSpecialPage(
         select page.*, row_number() over () as ord
         from (
           select *
-          from (
-            select
-              event_id,
-              max(search_rank) as search_rank,
-              max(match_intent_rank) as match_intent_rank,
-              min(fifa_section) as section,
-              max(coalesce(event_volume_display, 0)) as volume_display,
-              max(coalesce(event_volume_24h, 0)) as volume_24h_display,
-              max(coalesce(event_liquidity_display, 0)) as liquidity_display,
-              min(sort_time) as sort_time,
-              min(market_created_at) as created_at
-            from candidate_keys
-            group by event_id
-          ) grouped_events
+          from (${buildGroupedEventCandidatesSql("candidate_keys")}) grouped_events
           order by ${orderSql}
           limit ${limitParam} offset ${offsetParam}
         ) page
