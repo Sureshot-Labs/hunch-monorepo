@@ -196,33 +196,92 @@ function buildBroadOrderableMarketCandidatesCte(args: {
 }): string {
   const cteName = args.cteName ?? "orderable_market_candidates";
   const materialized = args.materialized ? " as materialized" : " as";
+  const safeCtePrefix = cteName.replace(/[^a-zA-Z0-9_]/g, "_");
+  const strictMarketBaseCte = `${safeCtePrefix}_strict_market_base`;
+  const strictCandidatesCte = `${safeCtePrefix}_strict_candidates`;
+  const pmRecentCandidatesCte = `${safeCtePrefix}_pm_recent_candidates`;
+  const pmGraceCandidatesCte = `${safeCtePrefix}_pm_grace_candidates`;
   const extraSql = (args.extraMarketSql ?? [])
     .filter(Boolean)
     .map((clause) => `and ${clause}`)
     .join("\n        ");
   return `
-    ${cteName}${materialized} (
+    ${strictMarketBaseCte} as materialized (
       select
         m.id as market_id,
         m.event_id
       from unified_markets m
-      join unified_events e on e.id = m.event_id
       where ${buildStrictIndexedMarketSql({
         marketAlias: "m",
-        eventAlias: "e",
         nowParam: args.nowParam,
         nowCloseParam: args.nowCloseParam,
       })}
+    ),
+    ${strictCandidatesCte} as materialized (
+      select
+        c.market_id,
+        c.event_id
+      from ${strictMarketBaseCte} c
+      join unified_markets m on m.id = c.market_id
+      join unified_events e on e.id = c.event_id
+      where e.status = 'ACTIVE'
+        and (e.end_date is null or e.end_date > ${args.nowParam}::timestamptz)
         ${extraSql}
+    ),
+    ${pmRecentCandidatesCte} as materialized (
+      select
+        m.id as market_id,
+        m.event_id,
+        m.venue_market_id
+      from unified_markets m
+      where m.status = 'ACTIVE'
+        and m.venue = 'polymarket'
+        and m.close_time is not null
+        and m.close_time <= ${args.nowParam}::timestamptz
+        and m.close_time > (${args.nowParam}::timestamptz - interval '6 hours')
       union all
       select
         m.id as market_id,
-        m.event_id
+        m.event_id,
+        m.venue_market_id
       from unified_markets m
+      where m.status = 'ACTIVE'
+        and m.venue = 'polymarket'
+        and m.expiration_time is not null
+        and m.expiration_time <= ${args.nowParam}::timestamptz
+        and m.expiration_time > (${args.nowParam}::timestamptz - interval '6 hours')
+      union all
+      select
+        m.id as market_id,
+        m.event_id,
+        m.venue_market_id
+      from unified_events e
+      join unified_markets m on m.event_id = e.id
+      where e.status = 'ACTIVE'
+        and e.end_date is not null
+        and e.end_date <= ${args.nowParam}::timestamptz
+        and e.end_date > (${args.nowParam}::timestamptz - interval '6 hours')
+        and m.status = 'ACTIVE'
+        and m.venue = 'polymarket'
+    ),
+    ${pmGraceCandidatesCte} as materialized (
+      select distinct
+        m.id as market_id,
+        m.event_id
+      from ${pmRecentCandidatesCte} c
+      join unified_markets m on m.id = c.market_id
       join unified_events e on e.id = m.event_id
-      join polymarket_markets pm_filter
-        on pm_filter.id = m.venue_market_id
-       and m.venue = 'polymarket'
+      join lateral (
+        select
+          pm.id,
+          pm.accepting_orders,
+          pm.active,
+          pm.closed,
+          pm.archived
+        from polymarket_markets pm
+        where pm.id = c.venue_market_id
+        limit 1
+      ) pm_filter on true
       where ${buildPolymarketGraceMarketSql({
         marketAlias: "m",
         eventAlias: "e",
@@ -230,6 +289,13 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         pmAlias: "pm_filter",
       })}
         ${extraSql}
+    ),
+    ${cteName}${materialized} (
+      select market_id, event_id
+      from ${strictCandidatesCte}
+      union all
+      select market_id, event_id
+      from ${pmGraceCandidatesCte}
     )
   `;
 }
@@ -904,6 +970,7 @@ function buildFeedEventWhere(args: {
   hasSearch: boolean;
   requireNamedCategory?: boolean;
   includeOrderableExists?: boolean;
+  includeDurationExists?: boolean;
   includeSearchCondition?: boolean;
   searchFilterExpr?: string;
 }): string[] {
@@ -914,6 +981,7 @@ function buildFeedEventWhere(args: {
     hasSearch,
     requireNamedCategory = false,
     includeOrderableExists = true,
+    includeDurationExists = true,
     includeSearchCondition = true,
     searchFilterExpr = "e.id in (select id from search_events)",
   } = args;
@@ -933,13 +1001,15 @@ function buildFeedEventWhere(args: {
   } else if (inputs.category) {
     where.push(`lower(e.category) = ${add(inputs.category.toLowerCase())}`);
   }
-  const durationExistsSql = buildEventDurationExistsSql({
-    inputs,
-    add,
-    nowParam,
-  });
-  if (durationExistsSql) {
-    where.push(durationExistsSql);
+  if (includeDurationExists) {
+    const durationExistsSql = buildEventDurationExistsSql({
+      inputs,
+      add,
+      nowParam,
+    });
+    if (durationExistsSql) {
+      where.push(durationExistsSql);
+    }
   }
   if (hasSearch && includeSearchCondition) {
     where.push(searchFilterExpr);
@@ -1218,6 +1288,9 @@ async function fetchFeedEventIdsFast(
     sql,
     params,
     false,
+    FEED_HEAVY_QUERY_WORK_MEM,
+    null,
+    true,
   );
   if (rows.length < pageTarget) return null;
   return rows.slice(inputs.offset, inputs.offset + inputs.limit);
@@ -1393,12 +1466,14 @@ async function queryRowsWithLocalSettings<T extends QueryResultRow>(
     useSearchHint?: boolean;
     workMem?: string | null;
     statementTimeoutMs?: number | null;
+    jitOff?: boolean;
   },
 ): Promise<T[]> {
   const useSearchHint = options?.useSearchHint ?? false;
   const workMem = options?.workMem ?? null;
   const statementTimeoutMs = options?.statementTimeoutMs ?? null;
-  if (!useSearchHint && !workMem && !statementTimeoutMs) {
+  const jitOff = options?.jitOff ?? false;
+  if (!useSearchHint && !workMem && !statementTimeoutMs && !jitOff) {
     const { rows } = await pool.query<T>(sql, params);
     return rows;
   }
@@ -1408,6 +1483,9 @@ async function queryRowsWithLocalSettings<T extends QueryResultRow>(
     await client.query("BEGIN");
     if (useSearchHint) {
       await client.query("SET LOCAL enable_seqscan = off");
+    }
+    if (jitOff) {
+      await client.query("SET LOCAL jit = off");
     }
     if (workMem) {
       if (!isSafeLocalWorkMem(workMem)) {
@@ -1447,11 +1525,13 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
   useSearchHint: boolean,
   workMem?: string | null,
   statementTimeoutMs?: number | null,
+  jitOff?: boolean,
 ): Promise<T[]> {
   return queryRowsWithLocalSettings<T>(pool, sql, params, {
     useSearchHint,
     workMem,
     statementTimeoutMs,
+    jitOff,
   });
 }
 
@@ -1569,8 +1649,9 @@ export async function fetchFeedCategoryFacetRows(
       sql,
       params,
       marketContext.hasSearch,
-      marketContext.hasSearch ? feedSearchWorkMem() : null,
+      marketContext.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
       marketContext.hasSearch ? feedSearchStatementTimeoutMs() : null,
+      true,
     );
   }
 
@@ -1601,7 +1682,8 @@ export async function fetchFeedCategoryFacetRows(
     nowParam,
     hasSearch: search.hasSearch,
     requireNamedCategory: true,
-    includeOrderableExists: !requiresMarketJoin,
+    includeOrderableExists: false,
+    includeDurationExists: false,
     searchFilterExpr: search.searchFilterExpr,
   });
 
@@ -1616,13 +1698,42 @@ export async function fetchFeedCategoryFacetRows(
       );
     }
 
+    const withParts: string[] = [];
+    if (search.searchCte) withParts.push(search.searchCte);
+    withParts.push(
+      buildBroadOrderableMarketCandidatesCte({
+        materialized: true,
+        nowParam,
+        extraMarketSql: [
+          ...buildFeedMarketCandidateExtraSql({
+            add,
+            inputs,
+            nowParam,
+            venueTarget: "event",
+            renderableMarketExpr,
+            supportedLimitlessMarketExpr,
+            hasSearch: search.hasSearch,
+            requireNamedCategory: true,
+          }),
+        ],
+      }),
+    );
+    withParts.push(`
+      orderable_events as materialized (
+        select distinct event_id
+        from orderable_market_candidates
+      )
+    `);
+    const withClause = `with ${withParts.join(",\n")}`;
+
     const sql = `
-      ${search.searchCte ? `with ${search.searchCte}` : ""}
+      ${withClause}
       select
         e.venue as venue,
         lower(e.category) as category,
         count(*)::int as events
-      from unified_events e
+      from orderable_events oe
+      join unified_events e on e.id = oe.event_id
       ${search.searchEventJoin}
       where ${eventOnlyWhere.join(" and ")}
       group by e.venue, lower(e.category)
@@ -1633,8 +1744,9 @@ export async function fetchFeedCategoryFacetRows(
       sql,
       params,
       search.hasSearch,
-      search.hasSearch ? feedSearchWorkMem() : null,
+      search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
       search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+      true,
     );
   }
 
@@ -1702,8 +1814,9 @@ export async function fetchFeedCategoryFacetRows(
     sql,
     params,
     search.hasSearch,
-    search.hasSearch ? feedSearchWorkMem() : null,
+    search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
     search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+    true,
   );
 }
 
@@ -1744,6 +1857,7 @@ async function fetchFeedEventIdsExact(
     nowParam,
     hasSearch: search.hasSearch,
     includeOrderableExists: !requiresMarketJoin,
+    includeDurationExists: !requiresMarketJoin,
     searchFilterExpr: search.searchFilterExpr,
   });
 
@@ -1789,6 +1903,7 @@ async function fetchFeedEventIdsExact(
       search.hasSearch,
       search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
       search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+      true,
     );
   }
 
@@ -1848,8 +1963,9 @@ async function fetchFeedEventIdsExact(
       eventOnlySql,
       params,
       search.hasSearch,
-      search.hasSearch ? feedSearchWorkMem() : null,
+      search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
       search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+      true,
     );
   }
   const having = buildFeedEventJoinHaving({
@@ -1949,12 +2065,9 @@ async function fetchFeedEventIdsExact(
     eventSql,
     params,
     search.hasSearch,
-    search.hasSearch
-      ? feedSearchWorkMem()
-      : inputs.sort === "change24h"
-        ? FEED_HEAVY_QUERY_WORK_MEM
-        : null,
+    search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
     search.hasSearch ? feedSearchStatementTimeoutMs() : null,
+    true,
   );
 }
 
@@ -2307,12 +2420,8 @@ export async function fetchFeedMarkets(
     marketSql,
     params,
     {
-      workMem:
-        inputs.sort === "change24h" ||
-        inputs.sort === "trending" ||
-        inputs.sort === "trending_v2"
-          ? FEED_HEAVY_QUERY_WORK_MEM
-          : null,
+      workMem: FEED_HEAVY_QUERY_WORK_MEM,
+      jitOff: true,
     },
   );
 }
@@ -2725,14 +2834,11 @@ export async function fetchFeedMarketsDirect(
       useSearchHint: marketContext.hasSearch,
       workMem: marketContext.hasSearch
         ? feedSearchWorkMem()
-        : inputs.sort === "change24h" ||
-            inputs.sort === "trending" ||
-            inputs.sort === "trending_v2"
-          ? FEED_HEAVY_QUERY_WORK_MEM
-          : null,
+        : FEED_HEAVY_QUERY_WORK_MEM,
       statementTimeoutMs: marketContext.hasSearch
         ? feedSearchStatementTimeoutMs()
         : null,
+      jitOff: true,
     },
   );
 }

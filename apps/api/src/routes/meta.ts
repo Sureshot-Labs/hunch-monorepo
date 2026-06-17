@@ -138,52 +138,38 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const ageWithinHours = q.age_within_hours;
 
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `meta:categories:facets:v3:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const cacheKey = `meta:categories:facets:v4:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const staleCacheKey = `${cacheKey}:stale`;
+      const refreshLockKey = `${cacheKey}:refresh`;
       const r = await getRedis();
       const cacheTtl = Math.max(1, env.feedTtlSec);
+      const staleTtl = Math.max(cacheTtl * 10, 300);
       const cacheEnabled = env.feedTtlSec > 0;
 
-      if (cacheEnabled && r) {
-        const cached = await r.get(cacheKey);
-        if (cached) {
-          reply.header("x-cache", "hit");
-          reply.header("Content-Type", "application/json; charset=utf-8");
-          reply.header(
-            "Cache-Control",
-            `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
-          );
-          return reply.send(cached);
-        }
-      }
+      const computeBody = async (): Promise<string> => {
+        const nowTs = new Date();
+        const nowParam = nowTs.toISOString();
+        const sevenDaysAgo = new Date(
+          nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        const sevenDaysFromNow = new Date(
+          nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
+        ).toISOString();
 
-      const nowTs = new Date();
-      const nowParam = nowTs.toISOString();
-      const sevenDaysAgo = new Date(
-        nowTs.getTime() - 7 * 24 * 60 * 60 * 1000,
-      ).toISOString();
-      const sevenDaysFromNow = new Date(
-        nowTs.getTime() + 7 * 24 * 60 * 60 * 1000,
-      ).toISOString();
+        const endWithin =
+          endWithinHours != null
+            ? new Date(
+                nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
+              ).toISOString()
+            : undefined;
+        const ageSince =
+          ageWithinHours != null
+            ? new Date(
+                nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
+              ).toISOString()
+            : undefined;
 
-      const endWithin =
-        endWithinHours != null
-          ? new Date(
-              nowTs.getTime() + endWithinHours * 60 * 60 * 1000,
-            ).toISOString()
-          : undefined;
-      const ageSince =
-        ageWithinHours != null
-          ? new Date(
-              nowTs.getTime() - ageWithinHours * 60 * 60 * 1000,
-            ).toISOString()
-          : undefined;
-
-      let facetRowsResult: Awaited<
-        ReturnType<typeof fetchFeedCategoryFacetRows>
-      >;
-      let universeRowsResult: { rows: Array<{ category: string }> };
-      try {
-        [facetRowsResult, universeRowsResult] = await Promise.all([
+        const [facetRowsResult, universeRowsResult] = await Promise.all([
           fetchFeedCategoryFacetRows(pool, {
             minVol,
             minLiquidity,
@@ -208,6 +194,98 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             order by category asc
           `),
         ]);
+
+        const categoriesMap = new Map<
+          string,
+          { category: string; events: number; venues: Record<string, number> }
+        >();
+
+        for (const row of universeRowsResult.rows) {
+          const category = row.category;
+          categoriesMap.set(category, {
+            category,
+            events: 0,
+            venues: {},
+          });
+        }
+
+        for (const row of facetRowsResult) {
+          const entry = categoriesMap.get(row.category) ?? {
+            category: row.category,
+            events: 0,
+            venues: {},
+          };
+          entry.events += Number(row.events) || 0;
+          entry.venues[row.venue] =
+            (entry.venues[row.venue] ?? 0) + (row.events || 0);
+          categoriesMap.set(row.category, entry);
+        }
+
+        const categories = Array.from(categoriesMap.values()).sort((a, b) => {
+          if (b.events !== a.events) return b.events - a.events;
+          return a.category.localeCompare(b.category);
+        });
+
+        const payload = {
+          total: categories.length,
+          generatedAt: nowTs.toISOString(),
+          categories,
+        };
+        return JSON.stringify(payload);
+      };
+
+      const storeBody = async (body: string): Promise<void> => {
+        if (!cacheEnabled || !r) return;
+        await Promise.all([
+          r.set(cacheKey, body, { EX: cacheTtl }),
+          r.set(staleCacheKey, body, { EX: staleTtl }),
+        ]);
+      };
+
+      if (cacheEnabled && r) {
+        const cached = await r.get(cacheKey);
+        if (cached) {
+          reply.header("x-cache", "hit");
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            `private, max-age=${cacheTtl}, stale-while-revalidate=${staleTtl}`,
+          );
+          return reply.send(cached);
+        }
+
+        const stale = await r.get(staleCacheKey);
+        if (stale) {
+          const lockAcquired = await r.set(refreshLockKey, "1", {
+            NX: true,
+            EX: Math.min(Math.max(cacheTtl, 30), 120),
+          });
+          if (lockAcquired) {
+            void computeBody()
+              .then(storeBody)
+              .catch((error) => {
+                req.log.warn(
+                  { error, q: search, view },
+                  "Category facet stale refresh failed",
+                );
+              })
+              .finally(() => {
+                void r.del(refreshLockKey).catch(() => undefined);
+              });
+          }
+          reply.header("x-cache", lockAcquired ? "stale" : "refreshing");
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          reply.header(
+            "Cache-Control",
+            `private, max-age=${cacheTtl}, stale-while-revalidate=${staleTtl}`,
+          );
+          return reply.send(stale);
+        }
+      }
+
+      let body: string;
+      try {
+        body = await computeBody();
       } catch (error) {
         if (isSearchStatementTimeout(error, search)) {
           req.log.warn(
@@ -218,54 +296,15 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
         }
         throw error;
       }
-
-      const categoriesMap = new Map<
-        string,
-        { category: string; events: number; venues: Record<string, number> }
-      >();
-
-      for (const row of universeRowsResult.rows) {
-        const category = row.category;
-        categoriesMap.set(category, {
-          category,
-          events: 0,
-          venues: {},
-        });
-      }
-
-      for (const row of facetRowsResult) {
-        const entry = categoriesMap.get(row.category) ?? {
-          category: row.category,
-          events: 0,
-          venues: {},
-        };
-        entry.events += Number(row.events) || 0;
-        entry.venues[row.venue] =
-          (entry.venues[row.venue] ?? 0) + (row.events || 0);
-        categoriesMap.set(row.category, entry);
-      }
-
-      const categories = Array.from(categoriesMap.values()).sort((a, b) => {
-        if (b.events !== a.events) return b.events - a.events;
-        return a.category.localeCompare(b.category);
-      });
-
-      const payload = {
-        total: categories.length,
-        generatedAt: nowTs.toISOString(),
-        categories,
-      };
-      const body = JSON.stringify(payload);
-
       if (cacheEnabled && r) {
-        await r.set(cacheKey, body, { EX: cacheTtl });
+        await storeBody(body);
         reply.header("x-cache", "miss");
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
       reply.header(
         "Cache-Control",
-        `private, max-age=${cacheTtl}, stale-while-revalidate=${cacheTtl * 2}`,
+        `private, max-age=${cacheTtl}, stale-while-revalidate=${staleTtl}`,
       );
       return reply.send(body);
     },

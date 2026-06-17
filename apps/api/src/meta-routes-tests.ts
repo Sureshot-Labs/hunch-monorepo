@@ -263,6 +263,35 @@ function distinctFeedEventCount(payload: FeedPayload): number {
   return new Set(payload.data.map((item) => item.eventId)).size;
 }
 
+function createSqlCapturePool<T extends Record<string, unknown>>(
+  capturedSql: string[],
+  rows: T[],
+) {
+  const runQuery = async (sql: string) => {
+    const normalized = sql.trim().toLowerCase();
+    if (
+      normalized !== "begin" &&
+      normalized !== "commit" &&
+      normalized !== "rollback" &&
+      !normalized.startsWith("set local ")
+    ) {
+      capturedSql.push(sql);
+    }
+    return { rows };
+  };
+  return {
+    query: runQuery,
+    async connect() {
+      return {
+        query: runQuery,
+        release() {
+          return undefined;
+        },
+      };
+    },
+  };
+}
+
 async function assertFacetParity(args: {
   app: Awaited<ReturnType<typeof buildApp>>;
   query: Record<string, string | number | undefined>;
@@ -346,13 +375,10 @@ async function assertEventFeed(args: {
 }
 
 async function assertDirectMarketSqlShape(): Promise<void> {
-  let capturedSql = "";
-  const fakePool = {
-    async query(sql: string) {
-      capturedSql = sql;
-      return { rows: [] };
-    },
-  } as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
+  const capturedSql: string[] = [];
+  const fakePool = createSqlCapturePool(capturedSql, []) as unknown as Parameters<
+    typeof fetchFeedMarketsDirect
+  >[0];
   const now = new Date("2026-06-16T12:00:00.000Z");
 
   await fetchFeedMarketsDirect(fakePool, {
@@ -371,18 +397,25 @@ async function assertDirectMarketSqlShape(): Promise<void> {
       .toISOString(),
   });
 
-  assert.match(capturedSql, /orderable_market_candidates as materialized/);
+  const sql = capturedSql.join("\n");
+  assert.match(sql, /orderable_market_candidates as materialized/);
+  assert.match(sql, /orderable_market_candidates_pm_recent_candidates as materialized/);
+  assert.match(sql, /join lateral \(/);
   assert.match(
-    capturedSql,
+    sql,
     /market_count as materialized \([\s\S]*from orderable_market_candidates/s,
   );
   assert.match(
-    capturedSql,
+    sql,
     /from orderable_market_candidates omc\s+join unified_markets m on m\.id = omc\.market_id/s,
   );
   assert.doesNotMatch(
-    capturedSql,
+    sql,
     /market_count as[\s\S]{0,300}from unified_markets m/s,
+  );
+  assert.doesNotMatch(
+    sql,
+    /join polymarket_markets pm_filter\s+on pm_filter\.id = m\.venue_market_id\s+and m\.venue = 'polymarket'/s,
   );
 }
 
@@ -407,16 +440,12 @@ async function assertEventFeedSqlShape(): Promise<void> {
     rowCount: number,
   ): Promise<string[]> => {
     const capturedSql: string[] = [];
-    const fakePool = {
-      async query(sql: string) {
-        capturedSql.push(sql);
-        return {
-          rows: Array.from({ length: rowCount }, (_, index) => ({
-            id: `event-${index}`,
-          })),
-        };
-      },
-    } as unknown as Parameters<typeof fetchFeedEventIds>[0];
+    const fakePool = createSqlCapturePool(
+      capturedSql,
+      Array.from({ length: rowCount }, (_, index) => ({
+        id: `event-${index}`,
+      })),
+    ) as unknown as Parameters<typeof fetchFeedEventIds>[0];
 
     await fetchFeedEventIds(fakePool, {
       ...baseInputs,
@@ -456,12 +485,9 @@ async function assertEventFeedSqlShape(): Promise<void> {
 
   {
     const capturedSql: string[] = [];
-    const fakePool = {
-      async query(sql: string) {
-        capturedSql.push(sql);
-        return { rows: [] };
-      },
-    } as unknown as Parameters<typeof fetchFeedEventIds>[0];
+    const fakePool = createSqlCapturePool(capturedSql, []) as unknown as Parameters<
+      typeof fetchFeedEventIds
+    >[0];
 
     await fetchFeedEventIds(fakePool, {
       ...baseInputs,
