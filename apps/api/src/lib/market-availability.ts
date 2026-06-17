@@ -10,7 +10,8 @@ type ComputeAcceptingOrdersInput = {
 };
 
 export const POLYMARKET_ACCEPTING_ORDERS_GRACE_MS = 6 * 60 * 60 * 1000;
-const POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL = "interval '6 hours'";
+export const POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL =
+  "interval '6 hours'";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -142,6 +143,14 @@ export function buildPolymarketOrderableSql(args: {
   )`;
 }
 
+export function buildOrderableEventFreshnessSql(args: {
+  eventAlias?: string;
+  nowParam: string;
+}): string {
+  const eventAlias = args.eventAlias ?? "e";
+  return `(${eventAlias}.end_date is null or ${eventAlias}.end_date > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL}))`;
+}
+
 export function buildNativeTradableMarketSql(alias: string): string {
   return `(
     ${alias}.venue <> 'kalshi'
@@ -196,7 +205,7 @@ function buildPolymarketFreshnessSql(args: {
   const terminalSql = buildPolymarketTerminalSql(args);
   return `(
     ${terminalSql} = 'infinity'::timestamptz
-    or ${terminalSql} > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL})
+    or ${terminalSql} > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
   )`;
 }
 

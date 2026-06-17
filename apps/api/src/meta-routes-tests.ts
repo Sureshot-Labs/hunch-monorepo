@@ -266,8 +266,9 @@ function distinctFeedEventCount(payload: FeedPayload): number {
 function createSqlCapturePool<T extends Record<string, unknown>>(
   capturedSql: string[],
   rows: T[],
+  capturedParams?: unknown[][],
 ) {
-  const runQuery = async (sql: string) => {
+  const runQuery = async (sql: string, params?: unknown[]) => {
     const normalized = sql.trim().toLowerCase();
     if (
       normalized !== "begin" &&
@@ -276,6 +277,7 @@ function createSqlCapturePool<T extends Record<string, unknown>>(
       !normalized.startsWith("set local ")
     ) {
       capturedSql.push(sql);
+      capturedParams?.push(params ?? []);
     }
     return { rows };
   };
@@ -395,10 +397,12 @@ async function assertDirectMarketSqlShape(): Promise<void> {
       sort: "totalvol",
       sortDir: "desc",
       nowParam: now.toISOString(),
-      sevenDaysAgo: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-        .toISOString(),
-      sevenDaysFromNow: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-        .toISOString(),
+      sevenDaysAgo: new Date(
+        now.getTime() - 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      sevenDaysFromNow: new Date(
+        now.getTime() + 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
     });
 
     return capturedSql.join("\n");
@@ -406,7 +410,10 @@ async function assertDirectMarketSqlShape(): Promise<void> {
 
   const sql = await captureMarketSql("grouped");
   assert.match(sql, /orderable_market_candidates as materialized/);
-  assert.match(sql, /orderable_market_candidates_pm_recent_candidates as materialized/);
+  assert.match(
+    sql,
+    /orderable_market_candidates_pm_recent_candidates as materialized/,
+  );
   assert.match(sql, /join lateral \(/);
   assert.match(
     sql,
@@ -442,29 +449,33 @@ async function assertEventFeedSqlShape(): Promise<void> {
     view: "events",
     sortDir: "desc",
     nowParam: now.toISOString(),
-    sevenDaysAgo: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-      .toISOString(),
-    sevenDaysFromNow: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-      .toISOString(),
+    sevenDaysAgo: new Date(
+      now.getTime() - 7 * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+    sevenDaysFromNow: new Date(
+      now.getTime() + 7 * 24 * 60 * 60 * 1000,
+    ).toISOString(),
   } satisfies Parameters<typeof fetchFeedEventIds>[1];
 
   const runWithRows = async (
     inputs: Partial<Parameters<typeof fetchFeedEventIds>[1]>,
     rowCount: number,
-  ): Promise<string[]> => {
+  ): Promise<{ capturedSql: string[]; capturedParams: unknown[][] }> => {
     const capturedSql: string[] = [];
+    const capturedParams: unknown[][] = [];
     const fakePool = createSqlCapturePool(
       capturedSql,
       Array.from({ length: rowCount }, (_, index) => ({
         id: `event-${index}`,
       })),
+      capturedParams,
     ) as unknown as Parameters<typeof fetchFeedEventIds>[0];
 
     await fetchFeedEventIds(fakePool, {
       ...baseInputs,
       ...inputs,
     });
-    return capturedSql;
+    return { capturedSql, capturedParams };
   };
 
   for (const sort of [
@@ -475,32 +486,65 @@ async function assertEventFeedSqlShape(): Promise<void> {
     "openinterest",
     "time",
   ]) {
-    const [sql] = await runWithRows({ sort }, baseInputs.limit);
+    const { capturedSql } = await runWithRows({ sort }, baseInputs.limit);
+    const [sql] = capturedSql;
     assert.match(sql, /ranked_event_candidates as materialized/);
     assert.match(sql, /valid_ranked_events as materialized/);
     assert.match(sql, /from unified_events e/s);
+    assert.match(
+      sql,
+      /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
+    );
     assert.doesNotMatch(sql, /join orderable_market_candidates/s);
   }
 
   {
-    const [sql] = await runWithRows({ sort: "change24h" }, baseInputs.limit);
+    const { capturedSql } = await runWithRows(
+      { sort: "change24h" },
+      baseInputs.limit,
+    );
+    const [sql] = capturedSql;
     assert.match(sql, /from unified_event_change_24h ec/s);
     assert.match(sql, /join unified_events e on e\.id = ec\.event_id/s);
     assert.match(sql, /valid_ranked_events as materialized/);
+    assert.match(
+      sql,
+      /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
+    );
   }
 
   {
-    const [sql] = await runWithRows({ sort: "trending_v2" }, baseInputs.limit);
+    const { capturedSql } = await runWithRows(
+      { sort: "trending_v2" },
+      baseInputs.limit,
+    );
+    const [sql] = capturedSql;
     assert.match(sql, /from unified_event_trade_24h et/s);
     assert.match(sql, /union all/s);
     assert.match(sql, /valid_ranked_events as materialized/);
+    assert.match(
+      sql,
+      /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
+    );
+  }
+
+  {
+    const { capturedParams } = await runWithRows(
+      { sort: "liquidity" },
+      baseInputs.limit,
+    );
+    assert.ok(
+      capturedParams[0]?.includes(10_000),
+      "liquidity event fast path should use wider candidate window",
+    );
   }
 
   {
     const capturedSql: string[] = [];
-    const fakePool = createSqlCapturePool(capturedSql, []) as unknown as Parameters<
-      typeof fetchFeedEventIds
-    >[0];
+    const fakePool = createSqlCapturePool(
+      capturedSql,
+      [],
+    ) as unknown as Parameters<typeof fetchFeedEventIds>[0];
 
     await fetchFeedEventIds(fakePool, {
       ...baseInputs,
@@ -511,6 +555,10 @@ async function assertEventFeedSqlShape(): Promise<void> {
     assert.match(capturedSql[0], /ranked_event_candidates as materialized/);
     assert.match(capturedSql[1], /select\s+e\.id[\s\S]*from unified_events e/s);
     assert.match(capturedSql[1], /exists \(/s);
+    assert.match(
+      capturedSql[1],
+      /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
+    );
   }
 }
 

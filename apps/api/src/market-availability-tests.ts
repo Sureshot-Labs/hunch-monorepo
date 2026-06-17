@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildBroadOrderableMarketSql,
   buildEventHasBroadOrderableMarketSql,
+  buildOrderableEventFreshnessSql,
   buildOrderableMarketSql,
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
@@ -182,6 +183,16 @@ test("broad orderable SQL keeps strict and Polymarket grace branches simple", ()
   assert.doesNotMatch(sql, /metadata->>'acceptingOrders'/);
 });
 
+test("event freshness SQL uses shared Polymarket grace window", () => {
+  const sql = buildOrderableEventFreshnessSql({
+    eventAlias: "e",
+    nowParam: "$1",
+  });
+
+  assert.match(sql, /e\.end_date is null/);
+  assert.match(sql, /interval '6 hours'/);
+});
+
 test("event broad orderable SQL isolates Polymarket join to grace branch", () => {
   const sql = buildEventHasBroadOrderableMarketSql({
     eventAlias: "e",
@@ -190,7 +201,10 @@ test("event broad orderable SQL isolates Polymarket join to grace branch", () =>
   });
 
   assert.match(sql, /exists \(\s*select 1\s*from unified_markets om\s*where/s);
-  assert.match(sql, /or exists \(\s*select 1\s*from unified_markets om\s*join polymarket_markets pm_om/s);
+  assert.match(
+    sql,
+    /or exists \(\s*select 1\s*from unified_markets om\s*join polymarket_markets pm_om/s,
+  );
   assert.match(sql, /pm_om\.accepting_orders = true/);
   assert.doesNotMatch(sql, /left join polymarket_markets/);
 });

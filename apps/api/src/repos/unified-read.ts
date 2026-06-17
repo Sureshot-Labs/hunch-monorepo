@@ -3,8 +3,10 @@ import type { QueryResultRow } from "pg";
 import { env } from "../env.js";
 import {
   buildEventHasBroadOrderableMarketSql,
+  buildOrderableEventFreshnessSql,
   buildOrderableMarketSql,
   buildPolymarketGraceMarketSql,
+  POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL,
   buildStrictIndexedMarketSql,
 } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
@@ -238,7 +240,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.venue = 'polymarket'
         and m.close_time is not null
         and m.close_time <= ${args.nowParam}::timestamptz
-        and m.close_time > (${args.nowParam}::timestamptz - interval '6 hours')
+        and m.close_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
       union all
       select
         m.id as market_id,
@@ -249,7 +251,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.venue = 'polymarket'
         and m.expiration_time is not null
         and m.expiration_time <= ${args.nowParam}::timestamptz
-        and m.expiration_time > (${args.nowParam}::timestamptz - interval '6 hours')
+        and m.expiration_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
       union all
       select
         m.id as market_id,
@@ -260,7 +262,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
       where e.status = 'ACTIVE'
         and e.end_date is not null
         and e.end_date <= ${args.nowParam}::timestamptz
-        and e.end_date > (${args.nowParam}::timestamptz - interval '6 hours')
+        and e.end_date > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
         and m.status = 'ACTIVE'
         and m.venue = 'polymarket'
     ),
@@ -445,7 +447,10 @@ function buildFeedMarketCandidateExtraSql(args: {
     hasSearch = false,
     requireNamedCategory = false,
   } = args;
-  const clauses: string[] = [supportedLimitlessMarketExpr, renderableMarketExpr];
+  const clauses: string[] = [
+    supportedLimitlessMarketExpr,
+    renderableMarketExpr,
+  ];
 
   if (requireNamedCategory) {
     clauses.push("e.category is not null", "btrim(e.category) <> ''");
@@ -678,7 +683,8 @@ function buildFeedSearchMatchesSql(args: {
       : finalMatchLimit;
   const finalLimitClause = buildFeedSearchLimitClause(finalMatchLimit);
   const fallbackLimitClause = buildFeedSearchLimitClause(fallbackMatchLimit);
-  const searchEventsLimitClause = buildFeedSearchLimitClause(fallbackMatchLimit);
+  const searchEventsLimitClause =
+    buildFeedSearchLimitClause(fallbackMatchLimit);
   const fallbackRunExpr =
     fallbackThreshold != null
       ? `(select matched from primary_search_state) < ${Math.max(1, Math.floor(fallbackThreshold))}`
@@ -926,9 +932,7 @@ function buildFeedSearchContext(args: {
     searchMarketJoin: plan.hasSearch
       ? "join search_events se on se.id = m.event_id"
       : "",
-    searchFilterExpr: plan.hasSearch
-      ? "true"
-      : "true",
+    searchFilterExpr: plan.hasSearch ? "true" : "true",
     joinedRankExpr: plan.hasSearch
       ? "(coalesce(se.search_priority, 0) * 1000000000000000000000000000000::numeric + coalesce(se.rank, 0))"
       : "0::double precision",
@@ -987,6 +991,7 @@ function buildFeedEventWhere(args: {
   } = args;
   const where: string[] = ["e.status = 'ACTIVE'"];
   if (includeOrderableExists) {
+    where.push(buildOrderableEventFreshnessSql({ eventAlias: "e", nowParam }));
     where.push(buildEventHasOrderableMarketSql({ eventAlias: "e", nowParam }));
   }
 
@@ -1105,14 +1110,15 @@ function buildFeedEventJoinHaving(args: {
 }
 
 function feedEventFastCandidateLimit(
-  inputs: Pick<FeedInputs, "limit" | "offset">,
+  inputs: Pick<FeedInputs, "limit" | "offset" | "sort">,
 ): number {
   const pageTarget = inputs.limit + inputs.offset;
+  const minCandidates =
+    inputs.sort === "liquidity"
+      ? FEED_EVENT_FAST_MAX_CANDIDATES
+      : FEED_EVENT_FAST_MIN_CANDIDATES;
   return Math.min(
-    Math.max(
-      FEED_EVENT_FAST_MIN_CANDIDATES,
-      pageTarget * FEED_EVENT_FAST_CANDIDATE_FACTOR,
-    ),
+    Math.max(minCandidates, pageTarget * FEED_EVENT_FAST_CANDIDATE_FACTOR),
     FEED_EVENT_FAST_MAX_CANDIDATES,
   );
 }
@@ -1151,10 +1157,7 @@ async function fetchFeedEventIdsFast(
 
   const { params, add } = createParamBuilder();
   const expressions = buildFeedSqlExpressions();
-  const {
-    eventVolumeDisplayExpr,
-    eventLiquidityDisplayExpr,
-  } = expressions;
+  const { eventVolumeDisplayExpr, eventLiquidityDisplayExpr } = expressions;
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const nowParam = add(inputs.nowParam);
   const eventWhere = buildFeedEventWhere({
@@ -1164,6 +1167,9 @@ async function fetchFeedEventIdsFast(
     hasSearch: false,
     includeOrderableExists: false,
   });
+  eventWhere.push(
+    buildOrderableEventFreshnessSql({ eventAlias: "e", nowParam }),
+  );
   if (inputs.minVol > 1e-9) {
     eventWhere.push(`${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
   }
@@ -1172,9 +1178,7 @@ async function fetchFeedEventIdsFast(
       `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
     );
   }
-  const eventWhereSql = eventWhere.length
-    ? eventWhere.join(" and ")
-    : "true";
+  const eventWhereSql = eventWhere.length ? eventWhere.join(" and ") : "true";
   const candidateLimitParam = add(candidateLimit);
   const targetParam = add(pageTarget);
 
@@ -2596,9 +2600,9 @@ export async function fetchFeedMarketsDirect(
         )
       `,
       `
-        exact_market_candidate_page as materialized (${buildExactMarketCandidatesSql([
-          `${metricStateCountExpr} < ${metricFirstTargetParam}`,
-        ])})
+        exact_market_candidate_page as materialized (${buildExactMarketCandidatesSql(
+          [`${metricStateCountExpr} < ${metricFirstTargetParam}`],
+        )})
       `,
       `
         market_candidates as (
@@ -2673,9 +2677,9 @@ export async function fetchFeedMarketsDirect(
         )
       `,
       `
-        exact_market_candidate_page as materialized (${buildExactMarketCandidatesSql([
-          `${metricStateCountExpr} < ${metricFirstTargetParam}`,
-        ])})
+        exact_market_candidate_page as materialized (${buildExactMarketCandidatesSql(
+          [`${metricStateCountExpr} < ${metricFirstTargetParam}`],
+        )})
       `,
       `
         market_candidates as (
