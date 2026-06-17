@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import type { QueryResultRow } from "pg";
 import {
   buildBroadOrderableMarketSql,
   buildEventHasBroadOrderableMarketSql,
@@ -6,6 +7,7 @@ import {
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams, TokenPair } from "../server-types.js";
 import type { FifaSection } from "../schemas/special.js";
+import { queryRowsWithLocalSettings } from "../repos/unified-read.js";
 import {
   buildMatchFixtureKey,
   canonicalSportsTeamKey,
@@ -181,7 +183,28 @@ type FifaCandidateRow = FifaMetaRow &
     market_created_at: unknown;
     search_rank: unknown;
     match_intent_rank: unknown;
+    ord?: unknown;
+    market_rank?: unknown;
   };
+
+type FifaCandidateProjectionMode = "page" | "count" | "facet";
+
+type FifaFacetCandidateRow = Pick<
+  FifaCandidateRow,
+  "event_id" | "market_uuid" | "venue" | "fifa_section"
+>;
+
+type FifaEventSortRow = {
+  event_id: string;
+  search_rank: number | null;
+  match_intent_rank: number | null;
+  section: string;
+  volume_display: number;
+  volume_24h_display: number;
+  liquidity_display: number;
+  sort_time: unknown;
+  created_at: unknown;
+};
 
 export type FifaSpecialPage = {
   rows: FifaSpecialRow[];
@@ -204,7 +227,23 @@ function createParamBuilder(): ParamBuilder {
   return { params, add };
 }
 
+async function queryFifaRows<T extends QueryResultRow>(
+  pool: Pool,
+  sql: string,
+  params: PgParams,
+): Promise<T[]> {
+  if (typeof (pool as { connect?: unknown }).connect !== "function") {
+    const { rows } = await pool.query<T>(sql, params);
+    return rows;
+  }
+  return queryRowsWithLocalSettings<T>(pool, sql, params, {
+    workMem: FIFA_SPECIAL_WORK_MEM,
+    jitOff: true,
+  });
+}
+
 const FIFA_SEARCH_MATCH_LIMIT = 2000;
+const FIFA_SPECIAL_WORK_MEM = "32MB";
 
 export function normalizeFifaSpecialSearchQuery(q: string | undefined): string | undefined {
   const trimmed = q?.trim();
@@ -937,35 +976,346 @@ function rowMatchesMetadataFilters(row: FifaMetaRow, inputs: FifaSpecialInputs):
   return true;
 }
 
-function paginateFilteredRows(
+function candidateNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function candidateTime(value: unknown): number | null {
+  if (value == null) return null;
+  if (value instanceof Date) return value.getTime();
+  const n = Date.parse(String(value));
+  return Number.isFinite(n) ? n : null;
+}
+
+function compareNullableNumbers(
+  a: unknown,
+  b: unknown,
+  direction: "asc" | "desc",
+): number {
+  const left = candidateNumber(a);
+  const right = candidateNumber(b);
+  if (left == null && right == null) return 0;
+  if (left == null) return 1;
+  if (right == null) return -1;
+  return direction === "asc" ? left - right : right - left;
+}
+
+function compareNullableTimes(
+  a: unknown,
+  b: unknown,
+  direction: "asc" | "desc",
+): number {
+  const left = candidateTime(a);
+  const right = candidateTime(b);
+  if (left == null && right == null) return 0;
+  if (left == null) return 1;
+  if (right == null) return -1;
+  return direction === "asc" ? left - right : right - left;
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function sectionFeaturedScore(section: string | null | undefined): number {
+  switch (section) {
+    case "winner":
+      return 90;
+    case "match_result":
+      return 80;
+    case "match_prop":
+      return 70;
+    case "stage":
+      return 60;
+    case "group":
+      return 50;
+    case "player_award":
+      return 40;
+    case "squad":
+      return 30;
+    default:
+      return 10;
+  }
+}
+
+function compareCandidateMarkets(
+  inputs: FifaSpecialInputs,
+  a: FifaCandidateRow,
+  b: FifaCandidateRow,
+): number {
+  const dir = sortDirectionSql(inputs);
+  if (inputs.sort === "time") {
+    return (
+      compareNullableTimes(a.sort_time, b.sort_time, dir) ||
+      compareText(a.market_uuid, b.market_uuid)
+    );
+  }
+  if (inputs.sort === "newest") {
+    return (
+      compareNullableTimes(a.market_created_at, b.market_created_at, dir) ||
+      compareText(a.market_uuid, b.market_uuid)
+    );
+  }
+  if (inputs.sort === "volume") {
+    return (
+      compareNullableNumbers(a.volume_display, b.volume_display, dir) ||
+      compareText(a.market_uuid, b.market_uuid)
+    );
+  }
+  if (inputs.sort === "volume24h") {
+    return (
+      compareNullableNumbers(a.volume_24h_display, b.volume_24h_display, dir) ||
+      compareText(a.market_uuid, b.market_uuid)
+    );
+  }
+  if (inputs.sort === "liquidity") {
+    return (
+      compareNullableNumbers(a.liquidity_display, b.liquidity_display, dir) ||
+      compareText(a.market_uuid, b.market_uuid)
+    );
+  }
+  return (
+    compareNullableNumbers(a.match_intent_rank, b.match_intent_rank, "desc") ||
+    compareNullableNumbers(a.search_rank, b.search_rank, "desc") ||
+    sectionFeaturedScore(b.fifa_section) - sectionFeaturedScore(a.fifa_section) ||
+    compareNullableNumbers(a.volume_display, b.volume_display, "desc") ||
+    compareNullableTimes(a.sort_time, b.sort_time, "asc") ||
+    compareText(a.market_uuid, b.market_uuid)
+  );
+}
+
+function maxNullableNumber(current: number | null, value: unknown): number | null {
+  const next = candidateNumber(value);
+  if (next == null) return current;
+  return current == null || next > current ? next : current;
+}
+
+function minNullableTime(current: unknown, value: unknown): unknown {
+  const currentTime = candidateTime(current);
+  const nextTime = candidateTime(value);
+  if (nextTime == null) return current;
+  if (currentTime == null || nextTime < currentTime) return value;
+  return current;
+}
+
+function buildEventSortRows(rows: FifaCandidateRow[]): FifaEventSortRow[] {
+  const events = new Map<string, FifaEventSortRow>();
+  for (const row of rows) {
+    const existing = events.get(row.event_id);
+    const rowSection = row.fifa_section ?? "special";
+    if (!existing) {
+      events.set(row.event_id, {
+        event_id: row.event_id,
+        search_rank: candidateNumber(row.search_rank),
+        match_intent_rank: candidateNumber(row.match_intent_rank),
+        section: rowSection,
+        volume_display: candidateNumber(row.event_volume_display) ?? 0,
+        volume_24h_display: candidateNumber(row.event_volume_24h) ?? 0,
+        liquidity_display: candidateNumber(row.event_liquidity_display) ?? 0,
+        sort_time: row.sort_time,
+        created_at: row.market_created_at,
+      });
+      continue;
+    }
+    existing.search_rank = maxNullableNumber(existing.search_rank, row.search_rank);
+    existing.match_intent_rank = maxNullableNumber(
+      existing.match_intent_rank,
+      row.match_intent_rank,
+    );
+    if (compareText(rowSection, existing.section) < 0) {
+      existing.section = rowSection;
+    }
+    existing.volume_display = Math.max(
+      existing.volume_display,
+      candidateNumber(row.event_volume_display) ?? 0,
+    );
+    existing.volume_24h_display = Math.max(
+      existing.volume_24h_display,
+      candidateNumber(row.event_volume_24h) ?? 0,
+    );
+    existing.liquidity_display = Math.max(
+      existing.liquidity_display,
+      candidateNumber(row.event_liquidity_display) ?? 0,
+    );
+    existing.sort_time = minNullableTime(existing.sort_time, row.sort_time);
+    existing.created_at = minNullableTime(existing.created_at, row.market_created_at);
+  }
+  return Array.from(events.values());
+}
+
+function compareEventSortRows(
+  inputs: FifaSpecialInputs,
+  a: FifaEventSortRow,
+  b: FifaEventSortRow,
+): number {
+  const dir = sortDirectionSql(inputs);
+  if (inputs.sort === "time") {
+    return (
+      compareNullableTimes(a.sort_time, b.sort_time, dir) ||
+      compareText(a.event_id, b.event_id)
+    );
+  }
+  if (inputs.sort === "newest") {
+    return (
+      compareNullableTimes(a.created_at, b.created_at, dir) ||
+      compareText(a.event_id, b.event_id)
+    );
+  }
+  if (inputs.sort === "volume") {
+    return (
+      compareNullableNumbers(a.volume_display, b.volume_display, dir) ||
+      compareText(a.event_id, b.event_id)
+    );
+  }
+  if (inputs.sort === "volume24h") {
+    return (
+      compareNullableNumbers(a.volume_24h_display, b.volume_24h_display, dir) ||
+      compareText(a.event_id, b.event_id)
+    );
+  }
+  if (inputs.sort === "liquidity") {
+    return (
+      compareNullableNumbers(a.liquidity_display, b.liquidity_display, dir) ||
+      compareText(a.event_id, b.event_id)
+    );
+  }
+  return (
+    compareNullableNumbers(a.match_intent_rank, b.match_intent_rank, "desc") ||
+    compareNullableNumbers(a.search_rank, b.search_rank, "desc") ||
+    sectionFeaturedScore(b.section) - sectionFeaturedScore(a.section) ||
+    compareNullableNumbers(a.volume_display, b.volume_display, "desc") ||
+    compareNullableTimes(a.sort_time, b.sort_time, "asc") ||
+    compareText(a.event_id, b.event_id)
+  );
+}
+
+function orderCandidateRows(
   rows: FifaCandidateRow[],
   inputs: FifaSpecialInputs,
+): FifaCandidateRow[] {
+  if (inputs.view === "markets") {
+    return [...rows]
+      .sort((a, b) => compareCandidateMarkets(inputs, a, b))
+      .map((row, index) => ({ ...row, ord: index + 1, market_rank: 1 }));
+  }
+
+  const rowsByEvent = new Map<string, FifaCandidateRow[]>();
+  for (const row of rows) {
+    const eventRows = rowsByEvent.get(row.event_id) ?? [];
+    eventRows.push(row);
+    rowsByEvent.set(row.event_id, eventRows);
+  }
+  const orderedEvents = buildEventSortRows(rows).sort((a, b) =>
+    compareEventSortRows(inputs, a, b),
+  );
+  const orderedRows: FifaCandidateRow[] = [];
+  for (const [eventIndex, event] of orderedEvents.entries()) {
+    const eventRows = [...(rowsByEvent.get(event.event_id) ?? [])].sort(
+      (a, b) =>
+        compareNullableNumbers(a.volume_display ?? 0, b.volume_display ?? 0, "desc") ||
+        compareText(a.market_uuid, b.market_uuid),
+    );
+    for (const [marketIndex, row] of eventRows.entries()) {
+      orderedRows.push({
+        ...row,
+        ord: eventIndex + 1,
+        market_rank: marketIndex + 1,
+      });
+    }
+  }
+  return orderedRows;
+}
+
+function rowMatchesRuntimeFilters(
+  row: FifaCandidateRow,
+  inputs: FifaSpecialInputs,
+  options: {
+    ignoreSections?: boolean;
+    ignoreVenues?: boolean;
+    applyMetadata?: boolean;
+  } = {},
+): boolean {
+  if (!options.ignoreVenues && inputs.venues?.length && !inputs.venues.includes(row.venue)) {
+    return false;
+  }
+  if (
+    !options.ignoreSections &&
+    inputs.sections?.length &&
+    !inputs.sections.includes(row.fifa_section)
+  ) {
+    return false;
+  }
+  if (options.applyMetadata && !rowMatchesMetadataFilters(row, inputs)) {
+    return false;
+  }
+  return true;
+}
+
+function paginateOrderedRows(
+  orderedRows: FifaCandidateRow[],
+  inputs: FifaSpecialInputs,
+  options: { capEventMarkets: boolean },
 ): { rows: FifaCandidateRow[]; total: number } {
-  const filtered = rows.filter((row) => rowMatchesMetadataFilters(row, inputs));
   if (inputs.view === "markets") {
     return {
-      rows: filtered.slice(inputs.offset, inputs.offset + inputs.limit),
-      total: filtered.length,
+      rows: orderedRows.slice(inputs.offset, inputs.offset + inputs.limit),
+      total: orderedRows.length,
     };
   }
 
-  const selectedEventIds = new Set<string>();
   const eventOrder: string[] = [];
-  for (const row of filtered) {
-    if (selectedEventIds.has(row.event_id)) continue;
-    selectedEventIds.add(row.event_id);
+  const seenEvents = new Set<string>();
+  for (const row of orderedRows) {
+    if (seenEvents.has(row.event_id)) continue;
+    seenEvents.add(row.event_id);
     eventOrder.push(row.event_id);
   }
   const pageEventIds = new Set(
     eventOrder.slice(inputs.offset, inputs.offset + inputs.limit),
   );
-  return {
-    rows: filtered.filter((row) => pageEventIds.has(row.event_id)),
-    total: eventOrder.length,
-  };
+  const rows = orderedRows.filter((row) => {
+    if (!pageEventIds.has(row.event_id)) return false;
+    if (!options.capEventMarkets) return true;
+    return (candidateNumber(row.market_rank) ?? 1) <= 100;
+  });
+  return { rows, total: eventOrder.length };
 }
 
-function buildCandidateKeyProjection(base: ReturnType<typeof buildBaseSql>): string {
+function buildCandidateKeyProjection(
+  base: ReturnType<typeof buildBaseSql>,
+  mode: FifaCandidateProjectionMode = "page",
+): string {
+  const fromSql = `
+    from unified_events e
+    join unified_markets m on m.event_id = e.id
+    left join polymarket_markets pm_filter
+      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+    ${base.searchJoin}
+    where ${base.where.join(" and ")}
+  `;
+
+  if (mode === "count") {
+    return `
+      select
+        e.id as event_id,
+        m.id as market_uuid
+      ${fromSql}
+    `;
+  }
+
+  if (mode === "facet") {
+    return `
+      select
+        e.id as event_id,
+        m.id as market_uuid,
+        m.venue,
+        (${base.sectionExpr})::text as fifa_section
+      ${fromSql}
+    `;
+  }
+
   return `
     select
       e.id as event_id,
@@ -995,12 +1345,7 @@ function buildCandidateKeyProjection(base: ReturnType<typeof buildBaseSql>): str
       end::text as fifa_confidence,
       (${base.searchRankExpr}) as search_rank,
       (${base.matchIntentRankExpr}) as match_intent_rank
-    from unified_events e
-    join unified_markets m on m.event_id = e.id
-    left join polymarket_markets pm_filter
-      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
-    ${base.searchJoin}
-    where ${base.where.join(" and ")}
+    ${fromSql}
   `;
 }
 
@@ -1030,8 +1375,8 @@ function selectedMarketKeysFromJson(jsonParam: string): string {
 function serializeSelectedCandidateRows(rows: FifaCandidateRow[]): string {
   return JSON.stringify(
     rows.map((row, index) => ({
-      ord: index + 1,
-      market_rank: index + 1,
+      ord: candidateNumber(row.ord) ?? index + 1,
+      market_rank: candidateNumber(row.market_rank) ?? index + 1,
       market_uuid: row.market_uuid,
       event_id: row.event_id,
       event_volume_display: row.event_volume_display ?? null,
@@ -1142,6 +1487,56 @@ function buildHydratedProjection(keySource: string): string {
   `;
 }
 
+function buildSectionFacetsFromRows(
+  rows: FifaFacetCandidateRow[],
+): FifaSpecialPage["sectionFacets"] {
+  const counts = new Map<
+    string,
+    { eventIds: Set<string>; marketIds: Set<string> }
+  >();
+  for (const row of rows) {
+    const key = row.fifa_section;
+    const entry =
+      counts.get(key) ??
+      { eventIds: new Set<string>(), marketIds: new Set<string>() };
+    entry.eventIds.add(row.event_id);
+    entry.marketIds.add(row.market_uuid);
+    counts.set(key, entry);
+  }
+  return Array.from(counts.entries())
+    .map(([section, entry]) => ({
+      section: section as FifaSection,
+      events: entry.eventIds.size,
+      markets: entry.marketIds.size,
+    }))
+    .sort((a, b) => b.markets - a.markets || a.section.localeCompare(b.section));
+}
+
+function buildVenueFacetsFromRows(
+  rows: FifaFacetCandidateRow[],
+): FifaSpecialPage["venueFacets"] {
+  const counts = new Map<
+    string,
+    { eventIds: Set<string>; marketIds: Set<string> }
+  >();
+  for (const row of rows) {
+    const key = row.venue;
+    const entry =
+      counts.get(key) ??
+      { eventIds: new Set<string>(), marketIds: new Set<string>() };
+    entry.eventIds.add(row.event_id);
+    entry.marketIds.add(row.market_uuid);
+    counts.set(key, entry);
+  }
+  return Array.from(counts.entries())
+    .map(([venue, entry]) => ({
+      venue,
+      events: entry.eventIds.size,
+      markets: entry.marketIds.size,
+    }))
+    .sort((a, b) => b.markets - a.markets || a.venue.localeCompare(b.venue));
+}
+
 async function fetchFacets(
   pool: Pool,
   inputs: FifaSpecialInputs,
@@ -1157,17 +1552,13 @@ async function fetchFacets(
     ignoreSections: true,
   });
   const sectionSql = `
-    ${sectionBase.cte ? `with ${sectionBase.cte}` : ""}
+    with ${sectionBase.cte ? `${sectionBase.cte},` : ""}
+    candidate_facets as materialized (${buildCandidateKeyProjection(sectionBase, "facet")})
     select
-      (${sectionBase.sectionExpr})::text as section,
-      count(distinct e.id)::int as events,
-      count(distinct m.id)::int as markets
-    from unified_events e
-    join unified_markets m on m.event_id = e.id
-    left join polymarket_markets pm_filter
-      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
-    ${sectionBase.searchJoin}
-    where ${sectionBase.where.join(" and ")}
+      fifa_section as section,
+      count(distinct event_id)::int as events,
+      count(distinct market_uuid)::int as markets
+    from candidate_facets
     group by section
     order by markets desc, section
   `;
@@ -1179,28 +1570,32 @@ async function fetchFacets(
     ignoreVenues: true,
   });
   const venueSql = `
-    ${venueBase.cte ? `with ${venueBase.cte}` : ""}
+    with ${venueBase.cte ? `${venueBase.cte},` : ""}
+    candidate_facets as materialized (${buildCandidateKeyProjection(venueBase, "facet")})
     select
-      m.venue as venue,
-      count(distinct e.id)::int as events,
-      count(distinct m.id)::int as markets
-    from unified_events e
-    join unified_markets m on m.event_id = e.id
-    left join polymarket_markets pm_filter
-      on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
-    ${venueBase.searchJoin}
-    where ${venueBase.where.join(" and ")}
-    group by m.venue
+      venue,
+      count(distinct event_id)::int as events,
+      count(distinct market_uuid)::int as markets
+    from candidate_facets
+    group by venue
     order by markets desc, venue
   `;
 
   const [sectionResult, venueResult] = await Promise.all([
-    pool.query(sectionSql, sectionBuilder.params),
-    pool.query(venueSql, venueBuilder.params),
+    queryFifaRows<FifaSpecialPage["sectionFacets"][number]>(
+      pool,
+      sectionSql,
+      sectionBuilder.params,
+    ),
+    queryFifaRows<FifaSpecialPage["venueFacets"][number]>(
+      pool,
+      venueSql,
+      venueBuilder.params,
+    ),
   ]);
   return {
-    sectionFacets: sectionResult.rows as FifaSpecialPage["sectionFacets"],
-    venueFacets: venueResult.rows as FifaSpecialPage["venueFacets"],
+    sectionFacets: sectionResult as FifaSpecialPage["sectionFacets"],
+    venueFacets: venueResult as FifaSpecialPage["venueFacets"],
   };
 }
 
@@ -1222,8 +1617,8 @@ async function fetchMetadataFilteredFacets(
       select *
       from candidate_markets
     `;
-    const result = await pool.query<FifaCandidateRow>(sql, builder.params);
-    return result.rows.filter((row) => rowMatchesMetadataFilters(row, inputs));
+    const rows = await queryFifaRows<FifaCandidateRow>(pool, sql, builder.params);
+    return rows.filter((row) => rowMatchesMetadataFilters(row, inputs));
   };
 
   const [sectionRows, venueRows] = await Promise.all([
@@ -1231,49 +1626,9 @@ async function fetchMetadataFilteredFacets(
     buildRows({ ignoreVenues: true }),
   ]);
 
-  const sectionCounts = new Map<
-    string,
-    { eventIds: Set<string>; marketIds: Set<string> }
-  >();
-  for (const row of sectionRows) {
-    const key = row.fifa_section;
-    const entry =
-      sectionCounts.get(key) ??
-      { eventIds: new Set<string>(), marketIds: new Set<string>() };
-    entry.eventIds.add(row.event_id);
-    entry.marketIds.add(row.market_uuid);
-    sectionCounts.set(key, entry);
-  }
-
-  const venueCounts = new Map<
-    string,
-    { eventIds: Set<string>; marketIds: Set<string> }
-  >();
-  for (const row of venueRows) {
-    const key = row.venue;
-    const entry =
-      venueCounts.get(key) ??
-      { eventIds: new Set<string>(), marketIds: new Set<string>() };
-    entry.eventIds.add(row.event_id);
-    entry.marketIds.add(row.market_uuid);
-    venueCounts.set(key, entry);
-  }
-
   return {
-    sectionFacets: Array.from(sectionCounts.entries())
-      .map(([section, counts]) => ({
-        section: section as FifaSection,
-        events: counts.eventIds.size,
-        markets: counts.marketIds.size,
-      }))
-      .sort((a, b) => b.markets - a.markets || a.section.localeCompare(b.section)),
-    venueFacets: Array.from(venueCounts.entries())
-      .map(([venue, counts]) => ({
-        venue,
-        events: counts.eventIds.size,
-        markets: counts.marketIds.size,
-      }))
-      .sort((a, b) => b.markets - a.markets || a.venue.localeCompare(b.venue)),
+    sectionFacets: buildSectionFacetsFromRows(sectionRows),
+    venueFacets: buildVenueFacetsFromRows(venueRows),
   };
 }
 
@@ -1290,76 +1645,80 @@ async function hydrateSelectedCandidateRows(
     from (${buildHydratedProjection("selected_market_keys")}) hydrated
     order by ord, market_rank, market_uuid
   `;
-  const result = await pool.query<FifaSpecialRow>(sql, builder.params);
-  return result.rows;
+  return queryFifaRows<FifaSpecialRow>(pool, sql, builder.params);
 }
 
-export async function fetchFifaSpecialPage(
+function selectedEventKeysFromJson(jsonParam: string): string {
+  return `
+    select *
+    from jsonb_to_recordset(${jsonParam}::jsonb) as e(
+      ord int,
+      event_id text
+    )
+  `;
+}
+
+function serializeSelectedEventRows(rows: Array<{ event_id: string; ord: unknown }>): string {
+  return JSON.stringify(
+    rows.map((row, index) => ({
+      ord: candidateNumber(row.ord) ?? index + 1,
+      event_id: row.event_id,
+    })),
+  );
+}
+
+async function fetchCandidateRows(
   pool: Pool,
   inputs: FifaSpecialInputs,
-): Promise<FifaSpecialPage> {
+  options: { ignoreSections?: boolean; ignoreVenues?: boolean } = {},
+): Promise<FifaCandidateRow[]> {
+  const builder = createParamBuilder();
+  const base = buildBaseSql({
+    inputs,
+    add: builder.add,
+    ignoreSections: options.ignoreSections,
+    ignoreVenues: options.ignoreVenues,
+  });
+  const sql = `
+    with ${base.cte ? `${base.cte},` : ""}
+    candidate_keys as materialized (${buildCandidateKeyProjection(base)})
+    select *
+    from candidate_keys
+  `;
+  return queryFifaRows<FifaCandidateRow>(pool, sql, builder.params);
+}
+
+async function fetchCount(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<number> {
   const builder = createParamBuilder();
   const base = buildBaseSql({ inputs, add: builder.add });
-  const candidateProjection = buildCandidateKeyProjection(base);
-  const orderSql = buildOrderSql(inputs, inputs.view === "markets" ? "market" : "event");
-  const withParts: string[] = [];
-  if (base.cte) withParts.push(base.cte);
-  withParts.push(`candidate_keys as materialized (${candidateProjection})`);
+  const totalSql =
+    inputs.view === "markets"
+      ? "select count(*)::int as total from candidate_keys"
+      : "select count(distinct event_id)::int as total from candidate_keys";
+  const sql = `
+    with ${base.cte ? `${base.cte},` : ""}
+    candidate_keys as materialized (${buildCandidateKeyProjection(base, "count")})
+    ${totalSql};
+  `;
+  const rows = await queryFifaRows<{ total: number }>(pool, sql, builder.params);
+  return rows[0]?.total ?? 0;
+}
 
-  let pageCte: string;
-  let rowSelect: string;
-  if (hasMetadataFilters(inputs)) {
-    if (inputs.view === "markets") {
-      pageCte = `
-        ordered_candidate_keys as materialized (
-          select ordered.*, row_number() over () as ord, 1::int as market_rank
-          from (
-            select *
-            from candidate_keys
-            order by ${orderSql}
-          ) ordered
-        )
-      `;
-      rowSelect = `
-        select *
-        from ordered_candidate_keys
-        order by ord
-      `;
-    } else {
-      pageCte = `
-        page_events as materialized (
-          select page.*, row_number() over () as ord
-          from (
-            select *
-            from (${buildGroupedEventCandidatesSql("candidate_keys")}) grouped_events
-            order by ${orderSql}
-          ) page
-        ),
-        ranked_event_markets as materialized (
-          select
-            c.*,
-            p.ord,
-            row_number() over (
-              partition by c.event_id
-              order by coalesce(c.volume_display, 0) desc, c.market_uuid
-            ) as market_rank
-          from candidate_keys c
-          join page_events p on p.event_id = c.event_id
-        )
-      `;
-      rowSelect = `
-        select *
-        from ranked_event_markets
-        order by
-          ord,
-          market_rank,
-          market_uuid
-      `;
-    }
-  } else if (inputs.view === "markets") {
-    const limitParam = builder.add(inputs.limit);
-    const offsetParam = builder.add(inputs.offset);
-    pageCte = `
+async function fetchMarketPageCandidateRows(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<FifaCandidateRow[]> {
+  const builder = createParamBuilder();
+  const base = buildBaseSql({ inputs, add: builder.add });
+  const orderSql = buildOrderSql(inputs, "market");
+  const limitParam = builder.add(inputs.limit);
+  const offsetParam = builder.add(inputs.offset);
+  const sql = `
+    with ${base.cte ? `${base.cte},` : ""}
+    candidate_keys as materialized (${buildCandidateKeyProjection(base)}),
       page_markets as materialized (
         select page.*, row_number() over () as ord
         from (
@@ -1374,16 +1733,25 @@ export async function fetchFifaSpecialPage(
         from page_markets p
         join candidate_keys c on c.market_uuid = p.market_uuid
       )
-    `;
-    rowSelect = `
-      select *
-      from (${buildHydratedProjection("selected_market_keys")}) hydrated
-      order by ord, market_uuid
-    `;
-  } else {
-    const limitParam = builder.add(inputs.limit);
-    const offsetParam = builder.add(inputs.offset);
-    pageCte = `
+    select *
+    from selected_market_keys
+    order by ord, market_uuid
+  `;
+  return queryFifaRows<FifaCandidateRow>(pool, sql, builder.params);
+}
+
+async function fetchEventPageEvents(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<Array<{ event_id: string; ord: number }>> {
+  const builder = createParamBuilder();
+  const base = buildBaseSql({ inputs, add: builder.add });
+  const orderSql = buildOrderSql(inputs, "event");
+  const limitParam = builder.add(inputs.limit);
+  const offsetParam = builder.add(inputs.offset);
+  const sql = `
+    with ${base.cte ? `${base.cte},` : ""}
+    candidate_keys as materialized (${buildCandidateKeyProjection(base)}),
       page_events as materialized (
         select page.*, row_number() over () as ord
         from (
@@ -1392,7 +1760,33 @@ export async function fetchFifaSpecialPage(
           order by ${orderSql}
           limit ${limitParam} offset ${offsetParam}
         ) page
-      ),
+      )
+    select event_id, ord
+    from page_events
+    order by ord
+  `;
+  return queryFifaRows<{ event_id: string; ord: number }>(
+    pool,
+    sql,
+    builder.params,
+  );
+}
+
+async function fetchEventCandidateRowsForEvents(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+  pageEvents: Array<{ event_id: string; ord: unknown }>,
+): Promise<FifaCandidateRow[]> {
+  if (pageEvents.length === 0) return [];
+  const builder = createParamBuilder();
+  const pageEventsParam = builder.add(serializeSelectedEventRows(pageEvents));
+  const eventIdsParam = builder.add(pageEvents.map((event) => event.event_id));
+  const base = buildBaseSql({ inputs, add: builder.add });
+  base.where.push(`e.id = ANY(${eventIdsParam}::text[])`);
+  const sql = `
+    with page_events as materialized (${selectedEventKeysFromJson(pageEventsParam)}),
+    ${base.cte ? `${base.cte},` : ""}
+    candidate_keys as materialized (${buildCandidateKeyProjection(base)}),
       selected_market_keys as materialized (
         select
           c.*,
@@ -1401,54 +1795,122 @@ export async function fetchFifaSpecialPage(
             partition by c.event_id
             order by coalesce(c.volume_display, 0) desc, c.market_uuid
           ) as market_rank
-        from candidate_keys c
-        join page_events p on p.event_id = c.event_id
+        from page_events p
+        join candidate_keys c on c.event_id = p.event_id
       )
-    `;
-    rowSelect = `
-      select *
-      from (${buildHydratedProjection("selected_market_keys")}) hydrated
-      where market_rank <= 100
-      order by
-        ord,
-        market_rank,
-        market_uuid
-    `;
-  }
-  if (pageCte) withParts.push(pageCte);
-  const totalSql =
-    inputs.view === "markets"
-      ? "select count(*)::int as total from candidate_keys"
-      : "select count(distinct event_id)::int as total from candidate_keys";
-  const sql = `
-    with ${withParts.join(",\n")}
-    ${rowSelect};
+    select *
+    from selected_market_keys
+    where market_rank <= 100
+    order by
+      ord,
+      market_rank,
+      market_uuid
   `;
-  const countBuilder = createParamBuilder();
-  const countBase = buildBaseSql({ inputs, add: countBuilder.add });
-  const countSql = `
-    with ${countBase.cte ? `${countBase.cte},` : ""}
-    candidate_keys as materialized (${buildCandidateKeyProjection(countBase)})
-    ${totalSql};
-  `;
+  return queryFifaRows<FifaCandidateRow>(pool, sql, builder.params);
+}
 
-  const [rowsResult, countResult, facets] = await Promise.all([
-    pool.query<FifaSpecialRow | FifaCandidateRow>(sql, builder.params),
-    hasMetadataFilters(inputs)
-      ? Promise.resolve({ rows: [{ total: 0 }] } as { rows: Array<{ total: number }> })
-      : pool.query<{ total: number }>(countSql, countBuilder.params),
+async function fetchEventPageCandidateRows(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<FifaCandidateRow[]> {
+  const pageEvents = await fetchEventPageEvents(pool, inputs);
+  return fetchEventCandidateRowsForEvents(pool, inputs, pageEvents);
+}
+
+async function fetchSearchFifaSpecialPage(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<FifaSpecialPage> {
+  const allRows = await fetchCandidateRows(pool, inputs, {
+    ignoreSections: true,
+    ignoreVenues: true,
+  });
+  const pageBaseRows = allRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs, {
+      applyMetadata: false,
+    }),
+  );
+  const orderedRows = orderCandidateRows(pageBaseRows, inputs);
+  const metadataFilteredRows = hasMetadataFilters(inputs)
+    ? orderedRows.filter((row) => rowMatchesMetadataFilters(row, inputs))
+    : orderedRows;
+  const page = paginateOrderedRows(metadataFilteredRows, inputs, {
+    capEventMarkets: inputs.view === "events" && !hasMetadataFilters(inputs),
+  });
+
+  const sectionFacetRows = allRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs, {
+      ignoreSections: true,
+      applyMetadata: true,
+    }),
+  );
+  const venueFacetRows = allRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs, {
+      ignoreVenues: true,
+      applyMetadata: true,
+    }),
+  );
+  const rows = await hydrateSelectedCandidateRows(pool, page.rows);
+  return {
+    rows,
+    total: page.total,
+    sectionFacets: buildSectionFacetsFromRows(sectionFacetRows),
+    venueFacets: buildVenueFacetsFromRows(venueFacetRows),
+  };
+}
+
+async function fetchMetadataFilteredPage(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<FifaSpecialPage> {
+  const [candidateRows, facets] = await Promise.all([
+    fetchCandidateRows(pool, inputs, { ignoreSections: true }),
+    fetchMetadataFilteredFacets(pool, inputs),
+  ]);
+  const pageBaseRows = candidateRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs, {
+      applyMetadata: false,
+    }),
+  );
+  const orderedRows = orderCandidateRows(pageBaseRows, inputs);
+  const filteredRows = orderedRows.filter((row) =>
+    rowMatchesMetadataFilters(row, inputs),
+  );
+  const page = paginateOrderedRows(filteredRows, inputs, {
+    capEventMarkets: false,
+  });
+  const rows = await hydrateSelectedCandidateRows(pool, page.rows);
+  return {
+    rows,
+    total: page.total,
+    ...facets,
+  };
+}
+
+export async function fetchFifaSpecialPage(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<FifaSpecialPage> {
+  if (inputs.q) {
+    return fetchSearchFifaSpecialPage(pool, inputs);
+  }
+
+  if (hasMetadataFilters(inputs)) {
+    return fetchMetadataFilteredPage(pool, inputs);
+  }
+
+  const [candidateRows, total, facets] = await Promise.all([
+    inputs.view === "markets"
+      ? fetchMarketPageCandidateRows(pool, inputs)
+      : fetchEventPageCandidateRows(pool, inputs),
+    fetchCount(pool, inputs),
     fetchFacets(pool, inputs),
   ]);
-  const filteredPage = hasMetadataFilters(inputs)
-    ? paginateFilteredRows(rowsResult.rows as FifaCandidateRow[], inputs)
-    : null;
-  const rows = filteredPage
-    ? await hydrateSelectedCandidateRows(pool, filteredPage.rows)
-    : (rowsResult.rows as FifaSpecialRow[]);
+  const rows = await hydrateSelectedCandidateRows(pool, candidateRows);
 
   return {
     rows,
-    total: filteredPage?.total ?? countResult.rows[0]?.total ?? 0,
+    total,
     ...facets,
   };
 }

@@ -5,7 +5,11 @@ import crypto from "node:crypto";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { buildFifaSpecialSearchSqlForTest } from "./services/fifa-special.js";
+import {
+  buildFifaSpecialSearchSqlForTest,
+  fetchFifaSpecialPage,
+  type FifaSpecialInputs,
+} from "./services/fifa-special.js";
 
 type Venue = "polymarket" | "kalshi" | "limitless";
 
@@ -48,6 +52,21 @@ function query(params: Record<string, string | number | undefined>): string {
     if (value != null) search.set(key, String(value));
   }
   return search.toString();
+}
+
+async function captureFifaSql(inputs: FifaSpecialInputs): Promise<string[]> {
+  const captured: string[] = [];
+  const fakePool = {
+    async query(sql: string) {
+      captured.push(sql);
+      if (/select\s+count\(/i.test(sql)) {
+        return { rows: [{ total: 0 }] };
+      }
+      return { rows: [] };
+    },
+  };
+  await fetchFifaSpecialPage(fakePool as never, inputs);
+  return captured;
 }
 
 async function insertEvent(event: SeedEvent): Promise<void> {
@@ -772,6 +791,54 @@ async function main() {
         !searchSql.predicate.includes(" like "),
         "normal FIFA search predicate must not broad-scan raw LIKE",
       );
+    }
+
+    {
+      const capturedSql = await captureFifaSql({
+        limit: 25,
+        offset: 0,
+        view: "events",
+        q: "usa",
+        sort: "featured",
+        sortDir: "desc",
+        nowParam: new Date().toISOString(),
+      });
+      assert.equal(
+        capturedSql.filter((sql) => /search_candidate_markets as materialized/.test(sql))
+          .length,
+        1,
+        "search should build bounded candidates once",
+      );
+      assert.ok(
+        capturedSql.every((sql) => !/select\s+count\(/i.test(sql)),
+        "search should not run a separate count query",
+      );
+      assert.ok(
+        capturedSql.every((sql) => !/group by section/i.test(sql)),
+        "search should compute section facets from bounded rows",
+      );
+    }
+
+    {
+      const capturedSql = await captureFifaSql({
+        limit: 25,
+        offset: 0,
+        view: "events",
+        sort: "featured",
+        sortDir: "desc",
+        nowParam: new Date().toISOString(),
+      });
+      const countSql = capturedSql.find((sql) => /select\s+count\(/i.test(sql));
+      assert.ok(countSql, "regular event feed should still issue an exact count");
+      assert.match(countSql, /candidate_keys as materialized/);
+      assert.doesNotMatch(countSql, /event_title/);
+      assert.doesNotMatch(countSql, /fifa_subtype/);
+      assert.doesNotMatch(countSql, /sum\(coalesce\(m\.volume_total/);
+      const facetSql = capturedSql.filter((sql) =>
+        /candidate_facets as materialized/.test(sql),
+      );
+      assert.equal(facetSql.length, 2);
+      assert.ok(facetSql.every((sql) => !/fifa_subtype/.test(sql)));
     }
 
     {

@@ -1462,7 +1462,7 @@ export function buildFeedSearchResultWindow(
   };
 }
 
-async function queryRowsWithLocalSettings<T extends QueryResultRow>(
+export async function queryRowsWithLocalSettings<T extends QueryResultRow>(
   pool: Pool,
   sql: string,
   params: PgParams,
