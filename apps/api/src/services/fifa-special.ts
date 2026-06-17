@@ -187,7 +187,7 @@ type FifaCandidateRow = FifaMetaRow &
     market_rank?: unknown;
   };
 
-type FifaCandidateProjectionMode = "page" | "count" | "facet";
+type FifaCandidateProjectionMode = "page" | "count" | "facet" | "runtime";
 
 type FifaFacetCandidateRow = Pick<
   FifaCandidateRow,
@@ -244,6 +244,43 @@ async function queryFifaRows<T extends QueryResultRow>(
 
 const FIFA_SEARCH_MATCH_LIMIT = 2000;
 const FIFA_SPECIAL_WORK_MEM = "32MB";
+const FIFA_WORLD_CUP_SERIES = [
+  "KXMENWORLDCUP",
+  "KXWCGAME",
+  "KXWCTOTAL",
+  "KXWCSPREAD",
+  "KXWCBTTS",
+  "KXWCSCORE",
+  "KXWC1H",
+  "KXWC1HBTTS",
+  "KXWC1HTOTAL",
+  "KXWCGOAL",
+  "KXWCTEAMTOTAL",
+  "KXWC1HSPREAD",
+  "KXWCCORNERS",
+  "KXWCSOA",
+  "KXWCTCORNERS",
+  "KXWCFTTS",
+  "KXWCFIRSTGOAL",
+  "KXWCGROUPWIN",
+  "KXWCGROUPQUAL",
+  "KXWCROUND",
+  "KXWCAWARD",
+  "KXWCSQUAD",
+  "KXWCCONTINENT",
+  "KXWCFURTHESTADVANCING",
+  "KXWCGOALLEADER",
+  "KXWCAST",
+  "KXWCFIFATOP10",
+  "KXWCGROUPBOTTOM",
+  "KXWCGROUPORDER",
+  "KXWCGROUPWINNER",
+  "KXWCSTAGEOFELIM",
+  "KXWCTOTALGOAL",
+  "KXWCMENTION",
+  "KXWCOCMEX",
+  "KXWORLDCUPHALFTIME",
+];
 
 export function normalizeFifaSpecialSearchQuery(q: string | undefined): string | undefined {
   const trimmed = q?.trim();
@@ -404,71 +441,103 @@ function buildLimitlessFifaCandidateSql(): string {
   )`;
 }
 
-function buildFifaCandidateSql(): string {
-  const worldCupSeries = [
-    "KXMENWORLDCUP",
-    "KXWCGAME",
-    "KXWCTOTAL",
-    "KXWCSPREAD",
-    "KXWCBTTS",
-    "KXWCSCORE",
-    "KXWC1H",
-    "KXWC1HBTTS",
-    "KXWC1HTOTAL",
-    "KXWCGOAL",
-    "KXWCTEAMTOTAL",
-    "KXWC1HSPREAD",
-    "KXWCCORNERS",
-    "KXWCSOA",
-    "KXWCTCORNERS",
-    "KXWCFTTS",
-    "KXWCFIRSTGOAL",
-    "KXWCGROUPWIN",
-    "KXWCGROUPQUAL",
-    "KXWCROUND",
-    "KXWCAWARD",
-    "KXWCSQUAD",
-    "KXWCCONTINENT",
-    "KXWCFURTHESTADVANCING",
-    "KXWCGOALLEADER",
-    "KXWCAST",
-    "KXWCFIFATOP10",
-    "KXWCGROUPBOTTOM",
-    "KXWCGROUPORDER",
-    "KXWCGROUPWINNER",
-    "KXWCSTAGEOFELIM",
-    "KXWCTOTALGOAL",
-    "KXWCMENTION",
-    "KXWCOCMEX",
-    "KXWORLDCUPHALFTIME",
-  ];
-  const seriesList = worldCupSeries.map((key) => `'${key}'`).join(",");
+function buildPolymarketFifaCandidateSql(): string {
   return `(
-    (
-      e.venue = 'polymarket'
-      and (
-        e.series_key = 'soccer-fifwc'
-        or e.slug like 'fifwc-%'
-        or e.slug like 'world-cup-%'
-        or e.slug in ('world-cup-winner', 'which-continent-will-win-the-world-cup')
+    e.venue = 'polymarket'
+    and (
+      e.series_key = 'soccer-fifwc'
+      or e.slug like 'fifwc-%'
+      or e.slug like 'world-cup-%'
+      or e.slug in ('world-cup-winner', 'which-continent-will-win-the-world-cup')
+    )
+    and coalesce(e.series_key, '') <> 'fifa-friendly'
+  )`;
+}
+
+function buildPolymarketFifaSeriesCandidateSql(): string {
+  return `(
+    e.venue = 'polymarket'
+    and e.series_key = 'soccer-fifwc'
+    and coalesce(e.series_key, '') <> 'fifa-friendly'
+  )`;
+}
+
+function buildPolymarketFifaFifwcSlugCandidateSql(): string {
+  return `(
+    e.venue = 'polymarket'
+    and coalesce(e.series_key, '') <> 'soccer-fifwc'
+    and e.slug like 'fifwc-%'
+    and coalesce(e.series_key, '') <> 'fifa-friendly'
+  )`;
+}
+
+function buildPolymarketFifaWorldCupSlugCandidateSql(): string {
+  return `(
+    e.venue = 'polymarket'
+    and coalesce(e.series_key, '') <> 'soccer-fifwc'
+    and e.slug not like 'fifwc-%'
+    and (
+      e.slug like 'world-cup-%'
+      or e.slug in ('world-cup-winner', 'which-continent-will-win-the-world-cup')
+    )
+    and coalesce(e.series_key, '') <> 'fifa-friendly'
+  )`;
+}
+
+function buildKalshiFifaCandidateSql(): string {
+  const seriesList = FIFA_WORLD_CUP_SERIES.map((key) => `'${key}'`).join(",");
+  return `(
+    e.venue = 'kalshi'
+    and (
+      e.series_key in (${seriesList})
+      or (
+        coalesce(e.metadata->>'competition', '') = 'FIFA'
+        and lower(coalesce(e.metadata->>'seriesCategory', '')) = 'sports'
+        and coalesce(e.series_key, '') not in ('KXWT20WORLDCUP', 'KXWCCREG')
       )
-      and coalesce(e.series_key, '') <> 'fifa-friendly'
     )
-    or (
-      e.venue = 'kalshi'
-      and (
-        e.series_key in (${seriesList})
-        or (
-          coalesce(e.metadata->>'competition', '') = 'FIFA'
-          and lower(coalesce(e.metadata->>'seriesCategory', '')) = 'sports'
-          and coalesce(e.series_key, '') not in ('KXWT20WORLDCUP', 'KXWCCREG')
-        )
-      )
-    )
-    or (
-      e.venue = 'limitless'
-      and ${buildLimitlessFifaCandidateSql()}
-    )
+  )`;
+}
+
+function buildKalshiFifaSeriesCandidateSql(): string {
+  const seriesList = FIFA_WORLD_CUP_SERIES.map((key) => `'${key}'`).join(",");
+  return `(
+    e.venue = 'kalshi'
+    and e.series_key in (${seriesList})
+  )`;
+}
+
+function buildKalshiFifaMetadataCandidateSql(): string {
+  const seriesList = FIFA_WORLD_CUP_SERIES.map((key) => `'${key}'`).join(",");
+  return `(
+    e.venue = 'kalshi'
+    and coalesce(e.series_key, '') not in (${seriesList})
+    and coalesce(e.metadata->>'competition', '') = 'FIFA'
+    and lower(coalesce(e.metadata->>'seriesCategory', '')) = 'sports'
+    and coalesce(e.series_key, '') not in ('KXWT20WORLDCUP', 'KXWCCREG')
+  )`;
+}
+
+function buildLimitlessFifaVenueCandidateSql(): string {
+  return `(
+    e.venue = 'limitless'
+    and ${buildLimitlessFifaCandidateSql()}
+  )`;
+}
+
+function buildLimitlessFifaMarketFirstCandidateSql(): string {
+  return `(
+    e.venue = 'limitless'
+    and m.venue = 'limitless'
+    and ${buildLimitlessFifaCandidateSql()}
+  )`;
+}
+
+function buildFifaCandidateSql(): string {
+  return `(
+    ${buildPolymarketFifaCandidateSql()}
+    or ${buildKalshiFifaCandidateSql()}
+    or ${buildLimitlessFifaVenueCandidateSql()}
   )`;
 }
 
@@ -849,6 +918,7 @@ function buildBaseSql(args: {
   add: ParamBuilder["add"];
   ignoreSections?: boolean;
   ignoreVenues?: boolean;
+  includeFifaCandidatePredicate?: boolean;
 }): {
   cte: string;
   where: string[];
@@ -859,7 +929,13 @@ function buildBaseSql(args: {
   searchRankExpr: string;
   matchIntentRankExpr: string;
 } {
-  const { inputs, add, ignoreSections = false, ignoreVenues = false } = args;
+  const {
+    inputs,
+    add,
+    ignoreSections = false,
+    ignoreVenues = false,
+    includeFifaCandidatePredicate = true,
+  } = args;
   const nowParam = add(inputs.nowParam);
   const sectionExpr = buildFifaSectionSql();
   const subtypeExpr = buildFifaSubtypeSql();
@@ -873,9 +949,11 @@ function buildBaseSql(args: {
       pmAlias: "pm_filter",
     }),
     buildRenderableMarketSql({ alias: "m" }),
-    buildFifaCandidateSql(),
     search.predicate,
   ];
+  if (includeFifaCandidatePredicate) {
+    where.splice(2, 0, buildFifaCandidateSql());
+  }
 
   if (!ignoreVenues && inputs.venues?.length) {
     where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
@@ -1283,19 +1361,39 @@ function paginateOrderedRows(
   return { rows, total: eventOrder.length };
 }
 
-function buildCandidateKeyProjection(
+function buildCandidateFromSql(
   base: ReturnType<typeof buildBaseSql>,
-  mode: FifaCandidateProjectionMode = "page",
+  candidatePredicate?: string,
+  options: { marketFirst?: boolean } = {},
 ): string {
-  const fromSql = `
+  const where = candidatePredicate
+    ? [...base.where, candidatePredicate]
+    : base.where;
+  if (options.marketFirst) {
+    return `
+      from unified_markets m
+      join unified_events e on e.id = m.event_id
+      left join polymarket_markets pm_filter
+        on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+      ${base.searchJoin}
+      where ${where.join(" and ")}
+    `;
+  }
+  return `
     from unified_events e
     join unified_markets m on m.event_id = e.id
     left join polymarket_markets pm_filter
       on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
     ${base.searchJoin}
-    where ${base.where.join(" and ")}
+    where ${where.join(" and ")}
   `;
+}
 
+function buildCandidateSelectSql(
+  base: ReturnType<typeof buildBaseSql>,
+  mode: FifaCandidateProjectionMode,
+  fromSql: string,
+): string {
   if (mode === "count") {
     return `
       select
@@ -1312,6 +1410,27 @@ function buildCandidateKeyProjection(
         m.id as market_uuid,
         m.venue,
         (${base.sectionExpr})::text as fifa_section
+      ${fromSql}
+    `;
+  }
+
+  if (mode === "runtime") {
+    return `
+      select
+        e.id as event_id,
+        e.volume_24h as event_volume_24h,
+        coalesce(nullif(case when e.liquidity >= 9e16 then null else e.liquidity end, 0), nullif(e.open_interest, 0)) as event_liquidity_display,
+        coalesce(nullif(e.volume_total, 0), nullif(sum(coalesce(m.volume_total, 0)) over (partition by e.id), 0)) as event_volume_display,
+        m.id as market_uuid,
+        m.venue,
+        case when m.volume_total is not null and m.volume_total > 0 then m.volume_total else null end as volume_display,
+        coalesce(m.volume_24h, 0) as volume_24h_display,
+        coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0)) as liquidity_display,
+        coalesce(m.close_time, m.expiration_time, e.end_date) as sort_time,
+        m.created_at as market_created_at,
+        (${base.sectionExpr})::text as fifa_section,
+        (${base.searchRankExpr}) as search_rank,
+        (${base.matchIntentRankExpr}) as match_intent_rank
       ${fromSql}
     `;
   }
@@ -1347,6 +1466,39 @@ function buildCandidateKeyProjection(
       (${base.matchIntentRankExpr}) as match_intent_rank
     ${fromSql}
   `;
+}
+
+function buildCandidateKeyProjection(
+  base: ReturnType<typeof buildBaseSql>,
+  mode: FifaCandidateProjectionMode = "page",
+  options: { splitByVenue?: boolean } = {},
+): string {
+  if (options.splitByVenue) {
+    const branches = [
+      { predicate: buildPolymarketFifaSeriesCandidateSql() },
+      { predicate: buildPolymarketFifaFifwcSlugCandidateSql() },
+      { predicate: buildPolymarketFifaWorldCupSlugCandidateSql() },
+      { predicate: buildKalshiFifaSeriesCandidateSql() },
+      { predicate: buildKalshiFifaMetadataCandidateSql() },
+      {
+        predicate: buildLimitlessFifaMarketFirstCandidateSql(),
+        marketFirst: true,
+      },
+    ];
+    return branches
+      .map((branch) =>
+        buildCandidateSelectSql(
+          base,
+          mode,
+          buildCandidateFromSql(base, branch.predicate, {
+            marketFirst: branch.marketFirst,
+          }),
+        ),
+      )
+      .join("\nunion all\n");
+  }
+
+  return buildCandidateSelectSql(base, mode, buildCandidateFromSql(base));
 }
 
 function selectedMarketKeysFromJson(jsonParam: string): string {
@@ -1467,10 +1619,17 @@ function buildHydratedProjection(keySource: string): string {
       m.created_at as market_created_at,
       coalesce(m.close_time, m.expiration_time, e.end_date) as sort_time,
       k.volume_24h_display as volume_24h_display,
-      k.fifa_section::text as fifa_section,
-      k.fifa_subtype::text as fifa_subtype,
-      k.fifa_source_rule::text as fifa_source_rule,
-      k.fifa_confidence::text as fifa_confidence,
+      coalesce(k.fifa_section::text, (${buildFifaSectionSql()})::text) as fifa_section,
+      coalesce(k.fifa_subtype::text, (${buildFifaSubtypeSql()})::text) as fifa_subtype,
+      coalesce(k.fifa_source_rule::text, (${buildFifaSourceRuleSql()})::text) as fifa_source_rule,
+      coalesce(
+        k.fifa_confidence::text,
+        case
+          when e.venue in ('polymarket', 'kalshi') then 'high'
+          when e.venue = 'limitless' then 'medium'
+          else 'low'
+        end::text
+      ) as fifa_confidence,
       k.search_rank as search_rank,
       k.ord as ord,
       coalesce(k.market_rank, 1) as market_rank
@@ -1670,7 +1829,12 @@ function serializeSelectedEventRows(rows: Array<{ event_id: string; ord: unknown
 async function fetchCandidateRows(
   pool: Pool,
   inputs: FifaSpecialInputs,
-  options: { ignoreSections?: boolean; ignoreVenues?: boolean } = {},
+  options: {
+    ignoreSections?: boolean;
+    ignoreVenues?: boolean;
+    projection?: FifaCandidateProjectionMode;
+    splitByVenue?: boolean;
+  } = {},
 ): Promise<FifaCandidateRow[]> {
   const builder = createParamBuilder();
   const base = buildBaseSql({
@@ -1678,10 +1842,15 @@ async function fetchCandidateRows(
     add: builder.add,
     ignoreSections: options.ignoreSections,
     ignoreVenues: options.ignoreVenues,
+    includeFifaCandidatePredicate: !options.splitByVenue,
   });
   const sql = `
     with ${base.cte ? `${base.cte},` : ""}
-    candidate_keys as materialized (${buildCandidateKeyProjection(base)})
+    candidate_keys as materialized (${buildCandidateKeyProjection(
+      base,
+      options.projection ?? "page",
+      { splitByVenue: options.splitByVenue },
+    )})
     select *
     from candidate_keys
   `;
@@ -1887,6 +2056,42 @@ async function fetchMetadataFilteredPage(
   };
 }
 
+async function fetchBroadEventFifaSpecialPage(
+  pool: Pool,
+  inputs: FifaSpecialInputs,
+): Promise<FifaSpecialPage> {
+  const allRows = await fetchCandidateRows(pool, inputs, {
+    ignoreSections: true,
+    ignoreVenues: true,
+    projection: "runtime",
+    splitByVenue: true,
+  });
+  const pageBaseRows = allRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs),
+  );
+  const orderedRows = orderCandidateRows(pageBaseRows, inputs);
+  const page = paginateOrderedRows(orderedRows, inputs, {
+    capEventMarkets: true,
+  });
+  const sectionFacetRows = allRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs, {
+      ignoreSections: true,
+    }),
+  );
+  const venueFacetRows = allRows.filter((row) =>
+    rowMatchesRuntimeFilters(row, inputs, {
+      ignoreVenues: true,
+    }),
+  );
+  const rows = await hydrateSelectedCandidateRows(pool, page.rows);
+  return {
+    rows,
+    total: page.total,
+    sectionFacets: buildSectionFacetsFromRows(sectionFacetRows),
+    venueFacets: buildVenueFacetsFromRows(venueFacetRows),
+  };
+}
+
 export async function fetchFifaSpecialPage(
   pool: Pool,
   inputs: FifaSpecialInputs,
@@ -1897,6 +2102,10 @@ export async function fetchFifaSpecialPage(
 
   if (hasMetadataFilters(inputs)) {
     return fetchMetadataFilteredPage(pool, inputs);
+  }
+
+  if (inputs.view === "events") {
+    return fetchBroadEventFifaSpecialPage(pool, inputs);
   }
 
   const [candidateRows, total, facets] = await Promise.all([

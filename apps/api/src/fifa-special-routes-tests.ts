@@ -828,17 +828,24 @@ async function main() {
         sortDir: "desc",
         nowParam: new Date().toISOString(),
       });
-      const countSql = capturedSql.find((sql) => /select\s+count\(/i.test(sql));
-      assert.ok(countSql, "regular event feed should still issue an exact count");
-      assert.match(countSql, /candidate_keys as materialized/);
-      assert.doesNotMatch(countSql, /event_title/);
-      assert.doesNotMatch(countSql, /fifa_subtype/);
-      assert.doesNotMatch(countSql, /sum\(coalesce\(m\.volume_total/);
+      const candidateSql = capturedSql.find((sql) =>
+        /candidate_keys as materialized/.test(sql),
+      );
+      assert.ok(candidateSql, "regular event feed should build runtime candidates");
+      assert.match(candidateSql, /union all/);
+      assert.match(candidateSql, /e\.venue = 'polymarket'/);
+      assert.match(candidateSql, /e\.venue = 'kalshi'/);
+      assert.match(candidateSql, /e\.venue = 'limitless'/);
+      assert.doesNotMatch(candidateSql, /event_title/);
+      assert.doesNotMatch(candidateSql, /fifa_subtype/);
+      assert.ok(
+        capturedSql.every((sql) => !/select\s+count\(/i.test(sql)),
+        "regular event feed should compute total from runtime candidates",
+      );
       const facetSql = capturedSql.filter((sql) =>
         /candidate_facets as materialized/.test(sql),
       );
-      assert.equal(facetSql.length, 2);
-      assert.ok(facetSql.every((sql) => !/fifa_subtype/.test(sql)));
+      assert.equal(facetSql.length, 0);
     }
 
     {
