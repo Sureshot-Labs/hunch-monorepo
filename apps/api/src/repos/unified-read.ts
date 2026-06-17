@@ -1370,15 +1370,24 @@ function buildFeedMarketViewContext(args: {
       requireNamedCategory,
     }),
   });
-  const marketCountCte = `
-    market_count as materialized (
-      select
-        event_id,
-        count(*) as market_count
-      from orderable_market_candidates
-      group by event_id
+  const scopedOrderableMarketCandidatesCte = needsMarketCount
+    ? `
+    scoped_orderable_market_candidates as materialized (
+      select market_id, event_id
+      from (
+        select
+          omc.market_id,
+          omc.event_id,
+          count(*) over (partition by omc.event_id) as market_count
+        from orderable_market_candidates omc
+      ) counted
+      where market_count ${inputs.eventScope === "grouped" ? "> 1" : "= 1"}
     )
-  `;
+  `
+    : "";
+  const orderableMarketCandidateSource = needsMarketCount
+    ? "scoped_orderable_market_candidates"
+    : "orderable_market_candidates";
   const where: string[] = [];
   if (inputs.minLiquidity > 0) {
     where.push(`${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`);
@@ -1397,17 +1406,12 @@ function buildFeedMarketViewContext(args: {
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
     );
   }
-  if (inputs.eventScope === "grouped") {
-    where.push("emc.market_count > 1");
-  } else if (inputs.eventScope === "single") {
-    where.push("emc.market_count = 1");
-  }
 
   return {
     marketIdsParam,
-    needsMarketCount,
     orderableMarketCandidatesCte,
-    marketCountCte,
+    scopedOrderableMarketCandidatesCte,
+    orderableMarketCandidateSource,
     where: where.length ? where : ["true"],
     ...search,
   };
@@ -1622,12 +1626,10 @@ export async function fetchFeedCategoryFacetRows(
     const withParts: string[] = [];
     if (marketContext.searchCte) withParts.push(marketContext.searchCte);
     withParts.push(marketContext.orderableMarketCandidatesCte);
-    if (marketContext.needsMarketCount)
-      withParts.push(marketContext.marketCountCte);
+    if (marketContext.scopedOrderableMarketCandidatesCte) {
+      withParts.push(marketContext.scopedOrderableMarketCandidatesCte);
+    }
     const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
-    const marketCountJoin = marketContext.needsMarketCount
-      ? "join market_count emc on emc.event_id = m.event_id"
-      : "";
 
     const sql = `
       ${withClause}
@@ -1635,11 +1637,10 @@ export async function fetchFeedCategoryFacetRows(
         m.venue as venue,
         lower(e.category) as category,
         count(distinct m.event_id)::int as events
-      from orderable_market_candidates omc
+      from ${marketContext.orderableMarketCandidateSource} omc
       join unified_markets m on m.id = omc.market_id
       join unified_events e on e.id = omc.event_id
       ${marketContext.searchEventJoin}
-      ${marketCountJoin}
       where ${marketContext.where.join(" and ")}
       group by m.venue, lower(e.category)
     `;
@@ -2510,9 +2511,6 @@ export async function fetchFeedMarketsDirect(
 
   const limitParam = add(inputs.limit);
   const offsetParam = add(inputs.offset);
-  const marketCountJoin = marketContext.needsMarketCount
-    ? "join market_count emc on emc.event_id = omc.event_id"
-    : "";
   const change24hCandidateJoin =
     inputs.sort === "change24h"
       ? "left join unified_market_change_24h mc on mc.market_id = m.id"
@@ -2529,11 +2527,10 @@ export async function fetchFeedMarketsDirect(
         m.id,
         m.event_id
         ${inputs.sort === "change24h" ? `, (${change24hCandidateExpr}) as change_24h` : ""}
-      from orderable_market_candidates omc
+      from ${marketContext.orderableMarketCandidateSource} omc
       join unified_markets m on m.id = omc.market_id
       join unified_events e on e.id = omc.event_id
       ${marketContext.searchEventJoin}
-      ${marketCountJoin}
       ${change24hCandidateJoin}
       ${tradeJoin}
       where ${[...where, ...extraWhere].join(" and ")}
@@ -2568,11 +2565,10 @@ export async function fetchFeedMarketsDirect(
               order by mc.change_24h ${sortDir} nulls last, m.venue_market_id
             ) as full_ord
           from unified_market_change_24h mc
-          join orderable_market_candidates omc on omc.market_id = mc.market_id
+          join ${marketContext.orderableMarketCandidateSource} omc on omc.market_id = mc.market_id
           join unified_markets m on m.id = omc.market_id
           join unified_events e on e.id = omc.event_id
           ${marketContext.searchEventJoin}
-          ${marketCountJoin}
           where ${where.join(" and ")}
             and mc.change_24h is not null
           order by mc.change_24h ${sortDir} nulls last, m.venue_market_id
@@ -2632,11 +2628,10 @@ export async function fetchFeedMarketsDirect(
               m.venue_market_id,
               trade_24h.volume_24h as trend_score
             from unified_market_trade_24h trade_24h
-            join orderable_market_candidates omc on omc.market_id = trade_24h.market_id
+            join ${marketContext.orderableMarketCandidateSource} omc on omc.market_id = trade_24h.market_id
             join unified_markets m on m.id = omc.market_id
             join unified_events e on e.id = omc.event_id
             ${marketContext.searchEventJoin}
-            ${marketCountJoin}
             where ${where.join(" and ")}
               and m.venue <> 'limitless'
               and trade_24h.volume_24h > 0
@@ -2646,11 +2641,10 @@ export async function fetchFeedMarketsDirect(
               m.event_id,
               m.venue_market_id,
               ${limitlessTrendExpr} as trend_score
-            from orderable_market_candidates omc
+            from ${marketContext.orderableMarketCandidateSource} omc
             join unified_markets m on m.id = omc.market_id
             join unified_events e on e.id = omc.event_id
             ${marketContext.searchEventJoin}
-            ${marketCountJoin}
             where ${where.join(" and ")}
               and m.venue = 'limitless'
               and ${limitlessTrendExpr} > 0
@@ -2743,8 +2737,8 @@ export async function fetchFeedMarketsDirect(
   const withParts: string[] = [];
   if (marketContext.searchCte) withParts.push(marketContext.searchCte);
   withParts.push(marketContext.orderableMarketCandidatesCte);
-  if (marketContext.needsMarketCount) {
-    withParts.push(marketContext.marketCountCte);
+  if (marketContext.scopedOrderableMarketCandidatesCte) {
+    withParts.push(marketContext.scopedOrderableMarketCandidatesCte);
   }
   if (metricFirstMarketCandidateCtes) {
     withParts.push(...metricFirstMarketCandidateCtes);

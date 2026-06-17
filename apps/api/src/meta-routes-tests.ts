@@ -375,40 +375,50 @@ async function assertEventFeed(args: {
 }
 
 async function assertDirectMarketSqlShape(): Promise<void> {
-  const capturedSql: string[] = [];
-  const fakePool = createSqlCapturePool(capturedSql, []) as unknown as Parameters<
-    typeof fetchFeedMarketsDirect
-  >[0];
   const now = new Date("2026-06-16T12:00:00.000Z");
+  const captureMarketSql = async (
+    eventScope: "grouped" | "single",
+  ): Promise<string> => {
+    const capturedSql: string[] = [];
+    const fakePool = createSqlCapturePool(
+      capturedSql,
+      [],
+    ) as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
 
-  await fetchFeedMarketsDirect(fakePool, {
-    limit: 25,
-    offset: 0,
-    minVol: 0,
-    minLiquidity: 0,
-    view: "markets",
-    eventScope: "grouped",
-    sort: "totalvol",
-    sortDir: "desc",
-    nowParam: now.toISOString(),
-    sevenDaysAgo: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-      .toISOString(),
-    sevenDaysFromNow: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-      .toISOString(),
-  });
+    await fetchFeedMarketsDirect(fakePool, {
+      limit: 25,
+      offset: 0,
+      minVol: 0,
+      minLiquidity: 0,
+      view: "markets",
+      eventScope,
+      sort: "totalvol",
+      sortDir: "desc",
+      nowParam: now.toISOString(),
+      sevenDaysAgo: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+        .toISOString(),
+      sevenDaysFromNow: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+        .toISOString(),
+    });
 
-  const sql = capturedSql.join("\n");
+    return capturedSql.join("\n");
+  };
+
+  const sql = await captureMarketSql("grouped");
   assert.match(sql, /orderable_market_candidates as materialized/);
   assert.match(sql, /orderable_market_candidates_pm_recent_candidates as materialized/);
   assert.match(sql, /join lateral \(/);
   assert.match(
     sql,
-    /market_count as materialized \([\s\S]*from orderable_market_candidates/s,
+    /scoped_orderable_market_candidates as materialized \([\s\S]*count\(\*\) over \(partition by omc\.event_id\) as market_count[\s\S]*from orderable_market_candidates omc/s,
   );
+  assert.match(sql, /where market_count > 1/);
   assert.match(
     sql,
-    /from orderable_market_candidates omc\s+join unified_markets m on m\.id = omc\.market_id/s,
+    /from scoped_orderable_market_candidates omc\s+join unified_markets m on m\.id = omc\.market_id/s,
   );
+  assert.doesNotMatch(sql, /join market_count emc/s);
+  assert.doesNotMatch(sql, /market_count as materialized/s);
   assert.doesNotMatch(
     sql,
     /market_count as[\s\S]{0,300}from unified_markets m/s,
@@ -417,6 +427,9 @@ async function assertDirectMarketSqlShape(): Promise<void> {
     sql,
     /join polymarket_markets pm_filter\s+on pm_filter\.id = m\.venue_market_id\s+and m\.venue = 'polymarket'/s,
   );
+
+  const singleSql = await captureMarketSql("single");
+  assert.match(singleSql, /where market_count = 1/);
 }
 
 async function assertEventFeedSqlShape(): Promise<void> {
@@ -1058,7 +1071,15 @@ async function main() {
       },
     });
 
-    for (const sort of ["trending_v2", "change24h", "totalvol"]) {
+    for (const sort of [
+      "trending",
+      "totalvol",
+      "liquidity",
+      "openinterest",
+      "time",
+      "change24h",
+      "trending_v2",
+    ]) {
       await assertMarketScopeFeed({
         app,
         category: categoryScope,
