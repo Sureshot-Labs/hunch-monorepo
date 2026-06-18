@@ -97,6 +97,7 @@ export async function limitlessRequest(inputs: {
   method: "GET" | "POST" | "DELETE";
   requestPath: string;
   auth?: "none" | "partner_hmac";
+  allowRetry?: boolean;
   headers?: Record<string, string>;
   body?: unknown;
   timeoutMs?: number;
@@ -153,7 +154,7 @@ export async function limitlessRequest(inputs: {
       body: bodyString,
     },
     timeoutMs: inputs.timeoutMs ?? env.limitlessApiTimeoutMs,
-    allowRetry: inputs.method === "GET",
+    allowRetry: inputs.allowRetry ?? inputs.method === "GET",
     telemetry: inputs.telemetry ?? null,
   });
 
