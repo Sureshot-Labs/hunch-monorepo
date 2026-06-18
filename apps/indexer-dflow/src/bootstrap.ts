@@ -70,6 +70,17 @@ type MappedMarketGroup = {
   mappedMarkets: DflowMappedMarket[];
 };
 
+type DflowUnifiedTokenRow = {
+  token_id: string;
+  market_id: string;
+  side: "YES" | "NO";
+};
+
+type DflowMarketInsertFilterResult = {
+  marketRows: UnifiedMarketRow[];
+  skippedStaleNewMarketIds: Set<string>;
+};
+
 type MarketStatusRefreshOptions = {
   includeSiblings?: boolean;
   publishMarketState?: boolean;
@@ -78,6 +89,9 @@ type MarketStatusRefreshOptions = {
 const STATUS_BATCH_LIMIT = 100;
 const STATUS_POSITION_TOKEN_LIMIT = 200;
 const TRADE_MIN_SIZE = 1e-9;
+const STALE_DFLOW_NEW_MARKET_INSERT_DAYS = 90;
+const STALE_DFLOW_NEW_MARKET_INSERT_MS =
+  STALE_DFLOW_NEW_MARKET_INSERT_DAYS * 24 * 60 * 60 * 1000;
 const unifiedMarketWriteQueue = new PQueue({ concurrency: 1 });
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
@@ -89,6 +103,89 @@ const topTickGate = createTopTickGate({
     });
   },
 });
+
+function getDflowMarketTerminalTime(
+  row: Pick<UnifiedMarketRow, "close_time" | "expiration_time">,
+): Date | undefined {
+  return row.close_time ?? row.expiration_time;
+}
+
+export function shouldSkipStaleDflowNewMarketInsert(
+  row: Pick<
+    UnifiedMarketRow,
+    "id" | "venue" | "close_time" | "expiration_time"
+  >,
+  existingMarketIds: ReadonlySet<string>,
+  nowMs = Date.now(),
+): boolean {
+  if (row.venue !== "kalshi") return false;
+  if (existingMarketIds.has(row.id)) return false;
+
+  const terminalTime = getDflowMarketTerminalTime(row);
+  if (!terminalTime) return false;
+
+  const terminalMs = terminalTime.getTime();
+  if (!Number.isFinite(terminalMs)) return false;
+
+  return terminalMs < nowMs - STALE_DFLOW_NEW_MARKET_INSERT_MS;
+}
+
+async function loadExistingDflowMarketIds(
+  rows: UnifiedMarketRow[],
+): Promise<Set<string>> {
+  const ids = Array.from(new Set(rows.map((row) => row.id)));
+  if (!ids.length) return new Set();
+
+  const result = await pool.query<{ id: string }>(
+    `
+      select id
+      from unified_markets
+      where id = any($1::text[])
+    `,
+    [ids],
+  );
+  return new Set(result.rows.map((row) => row.id));
+}
+
+async function filterStaleDflowNewMarketInserts(
+  rows: UnifiedMarketRow[],
+): Promise<DflowMarketInsertFilterResult> {
+  if (!rows.length) {
+    return { marketRows: [], skippedStaleNewMarketIds: new Set() };
+  }
+
+  const existingMarketIds = await loadExistingDflowMarketIds(rows);
+  const nowMs = Date.now();
+  const marketRows: UnifiedMarketRow[] = [];
+  const skippedStaleNewMarketIds = new Set<string>();
+
+  for (const row of rows) {
+    if (shouldSkipStaleDflowNewMarketInsert(row, existingMarketIds, nowMs)) {
+      skippedStaleNewMarketIds.add(row.id);
+      continue;
+    }
+    marketRows.push(row);
+  }
+
+  if (skippedStaleNewMarketIds.size) {
+    log.info("DFlow skipped stale new market inserts", {
+      cutoffDays: STALE_DFLOW_NEW_MARKET_INSERT_DAYS,
+      inputRows: rows.length,
+      skippedRows: skippedStaleNewMarketIds.size,
+      sampleMarketIds: Array.from(skippedStaleNewMarketIds).slice(0, 5),
+    });
+  }
+
+  return { marketRows, skippedStaleNewMarketIds };
+}
+
+function filterTokenRowsForSkippedMarkets(
+  tokenRows: DflowUnifiedTokenRow[],
+  skippedMarketIds: ReadonlySet<string>,
+): DflowUnifiedTokenRow[] {
+  if (!skippedMarketIds.size) return tokenRows;
+  return tokenRows.filter((row) => !skippedMarketIds.has(row.market_id));
+}
 
 async function upsertDflowUnifiedMarkets(
   rows: UnifiedMarketRow[],
@@ -1213,35 +1310,42 @@ async function syncMarketStatusesForTokenIds(
       await maybeEnrichKalshiMappedMarketGroups(mappedGroups, context);
 
       const unifiedMarketRows: UnifiedMarketRow[] = [];
-      const tokenRows: Array<{
-        token_id: string;
-        market_id: string;
-        side: "YES" | "NO";
-      }> = [];
+      const tokenRows: DflowUnifiedTokenRow[] = [];
       for (const group of mappedGroups) {
         for (const mapped of group.mappedMarkets) {
           unifiedMarketRows.push(mapped.marketRow);
           tokenRows.push(...mapped.tokenRows);
-          touchedEventIds.add(mapped.marketRow.event_id);
         }
       }
 
-      if (unifiedMarketRows.length) {
-        await upsertDflowUnifiedMarkets(unifiedMarketRows);
+      const marketFilter =
+        await filterStaleDflowNewMarketInserts(unifiedMarketRows);
+      const persistedMarketRows = marketFilter.marketRows;
+      const persistedTokenRows = filterTokenRowsForSkippedMarkets(
+        tokenRows,
+        marketFilter.skippedStaleNewMarketIds,
+      );
+
+      if (persistedMarketRows.length) {
+        await upsertDflowUnifiedMarkets(persistedMarketRows);
       }
-      if (tokenRows.length) {
-        await upsertUnifiedTokens(pool, tokenRows);
+      if (persistedTokenRows.length) {
+        await upsertUnifiedTokens(pool, persistedTokenRows);
       }
       if (options.publishMarketState) {
-        await publishDflowMarketStates(unifiedMarketRows);
+        await publishDflowMarketStates(persistedMarketRows);
       }
       try {
-        await publishDflowMarketUpdates(unifiedMarketRows);
+        await publishDflowMarketUpdates(persistedMarketRows);
       } catch (error) {
         log.warn("DFlow market update publish failed", { context, error });
       }
 
-      if (unifiedMarketRows.length) {
+      for (const row of persistedMarketRows) {
+        touchedEventIds.add(row.event_id);
+      }
+
+      if (persistedMarketRows.length) {
         try {
           const eventTitleById = new Map(
             Array.from(eventInfoByTicker.values()).map((info) => [
@@ -1249,7 +1353,7 @@ async function syncMarketStatusesForTokenIds(
               info.eventTitle,
             ]),
           );
-          const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map(
+          const embedMarkets: EmbedQueueItem[] = persistedMarketRows.map(
             (row) => ({
               entity_type: "market",
               market_id: row.id,
@@ -1392,11 +1496,7 @@ async function processEvents(
 }> {
   const unifiedEventRows: UnifiedEventRow[] = [];
   const unifiedMarketRows: UnifiedMarketRow[] = [];
-  const tokenRows: Array<{
-    token_id: string;
-    market_id: string;
-    side: "YES" | "NO";
-  }> = [];
+  const tokenRows: DflowUnifiedTokenRow[] = [];
   const snapshots: DflowMarketSnapshot[] = [];
 
   let processedEvents = 0;
@@ -1513,47 +1613,72 @@ async function processEvents(
     unifiedEventRows.push(unifiedEvent);
   }
 
-  if (unifiedEventRows.length) {
-    await upsertUnifiedEvents(pool, unifiedEventRows);
+  const marketFilter =
+    await filterStaleDflowNewMarketInserts(unifiedMarketRows);
+  const persistedMarketRows = marketFilter.marketRows;
+  const persistedTokenRows = filterTokenRowsForSkippedMarkets(
+    tokenRows,
+    marketFilter.skippedStaleNewMarketIds,
+  );
+  const skippedEventIds = new Set(
+    unifiedMarketRows
+      .filter((row) => marketFilter.skippedStaleNewMarketIds.has(row.id))
+      .map((row) => row.event_id),
+  );
+  const persistedEventIds = new Set(
+    persistedMarketRows.map((row) => row.event_id),
+  );
+  const eventRowsForWrite = marketFilter.skippedStaleNewMarketIds.size
+    ? unifiedEventRows.filter(
+        (row) => !skippedEventIds.has(row.id) || persistedEventIds.has(row.id),
+      )
+    : unifiedEventRows;
+  const persistedMarketIds = new Set(persistedMarketRows.map((row) => row.id));
+  const persistedSnapshots = snapshots.filter((snapshot) =>
+    persistedMarketIds.has(snapshot.marketId),
+  );
+
+  if (eventRowsForWrite.length) {
+    await upsertUnifiedEvents(pool, eventRowsForWrite);
   }
-  if (unifiedMarketRows.length) {
-    await upsertDflowUnifiedMarkets(unifiedMarketRows);
+  if (persistedMarketRows.length) {
+    await upsertDflowUnifiedMarkets(persistedMarketRows);
   }
-  if (tokenRows.length) {
-    await upsertUnifiedTokens(pool, tokenRows);
+  if (persistedTokenRows.length) {
+    await upsertUnifiedTokens(pool, persistedTokenRows);
   }
   try {
-    await publishDflowMarketUpdates(unifiedMarketRows, unifiedEventRows);
+    await publishDflowMarketUpdates(persistedMarketRows, eventRowsForWrite);
   } catch (error) {
     log.warn("DFlow market update publish failed", {
       context: options.enrichmentContext ?? "events",
       error,
     });
   }
-  if (unifiedMarketRows.length) {
+  if (persistedMarketRows.length) {
     await reconcileKalshiEventStatuses(
-      unifiedMarketRows.map((row) => row.event_id),
+      persistedMarketRows.map((row) => row.event_id),
     );
   }
 
-  if (unifiedEventRows.length || unifiedMarketRows.length) {
+  if (eventRowsForWrite.length || persistedMarketRows.length) {
     try {
       const eventTitleById = new Map(
-        unifiedEventRows.map((row) => [row.id, row.title]),
+        eventRowsForWrite.map((row) => [row.id, row.title]),
       );
       const marketsByEvent = new Map<string, UnifiedMarketRow[]>();
-      for (const row of unifiedMarketRows) {
+      for (const row of persistedMarketRows) {
         const list = marketsByEvent.get(row.event_id) ?? [];
         list.push(row);
         marketsByEvent.set(row.event_id, list);
       }
       const topMarketsByEvent = new Map<string, string>();
-      for (const row of unifiedEventRows) {
+      for (const row of eventRowsForWrite) {
         const markets = marketsByEvent.get(row.id) ?? [];
         const topMarkets = buildTopMarketsText(markets, row.title);
         if (topMarkets) topMarketsByEvent.set(row.id, topMarkets);
       }
-      const embedEvents: EmbedQueueItem[] = unifiedEventRows.map((row) => ({
+      const embedEvents: EmbedQueueItem[] = eventRowsForWrite.map((row) => ({
         entity_type: "event",
         event_id: row.id,
         venue: row.venue,
@@ -1565,7 +1690,7 @@ async function processEvents(
         updated_at: row.updated_at ?? row.created_at,
         source: "dflow",
       }));
-      const embedMarkets: EmbedQueueItem[] = unifiedMarketRows.map((row) => ({
+      const embedMarkets: EmbedQueueItem[] = persistedMarketRows.map((row) => ({
         entity_type: "market",
         market_id: row.id,
         venue: row.venue,
@@ -1585,7 +1710,7 @@ async function processEvents(
     }
   }
 
-  return { processedEvents, processedMarkets, snapshots };
+  return { processedEvents, processedMarkets, snapshots: persistedSnapshots };
 }
 
 async function hasAnyDflowData(): Promise<boolean> {
