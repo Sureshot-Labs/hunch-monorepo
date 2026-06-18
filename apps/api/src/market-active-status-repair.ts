@@ -628,9 +628,7 @@ async function applyKalshiPublicFallbacks(
   timeoutMs: number,
   concurrency: number,
 ): Promise<ValidationRow[]> {
-  const fallbackRows = rows.filter(
-    (row) => row.reason === "dflow_not_found" || row.reason === "dflow_active",
-  );
+  const fallbackRows = rows.filter((row) => row.reason === "dflow_active");
   if (fallbackRows.length === 0) return rows;
 
   const fallbackIds = new Set(fallbackRows.map((row) => row.market_id));
@@ -715,13 +713,11 @@ async function applyKalshiPublicFallbacks(
     if (lookup.kind === "not_found") {
       fallbackById.set(
         candidate.market_id,
-        previous.reason === "dflow_not_found"
-          ? buildValidation(candidate, "ARCHIVED", `${lookup.source}_not_found`)
-          : buildValidation(
-              candidate,
-              null,
-              `${previous.reason}_${lookup.source}_not_found`,
-            ),
+        buildValidation(
+          candidate,
+          null,
+          `${previous.reason}_${lookup.source}_not_found`,
+        ),
       );
       continue;
     }
@@ -769,7 +765,7 @@ async function validateKalshiChunk(
     const rows = candidates.map((candidate) => {
       const market = findDflowMarket(markets, candidate.venue_market_id);
       if (!market) {
-        return buildValidation(candidate, null, "dflow_not_found");
+        return buildValidation(candidate, "ARCHIVED", "dflow_not_found");
       }
       const rawStatus = stringValue(market.status);
       const targetStatus = mapDflowStatusToUnified(rawStatus);
