@@ -250,21 +250,54 @@ function protectedRefsSql(
 }
 
 const candidateCte = `
-  with candidate_pool as materialized (
+  with raw_candidate_pool as materialized (
     select
       m.id as market_id,
       m.venue,
       m.status::text as status,
       m.event_id,
       m.title,
-      coalesce(m.close_time, m.expiration_time, e.end_date) as terminal_at
+      m.close_time as terminal_at
+    from unified_markets m
+    where m.status::text = any($1::text[])
+      and ($2::text[] is null or m.venue = any($2::text[]))
+      and m.close_time is not null
+      and m.close_time < now() - make_interval(days => $3::int)
+    union all
+    select
+      m.id as market_id,
+      m.venue,
+      m.status::text as status,
+      m.event_id,
+      m.title,
+      m.expiration_time as terminal_at
+    from unified_markets m
+    where m.status::text = any($1::text[])
+      and ($2::text[] is null or m.venue = any($2::text[]))
+      and m.close_time is null
+      and m.expiration_time is not null
+      and m.expiration_time < now() - make_interval(days => $3::int)
+    union all
+    select
+      m.id as market_id,
+      m.venue,
+      m.status::text as status,
+      m.event_id,
+      m.title,
+      e.end_date as terminal_at
     from unified_markets m
     join unified_events e on e.id = m.event_id
     where m.status::text = any($1::text[])
       and ($2::text[] is null or m.venue = any($2::text[]))
-      and coalesce(m.close_time, m.expiration_time, e.end_date) is not null
-      and coalesce(m.close_time, m.expiration_time, e.end_date) < now() - make_interval(days => $3::int)
-    order by coalesce(m.close_time, m.expiration_time, e.end_date) asc, m.id asc
+      and m.close_time is null
+      and m.expiration_time is null
+      and e.end_date is not null
+      and e.end_date < now() - make_interval(days => $3::int)
+  ),
+  candidate_pool as materialized (
+    select *
+    from raw_candidate_pool
+    order by terminal_at asc, market_id asc
     limit $4::int
   ),
   candidate_events as materialized (
@@ -296,28 +329,54 @@ async function queryGlobalTerminalSummary(
 ): Promise<GlobalSummaryRow[]> {
   const { rows } = await client.query<GlobalSummaryRow>(
     `
-      select
-        s.venue,
-        s.status,
-        count(*)::text as markets,
-        count(distinct s.event_id)::text as events,
-        min(s.terminal_at) as oldest_terminal_at,
-        max(s.terminal_at) as newest_terminal_at
-      from (
+      with terminal_candidates as materialized (
         select
           m.venue,
           m.status::text as status,
           m.event_id,
-          coalesce(m.close_time, m.expiration_time, e.end_date) as terminal_at
+          m.close_time as terminal_at
+        from unified_markets m
+        where m.status::text = any($1::text[])
+          and ($2::text[] is null or m.venue = any($2::text[]))
+          and m.close_time is not null
+          and m.close_time < now() - make_interval(days => $3::int)
+        union all
+        select
+          m.venue,
+          m.status::text as status,
+          m.event_id,
+          m.expiration_time as terminal_at
+        from unified_markets m
+        where m.status::text = any($1::text[])
+          and ($2::text[] is null or m.venue = any($2::text[]))
+          and m.close_time is null
+          and m.expiration_time is not null
+          and m.expiration_time < now() - make_interval(days => $3::int)
+        union all
+        select
+          m.venue,
+          m.status::text as status,
+          m.event_id,
+          e.end_date as terminal_at
         from unified_markets m
         join unified_events e on e.id = m.event_id
         where m.status::text = any($1::text[])
           and ($2::text[] is null or m.venue = any($2::text[]))
-      ) s
-      where s.terminal_at is not null
-        and s.terminal_at < now() - make_interval(days => $3::int)
-      group by s.venue, s.status
-      order by s.venue, s.status
+          and m.close_time is null
+          and m.expiration_time is null
+          and e.end_date is not null
+          and e.end_date < now() - make_interval(days => $3::int)
+      )
+      select
+        venue,
+        status,
+        count(*)::text as markets,
+        count(distinct event_id)::text as events,
+        min(terminal_at) as oldest_terminal_at,
+        max(terminal_at) as newest_terminal_at
+      from terminal_candidates
+      group by venue, status
+      order by venue, status
     `,
     queryParams(args).slice(0, 3),
   );
@@ -331,28 +390,54 @@ async function queryActivePastTerminalSummary(
 ): Promise<GlobalSummaryRow[]> {
   const { rows } = await client.query<GlobalSummaryRow>(
     `
-      select
-        s.venue,
-        s.status,
-        count(*)::text as markets,
-        count(distinct s.event_id)::text as events,
-        min(s.terminal_at) as oldest_terminal_at,
-        max(s.terminal_at) as newest_terminal_at
-      from (
+      with active_candidates as materialized (
         select
           m.venue,
           m.status::text as status,
           m.event_id,
-          coalesce(m.close_time, m.expiration_time, e.end_date) as terminal_at
+          m.close_time as terminal_at
+        from unified_markets m
+        where m.status = 'ACTIVE'
+          and ($1::text[] is null or m.venue = any($1::text[]))
+          and m.close_time is not null
+          and m.close_time < now() - make_interval(days => $2::int)
+        union all
+        select
+          m.venue,
+          m.status::text as status,
+          m.event_id,
+          m.expiration_time as terminal_at
+        from unified_markets m
+        where m.status = 'ACTIVE'
+          and ($1::text[] is null or m.venue = any($1::text[]))
+          and m.close_time is null
+          and m.expiration_time is not null
+          and m.expiration_time < now() - make_interval(days => $2::int)
+        union all
+        select
+          m.venue,
+          m.status::text as status,
+          m.event_id,
+          e.end_date as terminal_at
         from unified_markets m
         join unified_events e on e.id = m.event_id
         where m.status = 'ACTIVE'
           and ($1::text[] is null or m.venue = any($1::text[]))
-      ) s
-      where s.terminal_at is not null
-        and s.terminal_at < now() - make_interval(days => $2::int)
-      group by s.venue, s.status
-      order by s.venue, s.status
+          and m.close_time is null
+          and m.expiration_time is null
+          and e.end_date is not null
+          and e.end_date < now() - make_interval(days => $2::int)
+      )
+      select
+        venue,
+        status,
+        count(*)::text as markets,
+        count(distinct event_id)::text as events,
+        min(terminal_at) as oldest_terminal_at,
+        max(terminal_at) as newest_terminal_at
+      from active_candidates
+      group by venue, status
+      order by venue, status
     `,
     [args.venues.length > 0 ? args.venues : null, args.cutoffDays],
   );

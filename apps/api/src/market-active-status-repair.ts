@@ -40,6 +40,11 @@ type ValidationRow = CandidateRow & {
   reason: string;
 };
 
+type KalshiPublicLookup =
+  | { kind: "found"; market: Record<string, unknown>; source: string }
+  | { kind: "not_found"; source: string }
+  | { kind: "error"; reason: string };
+
 type SummaryRow = {
   section: string;
   venue: string | null;
@@ -177,7 +182,8 @@ Selection rule:
 Live sources:
   polymarket: Gamma markets API
   limitless: Limitless /markets/:slug API
-  kalshi: DFlow /api/v1/markets/batch API
+  kalshi: DFlow /api/v1/markets/batch API, then Kalshi public API fallback
+          for stale/missing DFlow rows
 
 Dry-run is the default. Update mode only runs when both --execute and
 --confirm-update are present.`);
@@ -464,9 +470,279 @@ function findDflowMarket(
   );
 }
 
+function mapKalshiPublicReason(
+  status: UnifiedStatus,
+  rawStatus: string | null,
+  source: string,
+): string {
+  if (status === "ACTIVE") return `${source}_active`;
+  const suffix = rawStatus?.toLowerCase() || status.toLowerCase();
+  return `${source}_${suffix}`;
+}
+
+function kalshiPublicBaseUrl(): string {
+  return (
+    process.env.KALSHI_PUBLIC_API_BASE?.trim() ||
+    "https://api.elections.kalshi.com"
+  ).replace(/\/+$/, "");
+}
+
+function kalshiEventTicker(candidate: CandidateRow): string | null {
+  const value = candidate.event_id.trim();
+  if (!value.length) return null;
+  return value.startsWith("kalshi:") ? value.slice("kalshi:".length) : value;
+}
+
+function kalshiPublicMarketArray(
+  payload: unknown,
+): Array<Record<string, unknown>> {
+  if (!isRecord(payload)) return [];
+
+  const topLevel = Array.isArray(payload.markets)
+    ? payload.markets.filter(isRecord)
+    : [];
+  const nested =
+    isRecord(payload.event) && Array.isArray(payload.event.markets)
+      ? payload.event.markets.filter(isRecord)
+      : [];
+
+  return [...topLevel, ...nested];
+}
+
+function firstKalshiPublicMarketRecord(
+  payload: unknown,
+): Record<string, unknown> | null {
+  if (isRecord(payload) && isRecord(payload.market)) return payload.market;
+  return firstRecord(payload);
+}
+
+function findKalshiPublicMarket(
+  markets: Array<Record<string, unknown>>,
+  ticker: string,
+): Record<string, unknown> | null {
+  const normalized = ticker.trim().toLowerCase();
+  return (
+    markets.find((market) => {
+      const candidate =
+        stringValue(market.ticker) ??
+        stringValue(market.marketTicker) ??
+        stringValue(market.market_ticker);
+      return candidate?.toLowerCase() === normalized;
+    }) ?? null
+  );
+}
+
+async function fetchKalshiPublicEventMarkets(
+  eventTicker: string,
+  timeoutMs: number,
+): Promise<
+  | { ok: true; markets: Array<Record<string, unknown>> }
+  | { ok: false; notFound: boolean; reason: string }
+> {
+  const url = `${kalshiPublicBaseUrl()}/trade-api/v2/events/${encodeURIComponent(
+    eventTicker,
+  )}?with_nested_markets=true`;
+  try {
+    const res = await fetchJsonWithTimeout(url, timeoutMs);
+    if (!res.ok) {
+      return {
+        ok: false,
+        notFound: res.status === 404,
+        reason: `kalshi_public_event_${res.status}`,
+      };
+    }
+    return { ok: true, markets: kalshiPublicMarketArray(res.payload) };
+  } catch (error) {
+    return {
+      ok: false,
+      notFound: false,
+      reason: `kalshi_public_event_error:${errorMessage(error)}`,
+    };
+  }
+}
+
+async function fetchKalshiPublicMarket(
+  ticker: string,
+  timeoutMs: number,
+): Promise<KalshiPublicLookup> {
+  const url = `${kalshiPublicBaseUrl()}/trade-api/v2/markets/${encodeURIComponent(
+    ticker,
+  )}`;
+  try {
+    const res = await fetchJsonWithTimeout(url, timeoutMs);
+    if (!res.ok) {
+      if (res.status === 404) {
+        return { kind: "not_found", source: "kalshi_public_market" };
+      }
+      return { kind: "error", reason: `kalshi_public_market_${res.status}` };
+    }
+
+    const market = firstKalshiPublicMarketRecord(res.payload);
+    if (!market) return { kind: "not_found", source: "kalshi_public_market" };
+    return { kind: "found", market, source: "kalshi_public_market" };
+  } catch (error) {
+    return {
+      kind: "error",
+      reason: `kalshi_public_market_error:${errorMessage(error)}`,
+    };
+  }
+}
+
+async function lookupKalshiPublicMarket(
+  candidate: CandidateRow,
+  eventMarketsByEvent: Map<string, Array<Record<string, unknown>>>,
+  eventFailuresByEvent: Map<string, string>,
+  timeoutMs: number,
+): Promise<KalshiPublicLookup> {
+  const eventTicker = kalshiEventTicker(candidate);
+  if (eventTicker) {
+    const eventMarkets = eventMarketsByEvent.get(eventTicker);
+    if (eventMarkets) {
+      const market = findKalshiPublicMarket(
+        eventMarkets,
+        candidate.venue_market_id,
+      );
+      if (market) {
+        return { kind: "found", market, source: "kalshi_public_event" };
+      }
+    }
+  }
+
+  const marketLookup = await fetchKalshiPublicMarket(
+    candidate.venue_market_id,
+    timeoutMs,
+  );
+  if (marketLookup.kind !== "error") return marketLookup;
+
+  const eventReason = eventTicker ? eventFailuresByEvent.get(eventTicker) : null;
+  if (!eventReason) return marketLookup;
+  return {
+    kind: "error",
+    reason: `${eventReason};${marketLookup.reason}`,
+  };
+}
+
+async function applyKalshiPublicFallbacks(
+  candidates: CandidateRow[],
+  rows: ValidationRow[],
+  timeoutMs: number,
+  concurrency: number,
+): Promise<ValidationRow[]> {
+  const fallbackRows = rows.filter(
+    (row) => row.reason === "dflow_not_found" || row.reason === "dflow_active",
+  );
+  if (fallbackRows.length === 0) return rows;
+
+  const fallbackIds = new Set(fallbackRows.map((row) => row.market_id));
+  const candidatesById = new Map(
+    candidates.map((candidate) => [candidate.market_id, candidate]),
+  );
+  const fallbackCandidates = fallbackRows
+    .map((row) => candidatesById.get(row.market_id))
+    .filter((candidate): candidate is CandidateRow => Boolean(candidate));
+
+  const uniqueEventTickers = [
+    ...new Set(
+      fallbackCandidates
+        .map(kalshiEventTicker)
+        .filter((ticker): ticker is string => Boolean(ticker)),
+    ),
+  ];
+  const eventResults = await mapWithConcurrency(
+    uniqueEventTickers,
+    Math.max(1, Math.min(concurrency, 2)),
+    async (eventTicker) => ({
+      eventTicker,
+      result: await fetchKalshiPublicEventMarkets(eventTicker, timeoutMs),
+    }),
+  );
+
+  const eventMarketsByEvent = new Map<string, Array<Record<string, unknown>>>();
+  const eventFailuresByEvent = new Map<string, string>();
+  for (const { eventTicker, result } of eventResults) {
+    if (result.ok) {
+      eventMarketsByEvent.set(eventTicker, result.markets);
+    } else if (!result.notFound) {
+      eventFailuresByEvent.set(eventTicker, result.reason);
+    }
+  }
+
+  const previousById = new Map(rows.map((row) => [row.market_id, row]));
+  const lookups = await mapWithConcurrency(
+    fallbackCandidates,
+    Math.max(1, Math.min(concurrency, 4)),
+    async (candidate) => ({
+      candidate,
+      lookup: await lookupKalshiPublicMarket(
+        candidate,
+        eventMarketsByEvent,
+        eventFailuresByEvent,
+        timeoutMs,
+      ),
+    }),
+  );
+
+  const fallbackById = new Map<string, ValidationRow>();
+  for (const { candidate, lookup } of lookups) {
+    const previous = previousById.get(candidate.market_id);
+    if (!previous) continue;
+
+    if (lookup.kind === "found") {
+      const rawStatus = stringValue(lookup.market.status);
+      const targetStatus = mapDflowStatusToUnified(rawStatus);
+      if (targetStatus === "ACTIVE") {
+        fallbackById.set(
+          candidate.market_id,
+          buildValidation(
+            candidate,
+            null,
+            `${previous.reason}_${lookup.source}_active`,
+          ),
+        );
+      } else {
+        fallbackById.set(
+          candidate.market_id,
+          buildValidation(
+            candidate,
+            targetStatus,
+            mapKalshiPublicReason(targetStatus, rawStatus, lookup.source),
+          ),
+        );
+      }
+      continue;
+    }
+
+    if (lookup.kind === "not_found") {
+      fallbackById.set(
+        candidate.market_id,
+        previous.reason === "dflow_not_found"
+          ? buildValidation(candidate, "ARCHIVED", `${lookup.source}_not_found`)
+          : buildValidation(
+              candidate,
+              null,
+              `${previous.reason}_${lookup.source}_not_found`,
+            ),
+      );
+      continue;
+    }
+
+    fallbackById.set(
+      candidate.market_id,
+      buildValidation(candidate, null, `${previous.reason}_${lookup.reason}`),
+    );
+  }
+
+  return rows.map((row) =>
+    fallbackIds.has(row.market_id)
+      ? (fallbackById.get(row.market_id) ?? row)
+      : row,
+  );
+}
+
 async function validateKalshiChunk(
   candidates: CandidateRow[],
   timeoutMs: number,
+  concurrency: number,
 ): Promise<ValidationRow[]> {
   const tickers = candidates.map((candidate) => candidate.venue_market_id);
   try {
@@ -490,7 +766,7 @@ async function validateKalshiChunk(
     }
 
     const markets = recordArray(res.payload);
-    return candidates.map((candidate) => {
+    const rows = candidates.map((candidate) => {
       const market = findDflowMarket(markets, candidate.venue_market_id);
       if (!market) {
         return buildValidation(candidate, null, "dflow_not_found");
@@ -506,6 +782,7 @@ async function validateKalshiChunk(
         mapDflowReason(targetStatus, rawStatus),
       );
     });
+    return applyKalshiPublicFallbacks(candidates, rows, timeoutMs, concurrency);
   } catch (error) {
     return candidates.map((candidate) =>
       buildValidation(candidate, null, `dflow_error:${errorMessage(error)}`),
@@ -582,7 +859,7 @@ async function validateCandidates(
     mapWithConcurrency(
       chunkArray(kalshi, DFLOW_BATCH_SIZE),
       Math.max(1, Math.min(args.concurrency, 2)),
-      (chunk) => validateKalshiChunk(chunk, timeoutMs),
+      (chunk) => validateKalshiChunk(chunk, timeoutMs, args.concurrency),
     ).then((chunks) => chunks.flat()),
   ]);
 
@@ -604,23 +881,62 @@ async function queryCandidates(
 ): Promise<CandidateRow[]> {
   const { rows } = await client.query<CandidateRow>(
     `
-      select
-        m.id as market_id,
-        m.venue::text as venue,
-        m.venue_market_id,
-        m.slug,
-        m.event_id,
-        m.title,
-        coalesce(m.close_time, m.expiration_time, e.end_date) as terminal_at
-      from unified_markets m
-      join unified_events e on e.id = m.event_id
-      where m.status = 'ACTIVE'::unified_status
-        and ($1::text[] is null or m.venue = any($1::text[]))
-        and m.venue in ('polymarket', 'limitless', 'kalshi')
-        and m.venue_market_id is not null
-        and coalesce(m.close_time, m.expiration_time, e.end_date) is not null
-        and coalesce(m.close_time, m.expiration_time, e.end_date) < now() - make_interval(days => $2::int)
-      order by coalesce(m.close_time, m.expiration_time, e.end_date) asc, m.id asc
+      with raw_candidates as materialized (
+        select
+          m.id as market_id,
+          m.venue::text as venue,
+          m.venue_market_id,
+          m.slug,
+          m.event_id,
+          m.title,
+          m.close_time as terminal_at
+        from unified_markets m
+        where m.status = 'ACTIVE'::unified_status
+          and ($1::text[] is null or m.venue = any($1::text[]))
+          and m.venue in ('polymarket', 'limitless', 'kalshi')
+          and m.venue_market_id is not null
+          and m.close_time is not null
+          and m.close_time < now() - make_interval(days => $2::int)
+        union all
+        select
+          m.id as market_id,
+          m.venue::text as venue,
+          m.venue_market_id,
+          m.slug,
+          m.event_id,
+          m.title,
+          m.expiration_time as terminal_at
+        from unified_markets m
+        where m.status = 'ACTIVE'::unified_status
+          and ($1::text[] is null or m.venue = any($1::text[]))
+          and m.venue in ('polymarket', 'limitless', 'kalshi')
+          and m.venue_market_id is not null
+          and m.close_time is null
+          and m.expiration_time is not null
+          and m.expiration_time < now() - make_interval(days => $2::int)
+        union all
+        select
+          m.id as market_id,
+          m.venue::text as venue,
+          m.venue_market_id,
+          m.slug,
+          m.event_id,
+          m.title,
+          e.end_date as terminal_at
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        where m.status = 'ACTIVE'::unified_status
+          and ($1::text[] is null or m.venue = any($1::text[]))
+          and m.venue in ('polymarket', 'limitless', 'kalshi')
+          and m.venue_market_id is not null
+          and m.close_time is null
+          and m.expiration_time is null
+          and e.end_date is not null
+          and e.end_date < now() - make_interval(days => $2::int)
+      )
+      select *
+      from raw_candidates
+      order by terminal_at asc, market_id asc
       limit $3::int
     `,
     queryParams(args),

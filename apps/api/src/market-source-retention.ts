@@ -162,7 +162,22 @@ const sourceCandidateCte = `
       'polymarket'::text as venue,
       pm.id as source_market_id,
       pm.event_id as source_event_id,
-      coalesce(pm.end_date, pe.end_date) as terminal_at,
+      pm.end_date as terminal_at,
+      pm.question as title
+    from polymarket_markets pm
+    left join unified_markets um
+      on um.venue = 'polymarket'
+      and um.venue_market_id = pm.id
+    where ($1::text[] is null or 'polymarket' = any($1::text[]))
+      and um.id is null
+      and pm.end_date is not null
+      and pm.end_date < now() - make_interval(days => $2::int)
+    union all
+    select
+      'polymarket'::text as venue,
+      pm.id as source_market_id,
+      pm.event_id as source_event_id,
+      pe.end_date as terminal_at,
       pm.question as title
     from polymarket_markets pm
     join polymarket_events pe on pe.id = pm.event_id
@@ -171,25 +186,30 @@ const sourceCandidateCte = `
       and um.venue_market_id = pm.id
     where ($1::text[] is null or 'polymarket' = any($1::text[]))
       and um.id is null
-      and coalesce(pm.end_date, pe.end_date) is not null
-      and coalesce(pm.end_date, pe.end_date) < now() - make_interval(days => $2::int)
+      and pm.end_date is null
+      and pe.end_date is not null
+      and pe.end_date < now() - make_interval(days => $2::int)
     union all
     select
       'limitless'::text as venue,
       lm.id as source_market_id,
       lm.event_id as source_event_id,
-      coalesce(
-        case
-          when lm.expiration_timestamp is not null
-          then to_timestamp(lm.expiration_timestamp / 1000.0)
-          else null
-        end,
-        case
-          when le.expiration_timestamp is not null
-          then to_timestamp(le.expiration_timestamp / 1000.0)
-          else null
-        end
-      ) as terminal_at,
+      to_timestamp(lm.expiration_timestamp / 1000.0) as terminal_at,
+      lm.title
+    from limitless_markets lm
+    left join unified_markets um
+      on um.venue = 'limitless'
+      and um.venue_market_id = lm.id
+    where ($1::text[] is null or 'limitless' = any($1::text[]))
+      and um.id is null
+      and lm.expiration_timestamp is not null
+      and lm.expiration_timestamp < floor(extract(epoch from now() - make_interval(days => $2::int)) * 1000)::bigint
+    union all
+    select
+      'limitless'::text as venue,
+      lm.id as source_market_id,
+      lm.event_id as source_event_id,
+      to_timestamp(le.expiration_timestamp / 1000.0) as terminal_at,
       lm.title
     from limitless_markets lm
     join limitless_events le on le.id = lm.event_id
@@ -198,30 +218,9 @@ const sourceCandidateCte = `
       and um.venue_market_id = lm.id
     where ($1::text[] is null or 'limitless' = any($1::text[]))
       and um.id is null
-      and coalesce(
-        case
-          when lm.expiration_timestamp is not null
-          then to_timestamp(lm.expiration_timestamp / 1000.0)
-          else null
-        end,
-        case
-          when le.expiration_timestamp is not null
-          then to_timestamp(le.expiration_timestamp / 1000.0)
-          else null
-        end
-      ) is not null
-      and coalesce(
-        case
-          when lm.expiration_timestamp is not null
-          then to_timestamp(lm.expiration_timestamp / 1000.0)
-          else null
-        end,
-        case
-          when le.expiration_timestamp is not null
-          then to_timestamp(le.expiration_timestamp / 1000.0)
-          else null
-        end
-      ) < now() - make_interval(days => $2::int)
+      and lm.expiration_timestamp is null
+      and le.expiration_timestamp is not null
+      and le.expiration_timestamp < floor(extract(epoch from now() - make_interval(days => $2::int)) * 1000)::bigint
   ),
   bounded_candidates as materialized (
     select *
