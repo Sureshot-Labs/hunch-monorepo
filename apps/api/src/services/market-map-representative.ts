@@ -221,6 +221,232 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
   };
 }
 
+export async function selectPreferredRepresentativeMarketsForEvents(
+  pool: Pool,
+  inputs: RepresentativeEventInput[],
+): Promise<RankedRepresentativeMarket[]> {
+  const normalized = normalizeInput(inputs);
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  const nowParam = new Date().toISOString();
+  const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
+  const orderableMarketExpr = buildOrderableMarketSql({
+    marketAlias: "m",
+    eventAlias: "e",
+    nowParam: "$4",
+    pmAlias: "pm",
+  });
+  const eventIds = normalized.map((input) => input.eventId);
+  const venues = normalized.map((input) => input.venue);
+  const preferredMarketIds = normalized.map((input) => input.preferredMarketId);
+
+  const { rows } = await pool.query<SelectionRow>(
+    `
+    with raw_input as (
+      select *
+      from unnest($1::text[], $2::text[], $3::text[]) as ei(event_id, event_venue, preferred_market_id)
+    ),
+    event_input as (
+      select distinct on (event_id, event_venue)
+        event_id,
+        event_venue,
+        preferred_market_id
+      from raw_input
+      where preferred_market_id is not null
+        and preferred_market_id <> ''
+      order by event_id, event_venue, preferred_market_id
+    ),
+    market_base as (
+      select
+        ei.event_id as input_event_id,
+        ei.event_venue as input_event_venue,
+        ei.preferred_market_id as input_preferred_market_id,
+        m.*
+      from event_input ei
+      join unified_events e
+        on e.id = ei.event_id
+       and e.venue = ei.event_venue
+      join unified_markets m
+        on m.id = ei.preferred_market_id
+       and m.event_id = ei.event_id
+       and m.venue = ei.event_venue
+      left join polymarket_markets pm
+        on m.venue = 'polymarket' and pm.id = m.venue_market_id
+      where ${orderableMarketExpr} is true
+        and ${renderableMarketExpr}
+    )
+    select
+      m.input_event_id as event_id,
+      m.input_event_venue as event_venue,
+      m.id as market_id,
+      m.title as market_title,
+      m.image as market_image,
+      m.icon as market_icon,
+      m.metadata->>'tradeType' as market_trade_type,
+      m.metadata->>'address' as market_address,
+      m.close_time as market_close_time,
+      m.status::text as market_status,
+      coalesce(m.best_bid, km.yes_bid_dollars) as market_best_bid,
+      coalesce(m.best_ask, km.yes_ask_dollars) as market_best_ask,
+      coalesce(m.last_price, km.last_price_dollars) as last_price,
+      mc.change_24h as market_change_24h,
+      mt.token_yes,
+      mt.token_no,
+      coalesce(yes_top.best_bid, km.yes_bid_dollars) as yes_top_bid,
+      coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
+      coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
+      coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
+      ${orderableMarketExpr} as accepting_orders,
+      m.resolved_outcome,
+      m.resolved_outcome_pct,
+      odds.yes_probability,
+      m.volume_24h as market_volume_24h,
+      m.volume_total as market_volume_total,
+      m.liquidity as market_liquidity,
+      coalesce(m.open_interest, 0) as market_open_interest,
+      mam.volume_last_24h as market_volume_last_24h,
+      mam.volume_prev_24h as market_volume_prev_24h,
+      mam.volume_last_24h_change as market_volume_last_24h_change,
+      mam.volume_last_24h_change_pct as market_volume_last_24h_change_pct,
+      mam.liquidity_now as market_liquidity_now,
+      mam.liquidity_change_24h as market_liquidity_change_24h,
+      mam.liquidity_change_pct_24h as market_liquidity_change_pct_24h,
+      mam.open_interest_now as market_open_interest_now,
+      mam.open_interest_change_24h as market_open_interest_change_24h,
+      mam.open_interest_change_pct_24h as market_open_interest_change_pct_24h,
+      mam.updated_at as market_activity_metrics_updated_at,
+      m.input_preferred_market_id as preferred_market_id,
+      1 as market_rank
+    from market_base m
+    join unified_events e
+      on e.id = m.input_event_id
+     and e.venue = m.input_event_venue
+    cross join lateral (
+      select
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null then
+            coalesce(
+              (regexp_match(
+                m.clob_token_ids,
+                '^[[:space:]]*\\[[[:space:]]*"([^"]+)"[[:space:]]*,[[:space:]]*"([^"]+)"'
+              ))[1],
+              m.token_yes
+            )
+          else m.token_yes
+        end as token_yes,
+        case
+          when m.venue = 'polymarket' and m.clob_token_ids is not null then
+            coalesce(
+              (regexp_match(
+                m.clob_token_ids,
+                '^[[:space:]]*\\[[[:space:]]*"([^"]+)"[[:space:]]*,[[:space:]]*"([^"]+)"'
+              ))[2],
+              m.token_no
+            )
+          else m.token_no
+        end as token_no
+    ) mt
+    left join lateral (
+      select best_bid, best_ask
+      from unified_token_top_latest
+      where mt.token_yes is not null
+        and token_id = mt.token_yes
+        and ts > ($4::timestamptz - interval '7 days')
+      limit 1
+    ) yes_top on true
+    left join lateral (
+      select best_bid, best_ask
+      from unified_token_top_latest
+      where mt.token_no is not null
+        and token_id = mt.token_no
+        and ts > ($4::timestamptz - interval '7 days')
+      limit 1
+    ) no_top on true
+    left join polymarket_markets pm
+      on m.venue = 'polymarket' and pm.id = m.venue_market_id
+    left join kalshi_markets km
+      on m.venue = 'kalshi' and km.id = m.venue_market_id
+    left join unified_market_change_24h mc
+      on mc.market_id = m.id
+    left join unified_market_activity_metrics_24h mam
+      on mam.market_id = m.id
+    cross join lateral (
+      select
+        case
+          when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+            and coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(
+                1::double precision,
+                ((coalesce(yes_top.best_bid, km.yes_bid_dollars) + coalesce(yes_top.best_ask, km.yes_ask_dollars)) / 2)::double precision
+              )
+            )
+          when coalesce(yes_top.best_bid, km.yes_bid_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, coalesce(yes_top.best_bid, km.yes_bid_dollars)::double precision)
+            )
+          when coalesce(yes_top.best_ask, km.yes_ask_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, coalesce(yes_top.best_ask, km.yes_ask_dollars)::double precision)
+            )
+          when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+            and coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(
+                1::double precision,
+                (1 - ((coalesce(no_top.best_bid, km.no_bid_dollars) + coalesce(no_top.best_ask, km.no_ask_dollars)) / 2)::double precision)
+              )
+            )
+          when coalesce(no_top.best_bid, km.no_bid_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, (1 - coalesce(no_top.best_bid, km.no_bid_dollars)::double precision))
+            )
+          when coalesce(no_top.best_ask, km.no_ask_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, (1 - coalesce(no_top.best_ask, km.no_ask_dollars)::double precision))
+            )
+          when m.best_bid is not null and m.best_ask is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, ((m.best_bid + m.best_ask) / 2)::double precision)
+            )
+          when m.best_bid is not null
+            then greatest(0::double precision, least(1::double precision, m.best_bid::double precision))
+          when m.best_ask is not null
+            then greatest(0::double precision, least(1::double precision, m.best_ask::double precision))
+          when m.resolved_outcome_pct is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, (m.resolved_outcome_pct::double precision / 10000))
+            )
+          when upper(coalesce(m.resolved_outcome::text, '')) = 'YES'
+            then 1::double precision
+          when upper(coalesce(m.resolved_outcome::text, '')) = 'NO'
+            then 0::double precision
+          when coalesce(m.last_price, km.last_price_dollars) is not null
+            then greatest(
+              0::double precision,
+              least(1::double precision, coalesce(m.last_price, km.last_price_dollars)::double precision)
+            )
+          else null::double precision
+        end as yes_probability
+    ) odds
+    order by event_id, event_venue, market_rank
+    `,
+    [eventIds, venues, preferredMarketIds, nowParam],
+  );
+
+  return rows.map(normalizeRow);
+}
+
 export async function selectRankedRepresentativeMarketsForEvents(
   pool: Pool,
   inputs: RepresentativeEventInput[],

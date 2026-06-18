@@ -40,6 +40,7 @@ import {
 } from "../services/market-map.js";
 import {
   eventVenueKey,
+  selectPreferredRepresentativeMarketsForEvents,
   selectRankedRepresentativeMarketsForEvents,
   type RankedRepresentativeMarket,
 } from "../services/market-map-representative.js";
@@ -1785,6 +1786,63 @@ async function loadLiveMarketDataForEvents(
   return { primaryByEventVenue, marketsByEventVenue };
 }
 
+async function loadPrimaryLiveMarketDataForEvents(
+  events: MarketMapEventSummary[],
+): Promise<MarketMapLiveMarketBundle> {
+  const primaryByEventVenue = new Map<string, MarketMapLiveMarketData>();
+  const marketsByEventVenue = new Map<string, MarketMapEventMarketPreview[]>();
+  if (events.length === 0) {
+    return { primaryByEventVenue, marketsByEventVenue };
+  }
+
+  const preferredByEventVenue = new Map<string, string | null>();
+  const inputs = events.map((event) => {
+    const key = eventVenueKey(event.eventId, event.venue);
+    const preferredMarketId = event.representativeMarketId ?? null;
+    preferredByEventVenue.set(key, preferredMarketId);
+    return {
+      eventId: event.eventId,
+      venue: event.venue,
+      preferredMarketId,
+    };
+  });
+
+  const directRows = await selectPreferredRepresentativeMarketsForEvents(
+    pool,
+    inputs,
+  );
+  for (const row of directRows) {
+    const key = eventVenueKey(row.eventId, row.venue);
+    if (primaryByEventVenue.has(key)) continue;
+    primaryByEventVenue.set(key, normalizeLiveRow(row, "representative"));
+    marketsByEventVenue.set(key, [normalizePreviewMarketRow(row)]);
+  }
+
+  const fallbackInputs = inputs.filter(
+    (input) => !primaryByEventVenue.has(eventVenueKey(input.eventId, input.venue)),
+  );
+  if (fallbackInputs.length > 0) {
+    const fallbackRows = await selectRankedRepresentativeMarketsForEvents(
+      pool,
+      fallbackInputs,
+      1,
+    );
+    for (const row of fallbackRows) {
+      const key = eventVenueKey(row.eventId, row.venue);
+      if (primaryByEventVenue.has(key)) continue;
+      const preferredMarketId = preferredByEventVenue.get(key) ?? null;
+      const oddsSource =
+        preferredMarketId != null && row.marketId === preferredMarketId
+          ? "representative"
+          : "fallback";
+      primaryByEventVenue.set(key, normalizeLiveRow(row, oddsSource));
+      marketsByEventVenue.set(key, [normalizePreviewMarketRow(row)]);
+    }
+  }
+
+  return { primaryByEventVenue, marketsByEventVenue };
+}
+
 function applyLiveMarketDataToEvents(
   events: MarketMapEventSummary[],
   primaryByEventVenue: ReadonlyMap<string, MarketMapLiveMarketData>,
@@ -2340,10 +2398,8 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 let hydratedCandidates = candidates;
                 const liveStartedAt = Date.now();
                 try {
-                  const liveBundle = await loadLiveMarketDataForEvents(
-                    liveInputs,
-                    marketsPreviewLimit,
-                  );
+                  const liveBundle =
+                    await loadPrimaryLiveMarketDataForEvents(liveInputs);
                   hydratedCandidates = applyLiveMarketDataToEvents(
                     candidates,
                     liveBundle.primaryByEventVenue,

@@ -57,6 +57,15 @@ type MarketMapPayload = {
     eventsPreview?: Array<{
       eventId: string;
       venue: string;
+      representativeMarketId?: string | null;
+      oddsSource?: string | null;
+      marketBestBid?: number | null;
+      marketBestAsk?: number | null;
+      marketsPreview?: Array<{
+        marketId: string;
+        marketBestBid: number | null;
+        marketBestAsk: number | null;
+      }>;
     }>;
     childrenPreview?: Array<{
       id: string;
@@ -309,6 +318,77 @@ async function insertUnifiedMarketForSignal(params: {
   return { tokenYes, tokenNo };
 }
 
+async function insertUnifiedMarketForPreview(params: {
+  marketId: string;
+  venue: MarketMapVenue;
+  venueMarketId: string;
+  eventId: string;
+  title: string;
+  closeOffsetSeconds: number;
+  bestBid: number;
+  bestAsk: number;
+  lastPrice: number;
+  volume24h: number;
+}): Promise<void> {
+  await pool.query(
+    `
+      insert into unified_markets (
+        id,
+        venue,
+        venue_market_id,
+        event_id,
+        title,
+        description,
+        category,
+        status,
+        market_type,
+        open_time,
+        close_time,
+        expiration_time,
+        best_bid,
+        best_ask,
+        last_price,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        outcomes,
+        token_yes,
+        token_no,
+        metadata,
+        slug,
+        created_at,
+        updated_at
+      )
+      values (
+        $1, $2, $3, $4, $5, null, null, 'ACTIVE', 'binary',
+        now() - interval '1 hour',
+        now() + ($6::int * interval '1 second'),
+        now() + ($6::int * interval '1 second'),
+        $7, $8, $9, $10, $10, 100, 50,
+        '["Yes","No"]', $11, $12,
+        jsonb_build_object('acceptingOrders', true, 'tradeType', 'binary'),
+        $13, now(), now()
+      )
+    `,
+    [
+      params.marketId,
+      params.venue,
+      params.venueMarketId,
+      params.eventId,
+      params.title,
+      params.closeOffsetSeconds,
+      params.bestBid,
+      params.bestAsk,
+      params.lastPrice,
+      params.volume24h,
+      makeToken(`yes-${params.marketId}`),
+      makeToken(`no-${params.marketId}`),
+      makeToken(`slug-${params.marketId}`),
+    ],
+  );
+}
+
 async function insertUnifiedEventForSignal(params: {
   eventId: string;
   venue: MarketMapVenue;
@@ -451,6 +531,11 @@ async function main() {
   const nodeId = `test-market-map-node-${suiteId}`;
   const qualityRootNodeId = `test-market-map-quality-root-${suiteId}`;
   const qualityNodeId = `test-market-map-quality-node-${suiteId}`;
+  const fallbackRootNodeId = `test-market-map-fallback-root-${suiteId}`;
+  const fallbackNodeId = `test-market-map-fallback-node-${suiteId}`;
+  const fallbackEventId = `fallback-event-${suiteId}`;
+  const staleRepresentativeMarketId = `fallback-stale-market-${suiteId}`;
+  const activeFallbackMarketId = `fallback-active-market-${suiteId}`;
   const signalMarketId = `market-signal-${suiteId}`;
   const signalNoteId = crypto.randomUUID();
   const signalNoteKey = `note-signal-${suiteId}`;
@@ -578,9 +663,29 @@ async function main() {
       score: 0.5,
     }),
   ];
+  const fallbackEvents: MarketMapEventSummary[] = [
+    {
+      ...buildEvent({
+        eventId: fallbackEventId,
+        venue: "polymarket",
+        title: "Fallback representative event",
+        volume24h: 95,
+        liquidity: 250,
+        openInterest: 10,
+        score: 0.88,
+      }),
+      representativeMarketId: staleRepresentativeMarketId,
+      representativeMarketTitle: "Stale representative line",
+      marketBestBid: 0.1,
+      marketBestAsk: 0.2,
+      yesBid: 0.1,
+      yesAsk: 0.2,
+    },
+  ];
 
   const node = buildNode(nodeId, events);
   const qualityNode = buildNode(qualityNodeId, qualityEvents);
+  const fallbackNode = buildNode(fallbackNodeId, fallbackEvents);
   const rootNodeId = `test-market-map-root-${suiteId}`;
   const rootNode: MarketMapNode = {
     ...node,
@@ -622,11 +727,37 @@ async function main() {
     label: "Quality child node",
     labelRepresentative: "Quality child node",
   };
+  const fallbackRootNode: MarketMapNode = {
+    ...fallbackNode,
+    id: fallbackRootNodeId,
+    level: 1,
+    parentId: null,
+    childIds: [fallbackNodeId],
+    label: "Fallback root node",
+    labelRepresentative: "Fallback root node",
+    heroEventId: null,
+    heroMarketId: null,
+  };
+  const fallbackChildNode: MarketMapNode = {
+    ...fallbackNode,
+    id: fallbackNodeId,
+    level: 2,
+    parentId: fallbackRootNodeId,
+    childIds: [],
+    label: "Fallback child node",
+    labelRepresentative: "Fallback child node",
+  };
   const nodeKey = marketMapRunNodeKey(runId, nodeId);
   const nodeEventsKey = marketMapRunNodeEventsKey(runId, nodeId);
   const qualityRootNodeKey = marketMapRunNodeKey(runId, qualityRootNodeId);
   const qualityNodeKey = marketMapRunNodeKey(runId, qualityNodeId);
   const qualityNodeEventsKey = marketMapRunNodeEventsKey(runId, qualityNodeId);
+  const fallbackRootNodeKey = marketMapRunNodeKey(runId, fallbackRootNodeId);
+  const fallbackNodeKey = marketMapRunNodeKey(runId, fallbackNodeId);
+  const fallbackNodeEventsKey = marketMapRunNodeEventsKey(
+    runId,
+    fallbackNodeId,
+  );
   const nodesGlobalKey = marketMapRunNodesGlobalKey(runId);
 
   try {
@@ -636,6 +767,9 @@ async function main() {
     await redis.set(qualityRootNodeKey, JSON.stringify(qualityRootNode));
     await redis.set(qualityNodeKey, JSON.stringify(qualityChildNode));
     await redis.set(qualityNodeEventsKey, JSON.stringify(qualityEvents));
+    await redis.set(fallbackRootNodeKey, JSON.stringify(fallbackRootNode));
+    await redis.set(fallbackNodeKey, JSON.stringify(fallbackChildNode));
+    await redis.set(fallbackNodeEventsKey, JSON.stringify(fallbackEvents));
     await redis.set(
       nodesGlobalKey,
       JSON.stringify([
@@ -643,6 +777,8 @@ async function main() {
         previewChildNode,
         qualityRootNode,
         qualityChildNode,
+        fallbackRootNode,
+        fallbackChildNode,
       ]),
     );
     await insertUnifiedEventForSignal({
@@ -651,12 +787,42 @@ async function main() {
       venueEventId: `venue-event-a-${suiteId}`,
       title: "Alpha event",
     });
+    await insertUnifiedEventForSignal({
+      eventId: fallbackEventId,
+      venue: "polymarket",
+      venueEventId: `venue-${fallbackEventId}`,
+      title: "Fallback representative event",
+    });
     const signalMarketTokens = await insertUnifiedMarketForSignal({
       marketId: signalMarketId,
       venue: "polymarket",
       venueMarketId: `venue-market-signal-${suiteId}`,
       eventId: `event-a-${suiteId}`,
       title: "Alpha alternate line",
+    });
+    await insertUnifiedMarketForPreview({
+      marketId: staleRepresentativeMarketId,
+      venue: "polymarket",
+      venueMarketId: `venue-${staleRepresentativeMarketId}`,
+      eventId: fallbackEventId,
+      title: "Stale representative line",
+      closeOffsetSeconds: -86_400,
+      bestBid: 0.1,
+      bestAsk: 0.2,
+      lastPrice: 0.15,
+      volume24h: 100,
+    });
+    await insertUnifiedMarketForPreview({
+      marketId: activeFallbackMarketId,
+      venue: "polymarket",
+      venueMarketId: `venue-${activeFallbackMarketId}`,
+      eventId: fallbackEventId,
+      title: "Active fallback line",
+      closeOffsetSeconds: 86_400,
+      bestBid: 0.42,
+      bestAsk: 0.58,
+      lastPrice: 0.5,
+      volume24h: 200,
     });
     await insertEventSignalNote({
       noteId: signalNoteId,
@@ -924,6 +1090,32 @@ async function main() {
       [`quality-open-c-${suiteId}`, `quality-open-d-${suiteId}`],
     );
 
+    const fallbackPreviewMap = await requestMarketMap({
+      app,
+      query: {
+        level: 2,
+        parent: fallbackRootNodeId,
+        includeEventsPreview: true,
+        eventsPreviewLimit: 1,
+        limit: 1,
+      },
+    });
+    const fallbackPreviewEvent =
+      fallbackPreviewMap.items.find((item) => item.id === fallbackNodeId)
+        ?.eventsPreview?.[0] ?? null;
+    assert.equal(fallbackPreviewEvent?.eventId, fallbackEventId);
+    assert.equal(
+      fallbackPreviewEvent?.representativeMarketId,
+      activeFallbackMarketId,
+    );
+    assert.equal(fallbackPreviewEvent?.oddsSource, "fallback");
+    assert.equal(fallbackPreviewEvent?.marketBestBid, 0.42);
+    assert.equal(fallbackPreviewEvent?.marketBestAsk, 0.58);
+    assert.equal(
+      fallbackPreviewEvent?.marketsPreview?.[0]?.marketId,
+      activeFallbackMarketId,
+    );
+
     console.log("[market-map-routes-tests] ok node event sorting");
   } finally {
     await pool.query(
@@ -933,11 +1125,11 @@ async function main() {
     await pool.query("delete from ai_notes where id = any($1::uuid[])", [
       [signalNoteId, signalNoteIdTwo],
     ]);
-    await pool.query("delete from unified_markets where id = $1", [
-      signalMarketId,
+    await pool.query("delete from unified_markets where id = any($1::text[])", [
+      [signalMarketId, staleRepresentativeMarketId, activeFallbackMarketId],
     ]);
-    await pool.query("delete from unified_events where id = $1", [
-      `event-a-${suiteId}`,
+    await pool.query("delete from unified_events where id = any($1::text[])", [
+      [`event-a-${suiteId}`, fallbackEventId],
     ]);
     await pool.query("delete from runtime_policies where id = $1", [policy.id]);
     if (previousActiveRunId) {
@@ -951,6 +1143,9 @@ async function main() {
       qualityRootNodeKey,
       qualityNodeKey,
       qualityNodeEventsKey,
+      fallbackRootNodeKey,
+      fallbackNodeKey,
+      fallbackNodeEventsKey,
       nodesGlobalKey,
     ]);
     await app.close();
