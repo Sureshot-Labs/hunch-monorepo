@@ -14,6 +14,7 @@
     "openapi:dump": "tsx src/dump-openapi.ts",
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
     "delete-closed": "tsx src/delete-closed-markets.ts",
+    "market:retention:select": "tsx src/market-retention-selector.ts",
     "admin:auth": "tsx src/admin-auth-cli.ts",
     "admin:user": "tsx src/admin-user.ts",
     "admin:points": "tsx src/admin-points.ts",
