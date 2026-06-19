@@ -65,5 +65,6 @@ COPY --chown=10001:10001 --from=builder /app/pnpm-workspace.yaml /app/pnpm-works
 COPY --chown=10001:10001 --from=builder /app/apps /app/apps
 COPY --chown=10001:10001 --from=builder /app/packages /app/packages
 COPY --chown=10001:10001 --from=builder /app/ops/run-js-runtime.sh /app/ops/run-js-runtime.sh
+COPY --chown=10001:10001 --from=builder /app/ops/market-maintenance.sh /app/ops/market-maintenance.sh
 
 USER hunch

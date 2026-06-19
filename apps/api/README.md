@@ -46,6 +46,28 @@ pnpm -C hunch-monorepo -F api exec -- tsx src/solana-rpc-check.ts \
   --venue=kalshi --status=ACTIVE --check=existence --limit=200 --sample=50
 ```
 
+## Market maintenance
+
+Daily market cleanup is orchestrated by `ops/market-maintenance.sh`.
+
+```bash
+ops/market-maintenance.sh              # dry-run
+ops/market-maintenance.sh --execute    # write mode
+```
+
+Order:
+
+- live-validated ACTIVE status repair by venue
+- unified terminal market retention
+- source market/event retention by venue
+
+Venue ownership is explicit in the wrapper. When adding a venue, update
+`ops/market-maintenance.sh`, the TS script venue allowlists, source cleanup if
+source tables exist, and run dry-runs before enabling cron.
+
+The wrapper continues after individual stage failures and exits nonzero if any
+stage failed, so one venue outage does not block later retention steps.
+
 ## Environment
 
 Wallet intel limits and thresholds are set in `hunch-monorepo/.env`.
