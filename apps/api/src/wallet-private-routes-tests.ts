@@ -1179,6 +1179,172 @@ async function main() {
       );
       assert.equal(eventPositioningBody.items[0]?.marketId, matching.marketId);
 
+      const sameEventOneSided = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-same-event-one-sided`,
+        category,
+      });
+      const sameEventLopsided = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-same-event-lopsided`,
+        category,
+      });
+      await pool.query(
+        `
+          update unified_markets
+          set event_id = $1, category = $2
+          where id = any($3::text[])
+        `,
+        [
+          matching.eventId,
+          category,
+          [sameEventOneSided.marketId, sameEventLopsided.marketId],
+        ],
+      );
+      await pool.query(
+        `
+          insert into wallet_position_snapshots (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            shares,
+            size_usd,
+            price,
+            metadata,
+            snapshot_at
+          )
+          values
+            ($1, 'polymarket', $3, 'YES', 15, 150, 0.4, '{}'::jsonb, $5),
+            ($1, 'polymarket', $4, 'YES', 1000000, 1000000, 0.99, '{}'::jsonb, $5),
+            ($2, 'polymarket', $4, 'NO', 5000, 5000, 0.01, '{}'::jsonb, $5)
+        `,
+        [
+          yesWalletId,
+          noWalletId,
+          sameEventOneSided.marketId,
+          sameEventLopsided.marketId,
+          snapshotAt,
+        ],
+      );
+
+      const disagreementMarketsResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/markets?category=${encodeURIComponent(category)}&minWallets=1&sort=balanced_disagreement&limit=5`,
+      });
+      assert.equal(disagreementMarketsResponse.statusCode, 200);
+      const disagreementMarketsBody = disagreementMarketsResponse.json() as {
+        ok: boolean;
+        items: Array<{
+          marketId: string;
+          minoritySide: string | null;
+          minoritySideUsd: number;
+          minoritySideShare: number | null;
+          absImbalancePct: number | null;
+          balancedDisagreementScore: number;
+        }>;
+      };
+      assert.equal(disagreementMarketsBody.ok, true);
+      assert.equal(
+        disagreementMarketsBody.items[0]?.marketId,
+        matching.marketId,
+      );
+      const balancedMarket = disagreementMarketsBody.items.find(
+        (item) => item.marketId === matching.marketId,
+      );
+      const lopsidedMarket = disagreementMarketsBody.items.find(
+        (item) => item.marketId === sameEventLopsided.marketId,
+      );
+      assert.ok(balancedMarket);
+      assert.ok(lopsidedMarket);
+      assert.equal(balancedMarket.minoritySide, "YES");
+      assert.equal(balancedMarket.minoritySideUsd, 250);
+      assert.ok((balancedMarket.minoritySideShare ?? 0) > 0.45);
+      assert.ok((balancedMarket.absImbalancePct ?? 0) < 0.1);
+      assert.ok(
+        balancedMarket.balancedDisagreementScore >
+          lopsidedMarket.balancedDisagreementScore,
+      );
+
+      const filteredDisagreementResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/markets?category=${encodeURIComponent(category)}&minWallets=1&sort=balanced_disagreement&minMinoritySideUsd=100&minMinoritySideShare=0.05&minYesWallets=1&minNoWallets=1&limit=10`,
+      });
+      assert.equal(filteredDisagreementResponse.statusCode, 200);
+      const filteredDisagreementBody =
+        filteredDisagreementResponse.json() as {
+          ok: boolean;
+          items: Array<{ marketId: string }>;
+        };
+      assert.equal(filteredDisagreementBody.ok, true);
+      assert.equal(
+        filteredDisagreementBody.items.some(
+          (item) => item.marketId === matching.marketId,
+        ),
+        true,
+      );
+      assert.equal(
+        filteredDisagreementBody.items.some(
+          (item) => item.marketId === sameEventLopsided.marketId,
+        ),
+        false,
+      );
+
+      const contestedEventDetailResponse = await app.inject({
+        method: "GET",
+        url: `/events/${encodeURIComponent(matching.eventId)}/wallet-positioning?minWallets=1&sort=event_disagreement_score&contestedMinMinoritySideUsd=100&contestedMinMinoritySideShare=0.05&contestedMinSideWallets=1&contestedMaxLargestHolderPct=0.9&limit=10`,
+      });
+      assert.equal(contestedEventDetailResponse.statusCode, 200);
+      const contestedEventDetailBody =
+        contestedEventDetailResponse.json() as {
+          ok: boolean;
+          event: {
+            eventShape: string;
+            contestedMarketCount: number;
+            eventDisagreementScore: number;
+            crossMarketWalletCount: number;
+            topMarketMinoritySideUsd: number | null;
+            topMarketMinoritySideShare: number | null;
+          } | null;
+          items: Array<{ marketId: string }>;
+        };
+      assert.equal(contestedEventDetailBody.ok, true);
+      assert.equal(contestedEventDetailBody.event?.eventShape, "multi_market");
+      assert.equal(contestedEventDetailBody.event?.contestedMarketCount, 1);
+      assert.ok((contestedEventDetailBody.event?.eventDisagreementScore ?? 0) > 0);
+      assert.equal(contestedEventDetailBody.event?.crossMarketWalletCount, 2);
+      assert.equal(contestedEventDetailBody.event?.topMarketMinoritySideUsd, 250);
+      assert.ok(
+        (contestedEventDetailBody.event?.topMarketMinoritySideShare ?? 0) >
+          0.45,
+      );
+      assert.equal(
+        contestedEventDetailBody.items[0]?.marketId,
+        matching.marketId,
+      );
+
+      const contestedEventRollupResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?category=${encodeURIComponent(category)}&minWallets=1&eventShape=multi_market&minContestedMarketCount=1&minCrossMarketWallets=2&sort=event_disagreement_score&contestedMinMinoritySideUsd=100&contestedMinMinoritySideShare=0.05&contestedMinSideWallets=1&contestedMaxLargestHolderPct=0.9&limit=5`,
+      });
+      assert.equal(contestedEventRollupResponse.statusCode, 200);
+      const contestedEventRollupBody =
+        contestedEventRollupResponse.json() as {
+          ok: boolean;
+          items: Array<{
+            eventId: string;
+            eventShape: string;
+            contestedMarketCount: number;
+            crossMarketWalletCount: number;
+          }>;
+        };
+      assert.equal(contestedEventRollupBody.ok, true);
+      assert.equal(contestedEventRollupBody.items[0]?.eventId, matching.eventId);
+      assert.equal(
+        contestedEventRollupBody.items[0]?.eventShape,
+        "multi_market",
+      );
+      assert.equal(contestedEventRollupBody.items[0]?.contestedMarketCount, 1);
+      assert.equal(contestedEventRollupBody.items[0]?.crossMarketWalletCount, 2);
+
       const positionResponse = await app.inject({
         method: "GET",
         url: `/wallets/positions?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&eventId=${encodeURIComponent(matching.eventId)}&category=${encodeURIComponent(category)}&outcomeSide=YES&marketStatus=OPEN&acceptingOrders=true&minSizeUsd=100&limit=10&offset=0`,

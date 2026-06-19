@@ -1126,6 +1126,24 @@ type WalletPositioningQuery = {
   minWalletExposureUsd: number;
   minPositionUsd: number;
   minWallets?: number;
+  minYesPositionUsd?: number;
+  minNoPositionUsd?: number;
+  minMinoritySideUsd?: number;
+  minMinoritySideShare?: number;
+  minYesWallets?: number;
+  minNoWallets?: number;
+  minAbsImbalancePct?: number;
+  maxAbsImbalancePct?: number;
+  maxLargestHolderPct?: number;
+  minBalancedDisagreementScore?: number;
+  contestedMinMinoritySideUsd: number;
+  contestedMinMinoritySideShare: number;
+  contestedMinSideWallets: number;
+  contestedMaxLargestHolderPct: number;
+  eventShape: "any" | "single_market" | "multi_market";
+  minContestedMarketCount?: number;
+  minEventDisagreementScore?: number;
+  minCrossMarketWallets?: number;
   mmMode: "all" | "exclude" | "only";
   sort:
     | "tracked_position_usd"
@@ -1133,6 +1151,14 @@ type WalletPositioningQuery = {
     | "yes_position_usd"
     | "no_position_usd"
     | "imbalance_usd"
+    | "balanced_disagreement"
+    | "minority_side_usd"
+    | "abs_imbalance_pct"
+    | "event_disagreement_score"
+    | "contested_market_count"
+    | "cross_market_wallet_count"
+    | "top_market_minority_side_usd"
+    | "largest_market_pct"
     | "avg_win_rate"
     | "avg_roi"
     | "newest_snapshot";
@@ -1297,6 +1323,11 @@ type PositioningMarketAggregate = {
   largestHolderPct: number | null;
   imbalanceUsd: number;
   imbalancePct: number | null;
+  minoritySide: PositioningSide | null;
+  minoritySideUsd: number;
+  minoritySideShare: number | null;
+  absImbalancePct: number | null;
+  balancedDisagreementScore: number;
   weightedAvgWinRate30d: number | null;
   weightedAvgRoi30d: number | null;
   newestSnapshotAt: string | null;
@@ -1315,8 +1346,14 @@ type PositioningEventAggregate = {
   trackedPositionUsd: number;
   walletCount: number;
   marketCount: number;
+  eventShape: "single_market" | "multi_market";
   largestMarketUsd: number | null;
   largestMarketPct: number | null;
+  contestedMarketCount: number;
+  eventDisagreementScore: number;
+  crossMarketWalletCount: number;
+  topMarketMinoritySideUsd: number | null;
+  topMarketMinoritySideShare: number | null;
   weightedAvgWinRate30d: number | null;
   weightedAvgRoi30d: number | null;
   newestSnapshotAt: string | null;
@@ -1408,6 +1445,145 @@ function addNullable(
   return (total ?? 0) + value;
 }
 
+function computePositioningMarketDisagreement(
+  market: PositioningMarketAggregate,
+) {
+  const yesUsd = market.sideBreakdown.YES.positionUsd;
+  const noUsd = market.sideBreakdown.NO.positionUsd;
+  const minoritySideUsd = Math.min(yesUsd, noUsd);
+  market.minoritySideUsd = minoritySideUsd;
+  market.minoritySide =
+    minoritySideUsd <= 0 || yesUsd === noUsd
+      ? null
+      : yesUsd < noUsd
+        ? "YES"
+        : "NO";
+  market.minoritySideShare =
+    market.trackedPositionUsd > 0
+      ? minoritySideUsd / market.trackedPositionUsd
+      : null;
+  market.absImbalancePct =
+    market.imbalancePct != null ? Math.abs(market.imbalancePct) : null;
+  market.balancedDisagreementScore =
+    Math.sqrt(Math.max(yesUsd, 0) * Math.max(noUsd, 0)) *
+    (market.minoritySideShare ?? 0) *
+    Math.max(0, 1 - (market.largestHolderPct ?? 1));
+}
+
+function pctPassesMin(value: number | null, threshold: number | undefined) {
+  return threshold == null || (value != null && value >= threshold);
+}
+
+function pctPassesMax(value: number | null, threshold: number | undefined) {
+  return threshold == null || (value != null && value <= threshold);
+}
+
+function marketPassesPositioningFilters(
+  market: PositioningMarketAggregate,
+  query: WalletPositioningQuery,
+): boolean {
+  if (
+    query.minYesPositionUsd != null &&
+    market.sideBreakdown.YES.positionUsd < query.minYesPositionUsd
+  ) {
+    return false;
+  }
+  if (
+    query.minNoPositionUsd != null &&
+    market.sideBreakdown.NO.positionUsd < query.minNoPositionUsd
+  ) {
+    return false;
+  }
+  if (
+    query.minMinoritySideUsd != null &&
+    market.minoritySideUsd < query.minMinoritySideUsd
+  ) {
+    return false;
+  }
+  if (!pctPassesMin(market.minoritySideShare, query.minMinoritySideShare)) {
+    return false;
+  }
+  if (
+    query.minYesWallets != null &&
+    market.sideBreakdown.YES.walletCount < query.minYesWallets
+  ) {
+    return false;
+  }
+  if (
+    query.minNoWallets != null &&
+    market.sideBreakdown.NO.walletCount < query.minNoWallets
+  ) {
+    return false;
+  }
+  if (!pctPassesMin(market.absImbalancePct, query.minAbsImbalancePct)) {
+    return false;
+  }
+  if (!pctPassesMax(market.absImbalancePct, query.maxAbsImbalancePct)) {
+    return false;
+  }
+  if (!pctPassesMax(market.largestHolderPct, query.maxLargestHolderPct)) {
+    return false;
+  }
+  if (
+    query.minBalancedDisagreementScore != null &&
+    market.balancedDisagreementScore < query.minBalancedDisagreementScore
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isContestedPositioningMarket(
+  market: PositioningMarketAggregate,
+  query: WalletPositioningQuery,
+): boolean {
+  return (
+    market.minoritySideUsd >= query.contestedMinMinoritySideUsd &&
+    (market.minoritySideShare ?? 0) >= query.contestedMinMinoritySideShare &&
+    market.sideBreakdown.YES.walletCount >= query.contestedMinSideWallets &&
+    market.sideBreakdown.NO.walletCount >= query.contestedMinSideWallets &&
+    (market.largestHolderPct ?? 1) <= query.contestedMaxLargestHolderPct
+  );
+}
+
+function eventPassesPositioningFilters(
+  event: PositioningEventAggregate,
+  query: WalletPositioningQuery,
+): boolean {
+  if (query.eventShape !== "any" && event.eventShape !== query.eventShape) {
+    return false;
+  }
+  if (
+    query.minContestedMarketCount != null &&
+    event.contestedMarketCount < query.minContestedMarketCount
+  ) {
+    return false;
+  }
+  if (
+    query.minEventDisagreementScore != null &&
+    event.eventDisagreementScore < query.minEventDisagreementScore
+  ) {
+    return false;
+  }
+  if (
+    query.minCrossMarketWallets != null &&
+    event.crossMarketWalletCount < query.minCrossMarketWallets
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isEventPositioningSort(sort: WalletPositioningQuery["sort"]) {
+  return [
+    "event_disagreement_score",
+    "contested_market_count",
+    "cross_market_wallet_count",
+    "top_market_minority_side_usd",
+    "largest_market_pct",
+  ].includes(sort);
+}
+
 function sortPositioningMarkets(
   markets: PositioningMarketAggregate[],
   sort: WalletPositioningQuery["sort"],
@@ -1422,6 +1598,12 @@ function sortPositioningMarkets(
         return market.sideBreakdown.NO.positionUsd;
       case "imbalance_usd":
         return Math.abs(market.imbalanceUsd);
+      case "balanced_disagreement":
+        return market.balancedDisagreementScore;
+      case "minority_side_usd":
+        return market.minoritySideUsd;
+      case "abs_imbalance_pct":
+        return market.absImbalancePct ?? -Infinity;
       case "avg_win_rate":
         return market.weightedAvgWinRate30d ?? -Infinity;
       case "avg_roi":
@@ -1430,6 +1612,12 @@ function sortPositioningMarkets(
         return market.newestSnapshotAt
           ? new Date(market.newestSnapshotAt).getTime()
           : -Infinity;
+      case "event_disagreement_score":
+      case "contested_market_count":
+      case "cross_market_wallet_count":
+      case "top_market_minority_side_usd":
+      case "largest_market_pct":
+        return market.balancedDisagreementScore;
       case "tracked_position_usd":
       default:
         return market.trackedPositionUsd;
@@ -1454,9 +1642,22 @@ function sortPositioningEvents(
         return event.newestSnapshotAt
           ? new Date(event.newestSnapshotAt).getTime()
           : -Infinity;
+      case "event_disagreement_score":
+        return event.eventDisagreementScore;
+      case "contested_market_count":
+        return event.contestedMarketCount;
+      case "cross_market_wallet_count":
+        return event.crossMarketWalletCount;
+      case "top_market_minority_side_usd":
+        return event.topMarketMinoritySideUsd ?? -Infinity;
+      case "largest_market_pct":
+        return event.largestMarketPct ?? -Infinity;
       case "yes_position_usd":
       case "no_position_usd":
       case "imbalance_usd":
+      case "balanced_disagreement":
+      case "minority_side_usd":
+      case "abs_imbalance_pct":
       case "tracked_position_usd":
       default:
         return event.trackedPositionUsd;
@@ -1540,6 +1741,12 @@ function buildPositioningGraph(input: {
       label: market.marketTitle,
       trackedPositionUsd: market.trackedPositionUsd,
       walletCount: market.walletCount,
+      minoritySide: market.minoritySide,
+      minoritySideUsd: market.minoritySideUsd,
+      minoritySideShare: market.minoritySideShare,
+      absImbalancePct: market.absImbalancePct,
+      balancedDisagreementScore: market.balancedDisagreementScore,
+      largestHolderPct: market.largestHolderPct,
     });
 
     for (const side of ["YES", "NO"] as const) {
@@ -1641,6 +1848,19 @@ async function loadTrackedWalletPositioning(input: {
     params.push(venueFilter);
   }
 
+  const latestPositionClauses = [
+    "ws.outcome_side in ('YES', 'NO')",
+    "coalesce(ws.shares, 0) > 0",
+  ];
+  if (query.outcomeSide) {
+    latestPositionClauses.push(`ws.outcome_side = $${idx++}::text`);
+    params.push(query.outcomeSide);
+  }
+  latestPositionClauses.push(
+    `greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))) >= $${idx++}::numeric`,
+  );
+  params.push(query.minPositionUsd);
+
   const marketClauses: string[] = [];
   idx = appendMarketReferenceFilters(
     marketClauses,
@@ -1658,15 +1878,6 @@ async function loadTrackedWalletPositioning(input: {
   if (normalizeMarketStatusFilter(query.marketStatus) === "ACTIVE") {
     marketClauses.push("(ue.id is null or ue.status = 'ACTIVE')");
   }
-  if (query.outcomeSide) {
-    marketClauses.push(`ws.outcome_side = $${idx++}::text`);
-    params.push(query.outcomeSide);
-  }
-  marketClauses.push(
-    `greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))) >= $${idx++}::numeric`,
-  );
-  params.push(query.minPositionUsd);
-  marketClauses.push("coalesce(ws.shares, 0) > 0");
   marketClauses.push("hp.token_id is null");
 
   const { rows } = await client.query<WalletPositioningRow>(
@@ -1725,15 +1936,35 @@ async function loadTrackedWalletPositioning(input: {
           order by ws.snapshot_at desc
           limit 1
         ) latest on true
+      ),
+      latest_positions as materialized (
+        select
+          ls.*,
+          ws.market_id,
+          ws.outcome_side,
+          ws.shares,
+          ws.size_usd,
+          ws.price,
+          ws.metadata,
+          greatest(
+            coalesce(ws.size_usd, 0),
+            abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
+          ) as position_usd
+        from latest_snapshots ls
+        join wallet_position_snapshots ws
+          on ws.wallet_id = ls.wallet_id
+         and ws.venue = ls.venue
+         and ws.snapshot_at = ls.snapshot_at
+        where ${latestPositionClauses.join(" and ")}
       )
       select
-        ws.wallet_id,
-        ls.address,
-        ls.chain,
-        ls.wallet_label,
-        ls.profile_label,
-        ws.venue,
-        ws.market_id,
+        lp.wallet_id,
+        lp.address,
+        lp.chain,
+        lp.wallet_label,
+        lp.profile_label,
+        lp.venue,
+        lp.market_id,
         um.title as market_title,
         um.event_id,
         ue.title as event_title,
@@ -1757,38 +1988,34 @@ async function loadTrackedWalletPositioning(input: {
         um.volume_24h::text as volume_24h,
         um.volume_total::text as volume_total,
         um.open_interest::text as open_interest,
-        case when ws.outcome_side in ('YES', 'NO') then ws.outcome_side else null end as outcome_side,
-        ws.shares::text as shares,
-        ws.size_usd::text as size_usd,
-        ws.price::text as price,
-        greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0)))::text as position_usd,
-        ws.snapshot_at,
-        ws.metadata,
-        ls.metrics_pnl_30d::text as metrics_pnl_30d,
-        ls.metrics_roi_30d::text as metrics_roi_30d,
-        ls.metrics_trades_30d,
-        ls.metrics_win_rate_30d::text as metrics_win_rate_30d,
-        ls.exposure_usd::text as exposure_usd,
-        ls.hedged_notional_usd::text as hedged_notional_usd,
-        ls.net_imbalance_usd::text as net_imbalance_usd,
-        ls.hedge_ratio::text as hedge_ratio,
-        ls.two_sided_markets,
-        ls.last_activity_at,
-        ls.inferred_wins,
-        ls.inferred_total
-      from latest_snapshots ls
-      join wallet_position_snapshots ws
-        on ws.wallet_id = ls.wallet_id
-       and ws.venue = ls.venue
-       and ws.snapshot_at = ls.snapshot_at
-      join unified_markets um on um.id = ws.market_id
+        lp.outcome_side as outcome_side,
+        lp.shares::text as shares,
+        lp.size_usd::text as size_usd,
+        lp.price::text as price,
+        lp.position_usd::text as position_usd,
+        lp.snapshot_at,
+        lp.metadata,
+        lp.metrics_pnl_30d::text as metrics_pnl_30d,
+        lp.metrics_roi_30d::text as metrics_roi_30d,
+        lp.metrics_trades_30d,
+        lp.metrics_win_rate_30d::text as metrics_win_rate_30d,
+        lp.exposure_usd::text as exposure_usd,
+        lp.hedged_notional_usd::text as hedged_notional_usd,
+        lp.net_imbalance_usd::text as net_imbalance_usd,
+        lp.hedge_ratio::text as hedge_ratio,
+        lp.two_sided_markets,
+        lp.last_activity_at,
+        lp.inferred_wins,
+        lp.inferred_total
+      from latest_positions lp
+      join unified_markets um on um.id = lp.market_id
       left join unified_events ue on ue.id = um.event_id
       left join hidden_positions hp
-        on hp.venue = ws.venue
-       and hp.token_id = ws.metadata->>'tokenId'
+        on hp.venue = lp.venue
+       and hp.token_id = lp.metadata->>'tokenId'
        and (
-         (ls.chain = 'solana' and hp.wallet_address = ls.address)
-         or (ls.chain <> 'solana' and lower(hp.wallet_address) = lower(ls.address))
+         (lp.chain = 'solana' and hp.wallet_address = lp.address)
+         or (lp.chain <> 'solana' and lower(hp.wallet_address) = lower(lp.address))
        )
       where ${marketClauses.join(" and ")}
     `,
@@ -1893,6 +2120,11 @@ async function loadTrackedWalletPositioning(input: {
           largestHolderPct: null,
           imbalanceUsd: 0,
           imbalancePct: null,
+          minoritySide: null,
+          minoritySideUsd: 0,
+          minoritySideShare: null,
+          absImbalancePct: null,
+          balancedDisagreementScore: 0,
           weightedAvgWinRate30d: null,
           weightedAvgRoi30d: null,
           newestSnapshotAt: null,
@@ -2037,6 +2269,7 @@ async function loadTrackedWalletPositioning(input: {
       market.trackedPositionUsd > 0
         ? market.imbalanceUsd / market.trackedPositionUsd
         : null;
+    computePositioningMarketDisagreement(market);
 
     const sortedHolders = [...builder.holders].sort(
       (a, b) => b.positionUsd - a.positionUsd,
@@ -2080,10 +2313,16 @@ async function loadTrackedWalletPositioning(input: {
 
   const effectiveMinWallets =
     query.minWallets ?? (input.rollup === "market-detail" ? 1 : 2);
-  const filteredMarkets = markets.filter(
+  const walletFilteredMarkets = markets.filter(
     (market) => market.walletCount >= effectiveMinWallets,
   );
-  const sortedMarkets = sortPositioningMarkets(filteredMarkets, query.sort);
+  const marketFilteredMarkets = walletFilteredMarkets.filter((market) =>
+    marketPassesPositioningFilters(market, query),
+  );
+  const sortedMarkets = sortPositioningMarkets(
+    marketFilteredMarkets,
+    query.sort,
+  );
 
   const eventBuilders = new Map<
     string,
@@ -2092,17 +2331,24 @@ async function loadTrackedWalletPositioning(input: {
         PositioningEventAggregate,
         | "walletCount"
         | "marketCount"
+        | "eventShape"
         | "largestMarketPct"
+        | "contestedMarketCount"
+        | "eventDisagreementScore"
+        | "crossMarketWalletCount"
+        | "topMarketMinoritySideUsd"
+        | "topMarketMinoritySideShare"
         | "weightedAvgWinRate30d"
         | "weightedAvgRoi30d"
         | "topMarketsPreview"
       >;
       walletIds: Set<string>;
+      walletMarketIds: Map<string, Set<string>>;
       markets: PositioningMarketAggregate[];
       stats: PositioningAccumulator;
     }
   >();
-  for (const market of sortedMarkets) {
+  for (const market of walletFilteredMarkets) {
     if (!market.eventId) continue;
     let builder = eventBuilders.get(market.eventId);
     if (!builder) {
@@ -2120,6 +2366,7 @@ async function loadTrackedWalletPositioning(input: {
           newestSnapshotAt: null,
         },
         walletIds: new Set(),
+        walletMarketIds: new Map(),
         markets: [],
         stats: initPositioningAccumulator(),
       };
@@ -2140,20 +2387,54 @@ async function loadTrackedWalletPositioning(input: {
     const sourceBuilder = marketBuilders.get(market.marketId);
     for (const holder of sourceBuilder?.holders ?? market.topHolders) {
       builder.walletIds.add(holder.walletId);
+      let walletMarketIds = builder.walletMarketIds.get(holder.walletId);
+      if (!walletMarketIds) {
+        walletMarketIds = new Set();
+        builder.walletMarketIds.set(holder.walletId, walletMarketIds);
+      }
+      walletMarketIds.add(market.marketId);
       addPositioningStats(builder.stats, holder);
     }
   }
   const sortedEvents = sortPositioningEvents(
-    Array.from(eventBuilders.values()).map((builder) => {
+    Array.from(eventBuilders.values())
+      .map((builder) => {
       const event = builder.event;
+      const marketCount = builder.markets.length;
+      const eventShape: PositioningEventAggregate["eventShape"] =
+        marketCount <= 1 ? "single_market" : "multi_market";
+      const contestedMarkets = builder.markets.filter((market) =>
+        isContestedPositioningMarket(market, query),
+      );
+      const topMinorityMarket = contestedMarkets.reduce<
+        PositioningMarketAggregate | null
+      >(
+        (top, market) =>
+          !top || market.minoritySideUsd > top.minoritySideUsd ? market : top,
+        null,
+      );
+      const previewMarkets = isEventPositioningSort(query.sort)
+        ? sortPositioningMarkets(builder.markets, "balanced_disagreement")
+        : sortPositioningMarkets(builder.markets, query.sort);
       return {
         ...event,
         walletCount: builder.walletIds.size,
-        marketCount: builder.markets.length,
+        marketCount,
+        eventShape,
         largestMarketPct:
           event.trackedPositionUsd > 0 && event.largestMarketUsd != null
             ? event.largestMarketUsd / event.trackedPositionUsd
             : null,
+        contestedMarketCount: contestedMarkets.length,
+        eventDisagreementScore: contestedMarkets.reduce(
+          (total, market) => total + market.balancedDisagreementScore,
+          0,
+        ),
+        crossMarketWalletCount: Array.from(builder.walletMarketIds.values())
+          .filter((marketIds) => marketIds.size >= 2).length,
+        topMarketMinoritySideUsd: topMinorityMarket?.minoritySideUsd ?? null,
+        topMarketMinoritySideShare:
+          topMinorityMarket?.minoritySideShare ?? null,
         weightedAvgWinRate30d: finalizeWeightedAverage(
           builder.stats.weightedWinRateTotal,
           builder.stats.weightedWinRateWeight,
@@ -2162,9 +2443,10 @@ async function loadTrackedWalletPositioning(input: {
           builder.stats.weightedRoiTotal,
           builder.stats.weightedRoiWeight,
         ),
-        topMarketsPreview: builder.markets.slice(0, 3),
+        topMarketsPreview: previewMarkets.slice(0, 3),
       };
-    }),
+    })
+      .filter((event) => eventPassesPositioningFilters(event, query)),
     query.sort,
   );
 
@@ -2206,11 +2488,33 @@ async function loadTrackedWalletPositioning(input: {
       minWalletExposureUsd: query.minWalletExposureUsd,
       minPositionUsd: query.minPositionUsd,
       minWallets: effectiveMinWallets,
+      minYesPositionUsd: query.minYesPositionUsd ?? null,
+      minNoPositionUsd: query.minNoPositionUsd ?? null,
+      minMinoritySideUsd: query.minMinoritySideUsd ?? null,
+      minMinoritySideShare: query.minMinoritySideShare ?? null,
+      minYesWallets: query.minYesWallets ?? null,
+      minNoWallets: query.minNoWallets ?? null,
+      minAbsImbalancePct: query.minAbsImbalancePct ?? null,
+      maxAbsImbalancePct: query.maxAbsImbalancePct ?? null,
+      maxLargestHolderPct: query.maxLargestHolderPct ?? null,
+      minBalancedDisagreementScore:
+        query.minBalancedDisagreementScore ?? null,
+      contestedMinMinoritySideUsd: query.contestedMinMinoritySideUsd,
+      contestedMinMinoritySideShare: query.contestedMinMinoritySideShare,
+      contestedMinSideWallets: query.contestedMinSideWallets,
+      contestedMaxLargestHolderPct: query.contestedMaxLargestHolderPct,
+      eventShape: query.eventShape,
+      minContestedMarketCount: query.minContestedMarketCount ?? null,
+      minEventDisagreementScore: query.minEventDisagreementScore ?? null,
+      minCrossMarketWallets: query.minCrossMarketWallets ?? null,
       mmMode: query.mmMode,
       includePositionPnl: query.includePositionPnl,
     },
     totals: {
-      markets: filteredMarkets.length,
+      markets:
+        input.rollup === "events" || input.rollup === "event-detail"
+          ? walletFilteredMarkets.length
+          : marketFilteredMarkets.length,
       events: sortedEvents.length,
       positions: rows.length,
     },
