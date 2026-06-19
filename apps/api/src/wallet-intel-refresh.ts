@@ -37,6 +37,7 @@ import {
   buildSnapshotDeltaTrackableActivitySql,
   buildWalletIntelTrackableMarketSql,
 } from "./services/wallet-intel-market-eligibility.js";
+import { loadWalletOpenPositionStatsMap } from "./services/wallet-open-position-stats.js";
 import {
   createWalletIntelRetryTelemetry,
   type WalletIntelRetryTelemetry,
@@ -3421,10 +3422,50 @@ async function refreshWalletPositionExposure(
     walletIds,
     WALLET_POSITION_EXPOSURE_CHUNK_SIZE,
   )) {
+    const openPositionStats = await loadWalletOpenPositionStatsMap(
+      client,
+      chunk,
+      { asOf: inputs.asOf },
+    );
+    const openPositionStatsPayload = chunk.map((walletId) => {
+      const stats = openPositionStats.get(walletId);
+      return {
+        wallet_id: walletId,
+        open_positions_count: stats?.openPositionsCount ?? 0,
+        open_markets_count: stats?.openMarketsCount ?? 0,
+        avg_open_position_size_usd:
+          stats?.avgOpenPositionSizeUsd != null
+            ? String(stats.avgOpenPositionSizeUsd)
+            : null,
+        avg_open_entry_price:
+          stats?.avgOpenEntryPrice != null
+            ? String(stats.avgOpenEntryPrice)
+            : null,
+        avg_open_entry_approx: stats?.avgOpenEntryApprox ?? null,
+      };
+    });
+
     await client.query(
       `
       with wallet_set as (
         select unnest($1::uuid[]) as wallet_id
+      ),
+      open_position_stats as (
+        select
+          x.wallet_id::uuid as wallet_id,
+          x.open_positions_count::int as open_positions_count,
+          x.open_markets_count::int as open_markets_count,
+          x.avg_open_position_size_usd::numeric as avg_open_position_size_usd,
+          x.avg_open_entry_price::numeric as avg_open_entry_price,
+          x.avg_open_entry_approx::boolean as avg_open_entry_approx
+        from jsonb_to_recordset($3::jsonb) as x(
+          wallet_id text,
+          open_positions_count int,
+          open_markets_count int,
+          avg_open_position_size_usd text,
+          avg_open_entry_price text,
+          avg_open_entry_approx boolean
+        )
       ),
       latest as (
         select
@@ -3506,9 +3547,15 @@ async function refreshWalletPositionExposure(
           coalesce(e.exposure_usd, 0) as exposure_usd,
           coalesce(e.hedged_notional_usd, 0) as hedged_notional_usd,
           coalesce(e.net_imbalance_usd, 0) as net_imbalance_usd,
-          coalesce(e.two_sided_markets, 0) as two_sided_markets
+          coalesce(e.two_sided_markets, 0) as two_sided_markets,
+          coalesce(ops.open_positions_count, 0) as open_positions_count,
+          coalesce(ops.open_markets_count, 0) as open_markets_count,
+          ops.avg_open_position_size_usd,
+          ops.avg_open_entry_price,
+          ops.avg_open_entry_approx
         from wallet_set ws
         left join exposure e on e.wallet_id = ws.wallet_id
+        left join open_position_stats ops on ops.wallet_id = ws.wallet_id
       )
       insert into wallet_position_exposure (
         wallet_id,
@@ -3517,6 +3564,11 @@ async function refreshWalletPositionExposure(
         net_imbalance_usd,
         hedge_ratio,
         two_sided_markets,
+        open_positions_count,
+        open_markets_count,
+        avg_open_position_size_usd,
+        avg_open_entry_price,
+        avg_open_entry_approx,
         as_of
       )
       select
@@ -3529,6 +3581,11 @@ async function refreshWalletPositionExposure(
           else 0
         end as hedge_ratio,
         two_sided_markets,
+        open_positions_count,
+        open_markets_count,
+        avg_open_position_size_usd,
+        avg_open_entry_price,
+        avg_open_entry_approx,
         $2::timestamptz
       from final_rows
       on conflict (wallet_id)
@@ -3538,10 +3595,15 @@ async function refreshWalletPositionExposure(
         net_imbalance_usd = excluded.net_imbalance_usd,
         hedge_ratio = excluded.hedge_ratio,
         two_sided_markets = excluded.two_sided_markets,
+        open_positions_count = excluded.open_positions_count,
+        open_markets_count = excluded.open_markets_count,
+        avg_open_position_size_usd = excluded.avg_open_position_size_usd,
+        avg_open_entry_price = excluded.avg_open_entry_price,
+        avg_open_entry_approx = excluded.avg_open_entry_approx,
         as_of = excluded.as_of,
         updated_at = now()
     `,
-      [chunk, inputs.asOf],
+      [chunk, inputs.asOf, JSON.stringify(openPositionStatsPayload)],
     );
   }
 }

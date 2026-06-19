@@ -29,6 +29,16 @@ type OpenPositionSnapshotRow = {
   observed_price: string | null;
 };
 
+type OpenPositionRollupRow = {
+  wallet_id: string;
+  exposure_usd: string | null;
+  open_positions_count: number | null;
+  open_markets_count: number | null;
+  avg_open_position_size_usd: string | null;
+  avg_open_entry_price: string | null;
+  avg_open_entry_approx: boolean | null;
+};
+
 type WalletOpenPositionAccumulator = {
   entrySharesTotal: number;
   entryWeightedPriceTotal: number;
@@ -65,6 +75,7 @@ function createAccumulator(): WalletOpenPositionAccumulator {
 export async function loadWalletOpenPositionStatsMap(
   client: Queryable,
   walletIds: string[],
+  options?: { asOf?: Date | null },
 ): Promise<Map<string, WalletOpenPositionStats>> {
   const byWallet = new Map<string, WalletOpenPositionStats>();
   if (walletIds.length === 0) return byWallet;
@@ -86,6 +97,7 @@ export async function loadWalletOpenPositionStatsMap(
             ws.snapshot_at
           from wallet_position_snapshots ws
           where ws.wallet_id = wallet_set.wallet_id
+            and ($2::timestamptz is null or ws.snapshot_at <= $2::timestamptz)
           order by ws.venue, ws.snapshot_at desc
         ) latest_venue_snapshot on true
       ),
@@ -126,6 +138,7 @@ export async function loadWalletOpenPositionStatsMap(
         where ${buildWalletIntelTrackableMarketSql({
           marketAlias: "um",
           eventAlias: "ue",
+          asOfSql: "coalesce($2::timestamptz, now())",
         })}
       )
       select
@@ -142,7 +155,7 @@ export async function loadWalletOpenPositionStatsMap(
       )
         and resolved_outcome not in ('YES', 'NO')
     `,
-    [walletIds],
+    [walletIds, options?.asOf ?? null],
   );
 
   const ledgerByKey = await loadWalletPositionLedgerMap(
@@ -224,4 +237,66 @@ export async function loadWalletOpenPositionStatsMap(
   }
 
   return byWallet;
+}
+
+export async function loadWalletOpenPositionStatsRollupMap(
+  client: Queryable,
+  walletIds: string[],
+): Promise<Map<string, WalletOpenPositionStats>> {
+  const byWallet = new Map<string, WalletOpenPositionStats>();
+  if (walletIds.length === 0) return byWallet;
+
+  const { rows } = await client.query<OpenPositionRollupRow>(
+    `
+      select
+        wallet_id,
+        exposure_usd::text as exposure_usd,
+        open_positions_count,
+        open_markets_count,
+        avg_open_position_size_usd::text as avg_open_position_size_usd,
+        avg_open_entry_price::text as avg_open_entry_price,
+        avg_open_entry_approx
+      from wallet_position_exposure
+      where wallet_id = any($1::uuid[])
+        and open_positions_count is not null
+    `,
+    [walletIds],
+  );
+
+  for (const row of rows) {
+    const exposureUsd = parseNumber(row.exposure_usd);
+    byWallet.set(row.wallet_id, {
+      trackedExposureUsd:
+        exposureUsd != null && exposureUsd > 0 ? exposureUsd : null,
+      openPositionsCount: row.open_positions_count ?? 0,
+      openMarketsCount: row.open_markets_count ?? 0,
+      avgOpenPositionSizeUsd: parseNumber(row.avg_open_position_size_usd),
+      avgOpenEntryPrice: parseNumber(row.avg_open_entry_price),
+      avgOpenEntryApprox: row.avg_open_entry_approx,
+    });
+  }
+
+  return byWallet;
+}
+
+export async function loadWalletOpenPositionStatsPreferRollupMap(
+  client: Queryable,
+  walletIds: string[],
+): Promise<Map<string, WalletOpenPositionStats>> {
+  const uniqueWalletIds = Array.from(new Set(walletIds));
+  const rollup = await loadWalletOpenPositionStatsRollupMap(
+    client,
+    uniqueWalletIds,
+  );
+  const missingWalletIds = uniqueWalletIds.filter((walletId) => {
+    return !rollup.has(walletId);
+  });
+  if (missingWalletIds.length === 0) return rollup;
+
+  const fallback = await loadWalletOpenPositionStatsMap(client, missingWalletIds);
+  for (const [walletId, stats] of fallback.entries()) {
+    rollup.set(walletId, stats);
+  }
+
+  return rollup;
 }

@@ -60,6 +60,11 @@ async function createWhaleFixtureWallet(
     winRate30d?: number;
     exposureUsd?: number;
     netImbalanceUsd?: number;
+    openPositionsCount?: number;
+    openMarketsCount?: number;
+    avgOpenPositionSizeUsd?: number;
+    avgOpenEntryPrice?: number;
+    avgOpenEntryApprox?: boolean;
     inferredWins?: number;
     inferredTotal?: number;
   },
@@ -165,6 +170,57 @@ async function createWhaleFixtureWallet(
         do update set last_occurred_at = excluded.last_occurred_at
       `,
       [walletId],
+    );
+  }
+
+  if (
+    inputs.exposureUsd != null ||
+    inputs.netImbalanceUsd != null ||
+    inputs.openPositionsCount != null ||
+    inputs.openMarketsCount != null ||
+    inputs.avgOpenPositionSizeUsd != null ||
+    inputs.avgOpenEntryPrice != null ||
+    inputs.avgOpenEntryApprox != null
+  ) {
+    await pool.query(
+      `
+        insert into wallet_position_exposure (
+          wallet_id,
+          exposure_usd,
+          hedged_notional_usd,
+          net_imbalance_usd,
+          hedge_ratio,
+          two_sided_markets,
+          open_positions_count,
+          open_markets_count,
+          avg_open_position_size_usd,
+          avg_open_entry_price,
+          avg_open_entry_approx,
+          as_of
+        )
+        values ($1, $2, 0, $3, 0, 0, $4, $5, $6, $7, $8, now())
+        on conflict (wallet_id)
+        do update set
+          exposure_usd = excluded.exposure_usd,
+          net_imbalance_usd = excluded.net_imbalance_usd,
+          open_positions_count = excluded.open_positions_count,
+          open_markets_count = excluded.open_markets_count,
+          avg_open_position_size_usd = excluded.avg_open_position_size_usd,
+          avg_open_entry_price = excluded.avg_open_entry_price,
+          avg_open_entry_approx = excluded.avg_open_entry_approx,
+          as_of = excluded.as_of,
+          updated_at = now()
+      `,
+      [
+        walletId,
+        inputs.exposureUsd ?? 0,
+        inputs.netImbalanceUsd ?? 0,
+        inputs.openPositionsCount ?? 0,
+        inputs.openMarketsCount ?? 0,
+        inputs.avgOpenPositionSizeUsd ?? null,
+        inputs.avgOpenEntryPrice ?? null,
+        inputs.avgOpenEntryApprox ?? null,
+      ],
     );
   }
 
@@ -752,12 +808,74 @@ async function main() {
     }
 
     {
+      const rollupAddress = randomEvmAddress();
+      const rollupWalletId = await createWhaleFixtureWallet(context, {
+        address: rollupAddress,
+        chain: "polygon",
+        volumeUsd: 3_000,
+        pnlUsd: 250,
+        roi: 0.08,
+        trades30d: 9,
+        exposureUsd: 1234,
+        openPositionsCount: 4,
+        openMarketsCount: 3,
+        avgOpenPositionSizeUsd: 308.5,
+        avgOpenEntryPrice: 0.37,
+        avgOpenEntryApprox: true,
+      });
+
       const response = await app.inject({
         method: "GET",
-        url: "/wallets/activity/summary?scope=whales&limit=5&offset=0",
+        url: "/wallets/activity/summary?scope=whales&limit=100&offset=0&includeAttribution=false",
       });
       assert.equal(response.statusCode, 200);
-      assert.equal(response.json().ok, true);
+      const body = response.json() as {
+        ok: boolean;
+        items: Array<{
+          walletId: string;
+          trackedExposureUsd: number | null;
+          openPositionsCount: number | null;
+          openMarketsCount: number | null;
+          avgOpenPositionSizeUsd: number | null;
+          avgOpenEntryPrice: number | null;
+          avgOpenEntryApprox: boolean | null;
+        }>;
+      };
+      assert.equal(body.ok, true);
+      const summaryItem = body.items.find(
+        (item) => item.walletId === rollupWalletId,
+      );
+      assert.ok(summaryItem);
+      assert.equal(summaryItem.trackedExposureUsd, 1234);
+      assert.equal(summaryItem.openPositionsCount, 4);
+      assert.equal(summaryItem.openMarketsCount, 3);
+      assert.equal(summaryItem.avgOpenPositionSizeUsd, 308.5);
+      assert.equal(summaryItem.avgOpenEntryPrice, 0.37);
+      assert.equal(summaryItem.avgOpenEntryApprox, true);
+
+      const profileResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/${rollupWalletId}`,
+      });
+      assert.equal(profileResponse.statusCode, 200);
+      const profileBody = profileResponse.json() as {
+        ok: boolean;
+        wallet: {
+          trackedExposureUsd: number | null;
+          openPositionsCount: number | null;
+          openMarketsCount: number | null;
+          avgOpenPositionSizeUsd: number | null;
+          avgOpenEntryPrice: number | null;
+          avgOpenEntryApprox: boolean | null;
+        };
+      };
+      assert.equal(profileBody.ok, true);
+      assert.equal(profileBody.wallet.trackedExposureUsd, 1234);
+      assert.equal(profileBody.wallet.openPositionsCount, 4);
+      assert.equal(profileBody.wallet.openMarketsCount, 3);
+      assert.equal(profileBody.wallet.avgOpenPositionSizeUsd, 308.5);
+      assert.equal(profileBody.wallet.avgOpenEntryPrice, 0.37);
+      assert.equal(profileBody.wallet.avgOpenEntryApprox, true);
     }
 
     {

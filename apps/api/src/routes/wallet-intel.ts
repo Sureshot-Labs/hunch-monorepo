@@ -67,7 +67,7 @@ import {
   aggregateWalletMetricsFilterSql,
   aggregateWalletMetricsPreferenceSql,
 } from "../services/wallet-metrics-constants.js";
-import { loadWalletOpenPositionStatsMap } from "../services/wallet-open-position-stats.js";
+import { loadWalletOpenPositionStatsPreferRollupMap } from "../services/wallet-open-position-stats.js";
 import {
   loadLatestWalletPositionNowMap,
   loadWalletPositionApproxMetrics,
@@ -6211,7 +6211,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           categoryMix,
         ] = await Promise.all([
           loadWalletFollowerCountsMap(client, [walletId]),
-          loadWalletOpenPositionStatsMap(client, [walletId]),
+          loadWalletOpenPositionStatsPreferRollupMap(client, [walletId]),
           loadWalletPortfolioPerformanceMap(client, [walletId], {
             rangeHours: 720,
           }),
@@ -6736,7 +6736,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     })
                   : Promise.resolve(new Map<string, WalletActivitySparkline>()),
                 loadWalletFollowerCountsMap(client, pagedIds),
-                loadWalletOpenPositionStatsMap(client, pagedIds),
+                loadWalletOpenPositionStatsPreferRollupMap(client, pagedIds),
                 loadWalletPortfolioPerformanceMap(client, pagedIds, {
                   rangeHours: 720,
                 }),
@@ -7012,7 +7012,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   })
                 : Promise.resolve(new Map<string, WalletActivitySparkline>()),
               loadWalletFollowerCountsMap(client, pagedIds),
-              loadWalletOpenPositionStatsMap(client, pagedIds),
+              loadWalletOpenPositionStatsPreferRollupMap(client, pagedIds),
               loadWalletPortfolioPerformanceMap(client, pagedIds, {
                 rangeHours: 720,
               }),
