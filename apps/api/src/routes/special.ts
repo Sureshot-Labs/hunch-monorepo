@@ -8,6 +8,10 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import {
+  collectMarketRefreshMarketIdsFromPayload,
+  requestMarketRefreshForMarketRefs,
+} from "../lib/market-refresh.js";
 import { fifaSpecialQuerySchema } from "../schemas/special.js";
 import type { TokenPair } from "../server-types.js";
 import {
@@ -60,6 +64,26 @@ function numberOrNull(value: unknown): number | null {
   if (value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function requestFifaSpecialMarketRefresh(payload: unknown): void {
+  const marketIds = collectMarketRefreshMarketIdsFromPayload(payload, {
+    fields: ["internalMarketId"],
+    maxMarkets: 100,
+  });
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    marketIds,
+    logLabel: "special:fifa-2026",
+  });
+}
+
+function requestFifaSpecialMarketRefreshForBody(body: string): void {
+  try {
+    requestFifaSpecialMarketRefresh(JSON.parse(body) as unknown);
+  } catch {
+    // Cache body is controlled by this route. If it is invalid, skip warming.
+  }
 }
 
 function buildTop(row: FifaSpecialRow) {
@@ -329,6 +353,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         const cachedBody = await r.get(cacheKey);
         if (cachedBody) {
           const etag = `W/"${crypto.createHash("sha1").update(cachedBody).digest("hex")}"`;
+          requestFifaSpecialMarketRefreshForBody(cachedBody);
           applyCacheHeaders({ reply, hit: true, cacheStatus: redisStatus });
           reply.header("ETag", etag);
           reply.header(
@@ -418,6 +443,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       }
       const body = JSON.stringify(payload);
       const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+      requestFifaSpecialMarketRefresh(payload);
       if (cacheEnabled && r) {
         await r.set(cacheKey, body, { EX: cacheTtl });
       }

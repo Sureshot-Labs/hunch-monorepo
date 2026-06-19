@@ -13,6 +13,7 @@ type TestContext = {
   createdWallets: Array<{ address: string; chain: "polygon" | "solana" }>;
   createdMarketIds: string[];
   createdEventIds: string[];
+  createdTokenIds: string[];
 };
 
 type TestWalletChain = TestContext["createdWallets"][number]["chain"];
@@ -378,6 +379,15 @@ async function cleanup(context: TestContext): Promise<void> {
     ]);
   }
   if (context.createdMarketIds.length) {
+    if (context.createdTokenIds.length) {
+      await pool.query(
+        "delete from unified_token_top_latest where token_id = any($1::text[])",
+        [context.createdTokenIds],
+      );
+      await pool.query("delete from unified_tokens where token_id = any($1::text[])", [
+        context.createdTokenIds,
+      ]);
+    }
     await pool.query("delete from unified_markets where id = any($1::text[])", [
       context.createdMarketIds,
     ]);
@@ -399,6 +409,7 @@ async function main() {
     createdWallets: [],
     createdMarketIds: [],
     createdEventIds: [],
+    createdTokenIds: [],
   };
 
   try {
@@ -1060,6 +1071,36 @@ async function main() {
         inferredWins: 6,
         inferredTotal: 10,
       });
+      const yesTokenId = `${matching.marketId}:YES`;
+      const noTokenId = `${matching.marketId}:NO`;
+      context.createdTokenIds.push(yesTokenId, noTokenId);
+      await pool.query(
+        `
+          insert into unified_tokens (token_id, venue, market_id, side)
+          values
+            ($1, 'polymarket', $3, 'YES'),
+            ($2, 'polymarket', $3, 'NO')
+        `,
+        [yesTokenId, noTokenId, matching.marketId],
+      );
+      await pool.query(
+        `
+          insert into unified_token_top_latest (
+            token_id,
+            venue,
+            ts,
+            best_bid,
+            best_ask,
+            mid,
+            spread,
+            updated_at
+          )
+          values
+            ($1, 'polymarket', $3, 0.44, 0.46, 0.45, 0.02, $3),
+            ($2, 'polymarket', $3, 0.54, 0.56, 0.55, 0.02, $3)
+        `,
+        [yesTokenId, noTokenId, snapshotAt],
+      );
       await pool.query(
         `
           insert into wallet_position_snapshots (
@@ -1074,8 +1115,8 @@ async function main() {
             snapshot_at
           )
           values
-            ($1, 'polymarket', $3, 'YES', 10, 250, 0.45, '{"tokenId":"positioning-yes"}'::jsonb, $5),
-            ($2, 'polymarket', $3, 'NO', 12, 300, 0.55, '{"tokenId":"positioning-no"}'::jsonb, $5),
+            ($1, 'polymarket', $3, 'YES', 10, 250, 0.45, jsonb_build_object('tokenId', $6::text), $5),
+            ($2, 'polymarket', $3, 'NO', 12, 300, 0.55, jsonb_build_object('tokenId', $7::text), $5),
             ($1, 'polymarket', $4, 'YES', 8, 90, 0.4, '{}'::jsonb, $5)
         `,
         [
@@ -1084,6 +1125,8 @@ async function main() {
           matching.marketId,
           other.marketId,
           snapshotAt,
+          yesTokenId,
+          noTokenId,
         ],
       );
 
@@ -1103,14 +1146,27 @@ async function main() {
           eventStartDate: string | null;
           eventEndDate: string | null;
           sideBreakdown: {
-            YES: { positionUsd: number; walletCount: number };
-            NO: { positionUsd: number; walletCount: number };
+            YES: {
+              positionUsd: number;
+              walletCount: number;
+              quote: { tokenId: string | null; bestBid: number | null } | null;
+            };
+            NO: {
+              positionUsd: number;
+              walletCount: number;
+              quote: { tokenId: string | null; bestBid: number | null } | null;
+            };
+          };
+          odds: {
+            yes: { label: string; tokenId: string | null; bid: number | null };
+            no: { label: string; tokenId: string | null; bid: number | null };
           };
           topHolders: Array<Record<string, unknown>>;
         } | null;
         graph?: {
           nodes: Array<{
             type?: string;
+            odds?: Record<string, unknown>;
             walletUrl?: string;
           }>;
         };
@@ -1128,6 +1184,20 @@ async function main() {
         marketPositioningBody.market?.sideBreakdown.NO.positionUsd,
         300,
       );
+      assert.equal(
+        marketPositioningBody.market?.sideBreakdown.YES.quote?.tokenId,
+        yesTokenId,
+      );
+      assert.equal(
+        marketPositioningBody.market?.sideBreakdown.NO.quote?.tokenId,
+        noTokenId,
+      );
+      assert.equal(marketPositioningBody.market?.odds.yes.label, "Yes");
+      assert.equal(marketPositioningBody.market?.odds.no.label, "No");
+      assert.equal(marketPositioningBody.market?.odds.yes.tokenId, yesTokenId);
+      assert.equal(marketPositioningBody.market?.odds.no.tokenId, noTokenId);
+      assert.equal(marketPositioningBody.market?.odds.yes.bid, 0.44);
+      assert.equal(marketPositioningBody.market?.odds.no.bid, 0.54);
       assert.equal(marketPositioningBody.market?.eventStatus, "ACTIVE");
       assert.ok(marketPositioningBody.market?.eventStartDate);
       assert.ok(marketPositioningBody.market?.eventEndDate);
@@ -1138,6 +1208,12 @@ async function main() {
       );
       assert.equal(
         marketPositioningBody.graph?.nodes.some((node) => node.type === "side"),
+        true,
+      );
+      assert.equal(
+        marketPositioningBody.graph?.nodes.some(
+          (node) => node.type === "market" && node.odds != null,
+        ),
         true,
       );
       assert.equal(
@@ -1161,7 +1237,13 @@ async function main() {
           startDate: string | null;
           endDate: string | null;
           walletCount: number;
-          topMarketsPreview: Array<{ marketId: string }>;
+          topMarketsPreview: Array<{
+            marketId: string;
+            odds: {
+              yes: { tokenId: string | null };
+              no: { tokenId: string | null };
+            };
+          }>;
         } | null;
         items: Array<{ marketId: string }>;
       };
@@ -1176,6 +1258,10 @@ async function main() {
       assert.equal(
         eventPositioningBody.event?.topMarketsPreview[0]?.marketId,
         matching.marketId,
+      );
+      assert.equal(
+        eventPositioningBody.event?.topMarketsPreview[0]?.odds.yes.tokenId,
+        yesTokenId,
       );
       assert.equal(eventPositioningBody.items[0]?.marketId, matching.marketId);
 

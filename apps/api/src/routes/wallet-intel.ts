@@ -9,6 +9,10 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  collectMarketRefreshMarketIdsFromPayload,
+  requestMarketRefreshForMarketRefs,
+} from "../lib/market-refresh.js";
 import { getRedisStatus } from "../redis.js";
 import {
   derivePolymarketFunders,
@@ -730,6 +734,28 @@ function walletAddressIdentityKey(address: string): string {
   return trimmed;
 }
 
+function requestWalletPositioningMarketRefresh(
+  payload: unknown,
+  logLabel: string,
+): void {
+  const marketIds = collectMarketRefreshMarketIdsFromPayload(payload, {
+    fields: ["marketId"],
+    maxMarkets: 100,
+  });
+  requestMarketRefreshForMarketRefs({ db: pool, marketIds, logLabel });
+}
+
+function requestWalletPositioningSingleMarketRefresh(
+  marketId: string,
+  logLabel: string,
+): void {
+  requestMarketRefreshForMarketRefs({
+    db: pool,
+    marketIds: [marketId],
+    logLabel,
+  });
+}
+
 function isZeroEvmWalletAddress(address: string): boolean {
   return address.toLowerCase() === ethers.ZeroAddress;
 }
@@ -1184,6 +1210,7 @@ type WalletPositioningRow = {
   category: string | null;
   market_status: string | null;
   event_status: string | null;
+  outcomes: string | null;
   event_start_date: Date | null;
   event_end_date: Date | null;
   close_time: Date | null;
@@ -1231,6 +1258,21 @@ type WalletPositioningQuoteRow = {
 };
 
 type PositioningSide = "YES" | "NO";
+
+type PositioningOddsSide = {
+  label: string;
+  tokenId: string | null;
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  spread: number | null;
+  updatedAt: string | null;
+};
+
+type PositioningOdds = {
+  yes: PositioningOddsSide;
+  no: PositioningOddsSide;
+};
 
 type PositioningPnl = {
   avgEntryPrice: number | null;
@@ -1331,6 +1373,7 @@ type PositioningMarketAggregate = {
   weightedAvgWinRate30d: number | null;
   weightedAvgRoi30d: number | null;
   newestSnapshotAt: string | null;
+  odds: PositioningOdds;
   sideBreakdown: Record<PositioningSide, PositioningSideAggregate>;
   topHolders: PositioningHolder[];
 };
@@ -1435,6 +1478,54 @@ function isoDate(value: Date | null | undefined): string | null {
 
 function resolvePositioningSide(value: string | null): PositioningSide | null {
   return value === "YES" || value === "NO" ? value : null;
+}
+
+function parsePositioningOutcomeLabels(
+  value: string | null,
+): Record<PositioningSide, string> {
+  const fallback = { YES: "YES", NO: "NO" };
+  const parsed = parseMarketOutcomes(value);
+  const yes = parsed?.[0]?.trim() ?? "";
+  const no = parsed?.[1]?.trim() ?? "";
+  return {
+    YES: yes || fallback.YES,
+    NO: no || fallback.NO,
+  };
+}
+
+function buildPositioningOddsSide(
+  label: string,
+  quote: PositioningSideAggregate["quote"],
+): PositioningOddsSide {
+  return {
+    label,
+    tokenId: quote?.tokenId ?? null,
+    bid: quote?.bestBid ?? null,
+    ask: quote?.bestAsk ?? null,
+    mid: quote?.mid ?? null,
+    spread: quote?.spread ?? null,
+    updatedAt: quote?.updatedAt ?? null,
+  };
+}
+
+function buildPositioningOdds(
+  labels: Record<PositioningSide, string>,
+  sideBreakdown: Record<PositioningSide, PositioningSideAggregate>,
+): PositioningOdds {
+  return {
+    yes: buildPositioningOddsSide(labels.YES, sideBreakdown.YES.quote),
+    no: buildPositioningOddsSide(labels.NO, sideBreakdown.NO.quote),
+  };
+}
+
+function refreshPositioningOdds(market: PositioningMarketAggregate) {
+  market.odds = buildPositioningOdds(
+    {
+      YES: market.odds.yes.label,
+      NO: market.odds.no.label,
+    },
+    market.sideBreakdown,
+  );
 }
 
 function addNullable(
@@ -1739,6 +1830,7 @@ function buildPositioningGraph(input: {
       marketId: market.marketId,
       eventId: market.eventId,
       label: market.marketTitle,
+      odds: market.odds,
       trackedPositionUsd: market.trackedPositionUsd,
       walletCount: market.walletCount,
       minoritySide: market.minoritySide,
@@ -1971,6 +2063,7 @@ async function loadTrackedWalletPositioning(input: {
         coalesce(um.category, ue.category) as category,
         um.status::text as market_status,
         ue.status::text as event_status,
+        um.outcomes::text as outcomes,
         ue.start_date as event_start_date,
         ue.end_date as event_end_date,
         um.close_time,
@@ -2091,6 +2184,11 @@ async function loadTrackedWalletPositioning(input: {
 
     let builder = marketBuilders.get(row.market_id);
     if (!builder) {
+      const outcomeLabels = parsePositioningOutcomeLabels(row.outcomes);
+      const sideBreakdown = {
+        YES: initSideAggregate("YES"),
+        NO: initSideAggregate("NO"),
+      };
       builder = {
         market: {
           marketId: row.market_id,
@@ -2128,10 +2226,8 @@ async function loadTrackedWalletPositioning(input: {
           weightedAvgWinRate30d: null,
           weightedAvgRoi30d: null,
           newestSnapshotAt: null,
-          sideBreakdown: {
-            YES: initSideAggregate("YES"),
-            NO: initSideAggregate("NO"),
-          },
+          odds: buildPositioningOdds(outcomeLabels, sideBreakdown),
+          sideBreakdown,
           topHolders: [],
         },
         holders: [],
@@ -2471,6 +2567,7 @@ async function loadTrackedWalletPositioning(input: {
       market.sideBreakdown[side].quote =
         quoteMap.get(`${market.marketId}::${side}`) ?? null;
     }
+    refreshPositioningOdds(market);
   }
 
   return {
@@ -9275,6 +9372,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               rollup: "events",
             }),
         );
+        requestWalletPositioningMarketRefresh(
+          result,
+          "wallet-positioning:events",
+        );
         return reply.send(result);
       } catch (error) {
         app.log.error({ error, query }, "Failed to load event positioning");
@@ -9307,6 +9408,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               query,
               rollup: "markets",
             }),
+        );
+        requestWalletPositioningMarketRefresh(
+          result,
+          "wallet-positioning:markets",
         );
         return reply.send(result);
       } catch (error) {
@@ -9348,6 +9453,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               eventId: request.params.eventId,
               rollup: "event-detail",
             }),
+        );
+        requestWalletPositioningMarketRefresh(
+          result,
+          "wallet-positioning:event-detail",
         );
         return reply.send({
           ...result,
@@ -9395,6 +9504,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               marketId: request.params.marketId,
               rollup: "market-detail",
             }),
+        );
+        requestWalletPositioningSingleMarketRefresh(
+          request.params.marketId,
+          "wallet-positioning:market-detail",
         );
         return reply.send({
           ...result,

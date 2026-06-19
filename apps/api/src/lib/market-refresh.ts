@@ -23,6 +23,7 @@ export type MarketRefreshTokenRef = {
 };
 
 const MARKET_REFRESH_BATCH_DELAY_MS = 250;
+const DEFAULT_VISIBLE_MARKET_REFRESH_MAX_MARKETS = 100;
 
 let pendingMarketRefreshBatch: PendingMarketRefreshBatch | null = null;
 let pendingMarketRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -31,6 +32,67 @@ let marketRefreshFlushChain: Promise<void> = Promise.resolve();
 function normalizeId(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function collectMarketIdsFromPayloadValue(
+  value: unknown,
+  input: {
+    fields: readonly string[];
+    marketIds: Set<string>;
+    maxMarkets: number;
+    seen: WeakSet<object>;
+  },
+): void {
+  if (input.marketIds.size >= input.maxMarkets) return;
+  if (value == null) return;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectMarketIdsFromPayloadValue(item, input);
+      if (input.marketIds.size >= input.maxMarkets) return;
+    }
+    return;
+  }
+
+  if (typeof value !== "object") return;
+  if (input.seen.has(value)) return;
+  input.seen.add(value);
+
+  const record = value as Record<string, unknown>;
+  for (const field of input.fields) {
+    const id = typeof record[field] === "string" ? normalizeId(record[field]) : null;
+    if (id) input.marketIds.add(id);
+    if (input.marketIds.size >= input.maxMarkets) return;
+  }
+
+  for (const child of Object.values(record)) {
+    collectMarketIdsFromPayloadValue(child, input);
+    if (input.marketIds.size >= input.maxMarkets) return;
+  }
+}
+
+export function collectMarketRefreshMarketIdsFromPayload(
+  payload: unknown,
+  options: {
+    fields?: readonly string[];
+    maxMarkets?: number;
+  } = {},
+): string[] {
+  const maxMarkets = Math.max(
+    0,
+    Math.trunc(options.maxMarkets ?? DEFAULT_VISIBLE_MARKET_REFRESH_MAX_MARKETS),
+  );
+  if (maxMarkets <= 0) return [];
+
+  const fields = options.fields?.length ? options.fields : ["marketId"];
+  const marketIds = new Set<string>();
+  collectMarketIdsFromPayloadValue(payload, {
+    fields,
+    marketIds,
+    maxMarkets,
+    seen: new WeakSet<object>(),
+  });
+  return Array.from(marketIds);
 }
 
 function toMarketRefreshVenue(
