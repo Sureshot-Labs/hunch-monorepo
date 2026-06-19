@@ -284,6 +284,53 @@ export const marketWalletActivityQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+const walletPositioningSortSchema = z.enum([
+  "tracked_position_usd",
+  "wallet_count",
+  "yes_position_usd",
+  "no_position_usd",
+  "imbalance_usd",
+  "avg_win_rate",
+  "avg_roi",
+  "newest_snapshot",
+]);
+
+const walletPositioningShapeSchema = z.enum(["table", "tree", "graph", "both"]);
+
+export const walletPositioningQuerySchema = z.object({
+  scope: z.enum(["whales"]).default("whales"),
+  venue: zVenue.optional(),
+  category: z.string().trim().min(1).optional(),
+  marketStatus: walletMarketStatusSchema.default("ACTIVE"),
+  acceptingOrders: queryBooleanSchema.optional(),
+  outcomeSide: walletOutcomeSideSchema.optional(),
+  walletActiveWithinHours: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 365)
+    .default(24 * 30),
+  minWalletExposureUsd: z.coerce.number().min(0).default(100),
+  minPositionUsd: z.coerce.number().min(0).default(100),
+  minWallets: z.coerce.number().int().min(1).max(100).optional(),
+  mmMode: z.enum(["all", "exclude", "only"]).default("all"),
+  sort: walletPositioningSortSchema.default("tracked_position_usd"),
+  includeHolders: queryBooleanSchema.default(true),
+  holdersLimit: z.coerce.number().int().min(0).max(20).default(3),
+  includePositionPnl: queryBooleanSchema.default(false),
+  shape: walletPositioningShapeSchema.default("table"),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+export const eventWalletPositioningParamsSchema = z.object({
+  eventId: z.string().trim().min(1),
+});
+
+export const marketWalletPositioningParamsSchema = z.object({
+  marketId: z.string().trim().min(1),
+});
+
 export const walletWhalesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),

@@ -91,8 +91,10 @@ import {
   type WalletSignalSeverity,
 } from "../services/wallet-attribution.js";
 import {
+  eventWalletPositioningParamsSchema,
   marketWalletActivityParamsSchema,
   marketWalletActivityQuerySchema,
+  marketWalletPositioningParamsSchema,
   walletActivityQuerySchema,
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
@@ -106,6 +108,7 @@ import {
   walletPrivateNoteBodySchema,
   walletPrivateNoteParamsSchema,
   walletPositionHistoryQuerySchema,
+  walletPositioningQuerySchema,
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
   walletResolverParamsSchema,
@@ -1047,7 +1050,9 @@ function appendWalletActivityFilters(
     params.push(query.changeAction);
   }
   if (query.minSizeUsd != null) {
-    clauses.push(`coalesce(${activityAlias}.size_usd, 0) >= $${idx++}::numeric`);
+    clauses.push(
+      `coalesce(${activityAlias}.size_usd, 0) >= $${idx++}::numeric`,
+    );
     params.push(query.minSizeUsd);
   }
   if (query.minDeltaShares != null) {
@@ -1108,6 +1113,1134 @@ function appendMarketReferenceFilters(
     params.push(query.acceptingOrders);
   }
   return idx;
+}
+
+type WalletPositioningQuery = {
+  scope: "whales";
+  venue?: string;
+  category?: string;
+  marketStatus: string;
+  acceptingOrders?: boolean;
+  outcomeSide?: string;
+  walletActiveWithinHours: number;
+  minWalletExposureUsd: number;
+  minPositionUsd: number;
+  minWallets?: number;
+  mmMode: "all" | "exclude" | "only";
+  sort:
+    | "tracked_position_usd"
+    | "wallet_count"
+    | "yes_position_usd"
+    | "no_position_usd"
+    | "imbalance_usd"
+    | "avg_win_rate"
+    | "avg_roi"
+    | "newest_snapshot";
+  includeHolders: boolean;
+  holdersLimit: number;
+  includePositionPnl: boolean;
+  shape: "table" | "tree" | "graph" | "both";
+  limit: number;
+  offset: number;
+};
+
+type WalletPositioningRow = {
+  wallet_id: string;
+  address: string;
+  chain: string;
+  wallet_label: string | null;
+  profile_label: string | null;
+  venue: string;
+  market_id: string;
+  market_title: string | null;
+  event_id: string | null;
+  event_title: string | null;
+  category: string | null;
+  market_status: string | null;
+  event_status: string | null;
+  event_start_date: Date | null;
+  event_end_date: Date | null;
+  close_time: Date | null;
+  expiration_time: Date | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: string | null;
+  accepting_orders: boolean | null;
+  best_bid: string | null;
+  best_ask: string | null;
+  last_price: string | null;
+  liquidity: string | null;
+  volume_24h: string | null;
+  volume_total: string | null;
+  open_interest: string | null;
+  outcome_side: string | null;
+  shares: string | null;
+  size_usd: string | null;
+  price: string | null;
+  position_usd: string | null;
+  snapshot_at: Date;
+  metadata: unknown;
+  metrics_pnl_30d: string | null;
+  metrics_roi_30d: string | null;
+  metrics_trades_30d: number | null;
+  metrics_win_rate_30d: string | null;
+  exposure_usd: string | null;
+  hedged_notional_usd: string | null;
+  net_imbalance_usd: string | null;
+  hedge_ratio: string | null;
+  two_sided_markets: number | null;
+  last_activity_at: Date | null;
+  inferred_wins: number | null;
+  inferred_total: number | null;
+};
+
+type WalletPositioningQuoteRow = {
+  market_id: string;
+  side: string;
+  token_id: string;
+  best_bid: string | null;
+  best_ask: string | null;
+  mid: string | null;
+  spread: string | null;
+  updated_at: Date | null;
+};
+
+type PositioningSide = "YES" | "NO";
+
+type PositioningPnl = {
+  avgEntryPrice: number | null;
+  currentPrice: number | null;
+  openPnlUsd: number | null;
+  realizedPnlUsd: number | null;
+  totalPnlUsd: number | null;
+  pnlPct: number | null;
+  approxReliable: boolean;
+  source: "activity" | "snapshot" | null;
+};
+
+type PositioningHolder = {
+  walletId: string;
+  address: string;
+  chain: string;
+  label: string | null;
+  profileLabel: string | null;
+  side: PositioningSide;
+  shares: number | null;
+  positionUsd: number;
+  price: number | null;
+  snapshotAt: string | null;
+  lastActivityAt: string | null;
+  metrics: {
+    pnl30d: number | null;
+    roi30d: number | null;
+    trades30d: number | null;
+    winRate30d: number | null;
+    inferredWinRate: number | null;
+    resolvedWins: number | null;
+    resolvedTotal: number | null;
+  };
+  mmDiagnostics: WalletMmDiagnostics;
+  pnl?: PositioningPnl;
+};
+
+type PositioningSideAggregate = {
+  side: PositioningSide;
+  positionUsd: number;
+  shares: number | null;
+  walletCount: number;
+  largestHolderUsd: number | null;
+  largestHolderPct: number | null;
+  weightedAvgWinRate30d: number | null;
+  weightedAvgRoi30d: number | null;
+  topWinRate30d: number | null;
+  topPnl30d: number | null;
+  avgEntryPrice: number | null;
+  openPnlUsd: number | null;
+  realizedPnlUsd: number | null;
+  totalPnlUsd: number | null;
+  pnlHolderCount: number;
+  quote: {
+    tokenId: string | null;
+    bestBid: number | null;
+    bestAsk: number | null;
+    mid: number | null;
+    spread: number | null;
+    updatedAt: string | null;
+  } | null;
+  topHolders: PositioningHolder[];
+};
+
+type PositioningMarketAggregate = {
+  marketId: string;
+  eventId: string | null;
+  venue: string;
+  marketTitle: string | null;
+  eventTitle: string | null;
+  eventStartDate: string | null;
+  eventEndDate: string | null;
+  category: string | null;
+  marketStatus: string | null;
+  eventStatus: string | null;
+  acceptingOrders: boolean | null;
+  closeTime: string | null;
+  expirationTime: string | null;
+  resolvedOutcome: string | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  lastPrice: number | null;
+  marketLiquidityUsd: number | null;
+  volume24h: number | null;
+  volumeTotal: number | null;
+  openInterest: number | null;
+  trackedPositionUsd: number;
+  walletCount: number;
+  largestHolderUsd: number | null;
+  largestHolderPct: number | null;
+  imbalanceUsd: number;
+  imbalancePct: number | null;
+  weightedAvgWinRate30d: number | null;
+  weightedAvgRoi30d: number | null;
+  newestSnapshotAt: string | null;
+  sideBreakdown: Record<PositioningSide, PositioningSideAggregate>;
+  topHolders: PositioningHolder[];
+};
+
+type PositioningEventAggregate = {
+  eventId: string;
+  venue: string | null;
+  eventTitle: string | null;
+  eventStatus: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  category: string | null;
+  trackedPositionUsd: number;
+  walletCount: number;
+  marketCount: number;
+  largestMarketUsd: number | null;
+  largestMarketPct: number | null;
+  weightedAvgWinRate30d: number | null;
+  weightedAvgRoi30d: number | null;
+  newestSnapshotAt: string | null;
+  topMarketsPreview: PositioningMarketAggregate[];
+};
+
+type PositioningAccumulator = {
+  weightedWinRateTotal: number;
+  weightedWinRateWeight: number;
+  weightedRoiTotal: number;
+  weightedRoiWeight: number;
+  topWinRate: number | null;
+  topPnl: number | null;
+};
+
+function initPositioningAccumulator(): PositioningAccumulator {
+  return {
+    weightedWinRateTotal: 0,
+    weightedWinRateWeight: 0,
+    weightedRoiTotal: 0,
+    weightedRoiWeight: 0,
+    topWinRate: null,
+    topPnl: null,
+  };
+}
+
+function addPositioningStats(
+  acc: PositioningAccumulator,
+  holder: Pick<PositioningHolder, "positionUsd" | "metrics">,
+) {
+  const winRate =
+    holder.metrics.winRate30d ?? holder.metrics.inferredWinRate ?? null;
+  if (winRate != null) {
+    acc.weightedWinRateTotal += winRate * holder.positionUsd;
+    acc.weightedWinRateWeight += holder.positionUsd;
+    acc.topWinRate = Math.max(acc.topWinRate ?? winRate, winRate);
+  }
+  if (holder.metrics.roi30d != null) {
+    acc.weightedRoiTotal += holder.metrics.roi30d * holder.positionUsd;
+    acc.weightedRoiWeight += holder.positionUsd;
+  }
+  if (holder.metrics.pnl30d != null) {
+    acc.topPnl = Math.max(
+      acc.topPnl ?? holder.metrics.pnl30d,
+      holder.metrics.pnl30d,
+    );
+  }
+}
+
+function finalizeWeightedAverage(total: number, weight: number): number | null {
+  return weight > 0 ? total / weight : null;
+}
+
+function initSideAggregate(side: PositioningSide): PositioningSideAggregate {
+  return {
+    side,
+    positionUsd: 0,
+    shares: null,
+    walletCount: 0,
+    largestHolderUsd: null,
+    largestHolderPct: null,
+    weightedAvgWinRate30d: null,
+    weightedAvgRoi30d: null,
+    topWinRate30d: null,
+    topPnl30d: null,
+    avgEntryPrice: null,
+    openPnlUsd: null,
+    realizedPnlUsd: null,
+    totalPnlUsd: null,
+    pnlHolderCount: 0,
+    quote: null,
+    topHolders: [],
+  };
+}
+
+function isoDate(value: Date | null | undefined): string | null {
+  return value ? value.toISOString() : null;
+}
+
+function resolvePositioningSide(value: string | null): PositioningSide | null {
+  return value === "YES" || value === "NO" ? value : null;
+}
+
+function addNullable(
+  total: number | null,
+  value: number | null,
+): number | null {
+  if (value == null) return total;
+  return (total ?? 0) + value;
+}
+
+function sortPositioningMarkets(
+  markets: PositioningMarketAggregate[],
+  sort: WalletPositioningQuery["sort"],
+): PositioningMarketAggregate[] {
+  const value = (market: PositioningMarketAggregate) => {
+    switch (sort) {
+      case "wallet_count":
+        return market.walletCount;
+      case "yes_position_usd":
+        return market.sideBreakdown.YES.positionUsd;
+      case "no_position_usd":
+        return market.sideBreakdown.NO.positionUsd;
+      case "imbalance_usd":
+        return Math.abs(market.imbalanceUsd);
+      case "avg_win_rate":
+        return market.weightedAvgWinRate30d ?? -Infinity;
+      case "avg_roi":
+        return market.weightedAvgRoi30d ?? -Infinity;
+      case "newest_snapshot":
+        return market.newestSnapshotAt
+          ? new Date(market.newestSnapshotAt).getTime()
+          : -Infinity;
+      case "tracked_position_usd":
+      default:
+        return market.trackedPositionUsd;
+    }
+  };
+  return [...markets].sort((a, b) => value(b) - value(a));
+}
+
+function sortPositioningEvents(
+  events: PositioningEventAggregate[],
+  sort: WalletPositioningQuery["sort"],
+): PositioningEventAggregate[] {
+  const value = (event: PositioningEventAggregate) => {
+    switch (sort) {
+      case "wallet_count":
+        return event.walletCount;
+      case "avg_win_rate":
+        return event.weightedAvgWinRate30d ?? -Infinity;
+      case "avg_roi":
+        return event.weightedAvgRoi30d ?? -Infinity;
+      case "newest_snapshot":
+        return event.newestSnapshotAt
+          ? new Date(event.newestSnapshotAt).getTime()
+          : -Infinity;
+      case "yes_position_usd":
+      case "no_position_usd":
+      case "imbalance_usd":
+      case "tracked_position_usd":
+      default:
+        return event.trackedPositionUsd;
+    }
+  };
+  return [...events].sort((a, b) => value(b) - value(a));
+}
+
+async function loadPositioningQuotes(
+  client: PoolClient,
+  marketIds: string[],
+): Promise<Map<string, PositioningSideAggregate["quote"]>> {
+  const uniqueIds = Array.from(new Set(marketIds)).filter(Boolean);
+  const byKey = new Map<string, PositioningSideAggregate["quote"]>();
+  if (uniqueIds.length === 0) return byKey;
+  const { rows } = await client.query<WalletPositioningQuoteRow>(
+    `
+      select
+        ut.market_id,
+        ut.side,
+        ut.token_id,
+        ttl.best_bid::text as best_bid,
+        ttl.best_ask::text as best_ask,
+        ttl.mid::text as mid,
+        ttl.spread::text as spread,
+        ttl.updated_at
+      from unified_tokens ut
+      left join unified_token_top_latest ttl on ttl.token_id = ut.token_id
+      where ut.market_id = any($1::text[])
+        and ut.side in ('YES', 'NO')
+    `,
+    [uniqueIds],
+  );
+  for (const row of rows) {
+    byKey.set(`${row.market_id}::${row.side}`, {
+      tokenId: row.token_id,
+      bestBid: nullableNumber(row.best_bid),
+      bestAsk: nullableNumber(row.best_ask),
+      mid: nullableNumber(row.mid),
+      spread: nullableNumber(row.spread),
+      updatedAt: isoDate(row.updated_at),
+    });
+  }
+  return byKey;
+}
+
+function buildPositioningGraph(input: {
+  markets: PositioningMarketAggregate[];
+  includeEvents: boolean;
+}) {
+  const nodes = new Map<string, Record<string, unknown>>();
+  const edges: Array<Record<string, unknown>> = [];
+
+  for (const market of input.markets) {
+    const marketNodeId = `market:${market.marketId}`;
+    if (input.includeEvents && market.eventId) {
+      const eventNodeId = `event:${market.eventId}`;
+      nodes.set(eventNodeId, {
+        id: eventNodeId,
+        type: "event",
+        eventId: market.eventId,
+        label: market.eventTitle,
+        eventStatus: market.eventStatus,
+        startDate: market.eventStartDate,
+        endDate: market.eventEndDate,
+        category: market.category,
+      });
+      edges.push({
+        source: eventNodeId,
+        target: marketNodeId,
+        type: "event_market",
+        weight: market.trackedPositionUsd,
+      });
+    }
+
+    nodes.set(marketNodeId, {
+      id: marketNodeId,
+      type: "market",
+      marketId: market.marketId,
+      eventId: market.eventId,
+      label: market.marketTitle,
+      trackedPositionUsd: market.trackedPositionUsd,
+      walletCount: market.walletCount,
+    });
+
+    for (const side of ["YES", "NO"] as const) {
+      const sideAgg = market.sideBreakdown[side];
+      const sideNodeId = `side:${market.marketId}:${side}`;
+      nodes.set(sideNodeId, {
+        id: sideNodeId,
+        type: "side",
+        marketId: market.marketId,
+        side,
+        positionUsd: sideAgg.positionUsd,
+        walletCount: sideAgg.walletCount,
+      });
+      edges.push({
+        source: marketNodeId,
+        target: sideNodeId,
+        type: "market_side",
+        weight: sideAgg.positionUsd,
+      });
+
+      for (const holder of sideAgg.topHolders) {
+        const traderNodeId = `trader:${holder.walletId}`;
+        nodes.set(traderNodeId, {
+          id: traderNodeId,
+          type: "trader",
+          walletId: holder.walletId,
+          address: holder.address,
+          chain: holder.chain,
+          label: holder.profileLabel ?? holder.label,
+          metrics: holder.metrics,
+          mmSuspected: holder.mmDiagnostics.mmSuspected,
+        });
+        edges.push({
+          source: sideNodeId,
+          target: traderNodeId,
+          type: "side_trader",
+          weight: holder.positionUsd,
+          shares: holder.shares,
+        });
+      }
+    }
+  }
+
+  return {
+    nodes: Array.from(nodes.values()),
+    edges,
+  };
+}
+
+async function loadTrackedWalletPositioning(input: {
+  client: PoolClient;
+  query: WalletPositioningQuery;
+  eventId?: string;
+  marketId?: string;
+  rollup: "events" | "markets" | "event-detail" | "market-detail";
+}) {
+  const { client, query } = input;
+  const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
+  const params: Array<string | number | boolean | null> = [
+    query.walletActiveWithinHours,
+    query.minWalletExposureUsd,
+  ];
+  let idx = 3;
+
+  const candidateClauses = [
+    "tag.slug = 'whale'",
+    "wis.last_activity_at >= now() - ($1::integer * interval '1 hour')",
+    "coalesce(wis.exposure_usd, 0) >= $2::numeric",
+  ];
+  if (query.mmMode !== "all") {
+    const whaleUsdIdx = idx++;
+    const whaleUsdSolanaIdx = idx++;
+    params.push(
+      refreshPolicy.effective.whaleUsd,
+      refreshPolicy.effective.whaleUsdSolana,
+    );
+    const candidateMmSql = `
+      (
+        coalesce(wis.hedge_ratio, 0) >= ${MM_HEDGE_RATIO_MIN}
+        and coalesce(wis.two_sided_markets, 0) >= ${MM_TWO_SIDED_MARKETS_MIN}
+        and coalesce(wis.exposure_usd, 0) >= case
+          when w.chain = 'solana' then $${whaleUsdSolanaIdx}::numeric
+          else $${whaleUsdIdx}::numeric
+        end
+      )
+    `;
+    if (query.mmMode === "exclude") {
+      candidateClauses.push(`not ${candidateMmSql}`);
+    } else {
+      candidateClauses.push(candidateMmSql);
+    }
+  }
+
+  const venueFilter = query.venue ?? inferVenueFromMarketId(input.marketId);
+  let candidateVenuesSql =
+    "values ('polymarket'::text), ('limitless'::text), ('kalshi'::text)";
+  if (venueFilter) {
+    candidateVenuesSql = `select $${idx++}::text`;
+    params.push(venueFilter);
+  }
+
+  const marketClauses: string[] = [];
+  idx = appendMarketReferenceFilters(
+    marketClauses,
+    params,
+    idx,
+    {
+      marketId: input.marketId,
+      eventId: input.eventId,
+      category: query.category,
+      marketStatus: query.marketStatus,
+      acceptingOrders: query.acceptingOrders,
+    },
+    { marketAlias: "um", eventAlias: "ue" },
+  );
+  if (normalizeMarketStatusFilter(query.marketStatus) === "ACTIVE") {
+    marketClauses.push("(ue.id is null or ue.status = 'ACTIVE')");
+  }
+  if (query.outcomeSide) {
+    marketClauses.push(`ws.outcome_side = $${idx++}::text`);
+    params.push(query.outcomeSide);
+  }
+  marketClauses.push(
+    `greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))) >= $${idx++}::numeric`,
+  );
+  params.push(query.minPositionUsd);
+  marketClauses.push("coalesce(ws.shares, 0) > 0");
+  marketClauses.push("hp.token_id is null");
+
+  const { rows } = await client.query<WalletPositioningRow>(
+    `
+      with candidate_wallets as materialized (
+        select
+          w.id as wallet_id,
+          w.address,
+          w.chain,
+          w.label as wallet_label,
+          wp.profile->>'label_short' as profile_label,
+          wis.metrics_pnl_30d,
+          wis.metrics_roi_30d,
+          wis.metrics_trades_30d,
+          wis.metrics_win_rate_30d,
+          wis.exposure_usd,
+          wis.hedged_notional_usd,
+          wis.net_imbalance_usd,
+          wis.hedge_ratio,
+          wis.two_sided_markets,
+          wis.last_activity_at,
+          inferred.wins as inferred_wins,
+          inferred.total as inferred_total
+        from wallet_tags tag
+        join wallet_tag_map tm on tm.tag_id = tag.id
+        join wallet_intel_selector_snapshot wis on wis.wallet_id = tm.wallet_id
+        join wallets w on w.id = tm.wallet_id
+        left join wallet_profiles wp on wp.wallet_id = w.id
+        left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
+        where ${candidateClauses.join(" and ")}
+      ),
+      candidate_venues(venue) as (
+        ${candidateVenuesSql}
+      ),
+      hidden_positions as materialized (
+        select venue, token_id, wallet_address
+        from positions
+        where position_scope = 'own'
+          and coalesce(is_hidden, false) = true
+          and token_id is not null
+          and wallet_address is not null
+          and btrim(wallet_address) <> ''
+      ),
+      latest_snapshots as materialized (
+        select
+          cw.*,
+          cv.venue,
+          latest.snapshot_at
+        from candidate_wallets cw
+        cross join candidate_venues cv
+        join lateral (
+          select ws.snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = cw.wallet_id
+            and ws.venue = cv.venue
+          order by ws.snapshot_at desc
+          limit 1
+        ) latest on true
+      )
+      select
+        ws.wallet_id,
+        ls.address,
+        ls.chain,
+        ls.wallet_label,
+        ls.profile_label,
+        ws.venue,
+        ws.market_id,
+        um.title as market_title,
+        um.event_id,
+        ue.title as event_title,
+        coalesce(um.category, ue.category) as category,
+        um.status::text as market_status,
+        ue.status::text as event_status,
+        ue.start_date as event_start_date,
+        ue.end_date as event_end_date,
+        um.close_time,
+        um.expiration_time,
+        um.resolved_outcome,
+        um.resolved_outcome_pct::text as resolved_outcome_pct,
+        ${buildWalletIntelAcceptingOrdersSql({
+          marketAlias: "um",
+          eventAlias: "ue",
+        })} as accepting_orders,
+        um.best_bid::text as best_bid,
+        um.best_ask::text as best_ask,
+        um.last_price::text as last_price,
+        um.liquidity::text as liquidity,
+        um.volume_24h::text as volume_24h,
+        um.volume_total::text as volume_total,
+        um.open_interest::text as open_interest,
+        case when ws.outcome_side in ('YES', 'NO') then ws.outcome_side else null end as outcome_side,
+        ws.shares::text as shares,
+        ws.size_usd::text as size_usd,
+        ws.price::text as price,
+        greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0)))::text as position_usd,
+        ws.snapshot_at,
+        ws.metadata,
+        ls.metrics_pnl_30d::text as metrics_pnl_30d,
+        ls.metrics_roi_30d::text as metrics_roi_30d,
+        ls.metrics_trades_30d,
+        ls.metrics_win_rate_30d::text as metrics_win_rate_30d,
+        ls.exposure_usd::text as exposure_usd,
+        ls.hedged_notional_usd::text as hedged_notional_usd,
+        ls.net_imbalance_usd::text as net_imbalance_usd,
+        ls.hedge_ratio::text as hedge_ratio,
+        ls.two_sided_markets,
+        ls.last_activity_at,
+        ls.inferred_wins,
+        ls.inferred_total
+      from latest_snapshots ls
+      join wallet_position_snapshots ws
+        on ws.wallet_id = ls.wallet_id
+       and ws.venue = ls.venue
+       and ws.snapshot_at = ls.snapshot_at
+      join unified_markets um on um.id = ws.market_id
+      left join unified_events ue on ue.id = um.event_id
+      left join hidden_positions hp
+        on hp.venue = ws.venue
+       and hp.token_id = ws.metadata->>'tokenId'
+       and (
+         (ls.chain = 'solana' and hp.wallet_address = ls.address)
+         or (ls.chain <> 'solana' and lower(hp.wallet_address) = lower(ls.address))
+       )
+      where ${marketClauses.join(" and ")}
+    `,
+    params,
+  );
+
+  const marketBuilders = new Map<
+    string,
+    {
+      market: PositioningMarketAggregate;
+      holders: PositioningHolder[];
+      walletIds: Set<string>;
+      stats: PositioningAccumulator;
+      sideWalletIds: Record<PositioningSide, Set<string>>;
+      sideStats: Record<PositioningSide, PositioningAccumulator>;
+      pnlEntryWeighted: Record<PositioningSide, number>;
+      pnlEntryShares: Record<PositioningSide, number>;
+    }
+  >();
+
+  const holdersByKey = new Map<string, PositioningHolder>();
+  const rowsByHolderKey = new Map<string, WalletPositioningRow>();
+
+  for (const row of rows) {
+    const side = resolvePositioningSide(row.outcome_side);
+    if (!side) continue;
+    const positionUsd = nullableNumber(row.position_usd) ?? 0;
+    if (positionUsd <= 0) continue;
+    const shares = nullableNumber(row.shares);
+    const holder: PositioningHolder = {
+      walletId: row.wallet_id,
+      address: row.address,
+      chain: row.chain,
+      label: row.wallet_label,
+      profileLabel: row.profile_label,
+      side,
+      shares,
+      positionUsd,
+      price: nullableNumber(row.price),
+      snapshotAt: isoDate(row.snapshot_at),
+      lastActivityAt: isoDate(row.last_activity_at),
+      metrics: {
+        pnl30d: nullableNumber(row.metrics_pnl_30d),
+        roi30d: nullableNumber(row.metrics_roi_30d),
+        trades30d: row.metrics_trades_30d,
+        winRate30d: nullableNumber(row.metrics_win_rate_30d),
+        inferredWinRate:
+          row.inferred_total &&
+          row.inferred_total > 0 &&
+          row.inferred_wins != null
+            ? row.inferred_wins / row.inferred_total
+            : null,
+        resolvedWins: row.inferred_wins,
+        resolvedTotal: row.inferred_total,
+      },
+      mmDiagnostics: buildWalletMmDiagnostics({
+        exposureUsd: nullableNumber(row.exposure_usd),
+        hedgedNotionalUsd: nullableNumber(row.hedged_notional_usd),
+        netImbalanceUsd: nullableNumber(row.net_imbalance_usd),
+        hedgeRatio: nullableNumber(row.hedge_ratio),
+        twoSidedMarkets: row.two_sided_markets,
+        chain: row.chain,
+        refreshPolicy: refreshPolicy.effective,
+      }),
+    };
+    const holderKey = makeWalletPositionLedgerKey(
+      row.wallet_id,
+      row.market_id,
+      side,
+    );
+    holdersByKey.set(holderKey, holder);
+    rowsByHolderKey.set(holderKey, row);
+
+    let builder = marketBuilders.get(row.market_id);
+    if (!builder) {
+      builder = {
+        market: {
+          marketId: row.market_id,
+          eventId: row.event_id,
+          venue: row.venue,
+          marketTitle: row.market_title,
+          eventTitle: row.event_title,
+          eventStartDate: isoDate(row.event_start_date),
+          eventEndDate: isoDate(row.event_end_date),
+          category: row.category,
+          marketStatus: row.market_status,
+          eventStatus: row.event_status,
+          acceptingOrders: row.accepting_orders,
+          closeTime: isoDate(row.close_time),
+          expirationTime: isoDate(row.expiration_time),
+          resolvedOutcome: row.resolved_outcome,
+          bestBid: nullableNumber(row.best_bid),
+          bestAsk: nullableNumber(row.best_ask),
+          lastPrice: nullableNumber(row.last_price),
+          marketLiquidityUsd: nullableNumber(row.liquidity),
+          volume24h: nullableNumber(row.volume_24h),
+          volumeTotal: nullableNumber(row.volume_total),
+          openInterest: nullableNumber(row.open_interest),
+          trackedPositionUsd: 0,
+          walletCount: 0,
+          largestHolderUsd: null,
+          largestHolderPct: null,
+          imbalanceUsd: 0,
+          imbalancePct: null,
+          weightedAvgWinRate30d: null,
+          weightedAvgRoi30d: null,
+          newestSnapshotAt: null,
+          sideBreakdown: {
+            YES: initSideAggregate("YES"),
+            NO: initSideAggregate("NO"),
+          },
+          topHolders: [],
+        },
+        holders: [],
+        walletIds: new Set(),
+        stats: initPositioningAccumulator(),
+        sideWalletIds: {
+          YES: new Set(),
+          NO: new Set(),
+        },
+        sideStats: {
+          YES: initPositioningAccumulator(),
+          NO: initPositioningAccumulator(),
+        },
+        pnlEntryWeighted: { YES: 0, NO: 0 },
+        pnlEntryShares: { YES: 0, NO: 0 },
+      };
+      marketBuilders.set(row.market_id, builder);
+    }
+
+    const sideAgg = builder.market.sideBreakdown[side];
+    builder.holders.push(holder);
+    builder.walletIds.add(holder.walletId);
+    builder.sideWalletIds[side].add(holder.walletId);
+    builder.market.trackedPositionUsd += positionUsd;
+    builder.market.largestHolderUsd = Math.max(
+      builder.market.largestHolderUsd ?? positionUsd,
+      positionUsd,
+    );
+    builder.market.newestSnapshotAt =
+      !builder.market.newestSnapshotAt ||
+      (holder.snapshotAt && holder.snapshotAt > builder.market.newestSnapshotAt)
+        ? holder.snapshotAt
+        : builder.market.newestSnapshotAt;
+    sideAgg.positionUsd += positionUsd;
+    sideAgg.shares = addNullable(sideAgg.shares, shares);
+    sideAgg.largestHolderUsd = Math.max(
+      sideAgg.largestHolderUsd ?? positionUsd,
+      positionUsd,
+    );
+    addPositioningStats(builder.stats, holder);
+    addPositioningStats(builder.sideStats[side], holder);
+  }
+
+  if (query.includePositionPnl && holdersByKey.size > 0) {
+    const approxInputs = Array.from(holdersByKey.entries()).map(
+      ([key, holder]) => {
+        const row = rowsByHolderKey.get(key);
+        return {
+          walletId: holder.walletId,
+          marketId: row?.market_id ?? "",
+          outcomeSide: holder.side,
+          shares: holder.shares,
+          price: holder.price,
+          bestBid: nullableNumber(row?.best_bid),
+          bestAsk: nullableNumber(row?.best_ask),
+          lastPrice: nullableNumber(row?.last_price),
+          resolvedOutcome: row?.resolved_outcome ?? null,
+          resolvedOutcomePct: nullableNumber(row?.resolved_outcome_pct),
+          metadata: row?.metadata,
+        };
+      },
+    );
+    const approxMetrics = await loadWalletPositionApproxMetrics(
+      client,
+      approxInputs,
+    );
+    for (const [key, holder] of holdersByKey.entries()) {
+      const row = rowsByHolderKey.get(key);
+      if (!row) continue;
+      const metrics = approxMetrics.get(key);
+      const basis =
+        metrics?.approxEntryPrice != null &&
+        holder.shares != null &&
+        holder.shares > 0
+          ? metrics.approxEntryPrice * holder.shares
+          : null;
+      holder.pnl = {
+        avgEntryPrice: metrics?.approxEntryPrice ?? null,
+        currentPrice: metrics?.currentPrice ?? null,
+        openPnlUsd: metrics?.openPnlUsd ?? null,
+        realizedPnlUsd: metrics?.realizedPnlUsd ?? null,
+        totalPnlUsd: metrics?.totalPnlUsd ?? null,
+        pnlPct:
+          basis != null && basis > 0 && metrics?.totalPnlUsd != null
+            ? metrics.totalPnlUsd / basis
+            : null,
+        approxReliable: metrics?.approxReliable ?? false,
+        source: metrics?.approxPnlSource ?? null,
+      };
+      const builder = marketBuilders.get(row.market_id);
+      if (!builder) continue;
+      const sideAgg = builder.market.sideBreakdown[holder.side];
+      sideAgg.openPnlUsd = addNullable(
+        sideAgg.openPnlUsd,
+        holder.pnl.openPnlUsd,
+      );
+      sideAgg.realizedPnlUsd = addNullable(
+        sideAgg.realizedPnlUsd,
+        holder.pnl.realizedPnlUsd,
+      );
+      sideAgg.totalPnlUsd = addNullable(
+        sideAgg.totalPnlUsd,
+        holder.pnl.totalPnlUsd,
+      );
+      if (holder.pnl.avgEntryPrice != null && holder.shares != null) {
+        builder.pnlEntryWeighted[holder.side] +=
+          holder.pnl.avgEntryPrice * holder.shares;
+        builder.pnlEntryShares[holder.side] += holder.shares;
+      }
+      if (holder.pnl.totalPnlUsd != null) {
+        sideAgg.pnlHolderCount += 1;
+      }
+    }
+  }
+
+  const markets = Array.from(marketBuilders.values()).map((builder) => {
+    const market = builder.market;
+    market.walletCount = builder.walletIds.size;
+    market.largestHolderPct =
+      market.trackedPositionUsd > 0 && market.largestHolderUsd != null
+        ? market.largestHolderUsd / market.trackedPositionUsd
+        : null;
+    market.weightedAvgWinRate30d = finalizeWeightedAverage(
+      builder.stats.weightedWinRateTotal,
+      builder.stats.weightedWinRateWeight,
+    );
+    market.weightedAvgRoi30d = finalizeWeightedAverage(
+      builder.stats.weightedRoiTotal,
+      builder.stats.weightedRoiWeight,
+    );
+    market.imbalanceUsd =
+      market.sideBreakdown.YES.positionUsd -
+      market.sideBreakdown.NO.positionUsd;
+    market.imbalancePct =
+      market.trackedPositionUsd > 0
+        ? market.imbalanceUsd / market.trackedPositionUsd
+        : null;
+
+    const sortedHolders = [...builder.holders].sort(
+      (a, b) => b.positionUsd - a.positionUsd,
+    );
+    market.topHolders =
+      query.includeHolders && query.holdersLimit > 0
+        ? sortedHolders.slice(0, query.holdersLimit)
+        : [];
+
+    for (const side of ["YES", "NO"] as const) {
+      const sideAgg = market.sideBreakdown[side];
+      sideAgg.walletCount = builder.sideWalletIds[side].size;
+      sideAgg.largestHolderPct =
+        sideAgg.positionUsd > 0 && sideAgg.largestHolderUsd != null
+          ? sideAgg.largestHolderUsd / sideAgg.positionUsd
+          : null;
+      sideAgg.weightedAvgWinRate30d = finalizeWeightedAverage(
+        builder.sideStats[side].weightedWinRateTotal,
+        builder.sideStats[side].weightedWinRateWeight,
+      );
+      sideAgg.weightedAvgRoi30d = finalizeWeightedAverage(
+        builder.sideStats[side].weightedRoiTotal,
+        builder.sideStats[side].weightedRoiWeight,
+      );
+      sideAgg.topWinRate30d = builder.sideStats[side].topWinRate;
+      sideAgg.topPnl30d = builder.sideStats[side].topPnl;
+      sideAgg.avgEntryPrice =
+        builder.pnlEntryShares[side] > 0
+          ? builder.pnlEntryWeighted[side] / builder.pnlEntryShares[side]
+          : null;
+      sideAgg.topHolders =
+        query.includeHolders && query.holdersLimit > 0
+          ? sortedHolders
+              .filter((holder) => holder.side === side)
+              .slice(0, query.holdersLimit)
+          : [];
+    }
+
+    return market as PositioningMarketAggregate;
+  });
+
+  const effectiveMinWallets =
+    query.minWallets ?? (input.rollup === "market-detail" ? 1 : 2);
+  const filteredMarkets = markets.filter(
+    (market) => market.walletCount >= effectiveMinWallets,
+  );
+  const sortedMarkets = sortPositioningMarkets(filteredMarkets, query.sort);
+
+  const eventBuilders = new Map<
+    string,
+    {
+      event: Omit<
+        PositioningEventAggregate,
+        | "walletCount"
+        | "marketCount"
+        | "largestMarketPct"
+        | "weightedAvgWinRate30d"
+        | "weightedAvgRoi30d"
+        | "topMarketsPreview"
+      >;
+      walletIds: Set<string>;
+      markets: PositioningMarketAggregate[];
+      stats: PositioningAccumulator;
+    }
+  >();
+  for (const market of sortedMarkets) {
+    if (!market.eventId) continue;
+    let builder = eventBuilders.get(market.eventId);
+    if (!builder) {
+      builder = {
+        event: {
+          eventId: market.eventId,
+          venue: market.venue,
+          eventTitle: market.eventTitle,
+          eventStatus: market.eventStatus,
+          startDate: market.eventStartDate,
+          endDate: market.eventEndDate,
+          category: market.category,
+          trackedPositionUsd: 0,
+          largestMarketUsd: null,
+          newestSnapshotAt: null,
+        },
+        walletIds: new Set(),
+        markets: [],
+        stats: initPositioningAccumulator(),
+      };
+      eventBuilders.set(market.eventId, builder);
+    }
+    builder.markets.push(market);
+    builder.event.trackedPositionUsd += market.trackedPositionUsd;
+    builder.event.largestMarketUsd = Math.max(
+      builder.event.largestMarketUsd ?? market.trackedPositionUsd,
+      market.trackedPositionUsd,
+    );
+    builder.event.newestSnapshotAt =
+      !builder.event.newestSnapshotAt ||
+      (market.newestSnapshotAt &&
+        market.newestSnapshotAt > builder.event.newestSnapshotAt)
+        ? market.newestSnapshotAt
+        : builder.event.newestSnapshotAt;
+    const sourceBuilder = marketBuilders.get(market.marketId);
+    for (const holder of sourceBuilder?.holders ?? market.topHolders) {
+      builder.walletIds.add(holder.walletId);
+      addPositioningStats(builder.stats, holder);
+    }
+  }
+  const sortedEvents = sortPositioningEvents(
+    Array.from(eventBuilders.values()).map((builder) => {
+      const event = builder.event;
+      return {
+        ...event,
+        walletCount: builder.walletIds.size,
+        marketCount: builder.markets.length,
+        largestMarketPct:
+          event.trackedPositionUsd > 0 && event.largestMarketUsd != null
+            ? event.largestMarketUsd / event.trackedPositionUsd
+            : null,
+        weightedAvgWinRate30d: finalizeWeightedAverage(
+          builder.stats.weightedWinRateTotal,
+          builder.stats.weightedWinRateWeight,
+        ),
+        weightedAvgRoi30d: finalizeWeightedAverage(
+          builder.stats.weightedRoiTotal,
+          builder.stats.weightedRoiWeight,
+        ),
+        topMarketsPreview: builder.markets.slice(0, 3),
+      };
+    }),
+    query.sort,
+  );
+
+  const page =
+    input.rollup === "events"
+      ? sortedEvents.slice(query.offset, query.offset + query.limit)
+      : sortedMarkets.slice(query.offset, query.offset + query.limit);
+  const selectedMarkets =
+    input.rollup === "events"
+      ? (page as PositioningEventAggregate[]).flatMap(
+          (event) => event.topMarketsPreview,
+        )
+      : (page as PositioningMarketAggregate[]);
+  const includeGraph = query.shape === "graph" || query.shape === "both";
+  const includeTree = query.shape === "tree" || query.shape === "both";
+  const quoteMap = await loadPositioningQuotes(
+    client,
+    selectedMarkets.map((market) => market.marketId),
+  );
+  for (const market of selectedMarkets) {
+    for (const side of ["YES", "NO"] as const) {
+      market.sideBreakdown[side].quote =
+        quoteMap.get(`${market.marketId}::${side}`) ?? null;
+    }
+  }
+
+  return {
+    ok: true,
+    scope: query.scope,
+    filters: {
+      venue: venueFilter ?? null,
+      eventId: input.eventId ?? null,
+      marketId: input.marketId ?? null,
+      category: query.category ?? null,
+      marketStatus: query.marketStatus,
+      acceptingOrders: query.acceptingOrders ?? null,
+      outcomeSide: query.outcomeSide ?? null,
+      walletActiveWithinHours: query.walletActiveWithinHours,
+      minWalletExposureUsd: query.minWalletExposureUsd,
+      minPositionUsd: query.minPositionUsd,
+      minWallets: effectiveMinWallets,
+      mmMode: query.mmMode,
+      includePositionPnl: query.includePositionPnl,
+    },
+    totals: {
+      markets: filteredMarkets.length,
+      events: sortedEvents.length,
+      positions: rows.length,
+    },
+    items: page,
+    event:
+      input.rollup === "event-detail" ? (sortedEvents[0] ?? null) : undefined,
+    hasMore:
+      input.rollup === "events"
+        ? query.offset + query.limit < sortedEvents.length
+        : query.offset + query.limit < sortedMarkets.length,
+    tree: includeTree
+      ? {
+          events:
+            input.rollup === "events"
+              ? page
+              : sortedEvents.filter((event) =>
+                  selectedMarkets.some(
+                    (market) => market.eventId === event.eventId,
+                  ),
+                ),
+          markets: selectedMarkets,
+        }
+      : undefined,
+    graph: includeGraph
+      ? buildPositioningGraph({
+          markets: selectedMarkets,
+          includeEvents: input.rollup !== "market-detail",
+        })
+      : undefined,
+  };
 }
 
 const ATTRIBUTION_LABEL_TEXT: Record<WalletAttributionLabelKey, string> = {
@@ -1903,7 +3036,9 @@ function buildWhaleQualityFilterSql(
     params.push(query.maxExposureUsd);
   }
   if (query.maxNetImbalanceUsd != null) {
-    selectorClauses.push(`abs(coalesce(wis.net_imbalance_usd, 0)) <= $${idx++}`);
+    selectorClauses.push(
+      `abs(coalesce(wis.net_imbalance_usd, 0)) <= $${idx++}`,
+    );
     params.push(query.maxNetImbalanceUsd);
   }
   const clauses = [...selectorClauses, ...inferredClauses];
@@ -7815,6 +8950,169 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
   );
 
   /**
+   * GET /wallets/positioning/events
+   */
+  z.get(
+    "/wallets/positioning/events",
+    {
+      schema: { querystring: walletPositioningQuerySchema },
+    },
+    async (request, reply) => {
+      const query = request.query;
+      const client = await pool.connect();
+      try {
+        const result = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "32MB" },
+          () =>
+            loadTrackedWalletPositioning({
+              client,
+              query,
+              rollup: "events",
+            }),
+        );
+        return reply.send(result);
+      } catch (error) {
+        app.log.error({ error, query }, "Failed to load event positioning");
+        reply.code(500);
+        return reply.send({ error: "Failed to load event positioning" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /wallets/positioning/markets
+   */
+  z.get(
+    "/wallets/positioning/markets",
+    {
+      schema: { querystring: walletPositioningQuerySchema },
+    },
+    async (request, reply) => {
+      const query = request.query;
+      const client = await pool.connect();
+      try {
+        const result = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "32MB" },
+          () =>
+            loadTrackedWalletPositioning({
+              client,
+              query,
+              rollup: "markets",
+            }),
+        );
+        return reply.send(result);
+      } catch (error) {
+        app.log.error({ error, query }, "Failed to load market positioning");
+        reply.code(500);
+        return reply.send({ error: "Failed to load market positioning" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /events/:eventId/wallet-positioning
+   */
+  z.get(
+    "/events/:eventId/wallet-positioning",
+    {
+      schema: {
+        params: eventWalletPositioningParamsSchema,
+        querystring: walletPositioningQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const query = {
+        ...request.query,
+        limit: request.query.limit ?? 100,
+        minWallets: request.query.minWallets ?? 1,
+      };
+      const client = await pool.connect();
+      try {
+        const result = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "32MB" },
+          () =>
+            loadTrackedWalletPositioning({
+              client,
+              query,
+              eventId: request.params.eventId,
+              rollup: "event-detail",
+            }),
+        );
+        return reply.send({
+          ...result,
+          eventId: request.params.eventId,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, eventId: request.params.eventId, query },
+          "Failed to load event wallet positioning",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load event wallet positioning" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /markets/:marketId/wallet-positioning
+   */
+  z.get(
+    "/markets/:marketId/wallet-positioning",
+    {
+      schema: {
+        params: marketWalletPositioningParamsSchema,
+        querystring: walletPositioningQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const query = {
+        ...request.query,
+        limit: request.query.limit ?? 1,
+        minWallets: request.query.minWallets ?? 1,
+      };
+      const client = await pool.connect();
+      try {
+        const result = await withWalletIntelQuerySettings(
+          client,
+          { workMem: "32MB" },
+          () =>
+            loadTrackedWalletPositioning({
+              client,
+              query,
+              marketId: request.params.marketId,
+              rollup: "market-detail",
+            }),
+        );
+        return reply.send({
+          ...result,
+          marketId: request.params.marketId,
+          market: result.items[0] ?? null,
+        });
+      } catch (error) {
+        app.log.error(
+          { error, marketId: request.params.marketId, query },
+          "Failed to load market wallet positioning",
+        );
+        reply.code(500);
+        return reply.send({
+          error: "Failed to load market wallet positioning",
+        });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
    * GET /markets/:marketId/wallet-activity
    */
   z.get(
@@ -7844,13 +9142,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         params.push(query.since);
       }
 
-      idx = appendWalletActivityFilters(
-        clauses,
-        params,
-        idx,
-        query,
-        "wa",
-      );
+      idx = appendWalletActivityFilters(clauses, params, idx, query, "wa");
 
       params.push(query.limit, query.offset);
       const limitParam = idx++;
