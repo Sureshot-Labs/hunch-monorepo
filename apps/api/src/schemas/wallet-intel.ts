@@ -5,6 +5,27 @@ import { zVenue } from "./common.js";
 const zChain = z.enum(["polygon", "base", "solana"]);
 const filterModeSchema = z.enum(["any", "all"]).default("any");
 const signalSeveritySchema = z.enum(["low", "medium", "high", "critical"]);
+const uppercaseEnum = <T extends [string, ...string[]]>(values: T) =>
+  z.preprocess(
+    (value) => (typeof value === "string" ? value.trim().toUpperCase() : value),
+    z.enum(values),
+  );
+const walletOutcomeSideSchema = uppercaseEnum(["YES", "NO"]);
+const walletTradeActionSchema = uppercaseEnum(["BUY", "SELL"]);
+const walletChangeActionSchema = uppercaseEnum([
+  "OPENED",
+  "INCREASED",
+  "REDUCED",
+  "CLOSED",
+]);
+const walletMarketStatusSchema = uppercaseEnum([
+  "ACTIVE",
+  "OPEN",
+  "CLOSED",
+  "SETTLED",
+  "ARCHIVED",
+  "RESOLVED",
+]);
 const walletLabelColorSchema = z.enum([
   "orange",
   "cyan",
@@ -135,6 +156,16 @@ export const walletProfileParamsSchema = z.object({
 export const walletActivityQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   venue: zVenue.optional(),
+  marketId: z.string().trim().min(1).optional(),
+  eventId: z.string().trim().min(1).optional(),
+  category: z.string().trim().min(1).optional(),
+  outcomeSide: walletOutcomeSideSchema.optional(),
+  action: walletTradeActionSchema.optional(),
+  changeAction: walletChangeActionSchema.optional(),
+  minSizeUsd: z.coerce.number().min(0).optional(),
+  minDeltaShares: z.coerce.number().min(0).optional(),
+  marketStatus: walletMarketStatusSchema.optional(),
+  acceptingOrders: queryBooleanSchema.optional(),
   since: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
@@ -204,11 +235,18 @@ export const walletActivitySignalsQuerySchema = z.object({
 export const walletPositionsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   venue: zVenue.optional(),
+  marketId: z.string().trim().min(1).optional(),
+  eventId: z.string().trim().min(1).optional(),
+  category: z.string().trim().min(1).optional(),
+  outcomeSide: walletOutcomeSideSchema.optional(),
+  marketStatus: walletMarketStatusSchema.optional(),
+  acceptingOrders: queryBooleanSchema.optional(),
   since: z.string().datetime().optional(),
   latest: queryBooleanSchema.default(true),
   includeSmall: queryBooleanSchema.default(false),
   minPositionUsd: z.coerce.number().min(0).optional(),
   minPositionShares: z.coerce.number().min(0).optional(),
+  minSizeUsd: z.coerce.number().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -216,10 +254,32 @@ export const walletPositionsQuerySchema = z.object({
 export const walletPositionHistoryQuerySchema = z.object({
   walletId: z.string().uuid(),
   venue: zVenue.optional(),
+  marketId: z.string().trim().min(1).optional(),
+  eventId: z.string().trim().min(1).optional(),
+  category: z.string().trim().min(1).optional(),
+  outcomeSide: walletOutcomeSideSchema.optional(),
+  marketStatus: walletMarketStatusSchema.optional(),
+  acceptingOrders: queryBooleanSchema.optional(),
   since: z.string().datetime().optional(),
   includeSmall: queryBooleanSchema.default(false),
   minPositionUsd: z.coerce.number().min(0).optional(),
   minPositionShares: z.coerce.number().min(0).optional(),
+  minSizeUsd: z.coerce.number().min(0).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+export const marketWalletActivityParamsSchema = z.object({
+  marketId: z.string().trim().min(1),
+});
+
+export const marketWalletActivityQuerySchema = z.object({
+  since: z.string().datetime().optional(),
+  outcomeSide: walletOutcomeSideSchema.optional(),
+  action: walletTradeActionSchema.optional(),
+  changeAction: walletChangeActionSchema.optional(),
+  minSizeUsd: z.coerce.number().min(0).optional(),
+  minDeltaShares: z.coerce.number().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -261,9 +321,17 @@ export const walletWhalesQuerySchema = z.object({
       "imbalance_usd",
       "winrate",
       "pnl_30d",
+      "roi_30d",
     ])
     .default("last_activity"),
   mmMode: z.enum(["all", "exclude", "only"]).default("all"),
+  minTrades30d: z.coerce.number().int().min(0).optional(),
+  minResolvedCount: z.coerce.number().int().min(0).optional(),
+  minPnl30d: z.coerce.number().optional(),
+  minRoi30d: z.coerce.number().optional(),
+  minWinRate30d: z.coerce.number().min(0).max(1).optional(),
+  maxExposureUsd: z.coerce.number().min(0).optional(),
+  maxNetImbalanceUsd: z.coerce.number().min(0).optional(),
   tags: csvStringArraySchema.optional(),
   tagMode: filterModeSchema,
   primary: csvStringArraySchema.optional(),

@@ -11,6 +11,8 @@ type TestContext = {
   userId: string;
   authHeaders: Record<string, string>;
   createdWallets: Array<{ address: string; chain: "polygon" | "solana" }>;
+  createdMarketIds: string[];
+  createdEventIds: string[];
 };
 
 type TestWalletChain = TestContext["createdWallets"][number]["chain"];
@@ -52,6 +54,14 @@ async function createWhaleFixtureWallet(
     chain: TestWalletChain;
     metadata?: Record<string, unknown>;
     volumeUsd?: number;
+    pnlUsd?: number;
+    roi?: number;
+    trades30d?: number;
+    winRate30d?: number;
+    exposureUsd?: number;
+    netImbalanceUsd?: number;
+    inferredWins?: number;
+    inferredTotal?: number;
   },
 ): Promise<string> {
   const walletResult = await pool.query<{ id: string }>(
@@ -92,22 +102,53 @@ async function createWhaleFixtureWallet(
           metrics_as_of,
           metrics_volume_30d,
           metrics_pnl_30d,
+          metrics_roi_30d,
           metrics_trades_30d,
+          metrics_win_rate_30d,
+          exposure_usd,
+          net_imbalance_usd,
           last_activity_at,
           updated_at
         )
-        values ($1, now(), $2, 0, 1, now(), now())
+        values ($1, now(), $2, $3, $4, $5, $6, $7, $8, now(), now())
         on conflict (wallet_id)
         do update set
           metrics_as_of = excluded.metrics_as_of,
           metrics_volume_30d = excluded.metrics_volume_30d,
           metrics_pnl_30d = excluded.metrics_pnl_30d,
+          metrics_roi_30d = excluded.metrics_roi_30d,
           metrics_trades_30d = excluded.metrics_trades_30d,
+          metrics_win_rate_30d = excluded.metrics_win_rate_30d,
+          exposure_usd = excluded.exposure_usd,
+          net_imbalance_usd = excluded.net_imbalance_usd,
           last_activity_at = excluded.last_activity_at,
           updated_at = excluded.updated_at
       `,
-      [walletId, inputs.volumeUsd],
+      [
+        walletId,
+        inputs.volumeUsd,
+        inputs.pnlUsd ?? 0,
+        inputs.roi ?? 0,
+        inputs.trades30d ?? 1,
+        inputs.winRate30d ?? null,
+        inputs.exposureUsd ?? 0,
+        inputs.netImbalanceUsd ?? 0,
+      ],
     );
+    if (inputs.inferredTotal != null) {
+      await pool.query(
+        `
+          insert into wallet_inferred_outcomes (wallet_id, wins, total, updated_at)
+          values ($1, $2, $3, now())
+          on conflict (wallet_id)
+          do update set
+            wins = excluded.wins,
+            total = excluded.total,
+            updated_at = excluded.updated_at
+        `,
+        [walletId, inputs.inferredWins ?? 0, inputs.inferredTotal],
+      );
+    }
     await pool.query(
       `
         insert into wallet_activity_hourly (
@@ -128,6 +169,82 @@ async function createWhaleFixtureWallet(
   }
 
   return walletId;
+}
+
+async function createWalletMarketFixture(
+  context: TestContext,
+  inputs: {
+    suffix: string;
+    category: string;
+  },
+): Promise<{ eventId: string; marketId: string }> {
+  const eventId = `wallet-routes-event-${inputs.suffix}`;
+  const marketId = `polymarket:wallet-routes-market-${inputs.suffix}`;
+  await pool.query(
+    `
+      insert into unified_events (
+        id,
+        venue,
+        venue_event_id,
+        title,
+        category,
+        status,
+        start_date,
+        end_date,
+        volume_total,
+        volume_24h,
+        liquidity,
+        slug,
+        created_at,
+        updated_at
+      )
+      values (
+        $1, 'polymarket', $2, 'Wallet routes test event', $3, 'ACTIVE',
+        now() - interval '1 day', now() + interval '30 days',
+        1000, 100, 500, $4, now(), now()
+      )
+    `,
+    [eventId, eventId, inputs.category, `${eventId}-slug`],
+  );
+  await pool.query(
+    `
+      insert into unified_markets (
+        id,
+        venue,
+        venue_market_id,
+        event_id,
+        title,
+        category,
+        status,
+        market_type,
+        open_time,
+        close_time,
+        expiration_time,
+        best_bid,
+        best_ask,
+        last_price,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        outcomes,
+        slug,
+        metadata,
+        created_at,
+        updated_at
+      )
+      values (
+        $1, 'polymarket', $2, $3, 'Wallet routes test market', $4, 'ACTIVE',
+        'binary', now() - interval '1 day', now() + interval '30 days',
+        now() + interval '30 days', 0.42, 0.45, 0.43,
+        1000, 100, 500, 50, '["Yes","No"]', $5, '{}'::jsonb, now(), now()
+      )
+    `,
+    [marketId, marketId, eventId, inputs.category, `${marketId}-slug`],
+  );
+  context.createdEventIds.push(eventId);
+  context.createdMarketIds.push(marketId);
+  return { eventId, marketId };
 }
 
 async function createTestUser(): Promise<{
@@ -205,13 +322,29 @@ async function cleanup(context: TestContext): Promise<void> {
       wallet.chain,
     ]);
   }
+  if (context.createdMarketIds.length) {
+    await pool.query("delete from unified_markets where id = any($1::text[])", [
+      context.createdMarketIds,
+    ]);
+  }
+  if (context.createdEventIds.length) {
+    await pool.query("delete from unified_events where id = any($1::text[])", [
+      context.createdEventIds,
+    ]);
+  }
 }
 
 async function main() {
   await assertPrivateWalletTablesExist();
   const app = await buildApp();
   const { userId, authHeaders } = await createTestUser();
-  const context: TestContext = { userId, authHeaders, createdWallets: [] };
+  const context: TestContext = {
+    userId,
+    authHeaders,
+    createdWallets: [],
+    createdMarketIds: [],
+    createdEventIds: [],
+  };
 
   try {
     const unknownAddress = randomEvmAddress();
@@ -430,6 +563,39 @@ async function main() {
     }
 
     {
+      const trackedStatsAddress = randomEvmAddress();
+      const trackedStatsWalletId = await createWhaleFixtureWallet(context, {
+        address: trackedStatsAddress,
+        chain: "polygon",
+        volumeUsd: 1_000,
+        pnlUsd: 12_345,
+        roi: 0.12,
+        trades30d: 12,
+      });
+      await pool.query(
+        `
+          insert into wallet_follows (user_id, wallet_id)
+          values ($1, $2)
+          on conflict (user_id, wallet_id)
+          do nothing
+        `,
+        [userId, trackedStatsWalletId],
+      );
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/activity/summary/stats?windowHours=2",
+        headers: authHeaders,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.stats.trackedWallets, 1);
+      assert.equal(body.stats.trackedPnl30d, 12_345);
+      assert.equal(typeof body.stats.totalPnl30d, "number");
+    }
+
+    {
       const response = await app.inject({
         method: "GET",
         url: "/wallets/activity/summary/stats",
@@ -478,7 +644,7 @@ async function main() {
         metadata: {
           linkedOwnerAddress: withMixedEvmCase(linkedOwnerAddress),
         },
-        volumeUsd: 999_000_000,
+        volumeUsd: 999_000_000_000_000,
       });
 
       const safeAddress = randomEvmAddress();
@@ -495,7 +661,7 @@ async function main() {
         address: safeAddress,
         chain: "polygon",
         metadata: { kind: "safe" },
-        volumeUsd: 998_000_000,
+        volumeUsd: 998_000_000_000_000,
       });
 
       const solanaLinkedOwnerAddress = randomSolanaLikeAddress();
@@ -510,12 +676,12 @@ async function main() {
         metadata: {
           linkedOwnerAddress: solanaLinkedOwnerAddress,
         },
-        volumeUsd: 997_000_000,
+        volumeUsd: 997_000_000_000_000,
       });
 
       const response = await app.inject({
         method: "GET",
-        url: "/wallets/whales?limit=20&offset=0&sort=volume_30d&windowDays=30&includeSummary=false&includeAttribution=false",
+        url: "/wallets/whales?limit=100&offset=0&sort=volume_30d&windowDays=30&includeSummary=false&includeAttribution=false",
       });
       assert.equal(response.statusCode, 200);
       const body = response.json() as {
@@ -536,6 +702,53 @@ async function main() {
         safeOwnerAddress,
       );
       assert.equal(byAddress.get(solanaProxyAddress)?.ownerAddress, null);
+    }
+
+    {
+      const roiLeaderAddress = randomEvmAddress();
+      const lowQualityAddress = randomEvmAddress();
+      await createWhaleFixtureWallet(context, {
+        address: roiLeaderAddress,
+        chain: "polygon",
+        volumeUsd: 250_000,
+        pnlUsd: 25_000,
+        roi: 0.18,
+        trades30d: 80,
+        winRate30d: 0.7,
+        exposureUsd: 10_000,
+        netImbalanceUsd: 1_000,
+        inferredWins: 35,
+        inferredTotal: 50,
+      });
+      await createWhaleFixtureWallet(context, {
+        address: lowQualityAddress,
+        chain: "polygon",
+        volumeUsd: 240_000,
+        pnlUsd: 500,
+        roi: 0.01,
+        trades30d: 5,
+        winRate30d: 0.2,
+        exposureUsd: 250_000,
+        netImbalanceUsd: 200_000,
+        inferredWins: 1,
+        inferredTotal: 5,
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/whales?limit=20&offset=0&sort=roi_30d&minTrades30d=50&minResolvedCount=30&minPnl30d=10000&minRoi30d=0.05&minWinRate30d=0.6&maxExposureUsd=50000&maxNetImbalanceUsd=10000&includeAttribution=false",
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json() as {
+        ok: boolean;
+        wallets: Array<{ address: string; metrics?: { roi?: number | null } }>;
+      };
+      assert.equal(body.ok, true);
+      const addresses = body.wallets.map((wallet) =>
+        wallet.address.toLowerCase(),
+      );
+      assert.equal(addresses.includes(roiLeaderAddress.toLowerCase()), true);
+      assert.equal(addresses.includes(lowQualityAddress.toLowerCase()), false);
     }
 
     {
@@ -587,6 +800,190 @@ async function main() {
       });
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().ok, true);
+    }
+
+    {
+      const suffix = crypto.randomUUID().slice(0, 8);
+      const category = `wallet-routes-category-${suffix}`;
+      const matching = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-match`,
+        category,
+      });
+      const other = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-other`,
+        category: `${category}-other`,
+      });
+      const snapshotAt = new Date();
+
+      await pool.query(
+        `
+          insert into wallet_activity_events (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            action,
+            delta_shares,
+            size_usd,
+            price,
+            activity_type,
+            source,
+            metadata,
+            occurred_at
+          )
+          values
+            ($1, 'polymarket', $2, 'YES', 'BUY', 20, 250, 0.42, 'delta', 'snapshot_delta', '{"prevShares":0,"currShares":20}'::jsonb, $3),
+            ($1, 'polymarket', $4, 'NO', 'SELL', -5, 20, 0.2, 'delta', 'snapshot_delta', '{"prevShares":10,"currShares":5}'::jsonb, $5),
+            ($1, 'polymarket', $2, 'NO', 'SELL', -12, null, 0.42, 'delta', 'snapshot_delta', '{"prevShares":20,"currShares":8}'::jsonb, $6)
+        `,
+        [
+          labeledWalletId,
+          matching.marketId,
+          new Date(snapshotAt.getTime() - 1_000),
+          other.marketId,
+          new Date(snapshotAt.getTime() - 2_000),
+          new Date(snapshotAt.getTime() - 3_000),
+        ],
+      );
+      await pool.query(
+        `
+          insert into wallet_position_snapshots (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            shares,
+            size_usd,
+            price,
+            metadata,
+            snapshot_at
+          )
+          values
+            ($1, 'polymarket', $2, 'YES', 20, 250, 0.42, '{}'::jsonb, $3),
+            ($1, 'polymarket', $4, 'NO', 5, 20, 0.2, '{}'::jsonb, $3)
+        `,
+        [labeledWalletId, matching.marketId, snapshotAt, other.marketId],
+      );
+
+      const activityResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/activity?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&eventId=${encodeURIComponent(matching.eventId)}&category=${encodeURIComponent(category)}&outcomeSide=YES&action=BUY&changeAction=OPENED&minSizeUsd=100&minDeltaShares=10&marketStatus=ACTIVE&acceptingOrders=true&limit=10&offset=0`,
+      });
+      assert.equal(activityResponse.statusCode, 200);
+      const activityBody = activityResponse.json() as {
+        ok: boolean;
+        items: Array<{
+          marketId: string;
+          eventId: string | null;
+          outcomeSide: string | null;
+          changeAction: string | null;
+        }>;
+      };
+      assert.equal(activityBody.ok, true);
+      assert.equal(activityBody.items.length, 1);
+      assert.equal(activityBody.items[0]?.marketId, matching.marketId);
+      assert.equal(activityBody.items[0]?.eventId, matching.eventId);
+      assert.equal(activityBody.items[0]?.outcomeSide, "YES");
+      assert.equal(activityBody.items[0]?.changeAction, "OPENED");
+
+      const reducedActivityResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/activity?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&outcomeSide=NO&action=SELL&changeAction=REDUCED&minDeltaShares=10&marketStatus=OPEN&limit=10&offset=0`,
+      });
+      assert.equal(reducedActivityResponse.statusCode, 200);
+      const reducedActivityBody = reducedActivityResponse.json() as {
+        ok: boolean;
+        items: Array<{
+          marketId: string;
+          outcomeSide: string | null;
+          changeAction: string | null;
+          deltaShares: number | null;
+        }>;
+      };
+      assert.equal(reducedActivityBody.ok, true);
+      assert.equal(reducedActivityBody.items.length, 1);
+      assert.equal(reducedActivityBody.items[0]?.marketId, matching.marketId);
+      assert.equal(reducedActivityBody.items[0]?.outcomeSide, "NO");
+      assert.equal(reducedActivityBody.items[0]?.changeAction, "REDUCED");
+      assert.equal(reducedActivityBody.items[0]?.deltaShares, -12);
+
+      const marketActivityResponse = await app.inject({
+        method: "GET",
+        url: `/markets/${encodeURIComponent(matching.marketId)}/wallet-activity?outcomeSide=YES&action=BUY&changeAction=OPENED&minSizeUsd=100&minDeltaShares=10&limit=10&offset=0`,
+      });
+      assert.equal(marketActivityResponse.statusCode, 200);
+      const marketActivityBody = marketActivityResponse.json() as {
+        ok: boolean;
+        marketId: string;
+        items: Array<{ marketId: string }>;
+      };
+      assert.equal(marketActivityBody.ok, true);
+      assert.equal(marketActivityBody.marketId, matching.marketId);
+      assert.equal(marketActivityBody.items.length, 1);
+      assert.equal(marketActivityBody.items[0]?.marketId, matching.marketId);
+
+      const positionResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positions?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&eventId=${encodeURIComponent(matching.eventId)}&category=${encodeURIComponent(category)}&outcomeSide=YES&marketStatus=OPEN&acceptingOrders=true&minSizeUsd=100&limit=10&offset=0`,
+      });
+      assert.equal(positionResponse.statusCode, 200);
+      const positionBody = positionResponse.json() as {
+        ok: boolean;
+        items: Array<{ marketId: string; outcomeSide: string | null }>;
+      };
+      assert.equal(positionBody.ok, true);
+      assert.equal(positionBody.items.length, 1);
+      assert.equal(positionBody.items[0]?.marketId, matching.marketId);
+      assert.equal(positionBody.items[0]?.outcomeSide, "YES");
+
+      await pool.query(
+        `
+          insert into wallet_follows (user_id, wallet_id)
+          values ($1, $2)
+          on conflict (user_id, wallet_id)
+          do nothing
+        `,
+        [userId, labeledWalletId],
+      );
+      await pool.query(
+        `
+          insert into wallet_position_snapshots (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            shares,
+            size_usd,
+            price,
+            metadata,
+            snapshot_at
+          )
+          values ($1, 'polymarket', $2, 'NO', 5, 20, 0.2, '{}'::jsonb, $3)
+        `,
+        [
+          labeledWalletId,
+          other.marketId,
+          new Date(snapshotAt.getTime() + 1_000),
+        ],
+      );
+
+      const followedCurrentPositionResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positions?marketId=${encodeURIComponent(matching.marketId)}&limit=10&offset=0`,
+        headers: authHeaders,
+      });
+      assert.equal(followedCurrentPositionResponse.statusCode, 200);
+      const followedCurrentPositionBody =
+        followedCurrentPositionResponse.json() as {
+          ok: boolean;
+          items: Array<{ marketId: string }>;
+        };
+      assert.equal(followedCurrentPositionBody.ok, true);
+      assert.equal(followedCurrentPositionBody.items.length, 0);
+      await pool.query(
+        "delete from wallet_follows where user_id = $1 and wallet_id = $2",
+        [userId, labeledWalletId],
+      );
     }
 
     {

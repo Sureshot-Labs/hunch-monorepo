@@ -91,6 +91,8 @@ import {
   type WalletSignalSeverity,
 } from "../services/wallet-attribution.js";
 import {
+  marketWalletActivityParamsSchema,
+  marketWalletActivityQuerySchema,
   walletActivityQuerySchema,
   walletActivitySignalsQuerySchema,
   walletActivitySummaryQuerySchema,
@@ -256,6 +258,44 @@ export type WalletActivitySummaryHeroStats = {
   totalPnl30d: number | null;
   trackedPnl30d: number | null;
   asOf: Date;
+};
+
+type WalletActivityRouteRow = {
+  wallet_id: string;
+  address: string;
+  chain: string;
+  label: string | null;
+  user_name: string | null;
+  user_label: string | null;
+  user_label_color: WalletLabelColor | null;
+  profile_label: string | null;
+  venue: string;
+  market_id: string;
+  market_title: string | null;
+  outcomes: string | null;
+  market_image: string | null;
+  market_icon: string | null;
+  event_id: string | null;
+  event_title: string | null;
+  event_image: string | null;
+  event_icon: string | null;
+  best_bid: string | null;
+  best_ask: string | null;
+  last_price: string | null;
+  market_status: string | null;
+  close_time: Date | null;
+  expiration_time: Date | null;
+  resolved_outcome: string | null;
+  accepting_orders: boolean | null;
+  outcome_side: string | null;
+  action: string | null;
+  delta_shares: string | null;
+  size_usd: string | null;
+  price: string | null;
+  activity_type: string;
+  source: string | null;
+  occurred_at: Date;
+  metadata: unknown;
 };
 
 type WalletPositionRouteRow = {
@@ -929,6 +969,147 @@ function resolveWalletActivityChangeAction(input: {
   return null;
 }
 
+function inferVenueFromMarketId(
+  marketId: string | null | undefined,
+): string | null {
+  const prefix = marketId?.split(":", 1)[0]?.trim().toLowerCase();
+  if (
+    prefix === "polymarket" ||
+    prefix === "kalshi" ||
+    prefix === "limitless"
+  ) {
+    return prefix;
+  }
+  return null;
+}
+
+function normalizeMarketStatusFilter(status: string): string {
+  return status === "OPEN" ? "ACTIVE" : status;
+}
+
+function buildJsonNumericSql(jsonTextExpr: string): string {
+  return `case when (${jsonTextExpr}) ~ '^-?[0-9]+(\\.[0-9]+)?$' then (${jsonTextExpr})::numeric else null end`;
+}
+
+function buildWalletActivityChangeActionSql(activityAlias: string): string {
+  const prevRaw = `${activityAlias}.metadata->>'prevShares'`;
+  const currRaw = `${activityAlias}.metadata->>'currShares'`;
+  const prevNumber = buildJsonNumericSql(prevRaw);
+  const currNumber = buildJsonNumericSql(currRaw);
+  const prev = `case when coalesce(${prevNumber}, 0) > 0.000000001 then coalesce(${prevNumber}, 0) else 0 end`;
+  const curr = `case when coalesce(${currNumber}, 0) > 0.000000001 then coalesce(${currNumber}, 0) else 0 end`;
+
+  return `
+    case
+      when lower(coalesce(${activityAlias}.source, '')) = 'snapshot_delta' then
+        case
+          when ${prev} <= 0 and ${curr} > 0 then 'OPENED'
+          when ${prev} > 0 and ${curr} <= 0 then 'CLOSED'
+          when ${curr} > ${prev} then 'INCREASED'
+          when ${curr} < ${prev} then 'REDUCED'
+          when upper(coalesce(${activityAlias}.action, '')) = 'BUY' then 'INCREASED'
+          when upper(coalesce(${activityAlias}.action, '')) = 'SELL' then 'REDUCED'
+          else null
+        end
+      else null
+    end
+  `;
+}
+
+function appendWalletActivityFilters(
+  clauses: string[],
+  params: Array<string | number | boolean | null>,
+  startIndex: number,
+  query: {
+    outcomeSide?: string;
+    action?: string;
+    changeAction?: string;
+    minSizeUsd?: number;
+    minDeltaShares?: number;
+  },
+  activityAlias: string,
+): number {
+  let idx = startIndex;
+  if (query.outcomeSide) {
+    clauses.push(`${activityAlias}.outcome_side = $${idx++}::text`);
+    params.push(query.outcomeSide);
+  }
+  if (query.action) {
+    clauses.push(
+      `upper(coalesce(${activityAlias}.action, '')) = $${idx++}::text`,
+    );
+    params.push(query.action);
+  }
+  if (query.changeAction) {
+    clauses.push(
+      `(${buildWalletActivityChangeActionSql(activityAlias)}) = $${idx++}::text`,
+    );
+    params.push(query.changeAction);
+  }
+  if (query.minSizeUsd != null) {
+    clauses.push(`coalesce(${activityAlias}.size_usd, 0) >= $${idx++}::numeric`);
+    params.push(query.minSizeUsd);
+  }
+  if (query.minDeltaShares != null) {
+    clauses.push(
+      `abs(coalesce(${activityAlias}.delta_shares, 0)) >= $${idx++}::numeric`,
+    );
+    params.push(query.minDeltaShares);
+  }
+  return idx;
+}
+
+function appendMarketReferenceFilters(
+  clauses: string[],
+  params: Array<string | number | boolean | null>,
+  startIndex: number,
+  query: {
+    marketId?: string;
+    eventId?: string;
+    category?: string;
+    marketStatus?: string;
+    acceptingOrders?: boolean;
+  },
+  aliases: { marketAlias: string; eventAlias: string },
+): number {
+  let idx = startIndex;
+  if (query.marketId) {
+    clauses.push(`${aliases.marketAlias}.id = $${idx++}::text`);
+    params.push(query.marketId);
+  }
+  if (query.eventId) {
+    clauses.push(`${aliases.marketAlias}.event_id = $${idx++}::text`);
+    params.push(query.eventId);
+  }
+  if (query.category) {
+    clauses.push(
+      `lower(coalesce(${aliases.marketAlias}.category, ${aliases.eventAlias}.category, '')) = lower($${idx++}::text)`,
+    );
+    params.push(query.category);
+  }
+  if (query.marketStatus) {
+    const normalizedStatus = normalizeMarketStatusFilter(query.marketStatus);
+    clauses.push(`
+      (
+        upper(coalesce(${aliases.marketAlias}.status::text, '')) = $${idx}::text
+        or ($${idx}::text = 'RESOLVED' and ${aliases.marketAlias}.resolved_outcome is not null)
+      )
+    `);
+    params.push(normalizedStatus);
+    idx += 1;
+  }
+  if (query.acceptingOrders != null) {
+    clauses.push(
+      `(${buildWalletIntelAcceptingOrdersSql({
+        marketAlias: aliases.marketAlias,
+        eventAlias: aliases.eventAlias,
+      })}) = $${idx++}::boolean`,
+    );
+    params.push(query.acceptingOrders);
+  }
+  return idx;
+}
+
 const ATTRIBUTION_LABEL_TEXT: Record<WalletAttributionLabelKey, string> = {
   sports_specialist: "Sports Specialist",
   politics_specialist: "Politics Specialist",
@@ -1499,6 +1680,7 @@ function buildWalletOwnerResolutionJoinSql(includeDetails = false): string {
 function buildSlimWhaleSelectorSql(
   orderBy: string,
   includeInferred: boolean,
+  qualityFilter: WhaleQualityFilterSql = EMPTY_WHALE_QUALITY_FILTER,
 ): string {
   const inferredSelect = includeInferred
     ? `,
@@ -1511,6 +1693,50 @@ function buildSlimWhaleSelectorSql(
     ? `
               left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id`
     : "";
+  if (qualityFilter.hasFilters) {
+    return `
+              with quality as materialized (
+                select wis.*
+                from wallet_intel_selector_snapshot wis
+                where wis.last_activity_at >= now() - ($2::text || ' days')::interval
+                  ${qualityFilter.selectorSql}
+              )
+              select
+                w.id,
+                w.address,
+                w.chain,
+                w.label,
+                null::text as user_name,
+                null::text as user_label_color,
+                w.is_system_flagged,
+                (w.metadata->>'kind' = 'safe') as is_safe,
+                w.first_seen_at,
+                w.last_seen_at,
+                wis.metrics_volume_30d as metrics_volume,
+                wis.metrics_pnl_30d as metrics_pnl,
+                wis.metrics_roi_30d as metrics_roi,
+                wis.metrics_trades_30d as metrics_trades,
+                wis.exposure_usd,
+                wis.hedged_notional_usd,
+                wis.net_imbalance_usd,
+                wis.hedge_ratio,
+                wis.two_sided_markets,
+                ${buildWalletIntelWhaleScoreSql("wis")} as whale_score,
+                owner.owner_address,
+                wis.last_activity_at,
+                null::boolean as has_trade_activity,
+                null::boolean as has_holder_activity${inferredSelect}
+              from quality wis
+              join wallet_tag_map tm on tm.wallet_id = wis.wallet_id
+               and tm.tag_id = $3::uuid
+              join wallets w on w.id = wis.wallet_id
+              ${buildWalletOwnerResolutionJoinSql()}${inferredJoin}
+              where true
+                ${qualityFilter.inferredSql}
+              order by ${orderBy}
+              limit $1
+            `;
+  }
   return `
               select
                 w.id,
@@ -1551,6 +1777,7 @@ function buildSlimWhaleSelectorSql(
 function buildSlimWhaleSelectorWithSnapshotShortlistSql(
   orderBy: string,
   includeInferred: boolean,
+  qualityFilter: WhaleQualityFilterSql = EMPTY_WHALE_QUALITY_FILTER,
 ): string {
   const inferredSelect = includeInferred
     ? `,
@@ -1574,6 +1801,7 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                  and tm.tag_id = $3::uuid
                 join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
                 where wis.last_activity_at >= now() - ($4::text || ' days')::interval
+                  ${qualityFilter.sql}
                 order by
                   wis.last_activity_at desc nulls last,
                   whale_score desc nulls last,
@@ -1613,6 +1841,84 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
               order by ${orderBy}
               limit $2
             `;
+}
+
+type WhaleQualityFilterSql = {
+  sql: string;
+  selectorSql: string;
+  inferredSql: string;
+  params: Array<number>;
+  hasFilters: boolean;
+};
+
+const EMPTY_WHALE_QUALITY_FILTER: WhaleQualityFilterSql = {
+  sql: "",
+  selectorSql: "",
+  inferredSql: "",
+  params: [],
+  hasFilters: false,
+};
+
+function buildWhaleQualityFilterSql(
+  query: {
+    minTrades30d?: number;
+    minResolvedCount?: number;
+    minPnl30d?: number;
+    minRoi30d?: number;
+    minWinRate30d?: number;
+    maxExposureUsd?: number;
+    maxNetImbalanceUsd?: number;
+  },
+  startIndex: number,
+): WhaleQualityFilterSql {
+  const selectorClauses: string[] = [];
+  const inferredClauses: string[] = [];
+  const params: Array<number> = [];
+  let idx = startIndex;
+
+  if (query.minTrades30d != null) {
+    selectorClauses.push(`coalesce(wis.metrics_trades_30d, 0) >= $${idx++}`);
+    params.push(query.minTrades30d);
+  }
+  if (query.minResolvedCount != null) {
+    inferredClauses.push(`coalesce(inferred.total, 0) >= $${idx++}`);
+    params.push(query.minResolvedCount);
+  }
+  if (query.minPnl30d != null) {
+    selectorClauses.push(`coalesce(wis.metrics_pnl_30d, 0) >= $${idx++}`);
+    params.push(query.minPnl30d);
+  }
+  if (query.minRoi30d != null) {
+    selectorClauses.push(`coalesce(wis.metrics_roi_30d, 0) >= $${idx++}`);
+    params.push(query.minRoi30d);
+  }
+  if (query.minWinRate30d != null) {
+    inferredClauses.push(
+      `case when inferred.total > 0 then inferred.wins::float / inferred.total else null end >= $${idx++}`,
+    );
+    params.push(query.minWinRate30d);
+  }
+  if (query.maxExposureUsd != null) {
+    selectorClauses.push(`coalesce(wis.exposure_usd, 0) <= $${idx++}`);
+    params.push(query.maxExposureUsd);
+  }
+  if (query.maxNetImbalanceUsd != null) {
+    selectorClauses.push(`abs(coalesce(wis.net_imbalance_usd, 0)) <= $${idx++}`);
+    params.push(query.maxNetImbalanceUsd);
+  }
+  const clauses = [...selectorClauses, ...inferredClauses];
+
+  return {
+    sql: clauses.length ? `and ${clauses.join("\n                and ")}` : "",
+    selectorSql: selectorClauses.length
+      ? `and ${selectorClauses.join("\n                  and ")}`
+      : "",
+    inferredSql: inferredClauses.length
+      ? `and ${inferredClauses.join("\n                and ")}`
+      : "",
+    params,
+    hasFilters: clauses.length > 0,
+  };
 }
 
 function resolveWalletActivityKind(
@@ -2937,21 +3243,47 @@ async function loadWalletActivitySummaryHeroStats(
     followedWalletIds,
     activeWalletIds,
   );
-  const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
-    client,
-    walletIds,
-    {
-      rangeHours: 720,
-      asOf,
-    },
+  const stats = await client.query<{
+    total_wallets: number | string;
+    tracked_wallets: number | string | null;
+    total_pnl_30d: string | null;
+    tracked_pnl_30d: string | null;
+    as_of: Date | null;
+  }>(
+    `
+      with wallet_set as (
+        select distinct unnest($1::uuid[]) as wallet_id
+      ),
+      followed_set as (
+        select distinct unnest($2::uuid[]) as wallet_id
+      )
+      select
+        count(ws.wallet_id)::int as total_wallets,
+        count(fs.wallet_id)::int as tracked_wallets,
+        sum(wis.metrics_pnl_30d)::text as total_pnl_30d,
+        sum(wis.metrics_pnl_30d) filter (
+          where fs.wallet_id is not null
+        )::text as tracked_pnl_30d,
+        max(coalesce(wis.metrics_as_of, wis.updated_at)) as as_of
+      from wallet_set ws
+      left join followed_set fs on fs.wallet_id = ws.wallet_id
+      left join wallet_intel_selector_snapshot wis on wis.wallet_id = ws.wallet_id
+    `,
+    [walletIds, followedWalletIds],
   );
-  return buildWalletActivitySummaryHeroStats({
-    walletIds,
-    followedWalletIds,
-    portfolioPerformanceMap,
-    asOfFallback: asOf,
-    includeTrackedStats: userId != null,
-  });
+  const row = stats.rows[0];
+  const includeTrackedStats = userId != null;
+  return {
+    totalWallets: Number(row?.total_wallets ?? walletIds.length),
+    trackedWallets: includeTrackedStats
+      ? Number(row?.tracked_wallets ?? followedWalletIds.length)
+      : null,
+    totalPnl30d: nullableNumber(row?.total_pnl_30d),
+    trackedPnl30d: includeTrackedStats
+      ? nullableNumber(row?.tracked_pnl_30d)
+      : null,
+    asOf: row?.as_of ?? asOf,
+  };
 }
 
 async function loadWalletIdsForSignalScope(
@@ -3288,6 +3620,54 @@ function serializeWalletResponseItem<
     ...item,
     metrics: serializeWalletMetrics(item.metrics),
   };
+}
+
+function mapWalletActivityRouteItems(rows: WalletActivityRouteRow[]) {
+  return rows.map((row) => ({
+    walletId: row.wallet_id,
+    address: row.address,
+    chain: row.chain,
+    label: row.label,
+    userName: row.user_name ?? null,
+    userLabel: row.user_label ?? null,
+    userLabelColor: row.user_label_color ?? null,
+    profileLabel: row.profile_label,
+    venue: row.venue,
+    marketId: row.market_id,
+    marketTitle: row.market_title,
+    outcomes: parseMarketOutcomes(row.outcomes),
+    marketImage: row.market_image,
+    marketIcon: row.market_icon,
+    eventId: row.event_id,
+    eventTitle: row.event_title,
+    eventImage: row.event_image,
+    eventIcon: row.event_icon,
+    bestBid: row.best_bid ? Number(row.best_bid) : null,
+    bestAsk: row.best_ask ? Number(row.best_ask) : null,
+    lastPrice: row.last_price ? Number(row.last_price) : null,
+    marketStatus: row.market_status,
+    closeTime: row.close_time ? row.close_time.toISOString() : null,
+    expirationTime: row.expiration_time
+      ? row.expiration_time.toISOString()
+      : null,
+    resolvedOutcome: row.resolved_outcome,
+    acceptingOrders: row.accepting_orders,
+    outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
+    action: row.action,
+    deltaShares: row.delta_shares ? Number(row.delta_shares) : null,
+    sizeUsd: row.size_usd ? Number(row.size_usd) : null,
+    price: row.price ? Number(row.price) : null,
+    activityType: row.activity_type,
+    source: row.source,
+    changeAction: resolveWalletActivityChangeAction({
+      action: row.action,
+      source: row.source,
+      metadata: row.metadata,
+    }),
+    quoteTiming: "current" as const,
+    occurredAt: row.occurred_at,
+    metadata: row.metadata ?? null,
+  }));
 }
 
 function mapWalletPositionBaseItems(
@@ -5190,11 +5570,18 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tagsFilter.length === 0 &&
               primaryFilter.length === 0 &&
               labelsFilter.length === 0;
+            const slimQualityFilter = buildWhaleQualityFilterSql(query, 4);
             const useSnapshotWhaleShortlist =
-              useSlimWhaleSelector && query.sort === "last_activity";
+              useSlimWhaleSelector &&
+              query.sort === "last_activity" &&
+              !slimQualityFilter.hasFilters;
             const whaleActivityOrderExpr = useSlimWhaleSelector
               ? "wis.last_activity_at"
               : "activity.last_activity_at";
+            const needsInferredStats =
+              query.sort === "winrate" ||
+              query.minResolvedCount != null ||
+              query.minWinRate30d != null;
             const orderBy = (() => {
               switch (query.sort) {
                 case "volume_30d":
@@ -5209,6 +5596,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   return `case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
                 case "pnl_30d":
                   return `wis.metrics_pnl_30d desc nulls last, whale_score desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+                case "roi_30d":
+                  return `wis.metrics_roi_30d desc nulls last, wis.metrics_pnl_30d desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
                 case "last_activity":
                 default:
                   return `${whaleActivityOrderExpr} desc nulls last, whale_score desc nulls last, w.last_seen_at desc`;
@@ -5220,17 +5609,20 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   maxScanCandidates + 1,
                 )
               : null;
+            const fullQualityFilter = buildWhaleQualityFilterSql(query, 6);
 
             const whaleRows = useSlimWhaleSelector
               ? await client.query<WhaleSelectorSlimRow>(
                   useSnapshotWhaleShortlist
                     ? buildSlimWhaleSelectorWithSnapshotShortlistSql(
                         orderBy,
-                        query.sort === "winrate",
+                        needsInferredStats,
+                        slimQualityFilter,
                       )
                     : buildSlimWhaleSelectorSql(
                         orderBy,
-                        query.sort === "winrate",
+                        needsInferredStats,
+                        slimQualityFilter,
                       ),
                   useSnapshotWhaleShortlist
                     ? [
@@ -5238,8 +5630,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                         maxScanCandidates + 1,
                         whaleTagId,
                         query.windowDays,
+                        ...slimQualityFilter.params,
                       ]
-                    : [maxScanCandidates + 1, query.windowDays, whaleTagId],
+                    : [
+                        maxScanCandidates + 1,
+                        query.windowDays,
+                        whaleTagId,
+                        ...slimQualityFilter.params,
+                      ],
                 )
               : await client.query<WhaleSelectorRow>(
                   `
@@ -5313,6 +5711,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
                   where ($4::text[] is null or wp.profile->'categories' ?| $4::text[])
                     and activity.last_activity_at is not null
+                    ${fullQualityFilter.sql}
                   order by ${orderBy}
                   limit $2
                 `,
@@ -5322,6 +5721,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     query.windowDays,
                     categoryFilter.length > 0 ? categoryFilter : null,
                     whaleTagId,
+                    ...fullQualityFilter.params,
                   ],
                 );
 
@@ -5365,6 +5765,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     return existing.trackedNetImbalanceUsd ?? 0;
                   case "winrate":
                     return existing.inferredWinRate ?? 0;
+                  case "roi_30d":
+                    return nullableNumber(existing.metrics?.roi) ?? 0;
                   case "pnl_30d":
                     return existing.approxPnlUsd ?? 0;
                   case "last_activity":
@@ -5384,6 +5786,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     return row.trackedNetImbalanceUsd ?? 0;
                   case "winrate":
                     return row.inferredWinRate ?? 0;
+                  case "roi_30d":
+                    return nullableNumber(row.metrics?.roi) ?? 0;
                   case "pnl_30d":
                     return row.approxPnlUsd ?? 0;
                   case "last_activity":
@@ -7254,7 +7658,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           error: "Authentication required when walletId is omitted",
         });
       }
-      const params: Array<string | number | null> = [userId];
+      const params: Array<string | number | boolean | null> = [userId];
       let where = "";
       let idx = 2;
       const userParam = 1;
@@ -7269,6 +7673,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       if (query.venue) {
         where += ` and wa.venue = $${idx++}`;
         params.push(query.venue);
+      } else {
+        const derivedVenue = inferVenueFromMarketId(query.marketId);
+        if (derivedVenue) {
+          where += ` and wa.venue = $${idx++}`;
+          params.push(derivedVenue);
+        }
       }
 
       if (query.since) {
@@ -7276,49 +7686,27 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         params.push(query.since);
       }
 
+      const filterClauses = [where];
+      idx = appendMarketReferenceFilters(filterClauses, params, idx, query, {
+        marketAlias: "um",
+        eventAlias: "ue",
+      });
+      idx = appendWalletActivityFilters(
+        filterClauses,
+        params,
+        idx,
+        query,
+        "wa",
+      );
+      where = filterClauses.join(" and ");
+
       params.push(query.limit, query.offset);
       const limitParam = idx++;
       const offsetParam = idx++;
 
       const client = await pool.connect();
       try {
-        const rows = await client.query<{
-          wallet_id: string;
-          address: string;
-          chain: string;
-          label: string | null;
-          user_name: string | null;
-          user_label: string | null;
-          user_label_color: WalletLabelColor | null;
-          profile_label: string | null;
-          venue: string;
-          market_id: string;
-          market_title: string | null;
-          outcomes: string | null;
-          market_image: string | null;
-          market_icon: string | null;
-          event_id: string | null;
-          event_title: string | null;
-          event_image: string | null;
-          event_icon: string | null;
-          best_bid: string | null;
-          best_ask: string | null;
-          last_price: string | null;
-          market_status: string | null;
-          close_time: Date | null;
-          expiration_time: Date | null;
-          resolved_outcome: string | null;
-          accepting_orders: boolean | null;
-          outcome_side: string | null;
-          action: string | null;
-          delta_shares: string | null;
-          size_usd: string | null;
-          price: string | null;
-          activity_type: string;
-          source: string | null;
-          occurred_at: Date;
-          metadata: unknown;
-        }>(
+        const rows = await client.query<WalletActivityRouteRow>(
           `
             select
               wa.wallet_id,
@@ -7387,51 +7775,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const minUsd = env.walletIntelMinActivityUsd;
         const minShares = env.walletIntelMinActivityShares;
 
-        const items = rows.rows.map((row) => ({
-          walletId: row.wallet_id,
-          address: row.address,
-          chain: row.chain,
-          label: row.label,
-          userName: row.user_name ?? null,
-          userLabel: row.user_label ?? null,
-          userLabelColor: row.user_label_color ?? null,
-          profileLabel: row.profile_label,
-          venue: row.venue,
-          marketId: row.market_id,
-          marketTitle: row.market_title,
-          outcomes: parseMarketOutcomes(row.outcomes),
-          marketImage: row.market_image,
-          marketIcon: row.market_icon,
-          eventId: row.event_id,
-          eventTitle: row.event_title,
-          eventImage: row.event_image,
-          eventIcon: row.event_icon,
-          bestBid: row.best_bid ? Number(row.best_bid) : null,
-          bestAsk: row.best_ask ? Number(row.best_ask) : null,
-          lastPrice: row.last_price ? Number(row.last_price) : null,
-          marketStatus: row.market_status,
-          closeTime: row.close_time ? row.close_time.toISOString() : null,
-          expirationTime: row.expiration_time
-            ? row.expiration_time.toISOString()
-            : null,
-          resolvedOutcome: row.resolved_outcome,
-          acceptingOrders: row.accepting_orders,
-          outcomeSide: normalizeOutcomeSideForApi(row.outcome_side),
-          action: row.action,
-          deltaShares: row.delta_shares ? Number(row.delta_shares) : null,
-          sizeUsd: row.size_usd ? Number(row.size_usd) : null,
-          price: row.price ? Number(row.price) : null,
-          activityType: row.activity_type,
-          source: row.source,
-          changeAction: resolveWalletActivityChangeAction({
-            action: row.action,
-            source: row.source,
-            metadata: row.metadata,
-          }),
-          quoteTiming: "current" as const,
-          occurredAt: row.occurred_at,
-          metadata: row.metadata ?? null,
-        }));
+        const items = mapWalletActivityRouteItems(rows.rows);
 
         const filteredItems =
           minUsd <= 0 && minShares <= 0
@@ -7441,14 +7785,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   if (item.sizeUsd >= minUsd) return true;
                   if (
                     item.deltaShares != null &&
-                    item.deltaShares >= minShares
+                    Math.abs(item.deltaShares) >= minShares
                   ) {
                     return true;
                   }
                   return false;
                 }
                 if (item.deltaShares != null) {
-                  return item.deltaShares >= minShares;
+                  return Math.abs(item.deltaShares) >= minShares;
                 }
                 return true;
               });
@@ -7464,6 +7808,128 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         );
         reply.code(500);
         return reply.send({ error: "Failed to load wallet activity" });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  /**
+   * GET /markets/:marketId/wallet-activity
+   */
+  z.get(
+    "/markets/:marketId/wallet-activity",
+    {
+      schema: {
+        params: marketWalletActivityParamsSchema,
+        querystring: marketWalletActivityQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const query = request.query;
+      const params: Array<string | number | boolean | null> = [
+        request.params.marketId,
+      ];
+      let idx = 2;
+      const clauses = ["wa.market_id = $1"];
+      const derivedVenue = inferVenueFromMarketId(request.params.marketId);
+
+      if (derivedVenue) {
+        clauses.push(`wa.venue = $${idx++}`);
+        params.push(derivedVenue);
+      }
+
+      if (query.since) {
+        clauses.push(`wa.occurred_at >= $${idx++}`);
+        params.push(query.since);
+      }
+
+      idx = appendWalletActivityFilters(
+        clauses,
+        params,
+        idx,
+        query,
+        "wa",
+      );
+
+      params.push(query.limit, query.offset);
+      const limitParam = idx++;
+      const offsetParam = idx++;
+
+      const client = await pool.connect();
+      try {
+        const rows = await client.query<WalletActivityRouteRow>(
+          `
+            select
+              wa.wallet_id,
+              w.address,
+              w.chain,
+              w.label,
+              null::text as user_name,
+              null::text as user_label,
+              null::text as user_label_color,
+              wp.profile->>'label_short' as profile_label,
+              wa.venue,
+              wa.market_id,
+              um.title as market_title,
+              um.outcomes,
+              um.image as market_image,
+              um.icon as market_icon,
+              um.event_id as event_id,
+              ue.title as event_title,
+              ue.image as event_image,
+              ue.icon as event_icon,
+              um.best_bid,
+              um.best_ask,
+              um.last_price,
+              um.status as market_status,
+              um.close_time,
+              um.expiration_time,
+              um.resolved_outcome,
+              ${buildWalletIntelAcceptingOrdersSql({
+                marketAlias: "um",
+                eventAlias: "ue",
+              })} as accepting_orders,
+              wa.outcome_side,
+              wa.action,
+              wa.delta_shares,
+              wa.size_usd,
+              wa.price,
+              wa.activity_type,
+              wa.source,
+              wa.occurred_at,
+              wa.metadata
+            from wallet_activity_events wa
+            join wallets w on w.id = wa.wallet_id
+            left join wallet_profiles wp on wp.wallet_id = w.id
+            left join unified_markets um on um.id = wa.market_id
+            left join unified_events ue on ue.id = um.event_id
+            where ${clauses.join(" and ")}
+              and wa.activity_type in ('delta', 'trade')
+              and ${buildSnapshotDeltaTrackableActivitySql({
+                activityAlias: "wa",
+                marketAlias: "um",
+                eventAlias: "ue",
+              })}
+            order by wa.occurred_at desc
+            limit $${limitParam}
+            offset $${offsetParam}
+          `,
+          params,
+        );
+
+        return reply.send({
+          ok: true,
+          marketId: request.params.marketId,
+          items: mapWalletActivityRouteItems(rows.rows),
+        });
+      } catch (error) {
+        app.log.error(
+          { error, marketId: request.params.marketId, query },
+          "Failed to load market wallet activity",
+        );
+        reply.code(500);
+        return reply.send({ error: "Failed to load market wallet activity" });
       } finally {
         client.release();
       }
@@ -7489,13 +7955,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           error: "Authentication required when walletId is omitted",
         });
       }
-      const params: Array<string | number | null> = [userId];
+      const params: Array<string | number | boolean | null> = [userId];
       let where = "";
       let idx = 2;
       const userParam = 1;
       let walletParam: number | null = null;
       let venueParam: number | null = null;
       let sinceParam: number | null = null;
+      const derivedVenue = inferVenueFromMarketId(query.marketId);
 
       if (query.walletId) {
         walletParam = idx++;
@@ -7509,6 +7976,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         venueParam = idx++;
         where += ` and ws.venue = $${venueParam}`;
         params.push(query.venue);
+      } else if (derivedVenue) {
+        venueParam = idx++;
+        where += ` and ws.venue = $${venueParam}`;
+        params.push(derivedVenue);
       }
 
       if (query.since) {
@@ -7529,13 +8000,40 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             return `
               (
                 case
-                  when ws.size_usd is not null then ws.size_usd >= $${minUsdParam}
-                  when ws.shares is not null then ws.shares >= $${minSharesParam}
+                  when ws.size_usd is not null then ws.size_usd >= $${minUsdParam}::numeric
+                  when ws.shares is not null then ws.shares >= $${minSharesParam}::numeric
                   else true
                 end
               )
             `;
           })();
+      const positionMarketClauses: string[] = [];
+      idx = appendMarketReferenceFilters(
+        positionMarketClauses,
+        params,
+        idx,
+        {
+          marketId: query.marketId,
+          eventId: query.eventId,
+          category: query.category,
+          marketStatus: query.marketStatus,
+          acceptingOrders: query.acceptingOrders,
+        },
+        { marketAlias: "um", eventAlias: "ue" },
+      );
+      if (query.outcomeSide) {
+        positionMarketClauses.push(`ws.outcome_side = $${idx++}::text`);
+        params.push(query.outcomeSide);
+      }
+      if (query.minSizeUsd != null) {
+        positionMarketClauses.push(
+          `coalesce(ws.size_usd, 0) >= $${idx++}::numeric`,
+        );
+        params.push(query.minSizeUsd);
+      }
+      const positionMarketFilterSql = positionMarketClauses.length
+        ? `and ${positionMarketClauses.join(" and ")}`
+        : "";
       const hiddenPositionSuppressionSql =
         buildHiddenOwnPositionSnapshotSuppressionSql({
           snapshotAlias: "ws",
@@ -7631,6 +8129,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${positionFilterSql}
+                ${positionMarketFilterSql}
                 and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
@@ -7641,8 +8140,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.size_usd desc nulls last,
                 ws.shares desc nulls last,
                 coalesce(um.title, ws.market_id) asc
-              limit $${limitParam}
-              offset $${offsetParam}
+              limit $${limitParam}::integer
+              offset $${offsetParam}::integer
             `
             : `
               with latest_snapshots as (
@@ -7707,6 +8206,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_markets um on um.id = ws.market_id
               left join unified_events ue on ue.id = um.event_id
               where ${positionFilterSql}
+                ${positionMarketFilterSql}
                 and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
@@ -7717,8 +8217,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.size_usd desc nulls last,
                 ws.shares desc nulls last,
                 coalesce(um.title, ws.market_id) asc
-              limit $${limitParam}
-              offset $${offsetParam}
+              limit $${limitParam}::integer
+              offset $${offsetParam}::integer
             `
           : `
               select
@@ -7771,6 +8271,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               left join unified_events ue on ue.id = um.event_id
               where ${where}
                 and ${positionFilterSql}
+                ${positionMarketFilterSql}
                 and ${hiddenPositionSuppressionSql}
                 and ${buildWalletIntelTrackableMarketSql({
                   marketAlias: "um",
@@ -7781,8 +8282,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.size_usd desc nulls last,
                 ws.shares desc nulls last,
                 coalesce(um.title, ws.market_id) asc
-              limit $${limitParam}
-              offset $${offsetParam}
+              limit $${limitParam}::integer
+              offset $${offsetParam}::integer
             `;
 
         const rows = await client.query<WalletPositionRouteRow>(sql, params);
@@ -7819,16 +8320,34 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const userId = request.user?.id ?? null;
 
       const query = request.query;
-      const params: Array<string | number | null> = [userId, query.walletId];
+      const params: Array<string | number | boolean | null> = [
+        userId,
+        query.walletId,
+      ];
       let idx = 3;
       const userParam = 1;
       const walletParam = 2;
+      const derivedVenue = inferVenueFromMarketId(query.marketId);
 
       let historyWhere = `ws.wallet_id = $${walletParam}`;
       if (query.venue) {
         const venueParam = idx++;
         historyWhere += ` and ws.venue = $${venueParam}`;
         params.push(query.venue);
+      } else if (derivedVenue) {
+        const venueParam = idx++;
+        historyWhere += ` and ws.venue = $${venueParam}`;
+        params.push(derivedVenue);
+      }
+
+      if (query.marketId) {
+        historyWhere += ` and ws.market_id = $${idx++}::text`;
+        params.push(query.marketId);
+      }
+
+      if (query.outcomeSide) {
+        historyWhere += ` and ws.outcome_side = $${idx++}::text`;
+        params.push(query.outcomeSide);
       }
 
       const historyPositionFilterSql = query.includeSmall
@@ -7843,8 +8362,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             return `
               (
                 case
-                  when tr.size_usd is not null then tr.size_usd >= $${minUsdParam}
-                  when tr.shares is not null then tr.shares >= $${minSharesParam}
+                  when tr.size_usd is not null then tr.size_usd >= $${minUsdParam}::numeric
+                  when tr.shares is not null then tr.shares >= $${minSharesParam}::numeric
                   else true
                 end
               )
@@ -7861,6 +8380,34 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       if (query.since) {
         outerWhere += ` and tr.snapshot_at >= $${idx++}`;
         params.push(query.since);
+      }
+
+      const historyMarketClauses: string[] = [];
+      idx = appendMarketReferenceFilters(
+        historyMarketClauses,
+        params,
+        idx,
+        {
+          marketId: query.marketId,
+          eventId: query.eventId,
+          category: query.category,
+          marketStatus: query.marketStatus,
+          acceptingOrders: query.acceptingOrders,
+        },
+        { marketAlias: "um", eventAlias: "ue" },
+      );
+      if (query.outcomeSide) {
+        historyMarketClauses.push(`tr.outcome_side = $${idx++}::text`);
+        params.push(query.outcomeSide);
+      }
+      if (query.minSizeUsd != null) {
+        historyMarketClauses.push(
+          `coalesce(tr.size_usd, 0) >= $${idx++}::numeric`,
+        );
+        params.push(query.minSizeUsd);
+      }
+      if (historyMarketClauses.length) {
+        outerWhere += ` and ${historyMarketClauses.join(" and ")}`;
       }
 
       params.push(query.limit + 1, query.offset);
@@ -7995,8 +8542,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tr.size_usd desc nulls last,
               tr.shares desc nulls last,
               coalesce(um.title, tr.market_id) asc
-            limit $${limitParam}
-            offset $${offsetParam}
+            limit $${limitParam}::integer
+            offset $${offsetParam}::integer
           `,
           params,
         );
