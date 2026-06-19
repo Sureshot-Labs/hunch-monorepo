@@ -26,6 +26,10 @@ import {
   formatSportsFixtureForApi,
   type SportsFixtureApi,
 } from "../services/sports-fixtures.js";
+import {
+  getFifa2026TeamsRankingPayload,
+  getFifa2026TeamsRankingCacheControl,
+} from "../services/fifa-world-rankings.js";
 
 function applyCacheHeaders(input: {
   reply: FastifyReply;
@@ -262,6 +266,39 @@ function buildPayload(input: {
 
 export const specialRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  z.get("/special/fifa-2026/teams", async (req, reply) => {
+    const redisContext = await getRedisStatus();
+    const r = redisContext.redis;
+    const payload = await getFifa2026TeamsRankingPayload({
+      redis: r
+        ? {
+            get: (key) => r.get(key),
+            ttl: (key) => r.ttl(key),
+            set: (key, value, options) => r.set(key, value, options),
+            del: (key) => r.del(key),
+          }
+        : null,
+      redisStatus: redisContext.status,
+      log: req.log,
+    });
+    const body = JSON.stringify(payload);
+    const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
+    reply.header("x-cache", payload.source.cacheStatus);
+    reply.header("x-cache-layer", r ? "redis" : "none");
+    reply.header("x-cache-status", redisContext.status);
+    reply.header("ETag", etag);
+    reply.header(
+      "Cache-Control",
+      getFifa2026TeamsRankingCacheControl(payload.source.cacheStatus),
+    );
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    if (req.headers["if-none-match"] === etag) {
+      reply.code(304);
+      return reply.send();
+    }
+    return reply.send(body);
+  });
 
   z.get(
     "/special/fifa-2026",

@@ -16,9 +16,13 @@ const TEAM_KEY_ALIASES: Record<string, string> = {
   turkiye: "turkiye",
   "korea-republic": "south-korea",
   "republic-of-korea": "south-korea",
+  "ir-iran": "iran",
   "dr-congo": "congo-dr",
   "democratic-republic-of-congo": "congo-dr",
   "cote-d-ivoire": "ivory-coast",
+  "cabo-verde": "cape-verde",
+  "bosnia-herzegovina": "bosnia-and-herzegovina",
+  "czech-republic": "czechia",
 };
 
 export function canonicalSportsTeamKey(value: string): string {

@@ -2143,7 +2143,7 @@ const MONTHS: Record<string, string> = {
   DEC: "12",
 };
 
-const FIFA_2026_GROUPS: Record<string, string[]> = {
+export const FIFA_2026_GROUPS: Record<string, string[]> = {
   A: ["Mexico", "South Korea", "South Africa", "Czechia"],
   B: ["Canada", "Qatar", "Bosnia and Herzegovina", "Switzerland"],
   C: ["Scotland", "Brazil", "Haiti", "Morocco"],
