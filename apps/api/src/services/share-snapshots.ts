@@ -76,7 +76,7 @@ type TradePnlSnapshot = {
   referralCode: string | null;
 } & PublicPositionSnapshot;
 
-type PublicShareResponse = {
+export type PublicShareResponse = {
   id: string;
   kind: ShareKind;
   createdAt: string;
@@ -189,6 +189,27 @@ function resolveCurrentPrice(row: PositionShareSourceRow): number | null {
   return parseOptionalNumber(row.last_price);
 }
 
+function isResolvedMarket(row: PositionShareSourceRow): boolean {
+  return (
+    normalizeOutcome(row.resolved_outcome) != null ||
+    parseOptionalNumber(row.resolved_outcome_pct) != null
+  );
+}
+
+function resolveClosedAt(
+  row: PositionShareSourceRow,
+  inputs: { isResolved: boolean; isFlatPosition: boolean },
+): string {
+  if (inputs.isFlatPosition) return row.updated_at.toISOString();
+  if (!inputs.isResolved) return row.updated_at.toISOString();
+  return (
+    row.market_close_time ??
+    row.market_expiration_time ??
+    row.event_end_time ??
+    row.updated_at
+  ).toISOString();
+}
+
 function publicImageRef(row: PositionShareSourceRow): PublicImageRef {
   const marketOrToken = row.market_id ?? row.token_id;
   return {
@@ -203,13 +224,21 @@ function buildPublicPositionSnapshot(
 ): PublicPositionSnapshot {
   const size = parseNumber(row.size);
   const averagePrice = parseOptionalNumber(row.average_price);
-  const realizedPnl = parseNumber(row.realized_pnl);
-  const unrealizedPnl = parseNumber(row.unrealized_pnl_effective);
+  const isResolved = isResolvedMarket(row);
+  const realizedPnl = isResolved
+    ? parseNumber(row.effective_pnl)
+    : parseNumber(row.realized_pnl);
+  const unrealizedPnl = isResolved
+    ? 0
+    : parseNumber(row.unrealized_pnl_effective);
   const totalPnl = realizedPnl + unrealizedPnl;
   const costBasis =
     averagePrice != null && size > 0 ? averagePrice * size : null;
+  const isFlatPosition = row.side === "FLAT" || size <= 0;
   const positionStatus =
-    row.side !== "FLAT" && size > 0 ? ("open" as const) : ("closed" as const);
+    !isFlatPosition && !isResolved
+      ? ("open" as const)
+      : ("closed" as const);
   const currentPrice = resolveCurrentPrice(row);
 
   return {
@@ -229,16 +258,21 @@ function buildPublicPositionSnapshot(
     realizedPnlCents: usdToCents(realizedPnl),
     unrealizedPnlCents: usdToCents(unrealizedPnl),
     totalPnlCents: usdToCents(totalPnl),
-    pnlPercentBasisPoints: positionPnlPercentBasisPoints({
-      totalPnl,
-      realizedPnl,
-      costBasis,
-    }),
+    pnlPercentBasisPoints:
+      positionStatus === "closed"
+        ? null
+        : positionPnlPercentBasisPoints({
+            totalPnl,
+            realizedPnl,
+            costBasis,
+          }),
     ...(options.includeTradeFields
       ? {
           openedAt: row.created_at.toISOString(),
           closedAt:
-            positionStatus === "closed" ? row.updated_at.toISOString() : null,
+            positionStatus === "closed"
+              ? resolveClosedAt(row, { isResolved, isFlatPosition })
+              : null,
         }
       : {}),
     image: publicImageRef(row),

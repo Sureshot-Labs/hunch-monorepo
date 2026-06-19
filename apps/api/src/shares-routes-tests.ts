@@ -6,6 +6,8 @@ import crypto from "node:crypto";
 import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
+import { env } from "./env.js";
+import { resetShareCreateGuardForTests } from "./services/share-create-guard.js";
 
 type TestContext = {
   userId: string;
@@ -18,6 +20,11 @@ type MarketFixture = {
   marketId: string;
   yesTokenId: string;
   noTokenId: string;
+};
+
+type MarketFixtureOptions = {
+  resolvedOutcome?: "YES" | "NO" | null;
+  resolvedOutcomePct?: number | null;
 };
 
 async function test(name: string, fn: () => Promise<void>) {
@@ -135,11 +142,15 @@ async function createReferralCode(
 async function insertMarketFixture(
   prefix: string,
   venue = "limitless",
+  options: MarketFixtureOptions = {},
 ): Promise<MarketFixture> {
   const eventId = `share-event-${prefix}-${crypto.randomUUID()}`;
   const marketId = `share-market-${prefix}-${crypto.randomUUID()}`;
   const yesTokenId = `share-token-yes-${prefix}-${crypto.randomUUID()}`;
   const noTokenId = `share-token-no-${prefix}-${crypto.randomUUID()}`;
+  const isResolved =
+    options.resolvedOutcome != null || options.resolvedOutcomePct != null;
+  const status = isResolved ? "SETTLED" : "ACTIVE";
 
   await pool.query(
     `
@@ -164,9 +175,9 @@ async function insertMarketFixture(
         $5,
         $1,
         $2,
-        'ACTIVE',
+        $6,
         now() - interval '1 day',
-        now() + interval '1 day',
+        case when $7::boolean then now() - interval '1 day' else now() + interval '1 day' end,
         0,
         0,
         0,
@@ -182,6 +193,8 @@ async function insertMarketFixture(
       `slug-${eventId}`,
       `https://img/${eventId}.png`,
       venue,
+      status,
+      isResolved,
     ],
   );
 
@@ -210,6 +223,8 @@ async function insertMarketFixture(
         token_no,
         slug,
         image,
+        resolved_outcome,
+        resolved_outcome_pct,
         created_at,
         updated_at
       )
@@ -219,11 +234,11 @@ async function insertMarketFixture(
         $1,
         $2,
         $3,
-        'ACTIVE',
+        $9,
         'binary',
         now() - interval '1 day',
-        now() + interval '1 day',
-        now() + interval '1 day',
+        case when $10::boolean then now() - interval '1 day' else now() + interval '1 day' end,
+        case when $10::boolean then now() - interval '1 day' else now() + interval '1 day' end,
         0.54,
         0.56,
         0.55,
@@ -236,6 +251,8 @@ async function insertMarketFixture(
         $5,
         $6,
         $7,
+        $11,
+        $12,
         now(),
         now()
       )
@@ -249,6 +266,10 @@ async function insertMarketFixture(
       `slug-${marketId}`,
       `https://img/${marketId}.png`,
       venue,
+      status,
+      isResolved,
+      options.resolvedOutcome ?? null,
+      options.resolvedOutcomePct ?? null,
     ],
   );
 
@@ -414,6 +435,9 @@ function assertNoPrivateFields(payload: unknown, context: TestContext): void {
 
 async function main() {
   resetAuthDbFeatureCachesForTests();
+  const previousRedisUrl = env.redisUrl;
+  env.redisUrl = "";
+  resetShareCreateGuardForTests();
   await ensureShareSnapshotsTableForTests();
   const app = await buildApp();
 
@@ -708,6 +732,167 @@ async function main() {
     }
   });
 
+  await test("trade share fanout is throttled without 500s", async () => {
+    resetShareCreateGuardForTests();
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-fanout");
+    try {
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.5,
+        realizedPnl: 1,
+        unrealizedPnl: 1,
+      });
+
+      const responses = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          app.inject({
+            method: "POST",
+            url: "/shares/trade-pnl",
+            headers: context.authHeaders,
+            payload: {
+              source: "position",
+              positionId,
+            },
+          }),
+        ),
+      );
+
+      const statusCodes = responses.map((response) => response.statusCode);
+      assert.equal(statusCodes.includes(500), false);
+      assert.equal(statusCodes.includes(200), true);
+      assert.equal(statusCodes.includes(429), true);
+      for (const response of responses.filter(
+        (item) => item.statusCode === 429,
+      )) {
+        assert.equal(response.headers["retry-after"], "15");
+        assert.deepEqual(response.json(), { error: "rate_limit_exceeded" });
+      }
+
+      const inserted = await pool.query<{ count: string }>(
+        `
+          select count(*)::text as count
+          from share_snapshots
+          where user_id = $1
+            and kind = 'trade_pnl'
+            and snapshot->>'positionId' = $2
+        `,
+        [context.userId, positionId],
+      );
+      assert.equal(inserted.rows[0]?.count, "1");
+    } finally {
+      resetShareCreateGuardForTests();
+      await cleanup([context], [fixture]);
+    }
+  });
+
+  await test("trade share retry returns recent cached share", async () => {
+    resetShareCreateGuardForTests();
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-cache");
+    try {
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.5,
+        realizedPnl: 1,
+        unrealizedPnl: 1,
+      });
+
+      const first = await app.inject({
+        method: "POST",
+        url: "/shares/trade-pnl",
+        headers: context.authHeaders,
+        payload: {
+          source: "position",
+          positionId,
+        },
+      });
+      assert.equal(first.statusCode, 200);
+
+      const second = await app.inject({
+        method: "POST",
+        url: "/shares/trade-pnl",
+        headers: context.authHeaders,
+        payload: {
+          source: "position",
+          positionId,
+        },
+      });
+      assert.equal(second.statusCode, 200);
+      assert.equal(second.json().id, first.json().id);
+
+      const inserted = await pool.query<{ count: string }>(
+        `
+          select count(*)::text as count
+          from share_snapshots
+          where user_id = $1
+            and kind = 'trade_pnl'
+            and snapshot->>'positionId' = $2
+        `,
+        [context.userId, positionId],
+      );
+      assert.equal(inserted.rows[0]?.count, "1");
+    } finally {
+      resetShareCreateGuardForTests();
+      await cleanup([context], [fixture]);
+    }
+  });
+
+  await test("share create burst limit returns 429", async () => {
+    resetShareCreateGuardForTests();
+    const context = await createTestContext();
+    const fixtures = await Promise.all(
+      Array.from({ length: 7 }, (_, index) =>
+        insertMarketFixture(`trade-burst-${index}`),
+      ),
+    );
+    try {
+      const positionIds = await Promise.all(
+        fixtures.map((fixture, index) =>
+          insertPosition({
+            context,
+            tokenId: fixture.yesTokenId,
+            size: 10 + index,
+            averagePrice: 0.5,
+            realizedPnl: index,
+            unrealizedPnl: 1,
+          }),
+        ),
+      );
+
+      const responses = [];
+      for (const positionId of positionIds) {
+        responses.push(
+          await app.inject({
+            method: "POST",
+            url: "/shares/trade-pnl",
+            headers: context.authHeaders,
+            payload: {
+              source: "position",
+              positionId,
+            },
+          }),
+        );
+      }
+
+      assert.equal(
+        responses.slice(0, 6).every((response) => response.statusCode === 200),
+        true,
+      );
+      const limited = responses[6];
+      assert.equal(limited?.statusCode, 429);
+      assert.equal(limited?.headers["retry-after"], "60");
+      assert.deepEqual(limited?.json(), { error: "rate_limit_exceeded" });
+    } finally {
+      resetShareCreateGuardForTests();
+      await cleanup([context], fixtures);
+    }
+  });
+
   await test("trade share keeps percent for unrealized-only open position", async () => {
     const context = await createTestContext();
     const fixture = await insertMarketFixture("trade-open-percent");
@@ -774,6 +959,82 @@ async function main() {
     }
   });
 
+  await test("trade share treats resolved losing non-flat position as closed realized loss", async () => {
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-resolved-loss", "limitless", {
+      resolvedOutcome: "NO",
+    });
+    try {
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.5,
+        realizedPnl: 0,
+        unrealizedPnl: 99,
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/shares/trade-pnl",
+        headers: context.authHeaders,
+        payload: {
+          source: "position",
+          positionId,
+        },
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json();
+      assert.equal(payload.positionStatus, "closed");
+      assert.equal(payload.currentPrice, "0");
+      assert.equal(payload.realizedPnlCents, -500);
+      assert.equal(payload.unrealizedPnlCents, 0);
+      assert.equal(payload.totalPnlCents, -500);
+      assert.equal(payload.pnlPercentBasisPoints, null);
+      assert.equal(payload.closedAt != null, true);
+    } finally {
+      await cleanup([context], [fixture]);
+    }
+  });
+
+  await test("trade share treats resolved winning non-flat position as closed realized gain", async () => {
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-resolved-win", "limitless", {
+      resolvedOutcome: "YES",
+    });
+    try {
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.4,
+        realizedPnl: 0,
+        unrealizedPnl: -99,
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/shares/trade-pnl",
+        headers: context.authHeaders,
+        payload: {
+          source: "position",
+          positionId,
+        },
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json();
+      assert.equal(payload.positionStatus, "closed");
+      assert.equal(payload.currentPrice, "1");
+      assert.equal(payload.realizedPnlCents, 600);
+      assert.equal(payload.unrealizedPnlCents, 0);
+      assert.equal(payload.totalPnlCents, 600);
+      assert.equal(payload.pnlPercentBasisPoints, null);
+      assert.equal(payload.closedAt != null, true);
+    } finally {
+      await cleanup([context], [fixture]);
+    }
+  });
+
   await test("unknown public share returns 404", async () => {
     const response = await app.inject({
       method: "GET",
@@ -783,6 +1044,8 @@ async function main() {
   });
 
   await app.close();
+  env.redisUrl = previousRedisUrl;
+  resetShareCreateGuardForTests();
 }
 
 await main();

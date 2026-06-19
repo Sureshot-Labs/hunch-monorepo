@@ -1,8 +1,7 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
-import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
   shareIdParamsSchema,
@@ -10,23 +9,18 @@ import {
   tradePnlShareCreateBodySchema,
 } from "../schemas/shares.js";
 import {
+  cacheTradePnlShare,
+  getCachedTradePnlShare,
+  ShareCreateGuardError,
+  type ShareCreateKind,
+  withShareCreateGuard,
+} from "../services/share-create-guard.js";
+import {
   createPortfolioPnlShare,
   createTradePnlShare,
   getPublicShareSnapshot,
   ShareSnapshotError,
 } from "../services/share-snapshots.js";
-
-const SHARE_CREATE_RATE_LIMIT_MAX = 60;
-const SHARE_CREATE_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
-
-async function enforceShareCreateRateLimit(userId: string): Promise<boolean> {
-  return checkRateLimit(
-    `shares:create:${userId}`,
-    SHARE_CREATE_RATE_LIMIT_MAX,
-    SHARE_CREATE_RATE_LIMIT_WINDOW_MS,
-    { onError: "fail_open" },
-  );
-}
 
 function errorStatusCode(error: unknown): number {
   if (error instanceof ShareSnapshotError) return error.statusCode;
@@ -40,8 +34,32 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function sendShareCreateThrottle(
+  reply: FastifyReply,
+  error: ShareCreateGuardError,
+) {
+  reply.header("Retry-After", String(error.retryAfterSec));
+  reply.code(error.statusCode);
+  return reply.send({ error: "rate_limit_exceeded" });
+}
+
 export const sharesRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  function logShareCreateThrottle(inputs: {
+    userId: string;
+    kind: ShareCreateKind;
+    error: ShareCreateGuardError;
+  }): void {
+    app.log.warn(
+      {
+        userId: inputs.userId,
+        kind: inputs.kind,
+        reason: inputs.error.reason,
+      },
+      "Share create throttled",
+    );
+  }
 
   z.post(
     "/shares/portfolio-pnl",
@@ -57,41 +75,50 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const allowed = await enforceShareCreateRateLimit(user.id);
-      if (!allowed) {
-        reply.code(429);
-        return reply.send({ error: "rate_limit_exceeded" });
-      }
-
       const body = request.body;
       try {
-        const allowPolymarketFunders =
-          body.venue === "polymarket" ||
-          body.venues?.includes("polymarket") ||
-          (!body.venue && (!body.venues || body.venues.length === 0));
-        const walletAddresses = await resolveRequestedWalletAddresses(
-          user.id,
-          walletAddress,
-          body.wallets,
-          { allowPolymarketFunders },
-        );
-        if (walletAddresses.length === 0) {
-          reply.code(400);
-          return reply.send({ error: "No wallets available to query." });
-        }
+        const share = await withShareCreateGuard(
+          { userId: user.id, kind: "portfolio_pnl" },
+          async () => {
+            const allowPolymarketFunders =
+              body.venue === "polymarket" ||
+              body.venues?.includes("polymarket") ||
+              (!body.venue && (!body.venues || body.venues.length === 0));
+            const walletAddresses = await resolveRequestedWalletAddresses(
+              user.id,
+              walletAddress,
+              body.wallets,
+              { allowPolymarketFunders },
+            );
+            if (walletAddresses.length === 0) {
+              throw new ShareSnapshotError(
+                400,
+                "No wallets available to query.",
+              );
+            }
 
-        const share = await createPortfolioPnlShare(pool, {
-          userId: user.id,
-          walletAddresses,
-          referralCode: body.referralCode,
-          venue: body.venue,
-          venues: body.venues,
-          topPositionId: body.topPositionId,
-        });
+            return createPortfolioPnlShare(pool, {
+              userId: user.id,
+              walletAddresses,
+              referralCode: body.referralCode,
+              venue: body.venue,
+              venues: body.venues,
+              topPositionId: body.topPositionId,
+            });
+          },
+        );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(share);
       } catch (error) {
+        if (error instanceof ShareCreateGuardError) {
+          logShareCreateThrottle({
+            userId: user.id,
+            kind: "portfolio_pnl",
+            error,
+          });
+          return sendShareCreateThrottle(reply, error);
+        }
         const statusCode = errorStatusCode(error);
         if (statusCode >= 500) {
           app.log.error({ error, userId: user.id }, "Failed to create PnL share");
@@ -117,22 +144,46 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
-      const allowed = await enforceShareCreateRateLimit(user.id);
-      if (!allowed) {
-        reply.code(429);
-        return reply.send({ error: "rate_limit_exceeded" });
-      }
-
       try {
-        const share = await createTradePnlShare(pool, {
+        const cachedShare = await getCachedTradePnlShare({
           userId: user.id,
           positionId: request.body.positionId,
           referralCode: request.body.referralCode,
         });
+        if (cachedShare) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(cachedShare);
+        }
+
+        const share = await withShareCreateGuard(
+          { userId: user.id, kind: "trade_pnl" },
+          () =>
+            createTradePnlShare(pool, {
+              userId: user.id,
+              positionId: request.body.positionId,
+              referralCode: request.body.referralCode,
+            }),
+        );
+        await cacheTradePnlShare(
+          {
+            userId: user.id,
+            positionId: request.body.positionId,
+            referralCode: request.body.referralCode,
+          },
+          share,
+        );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(share);
       } catch (error) {
+        if (error instanceof ShareCreateGuardError) {
+          logShareCreateThrottle({
+            userId: user.id,
+            kind: "trade_pnl",
+            error,
+          });
+          return sendShareCreateThrottle(reply, error);
+        }
         const statusCode = errorStatusCode(error);
         if (statusCode >= 500) {
           app.log.error(
