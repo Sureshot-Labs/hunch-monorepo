@@ -1186,6 +1186,28 @@ function escapeSqlLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
 
+function extractSearchTerms(value: string | null | undefined): string[] {
+  const terms =
+    value
+      ?.toLowerCase()
+      .match(/[a-z0-9]+/g)
+      ?.filter((term) => term.length >= 2) ?? [];
+  return Array.from(new Set(terms)).slice(0, 8);
+}
+
+function buildAllSearchTermsMatchSql(
+  documentSql: string,
+  termsParam: string,
+): string {
+  return `
+    not exists (
+      select 1
+      from unnest(${termsParam}::text[]) search_term
+      where lower(${documentSql}) not like '%' || search_term || '%'
+    )
+  `;
+}
+
 function appendWalletMarketSearchFilter(
   clauses: string[],
   params: PgParams,
@@ -1325,6 +1347,9 @@ type WalletPositioningRow = {
   last_activity_at: Date | null;
   inferred_wins: number | null;
   inferred_total: number | null;
+  search_membership_tier: number | null;
+  search_market_match_tier: number | null;
+  search_event_match_tier: number | null;
 };
 
 type WalletPositioningQuoteRow = {
@@ -1846,6 +1871,7 @@ function compareStringAsc(a: string, b: string): number {
 function sortPositioningMarkets(
   markets: PositioningMarketAggregate[],
   sort: WalletPositioningQuery["sort"],
+  searchTierByMarketId?: Map<string, number>,
 ): PositioningMarketAggregate[] {
   const value = (market: PositioningMarketAggregate): number | null => {
     switch (sort) {
@@ -1891,6 +1917,14 @@ function sortPositioningMarkets(
     }
   };
   return [...markets].sort((a, b) => {
+    if (searchTierByMarketId) {
+      const bySearchTier = compareNullableNumberDesc(
+        searchTierByMarketId.get(a.marketId) ?? 0,
+        searchTierByMarketId.get(b.marketId) ?? 0,
+      );
+      if (bySearchTier !== 0) return bySearchTier;
+    }
+
     const byPrimary = compareNullableNumberDesc(value(a), value(b));
     if (byPrimary !== 0) return byPrimary;
 
@@ -1947,6 +1981,7 @@ function sortPositioningHolders(
 function sortPositioningEvents(
   events: PositioningEventAggregate[],
   sort: WalletPositioningQuery["sort"],
+  searchTierByEventId?: Map<string, number>,
 ): PositioningEventAggregate[] {
   const value = (event: PositioningEventAggregate): number | null => {
     switch (sort) {
@@ -1990,6 +2025,14 @@ function sortPositioningEvents(
     }
   };
   return [...events].sort((a, b) => {
+    if (searchTierByEventId) {
+      const bySearchTier = compareNullableNumberDesc(
+        searchTierByEventId.get(a.eventId) ?? 0,
+        searchTierByEventId.get(b.eventId) ?? 0,
+      );
+      if (bySearchTier !== 0) return bySearchTier;
+    }
+
     const byPrimary = compareNullableNumberDesc(value(a), value(b));
     if (byPrimary !== 0) return byPrimary;
 
@@ -2242,9 +2285,72 @@ async function loadTrackedWalletPositioning(input: {
     fallbackThreshold: searchWindow.fallbackThreshold,
     earlyFilterInputs: searchEarlyFilterInputs,
   });
-  if (searchFilter.hasSearch) {
-    marketClauses.push("um.event_id in (select id from search_events)");
+  const searchTerms = searchFilter.hasSearch ? extractSearchTerms(query.q) : [];
+  const searchTermsParam = searchFilter.hasSearch
+    ? addSearchParam(searchTerms)
+    : null;
+  const marketSearchDocumentSql = `
+    concat_ws(
+      ' ',
+      um.id,
+      um.title,
+      um.slug,
+      um.description,
+      um.category,
+      um.outcomes::text
+    )
+  `;
+  const eventSearchDocumentSql = `
+    concat_ws(
+      ' ',
+      ue.id,
+      ue.title,
+      ue.slug,
+      ue.description,
+      ue.category
+    )
+  `;
+  const siblingMarketSearchDocumentSql = `
+    concat_ws(
+      ' ',
+      sm.id,
+      sm.title,
+      sm.slug,
+      sm.description,
+      sm.category,
+      sm.outcomes::text
+    )
+  `;
+  const marketSearchMatchSql =
+    searchTermsParam && searchTerms.length > 0
+      ? `case when ${buildAllSearchTermsMatchSql(marketSearchDocumentSql, searchTermsParam)} then 1 else 0 end`
+      : "0";
+  const eventSearchMatchSql =
+    searchTermsParam && searchTerms.length > 0
+      ? `case when ${buildAllSearchTermsMatchSql(eventSearchDocumentSql, searchTermsParam)} then 1 else 0 end`
+      : "0";
+  if (searchTermsParam && searchTerms.length > 0) {
+    const siblingMarketSearchMatchSql = buildAllSearchTermsMatchSql(
+      siblingMarketSearchDocumentSql,
+      searchTermsParam,
+    );
+    marketClauses.push(`
+      (
+        (${marketSearchMatchSql}) > 0
+        or (
+          (${eventSearchMatchSql}) > 0
+          and not exists (
+            select 1
+            from unified_markets sm
+            where sm.event_id = um.event_id
+              and sm.status = 'ACTIVE'
+              and ${siblingMarketSearchMatchSql}
+          )
+        )
+      )
+    `);
   }
+  const searchMembershipSql = searchFilter.hasSearch ? "1" : "0";
 
   const { rows } = await client.query<WalletPositioningRow>(
     `
@@ -2390,7 +2496,10 @@ async function loadTrackedWalletPositioning(input: {
         lp.two_sided_markets,
         lp.last_activity_at,
         lp.inferred_wins,
-        lp.inferred_total
+        lp.inferred_total,
+        ${searchMembershipSql}::int as search_membership_tier,
+        (${marketSearchMatchSql})::int as search_market_match_tier,
+        (${eventSearchMatchSql})::int as search_event_match_tier
       from latest_positions lp
       join unified_markets um on um.id = lp.market_id
       left join unified_events ue on ue.id = um.event_id
@@ -2417,6 +2526,8 @@ async function loadTrackedWalletPositioning(input: {
       sideStats: Record<PositioningSide, PositioningAccumulator>;
       pnlEntryWeighted: Record<PositioningSide, number>;
       pnlEntryShares: Record<PositioningSide, number>;
+      searchMarketTier: number;
+      searchEventTier: number;
     }
   >();
 
@@ -2561,9 +2672,31 @@ async function loadTrackedWalletPositioning(input: {
         },
         pnlEntryWeighted: { YES: 0, NO: 0 },
         pnlEntryShares: { YES: 0, NO: 0 },
+        searchMarketTier: 0,
+        searchEventTier: 0,
       };
       marketBuilders.set(row.market_id, builder);
     }
+
+    const searchMembershipTier = row.search_membership_tier ?? 0;
+    const hasDirectMarketMatch = (row.search_market_match_tier ?? 0) > 0;
+    const hasDirectEventMatch = (row.search_event_match_tier ?? 0) > 0;
+    builder.searchMarketTier = Math.max(
+      builder.searchMarketTier,
+      hasDirectMarketMatch
+        ? 3
+        : hasDirectEventMatch
+          ? 2
+          : searchMembershipTier,
+    );
+    builder.searchEventTier = Math.max(
+      builder.searchEventTier,
+      hasDirectEventMatch
+        ? 3
+        : hasDirectMarketMatch
+          ? 2
+          : searchMembershipTier,
+    );
 
     const sideAgg = builder.market.sideBreakdown[side];
     builder.holders.push(holder);
@@ -2752,18 +2885,43 @@ async function loadTrackedWalletPositioning(input: {
 
     return market as PositioningMarketAggregate;
   });
+  const searchTierByMarketId =
+    searchFilter.hasSearch && marketBuilders.size > 0
+      ? new Map(
+          Array.from(marketBuilders.entries()).map(([marketId, builder]) => [
+            marketId,
+            builder.searchMarketTier,
+          ]),
+        )
+      : undefined;
+  const searchTierByEventMarketId =
+    searchFilter.hasSearch && marketBuilders.size > 0
+      ? new Map(
+          Array.from(marketBuilders.entries()).map(([marketId, builder]) => [
+            marketId,
+            builder.searchEventTier,
+          ]),
+        )
+      : undefined;
 
   const effectiveMinWallets =
     query.minWallets ?? (input.rollup === "market-detail" ? 1 : 2);
   const walletFilteredMarkets = markets.filter(
     (market) => market.walletCount >= effectiveMinWallets,
   );
-  const marketFilteredMarkets = walletFilteredMarkets.filter((market) =>
-    marketPassesPositioningFilters(market, query),
-  );
+  const marketFilteredMarkets = walletFilteredMarkets.filter((market) => {
+    if (
+      searchFilter.hasSearch &&
+      (searchTierByMarketId?.get(market.marketId) ?? 0) > 0
+    ) {
+      return true;
+    }
+    return marketPassesPositioningFilters(market, query);
+  });
   const sortedMarkets = sortPositioningMarkets(
     marketFilteredMarkets,
     query.sort,
+    searchTierByMarketId,
   );
 
   const eventBuilders = new Map<
@@ -2792,6 +2950,7 @@ async function loadTrackedWalletPositioning(input: {
       walletMarketIds: Map<string, Set<string>>;
       markets: PositioningMarketAggregate[];
       stats: PositioningAccumulator;
+      searchTier: number;
     }
   >();
   for (const market of walletFilteredMarkets) {
@@ -2815,10 +2974,16 @@ async function loadTrackedWalletPositioning(input: {
         walletMarketIds: new Map(),
         markets: [],
         stats: initPositioningAccumulator(),
+        searchTier: 0,
       };
       eventBuilders.set(market.eventId, builder);
     }
     builder.markets.push(market);
+    builder.searchTier = Math.max(
+      builder.searchTier,
+      searchTierByMarketId?.get(market.marketId) ?? 0,
+      searchTierByEventMarketId?.get(market.marketId) ?? 0,
+    );
     builder.event.trackedPositionUsd += market.trackedPositionUsd;
     builder.event.largestMarketUsd = Math.max(
       builder.event.largestMarketUsd ?? market.trackedPositionUsd,
@@ -2842,6 +3007,15 @@ async function loadTrackedWalletPositioning(input: {
       addPositioningStats(builder.stats, holder);
     }
   }
+  const searchTierByEventId =
+    searchFilter.hasSearch && eventBuilders.size > 0
+      ? new Map(
+          Array.from(eventBuilders.entries()).map(([eventId, builder]) => [
+            eventId,
+            builder.searchTier,
+          ]),
+        )
+      : undefined;
   const sortedEvents = sortPositioningEvents(
     Array.from(eventBuilders.values())
       .map((builder) => {
@@ -2860,8 +3034,16 @@ async function loadTrackedWalletPositioning(input: {
         null,
       );
       const previewMarkets = isEventPositioningSort(query.sort)
-        ? sortPositioningMarkets(builder.markets, "balanced_disagreement")
-        : sortPositioningMarkets(builder.markets, query.sort);
+        ? sortPositioningMarkets(
+            builder.markets,
+            "balanced_disagreement",
+            searchTierByMarketId,
+          )
+        : sortPositioningMarkets(
+            builder.markets,
+            query.sort,
+            searchTierByMarketId,
+          );
       return {
         ...event,
         walletCount: builder.walletIds.size,
@@ -2904,9 +3086,17 @@ async function loadTrackedWalletPositioning(input: {
         ),
         topMarketsPreview: previewMarkets.slice(0, 3),
       };
-    })
-      .filter((event) => eventPassesPositioningFilters(event, query)),
+    }).filter((event) => {
+      if (
+        searchFilter.hasSearch &&
+        (searchTierByEventId?.get(event.eventId) ?? 0) > 0
+      ) {
+        return true;
+      }
+      return eventPassesPositioningFilters(event, query);
+    }),
     query.sort,
+    searchTierByEventId,
   );
 
   const page =
@@ -4783,6 +4973,116 @@ async function filterWalletIdsByMetadata(
         )
     `,
     [walletIds, categoryFilter, tagsFilter, filters.tagMode ?? "any"],
+  );
+  return rows.rows.map((row) => row.wallet_id);
+}
+
+async function filterWalletIdsByActivitySummarySearch(
+  client: PoolClient,
+  userId: string | null,
+  walletIds: string[],
+  filters: {
+    q?: string | null;
+    marketId?: string | null;
+    eventId?: string | null;
+    windowHours: number;
+  },
+): Promise<string[]> {
+  if (walletIds.length === 0) return [];
+  const rawQuery = filters.q?.trim() ?? "";
+  const terms = extractSearchTerms(rawQuery);
+  const hasRawQuery = rawQuery.length > 0;
+  const hasQuery = terms.length > 0;
+  const marketId = filters.marketId?.trim() || null;
+  const eventId = filters.eventId?.trim() || null;
+  const hasReferenceFilter = marketId != null || eventId != null;
+  if (hasRawQuery && !hasQuery) return [];
+  if (!hasQuery && !hasReferenceFilter) return walletIds;
+
+  const walletDocumentSql = `
+    concat_ws(
+      ' ',
+      w.address,
+      w.label,
+      wl.label,
+      wn.name,
+      wp.profile->>'label',
+      wp.profile->>'label_short'
+    )
+  `;
+  const marketDocumentSql = `
+    concat_ws(
+      ' ',
+      um.id,
+      um.title,
+      um.slug,
+      um.description,
+      um.category,
+      um.outcomes::text,
+      ue.id,
+      ue.title,
+      ue.slug,
+      ue.description,
+      ue.category
+    )
+  `;
+  const walletQueryMatchSql = hasQuery
+    ? buildAllSearchTermsMatchSql(walletDocumentSql, "$6")
+    : "false";
+  const marketQueryMatchSql = hasQuery
+    ? buildAllSearchTermsMatchSql(marketDocumentSql, "$6")
+    : "true";
+
+  const rows = await client.query<{ wallet_id: string }>(
+    `
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      )
+      select ws.wallet_id
+      from wallet_set ws
+      join wallets w on w.id = ws.wallet_id
+      left join wallet_user_labels wl
+        on wl.wallet_id = w.id
+       and wl.user_id = $2::uuid
+      left join wallet_user_names wn
+        on wn.wallet_id = w.id
+       and wn.user_id = $2::uuid
+      left join wallet_profiles wp on wp.wallet_id = w.id
+      where (
+        (
+          $4::text is null
+          and $5::text is null
+        )
+        or exists (
+          select 1
+          from wallet_activity_hourly wah
+          join unified_markets um on um.id = wah.market_id
+          left join unified_events ue on ue.id = um.event_id
+          where wah.wallet_id = ws.wallet_id
+            and wah.activity_type in ('delta', 'trade')
+            and wah.hour_bucket >= now() - ($3::text || ' hours')::interval
+            and ($4::text is null or wah.market_id = $4::text)
+            and ($5::text is null or um.event_id = $5::text)
+        )
+      )
+      and (
+        cardinality($6::text[]) = 0
+        or ${walletQueryMatchSql}
+        or exists (
+          select 1
+          from wallet_activity_hourly wah
+          join unified_markets um on um.id = wah.market_id
+          left join unified_events ue on ue.id = um.event_id
+          where wah.wallet_id = ws.wallet_id
+            and wah.activity_type in ('delta', 'trade')
+            and wah.hour_bucket >= now() - ($3::text || ' hours')::interval
+            and ($4::text is null or wah.market_id = $4::text)
+            and ($5::text is null or um.event_id = $5::text)
+            and ${marketQueryMatchSql}
+        )
+      )
+    `,
+    [walletIds, userId, filters.windowHours, marketId, eventId, terms],
   );
   return rows.rows.map((row) => row.wallet_id);
 }
@@ -8697,7 +8997,19 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 tagMode: query.tagMode,
               },
             );
-            let workingWalletIds = filteredWalletIds;
+            const searchedWalletIds =
+              await filterWalletIdsByActivitySummarySearch(
+                client,
+                userId,
+                filteredWalletIds,
+                {
+                  q: query.q,
+                  marketId: query.marketId,
+                  eventId: query.eventId,
+                  windowHours,
+                },
+              );
+            let workingWalletIds = searchedWalletIds;
             if (
               needsAttributionForFilters &&
               !requiresSummaryForAttributionFilters &&
@@ -8917,12 +9229,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             const candidates = await loadWalletRowsByIds(
               client,
               userId,
-              filteredWalletIds,
+              searchedWalletIds,
               null,
             );
             const summaryStatsMap = await fetchWalletActivitySummaryStats(
               client,
-              filteredWalletIds,
+              searchedWalletIds,
               summaryOptions,
             );
 

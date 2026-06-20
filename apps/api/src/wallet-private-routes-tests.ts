@@ -991,6 +991,105 @@ async function main() {
     }
 
     {
+      const suffix = crypto.randomUUID().slice(0, 8);
+      const category = `summary-search-category-${suffix}`;
+      const matching = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-summary-match`,
+        category,
+      });
+      const unrelated = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-summary-other`,
+        category,
+      });
+      const searchNeedle = `summarysearch${suffix}`;
+      await pool.query(
+        `
+          update unified_markets
+          set title = $1
+          where id = $2
+        `,
+        [`Summary ${searchNeedle} market`, matching.marketId],
+      );
+      await pool.query(
+        `
+          update unified_events
+          set title = $1
+          where id = $2
+        `,
+        [`Summary ${searchNeedle} event`, matching.eventId],
+      );
+      const matchingWalletId = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        volumeUsd: 4_000,
+        pnlUsd: 100,
+        roi: 0.025,
+        trades30d: 11,
+      });
+      const otherWalletId = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        volumeUsd: 4_100,
+        pnlUsd: 110,
+        roi: 0.026,
+        trades30d: 12,
+      });
+      await pool.query(
+        `
+          insert into wallet_activity_hourly (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            activity_type,
+            hour_bucket,
+            signed_delta_usd,
+            abs_delta_usd,
+            counts_opened,
+            last_occurred_at
+          )
+          values
+            ($1, 'polymarket', $2, 'YES', 'trade', date_trunc('hour', now()), 11, 11, 1, now()),
+            ($1, 'polymarket', $3, 'NO', 'trade', date_trunc('hour', now()), 7, 7, 1, now()),
+            ($4, 'polymarket', $3, 'YES', 'trade', date_trunc('hour', now()), 19, 19, 1, now())
+          on conflict (wallet_id, venue, market_id, outcome_side, activity_type, hour_bucket)
+          do update set
+            signed_delta_usd = excluded.signed_delta_usd,
+            abs_delta_usd = excluded.abs_delta_usd,
+            counts_opened = excluded.counts_opened,
+            last_occurred_at = excluded.last_occurred_at
+        `,
+        [matchingWalletId, matching.marketId, unrelated.marketId, otherWalletId],
+      );
+
+      for (const url of [
+        `/wallets/activity/summary?scope=whales&q=${encodeURIComponent(searchNeedle)}&limit=100&offset=0&includeAttribution=false`,
+        `/wallets/activity/summary?scope=whales&marketId=${encodeURIComponent(matching.marketId)}&limit=100&offset=0&includeAttribution=false`,
+        `/wallets/activity/summary?scope=whales&eventId=${encodeURIComponent(matching.eventId)}&limit=100&offset=0&includeAttribution=false`,
+      ]) {
+        const response = await app.inject({ method: "GET", url });
+        assert.equal(response.statusCode, 200);
+        const body = response.json() as {
+          ok: boolean;
+          items: Array<{ walletId: string; netChangeUsd: number | null }>;
+        };
+        assert.equal(body.ok, true);
+        assert.equal(
+          body.items.some((item) => item.walletId === matchingWalletId),
+          true,
+        );
+        assert.equal(
+          body.items.some((item) => item.walletId === otherWalletId),
+          false,
+        );
+        const item = body.items.find(
+          (candidate) => candidate.walletId === matchingWalletId,
+        );
+        assert.equal(item?.netChangeUsd, 18);
+      }
+    }
+
+    {
       const response = await app.inject({
         method: "GET",
         url: "/wallets/activity/summary?scope=following&limit=5&offset=0",
@@ -1599,6 +1698,114 @@ async function main() {
       assert.equal(
         searchedEventPositioningBody.items[0]?.eventId,
         matching.eventId,
+      );
+
+      const childSearchCategory = `${category}-child-search`;
+      const childSearchEvent = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-child-search`,
+        category: childSearchCategory,
+      });
+      const childSearchSibling = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-child-search-sibling`,
+        category: childSearchCategory,
+      });
+      await pool.query(
+        `
+          update unified_events
+          set title = $1
+          where id = $2
+        `,
+        ["Republican presidential nominee test event", childSearchEvent.eventId],
+      );
+      await pool.query(
+        `
+          update unified_markets
+          set title = case
+                when id = $2 then 'Elon Musk nominee test market'
+                else 'Unrelated candidate nominee test market'
+              end,
+              event_id = $1,
+              category = $4
+          where id = any($3::text[])
+        `,
+        [
+          childSearchEvent.eventId,
+          childSearchEvent.marketId,
+          [childSearchEvent.marketId, childSearchSibling.marketId],
+          childSearchCategory,
+        ],
+      );
+      const childSearchWalletA = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        volumeUsd: 1_300,
+        pnlUsd: 20,
+        roi: 0.01,
+        trades30d: 6,
+        exposureUsd: 1_300,
+      });
+      const childSearchWalletB = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        volumeUsd: 1_400,
+        pnlUsd: 30,
+        roi: 0.02,
+        trades30d: 7,
+        exposureUsd: 1_400,
+      });
+      await pool.query(
+        `
+          insert into wallet_position_snapshots (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            shares,
+            size_usd,
+            price,
+            metadata,
+            snapshot_at
+          )
+          values
+            ($1, 'polymarket', $3, 'YES', 20, 200, 0.2, '{}'::jsonb, $5),
+            ($2, 'polymarket', $3, 'YES', 25, 250, 0.2, '{}'::jsonb, $5),
+            ($1, 'polymarket', $4, 'YES', 40, 400, 0.4, '{}'::jsonb, $5),
+            ($2, 'polymarket', $4, 'NO', 45, 450, 0.6, '{}'::jsonb, $5)
+        `,
+        [
+          childSearchWalletA,
+          childSearchWalletB,
+          childSearchEvent.marketId,
+          childSearchSibling.marketId,
+          new Date(snapshotAt.getTime() + 500),
+        ],
+      );
+      const childSearchEventResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?q=${encodeURIComponent("elon musk")}&category=${encodeURIComponent(childSearchCategory)}&minWallets=2&minContestedMarketCount=1&limit=5`,
+      });
+      assert.equal(childSearchEventResponse.statusCode, 200);
+      const childSearchEventBody = childSearchEventResponse.json() as {
+        ok: boolean;
+        items: Array<{
+          eventId: string;
+          topMarketsPreview: Array<{ marketId: string }>;
+        }>;
+      };
+      assert.equal(childSearchEventBody.ok, true);
+      const childSearchEventItem = childSearchEventBody.items.find(
+        (item) => item.eventId === childSearchEvent.eventId,
+      );
+      assert.ok(childSearchEventItem);
+      assert.equal(
+        childSearchEventItem.topMarketsPreview[0]?.marketId,
+        childSearchEvent.marketId,
+      );
+      assert.equal(
+        childSearchEventItem.topMarketsPreview.some(
+          (market) => market.marketId === childSearchSibling.marketId,
+        ),
+        false,
       );
 
       const sameEventOneSided = await createWalletMarketFixture(context, {

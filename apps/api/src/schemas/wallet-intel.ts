@@ -175,6 +175,9 @@ export const walletActivityQuerySchema = z.object({
 
 export const walletActivitySummaryQuerySchema = z.object({
   scope: z.enum(["following", "whales", "all"]).default("whales"),
+  q: z.string().trim().min(1).max(160).optional(),
+  marketId: z.string().trim().min(1).optional(),
+  eventId: z.string().trim().min(1).optional(),
   windowHours: z.coerce.number().int().min(1).optional(),
   topChanges: z.coerce.number().int().min(1).max(10).default(5),
   limit: z.coerce.number().int().min(1).max(100).default(50),

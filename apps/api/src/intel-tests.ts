@@ -1385,12 +1385,18 @@ const tests: TestCase[] = [
       const summary = walletActivitySummaryQuerySchema.parse({
         includeSparkline: "1",
         sort: "importance",
+        q: "Elon Musk",
+        marketId: "polymarket:123",
+        eventId: "polymarket:999",
       });
       const series = walletSeriesQuerySchema.parse({});
 
       assert.equal(whales.includeSparkline, true);
       assert.equal(summary.includeSparkline, true);
       assert.equal(summary.sort, "importance");
+      assert.equal(summary.q, "Elon Musk");
+      assert.equal(summary.marketId, "polymarket:123");
+      assert.equal(summary.eventId, "polymarket:999");
       assert.equal(series.windowHours, undefined);
       assert.equal(series.bucketHours, undefined);
       assert.equal(series.period, "30d");
