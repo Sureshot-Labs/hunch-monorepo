@@ -371,7 +371,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v20:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v26:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -1178,6 +1178,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         const searchWindow = buildFeedSearchResultWindow({
           limit,
           offset,
+          sort,
         });
         const searchFilter = buildFeedCandidateEventSearchFilter({
           add,

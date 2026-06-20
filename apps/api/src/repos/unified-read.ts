@@ -515,6 +515,13 @@ function buildFeedSearchDocumentExpr(
   `;
 }
 
+function buildFeedDirectMarketSearchDocumentExpr(alias: string): string {
+  return `
+    setweight(to_tsvector('english', coalesce(${alias}.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(${alias}.outcomes, '')), 'A')
+  `;
+}
+
 function extractFeedSearchPrefixTerms(q?: string): string[] {
   const terms = (q?.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(
     (term) => term.length >= 2,
@@ -555,6 +562,50 @@ function buildFeedSearchPlan(q?: string): FeedSearchPlan {
     searchText,
     prefixQueryText: prefixTerm ? `${prefixTerm}:*` : null,
   };
+}
+
+function buildFeedDirectMarketRelaxedQueryText(q?: string): string | null {
+  const terms = q?.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const relaxedTerms = Array.from(
+    new Set(
+      terms.filter(
+        (term) => term.length >= 4 && !FEED_SEARCH_STOP_WORDS.has(term),
+      ),
+    ),
+  ).slice(0, 2);
+
+  if (relaxedTerms.length < 2) return null;
+  return relaxedTerms.join(" | ");
+}
+
+function buildFeedSearchQueryCte(searchParam: string, prefixParam: string) {
+  return `
+      search_query as materialized (
+        select
+          prepared.query,
+          prepared.prefix_query,
+          (
+            querytree(prepared.query) <> ''
+            or (prepared.prefix_query is not null and querytree(prepared.prefix_query) <> '')
+          ) as applies
+        from (
+          select
+            raw.query,
+            case
+              when querytree(raw.query) = '' then null::tsquery
+              else raw.prefix_query
+            end as prefix_query
+          from (
+            select
+              websearch_to_tsquery('english', ${searchParam}::text) as query,
+              case
+                when ${prefixParam}::text is null then null::tsquery
+                else to_tsquery('english', ${prefixParam}::text)
+              end as prefix_query
+          ) raw
+        ) prepared
+      )
+    `;
 }
 
 function buildFeedSearchEarlyFilterSql(args: {
@@ -869,7 +920,10 @@ function buildFeedSearchContext(args: {
     "primary",
   );
   const fullEventSearchDocExpr = buildFeedSearchDocumentExpr("e", "full");
-  const fullMarketSearchDocExpr = buildFeedSearchDocumentExpr("m", "full");
+  const fullMarketSearchDocExpr = buildFeedSearchDocumentExpr(
+    "m",
+    "full",
+  );
   const effectiveMode = mode === "ranked" ? plan.rankMode : mode;
   const earlyFilters = plan.hasSearch
     ? buildFeedSearchEarlyFilterSql({
@@ -892,36 +946,16 @@ function buildFeedSearchContext(args: {
         earlyFilters,
       })
     : "";
-  const searchCte = plan.hasSearch
-    ? `
-      search_query as materialized (
-        select
-          prepared.query,
-          prepared.prefix_query,
-          (
-            querytree(prepared.query) <> ''
-            or (prepared.prefix_query is not null and querytree(prepared.prefix_query) <> '')
-          ) as applies
-        from (
-          select
-            raw.query,
-            case
-              when querytree(raw.query) = '' then null::tsquery
-              else raw.prefix_query
-            end as prefix_query
-          from (
-            select
-              websearch_to_tsquery('english', ${searchParam}::text) as query,
-              case
-                when ${prefixParam}::text is null then null::tsquery
-                else to_tsquery('english', ${prefixParam}::text)
-              end as prefix_query
-          ) raw
-        ) prepared
-      ),
+  let searchCte = "";
+  if (plan.hasSearch) {
+    if (!searchParam || !prefixParam) {
+      throw new Error("Feed search params were not initialized");
+    }
+    searchCte = `
+      ${buildFeedSearchQueryCte(searchParam, prefixParam)},
       ${searchMatchesSql}
-    `
-    : "";
+    `;
+  }
 
   return {
     hasSearch: plan.hasSearch,
@@ -1442,15 +1476,22 @@ function feedSearchResultMatchLimit(): number {
 }
 
 function feedSearchResultMatchLimitForInputs(
-  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds" | "sort" | "filter">,
 ): number | null {
   if (inputs.marketIds?.length) return null;
+  if (
+    inputs.sort === "time" ||
+    inputs.filter === "endingsoon" ||
+    inputs.filter === "newest"
+  ) {
+    return null;
+  }
   const pageAwareLimit = Math.max(inputs.limit + inputs.offset + 100, 200);
   return Math.min(pageAwareLimit, feedSearchResultMatchLimit());
 }
 
 function feedSearchFallbackThresholdForInputs(
-  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds" | "sort" | "filter">,
 ): number | null {
   const matchLimit = feedSearchResultMatchLimitForInputs(inputs);
   if (matchLimit == null) return null;
@@ -1458,7 +1499,10 @@ function feedSearchFallbackThresholdForInputs(
 }
 
 export function buildFeedSearchResultWindow(
-  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds">,
+  inputs: Pick<
+    FeedInputs,
+    "limit" | "offset" | "marketIds" | "sort" | "filter"
+  >,
 ): FeedSearchResultWindow {
   return {
     matchLimit: feedSearchResultMatchLimitForInputs(inputs),
@@ -2243,17 +2287,209 @@ export async function fetchFeedMarkets(
     );
   }
 
+  const directMarketSearchPlan = buildFeedSearchPlan(inputs.q);
+  const directMarketSearchParam = directMarketSearchPlan.hasSearch
+    ? add(directMarketSearchPlan.searchText)
+    : null;
+  const directMarketPrefixParam = directMarketSearchPlan.hasSearch
+    ? add(directMarketSearchPlan.prefixQueryText)
+    : null;
+  const directMarketRelaxedQueryText = directMarketSearchPlan.hasSearch
+    ? buildFeedDirectMarketRelaxedQueryText(inputs.q)
+    : null;
+  const directMarketRelaxedParam = directMarketRelaxedQueryText
+    ? add(directMarketRelaxedQueryText)
+    : null;
+  const directMarketSearchDocExpr =
+    buildFeedDirectMarketSearchDocumentExpr("m");
+  const directMarketExactExpr = directMarketSearchParam
+    ? `
+      lower(regexp_replace(btrim(coalesce(m.title, '')), '\\s+', ' ', 'g')) =
+        lower(regexp_replace(btrim(${directMarketSearchParam}::text), '\\s+', ' ', 'g'))
+      or exists (
+        select 1
+        from jsonb_array_elements_text(
+          case
+            when m.outcomes is not null and btrim(m.outcomes) <> '' then m.outcomes::jsonb
+            else '[]'::jsonb
+          end
+        ) as outcome(label)
+        where lower(regexp_replace(btrim(outcome.label), '\\s+', ' ', 'g')) =
+          lower(regexp_replace(btrim(${directMarketSearchParam}::text), '\\s+', ' ', 'g'))
+      )
+    `
+    : "false";
+  const directMarketRankExpr =
+    directMarketSearchPlan.rankMode === "ranked"
+      ? `ts_rank_cd((${directMarketSearchDocExpr}), SEARCH_QUERY_PLACEHOLDER) * 2`
+      : "coalesce(m.volume_total, m.open_interest, m.liquidity, 0)";
+  const buildDirectMarketMatchesSql = (
+    queryExpr: "sq.query" | "sq.prefix_query",
+    matchKind: "strict" | "relaxed" = "strict",
+  ) => `
+        select
+          m.id as market_id,
+          m.event_id,
+          (${directMarketExactExpr}) as exact_match,
+          ${matchKind === "strict" ? "true" : "false"} as strict_match,
+          ${matchKind === "relaxed" ? "true" : "false"} as relaxed_match,
+          ${directMarketRankExpr.replace("SEARCH_QUERY_PLACEHOLDER", queryExpr)} as rank
+        from unified_markets m
+        left join polymarket_markets pm_filter
+          on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+        cross join search_query sq
+        where ${queryExpr === "sq.query" ? "querytree(sq.query) <> ''" : "sq.prefix_query is not null and querytree(sq.prefix_query) <> ''"}
+          and ${marketWhere.join(" and ")}
+          and (${directMarketSearchDocExpr}) @@ ${queryExpr}
+      `;
+  const directMarketRelaxedMatchesSql = directMarketRelaxedParam
+    ? `
+        select
+          m.id as market_id,
+          m.event_id,
+          false as exact_match,
+          false as strict_match,
+          true as relaxed_match,
+          coalesce(m.volume_total, m.open_interest, m.liquidity, 0) as rank
+        from unified_markets m
+        left join polymarket_markets pm_filter
+          on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+        where ${marketWhere.join(" and ")}
+          and (${directMarketSearchDocExpr}) @@ to_tsquery('english', ${directMarketRelaxedParam}::text)
+      `
+    : null;
+  const directMarketSearchCtes =
+    directMarketSearchPlan.hasSearch &&
+    directMarketSearchParam &&
+    directMarketPrefixParam
+      ? [
+          buildFeedSearchQueryCte(
+            directMarketSearchParam,
+            directMarketPrefixParam,
+          ),
+          `
+      direct_market_matches as materialized (
+        select
+          market_id,
+          event_id,
+          bool_or(exact_match) as exact_match,
+          bool_or(strict_match) as strict_match,
+          bool_or(relaxed_match) as relaxed_match,
+          max(rank) as rank
+        from (
+          ${buildDirectMarketMatchesSql("sq.query")}
+          union all
+          ${buildDirectMarketMatchesSql("sq.prefix_query")}
+          ${
+            directMarketRelaxedMatchesSql
+              ? `union all
+          ${directMarketRelaxedMatchesSql}`
+              : ""
+          }
+        ) matches
+        group by market_id, event_id
+      )
+    `,
+          `
+      events_with_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+      )
+    `,
+          `
+      events_with_exact_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+        where exact_match
+      )
+    `,
+          `
+      events_with_strict_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+        where strict_match
+      )
+    `,
+          `
+      events_with_relaxed_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+        where relaxed_match
+      )
+    `,
+        ]
+      : [];
+
   const marketOrder = "eo.ord, m.market_rank, m.venue_market_id";
 
   const marketRankExpr = `
     row_number() over (
       partition by m.event_id
       order by
+        ${
+          directMarketSearchPlan.hasSearch
+            ? `case when dmm.exact_match then 0 when dmm.strict_match then 1 when dmm.relaxed_match then 2 else 3 end,
+        dmm.rank desc nulls last,`
+            : ""
+        }
         coalesce(${marketVolumeDisplayExpr}, 0) desc nulls last,
         coalesce(${marketLiquidityDisplayExpr}, 0) desc nulls last,
         m.venue_market_id
     ) as market_rank
   `;
+  const directMarketJoin = directMarketSearchPlan.hasSearch
+    ? "left join direct_market_matches dmm on dmm.market_id = m.id"
+    : "";
+  const directMarketFilter = directMarketSearchPlan.hasSearch
+    ? `
+      and (
+        (
+          exists (
+            select 1
+            from events_with_exact_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and dmm.exact_match
+        )
+        or (
+          not exists (
+            select 1
+            from events_with_exact_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and exists (
+            select 1
+            from events_with_strict_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and dmm.strict_match
+        )
+        or (
+          not exists (
+            select 1
+            from events_with_exact_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and not exists (
+            select 1
+            from events_with_strict_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and exists (
+            select 1
+            from events_with_relaxed_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and dmm.relaxed_match
+        )
+        or not exists (
+          select 1
+          from events_with_direct_market_matches edm
+          where edm.event_id = m.event_id
+        )
+      )
+    `
+    : "";
   const rankedMarketSql = `
     select
       m.*,
@@ -2261,7 +2497,9 @@ export async function fetchFeedMarkets(
     from unified_markets m
     left join polymarket_markets pm_filter
       on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
+    ${directMarketJoin}
     where ${marketWhere.join(" and ")}
+    ${directMarketFilter}
   `;
 
   const marketBaseSql = `
@@ -2343,6 +2581,7 @@ export async function fetchFeedMarkets(
   const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
   if (change24hCteParts.length) withParts.push(...change24hCteParts);
+  if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   withParts.push(`event_order as (${eventOrderSql})`);
   withParts.push(`market_base as (${marketBaseSql})`);
   withParts.push(...bookSnapshot.ctes);

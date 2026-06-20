@@ -27,6 +27,7 @@ type SeededMarket = {
   eventId: string;
   title: string;
   description?: string | null;
+  outcomes?: string;
   category?: string | null;
   closeTime: Date;
   expirationTime: Date;
@@ -42,7 +43,7 @@ type FeedPayload = {
     markets: Array<{
       id: string;
       marketId: string;
-      title: string | null;
+      marketTitle: string | null;
       volume: number;
     }>;
   }>;
@@ -144,7 +145,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         $1, $2, $3, $4, $5, $6, $7, 'ACTIVE', 'binary',
         now() - interval '1 hour', $8, $9,
         0.45, 0.55, 0.5, $10, 10, $11, 50,
-        '["Yes","No"]', $12,
+        $12, $13,
         case
           when $2 = 'kalshi' then '{"dflowNativeAcceptingOrders":true}'::jsonb
           else '{}'::jsonb
@@ -164,6 +165,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       market.expirationTime.toISOString(),
       market.volumeTotal,
       market.liquidity ?? 100,
+      market.outcomes ?? '["Yes","No"]',
       makeId("slug"),
     ],
   );
@@ -252,6 +254,7 @@ async function main() {
       venue: "polymarket",
       venueEventId: makeId("venue-event"),
       title: `Child market event ${needle}`,
+      description: "Container event mention for Elon Musk child expansion",
       category,
       startDate: new Date(now - 60 * 60 * 1000),
       endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
@@ -350,6 +353,37 @@ async function main() {
       endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
       volumeTotal: 2,
     },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Last-name child market event ${needle}`,
+      description: "Container event mention for Donald Trump child expansion",
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 900,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Bitcoin Up or Down near-term ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 5 * 60 * 1000),
+      volumeTotal: 0,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `Bitcoin Bitcoin Bitcoin Up or Down high-volume future ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 24 * 60 * 60 * 1000),
+      volumeTotal: 1_000_000,
+    },
     ...outOfCategoryFallbackEvents,
   ];
 
@@ -368,11 +402,112 @@ async function main() {
       id: makeId("polymarket:market"),
       venue: "polymarket",
       venueMarketId: makeId("venue-market"),
+      eventId: events[0].id,
+      title: `Second event title backed market ${needle}`,
+      closeTime: events[0].endDate,
+      expirationTime: events[0].endDate,
+      volumeTotal: 300,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
       eventId: events[1].id,
       title: `Trump President June market child ${needle}`,
       closeTime: events[1].endDate,
       expirationTime: events[1].endDate,
       volumeTotal: 1200,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[1].id,
+      title: `Unrelated high-volume sibling ${needle}`,
+      closeTime: events[1].endDate,
+      expirationTime: events[1].endDate,
+      volumeTotal: 999999,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[1].id,
+      title: "Donald Trump Jr.",
+      closeTime: events[1].endDate,
+      expirationTime: events[1].endDate,
+      volumeTotal: 5000,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[1].id,
+      title: "Donald Trump",
+      closeTime: events[1].endDate,
+      expirationTime: events[1].endDate,
+      volumeTotal: 1000,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[1].id,
+      title: `Generic nomination outcome market ${needle}`,
+      outcomes: '["Elon Musk","No"]',
+      closeTime: events[1].endDate,
+      expirationTime: events[1].endDate,
+      volumeTotal: 1300,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[11].id,
+      title: "Petro - Colombia President",
+      closeTime: events[11].endDate,
+      expirationTime: events[11].endDate,
+      volumeTotal: 9000,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[11].id,
+      title: "Trump - USA President",
+      closeTime: events[11].endDate,
+      expirationTime: events[11].endDate,
+      volumeTotal: 100,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[11].id,
+      title: "Starmer - UK PM",
+      closeTime: events[11].endDate,
+      expirationTime: events[11].endDate,
+      volumeTotal: 8000,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[12].id,
+      title: `Bitcoin Up or Down near-term ${needle}`,
+      closeTime: events[12].endDate,
+      expirationTime: events[12].endDate,
+      volumeTotal: 0,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[13].id,
+      title: `Bitcoin Bitcoin Bitcoin Up or Down high-volume future ${needle}`,
+      closeTime: events[13].endDate,
+      expirationTime: events[13].endDate,
+      volumeTotal: 1_000_000,
     },
     {
       id: makeId("kalshi:market"),
@@ -555,6 +690,36 @@ async function main() {
       const response = await app.inject({
         method: "GET",
         url: `/feed?${buildQuery({
+          q: "Donald Trump",
+          view: "events",
+          category,
+          limit: 5,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const childMarketEvent = payload.data.find(
+        (event) => event.eventId === events[1].id,
+      );
+      assert.deepEqual(
+        childMarketEvent?.markets.map((market) => market.marketTitle),
+        ["Donald Trump"],
+        "event-mode search should prefer exact child market matches over broader token matches",
+      );
+      const lastNameOnlyEvent = payload.data.find(
+        (event) => event.eventId === events[11].id,
+      );
+      assert.deepEqual(
+        lastNameOnlyEvent?.markets.map((market) => market.marketTitle),
+        ["Trump - USA President"],
+        "event-mode search should use bounded child fallback for last-name market labels before showing all siblings",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
           q: "x",
           view: "events",
           category,
@@ -673,6 +838,74 @@ async function main() {
       const eventIds = payload.data.map((event) => event.eventId);
       assert.ok(eventIds.includes(events[0].id));
       assert.ok(eventIds.includes(events[1].id));
+      const eventTitleOnlyMatch = payload.data.find(
+        (event) => event.eventId === events[0].id,
+      );
+      assert.deepEqual(
+        eventTitleOnlyMatch?.markets.map((market) => market.marketTitle),
+        [
+          `Second event title backed market ${needle}`,
+          `Event title backed market ${needle}`,
+        ],
+        "event-mode search should keep all child markets when only the event matches",
+      );
+      const childMarketEvent = payload.data.find(
+        (event) => event.eventId === events[1].id,
+      );
+      assert.deepEqual(
+        childMarketEvent?.markets.map((market) => market.marketTitle),
+        [`Trump President June market child ${needle}`],
+        "event-mode search should expand direct child market matches instead of unrelated sibling markets",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: "Elon Musk",
+          view: "events",
+          category,
+          limit: 5,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const childMarketEvent = payload.data.find(
+        (event) => event.eventId === events[1].id,
+      );
+      assert.deepEqual(
+        childMarketEvent?.markets.map((market) => market.marketTitle),
+        [`Generic nomination outcome market ${needle}`],
+        "event-mode search should match market outcomes and expand only the matching child market",
+      );
+    }
+
+    {
+      const savedSearchLimit = env.feedSearchResultMatchLimit;
+      env.feedSearchResultMatchLimit = 1;
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/feed?${buildQuery({
+            q: `Bitcoin up ${needle}`,
+            view: "events",
+            category,
+            sort: "time",
+            sort_dir: "asc",
+            limit: 2,
+          })}`,
+        });
+        assert.equal(response.statusCode, 200);
+        const payload = response.json<FeedPayload>();
+        assert.equal(
+          payload.data[0]?.eventId,
+          events[12].id,
+          "time-sorted search should apply chronological ordering across all search matches, not only top relevance matches",
+        );
+      } finally {
+        env.feedSearchResultMatchLimit = savedSearchLimit;
+      }
     }
 
     {
@@ -685,13 +918,16 @@ async function main() {
           category,
           sort: "totalvol",
           sort_dir: "desc",
-          limit: 5,
+          limit: 20,
         })}`,
       });
       assert.equal(response.statusCode, 200);
       const payload = response.json<FeedPayload>();
+      const uniqueEventIds = Array.from(
+        new Set(payload.data.map((event) => event.eventId)),
+      );
       assert.deepEqual(
-        payload.data.map((event) => event.eventId),
+        uniqueEventIds,
         [events[1].id, events[0].id],
       );
     }
@@ -727,7 +963,7 @@ async function main() {
       const payload = response.json<FeedPayload>();
       assert.deepEqual(
         payload.data.map((event) => event.eventId),
-        [events[2].id, events[1].id],
+        [events[13].id, events[2].id],
       );
     }
   } finally {

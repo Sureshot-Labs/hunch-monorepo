@@ -2526,6 +2526,7 @@ async function loadTrackedWalletPositioning(input: {
       sideStats: Record<PositioningSide, PositioningAccumulator>;
       pnlEntryWeighted: Record<PositioningSide, number>;
       pnlEntryShares: Record<PositioningSide, number>;
+      directSearchMarketTier: number;
       searchMarketTier: number;
       searchEventTier: number;
     }
@@ -2672,6 +2673,7 @@ async function loadTrackedWalletPositioning(input: {
         },
         pnlEntryWeighted: { YES: 0, NO: 0 },
         pnlEntryShares: { YES: 0, NO: 0 },
+        directSearchMarketTier: 0,
         searchMarketTier: 0,
         searchEventTier: 0,
       };
@@ -2681,6 +2683,10 @@ async function loadTrackedWalletPositioning(input: {
     const searchMembershipTier = row.search_membership_tier ?? 0;
     const hasDirectMarketMatch = (row.search_market_match_tier ?? 0) > 0;
     const hasDirectEventMatch = (row.search_event_match_tier ?? 0) > 0;
+    builder.directSearchMarketTier = Math.max(
+      builder.directSearchMarketTier,
+      hasDirectMarketMatch ? 3 : 0,
+    );
     builder.searchMarketTier = Math.max(
       builder.searchMarketTier,
       hasDirectMarketMatch
@@ -2894,6 +2900,15 @@ async function loadTrackedWalletPositioning(input: {
           ]),
         )
       : undefined;
+  const directSearchTierByMarketId =
+    searchFilter.hasSearch && marketBuilders.size > 0
+      ? new Map(
+          Array.from(marketBuilders.entries()).map(([marketId, builder]) => [
+            marketId,
+            builder.directSearchMarketTier,
+          ]),
+        )
+      : undefined;
   const searchTierByEventMarketId =
     searchFilter.hasSearch && marketBuilders.size > 0
       ? new Map(
@@ -3033,16 +3048,31 @@ async function loadTrackedWalletPositioning(input: {
           !top || market.minoritySideUsd > top.minoritySideUsd ? market : top,
         null,
       );
+      const directMatchedMarkets =
+        searchFilter.hasSearch && directSearchTierByMarketId
+          ? builder.markets.filter(
+              (market) =>
+                (directSearchTierByMarketId.get(market.marketId) ?? 0) > 0,
+            )
+          : [];
+      const previewSourceMarkets =
+        directMatchedMarkets.length > 0
+          ? directMatchedMarkets
+          : builder.markets;
       const previewMarkets = isEventPositioningSort(query.sort)
         ? sortPositioningMarkets(
-            builder.markets,
+            previewSourceMarkets,
             "balanced_disagreement",
-            searchTierByMarketId,
+            directMatchedMarkets.length > 0
+              ? directSearchTierByMarketId
+              : searchTierByMarketId,
           )
         : sortPositioningMarkets(
-            builder.markets,
+            previewSourceMarkets,
             query.sort,
-            searchTierByMarketId,
+            directMatchedMarkets.length > 0
+              ? directSearchTierByMarketId
+              : searchTierByMarketId,
           );
       return {
         ...event,
