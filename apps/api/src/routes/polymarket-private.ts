@@ -36,6 +36,7 @@ import {
   polymarketOpenOrdersQuerySchema,
   polymarketPlaceOrderBodySchema,
   polymarketQuoteBodySchema,
+  polymarketMaxSpendBodySchema,
 } from "../schemas/polymarket-private.js";
 import {
   fetchErc1155BalancesByOwner,
@@ -49,9 +50,11 @@ import {
   POLYGON_NATIVE_USDC_ADDRESS,
 } from "../services/polymarket-onchain.js";
 import { buildPolymarketRedemptionPlan } from "../services/polymarket-redemption-plan.js";
-import { derivePolymarketFunders } from "../services/polymarket-funder.js";
+import {
+  derivePolymarketFunders,
+  type PolymarketFunderCandidate,
+} from "../services/polymarket-funder.js";
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
-import { polymarketClient } from "../services/polymarket-client.js";
 import {
   buildEmbeddedPolymarketOrderRequest,
   buildEmbeddedPolymarketConnectRequest,
@@ -98,18 +101,24 @@ import {
   type PolymarketL2Credentials,
 } from "../services/polymarket-clob-l2.js";
 import {
-  calculatePolymarketBuilderFeeRaw,
   resolvePolymarketFeePolicySnapshot,
   validatePolymarketOrderBuilderCodeForConfig,
 } from "../services/polymarket-builder-fees.js";
+import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
+import {
+  calculatePolymarketQuote,
+  findMaxPolymarketMarketBuyUsdDetailed,
+  loadPolymarketQuoteContext,
+  normalizeOrderTypeForClob as normalizeQuoteOrderTypeForClob,
+  PolymarketQuoteError,
+} from "../services/polymarket-quote.js";
+import {
+  computePolymarketClobOpenOrderLocks,
+  computePolymarketExecutableFunds,
+  type PolymarketFunderExecutionKind,
+} from "../services/polymarket-max-spend.js";
 
 const POLY_DECIMALS = 6;
-const MARKET_USD_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal USDC
-const MARKET_USD_MICRO_STEP_5_DEC = 10n; // 5 decimals in 6-decimal USDC
-const MARKET_SHARES_MICRO_STEP = 100n; // 4 decimals in 6-decimal share units
-const MARKET_SHARES_MICRO_STEP_2_DEC = 10_000n; // 2 decimals in 6-decimal share units
-const LIMIT_USD_MICRO_STEP = 100n; // 4 decimals in 6-decimal USDC
-const LIMIT_SHARES_MICRO_STEP = 10_000n; // 2 decimals in 6-decimal share units
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
@@ -118,60 +127,7 @@ const POLYMARKET_UNCONFIRMED_TRADE_SYNC_LOOKBACK_MS = 30_000;
 const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 const POLYMARKET_SELL_BALANCE_CHANGED_CODE = "POLYMARKET_SELL_BALANCE_CHANGED";
-const POLYMARKET_CREDENTIALS_INVALID_CODE =
-  "polymarket_credentials_invalid";
-
-function feeBaseRawForSide(
-  side: "BUY" | "SELL",
-  makerAmountRaw: bigint,
-  takerAmountRaw: bigint,
-): bigint {
-  return side === "BUY" ? makerAmountRaw : takerAmountRaw;
-}
-
-function readFiniteNumber(value: unknown): number | null {
-  const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function calculatePolymarketPlatformFeeRaw(inputs: {
-  sizeRaw: bigint;
-  price: number;
-  feeRate: number;
-  feeExponent: number;
-}): bigint {
-  const { sizeRaw, price, feeRate, feeExponent } = inputs;
-  if (
-    sizeRaw <= 0n ||
-    !Number.isFinite(price) ||
-    price <= 0 ||
-    price >= 1 ||
-    !Number.isFinite(feeRate) ||
-    feeRate <= 0 ||
-    !Number.isFinite(feeExponent) ||
-    feeExponent < 0
-  ) {
-    return 0n;
-  }
-  const size = Number(sizeRaw) / 1_000_000;
-  const term = Math.pow(price * (1 - price), feeExponent);
-  const feeMicro = Math.ceil(size * feeRate * term * 1_000_000);
-  return Number.isFinite(feeMicro) && feeMicro > 0
-    ? BigInt(feeMicro)
-    : 0n;
-}
-
-async function fetchPolymarketPlatformFeeCurve(
-  conditionId: string | null | undefined,
-): Promise<{ rate: number; exponent: number } | null> {
-  if (!conditionId) return null;
-  const payload = await polymarketClient.getClobMarketInfo(conditionId);
-  if (!isRecord(payload) || !isRecord(payload.fd)) return null;
-  const rate = readFiniteNumber(payload.fd.r);
-  const exponent = readFiniteNumber(payload.fd.e);
-  if (rate == null || exponent == null) return null;
-  return { rate, exponent };
-}
+const POLYMARKET_CREDENTIALS_INVALID_CODE = "polymarket_credentials_invalid";
 
 type PolymarketAccountPayload = Record<string, unknown>;
 type PolymarketAccountCacheEntry = {
@@ -187,14 +143,6 @@ const polymarketAccountInflight = new Map<
 type PolymarketSide = "BUY" | "SELL";
 type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
 type PolymarketClobOrderType = "GTC" | "GTD" | "FOK";
-type OrderbookSummary = {
-  bids: Array<{ price: number; size: number }>;
-  asks: Array<{ price: number; size: number }>;
-  tickSize: number | null;
-  minOrderSize: number | null;
-  negRisk: boolean | null;
-};
-
 type PolymarketUnconfirmedRow = {
   id: string;
   venue_order_id: string | null;
@@ -346,9 +294,9 @@ function isPolymarketOrderLookupNotFoundResponse(
     message.match(
       /\b(order|hash)\b.{0,80}(not found|can't be found|cannot be found)/,
     ) ??
-      message.match(
-        /(not found|can't be found|cannot be found).{0,80}\b(order|hash)\b/,
-      ),
+    message.match(
+      /(not found|can't be found|cannot be found).{0,80}\b(order|hash)\b/,
+    ),
   );
 }
 
@@ -435,9 +383,7 @@ async function reconcilePolymarketTerminalOrder(inputs: {
   const externalFillPrice = parsePositiveNumber(inputs.externalFillPrice);
   const hasExternalExecution =
     inputs.externalHasExecution === true || externalFilledSize != null;
-  const hasStoredFill =
-    filledSize != null ||
-    row.has_positive_fill_rows;
+  const hasStoredFill = filledSize != null || row.has_positive_fill_rows;
   const storedFillKind =
     hasStoredFill &&
     (orderType === "FOK" ||
@@ -483,7 +429,8 @@ async function reconcilePolymarketTerminalOrder(inputs: {
 
   const nextStatus = resolvePolymarketTerminalReconcileStatus({
     statusHint: inputs.statusHint,
-    hasStoredFill: storedFillKind === "full" || (!hasStoredFill && hasExecutionEvidence),
+    hasStoredFill:
+      storedFillKind === "full" || (!hasStoredFill && hasExecutionEvidence),
     storedFillKind,
     executionSummary,
     noFillStatus: inputs.terminalNoFillStatus ?? null,
@@ -955,8 +902,7 @@ async function resolvePolymarketOrdersSyncSignerCandidates(inputs: {
   const candidates = new Map<string, string>();
   let authFallbackSigner: string | null = null;
   const isTargeted =
-    inputs.orderIds.length > 0 ||
-    Boolean(inputs.targetWalletAddress?.trim());
+    inputs.orderIds.length > 0 || Boolean(inputs.targetWalletAddress?.trim());
   const addCandidate = (value: string | null | undefined) => {
     const trimmed = value?.trim() ?? "";
     if (!EVM_ADDRESS_RE.test(trimmed)) return;
@@ -1048,7 +994,10 @@ async function backfillPolymarketRequestedOrderSigner(inputs: {
   requestedOrderIds: string[];
   walletAliases: string[];
 }): Promise<number> {
-  if (inputs.requestedOrderIds.length === 0 || inputs.walletAliases.length === 0) {
+  if (
+    inputs.requestedOrderIds.length === 0 ||
+    inputs.walletAliases.length === 0
+  ) {
     return 0;
   }
   const result = await pool.query(
@@ -1233,7 +1182,10 @@ async function reconcileDelayedPolymarketOrdersAfterOpenSync(inputs: {
       }
     }
 
-    if (!evidence.hasExecution && isPolymarketClobOpenStatus(evidence.orderStatus)) {
+    if (
+      !evidence.hasExecution &&
+      isPolymarketClobOpenStatus(evidence.orderStatus)
+    ) {
       skippedOpenCount += 1;
       const markedLive = await markPolymarketOrderLiveFromClob({
         userId: inputs.userId,
@@ -1256,7 +1208,8 @@ async function reconcileDelayedPolymarketOrdersAfterOpenSync(inputs: {
       externalHasExecution: evidence.hasExecution,
       skipOnchainExecutionCheck: true,
       allowAmbiguousNoFillReconcile:
-        noFillTerminalStatus != null && isPolymarketNoFillGraceElapsed(row.posted_at),
+        noFillTerminalStatus != null &&
+        isPolymarketNoFillGraceElapsed(row.posted_at),
       allowExternalExecutionEvidence: false,
       terminalNoFillStatus: noFillTerminalStatus,
     });
@@ -1301,13 +1254,6 @@ async function reconcileDelayedPolymarketOrdersAfterOpenSync(inputs: {
     skippedOpenCount,
     liveCount,
   };
-}
-
-const USDC_SCALE = 1_000_000n;
-
-function ceilDivRaw(numerator: bigint, denominator: bigint): bigint {
-  if (denominator <= 0n) return 0n;
-  return (numerator + denominator - 1n) / denominator;
 }
 
 function normalizeAddress(value: string | null | undefined): string {
@@ -2018,131 +1964,8 @@ function extractPolymarketImmediateFill(inputs: {
   return null;
 }
 
-function parseOrderbookSide(
-  side: unknown,
-): Array<{ price: number; size: number }> {
-  if (!Array.isArray(side)) return [];
-  const entries: Array<{ price: number; size: number }> = [];
-  for (const row of side) {
-    if (!isRecord(row)) continue;
-    const price = parseNumberish(row.price);
-    const size = parseNumberish(row.size);
-    if (price == null || size == null) continue;
-    entries.push({ price, size });
-  }
-  return entries;
-}
-
-function extractOrderbookSummary(payload: unknown): OrderbookSummary | null {
-  if (!isRecord(payload)) return null;
-  const raw = isRecord(payload.data) ? payload.data : payload;
-  if (!isRecord(raw)) return null;
-
-  const bidsRaw = Array.isArray(raw.bids)
-    ? raw.bids
-    : Array.isArray(raw.buys)
-      ? raw.buys
-      : [];
-  const asksRaw = Array.isArray(raw.asks)
-    ? raw.asks
-    : Array.isArray(raw.sells)
-      ? raw.sells
-      : [];
-
-  const bids = parseOrderbookSide(bidsRaw);
-  const asks = parseOrderbookSide(asksRaw);
-
-  const tickSize =
-    parseNumberish(
-      raw.tick_size ?? raw.tickSize ?? raw.order_price_min_tick_size,
-    ) ?? null;
-  const minOrderSize =
-    parseNumberish(
-      raw.min_order_size ?? raw.minOrderSize ?? raw.order_min_size,
-    ) ?? null;
-  const negRisk =
-    typeof raw.neg_risk === "boolean"
-      ? raw.neg_risk
-      : typeof raw.negRisk === "boolean"
-        ? raw.negRisk
-        : null;
-
-  return { bids, asks, tickSize, minOrderSize, negRisk };
-}
-
-function findBestBid(bids: Array<{ price: number }>): number | null {
-  let best: number | null = null;
-  for (const bid of bids) {
-    if (best == null || bid.price > best) best = bid.price;
-  }
-  return best;
-}
-
-function findBestAsk(asks: Array<{ price: number }>): number | null {
-  let best: number | null = null;
-  for (const ask of asks) {
-    if (best == null || ask.price < best) best = ask.price;
-  }
-  return best;
-}
-
-function roundPriceToTick(
-  price: number,
-  tickSize: number,
-  side: PolymarketSide,
-): number {
-  if (!Number.isFinite(price) || !Number.isFinite(tickSize) || tickSize <= 0) {
-    return price;
-  }
-  const ticks = price / tickSize;
-  const roundedTicks =
-    side === "BUY" ? Math.ceil(ticks - 1e-9) : Math.floor(ticks + 1e-9);
-  return roundedTicks * tickSize;
-}
-
-function roundLimitPriceToTick(
-  price: number,
-  tickSize: number,
-  side: PolymarketSide,
-): number {
-  if (!Number.isFinite(price) || !Number.isFinite(tickSize) || tickSize <= 0) {
-    return price;
-  }
-  const ticks = price / tickSize;
-  const roundedTicks =
-    side === "BUY" ? Math.floor(ticks + 1e-9) : Math.ceil(ticks - 1e-9);
-  return roundedTicks * tickSize;
-}
-
-const DEFAULT_POLYMARKET_PRICE_TICK = 0.01;
 const POLYMARKET_SERVICE_NOT_READY_STATUS = 425;
 const POLYMARKET_ORDER_RETRY_DELAYS_MS = [250, 750, 1500] as const;
-
-function resolvePolymarketPriceTick(
-  tickSize: number | null | undefined,
-): number {
-  if (
-    tickSize != null &&
-    Number.isFinite(tickSize) &&
-    tickSize > 0 &&
-    tickSize < 1
-  ) {
-    return tickSize;
-  }
-  return DEFAULT_POLYMARKET_PRICE_TICK;
-}
-
-function clampMarketOrderPriceToValidRange(
-  price: number,
-  tickSize: number | null | undefined,
-): number {
-  if (!Number.isFinite(price)) return price;
-  const tick = resolvePolymarketPriceTick(tickSize);
-  const maxTicksBelowOne = Math.max(1, Math.floor((1 - 1e-12) / tick));
-  const maxPrice = Number((maxTicksBelowOne * tick).toFixed(8));
-  const minPrice = tick;
-  return Math.min(maxPrice, Math.max(minPrice, price));
-}
 
 function isPolymarketServiceNotReadyResponse(inputs: {
   status: number;
@@ -2152,22 +1975,6 @@ function isPolymarketServiceNotReadyResponse(inputs: {
   const message = extractPolymarketUpstreamMessage(inputs.payload);
   if (!message) return true;
   return message.toLowerCase().includes("service not ready");
-}
-
-function gcd(a: bigint, b: bigint): bigint {
-  let x = a < 0n ? -a : a;
-  let y = b < 0n ? -b : b;
-  while (y !== 0n) {
-    const t = x % y;
-    x = y;
-    y = t;
-  }
-  return x;
-}
-
-function lcm(a: bigint, b: bigint): bigint {
-  if (a === 0n || b === 0n) return 0n;
-  return (a / gcd(a, b)) * b;
 }
 
 function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
@@ -2194,6 +2001,168 @@ function parseBigIntValue(
     }
   }
   return null;
+}
+
+type PolymarketMaxSpendUnavailableReason =
+  | "missing_credentials"
+  | "unsupported_wallet"
+  | "unsupported_order_type"
+  | "quote_unavailable"
+  | "balance_unavailable"
+  | "no_executable_funds"
+  | "no_liquidity"
+  | "below_min_order";
+
+function polymarketMaxSpendUnavailable(
+  reason: PolymarketMaxSpendUnavailableReason,
+  message: string,
+) {
+  return { ok: false, reason, message };
+}
+
+function resolvePolymarketFunderExecutionKindForMaxSpend(
+  candidate: PolymarketFunderCandidate | null | undefined,
+): PolymarketFunderExecutionKind {
+  if (!candidate) return null;
+  if (candidate.source === "magic_proxy") return "magic";
+  if (candidate.source === "safe_proxy") return "safe";
+  if (candidate.source === "stored") {
+    if (candidate.signatureType === 3) return "deposit_wallet";
+    if (
+      candidate.signatureType === 2 &&
+      candidate.contractKind === "SAFE_LIKE"
+    ) {
+      return "safe";
+    }
+    if (candidate.signatureType === 1) return "magic";
+  }
+  return null;
+}
+
+function findPolymarketFunderCandidateByAddress(
+  candidates: PolymarketFunderCandidate[],
+  address: string,
+): PolymarketFunderCandidate | null {
+  const normalized = normalizeEvmAddress(address);
+  if (!normalized) return null;
+  return (
+    candidates.find(
+      (candidate) => normalizeEvmAddress(candidate.funder) === normalized,
+    ) ?? null
+  );
+}
+
+class PolymarketMaxSpendLiveOrderLocksError extends Error {
+  constructor(readonly upstream: { status: number; payload: unknown }) {
+    super("Failed to fetch live Polymarket open-order locks");
+    this.name = "PolymarketMaxSpendLiveOrderLocksError";
+  }
+}
+
+async function fetchPolymarketMaxSpendLiveOpenOrderLocks(inputs: {
+  signer: string;
+  creds: PolymarketL2Credentials;
+  wallets: string[];
+}): Promise<Map<string, bigint>> {
+  const upstream = await polymarketL2Request({
+    baseUrl: env.polymarketClobBase,
+    timeoutMs: 10_000,
+    address: inputs.signer,
+    creds: inputs.creds,
+    method: "GET",
+    requestPath: "/data/orders",
+  });
+
+  if (!upstream.ok) {
+    throw new PolymarketMaxSpendLiveOrderLocksError(upstream);
+  }
+
+  return computePolymarketClobOpenOrderLocks({
+    orders: extractOrderArray(upstream.payload),
+    wallets: inputs.wallets,
+  });
+}
+
+function maxRaw(a: bigint | null | undefined, b: bigint | null | undefined) {
+  const left = a != null && a > 0n ? a : 0n;
+  const right = b != null && b > 0n ? b : 0n;
+  return left > right ? left : right;
+}
+
+async function resolvePolymarketMaxSpendFunds(inputs: {
+  userId: string;
+  signer: string;
+  funder: string;
+  funderExecutionKind: PolymarketFunderExecutionKind;
+  creds: PolymarketL2Credentials;
+}): Promise<{
+  executableFundsRaw: bigint;
+  funderPusdRaw: bigint;
+  funderPusdAvailableRaw: bigint;
+  funderLockedRaw: bigint;
+  signerLockedRaw: bigint;
+  signerPusdTopUpRaw: bigint;
+  signerUsdceTopUpRaw: bigint;
+  usesSignerTopUp: boolean;
+}> {
+  const signerNormalized = normalizeEvmAddress(inputs.signer);
+  const funderNormalized = normalizeEvmAddress(inputs.funder);
+  if (!signerNormalized || !funderNormalized) {
+    throw new Error("Invalid Polymarket signer or funder address.");
+  }
+
+  const includeSignerUsdc =
+    inputs.funderExecutionKind === "deposit_wallet" &&
+    signerNormalized !== funderNormalized;
+  const lockWallets = includeSignerUsdc
+    ? [funderNormalized, signerNormalized]
+    : [funderNormalized];
+  const negRiskAdapterAddress =
+    env.polymarketNegRiskAdapterAddress?.trim() || "";
+  const [snapshot, localCollateralLocks, liveCollateralLocks] =
+    await Promise.all([
+      fetchPolymarketOnchainSnapshot({
+        rpcUrl: env.polygonRpcUrl,
+        timeoutMs: env.polygonRpcTimeoutMs,
+        signer: signerNormalized,
+        funder: funderNormalized,
+        includeSignerUsdc,
+        includeFeeCollectorNonce: false,
+        negRiskAdapterAddress,
+        feeCollectorAddress: null,
+      }),
+      fetchOpenOrderCollateralLocks(pool, {
+        userId: inputs.userId,
+        polymarketWallets: lockWallets,
+        limitlessWallets: [],
+      }),
+      fetchPolymarketMaxSpendLiveOpenOrderLocks({
+        signer: signerNormalized,
+        creds: inputs.creds,
+        wallets: lockWallets,
+      }),
+    ]);
+  const funderLockKey = funderNormalized.toLowerCase();
+  const signerLockKey = signerNormalized.toLowerCase();
+  const funderLockedRaw = maxRaw(
+    localCollateralLocks.polymarket.get(funderLockKey),
+    liveCollateralLocks.get(funderLockKey),
+  );
+  const signerLockedRaw = maxRaw(
+    localCollateralLocks.polymarket.get(signerLockKey),
+    liveCollateralLocks.get(signerLockKey),
+  );
+
+  return computePolymarketExecutableFunds({
+    signer: signerNormalized,
+    funder: funderNormalized,
+    funderExecutionKind: inputs.funderExecutionKind,
+    funderPusdRaw: snapshot.pusdBalance,
+    funderLockedRaw,
+    signerPusdRaw: snapshot.signerPusdBalance,
+    signerLockedRaw,
+    signerUsdceRaw: snapshot.signerUsdceBalance,
+  });
 }
 
 function readMakerAmountFromOrderPayload(orderPayload: unknown): bigint | null {
@@ -2408,8 +2377,7 @@ async function reconcileUnconfirmedOrders(inputs: {
             row.order_payload_version ??
             resolvePolymarketOrderPayloadVersion(row.order_payload),
         });
-        const decision =
-          resolvePolymarketUnconfirmedReconcileDecision(summary);
+        const decision = resolvePolymarketUnconfirmedReconcileDecision(summary);
         if (decision === "sync_for_fill") {
           try {
             await syncUnconfirmedFillsOnce();
@@ -2570,8 +2538,7 @@ async function reconcileUnconfirmedOrders(inputs: {
                 price: reconciled.price,
                 orderId: venueOrderId,
                 tokenId: reconciled.tokenId,
-                walletAddress:
-                  reconciled.walletAddress ?? inputs.signerAddress,
+                walletAddress: reconciled.walletAddress ?? inputs.signerAddress,
               }),
               inputs.log,
             );
@@ -2604,7 +2571,10 @@ async function reconcileUnconfirmedOrders(inputs: {
             allowExternalExecutionEvidence: false,
             terminalNoFillStatus: noFillTerminalStatus,
           });
-          if (reconciled?.status === "unmatched" || reconciled?.status === "expired") {
+          if (
+            reconciled?.status === "unmatched" ||
+            reconciled?.status === "expired"
+          ) {
             if (reconciled.status === "unmatched") unmatchedCount += 1;
             if (reconciled.status === "expired") expiredCount += 1;
             void createNotificationSafe(
@@ -2618,8 +2588,7 @@ async function reconcileUnconfirmedOrders(inputs: {
                 price: reconciled.price,
                 orderId: venueOrderId,
                 tokenId: reconciled.tokenId,
-                walletAddress:
-                  reconciled.walletAddress ?? inputs.signerAddress,
+                walletAddress: reconciled.walletAddress ?? inputs.signerAddress,
               }),
               inputs.log,
             );
@@ -2743,11 +2712,9 @@ function mergePolymarketOrdersSyncStats(
     ].slice(0, 10),
     tradeSync: {
       insertedFillCount:
-        base.tradeSync.insertedFillCount +
-        next.tradeSync.insertedFillCount,
+        base.tradeSync.insertedFillCount + next.tradeSync.insertedFillCount,
       persistedFillCount:
-        base.tradeSync.persistedFillCount +
-        next.tradeSync.persistedFillCount,
+        base.tradeSync.persistedFillCount + next.tradeSync.persistedFillCount,
       positionsRecomputed:
         base.tradeSync.positionsRecomputed ||
         next.tradeSync.positionsRecomputed,
@@ -2763,24 +2730,19 @@ function mergePolymarketOrdersSyncStats(
       expiredCount:
         base.delayedSync.expiredCount + next.delayedSync.expiredCount,
       unconfirmedCount:
-        base.delayedSync.unconfirmedCount +
-        next.delayedSync.unconfirmedCount,
+        base.delayedSync.unconfirmedCount + next.delayedSync.unconfirmedCount,
       skippedOpenCount:
-        base.delayedSync.skippedOpenCount +
-        next.delayedSync.skippedOpenCount,
+        base.delayedSync.skippedOpenCount + next.delayedSync.skippedOpenCount,
       liveCount: base.delayedSync.liveCount + next.delayedSync.liveCount,
     },
     settlementSync: {
       checked: base.settlementSync.checked + next.settlementSync.checked,
       confirmedCount:
-        base.settlementSync.confirmedCount +
-        next.settlementSync.confirmedCount,
+        base.settlementSync.confirmedCount + next.settlementSync.confirmedCount,
       cancelledCount:
-        base.settlementSync.cancelledCount +
-        next.settlementSync.cancelledCount,
+        base.settlementSync.cancelledCount + next.settlementSync.cancelledCount,
       unmatchedCount:
-        base.settlementSync.unmatchedCount +
-        next.settlementSync.unmatchedCount,
+        base.settlementSync.unmatchedCount + next.settlementSync.unmatchedCount,
       expiredCount:
         base.settlementSync.expiredCount + next.settlementSync.expiredCount,
     },
@@ -2887,7 +2849,9 @@ async function syncPolymarketOrdersForSigner(inputs: {
       (typeof record?.side === "string" ? record.side.toUpperCase() : null);
     const side = sideRaw === "BUY" || sideRaw === "SELL" ? sideRaw : null;
     const derivedAmounts =
-      side && record ? derivePriceAndSize(record, side) : { price: null, size: null };
+      side && record
+        ? derivePriceAndSize(record, side)
+        : { price: null, size: null };
     const { price, size } =
       derivedAmounts.price != null && derivedAmounts.size != null
         ? derivedAmounts
@@ -3667,7 +3631,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const body = request.body;
       const tokenId = body.tokenId.trim();
-      const orderType = normalizeOrderTypeForClob(body.orderType ?? "FOK");
+      const orderType = normalizeQuoteOrderTypeForClob(body.orderType ?? "FOK");
       const amountType =
         (body.amountType ?? "usd") === "shares" ? "shares" : "usd";
       const amountUsdInput =
@@ -3686,353 +3650,32 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       try {
-        const [orderbookPayload, marketInfo, feePolicySnapshot] =
-          await Promise.all([
-            polymarketClient.getOrderBook(tokenId),
-            fetchPolymarketMarketInfo(pool, { tokenId }),
-            resolvePolymarketFeePolicySnapshot(pool),
-          ]);
-
-        const orderbook = extractOrderbookSummary(orderbookPayload);
-        if (!orderbook) {
-          reply.code(502);
-          return reply.send({ error: "Invalid Polymarket orderbook response" });
-        }
-
-        const bestBid = findBestBid(orderbook.bids);
-        const bestAsk = findBestAsk(orderbook.asks);
-        const bestPrice = body.side === "BUY" ? bestAsk : bestBid;
-        const isLimitOrder = orderType === "GTC" || orderType === "GTD";
-
-        if (
-          !isLimitOrder &&
-          (bestPrice == null || !Number.isFinite(bestPrice))
-        ) {
-          reply.code(502);
-          return reply.send({ error: "Missing top-of-book price" });
-        }
-
-        if (marketInfo?.accepting_orders === false) {
-          reply.code(400);
-          return reply.send({ error: "Market is not accepting orders" });
-        }
-        let platformFeeCurve: { rate: number; exponent: number } | null = null;
-        try {
-          platformFeeCurve = await fetchPolymarketPlatformFeeCurve(
-            marketInfo?.condition_id,
-          );
-        } catch (error) {
-          request.log.warn(
-            { error, tokenId, conditionId: marketInfo?.condition_id },
-            "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
-          );
-        }
-
-        const topPrice = bestPrice ?? NaN;
-        const slippageBps = body.slippageBps ?? null;
-        let price: number = isLimitOrder ? (body.limitPrice ?? NaN) : topPrice;
-        if (!isLimitOrder && slippageBps != null) {
-          const multiplier =
-            body.side === "BUY"
-              ? 1 + slippageBps / 10_000
-              : 1 - slippageBps / 10_000;
-          price = topPrice * multiplier;
-        }
-
-        const tickSize =
-          orderbook.tickSize ??
-          (marketInfo?.order_price_min_tick_size != null
-            ? Number(marketInfo.order_price_min_tick_size)
-            : null);
-        const priceTick = resolvePolymarketPriceTick(tickSize);
-        const minOrderSize =
-          orderbook.minOrderSize ??
-          (marketInfo?.order_min_size != null
-            ? Number(marketInfo.order_min_size)
-            : null);
-
-        price = isLimitOrder
-          ? roundLimitPriceToTick(price, priceTick, body.side)
-          : roundPriceToTick(price, priceTick, body.side);
-
-        if (!isLimitOrder) {
-          price = clampMarketOrderPriceToValidRange(price, priceTick);
-        }
-
-        if (!Number.isFinite(price) || price <= 0 || price >= 1) {
-          reply.code(400);
-          return reply.send({
-            error: isLimitOrder
-              ? "Polymarket limit price must be greater than 0 and less than 1"
-              : "Invalid price computed from orderbook",
-          });
-        }
-
-        const priceMicro = BigInt(Math.round(price * 1_000_000));
-        if (priceMicro <= 0n) {
-          reply.code(400);
-          return reply.send({ error: "Invalid price computed from orderbook" });
-        }
-
-        let sizeMicro: bigint;
-        let makerAmountMicro: bigint;
-        let takerAmountMicro: bigint;
-
-        if (orderType === "FOK") {
-          const shareStep =
-            body.side === "SELL"
-              ? MARKET_SHARES_MICRO_STEP_2_DEC
-              : MARKET_SHARES_MICRO_STEP;
-          const usdcStep =
-            body.side === "SELL"
-              ? MARKET_USD_MICRO_STEP_5_DEC
-              : MARKET_USD_MICRO_STEP;
-          const precisionProduct = usdcStep * USDC_SCALE;
-          const stepForPrice =
-            precisionProduct / gcd(priceMicro, precisionProduct);
-          const step = lcm(stepForPrice, shareStep);
-
-          if (amountType === "shares") {
-            if (amountSharesInput == null) {
-              reply.code(400);
-              return reply.send({
-                error: "amount is required for shares quotes",
-              });
-            }
-
-            const sizeMicroRaw = BigInt(
-              Math.floor(amountSharesInput * 1_000_000),
-            );
-            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
-
-            if (sizeMicro <= 0n) {
-              reply.code(400);
-              return reply.send({ error: "Amount too small for order" });
-            }
-
-            if (body.side === "BUY") {
-              makerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
-              takerAmountMicro = sizeMicro;
-            } else {
-              makerAmountMicro = sizeMicro;
-              takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
-            }
-          } else {
-            if (amountUsdInput == null) {
-              reply.code(400);
-              return reply.send({
-                error: "amountUsd is required for USD quotes",
-              });
-            }
-
-            const amountUsdCents = BigInt(Math.floor(amountUsdInput * 100));
-            if (amountUsdCents <= 0n) {
-              reply.code(400);
-              return reply.send({ error: "Invalid amount or price" });
-            }
-
-            const makerAmountMicroMax = amountUsdCents * MARKET_USD_MICRO_STEP;
-            const sizeMicroRaw =
-              (makerAmountMicroMax * USDC_SCALE) / priceMicro;
-            if (body.side === "BUY") {
-              sizeMicro = sizeMicroRaw - (sizeMicroRaw % shareStep);
-              if (sizeMicro <= 0n) {
-                reply.code(400);
-                return reply.send({ error: "Amount too small for order" });
-              }
-              makerAmountMicro = makerAmountMicroMax;
-              takerAmountMicro = sizeMicro;
-            } else {
-              sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
-              if (sizeMicro <= 0n) {
-                reply.code(400);
-                return reply.send({ error: "Amount too small for order" });
-              }
-              makerAmountMicro = sizeMicro;
-              takerAmountMicro = (sizeMicro * priceMicro) / USDC_SCALE;
-            }
-          }
-        } else {
-          const shareStep = LIMIT_SHARES_MICRO_STEP;
-          const usdcStep = LIMIT_USD_MICRO_STEP;
-          const precisionProduct = usdcStep * USDC_SCALE;
-          const stepForPrice =
-            precisionProduct / gcd(priceMicro, precisionProduct);
-          const step = lcm(stepForPrice, shareStep);
-
-          if (amountType === "shares") {
-            if (amountSharesInput == null) {
-              reply.code(400);
-              return reply.send({
-                error: "amount is required for shares quotes",
-              });
-            }
-
-            const sizeMicroRaw = BigInt(
-              Math.floor(amountSharesInput * 1_000_000),
-            );
-            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
-
-            if (sizeMicro <= 0n) {
-              reply.code(400);
-              return reply.send({ error: "Amount too small for order" });
-            }
-          } else {
-            if (amountUsdInput == null) {
-              reply.code(400);
-              return reply.send({
-                error: "amountUsd is required for USD quotes",
-              });
-            }
-
-            const amountUsdMicroRaw = BigInt(
-              Math.floor(amountUsdInput * 1_000_000),
-            );
-            const amountUsdMicro =
-              amountUsdMicroRaw - (amountUsdMicroRaw % usdcStep);
-            if (amountUsdMicro <= 0n) {
-              reply.code(400);
-              return reply.send({ error: "Invalid amount or price" });
-            }
-
-            const sizeMicroRaw = (amountUsdMicro * USDC_SCALE) / priceMicro;
-            sizeMicro = sizeMicroRaw - (sizeMicroRaw % step);
-
-            if (sizeMicro <= 0n) {
-              reply.code(400);
-              return reply.send({ error: "Amount too small for order" });
-            }
-          }
-
-          makerAmountMicro =
-            body.side === "BUY"
-              ? (sizeMicro * priceMicro) / USDC_SCALE
-              : sizeMicro;
-          takerAmountMicro =
-            body.side === "BUY"
-              ? sizeMicro
-              : (sizeMicro * priceMicro) / USDC_SCALE;
-        }
-
-        const violatesMinOrderSize =
-          isLimitOrder && minOrderSize != null
-            ? sizeMicro < BigInt(Math.ceil(minOrderSize * 1_000_000))
-            : null;
-        const takerFeeRaw = marketInfo?.taker_fee_bps ?? null;
-        const makerFeeRaw = marketInfo?.maker_fee_bps ?? null;
-        const takerFeeBps =
-          takerFeeRaw != null && takerFeeRaw !== ""
-            ? Math.max(0, Number(takerFeeRaw))
-            : 0;
-        const makerFeeBps =
-          makerFeeRaw != null && makerFeeRaw !== ""
-            ? Math.max(0, Number(makerFeeRaw))
-            : 0;
-        const platformFeeBps = isLimitOrder ? makerFeeBps : takerFeeBps;
-        const builderFeeBps =
-          feePolicySnapshot.collectionMode === "builder"
-            ? isLimitOrder
-              ? feePolicySnapshot.builderMakerFeeBps
-              : feePolicySnapshot.builderTakerFeeBps
-            : 0;
-        const effectivePlatformFeeCurve =
-          platformFeeCurve ??
-          (platformFeeBps > 0
-            ? { rate: platformFeeBps / 10_000, exponent: 1 }
-            : null);
-        const feeBaseRaw = feeBaseRawForSide(
-          body.side,
-          makerAmountMicro,
-          takerAmountMicro,
-        );
-        let platformFeePrice = price;
-        let platformFeeSizeRaw = sizeMicro;
-        if (
-          body.side === "BUY" &&
-          bestAsk != null &&
-          Number.isFinite(bestAsk) &&
-          bestAsk > 0 &&
-          bestAsk < 1
-        ) {
-          platformFeePrice = Math.min(price, bestAsk);
-          const platformFeePriceMicro = BigInt(
-            Math.round(platformFeePrice * 1_000_000),
-          );
-          if (platformFeePriceMicro > 0n) {
-            platformFeeSizeRaw = ceilDivRaw(
-              makerAmountMicro * USDC_SCALE,
-              platformFeePriceMicro,
-            );
-          }
-        }
-        const platformFeeEstimateRaw = effectivePlatformFeeCurve
-          ? calculatePolymarketPlatformFeeRaw({
-              sizeRaw: platformFeeSizeRaw,
-              price: platformFeePrice,
-              feeRate: effectivePlatformFeeCurve.rate,
-              feeExponent: effectivePlatformFeeCurve.exponent,
-            })
-          : 0n;
-        const builderFeeEstimateRaw = calculatePolymarketBuilderFeeRaw(
-          feeBaseRaw,
-          builderFeeBps,
-        );
-        const totalFeeEstimateRaw =
-          platformFeeEstimateRaw + builderFeeEstimateRaw;
-        const totalRequiredUsdcRaw =
-          body.side === "BUY"
-            ? makerAmountMicro + totalFeeEstimateRaw
-            : null;
-
-        const size = Number(sizeMicro) / 1_000_000;
-        const amountUsdUsed =
-          body.side === "BUY"
-            ? Number(makerAmountMicro) / 1_000_000
-            : Number(takerAmountMicro) / 1_000_000;
-        const estimatedPayout = size;
-        const estimatedProfit =
-          body.side === "BUY"
-            ? estimatedPayout - amountUsdUsed
-            : amountUsdUsed - estimatedPayout;
-
-        const negRisk =
-          orderbook.negRisk ??
-          (marketInfo?.neg_risk != null ? Boolean(marketInfo.neg_risk) : null);
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
+        const context = await loadPolymarketQuoteContext(pool, {
+          tokenId,
+          logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
+            request.log.warn(
+              { error, tokenId: warningTokenId, conditionId },
+              "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
+            ),
+        });
+        const quote = calculatePolymarketQuote({
           tokenId,
           side: body.side,
           orderType,
           amountType,
-          amountUsd: amountUsdInput ?? undefined,
-          amountShares: amountSharesInput ?? undefined,
-          amountUsdUsed,
-          bestBid,
-          bestAsk,
-          price,
-          size,
-          makerAmount: makerAmountMicro.toString(),
-          takerAmount: takerAmountMicro.toString(),
-          platformFeeEstimateRaw: platformFeeEstimateRaw.toString(),
-          builderFeeEstimateRaw: builderFeeEstimateRaw.toString(),
-          totalFeeEstimateRaw: totalFeeEstimateRaw.toString(),
-          totalRequiredUsdcRaw: totalRequiredUsdcRaw?.toString() ?? null,
-          builderRateSource: feePolicySnapshot.builderRateSource,
-          builderEnabled: feePolicySnapshot.builderEnabled,
-          builderTakerFeeBps: feePolicySnapshot.builderTakerFeeBps,
-          builderMakerFeeBps: feePolicySnapshot.builderMakerFeeBps,
-          orderPriceMinTickSize: tickSize,
-          orderMinSize: minOrderSize,
-          violatesMinOrderSize,
-          negRisk,
-          exchangeAddress: exchangeAddressForNegRisk(negRisk),
-          estimatedPayout,
-          estimatedProfit,
-          slippageBps,
+          amountUsdInput,
+          amountSharesInput,
+          limitPrice: body.limitPrice,
+          slippageBps: body.slippageBps,
+          context,
         });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(quote);
       } catch (error) {
+        if (error instanceof PolymarketQuoteError) {
+          reply.code(error.statusCode);
+          return reply.send({ error: error.publicMessage });
+        }
         app.log.error(
           { error, userId: user.id, signer, body },
           "Failed to quote Polymarket order",
@@ -4041,6 +3684,271 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({
           error: "Polymarket quote failed",
         });
+      }
+    },
+  );
+
+  /**
+   * POST /max-spend
+   * Returns the largest market BUY FOK USD amount executable with current funds.
+   */
+  z.post(
+    "/max-spend",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { body: polymarketMaxSpendBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      const signer = request.walletAddress;
+      if (!user || !signer) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      if (!signer.startsWith("0x")) {
+        reply.code(400);
+        return reply.send({
+          error: "Polymarket max spend requires an EVM wallet address",
+        });
+      }
+
+      const body = request.body;
+      const tokenId = body.tokenId.trim();
+      const orderType = body.orderType ?? "FOK";
+      const amountType = body.amountType ?? "usd";
+
+      if (orderType !== "FOK" || amountType !== "usd") {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "unsupported_order_type",
+            "Polymarket max spend currently supports market BUY FOK USD orders only.",
+          ),
+        );
+      }
+
+      void markHotTokens({ tokenIds: [tokenId], venue: "polymarket" });
+      void requestPriceRefreshForTokens({
+        tokenIds: [tokenId],
+        venue: "polymarket",
+      });
+
+      const creds = await AuthService.getVenueCredentials(
+        user.id,
+        "polymarket",
+        signer,
+      );
+      if (!creds || !creds.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "missing_credentials",
+            "Polymarket credentials not found.",
+          ),
+        );
+      }
+
+      const requestedFunder = body.funderAddress ?? creds.funderAddress ?? null;
+      const funder = normalizeEvmAddress(requestedFunder);
+      if (!funder || funder === normalizeEvmAddress(signer)) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "unsupported_wallet",
+            "Polymarket max spend requires a configured executable funder.",
+          ),
+        );
+      }
+
+      let funderExecutionKind: PolymarketFunderExecutionKind = null;
+      try {
+        const funderDerivation = await derivePolymarketFunders({
+          signer,
+          storedFunder: funder,
+          includeMagicProxy: true,
+          bypassCodeCache: false,
+        });
+        const candidate = findPolymarketFunderCandidateByAddress(
+          funderDerivation.candidates,
+          funder,
+        );
+        funderExecutionKind =
+          resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
+        if (
+          !candidate ||
+          candidate.deployed !== true ||
+          (funderExecutionKind !== "deposit_wallet" &&
+            funderExecutionKind !== "safe")
+        ) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(
+            polymarketMaxSpendUnavailable(
+              "unsupported_wallet",
+              "Configured Polymarket funder cannot execute backend-supported orders.",
+            ),
+          );
+        }
+      } catch (error) {
+        request.log.warn(
+          { error, userId: user.id, signer, funder },
+          "Failed to resolve Polymarket max-spend funder",
+        );
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "unsupported_wallet",
+            "Configured Polymarket funder could not be validated.",
+          ),
+        );
+      }
+
+      let funds: Awaited<ReturnType<typeof resolvePolymarketMaxSpendFunds>>;
+      try {
+        funds = await resolvePolymarketMaxSpendFunds({
+          userId: user.id,
+          signer,
+          funder,
+          funderExecutionKind,
+          creds: {
+            apiKey: creds.apiKey,
+            apiSecret: creds.apiSecret,
+            apiPassphrase: creds.apiPassphrase,
+          },
+        });
+      } catch (error) {
+        if (
+          error instanceof PolymarketMaxSpendLiveOrderLocksError &&
+          (await invalidatePolymarketCredentialsForInvalidApiKey({
+            userId: user.id,
+            signer,
+            endpoint: "max-spend/open-orders",
+            upstream: error.upstream,
+            log: request.log,
+          }))
+        ) {
+          return sendPolymarketCredentialsInvalidResponse(reply, error.upstream);
+        }
+        request.log.warn(
+          { error, userId: user.id, signer, funder },
+          "Failed to resolve Polymarket max-spend balances",
+        );
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "balance_unavailable",
+            "Polymarket balances are unavailable.",
+          ),
+        );
+      }
+
+      if (funds.executableFundsRaw <= 0n) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "no_executable_funds",
+            "No executable Polymarket funds are available.",
+          ),
+        );
+      }
+
+      try {
+        const context = await loadPolymarketQuoteContext(pool, {
+          tokenId,
+          logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
+            request.log.warn(
+              { error, tokenId: warningTokenId, conditionId },
+              "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
+            ),
+        });
+        const maxSpend = findMaxPolymarketMarketBuyUsdDetailed({
+          context,
+          tokenId,
+          executableFundsRaw: funds.executableFundsRaw,
+          slippageBps: body.slippageBps,
+          requireOrderbookDepth: true,
+        });
+
+        if (!maxSpend.ok) {
+          reply.header("Content-Type", "application/json; charset=utf-8");
+          return reply.send(
+            polymarketMaxSpendUnavailable(
+              maxSpend.reason,
+              maxSpend.reason === "no_liquidity"
+                ? "No executable Polymarket liquidity is available for the max spend amount."
+                : "Executable funds are below the minimum Polymarket order amount.",
+            ),
+          );
+        }
+
+        const quote = maxSpend.quote;
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send({
+          ok: true,
+          reason: "ok",
+          tokenId,
+          side: "BUY",
+          orderType: "FOK",
+          amountType: "usd",
+          maxAmountUsd: Number(maxSpend.maxAmountUsdRaw) / 1_000_000,
+          maxAmountUsdRaw: maxSpend.maxAmountUsdRaw,
+          totalRequiredUsdcRaw: quote.totalRequiredUsdcRaw ?? "0",
+          totalFeeEstimateRaw: quote.totalFeeEstimateRaw,
+          platformFeeEstimateRaw: quote.platformFeeEstimateRaw,
+          builderFeeEstimateRaw: quote.builderFeeEstimateRaw,
+          makerAmount: quote.makerAmount,
+          takerAmount: quote.takerAmount,
+          price: quote.price,
+          size: quote.size,
+          amountUsdUsed: quote.amountUsdUsed,
+          bestBid: quote.bestBid,
+          bestAsk: quote.bestAsk,
+          slippageBps: quote.slippageBps,
+          executableFundsRaw: funds.executableFundsRaw.toString(),
+          funderPusdRaw: funds.funderPusdRaw.toString(),
+          funderPusdAvailableRaw: funds.funderPusdAvailableRaw.toString(),
+          funderLockedRaw: funds.funderLockedRaw.toString(),
+          signerLockedRaw: funds.signerLockedRaw.toString(),
+          signerPusdTopUpRaw: funds.signerPusdTopUpRaw.toString(),
+          signerUsdceTopUpRaw: funds.signerUsdceTopUpRaw.toString(),
+          usesSignerTopUp: funds.usesSignerTopUp,
+        });
+      } catch (error) {
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        if (error instanceof PolymarketQuoteError) {
+          if (error.reason === "missing_top_of_book") {
+            return reply.send(
+              polymarketMaxSpendUnavailable(
+                "no_liquidity",
+                "No executable Polymarket liquidity is available.",
+              ),
+            );
+          }
+          if (error.reason === "amount_too_small") {
+            return reply.send(
+              polymarketMaxSpendUnavailable(
+                "below_min_order",
+                "Executable funds are below the minimum Polymarket order amount.",
+              ),
+            );
+          }
+          return reply.send(
+            polymarketMaxSpendUnavailable(
+              "quote_unavailable",
+              error.publicMessage,
+            ),
+          );
+        }
+        app.log.error(
+          { error, userId: user.id, signer, body },
+          "Failed to compute Polymarket max spend",
+        );
+        return reply.send(
+          polymarketMaxSpendUnavailable(
+            "quote_unavailable",
+            "Polymarket max spend quote is unavailable.",
+          ),
+        );
       }
     },
   );
@@ -4842,12 +4750,13 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
         body.orderIds,
       );
       const targetWalletAddress = body.targetWalletAddress ?? null;
-      const signerResolution = await resolvePolymarketOrdersSyncSignerCandidates({
-        userId: user.id,
-        authWalletAddress,
-        orderIds: requestedOrderIds,
-        targetWalletAddress,
-      });
+      const signerResolution =
+        await resolvePolymarketOrdersSyncSignerCandidates({
+          userId: user.id,
+          authWalletAddress,
+          orderIds: requestedOrderIds,
+          targetWalletAddress,
+        });
       const signerCandidates = signerResolution.signers;
 
       if (
@@ -5791,9 +5700,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                 orderId: request.body.orderID,
                 signer: lastCancelRejection.signer,
               });
-            let tradeSync:
-              | Awaited<ReturnType<typeof syncPolymarketTradesForSigner>>
-              | null = null;
+            let tradeSync: Awaited<
+              ReturnType<typeof syncPolymarketTradesForSigner>
+            > | null = null;
             if (clobOrderEvidence.hasExecution) {
               try {
                 tradeSync = await syncPolymarketTradesForSigner(pool, {
@@ -5849,9 +5758,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                 userId: user.id,
                 venueOrderId: request.body.orderID,
               }));
-            const terminalNoFillStatus = resolvePolymarketClobNoFillTerminalStatus(
-              clobOrderEvidence.orderStatus,
-            );
+            const terminalNoFillStatus =
+              resolvePolymarketClobNoFillTerminalStatus(
+                clobOrderEvidence.orderStatus,
+              );
             let reconciled = await reconcilePolymarketTerminalOrder({
               userId: user.id,
               venueOrderId: request.body.orderID,

@@ -2,6 +2,8 @@ import type { Pool, PoolClient } from "@hunch/infra";
 import { tx } from "@hunch/infra";
 import {
   EFFECTIVE_PNL_SQL,
+  POSITION_MARKET_JOIN_SQL,
+  RESOLVED_MARKET_SQL,
   UNREALIZED_PNL_COMPONENT_SQL,
 } from "../lib/pnl-sql.js";
 import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
@@ -84,48 +86,6 @@ export type PositionMetricsInput = {
 };
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
-
-const POSITION_MARKET_JOIN_SQL = `
-  left join lateral (
-    select
-      token_market.market_id,
-      token_market.outcome_side
-    from (
-      select
-        ut.market_id,
-        upper(ut.side) as outcome_side,
-        case when ut.venue = p.venue then 0 else 1 end as venue_rank,
-        ut.updated_at
-      from unified_tokens ut
-      where ut.token_id = p.token_id
-
-      union all
-
-      select
-        umt.market_id,
-        upper(umt.outcome_side) as outcome_side,
-        case when umt.venue = p.venue then 0 else 1 end as venue_rank,
-        umt.updated_at
-      from unified_market_tokens umt
-      where umt.token_id = p.token_id
-    ) token_market
-    where token_market.outcome_side in ('YES', 'NO')
-    order by
-      token_market.venue_rank asc,
-      token_market.updated_at desc nulls last,
-      token_market.market_id asc
-    limit 1
-  ) umt on true
-  left join unified_markets m
-    on m.id = umt.market_id
-`;
-
-const RESOLVED_MARKET_SQL = `
-  (
-    upper(coalesce(m.resolved_outcome, '')) in ('YES', 'NO')
-    or m.resolved_outcome_pct is not null
-  )
-`;
 
 const MATERIALIZABLE_RESOLVED_POSITION_SQL = `
   p.average_price is not null

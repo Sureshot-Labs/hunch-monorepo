@@ -223,6 +223,18 @@ export const polymarketQuoteBodySchema = z
     },
   );
 
+export const polymarketMaxSpendBodySchema = z.object({
+  tokenId: zRequiredString("tokenId is required"),
+  side: z.enum(["BUY"], {
+    message: "Max spend only supports BUY orders",
+  }),
+  orderType: zOrderType.optional(),
+  amountType: zAmountType.optional(),
+  slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
+  funderAddress: zEthAddress.optional(),
+  executableFundsRaw: z.string().regex(/^\d+$/).optional(),
+});
+
 export const polymarketEmbeddedEnsureReadyBodySchema = z.object({
   funderAddress: zEthAddress.optional(),
 });

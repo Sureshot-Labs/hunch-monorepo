@@ -2053,3 +2053,9 @@ await test("hiding a resolved position marks its notification read", async () =>
     await cleanupPositionTest(userId, [tokenId]);
   }
 });
+
+await Promise.race([
+  pool.end(),
+  new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+]);
+process.exit(0);

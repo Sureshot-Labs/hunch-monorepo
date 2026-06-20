@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { pool } from "./db.js";
 import { normalizeRewardsChainId } from "./lib/rewards-chain.js";
 import { withRewardsUserAdvisoryXactLock } from "./lib/rewards-user-lock.js";
 import {
@@ -52,6 +54,13 @@ type TestCase = {
 
 function toNumber(value: bigint): number {
   return Number(usdcMicroToDecimalString(value));
+}
+
+function assertClose(actual: number, expected: number, epsilon = 1e-9) {
+  assert.ok(
+    Math.abs(actual - expected) <= epsilon,
+    `expected ${actual} to be within ${epsilon} of ${expected}`,
+  );
 }
 
 function createReferralDb(
@@ -777,6 +786,8 @@ function createRewardsLeaderboardDb(seed: {
     tier_points: seed.tierPoints,
     volume_usd: "100",
     pnl_usd: "0",
+    realized_pnl_usd: "0",
+    unrealized_pnl_usd: "0",
     display_name: "User A",
     username: "usera",
     wallet_address: "0xabc",
@@ -944,6 +955,289 @@ const samplePolicy: RewardsPolicy = {
     { minReferrals: 10, bonusBps: 3000 },
   ],
 };
+
+function randomRewardsEmail(): string {
+  return `rewards-pnl-${crypto.randomUUID()}@example.com`;
+}
+
+function randomEvmAddress(): string {
+  return `0x${crypto.randomBytes(20).toString("hex")}`;
+}
+
+async function createRewardsPnlFixture(inputs: {
+  averagePrice: number | null;
+  realizedPnl: number;
+  resolvedOutcome?: "YES" | "NO" | null;
+  side?: "YES" | "NO";
+  size: number;
+  topAsk?: number | null;
+  topBid?: number | null;
+  unrealizedPnl: number;
+}): Promise<{
+  cleanup: () => Promise<void>;
+  tokenId: string;
+  userId: string;
+  walletAddress: string;
+}> {
+  const walletAddress = randomEvmAddress();
+  const userInsert = await pool.query<{ id: string }>(
+    `
+      insert into users (email, is_active, is_verified)
+      values ($1, true, true)
+      returning id
+    `,
+    [randomRewardsEmail()],
+  );
+  const userId = userInsert.rows[0]?.id;
+  if (!userId) throw new Error("Failed to create rewards pnl test user");
+
+  const marketId = `rewards-pnl:${crypto.randomUUID()}`;
+  const eventId = `event-${marketId}`;
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const otherTokenId = `other-${tokenId}`;
+  const side = inputs.side ?? "YES";
+  const resolvedOutcome = inputs.resolvedOutcome ?? null;
+
+  await pool.query(
+    `
+      insert into user_wallets (
+        user_id,
+        wallet_address,
+        wallet_type,
+        is_primary,
+        is_verified
+      )
+      values ($1, $2, 'ethereum', true, true)
+    `,
+    [userId, walletAddress],
+  );
+
+  await pool.query(
+    `
+      insert into unified_events (
+        id,
+        venue,
+        venue_event_id,
+        title,
+        status,
+        start_date,
+        end_date,
+        volume_total,
+        volume_24h,
+        liquidity,
+        slug,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'limitless',
+        $1,
+        'Rewards PnL test event',
+        $2,
+        now() - interval '2 days',
+        now() + interval '1 day',
+        0,
+        0,
+        0,
+        $3,
+        now(),
+        now()
+      )
+    `,
+    [eventId, resolvedOutcome ? "SETTLED" : "ACTIVE", `slug-${eventId}`],
+  );
+
+  await pool.query(
+    `
+      insert into unified_markets (
+        id,
+        venue,
+        venue_market_id,
+        event_id,
+        title,
+        status,
+        market_type,
+        open_time,
+        close_time,
+        expiration_time,
+        best_bid,
+        best_ask,
+        last_price,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        outcomes,
+        token_yes,
+        token_no,
+        slug,
+        resolved_outcome,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'limitless',
+        $1,
+        $2,
+        'Rewards PnL test market',
+        $3,
+        'binary',
+        now() - interval '2 days',
+        now() + interval '1 day',
+        now() + interval '1 day',
+        0,
+        0,
+        null,
+        0,
+        0,
+        0,
+        0,
+        '["Yes","No"]',
+        case when $4 = 'YES' then $5 else $6 end,
+        case when $4 = 'NO' then $5 else $6 end,
+        $7,
+        $8,
+        now(),
+        now()
+      )
+    `,
+    [
+      marketId,
+      eventId,
+      resolvedOutcome ? "SETTLED" : "ACTIVE",
+      side,
+      tokenId,
+      otherTokenId,
+      `slug-${marketId}`,
+      resolvedOutcome,
+    ],
+  );
+
+  await pool.query(
+    `
+      insert into unified_tokens(token_id, venue, market_id, side)
+      values ($1, 'limitless', $2, $3)
+    `,
+    [tokenId, marketId, side],
+  );
+
+  if (inputs.topBid != null || inputs.topAsk != null) {
+    await pool.query(
+      `
+        insert into unified_token_top_latest (
+          token_id,
+          venue,
+          ts,
+          best_bid,
+          best_ask,
+          mid,
+          spread
+        )
+        values (
+          $1,
+          'limitless',
+          now(),
+          $2,
+          $3,
+          null,
+          null
+        )
+      `,
+      [tokenId, inputs.topBid ?? null, inputs.topAsk ?? null],
+    );
+  }
+
+  await pool.query(
+    `
+      insert into positions (
+        user_id,
+        wallet_address,
+        venue,
+        position_scope,
+        token_id,
+        side,
+        size,
+        average_price,
+        unrealized_pnl,
+        realized_pnl,
+        last_updated_at,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        $2,
+        'limitless',
+        'own',
+        $3,
+        'LONG',
+        $4,
+        $5,
+        $6,
+        $7,
+        now(),
+        now(),
+        now()
+      )
+    `,
+    [
+      userId,
+      walletAddress,
+      tokenId,
+      inputs.size,
+      inputs.averagePrice,
+      inputs.unrealizedPnl,
+      inputs.realizedPnl,
+    ],
+  );
+
+  return {
+    cleanup: async () => {
+      await pool.query("delete from positions where user_id = $1", [userId]);
+      await pool.query("delete from user_wallets where user_id = $1", [userId]);
+      await pool.query("delete from unified_token_top_latest where token_id = $1", [
+        tokenId,
+      ]);
+      await pool.query("delete from unified_market_tokens where token_id = $1", [
+        tokenId,
+      ]);
+      await pool.query("delete from unified_tokens where token_id = $1", [
+        tokenId,
+      ]);
+      await pool.query("delete from unified_markets where id = $1", [marketId]);
+      await pool.query("delete from unified_events where id = $1", [eventId]);
+      await pool.query("delete from users where id = $1", [userId]);
+    },
+    tokenId,
+    userId,
+    walletAddress,
+  };
+}
+
+function uppercaseOneHexChar(address: string): string {
+  for (let index = 2; index < address.length; index += 1) {
+    const char = address[index];
+    if (char != null && char >= "a" && char <= "f") {
+      return `${address.slice(0, index)}${char.toUpperCase()}${address.slice(index + 1)}`;
+    }
+  }
+  throw new Error(`Cannot uppercase hex address without a-f chars: ${address}`);
+}
+
+async function loadRewardsPnlEntry(userId: string) {
+  const leaderboard = await getRewardsLeaderboard(pool, {
+    userId,
+    metric: "pnl",
+    interval: "alltime",
+    limit: 10,
+    offset: 0,
+    excludeManual: true,
+  });
+  assert.ok(leaderboard.me);
+  return leaderboard.me;
+}
 
 const tests: TestCase[] = [
   {
@@ -1947,6 +2241,157 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "leaderboard pnl treats resolved winning unified_tokens position as realized",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: 0.4,
+        realizedPnl: 0.25,
+        resolvedOutcome: "YES",
+        side: "YES",
+        size: 2,
+        unrealizedPnl: 99,
+      });
+      try {
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, 1.45);
+        assertClose(entry.realizedPnlUsd, 1.45);
+        assertClose(entry.unrealizedPnlUsd, 0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl treats resolved losing unified_tokens position as realized",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: 0.2,
+        realizedPnl: 0,
+        resolvedOutcome: "NO",
+        side: "YES",
+        size: 3,
+        unrealizedPnl: 99,
+      });
+      try {
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, -0.6);
+        assertClose(entry.realizedPnlUsd, -0.6);
+        assertClose(entry.unrealizedPnlUsd, 0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl splits unresolved position into realized and unrealized",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: 0.25,
+        realizedPnl: 1.25,
+        resolvedOutcome: null,
+        side: "YES",
+        size: 4,
+        unrealizedPnl: -0.5,
+      });
+      try {
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, 0.75);
+        assertClose(entry.realizedPnlUsd, 1.25);
+        assertClose(entry.unrealizedPnlUsd, -0.5);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl uses fresh top book for unresolved position pnl",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: 0.25,
+        realizedPnl: 1.25,
+        resolvedOutcome: null,
+        side: "YES",
+        size: 4,
+        topBid: 0.5,
+        topAsk: 0.55,
+        unrealizedPnl: -99,
+      });
+      try {
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, 2.25);
+        assertClose(entry.realizedPnlUsd, 1.25);
+        assertClose(entry.unrealizedPnlUsd, 1);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl does not double count case-variant wallet positions",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: null,
+        realizedPnl: 1.5,
+        resolvedOutcome: null,
+        side: "YES",
+        size: 1,
+        unrealizedPnl: 0,
+      });
+      try {
+        const caseVariantWalletAddress = uppercaseOneHexChar(
+          fixture.walletAddress,
+        );
+        await pool.query(
+          `
+            insert into positions (
+              user_id,
+              wallet_address,
+              venue,
+              position_scope,
+              token_id,
+              side,
+              size,
+              average_price,
+              unrealized_pnl,
+              realized_pnl,
+              last_updated_at,
+              created_at,
+              updated_at
+            )
+            values (
+              $1,
+              $2,
+              'limitless',
+              'own',
+              $3,
+              'LONG',
+              1,
+              null,
+              0,
+              -20,
+              now(),
+              now(),
+              now()
+            )
+          `,
+          [fixture.userId, caseVariantWalletAddress, fixture.tokenId],
+        );
+
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, 1.5);
+        assertClose(entry.realizedPnlUsd, 1.5);
+        assertClose(entry.unrealizedPnlUsd, 0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
     name: "fetchUserVolume excludes manual grants and referral-code drops",
     run: async () => {
       const capture: { sql?: string; params?: unknown[] } = {};
@@ -2264,14 +2709,18 @@ const tests: TestCase[] = [
 ];
 
 let passed = 0;
-for (const test of tests) {
-  try {
-    await test.run();
-    passed += 1;
-  } catch (error) {
-    console.error(`[rewards-tests] failed: ${test.name}`);
-    throw error;
+try {
+  for (const test of tests) {
+    try {
+      await test.run();
+      passed += 1;
+    } catch (error) {
+      console.error(`[rewards-tests] failed: ${test.name}`);
+      throw error;
+    }
   }
+} finally {
+  await pool.end();
 }
 
 console.log(`[rewards-tests] passed ${passed}/${tests.length}`);

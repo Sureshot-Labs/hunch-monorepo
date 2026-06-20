@@ -1,6 +1,11 @@
 import type { DbQuery } from "../db.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
-import { EFFECTIVE_PNL_SQL } from "../lib/pnl-sql.js";
+import {
+  EFFECTIVE_PNL_SQL,
+  POSITION_MARKET_JOIN_SQL,
+  RESOLVED_MARKET_SQL,
+  UNREALIZED_PNL_COMPONENT_SQL,
+} from "../lib/pnl-sql.js";
 import type { PgParams } from "../server-types.js";
 
 export type RewardsPolicyRow = {
@@ -92,6 +97,8 @@ export type RewardsLeaderboardRow = {
   level: number | null;
   volumeUsd: number;
   pnlUsd: number;
+  realizedPnlUsd: number;
+  unrealizedPnlUsd: number;
   displayName: string | null;
   username: string | null;
   walletAddress: string | null;
@@ -2137,6 +2144,8 @@ type RewardsLeaderboardRowDb = {
   tier_points: string | null;
   volume_usd: string | null;
   pnl_usd: string | null;
+  realized_pnl_usd: string | null;
+  unrealized_pnl_usd: string | null;
   display_name: string | null;
   username: string | null;
   wallet_address: string | null;
@@ -2152,6 +2161,8 @@ function mapLeaderboardRow(
     tierPoints: Number(row.tier_points ?? 0),
     volumeUsd: Number(row.volume_usd ?? 0),
     pnlUsd: Number(row.pnl_usd ?? 0),
+    realizedPnlUsd: Number(row.realized_pnl_usd ?? 0),
+    unrealizedPnlUsd: Number(row.unrealized_pnl_usd ?? 0),
     displayName: row.display_name ?? null,
     username: row.username ?? null,
     walletAddress: row.wallet_address ?? null,
@@ -2170,19 +2181,23 @@ function buildConnectedWalletScopeSql(userIdPlaceholder?: string): string {
     : "";
 
   return `
-    wallet_scope as (
-      select distinct
+    wallet_scope_candidates as (
+      select
         uw.user_id,
+        uw.wallet_address,
         case
           when uw.wallet_address ~* '^0x[0-9a-f]{40}$' then lower(uw.wallet_address)
           else uw.wallet_address
-        end as wallet_key
+        end as wallet_key,
+        10 as priority
       from user_wallets uw
       ${userWhere}
-      union
-      select distinct
+      union all
+      select
         uvc.user_id,
-        lower(uvc.funder_address) as wallet_key
+        uvc.funder_address as wallet_address,
+        lower(uvc.funder_address) as wallet_key,
+        20 as priority
       from user_venue_credentials uvc
       join user_wallets uw
         on uw.user_id = uvc.user_id
@@ -2190,18 +2205,38 @@ function buildConnectedWalletScopeSql(userIdPlaceholder?: string): string {
       where uvc.venue = 'polymarket'
         and uvc.is_active = true
         and uvc.funder_address is not null
+        and uvc.funder_address <> ''
         ${userAnd}
-      union
-      select distinct
+      union all
+      select
         o.user_id,
-        lower(o.wallet_address) as wallet_key
+        o.wallet_address,
+        lower(o.wallet_address) as wallet_key,
+        30 as priority
       from orders o
       join user_wallets uw
         on uw.user_id = o.user_id
        and lower(uw.wallet_address) = lower(o.signer_address)
       where o.venue = 'polymarket'
         and o.wallet_address is not null
+        and o.wallet_address <> ''
         ${userAndOrders}
+    ),
+    wallet_scope as (
+      select distinct on (user_id, wallet_key)
+        user_id,
+        wallet_address,
+        wallet_key
+      from wallet_scope_candidates
+      where wallet_address is not null
+        and wallet_address <> ''
+        and wallet_key is not null
+        and wallet_key <> ''
+      order by
+        user_id,
+        wallet_key,
+        priority desc,
+        wallet_address desc
     )
   `;
 }
@@ -2212,25 +2247,36 @@ function buildPnlCteSql(userIdPlaceholder?: string): string {
     : "";
   return `
     ${buildConnectedWalletScopeSql(userIdPlaceholder)},
-    pnl as (
+    position_pnl as (
       select
         p.user_id,
-        coalesce(sum(${EFFECTIVE_PNL_SQL}), 0)::numeric as pnl_usd
+        (${EFFECTIVE_PNL_SQL})::numeric as effective_pnl_usd,
+        (case
+          when p.side <> 'FLAT'
+            and p.size > 0
+            and not (${RESOLVED_MARKET_SQL})
+            then (${UNREALIZED_PNL_COMPONENT_SQL})
+          else 0
+        end)::numeric as unresolved_unrealized_pnl_usd
       from positions p
       join wallet_scope ws
         on ws.user_id = p.user_id
-       and ws.wallet_key = case
-         when p.wallet_address ~* '^0x[0-9a-f]{40}$' then lower(p.wallet_address)
-         else p.wallet_address
-       end
-      left join unified_market_tokens umt
-        on umt.token_id = p.token_id
-       and umt.outcome_side in ('YES', 'NO')
-      left join unified_markets m
-        on m.id = umt.market_id
+       and ws.wallet_address = p.wallet_address
+      ${POSITION_MARKET_JOIN_SQL}
       where p.position_scope = 'own'
         ${userFilter}
-      group by p.user_id
+    ),
+    pnl as (
+      select
+        user_id,
+        coalesce(sum(effective_pnl_usd), 0)::numeric as pnl_usd,
+        coalesce(
+          sum(effective_pnl_usd - unresolved_unrealized_pnl_usd),
+          0
+        )::numeric as realized_pnl_usd,
+        coalesce(sum(unresolved_unrealized_pnl_usd), 0)::numeric as unrealized_pnl_usd
+      from position_pnl
+      group by user_id
     )
   `;
 }
@@ -2357,6 +2403,8 @@ export async function fetchRewardsLeaderboardRows(
           select
             user_id,
             pnl_usd,
+            realized_pnl_usd,
+            unrealized_pnl_usd,
             dense_rank() over (order by pnl_usd desc) as rank
           from pnl
         ),
@@ -2373,6 +2421,8 @@ export async function fetchRewardsLeaderboardRows(
           coalesce(t.points, 0)::text as points,
           coalesce(tier_points.points, 0)::text as tier_points,
           r.pnl_usd::text as pnl_usd,
+          r.realized_pnl_usd::text as realized_pnl_usd,
+          r.unrealized_pnl_usd::text as unrealized_pnl_usd,
           u.display_name,
           u.username,
           primary_wallet.wallet_address
@@ -2442,6 +2492,8 @@ export async function fetchRewardsLeaderboardRows(
         r.points::text as points,
         coalesce(tier_points.points, 0)::text as tier_points,
         coalesce(p.pnl_usd, 0)::text as pnl_usd,
+        coalesce(p.realized_pnl_usd, 0)::text as realized_pnl_usd,
+        coalesce(p.unrealized_pnl_usd, 0)::text as unrealized_pnl_usd,
         u.display_name,
         u.username,
         primary_wallet.wallet_address
@@ -2514,6 +2566,8 @@ export async function fetchRewardsLeaderboardMe(
         coalesce(t.points, 0)::text as points,
         coalesce(tt.tier_points, 0)::text as tier_points,
         coalesce(p.pnl_usd, 0)::text as pnl_usd,
+        coalesce(p.realized_pnl_usd, 0)::text as realized_pnl_usd,
+        coalesce(p.unrealized_pnl_usd, 0)::text as unrealized_pnl_usd,
         u.display_name,
         u.username,
         primary_wallet.wallet_address
