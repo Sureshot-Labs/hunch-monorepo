@@ -8,6 +8,10 @@ import {
 } from "../lib/pnl-sql.js";
 import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
+import {
+  isEvmAddress,
+  normalizeWalletForStorage,
+} from "../lib/wallet-address.js";
 import type { Position } from "../order-types.js";
 import type { PgParams } from "../server-types.js";
 
@@ -85,23 +89,103 @@ export type PositionMetricsInput = {
   }>;
 };
 
-const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
-
 const MATERIALIZABLE_RESOLVED_POSITION_SQL = `
   p.average_price is not null
   and ${RESOLVED_MARKET_SQL}
 `;
 
 function isEthAddress(address: string | null | undefined): address is string {
-  if (!address) return false;
-  return ETH_ADDRESS_RE.test(address);
+  return isEvmAddress(address);
 }
 
 function normalizeWalletKey(address: string): string {
-  const trimmed = address.trim();
-  if (trimmed.startsWith("0x")) return trimmed.toLowerCase();
-  return trimmed;
+  return normalizeWalletForStorage(address);
 }
+
+function splitWalletAddressesForRead(walletAddresses: string[]): {
+  exactWalletAddresses: string[];
+  evmWalletAddresses: string[];
+} {
+  const exactWalletAddresses = new Map<string, string>();
+  const evmWalletAddresses = new Set<string>();
+
+  for (const walletAddress of walletAddresses) {
+    const normalized = normalizeWalletForStorage(walletAddress);
+    if (!normalized) continue;
+    if (isEthAddress(normalized)) {
+      evmWalletAddresses.add(normalized.toLowerCase());
+    } else {
+      exactWalletAddresses.set(normalized, normalized);
+    }
+  }
+
+  return {
+    exactWalletAddresses: Array.from(exactWalletAddresses.values()),
+    evmWalletAddresses: Array.from(evmWalletAddresses.values()),
+  };
+}
+
+function appendWalletAddressReadFilter(
+  params: PgParams,
+  walletAddresses: string[],
+): string {
+  const { exactWalletAddresses, evmWalletAddresses } =
+    splitWalletAddressesForRead(walletAddresses);
+  params.push(exactWalletAddresses);
+  const exactParam = params.length;
+  params.push(evmWalletAddresses);
+  const evmParam = params.length;
+
+  return `(
+    p.wallet_address = any($${exactParam}::text[])
+    or lower(p.wallet_address) = any($${evmParam}::text[])
+  )`;
+}
+
+const POSITION_WALLET_CASE_RANK_SQL = `
+  row_number() over (
+    partition by
+      p.user_id,
+      p.venue,
+      p.position_scope,
+      p.token_id,
+      case
+        when p.wallet_address ~* '^0x[0-9a-f]{40}$' then lower(p.wallet_address)
+        else coalesce(p.wallet_address, '')
+      end
+    order by
+      (p.side <> 'FLAT' and p.size > 0) desc,
+      p.last_updated_at desc nulls last,
+      p.updated_at desc nulls last,
+      p.created_at desc nulls last,
+      (
+        p.wallet_address ~ '^0x[0-9a-f]{40}$'
+        and p.wallet_address = lower(p.wallet_address)
+      ) desc,
+      p.id desc
+  ) as wallet_case_rank
+`;
+
+const POSITION_ORDER_ACTIVITY_JOIN_SQL = `
+  left join lateral (
+    select max(coalesce(o.filled_at, o.posted_at, o.last_update)) as latest_order_at
+    from orders o
+    where o.user_id = p.user_id
+      and o.venue = p.venue
+      and o.token_id = p.token_id
+      and (
+        o.wallet_address = p.wallet_address
+        or o.signer_address = p.wallet_address
+        or (
+          p.wallet_address ~* '^0x[0-9a-f]{40}$'
+          and (
+            lower(o.wallet_address) = lower(p.wallet_address)
+            or lower(o.signer_address) = lower(p.wallet_address)
+          )
+        )
+      )
+  ) position_order_activity on true
+`;
 
 function normalizeTokenIdsForLookup(
   tokenIds: string[],
@@ -128,7 +212,7 @@ export async function expandPolymarketWallets(
   if (inputs.walletAddresses.length === 0) return [];
   const evmWallets = inputs.walletAddresses
     .filter(isEthAddress)
-    .map((address) => address.toLowerCase());
+    .map((address) => normalizeWalletForStorage(address));
   if (evmWallets.length === 0) {
     return Array.from(
       new Map(
@@ -177,19 +261,19 @@ export async function expandPolymarketWallets(
   const merged = new Map<string, string>();
   for (const address of inputs.walletAddresses) {
     const key = normalizeWalletKey(address);
-    if (key) merged.set(key, address);
+    if (key) merged.set(key, key);
   }
   for (const row of rows) {
     const funder = row.funder_address;
     if (!isEthAddress(funder)) continue;
     const key = normalizeWalletKey(funder);
-    if (key) merged.set(key, funder);
+    if (key) merged.set(key, key);
   }
   for (const row of rows) {
     const orderWallet = row.order_wallet;
     if (!isEthAddress(orderWallet)) continue;
     const key = normalizeWalletKey(orderWallet);
-    if (key) merged.set(key, orderWallet);
+    if (key) merged.set(key, key);
   }
   return Array.from(merged.values());
 }
@@ -339,7 +423,9 @@ export async function resolvePositionReadScope(
         userId: inputs.userId,
         walletAddresses: inputs.walletAddresses,
       })
-    : inputs.walletAddresses;
+    : inputs.walletAddresses.map((address) =>
+        normalizeWalletForStorage(address),
+      );
 
   return { walletAddresses, venueList };
 }
@@ -365,10 +451,11 @@ export async function fetchPositionPnlSummaryForResolvedScope(
     };
   }
 
-  let whereClause =
-    "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
-  const params: PgParams = [inputs.userId, inputs.walletAddresses];
-  let paramCount = 2;
+  const params: PgParams = [inputs.userId];
+  let whereClause = `where p.user_id = $1
+    and ${appendWalletAddressReadFilter(params, inputs.walletAddresses)}
+    and p.position_scope = 'own'`;
+  let paramCount = params.length;
 
   if (inputs.venueList?.length) {
     paramCount += 1;
@@ -403,9 +490,13 @@ export async function fetchPositionPnlSummaryForResolvedScope(
             then p.average_price * p.size
           else 0
         end), 0)::text as unrealized_cost_basis_current
-      from positions p
+      from (
+        select p.*, ${POSITION_WALLET_CASE_RANK_SQL}
+        from positions p
+        ${whereClause}
+      ) p
       ${POSITION_MARKET_JOIN_SQL}
-      ${whereClause}
+      where p.wallet_case_rank = 1
     `,
     params,
   );
@@ -465,10 +556,13 @@ export async function fetchPositionsForUserWallet(
   );
   if (walletAddresses.length === 0) return [];
 
-  let whereClause =
-    "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
-  const params: PgParams = [inputs.userId, walletAddresses];
-  let paramCount = 2;
+  const params: PgParams = [inputs.userId];
+  let whereClause = `where p.user_id = $1
+    and ${appendWalletAddressReadFilter(params, walletAddresses)}
+    and p.position_scope = 'own'
+    and p.side <> 'FLAT'
+    and p.size > 0`;
+  let paramCount = params.length;
 
   if (!inputs.includeHidden) {
     whereClause += " and (p.is_hidden is null or p.is_hidden = false)";
@@ -511,10 +605,16 @@ export async function fetchPositionsForUserWallet(
         p.last_updated_at,
         p.created_at,
         p.updated_at
-      from positions p
+      from (
+        select p.*, ${POSITION_WALLET_CASE_RANK_SQL}
+        from positions p
+        ${whereClause}
+      ) p
+      ${POSITION_ORDER_ACTIVITY_JOIN_SQL}
       ${POSITION_MARKET_JOIN_SQL}
-      ${whereClause}
+      where p.wallet_case_rank = 1
       order by
+        position_order_activity.latest_order_at desc nulls last,
         p.last_updated_at desc nulls last,
         p.created_at desc nulls last,
         p.venue asc,
@@ -549,10 +649,13 @@ export async function fetchPositionsForUserWalletByTokenIds(
   if (tokenIds.length === 0) return [];
   if (walletAddresses.length === 0) return [];
 
-  let whereClause =
-    "where p.user_id = $1 and p.wallet_address = any($2::text[]) and p.position_scope = 'own'";
-  const params: PgParams = [inputs.userId, walletAddresses];
-  let paramCount = 2;
+  const params: PgParams = [inputs.userId];
+  let whereClause = `where p.user_id = $1
+    and ${appendWalletAddressReadFilter(params, walletAddresses)}
+    and p.position_scope = 'own'
+    and p.side <> 'FLAT'
+    and p.size > 0`;
+  let paramCount = params.length;
 
   paramCount += 1;
   whereClause += ` and p.token_id = any($${paramCount}::text[])`;
@@ -599,10 +702,16 @@ export async function fetchPositionsForUserWalletByTokenIds(
         p.last_updated_at,
         p.created_at,
         p.updated_at
-      from positions p
+      from (
+        select p.*, ${POSITION_WALLET_CASE_RANK_SQL}
+        from positions p
+        ${whereClause}
+      ) p
+      ${POSITION_ORDER_ACTIVITY_JOIN_SQL}
       ${POSITION_MARKET_JOIN_SQL}
-      ${whereClause}
+      where p.wallet_case_rank = 1
       order by
+        position_order_activity.latest_order_at desc nulls last,
         p.last_updated_at desc nulls last,
         p.created_at desc nulls last,
         p.venue asc,
@@ -633,7 +742,7 @@ export async function setPositionHidden(
           userId: inputs.userId,
           walletAddresses: [inputs.walletAddress],
         })
-      : [inputs.walletAddress];
+      : [normalizeWalletForStorage(inputs.walletAddress)];
   const exactWalletAddresses = walletAddresses.filter(
     (walletAddress) => !isEthAddress(walletAddress),
   );
@@ -771,6 +880,7 @@ async function upsertLongPositionsInTx(
 ): Promise<number> {
   if (inputs.positions.length === 0) return 0;
 
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const tokenIds = inputs.positions.map((p) => p.tokenId);
   const sizes = inputs.positions.map((p) => p.size);
   const averagePrices = inputs.positions.map((p) => p.averagePrice ?? null);
@@ -855,7 +965,7 @@ async function upsertLongPositionsInTx(
     `,
     [
       inputs.userId,
-      inputs.walletAddress,
+      walletAddress,
       inputs.venue,
       inputs.positionScope,
       tokenIds,
@@ -880,11 +990,12 @@ async function markMissingPositionsFlatInTx(
     flattenGraceSec?: number;
   },
 ): Promise<number> {
-  const walletClause = isEthAddress(inputs.walletAddress)
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
+  const walletClause = isEthAddress(walletAddress)
     ? "lower(p.wallet_address) = lower($2)"
     : "p.wallet_address = $2";
   let whereClause = `where p.user_id = $1 and ${walletClause} and p.venue = $3`;
-  const params: PgParams = [inputs.userId, inputs.walletAddress, inputs.venue];
+  const params: PgParams = [inputs.userId, walletAddress, inputs.venue];
   let paramCount = 3;
 
   paramCount += 1;
@@ -970,6 +1081,7 @@ export async function syncWalletPositionsFromTokenBalances(
     protectRecentFlatsSec?: number;
   },
 ): Promise<SyncWalletPositionsResult> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const positionScope: PositionScope = inputs.positionScope ?? "own";
   const filteredTokenBalances = inputs.tokenBalances.filter((balance) => {
     const parsed = Number(balance.size);
@@ -1000,7 +1112,7 @@ export async function syncWalletPositionsFromTokenBalances(
     async (client: PoolClient) => {
       const upsertedPositions = await upsertLongPositionsInTx(client, {
         userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
+        walletAddress,
         venue: inputs.venue,
         positionScope,
         positions: knownTokenBalances,
@@ -1009,7 +1121,7 @@ export async function syncWalletPositionsFromTokenBalances(
 
       const flattenedPositions = await markMissingPositionsFlatInTx(client, {
         userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
+        walletAddress,
         venue: inputs.venue,
         positionScope,
         heldTokenIds,
@@ -1034,20 +1146,26 @@ export async function updatePositionMetrics(
   inputs: PositionMetricsInput,
 ): Promise<void> {
   if (inputs.metrics.length === 0) return;
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   await withPositionMutationLock(
     pool,
     { userId: inputs.userId, venue: inputs.venue },
-    async (client) => updatePositionMetricsInTx(client, inputs),
+    async (client) =>
+      updatePositionMetricsInTx(client, {
+        ...inputs,
+        walletAddress,
+      }),
   );
 }
 
 export async function updatePositionMetricsInTx(
-  client: PoolClient,
+  client: Pick<PoolClient, "query">,
   inputs: PositionMetricsInput,
 ): Promise<void> {
   const metrics = sortPositionMetrics(inputs.metrics);
   if (metrics.length === 0) return;
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   const tokenIds = metrics.map((metric) => metric.tokenId);
   const averagePrices = metrics.map((metric) => metric.averagePrice);
@@ -1115,7 +1233,7 @@ export async function updatePositionMetricsInTx(
       realizedPnls,
       unrealizedPnls,
       inputs.userId,
-      inputs.walletAddress,
+      walletAddress,
       inputs.venue,
     ],
   );

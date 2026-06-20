@@ -190,7 +190,7 @@ const tests: TestCase[] = [
         assert.deepEqual(queryCall.params, [
           "u-1",
           "polymarket",
-          "0xAbC0000000000000000000000000000000000000",
+          "0xabc0000000000000000000000000000000000000",
         ]);
       } finally {
         poolAny.query = originalQuery;
@@ -248,10 +248,73 @@ const tests: TestCase[] = [
         );
         assert.deepEqual(queryCall.params, [
           "u-1",
-          "0xAbC0000000000000000000000000000000000000",
+          "0xabc0000000000000000000000000000000000000",
         ]);
       } finally {
         poolAny.query = originalQuery;
+      }
+    },
+  },
+  {
+    name: "updateVenueFunderAddress lowercases EVM funder storage",
+    run: async () => {
+      const poolAny = pool as unknown as {
+        query: (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<{ rows: Array<Record<string, unknown>> }>;
+      };
+      const originalQuery = poolAny.query;
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      try {
+        resetAuthDbFeatureCachesForTests();
+        poolAny.query = async (sql, params) => {
+          calls.push({ sql, params });
+          if (/information_schema\.columns/i.test(sql)) {
+            return {
+              rows: [
+                { column_name: "api_secret_enc" },
+                { column_name: "api_passphrase_enc" },
+                { column_name: "funder_address" },
+                { column_name: "funder_updated_at" },
+              ],
+            };
+          }
+          return {
+            rows: [
+              {
+                funder_address:
+                  "0xdef0000000000000000000000000000000000000",
+                funder_updated_at: new Date("2026-01-04T00:00:00.000Z"),
+              },
+            ],
+          };
+        };
+
+        const result = await AuthService.updateVenueFunderAddress(
+          "u-1",
+          "0xAbC0000000000000000000000000000000000000",
+          "polymarket",
+          "0xDef0000000000000000000000000000000000000",
+        );
+
+        assert.equal(
+          result.funderAddress,
+          "0xdef0000000000000000000000000000000000000",
+        );
+        const updateCall = calls.find((call) =>
+          /update user_venue_credentials/i.test(call.sql),
+        );
+        assert.ok(updateCall);
+        assert.deepEqual(updateCall.params, [
+          "u-1",
+          "0xabc0000000000000000000000000000000000000",
+          "polymarket",
+          "0xdef0000000000000000000000000000000000000",
+        ]);
+      } finally {
+        poolAny.query = originalQuery;
+        resetAuthDbFeatureCachesForTests();
       }
     },
   },

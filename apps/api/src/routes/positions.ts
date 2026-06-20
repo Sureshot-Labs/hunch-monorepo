@@ -204,7 +204,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         );
         const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
 
-        const positions =
+        let positions =
           tokenIds != null
             ? tokenIds.length === 0
               ? []
@@ -226,14 +226,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 minSize: effectiveMinSize,
               });
 
-        if (positions.length) {
-          const tokenIds = positions.map((position) => position.tokenId);
-          void markHotTokens({
-            tokenIds,
-          });
-          void requestPriceRefreshForTokens({ tokenIds });
-        }
-
         let marketsByToken:
           | ReturnType<typeof mapMarketsByTokenRows>
           | undefined;
@@ -253,6 +245,12 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 includeTop: true,
               });
               marketsByToken = mapMarketsByTokenRows(marketRows);
+              const mappedTokenIds = new Set(
+                marketsByToken.map((entry) => entry.tokenId),
+              );
+              positions = positions.filter((position) =>
+                mappedTokenIds.has(position.tokenId),
+              );
             } catch (marketError) {
               app.log.warn(
                 {
@@ -265,6 +263,14 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               );
             }
           }
+        }
+
+        if (positions.length) {
+          const tokenIds = positions.map((position) => position.tokenId);
+          void markHotTokens({
+            tokenIds,
+          });
+          void requestPriceRefreshForTokens({ tokenIds });
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");

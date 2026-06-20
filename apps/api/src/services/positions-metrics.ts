@@ -1,4 +1,5 @@
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
+import { normalizeWalletForStorage } from "../lib/wallet-address.js";
 import type { PgParams } from "../server-types.js";
 import {
   updatePositionMetricsInTx,
@@ -22,7 +23,7 @@ type TradeFill = {
   timestamp: Date;
 };
 
-type Queryable = Pick<Pool, "query">;
+type Queryable = Pick<PoolClient, "query">;
 
 function computeBuyAveragePrice(fills: TradeFill[]): number | null {
   let shares = 0;
@@ -527,6 +528,7 @@ async function fetchPositionSnapshots(
   db: Queryable,
   inputs: { userId: string; walletAddress: string; venue: string },
 ): Promise<PositionSnapshot[]> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const { rows } = await db.query<{ token_id: string; size: string }>(
     `
       select token_id, size
@@ -537,7 +539,7 @@ async function fetchPositionSnapshots(
         and position_scope = 'own'
       order by token_id
     `,
-    [inputs.userId, inputs.walletAddress, inputs.venue],
+    [inputs.userId, walletAddress, inputs.venue],
   );
 
   return rows.map((row) => ({
@@ -599,10 +601,11 @@ async function fetchPolymarketFills(
   inputs: { userId: string; walletAddress: string; tokenIds: string[] },
 ): Promise<TradeFill[]> {
   if (inputs.tokenIds.length === 0) return [];
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   const params: PgParams = [
     inputs.userId,
-    inputs.walletAddress,
+    walletAddress,
     inputs.tokenIds,
   ];
 
@@ -674,6 +677,7 @@ async function fetchDflowFills(
     .filter((tokenId) => tokenId.startsWith("sol:"))
     .map((tokenId) => tokenId.replace(/^sol:/, ""));
   if (mintIds.length === 0) return [];
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   const { rows } = await db.query<{
     side: string | null;
@@ -709,7 +713,7 @@ async function fetchDflowFills(
           or output_mint = any($3::text[])
         )
     `,
-    [inputs.userId, inputs.walletAddress, mintIds],
+    [inputs.userId, walletAddress, mintIds],
   );
 
   return rows
@@ -722,6 +726,7 @@ async function fetchLimitlessFills(
   inputs: { userId: string; walletAddress: string; tokenIds: string[] },
 ): Promise<TradeFill[]> {
   if (inputs.tokenIds.length === 0) return [];
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   const { rows } = await db.query<{
     token_id: string | null;
@@ -751,7 +756,7 @@ async function fetchLimitlessFills(
         and venue = 'limitless'
         and token_id = any($3::text[])
     `,
-    [inputs.userId, inputs.walletAddress, inputs.tokenIds],
+    [inputs.userId, walletAddress, inputs.tokenIds],
   );
 
   return rows
@@ -767,76 +772,92 @@ export async function recomputePositionMetricsForWallet(
     venue: "polymarket" | "kalshi" | "limitless";
   },
 ): Promise<void> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   await withPositionMutationLock(
     pool,
     { userId: inputs.userId, venue: inputs.venue },
-    async (client) => {
-      const positions = await fetchPositionSnapshots(client, inputs);
-      if (positions.length === 0) return;
-
-      const tokenIds = positions.map((pos) => pos.tokenId);
-      const marks = await fetchMarksByToken(client, tokenIds);
-      const fills =
-        inputs.venue === "polymarket"
-          ? await fetchPolymarketFills(client, {
-              userId: inputs.userId,
-              walletAddress: inputs.walletAddress,
-              tokenIds,
-            })
-          : inputs.venue === "limitless"
-            ? await fetchLimitlessFills(client, {
-                userId: inputs.userId,
-                walletAddress: inputs.walletAddress,
-                tokenIds,
-              })
-            : await fetchDflowFills(client, {
-                userId: inputs.userId,
-                walletAddress: inputs.walletAddress,
-                tokenIds,
-              });
-
-      const fillsByToken = new Map<string, TradeFill[]>();
-      for (const fill of fills) {
-        const list = fillsByToken.get(fill.tokenId) ?? [];
-        list.push(fill);
-        fillsByToken.set(fill.tokenId, list);
-      }
-
-      const metrics = positions.map((position) => {
-        const tokenFills = fillsByToken.get(position.tokenId) ?? [];
-        const markPrice = marks.get(position.tokenId) ?? null;
-        const {
-          averagePrice,
-          realizedPnl,
-          unrealizedPnl,
-          computedSize,
-          hasUnmatchedSells,
-        } = computeMetrics(tokenFills, position.size, markPrice);
-        const sizeDelta = Math.abs(position.size - computedSize);
-        const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
-        const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
-        const fallbackAveragePrice = !reliable
-          ? (computeOpenBuyAveragePrice(tokenFills, position.size) ??
-            computeBuyAveragePrice(tokenFills))
-          : null;
-        const averagePriceValue = reliable
-          ? averagePrice
-          : fallbackAveragePrice;
-
-        return {
-          tokenId: position.tokenId,
-          averagePrice: averagePriceValue,
-          realizedPnl: reliable ? realizedPnl : 0,
-          unrealizedPnl: reliable ? unrealizedPnl : 0,
-        };
-      });
-
-      await updatePositionMetricsInTx(client, {
-        userId: inputs.userId,
-        walletAddress: inputs.walletAddress,
-        venue: inputs.venue,
-        metrics,
-      });
-    },
+    async (client) =>
+      recomputePositionMetricsForWalletInTx(client, {
+        ...inputs,
+        walletAddress,
+      }),
   );
+}
+
+export async function recomputePositionMetricsForWalletInTx(
+  db: Queryable,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    venue: "polymarket" | "kalshi" | "limitless";
+  },
+): Promise<void> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
+  const positions = await fetchPositionSnapshots(db, {
+    ...inputs,
+    walletAddress,
+  });
+  if (positions.length === 0) return;
+
+  const tokenIds = positions.map((pos) => pos.tokenId);
+  const marks = await fetchMarksByToken(db, tokenIds);
+  const fills =
+    inputs.venue === "polymarket"
+      ? await fetchPolymarketFills(db, {
+          userId: inputs.userId,
+          walletAddress,
+          tokenIds,
+        })
+      : inputs.venue === "limitless"
+        ? await fetchLimitlessFills(db, {
+            userId: inputs.userId,
+            walletAddress,
+            tokenIds,
+          })
+        : await fetchDflowFills(db, {
+            userId: inputs.userId,
+            walletAddress,
+            tokenIds,
+          });
+
+  const fillsByToken = new Map<string, TradeFill[]>();
+  for (const fill of fills) {
+    const list = fillsByToken.get(fill.tokenId) ?? [];
+    list.push(fill);
+    fillsByToken.set(fill.tokenId, list);
+  }
+
+  const metrics = positions.map((position) => {
+    const tokenFills = fillsByToken.get(position.tokenId) ?? [];
+    const markPrice = marks.get(position.tokenId) ?? null;
+    const {
+      averagePrice,
+      realizedPnl,
+      unrealizedPnl,
+      computedSize,
+      hasUnmatchedSells,
+    } = computeMetrics(tokenFills, position.size, markPrice);
+    const sizeDelta = Math.abs(position.size - computedSize);
+    const tolerance = Math.max(0.01, Math.abs(position.size) * 0.05);
+    const reliable = !hasUnmatchedSells && sizeDelta <= tolerance;
+    const fallbackAveragePrice = !reliable
+      ? (computeOpenBuyAveragePrice(tokenFills, position.size) ??
+        computeBuyAveragePrice(tokenFills))
+      : null;
+    const averagePriceValue = reliable ? averagePrice : fallbackAveragePrice;
+
+    return {
+      tokenId: position.tokenId,
+      averagePrice: averagePriceValue,
+      realizedPnl: reliable ? realizedPnl : 0,
+      unrealizedPnl: reliable ? unrealizedPnl : 0,
+    };
+  });
+
+  await updatePositionMetricsInTx(db, {
+    userId: inputs.userId,
+    walletAddress,
+    venue: inputs.venue,
+    metrics,
+  });
 }

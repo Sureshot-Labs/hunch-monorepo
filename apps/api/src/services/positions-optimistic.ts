@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import {
+  isEvmAddress,
+  normalizeWalletForStorage,
+} from "../lib/wallet-address.js";
+import {
   markPositionFlatByIdInTx,
   withPositionMutationLock,
 } from "../repos/positions-repo.js";
@@ -8,7 +12,6 @@ import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 
 type SupportedVenue = "polymarket" | "kalshi" | "limitless";
 type TradeSide = "BUY" | "SELL";
-const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 type PositionRow = {
   id: string;
@@ -61,7 +64,7 @@ function clampNonNegative(value: number): number | null {
 }
 
 function isEthAddress(value: string): boolean {
-  return ETH_ADDRESS_RE.test(value);
+  return isEvmAddress(value);
 }
 
 async function selectPositionForUpdate(
@@ -272,7 +275,7 @@ export async function reconcileExactPositionBalance(
   pool: Pool,
   input: ReconcileExactPositionBalanceInput,
 ): Promise<OptimisticPositionTradeResult> {
-  const walletAddress = input.walletAddress.trim();
+  const walletAddress = normalizeWalletForStorage(input.walletAddress);
   const tokenId = input.tokenId.trim();
   const exactSize = clampNonNegative(input.size);
   const averagePrice =
@@ -432,7 +435,7 @@ async function applyPositionTradeDelta(
   pool: Pool,
   input: OptimisticPositionTradeInput,
 ): Promise<OptimisticPositionTradeResult> {
-  const walletAddress = input.walletAddress.trim();
+  const walletAddress = normalizeWalletForStorage(input.walletAddress);
   const tokenId = input.tokenId.trim();
   const shares = clampPositive(input.shares);
   const notionalUsd = clampPositive(input.notionalUsd);

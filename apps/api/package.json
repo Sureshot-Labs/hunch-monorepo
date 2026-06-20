@@ -22,6 +22,7 @@
     "admin:points": "tsx src/admin-points.ts",
     "admin:merge-user": "tsx src/admin-merge-user.ts",
     "admin:wallets:duplicates": "tsx src/admin-wallet-duplicates.ts",
+    "wallet:casing:cleanup": "tsx src/wallet-casing-cleanup.ts",
     "analytics:retention": "tsx src/analytics-retention.ts",
     "fees:collect": "tsx src/collect-fees.ts",
     "fees:reconcile": "tsx src/reconcile-fees.ts",

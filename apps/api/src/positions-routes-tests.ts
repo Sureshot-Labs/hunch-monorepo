@@ -288,6 +288,19 @@ async function main() {
       "prepare failed",
     );
 
+    const orphanIncludeMarketsResponse = await app.inject({
+      method: "GET",
+      url: `/positions?includeMarkets=true&venue=polymarket&wallets=${encodeURIComponent(
+        persistedContext.funderWallet,
+      )}&minSize=0`,
+      headers: persistedContext.authHeaders,
+    });
+
+    assert.equal(orphanIncludeMarketsResponse.statusCode, 200);
+    const orphanIncludeMarketsPayload = orphanIncludeMarketsResponse.json();
+    assert.deepEqual(orphanIncludeMarketsPayload.positions, []);
+    assert.deepEqual(orphanIncludeMarketsPayload.marketsByToken, []);
+
     const persistedResponse = await app.inject({
       method: "GET",
       url: `/positions/by-token?tokenIds=123&venue=polymarket&wallets=${encodeURIComponent(

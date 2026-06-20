@@ -118,6 +118,13 @@ const POSITION_MARKET_JOIN_SQL = `
       and top.ts > now() - interval '7 days'
     limit 1
   ) no_top on true
+  left join lateral (
+    select top.best_bid, top.best_ask
+    from unified_token_top_latest top
+    where top.token_id = p.token_id
+      and top.ts > now() - interval '7 days'
+    limit 1
+  ) selected_top on true
 `;
 
 const POSITION_SHARE_SELECT_SQL = `

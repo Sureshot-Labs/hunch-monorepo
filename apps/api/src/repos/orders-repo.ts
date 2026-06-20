@@ -1,7 +1,10 @@
 import type { Pool, PoolClient } from "@hunch/infra";
+import {
+  isEvmAddress,
+  normalizeOptionalWalletForStorage,
+  normalizeWalletForStorage,
+} from "../lib/wallet-address.js";
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
-
-const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 function extractPayloadAddress(
   payload: unknown,
@@ -16,23 +19,30 @@ function extractPayloadAddress(
   for (const value of candidates) {
     if (typeof value !== "string") continue;
     const trimmed = value.trim();
-    if (!EVM_ADDRESS_RE.test(trimmed)) continue;
+    if (!isEvmAddress(trimmed)) continue;
     return trimmed;
   }
   return null;
-}
-
-function normalizeAddress(value: string): string {
-  return value.toLowerCase();
 }
 
 export async function findOrderVenueForUser(
   pool: Pool,
   inputs: { orderId: string; userId: string; walletAddress: string },
 ): Promise<string | null> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const { rows } = await pool.query<{ venue: string }>(
-    "SELECT venue FROM orders WHERE id = $1 AND user_id = $2 AND (wallet_address IS NULL OR wallet_address = $3 OR signer_address = $3)",
-    [inputs.orderId, inputs.userId, inputs.walletAddress],
+    `SELECT venue
+     FROM orders
+     WHERE id = $1
+       AND user_id = $2
+       AND (
+         wallet_address IS NULL
+         OR wallet_address = $3
+         OR signer_address = $3
+         OR lower(coalesce(wallet_address, '')) = lower($3)
+         OR lower(coalesce(signer_address, '')) = lower($3)
+       )`,
+    [inputs.orderId, inputs.userId, walletAddress],
   );
 
   return rows.length ? rows[0].venue : null;
@@ -52,10 +62,17 @@ export async function fetchOrderHistoryRows(
   let whereClause = "WHERE user_id = $1";
   const params: PgParams = [inputs.userId];
   let paramCount = 1;
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   paramCount++;
-  whereClause += ` AND (wallet_address IS NULL OR wallet_address = $${paramCount} OR signer_address = $${paramCount})`;
-  params.push(inputs.walletAddress);
+  whereClause += ` AND (
+    wallet_address IS NULL
+    OR wallet_address = $${paramCount}
+    OR signer_address = $${paramCount}
+    OR lower(coalesce(wallet_address, '')) = lower($${paramCount})
+    OR lower(coalesce(signer_address, '')) = lower($${paramCount})
+  )`;
+  params.push(walletAddress);
 
   if (inputs.venue) {
     paramCount++;
@@ -143,12 +160,15 @@ async function storeOrderInTx(
 ): Promise<StoreOrderResult> {
   const payloadMaker = extractPayloadAddress(inputs.orderPayload, "maker");
   const payloadSigner = extractPayloadAddress(inputs.orderPayload, "signer");
+  const inputWalletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const resolvedWalletAddress =
     payloadMaker &&
-    normalizeAddress(payloadMaker) !== normalizeAddress(inputs.walletAddress)
-      ? payloadMaker
-      : inputs.walletAddress;
-  const resolvedSignerAddress = inputs.signerAddress ?? payloadSigner ?? null;
+    normalizeWalletForStorage(payloadMaker) !== inputWalletAddress
+      ? normalizeWalletForStorage(payloadMaker)
+      : inputWalletAddress;
+  const resolvedSignerAddress = normalizeOptionalWalletForStorage(
+    inputs.signerAddress ?? payloadSigner,
+  );
 
   const existingOrder = await client.query<{
     id: string;
@@ -356,6 +376,7 @@ export async function findLimitlessHistoryMatch(
   const windowMs = inputs.windowMs ?? 2 * 60 * 1000;
   const from = new Date(inputs.postedAt.getTime() - windowMs);
   const to = new Date(inputs.postedAt.getTime() + windowMs);
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   const { rows } = await pool.query<{
     id: string;
@@ -389,7 +410,7 @@ export async function findLimitlessHistoryMatch(
       inputs.userId,
       inputs.tokenId,
       inputs.side,
-      inputs.walletAddress,
+      walletAddress,
       inputs.orderType,
       from,
       to,
@@ -514,6 +535,7 @@ export async function expireStaleLimitlessFokOrders(
 ): Promise<number> {
   const olderThanMs = inputs.olderThanMs ?? 2 * 60 * 1000;
   const cutoff = new Date(Date.now() - olderThanMs);
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const { rowCount } = await pool.query(
     `
       update orders
@@ -534,7 +556,7 @@ export async function expireStaleLimitlessFokOrders(
     `,
     [
       inputs.userId,
-      inputs.walletAddress,
+      walletAddress,
       inputs.marketSlug,
       inputs.activeVenueOrderIds,
       cutoff,
@@ -552,6 +574,7 @@ export async function normalizeLimitlessFokOrderSizesForMarket(
     marketSlug: string;
   },
 ): Promise<number> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
   const { rowCount } = await pool.query(
     `
       update orders
@@ -567,7 +590,7 @@ export async function normalizeLimitlessFokOrderSizesForMarket(
         and coalesce(order_payload->>'marketSlug', '') = $3
         and (order_payload->'order'->>'makerAmount') ~ '^[0-9]+$'
     `,
-    [inputs.userId, inputs.walletAddress, inputs.marketSlug],
+    [inputs.userId, walletAddress, inputs.marketSlug],
   );
 
   return rowCount ?? 0;
@@ -589,10 +612,17 @@ export async function fetchOrdersForUser(
     let whereClause = "WHERE user_id = $1";
     const params: PgParams = [inputs.userId];
     let paramCount = 1;
+    const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
     paramCount++;
-    whereClause += ` AND (wallet_address IS NULL OR wallet_address = $${paramCount} OR signer_address = $${paramCount})`;
-    params.push(inputs.walletAddress);
+    whereClause += ` AND (
+      wallet_address IS NULL
+      OR wallet_address = $${paramCount}
+      OR signer_address = $${paramCount}
+      OR lower(coalesce(wallet_address, '')) = lower($${paramCount})
+      OR lower(coalesce(signer_address, '')) = lower($${paramCount})
+    )`;
+    params.push(walletAddress);
 
     if (inputs.status) {
       paramCount++;

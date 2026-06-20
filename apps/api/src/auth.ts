@@ -18,6 +18,11 @@ import {
 } from "./lib/credentials-encryption.js";
 import { checkRateLimitForSecurityClientIp } from "./lib/request-ip.js";
 import {
+  isEvmAddress,
+  normalizeOptionalWalletForStorage,
+  normalizeWalletForStorage,
+} from "./lib/wallet-address.js";
+import {
   attachAdminSessionToRequest,
   type AdminPermission,
   type AdminRole,
@@ -1312,10 +1317,11 @@ export class AuthService {
       dbFeatures.hasEncryptedPassphrase && passphrase
         ? encryptCredentialsString(passphrase, encryptionKey)
         : null;
-    const funderAddressValue = funderAddress ?? null;
+    const funderAddressValue =
+      normalizeOptionalWalletForStorage(funderAddress);
 
-    const normalizedWallet = walletAddress.trim();
-    const isEthWallet = ETH_ADDRESS_RE.test(normalizedWallet);
+    const normalizedWallet = normalizeWalletForStorage(walletAddress);
+    const isEthWallet = isEvmAddress(normalizedWallet);
     let walletAddressKey = normalizedWallet;
 
     if (isEthWallet) {
@@ -1433,7 +1439,8 @@ export class AuthService {
       2,
       walletAddress,
     );
-    const funderAddressValue = funderAddress ? funderAddress.trim() : null;
+    const funderAddressValue =
+      normalizeOptionalWalletForStorage(funderAddress);
 
     const result = await pool.query<{
       funder_address: string | null;
@@ -2016,9 +2023,7 @@ type AdminMiddlewareOptions = AuthMiddlewareOptions & {
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 function normalizeWalletAddress(input: string): string {
-  const trimmed = input.trim();
-  if (ETH_ADDRESS_RE.test(trimmed)) return trimmed.toLowerCase();
-  return trimmed;
+  return normalizeWalletForStorage(input);
 }
 
 function buildWalletAddressMatch(
@@ -2026,8 +2031,8 @@ function buildWalletAddressMatch(
   parameterIndex: number,
   walletAddress: string,
 ): { normalizedWallet: string; clause: string } {
-  const normalizedWallet = walletAddress.trim();
-  const clause = ETH_ADDRESS_RE.test(normalizedWallet)
+  const normalizedWallet = normalizeWalletForStorage(walletAddress);
+  const clause = isEvmAddress(normalizedWallet)
     ? `lower(${columnName}) = lower($${parameterIndex})`
     : `${columnName} = $${parameterIndex}`;
   return { normalizedWallet, clause };

@@ -93,6 +93,20 @@ async function insertLimitlessToken(
   );
 }
 
+async function insertPolymarketToken(
+  tokenId: string,
+  marketId: string,
+  side: "YES" | "NO" = "YES",
+): Promise<void> {
+  await pool.query(
+    `
+      insert into unified_tokens(token_id, venue, market_id, side)
+      values ($1, 'polymarket', $2, $3)
+    `,
+    [tokenId, marketId, side],
+  );
+}
+
 async function insertLimitlessPosition(params: {
   userId: string;
   walletAddress: string;
@@ -266,6 +280,326 @@ async function insertResolvedLimitlessMarket(params: {
     [params.tokenId, params.marketId, params.outcomeSide],
   );
 }
+
+await test("polymarket position sync canonicalizes checksum then lowercase wallet to one row", async () => {
+  const checksumWallet = "0xAAbBcCdDEeFf0011223344556677889900aABbCc";
+  const lowerWallet = checksumWallet.toLowerCase();
+  const tokenId = `poly-token-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertPolymarketToken(tokenId, `poly-market-${crypto.randomUUID()}`);
+
+    await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress: checksumWallet,
+      venue: "polymarket",
+      tokenBalances: [{ tokenId, size: "1" }],
+    });
+
+    await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress: lowerWallet,
+      venue: "polymarket",
+      tokenBalances: [{ tokenId, size: "2" }],
+    });
+
+    const { rows } = await pool.query<{
+      wallet_address: string;
+      size: string;
+    }>(
+      `
+        select wallet_address, size::text
+        from positions
+        where user_id = $1 and token_id = $2
+      `,
+      [userId, tokenId],
+    );
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.wallet_address, lowerWallet);
+    assert.equal(rows[0]?.size, "2");
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("polymarket position sync canonicalizes lowercase then checksum wallet to one row", async () => {
+  const checksumWallet = "0xCcDdEeFf0011223344556677889900AaBbCcDdEe";
+  const lowerWallet = checksumWallet.toLowerCase();
+  const tokenId = `poly-token-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertPolymarketToken(tokenId, `poly-market-${crypto.randomUUID()}`);
+
+    await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress: lowerWallet,
+      venue: "polymarket",
+      tokenBalances: [{ tokenId, size: "3" }],
+    });
+
+    await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress: checksumWallet,
+      venue: "polymarket",
+      tokenBalances: [{ tokenId, size: "4" }],
+    });
+
+    const { rows } = await pool.query<{
+      wallet_address: string;
+      size: string;
+    }>(
+      `
+        select wallet_address, size::text
+        from positions
+        where user_id = $1 and token_id = $2
+      `,
+      [userId, tokenId],
+    );
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.wallet_address, lowerWallet);
+    assert.equal(rows[0]?.size, "4");
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("polymarket position reads tolerate mixed-case duplicates before cleanup", async () => {
+  const lowerWallet = randomEvmAddress();
+  const checksumWallet = `0x${lowerWallet
+    .slice(2)
+    .split("")
+    .map((char, index) =>
+      /[a-f]/.test(char) && index % 2 === 0 ? char.toUpperCase() : char,
+    )
+    .join("")}`;
+  const tokenId = `poly-token-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertPolymarketToken(tokenId, `poly-market-${crypto.randomUUID()}`);
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          (
+            $1,
+            $2,
+            'polymarket',
+            'own',
+            $4,
+            'LONG',
+            1,
+            0.4,
+            -0.1,
+            0.2,
+            '2026-01-01T00:00:00.000Z'::timestamptz,
+            '2026-01-01T00:00:00.000Z'::timestamptz,
+            '2026-01-01T00:00:00.000Z'::timestamptz
+          ),
+          (
+            $1,
+            $3,
+            'polymarket',
+            'own',
+            $4,
+            'LONG',
+            2,
+            0.5,
+            0.25,
+            0.75,
+            '2026-01-02T00:00:00.000Z'::timestamptz,
+            '2026-01-02T00:00:00.000Z'::timestamptz,
+            '2026-01-02T00:00:00.000Z'::timestamptz
+          )
+      `,
+      [userId, checksumWallet, lowerWallet, tokenId],
+    );
+
+    const positions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [checksumWallet],
+      venue: "polymarket",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.equal(positions.length, 1);
+    assert.equal(positions[0]?.walletAddress, lowerWallet);
+    assert.equal(positions[0]?.size, 2);
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [checksumWallet],
+      tokenIds: [tokenId],
+      venue: "polymarket",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.equal(byToken.length, 1);
+    assert.equal(byToken[0]?.walletAddress, lowerWallet);
+    assert.equal(byToken[0]?.size, 2);
+
+    const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
+      userId,
+      walletAddresses: [checksumWallet],
+      venue: "polymarket",
+    });
+    assert.equal(summary.positionsCount, 1);
+    assert.equal(summary.openPositionsCount, 1);
+    assertClose(summary.realizedPnlAllTime, 0.75);
+    assertClose(summary.unrealizedPnlCurrent, 0.25);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("polymarket position reads sort recent order activity before sync-discovered rows", async () => {
+  const walletAddress = randomEvmAddress();
+  const tradedTokenId = `poly-token-${crypto.randomUUID()}`;
+  const syncedTokenId = `poly-token-${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertPolymarketToken(
+      tradedTokenId,
+      `poly-market-${crypto.randomUUID()}`,
+    );
+    await insertPolymarketToken(
+      syncedTokenId,
+      `poly-market-${crypto.randomUUID()}`,
+    );
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          (
+            $1,
+            $2,
+            'polymarket',
+            'own',
+            $3,
+            'LONG',
+            1,
+            0.4,
+            0,
+            0,
+            '2026-06-20T15:40:59.000Z'::timestamptz,
+            '2026-06-20T15:40:59.000Z'::timestamptz,
+            '2026-06-20T15:40:59.000Z'::timestamptz
+          ),
+          (
+            $1,
+            $2,
+            'polymarket',
+            'own',
+            $4,
+            'LONG',
+            2,
+            0.5,
+            0,
+            0,
+            '2026-06-20T15:41:01.000Z'::timestamptz,
+            '2026-06-20T15:41:01.000Z'::timestamptz,
+            '2026-06-20T15:41:01.000Z'::timestamptz
+          )
+      `,
+      [userId, walletAddress, tradedTokenId, syncedTokenId],
+    );
+
+    await pool.query(
+      `
+        insert into orders (
+          user_id,
+          wallet_address,
+          venue,
+          venue_order_id,
+          token_id,
+          side,
+          order_type,
+          price,
+          size,
+          status,
+          filled_size,
+          average_fill_price,
+          posted_at,
+          filled_at,
+          last_update
+        )
+        values (
+          $1,
+          $2,
+          'polymarket',
+          $3,
+          $4,
+          'BUY',
+          'FOK',
+          0.4,
+          1,
+          'matched',
+          1,
+          0.4,
+          '2026-06-20T15:40:55.000Z'::timestamptz,
+          '2026-06-20T15:40:55.000Z'::timestamptz,
+          '2026-06-20T15:40:56.000Z'::timestamptz
+        )
+      `,
+      [
+        userId,
+        walletAddress,
+        `test-order-${crypto.randomUUID()}`,
+        tradedTokenId,
+      ],
+    );
+
+    const positions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "polymarket",
+      includeHidden: true,
+      minSize: 0,
+    });
+
+    assert.equal(positions.length, 2);
+    assert.equal(positions[0]?.tokenId, tradedTokenId);
+    assert.equal(positions[1]?.tokenId, syncedTokenId);
+  } finally {
+    await pool.query("delete from orders where user_id = $1", [userId]);
+    await cleanupPositionTest(userId, [tradedTokenId, syncedTokenId]);
+  }
+});
 
 await test("position sync protection does not extend stale-balance grace forever", async () => {
   const walletAddress = randomEvmAddress();
@@ -1274,6 +1608,94 @@ await test("exact position reconciliation flattens empty AMM balance", async () 
     assert.equal(flatRow.rows[0]?.average_price, null);
   } finally {
     await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
+await test("active position reads exclude flat zero rows even with minSize zero", async () => {
+  const walletAddress = randomEvmAddress();
+  const flatTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const openTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const userId = await createTestUser();
+
+  try {
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          (
+            $1,
+            $2,
+            'limitless',
+            'own',
+            $3,
+            'FLAT',
+            0,
+            null,
+            0,
+            0,
+            now(),
+            now(),
+            now()
+          ),
+          (
+            $1,
+            $2,
+            'limitless',
+            'own',
+            $4,
+            'LONG',
+            0.0001,
+            0.5,
+            0,
+            0,
+            now(),
+            now(),
+            now()
+          )
+      `,
+      [userId, walletAddress, flatTokenId, openTokenId],
+    );
+
+    const positions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.deepEqual(
+      positions.map((position) => position.tokenId),
+      [openTokenId],
+    );
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [flatTokenId, openTokenId],
+      venue: "limitless",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.deepEqual(
+      byToken.map((position) => position.tokenId),
+      [openTokenId],
+    );
+  } finally {
+    await cleanupPositionTest(userId, [flatTokenId, openTokenId]);
   }
 });
 
