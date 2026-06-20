@@ -75,6 +75,7 @@ import { loadWalletOpenPositionStatsPreferRollupMap } from "../services/wallet-o
 import {
   loadLatestWalletPositionNowMap,
   loadWalletPositionApproxMetrics,
+  type WalletPositionNow,
 } from "../services/wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "../services/wallet-position-ledger.js";
 import {
@@ -1789,11 +1790,30 @@ function isEventPositioningSort(sort: WalletPositioningQuery["sort"]) {
   ].includes(sort);
 }
 
+function compareNullableNumberDesc(
+  a: number | null | undefined,
+  b: number | null | undefined,
+): number {
+  const aValid = typeof a === "number" && Number.isFinite(a);
+  const bValid = typeof b === "number" && Number.isFinite(b);
+  if (aValid && bValid) {
+    if (a === b) return 0;
+    return b - a;
+  }
+  if (aValid) return -1;
+  if (bValid) return 1;
+  return 0;
+}
+
+function compareStringAsc(a: string, b: string): number {
+  return a.localeCompare(b);
+}
+
 function sortPositioningMarkets(
   markets: PositioningMarketAggregate[],
   sort: WalletPositioningQuery["sort"],
 ): PositioningMarketAggregate[] {
-  const value = (market: PositioningMarketAggregate) => {
+  const value = (market: PositioningMarketAggregate): number | null => {
     switch (sort) {
       case "wallet_count":
         return market.walletCount;
@@ -1808,23 +1828,23 @@ function sortPositioningMarkets(
       case "minority_side_usd":
         return market.minoritySideUsd;
       case "abs_imbalance_pct":
-        return market.absImbalancePct ?? -Infinity;
+        return market.absImbalancePct;
       case "avg_win_rate":
-        return market.weightedAvgWinRate30d ?? -Infinity;
+        return market.weightedAvgWinRate30d;
       case "avg_win_rate_edge":
-        return market.weightedAvgResolvedWinRateEdge30d ?? -Infinity;
+        return market.weightedAvgResolvedWinRateEdge30d;
       case "avg_edge_z_score":
-        return market.weightedAvgResolvedEdgeZScore30d ?? -Infinity;
+        return market.weightedAvgResolvedEdgeZScore30d;
       case "avg_brier_score":
         return market.weightedAvgResolvedBrierScore30d != null
           ? -market.weightedAvgResolvedBrierScore30d
-          : -Infinity;
+          : null;
       case "avg_roi":
-        return market.weightedAvgRoi30d ?? -Infinity;
+        return market.weightedAvgRoi30d;
       case "newest_snapshot":
         return market.newestSnapshotAt
           ? new Date(market.newestSnapshotAt).getTime()
-          : -Infinity;
+          : null;
       case "event_disagreement_score":
       case "contested_market_count":
       case "cross_market_wallet_count":
@@ -1836,13 +1856,27 @@ function sortPositioningMarkets(
         return market.trackedPositionUsd;
     }
   };
-  return [...markets].sort((a, b) => value(b) - value(a));
+  return [...markets].sort((a, b) => {
+    const byPrimary = compareNullableNumberDesc(value(a), value(b));
+    if (byPrimary !== 0) return byPrimary;
+
+    const byPosition = compareNullableNumberDesc(
+      a.trackedPositionUsd,
+      b.trackedPositionUsd,
+    );
+    if (byPosition !== 0) return byPosition;
+
+    const byWallets = compareNullableNumberDesc(a.walletCount, b.walletCount);
+    if (byWallets !== 0) return byWallets;
+
+    return compareStringAsc(a.marketId, b.marketId);
+  });
 }
 
-function holderEdgeZScoreSortValue(holder: PositioningHolder): number {
+function holderEdgeZScoreSortValue(holder: PositioningHolder): number | null {
   const sampleCount = holder.metrics.resolvedEdgeSampleCount30d ?? 0;
-  if (sampleCount <= 0) return -Infinity;
-  return holder.metrics.resolvedEdgeZScore30d ?? -Infinity;
+  if (sampleCount <= 0) return null;
+  return holder.metrics.resolvedEdgeZScore30d ?? null;
 }
 
 function sortPositioningHolders(
@@ -1851,17 +1885,22 @@ function sortPositioningHolders(
 ): PositioningHolder[] {
   if (sort === "edge_z_score") {
     return [...holders].sort((a, b) => {
-      const byEdge = holderEdgeZScoreSortValue(b) - holderEdgeZScoreSortValue(a);
+      const byEdge = compareNullableNumberDesc(
+        holderEdgeZScoreSortValue(a),
+        holderEdgeZScoreSortValue(b),
+      );
       if (byEdge !== 0) return byEdge;
 
-      const bySamples =
-        (b.metrics.resolvedEdgeSampleCount30d ?? 0) -
-        (a.metrics.resolvedEdgeSampleCount30d ?? 0);
+      const bySamples = compareNullableNumberDesc(
+        a.metrics.resolvedEdgeSampleCount30d ?? 0,
+        b.metrics.resolvedEdgeSampleCount30d ?? 0,
+      );
       if (bySamples !== 0) return bySamples;
 
-      const byStake =
-        (b.metrics.resolvedStakeUsd30d ?? 0) -
-        (a.metrics.resolvedStakeUsd30d ?? 0);
+      const byStake = compareNullableNumberDesc(
+        a.metrics.resolvedStakeUsd30d ?? 0,
+        b.metrics.resolvedStakeUsd30d ?? 0,
+      );
       if (byStake !== 0) return byStake;
 
       return b.positionUsd - a.positionUsd;
@@ -1875,26 +1914,26 @@ function sortPositioningEvents(
   events: PositioningEventAggregate[],
   sort: WalletPositioningQuery["sort"],
 ): PositioningEventAggregate[] {
-  const value = (event: PositioningEventAggregate) => {
+  const value = (event: PositioningEventAggregate): number | null => {
     switch (sort) {
       case "wallet_count":
         return event.walletCount;
       case "avg_win_rate":
-        return event.weightedAvgWinRate30d ?? -Infinity;
+        return event.weightedAvgWinRate30d;
       case "avg_win_rate_edge":
-        return event.weightedAvgResolvedWinRateEdge30d ?? -Infinity;
+        return event.weightedAvgResolvedWinRateEdge30d;
       case "avg_edge_z_score":
-        return event.weightedAvgResolvedEdgeZScore30d ?? -Infinity;
+        return event.weightedAvgResolvedEdgeZScore30d;
       case "avg_brier_score":
         return event.weightedAvgResolvedBrierScore30d != null
           ? -event.weightedAvgResolvedBrierScore30d
-          : -Infinity;
+          : null;
       case "avg_roi":
-        return event.weightedAvgRoi30d ?? -Infinity;
+        return event.weightedAvgRoi30d;
       case "newest_snapshot":
         return event.newestSnapshotAt
           ? new Date(event.newestSnapshotAt).getTime()
-          : -Infinity;
+          : null;
       case "event_disagreement_score":
         return event.eventDisagreementScore;
       case "contested_market_count":
@@ -1902,9 +1941,9 @@ function sortPositioningEvents(
       case "cross_market_wallet_count":
         return event.crossMarketWalletCount;
       case "top_market_minority_side_usd":
-        return event.topMarketMinoritySideUsd ?? -Infinity;
+        return event.topMarketMinoritySideUsd;
       case "largest_market_pct":
-        return event.largestMarketPct ?? -Infinity;
+        return event.largestMarketPct;
       case "yes_position_usd":
       case "no_position_usd":
       case "imbalance_usd":
@@ -1916,7 +1955,21 @@ function sortPositioningEvents(
         return event.trackedPositionUsd;
     }
   };
-  return [...events].sort((a, b) => value(b) - value(a));
+  return [...events].sort((a, b) => {
+    const byPrimary = compareNullableNumberDesc(value(a), value(b));
+    if (byPrimary !== 0) return byPrimary;
+
+    const byPosition = compareNullableNumberDesc(
+      a.trackedPositionUsd,
+      b.trackedPositionUsd,
+    );
+    if (byPosition !== 0) return byPosition;
+
+    const byMarkets = compareNullableNumberDesc(a.marketCount, b.marketCount);
+    if (byMarkets !== 0) return byMarkets;
+
+    return compareStringAsc(a.eventId, b.eventId);
+  });
 }
 
 async function loadPositioningQuotes(
@@ -5562,6 +5615,41 @@ function mapWalletActivityRouteItems(rows: WalletActivityRouteRow[]) {
     quoteTiming: "current" as const,
     occurredAt: row.occurred_at,
     metadata: row.metadata ?? null,
+  }));
+}
+
+type WalletActivityRouteItem = ReturnType<
+  typeof mapWalletActivityRouteItems
+>[number];
+
+async function enrichWalletActivityRouteItemsWithPositionNow(
+  client: PoolClient,
+  items: WalletActivityRouteItem[],
+): Promise<
+  Array<WalletActivityRouteItem & { positionNow: WalletPositionNow | null }>
+> {
+  if (items.length === 0) return [];
+
+  const positionNowByKey = await loadLatestWalletPositionNowMap(
+    client,
+    items.map((item) => ({
+      walletId: item.walletId,
+      venue: item.venue,
+      marketId: item.marketId,
+      outcomeSide: item.outcomeSide,
+    })),
+  );
+
+  return items.map((item) => ({
+    ...item,
+    positionNow:
+      positionNowByKey.get(
+        makeWalletPositionLedgerKey(
+          item.walletId,
+          item.marketId,
+          item.outcomeSide,
+        ),
+      ) ?? null,
   }));
 }
 
@@ -9685,7 +9773,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         const minUsd = env.walletIntelMinActivityUsd;
         const minShares = env.walletIntelMinActivityShares;
 
-        const items = mapWalletActivityRouteItems(rows.rows);
+        const items = query.includePositionNow
+          ? await enrichWalletActivityRouteItemsWithPositionNow(
+              client,
+              mapWalletActivityRouteItems(rows.rows),
+            )
+          : mapWalletActivityRouteItems(rows.rows);
 
         const filteredItems =
           minUsd <= 0 && minShares <= 0
@@ -10001,10 +10094,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           params,
         );
 
+        const items = query.includePositionNow
+          ? await enrichWalletActivityRouteItemsWithPositionNow(
+              client,
+              mapWalletActivityRouteItems(rows.rows),
+            )
+          : mapWalletActivityRouteItems(rows.rows);
+
         return reply.send({
           ok: true,
           marketId: request.params.marketId,
-          items: mapWalletActivityRouteItems(rows.rows),
+          items,
         });
       } catch (error) {
         app.log.error(

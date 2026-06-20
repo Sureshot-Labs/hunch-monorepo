@@ -166,6 +166,7 @@ export const walletActivityQuerySchema = z.object({
   minDeltaShares: z.coerce.number().min(0).optional(),
   marketStatus: walletMarketStatusSchema.optional(),
   acceptingOrders: queryBooleanSchema.optional(),
+  includePositionNow: queryBooleanSchema.default(false),
   since: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
@@ -280,6 +281,7 @@ export const marketWalletActivityQuerySchema = z.object({
   changeAction: walletChangeActionSchema.optional(),
   minSizeUsd: z.coerce.number().min(0).optional(),
   minDeltaShares: z.coerce.number().min(0).optional(),
+  includePositionNow: queryBooleanSchema.default(false),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });

@@ -1097,7 +1097,7 @@ async function main() {
 
       const activityResponse = await app.inject({
         method: "GET",
-        url: `/wallets/activity?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&eventId=${encodeURIComponent(matching.eventId)}&category=${encodeURIComponent(category)}&outcomeSide=YES&action=BUY&changeAction=OPENED&minSizeUsd=100&minDeltaShares=10&marketStatus=ACTIVE&acceptingOrders=true&limit=10&offset=0`,
+        url: `/wallets/activity?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&eventId=${encodeURIComponent(matching.eventId)}&category=${encodeURIComponent(category)}&outcomeSide=YES&action=BUY&changeAction=OPENED&minSizeUsd=100&minDeltaShares=10&marketStatus=ACTIVE&acceptingOrders=true&includePositionNow=true&limit=10&offset=0`,
       });
       assert.equal(activityResponse.statusCode, 200);
       const activityBody = activityResponse.json() as {
@@ -1107,6 +1107,10 @@ async function main() {
           eventId: string | null;
           outcomeSide: string | null;
           changeAction: string | null;
+          positionNow: {
+            positionShares: number | null;
+            positionSizeUsd: number | null;
+          } | null;
         }>;
       };
       assert.equal(activityBody.ok, true);
@@ -1115,6 +1119,8 @@ async function main() {
       assert.equal(activityBody.items[0]?.eventId, matching.eventId);
       assert.equal(activityBody.items[0]?.outcomeSide, "YES");
       assert.equal(activityBody.items[0]?.changeAction, "OPENED");
+      assert.equal(activityBody.items[0]?.positionNow?.positionShares, 20);
+      assert.equal(activityBody.items[0]?.positionNow?.positionSizeUsd, 250);
 
       const reducedActivityResponse = await app.inject({
         method: "GET",
@@ -1139,18 +1145,22 @@ async function main() {
 
       const marketActivityResponse = await app.inject({
         method: "GET",
-        url: `/markets/${encodeURIComponent(matching.marketId)}/wallet-activity?outcomeSide=YES&action=BUY&changeAction=OPENED&minSizeUsd=100&minDeltaShares=10&limit=10&offset=0`,
+        url: `/markets/${encodeURIComponent(matching.marketId)}/wallet-activity?outcomeSide=YES&action=BUY&changeAction=OPENED&minSizeUsd=100&minDeltaShares=10&includePositionNow=true&limit=10&offset=0`,
       });
       assert.equal(marketActivityResponse.statusCode, 200);
       const marketActivityBody = marketActivityResponse.json() as {
         ok: boolean;
         marketId: string;
-        items: Array<{ marketId: string }>;
+        items: Array<{
+          marketId: string;
+          positionNow: { positionShares: number | null } | null;
+        }>;
       };
       assert.equal(marketActivityBody.ok, true);
       assert.equal(marketActivityBody.marketId, matching.marketId);
       assert.equal(marketActivityBody.items.length, 1);
       assert.equal(marketActivityBody.items[0]?.marketId, matching.marketId);
+      assert.equal(marketActivityBody.items[0]?.positionNow?.positionShares, 20);
 
       const yesWalletId = await createWhaleFixtureWallet(context, {
         address: randomEvmAddress(),
@@ -1381,6 +1391,94 @@ async function main() {
         edgeSortedHoldersBody.market?.sideBreakdown.NO.topHolders[0]?.walletId,
         noWalletId,
       );
+
+      const noEdgeCategory = `${category}-no-edge`;
+      const noEdgeMarket = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-no-edge`,
+        category: noEdgeCategory,
+      });
+      const smallerNoEdgeMarket = await createWalletMarketFixture(context, {
+        suffix: `${suffix}-no-edge-small`,
+        category: noEdgeCategory,
+      });
+      const largeNoEdgeWalletId = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        volumeUsd: 2_000,
+        pnlUsd: 20,
+        roi: 0.01,
+        trades30d: 5,
+        winRate30d: 0.5,
+        exposureUsd: 2_000,
+      });
+      const smallNoEdgeWalletId = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        volumeUsd: 1_000,
+        pnlUsd: 10,
+        roi: 0.01,
+        trades30d: 5,
+        winRate30d: 0.5,
+        exposureUsd: 1_000,
+      });
+      await pool.query(
+        `
+          insert into wallet_position_snapshots (
+            wallet_id,
+            venue,
+            market_id,
+            outcome_side,
+            shares,
+            size_usd,
+            price,
+            metadata,
+            snapshot_at
+          )
+          values
+            ($1, 'polymarket', $3, 'NO', 90, 900, 0.55, '{}'::jsonb, $5),
+            ($2, 'polymarket', $3, 'YES', 10, 100, 0.45, '{}'::jsonb, $5),
+            ($2, 'polymarket', $4, 'YES', 5, 50, 0.4, '{}'::jsonb, $5)
+        `,
+        [
+          largeNoEdgeWalletId,
+          smallNoEdgeWalletId,
+          noEdgeMarket.marketId,
+          smallerNoEdgeMarket.marketId,
+          snapshotAt,
+        ],
+      );
+      const noEdgeSortedHoldersResponse = await app.inject({
+        method: "GET",
+        url: `/markets/${encodeURIComponent(noEdgeMarket.marketId)}/wallet-positioning?minWallets=1&holdersLimit=2&holderSort=edge_z_score`,
+      });
+      assert.equal(noEdgeSortedHoldersResponse.statusCode, 200);
+      const noEdgeSortedHoldersBody = noEdgeSortedHoldersResponse.json() as {
+        ok: boolean;
+        market: {
+          topHolders: Array<{ walletId: string; positionUsd: number }>;
+        } | null;
+      };
+      assert.equal(noEdgeSortedHoldersBody.ok, true);
+      assert.equal(
+        noEdgeSortedHoldersBody.market?.topHolders[0]?.walletId,
+        largeNoEdgeWalletId,
+      );
+      assert.equal(
+        noEdgeSortedHoldersBody.market?.topHolders[0]?.positionUsd,
+        900,
+      );
+      const noEdgeMarketSortResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/markets?category=${encodeURIComponent(noEdgeCategory)}&sort=avg_edge_z_score&minWallets=1&includeHolders=false&limit=2`,
+      });
+      assert.equal(noEdgeMarketSortResponse.statusCode, 200);
+      const noEdgeMarketSortBody = noEdgeMarketSortResponse.json() as {
+        ok: boolean;
+        items: Array<{ marketId: string; trackedPositionUsd: number }>;
+      };
+      assert.equal(noEdgeMarketSortBody.ok, true);
+      assert.equal(noEdgeMarketSortBody.items[0]?.marketId, noEdgeMarket.marketId);
+      assert.equal(noEdgeMarketSortBody.items[0]?.trackedPositionUsd, 1_000);
 
       const eventPositioningResponse = await app.inject({
         method: "GET",
