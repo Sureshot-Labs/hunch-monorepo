@@ -703,6 +703,7 @@ function buildFeedSearchMatchesSql(args: {
   fullEventSearchDocExpr: string;
   fullMarketSearchDocExpr: string;
   renderableMarketExpr: string;
+  orderableMarketExpr: string;
   strategy: FeedSearchStrategy;
   earlyFilters?: FeedSearchEarlyFilterSql;
 }): string {
@@ -715,6 +716,7 @@ function buildFeedSearchMatchesSql(args: {
     fullEventSearchDocExpr,
     fullMarketSearchDocExpr,
     renderableMarketExpr,
+    orderableMarketExpr,
     strategy,
     earlyFilters,
   } = args;
@@ -816,11 +818,13 @@ function buildFeedSearchMatchesSql(args: {
           } as rank
         from unified_markets m
         join unified_events e on e.id = m.event_id
+        left join polymarket_markets pm_search
+          on pm_search.id = m.venue_market_id
+         and m.venue = 'polymarket'
         cross join search_query sq
         where querytree(sq.query) <> ''
           ${profileGate}
-          and e.status = 'ACTIVE'
-          and m.status = 'ACTIVE'
+          and ${orderableMarketExpr}
           ${marketEarlyWhere}
           and ${renderableMarketExpr}
           and (${marketSearchDocExpr}) @@ sq.query
@@ -834,12 +838,14 @@ function buildFeedSearchMatchesSql(args: {
           } as rank
         from unified_markets m
         join unified_events e on e.id = m.event_id
+        left join polymarket_markets pm_search
+          on pm_search.id = m.venue_market_id
+         and m.venue = 'polymarket'
         cross join search_query sq
         where sq.prefix_query is not null
           and querytree(sq.prefix_query) <> ''
           ${profileGate}
-          and e.status = 'ACTIVE'
-          and m.status = 'ACTIVE'
+          and ${orderableMarketExpr}
           ${marketEarlyWhere}
           and ${renderableMarketExpr}
           and (${marketSearchDocExpr}) @@ sq.prefix_query
@@ -904,6 +910,7 @@ function buildFeedSearchContext(args: {
   const {
     add,
     q,
+    nowParam,
     renderableMarketExpr,
     mode = "ranked",
     matchLimit = null,
@@ -925,6 +932,12 @@ function buildFeedSearchContext(args: {
     "full",
   );
   const effectiveMode = mode === "ranked" ? plan.rankMode : mode;
+  const orderableMarketExpr = buildOrderableMarketSql({
+    marketAlias: "m",
+    eventAlias: "e",
+    nowParam,
+    pmAlias: "pm_search",
+  });
   const earlyFilters = plan.hasSearch
     ? buildFeedSearchEarlyFilterSql({
         add,
@@ -942,6 +955,7 @@ function buildFeedSearchContext(args: {
         fullEventSearchDocExpr,
         fullMarketSearchDocExpr,
         renderableMarketExpr,
+        orderableMarketExpr,
         strategy: plan.strategy,
         earlyFilters,
       })
@@ -1486,8 +1500,7 @@ function feedSearchResultMatchLimitForInputs(
   ) {
     return null;
   }
-  const pageAwareLimit = Math.max(inputs.limit + inputs.offset + 100, 200);
-  return Math.min(pageAwareLimit, feedSearchResultMatchLimit());
+  return feedSearchResultMatchLimit();
 }
 
 function feedSearchFallbackThresholdForInputs(
@@ -1495,7 +1508,7 @@ function feedSearchFallbackThresholdForInputs(
 ): number | null {
   const matchLimit = feedSearchResultMatchLimitForInputs(inputs);
   if (matchLimit == null) return null;
-  return Math.min(matchLimit, inputs.limit + inputs.offset + 25);
+  return Math.min(matchLimit, 50);
 }
 
 export function buildFeedSearchResultWindow(
@@ -2715,6 +2728,184 @@ export async function fetchFeedMarketsDirect(
   });
   const where = marketContext.where;
 
+  const directMarketSearchPlan = buildFeedSearchPlan(inputs.q);
+  const directMarketSearchParam = directMarketSearchPlan.hasSearch
+    ? add(directMarketSearchPlan.searchText)
+    : null;
+  const directMarketRelaxedQueryText = directMarketSearchPlan.hasSearch
+    ? buildFeedDirectMarketRelaxedQueryText(inputs.q)
+    : null;
+  const directMarketRelaxedParam = directMarketRelaxedQueryText
+    ? add(directMarketRelaxedQueryText)
+    : null;
+  const directMarketSearchDocExpr =
+    buildFeedDirectMarketSearchDocumentExpr("m");
+  const directMarketExactExpr = directMarketSearchParam
+    ? `
+      lower(regexp_replace(btrim(coalesce(m.title, '')), '\\s+', ' ', 'g')) =
+        lower(regexp_replace(btrim(${directMarketSearchParam}::text), '\\s+', ' ', 'g'))
+      or exists (
+        select 1
+        from jsonb_array_elements_text(
+          case
+            when m.outcomes is not null and btrim(m.outcomes) <> '' then m.outcomes::jsonb
+            else '[]'::jsonb
+          end
+        ) as outcome(label)
+        where lower(regexp_replace(btrim(outcome.label), '\\s+', ' ', 'g')) =
+          lower(regexp_replace(btrim(${directMarketSearchParam}::text), '\\s+', ' ', 'g'))
+      )
+    `
+    : "false";
+  const directMarketRankExpr =
+    directMarketSearchPlan.rankMode === "ranked"
+      ? `ts_rank_cd((${directMarketSearchDocExpr}), SEARCH_QUERY_PLACEHOLDER) * 2`
+      : "coalesce(m.volume_total, m.open_interest, m.liquidity, 0)";
+  const buildDirectMarketViewMatchesSql = (
+    queryExpr: "sq.query" | "sq.prefix_query",
+    matchKind: "strict" | "relaxed" = "strict",
+  ) => `
+        select
+          m.id as market_id,
+          m.event_id,
+          (${directMarketExactExpr}) as exact_match,
+          ${matchKind === "strict" ? "true" : "false"} as strict_match,
+          ${matchKind === "relaxed" ? "true" : "false"} as relaxed_match,
+          ${directMarketRankExpr.replace("SEARCH_QUERY_PLACEHOLDER", queryExpr)} as rank
+        from ${marketContext.orderableMarketCandidateSource} omc
+        join unified_markets m on m.id = omc.market_id
+        join unified_events e on e.id = omc.event_id
+        cross join search_query sq
+        where ${queryExpr === "sq.query" ? "querytree(sq.query) <> ''" : "sq.prefix_query is not null and querytree(sq.prefix_query) <> ''"}
+          and ${where.join(" and ")}
+          and (${directMarketSearchDocExpr}) @@ ${queryExpr}
+      `;
+  const directMarketRelaxedMatchesSql = directMarketRelaxedParam
+    ? `
+        select
+          m.id as market_id,
+          m.event_id,
+          false as exact_match,
+          false as strict_match,
+          true as relaxed_match,
+          coalesce(m.volume_total, m.open_interest, m.liquidity, 0) as rank
+        from ${marketContext.orderableMarketCandidateSource} omc
+        join unified_markets m on m.id = omc.market_id
+        join unified_events e on e.id = omc.event_id
+        where ${where.join(" and ")}
+          and (${directMarketSearchDocExpr}) @@ to_tsquery('english', ${directMarketRelaxedParam}::text)
+      `
+    : null;
+  const directMarketSearchCtes =
+    directMarketSearchPlan.hasSearch &&
+    directMarketSearchParam
+      ? [
+          `
+      direct_market_matches as materialized (
+        select
+          market_id,
+          event_id,
+          bool_or(exact_match) as exact_match,
+          bool_or(strict_match) as strict_match,
+          bool_or(relaxed_match) as relaxed_match,
+          max(rank) as rank
+        from (
+          ${buildDirectMarketViewMatchesSql("sq.query")}
+          union all
+          ${buildDirectMarketViewMatchesSql("sq.prefix_query")}
+          ${
+            directMarketRelaxedMatchesSql
+              ? `union all
+          ${directMarketRelaxedMatchesSql}`
+              : ""
+          }
+        ) matches
+        group by market_id, event_id
+      )
+    `,
+          `
+      events_with_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+      )
+    `,
+          `
+      events_with_exact_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+        where exact_match
+      )
+    `,
+          `
+      events_with_strict_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+        where strict_match
+      )
+    `,
+          `
+      events_with_relaxed_direct_market_matches as materialized (
+        select distinct event_id
+        from direct_market_matches
+        where relaxed_match
+      )
+    `,
+        ]
+      : [];
+  const directMarketJoin = directMarketSearchPlan.hasSearch
+    ? "left join direct_market_matches dmm on dmm.market_id = m.id"
+    : "";
+  const directMarketFilter = directMarketSearchPlan.hasSearch
+    ? `
+      and (
+        (
+          exists (
+            select 1
+            from events_with_exact_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and dmm.exact_match
+        )
+        or (
+          not exists (
+            select 1
+            from events_with_exact_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and exists (
+            select 1
+            from events_with_strict_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and dmm.strict_match
+        )
+        or (
+          not exists (
+            select 1
+            from events_with_exact_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and not exists (
+            select 1
+            from events_with_strict_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and exists (
+            select 1
+            from events_with_relaxed_direct_market_matches edm
+            where edm.event_id = m.event_id
+          )
+          and dmm.relaxed_match
+        )
+        or not exists (
+          select 1
+          from events_with_direct_market_matches edm
+          where edm.event_id = m.event_id
+        )
+      )
+    `
+    : "";
+
   let marketOrder = "";
   if (inputs.sort === "totalvol")
     marketOrder = `${marketVolumeDisplayExpr} ${sortDir} nulls last, m.venue_market_id`;
@@ -2740,8 +2931,12 @@ export async function fetchFeedMarketsDirect(
     `;
     marketOrder = `${marketTrendExpr} ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.sort == null || inputs.sort === "trending") {
+    const directSearchOrder = directMarketSearchPlan.hasSearch
+      ? `case when dmm.exact_match then 0 when dmm.strict_match then 1 when dmm.relaxed_match then 2 else 3 end,
+         dmm.rank desc nulls last, `
+      : "";
     const searchOrder = marketContext.hasSearch
-      ? `${marketContext.joinedRankExpr} desc nulls last, `
+      ? `${directSearchOrder}${marketContext.joinedRankExpr} desc nulls last, `
       : "";
     marketOrder = `
       ${searchOrder}(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4 +
@@ -2774,9 +2969,11 @@ export async function fetchFeedMarketsDirect(
       join unified_markets m on m.id = omc.market_id
       join unified_events e on e.id = omc.event_id
       ${marketContext.searchEventJoin}
+      ${directMarketJoin}
       ${change24hCandidateJoin}
       ${tradeJoin}
       where ${[...where, ...extraWhere].join(" and ")}
+      ${directMarketFilter}
       ${marketOrder ? `order by ${marketOrder}` : ""}
       limit ${limitParam} offset ${offsetParam}
     `;
@@ -2812,7 +3009,9 @@ export async function fetchFeedMarketsDirect(
           join unified_markets m on m.id = omc.market_id
           join unified_events e on e.id = omc.event_id
           ${marketContext.searchEventJoin}
+          ${directMarketJoin}
           where ${where.join(" and ")}
+            ${directMarketFilter}
             and mc.change_24h is not null
           order by mc.change_24h ${sortDir} nulls last, m.venue_market_id
           limit ${metricFirstTargetParam}
@@ -2875,7 +3074,9 @@ export async function fetchFeedMarketsDirect(
             join unified_markets m on m.id = omc.market_id
             join unified_events e on e.id = omc.event_id
             ${marketContext.searchEventJoin}
+            ${directMarketJoin}
             where ${where.join(" and ")}
+              ${directMarketFilter}
               and m.venue <> 'limitless'
               and trade_24h.volume_24h > 0
             union all
@@ -2888,7 +3089,9 @@ export async function fetchFeedMarketsDirect(
             join unified_markets m on m.id = omc.market_id
             join unified_events e on e.id = omc.event_id
             ${marketContext.searchEventJoin}
+            ${directMarketJoin}
             where ${where.join(" and ")}
+              ${directMarketFilter}
               and m.venue = 'limitless'
               and ${limitlessTrendExpr} > 0
           ) candidate
@@ -2983,6 +3186,7 @@ export async function fetchFeedMarketsDirect(
   if (marketContext.scopedOrderableMarketCandidatesCte) {
     withParts.push(marketContext.scopedOrderableMarketCandidatesCte);
   }
+  if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   if (metricFirstMarketCandidateCtes) {
     withParts.push(...metricFirstMarketCandidateCtes);
   } else {

@@ -33,6 +33,7 @@ type SeededMarket = {
   expirationTime: Date;
   volumeTotal: number;
   liquidity?: number;
+  dflowNativeAcceptingOrders?: boolean;
 };
 
 type FeedPayload = {
@@ -147,7 +148,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
         0.45, 0.55, 0.5, $10, 10, $11, 50,
         $12, $13,
         case
-          when $2 = 'kalshi' then '{"dflowNativeAcceptingOrders":true}'::jsonb
+          when $2 = 'kalshi' then jsonb_build_object('dflowNativeAcceptingOrders', $14::boolean)
           else '{}'::jsonb
         end,
         now(), now()
@@ -167,6 +168,7 @@ async function insertMarket(market: SeededMarket): Promise<void> {
       market.liquidity ?? 100,
       market.outcomes ?? '["Yes","No"]',
       makeId("slug"),
+      market.dflowNativeAcceptingOrders ?? true,
     ],
   );
 }
@@ -232,6 +234,8 @@ async function main() {
       searchFilter.searchCte.indexOf("search_events as materialized"),
     );
     assert.match(primarySql, /lower\(e\.category\)/);
+    assert.match(primarySql, /polymarket_markets pm_search/);
+    assert.match(primarySql, /dflowNativeAcceptingOrders/);
     assert.match(primarySql, /limit 200/);
     assert.doesNotMatch(fallbackSql, /lower\(e\.category\)/);
     assert.match(fallbackSql, /limit 500/);
@@ -384,6 +388,26 @@ async function main() {
       endDate: new Date(now + 24 * 60 * 60 * 1000),
       volumeTotal: 1_000_000,
     },
+    {
+      id: makeId("kalshi:event"),
+      venue: "kalshi",
+      venueEventId: makeId("venue-event"),
+      title: `World Soccer Cup Quarterfinals Qualifiers ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 700,
+    },
+    {
+      id: makeId("polymarket:event"),
+      venue: "polymarket",
+      venueEventId: makeId("venue-event"),
+      title: `World Cup Winner pool ${needle}`,
+      category,
+      startDate: new Date(now - 60 * 60 * 1000),
+      endDate: new Date(now + 30 * 24 * 60 * 60 * 1000),
+      volumeTotal: 600,
+    },
     ...outOfCategoryFallbackEvents,
   ];
 
@@ -508,6 +532,58 @@ async function main() {
       closeTime: events[13].endDate,
       expirationTime: events[13].endDate,
       volumeTotal: 1_000_000,
+    },
+    {
+      id: makeId("kalshi:market"),
+      venue: "kalshi",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[14].id,
+      title: "Morocco",
+      closeTime: events[14].endDate,
+      expirationTime: events[14].endDate,
+      volumeTotal: 1_000_000,
+      dflowNativeAcceptingOrders: false,
+    },
+    {
+      id: makeId("kalshi:market"),
+      venue: "kalshi",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[14].id,
+      title: "USA",
+      closeTime: events[14].endDate,
+      expirationTime: events[14].endDate,
+      volumeTotal: 900_000,
+      dflowNativeAcceptingOrders: true,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[15].id,
+      title: "Morocco",
+      closeTime: events[15].endDate,
+      expirationTime: events[15].endDate,
+      volumeTotal: 750,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[15].id,
+      title: "France",
+      closeTime: events[15].endDate,
+      expirationTime: events[15].endDate,
+      volumeTotal: 800,
+    },
+    {
+      id: makeId("polymarket:market"),
+      venue: "polymarket",
+      venueMarketId: makeId("venue-market"),
+      eventId: events[15].id,
+      title: "Brazil",
+      closeTime: events[15].endDate,
+      expirationTime: events[15].endDate,
+      volumeTotal: 10_000_000,
     },
     {
       id: makeId("kalshi:market"),
@@ -690,6 +766,55 @@ async function main() {
       const response = await app.inject({
         method: "GET",
         url: `/feed?${buildQuery({
+          q: "Morocc",
+          view: "events",
+          category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const eventIds = payload.data.map((event) => event.eventId);
+      assert.ok(
+        !eventIds.includes(events[14].id),
+        "search should not admit an event through a non-orderable child market",
+      );
+      const visibleWorldCupEvent = payload.data.find(
+        (event) => event.eventId === events[15].id,
+      );
+      assert.deepEqual(
+        visibleWorldCupEvent?.markets.map((market) => market.marketTitle),
+        ["Morocco"],
+        "search should preview matching visible child markets instead of unrelated siblings",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: "France",
+          view: "events",
+          category,
+          limit: 10,
+        })}`,
+      });
+      assert.equal(response.statusCode, 200);
+      const payload = response.json<FeedPayload>();
+      const worldCupEvent = payload.data.find(
+        (event) => event.eventId === events[15].id,
+      );
+      assert.deepEqual(
+        worldCupEvent?.markets.map((market) => market.marketTitle),
+        ["France"],
+        "World Cup winner searches should find the visible country child market",
+      );
+    }
+
+    {
+      const response = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
           q: "Donald Trump",
           view: "events",
           category,
@@ -781,6 +906,40 @@ async function main() {
       assert.ok(
         eventIds.every((eventId) => !outOfCategoryEventIds.has(eventId)),
         "category-filtered fallback should not return out-of-category events",
+      );
+    }
+
+    {
+      const smallResponse = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: fallbackNeedle,
+          view: "events",
+          category,
+          limit: 3,
+        })}`,
+      });
+      const largeResponse = await app.inject({
+        method: "GET",
+        url: `/feed?${buildQuery({
+          q: fallbackNeedle,
+          view: "events",
+          category,
+          limit: 18,
+        })}`,
+      });
+      assert.equal(smallResponse.statusCode, 200);
+      assert.equal(largeResponse.statusCode, 200);
+      const smallEventIds = smallResponse
+        .json<FeedPayload>()
+        .data.map((event) => event.eventId);
+      const largeEventIds = largeResponse
+        .json<FeedPayload>()
+        .data.map((event) => event.eventId);
+      assert.deepEqual(
+        smallEventIds,
+        largeEventIds.slice(0, smallEventIds.length),
+        "search result ordering should not depend on the requested page limit",
       );
     }
 

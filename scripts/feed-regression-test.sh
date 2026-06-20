@@ -47,6 +47,11 @@ if [[ "$FULL" == "1" ]]; then
   add_case "minliq:1000" "min_liquidity=1000"
   add_case "minvol:1000" "min_volume24hr=1000"
   add_case "q:bitcoin" "q=bitcoin"
+  add_case "q:morocc" "q=Morocc"
+  add_case "q:france" "q=France"
+  add_case "q:donald-trump" "q=Donald%20Trump"
+  add_case "q:elon-musk" "q=Elon%20Musk"
+  add_case "q:bitcoin-up" "q=Bitcoin%20up"
 fi
 
 printf "base\t%s\n" "$BASE_URL"
