@@ -1043,6 +1043,23 @@ async function main() {
         suffix: `${suffix}-other`,
         category: `${category}-other`,
       });
+      const searchNeedle = `positioningsearch${suffix}`;
+      await pool.query(
+        `
+          update unified_events
+          set title = $1
+          where id = $2
+        `,
+        [`Tracked ${searchNeedle} event`, matching.eventId],
+      );
+      await pool.query(
+        `
+          update unified_markets
+          set title = $1
+          where id = $2
+        `,
+        [`Tracked ${searchNeedle} market`, matching.marketId],
+      );
       const snapshotAt = new Date();
 
       await pool.query(
@@ -1121,6 +1138,23 @@ async function main() {
       assert.equal(activityBody.items[0]?.changeAction, "OPENED");
       assert.equal(activityBody.items[0]?.positionNow?.positionShares, 20);
       assert.equal(activityBody.items[0]?.positionNow?.positionSizeUsd, 250);
+
+      const searchedActivityResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/activity?walletId=${labeledWalletId}&q=${encodeURIComponent(searchNeedle)}&limit=10&offset=0`,
+      });
+      assert.equal(searchedActivityResponse.statusCode, 200);
+      const searchedActivityBody = searchedActivityResponse.json() as {
+        ok: boolean;
+        items: Array<{ marketId: string }>;
+      };
+      assert.equal(searchedActivityBody.ok, true);
+      assert.ok(searchedActivityBody.items.length > 0);
+      assert.ok(
+        searchedActivityBody.items.every(
+          (item) => item.marketId === matching.marketId,
+        ),
+      );
 
       const reducedActivityResponse = await app.inject({
         method: "GET",
@@ -1354,6 +1388,32 @@ async function main() {
         false,
       );
 
+      const searchedMarketPositioningResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/markets?q=${encodeURIComponent(searchNeedle)}&minWallets=1&limit=5`,
+      });
+      assert.equal(searchedMarketPositioningResponse.statusCode, 200);
+      const searchedMarketPositioningBody =
+        searchedMarketPositioningResponse.json() as {
+          ok: boolean;
+          filters: { q: string | null };
+          items: Array<{ marketId: string }>;
+        };
+      assert.equal(searchedMarketPositioningBody.ok, true);
+      assert.equal(searchedMarketPositioningBody.filters.q, searchNeedle);
+      assert.equal(
+        searchedMarketPositioningBody.items.some(
+          (item) => item.marketId === matching.marketId,
+        ),
+        true,
+      );
+      assert.equal(
+        searchedMarketPositioningBody.items.some(
+          (item) => item.marketId === other.marketId,
+        ),
+        false,
+      );
+
       const edgeSortedHoldersResponse = await app.inject({
         method: "GET",
         url: `/markets/${encodeURIComponent(matching.marketId)}/wallet-positioning?minWallets=1&holdersLimit=2&holderSort=edge_z_score`,
@@ -1521,6 +1581,25 @@ async function main() {
         yesTokenId,
       );
       assert.equal(eventPositioningBody.items[0]?.marketId, matching.marketId);
+
+      const searchedEventPositioningResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?q=${encodeURIComponent(searchNeedle)}&minWallets=1&limit=5`,
+      });
+      assert.equal(searchedEventPositioningResponse.statusCode, 200);
+      const searchedEventPositioningBody =
+        searchedEventPositioningResponse.json() as {
+          ok: boolean;
+          filters: { q: string | null };
+          items: Array<{ eventId: string }>;
+        };
+      assert.equal(searchedEventPositioningBody.ok, true);
+      assert.equal(searchedEventPositioningBody.filters.q, searchNeedle);
+      assert.equal(searchedEventPositioningBody.items.length, 1);
+      assert.equal(
+        searchedEventPositioningBody.items[0]?.eventId,
+        matching.eventId,
+      );
 
       const sameEventOneSided = await createWalletMarketFixture(context, {
         suffix: `${suffix}-same-event-one-sided`,
@@ -1701,6 +1780,26 @@ async function main() {
       assert.equal(positionBody.items.length, 1);
       assert.equal(positionBody.items[0]?.marketId, matching.marketId);
       assert.equal(positionBody.items[0]?.outcomeSide, "YES");
+
+      const searchedPositionResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positions?walletId=${labeledWalletId}&q=${encodeURIComponent(searchNeedle)}&includeSmall=true&limit=10&offset=0`,
+      });
+      assert.equal(searchedPositionResponse.statusCode, 200);
+      const searchedPositionBody = searchedPositionResponse.json() as {
+        ok: boolean;
+        items: Array<{ marketId: string }>;
+      };
+      assert.equal(searchedPositionBody.ok, true);
+      assert.equal(searchedPositionBody.items.length, 1);
+      assert.equal(searchedPositionBody.items[0]?.marketId, matching.marketId);
+
+      const searchedPositionHistoryResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positions/history?walletId=${labeledWalletId}&q=${encodeURIComponent(searchNeedle)}&includeSmall=true&limit=10&offset=0`,
+      });
+      assert.equal(searchedPositionHistoryResponse.statusCode, 200);
+      assert.equal(searchedPositionHistoryResponse.json().ok, true);
 
       await pool.query(
         `

@@ -19,6 +19,12 @@ import {
   inspectSafeWallet,
 } from "../services/polymarket-funder.js";
 import {
+  buildFeedCandidateEventSearchFilter,
+  buildFeedSearchResultWindow,
+  type FeedInputs,
+} from "../repos/unified-read.js";
+import type { PgParams } from "../server-types.js";
+import {
   compareWalletActivitySummaryStats,
   fetchWalletActivitySignalPageLabels,
   fetchWalletActivitySignalSummary,
@@ -1127,7 +1133,7 @@ function appendWalletActivityFilters(
 
 function appendMarketReferenceFilters(
   clauses: string[],
-  params: Array<string | number | boolean | null>,
+  params: PgParams,
   startIndex: number,
   query: {
     marketId?: string;
@@ -1176,8 +1182,36 @@ function appendMarketReferenceFilters(
   return idx;
 }
 
+function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+function appendWalletMarketSearchFilter(
+  clauses: string[],
+  params: PgParams,
+  startIndex: number,
+  query: { q?: string },
+  aliases: { marketAlias: string; eventAlias: string },
+): number {
+  const q = query.q?.trim();
+  if (!q) return startIndex;
+  const idx = startIndex;
+  params.push(`%${escapeSqlLikePattern(q)}%`);
+  clauses.push(`
+    (
+      coalesce(${aliases.marketAlias}.title, '') ilike $${idx} escape '\\'
+      or coalesce(${aliases.eventAlias}.title, '') ilike $${idx} escape '\\'
+      or coalesce(${aliases.marketAlias}.outcomes::text, '') ilike $${idx} escape '\\'
+      or coalesce(${aliases.marketAlias}.id, '') ilike $${idx} escape '\\'
+      or coalesce(${aliases.marketAlias}.event_id, '') ilike $${idx} escape '\\'
+    )
+  `);
+  return idx + 1;
+}
+
 type WalletPositioningQuery = {
   scope: "whales";
+  q?: string;
   venue?: string;
   category?: string;
   marketStatus: string;
@@ -2112,7 +2146,7 @@ async function loadTrackedWalletPositioning(input: {
 }) {
   const { client, query } = input;
   const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
-  const params: Array<string | number | boolean | null> = [
+  const params: PgParams = [
     query.walletActiveWithinHours,
     query.minWalletExposureUsd,
   ];
@@ -2186,10 +2220,36 @@ async function loadTrackedWalletPositioning(input: {
     marketClauses.push("(ue.id is null or ue.status = 'ACTIVE')");
   }
   marketClauses.push("hp.token_id is null");
+  const addSearchParam = (value: PgParams[number]) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  const searchWindow = buildFeedSearchResultWindow({
+    limit: query.limit,
+    offset: query.offset,
+  });
+  const searchEarlyFilterInputs: Pick<
+    FeedInputs,
+    "venues" | "category"
+  > = {};
+  if (venueFilter) searchEarlyFilterInputs.venues = [venueFilter];
+  if (query.category) searchEarlyFilterInputs.category = query.category;
+  const searchFilter = buildFeedCandidateEventSearchFilter({
+    add: addSearchParam,
+    q: query.q,
+    nowParam: "now()",
+    matchLimit: searchWindow.matchLimit,
+    fallbackThreshold: searchWindow.fallbackThreshold,
+    earlyFilterInputs: searchEarlyFilterInputs,
+  });
+  if (searchFilter.hasSearch) {
+    marketClauses.push("um.event_id in (select id from search_events)");
+  }
 
   const { rows } = await client.query<WalletPositioningRow>(
     `
-      with candidate_wallets as materialized (
+      with ${searchFilter.searchCte ? `${searchFilter.searchCte},` : ""}
+      candidate_wallets as materialized (
         select
           w.id as wallet_id,
           w.address,
@@ -2877,6 +2937,7 @@ async function loadTrackedWalletPositioning(input: {
     ok: true,
     scope: query.scope,
     filters: {
+      q: query.q ?? null,
       venue: venueFilter ?? null,
       eventId: input.eventId ?? null,
       marketId: input.marketId ?? null,
@@ -9689,6 +9750,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         marketAlias: "um",
         eventAlias: "ue",
       });
+      idx = appendWalletMarketSearchFilter(filterClauses, params, idx, query, {
+        marketAlias: "um",
+        eventAlias: "ue",
+      });
       idx = appendWalletActivityFilters(
         filterClauses,
         params,
@@ -10204,6 +10269,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         },
         { marketAlias: "um", eventAlias: "ue" },
       );
+      idx = appendWalletMarketSearchFilter(
+        positionMarketClauses,
+        params,
+        idx,
+        query,
+        { marketAlias: "um", eventAlias: "ue" },
+      );
       if (query.outcomeSide) {
         positionMarketClauses.push(`ws.outcome_side = $${idx++}::text`);
         params.push(query.outcomeSide);
@@ -10577,6 +10649,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           marketStatus: query.marketStatus,
           acceptingOrders: query.acceptingOrders,
         },
+        { marketAlias: "um", eventAlias: "ue" },
+      );
+      idx = appendWalletMarketSearchFilter(
+        historyMarketClauses,
+        params,
+        idx,
+        query,
         { marketAlias: "um", eventAlias: "ue" },
       );
       if (query.outcomeSide) {

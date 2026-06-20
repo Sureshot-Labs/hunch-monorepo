@@ -81,6 +81,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         const result = await fetchUnifiedOrders(pool, {
           userId: user.id,
           walletAddresses,
+          q: query.q,
           venue: query.venue,
           marketId: query.marketId,
           marketIds: marketIds.length ? marketIds : undefined,
@@ -168,6 +169,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         const result = await fetchUnifiedOrders(pool, {
           userId: user.id,
           walletAddresses,
+          q: query.q,
           venue: query.venue,
           marketId: query.marketId,
           marketIds: marketIds.length ? marketIds : undefined,

@@ -155,6 +155,7 @@ export const walletProfileParamsSchema = z.object({
 
 export const walletActivityQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
+  q: z.string().trim().min(1).max(160).optional(),
   venue: zVenue.optional(),
   marketId: z.string().trim().min(1).optional(),
   eventId: z.string().trim().min(1).optional(),
@@ -235,6 +236,7 @@ export const walletActivitySignalsQuerySchema = z.object({
 
 export const walletPositionsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
+  q: z.string().trim().min(1).max(160).optional(),
   venue: zVenue.optional(),
   marketId: z.string().trim().min(1).optional(),
   eventId: z.string().trim().min(1).optional(),
@@ -254,6 +256,7 @@ export const walletPositionsQuerySchema = z.object({
 
 export const walletPositionHistoryQuerySchema = z.object({
   walletId: z.string().uuid(),
+  q: z.string().trim().min(1).max(160).optional(),
   venue: zVenue.optional(),
   marketId: z.string().trim().min(1).optional(),
   eventId: z.string().trim().min(1).optional(),
@@ -321,6 +324,13 @@ const walletPositioningHolderSortSchema = z.enum([
 
 export const walletPositioningQuerySchema = z.object({
   scope: z.enum(["whales"]).default("whales"),
+  q: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.string(),
+    )
+    .optional()
+    .transform((value) => (value && value.length ? value : undefined)),
   venue: zVenue.optional(),
   category: z.string().trim().min(1).optional(),
   marketStatus: walletMarketStatusSchema.default("ACTIVE"),

@@ -125,33 +125,160 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     );
   };
 
+  const escapeSqlLikePattern = (value: string): string =>
+    value.replace(/[\\%_]/g, "\\$&");
+
+  type MappedMarketByTokenEntry = ReturnType<typeof mapMarketsByTokenRows>[number];
+
+  const normalizeSearchText = (value: unknown): string => {
+    if (value == null) return "";
+    if (typeof value === "string") return value.toLowerCase();
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value).toLowerCase();
+    }
+    try {
+      return JSON.stringify(value).toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+
+  const positionMatchesSearch = (
+    position: { tokenId: string },
+    entry: MappedMarketByTokenEntry | undefined,
+    search: string | undefined,
+  ): boolean => {
+    const needle = search?.trim().toLowerCase();
+    if (!needle) return true;
+
+    const market = entry?.market;
+    const event = market?.event;
+    const searchable = [
+      position.tokenId,
+      entry?.tokenId,
+      entry?.side,
+      market?.marketId,
+      market?.venue,
+      market?.venueMarketId,
+      market?.marketTitle,
+      market?.marketSlug,
+      market?.outcomes,
+      market?.tokens?.yes,
+      market?.tokens?.no,
+      event?.eventId,
+      event?.venue,
+      event?.venueEventId,
+      event?.eventTitle,
+      event?.eventSlug,
+      event?.category,
+    ]
+      .map(normalizeSearchText)
+      .join(" ");
+
+    return searchable.includes(needle);
+  };
+
   const resolveTokenIdsForFilter = async (
-    marketId: string | undefined,
-    eventId: string | undefined,
+    inputs: {
+      marketId?: string;
+      eventId?: string;
+      q?: string;
+      venue?: string;
+      venues?: string[];
+    },
   ): Promise<string[] | null> => {
+    const { eventId, marketId, q, venue, venues } = inputs;
+    const search = q?.trim();
+    const venueList =
+      venues && venues.length > 0 ? venues : venue ? [venue] : undefined;
+
     if (marketId) {
-      const { rows } = await pool.query<{ token_id: string }>(
-        `
-          select token_id
-          from unified_tokens
-          where market_id = $1
-        `,
-        [marketId],
-      );
+      const params: Array<string | string[]> = [marketId];
+      let where = "where m.id = $1";
+      if (venueList?.length) {
+        params.push(venueList);
+        where += ` and m.venue = any($${params.length}::text[])`;
+      }
+      if (search) {
+        params.push(`%${escapeSqlLikePattern(search)}%`);
+        const idx = params.length;
+        where += `
+          and (
+            coalesce(m.title, '') ilike $${idx} escape '\\'
+            or coalesce(e.title, '') ilike $${idx} escape '\\'
+            or coalesce(m.outcomes::text, '') ilike $${idx} escape '\\'
+            or coalesce(m.id, '') ilike $${idx} escape '\\'
+            or coalesce(m.event_id, '') ilike $${idx} escape '\\'
+          )
+        `;
+      }
+      const { rows } = await pool.query<{ token_id: string }>(`
+        with matched_markets as (
+          select m.id
+          from unified_markets m
+          left join unified_events e
+            on e.id = m.event_id
+          ${where}
+        ),
+        token_links as (
+          select ut.token_id
+          from matched_markets mm
+          join unified_tokens ut
+            on ut.market_id = mm.id
+          union
+          select umt.token_id
+          from matched_markets mm
+          join unified_market_tokens umt
+            on umt.market_id = mm.id
+        )
+        select distinct token_id
+        from token_links
+      `, params);
       return rows.map((row) => row.token_id);
     }
 
     if (eventId) {
-      const { rows } = await pool.query<{ token_id: string }>(
-        `
+      const params: Array<string | string[]> = [eventId];
+      let where = "where m.event_id = $1";
+      if (venueList?.length) {
+        params.push(venueList);
+        where += ` and m.venue = any($${params.length}::text[])`;
+      }
+      if (search) {
+        params.push(`%${escapeSqlLikePattern(search)}%`);
+        const idx = params.length;
+        where += `
+          and (
+            coalesce(m.title, '') ilike $${idx} escape '\\'
+            or coalesce(e.title, '') ilike $${idx} escape '\\'
+            or coalesce(m.outcomes::text, '') ilike $${idx} escape '\\'
+            or coalesce(m.id, '') ilike $${idx} escape '\\'
+            or coalesce(m.event_id, '') ilike $${idx} escape '\\'
+          )
+        `;
+      }
+      const { rows } = await pool.query<{ token_id: string }>(`
+        with matched_markets as (
+          select m.id
+          from unified_markets m
+          left join unified_events e
+            on e.id = m.event_id
+          ${where}
+        ),
+        token_links as (
           select ut.token_id
-          from unified_tokens ut
-          join unified_markets m
-            on m.id = ut.market_id
-          where m.event_id = $1
-        `,
-        [eventId],
-      );
+          from matched_markets mm
+          join unified_tokens ut
+            on ut.market_id = mm.id
+          union
+          select umt.token_id
+          from matched_markets mm
+          join unified_market_tokens umt
+            on umt.market_id = mm.id
+        )
+        select distinct token_id
+        from token_links
+      `, params);
       return rows.map((row) => row.token_id);
     }
 
@@ -198,10 +325,13 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
-        const tokenIds = await resolveTokenIdsForFilter(
-          query.marketId,
-          query.eventId,
-        );
+        const tokenIds = await resolveTokenIdsForFilter({
+          marketId: query.marketId,
+          eventId: query.eventId,
+          q: query.q,
+          venue,
+          venues,
+        });
         const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
 
         let positions =
@@ -226,10 +356,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 minSize: effectiveMinSize,
               });
 
-        let marketsByToken:
-          | ReturnType<typeof mapMarketsByTokenRows>
-          | undefined;
-        if (query.includeMarkets && positions.length) {
+        let marketsByToken: MappedMarketByTokenEntry[] | undefined;
+        const shouldLoadMarketsForPositions =
+          positions.length > 0 && Boolean(query.includeMarkets || query.q);
+        if (shouldLoadMarketsForPositions) {
           const tokenIds = Array.from(
             new Set(
               positions
@@ -248,9 +378,29 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               const mappedTokenIds = new Set(
                 marketsByToken.map((entry) => entry.tokenId),
               );
-              positions = positions.filter((position) =>
-                mappedTokenIds.has(position.tokenId),
-              );
+              if (query.q) {
+                const entriesByToken = new Map(
+                  marketsByToken.map((entry) => [entry.tokenId, entry]),
+                );
+                positions = positions.filter((position) =>
+                  positionMatchesSearch(
+                    position,
+                    entriesByToken.get(position.tokenId),
+                    query.q,
+                  ),
+                );
+                const matchingPositionTokenIds = new Set(
+                  positions.map((position) => position.tokenId),
+                );
+                marketsByToken = marketsByToken.filter((entry) =>
+                  matchingPositionTokenIds.has(entry.tokenId),
+                );
+              }
+              if (query.includeMarkets) {
+                positions = positions.filter((position) =>
+                  mappedTokenIds.has(position.tokenId),
+                );
+              }
             } catch (marketError) {
               app.log.warn(
                 {
@@ -261,6 +411,12 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 },
                 "Failed to include market metadata with positions",
               );
+              if (query.q) {
+                const needle = query.q.trim().toLowerCase();
+                positions = positions.filter((position) =>
+                  position.tokenId.toLowerCase().includes(needle),
+                );
+              }
             }
           }
         }
@@ -276,7 +432,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           positions,
-          ...(marketsByToken ? { marketsByToken } : {}),
+          ...(query.includeMarkets && marketsByToken ? { marketsByToken } : {}),
           ...(responseVenue ? { venue: responseVenue } : {}),
         });
       } catch (error) {

@@ -34,6 +34,7 @@ export type UnifiedOrderRow = {
 type FilterInputs = {
   userId: string;
   walletAddresses?: string[];
+  q?: string;
   venue?: string;
   status?: string | string[];
   openOnly?: boolean;
@@ -59,7 +60,11 @@ type FilterParams = {
   tokenIndex?: number;
   fromIndex?: number;
   toIndex?: number;
+  qIndex?: number;
 };
+
+const escapeSqlLikePattern = (value: string): string =>
+  value.replace(/[\\%_]/g, "\\$&");
 
 const buildFilterParams = (inputs: FilterInputs): FilterParams => {
   const params: PgParams = [inputs.userId];
@@ -132,6 +137,14 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(inputs.to instanceof Date ? inputs.to : new Date(inputs.to));
   }
 
+  let qIndex: number | undefined;
+  const q = inputs.q?.trim();
+  if (q) {
+    paramCount += 1;
+    qIndex = paramCount;
+    params.push(`%${escapeSqlLikePattern(q)}%`);
+  }
+
   return {
     params,
     walletIndex,
@@ -141,6 +154,7 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     tokenIndex,
     fromIndex,
     toIndex,
+    qIndex,
   };
 };
 
@@ -191,6 +205,25 @@ const buildWhereClause = (
     conditions.push(
       `${columns.createdAt} <= $${filterParams.toIndex}::timestamptz`,
     );
+  }
+
+  if (filterParams.qIndex && columns.market) {
+    conditions.push(`
+      exists (
+        select 1
+        from unified_markets search_market
+        left join unified_events search_event
+          on search_event.id = search_market.event_id
+        where search_market.id = ${columns.market}
+          and (
+            coalesce(search_market.title, '') ilike $${filterParams.qIndex} escape '\\'
+            or coalesce(search_event.title, '') ilike $${filterParams.qIndex} escape '\\'
+            or coalesce(search_market.outcomes::text, '') ilike $${filterParams.qIndex} escape '\\'
+            or coalesce(search_market.id, '') ilike $${filterParams.qIndex} escape '\\'
+            or coalesce(search_market.event_id, '') ilike $${filterParams.qIndex} escape '\\'
+          )
+      )
+    `);
   }
 
   return `where ${conditions.join(" and ")}`;

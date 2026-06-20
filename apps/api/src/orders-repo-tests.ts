@@ -78,6 +78,33 @@ await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders
   assert.doesNotMatch(selectSql, /'cancelled'/);
 });
 
+await test("fetchUnifiedOrders q filters by unified market metadata", async () => {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      capturedSql.push(sql);
+      capturedParams.push(params ?? []);
+      if (/count\(\*\)/i.test(sql)) return { rows: [{ total: "0" }] };
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+
+  await fetchUnifiedOrders(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    q: "world cup",
+    limit: 50,
+    offset: 0,
+  });
+
+  const selectSql = capturedSql[0] ?? "";
+  assert.match(selectSql, /from unified_markets search_market/);
+  assert.match(selectSql, /left join unified_events search_event/);
+  assert.match(selectSql, /search_market\.title/);
+  assert.match(selectSql, /search_event\.title/);
+  assert.equal(capturedParams[0]?.[1], "%world cup%");
+});
+
 await test("storeOrder lowercases EVM maker and signer storage without mutating raw payload", async () => {
   const payload = {
     maker: "0xAAbBcCdDEeFf0011223344556677889900aABbCc",
