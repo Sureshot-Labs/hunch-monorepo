@@ -26,6 +26,14 @@ export type WalletPerformanceSeriesPoint = {
   volumeUsd: number | null;
   tradesCount: number | null;
   winRate: number | null;
+  resolvedEdgeSampleCount: number | null;
+  resolvedActualWinRate: number | null;
+  resolvedExpectedWinRate: number | null;
+  resolvedWinRateEdge: number | null;
+  resolvedEdgeZScore: number | null;
+  resolvedBrierScore: number | null;
+  resolvedStakeWeightedEdge: number | null;
+  resolvedStakeUsd: number | null;
   avgHoldHours: number | null;
   lastTradeAt: Date | null;
 };
@@ -75,6 +83,14 @@ type WalletPerformanceSeriesDbRow = {
   volume_usd: string | null;
   trades_count: number | null;
   win_rate: string | null;
+  resolved_edge_sample_count: number | null;
+  resolved_actual_win_rate: string | null;
+  resolved_expected_win_rate: string | null;
+  resolved_win_rate_edge: string | null;
+  resolved_edge_z_score: string | null;
+  resolved_brier_score: string | null;
+  resolved_stake_weighted_edge: string | null;
+  resolved_stake_usd: string | null;
   avg_hold_hours: string | null;
   last_trade_at: Date | null;
 };
@@ -368,6 +384,14 @@ export async function fetchWalletPerformanceSeries(
                 s.volume_usd,
                 s.trades_count,
                 s.win_rate,
+                s.resolved_edge_sample_count,
+                s.resolved_actual_win_rate,
+                s.resolved_expected_win_rate,
+                s.resolved_win_rate_edge,
+                s.resolved_edge_z_score,
+                s.resolved_brier_score,
+                s.resolved_stake_weighted_edge,
+                s.resolved_stake_usd,
                 s.avg_hold_hours,
                 s.last_trade_at,
                 ${aggregateWalletMetricsPreferenceExpressionSql("s")} as preferred_metric,
@@ -389,6 +413,14 @@ export async function fetchWalletPerformanceSeries(
                 volume_usd,
                 trades_count,
                 win_rate,
+                resolved_edge_sample_count,
+                resolved_actual_win_rate,
+                resolved_expected_win_rate,
+                resolved_win_rate_edge,
+                resolved_edge_z_score,
+                resolved_brier_score,
+                resolved_stake_weighted_edge,
+                resolved_stake_usd,
                 avg_hold_hours,
                 last_trade_at
               from filtered
@@ -402,6 +434,14 @@ export async function fetchWalletPerformanceSeries(
                 volume_usd,
                 trades_count,
                 win_rate,
+                resolved_edge_sample_count,
+                resolved_actual_win_rate,
+                resolved_expected_win_rate,
+                resolved_win_rate_edge,
+                resolved_edge_z_score,
+                resolved_brier_score,
+                resolved_stake_weighted_edge,
+                resolved_stake_usd,
                 avg_hold_hours,
                 last_trade_at
               from bucketed
@@ -415,6 +455,14 @@ export async function fetchWalletPerformanceSeries(
               volume_usd::text,
               trades_count,
               win_rate::text,
+              resolved_edge_sample_count,
+              resolved_actual_win_rate::text,
+              resolved_expected_win_rate::text,
+              resolved_win_rate_edge::text,
+              resolved_edge_z_score::text,
+              resolved_brier_score::text,
+              resolved_stake_weighted_edge::text,
+              resolved_stake_usd::text,
               avg_hold_hours::text,
               last_trade_at
             from limited
@@ -439,6 +487,14 @@ export async function fetchWalletPerformanceSeries(
                 ranked.volume_usd,
                 ranked.trades_count,
                 ranked.win_rate,
+                ranked.resolved_edge_sample_count,
+                ranked.resolved_actual_win_rate,
+                ranked.resolved_expected_win_rate,
+                ranked.resolved_win_rate_edge,
+                ranked.resolved_edge_z_score,
+                ranked.resolved_brier_score,
+                ranked.resolved_stake_weighted_edge,
+                ranked.resolved_stake_usd,
                 ranked.avg_hold_hours,
                 ranked.last_trade_at
               from (
@@ -449,6 +505,14 @@ export async function fetchWalletPerformanceSeries(
                   s.volume_usd,
                   s.trades_count,
                   s.win_rate,
+                  s.resolved_edge_sample_count,
+                  s.resolved_actual_win_rate,
+                  s.resolved_expected_win_rate,
+                  s.resolved_win_rate_edge,
+                  s.resolved_edge_z_score,
+                  s.resolved_brier_score,
+                  s.resolved_stake_weighted_edge,
+                  s.resolved_stake_usd,
                   s.avg_hold_hours,
                   s.last_trade_at,
                   row_number() over (
@@ -470,6 +534,14 @@ export async function fetchWalletPerformanceSeries(
                 volume_usd,
                 trades_count,
                 win_rate,
+                resolved_edge_sample_count,
+                resolved_actual_win_rate,
+                resolved_expected_win_rate,
+                resolved_win_rate_edge,
+                resolved_edge_z_score,
+                resolved_brier_score,
+                resolved_stake_weighted_edge,
+                resolved_stake_usd,
                 avg_hold_hours,
                 last_trade_at
               from deduped
@@ -483,6 +555,14 @@ export async function fetchWalletPerformanceSeries(
               volume_usd::text,
               trades_count,
               win_rate::text,
+              resolved_edge_sample_count,
+              resolved_actual_win_rate::text,
+              resolved_expected_win_rate::text,
+              resolved_win_rate_edge::text,
+              resolved_edge_z_score::text,
+              resolved_brier_score::text,
+              resolved_stake_weighted_edge::text,
+              resolved_stake_usd::text,
               avg_hold_hours::text,
               last_trade_at
             from limited
@@ -500,6 +580,16 @@ export async function fetchWalletPerformanceSeries(
       volumeUsd: nullableNumber(row.volume_usd),
       tradesCount: row.trades_count ?? null,
       winRate: nullableNumber(row.win_rate),
+      resolvedEdgeSampleCount: row.resolved_edge_sample_count ?? null,
+      resolvedActualWinRate: nullableNumber(row.resolved_actual_win_rate),
+      resolvedExpectedWinRate: nullableNumber(row.resolved_expected_win_rate),
+      resolvedWinRateEdge: nullableNumber(row.resolved_win_rate_edge),
+      resolvedEdgeZScore: nullableNumber(row.resolved_edge_z_score),
+      resolvedBrierScore: nullableNumber(row.resolved_brier_score),
+      resolvedStakeWeightedEdge: nullableNumber(
+        row.resolved_stake_weighted_edge,
+      ),
+      resolvedStakeUsd: nullableNumber(row.resolved_stake_usd),
       avgHoldHours: nullableNumber(row.avg_hold_hours),
       lastTradeAt: row.last_trade_at,
     })),

@@ -34,7 +34,10 @@ import {
   replayWalletPositionLedgerRows,
   resolveApproxOpenEntryFromLedger,
 } from "./services/wallet-position-ledger.js";
-import { buildWalletThirtyDayMetricsUpsertRows } from "./services/wallet-metrics-30d.js";
+import {
+  buildWalletThirtyDayMetricsUpsertRows,
+  computeWalletResolvedEdgeMetrics,
+} from "./services/wallet-metrics-30d.js";
 import {
   applyResolvedTradeStatsToMetrics,
   buildWalletActivitySummaryHeroStats,
@@ -2845,6 +2848,123 @@ const tests: TestCase[] = [
       assert.equal(dormant?.roi, null);
       assert.equal(dormant?.winRate, null);
       assert.equal(dormant?.lastTradeAt, null);
+    },
+  },
+  {
+    name: "30d metric builder computes resolved edge metrics from entry odds",
+    run: () => {
+      const yesLedger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-edge",
+          marketId: "market-yes",
+          outcomeSide: "YES",
+          action: "BUY",
+          deltaShares: "100",
+          sizeUsd: "40",
+          price: "0.4",
+          occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:01.000Z"),
+          id: "edge-buy-yes",
+        },
+      ]);
+      const noLedger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-edge",
+          marketId: "market-no",
+          outcomeSide: "NO",
+          action: "BUY",
+          deltaShares: "100",
+          sizeUsd: "70",
+          price: "0.7",
+          occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+          createdAt: new Date("2026-01-02T00:00:01.000Z"),
+          id: "edge-buy-no",
+        },
+      ]);
+      const marketMarksById = new Map([
+        [
+          "market-yes",
+          {
+            resolvedOutcome: "YES",
+            yesMarkPrice: 1,
+            resolvedYesPayout: 1,
+          },
+        ],
+        [
+          "market-no",
+          {
+            resolvedOutcome: "YES",
+            yesMarkPrice: 1,
+            resolvedYesPayout: 1,
+          },
+        ],
+      ]);
+
+      const edge = computeWalletResolvedEdgeMetrics(
+        [
+          {
+            marketId: "market-yes",
+            outcomeSide: "YES",
+            ledger: yesLedger,
+          },
+          {
+            marketId: "market-no",
+            outcomeSide: "NO",
+            ledger: noLedger,
+          },
+        ],
+        marketMarksById,
+      );
+
+      assert.equal(edge.sampleCount, 2);
+      assert.ok(Math.abs((edge.actualWinRate ?? 0) - 0.5) < 1e-9);
+      assert.ok(Math.abs((edge.expectedWinRate ?? 0) - 0.55) < 1e-9);
+      assert.ok(Math.abs((edge.winRateEdge ?? 0) - -0.05) < 1e-9);
+      assert.ok(Math.abs((edge.brierScore ?? 0) - 0.425) < 1e-9);
+      assert.ok(Math.abs((edge.resolvedStakeUsd ?? 0) - 110) < 1e-9);
+
+      const metrics = buildWalletThirtyDayMetricsUpsertRows({
+        walletIds: ["wallet-edge"],
+        aggregates: [
+          {
+            walletId: "wallet-edge",
+            tradesCount: 2,
+            volumeUsd: 110,
+            lastTradeAt: new Date("2026-01-02T00:00:00.000Z"),
+            resolvedCount: 2,
+            winningCount: 1,
+          },
+        ],
+        ledgersByWallet: new Map([
+          [
+            "wallet-edge",
+            [
+              {
+                marketId: "market-yes",
+                outcomeSide: "YES",
+                ledger: yesLedger,
+              },
+              {
+                marketId: "market-no",
+                outcomeSide: "NO",
+                ledger: noLedger,
+              },
+            ],
+          ],
+        ]),
+        marketMarksById,
+      });
+
+      assert.equal(metrics.rows[0]?.resolvedEdgeSampleCount, 2);
+      assert.ok(
+        Math.abs((metrics.rows[0]?.resolvedExpectedWinRate ?? 0) - 0.55) <
+          1e-9,
+      );
+      assert.ok(
+        Math.abs(
+          (metrics.rows[0]?.resolvedStakeWeightedEdge ?? 0) - -25 / 110,
+        ) < 1e-9,
+      );
     },
   },
   {

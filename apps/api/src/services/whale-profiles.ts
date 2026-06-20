@@ -121,6 +121,14 @@ type WhaleProfileInput = {
     roi: number | null;
     pnl_to_volume_ratio: number | null;
     win_rate: number | null;
+    resolved_edge_sample_count: number | null;
+    resolved_actual_win_rate: number | null;
+    resolved_expected_win_rate: number | null;
+    resolved_win_rate_edge: number | null;
+    resolved_edge_z_score: number | null;
+    resolved_brier_score: number | null;
+    resolved_stake_weighted_edge: number | null;
+    resolved_stake_usd: number | null;
     last_trade_at: string | null;
   };
   performance_context: {
@@ -293,6 +301,14 @@ type WhaleRow = {
   metrics_trades: number | null;
   metrics_roi: string | null;
   metrics_win_rate: string | null;
+  metrics_resolved_edge_sample_count: number | null;
+  metrics_resolved_actual_win_rate: string | null;
+  metrics_resolved_expected_win_rate: string | null;
+  metrics_resolved_win_rate_edge: string | null;
+  metrics_resolved_edge_z_score: string | null;
+  metrics_resolved_brier_score: string | null;
+  metrics_resolved_stake_weighted_edge: string | null;
+  metrics_resolved_stake_usd: string | null;
   metrics_last_trade_at: Date | null;
   exposure_usd: string | null;
   hedged_notional_usd: string | null;
@@ -1142,6 +1158,9 @@ function buildProfileHashInput(input: WhaleProfileInput): WhaleProfileInput {
       tradeCount: bucketCount(item.tradeCount),
       resolvedCount: bucketCount(item.resolvedCount),
       winRate: bucketRate(item.winRate),
+      expectedWinRate: bucketRate(item.expectedWinRate),
+      winRateEdge: bucketRate(item.winRateEdge),
+      brierScore: bucketRate(item.brierScore),
     })),
     performance_30d: performanceHash,
     signals: signalsHash,
@@ -1412,6 +1431,14 @@ async function loadWhaleSelectionRows(
           s.pnl_usd as metrics_pnl,
           s.trades_count as metrics_trades,
           s.win_rate as metrics_win_rate,
+          s.resolved_edge_sample_count as metrics_resolved_edge_sample_count,
+          s.resolved_actual_win_rate as metrics_resolved_actual_win_rate,
+          s.resolved_expected_win_rate as metrics_resolved_expected_win_rate,
+          s.resolved_win_rate_edge as metrics_resolved_win_rate_edge,
+          s.resolved_edge_z_score as metrics_resolved_edge_z_score,
+          s.resolved_brier_score as metrics_resolved_brier_score,
+          s.resolved_stake_weighted_edge as metrics_resolved_stake_weighted_edge,
+          s.resolved_stake_usd as metrics_resolved_stake_usd,
           s.last_trade_at as metrics_last_trade_at
         from wallet_metrics_snapshots s
         join selection_wallets sw on sw.id = s.wallet_id
@@ -1650,6 +1677,14 @@ async function loadWhaleRowsByIds(
         metrics.metrics_trades,
         metrics.metrics_roi,
         metrics.metrics_win_rate,
+        metrics.metrics_resolved_edge_sample_count,
+        metrics.metrics_resolved_actual_win_rate,
+        metrics.metrics_resolved_expected_win_rate,
+        metrics.metrics_resolved_win_rate_edge,
+        metrics.metrics_resolved_edge_z_score,
+        metrics.metrics_resolved_brier_score,
+        metrics.metrics_resolved_stake_weighted_edge,
+        metrics.metrics_resolved_stake_usd,
         metrics.metrics_last_trade_at,
         exposure.exposure_usd,
         exposure.hedged_notional_usd,
@@ -1676,6 +1711,14 @@ async function loadWhaleRowsByIds(
           s.trades_count as metrics_trades,
           s.roi as metrics_roi,
           s.win_rate as metrics_win_rate,
+          s.resolved_edge_sample_count as metrics_resolved_edge_sample_count,
+          s.resolved_actual_win_rate as metrics_resolved_actual_win_rate,
+          s.resolved_expected_win_rate as metrics_resolved_expected_win_rate,
+          s.resolved_win_rate_edge as metrics_resolved_win_rate_edge,
+          s.resolved_edge_z_score as metrics_resolved_edge_z_score,
+          s.resolved_brier_score as metrics_resolved_brier_score,
+          s.resolved_stake_weighted_edge as metrics_resolved_stake_weighted_edge,
+          s.resolved_stake_usd as metrics_resolved_stake_usd,
           s.last_trade_at as metrics_last_trade_at
         from wallet_metrics_snapshots s
         where s.wallet_id = w.id
@@ -2334,6 +2377,27 @@ function buildProfileInput(
       roi: roi30d,
       pnl_to_volume_ratio: pnlToVolumeRatio,
       win_rate: parseNumber(wallet.metrics_win_rate),
+      resolved_edge_sample_count:
+        wallet.metrics_resolved_edge_sample_count != null
+          ? Number(wallet.metrics_resolved_edge_sample_count)
+          : null,
+      resolved_actual_win_rate: parseNumber(
+        wallet.metrics_resolved_actual_win_rate,
+      ),
+      resolved_expected_win_rate: parseNumber(
+        wallet.metrics_resolved_expected_win_rate,
+      ),
+      resolved_win_rate_edge: parseNumber(
+        wallet.metrics_resolved_win_rate_edge,
+      ),
+      resolved_edge_z_score: parseNumber(
+        wallet.metrics_resolved_edge_z_score,
+      ),
+      resolved_brier_score: parseNumber(wallet.metrics_resolved_brier_score),
+      resolved_stake_weighted_edge: parseNumber(
+        wallet.metrics_resolved_stake_weighted_edge,
+      ),
+      resolved_stake_usd: parseNumber(wallet.metrics_resolved_stake_usd),
       last_trade_at: wallet.metrics_last_trade_at
         ? wallet.metrics_last_trade_at.toISOString()
         : null,

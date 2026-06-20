@@ -299,6 +299,9 @@ const walletPositioningSortSchema = z.enum([
   "top_market_minority_side_usd",
   "largest_market_pct",
   "avg_win_rate",
+  "avg_win_rate_edge",
+  "avg_edge_z_score",
+  "avg_brier_score",
   "avg_roi",
   "newest_snapshot",
 ]);
@@ -308,6 +311,10 @@ const walletPositioningEventShapeSchema = z.enum([
   "any",
   "single_market",
   "multi_market",
+]);
+const walletPositioningHolderSortSchema = z.enum([
+  "position_usd",
+  "edge_z_score",
 ]);
 
 export const walletPositioningQuerySchema = z.object({
@@ -348,6 +355,7 @@ export const walletPositioningQuerySchema = z.object({
   sort: walletPositioningSortSchema.default("tracked_position_usd"),
   includeHolders: queryBooleanSchema.default(true),
   holdersLimit: z.coerce.number().int().min(0).max(20).default(3),
+  holderSort: walletPositioningHolderSortSchema.default("position_usd"),
   includePositionPnl: queryBooleanSchema.default(false),
   shape: walletPositioningShapeSchema.default("table"),
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -398,6 +406,9 @@ export const walletWhalesQuerySchema = z.object({
       "exposure_usd",
       "imbalance_usd",
       "winrate",
+      "edge_z_score",
+      "stake_weighted_edge",
+      "brier_score",
       "pnl_30d",
       "roi_30d",
     ])
@@ -408,6 +419,11 @@ export const walletWhalesQuerySchema = z.object({
   minPnl30d: z.coerce.number().optional(),
   minRoi30d: z.coerce.number().optional(),
   minWinRate30d: z.coerce.number().min(0).max(1).optional(),
+  minResolvedEdgeSampleCount: z.coerce.number().int().min(0).optional(),
+  minResolvedStakeUsd: z.coerce.number().min(0).optional(),
+  minResolvedWinRateEdge30d: z.coerce.number().optional(),
+  minResolvedEdgeZScore30d: z.coerce.number().optional(),
+  maxResolvedBrierScore30d: z.coerce.number().min(0).optional(),
   maxExposureUsd: z.coerce.number().min(0).optional(),
   maxNetImbalanceUsd: z.coerce.number().min(0).optional(),
   tags: csvStringArraySchema.optional(),

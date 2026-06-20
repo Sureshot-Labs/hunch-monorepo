@@ -191,6 +191,14 @@ type WalletMetricsRow = {
   pnl_usd: string | null;
   roi: string | null;
   win_rate: string | null;
+  resolved_edge_sample_count?: number | null;
+  resolved_actual_win_rate?: string | null;
+  resolved_expected_win_rate?: string | null;
+  resolved_win_rate_edge?: string | null;
+  resolved_edge_z_score?: string | null;
+  resolved_brier_score?: string | null;
+  resolved_stake_weighted_edge?: string | null;
+  resolved_stake_usd?: string | null;
   avg_hold_hours: string | null;
   last_trade_at: Date | null;
   winning_count?: number | null;
@@ -206,6 +214,14 @@ type WalletMetricsResponse = {
   pnlUsd: number | null;
   roi: number | null;
   winRate: number | null;
+  resolvedEdgeSampleCount: number | null;
+  resolvedActualWinRate: number | null;
+  resolvedExpectedWinRate: number | null;
+  resolvedWinRateEdge: number | null;
+  resolvedEdgeZScore: number | null;
+  resolvedBrierScore: number | null;
+  resolvedStakeWeightedEdge: number | null;
+  resolvedStakeUsd: number | null;
   avgHoldHours: number | null;
   lastTradeAt: Date | null;
   winningCount: number | null;
@@ -513,7 +529,16 @@ type WhaleSelectorRow = WalletRow &
     has_holder_activity: boolean | null;
     metrics_volume: string | null;
     metrics_pnl: string | null;
+    metrics_roi: string | null;
     metrics_trades: number | null;
+    metrics_resolved_edge_sample_count: number | null;
+    metrics_resolved_actual_win_rate: string | null;
+    metrics_resolved_expected_win_rate: string | null;
+    metrics_resolved_win_rate_edge: string | null;
+    metrics_resolved_edge_z_score: string | null;
+    metrics_resolved_brier_score: string | null;
+    metrics_resolved_stake_weighted_edge: string | null;
+    metrics_resolved_stake_usd: string | null;
     exposure_usd: string | null;
     hedged_notional_usd: string | null;
     net_imbalance_usd: string | null;
@@ -539,6 +564,15 @@ type WhaleSelectorSlimRow = WalletRow & {
   metrics_pnl: string | null;
   metrics_roi: string | null;
   metrics_trades: number | null;
+  metrics_win_rate: string | null;
+  metrics_resolved_edge_sample_count: number | null;
+  metrics_resolved_actual_win_rate: string | null;
+  metrics_resolved_expected_win_rate: string | null;
+  metrics_resolved_win_rate_edge: string | null;
+  metrics_resolved_edge_z_score: string | null;
+  metrics_resolved_brier_score: string | null;
+  metrics_resolved_stake_weighted_edge: string | null;
+  metrics_resolved_stake_usd: string | null;
   exposure_usd: string | null;
   hedged_notional_usd: string | null;
   net_imbalance_usd: string | null;
@@ -1186,10 +1220,14 @@ type WalletPositioningQuery = {
     | "top_market_minority_side_usd"
     | "largest_market_pct"
     | "avg_win_rate"
+    | "avg_win_rate_edge"
+    | "avg_edge_z_score"
+    | "avg_brier_score"
     | "avg_roi"
     | "newest_snapshot";
   includeHolders: boolean;
   holdersLimit: number;
+  holderSort: "position_usd" | "edge_z_score";
   includePositionPnl: boolean;
   shape: "table" | "tree" | "graph" | "both";
   limit: number;
@@ -1236,6 +1274,14 @@ type WalletPositioningRow = {
   metrics_roi_30d: string | null;
   metrics_trades_30d: number | null;
   metrics_win_rate_30d: string | null;
+  metrics_resolved_edge_sample_count_30d: number | null;
+  metrics_resolved_actual_win_rate_30d: string | null;
+  metrics_resolved_expected_win_rate_30d: string | null;
+  metrics_resolved_win_rate_edge_30d: string | null;
+  metrics_resolved_edge_z_score_30d: string | null;
+  metrics_resolved_brier_score_30d: string | null;
+  metrics_resolved_stake_weighted_edge_30d: string | null;
+  metrics_resolved_stake_usd_30d: string | null;
   exposure_usd: string | null;
   hedged_notional_usd: string | null;
   net_imbalance_usd: string | null;
@@ -1302,6 +1348,14 @@ type PositioningHolder = {
     roi30d: number | null;
     trades30d: number | null;
     winRate30d: number | null;
+    resolvedEdgeSampleCount30d: number | null;
+    resolvedActualWinRate30d: number | null;
+    resolvedExpectedWinRate30d: number | null;
+    resolvedWinRateEdge30d: number | null;
+    resolvedEdgeZScore30d: number | null;
+    resolvedBrierScore30d: number | null;
+    resolvedStakeWeightedEdge30d: number | null;
+    resolvedStakeUsd30d: number | null;
     inferredWinRate: number | null;
     resolvedWins: number | null;
     resolvedTotal: number | null;
@@ -1318,6 +1372,10 @@ type PositioningSideAggregate = {
   largestHolderUsd: number | null;
   largestHolderPct: number | null;
   weightedAvgWinRate30d: number | null;
+  weightedAvgResolvedWinRateEdge30d: number | null;
+  weightedAvgResolvedEdgeZScore30d: number | null;
+  weightedAvgResolvedBrierScore30d: number | null;
+  resolvedEdgeHolderCount: number;
   weightedAvgRoi30d: number | null;
   topWinRate30d: number | null;
   topPnl30d: number | null;
@@ -1371,6 +1429,10 @@ type PositioningMarketAggregate = {
   absImbalancePct: number | null;
   balancedDisagreementScore: number;
   weightedAvgWinRate30d: number | null;
+  weightedAvgResolvedWinRateEdge30d: number | null;
+  weightedAvgResolvedEdgeZScore30d: number | null;
+  weightedAvgResolvedBrierScore30d: number | null;
+  resolvedEdgeHolderCount: number;
   weightedAvgRoi30d: number | null;
   newestSnapshotAt: string | null;
   odds: PositioningOdds;
@@ -1398,6 +1460,10 @@ type PositioningEventAggregate = {
   topMarketMinoritySideUsd: number | null;
   topMarketMinoritySideShare: number | null;
   weightedAvgWinRate30d: number | null;
+  weightedAvgResolvedWinRateEdge30d: number | null;
+  weightedAvgResolvedEdgeZScore30d: number | null;
+  weightedAvgResolvedBrierScore30d: number | null;
+  resolvedEdgeHolderCount: number;
   weightedAvgRoi30d: number | null;
   newestSnapshotAt: string | null;
   topMarketsPreview: PositioningMarketAggregate[];
@@ -1406,6 +1472,13 @@ type PositioningEventAggregate = {
 type PositioningAccumulator = {
   weightedWinRateTotal: number;
   weightedWinRateWeight: number;
+  weightedResolvedWinRateEdgeTotal: number;
+  weightedResolvedWinRateEdgeWeight: number;
+  weightedResolvedEdgeZScoreTotal: number;
+  weightedResolvedEdgeZScoreWeight: number;
+  weightedResolvedBrierScoreTotal: number;
+  weightedResolvedBrierScoreWeight: number;
+  resolvedEdgeHolderIds: Set<string>;
   weightedRoiTotal: number;
   weightedRoiWeight: number;
   topWinRate: number | null;
@@ -1416,6 +1489,13 @@ function initPositioningAccumulator(): PositioningAccumulator {
   return {
     weightedWinRateTotal: 0,
     weightedWinRateWeight: 0,
+    weightedResolvedWinRateEdgeTotal: 0,
+    weightedResolvedWinRateEdgeWeight: 0,
+    weightedResolvedEdgeZScoreTotal: 0,
+    weightedResolvedEdgeZScoreWeight: 0,
+    weightedResolvedBrierScoreTotal: 0,
+    weightedResolvedBrierScoreWeight: 0,
+    resolvedEdgeHolderIds: new Set(),
     weightedRoiTotal: 0,
     weightedRoiWeight: 0,
     topWinRate: null,
@@ -1425,7 +1505,7 @@ function initPositioningAccumulator(): PositioningAccumulator {
 
 function addPositioningStats(
   acc: PositioningAccumulator,
-  holder: Pick<PositioningHolder, "positionUsd" | "metrics">,
+  holder: Pick<PositioningHolder, "walletId" | "positionUsd" | "metrics">,
 ) {
   const winRate =
     holder.metrics.winRate30d ?? holder.metrics.inferredWinRate ?? null;
@@ -1433,6 +1513,36 @@ function addPositioningStats(
     acc.weightedWinRateTotal += winRate * holder.positionUsd;
     acc.weightedWinRateWeight += holder.positionUsd;
     acc.topWinRate = Math.max(acc.topWinRate ?? winRate, winRate);
+  }
+  if (
+    holder.metrics.resolvedWinRateEdge30d != null &&
+    holder.metrics.resolvedEdgeSampleCount30d != null &&
+    holder.metrics.resolvedEdgeSampleCount30d > 0
+  ) {
+    acc.weightedResolvedWinRateEdgeTotal +=
+      holder.metrics.resolvedWinRateEdge30d * holder.positionUsd;
+    acc.weightedResolvedWinRateEdgeWeight += holder.positionUsd;
+    acc.resolvedEdgeHolderIds.add(holder.walletId);
+  }
+  if (
+    holder.metrics.resolvedEdgeZScore30d != null &&
+    holder.metrics.resolvedEdgeSampleCount30d != null &&
+    holder.metrics.resolvedEdgeSampleCount30d > 0
+  ) {
+    acc.weightedResolvedEdgeZScoreTotal +=
+      holder.metrics.resolvedEdgeZScore30d * holder.positionUsd;
+    acc.weightedResolvedEdgeZScoreWeight += holder.positionUsd;
+    acc.resolvedEdgeHolderIds.add(holder.walletId);
+  }
+  if (
+    holder.metrics.resolvedBrierScore30d != null &&
+    holder.metrics.resolvedEdgeSampleCount30d != null &&
+    holder.metrics.resolvedEdgeSampleCount30d > 0
+  ) {
+    acc.weightedResolvedBrierScoreTotal +=
+      holder.metrics.resolvedBrierScore30d * holder.positionUsd;
+    acc.weightedResolvedBrierScoreWeight += holder.positionUsd;
+    acc.resolvedEdgeHolderIds.add(holder.walletId);
   }
   if (holder.metrics.roi30d != null) {
     acc.weightedRoiTotal += holder.metrics.roi30d * holder.positionUsd;
@@ -1459,6 +1569,10 @@ function initSideAggregate(side: PositioningSide): PositioningSideAggregate {
     largestHolderUsd: null,
     largestHolderPct: null,
     weightedAvgWinRate30d: null,
+    weightedAvgResolvedWinRateEdge30d: null,
+    weightedAvgResolvedEdgeZScore30d: null,
+    weightedAvgResolvedBrierScore30d: null,
+    resolvedEdgeHolderCount: 0,
     weightedAvgRoi30d: null,
     topWinRate30d: null,
     topPnl30d: null,
@@ -1697,6 +1811,14 @@ function sortPositioningMarkets(
         return market.absImbalancePct ?? -Infinity;
       case "avg_win_rate":
         return market.weightedAvgWinRate30d ?? -Infinity;
+      case "avg_win_rate_edge":
+        return market.weightedAvgResolvedWinRateEdge30d ?? -Infinity;
+      case "avg_edge_z_score":
+        return market.weightedAvgResolvedEdgeZScore30d ?? -Infinity;
+      case "avg_brier_score":
+        return market.weightedAvgResolvedBrierScore30d != null
+          ? -market.weightedAvgResolvedBrierScore30d
+          : -Infinity;
       case "avg_roi":
         return market.weightedAvgRoi30d ?? -Infinity;
       case "newest_snapshot":
@@ -1717,6 +1839,38 @@ function sortPositioningMarkets(
   return [...markets].sort((a, b) => value(b) - value(a));
 }
 
+function holderEdgeZScoreSortValue(holder: PositioningHolder): number {
+  const sampleCount = holder.metrics.resolvedEdgeSampleCount30d ?? 0;
+  if (sampleCount <= 0) return -Infinity;
+  return holder.metrics.resolvedEdgeZScore30d ?? -Infinity;
+}
+
+function sortPositioningHolders(
+  holders: PositioningHolder[],
+  sort: WalletPositioningQuery["holderSort"],
+): PositioningHolder[] {
+  if (sort === "edge_z_score") {
+    return [...holders].sort((a, b) => {
+      const byEdge = holderEdgeZScoreSortValue(b) - holderEdgeZScoreSortValue(a);
+      if (byEdge !== 0) return byEdge;
+
+      const bySamples =
+        (b.metrics.resolvedEdgeSampleCount30d ?? 0) -
+        (a.metrics.resolvedEdgeSampleCount30d ?? 0);
+      if (bySamples !== 0) return bySamples;
+
+      const byStake =
+        (b.metrics.resolvedStakeUsd30d ?? 0) -
+        (a.metrics.resolvedStakeUsd30d ?? 0);
+      if (byStake !== 0) return byStake;
+
+      return b.positionUsd - a.positionUsd;
+    });
+  }
+
+  return [...holders].sort((a, b) => b.positionUsd - a.positionUsd);
+}
+
 function sortPositioningEvents(
   events: PositioningEventAggregate[],
   sort: WalletPositioningQuery["sort"],
@@ -1727,6 +1881,14 @@ function sortPositioningEvents(
         return event.walletCount;
       case "avg_win_rate":
         return event.weightedAvgWinRate30d ?? -Infinity;
+      case "avg_win_rate_edge":
+        return event.weightedAvgResolvedWinRateEdge30d ?? -Infinity;
+      case "avg_edge_z_score":
+        return event.weightedAvgResolvedEdgeZScore30d ?? -Infinity;
+      case "avg_brier_score":
+        return event.weightedAvgResolvedBrierScore30d != null
+          ? -event.weightedAvgResolvedBrierScore30d
+          : -Infinity;
       case "avg_roi":
         return event.weightedAvgRoi30d ?? -Infinity;
       case "newest_snapshot":
@@ -1985,6 +2147,14 @@ async function loadTrackedWalletPositioning(input: {
           wis.metrics_roi_30d,
           wis.metrics_trades_30d,
           wis.metrics_win_rate_30d,
+          wis.metrics_resolved_edge_sample_count_30d,
+          wis.metrics_resolved_actual_win_rate_30d,
+          wis.metrics_resolved_expected_win_rate_30d,
+          wis.metrics_resolved_win_rate_edge_30d,
+          wis.metrics_resolved_edge_z_score_30d,
+          wis.metrics_resolved_brier_score_30d,
+          wis.metrics_resolved_stake_weighted_edge_30d,
+          wis.metrics_resolved_stake_usd_30d,
           wis.exposure_usd,
           wis.hedged_notional_usd,
           wis.net_imbalance_usd,
@@ -2092,6 +2262,14 @@ async function loadTrackedWalletPositioning(input: {
         lp.metrics_roi_30d::text as metrics_roi_30d,
         lp.metrics_trades_30d,
         lp.metrics_win_rate_30d::text as metrics_win_rate_30d,
+        lp.metrics_resolved_edge_sample_count_30d,
+        lp.metrics_resolved_actual_win_rate_30d::text as metrics_resolved_actual_win_rate_30d,
+        lp.metrics_resolved_expected_win_rate_30d::text as metrics_resolved_expected_win_rate_30d,
+        lp.metrics_resolved_win_rate_edge_30d::text as metrics_resolved_win_rate_edge_30d,
+        lp.metrics_resolved_edge_z_score_30d::text as metrics_resolved_edge_z_score_30d,
+        lp.metrics_resolved_brier_score_30d::text as metrics_resolved_brier_score_30d,
+        lp.metrics_resolved_stake_weighted_edge_30d::text as metrics_resolved_stake_weighted_edge_30d,
+        lp.metrics_resolved_stake_usd_30d::text as metrics_resolved_stake_usd_30d,
         lp.exposure_usd::text as exposure_usd,
         lp.hedged_notional_usd::text as hedged_notional_usd,
         lp.net_imbalance_usd::text as net_imbalance_usd,
@@ -2155,6 +2333,29 @@ async function loadTrackedWalletPositioning(input: {
         roi30d: nullableNumber(row.metrics_roi_30d),
         trades30d: row.metrics_trades_30d,
         winRate30d: nullableNumber(row.metrics_win_rate_30d),
+        resolvedEdgeSampleCount30d:
+          row.metrics_resolved_edge_sample_count_30d,
+        resolvedActualWinRate30d: nullableNumber(
+          row.metrics_resolved_actual_win_rate_30d,
+        ),
+        resolvedExpectedWinRate30d: nullableNumber(
+          row.metrics_resolved_expected_win_rate_30d,
+        ),
+        resolvedWinRateEdge30d: nullableNumber(
+          row.metrics_resolved_win_rate_edge_30d,
+        ),
+        resolvedEdgeZScore30d: nullableNumber(
+          row.metrics_resolved_edge_z_score_30d,
+        ),
+        resolvedBrierScore30d: nullableNumber(
+          row.metrics_resolved_brier_score_30d,
+        ),
+        resolvedStakeWeightedEdge30d: nullableNumber(
+          row.metrics_resolved_stake_weighted_edge_30d,
+        ),
+        resolvedStakeUsd30d: nullableNumber(
+          row.metrics_resolved_stake_usd_30d,
+        ),
         inferredWinRate:
           row.inferred_total &&
           row.inferred_total > 0 &&
@@ -2224,6 +2425,10 @@ async function loadTrackedWalletPositioning(input: {
           absImbalancePct: null,
           balancedDisagreementScore: 0,
           weightedAvgWinRate30d: null,
+          weightedAvgResolvedWinRateEdge30d: null,
+          weightedAvgResolvedEdgeZScore30d: null,
+          weightedAvgResolvedBrierScore30d: null,
+          resolvedEdgeHolderCount: 0,
           weightedAvgRoi30d: null,
           newestSnapshotAt: null,
           odds: buildPositioningOdds(outcomeLabels, sideBreakdown),
@@ -2354,6 +2559,19 @@ async function loadTrackedWalletPositioning(input: {
       builder.stats.weightedWinRateTotal,
       builder.stats.weightedWinRateWeight,
     );
+    market.weightedAvgResolvedWinRateEdge30d = finalizeWeightedAverage(
+      builder.stats.weightedResolvedWinRateEdgeTotal,
+      builder.stats.weightedResolvedWinRateEdgeWeight,
+    );
+    market.weightedAvgResolvedEdgeZScore30d = finalizeWeightedAverage(
+      builder.stats.weightedResolvedEdgeZScoreTotal,
+      builder.stats.weightedResolvedEdgeZScoreWeight,
+    );
+    market.weightedAvgResolvedBrierScore30d = finalizeWeightedAverage(
+      builder.stats.weightedResolvedBrierScoreTotal,
+      builder.stats.weightedResolvedBrierScoreWeight,
+    );
+    market.resolvedEdgeHolderCount = builder.stats.resolvedEdgeHolderIds.size;
     market.weightedAvgRoi30d = finalizeWeightedAverage(
       builder.stats.weightedRoiTotal,
       builder.stats.weightedRoiWeight,
@@ -2367,8 +2585,9 @@ async function loadTrackedWalletPositioning(input: {
         : null;
     computePositioningMarketDisagreement(market);
 
-    const sortedHolders = [...builder.holders].sort(
-      (a, b) => b.positionUsd - a.positionUsd,
+    const sortedHolders = sortPositioningHolders(
+      builder.holders,
+      query.holderSort,
     );
     market.topHolders =
       query.includeHolders && query.holdersLimit > 0
@@ -2386,6 +2605,20 @@ async function loadTrackedWalletPositioning(input: {
         builder.sideStats[side].weightedWinRateTotal,
         builder.sideStats[side].weightedWinRateWeight,
       );
+      sideAgg.weightedAvgResolvedWinRateEdge30d = finalizeWeightedAverage(
+        builder.sideStats[side].weightedResolvedWinRateEdgeTotal,
+        builder.sideStats[side].weightedResolvedWinRateEdgeWeight,
+      );
+      sideAgg.weightedAvgResolvedEdgeZScore30d = finalizeWeightedAverage(
+        builder.sideStats[side].weightedResolvedEdgeZScoreTotal,
+        builder.sideStats[side].weightedResolvedEdgeZScoreWeight,
+      );
+      sideAgg.weightedAvgResolvedBrierScore30d = finalizeWeightedAverage(
+        builder.sideStats[side].weightedResolvedBrierScoreTotal,
+        builder.sideStats[side].weightedResolvedBrierScoreWeight,
+      );
+      sideAgg.resolvedEdgeHolderCount =
+        builder.sideStats[side].resolvedEdgeHolderIds.size;
       sideAgg.weightedAvgRoi30d = finalizeWeightedAverage(
         builder.sideStats[side].weightedRoiTotal,
         builder.sideStats[side].weightedRoiWeight,
@@ -2435,6 +2668,10 @@ async function loadTrackedWalletPositioning(input: {
         | "topMarketMinoritySideUsd"
         | "topMarketMinoritySideShare"
         | "weightedAvgWinRate30d"
+        | "weightedAvgResolvedWinRateEdge30d"
+        | "weightedAvgResolvedEdgeZScore30d"
+        | "weightedAvgResolvedBrierScore30d"
+        | "resolvedEdgeHolderCount"
         | "weightedAvgRoi30d"
         | "topMarketsPreview"
       >;
@@ -2535,6 +2772,19 @@ async function loadTrackedWalletPositioning(input: {
           builder.stats.weightedWinRateTotal,
           builder.stats.weightedWinRateWeight,
         ),
+        weightedAvgResolvedWinRateEdge30d: finalizeWeightedAverage(
+          builder.stats.weightedResolvedWinRateEdgeTotal,
+          builder.stats.weightedResolvedWinRateEdgeWeight,
+        ),
+        weightedAvgResolvedEdgeZScore30d: finalizeWeightedAverage(
+          builder.stats.weightedResolvedEdgeZScoreTotal,
+          builder.stats.weightedResolvedEdgeZScoreWeight,
+        ),
+        weightedAvgResolvedBrierScore30d: finalizeWeightedAverage(
+          builder.stats.weightedResolvedBrierScoreTotal,
+          builder.stats.weightedResolvedBrierScoreWeight,
+        ),
+        resolvedEdgeHolderCount: builder.stats.resolvedEdgeHolderIds.size,
         weightedAvgRoi30d: finalizeWeightedAverage(
           builder.stats.weightedRoiTotal,
           builder.stats.weightedRoiWeight,
@@ -2605,6 +2855,9 @@ async function loadTrackedWalletPositioning(input: {
       minEventDisagreementScore: query.minEventDisagreementScore ?? null,
       minCrossMarketWallets: query.minCrossMarketWallets ?? null,
       mmMode: query.mmMode,
+      includeHolders: query.includeHolders,
+      holdersLimit: query.holdersLimit,
+      holderSort: query.holderSort,
       includePositionPnl: query.includePositionPnl,
     },
     totals: {
@@ -3115,6 +3368,7 @@ function buildWalletIntelSelectorMetricsJsonSql(alias: string): string {
         or ${alias}.metrics_volume_30d is not null
         or ${alias}.metrics_pnl_30d is not null
         or ${alias}.metrics_trades_30d is not null
+        or ${alias}.metrics_resolved_edge_sample_count_30d is not null
       then jsonb_build_object(
         'period', '30d',
         'as_of', ${alias}.metrics_as_of,
@@ -3123,6 +3377,14 @@ function buildWalletIntelSelectorMetricsJsonSql(alias: string): string {
         'pnl_usd', ${alias}.metrics_pnl_30d,
         'roi', ${alias}.metrics_roi_30d,
         'win_rate', ${alias}.metrics_win_rate_30d,
+        'resolved_edge_sample_count', ${alias}.metrics_resolved_edge_sample_count_30d,
+        'resolved_actual_win_rate', ${alias}.metrics_resolved_actual_win_rate_30d,
+        'resolved_expected_win_rate', ${alias}.metrics_resolved_expected_win_rate_30d,
+        'resolved_win_rate_edge', ${alias}.metrics_resolved_win_rate_edge_30d,
+        'resolved_edge_z_score', ${alias}.metrics_resolved_edge_z_score_30d,
+        'resolved_brier_score', ${alias}.metrics_resolved_brier_score_30d,
+        'resolved_stake_weighted_edge', ${alias}.metrics_resolved_stake_weighted_edge_30d,
+        'resolved_stake_usd', ${alias}.metrics_resolved_stake_usd_30d,
         'avg_hold_hours', ${alias}.metrics_avg_hold_hours_30d,
         'last_trade_at', ${alias}.metrics_last_trade_at_30d
       )
@@ -3250,6 +3512,15 @@ function buildSlimWhaleSelectorSql(
                 wis.metrics_pnl_30d as metrics_pnl,
                 wis.metrics_roi_30d as metrics_roi,
                 wis.metrics_trades_30d as metrics_trades,
+                wis.metrics_win_rate_30d as metrics_win_rate,
+                wis.metrics_resolved_edge_sample_count_30d as metrics_resolved_edge_sample_count,
+                wis.metrics_resolved_actual_win_rate_30d as metrics_resolved_actual_win_rate,
+                wis.metrics_resolved_expected_win_rate_30d as metrics_resolved_expected_win_rate,
+                wis.metrics_resolved_win_rate_edge_30d as metrics_resolved_win_rate_edge,
+                wis.metrics_resolved_edge_z_score_30d as metrics_resolved_edge_z_score,
+                wis.metrics_resolved_brier_score_30d as metrics_resolved_brier_score,
+                wis.metrics_resolved_stake_weighted_edge_30d as metrics_resolved_stake_weighted_edge,
+                wis.metrics_resolved_stake_usd_30d as metrics_resolved_stake_usd,
                 wis.exposure_usd,
                 wis.hedged_notional_usd,
                 wis.net_imbalance_usd,
@@ -3287,6 +3558,15 @@ function buildSlimWhaleSelectorSql(
                 wis.metrics_pnl_30d as metrics_pnl,
                 wis.metrics_roi_30d as metrics_roi,
                 wis.metrics_trades_30d as metrics_trades,
+                wis.metrics_win_rate_30d as metrics_win_rate,
+                wis.metrics_resolved_edge_sample_count_30d as metrics_resolved_edge_sample_count,
+                wis.metrics_resolved_actual_win_rate_30d as metrics_resolved_actual_win_rate,
+                wis.metrics_resolved_expected_win_rate_30d as metrics_resolved_expected_win_rate,
+                wis.metrics_resolved_win_rate_edge_30d as metrics_resolved_win_rate_edge,
+                wis.metrics_resolved_edge_z_score_30d as metrics_resolved_edge_z_score,
+                wis.metrics_resolved_brier_score_30d as metrics_resolved_brier_score,
+                wis.metrics_resolved_stake_weighted_edge_30d as metrics_resolved_stake_weighted_edge,
+                wis.metrics_resolved_stake_usd_30d as metrics_resolved_stake_usd,
                 wis.exposure_usd,
                 wis.hedged_notional_usd,
                 wis.net_imbalance_usd,
@@ -3357,6 +3637,15 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                 wis.metrics_pnl_30d as metrics_pnl,
                 wis.metrics_roi_30d as metrics_roi,
                 wis.metrics_trades_30d as metrics_trades,
+                wis.metrics_win_rate_30d as metrics_win_rate,
+                wis.metrics_resolved_edge_sample_count_30d as metrics_resolved_edge_sample_count,
+                wis.metrics_resolved_actual_win_rate_30d as metrics_resolved_actual_win_rate,
+                wis.metrics_resolved_expected_win_rate_30d as metrics_resolved_expected_win_rate,
+                wis.metrics_resolved_win_rate_edge_30d as metrics_resolved_win_rate_edge,
+                wis.metrics_resolved_edge_z_score_30d as metrics_resolved_edge_z_score,
+                wis.metrics_resolved_brier_score_30d as metrics_resolved_brier_score,
+                wis.metrics_resolved_stake_weighted_edge_30d as metrics_resolved_stake_weighted_edge,
+                wis.metrics_resolved_stake_usd_30d as metrics_resolved_stake_usd,
                 wis.exposure_usd,
                 wis.hedged_notional_usd,
                 wis.net_imbalance_usd,
@@ -3400,6 +3689,11 @@ function buildWhaleQualityFilterSql(
     minPnl30d?: number;
     minRoi30d?: number;
     minWinRate30d?: number;
+    minResolvedEdgeSampleCount?: number;
+    minResolvedStakeUsd?: number;
+    minResolvedWinRateEdge30d?: number;
+    minResolvedEdgeZScore30d?: number;
+    maxResolvedBrierScore30d?: number;
     maxExposureUsd?: number;
     maxNetImbalanceUsd?: number;
   },
@@ -3431,6 +3725,36 @@ function buildWhaleQualityFilterSql(
       `case when inferred.total > 0 then inferred.wins::float / inferred.total else null end >= $${idx++}`,
     );
     params.push(query.minWinRate30d);
+  }
+  if (query.minResolvedEdgeSampleCount != null) {
+    selectorClauses.push(
+      `coalesce(wis.metrics_resolved_edge_sample_count_30d, 0) >= $${idx++}`,
+    );
+    params.push(query.minResolvedEdgeSampleCount);
+  }
+  if (query.minResolvedStakeUsd != null) {
+    selectorClauses.push(
+      `coalesce(wis.metrics_resolved_stake_usd_30d, 0) >= $${idx++}`,
+    );
+    params.push(query.minResolvedStakeUsd);
+  }
+  if (query.minResolvedWinRateEdge30d != null) {
+    selectorClauses.push(
+      `coalesce(wis.metrics_resolved_win_rate_edge_30d, -1) >= $${idx++}`,
+    );
+    params.push(query.minResolvedWinRateEdge30d);
+  }
+  if (query.minResolvedEdgeZScore30d != null) {
+    selectorClauses.push(
+      `coalesce(wis.metrics_resolved_edge_z_score_30d, -1000000000) >= $${idx++}`,
+    );
+    params.push(query.minResolvedEdgeZScore30d);
+  }
+  if (query.maxResolvedBrierScore30d != null) {
+    selectorClauses.push(
+      `wis.metrics_resolved_brier_score_30d is not null and wis.metrics_resolved_brier_score_30d <= $${idx++}`,
+    );
+    params.push(query.maxResolvedBrierScore30d);
   }
   if (query.maxExposureUsd != null) {
     selectorClauses.push(`coalesce(wis.exposure_usd, 0) <= $${idx++}`);
@@ -3567,7 +3891,8 @@ function mapWhaleSlimRowToItem(
       metrics:
         row.metrics_volume != null ||
         row.metrics_pnl != null ||
-        row.metrics_trades != null
+        row.metrics_trades != null ||
+        row.metrics_resolved_edge_sample_count != null
           ? {
               period: "30d",
               as_of: row.last_seen_at,
@@ -3575,7 +3900,18 @@ function mapWhaleSlimRowToItem(
               volume_usd: row.metrics_volume,
               pnl_usd: row.metrics_pnl,
               roi: row.metrics_roi,
-              win_rate: null,
+              win_rate: row.metrics_win_rate,
+              resolved_edge_sample_count:
+                row.metrics_resolved_edge_sample_count,
+              resolved_actual_win_rate: row.metrics_resolved_actual_win_rate,
+              resolved_expected_win_rate:
+                row.metrics_resolved_expected_win_rate,
+              resolved_win_rate_edge: row.metrics_resolved_win_rate_edge,
+              resolved_edge_z_score: row.metrics_resolved_edge_z_score,
+              resolved_brier_score: row.metrics_resolved_brier_score,
+              resolved_stake_weighted_edge:
+                row.metrics_resolved_stake_weighted_edge,
+              resolved_stake_usd: row.metrics_resolved_stake_usd,
               avg_hold_hours: null,
               last_trade_at: null,
             }
@@ -5110,6 +5446,14 @@ export function applyResolvedTradeStatsToMetrics(
       win_rate: nextWinRate,
       avg_hold_hours: null,
       last_trade_at: null,
+      resolved_edge_sample_count: null,
+      resolved_actual_win_rate: null,
+      resolved_expected_win_rate: null,
+      resolved_win_rate_edge: null,
+      resolved_edge_z_score: null,
+      resolved_brier_score: null,
+      resolved_stake_weighted_edge: null,
+      resolved_stake_usd: null,
       winning_count: nextWinningCount,
       losing_count: nextLosingCount,
       resolved_count: nextResolvedCount,
@@ -5138,6 +5482,21 @@ function serializeWalletMetrics(
     pnlUsd: nullableNumber(metrics.pnl_usd),
     roi: nullableNumber(metrics.roi),
     winRate: nullableNumber(metrics.win_rate),
+    resolvedEdgeSampleCount:
+      metrics.resolved_edge_sample_count != null
+        ? Number(metrics.resolved_edge_sample_count)
+        : null,
+    resolvedActualWinRate: nullableNumber(metrics.resolved_actual_win_rate),
+    resolvedExpectedWinRate: nullableNumber(
+      metrics.resolved_expected_win_rate,
+    ),
+    resolvedWinRateEdge: nullableNumber(metrics.resolved_win_rate_edge),
+    resolvedEdgeZScore: nullableNumber(metrics.resolved_edge_z_score),
+    resolvedBrierScore: nullableNumber(metrics.resolved_brier_score),
+    resolvedStakeWeightedEdge: nullableNumber(
+      metrics.resolved_stake_weighted_edge,
+    ),
+    resolvedStakeUsd: nullableNumber(metrics.resolved_stake_usd),
     avgHoldHours: nullableNumber(metrics.avg_hold_hours),
     lastTradeAt: metrics.last_trade_at ?? null,
     winningCount:
@@ -7130,6 +7489,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   return `wis.net_imbalance_usd desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
                 case "winrate":
                   return `case when inferred.total > 0 then inferred.wins::float / inferred.total end desc nulls last, inferred.total desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+                case "edge_z_score":
+                  return `wis.metrics_resolved_edge_z_score_30d desc nulls last, wis.metrics_resolved_edge_sample_count_30d desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+                case "stake_weighted_edge":
+                  return `wis.metrics_resolved_stake_weighted_edge_30d desc nulls last, wis.metrics_resolved_stake_usd_30d desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
+                case "brier_score":
+                  return `wis.metrics_resolved_brier_score_30d asc nulls last, wis.metrics_resolved_edge_sample_count_30d desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
                 case "pnl_30d":
                   return `wis.metrics_pnl_30d desc nulls last, whale_score desc nulls last, ${whaleActivityOrderExpr} desc nulls last, w.last_seen_at desc`;
                 case "roi_30d":
@@ -7194,7 +7559,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     ${buildWalletIntelSelectorMetricsJsonSql("wis")} as metrics,
                     wis.metrics_volume_30d as metrics_volume,
                     wis.metrics_pnl_30d as metrics_pnl,
+                    wis.metrics_roi_30d as metrics_roi,
                     wis.metrics_trades_30d as metrics_trades,
+                    wis.metrics_resolved_edge_sample_count_30d as metrics_resolved_edge_sample_count,
+                    wis.metrics_resolved_actual_win_rate_30d as metrics_resolved_actual_win_rate,
+                    wis.metrics_resolved_expected_win_rate_30d as metrics_resolved_expected_win_rate,
+                    wis.metrics_resolved_win_rate_edge_30d as metrics_resolved_win_rate_edge,
+                    wis.metrics_resolved_edge_z_score_30d as metrics_resolved_edge_z_score,
+                    wis.metrics_resolved_brier_score_30d as metrics_resolved_brier_score,
+                    wis.metrics_resolved_stake_weighted_edge_30d as metrics_resolved_stake_weighted_edge,
+                    wis.metrics_resolved_stake_usd_30d as metrics_resolved_stake_usd,
                     wis.exposure_usd,
                     wis.hedged_notional_usd,
                     wis.net_imbalance_usd,

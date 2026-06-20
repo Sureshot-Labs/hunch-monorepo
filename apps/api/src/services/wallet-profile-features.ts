@@ -26,6 +26,9 @@ export type WalletEntryBracketStat = {
   tradeCount: number;
   resolvedCount: number;
   winRate: number | null;
+  expectedWinRate: number | null;
+  winRateEdge: number | null;
+  brierScore: number | null;
 };
 
 export type WalletPerformanceSummaryPoint = {
@@ -193,6 +196,9 @@ export async function loadWalletEntryBracketStats(
     trade_count: number | null;
     resolved_count: number | null;
     win_rate: string | null;
+    expected_win_rate: string | null;
+    win_rate_edge: string | null;
+    brier_score: string | null;
   }>(
     `
       with entry_events as (
@@ -224,6 +230,7 @@ export async function loadWalletEntryBracketStats(
             when price_probability < 0.8 then '60-80'
             else '80-100'
           end as bracket,
+          price_probability,
           stake_usd,
           case
             when resolved_outcome in ('YES', 'NO')
@@ -245,11 +252,38 @@ export async function loadWalletEntryBracketStats(
         coalesce(sum(stake_usd), 0)::text as total_stake_usd,
         count(*)::int as trade_count,
         sum(resolved_row)::int as resolved_count,
-        case
-          when sum(resolved_row) > 0
-            then (sum(win_row)::double precision / sum(resolved_row))::text
-          else null
-        end as win_rate
+          case
+            when sum(resolved_row) > 0
+              then (sum(win_row)::double precision / sum(resolved_row))::text
+            else null
+          end as win_rate,
+          case
+            when sum(resolved_row) > 0
+              then (
+                sum(price_probability) filter (where resolved_row = 1)::double precision
+                / sum(resolved_row)
+              )::text
+            else null
+          end as expected_win_rate,
+          case
+            when sum(resolved_row) > 0
+              then (
+                (
+                  sum(win_row)::double precision
+                  - sum(price_probability) filter (where resolved_row = 1)::double precision
+                )
+                / sum(resolved_row)
+              )::text
+            else null
+          end as win_rate_edge,
+          case
+            when sum(resolved_row) > 0
+              then (
+                avg(power(win_row::double precision - price_probability, 2))
+                  filter (where resolved_row = 1)
+              )::text
+            else null
+          end as brier_score
       from bucketed
       where bracket is not null
       group by bracket
@@ -270,6 +304,9 @@ export async function loadWalletEntryBracketStats(
       tradeCount: row?.trade_count ?? 0,
       resolvedCount: row?.resolved_count ?? 0,
       winRate: row ? nullableNumber(row.win_rate) : null,
+      expectedWinRate: row ? nullableNumber(row.expected_win_rate) : null,
+      winRateEdge: row ? nullableNumber(row.win_rate_edge) : null,
+      brierScore: row ? nullableNumber(row.brier_score) : null,
     };
   });
 }

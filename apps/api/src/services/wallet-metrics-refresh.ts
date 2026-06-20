@@ -36,6 +36,7 @@ type WalletMetricMarketRow = {
 type WalletMetricMarketMark = {
   resolvedOutcome: string | null;
   yesMarkPrice: number | null;
+  resolvedYesPayout: number | null;
 };
 
 type WalletMetricPeriod = "1d" | "7d" | "30d" | "all";
@@ -210,19 +211,26 @@ async function loadWalletMetricMarketMarkMap(
   );
 
   for (const row of rows) {
+    const resolvedOutcome =
+      row.resolved_outcome === "YES" || row.resolved_outcome === "NO"
+        ? row.resolved_outcome
+        : null;
+    const resolvedOutcomePct = parseNumeric(row.resolved_outcome_pct);
+    const yesMarkPrice = resolveApproxYesMarkPrice({
+      resolvedOutcome: row.resolved_outcome,
+      resolvedOutcomePct,
+      markPrice:
+        parseNumeric(row.best_ask) ??
+        parseNumeric(row.best_bid) ??
+        parseNumeric(row.last_price),
+    });
     byMarket.set(row.id, {
-      resolvedOutcome:
-        row.resolved_outcome === "YES" || row.resolved_outcome === "NO"
-          ? row.resolved_outcome
+      resolvedOutcome,
+      yesMarkPrice,
+      resolvedYesPayout:
+        resolvedOutcome != null || resolvedOutcomePct != null
+          ? yesMarkPrice
           : null,
-      yesMarkPrice: resolveApproxYesMarkPrice({
-        resolvedOutcome: row.resolved_outcome,
-        resolvedOutcomePct: parseNumeric(row.resolved_outcome_pct),
-        markPrice:
-          parseNumeric(row.best_ask) ??
-          parseNumeric(row.best_bid) ??
-          parseNumeric(row.last_price),
-      }),
     });
   }
 
@@ -324,6 +332,14 @@ async function refreshLedgerWindowMetrics(
           x.pnl_usd::numeric as pnl_usd,
           x.roi::numeric as roi,
           x.win_rate::numeric as win_rate,
+          x.resolved_edge_sample_count::int as resolved_edge_sample_count,
+          x.resolved_actual_win_rate::numeric as resolved_actual_win_rate,
+          x.resolved_expected_win_rate::numeric as resolved_expected_win_rate,
+          x.resolved_win_rate_edge::numeric as resolved_win_rate_edge,
+          x.resolved_edge_z_score::numeric as resolved_edge_z_score,
+          x.resolved_brier_score::numeric as resolved_brier_score,
+          x.resolved_stake_weighted_edge::numeric as resolved_stake_weighted_edge,
+          x.resolved_stake_usd::numeric as resolved_stake_usd,
           x.last_trade_at::timestamptz as last_trade_at
         from jsonb_to_recordset($1::jsonb) as x(
           wallet_id text,
@@ -332,6 +348,14 @@ async function refreshLedgerWindowMetrics(
           pnl_usd text,
           roi text,
           win_rate text,
+          resolved_edge_sample_count int,
+          resolved_actual_win_rate text,
+          resolved_expected_win_rate text,
+          resolved_win_rate_edge text,
+          resolved_edge_z_score text,
+          resolved_brier_score text,
+          resolved_stake_weighted_edge text,
+          resolved_stake_usd text,
           last_trade_at text
         )
       )
@@ -345,6 +369,14 @@ async function refreshLedgerWindowMetrics(
         pnl_usd,
         roi,
         win_rate,
+        resolved_edge_sample_count,
+        resolved_actual_win_rate,
+        resolved_expected_win_rate,
+        resolved_win_rate_edge,
+        resolved_edge_z_score,
+        resolved_brier_score,
+        resolved_stake_weighted_edge,
+        resolved_stake_usd,
         last_trade_at
       )
       select
@@ -357,6 +389,14 @@ async function refreshLedgerWindowMetrics(
         u.pnl_usd,
         u.roi,
         u.win_rate,
+        u.resolved_edge_sample_count,
+        u.resolved_actual_win_rate,
+        u.resolved_expected_win_rate,
+        u.resolved_win_rate_edge,
+        u.resolved_edge_z_score,
+        u.resolved_brier_score,
+        u.resolved_stake_weighted_edge,
+        u.resolved_stake_usd,
         u.last_trade_at
       from upsert_rows u
       where not exists (
@@ -382,6 +422,14 @@ async function refreshLedgerWindowMetrics(
         pnl_usd = excluded.pnl_usd,
         roi = excluded.roi,
         win_rate = excluded.win_rate,
+        resolved_edge_sample_count = excluded.resolved_edge_sample_count,
+        resolved_actual_win_rate = excluded.resolved_actual_win_rate,
+        resolved_expected_win_rate = excluded.resolved_expected_win_rate,
+        resolved_win_rate_edge = excluded.resolved_win_rate_edge,
+        resolved_edge_z_score = excluded.resolved_edge_z_score,
+        resolved_brier_score = excluded.resolved_brier_score,
+        resolved_stake_weighted_edge = excluded.resolved_stake_weighted_edge,
+        resolved_stake_usd = excluded.resolved_stake_usd,
         last_trade_at = excluded.last_trade_at,
         updated_at = now()
     `,
@@ -394,6 +442,33 @@ async function refreshLedgerWindowMetrics(
           pnl_usd: row.pnlUsd != null ? String(row.pnlUsd) : null,
           roi: row.roi != null ? String(row.roi) : null,
           win_rate: row.winRate != null ? String(row.winRate) : null,
+          resolved_edge_sample_count: row.resolvedEdgeSampleCount,
+          resolved_actual_win_rate:
+            row.resolvedActualWinRate != null
+              ? String(row.resolvedActualWinRate)
+              : null,
+          resolved_expected_win_rate:
+            row.resolvedExpectedWinRate != null
+              ? String(row.resolvedExpectedWinRate)
+              : null,
+          resolved_win_rate_edge:
+            row.resolvedWinRateEdge != null
+              ? String(row.resolvedWinRateEdge)
+              : null,
+          resolved_edge_z_score:
+            row.resolvedEdgeZScore != null
+              ? String(row.resolvedEdgeZScore)
+              : null,
+          resolved_brier_score:
+            row.resolvedBrierScore != null
+              ? String(row.resolvedBrierScore)
+              : null,
+          resolved_stake_weighted_edge:
+            row.resolvedStakeWeightedEdge != null
+              ? String(row.resolvedStakeWeightedEdge)
+              : null,
+          resolved_stake_usd:
+            row.resolvedStakeUsd != null ? String(row.resolvedStakeUsd) : null,
           last_trade_at: row.lastTradeAt?.toISOString() ?? null,
         })),
       ),

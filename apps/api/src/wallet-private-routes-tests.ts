@@ -58,6 +58,14 @@ async function createWhaleFixtureWallet(
     roi?: number;
     trades30d?: number;
     winRate30d?: number;
+    resolvedEdgeSampleCount30d?: number;
+    resolvedActualWinRate30d?: number;
+    resolvedExpectedWinRate30d?: number;
+    resolvedWinRateEdge30d?: number;
+    resolvedEdgeZScore30d?: number;
+    resolvedBrierScore30d?: number;
+    resolvedStakeWeightedEdge30d?: number;
+    resolvedStakeUsd30d?: number;
     exposureUsd?: number;
     netImbalanceUsd?: number;
     openPositionsCount?: number;
@@ -110,12 +118,20 @@ async function createWhaleFixtureWallet(
           metrics_roi_30d,
           metrics_trades_30d,
           metrics_win_rate_30d,
+          metrics_resolved_edge_sample_count_30d,
+          metrics_resolved_actual_win_rate_30d,
+          metrics_resolved_expected_win_rate_30d,
+          metrics_resolved_win_rate_edge_30d,
+          metrics_resolved_edge_z_score_30d,
+          metrics_resolved_brier_score_30d,
+          metrics_resolved_stake_weighted_edge_30d,
+          metrics_resolved_stake_usd_30d,
           exposure_usd,
           net_imbalance_usd,
           last_activity_at,
           updated_at
         )
-        values ($1, now(), $2, $3, $4, $5, $6, $7, $8, now(), now())
+        values ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now(), now())
         on conflict (wallet_id)
         do update set
           metrics_as_of = excluded.metrics_as_of,
@@ -124,6 +140,14 @@ async function createWhaleFixtureWallet(
           metrics_roi_30d = excluded.metrics_roi_30d,
           metrics_trades_30d = excluded.metrics_trades_30d,
           metrics_win_rate_30d = excluded.metrics_win_rate_30d,
+          metrics_resolved_edge_sample_count_30d = excluded.metrics_resolved_edge_sample_count_30d,
+          metrics_resolved_actual_win_rate_30d = excluded.metrics_resolved_actual_win_rate_30d,
+          metrics_resolved_expected_win_rate_30d = excluded.metrics_resolved_expected_win_rate_30d,
+          metrics_resolved_win_rate_edge_30d = excluded.metrics_resolved_win_rate_edge_30d,
+          metrics_resolved_edge_z_score_30d = excluded.metrics_resolved_edge_z_score_30d,
+          metrics_resolved_brier_score_30d = excluded.metrics_resolved_brier_score_30d,
+          metrics_resolved_stake_weighted_edge_30d = excluded.metrics_resolved_stake_weighted_edge_30d,
+          metrics_resolved_stake_usd_30d = excluded.metrics_resolved_stake_usd_30d,
           exposure_usd = excluded.exposure_usd,
           net_imbalance_usd = excluded.net_imbalance_usd,
           last_activity_at = excluded.last_activity_at,
@@ -136,6 +160,14 @@ async function createWhaleFixtureWallet(
         inputs.roi ?? 0,
         inputs.trades30d ?? 1,
         inputs.winRate30d ?? null,
+        inputs.resolvedEdgeSampleCount30d ?? null,
+        inputs.resolvedActualWinRate30d ?? null,
+        inputs.resolvedExpectedWinRate30d ?? null,
+        inputs.resolvedWinRateEdge30d ?? null,
+        inputs.resolvedEdgeZScore30d ?? null,
+        inputs.resolvedBrierScore30d ?? null,
+        inputs.resolvedStakeWeightedEdge30d ?? null,
+        inputs.resolvedStakeUsd30d ?? null,
         inputs.exposureUsd ?? 0,
         inputs.netImbalanceUsd ?? 0,
       ],
@@ -815,6 +847,79 @@ async function main() {
     }
 
     {
+      const edgeLeaderAddress = randomEvmAddress();
+      const noisyAddress = randomEvmAddress();
+      await createWhaleFixtureWallet(context, {
+        address: edgeLeaderAddress,
+        chain: "polygon",
+        volumeUsd: 120_000,
+        pnlUsd: 8_000,
+        roi: 0.08,
+        trades30d: 40,
+        winRate30d: 0.58,
+        resolvedEdgeSampleCount30d: 35,
+        resolvedActualWinRate30d: 0.62,
+        resolvedExpectedWinRate30d: 0.48,
+        resolvedWinRateEdge30d: 0.14,
+        resolvedEdgeZScore30d: 2.4,
+        resolvedBrierScore30d: 0.19,
+        resolvedStakeWeightedEdge30d: 0.11,
+        resolvedStakeUsd30d: 15_000,
+        exposureUsd: 20_000,
+        netImbalanceUsd: 2_000,
+      });
+      await createWhaleFixtureWallet(context, {
+        address: noisyAddress,
+        chain: "polygon",
+        volumeUsd: 130_000,
+        pnlUsd: 9_000,
+        roi: 0.09,
+        trades30d: 50,
+        winRate30d: 0.7,
+        resolvedEdgeSampleCount30d: 8,
+        resolvedActualWinRate30d: 0.7,
+        resolvedExpectedWinRate30d: 0.66,
+        resolvedWinRateEdge30d: 0.04,
+        resolvedEdgeZScore30d: 0.3,
+        resolvedBrierScore30d: 0.24,
+        resolvedStakeWeightedEdge30d: 0.02,
+        resolvedStakeUsd30d: 900,
+        exposureUsd: 20_000,
+        netImbalanceUsd: 2_000,
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/wallets/whales?limit=20&offset=0&sort=edge_z_score&minResolvedEdgeSampleCount=20&minResolvedStakeUsd=10000&minResolvedEdgeZScore30d=1&maxResolvedBrierScore30d=0.2&includeAttribution=false",
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json() as {
+        ok: boolean;
+        wallets: Array<{
+          address: string;
+          metrics?: {
+            resolvedEdgeSampleCount?: number | null;
+            resolvedEdgeZScore?: number | null;
+            resolvedBrierScore?: number | null;
+          } | null;
+        }>;
+      };
+      assert.equal(body.ok, true);
+      const addresses = body.wallets.map((wallet) =>
+        wallet.address.toLowerCase(),
+      );
+      assert.equal(addresses.includes(edgeLeaderAddress.toLowerCase()), true);
+      assert.equal(addresses.includes(noisyAddress.toLowerCase()), false);
+      const edgeLeader = body.wallets.find(
+        (wallet) =>
+          wallet.address.toLowerCase() === edgeLeaderAddress.toLowerCase(),
+      );
+      assert.equal(edgeLeader?.metrics?.resolvedEdgeSampleCount, 35);
+      assert.equal(edgeLeader?.metrics?.resolvedEdgeZScore, 2.4);
+      assert.equal(edgeLeader?.metrics?.resolvedBrierScore, 0.19);
+    }
+
+    {
       const rollupAddress = randomEvmAddress();
       const rollupWalletId = await createWhaleFixtureWallet(context, {
         address: rollupAddress,
@@ -1055,6 +1160,12 @@ async function main() {
         roi: 0.12,
         trades30d: 10,
         winRate30d: 0.7,
+        resolvedEdgeSampleCount30d: 12,
+        resolvedWinRateEdge30d: 0.24,
+        resolvedEdgeZScore30d: 2.8,
+        resolvedBrierScore30d: 0.12,
+        resolvedStakeWeightedEdge30d: 0.18,
+        resolvedStakeUsd30d: 24_000,
         exposureUsd: 1_000,
         inferredWins: 7,
         inferredTotal: 10,
@@ -1067,6 +1178,12 @@ async function main() {
         roi: 0.08,
         trades30d: 12,
         winRate30d: 0.6,
+        resolvedEdgeSampleCount30d: 3,
+        resolvedWinRateEdge30d: 0.01,
+        resolvedEdgeZScore30d: 0.1,
+        resolvedBrierScore30d: 0.2,
+        resolvedStakeWeightedEdge30d: 0.02,
+        resolvedStakeUsd30d: 5_000,
         exposureUsd: 1_200,
         inferredWins: 6,
         inferredTotal: 10,
@@ -1201,6 +1318,10 @@ async function main() {
       assert.equal(marketPositioningBody.market?.eventStatus, "ACTIVE");
       assert.ok(marketPositioningBody.market?.eventStartDate);
       assert.ok(marketPositioningBody.market?.eventEndDate);
+      assert.equal(
+        marketPositioningBody.market?.topHolders[0]?.["walletId"],
+        noWalletId,
+      );
       assert.equal("marketUrl" in (marketPositioningBody.market ?? {}), false);
       assert.equal(
         "walletUrl" in (marketPositioningBody.market?.topHolders[0] ?? {}),
@@ -1221,6 +1342,44 @@ async function main() {
           (node) => node.type === "trader" && "walletUrl" in node,
         ),
         false,
+      );
+
+      const edgeSortedHoldersResponse = await app.inject({
+        method: "GET",
+        url: `/markets/${encodeURIComponent(matching.marketId)}/wallet-positioning?minWallets=1&holdersLimit=2&holderSort=edge_z_score`,
+      });
+      assert.equal(edgeSortedHoldersResponse.statusCode, 200);
+      const edgeSortedHoldersBody = edgeSortedHoldersResponse.json() as {
+        ok: boolean;
+        market: {
+          topHolders: Array<{
+            walletId: string;
+            metrics: { resolvedEdgeZScore30d: number | null };
+          }>;
+          sideBreakdown: {
+            YES: { topHolders: Array<{ walletId: string }> };
+            NO: { topHolders: Array<{ walletId: string }> };
+          };
+        } | null;
+      };
+      assert.equal(edgeSortedHoldersBody.ok, true);
+      assert.equal(
+        edgeSortedHoldersBody.market?.topHolders[0]?.walletId,
+        yesWalletId,
+      );
+      assert.equal(
+        edgeSortedHoldersBody.market?.topHolders[0]?.metrics
+          .resolvedEdgeZScore30d,
+        2.8,
+      );
+      assert.equal(
+        edgeSortedHoldersBody.market?.sideBreakdown.YES.topHolders[0]
+          ?.walletId,
+        yesWalletId,
+      );
+      assert.equal(
+        edgeSortedHoldersBody.market?.sideBreakdown.NO.topHolders[0]?.walletId,
+        noWalletId,
       );
 
       const eventPositioningResponse = await app.inject({
