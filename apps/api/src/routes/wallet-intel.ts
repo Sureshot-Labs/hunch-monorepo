@@ -1300,8 +1300,12 @@ type WalletPositioningRow = {
   venue: string;
   market_id: string;
   market_title: string | null;
+  market_image: string | null;
+  market_icon: string | null;
   event_id: string | null;
   event_title: string | null;
+  event_image: string | null;
+  event_icon: string | null;
   category: string | null;
   market_status: string | null;
   event_status: string | null;
@@ -1460,7 +1464,11 @@ type PositioningMarketAggregate = {
   eventId: string | null;
   venue: string;
   marketTitle: string | null;
+  marketImage: string | null;
+  marketIcon: string | null;
   eventTitle: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
   eventStartDate: string | null;
   eventEndDate: string | null;
   category: string | null;
@@ -1504,6 +1512,8 @@ type PositioningEventAggregate = {
   eventId: string;
   venue: string | null;
   eventTitle: string | null;
+  eventImage: string | null;
+  eventIcon: string | null;
   eventStatus: string | null;
   startDate: string | null;
   endDate: string | null;
@@ -2103,6 +2113,8 @@ function buildPositioningGraph(input: {
         type: "event",
         eventId: market.eventId,
         label: market.eventTitle,
+        image: market.eventImage,
+        icon: market.eventIcon,
         eventStatus: market.eventStatus,
         startDate: market.eventStartDate,
         endDate: market.eventEndDate,
@@ -2122,6 +2134,10 @@ function buildPositioningGraph(input: {
       marketId: market.marketId,
       eventId: market.eventId,
       label: market.marketTitle,
+      image: market.marketImage,
+      icon: market.marketIcon,
+      eventImage: market.eventImage,
+      eventIcon: market.eventIcon,
       odds: market.odds,
       trackedPositionUsd: market.trackedPositionUsd,
       walletCount: market.walletCount,
@@ -2447,8 +2463,12 @@ async function loadTrackedWalletPositioning(input: {
         lp.venue,
         lp.market_id,
         um.title as market_title,
+        um.image as market_image,
+        um.icon as market_icon,
         um.event_id,
         ue.title as event_title,
+        ue.image as event_image,
+        ue.icon as event_icon,
         coalesce(um.category, ue.category) as category,
         um.status::text as market_status,
         ue.status::text as event_status,
@@ -2621,7 +2641,11 @@ async function loadTrackedWalletPositioning(input: {
           eventId: row.event_id,
           venue: row.venue,
           marketTitle: row.market_title,
+          marketImage: row.market_image,
+          marketIcon: row.market_icon,
           eventTitle: row.event_title,
+          eventImage: row.event_image,
+          eventIcon: row.event_icon,
           eventStartDate: isoDate(row.event_start_date),
           eventEndDate: isoDate(row.event_end_date),
           category: row.category,
@@ -2977,6 +3001,8 @@ async function loadTrackedWalletPositioning(input: {
           eventId: market.eventId,
           venue: market.venue,
           eventTitle: market.eventTitle,
+          eventImage: market.eventImage,
+          eventIcon: market.eventIcon,
           eventStatus: market.eventStatus,
           startDate: market.eventStartDate,
           endDate: market.eventEndDate,

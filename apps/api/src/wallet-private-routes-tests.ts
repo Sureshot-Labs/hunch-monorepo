@@ -282,6 +282,8 @@ async function createWalletMarketFixture(
         volume_total,
         volume_24h,
         liquidity,
+        image,
+        icon,
         slug,
         created_at,
         updated_at
@@ -289,10 +291,17 @@ async function createWalletMarketFixture(
       values (
         $1, 'polymarket', $2, 'Wallet routes test event', $3, 'ACTIVE',
         now() - interval '1 day', now() + interval '30 days',
-        1000, 100, 500, $4, now(), now()
+        1000, 100, 500, $4, $5, $6, now(), now()
       )
     `,
-    [eventId, eventId, inputs.category, `${eventId}-slug`],
+    [
+      eventId,
+      eventId,
+      inputs.category,
+      `https://img.test/${eventId}.png`,
+      `https://img.test/${eventId}-icon.png`,
+      `${eventId}-slug`,
+    ],
   );
   await pool.query(
     `
@@ -315,6 +324,8 @@ async function createWalletMarketFixture(
         volume_24h,
         liquidity,
         open_interest,
+        image,
+        icon,
         outcomes,
         slug,
         metadata,
@@ -325,10 +336,18 @@ async function createWalletMarketFixture(
         $1, 'polymarket', $2, $3, 'Wallet routes test market', $4, 'ACTIVE',
         'binary', now() - interval '1 day', now() + interval '30 days',
         now() + interval '30 days', 0.42, 0.45, 0.43,
-        1000, 100, 500, 50, '["Yes","No"]', $5, '{}'::jsonb, now(), now()
+        1000, 100, 500, 50, $5, $6, '["Yes","No"]', $7, '{}'::jsonb, now(), now()
       )
     `,
-    [marketId, marketId, eventId, inputs.category, `${marketId}-slug`],
+    [
+      marketId,
+      marketId,
+      eventId,
+      inputs.category,
+      `https://img.test/${marketId}.png`,
+      `https://img.test/${marketId}-icon.png`,
+      `${marketId}-slug`,
+    ],
   );
   context.createdEventIds.push(eventId);
   context.createdMarketIds.push(marketId);
@@ -1402,6 +1421,10 @@ async function main() {
           marketId: string;
           trackedPositionUsd: number;
           walletCount: number;
+          marketImage: string | null;
+          marketIcon: string | null;
+          eventImage: string | null;
+          eventIcon: string | null;
           eventStatus: string | null;
           eventStartDate: string | null;
           eventEndDate: string | null;
@@ -1426,6 +1449,10 @@ async function main() {
         graph?: {
           nodes: Array<{
             type?: string;
+            image?: string | null;
+            icon?: string | null;
+            eventImage?: string | null;
+            eventIcon?: string | null;
             odds?: Record<string, unknown>;
             walletUrl?: string;
           }>;
@@ -1458,6 +1485,22 @@ async function main() {
       assert.equal(marketPositioningBody.market?.odds.no.tokenId, noTokenId);
       assert.equal(marketPositioningBody.market?.odds.yes.bid, 0.44);
       assert.equal(marketPositioningBody.market?.odds.no.bid, 0.54);
+      assert.equal(
+        marketPositioningBody.market?.marketImage,
+        `https://img.test/${matching.marketId}.png`,
+      );
+      assert.equal(
+        marketPositioningBody.market?.marketIcon,
+        `https://img.test/${matching.marketId}-icon.png`,
+      );
+      assert.equal(
+        marketPositioningBody.market?.eventImage,
+        `https://img.test/${matching.eventId}.png`,
+      );
+      assert.equal(
+        marketPositioningBody.market?.eventIcon,
+        `https://img.test/${matching.eventId}-icon.png`,
+      );
       assert.equal(marketPositioningBody.market?.eventStatus, "ACTIVE");
       assert.ok(marketPositioningBody.market?.eventStartDate);
       assert.ok(marketPositioningBody.market?.eventEndDate);
@@ -1477,6 +1520,15 @@ async function main() {
       assert.equal(
         marketPositioningBody.graph?.nodes.some(
           (node) => node.type === "market" && node.odds != null,
+        ),
+        true,
+      );
+      assert.equal(
+        marketPositioningBody.graph?.nodes.some(
+          (node) =>
+            node.type === "market" &&
+            node.image === `https://img.test/${matching.marketId}.png` &&
+            node.eventImage === `https://img.test/${matching.eventId}.png`,
         ),
         true,
       );
