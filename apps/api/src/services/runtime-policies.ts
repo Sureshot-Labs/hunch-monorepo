@@ -101,6 +101,9 @@ export type WalletIntelRefreshPolicy = {
   safeLinkLimit: number;
   safeLinkStaleHours: number;
   safeLinkErrorStaleHours: number;
+  onchainStateLimit: number;
+  onchainStateStaleHours: number;
+  onchainStateErrorStaleHours: number;
 };
 
 export type AiWhaleProfilesPolicy = {
@@ -522,6 +525,9 @@ const walletIntelRefreshSchema = z
     safeLinkLimit: nonNegativeInt,
     safeLinkStaleHours: positiveInt,
     safeLinkErrorStaleHours: positiveInt,
+    onchainStateLimit: nonNegativeInt,
+    onchainStateStaleHours: positiveInt,
+    onchainStateErrorStaleHours: positiveInt,
   })
   .strict()
   .partial();
@@ -1147,6 +1153,10 @@ function getDefaults(): IntelPolicyMap {
       safeLinkLimit: env.walletIntelSafeLinkLimit,
       safeLinkStaleHours: env.walletIntelSafeLinkStaleHours,
       safeLinkErrorStaleHours: env.walletIntelSafeLinkErrorStaleHours,
+      onchainStateLimit: env.walletIntelOnchainStateLimit,
+      onchainStateStaleHours: env.walletIntelOnchainStateStaleHours,
+      onchainStateErrorStaleHours:
+        env.walletIntelOnchainStateErrorStaleHours,
     },
     wallet_intel_attribution: getWalletIntelAttributionDefaults(),
     api_cache_warm: {
@@ -1481,6 +1491,15 @@ function normalizeRefreshPolicy(
     safeLinkErrorStaleHours: Math.max(
       1,
       Math.trunc(policy.safeLinkErrorStaleHours),
+    ),
+    onchainStateLimit: Math.max(0, Math.trunc(policy.onchainStateLimit)),
+    onchainStateStaleHours: Math.max(
+      1,
+      Math.trunc(policy.onchainStateStaleHours),
+    ),
+    onchainStateErrorStaleHours: Math.max(
+      1,
+      Math.trunc(policy.onchainStateErrorStaleHours),
     ),
   };
 }

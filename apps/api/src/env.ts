@@ -1052,6 +1052,18 @@ export const env = {
     "WALLET_INTEL_SAFE_LINK_ERROR_STALE_HOURS",
     6,
   ),
+  walletIntelOnchainStateLimit: optionalNonNegativeInt(
+    "WALLET_INTEL_ONCHAIN_STATE_LIMIT",
+    300,
+  ),
+  walletIntelOnchainStateStaleHours: optionalPositiveInt(
+    "WALLET_INTEL_ONCHAIN_STATE_STALE_HOURS",
+    24,
+  ),
+  walletIntelOnchainStateErrorStaleHours: optionalPositiveInt(
+    "WALLET_INTEL_ONCHAIN_STATE_ERROR_STALE_HOURS",
+    6,
+  ),
   walletIntelSignalMaxOdds: optionalNonNegativeNumber(
     "WALLET_INTEL_SIGNAL_MAX_ODDS",
     0.05,

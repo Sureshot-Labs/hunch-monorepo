@@ -138,6 +138,40 @@ type WalletRow = {
   last_seen_at: Date;
 };
 
+type WalletResolveRow = WalletRow & {
+  has_venue: boolean | null;
+  exposure_usd: string | null;
+  last_activity_at: Date | null;
+  metrics_volume_30d: string | null;
+  metrics_trades_30d: number | null;
+};
+
+type WalletOnchainStateRow = {
+  wallet_id: string;
+  wallet_kind: string | null;
+  owner_address: string | null;
+  owner_wallet_id: string | null;
+  wallet_balances: unknown | null;
+  owner_balances: unknown | null;
+  wallet_usd_like_balance: string | null;
+  owner_usd_like_balance: string | null;
+  balance_as_of: Date | null;
+  identity_resolved_at: Date | null;
+};
+
+type WalletOnchainIdentityFields = {
+  walletKind: string | null;
+  ownerAddress: string | null;
+  ownerWalletId: string | null;
+  identityGroupKey: string;
+  walletBalances: unknown | null;
+  ownerBalances: unknown | null;
+  walletUsdLikeBalance: number | null;
+  ownerUsdLikeBalance: number | null;
+  balanceAsOf: string | null;
+  identityResolvedAt: string | null;
+};
+
 type WalletTagRow = {
   slug: string;
   label: string;
@@ -493,9 +527,17 @@ type WhaleWalletItem = {
   inferredWinRate: number | null;
   inferredResolvedCount: number | null;
   isSafe: boolean;
+  walletKind: string | null;
   ownerAddress: string | null;
   ownerLabel: string | null;
   ownerWalletId: string | null;
+  identityGroupKey: string;
+  walletBalances: unknown | null;
+  ownerBalances: unknown | null;
+  walletUsdLikeBalance: number | null;
+  ownerUsdLikeBalance: number | null;
+  balanceAsOf: string | null;
+  identityResolvedAt: string | null;
   profile: unknown | null;
   profileUpdatedAt: Date | null;
   windowHours: number | null;
@@ -834,13 +876,30 @@ async function findWalletByAddressAndChain(
 async function findWalletsByAddress(
   client: PoolClient,
   address: string,
-): Promise<WalletRow[]> {
-  const result = await client.query<WalletRow>(
+): Promise<WalletResolveRow[]> {
+  const result = await client.query<WalletResolveRow>(
     `
-      select id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
-      from wallets
-      where address = $1
-      order by last_seen_at desc, first_seen_at desc, chain asc
+      select
+        w.id,
+        w.address,
+        w.chain,
+        w.label,
+        w.is_system_flagged,
+        w.first_seen_at,
+        w.last_seen_at,
+        exists (
+          select 1
+          from wallet_venues wv
+          where wv.wallet_id = w.id
+        ) as has_venue,
+        wis.exposure_usd::text as exposure_usd,
+        wis.last_activity_at,
+        wis.metrics_volume_30d::text as metrics_volume_30d,
+        wis.metrics_trades_30d
+      from wallets w
+      left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
+      where w.address = $1
+      order by w.last_seen_at desc, w.first_seen_at desc, w.chain asc
     `,
     [address],
   );
@@ -1007,6 +1066,163 @@ function nullableNumber(value: unknown): number | null {
   if (value == null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function scoreWalletAddressResolutionCandidate(input: {
+  wallet: Pick<
+    WalletResolveRow,
+    | "has_venue"
+    | "exposure_usd"
+    | "last_activity_at"
+    | "metrics_volume_30d"
+    | "metrics_trades_30d"
+    | "last_seen_at"
+  >;
+  privateMeta?: WalletPrivateMetaRow | null;
+}): number[] {
+  const meta = input.privateMeta ?? null;
+  const exposureUsd = nullableNumber(input.wallet.exposure_usd) ?? 0;
+  const volumeUsd = nullableNumber(input.wallet.metrics_volume_30d) ?? 0;
+  const trades = input.wallet.metrics_trades_30d ?? 0;
+  return [
+    meta?.followed || meta?.user_label || meta?.user_name ? 1 : 0,
+    exposureUsd > 0 ? 1 : 0,
+    input.wallet.last_activity_at?.getTime() ?? 0,
+    volumeUsd > 0 || trades > 0 ? 1 : 0,
+    input.wallet.has_venue ? 1 : 0,
+    input.wallet.last_seen_at.getTime(),
+  ];
+}
+
+function compareNumericTuple(left: number[], right: number[]): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (left[index] ?? 0) - (right[index] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function pickAddressResolvedWallet(
+  wallets: WalletResolveRow[],
+  privateMetaByWallet: Map<string, WalletPrivateMetaRow>,
+): WalletResolveRow | null {
+  let best: WalletResolveRow | null = null;
+  let bestScore: number[] | null = null;
+  for (const wallet of wallets) {
+    const score = scoreWalletAddressResolutionCandidate({
+      wallet,
+      privateMeta: privateMetaByWallet.get(wallet.id) ?? null,
+    });
+    if (!best || !bestScore || compareNumericTuple(score, bestScore) > 0) {
+      best = wallet;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function buildIdentityGroupKey(
+  chain: string,
+  ownerAddress: string | null | undefined,
+  walletAddress: string,
+): string {
+  return `${chain}:${walletAddressIdentityKey(ownerAddress ?? walletAddress)}`;
+}
+
+function emptyWalletOnchainFields(input: {
+  chain: string;
+  address: string;
+  ownerAddress?: string | null;
+  ownerWalletId?: string | null;
+}): WalletOnchainIdentityFields {
+  const ownerAddress = input.ownerAddress ?? null;
+  return {
+    walletKind: null,
+    ownerAddress,
+    ownerWalletId: input.ownerWalletId ?? null,
+    identityGroupKey: buildIdentityGroupKey(
+      input.chain,
+      ownerAddress,
+      input.address,
+    ),
+    walletBalances: null,
+    ownerBalances: null,
+    walletUsdLikeBalance: null,
+    ownerUsdLikeBalance: null,
+    balanceAsOf: null,
+    identityResolvedAt: null,
+  };
+}
+
+function buildWalletOnchainFields(input: {
+  chain: string;
+  address: string;
+  fallbackOwnerAddress?: string | null;
+  fallbackOwnerWalletId?: string | null;
+  state?: WalletOnchainStateRow | null;
+}): WalletOnchainIdentityFields {
+  const state = input.state ?? null;
+  const ownerAddress =
+    state?.owner_address ?? input.fallbackOwnerAddress ?? null;
+  const ownerWalletId =
+    state?.owner_wallet_id ?? input.fallbackOwnerWalletId ?? null;
+  return {
+    walletKind: state?.wallet_kind ?? null,
+    ownerAddress,
+    ownerWalletId,
+    identityGroupKey: buildIdentityGroupKey(
+      input.chain,
+      ownerAddress,
+      input.address,
+    ),
+    walletBalances: state?.wallet_balances ?? null,
+    ownerBalances: state?.owner_balances ?? null,
+    walletUsdLikeBalance: nullableNumber(state?.wallet_usd_like_balance),
+    ownerUsdLikeBalance: nullableNumber(state?.owner_usd_like_balance),
+    balanceAsOf: isoDate(state?.balance_as_of),
+    identityResolvedAt: isoDate(state?.identity_resolved_at),
+  };
+}
+
+async function loadWalletOnchainStateByIds(
+  client: PoolClient,
+  walletIds: string[],
+): Promise<Map<string, WalletOnchainStateRow>> {
+  const byWalletId = new Map<string, WalletOnchainStateRow>();
+  if (walletIds.length === 0) return byWalletId;
+
+  const rows = await client.query<WalletOnchainStateRow>(
+    `
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      )
+      select
+        wos.wallet_id,
+        wos.wallet_kind,
+        wos.owner_address,
+        coalesce(wos.owner_wallet_id, owner_wallet.id) as owner_wallet_id,
+        wos.wallet_balances,
+        wos.owner_balances,
+        wos.wallet_usd_like_balance::text as wallet_usd_like_balance,
+        wos.owner_usd_like_balance::text as owner_usd_like_balance,
+        wos.balance_as_of,
+        wos.identity_resolved_at
+      from wallet_set ws
+      join wallet_onchain_state wos on wos.wallet_id = ws.wallet_id
+      left join wallets owner_wallet
+        on owner_wallet.chain = wos.chain
+       and wos.owner_address is not null
+       and (
+         (wos.chain = 'solana' and owner_wallet.address = wos.owner_address)
+         or (wos.chain <> 'solana' and lower(owner_wallet.address) = lower(wos.owner_address))
+       )
+    `,
+    [walletIds],
+  );
+
+  for (const row of rows.rows) byWalletId.set(row.wallet_id, row);
+  return byWalletId;
 }
 
 type WalletActivityChangeAction = "OPENED" | "INCREASED" | "REDUCED" | "CLOSED";
@@ -1321,6 +1537,15 @@ type WalletPositioningRow = {
   chain: string;
   wallet_label: string | null;
   profile_label: string | null;
+  wallet_kind: string | null;
+  owner_address: string | null;
+  owner_wallet_id: string | null;
+  wallet_balances: unknown | null;
+  owner_balances: unknown | null;
+  wallet_usd_like_balance: string | null;
+  owner_usd_like_balance: string | null;
+  balance_as_of: Date | null;
+  identity_resolved_at: Date | null;
   venue: string;
   market_id: string;
   market_title: string | null;
@@ -1425,6 +1650,16 @@ type PositioningHolder = {
   chain: string;
   label: string | null;
   profileLabel: string | null;
+  walletKind: string | null;
+  ownerAddress: string | null;
+  ownerWalletId: string | null;
+  identityGroupKey: string;
+  walletBalances: unknown | null;
+  ownerBalances: unknown | null;
+  walletUsdLikeBalance: number | null;
+  ownerUsdLikeBalance: number | null;
+  balanceAsOf: string | null;
+  identityResolvedAt: string | null;
   side: PositioningSide;
   shares: number | null;
   positionUsd: number;
@@ -2394,6 +2629,15 @@ async function loadTrackedWalletPositioning(input: {
           w.chain,
           w.label as wallet_label,
           wp.profile->>'label_short' as profile_label,
+          wos.wallet_kind,
+          coalesce(wos.owner_address, owner.owner_address) as owner_address,
+          coalesce(wos.owner_wallet_id, owner.owner_wallet_id) as owner_wallet_id,
+          wos.wallet_balances,
+          wos.owner_balances,
+          wos.wallet_usd_like_balance::text as wallet_usd_like_balance,
+          wos.owner_usd_like_balance::text as owner_usd_like_balance,
+          wos.balance_as_of,
+          wos.identity_resolved_at,
           wis.metrics_pnl_30d,
           wis.metrics_roi_30d,
           wis.metrics_trades_30d,
@@ -2420,6 +2664,8 @@ async function loadTrackedWalletPositioning(input: {
         join wallets w on w.id = tm.wallet_id
         left join wallet_profiles wp on wp.wallet_id = w.id
         left join wallet_inferred_outcomes inferred on inferred.wallet_id = w.id
+        left join wallet_onchain_state wos on wos.wallet_id = w.id
+        ${buildWalletOwnerResolutionJoinSql(true)}
         where ${candidateClauses.join(" and ")}
       ),
       candidate_venues(venue) as (
@@ -2476,6 +2722,15 @@ async function loadTrackedWalletPositioning(input: {
         lp.chain,
         lp.wallet_label,
         lp.profile_label,
+        lp.wallet_kind,
+        lp.owner_address,
+        lp.owner_wallet_id,
+        lp.wallet_balances,
+        lp.owner_balances,
+        lp.wallet_usd_like_balance,
+        lp.owner_usd_like_balance,
+        lp.balance_as_of,
+        lp.identity_resolved_at,
         lp.venue,
         lp.market_id,
         um.title as market_title,
@@ -2590,6 +2845,24 @@ async function loadTrackedWalletPositioning(input: {
       chain: row.chain,
       label: row.wallet_label,
       profileLabel: row.profile_label,
+      ...buildWalletOnchainFields({
+        chain: row.chain,
+        address: row.address,
+        fallbackOwnerAddress: row.owner_address,
+        fallbackOwnerWalletId: row.owner_wallet_id,
+        state: {
+          wallet_id: row.wallet_id,
+          wallet_kind: row.wallet_kind,
+          owner_address: row.owner_address,
+          owner_wallet_id: row.owner_wallet_id,
+          wallet_balances: row.wallet_balances,
+          owner_balances: row.owner_balances,
+          wallet_usd_like_balance: row.wallet_usd_like_balance,
+          owner_usd_like_balance: row.owner_usd_like_balance,
+          balance_as_of: row.balance_as_of,
+          identity_resolved_at: row.identity_resolved_at,
+        },
+      }),
       side,
       shares,
       positionUsd,
@@ -3778,6 +4051,12 @@ function buildWalletIntelWhaleScoreSql(alias: string): string {
 }
 
 function buildWalletOwnerResolutionJoinSql(includeDetails = false): string {
+  const linkedOwnerAddressSql = `
+    coalesce(
+      w.metadata->>'ownerAddress',
+      w.metadata->>'linkedOwnerAddress'
+    )
+  `;
   const ownerColumns = includeDetails
     ? `
           w2.address as owner_address,
@@ -3814,21 +4093,21 @@ function buildWalletOwnerResolutionJoinSql(includeDetails = false): string {
                 select${ownerColumns}
                 from wallets w2
                 where w.chain <> 'solana'
-                  and w.metadata->>'linkedOwnerAddress' ~* '^0x[0-9a-f]{40}$'
+                  and ${linkedOwnerAddressSql} ~* '^0x[0-9a-f]{40}$'
                   and w2.chain = w.chain
-                  and lower(w2.address) = lower(w.metadata->>'linkedOwnerAddress')
+                  and lower(w2.address) = lower(${linkedOwnerAddressSql})
                 limit 1
               ) linked_owner_evm on true
               left join lateral (
                 select${ownerColumns}
                 from wallets w2
-                where w.metadata->>'linkedOwnerAddress' is not null
+                where ${linkedOwnerAddressSql} is not null
                   and (
                     w.chain = 'solana'
-                    or w.metadata->>'linkedOwnerAddress' !~* '^0x[0-9a-f]{40}$'
+                    or ${linkedOwnerAddressSql} !~* '^0x[0-9a-f]{40}$'
                   )
                   and w2.chain = w.chain
-                  and w2.address = w.metadata->>'linkedOwnerAddress'
+                  and w2.address = ${linkedOwnerAddressSql}
                 limit 1
               ) linked_owner_exact on true
               left join lateral (
@@ -4224,6 +4503,12 @@ function mapWhaleRowToItem(
     inferredResolvedCount:
       row.inferred_total != null ? Number(row.inferred_total) : null,
     isSafe: row.is_safe,
+    ...emptyWalletOnchainFields({
+      chain: row.chain,
+      address: row.address,
+      ownerAddress: row.owner_address,
+      ownerWalletId: row.owner_wallet_id,
+    }),
     ownerAddress: row.owner_address,
     ownerLabel: row.owner_label,
     ownerWalletId: row.owner_wallet_id,
@@ -7555,10 +7840,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             userLabelColor: meta?.user_label_color ?? null,
           };
         });
-        const resolvedWallet =
-          matches.find((wallet) => wallet.chain === preferredChain) ??
-          matches.find((wallet) => Boolean(wallet.walletId)) ??
-          null;
+        const preferredWallet = preferredChain
+          ? (wallets.find((wallet) => wallet.chain === preferredChain) ??
+            wallets[0] ??
+            null)
+          : pickAddressResolvedWallet(wallets, privateMetaByWallet);
+        const resolvedWallet = preferredWallet
+          ? (matches.find((wallet) => wallet.walletId === preferredWallet.id) ??
+            null)
+          : null;
 
         return reply.send({
           ok: true,
@@ -7831,15 +8121,18 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           `,
           [user.id, query.limit, query.offset],
         );
-        const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
-          client,
-          rows.rows.map((row) => row.id),
-          { rangeHours: 720 },
-        );
-        const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
-          client,
-          rows.rows.map((row) => row.id),
-        );
+        const walletIds = rows.rows.map((row) => row.id);
+        const [
+          portfolioPerformanceMap,
+          resolvedTradeStatsMap,
+          onchainStateMap,
+        ] = await Promise.all([
+          loadWalletPortfolioPerformanceMap(client, walletIds, {
+            rangeHours: 720,
+          }),
+          loadWalletResolvedTradeStatsMap(client, walletIds),
+          loadWalletOnchainStateByIds(client, walletIds),
+        ]);
 
         return reply.send({
           ok: true,
@@ -7877,6 +8170,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             profileUpdatedAt: row.profile_updated_at ?? null,
             userLabel: row.user_label ?? null,
             userLabelColor: row.user_label_color ?? null,
+            ...buildWalletOnchainFields({
+              chain: row.chain,
+              address: row.address,
+              state: onchainStateMap.get(row.id) ?? null,
+            }),
           })),
         });
       } catch (error) {
@@ -8424,6 +8722,22 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 };
               });
             }
+            if (pagedIds.length > 0) {
+              const onchainStateMap = await loadWalletOnchainStateByIds(
+                client,
+                pagedIds,
+              );
+              pagedRows = pagedRows.map((row) => ({
+                ...row,
+                ...buildWalletOnchainFields({
+                  chain: row.chain,
+                  address: row.address,
+                  fallbackOwnerAddress: row.ownerAddress,
+                  fallbackOwnerWalletId: row.ownerWalletId,
+                  state: onchainStateMap.get(row.walletId) ?? null,
+                }),
+              }));
+            }
 
             const summaryMapForPage =
               summaryMapForFilters ?? new Map<string, WalletActivitySummary>();
@@ -8636,6 +8950,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           signalsPolicy,
           entryBracketStats,
           categoryMix,
+          onchainStateMap,
         ] = await Promise.all([
           loadWalletFollowerCountsMap(client, [walletId]),
           loadWalletOpenPositionStatsPreferRollupMap(client, [walletId]),
@@ -8647,6 +8962,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           resolveWalletIntelSignalsPolicy(client),
           loadWalletEntryBracketStats(client, walletId),
           loadWalletCategoryMix(client, walletId),
+          loadWalletOnchainStateByIds(client, [walletId]),
         ]);
         const openPositionStats = openPositionStatsMap.get(walletId) ?? null;
         const signalSummaryOptions = {
@@ -8774,6 +9090,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               portfolioPerformanceMap.get(walletId) ?? null,
             profile: responseProfile,
             profileUpdatedAt: wallet.profile_updated_at ?? null,
+            ...buildWalletOnchainFields({
+              chain: wallet.chain,
+              address: wallet.address,
+              state: onchainStateMap.get(walletId) ?? null,
+            }),
             attribution,
             categoryMix,
             entryBracketStats,

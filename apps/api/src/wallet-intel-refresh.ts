@@ -15,6 +15,18 @@ import {
   type PolymarketFunderCandidate,
 } from "./services/polymarket-funder.js";
 import {
+  fetchWalletLiquidBalancesPartial,
+  inspectPolymarketWalletIdentity,
+  isWalletOnchainIdentityErrorFresh,
+  resolveUsdLikeBalance,
+  resolveWalletOnchainStateVenueQuotas,
+  selectWalletOnchainStateCandidatesFromRanked,
+  type PolymarketWalletKind,
+  type WalletOnchainBalances,
+  type WalletOwnerConfidence,
+  type WalletOwnerSource,
+} from "./services/wallet-onchain-state.js";
+import {
   fetchSolanaTokenBalancesByOwner,
   type SolanaTokenBalance,
 } from "./services/solana-rpc.js";
@@ -1020,6 +1032,28 @@ async function upsertWalletWithMetadata(
   return result.rows[0].id;
 }
 
+async function upsertWalletIdentityOnly(
+  client: Queryable,
+  inputs: { address: string; chain: Chain; metadata: Record<string, unknown> },
+): Promise<string> {
+  if (inputs.chain !== "solana" && isZeroEvmWalletAddress(inputs.address)) {
+    throw new Error("Refusing to persist zero EVM wallet address");
+  }
+  const result = await client.query<{ id: string }>(
+    `
+      insert into wallets (address, chain, metadata)
+      values ($1, $2, $3)
+      on conflict (address, chain)
+      do update set
+        metadata = coalesce(wallets.metadata, '{}'::jsonb) || excluded.metadata,
+        updated_at = now()
+      returning id
+    `,
+    [inputs.address, inputs.chain, inputs.metadata],
+  );
+  return result.rows[0].id;
+}
+
 async function upsertWalletVenue(
   client: Queryable,
   walletId: string,
@@ -1416,10 +1450,13 @@ async function collectFollowedWalletSnapshotRows(
       inputs.followedFetchConcurrency,
       async ([userId, followedRows]) => {
         const startedAt = Date.now();
-        console.log("[wallets:intel:refresh] followed polymarket prefetch start", {
-          userId,
-          wallets: followedRows.length,
-        });
+        console.log(
+          "[wallets:intel:refresh] followed polymarket prefetch start",
+          {
+            userId,
+            wallets: followedRows.length,
+          },
+        );
         try {
           const prefetched = await runWithTelemetry(
             inputs.telemetry.followedPrefetchPolymarket,
@@ -1771,27 +1808,25 @@ async function collectFollowedWalletSnapshotRows(
 
     if (followed.chain === "solana") {
       try {
-        await runWithTelemetry(
-          inputs.telemetry.followedPositionsKalshi,
-          () =>
-            withWalletIntelDeadline(
-              "followedKalshiPositions",
-              env.walletIntelFollowedWalletTimeoutMs,
-              () =>
-                syncPositionsForUserWallet(inputs.poolClient, {
-                  userId: followed.user_id,
-                  walletAddress: followed.address,
-                  venue: "kalshi",
-                  positionScope: "followed",
-                  prefetchedSolanaBalances:
-                    prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
-                }),
-              {
+        await runWithTelemetry(inputs.telemetry.followedPositionsKalshi, () =>
+          withWalletIntelDeadline(
+            "followedKalshiPositions",
+            env.walletIntelFollowedWalletTimeoutMs,
+            () =>
+              syncPositionsForUserWallet(inputs.poolClient, {
                 userId: followed.user_id,
-                walletId: followed.wallet_id,
-                wallet: followed.address,
-              },
-            ),
+                walletAddress: followed.address,
+                venue: "kalshi",
+                positionScope: "followed",
+                prefetchedSolanaBalances:
+                  prefetchedSolanaBalances.get(followed.wallet_id) ?? null,
+              }),
+            {
+              userId: followed.user_id,
+              walletId: followed.wallet_id,
+              wallet: followed.address,
+            },
+          ),
         );
       } catch (error) {
         if (isWalletIntelStageTimeoutError(error)) {
@@ -3790,6 +3825,36 @@ type PolymarketProxyLinkResult = {
   errors: number;
 };
 
+type WalletOnchainStateRefreshResult = {
+  selected: number;
+  identitiesInspected: number;
+  identityErrors: number;
+  ownersUpserted: number;
+  balancesFetched: number;
+  balanceSubjectsFetched: number;
+  ownerBalanceSubjects: number;
+  skippedInvalidAddresses: number;
+  stateUpserts: number;
+};
+
+type WalletOnchainStateCandidate = {
+  wallet_id: string;
+  address: string;
+  chain: Chain;
+  venue: Venue;
+  metadata: Record<string, unknown> | null;
+};
+
+type WalletOnchainIdentityState = {
+  walletKind: PolymarketWalletKind | null;
+  ownerAddress: string | null;
+  ownerSource: WalletOwnerSource;
+  ownerConfidence: WalletOwnerConfidence;
+  safeOwners: string[] | null;
+  safeThreshold: number | null;
+  identityResolvedAt: string | null;
+};
+
 function emptySafeOwnerLinkResult(): SafeOwnerLinkResult {
   return {
     selected: 0,
@@ -3808,6 +3873,20 @@ function emptyPolymarketProxyLinkResult(): PolymarketProxyLinkResult {
     linked: 0,
     skipped: 0,
     errors: 0,
+  };
+}
+
+function emptyWalletOnchainStateRefreshResult(): WalletOnchainStateRefreshResult {
+  return {
+    selected: 0,
+    identitiesInspected: 0,
+    identityErrors: 0,
+    ownersUpserted: 0,
+    balancesFetched: 0,
+    balanceSubjectsFetched: 0,
+    ownerBalanceSubjects: 0,
+    skippedInvalidAddresses: 0,
+    stateUpserts: 0,
   };
 }
 
@@ -4132,6 +4211,519 @@ async function linkPolymarketProxyOwnersForKnownWallets(
       });
     }
   }
+
+  return result;
+}
+
+function emptyWalletOnchainIdentityState(): WalletOnchainIdentityState {
+  return {
+    walletKind: null,
+    ownerAddress: null,
+    ownerSource: null,
+    ownerConfidence: null,
+    safeOwners: null,
+    safeThreshold: null,
+    identityResolvedAt: null,
+  };
+}
+
+function shouldInspectPolymarketIdentity(
+  row: WalletOnchainStateCandidate,
+): boolean {
+  return row.chain === "polygon" && row.venue === "polymarket";
+}
+
+function walletOnchainBalanceKey(chain: Chain, address: string): string {
+  return chain === "solana"
+    ? `${chain}:${address.trim()}`
+    : `${chain}:${address.toLowerCase()}`;
+}
+
+function incrementCount(
+  counts: Record<string, number>,
+  key: string | null | undefined,
+): void {
+  const normalized = key && key.length > 0 ? key : "unknown";
+  counts[normalized] = (counts[normalized] ?? 0) + 1;
+}
+
+function buildPolymarketIdentityMetadata(
+  identity: WalletOnchainIdentityState,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    walletKind: identity.walletKind,
+    ownerAddress: identity.ownerAddress,
+    ownerSource: identity.ownerSource,
+    ownerConfidence: identity.ownerConfidence,
+    identityResolvedAt: identity.identityResolvedAt,
+    walletOnchainIdentityCheckStatus: "ok",
+    walletOnchainIdentityCheckedAt: identity.identityResolvedAt,
+  };
+
+  if (identity.walletKind === "safe") {
+    metadata.kind = "safe";
+    metadata.owners = identity.safeOwners ?? [];
+    metadata.threshold = identity.safeThreshold;
+    metadata.polymarketProxyKind = "safe";
+  }
+  if (identity.walletKind === "polymarket_deposit_wallet") {
+    metadata.polymarketProxyKind = "deposit_wallet";
+  }
+  if (identity.walletKind === "polymarket_magic_proxy") {
+    metadata.polymarketProxyKind = "magic";
+  }
+  if (identity.ownerAddress) {
+    metadata.linkedOwnerAddress = identity.ownerAddress;
+    metadata.linkedOwnerSource = identity.ownerSource;
+    metadata.linkedOwnerAt = identity.identityResolvedAt;
+  }
+  return metadata;
+}
+
+async function upsertWalletOnchainState(
+  client: Queryable,
+  input: {
+    walletId: string;
+    chain: Chain;
+    walletAddress: string;
+    identity: WalletOnchainIdentityState;
+    ownerWalletId: string | null;
+    walletBalances: WalletOnchainBalances | null;
+    ownerBalances: WalletOnchainBalances | null;
+    balanceAsOf: string | null;
+  },
+): Promise<void> {
+  await client.query(
+    `
+      insert into wallet_onchain_state (
+        wallet_id,
+        chain,
+        wallet_address,
+        wallet_kind,
+        owner_wallet_id,
+        owner_address,
+        owner_source,
+        owner_confidence,
+        identity_resolved_at,
+        wallet_balances,
+        owner_balances,
+        wallet_usd_like_balance,
+        owner_usd_like_balance,
+        balance_as_of
+      )
+      values (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9::timestamptz, $10::jsonb, $11::jsonb, $12::numeric, $13::numeric,
+        $14::timestamptz
+      )
+      on conflict (wallet_id)
+      do update set
+        chain = excluded.chain,
+        wallet_address = excluded.wallet_address,
+        wallet_kind = case
+          when excluded.identity_resolved_at is null then wallet_onchain_state.wallet_kind
+          else excluded.wallet_kind
+        end,
+        owner_wallet_id = case
+          when excluded.identity_resolved_at is null then wallet_onchain_state.owner_wallet_id
+          else excluded.owner_wallet_id
+        end,
+        owner_address = case
+          when excluded.identity_resolved_at is null then wallet_onchain_state.owner_address
+          else excluded.owner_address
+        end,
+        owner_source = case
+          when excluded.identity_resolved_at is null then wallet_onchain_state.owner_source
+          else excluded.owner_source
+        end,
+        owner_confidence = case
+          when excluded.identity_resolved_at is null then wallet_onchain_state.owner_confidence
+          else excluded.owner_confidence
+        end,
+        identity_resolved_at = coalesce(
+          excluded.identity_resolved_at,
+          wallet_onchain_state.identity_resolved_at
+        ),
+        wallet_balances = case
+          when excluded.balance_as_of is null then wallet_onchain_state.wallet_balances
+          else excluded.wallet_balances
+        end,
+        owner_balances = case
+          when excluded.balance_as_of is null then wallet_onchain_state.owner_balances
+          else excluded.owner_balances
+        end,
+        wallet_usd_like_balance = case
+          when excluded.balance_as_of is null then wallet_onchain_state.wallet_usd_like_balance
+          else excluded.wallet_usd_like_balance
+        end,
+        owner_usd_like_balance = case
+          when excluded.balance_as_of is null then wallet_onchain_state.owner_usd_like_balance
+          else excluded.owner_usd_like_balance
+        end,
+        balance_as_of = coalesce(excluded.balance_as_of, wallet_onchain_state.balance_as_of),
+        updated_at = now()
+    `,
+    [
+      input.walletId,
+      input.chain,
+      input.walletAddress,
+      input.identity.walletKind,
+      input.ownerWalletId,
+      input.identity.ownerAddress,
+      input.identity.ownerSource,
+      input.identity.ownerConfidence,
+      input.identity.identityResolvedAt,
+      input.walletBalances,
+      input.ownerBalances,
+      resolveUsdLikeBalance(input.walletBalances),
+      resolveUsdLikeBalance(input.ownerBalances),
+      input.balanceAsOf,
+    ],
+  );
+}
+
+async function refreshWalletOnchainState(
+  client: Queryable,
+): Promise<WalletOnchainStateRefreshResult> {
+  const refreshStartedAtMs = Date.now();
+  const limit = walletIntelRefreshPolicy.onchainStateLimit;
+  if (limit <= 0) return emptyWalletOnchainStateRefreshResult();
+
+  const staleBefore = new Date(
+    Date.now() -
+      walletIntelRefreshPolicy.onchainStateStaleHours * 60 * 60 * 1000,
+  ).toISOString();
+  const errorStaleBefore = new Date(
+    Date.now() -
+      walletIntelRefreshPolicy.onchainStateErrorStaleHours * 60 * 60 * 1000,
+  ).toISOString();
+  const quotas = resolveWalletOnchainStateVenueQuotas(limit);
+  const rows = await client.query<WalletOnchainStateCandidate>(
+    `
+      with candidates as (
+        select
+          w.id as wallet_id,
+          w.address,
+          w.chain,
+          wv.venue,
+          w.metadata,
+          greatest(
+            coalesce(wpe.exposure_usd, 0),
+            coalesce(wis.exposure_usd, 0)
+          ) as exposure_usd,
+          wis.last_activity_at,
+          wis.metrics_volume_30d,
+          w.last_seen_at,
+          row_number() over (
+            partition by w.id
+            order by case wv.venue
+              when 'polymarket' then 0
+              when 'limitless' then 1
+              when 'kalshi' then 2
+              else 9
+            end
+          ) as venue_rank
+        from wallets w
+        join wallet_venues wv on wv.wallet_id = w.id
+        left join wallet_intel_selector_snapshot wis on wis.wallet_id = w.id
+        left join wallet_position_exposure wpe on wpe.wallet_id = w.id
+        left join wallet_onchain_state wos on wos.wallet_id = w.id
+        where (
+            (w.chain = 'polygon' and wv.venue = 'polymarket')
+            or (w.chain = 'base' and wv.venue = 'limitless')
+            or (w.chain = 'solana' and wv.venue = 'kalshi')
+          )
+          and (
+            wos.balance_as_of is null
+            or wos.balance_as_of < $1::timestamptz
+            or (
+              w.chain = 'polygon'
+              and wv.venue = 'polymarket'
+              and (
+                wos.identity_resolved_at is null
+                or wos.identity_resolved_at < $1::timestamptz
+              )
+            )
+          )
+          and not (
+            w.chain = 'polygon'
+            and wv.venue = 'polymarket'
+            and w.metadata->>'walletOnchainIdentityCheckStatus' = 'error'
+            and coalesce(
+              w.metadata->>'walletOnchainIdentityCheckedAt',
+              ''
+            ) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+            and w.metadata->>'walletOnchainIdentityCheckedAt' >= $2::text
+          )
+      )
+      select wallet_id, address, chain, venue, metadata
+      from (
+        select
+          wallet_id,
+          address,
+          chain,
+          venue,
+          metadata,
+          exposure_usd,
+          last_activity_at,
+          metrics_volume_30d,
+          last_seen_at,
+          row_number() over (
+            order by
+              exposure_usd desc nulls last,
+              last_activity_at desc nulls last,
+              metrics_volume_30d desc nulls last,
+              last_seen_at desc nulls last,
+              wallet_id
+          ) as global_rank,
+          row_number() over (
+            partition by venue
+            order by
+              exposure_usd desc nulls last,
+              last_activity_at desc nulls last,
+              metrics_volume_30d desc nulls last,
+              last_seen_at desc nulls last,
+              wallet_id
+          ) as venue_candidate_rank
+        from candidates
+        where venue_rank = 1
+      ) ranked
+      where (
+          global_rank <= $3
+          or (
+            venue = 'polymarket'
+            and venue_candidate_rank <= $4
+          )
+          or (
+            venue = 'limitless'
+            and venue_candidate_rank <= $5
+          )
+          or (
+            venue = 'kalshi'
+            and venue_candidate_rank <= $6
+          )
+        )
+      order by global_rank
+    `,
+    [
+      staleBefore,
+      errorStaleBefore,
+      limit,
+      quotas.polymarket,
+      quotas.limitless,
+      quotas.kalshi,
+    ],
+  );
+  const errorStaleBeforeDate = new Date(errorStaleBefore);
+  const eligibleRows = rows.rows.filter(
+    (row) =>
+      !shouldInspectPolymarketIdentity(row) ||
+      !isWalletOnchainIdentityErrorFresh(row.metadata, errorStaleBeforeDate),
+  );
+  const skippedRecentIdentityErrors = rows.rows.length - eligibleRows.length;
+  const selectedRows = selectWalletOnchainStateCandidatesFromRanked(
+    eligibleRows,
+    limit,
+    quotas,
+  );
+  const selectedByChain: Record<string, number> = {};
+  for (const row of selectedRows) incrementCount(selectedByChain, row.chain);
+  const skippedInvalidAddresses = selectedRows.filter(
+    (row) => !normalizeAddress(row.address, row.chain),
+  ).length;
+
+  const result: WalletOnchainStateRefreshResult = {
+    ...emptyWalletOnchainStateRefreshResult(),
+    selected: selectedRows.length,
+    skippedInvalidAddresses,
+  };
+  if (selectedRows.length === 0) {
+    console.log("[wallets:intel:refresh] onchain state summary", {
+      selected: 0,
+      selectedByChain,
+      identityKindCounts: {},
+      ownersUpserted: 0,
+      balanceInputsByChain: {},
+      balanceFetchedByChain: {},
+      balanceSubjectsFetched: 0,
+      ownerBalanceSubjects: 0,
+      skippedInvalidAddresses,
+      skippedRecentIdentityErrors,
+      durationMs: Date.now() - refreshStartedAtMs,
+    });
+    return result;
+  }
+
+  const identities = new Map<string, WalletOnchainIdentityState>();
+  const identityKindCounts: Record<string, number> = {};
+  const inspectRows = selectedRows.filter(shouldInspectPolymarketIdentity);
+  for (const chunk of chunkArray(inspectRows, 8)) {
+    await Promise.all(
+      chunk.map(async (row) => {
+        const address = normalizeAddress(row.address, row.chain);
+        if (!address) return;
+        result.identitiesInspected += 1;
+        const checkedAt = new Date().toISOString();
+        try {
+          const identity = await inspectPolymarketWalletIdentity({ address });
+          const state: WalletOnchainIdentityState = {
+            walletKind: identity.walletKind,
+            ownerAddress: identity.ownerAddress,
+            ownerSource: identity.ownerSource,
+            ownerConfidence: identity.ownerConfidence,
+            safeOwners: identity.safeOwners,
+            safeThreshold: identity.safeThreshold,
+            identityResolvedAt: checkedAt,
+          };
+          identities.set(row.wallet_id, state);
+          incrementCount(identityKindCounts, state.walletKind);
+          await updateWalletMetadata(
+            client,
+            row.wallet_id,
+            buildPolymarketIdentityMetadata(state),
+          );
+        } catch (error) {
+          result.identityErrors += 1;
+          await updateWalletMetadata(client, row.wallet_id, {
+            walletOnchainIdentityCheckStatus: "error",
+            walletOnchainIdentityCheckedAt: checkedAt,
+            walletOnchainIdentityCheckError:
+              error instanceof Error
+                ? error.message.slice(0, 240)
+                : String(error),
+          });
+        }
+      }),
+    );
+  }
+
+  const ownerWalletIds = new Map<string, string>();
+  for (const row of selectedRows) {
+    const identity = identities.get(row.wallet_id);
+    const ownerAddress = identity?.ownerAddress;
+    if (!ownerAddress) continue;
+    const walletAddress = normalizeAddress(row.address, row.chain);
+    if (!walletAddress || ownerAddress === walletAddress) continue;
+    const ownerWalletId = await upsertWalletIdentityOnly(client, {
+      address: ownerAddress,
+      chain: row.chain,
+      metadata: {
+        kind: "wallet_identity_owner",
+        ownerForAddress: walletAddress,
+        ownerForWalletId: row.wallet_id,
+        ownerSource: identity.ownerSource,
+        ownerConfidence: identity.ownerConfidence,
+        ownerLinkedAt: identity.identityResolvedAt,
+      },
+    });
+    ownerWalletIds.set(
+      walletOnchainBalanceKey(row.chain, ownerAddress),
+      ownerWalletId,
+    );
+    result.ownersUpserted += 1;
+  }
+
+  const balanceInputs = new Map<string, { address: string; chain: Chain }>();
+  const ownerBalanceSubjectKeys = new Set<string>();
+  for (const row of selectedRows) {
+    const address = normalizeAddress(row.address, row.chain);
+    if (!address) continue;
+    balanceInputs.set(walletOnchainBalanceKey(row.chain, address), {
+      address,
+      chain: row.chain,
+    });
+    const ownerAddress = identities.get(row.wallet_id)?.ownerAddress;
+    if (ownerAddress && ownerAddress !== address) {
+      const ownerBalanceKey = walletOnchainBalanceKey(row.chain, ownerAddress);
+      balanceInputs.set(ownerBalanceKey, {
+        address: ownerAddress,
+        chain: row.chain,
+      });
+      ownerBalanceSubjectKeys.add(ownerBalanceKey);
+    }
+  }
+  const balanceInputsByChain: Record<string, number> = {};
+  for (const input of balanceInputs.values()) {
+    incrementCount(balanceInputsByChain, input.chain);
+  }
+
+  let balances = new Map<string, WalletOnchainBalances>();
+  let balanceFetchedByChain: Record<string, number> = {};
+  try {
+    const balanceResult = await fetchWalletLiquidBalancesPartial(
+      Array.from(balanceInputs.values()),
+    );
+    balances = balanceResult.balances;
+    result.balancesFetched = balances.size;
+    result.balanceSubjectsFetched = balances.size;
+    result.ownerBalanceSubjects = ownerBalanceSubjectKeys.size;
+    balanceFetchedByChain = {};
+    for (const key of balances.keys()) {
+      incrementCount(balanceFetchedByChain, key.split(":")[0]);
+    }
+    for (const failure of balanceResult.errors) {
+      console.warn("[wallets:intel:refresh] onchain balance fetch failed", {
+        chain: failure.chain,
+        error: failure.error,
+      });
+    }
+  } catch (error) {
+    console.warn("[wallets:intel:refresh] onchain balance fetch failed", {
+      error,
+    });
+  }
+
+  for (const row of selectedRows) {
+    const address = normalizeAddress(row.address, row.chain);
+    if (!address) continue;
+    const identity =
+      identities.get(row.wallet_id) ?? emptyWalletOnchainIdentityState();
+    const ownerAddress = identity.ownerAddress;
+    const walletBalances =
+      balances.get(walletOnchainBalanceKey(row.chain, address)) ?? null;
+    const ownerBalances =
+      ownerAddress && ownerAddress !== address
+        ? (balances.get(walletOnchainBalanceKey(row.chain, ownerAddress)) ??
+          null)
+        : null;
+    const ownerWalletId =
+      ownerAddress && ownerAddress !== address
+        ? (ownerWalletIds.get(
+            walletOnchainBalanceKey(row.chain, ownerAddress),
+          ) ?? null)
+        : null;
+    const balanceAsOf =
+      walletBalances || ownerBalances ? new Date().toISOString() : null;
+
+    await upsertWalletOnchainState(client, {
+      walletId: row.wallet_id,
+      chain: row.chain,
+      walletAddress: address,
+      identity,
+      ownerWalletId,
+      walletBalances,
+      ownerBalances,
+      balanceAsOf,
+    });
+    result.stateUpserts += 1;
+  }
+
+  console.log("[wallets:intel:refresh] onchain state summary", {
+    selected: result.selected,
+    selectedByChain,
+    identitiesInspected: result.identitiesInspected,
+    identityErrors: result.identityErrors,
+    identityKindCounts,
+    ownersUpserted: result.ownersUpserted,
+    balanceInputsByChain,
+    balanceFetchedByChain,
+    balanceSubjectsFetched: result.balanceSubjectsFetched,
+    ownerBalanceSubjects: result.ownerBalanceSubjects,
+    skippedInvalidAddresses: result.skippedInvalidAddresses,
+    skippedRecentIdentityErrors,
+    stateUpserts: result.stateUpserts,
+    durationMs: Date.now() - refreshStartedAtMs,
+  });
 
   return result;
 }
@@ -4921,11 +5513,12 @@ async function runSnapshot(snapshotAt: Date) {
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
     const polymarketProxyOwnersLinked =
       await linkPolymarketProxyOwnersForKnownWallets(client);
+    const onchainStateRefresh = await refreshWalletOnchainState(client);
     logRefreshTelemetry(telemetry);
 
     const runFinishedAt = new Date();
     console.log(
-      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors}`,
+      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors} onchainStateSelected=${onchainStateRefresh.selected} onchainIdentitiesInspected=${onchainStateRefresh.identitiesInspected} onchainIdentityErrors=${onchainStateRefresh.identityErrors} onchainOwnersUpserted=${onchainStateRefresh.ownersUpserted} onchainBalancesFetched=${onchainStateRefresh.balancesFetched} onchainBalanceSubjectsFetched=${onchainStateRefresh.balanceSubjectsFetched} onchainOwnerBalanceSubjects=${onchainStateRefresh.ownerBalanceSubjects} onchainSkippedInvalidAddresses=${onchainStateRefresh.skippedInvalidAddresses} onchainStateUpserts=${onchainStateRefresh.stateUpserts}`,
     );
   } finally {
     client.release();

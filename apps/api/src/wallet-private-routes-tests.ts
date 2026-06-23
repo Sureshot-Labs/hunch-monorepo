@@ -6,7 +6,10 @@ import crypto from "node:crypto";
 import { AuthService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
-import { assertSqlParamPlaceholders } from "./routes/wallet-intel.js";
+import {
+  assertSqlParamPlaceholders,
+  scoreWalletAddressResolutionCandidate,
+} from "./routes/wallet-intel.js";
 
 type TestContext = {
   userId: string;
@@ -37,6 +40,57 @@ function randomSolanaLikeAddress(): string {
     { length: 44 },
     () => alphabet[crypto.randomInt(alphabet.length)],
   ).join("");
+}
+
+function compareScore(left: number[], right: number[]): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (left[index] ?? 0) - (right[index] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function assertAddressResolverScoring() {
+  const now = new Date("2026-06-23T12:00:00.000Z");
+  const emptyRecent = scoreWalletAddressResolutionCandidate({
+    wallet: {
+      has_venue: false,
+      exposure_usd: null,
+      last_activity_at: null,
+      metrics_volume_30d: null,
+      metrics_trades_30d: null,
+      last_seen_at: now,
+    },
+  });
+  const olderWithIntel = scoreWalletAddressResolutionCandidate({
+    wallet: {
+      has_venue: true,
+      exposure_usd: "1000",
+      last_activity_at: new Date("2026-06-22T12:00:00.000Z"),
+      metrics_volume_30d: "2500",
+      metrics_trades_30d: 8,
+      last_seen_at: new Date("2026-06-01T12:00:00.000Z"),
+    },
+  });
+  assert.ok(compareScore(olderWithIntel, emptyRecent) > 0);
+  const followedEmpty = scoreWalletAddressResolutionCandidate({
+    wallet: {
+      has_venue: false,
+      exposure_usd: null,
+      last_activity_at: null,
+      metrics_volume_30d: null,
+      metrics_trades_30d: null,
+      last_seen_at: now,
+    },
+    privateMeta: {
+      followed: true,
+      user_name: null,
+      user_label: null,
+      user_label_color: null,
+    },
+  });
+  assert.ok(compareScore(followedEmpty, olderWithIntel) > 0);
 }
 
 async function loadWhaleTagId(): Promise<string> {
@@ -453,6 +507,7 @@ async function cleanup(context: TestContext): Promise<void> {
 }
 
 async function main() {
+  assertAddressResolverScoring();
   await assertPrivateWalletTablesExist();
   const app = await buildApp();
   const { userId, authHeaders } = await createTestUser();
