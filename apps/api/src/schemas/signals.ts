@@ -10,7 +10,13 @@ const zOptionalBool = z
     return undefined;
   });
 
-export const signalScopeSchema = z.enum(["all", "market", "event", "node"]);
+export const signalScopeSchema = z.enum([
+  "all",
+  "market",
+  "event",
+  "node",
+  "wallet",
+]);
 export const signalStatusFilterSchema = z.enum([
   "all",
   "active",
@@ -31,6 +37,8 @@ export const signalsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
   includeSimilarMarkets: zOptionalBool.optional(),
   similarLimit: z.coerce.number().int().min(1).max(12).optional(),
+  includeTraders: zOptionalBool.optional(),
+  traderLimit: z.coerce.number().int().min(1).max(10).optional(),
 });
 
 export const scopedSignalsQuerySchema = signalsQuerySchema.omit({
@@ -38,5 +46,14 @@ export const scopedSignalsQuerySchema = signalsQuerySchema.omit({
   targetId: true,
 });
 
+export const holderResearchWalletNotesBodySchema = z.object({
+  walletIds: z.array(z.string().uuid()).min(1).max(200),
+  limitPerWallet: z.coerce.number().int().min(0).max(10).optional(),
+  compact: zOptionalBool.optional(),
+});
+
 export type SignalsQuery = z.infer<typeof signalsQuerySchema>;
 export type ScopedSignalsQuery = z.infer<typeof scopedSignalsQuerySchema>;
+export type HolderResearchWalletNotesBody = z.infer<
+  typeof holderResearchWalletNotesBodySchema
+>;

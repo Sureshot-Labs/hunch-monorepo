@@ -20,6 +20,7 @@ export const INTEL_POLICY_KEYS = [
   "market_map",
   "map_search",
   "map_signals",
+  "holder_research",
   "arbitrage_defaults",
 ] as const;
 
@@ -127,6 +128,76 @@ export type AiWhaleProfilesPolicy = {
   maxTokens: number;
   maxTokensFallback: number;
   promptVersion: string;
+};
+
+export type HolderResearchPolicy = {
+  enabled: boolean;
+  dryRun: boolean;
+  persistNotes: boolean;
+  externalSearchEnabled: boolean;
+  externalSearchModel: string;
+  maxExternalSearchCallsPerRun: number;
+  externalSearchMinScore: number;
+  externalSearchWindowHours: number;
+  externalSearchMaxOutputTokens: number;
+  estimatedExternalSearchCostUsd: number;
+  decisionCacheEnabled: boolean;
+  decisionCacheTtlHours: number;
+  skipCooldownHours: number;
+  contextCooldownHours: number;
+  forceRecheckAfterHours: number;
+  minMeaningfulOddsDelta: number;
+  minMeaningfulSideUsdDelta: number;
+  minMeaningfulSidePctDelta: number;
+  minMeaningfulHolderUsdDelta: number;
+  minMeaningfulHolderPctDelta: number;
+  model: string;
+  maxAgentCallsPerRun: number;
+  maxPublishPerRun: number;
+  maxCandidatePool: number;
+  maxCandidatesPerRun: number;
+  maxLiveChecksPerRun: number;
+  maxHolderContextHoldersPerCandidate: number;
+  maxHolderContextPositionsPerHolder: number;
+  maxConsecutiveSkips: number;
+  maxRuntimeSeconds: number;
+  maxRunsPerDay: number;
+  dayBudgetUsd: number;
+  estimatedCallCostUsd: number;
+  maxOutputTokens: number;
+  candidateLookbackHours: number;
+  activityLookbackHours: number;
+  noteCooldownHours: number;
+  minScore: number;
+  publishMinScore: number;
+  minSidePositionUsd: number;
+  minHolderPositionUsd: number;
+  minMinorityUsd: number;
+  minMinorityShare: number;
+  minSideWallets: number;
+  maxExtremeOdds: number;
+  minResolvedWinRateEdge30d: number;
+  minResolvedEdgeZScore30d: number;
+  minResolvedEdgeSampleCount30d: number;
+  minResolvedStakeUsd30d: number;
+  minTrades30d: number;
+  strongResolvedWinRateEdge30d: number;
+  strongResolvedEdgeZScore30d: number;
+  strongResolvedEdgeSampleCount30d: number;
+  strongResolvedStakeUsd30d: number;
+  minRecentActivityUsd: number;
+  eventBridgeMinWallets: number;
+  concentrationMinTotalUsd: number;
+  concentrationLargestHolderPct: number;
+  twoSidedLargestHolderMaxPct: number;
+  quotaFollowupExisting: number;
+  quotaSharpMinority: number;
+  quotaSharpSide: number;
+  quotaSharpSplit: number;
+  quotaCleanDisagreement: number;
+  quotaRecentFlow: number;
+  quotaEventBridge: number;
+  quotaConcentrationRisk: number;
 };
 
 export type AiClustersPolicy = {
@@ -426,6 +497,7 @@ type IntelPolicyMap = {
   market_map: MarketMapPolicy;
   map_search: MapSearchPolicy;
   map_signals: MapSignalsPolicy;
+  holder_research: HolderResearchPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
 };
 
@@ -766,6 +838,79 @@ const mapSignalsSchema = z
   .strict()
   .partial();
 
+const holderResearchSchema = z
+  .object({
+    enabled: strictBoolean,
+    dryRun: strictBoolean,
+    persistNotes: strictBoolean,
+    externalSearchEnabled: strictBoolean,
+    externalSearchModel: z.string().trim().min(1).max(200),
+    maxExternalSearchCallsPerRun: nonNegativeInt.max(100),
+    externalSearchMinScore: ratio,
+    externalSearchWindowHours: positiveInt.max(24 * 365),
+    externalSearchMaxOutputTokens: positiveInt.max(8_000),
+    estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
+    decisionCacheEnabled: strictBoolean,
+    decisionCacheTtlHours: positiveInt.max(24 * 365),
+    skipCooldownHours: positiveInt.max(24 * 365),
+    contextCooldownHours: positiveInt.max(24 * 365),
+    forceRecheckAfterHours: positiveInt.max(24 * 365),
+    minMeaningfulOddsDelta: ratio,
+    minMeaningfulSideUsdDelta: nonNegativeNumber,
+    minMeaningfulSidePctDelta: ratio,
+    minMeaningfulHolderUsdDelta: nonNegativeNumber,
+    minMeaningfulHolderPctDelta: ratio,
+    model: z.string().trim().min(1).max(200),
+    maxAgentCallsPerRun: positiveInt.max(100),
+    maxPublishPerRun: positiveInt.max(100),
+    maxCandidatePool: positiveInt.max(2_000),
+    maxCandidatesPerRun: positiveInt.max(100),
+    maxLiveChecksPerRun: nonNegativeInt.max(1_000),
+    maxHolderContextHoldersPerCandidate: nonNegativeInt.max(20),
+    maxHolderContextPositionsPerHolder: nonNegativeInt.max(20),
+    maxConsecutiveSkips: positiveInt.max(100),
+    maxRuntimeSeconds: positiveInt.max(60 * 60),
+    maxRunsPerDay: positiveInt.max(1_000),
+    dayBudgetUsd: nonNegativeNumber.max(1_000_000),
+    estimatedCallCostUsd: nonNegativeNumber.max(10_000),
+    maxOutputTokens: positiveInt.max(8_000),
+    candidateLookbackHours: positiveInt.max(24 * 90),
+    activityLookbackHours: positiveInt.max(24 * 30),
+    noteCooldownHours: positiveInt.max(24 * 365),
+    minScore: ratio,
+    publishMinScore: ratio,
+    minSidePositionUsd: nonNegativeNumber,
+    minHolderPositionUsd: nonNegativeNumber,
+    minMinorityUsd: nonNegativeNumber,
+    minMinorityShare: ratio,
+    minSideWallets: positiveInt.max(1_000),
+    maxExtremeOdds: ratio,
+    minResolvedWinRateEdge30d: z.coerce.number().min(-1).max(1),
+    minResolvedEdgeZScore30d: nonNegativeNumber.max(20),
+    minResolvedEdgeSampleCount30d: nonNegativeInt.max(100_000),
+    minResolvedStakeUsd30d: nonNegativeNumber,
+    minTrades30d: nonNegativeInt.max(1_000_000),
+    strongResolvedWinRateEdge30d: z.coerce.number().min(-1).max(1),
+    strongResolvedEdgeZScore30d: nonNegativeNumber.max(20),
+    strongResolvedEdgeSampleCount30d: nonNegativeInt.max(100_000),
+    strongResolvedStakeUsd30d: nonNegativeNumber,
+    minRecentActivityUsd: nonNegativeNumber,
+    eventBridgeMinWallets: positiveInt.max(10_000),
+    concentrationMinTotalUsd: nonNegativeNumber,
+    concentrationLargestHolderPct: ratio,
+    twoSidedLargestHolderMaxPct: ratio,
+    quotaFollowupExisting: nonNegativeInt.max(100),
+    quotaSharpMinority: nonNegativeInt.max(100),
+    quotaSharpSide: nonNegativeInt.max(100),
+    quotaSharpSplit: nonNegativeInt.max(100),
+    quotaCleanDisagreement: nonNegativeInt.max(100),
+    quotaRecentFlow: nonNegativeInt.max(100),
+    quotaEventBridge: nonNegativeInt.max(100),
+    quotaConcentrationRisk: nonNegativeInt.max(100),
+  })
+  .strict()
+  .partial();
+
 const arbitrageDefaultsSchema = z
   .object({
     limit: positiveInt.max(200),
@@ -948,6 +1093,7 @@ const policySchemas = {
   market_map: marketMapSchema,
   map_search: mapSearchSchema,
   map_signals: mapSignalsSchema,
+  holder_research: holderResearchSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
 } as const;
 
@@ -1155,8 +1301,7 @@ function getDefaults(): IntelPolicyMap {
       safeLinkErrorStaleHours: env.walletIntelSafeLinkErrorStaleHours,
       onchainStateLimit: env.walletIntelOnchainStateLimit,
       onchainStateStaleHours: env.walletIntelOnchainStateStaleHours,
-      onchainStateErrorStaleHours:
-        env.walletIntelOnchainStateErrorStaleHours,
+      onchainStateErrorStaleHours: env.walletIntelOnchainStateErrorStaleHours,
     },
     wallet_intel_attribution: getWalletIntelAttributionDefaults(),
     api_cache_warm: {
@@ -1382,6 +1527,76 @@ function getDefaults(): IntelPolicyMap {
       verbose: false,
       persistNotes: false,
       maxPublishPerRun: 200,
+    },
+    holder_research: {
+      enabled: false,
+      dryRun: true,
+      persistNotes: false,
+      externalSearchEnabled: false,
+      externalSearchModel:
+        process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
+      maxExternalSearchCallsPerRun: 2,
+      externalSearchMinScore: 0.7,
+      externalSearchWindowHours: 72,
+      externalSearchMaxOutputTokens: 700,
+      estimatedExternalSearchCostUsd: 0.03,
+      decisionCacheEnabled: true,
+      decisionCacheTtlHours: 336,
+      skipCooldownHours: 12,
+      contextCooldownHours: 6,
+      forceRecheckAfterHours: 48,
+      minMeaningfulOddsDelta: 0.05,
+      minMeaningfulSideUsdDelta: 25_000,
+      minMeaningfulSidePctDelta: 0.2,
+      minMeaningfulHolderUsdDelta: 5_000,
+      minMeaningfulHolderPctDelta: 0.25,
+      model: "openai/gpt-5.4",
+      maxAgentCallsPerRun: 6,
+      maxPublishPerRun: 3,
+      maxCandidatePool: 80,
+      maxCandidatesPerRun: 6,
+      maxLiveChecksPerRun: 24,
+      maxHolderContextHoldersPerCandidate: 3,
+      maxHolderContextPositionsPerHolder: 4,
+      maxConsecutiveSkips: 3,
+      maxRuntimeSeconds: 5 * 60,
+      maxRunsPerDay: 24,
+      dayBudgetUsd: 10,
+      estimatedCallCostUsd: 0.05,
+      maxOutputTokens: 700,
+      candidateLookbackHours: 72,
+      activityLookbackHours: 24,
+      noteCooldownHours: 12,
+      minScore: 0.45,
+      publishMinScore: 0.72,
+      minSidePositionUsd: 25_000,
+      minHolderPositionUsd: 5_000,
+      minMinorityUsd: 25_000,
+      minMinorityShare: 0.1,
+      minSideWallets: 2,
+      maxExtremeOdds: 0.98,
+      minResolvedWinRateEdge30d: 0.1,
+      minResolvedEdgeZScore30d: 1.5,
+      minResolvedEdgeSampleCount30d: 10,
+      minResolvedStakeUsd30d: 0,
+      minTrades30d: 10,
+      strongResolvedWinRateEdge30d: 0.15,
+      strongResolvedEdgeZScore30d: 2,
+      strongResolvedEdgeSampleCount30d: 20,
+      strongResolvedStakeUsd30d: 5_000,
+      minRecentActivityUsd: 10_000,
+      eventBridgeMinWallets: 3,
+      concentrationMinTotalUsd: 50_000,
+      concentrationLargestHolderPct: 0.8,
+      twoSidedLargestHolderMaxPct: 0.7,
+      quotaFollowupExisting: 1,
+      quotaSharpMinority: 2,
+      quotaSharpSide: 1,
+      quotaSharpSplit: 1,
+      quotaCleanDisagreement: 1,
+      quotaRecentFlow: 1,
+      quotaEventBridge: 1,
+      quotaConcentrationRisk: 0,
     },
     arbitrage_defaults: {
       limit: 24,
@@ -2149,6 +2364,181 @@ function normalizeMapSignalsPolicy(policy: MapSignalsPolicy): MapSignalsPolicy {
   };
 }
 
+function normalizeHolderResearchPolicy(
+  policy: HolderResearchPolicy,
+): HolderResearchPolicy {
+  const minScore = clamp(policy.minScore, 0, 1);
+  const minEdge = clamp(policy.minResolvedWinRateEdge30d, -1, 1);
+  const strongEdge = clamp(policy.strongResolvedWinRateEdge30d, minEdge, 1);
+  const minZ = Math.max(0, policy.minResolvedEdgeZScore30d);
+  const strongZ = Math.max(minZ, policy.strongResolvedEdgeZScore30d);
+  const minSamples = Math.max(
+    0,
+    Math.trunc(policy.minResolvedEdgeSampleCount30d),
+  );
+  const strongSamples = Math.max(
+    minSamples,
+    Math.trunc(policy.strongResolvedEdgeSampleCount30d),
+  );
+  const minStake = Math.max(0, policy.minResolvedStakeUsd30d);
+  const strongStake = Math.max(minStake, policy.strongResolvedStakeUsd30d);
+
+  return {
+    ...policy,
+    enabled: Boolean(policy.enabled),
+    dryRun: Boolean(policy.dryRun),
+    persistNotes: Boolean(policy.persistNotes),
+    externalSearchEnabled: Boolean(policy.externalSearchEnabled),
+    externalSearchModel:
+      policy.externalSearchModel.trim() || "grok-4-1-fast-reasoning",
+    maxExternalSearchCallsPerRun: clamp(
+      Math.trunc(policy.maxExternalSearchCallsPerRun),
+      0,
+      100,
+    ),
+    externalSearchMinScore: clamp(policy.externalSearchMinScore, 0, 1),
+    externalSearchWindowHours: clamp(
+      Math.trunc(policy.externalSearchWindowHours),
+      1,
+      24 * 365,
+    ),
+    externalSearchMaxOutputTokens: clamp(
+      Math.trunc(policy.externalSearchMaxOutputTokens),
+      100,
+      8_000,
+    ),
+    estimatedExternalSearchCostUsd: clamp(
+      policy.estimatedExternalSearchCostUsd,
+      0,
+      10_000,
+    ),
+    decisionCacheEnabled: Boolean(policy.decisionCacheEnabled),
+    decisionCacheTtlHours: clamp(
+      Math.trunc(policy.decisionCacheTtlHours),
+      1,
+      24 * 365,
+    ),
+    skipCooldownHours: clamp(
+      Math.trunc(policy.skipCooldownHours),
+      1,
+      24 * 365,
+    ),
+    contextCooldownHours: clamp(
+      Math.trunc(policy.contextCooldownHours),
+      1,
+      24 * 365,
+    ),
+    forceRecheckAfterHours: clamp(
+      Math.trunc(policy.forceRecheckAfterHours),
+      1,
+      24 * 365,
+    ),
+    minMeaningfulOddsDelta: clamp(policy.minMeaningfulOddsDelta, 0, 1),
+    minMeaningfulSideUsdDelta: Math.max(0, policy.minMeaningfulSideUsdDelta),
+    minMeaningfulSidePctDelta: clamp(policy.minMeaningfulSidePctDelta, 0, 1),
+    minMeaningfulHolderUsdDelta: Math.max(
+      0,
+      policy.minMeaningfulHolderUsdDelta,
+    ),
+    minMeaningfulHolderPctDelta: clamp(
+      policy.minMeaningfulHolderPctDelta,
+      0,
+      1,
+    ),
+    model: policy.model.trim() || "openai/gpt-5.4",
+    maxAgentCallsPerRun: clamp(Math.trunc(policy.maxAgentCallsPerRun), 1, 100),
+    maxPublishPerRun: clamp(Math.trunc(policy.maxPublishPerRun), 1, 100),
+    maxCandidatePool: clamp(Math.trunc(policy.maxCandidatePool), 1, 2_000),
+    maxCandidatesPerRun: clamp(Math.trunc(policy.maxCandidatesPerRun), 1, 100),
+    maxLiveChecksPerRun: clamp(
+      Math.trunc(policy.maxLiveChecksPerRun),
+      0,
+      1_000,
+    ),
+    maxHolderContextHoldersPerCandidate: clamp(
+      Math.trunc(policy.maxHolderContextHoldersPerCandidate),
+      0,
+      20,
+    ),
+    maxHolderContextPositionsPerHolder: clamp(
+      Math.trunc(policy.maxHolderContextPositionsPerHolder),
+      0,
+      20,
+    ),
+    maxConsecutiveSkips: clamp(Math.trunc(policy.maxConsecutiveSkips), 1, 100),
+    maxRuntimeSeconds: clamp(Math.trunc(policy.maxRuntimeSeconds), 10, 60 * 60),
+    maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay), 1, 1_000),
+    dayBudgetUsd: clamp(policy.dayBudgetUsd, 0, 1_000_000),
+    estimatedCallCostUsd: clamp(policy.estimatedCallCostUsd, 0, 10_000),
+    maxOutputTokens: clamp(Math.trunc(policy.maxOutputTokens), 100, 8_000),
+    candidateLookbackHours: clamp(
+      Math.trunc(policy.candidateLookbackHours),
+      1,
+      24 * 90,
+    ),
+    activityLookbackHours: clamp(
+      Math.trunc(policy.activityLookbackHours),
+      1,
+      24 * 30,
+    ),
+    noteCooldownHours: clamp(Math.trunc(policy.noteCooldownHours), 1, 24 * 365),
+    minScore,
+    publishMinScore: clamp(policy.publishMinScore, minScore, 1),
+    minSidePositionUsd: Math.max(0, policy.minSidePositionUsd),
+    minHolderPositionUsd: Math.max(0, policy.minHolderPositionUsd),
+    minMinorityUsd: Math.max(0, policy.minMinorityUsd),
+    minMinorityShare: clamp(policy.minMinorityShare, 0, 1),
+    minSideWallets: clamp(Math.trunc(policy.minSideWallets), 1, 1_000),
+    maxExtremeOdds: clamp(policy.maxExtremeOdds, 0.5, 1),
+    minResolvedWinRateEdge30d: minEdge,
+    minResolvedEdgeZScore30d: minZ,
+    minResolvedEdgeSampleCount30d: minSamples,
+    minResolvedStakeUsd30d: minStake,
+    minTrades30d: Math.max(0, Math.trunc(policy.minTrades30d)),
+    strongResolvedWinRateEdge30d: strongEdge,
+    strongResolvedEdgeZScore30d: strongZ,
+    strongResolvedEdgeSampleCount30d: strongSamples,
+    strongResolvedStakeUsd30d: strongStake,
+    minRecentActivityUsd: Math.max(0, policy.minRecentActivityUsd),
+    eventBridgeMinWallets: clamp(
+      Math.trunc(policy.eventBridgeMinWallets),
+      1,
+      10_000,
+    ),
+    concentrationMinTotalUsd: Math.max(0, policy.concentrationMinTotalUsd),
+    concentrationLargestHolderPct: clamp(
+      policy.concentrationLargestHolderPct,
+      0,
+      1,
+    ),
+    twoSidedLargestHolderMaxPct: clamp(
+      policy.twoSidedLargestHolderMaxPct,
+      0,
+      1,
+    ),
+    quotaFollowupExisting: clamp(
+      Math.trunc(policy.quotaFollowupExisting),
+      0,
+      100,
+    ),
+    quotaSharpMinority: clamp(Math.trunc(policy.quotaSharpMinority), 0, 100),
+    quotaSharpSide: clamp(Math.trunc(policy.quotaSharpSide), 0, 100),
+    quotaSharpSplit: clamp(Math.trunc(policy.quotaSharpSplit), 0, 100),
+    quotaCleanDisagreement: clamp(
+      Math.trunc(policy.quotaCleanDisagreement),
+      0,
+      100,
+    ),
+    quotaRecentFlow: clamp(Math.trunc(policy.quotaRecentFlow), 0, 100),
+    quotaEventBridge: clamp(Math.trunc(policy.quotaEventBridge), 0, 100),
+    quotaConcentrationRisk: clamp(
+      Math.trunc(policy.quotaConcentrationRisk),
+      0,
+      100,
+    ),
+  };
+}
+
 function normalizeArbitrageDefaultsPolicy(
   policy: ArbitrageDefaultsPolicy,
 ): ArbitrageDefaultsPolicy {
@@ -2218,6 +2608,10 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeMapSignalsPolicy(
         merged as MapSignalsPolicy,
       ) as IntelPolicyMap[K];
+    case "holder_research":
+      return normalizeHolderResearchPolicy(
+        merged as HolderResearchPolicy,
+      ) as IntelPolicyMap[K];
     case "arbitrage_defaults":
       return normalizeArbitrageDefaultsPolicy(
         merged as ArbitrageDefaultsPolicy,
@@ -2271,6 +2665,9 @@ function sanitizeOverridePayload(
       return record;
     }
     case "map_signals": {
+      return record;
+    }
+    case "holder_research": {
       return record;
     }
     case "ai_whale_profiles": {
@@ -2410,6 +2807,10 @@ export async function resolveAllIntelPolicies(
       "map_signals",
       byKey.get("map_signals") ?? null,
     ),
+    holder_research: resolveFromRow(
+      "holder_research",
+      byKey.get("holder_research") ?? null,
+    ),
     arbitrage_defaults: resolveFromRow(
       "arbitrage_defaults",
       byKey.get("arbitrage_defaults") ?? null,
@@ -2451,6 +2852,10 @@ export async function resolveMapSearchPolicy(pool: DbQuery) {
 
 export async function resolveMapSignalsPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "map_signals");
+}
+
+export async function resolveHolderResearchPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "holder_research");
 }
 
 export async function resolveArbitrageDefaultsPolicy(pool: DbQuery) {
