@@ -955,6 +955,65 @@ async function loadExistingPolymarketMarketDurations(
   );
 }
 
+async function loadExistingUnifiedEventIds(
+  eventIds: string[],
+): Promise<Set<string>> {
+  if (!eventIds.length) return new Set();
+  const result = await pool.query<{ id: string }>(
+    `
+      select id
+      from unified_events
+      where id = any($1::text[])
+    `,
+    [eventIds],
+  );
+  return new Set(result.rows.map((row) => row.id));
+}
+
+function parseEventDependencies(
+  events: TEvent[],
+): Map<string, TPolymarketEvent> {
+  const parsed = new Map<string, TPolymarketEvent>();
+  for (const event of events) {
+    try {
+      const polyEvent = PolymarketEvent.parse(event) as TPolymarketEvent;
+      parsed.set(String(polyEvent.id), polyEvent);
+    } catch (error) {
+      log.warn("Failed to parse Polymarket refreshed event dependency", {
+        eventId: event.id,
+        error,
+      });
+    }
+  }
+  return parsed;
+}
+
+async function loadStoredPolymarketEventDependencies(
+  eventIds: string[],
+): Promise<Map<string, TPolymarketEvent>> {
+  if (!eventIds.length) return new Map();
+  const result = await pool.query<{ id: string; raw: unknown }>(
+    `
+      select id, raw
+      from polymarket_events
+      where id = any($1::text[])
+    `,
+    [eventIds],
+  );
+  const parsed = new Map<string, TPolymarketEvent>();
+  for (const row of result.rows) {
+    try {
+      parsed.set(row.id, PolymarketEvent.parse(row.raw) as TPolymarketEvent);
+    } catch (error) {
+      log.warn("Failed to parse stored Polymarket event dependency", {
+        eventId: row.id,
+        error,
+      });
+    }
+  }
+  return parsed;
+}
+
 async function refreshMarketRefs(
   refs: PolymarketMarketRef[],
 ): Promise<RefreshMarketRefsResult> {
@@ -979,6 +1038,21 @@ async function refreshMarketRefs(
     { eventIds: eventIds.length, marketRefs: dedupedRefs.length },
   );
   const events = eventRefresh.events;
+  const eventDependenciesById = parseEventDependencies(events);
+  const storedDependencyIds = eventIds.filter(
+    (eventId) => !eventDependenciesById.has(eventId),
+  );
+  if (storedDependencyIds.length) {
+    const storedDependencies = await timedPhase(
+      timings,
+      "refreshMarketRefs.loadStoredEvents",
+      () => loadStoredPolymarketEventDependencies(storedDependencyIds),
+      { events: storedDependencyIds.length },
+    );
+    for (const [eventId, event] of storedDependencies) {
+      eventDependenciesById.set(eventId, event);
+    }
+  }
   if (eventRefresh.failedIds.length) {
     log.warn("Polymarket event batch market refresh partially failed", {
       eventIds: eventIds.length,
@@ -1003,7 +1077,14 @@ async function refreshMarketRefs(
     rowsByMarketId.set(String(row.market.id), row);
   }
 
-  const parsed = Array.from(rowsByMarketId.values());
+  const parsed = Array.from(rowsByMarketId.values()).map((row) =>
+    row.event
+      ? row
+      : {
+          ...row,
+          event: eventDependenciesById.get(row.eventId),
+        },
+  );
   if (!parsed.length) {
     return {
       ...resultBase,
@@ -1014,10 +1095,65 @@ async function refreshMarketRefs(
     };
   }
 
-  const polymarketMarketRows = parsed.map(({ eventId, market }) =>
-    mapPolymarketMarketRow(eventId, market),
+  const unifiedEventIds = Array.from(
+    new Set(parsed.map((row) => `polymarket:${row.eventId}`)),
   );
-  const fallbackDurationMarketIds = parsed
+  const existingUnifiedEventIds = await timedPhase(
+    timings,
+    "refreshMarketRefs.loadExistingEvents",
+    () => loadExistingUnifiedEventIds(unifiedEventIds),
+    { events: unifiedEventIds.length },
+  );
+  const eventsToUpsertById = new Map<string, TPolymarketEvent>();
+  for (const row of parsed) {
+    if (row.event)
+      eventsToUpsertById.set(`polymarket:${row.eventId}`, row.event);
+  }
+  const parsedWithEventDependencies = parsed.filter((row) => {
+    const unifiedEventId = `polymarket:${row.eventId}`;
+    return (
+      existingUnifiedEventIds.has(unifiedEventId) ||
+      eventsToUpsertById.has(unifiedEventId)
+    );
+  });
+  const skippedMissingEventCount =
+    parsed.length - parsedWithEventDependencies.length;
+  if (skippedMissingEventCount > 0) {
+    log.warn("Skipped Polymarket refreshed markets with missing events", {
+      context: "refreshMarketRefs",
+      skippedMarkets: skippedMissingEventCount,
+      requestedMarkets: dedupedRefs.length,
+    });
+  }
+
+  const eventsToUpsert = Array.from(eventsToUpsertById.values());
+  if (eventsToUpsert.length) {
+    await timedPhase(
+      timings,
+      "refreshMarketRefs.eventUpsert",
+      () =>
+        upsertEventsConsistently(pool, {
+          unified: eventsToUpsert.map(mapToUnifiedEvent),
+          polymarket: eventsToUpsert.map(mapPolymarketEventRow),
+        }),
+      { events: eventsToUpsert.length },
+    );
+  }
+
+  if (!parsedWithEventDependencies.length) {
+    return {
+      ...resultBase,
+      eventsFetched: events.length,
+      fallbackMarketFetches: missingRefs.length,
+      refreshed: 0,
+      timings,
+    };
+  }
+
+  const polymarketMarketRows = parsedWithEventDependencies.map(
+    ({ eventId, market }) => mapPolymarketMarketRow(eventId, market),
+  );
+  const fallbackDurationMarketIds = parsedWithEventDependencies
     .filter((row) => !row.event)
     .map((row) => String(row.market.id));
   const existingDurations = fallbackDurationMarketIds.length
@@ -1028,27 +1164,33 @@ async function refreshMarketRefs(
         { markets: fallbackDurationMarketIds.length },
       )
     : new Map<string, number | null>();
-  const unifiedMarketRows = parsed.map(({ eventId, market, event }) =>
-    mapToUnifiedMarket(market, eventId, event, {
-      existingDurationMinutes: event
-        ? undefined
-        : existingDurations.get(String(market.id)),
-    }),
+  const unifiedMarketRows = parsedWithEventDependencies.map(
+    ({ eventId, market, event }) =>
+      mapToUnifiedMarket(market, eventId, event, {
+        existingDurationMinutes: event
+          ? undefined
+          : existingDurations.get(String(market.id)),
+      }),
   );
   const eventById = new Map<string, MarketUpdateEventMetrics>(
-    events.map(
-      (event) =>
-        [
-          `polymarket:${event.id}`,
-          {
-            volume_total: parsePrice(event.volume) ?? undefined,
-            volume_24h: parsePrice(event.volume24hr) ?? undefined,
-            liquidity: parsePrice(event.liquidity) ?? undefined,
-          },
-        ] as const,
-    ),
+    parsedWithEventDependencies
+      .filter(
+        (row): row is RefreshedPolymarketMarket & { event: TPolymarketEvent } =>
+          Boolean(row.event),
+      )
+      .map(
+        (row) =>
+          [
+            `polymarket:${row.eventId}`,
+            {
+              volume_total: parsePrice(row.event.volume) ?? undefined,
+              volume_24h: parsePrice(row.event.volume24hr) ?? undefined,
+              liquidity: parsePrice(row.event.liquidity) ?? undefined,
+            },
+          ] as const,
+      ),
   );
-  const unifiedTokenRows = parsed.flatMap(({ market }) => {
+  const unifiedTokenRows = parsedWithEventDependencies.flatMap(({ market }) => {
     const [yes, no] = Array.isArray(market.clobTokenIds)
       ? market.clobTokenIds
       : [];
@@ -1117,6 +1259,12 @@ async function refreshMarketRefs(
     });
   }
 
+  const refreshedMarketPairs = parsedWithEventDependencies.flatMap(
+    (row, index) => {
+      const unifiedMarket = unifiedMarketRows[index];
+      return unifiedMarket ? [{ row, unifiedMarket }] : [];
+    },
+  );
   const tsMs = Date.now();
   const stateQueue = new PQueue({ concurrency: 20 });
   await timedPhase(
@@ -1124,8 +1272,8 @@ async function refreshMarketRefs(
     "refreshMarketRefs.publishState",
     () =>
       Promise.all(
-        parsed.flatMap(({ market }, index) => {
-          const unifiedMarket = unifiedMarketRows[index];
+        refreshedMarketPairs.flatMap(({ row, unifiedMarket }) => {
+          const { market } = row;
           const { yes, no } = clobTokenPair(market);
           const tokenIds = [yes, no].filter((tokenId): tokenId is string =>
             Boolean(tokenId),
@@ -1150,7 +1298,7 @@ async function refreshMarketRefs(
           );
         }),
       ),
-    { markets: parsed.length },
+    { markets: refreshedMarketPairs.length },
   );
 
   try {
@@ -1159,20 +1307,13 @@ async function refreshMarketRefs(
       "refreshMarketRefs.publishMarketUpdates",
       () =>
         publishPolymarketMarketUpdates(
-          parsed.flatMap(({ market }, index) => {
-            const unifiedMarket = unifiedMarketRows[index];
-            return unifiedMarket
-              ? [
-                  {
-                    sourceMarket: market,
-                    market: unifiedMarket,
-                    event: eventById.get(unifiedMarket.event_id),
-                  },
-                ]
-              : [];
-          }),
+          refreshedMarketPairs.map(({ row, unifiedMarket }) => ({
+            sourceMarket: row.market,
+            market: unifiedMarket,
+            event: eventById.get(unifiedMarket.event_id),
+          })),
         ),
-      { markets: parsed.length },
+      { markets: refreshedMarketPairs.length },
     );
   } catch (error) {
     log.warn("Polymarket market update publish failed", {
@@ -1185,7 +1326,7 @@ async function refreshMarketRefs(
     ...resultBase,
     eventsFetched: events.length,
     fallbackMarketFetches: missingRefs.length,
-    refreshed: parsed.length,
+    refreshed: refreshedMarketPairs.length,
     timings,
   };
 }

@@ -11,6 +11,8 @@ type AuditRow = {
   status: string;
 };
 
+const DEFAULT_SELECT_TIMEOUT_MS = 30_000;
+
 function parseArgValue(name: string): string | null {
   const prefix = `--${name}=`;
   const arg = process.argv.find((entry) => entry.startsWith(prefix));
@@ -20,6 +22,14 @@ function parseArgValue(name: string): string | null {
 
 function hasFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
+}
+
+function errorCode(error: unknown): string | null {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? code : null;
+  }
+  return null;
 }
 
 function isMintNotFound(error: unknown): boolean {
@@ -41,6 +51,10 @@ async function main() {
   const delayMs = Math.max(0, Number(parseArgValue("delay") ?? "50"));
   const retry = Math.max(0, Number(parseArgValue("retry") ?? "2"));
   const backoffMs = Math.max(0, Number(parseArgValue("backoff") ?? "250"));
+  const selectTimeoutMs = Math.max(
+    1_000,
+    Number(parseArgValue("select-timeout-ms") ?? DEFAULT_SELECT_TIMEOUT_MS),
+  );
   const status = parseArgValue("status") ?? "ACTIVE";
   const dryRun = hasFlag("dry-run");
   const includeAudited = hasFlag("include-audited");
@@ -71,23 +85,43 @@ async function main() {
           ? ""
           : "and not (coalesce(metadata, '{}'::jsonb) ? 'mint_exists')";
 
-      const rows = await client.query<AuditRow>(
-        `
-          select id, token_yes, token_no, is_initialized, status::text
-          from unified_markets
-          where venue = 'kalshi'
-            and (
-              token_yes like 'sol:%'
-              or token_no like 'sol:%'
-            )
-            and status = $1::unified_status
-            ${missingClause}
-            ${afterClause}
-          order by id asc
-          limit $2
-        `,
-        params,
-      );
+      let rows: { rows: AuditRow[] };
+      try {
+        await client.query("begin");
+        await client.query("select set_config('statement_timeout', $1, true)", [
+          `${selectTimeoutMs}ms`,
+        ]);
+        rows = await client.query<AuditRow>(
+          `
+            select id, token_yes, token_no, is_initialized, status::text
+            from unified_markets
+            where venue = 'kalshi'
+              and (
+                token_yes like 'sol:%'
+                or token_no like 'sol:%'
+              )
+              and status = $1::unified_status
+              ${missingClause}
+              ${afterClause}
+            order by id asc
+            limit $2
+          `,
+          params,
+        );
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback").catch(() => {});
+        if (errorCode(error) === "57014") {
+          console.error("[kalshi:mint-audit] selector timed out", {
+            lastId,
+            batchLimit,
+            checked,
+            selectTimeoutMs,
+            resumeWith: lastId ? `--after=${lastId}` : undefined,
+          });
+        }
+        throw error;
+      }
 
       if (rows.rows.length === 0) break;
 

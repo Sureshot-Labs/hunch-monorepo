@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import crypto from "node:crypto";
 import { env } from "../env.js";
 import { pool } from "../db.js";
-import { getRedisStatus } from "../redis.js";
+import { getRedisStatus as getRedisStatusDefault } from "../redis.js";
 import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
@@ -16,7 +16,7 @@ import { fifaSpecialQuerySchema } from "../schemas/special.js";
 import type { TokenPair } from "../server-types.js";
 import {
   buildFifaMeta,
-  fetchFifaSpecialPage,
+  fetchFifaSpecialPage as fetchFifaSpecialPageDefault,
   normalizeFifaSpecialSearchQuery,
   resolveTokenPair,
   type FifaMeta,
@@ -25,7 +25,7 @@ import {
   type FifaSpecialSort,
 } from "../services/fifa-special.js";
 import {
-  fetchSportsFixturesByKeys,
+  fetchSportsFixturesByKeys as fetchSportsFixturesByKeysDefault,
   fillMissingSportsFixturesInBackground,
   formatSportsFixtureForApi,
   type SportsFixtureApi,
@@ -34,6 +34,24 @@ import {
   getFifa2026TeamsRankingPayload,
   getFifa2026TeamsRankingCacheControl,
 } from "../services/fifa-world-rankings.js";
+
+type FifaSpecialRouteTestHooks = {
+  getRedisStatus?: typeof getRedisStatusDefault;
+  fetchFifaSpecialPage?: typeof fetchFifaSpecialPageDefault;
+  fetchSportsFixturesByKeys?: typeof fetchSportsFixturesByKeysDefault;
+};
+
+let fifaSpecialRouteTestHooks: FifaSpecialRouteTestHooks = {};
+
+export function setFifaSpecialRouteTestHooksForTest(
+  hooks: FifaSpecialRouteTestHooks,
+): () => void {
+  const previous = fifaSpecialRouteTestHooks;
+  fifaSpecialRouteTestHooks = hooks;
+  return () => {
+    fifaSpecialRouteTestHooks = previous;
+  };
+}
 
 function applyCacheHeaders(input: {
   reply: FastifyReply;
@@ -292,7 +310,9 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   z.get("/special/fifa-2026/teams", async (req, reply) => {
-    const redisContext = await getRedisStatus();
+    const redisContext = await (
+      fifaSpecialRouteTestHooks.getRedisStatus ?? getRedisStatusDefault
+    )();
     const r = redisContext.redis;
     const payload = await getFifa2026TeamsRankingPayload({
       redis: r
@@ -345,7 +365,11 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       const cacheTtl = env.feedTtlSec;
       const cacheEnabled = cacheTtl > 0;
       const cacheKey = `special:fifa-2026:v6:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
-      const redisContext = await getRedisStatus();
+      const staleCacheKey = `${cacheKey}:stale`;
+      const staleTtl = Math.max(cacheTtl * 60, 6 * 60 * 60);
+      const redisContext = await (
+        fifaSpecialRouteTestHooks.getRedisStatus ?? getRedisStatusDefault
+      )();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
 
@@ -369,6 +393,44 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
+      const sendStaleFallback = async (error: unknown) => {
+        req.log.warn(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            cacheKey,
+          },
+          "FIFA special page DB load failed",
+        );
+
+        if (cacheEnabled && r) {
+          const staleBody = await r.get(staleCacheKey);
+          if (staleBody) {
+            const etag = `W/"${crypto.createHash("sha1").update(staleBody).digest("hex")}"`;
+            requestFifaSpecialMarketRefreshForBody(staleBody);
+            reply.header("x-cache", "stale");
+            reply.header("x-cache-layer", "redis");
+            reply.header("x-cache-status", redisStatus);
+            reply.header("ETag", etag);
+            reply.header(
+              "Cache-Control",
+              `public, max-age=0, stale-while-revalidate=${staleTtl}`,
+            );
+            reply.header("Content-Type", "application/json; charset=utf-8");
+            if (req.headers["if-none-match"] === etag) {
+              reply.code(304);
+              return reply.send();
+            }
+            return reply.send(staleBody);
+          }
+        }
+
+        reply.code(503);
+        reply.header("Cache-Control", "no-store");
+        return reply.send({
+          error: "Special page temporarily unavailable",
+        });
+      };
+
       const inputs: FifaSpecialInputs = {
         limit: q.limit,
         offset: q.offset,
@@ -382,39 +444,52 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         sortDir,
         nowParam: new Date().toISOString(),
       };
-      const page = await fetchFifaSpecialPage(pool, inputs);
-      const fixtureKeys = Array.from(
-        new Set(
-          page.rows
-            .map((row) => {
-              const fifa = buildFifaMeta(row, { scope: "event" });
-              return (
-                fifa.matchFixtureKey ??
-                (fifa.groupKey.startsWith("match:") ? fifa.groupKey : null)
-              );
-            })
-            .filter((key): key is string => Boolean(key)),
-        ),
-      );
-      const fixtureRows = await fetchSportsFixturesByKeys(pool, {
-        sport: "soccer",
-        competitionKey: "fifa_world_cup",
-        season: "2026",
-        fixtureKeys,
-      });
-      const fixturesByFixtureKey = new Map(
-        Array.from(fixtureRows.entries()).map(([key, row]) => [
-          key,
-          formatSportsFixtureForApi(row),
-        ]),
-      );
-      const payload = buildPayload({
-        ...page,
-        limit: q.limit,
-        offset: q.offset,
-        view,
-        fixturesByFixtureKey,
-      });
+      let fixtureKeys: string[];
+      let fixturesByFixtureKey: Map<string, SportsFixtureApi>;
+      let payload: ReturnType<typeof buildPayload>;
+      try {
+        const page = await (
+          fifaSpecialRouteTestHooks.fetchFifaSpecialPage ??
+          fetchFifaSpecialPageDefault
+        )(pool, inputs);
+        fixtureKeys = Array.from(
+          new Set(
+            page.rows
+              .map((row) => {
+                const fifa = buildFifaMeta(row, { scope: "event" });
+                return (
+                  fifa.matchFixtureKey ??
+                  (fifa.groupKey.startsWith("match:") ? fifa.groupKey : null)
+                );
+              })
+              .filter((key): key is string => Boolean(key)),
+          ),
+        );
+        const fixtureRows = await (
+          fifaSpecialRouteTestHooks.fetchSportsFixturesByKeys ??
+          fetchSportsFixturesByKeysDefault
+        )(pool, {
+          sport: "soccer",
+          competitionKey: "fifa_world_cup",
+          season: "2026",
+          fixtureKeys,
+        });
+        fixturesByFixtureKey = new Map(
+          Array.from(fixtureRows.entries()).map(([key, row]) => [
+            key,
+            formatSportsFixtureForApi(row),
+          ]),
+        );
+        payload = buildPayload({
+          ...page,
+          limit: q.limit,
+          offset: q.offset,
+          view,
+          fixturesByFixtureKey,
+        });
+      } catch (error) {
+        return sendStaleFallback(error);
+      }
       const missingFixtureKeys = fixtureKeys.filter(
         (fixtureKey) => !fixturesByFixtureKey.has(fixtureKey),
       );
@@ -445,7 +520,10 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       const etag = `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
       requestFifaSpecialMarketRefresh(payload);
       if (cacheEnabled && r) {
-        await r.set(cacheKey, body, { EX: cacheTtl });
+        await Promise.all([
+          r.set(cacheKey, body, { EX: cacheTtl }),
+          r.set(staleCacheKey, body, { EX: staleTtl }),
+        ]);
       }
       applyCacheHeaders({ reply, hit: false, cacheStatus: redisStatus });
       reply.header("ETag", etag);

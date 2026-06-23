@@ -1208,6 +1208,30 @@ function buildAllSearchTermsMatchSql(
   `;
 }
 
+export function assertSqlParamPlaceholders(
+  sql: string,
+  params: PgParams,
+  label: string,
+): void {
+  if (env.nodeEnv.toLowerCase() === "production") return;
+
+  const placeholders = new Set<number>();
+  for (const match of sql.matchAll(/\$(\d+)\b/g)) {
+    placeholders.add(Number(match[1]));
+  }
+  const maxPlaceholder = placeholders.size ? Math.max(...placeholders) : 0;
+  const missing: number[] = [];
+  for (let i = 1; i <= params.length; i += 1) {
+    if (!placeholders.has(i)) missing.push(i);
+  }
+
+  if (maxPlaceholder !== params.length || missing.length > 0) {
+    throw new Error(
+      `${label} SQL param mismatch: placeholders=${maxPlaceholder}, params=${params.length}, missing=${missing.join(",") || "none"}`,
+    );
+  }
+}
+
 function appendWalletMarketSearchFilter(
   clauses: string[],
   params: PgParams,
@@ -2205,22 +2229,22 @@ async function loadTrackedWalletPositioning(input: {
 }) {
   const { client, query } = input;
   const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
-  const params: PgParams = [
-    query.walletActiveWithinHours,
-    query.minWalletExposureUsd,
-  ];
-  let idx = 3;
+  const params: PgParams = [];
+  const addParam = (value: PgParams[number]) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  const walletActiveWithinHoursParam = addParam(query.walletActiveWithinHours);
+  const minWalletExposureUsdParam = addParam(query.minWalletExposureUsd);
 
   const candidateClauses = [
     "tag.slug = 'whale'",
-    "wis.last_activity_at >= now() - ($1::integer * interval '1 hour')",
-    "coalesce(wis.exposure_usd, 0) >= $2::numeric",
+    `wis.last_activity_at >= now() - (${walletActiveWithinHoursParam}::integer * interval '1 hour')`,
+    `coalesce(wis.exposure_usd, 0) >= ${minWalletExposureUsdParam}::numeric`,
   ];
   if (query.mmMode !== "all") {
-    const whaleUsdIdx = idx++;
-    const whaleUsdSolanaIdx = idx++;
-    params.push(
-      refreshPolicy.effective.whaleUsd,
+    const whaleUsdParam = addParam(refreshPolicy.effective.whaleUsd);
+    const whaleUsdSolanaParam = addParam(
       refreshPolicy.effective.whaleUsdSolana,
     );
     const candidateMmSql = `
@@ -2228,8 +2252,8 @@ async function loadTrackedWalletPositioning(input: {
         coalesce(wis.hedge_ratio, 0) >= ${MM_HEDGE_RATIO_MIN}
         and coalesce(wis.two_sided_markets, 0) >= ${MM_TWO_SIDED_MARKETS_MIN}
         and coalesce(wis.exposure_usd, 0) >= case
-          when w.chain = 'solana' then $${whaleUsdSolanaIdx}::numeric
-          else $${whaleUsdIdx}::numeric
+          when w.chain = 'solana' then ${whaleUsdSolanaParam}::numeric
+          else ${whaleUsdParam}::numeric
         end
       )
     `;
@@ -2244,8 +2268,7 @@ async function loadTrackedWalletPositioning(input: {
   let candidateVenuesSql =
     "values ('polymarket'::text), ('limitless'::text), ('kalshi'::text)";
   if (venueFilter) {
-    candidateVenuesSql = `select $${idx++}::text`;
-    params.push(venueFilter);
+    candidateVenuesSql = `select ${addParam(venueFilter)}::text`;
   }
 
   const latestPositionClauses = [
@@ -2253,19 +2276,19 @@ async function loadTrackedWalletPositioning(input: {
     "coalesce(ws.shares, 0) > 0",
   ];
   if (query.outcomeSide) {
-    latestPositionClauses.push(`ws.outcome_side = $${idx++}::text`);
-    params.push(query.outcomeSide);
+    latestPositionClauses.push(
+      `ws.outcome_side = ${addParam(query.outcomeSide)}::text`,
+    );
   }
   latestPositionClauses.push(
-    `greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))) >= $${idx++}::numeric`,
+    `greatest(coalesce(ws.size_usd, 0), abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))) >= ${addParam(query.minPositionUsd)}::numeric`,
   );
-  params.push(query.minPositionUsd);
 
   const marketClauses: string[] = [];
-  idx = appendMarketReferenceFilters(
+  appendMarketReferenceFilters(
     marketClauses,
     params,
-    idx,
+    params.length + 1,
     {
       marketId: input.marketId,
       eventId: input.eventId,
@@ -2279,22 +2302,15 @@ async function loadTrackedWalletPositioning(input: {
     marketClauses.push("(ue.id is null or ue.status = 'ACTIVE')");
   }
   marketClauses.push("hp.token_id is null");
-  const addSearchParam = (value: PgParams[number]) => {
-    params.push(value);
-    return `$${params.length}`;
-  };
   const searchWindow = buildFeedSearchResultWindow({
     limit: query.limit,
     offset: query.offset,
   });
-  const searchEarlyFilterInputs: Pick<
-    FeedInputs,
-    "venues" | "category"
-  > = {};
+  const searchEarlyFilterInputs: Pick<FeedInputs, "venues" | "category"> = {};
   if (venueFilter) searchEarlyFilterInputs.venues = [venueFilter];
   if (query.category) searchEarlyFilterInputs.category = query.category;
   const searchFilter = buildFeedCandidateEventSearchFilter({
-    add: addSearchParam,
+    add: addParam,
     q: query.q,
     nowParam: "now()",
     matchLimit: searchWindow.matchLimit,
@@ -2302,9 +2318,10 @@ async function loadTrackedWalletPositioning(input: {
     earlyFilterInputs: searchEarlyFilterInputs,
   });
   const searchTerms = searchFilter.hasSearch ? extractSearchTerms(query.q) : [];
-  const searchTermsParam = searchFilter.hasSearch
-    ? addSearchParam(searchTerms)
-    : null;
+  const searchTermsParam =
+    searchFilter.hasSearch && searchTerms.length > 0
+      ? addParam(searchTerms)
+      : null;
   const marketSearchDocumentSql = `
     concat_ws(
       ' ',
@@ -2368,8 +2385,7 @@ async function loadTrackedWalletPositioning(input: {
   }
   const searchMembershipSql = searchFilter.hasSearch ? "1" : "0";
 
-  const { rows } = await client.query<WalletPositioningRow>(
-    `
+  const positioningSql = `
       with ${searchFilter.searchCte ? `${searchFilter.searchCte},` : ""}
       candidate_wallets as materialized (
         select
@@ -2531,7 +2547,14 @@ async function loadTrackedWalletPositioning(input: {
          or (lp.chain <> 'solana' and lower(hp.wallet_address) = lower(lp.address))
        )
       where ${marketClauses.join(" and ")}
-    `,
+    `;
+  assertSqlParamPlaceholders(
+    positioningSql,
+    params,
+    "loadTrackedWalletPositioning",
+  );
+  const { rows } = await client.query<WalletPositioningRow>(
+    positioningSql,
     params,
   );
 
@@ -2578,8 +2601,7 @@ async function loadTrackedWalletPositioning(input: {
         roi30d: nullableNumber(row.metrics_roi_30d),
         trades30d: row.metrics_trades_30d,
         winRate30d: nullableNumber(row.metrics_win_rate_30d),
-        resolvedEdgeSampleCount30d:
-          row.metrics_resolved_edge_sample_count_30d,
+        resolvedEdgeSampleCount30d: row.metrics_resolved_edge_sample_count_30d,
         resolvedActualWinRate30d: nullableNumber(
           row.metrics_resolved_actual_win_rate_30d,
         ),
@@ -2598,9 +2620,7 @@ async function loadTrackedWalletPositioning(input: {
         resolvedStakeWeightedEdge30d: nullableNumber(
           row.metrics_resolved_stake_weighted_edge_30d,
         ),
-        resolvedStakeUsd30d: nullableNumber(
-          row.metrics_resolved_stake_usd_30d,
-        ),
+        resolvedStakeUsd30d: nullableNumber(row.metrics_resolved_stake_usd_30d),
         inferredWinRate:
           row.inferred_total &&
           row.inferred_total > 0 &&
@@ -2713,19 +2733,11 @@ async function loadTrackedWalletPositioning(input: {
     );
     builder.searchMarketTier = Math.max(
       builder.searchMarketTier,
-      hasDirectMarketMatch
-        ? 3
-        : hasDirectEventMatch
-          ? 2
-          : searchMembershipTier,
+      hasDirectMarketMatch ? 3 : hasDirectEventMatch ? 2 : searchMembershipTier,
     );
     builder.searchEventTier = Math.max(
       builder.searchEventTier,
-      hasDirectEventMatch
-        ? 3
-        : hasDirectMarketMatch
-          ? 2
-          : searchMembershipTier,
+      hasDirectEventMatch ? 3 : hasDirectMarketMatch ? 2 : searchMembershipTier,
     );
 
     const sideAgg = builder.market.sideBreakdown[side];
@@ -3060,97 +3072,100 @@ async function loadTrackedWalletPositioning(input: {
   const sortedEvents = sortPositioningEvents(
     Array.from(eventBuilders.values())
       .map((builder) => {
-      const event = builder.event;
-      const marketCount = builder.markets.length;
-      const eventShape: PositioningEventAggregate["eventShape"] =
-        marketCount <= 1 ? "single_market" : "multi_market";
-      const contestedMarkets = builder.markets.filter((market) =>
-        isContestedPositioningMarket(market, query),
-      );
-      const topMinorityMarket = contestedMarkets.reduce<
-        PositioningMarketAggregate | null
-      >(
-        (top, market) =>
-          !top || market.minoritySideUsd > top.minoritySideUsd ? market : top,
-        null,
-      );
-      const directMatchedMarkets =
-        searchFilter.hasSearch && directSearchTierByMarketId
-          ? builder.markets.filter(
-              (market) =>
-                (directSearchTierByMarketId.get(market.marketId) ?? 0) > 0,
-            )
-          : [];
-      const previewSourceMarkets =
-        directMatchedMarkets.length > 0
-          ? directMatchedMarkets
-          : builder.markets;
-      const previewMarkets = isEventPositioningSort(query.sort)
-        ? sortPositioningMarkets(
-            previewSourceMarkets,
-            "balanced_disagreement",
-            directMatchedMarkets.length > 0
-              ? directSearchTierByMarketId
-              : searchTierByMarketId,
-          )
-        : sortPositioningMarkets(
-            previewSourceMarkets,
-            query.sort,
-            directMatchedMarkets.length > 0
-              ? directSearchTierByMarketId
-              : searchTierByMarketId,
+        const event = builder.event;
+        const marketCount = builder.markets.length;
+        const eventShape: PositioningEventAggregate["eventShape"] =
+          marketCount <= 1 ? "single_market" : "multi_market";
+        const contestedMarkets = builder.markets.filter((market) =>
+          isContestedPositioningMarket(market, query),
+        );
+        const topMinorityMarket =
+          contestedMarkets.reduce<PositioningMarketAggregate | null>(
+            (top, market) =>
+              !top || market.minoritySideUsd > top.minoritySideUsd
+                ? market
+                : top,
+            null,
           );
-      return {
-        ...event,
-        walletCount: builder.walletIds.size,
-        marketCount,
-        eventShape,
-        largestMarketPct:
-          event.trackedPositionUsd > 0 && event.largestMarketUsd != null
-            ? event.largestMarketUsd / event.trackedPositionUsd
-            : null,
-        contestedMarketCount: contestedMarkets.length,
-        eventDisagreementScore: contestedMarkets.reduce(
-          (total, market) => total + market.balancedDisagreementScore,
-          0,
-        ),
-        crossMarketWalletCount: Array.from(builder.walletMarketIds.values())
-          .filter((marketIds) => marketIds.size >= 2).length,
-        topMarketMinoritySideUsd: topMinorityMarket?.minoritySideUsd ?? null,
-        topMarketMinoritySideShare:
-          topMinorityMarket?.minoritySideShare ?? null,
-        weightedAvgWinRate30d: finalizeWeightedAverage(
-          builder.stats.weightedWinRateTotal,
-          builder.stats.weightedWinRateWeight,
-        ),
-        weightedAvgResolvedWinRateEdge30d: finalizeWeightedAverage(
-          builder.stats.weightedResolvedWinRateEdgeTotal,
-          builder.stats.weightedResolvedWinRateEdgeWeight,
-        ),
-        weightedAvgResolvedEdgeZScore30d: finalizeWeightedAverage(
-          builder.stats.weightedResolvedEdgeZScoreTotal,
-          builder.stats.weightedResolvedEdgeZScoreWeight,
-        ),
-        weightedAvgResolvedBrierScore30d: finalizeWeightedAverage(
-          builder.stats.weightedResolvedBrierScoreTotal,
-          builder.stats.weightedResolvedBrierScoreWeight,
-        ),
-        resolvedEdgeHolderCount: builder.stats.resolvedEdgeHolderIds.size,
-        weightedAvgRoi30d: finalizeWeightedAverage(
-          builder.stats.weightedRoiTotal,
-          builder.stats.weightedRoiWeight,
-        ),
-        topMarketsPreview: previewMarkets.slice(0, 3),
-      };
-    }).filter((event) => {
-      if (
-        searchFilter.hasSearch &&
-        (searchTierByEventId?.get(event.eventId) ?? 0) > 0
-      ) {
-        return true;
-      }
-      return eventPassesPositioningFilters(event, query);
-    }),
+        const directMatchedMarkets =
+          searchFilter.hasSearch && directSearchTierByMarketId
+            ? builder.markets.filter(
+                (market) =>
+                  (directSearchTierByMarketId.get(market.marketId) ?? 0) > 0,
+              )
+            : [];
+        const previewSourceMarkets =
+          directMatchedMarkets.length > 0
+            ? directMatchedMarkets
+            : builder.markets;
+        const previewMarkets = isEventPositioningSort(query.sort)
+          ? sortPositioningMarkets(
+              previewSourceMarkets,
+              "balanced_disagreement",
+              directMatchedMarkets.length > 0
+                ? directSearchTierByMarketId
+                : searchTierByMarketId,
+            )
+          : sortPositioningMarkets(
+              previewSourceMarkets,
+              query.sort,
+              directMatchedMarkets.length > 0
+                ? directSearchTierByMarketId
+                : searchTierByMarketId,
+            );
+        return {
+          ...event,
+          walletCount: builder.walletIds.size,
+          marketCount,
+          eventShape,
+          largestMarketPct:
+            event.trackedPositionUsd > 0 && event.largestMarketUsd != null
+              ? event.largestMarketUsd / event.trackedPositionUsd
+              : null,
+          contestedMarketCount: contestedMarkets.length,
+          eventDisagreementScore: contestedMarkets.reduce(
+            (total, market) => total + market.balancedDisagreementScore,
+            0,
+          ),
+          crossMarketWalletCount: Array.from(
+            builder.walletMarketIds.values(),
+          ).filter((marketIds) => marketIds.size >= 2).length,
+          topMarketMinoritySideUsd: topMinorityMarket?.minoritySideUsd ?? null,
+          topMarketMinoritySideShare:
+            topMinorityMarket?.minoritySideShare ?? null,
+          weightedAvgWinRate30d: finalizeWeightedAverage(
+            builder.stats.weightedWinRateTotal,
+            builder.stats.weightedWinRateWeight,
+          ),
+          weightedAvgResolvedWinRateEdge30d: finalizeWeightedAverage(
+            builder.stats.weightedResolvedWinRateEdgeTotal,
+            builder.stats.weightedResolvedWinRateEdgeWeight,
+          ),
+          weightedAvgResolvedEdgeZScore30d: finalizeWeightedAverage(
+            builder.stats.weightedResolvedEdgeZScoreTotal,
+            builder.stats.weightedResolvedEdgeZScoreWeight,
+          ),
+          weightedAvgResolvedBrierScore30d: finalizeWeightedAverage(
+            builder.stats.weightedResolvedBrierScoreTotal,
+            builder.stats.weightedResolvedBrierScoreWeight,
+          ),
+          resolvedEdgeHolderCount: builder.stats.resolvedEdgeHolderIds.size,
+          weightedAvgRoi30d: finalizeWeightedAverage(
+            builder.stats.weightedRoiTotal,
+            builder.stats.weightedRoiWeight,
+          ),
+          topMarketsPreview: previewMarkets.slice(0, 3),
+        };
+      })
+      .filter((event) => {
+        if (
+          searchFilter.hasSearch &&
+          (searchTierByEventId?.get(event.eventId) ?? 0) > 0
+        ) {
+          return true;
+        }
+        return eventPassesPositioningFilters(event, query);
+      }),
     query.sort,
     searchTierByEventId,
   );
@@ -3204,8 +3219,7 @@ async function loadTrackedWalletPositioning(input: {
       minAbsImbalancePct: query.minAbsImbalancePct ?? null,
       maxAbsImbalancePct: query.maxAbsImbalancePct ?? null,
       maxLargestHolderPct: query.maxLargestHolderPct ?? null,
-      minBalancedDisagreementScore:
-        query.minBalancedDisagreementScore ?? null,
+      minBalancedDisagreementScore: query.minBalancedDisagreementScore ?? null,
       contestedMinMinoritySideUsd: query.contestedMinMinoritySideUsd,
       contestedMinMinoritySideShare: query.contestedMinMinoritySideShare,
       contestedMinSideWallets: query.contestedMinSideWallets,
@@ -5957,9 +5971,7 @@ function serializeWalletMetrics(
         ? Number(metrics.resolved_edge_sample_count)
         : null,
     resolvedActualWinRate: nullableNumber(metrics.resolved_actual_win_rate),
-    resolvedExpectedWinRate: nullableNumber(
-      metrics.resolved_expected_win_rate,
-    ),
+    resolvedExpectedWinRate: nullableNumber(metrics.resolved_expected_win_rate),
     resolvedWinRateEdge: nullableNumber(metrics.resolved_win_rate_edge),
     resolvedEdgeZScore: nullableNumber(metrics.resolved_edge_z_score),
     resolvedBrierScore: nullableNumber(metrics.resolved_brier_score),

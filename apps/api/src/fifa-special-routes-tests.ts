@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { setFifaSpecialRouteTestHooksForTest } from "./routes/special.js";
 import {
   buildFifaSpecialSearchSqlForTest,
   fetchFifaSpecialPage,
@@ -90,7 +91,9 @@ async function insertEvent(event: SeedEvent): Promise<void> {
       event.title,
       event.seriesKey ?? null,
       event.seriesTitle ?? null,
-      (event.endDate ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)).toISOString(),
+      (
+        event.endDate ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
+      ).toISOString(),
       event.volumeTotal ?? 100,
       event.slug ?? null,
       JSON.stringify(event.metadata ?? {}),
@@ -121,7 +124,9 @@ async function insertMarket(market: SeedMarket): Promise<void> {
       market.venueMarketId,
       market.eventId,
       market.title,
-      (market.closeTime ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)).toISOString(),
+      (
+        market.closeTime ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
+      ).toISOString(),
       market.volumeTotal ?? 100,
       token("yes"),
       token("no"),
@@ -129,7 +134,9 @@ async function insertMarket(market: SeedMarket): Promise<void> {
       market.slug ?? null,
       JSON.stringify(
         market.metadata ??
-          (market.venue === "kalshi" ? { dflowNativeAcceptingOrders: true } : {}),
+          (market.venue === "kalshi"
+            ? { dflowNativeAcceptingOrders: true }
+            : {}),
       ),
     ],
   );
@@ -191,7 +198,11 @@ async function main() {
       title: `2026 Men's World Cup Winner ${suffix}`,
       seriesKey: "KXMENWORLDCUP",
       seriesTitle: "Men's World Cup winner",
-      metadata: { competition: "FIFA", seriesCategory: "Sports", seriesTags: ["Soccer"] },
+      metadata: {
+        competition: "FIFA",
+        seriesCategory: "Sports",
+        seriesTags: ["Soccer"],
+      },
       volumeTotal: 700,
     },
     {
@@ -804,8 +815,9 @@ async function main() {
         nowParam: new Date().toISOString(),
       });
       assert.equal(
-        capturedSql.filter((sql) => /search_candidate_markets as materialized/.test(sql))
-          .length,
+        capturedSql.filter((sql) =>
+          /search_candidate_markets as materialized/.test(sql),
+        ).length,
         1,
         "search should build bounded candidates once",
       );
@@ -831,7 +843,10 @@ async function main() {
       const candidateSql = capturedSql.find((sql) =>
         /candidate_keys as materialized/.test(sql),
       );
-      assert.ok(candidateSql, "regular event feed should build runtime candidates");
+      assert.ok(
+        candidateSql,
+        "regular event feed should build runtime candidates",
+      );
       assert.match(candidateSql, /union all/);
       assert.match(candidateSql, /e\.venue = 'polymarket'/);
       assert.match(candidateSql, /e\.venue = 'kalshi'/);
@@ -846,6 +861,77 @@ async function main() {
         /candidate_facets as materialized/.test(sql),
       );
       assert.equal(facetSql.length, 0);
+    }
+
+    {
+      const previousTtl = env.feedTtlSec;
+      env.feedTtlSec = 30;
+      const staleBody = JSON.stringify({
+        ok: true,
+        data: [{ eventId: "stale-event" }],
+      });
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        getRedisStatus: async () =>
+          ({
+            status: "ready",
+            redis: {
+              get: async (key: string) =>
+                key.endsWith(":stale") ? staleBody : null,
+            },
+          }) as never,
+        fetchFifaSpecialPage: async () => {
+          throw new Error("forced page load failure");
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/special/fifa-2026?limit=1",
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.headers["x-cache"], "stale");
+        assert.equal(response.headers["x-cache-layer"], "redis");
+        assert.equal(response.headers["x-cache-status"], "ready");
+        assert.match(
+          String(response.headers["content-type"]),
+          /application\/json/,
+        );
+        assert.equal(response.body, staleBody);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousTtl;
+      }
+    }
+
+    {
+      const previousTtl = env.feedTtlSec;
+      env.feedTtlSec = 30;
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        getRedisStatus: async () =>
+          ({
+            status: "ready",
+            redis: {
+              get: async () => null,
+            },
+          }) as never,
+        fetchFifaSpecialPage: async () => {
+          throw new Error("forced page load failure");
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/special/fifa-2026?limit=1",
+        });
+        assert.equal(response.statusCode, 503, response.body);
+        assert.equal(response.headers["cache-control"], "no-store");
+        assert.deepEqual(response.json(), {
+          error: "Special page temporarily unavailable",
+        });
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousTtl;
+      }
     }
 
     {
@@ -867,7 +953,11 @@ async function main() {
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
         ok: boolean;
-        data: Array<{ eventId: string; fifa: { section: string }; markets: Array<{ fifa: { section: string } }> }>;
+        data: Array<{
+          eventId: string;
+          fifa: { section: string };
+          markets: Array<{ fifa: { section: string } }>;
+        }>;
       }>();
       assert.equal(payload.ok, true);
       const ids = payload.data.map((event) => event.eventId);
@@ -881,9 +971,18 @@ async function main() {
       assert.ok(ids.includes(events[23].id));
       assert.ok(ids.includes(events[24].id));
       assert.ok(ids.includes(events[26].id));
-      assert.ok(!ids.includes(events[3].id), "fifa-friendly should be excluded");
-      assert.ok(!ids.includes(events[8].id), "generic esports World Cup should be excluded");
-      assert.ok(!ids.includes(events[25].id), "Club World Cup should be excluded");
+      assert.ok(
+        !ids.includes(events[3].id),
+        "fifa-friendly should be excluded",
+      );
+      assert.ok(
+        !ids.includes(events[8].id),
+        "generic esports World Cup should be excluded",
+      );
+      assert.ok(
+        !ids.includes(events[25].id),
+        "Club World Cup should be excluded",
+      );
     }
 
     {
@@ -934,7 +1033,10 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; markets: Array<{ marketTitle: string | null }> }>;
+        data: Array<{
+          eventId: string;
+          markets: Array<{ marketTitle: string | null }>;
+        }>;
       }>();
       const winnerMarkets = payload.data
         .filter((event) => event.eventId === events[2].id)
@@ -949,10 +1051,18 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; markets: Array<{ marketTitle: string | null }> }>;
+        data: Array<{
+          eventId: string;
+          markets: Array<{ marketTitle: string | null }>;
+        }>;
       }>();
-      const winnerEvent = payload.data.find((event) => event.eventId === events[2].id);
-      assert.ok(winnerEvent, "market-only query should still include the parent event");
+      const winnerEvent = payload.data.find(
+        (event) => event.eventId === events[2].id,
+      );
+      assert.ok(
+        winnerEvent,
+        "market-only query should still include the parent event",
+      );
       assert.deepEqual(
         winnerEvent.markets.map((market) => market.marketTitle),
         ["Paraguay"],
@@ -966,7 +1076,10 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; markets: Array<{ marketTitle: string | null }> }>;
+        data: Array<{
+          eventId: string;
+          markets: Array<{ marketTitle: string | null }>;
+        }>;
       }>();
       const matchMarkets = payload.data
         .filter((event) => event.eventId === events[0].id)
@@ -1018,7 +1131,12 @@ async function main() {
       const payload = response.json<{
         data: Array<{
           eventId: string;
-          fifa: { section: string; sourceRule: string; groupCode: string | null; groupMarketType: string | null };
+          fifa: {
+            section: string;
+            sourceRule: string;
+            groupCode: string | null;
+            groupMarketType: string | null;
+          };
           markets: Array<{
             fifa: {
               section: string;
@@ -1030,26 +1148,66 @@ async function main() {
         }>;
       }>();
       const ids = payload.data.map((event) => event.eventId);
-      assert.ok(ids.includes(events[7].id), "exact Limitless FIFA text should remain included");
-      assert.ok(ids.includes(events[21].id), "Limitless Golden Boot World Cup row should be included");
-      assert.ok(ids.includes(events[22].id), "Limitless semifinal World Cup row should be included");
-      assert.ok(ids.includes(events[23].id), "Limitless group-scoring World Cup row should be included");
-      assert.ok(ids.includes(events[24].id), "Limitless captain World Cup row should be included");
-      assert.ok(ids.includes(events[26].id), "Limitless player-special World Cup row should be included");
-      assert.ok(!ids.includes(events[8].id), "Limitless esports World Cup should stay excluded");
-      assert.ok(!ids.includes(events[25].id), "Limitless Club World Cup should stay excluded");
+      assert.ok(
+        ids.includes(events[7].id),
+        "exact Limitless FIFA text should remain included",
+      );
+      assert.ok(
+        ids.includes(events[21].id),
+        "Limitless Golden Boot World Cup row should be included",
+      );
+      assert.ok(
+        ids.includes(events[22].id),
+        "Limitless semifinal World Cup row should be included",
+      );
+      assert.ok(
+        ids.includes(events[23].id),
+        "Limitless group-scoring World Cup row should be included",
+      );
+      assert.ok(
+        ids.includes(events[24].id),
+        "Limitless captain World Cup row should be included",
+      );
+      assert.ok(
+        ids.includes(events[26].id),
+        "Limitless player-special World Cup row should be included",
+      );
+      assert.ok(
+        !ids.includes(events[8].id),
+        "Limitless esports World Cup should stay excluded",
+      );
+      assert.ok(
+        !ids.includes(events[25].id),
+        "Limitless Club World Cup should stay excluded",
+      );
 
-      const goldenBoot = payload.data.find((event) => event.eventId === events[21].id);
-      const semifinals = payload.data.find((event) => event.eventId === events[22].id);
-      const groupScoring = payload.data.find((event) => event.eventId === events[23].id);
-      const captain = payload.data.find((event) => event.eventId === events[24].id);
-      const playerSpecial = payload.data.find((event) => event.eventId === events[26].id);
+      const goldenBoot = payload.data.find(
+        (event) => event.eventId === events[21].id,
+      );
+      const semifinals = payload.data.find(
+        (event) => event.eventId === events[22].id,
+      );
+      const groupScoring = payload.data.find(
+        (event) => event.eventId === events[23].id,
+      );
+      const captain = payload.data.find(
+        (event) => event.eventId === events[24].id,
+      );
+      const playerSpecial = payload.data.find(
+        (event) => event.eventId === events[26].id,
+      );
       assert.equal(goldenBoot?.markets[0]?.fifa.section, "player_award");
-      assert.equal(goldenBoot?.markets[0]?.fifa.sourceRule, "limitless_world_cup_pattern");
+      assert.equal(
+        goldenBoot?.markets[0]?.fifa.sourceRule,
+        "limitless_world_cup_pattern",
+      );
       assert.equal(semifinals?.markets[0]?.fifa.section, "stage");
       assert.equal(groupScoring?.markets[0]?.fifa.section, "group");
       assert.equal(groupScoring?.markets[0]?.fifa.groupCode, "D");
-      assert.equal(groupScoring?.markets[0]?.fifa.groupMarketType, "highest_scoring_team");
+      assert.equal(
+        groupScoring?.markets[0]?.fifa.groupMarketType,
+        "highest_scoring_team",
+      );
       assert.equal(captain?.markets[0]?.fifa.section, "special");
       assert.equal(playerSpecial?.markets[0]?.fifa.section, "special");
     }
@@ -1064,7 +1222,9 @@ async function main() {
         data: Array<{
           eventId: string;
           fifa: { section: string };
-          markets: Array<{ fifa: { teamName: string | null; teamGroupCode: string | null } }>;
+          markets: Array<{
+            fifa: { teamName: string | null; teamGroupCode: string | null };
+          }>;
         }>;
       }>();
       assert.deepEqual(
@@ -1105,14 +1265,27 @@ async function main() {
           }>;
         }>;
       }>();
-      const groupChampion = payload.data.find((event) => event.eventId === events[12].id);
-      const kalshiWinner = payload.data.find((event) => event.eventId === events[13].id);
-      const kalshiQualify = payload.data.find((event) => event.eventId === events[14].id);
-      const groupLast = payload.data.find((event) => event.eventId === events[15].id);
-      const groupHighestScoring = payload.data.find((event) => event.eventId === events[16].id);
+      const groupChampion = payload.data.find(
+        (event) => event.eventId === events[12].id,
+      );
+      const kalshiWinner = payload.data.find(
+        (event) => event.eventId === events[13].id,
+      );
+      const kalshiQualify = payload.data.find(
+        (event) => event.eventId === events[14].id,
+      );
+      const groupLast = payload.data.find(
+        (event) => event.eventId === events[15].id,
+      );
+      const groupHighestScoring = payload.data.find(
+        (event) => event.eventId === events[16].id,
+      );
       assert.equal(groupChampion?.fifa.groupMarketType, "champion_group");
       assert.equal(groupChampion?.fifa.matchFixtureKey, null);
-      assert.equal(groupChampion?.markets[0]?.fifa.groupKey, "group:a:champion_group");
+      assert.equal(
+        groupChampion?.markets[0]?.fifa.groupKey,
+        "group:a:champion_group",
+      );
       assert.equal(groupChampion?.markets[0]?.fifa.groupCode, "A");
       assert.deepEqual(groupChampion?.markets[0]?.fifa.groupTeams, [
         "Mexico",
@@ -1121,7 +1294,10 @@ async function main() {
         "Czechia",
       ]);
       assert.equal(groupChampion?.markets[0]?.internalMarketId, markets[12].id);
-      assert.equal(groupChampion?.markets[0]?.venueMarketId, markets[12].venueMarketId);
+      assert.equal(
+        groupChampion?.markets[0]?.venueMarketId,
+        markets[12].venueMarketId,
+      );
       assert.equal(kalshiWinner?.fifa.groupCode, "A");
       assert.equal(kalshiWinner?.markets[0]?.fifa.groupKey, "group:a:winner");
       assert.equal(kalshiWinner?.markets[0]?.fifa.groupMarketType, "winner");
@@ -1133,7 +1309,10 @@ async function main() {
       assert.equal(kalshiQualify?.markets[0]?.fifa.teamGroupCode, "A");
       assert.equal(groupLast?.markets[0]?.fifa.groupKey, "group:a:last_place");
       assert.equal(groupLast?.markets[0]?.fifa.groupMarketType, "last_place");
-      assert.equal(groupHighestScoring?.markets[0]?.fifa.groupKey, "group:a:highest_scoring_team");
+      assert.equal(
+        groupHighestScoring?.markets[0]?.fifa.groupKey,
+        "group:a:highest_scoring_team",
+      );
       assert.equal(
         groupHighestScoring?.markets[0]?.fifa.groupMarketType,
         "highest_scoring_team",
@@ -1147,7 +1326,9 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        facets: { sections: Array<{ section: string; events: number; markets: number }> };
+        facets: {
+          sections: Array<{ section: string; events: number; markets: number }>;
+        };
         data: Array<{ markets: Array<{ fifa: { groupCode: string | null } }> }>;
       }>();
       assert.ok(payload.data.length >= 5);
@@ -1186,7 +1367,9 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ markets: Array<{ fifa: { teamGroupCode: string | null } }> }>;
+        data: Array<{
+          markets: Array<{ fifa: { teamGroupCode: string | null } }>;
+        }>;
       }>();
       assert.ok(payload.data.length >= 2);
       assert.ok(
@@ -1235,13 +1418,28 @@ async function main() {
       assert.ok(ids.includes(events[9].id));
       assert.ok(ids.includes(events[10].id));
       assert.ok(ids.includes(events[11].id));
-      assert.ok(payload.data.some((event) => event.fifa.matchKey?.includes("paraguay")));
-      const polymarketMatch = payload.data.find((event) => event.eventId === events[0].id);
-      const kalshiTotal = payload.data.find((event) => event.eventId === events[5].id);
-      const exactScore = payload.data.find((event) => event.eventId === events[9].id);
-      const totalCorners = payload.data.find((event) => event.eventId === events[10].id);
-      const playerProps = payload.data.find((event) => event.eventId === events[11].id);
-      assert.equal(polymarketMatch?.fifa.groupKey, "match:2026-06-30:united-states:paraguay");
+      assert.ok(
+        payload.data.some((event) => event.fifa.matchKey?.includes("paraguay")),
+      );
+      const polymarketMatch = payload.data.find(
+        (event) => event.eventId === events[0].id,
+      );
+      const kalshiTotal = payload.data.find(
+        (event) => event.eventId === events[5].id,
+      );
+      const exactScore = payload.data.find(
+        (event) => event.eventId === events[9].id,
+      );
+      const totalCorners = payload.data.find(
+        (event) => event.eventId === events[10].id,
+      );
+      const playerProps = payload.data.find(
+        (event) => event.eventId === events[11].id,
+      );
+      assert.equal(
+        polymarketMatch?.fifa.groupKey,
+        "match:2026-06-30:united-states:paraguay",
+      );
       assert.equal(kalshiTotal?.fifa.groupKey, polymarketMatch?.fifa.groupKey);
       assert.equal(kalshiTotal?.markets[0]?.fifa.subtype, "total");
       assert.equal(
@@ -1259,7 +1457,9 @@ async function main() {
         assert.equal(event?.fifa.fixture?.providerFixtureId, fixtureProviderId);
         assert.equal(event?.fifa.fixture?.localDate, "2026-06-30");
         assert.ok(
-          event?.markets.every((market) => market.fifa.matchFixtureKey === fixtureKey),
+          event?.markets.every(
+            (market) => market.fifa.matchFixtureKey === fixtureKey,
+          ),
         );
       }
       assert.equal(polymarketMatch?.fifa.fixture?.homeTeam, "USA");
@@ -1280,10 +1480,17 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; markets: Array<{ fifa: { subtype: string | null } }> }>;
+        data: Array<{
+          eventId: string;
+          markets: Array<{ fifa: { subtype: string | null } }>;
+        }>;
       }>();
-      const spread = payload.data.find((event) => event.eventId === events[17].id);
-      const firstHalf = payload.data.find((event) => event.eventId === events[18].id);
+      const spread = payload.data.find(
+        (event) => event.eventId === events[17].id,
+      );
+      const firstHalf = payload.data.find(
+        (event) => event.eventId === events[18].id,
+      );
       assert.equal(spread?.markets[0]?.fifa.subtype, "spread");
       assert.equal(firstHalf?.markets[0]?.fifa.subtype, "first_half");
     }
@@ -1295,9 +1502,16 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; markets: Array<{ fifa: { section: string | null; subtype: string | null } }> }>;
+        data: Array<{
+          eventId: string;
+          markets: Array<{
+            fifa: { section: string | null; subtype: string | null };
+          }>;
+        }>;
       }>();
-      const award = payload.data.find((event) => event.eventId === events[19].id);
+      const award = payload.data.find(
+        (event) => event.eventId === events[19].id,
+      );
       assert.equal(award?.markets[0]?.fifa.section, "player_award");
       assert.equal(award?.markets[0]?.fifa.subtype, "player_award_entity");
     }
@@ -1309,7 +1523,12 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; markets: Array<{ fifa: { subtype: string | null; entity: string | null } }> }>;
+        data: Array<{
+          eventId: string;
+          markets: Array<{
+            fifa: { subtype: string | null; entity: string | null };
+          }>;
+        }>;
       }>();
       const tie = payload.data.find((event) => event.eventId === events[20].id);
       assert.equal(tie?.markets[0]?.fifa.subtype, "draw");
@@ -1323,9 +1542,14 @@ async function main() {
       });
       assert.equal(response.statusCode, 200, response.body);
       const payload = response.json<{
-        data: Array<{ eventId: string; fifa: { matchFixtureKey: string | null; matchDate: string | null } }>;
+        data: Array<{
+          eventId: string;
+          fifa: { matchFixtureKey: string | null; matchDate: string | null };
+        }>;
       }>();
-      const special = payload.data.find((event) => event.eventId === events[6].id);
+      const special = payload.data.find(
+        (event) => event.eventId === events[6].id,
+      );
       assert.equal(special?.fifa.matchFixtureKey, null);
       assert.equal(special?.fifa.matchDate, null);
     }
@@ -1356,7 +1580,9 @@ async function main() {
       assert.deepEqual(new Set(sections), new Set(["match_prop"]));
       assert.ok(
         payload.data.every((event) =>
-          event.markets.every((market) => market.fifa.matchFixtureKey === fixtureKey),
+          event.markets.every(
+            (market) => market.fifa.matchFixtureKey === fixtureKey,
+          ),
         ),
       );
       assert.ok(
@@ -1418,7 +1644,10 @@ async function main() {
           } | null;
         };
       }>();
-      assert.equal(payload.event.sportsFixture?.providerFixtureId, fixtureProviderId);
+      assert.equal(
+        payload.event.sportsFixture?.providerFixtureId,
+        fixtureProviderId,
+      );
       assert.equal(payload.event.sportsFixture?.homeTeam, "USA");
       assert.equal(payload.event.sportsFixture?.awayTeam, "Paraguay");
       assert.equal(payload.event.sportsFixture?.localDate, "2026-06-30");
@@ -1438,7 +1667,10 @@ async function main() {
           } | null;
         };
       }>();
-      assert.equal(payload.event.sportsFixture?.providerFixtureId, fixtureProviderId);
+      assert.equal(
+        payload.event.sportsFixture?.providerFixtureId,
+        fixtureProviderId,
+      );
       assert.equal(payload.event.sportsFixture?.localDate, "2026-06-30");
     }
   } finally {
@@ -1448,14 +1680,16 @@ async function main() {
       [fixtureProviderId],
     );
     if (marketIds.length) {
-      await pool.query("delete from unified_markets where id = any($1::text[])", [
-        marketIds,
-      ]);
+      await pool.query(
+        "delete from unified_markets where id = any($1::text[])",
+        [marketIds],
+      );
     }
     if (eventIds.length) {
-      await pool.query("delete from unified_events where id = any($1::text[])", [
-        eventIds,
-      ]);
+      await pool.query(
+        "delete from unified_events where id = any($1::text[])",
+        [eventIds],
+      );
     }
     await app.close();
   }

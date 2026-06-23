@@ -163,6 +163,25 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
     return null;
   };
 
+  const filterKnownTokenIds = async (tokenIds: string[]): Promise<string[]> => {
+    if (!tokenIds.length) return [];
+
+    const { rows } = await pool.query<{ token_id: string }>(
+      `
+        select token_id
+        from unified_tokens
+        where token_id = any($1::text[])
+        union
+        select token_id
+        from unified_market_tokens
+        where token_id = any($1::text[])
+      `,
+      [tokenIds],
+    );
+    const known = new Set(rows.map((row) => row.token_id));
+    return tokenIds.filter((tokenId) => known.has(tokenId));
+  };
+
   z.get(
     "/trades",
     {
@@ -208,22 +227,22 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      const tokenIds =
-        query.tokenIds ??
-        (await resolveTokenIdsForFilter(query.marketId, query.eventId)) ??
-        [];
+      if (query.tokenIds && query.tokenIds.length > MAX_TOKEN_IDS) {
+        return {
+          error: "tokenIds length exceeded",
+          message: `Max ${MAX_TOKEN_IDS} tokenIds allowed per request.`,
+        };
+      }
+
+      const tokenIds = query.tokenIds
+        ? await filterKnownTokenIds(query.tokenIds)
+        : ((await resolveTokenIdsForFilter(query.marketId, query.eventId)) ??
+          []);
 
       if (tokenIds.length === 0) {
         return {
           trades: [],
           pagination: { total: 0, limit: query.limit, offset: query.offset },
-        };
-      }
-
-      if (tokenIds.length > MAX_TOKEN_IDS) {
-        return {
-          error: "tokenIds length exceeded",
-          message: `Max ${MAX_TOKEN_IDS} tokenIds allowed per request.`,
         };
       }
 

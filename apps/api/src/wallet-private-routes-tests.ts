@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { AuthService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
+import { assertSqlParamPlaceholders } from "./routes/wallet-intel.js";
 
 type TestContext = {
   userId: string;
@@ -435,9 +436,10 @@ async function cleanup(context: TestContext): Promise<void> {
         "delete from unified_token_top_latest where token_id = any($1::text[])",
         [context.createdTokenIds],
       );
-      await pool.query("delete from unified_tokens where token_id = any($1::text[])", [
-        context.createdTokenIds,
-      ]);
+      await pool.query(
+        "delete from unified_tokens where token_id = any($1::text[])",
+        [context.createdTokenIds],
+      );
     }
     await pool.query("delete from unified_markets where id = any($1::text[])", [
       context.createdMarketIds,
@@ -1078,7 +1080,12 @@ async function main() {
             counts_opened = excluded.counts_opened,
             last_occurred_at = excluded.last_occurred_at
         `,
-        [matchingWalletId, matching.marketId, unrelated.marketId, otherWalletId],
+        [
+          matchingWalletId,
+          matching.marketId,
+          unrelated.marketId,
+          otherWalletId,
+        ],
       );
 
       for (const url of [
@@ -1312,7 +1319,10 @@ async function main() {
       assert.equal(marketActivityBody.marketId, matching.marketId);
       assert.equal(marketActivityBody.items.length, 1);
       assert.equal(marketActivityBody.items[0]?.marketId, matching.marketId);
-      assert.equal(marketActivityBody.items[0]?.positionNow?.positionShares, 20);
+      assert.equal(
+        marketActivityBody.items[0]?.positionNow?.positionShares,
+        20,
+      );
 
       const yesWalletId = await createWhaleFixtureWallet(context, {
         address: randomEvmAddress(),
@@ -1594,8 +1604,7 @@ async function main() {
         2.8,
       );
       assert.equal(
-        edgeSortedHoldersBody.market?.sideBreakdown.YES.topHolders[0]
-          ?.walletId,
+        edgeSortedHoldersBody.market?.sideBreakdown.YES.topHolders[0]?.walletId,
         yesWalletId,
       );
       assert.equal(
@@ -1688,7 +1697,10 @@ async function main() {
         items: Array<{ marketId: string; trackedPositionUsd: number }>;
       };
       assert.equal(noEdgeMarketSortBody.ok, true);
-      assert.equal(noEdgeMarketSortBody.items[0]?.marketId, noEdgeMarket.marketId);
+      assert.equal(
+        noEdgeMarketSortBody.items[0]?.marketId,
+        noEdgeMarket.marketId,
+      );
       assert.equal(noEdgeMarketSortBody.items[0]?.trackedPositionUsd, 1_000);
 
       const eventPositioningResponse = await app.inject({
@@ -1752,6 +1764,24 @@ async function main() {
         matching.eventId,
       );
 
+      assert.throws(
+        () => assertSqlParamPlaceholders("select $1::text", ["a", "b"], "test"),
+        /SQL param mismatch/,
+      );
+
+      const oneLetterEventPositioningResponse = await app.inject({
+        method: "GET",
+        url:
+          "/wallets/positioning/events?q=u&marketStatus=ACTIVE&acceptingOrders=true" +
+          "&walletActiveWithinHours=24&minWalletExposureUsd=100&minPositionUsd=100" +
+          "&contestedMinMinoritySideUsd=10000&contestedMinMinoritySideShare=0.05" +
+          "&contestedMinSideWallets=2&contestedMaxLargestHolderPct=0.85" +
+          "&minContestedMarketCount=1&mmMode=exclude&sort=event_disagreement_score" +
+          "&includeHolders=true&holdersLimit=2&holderSort=position_usd" +
+          "&includePositionPnl=true&shape=both&limit=5&offset=0",
+      });
+      assert.equal(oneLetterEventPositioningResponse.statusCode, 200);
+
       const childSearchCategory = `${category}-child-search`;
       const childSearchEvent = await createWalletMarketFixture(context, {
         suffix: `${suffix}-child-search`,
@@ -1767,7 +1797,10 @@ async function main() {
           set title = $1
           where id = $2
         `,
-        ["Republican presidential nominee test event", childSearchEvent.eventId],
+        [
+          "Republican presidential nominee test event",
+          childSearchEvent.eventId,
+        ],
       );
       await pool.query(
         `
@@ -1950,11 +1983,10 @@ async function main() {
         url: `/wallets/positioning/markets?category=${encodeURIComponent(category)}&minWallets=1&sort=balanced_disagreement&minMinoritySideUsd=100&minMinoritySideShare=0.05&minYesWallets=1&minNoWallets=1&limit=10`,
       });
       assert.equal(filteredDisagreementResponse.statusCode, 200);
-      const filteredDisagreementBody =
-        filteredDisagreementResponse.json() as {
-          ok: boolean;
-          items: Array<{ marketId: string }>;
-        };
+      const filteredDisagreementBody = filteredDisagreementResponse.json() as {
+        ok: boolean;
+        items: Array<{ marketId: string }>;
+      };
       assert.equal(filteredDisagreementBody.ok, true);
       assert.equal(
         filteredDisagreementBody.items.some(
@@ -1974,25 +2006,29 @@ async function main() {
         url: `/events/${encodeURIComponent(matching.eventId)}/wallet-positioning?minWallets=1&sort=event_disagreement_score&contestedMinMinoritySideUsd=100&contestedMinMinoritySideShare=0.05&contestedMinSideWallets=1&contestedMaxLargestHolderPct=0.9&limit=10`,
       });
       assert.equal(contestedEventDetailResponse.statusCode, 200);
-      const contestedEventDetailBody =
-        contestedEventDetailResponse.json() as {
-          ok: boolean;
-          event: {
-            eventShape: string;
-            contestedMarketCount: number;
-            eventDisagreementScore: number;
-            crossMarketWalletCount: number;
-            topMarketMinoritySideUsd: number | null;
-            topMarketMinoritySideShare: number | null;
-          } | null;
-          items: Array<{ marketId: string }>;
-        };
+      const contestedEventDetailBody = contestedEventDetailResponse.json() as {
+        ok: boolean;
+        event: {
+          eventShape: string;
+          contestedMarketCount: number;
+          eventDisagreementScore: number;
+          crossMarketWalletCount: number;
+          topMarketMinoritySideUsd: number | null;
+          topMarketMinoritySideShare: number | null;
+        } | null;
+        items: Array<{ marketId: string }>;
+      };
       assert.equal(contestedEventDetailBody.ok, true);
       assert.equal(contestedEventDetailBody.event?.eventShape, "multi_market");
       assert.equal(contestedEventDetailBody.event?.contestedMarketCount, 1);
-      assert.ok((contestedEventDetailBody.event?.eventDisagreementScore ?? 0) > 0);
+      assert.ok(
+        (contestedEventDetailBody.event?.eventDisagreementScore ?? 0) > 0,
+      );
       assert.equal(contestedEventDetailBody.event?.crossMarketWalletCount, 2);
-      assert.equal(contestedEventDetailBody.event?.topMarketMinoritySideUsd, 250);
+      assert.equal(
+        contestedEventDetailBody.event?.topMarketMinoritySideUsd,
+        250,
+      );
       assert.ok(
         (contestedEventDetailBody.event?.topMarketMinoritySideShare ?? 0) >
           0.45,
@@ -2007,24 +2043,29 @@ async function main() {
         url: `/wallets/positioning/events?category=${encodeURIComponent(category)}&minWallets=1&eventShape=multi_market&minContestedMarketCount=1&minCrossMarketWallets=2&sort=event_disagreement_score&contestedMinMinoritySideUsd=100&contestedMinMinoritySideShare=0.05&contestedMinSideWallets=1&contestedMaxLargestHolderPct=0.9&limit=5`,
       });
       assert.equal(contestedEventRollupResponse.statusCode, 200);
-      const contestedEventRollupBody =
-        contestedEventRollupResponse.json() as {
-          ok: boolean;
-          items: Array<{
-            eventId: string;
-            eventShape: string;
-            contestedMarketCount: number;
-            crossMarketWalletCount: number;
-          }>;
-        };
+      const contestedEventRollupBody = contestedEventRollupResponse.json() as {
+        ok: boolean;
+        items: Array<{
+          eventId: string;
+          eventShape: string;
+          contestedMarketCount: number;
+          crossMarketWalletCount: number;
+        }>;
+      };
       assert.equal(contestedEventRollupBody.ok, true);
-      assert.equal(contestedEventRollupBody.items[0]?.eventId, matching.eventId);
+      assert.equal(
+        contestedEventRollupBody.items[0]?.eventId,
+        matching.eventId,
+      );
       assert.equal(
         contestedEventRollupBody.items[0]?.eventShape,
         "multi_market",
       );
       assert.equal(contestedEventRollupBody.items[0]?.contestedMarketCount, 1);
-      assert.equal(contestedEventRollupBody.items[0]?.crossMarketWalletCount, 2);
+      assert.equal(
+        contestedEventRollupBody.items[0]?.crossMarketWalletCount,
+        2,
+      );
 
       const positionResponse = await app.inject({
         method: "GET",
