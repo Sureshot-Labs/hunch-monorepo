@@ -10,6 +10,7 @@ import {
   buildFifaSpecialSearchSqlForTest,
   fetchFifaSpecialPage,
   type FifaSpecialInputs,
+  type FifaSpecialRow,
 } from "./services/fifa-special.js";
 
 type Venue = "polymarket" | "kalshi" | "limitless";
@@ -53,6 +54,190 @@ function query(params: Record<string, string | number | undefined>): string {
     if (value != null) search.set(key, String(value));
   }
   return search.toString();
+}
+
+const liveFixtureKey = "match:2026-06-23:portugal:uzbekistan";
+const liveFixtureKickoff = "2026-06-23T17:00:00.000Z";
+const liveFixtureNow = new Date("2026-06-23T17:55:00.000Z");
+
+function fixtureRow(input: {
+  status: string;
+  fetchedAt: string;
+  homeScore?: number | null;
+  awayScore?: number | null;
+}) {
+  return {
+    sport: "soccer",
+    competition_key: "fifa_world_cup",
+    season: "2026",
+    fixture_key: liveFixtureKey,
+    provider: "thesportsdb",
+    provider_fixture_id: "fixture-live-test",
+    status: input.status,
+    kickoff_utc: liveFixtureKickoff,
+    local_date: "2026-06-23",
+    local_time: "17:00:00",
+    stage: "Group Stage",
+    group_name: "A",
+    home_team_key: "portugal",
+    home_team_name: "Portugal",
+    away_team_key: "uzbekistan",
+    away_team_name: "Uzbekistan",
+    home_score: input.homeScore ?? null,
+    away_score: input.awayScore ?? null,
+    venue: "Test Stadium",
+    city: "Test City",
+    country: "United States",
+    home_badge_url: null,
+    away_badge_url: null,
+    fetched_at: input.fetchedAt,
+  };
+}
+
+function fixtureApi(input: {
+  status: string;
+  fetchedAt: string;
+  homeScore?: number | null;
+  awayScore?: number | null;
+}) {
+  return {
+    provider: "thesportsdb",
+    providerFixtureId: "fixture-live-test",
+    status: input.status,
+    kickoffUtc: liveFixtureKickoff,
+    localDate: "2026-06-23",
+    localTime: "17:00:00",
+    stage: "Group Stage",
+    groupName: "A",
+    homeTeam: "Portugal",
+    awayTeam: "Uzbekistan",
+    homeScore: input.homeScore ?? null,
+    awayScore: input.awayScore ?? null,
+    venue: "Test Stadium",
+    city: "Test City",
+    country: "United States",
+    homeBadgeUrl: null,
+    awayBadgeUrl: null,
+    fetchedAt: input.fetchedAt,
+  };
+}
+
+function cachedLiveFixtureBody(input: {
+  status: string;
+  fetchedAt: string;
+  homeScore?: number | null;
+  awayScore?: number | null;
+}) {
+  return JSON.stringify({
+    ok: true,
+    special: "fifa_2026",
+    count: 1,
+    total: 1,
+    limit: 80,
+    offset: 0,
+    hasMore: false,
+    facets: {
+      sections: [{ section: "match_result", events: 1, markets: 1 }],
+      venues: [{ venue: "polymarket", events: 1, markets: 1 }],
+    },
+    data: [
+      {
+        eventId: "polymarket:live-fixture-event",
+        fifa: {
+          matchFixtureKey: liveFixtureKey,
+          groupKey: liveFixtureKey,
+          fixture: fixtureApi(input),
+        },
+        markets: [
+          {
+            internalMarketId: "polymarket:live-fixture-market",
+          },
+        ],
+      },
+    ],
+  });
+}
+
+function liveFifaRow(): FifaSpecialRow {
+  return {
+    event_id: "polymarket:live-fixture-event",
+    event_title: "Portugal vs. Uzbekistan",
+    event_duration_minutes: null,
+    category: "soccer",
+    start_date: "2026-06-23T16:00:00.000Z",
+    end_date: "2026-06-23T20:00:00.000Z",
+    event_liquidity: 100,
+    event_liquidity_display: 100,
+    event_volume: 1000,
+    event_volume_24h: 100,
+    event_volume_display: 1000,
+    event_open_interest: 500,
+    event_slug: "fifwc-portugal-uzbekistan-2026-06-23",
+    event_image: null,
+    event_icon: null,
+    event_venue: "polymarket",
+    venue_event_id: "live-fixture-event",
+    event_series_key: "soccer-fifwc",
+    event_series_title: "FIFA World Cup",
+    market_uuid: "polymarket:live-fixture-market",
+    venue: "polymarket",
+    venue_market_id: "live-fixture-market",
+    market_title: "Portugal",
+    market_type: "binary",
+    market_duration_minutes: null,
+    market_status: "ACTIVE",
+    pm_accepting_orders: true,
+    market_open_time: "2026-06-23T16:00:00.000Z",
+    market_close_time: "2026-06-23T20:00:00.000Z",
+    market_expiration_time: "2026-06-23T20:00:00.000Z",
+    volume_24h: 100,
+    volume_total: 1000,
+    volume_display: 1000,
+    open_interest: 500,
+    liquidity: 100,
+    liquidity_display: 100,
+    best_bid: 0.5,
+    best_ask: 0.55,
+    best_bid_yes: null,
+    best_ask_yes: null,
+    best_bid_no: null,
+    best_ask_no: null,
+    last_price: 0.52,
+    resolved_outcome: null,
+    resolved_outcome_pct: null,
+    change_24h: null,
+    outcomes: null,
+    token_yes: "token-yes",
+    token_no: "token-no",
+    clob_token_ids: null,
+    condition_id: null,
+    market_slug: "fifwc-portugal-uzbekistan-2026-06-23-portugal",
+    market_category: "soccer",
+    market_image: null,
+    market_icon: null,
+    market_metadata: null,
+    venue_exchange: null,
+    venue_adapter: null,
+    market_address: null,
+    trade_type: null,
+    last_update: "2026-06-23T17:50:00.000Z",
+    market_created_at: "2026-06-01T00:00:00.000Z",
+    fifa_section: "match_result",
+    fifa_subtype: "moneyline",
+    fifa_source_rule: "polymarket_fifwc_slug",
+    fifa_confidence: "high",
+  };
+}
+
+function livePage() {
+  return {
+    rows: [liveFifaRow()],
+    total: 1,
+    sectionFacets: [
+      { section: "match_result" as const, events: 1, markets: 1 },
+    ],
+    venueFacets: [{ venue: "polymarket", events: 1, markets: 1 }],
+  };
 }
 
 async function captureFifaSql(inputs: FifaSpecialInputs): Promise<string[]> {
@@ -931,6 +1116,277 @@ async function main() {
       } finally {
         resetHooks();
         env.feedTtlSec = previousTtl;
+      }
+    }
+
+    {
+      const previousFeedTtlForCache = env.feedTtlSec;
+      const previousFixtureTtl = env.sportsFixturesRefreshTtlSec;
+      env.feedTtlSec = 30;
+      env.sportsFixturesRefreshTtlSec = 900;
+      let pageLoads = 0;
+      let fixtureRefreshes = 0;
+      const staleBody = cachedLiveFixtureBody({
+        status: "NS",
+        fetchedAt: "2026-06-17T19:06:39.364Z",
+      });
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => liveFixtureNow,
+        getRedisStatus: async () =>
+          ({
+            status: "ready",
+            redis: {
+              get: async (key: string) =>
+                key.endsWith(":stale") ? null : staleBody,
+              set: async () => "OK",
+            },
+          }) as never,
+        fetchFifaSpecialPage: async () => {
+          pageLoads += 1;
+          return livePage();
+        },
+        fetchSportsFixturesByKeys: async () =>
+          new Map([
+            [
+              liveFixtureKey,
+              fixtureRow({
+                status: "1H",
+                fetchedAt: "2026-06-23T17:55:00.000Z",
+                homeScore: 1,
+                awayScore: 0,
+              }),
+            ],
+          ]),
+        refreshSportsFixtures: async (_pool, input) => {
+          fixtureRefreshes += 1;
+          assert.equal(input.fixtureKey, liveFixtureKey);
+          return {
+            provider: "thesportsdb",
+            sport: "soccer",
+            competitionKey: "fifa_world_cup",
+            season: "2026",
+            fetched: 1,
+            upserted: 1,
+            dryRun: false,
+          };
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/special/fifa-2026?${query({ view: "events", section: "match_result", limit: 80, sort: "time" })}`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.headers["x-cache"], "miss");
+        assert.equal(pageLoads, 1);
+        assert.equal(fixtureRefreshes, 1);
+        const payload = response.json<{
+          data: Array<{
+            fifa: {
+              fixture: {
+                status: string | null;
+                homeScore: number | null;
+                awayScore: number | null;
+                fetchedAt: string;
+              } | null;
+            };
+          }>;
+        }>();
+        assert.equal(payload.data[0]?.fifa.fixture?.status, "1H");
+        assert.equal(payload.data[0]?.fifa.fixture?.homeScore, 1);
+        assert.equal(payload.data[0]?.fifa.fixture?.awayScore, 0);
+        assert.equal(
+          payload.data[0]?.fifa.fixture?.fetchedAt,
+          "2026-06-23T17:55:00.000Z",
+        );
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForCache;
+        env.sportsFixturesRefreshTtlSec = previousFixtureTtl;
+      }
+    }
+
+    {
+      const previousFeedTtlForCache = env.feedTtlSec;
+      const previousFixtureTtl = env.sportsFixturesRefreshTtlSec;
+      env.feedTtlSec = 30;
+      env.sportsFixturesRefreshTtlSec = 900;
+      const staleBody = cachedLiveFixtureBody({
+        status: "NS",
+        fetchedAt: "2026-06-17T19:06:39.364Z",
+      });
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => liveFixtureNow,
+        getRedisStatus: async () =>
+          ({
+            status: "ready",
+            redis: {
+              get: async () => staleBody,
+              set: async (
+                _key: string,
+                _value: string,
+                options: { NX?: true },
+              ) => (options.NX ? null : "OK"),
+            },
+          }) as never,
+        fetchFifaSpecialPage: async () => {
+          throw new Error(
+            "cache should be served while fixture refresh is locked",
+          );
+        },
+        refreshSportsFixtures: async () => {
+          throw new Error("fixture refresh should not run without lock");
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/special/fifa-2026?${query({ view: "events", section: "match_result", limit: 80, sort: "time" })}`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.headers["x-cache"], "hit");
+        assert.equal(response.body, staleBody);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForCache;
+        env.sportsFixturesRefreshTtlSec = previousFixtureTtl;
+      }
+    }
+
+    {
+      const previousFeedTtlForCache = env.feedTtlSec;
+      const previousFixtureTtl = env.sportsFixturesRefreshTtlSec;
+      env.feedTtlSec = 0;
+      env.sportsFixturesRefreshTtlSec = 900;
+      let fixtureRefreshes = 0;
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => liveFixtureNow,
+        getRedisStatus: async () =>
+          ({
+            status: "disabled",
+            redis: null,
+          }) as never,
+        fetchFifaSpecialPage: async () => livePage(),
+        fetchSportsFixturesByKeys: async () =>
+          new Map([
+            [
+              liveFixtureKey,
+              fixtureRow({
+                status: "NS",
+                fetchedAt: "2026-06-17T19:06:39.364Z",
+              }),
+            ],
+          ]),
+        refreshSportsFixtures: async () => {
+          fixtureRefreshes += 1;
+          throw new Error("fixture refresh should require a Redis lock");
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/special/fifa-2026?${query({ view: "events", section: "match_result", limit: 80, sort: "time" })}`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.headers["x-cache-status"], "disabled");
+        assert.equal(fixtureRefreshes, 0);
+        const payload = response.json<{
+          data: Array<{ fifa: { fixture: { status: string | null } | null } }>;
+        }>();
+        assert.equal(payload.data[0]?.fifa.fixture?.status, "NS");
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForCache;
+        env.sportsFixturesRefreshTtlSec = previousFixtureTtl;
+      }
+    }
+
+    {
+      const previousFeedTtlForLive = env.feedTtlSec;
+      const previousFixtureTtl = env.sportsFixturesRefreshTtlSec;
+      env.feedTtlSec = 30;
+      env.sportsFixturesRefreshTtlSec = 900;
+      let fixtureFetches = 0;
+      let fixtureRefreshes = 0;
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => liveFixtureNow,
+        getRedisStatus: async () =>
+          ({
+            status: "ready",
+            redis: {
+              get: async () => null,
+              set: async () => "OK",
+            },
+          }) as never,
+        fetchFifaSpecialPage: async () => livePage(),
+        fetchSportsFixturesByKeys: async () => {
+          fixtureFetches += 1;
+          return new Map([
+            [
+              liveFixtureKey,
+              fixtureFetches === 1
+                ? fixtureRow({
+                    status: "NS",
+                    fetchedAt: "2026-06-17T19:06:39.364Z",
+                  })
+                : fixtureRow({
+                    status: "1H",
+                    fetchedAt: "2026-06-23T17:55:00.000Z",
+                    homeScore: 1,
+                    awayScore: 0,
+                  }),
+            ],
+          ]);
+        },
+        refreshSportsFixtures: async (_pool, input) => {
+          fixtureRefreshes += 1;
+          assert.equal(input.fixtureKey, liveFixtureKey);
+          return {
+            provider: "thesportsdb",
+            sport: "soccer",
+            competitionKey: "fifa_world_cup",
+            season: "2026",
+            fetched: 1,
+            upserted: 1,
+            dryRun: false,
+          };
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/special/fifa-2026/live",
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.headers["x-cache"], "miss");
+        assert.equal(fixtureFetches, 2);
+        assert.equal(fixtureRefreshes, 1);
+        const payload = response.json<{
+          ok: boolean;
+          special: string;
+          count: number;
+          total: number;
+          data: Array<{
+            fifa: {
+              fixture: {
+                status: string | null;
+                homeScore: number | null;
+                awayScore: number | null;
+              } | null;
+            };
+          }>;
+        }>();
+        assert.equal(payload.ok, true);
+        assert.equal(payload.special, "fifa_2026");
+        assert.equal(payload.count, 1);
+        assert.equal(payload.total, 1);
+        assert.equal(payload.data[0]?.fifa.fixture?.status, "1H");
+        assert.equal(payload.data[0]?.fifa.fixture?.homeScore, 1);
+        assert.equal(payload.data[0]?.fifa.fixture?.awayScore, 0);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForLive;
+        env.sportsFixturesRefreshTtlSec = previousFixtureTtl;
       }
     }
 
