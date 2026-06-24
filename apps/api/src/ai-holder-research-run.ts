@@ -479,7 +479,7 @@ async function runExternalResearch(params: {
           {
             role: "system",
             content:
-              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return a very compact public-context read, not a news memo. Answer only: does public information explain this holder move, partly explain it, or not explain it? Include at most 2 short sentences and a few source links. Do not invent a catalyst.",
+              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return a very compact public-context read, not a news memo. Compare dated headlines/posts to the supplied holder activity/snapshot timing. Answer only: did public information precede the holder move, coincide with it, follow it, or not explain it? Include at most 2 short sentences and a few source links. Do not invent a catalyst.",
           },
           {
             role: "user",

@@ -234,6 +234,32 @@ services:
       - packages/config/dist/run-with-secrets.js
       - apps/finance-worker/dist/main.js
 
+  signal-bot:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-signal-bot
+    restart: unless-stopped
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    environment:
+      HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_SIGNAL_BOT:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/signal-bot}
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - /app/ops/run-js-runtime.sh
+      - packages/config/dist/run-with-secrets.js
+      - apps/api/dist/signal-bot-runner.js
+
   nginx:
     image: nginx:1.27-alpine
     container_name: hunch-nginx

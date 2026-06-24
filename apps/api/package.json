@@ -70,7 +70,8 @@
     "ai:map-signals:run": "tsx src/ai-map-signals-run.ts",
     "ai:map-signals:runner": "tsx src/ai-map-signals-runner.ts",
     "ai:holder-research:run": "tsx src/ai-holder-research-run.ts",
-    "ai:holder-research:runner": "tsx src/ai-holder-research-runner.ts"
+    "ai:holder-research:runner": "tsx src/ai-holder-research-runner.ts",
+    "signal:bot": "tsx src/signal-bot-runner.ts"
   },
   "dependencies": {
     "@fastify/swagger": "^9.6.1",

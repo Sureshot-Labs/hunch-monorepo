@@ -5,7 +5,7 @@ REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.51.155.185}"
 APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 PROJECT_NAME="${PROJECT_NAME:-hunch-monorepo}"
-SERVICES="${SERVICES:-api indexer-polymarket indexer-limitless indexer-dflow ai-worker finance-worker}"
+SERVICES="${SERVICES:-api indexer-polymarket indexer-limitless indexer-dflow ai-worker finance-worker signal-bot}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 RESTART_NGINX="${RESTART_NGINX:-1}"
 VERIFY="${VERIFY:-1}"
@@ -40,7 +40,7 @@ find_backend_image() {
     return 0
   fi
 
-  for container in hunch-api hunch-indexer-polymarket hunch-indexer-limitless hunch-indexer-dflow hunch-ai-worker hunch-finance-worker; do
+  for container in hunch-api hunch-indexer-polymarket hunch-indexer-limitless hunch-indexer-dflow hunch-ai-worker hunch-finance-worker hunch-signal-bot; do
     image_id="$(docker inspect -f '{{.Image}}' "${container}" 2>/dev/null || true)"
     if [ -n "${image_id}" ]; then
       echo "${image_id}"
@@ -110,7 +110,7 @@ if [ "${VERIFY}" = "1" ]; then
 fi
 
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' \
-  | grep -E 'hunch-(api|indexer|ai-worker|finance-worker|nginx|postgres|redis|web)' || true
+  | grep -E 'hunch-(api|indexer|ai-worker|finance-worker|signal-bot|nginx|postgres|redis|web)' || true
 EOF
 )
 
