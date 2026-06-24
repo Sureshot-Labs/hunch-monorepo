@@ -1,11 +1,11 @@
 ARG BUN_VERSION=1.3.14
 
-FROM node:20-bookworm-slim AS builder
+FROM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 
 RUN corepack enable \
-  && corepack prepare pnpm@10.15.1 --activate
+  && corepack prepare pnpm@11.8.0 --activate
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
@@ -44,7 +44,7 @@ RUN pnpm --filter @hunch/config build \
 # instead of running the installer script inside the production runtime image.
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 
 ARG BUN_VERSION=1.3.14
 WORKDIR /app

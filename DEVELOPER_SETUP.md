@@ -21,10 +21,10 @@ Before you begin, ensure you have the following installed:
 
 ### Required Software
 
-- **Node.js**: v18 or higher ([Download](https://nodejs.org/))
-- **pnpm**: v10.15.1 or higher ([Installation Guide](https://pnpm.io/installation))
+- **Node.js**: v24 recommended; v22.13+ minimum for pnpm 11 ([Download](https://nodejs.org/))
+- **pnpm**: v11.8.0 or higher ([Installation Guide](https://pnpm.io/installation))
   ```bash
-  npm install -g pnpm@10.15.1
+  npm install -g pnpm@11.8.0
   ```
 - **Docker & Docker Compose**: For running PostgreSQL and Redis locally ([Download](https://www.docker.com/products/docker-desktop))
 - **Git**: For version control ([Download](https://git-scm.com/))
