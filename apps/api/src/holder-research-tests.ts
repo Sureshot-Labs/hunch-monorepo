@@ -614,6 +614,80 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder research follow-up reuses previous note holder target",
+    run: () => {
+      const p = policy();
+      const yesWalletId = "00000000-0000-4000-8000-000000000031";
+      const noWalletId = "00000000-0000-4000-8000-000000000032";
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("YES", {
+              walletId: yesWalletId,
+              positionUsd: 13_000,
+            }),
+            holder("NO", {
+              walletId: noWalletId,
+              positionUsd: 35_000_000,
+            }),
+          ],
+          previousNote: {
+            cooldownUntil: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            inputDigest: "previous",
+            noteId: "00000000-0000-4000-8000-000000000099",
+            title: "Previous YES holder note",
+            walletTargets: [{ side: "YES", walletId: yesWalletId }],
+          },
+        }),
+        p,
+      ).find((item) => item.bucket === "followup_existing");
+      assert.ok(candidate);
+
+      const targets = buildHolderResearchWalletTargets(candidate, [
+        "note:00000000-0000-4000-8000-000000000099",
+      ]);
+      assert.equal(targets.length, 1);
+      assert.equal(targets[0]?.walletId, yesWalletId);
+      assert.equal(targets[0]?.meta.side, "YES");
+    },
+  },
+  {
+    name: "holder research follow-up does not fall back to unrelated largest holder",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("YES", {
+              walletId: "00000000-0000-4000-8000-000000000041",
+              positionUsd: 13_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000042",
+              positionUsd: 35_000_000,
+            }),
+          ],
+          previousNote: {
+            cooldownUntil: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            inputDigest: "previous",
+            noteId: "00000000-0000-4000-8000-000000000098",
+            title: "Previous note without holder target",
+            walletTargets: [],
+          },
+        }),
+        p,
+      ).find((item) => item.bucket === "followup_existing");
+      assert.ok(candidate);
+
+      const targets = buildHolderResearchWalletTargets(candidate, [
+        "note:00000000-0000-4000-8000-000000000098",
+      ]);
+      assert.equal(targets.length, 0);
+    },
+  },
+  {
     name: "holder research signal schemas accept wallet scope and batch wallet notes",
     run: () => {
       const query = signalsQuerySchema.parse({

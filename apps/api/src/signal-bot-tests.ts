@@ -469,6 +469,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(
         resolveSignalBotBuySide(note({ primaryTargetMeta: {}, direction: "mixed" })),
+        "YES",
+      );
+      assert.equal(
+        resolveSignalBotBuySide(
+          note({
+            holderSide: null,
+            primaryTargetMeta: {},
+            direction: "mixed",
+          }),
+        ),
         null,
       );
     },

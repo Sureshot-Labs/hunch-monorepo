@@ -103,6 +103,10 @@ export type HolderResearchPreviousNote = {
   title: string;
   inputDigest: string | null;
   cooldownUntil: string | null;
+  walletTargets: Array<{
+    side: HolderResearchSideKey | null;
+    walletId: string;
+  }>;
 };
 
 export type HolderResearchCandidate = {
@@ -555,6 +559,30 @@ function parseHolderEvidenceId(
   };
 }
 
+function parsePreviousNoteWalletTargets(
+  value: unknown,
+): HolderResearchPreviousNote["walletTargets"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const record = entry as Record<string, unknown>;
+      const walletId =
+        typeof record.walletId === "string" ? record.walletId.trim() : "";
+      if (!walletId) return null;
+      const side = normalizeSide(record.side);
+      return { side, walletId };
+    })
+    .filter(
+      (
+        entry,
+      ): entry is {
+        side: HolderResearchSideKey | null;
+        walletId: string;
+      } => entry != null,
+    );
+}
+
 function selectedEvidenceHolders(
   candidate: HolderResearchCandidate,
 ): HolderResearchHolder[] {
@@ -577,6 +605,28 @@ function selectedEvidenceHolders(
   return [...candidate.market.holders]
     .sort((a, b) => b.positionUsd - a.positionUsd)
     .slice(0, 2);
+}
+
+function previousNoteTargetHolders(
+  candidate: HolderResearchCandidate,
+): HolderResearchHolder[] {
+  const targets = candidate.market.previousNote?.walletTargets ?? [];
+  if (targets.length === 0) return [];
+  const holders: HolderResearchHolder[] = [];
+  const seen = new Set<string>();
+  for (const target of targets) {
+    const holder = candidate.market.holders.find(
+      (entry) =>
+        entry.walletId === target.walletId &&
+        (target.side == null || entry.side === target.side),
+    );
+    if (!holder) continue;
+    const key = `${holder.walletId}:${holder.side}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    holders.push(holder);
+  }
+  return holders;
 }
 
 export function buildHolderResearchDecisionSnapshot(
@@ -1797,6 +1847,7 @@ export async function attachHolderResearchHistory(
     title: string;
     created_at: Date | string;
     input_digest: string | null;
+    wallet_targets: unknown;
   }>(
     `
       select distinct on (t.target_id)
@@ -1804,9 +1855,22 @@ export async function attachHolderResearchHistory(
         n.id as note_id,
         n.title,
         n.created_at,
-        n.lineage->>'input_digest' as input_digest
+        n.lineage->>'input_digest' as input_digest,
+        coalesce(wallet_targets.targets, '[]'::jsonb) as wallet_targets
       from ai_note_targets t
       join ai_notes n on n.id = t.note_id
+      left join lateral (
+        select jsonb_agg(
+          jsonb_build_object(
+            'walletId', wt.target_id,
+            'side', wt.target_meta->>'side'
+          )
+          order by wt.target_rank asc, wt.target_id asc
+        ) as targets
+        from ai_note_targets wt
+        where wt.note_id = n.id
+          and wt.target_kind = 'wallet'
+      ) wallet_targets on true
       where t.target_kind = 'market'
         and t.target_id = any($1::text[])
         and n.note_type = 'signal'
@@ -1826,6 +1890,7 @@ export async function attachHolderResearchHistory(
         createdAt: toIso(row.created_at) ?? now.toISOString(),
         inputDigest: row.input_digest,
         cooldownUntil: null,
+        walletTargets: parsePreviousNoteWalletTargets(row.wallet_targets),
       } satisfies HolderResearchPreviousNote,
     ]),
   );
@@ -2254,7 +2319,11 @@ export function buildHolderResearchWalletTargets(
   const holders =
     referencedHolders.length > 0
       ? referencedHolders
-      : selectedEvidenceHolders(candidate).slice(0, 1);
+      : candidate.bucket === "followup_existing"
+        ? previousNoteTargetHolders(candidate).slice(0, 1)
+        : candidate.side
+          ? selectedEvidenceHolders(candidate).slice(0, 1)
+          : [];
   return holders
     .map((holder, index) => ({
       walletId: holder.walletId,

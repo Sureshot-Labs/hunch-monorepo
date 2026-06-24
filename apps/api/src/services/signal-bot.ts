@@ -269,12 +269,13 @@ export function escapeTelegramMarkdownV2Url(value: string): string {
 }
 
 export function resolveSignalBotBuySide(
-  note: Pick<SignalBotNote, "direction" | "primaryTargetMeta">,
+  note: Pick<SignalBotNote, "direction" | "holderSide" | "primaryTargetMeta">,
 ): "NO" | "YES" | null {
   const side = String(note.primaryTargetMeta.side ?? "").toUpperCase();
   if (side === "YES" || side === "NO") return side;
   if (note.direction === "up") return "YES";
   if (note.direction === "down") return "NO";
+  if (note.direction === "mixed" && note.holderSide) return note.holderSide;
   return null;
 }
 
@@ -1141,7 +1142,7 @@ function formatSignalBotSignalLabel(note: SignalBotNote): string {
     case "concentration_risk":
       return "⚠️ Concentrated holder";
     case "followup_existing":
-      return "🔄 Holder update";
+      return "🔄 Signal update";
     default:
       return "🔎 Holder signal";
   }
