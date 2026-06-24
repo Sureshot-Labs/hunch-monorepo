@@ -18,6 +18,7 @@ import {
   type HolderResearchAgentOutputV1,
 } from "./schemas/holder-research.js";
 import {
+  applyHolderResearchPublishQualityGate,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchDecisionCacheKey,
@@ -958,12 +959,32 @@ export async function runHolderResearch(
         externalResearchByKey.set(candidate.key, externalResearch);
       }
 
-      const decision = await synthesizeCandidate({
+      const rawDecision = await synthesizeCandidate({
         candidate,
         policy,
         callModel: args.callModel,
         externalResearch,
       });
+      const gatedOutput = applyHolderResearchPublishQualityGate({
+        candidate,
+        output: rawDecision.output,
+      });
+      const decision: HolderResearchModelDecision = {
+        ...rawDecision,
+        output: gatedOutput,
+        modelMeta:
+          gatedOutput === rawDecision.output
+            ? rawDecision.modelMeta
+            : {
+                ...rawDecision.modelMeta,
+                publish_quality_gate: {
+                  originalStatus: rawDecision.output.status,
+                  originalRationale: rawDecision.output.rationale,
+                  gatedStatus: gatedOutput.status,
+                  gatedRationale: gatedOutput.rationale,
+                },
+              },
+      };
       decisions.push(decision);
       if (
         policy.decisionCacheEnabled &&

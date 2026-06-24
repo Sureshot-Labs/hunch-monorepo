@@ -159,6 +159,7 @@ type SignalBotNoteRow = {
 type SignalBotEligibilityCountRow = {
   below_min_confidence: string | number | null;
   eligible: string | number | null;
+  non_directional: string | number | null;
   total: string | number | null;
 };
 
@@ -269,13 +270,10 @@ export function escapeTelegramMarkdownV2Url(value: string): string {
 }
 
 export function resolveSignalBotBuySide(
-  note: Pick<SignalBotNote, "direction" | "holderSide" | "primaryTargetMeta">,
+  note: Pick<SignalBotNote, "direction">,
 ): "NO" | "YES" | null {
-  const side = String(note.primaryTargetMeta.side ?? "").toUpperCase();
-  if (side === "YES" || side === "NO") return side;
   if (note.direction === "up") return "YES";
   if (note.direction === "down") return "NO";
-  if (note.direction === "mixed" && note.holderSide) return note.holderSide;
   return null;
 }
 
@@ -366,10 +364,14 @@ export function buildSignalBotMessage(input: {
         side: buySide,
       })
     : null;
-  const holderUrl = buildSignalBotHolderUrl({
+  const rawHolderUrl = buildSignalBotHolderUrl({
     address: note.holderAddress,
     chain: note.holderChain,
   });
+  const holderUrl =
+    rawHolderUrl && (!buySide || !note.holderSide || note.holderSide === buySide)
+      ? rawHolderUrl
+      : null;
   const titleMarkdown = marketUrl
     ? `*[${title}](${escapeTelegramMarkdownV2Url(marketUrl)})*`
     : `*${title}*`;
@@ -702,6 +704,7 @@ export async function publishSignalBotTick(input: {
   blockedChats: number;
   chats: number;
   eligibleNotes: number;
+  nonDirectionalNotes: number;
   sent: number;
 }> {
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
@@ -709,6 +712,7 @@ export async function publishSignalBotTick(input: {
   let blockedChats = 0;
   let belowConfidenceNotes = 0;
   let eligibleNotes = 0;
+  let nonDirectionalNotes = 0;
   for (const chatId of chatIds) {
     const state = await getSignalBotChatState(input.redis, chatId);
     if (!state) {
@@ -722,6 +726,7 @@ export async function publishSignalBotTick(input: {
     });
     belowConfidenceNotes += counts.belowConfidence;
     eligibleNotes += counts.eligible;
+    nonDirectionalNotes += counts.nonDirectional;
     const notes = await loadSignalBotNotes(input.db, {
       afterCreatedAt: state.cursorCreatedAt,
       afterId: state.cursorId,
@@ -764,6 +769,7 @@ export async function publishSignalBotTick(input: {
     blockedChats,
     chats: chatIds.length,
     eligibleNotes,
+    nonDirectionalNotes,
     sent,
   };
 }
@@ -856,6 +862,7 @@ export async function loadSignalBotNotes(
       where n.note_type = 'signal'
         and n.status = 'active'
         and n.producer_type = 'holder_research'
+        and n.direction in ('up', 'down')
         and coalesce(n.confidence, 0) >= $1
         and ${buildWalletIntelAcceptingOrdersSql({
           eventAlias: "e",
@@ -880,12 +887,27 @@ async function loadSignalBotEligibilityCounts(
     afterId: string;
     minConfidence: number;
   },
-): Promise<{ belowConfidence: number; eligible: number; total: number }> {
+): Promise<{
+  belowConfidence: number;
+  eligible: number;
+  nonDirectional: number;
+  total: number;
+}> {
   const { rows } = await db.query<SignalBotEligibilityCountRow>(
     `
       select
-        count(*) filter (where coalesce(n.confidence, 0) >= $1)::int as eligible,
-        count(*) filter (where coalesce(n.confidence, 0) < $1)::int as below_min_confidence,
+        count(*) filter (
+          where n.direction in ('up', 'down')
+            and coalesce(n.confidence, 0) >= $1
+        )::int as eligible,
+        count(*) filter (
+          where n.direction in ('up', 'down')
+            and coalesce(n.confidence, 0) < $1
+        )::int as below_min_confidence,
+        count(*) filter (
+          where n.direction is null
+             or n.direction not in ('up', 'down')
+        )::int as non_directional,
         count(*)::int as total
       from ai_notes n
       join ai_note_targets pt
@@ -912,6 +934,7 @@ async function loadSignalBotEligibilityCounts(
   return {
     belowConfidence: Math.max(0, Math.trunc(toNumber(row?.below_min_confidence) ?? 0)),
     eligible: Math.max(0, Math.trunc(toNumber(row?.eligible) ?? 0)),
+    nonDirectional: Math.max(0, Math.trunc(toNumber(row?.non_directional) ?? 0)),
     total: Math.max(0, Math.trunc(toNumber(row?.total) ?? 0)),
   };
 }

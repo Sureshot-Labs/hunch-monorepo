@@ -128,12 +128,17 @@ class FakeDb {
     const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
     this.queries.push({ params, sql });
     const minConfidence = Number(params[0] ?? 0);
-    const rows = this.rows.filter((row) => {
+    const directionEligibleRows = this.rows.filter((row) => {
+      const direction = String((row as { direction?: unknown }).direction ?? "");
+      return direction === "up" || direction === "down";
+    });
+    const rows = directionEligibleRows.filter((row) => {
       const confidence = Number((row as { confidence?: unknown }).confidence ?? 0);
       return !Number.isFinite(minConfidence) || confidence >= minConfidence;
     });
     if (sql.includes("below_min_confidence")) {
-      const below = this.rows.length - rows.length;
+      const below = directionEligibleRows.length - rows.length;
+      const nonDirectional = this.rows.length - directionEligibleRows.length;
       return {
         command: "SELECT",
         fields: [],
@@ -143,6 +148,7 @@ class FakeDb {
           {
             below_min_confidence: below,
             eligible: rows.length,
+            non_directional: nonDirectional,
             total: this.rows.length,
           },
         ] as unknown as T[],
@@ -460,27 +466,42 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "buy side resolves from target meta before direction fallback",
+    name: "buy side resolves from final note direction only",
     run: () => {
-      assert.equal(resolveSignalBotBuySide(note({ direction: "down" })), "YES");
       assert.equal(
-        resolveSignalBotBuySide(note({ primaryTargetMeta: {}, direction: "down" })),
+        resolveSignalBotBuySide(note({ primaryTargetMeta: { side: "YES" }, direction: "down" })),
         "NO",
       );
       assert.equal(
         resolveSignalBotBuySide(note({ primaryTargetMeta: {}, direction: "mixed" })),
-        "YES",
+        null,
       );
       assert.equal(
         resolveSignalBotBuySide(
           note({
-            holderSide: null,
-            primaryTargetMeta: {},
-            direction: "mixed",
+            primaryTargetMeta: { side: "NO" },
+            direction: "up",
           }),
         ),
-        null,
+        "YES",
       );
+    },
+  },
+  {
+    name: "message hides holder button when old note holder conflicts with buy side",
+    run: () => {
+      const message = buildSignalBotMessage({
+        amountsUsd: [5],
+        appBaseUrl: "https://app.hunch.trade",
+        note: note({
+          direction: "up",
+          holderSide: "NO",
+          primaryTargetMeta: { bucket: "sharp_side", side: "YES" },
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[2]?.length, 1);
+      assert.equal(rows[2]?.[0]?.text, "↗️ Open market");
     },
   },
   {
@@ -519,8 +540,49 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(result.belowConfidenceNotes, 1);
       assert.equal(result.eligibleNotes, 1);
+      assert.equal(result.nonDirectionalNotes, 0);
       assert.equal(result.sent, 1);
       assert.match(telegram.messages[0]?.text ?? "", /Above threshold/);
+    },
+  },
+  {
+    name: "publish skips mixed notes as non-directional",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({
+          direction: "mixed",
+          id: "00000000-0000-4000-8000-000000000001",
+          title: "Mixed context",
+        }),
+        noteRow({
+          direction: "up",
+          id: "00000000-0000-4000-8000-000000000002",
+          title: "Directional signal",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.nonDirectionalNotes, 1);
+      assert.equal(result.eligibleNotes, 1);
+      assert.equal(result.sent, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Directional signal/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
     },
   },
   {

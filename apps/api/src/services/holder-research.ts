@@ -145,6 +145,12 @@ export type HolderResearchPersistStats = {
   errors: number;
 };
 
+const PUBLISHABLE_HOLDER_RESEARCH_BUCKETS = new Set<HolderResearchBucket>([
+  "followup_existing",
+  "sharp_minority",
+  "sharp_side",
+]);
+
 export type HolderResearchDecisionSnapshot = {
   version: 1;
   key: string;
@@ -2344,6 +2350,68 @@ export function buildHolderResearchWalletTargets(
         ownerAddress: holder.ownerAddress,
       },
     }));
+}
+
+function asContextHolderResearchOutput(
+  output: HolderResearchAgentOutputV1,
+  rationale: string,
+): HolderResearchAgentOutputV1 {
+  return {
+    ...output,
+    rationale,
+    status: "CONTEXT",
+  };
+}
+
+export function applyHolderResearchPublishQualityGate(input: {
+  candidate: HolderResearchCandidate;
+  output: HolderResearchAgentOutputV1;
+}): HolderResearchAgentOutputV1 {
+  const { candidate, output } = input;
+  if (output.status !== "PUBLISH") return output;
+
+  if (output.direction === "mixed") {
+    return asContextHolderResearchOutput(
+      output,
+      "Mixed holder reads are context-only until they name a clear side.",
+    );
+  }
+
+  if (!PUBLISHABLE_HOLDER_RESEARCH_BUCKETS.has(candidate.bucket)) {
+    return asContextHolderResearchOutput(
+      output,
+      "This holder read is useful context but not a directional publish signal.",
+    );
+  }
+
+  const walletTargets = buildHolderResearchWalletTargets(
+    candidate,
+    output.evidence_ids,
+  );
+  const holderSide = normalizeSide(walletTargets[0]?.meta.side);
+  const actionSide = candidate.side ?? holderSide;
+  if (!actionSide) {
+    return asContextHolderResearchOutput(
+      output,
+      "No clear holder-backed side was available for publication.",
+    );
+  }
+
+  if (sideDirection(actionSide) !== output.direction) {
+    return asContextHolderResearchOutput(
+      output,
+      "The model direction did not match the holder-backed side.",
+    );
+  }
+
+  if (walletTargets.length === 0) {
+    return asContextHolderResearchOutput(
+      output,
+      "No related holder target was available for publication.",
+    );
+  }
+
+  return output;
 }
 
 function normalizeText(value: string | null | undefined, max: number): string {

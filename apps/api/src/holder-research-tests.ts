@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import {
   holderResearchAgentOutputV1Schema,
   parseHolderResearchAgentOutputV1,
+  type HolderResearchAgentOutputV1,
 } from "./schemas/holder-research.js";
 import {
   holderResearchWalletNotesBodySchema,
   signalsQuerySchema,
 } from "./schemas/signals.js";
 import {
+  applyHolderResearchPublishQualityGate,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchDecisionCacheRecord,
   buildHolderResearchDecisionSnapshot,
@@ -126,6 +128,27 @@ function market(
     recentActivityAt: null,
     crossMarketWalletCount: 0,
     previousNote: null,
+    ...overrides,
+  };
+}
+
+function publishOutput(
+  candidate: ReturnType<typeof buildHolderResearchCandidatesFromMarket>[number],
+  overrides: Partial<HolderResearchAgentOutputV1> = {},
+): HolderResearchAgentOutputV1 {
+  return {
+    version: "holder_research_v1",
+    status: "PUBLISH",
+    bucket: candidate.bucket,
+    confidence: 0.82,
+    signal_type: candidate.signalType,
+    direction: candidate.direction,
+    headline: "Sharp holder signal",
+    summary:
+      "A capable holder side adds a concise directional read for this market.",
+    rationale: "Holder evidence clears the publish quality gate.",
+    evidence_ids: candidate.evidence.map((evidence) => evidence.id).slice(0, 3),
+    caveats: [],
     ...overrides,
   };
 }
@@ -685,6 +708,81 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "note:00000000-0000-4000-8000-000000000098",
       ]);
       assert.equal(targets.length, 0);
+    },
+  },
+  {
+    name: "holder research quality gate keeps directional sharp signals publishable",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const output = publishOutput(candidate);
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output,
+      });
+      assert.equal(gated.status, "PUBLISH");
+    },
+  },
+  {
+    name: "holder research quality gate downgrades mixed publishes",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          recentActivityUsd: 50_000,
+          recentActivityAt: "2026-01-01T00:00:00.000Z",
+        }),
+        p,
+      ).find((item) => item.bucket === "recent_flow");
+      assert.ok(candidate);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output: publishOutput(candidate, { direction: "mixed" }),
+      });
+      assert.equal(gated.status, "CONTEXT");
+      assert.match(gated.rationale, /Mixed holder reads/);
+    },
+  },
+  {
+    name: "holder research quality gate downgrades non-actionable buckets",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "clean_disagreement");
+      assert.ok(candidate);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output: publishOutput(candidate, { direction: "down" }),
+      });
+      assert.equal(gated.status, "CONTEXT");
+      assert.match(gated.rationale, /not a directional publish signal/);
+    },
+  },
+  {
+    name: "holder research quality gate downgrades side conflicts",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output: publishOutput(candidate, { direction: "up" }),
+      });
+      assert.equal(gated.status, "CONTEXT");
+      assert.match(gated.rationale, /did not match/);
     },
   },
   {
