@@ -172,6 +172,7 @@ const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
 const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
 const LOCK_TTL_MS = 120_000;
+const SIGNAL_CONTEXT_MAX_CHARS = 260;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
@@ -1241,17 +1242,18 @@ function formatSignalContextLine(note: SignalBotNote): string | null {
     /public (?:info|information|context|news) ([^.]{0,80})\./i,
   );
   if (timingMatch?.[0]) {
-    return `📰 ${truncateAtBoundary(timingMatch[0], 120)}`;
+    return `📰 ${truncateAtBoundary(timingMatch[0], SIGNAL_CONTEXT_MAX_CHARS)}`;
   }
-  if (summary) return `📰 ${truncateAtBoundary(summary, 120)}`;
+  if (summary) return `📰 ${truncateAtBoundary(summary, SIGNAL_CONTEXT_MAX_CHARS)}`;
   const caveats = Array.isArray(note.modelMeta.caveats)
     ? note.modelMeta.caveats.filter(
         (value): value is string => typeof value === "string" && value.trim().length > 0,
       )
     : [];
   const caveat = caveats[0]?.trim();
-  if (caveat) return `⚠️ ${truncateAtBoundary(caveat, 120)}`;
-  if (note.rationale) return `💡 ${truncateAtBoundary(note.rationale, 120)}`;
+  if (caveat) return `⚠️ ${truncateAtBoundary(caveat, SIGNAL_CONTEXT_MAX_CHARS)}`;
+  if (note.rationale)
+    return `💡 ${truncateAtBoundary(note.rationale, SIGNAL_CONTEXT_MAX_CHARS)}`;
   return null;
 }
 

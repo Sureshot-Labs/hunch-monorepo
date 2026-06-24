@@ -534,6 +534,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "message keeps public context sentence from being clipped",
+    run: () => {
+      const message = buildSignalBotMessage({
+        amountsUsd: [5],
+        appBaseUrl: "https://app.hunch.trade",
+        note: note({
+          modelMeta: {
+            external_research: {
+              summary:
+                "Public pickup reports (Al Arabiya/Reuters June 23: 36 transits, avg rising to 21-27 post-June 14 deal) coincide with holder activity and partially explain the move.",
+            },
+          },
+        }),
+      });
+      assert.match(message.text, /36 transits/);
+      assert.match(message.text, /coincide with holder activity/);
+      assert.doesNotMatch(message.text, /coincide with\\\.\\\.\\\./);
+    },
+  },
+  {
     name: "buy side resolves from final note direction only",
     run: () => {
       assert.equal(
