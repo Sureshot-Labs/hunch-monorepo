@@ -260,6 +260,19 @@ export function parseSignalBotCommand(
   }
 }
 
+function parseSignalBotCommandTargetChatId(
+  text: string | null | undefined,
+): string | null {
+  if (!text) return null;
+  const [, rawTarget] = text.trim().split(/\s+/, 2);
+  if (!rawTarget) return null;
+  const target = rawTarget.trim();
+  if (/^-100\d{5,}$/.test(target)) return target;
+  if (/^-\d{5,}$/.test(target)) return target;
+  if (/^\d{5,}$/.test(target)) return `-100${target}`;
+  return null;
+}
+
 export function isSignalBotAdmin(
   config: Pick<SignalBotConfig, "adminUserIds">,
   userId: number | null | undefined,
@@ -631,6 +644,7 @@ export async function handleSignalBotCommand(input: {
   const command = parseSignalBotCommand(input.message.text, input.botUsername);
   if (!command) return false;
   const chatId = String(input.message.chat.id);
+  const targetChatId = parseSignalBotCommandTargetChatId(input.message.text);
   const isAdmin = isSignalBotAdmin(input.config, input.message.from?.id);
 
   if (
@@ -648,6 +662,21 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
   if (command === "enable_signals") {
+    if (targetChatId) {
+      await enableSignalBotChat({
+        chat: {
+          id: targetChatId,
+          title: `Telegram channel ${targetChatId}`,
+          type: "channel",
+        },
+        enabledBy: input.message.from?.id ?? 0,
+        redis: input.redis,
+      });
+      await input.sendMessage(
+        buildPlainReply(chatId, `Signals enabled for ${targetChatId}.`),
+      );
+      return true;
+    }
     await enableSignalBotChat({
       chat: input.message.chat,
       enabledBy: input.message.from?.id ?? 0,
@@ -657,17 +686,32 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
   if (command === "disable_signals") {
-    await disableSignalBotChat(input.redis, chatId);
-    await input.sendMessage(buildPlainReply(chatId, "Signals disabled here."));
+    const disabledChatId = targetChatId ?? chatId;
+    await disableSignalBotChat(input.redis, disabledChatId);
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        targetChatId
+          ? `Signals disabled for ${targetChatId}.`
+          : "Signals disabled here.",
+      ),
+    );
     return true;
   }
   if (command === "status") {
-    const state = await getSignalBotChatState(input.redis, chatId);
+    const statusChatId = targetChatId ?? chatId;
+    const state = await getSignalBotChatState(input.redis, statusChatId);
     await input.sendMessage(
       buildPlainReply(
         chatId,
         [
-          state ? "Signals are enabled here." : "Signals are disabled here.",
+          state
+            ? targetChatId
+              ? `Signals are enabled for ${targetChatId}.`
+              : "Signals are enabled here."
+            : targetChatId
+              ? `Signals are disabled for ${targetChatId}.`
+              : "Signals are disabled here.",
           `Min confidence: ${formatPercent(input.config.minConfidence)}.`,
         ].join("\n"),
       ),
@@ -675,7 +719,7 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
   if (command === "test_signal") {
-    const sent = await input.sendTestSignal(chatId);
+    const sent = await input.sendTestSignal(targetChatId ?? chatId);
     await input.sendMessage(
       buildPlainReply(chatId, sent ? "Sent latest eligible signal." : "No eligible signal found."),
     );
@@ -1332,6 +1376,7 @@ function helpText(): string {
     "Hunch Signal Bot",
     "",
     "/enable_signals - enable this chat",
+    "/enable_signals <channel_id> - enable a channel",
     "/disable_signals - disable this chat",
     "/status - show chat status",
     "/test_signal - send latest eligible signal",
