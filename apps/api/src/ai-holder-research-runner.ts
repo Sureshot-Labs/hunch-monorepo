@@ -31,6 +31,8 @@ type RunHistoryEntry = {
   chargedCostUsd: number;
   externalSearchEstimatedCostUsd: number;
   externalSearchChargedCostUsd: number;
+  triageEstimatedCostUsd?: number;
+  triageChargedCostUsd?: number;
   result: "ok" | "dry_run" | "skipped" | "error";
 };
 
@@ -137,12 +139,20 @@ export async function runHolderResearchRunner(
       return;
     }
 
-    const estimate =
-      policy.maxAgentCallsPerRun * policy.estimatedCallCostUsd +
-      ((args.externalSearch ?? policy.externalSearchEnabled)
+    const modelCallsEstimate = args.callModel
+      ? policy.maxAgentCallsPerRun * policy.estimatedCallCostUsd
+      : 0;
+    const triageEstimate =
+      args.callModel && policy.triageEnabled
+        ? policy.triageMaxBatchesPerRun * policy.estimatedCallCostUsd
+        : 0;
+    const externalSearchEstimate =
+      (args.externalSearch ?? policy.externalSearchEnabled)
         ? policy.maxExternalSearchCallsPerRun *
           policy.estimatedExternalSearchCostUsd
-        : 0);
+        : 0;
+    const estimate =
+      modelCallsEstimate + triageEstimate + externalSearchEstimate;
     if (!args.ignoreBudget) {
       const now = Date.now();
       const history = (await readRunHistory(redis)).filter(
@@ -150,7 +160,10 @@ export async function runHolderResearchRunner(
       );
       const spent = history.reduce(
         (sum: number, entry: RunHistoryEntry) =>
-          sum + entry.chargedCostUsd + entry.externalSearchChargedCostUsd,
+          sum +
+          entry.chargedCostUsd +
+          entry.externalSearchChargedCostUsd +
+          (entry.triageChargedCostUsd ?? 0),
         0,
       );
       if (history.length >= policy.maxRunsPerDay) {
@@ -214,6 +227,8 @@ export async function runHolderResearchRunner(
           report.totals.externalSearchEstimatedCostUsd,
         externalSearchChargedCostUsd:
           report.totals.externalSearchChargedCostUsd,
+        triageEstimatedCostUsd: report.totals.triageEstimatedCostUsd,
+        triageChargedCostUsd: report.totals.triageChargedCostUsd,
         result: report.dryRun ? "dry_run" : "ok",
       };
       await redis

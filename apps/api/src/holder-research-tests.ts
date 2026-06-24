@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 
 import {
   buildHolderResearchSystemPrompt,
+  buildHolderResearchTriageSystemPrompt,
+  buildHolderResearchTriageUserPrompt,
   holderResearchAgentOutputV1Schema,
   parseHolderResearchAgentOutputV1,
+  parseHolderResearchTriageOutputV1,
   type HolderResearchAgentOutputV1,
 } from "./schemas/holder-research.js";
 import {
@@ -19,6 +22,7 @@ import {
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchCandidatesFromMarket,
   buildHolderResearchExternalSearchInput,
+  buildHolderResearchTriageCandidatePromptJson,
   buildHolderResearchWalletTargets,
   diffHolderResearchDecisionSnapshots,
   evaluateHolderResearchDecisionCache,
@@ -73,7 +77,16 @@ function holder(
     label: null,
     side: sideName,
     positionUsd: 10_000,
+    positionShares: null,
     openPnlUsd: null,
+    realizedPnlUsd: null,
+    totalPnlUsd: null,
+    avgEntryPrice: null,
+    currentPrice: null,
+    entryToCurrentDelta: null,
+    approxReliable: null,
+    approxPnlSource: null,
+    positionSnapshotAt: null,
     pnl30dUsd: 2_500,
     resolvedWinRateEdge30d: 0.16,
     resolvedEdgeZScore30d: 2.1,
@@ -113,6 +126,22 @@ function market(
     yesProbability: 0.55,
     volume24h: 100_000,
     liquidity: 25_000,
+    marketMovementContext: {
+      yesProbabilityNow: 0.55,
+      yesChange24h: null,
+      volume24h: 100_000,
+      volumeChange24h: null,
+      volumeChangePct24h: null,
+      liquidity: 25_000,
+      liquidityChange24h: null,
+      liquidityChangePct24h: null,
+      openInterestChange24h: null,
+      openInterestChangePct24h: null,
+      updatedAt: null,
+      previousDecisionYesProbability: null,
+      yesChangeSincePreviousDecision: null,
+      previousDecisionCheckedAt: null,
+    },
     sides: {
       YES: side("YES", { usd: 120_000, wallets: 5 }),
       NO: side("NO", {
@@ -219,78 +248,78 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           querySql = String(sql ?? "");
           queryParams = Array.isArray(params) ? params : [];
           return {
-          command: "SELECT",
-          fields: [],
-          oid: 0,
-          rowCount: 1,
-          rows: [
-            {
-              market_id: "polymarket:pnl-market",
-              event_id: "polymarket:pnl-event",
-              venue: "polymarket",
-              market_title: "Pnl market",
-              market_slug: null,
-              market_description: null,
-              event_title: "Pnl event",
-              event_slug: null,
-              event_description: null,
-              series_key: null,
-              series_title: null,
-              resolution_source: null,
-              category: null,
-              close_time: null,
-              expiration_time: null,
-              best_bid: "0.30",
-              best_ask: "0.32",
-              last_price: null,
-              volume_24h: null,
-              liquidity: null,
-              yes_usd: "0",
-              no_usd: "25000",
-              yes_wallets: "0",
-              no_wallets: "1",
-              yes_sharp_holders: "0",
-              no_sharp_holders: "1",
-              yes_sharp_usd: "0",
-              no_sharp_usd: "25000",
-              yes_best_edge: null,
-              no_best_edge: "0.16",
-              yes_best_z_score: null,
-              no_best_z_score: "2.1",
-              yes_best_sample_count: null,
-              no_best_sample_count: "24",
-              yes_best_resolved_stake_usd: null,
-              no_best_resolved_stake_usd: "6000",
-              yes_best_trades_30d: null,
-              no_best_trades_30d: "18",
-              largest_holder_usd: "25000",
-              recent_activity_usd: "0",
-              recent_activity_at: null,
-              cross_market_wallet_count: "0",
-              top_holders: [
-                {
-                  address: "0xabc",
-                  chain: "polygon",
-                  label: null,
-                  ownerAddress: null,
-                  ownerUsdLikeBalance: null,
-                  pnl30dUsd: 12_345,
-                  positionUsd: 25_000,
-                  resolvedEdgeSampleCount30d: 24,
-                  resolvedEdgeZScore30d: 2.1,
-                  resolvedStakeUsd30d: 6_000,
-                  resolvedWinRateEdge30d: 0.16,
-                  side: "NO",
-                  trades30d: 18,
-                  volume30dUsd: 90_000,
-                  walletId: "00000000-0000-4000-8000-000000000061",
-                  walletKind: "safe",
-                  walletUsdLikeBalance: null,
-                  winRate30d: 0.65,
-                },
-              ],
-            },
-          ],
+            command: "SELECT",
+            fields: [],
+            oid: 0,
+            rowCount: 1,
+            rows: [
+              {
+                market_id: "polymarket:pnl-market",
+                event_id: "polymarket:pnl-event",
+                venue: "polymarket",
+                market_title: "Pnl market",
+                market_slug: null,
+                market_description: null,
+                event_title: "Pnl event",
+                event_slug: null,
+                event_description: null,
+                series_key: null,
+                series_title: null,
+                resolution_source: null,
+                category: null,
+                close_time: null,
+                expiration_time: null,
+                best_bid: "0.30",
+                best_ask: "0.32",
+                last_price: null,
+                volume_24h: null,
+                liquidity: null,
+                yes_usd: "0",
+                no_usd: "25000",
+                yes_wallets: "0",
+                no_wallets: "1",
+                yes_sharp_holders: "0",
+                no_sharp_holders: "1",
+                yes_sharp_usd: "0",
+                no_sharp_usd: "25000",
+                yes_best_edge: null,
+                no_best_edge: "0.16",
+                yes_best_z_score: null,
+                no_best_z_score: "2.1",
+                yes_best_sample_count: null,
+                no_best_sample_count: "24",
+                yes_best_resolved_stake_usd: null,
+                no_best_resolved_stake_usd: "6000",
+                yes_best_trades_30d: null,
+                no_best_trades_30d: "18",
+                largest_holder_usd: "25000",
+                recent_activity_usd: "0",
+                recent_activity_at: null,
+                cross_market_wallet_count: "0",
+                top_holders: [
+                  {
+                    address: "0xabc",
+                    chain: "polygon",
+                    label: null,
+                    ownerAddress: null,
+                    ownerUsdLikeBalance: null,
+                    pnl30dUsd: 12_345,
+                    positionUsd: 25_000,
+                    resolvedEdgeSampleCount30d: 24,
+                    resolvedEdgeZScore30d: 2.1,
+                    resolvedStakeUsd30d: 6_000,
+                    resolvedWinRateEdge30d: 0.16,
+                    side: "NO",
+                    trades30d: 18,
+                    volume30dUsd: 90_000,
+                    walletId: "00000000-0000-4000-8000-000000000061",
+                    walletKind: "safe",
+                    walletUsdLikeBalance: null,
+                    winRate30d: 0.65,
+                  },
+                ],
+              },
+            ],
           };
         },
       };
@@ -424,7 +453,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   side: "NO",
                   positionUsd: 12_000,
                   yesProbability: 0.4,
-                  snapshotAt: new Date("2026-01-01T00:00:00.000Z").toISOString(),
+                  snapshotAt: new Date(
+                    "2026-01-01T00:00:00.000Z",
+                  ).toISOString(),
                 },
               ],
             }),
@@ -922,7 +953,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "Beat market prices by 16 points on recent resolved bets",
       ]);
       assert.equal(
-        actor.credentialBullets.some((bullet) => /sample|n=|resolved edge/i.test(bullet)),
+        actor.credentialBullets.some((bullet) =>
+          /sample|n=|resolved edge/i.test(bullet),
+        ),
         false,
       );
     },
@@ -1104,6 +1137,114 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const prompt = buildHolderResearchSystemPrompt();
       assert.match(prompt, /do not repeat the bullets verbatim/i);
       assert.match(prompt, /do not invent credentials/i);
+      assert.match(prompt, /marketMovementContext/i);
+      assert.match(prompt, /holderEntryContext/i);
+    },
+  },
+  {
+    name: "candidate prompt includes movement and holder entry context",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          yesProbability: 0.6,
+          marketMovementContext: {
+            ...market().marketMovementContext,
+            yesProbabilityNow: 0.6,
+            yesChange24h: 0.08,
+            volumeChange24h: 50_000,
+            liquidityChange24h: -2_000,
+            openInterestChange24h: 15_000,
+          },
+          holders: [
+            holder("NO", {
+              avgEntryPrice: 0.3,
+              currentPrice: 0.4,
+              entryToCurrentDelta: 0.1,
+              totalPnlUsd: 1_200,
+              approxReliable: true,
+              approxPnlSource: "activity",
+              positionSnapshotAt: "2026-01-01T00:00:00.000Z",
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const promptJson = buildHolderResearchCandidatePromptJson(candidate, p);
+      const record = promptJson as Record<string, unknown>;
+      assert.deepEqual(
+        (record.marketMovementContext as Record<string, unknown>).yesChange24h,
+        0.08,
+      );
+      const entry = (
+        record.holderEntryContext as Array<Record<string, unknown>>
+      )[0];
+      assert.equal(entry?.avgEntryPrice, 0.3);
+      assert.equal(entry?.currentPrice, 0.4);
+      assert.equal(entry?.entryToCurrentDelta, 0.1);
+      assert.equal(entry?.approxReliable, true);
+    },
+  },
+  {
+    name: "triage prompt uses thin candidate context and parser rejects unknown keys",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const triageCandidate = buildHolderResearchTriageCandidatePromptJson(
+        candidate,
+        p,
+      );
+      const serialized = JSON.stringify(triageCandidate);
+      assert.match(serialized, /marketMovementContext/);
+      assert.match(serialized, /holderEntryContext/);
+      assert.doesNotMatch(serialized, /0xno/i);
+      const prompt = buildHolderResearchTriageUserPrompt({
+        candidates: [triageCandidate],
+        maxInvestigate: 1,
+      });
+      assert.match(prompt, /holder_research_triage_v1/);
+      assert.match(buildHolderResearchTriageSystemPrompt(), /investigate/);
+
+      const parsed = parseHolderResearchTriageOutputV1(
+        {
+          version: "holder_research_triage_v1",
+          decisions: [
+            {
+              key: candidate.key,
+              action: "investigate",
+              priority: 0.8,
+              needs_external_search: true,
+              reason: "Clear sharp holder read with movement context.",
+            },
+          ],
+        },
+        [candidate.key],
+      );
+      assert.equal(parsed.decisions[0]?.action, "investigate");
+      assert.throws(() =>
+        parseHolderResearchTriageOutputV1(
+          {
+            version: "holder_research_triage_v1",
+            decisions: [
+              {
+                key: "unknown",
+                action: "watch",
+                priority: 0.5,
+                needs_external_search: false,
+                reason: "Unknown key.",
+              },
+            ],
+          },
+          [candidate.key],
+        ),
+      );
     },
   },
   {
@@ -1175,7 +1316,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   {
     name: "holder research policy is a separate runtime policy with external search budget",
     run: async () => {
-      assert.equal(getIntelPolicyDefaults("holder_research").model, "openai/gpt-5.5");
+      assert.equal(
+        getIntelPolicyDefaults("holder_research").model,
+        "openai/gpt-5.5",
+      );
 
       const db = {
         query: async (_sql: string) => ({
@@ -1190,6 +1334,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 externalSearchEnabled: "true",
                 maxExternalSearchCallsPerRun: 5,
                 externalSearchMinScore: 0.8,
+                triageEnabled: "true",
+                triageBatchSize: 12,
+                triageMaxBatchesPerRun: 3,
+                triageMaxOutputTokens: 900,
+                movementContextEnabled: "false",
+                holderEntryContextEnabled: "false",
+                minTriageInvestigatePriority: 0.7,
                 maxAgentCallsPerRun: 100,
                 maxOutputTokens: 1,
               },
@@ -1209,6 +1360,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);
+      assert.equal(resolved.defaults.triageEnabled, true);
+      assert.equal(resolved.defaults.triageBatchSize, 8);
+      assert.equal(resolved.effective.triageEnabled, true);
+      assert.equal(resolved.effective.triageBatchSize, 12);
+      assert.equal(resolved.effective.triageMaxBatchesPerRun, 3);
+      assert.equal(resolved.effective.triageMaxOutputTokens, 900);
+      assert.equal(resolved.effective.movementContextEnabled, false);
+      assert.equal(resolved.effective.holderEntryContextEnabled, false);
+      assert.equal(resolved.effective.minTriageInvestigatePriority, 0.7);
       assert.equal(resolved.effective.maxAgentCallsPerRun, 100);
       assert.equal(resolved.effective.maxOutputTokens, 100);
     },

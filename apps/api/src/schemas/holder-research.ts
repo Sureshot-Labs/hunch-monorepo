@@ -39,6 +39,39 @@ export type HolderResearchAgentOutputV1 = z.infer<
   typeof holderResearchAgentOutputV1Schema
 >;
 
+export const holderResearchTriageActionSchema = z.enum([
+  "investigate",
+  "watch",
+  "skip",
+]);
+
+export const holderResearchTriageOutputV1Schema = z
+  .object({
+    version: z.literal("holder_research_triage_v1"),
+    decisions: z
+      .array(
+        z
+          .object({
+            key: z.string().trim().min(1).max(240),
+            action: holderResearchTriageActionSchema,
+            priority: z.coerce.number().min(0).max(1),
+            needs_external_search: z.coerce.boolean(),
+            reason: z.string().trim().min(4).max(220),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+
+export type HolderResearchTriageAction = z.infer<
+  typeof holderResearchTriageActionSchema
+>;
+export type HolderResearchTriageOutputV1 = z.infer<
+  typeof holderResearchTriageOutputV1Schema
+>;
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -112,6 +145,88 @@ export function parseHolderResearchAgentOutputV1(
   return holderResearchAgentOutputV1Schema.parse(repaired);
 }
 
+export function parseHolderResearchTriageOutputV1(
+  value: unknown,
+  allowedCandidateKeys?: Iterable<string>,
+): HolderResearchTriageOutputV1 {
+  const record = asRecord(value);
+  const rawDecisions = Array.isArray(record.decisions) ? record.decisions : [];
+  const repaired = {
+    version: record.version,
+    decisions: rawDecisions.map((entry) => {
+      const item = asRecord(entry);
+      return {
+        key: asTrimmedString(item.key, "", 240),
+        action: item.action,
+        priority: item.priority,
+        needs_external_search: item.needs_external_search,
+        reason: asTrimmedString(item.reason, "No reason supplied.", 220),
+      };
+    }),
+  };
+  const parsed = holderResearchTriageOutputV1Schema.parse(repaired);
+  if (allowedCandidateKeys) {
+    const allowed = new Set(allowedCandidateKeys);
+    const unknown = parsed.decisions
+      .map((decision) => decision.key)
+      .filter((key) => !allowed.has(key));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Triage returned unknown candidate keys: ${unknown.join(", ")}`,
+      );
+    }
+  }
+  return parsed;
+}
+
+export function buildHolderResearchTriageSystemPrompt(): string {
+  return [
+    "You are a holder-research triage analyst for Hunch.",
+    "Return exactly one JSON object matching holder_research_triage_v1.",
+    "Your job is to choose which deterministic holder candidates deserve deeper research, not to write the final signal.",
+    "Prefer candidates where a sharp holder or sharp cluster has a clear side, movement context suggests the holder was early or still useful, and the signal adds something beyond public news or raw odds.",
+    "Downgrade mixed/conflicted reads, stale exposure, weak single-holder reads without credentials, already-priced moves, and cases where public news fully explains the positioning.",
+    "Use marketMovementContext to judge whether price moved with or ahead of the holder read. Use holderEntryContext to judge whether the holder is early, chasing, or still holding through a move.",
+    "Use investigate for candidates worth final synthesis. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
+    "Do not invent candidate keys. Return one decision per supplied candidate.",
+  ].join("\n");
+}
+
+export function buildHolderResearchTriageUserPrompt(input: {
+  candidates: unknown[];
+  maxInvestigate: number;
+}): string {
+  return JSON.stringify(
+    {
+      task: "Triage holder-research candidates before expensive final synthesis.",
+      output_contract: {
+        version: "holder_research_triage_v1",
+        decisions: [
+          {
+            key: "one supplied candidate key",
+            action: "investigate | watch | skip",
+            priority: "0..1; higher means more worth final synthesis",
+            needs_external_search:
+              "true when public/news context is likely needed before final synthesis",
+            reason: "one short internal reason",
+          },
+        ],
+      },
+      selection_rules: [
+        "Prefer early or still-informative sharp holder positioning.",
+        "Prefer clear single-side sharp holders or sharp clusters with credible credentials.",
+        "Prefer candidates where odds moved in the holder direction but not so much that the signal is already obvious.",
+        "Downgrade mixed holder reads, concentration-only reads, stale positions, and public-news-only moves.",
+        "Use watch when useful for memory/cooldown but not worth final synthesis now.",
+        `Return at most ${input.maxInvestigate} investigate decisions unless more are clearly exceptional.`,
+      ],
+      candidates: input.candidates,
+    },
+    null,
+    2,
+  );
+}
+
 export function buildHolderResearchSystemPrompt(): string {
   return [
     "You are a holder-research signal writer for Hunch, a prediction market product.",
@@ -133,6 +248,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "High scores are selection hints, not publish instructions. Even a high-score candidate should be CONTEXT if the user-facing takeaway is mixed or mostly risk/context.",
     "If public news partly explains the move, still choose PUBLISH when holder data adds incremental directional information: informed confirmation, unusual side selection, or early positioning.",
     "Pay close attention to timing. Compare holder snapshot/activity times with dated public headlines. If a holder moved before the public catalyst or before consensus odds reacted, that increases signal value.",
+    "Use marketMovementContext and holderEntryContext when supplied. Translate them plainly: 'in from lower prices', 'still holding after the move', or 'price already moved before the holder read'.",
     "Do not say public news explains the holder move unless the public information was available before or around the holder activity. Later headlines may validate an early holder signal.",
     "Choose CONTEXT when the candidate is interesting but not feed-worthy: holder data mostly repeats public news, the read is too balanced, the signal is too concentrated, the read is mixed, or the incremental takeaway is weak.",
     "Choose SKIP when the evidence is weak, stale, untradeable, tiny, already obvious from odds alone, or mostly noise.",

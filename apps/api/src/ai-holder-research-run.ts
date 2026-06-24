@@ -13,17 +13,23 @@ import {
 import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
 import {
   buildHolderResearchSystemPrompt,
+  buildHolderResearchTriageSystemPrompt,
+  buildHolderResearchTriageUserPrompt,
   buildHolderResearchUserPrompt,
   parseHolderResearchAgentOutputV1,
+  parseHolderResearchTriageOutputV1,
   type HolderResearchAgentOutputV1,
+  type HolderResearchTriageOutputV1,
 } from "./schemas/holder-research.js";
 import {
+  applyHolderResearchPreviousDecisionContext,
   applyHolderResearchPublishQualityGate,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchDecisionCacheKey,
   buildHolderResearchDecisionCacheRecord,
   buildHolderResearchExternalSearchInput,
+  buildHolderResearchTriageCandidatePromptJson,
   enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
   evaluateHolderResearchDecisionCache,
@@ -58,6 +64,15 @@ type HolderResearchModelDecision = {
   output: HolderResearchAgentOutputV1;
   modelMeta: Record<string, unknown>;
   cost: ResolvedCost;
+};
+
+type HolderResearchTriageDecision =
+  HolderResearchTriageOutputV1["decisions"][number];
+
+type HolderResearchTriageModelResult = {
+  decisions: HolderResearchTriageDecision[];
+  cost: ResolvedCost;
+  modelMeta: Record<string, unknown>;
 };
 
 type HolderResearchDecisionCacheRedis = {
@@ -100,6 +115,7 @@ type HolderResearchRunReport = {
     maxCandidatePool: number;
     externalSearchEnabled: boolean;
     maxExternalSearchCallsPerRun: number;
+    triageEnabled: boolean;
     decisionCacheEnabled: boolean;
   };
   totals: {
@@ -113,6 +129,8 @@ type HolderResearchRunReport = {
     chargedCostUsd: number;
     externalSearchEstimatedCostUsd: number;
     externalSearchChargedCostUsd: number;
+    triageEstimatedCostUsd: number;
+    triageChargedCostUsd: number;
     totalEstimatedCostUsd: number;
     totalChargedCostUsd: number;
     providerReportedCostUsd: number | null;
@@ -150,6 +168,22 @@ type HolderResearchRunReport = {
     nextEligibleAt: string | null;
     meaningfulDeltaReasons: string[];
   }>;
+  triage: {
+    enabled: boolean;
+    status: "ok" | "skipped" | "error";
+    calls: number;
+    investigate: number;
+    watch: number;
+    skip: number;
+    errors: number;
+  };
+  triageDecisions: Array<{
+    key: string;
+    action: string;
+    priority: number;
+    needsExternalSearch: boolean;
+    reason: string;
+  }>;
   selected: Array<{
     key: string;
     bucket: string;
@@ -179,6 +213,9 @@ type HolderResearchRunReport = {
   }>;
   persistence: Awaited<ReturnType<typeof persistHolderResearchNotes>> | null;
 };
+
+type HolderResearchDecisionCacheStats =
+  HolderResearchRunReport["decisionCache"];
 
 function parseBool(raw: string | undefined): boolean | null {
   if (!raw) return null;
@@ -403,7 +440,10 @@ function compactExternalResearchSummary(text: string): string {
     .join(" ");
   if (summary.length <= 280) return summary;
   const clipped = summary.slice(0, 280);
-  const boundary = Math.max(clipped.lastIndexOf(". "), clipped.lastIndexOf("; "));
+  const boundary = Math.max(
+    clipped.lastIndexOf(". "),
+    clipped.lastIndexOf("; "),
+  );
   if (boundary >= 160) return clipped.slice(0, boundary + 1).trim();
   const space = clipped.lastIndexOf(" ");
   return `${clipped.slice(0, space > 0 ? space : 277).trimEnd()}...`;
@@ -582,6 +622,37 @@ function zeroCost(): ResolvedCost {
   });
 }
 
+function addResolvedCosts(
+  left: ResolvedCost,
+  right: ResolvedCost,
+): ResolvedCost {
+  const providerCostUsd =
+    left.providerCostUsd != null || right.providerCostUsd != null
+      ? (left.providerCostUsd ?? 0) + (right.providerCostUsd ?? 0)
+      : null;
+  const providerCostUsdTicks =
+    left.providerCostUsdTicks != null || right.providerCostUsdTicks != null
+      ? (left.providerCostUsdTicks ?? 0) + (right.providerCostUsdTicks ?? 0)
+      : null;
+  return {
+    inputCostUsd: left.inputCostUsd + right.inputCostUsd,
+    outputCostUsd: left.outputCostUsd + right.outputCostUsd,
+    tokenCostUsd: left.tokenCostUsd + right.tokenCostUsd,
+    toolCostUsd: left.toolCostUsd + right.toolCostUsd,
+    estimatedCostUsd: left.estimatedCostUsd + right.estimatedCostUsd,
+    providerCostUsd,
+    providerCostField:
+      left.providerCostField ?? right.providerCostField ?? null,
+    providerCostUsdTicks,
+    chargedCostUsd: left.chargedCostUsd + right.chargedCostUsd,
+    costSource:
+      left.costSource === "provider_reported" ||
+      right.costSource === "provider_reported"
+        ? "provider_reported"
+        : "estimated",
+  };
+}
+
 function estimatedFailedModelCost(policy: HolderResearchPolicy): ResolvedCost {
   return {
     ...zeroCost(),
@@ -646,6 +717,100 @@ type OpenRouterResponse = {
     total_tokens?: number;
   };
 };
+
+async function callHolderResearchTriageModel(params: {
+  candidates: HolderResearchCandidate[];
+  policy: HolderResearchPolicy;
+  maxInvestigate: number;
+}): Promise<HolderResearchTriageModelResult> {
+  const candidateJson = params.candidates.map((candidate) =>
+    buildHolderResearchTriageCandidatePromptJson(candidate, params.policy),
+  );
+  const systemPrompt = buildHolderResearchTriageSystemPrompt();
+  const userPrompt = buildHolderResearchTriageUserPrompt({
+    candidates: candidateJson,
+    maxInvestigate: params.maxInvestigate,
+  });
+
+  if (!env.openRouterKey) {
+    throw new Error("OPENROUTER_API_KEY missing");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90_000);
+  try {
+    const response = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.openRouterKey}`,
+        },
+        body: JSON.stringify({
+          model: params.policy.model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.05,
+          max_tokens: params.policy.triageMaxOutputTokens,
+        }),
+      },
+    );
+    const payload = (await response
+      .json()
+      .catch(() => ({}))) as OpenRouterResponse;
+    if (!response.ok) {
+      throw new Error(
+        `OpenRouter ${response.status}: ${JSON.stringify(payload).slice(0, 500)}`,
+      );
+    }
+
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) throw new Error("OpenRouter triage response missing content");
+    const parsedJson = parseModelJsonObject(content);
+    const output = parseHolderResearchTriageOutputV1(
+      parsedJson,
+      params.candidates.map((candidate) => candidate.key),
+    );
+    const pricing = getOpenRouterModelPricingPerM(params.policy.model);
+    const provider = extractProviderCostUsd(payload);
+    const promptTokens =
+      payload.usage?.prompt_tokens ?? estimateTokens(systemPrompt + userPrompt);
+    const completionTokens =
+      payload.usage?.completion_tokens ?? estimateTokens(content);
+    const cost = resolveAiCost({
+      inputTokens: promptTokens,
+      outputTokens: completionTokens,
+      priceInputPerM: pricing?.inputPerM ?? 0,
+      priceOutputPerM: pricing?.outputPerM ?? 0,
+      providerCostUsd: provider.providerCostUsd,
+      providerCostField: provider.providerCostField,
+      providerCostUsdTicks: provider.providerCostUsdTicks,
+    });
+
+    return {
+      decisions: output.decisions,
+      cost,
+      modelMeta: {
+        model: params.policy.model,
+        mode: "openrouter_triage",
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: payload.usage?.total_tokens ?? null,
+        cost_source: cost.costSource,
+        charged_cost_usd: cost.chargedCostUsd,
+        estimated_cost_usd: cost.estimatedCostUsd,
+        provider_cost_usd: cost.providerCostUsd,
+      },
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function callHolderResearchModel(params: {
   candidate: HolderResearchCandidate;
@@ -761,9 +926,11 @@ function buildHolderResearchModelErrorDecision(input: {
   externalResearch: ExternalResearchResult | null;
   policy: HolderResearchPolicy;
 }): HolderResearchModelDecision {
-  const message = input.error instanceof Error ? input.error.message : String(input.error);
+  const message =
+    input.error instanceof Error ? input.error.message : String(input.error);
   const evidenceId =
-    input.candidate.evidence[0]?.id ?? `market:${input.candidate.market.marketId}`;
+    input.candidate.evidence[0]?.id ??
+    `market:${input.candidate.market.marketId}`;
   return {
     candidate: input.candidate,
     output: {
@@ -776,7 +943,8 @@ function buildHolderResearchModelErrorDecision(input: {
       headline: "Holder research model failed",
       summary:
         "The model response could not be parsed, so this candidate was skipped instead of publishing an incomplete signal.",
-      rationale: "Model synthesis failed; candidate skipped without publishing.",
+      rationale:
+        "Model synthesis failed; candidate skipped without publishing.",
       evidence_ids: [evidenceId],
       caveats: ["No user-facing signal was produced for this run."],
     },
@@ -863,11 +1031,17 @@ async function synthesizeCandidate(params: {
   };
 }
 
-function buildSelectionPolicy(policy: HolderResearchPolicy): HolderResearchPolicy {
-  if (!policy.decisionCacheEnabled) return policy;
+function buildSelectionPolicy(
+  policy: HolderResearchPolicy,
+): HolderResearchPolicy {
+  if (!policy.decisionCacheEnabled && !policy.triageEnabled) return policy;
+  const triageLookahead = policy.triageEnabled
+    ? policy.triageBatchSize * policy.triageMaxBatchesPerRun
+    : policy.maxCandidatesPerRun;
   const lookaheadLimit = Math.min(
     policy.maxCandidatePool,
-    policy.maxCandidatesPerRun + policy.maxAgentCallsPerRun * 2,
+    Math.max(policy.maxCandidatesPerRun, triageLookahead) +
+      policy.maxAgentCallsPerRun * 2,
   );
   return {
     ...policy,
@@ -886,6 +1060,55 @@ function decisionCacheReportEntry(
     lastCheckedAt: evaluation.lastCheckedAt,
     nextEligibleAt: evaluation.nextEligibleAt,
     meaningfulDeltaReasons: evaluation.meaningfulDeltaReasons,
+  };
+}
+
+async function maybeWriteDecisionCache(params: {
+  redis: HolderResearchDecisionCacheRedis | null | undefined;
+  policy: HolderResearchPolicy;
+  callModel: boolean;
+  candidate: HolderResearchCandidate;
+  output: Pick<HolderResearchAgentOutputV1, "rationale" | "status">;
+  decisionCache: HolderResearchDecisionCacheStats;
+}): Promise<void> {
+  if (
+    !params.policy.decisionCacheEnabled ||
+    !params.redis ||
+    params.policy.dryRun ||
+    !params.callModel
+  ) {
+    return;
+  }
+
+  try {
+    const cacheRecord = buildHolderResearchDecisionCacheRecord({
+      candidate: params.candidate,
+      output: params.output,
+      model: params.policy.model,
+      policy: params.policy,
+    });
+    await params.redis.set(
+      buildHolderResearchDecisionCacheKey(params.candidate.key),
+      JSON.stringify(cacheRecord),
+      { EX: params.policy.decisionCacheTtlHours * 3_600 },
+    );
+    params.decisionCache.written += 1;
+  } catch (error) {
+    params.decisionCache.status = "error";
+    params.decisionCache.errors += 1;
+    console.warn("[holder-research] decision_cache write skipped", {
+      key: params.candidate.key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function triageCacheOutput(
+  decision: HolderResearchTriageDecision,
+): Pick<HolderResearchAgentOutputV1, "rationale" | "status"> {
+  return {
+    status: decision.action === "skip" ? "SKIP" : "CONTEXT",
+    rationale: decision.reason,
   };
 }
 
@@ -973,14 +1196,22 @@ export async function runHolderResearch(
 
     const decisions: HolderResearchModelDecision[] = [];
     const externalResearchByKey = new Map<string, ExternalResearchResult>();
+    const triageDecisions: HolderResearchRunReport["triageDecisions"] = [];
+    const triageByKey = new Map<string, HolderResearchTriageDecision>();
+    const triage = {
+      enabled: policy.triageEnabled,
+      status: "skipped" as "ok" | "skipped" | "error",
+      calls: 0,
+      investigate: 0,
+      watch: 0,
+      skip: 0,
+      errors: 0,
+    };
+    let triageCost = zeroCost();
     let externalSearchCalls = 0;
-    let publishCount = 0;
-    let consecutiveSkips = 0;
-    for (const candidate of selectedWithContext) {
-      if (decisions.length >= policy.maxAgentCallsPerRun) break;
-      if (publishCount >= policy.maxPublishPerRun) break;
-      if (consecutiveSkips >= policy.maxConsecutiveSkips) break;
 
+    const cacheEligibleCandidates: HolderResearchCandidate[] = [];
+    for (const candidate of selectedWithContext) {
       let cacheEvaluation: HolderResearchDecisionCacheEvaluation | null = null;
       if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
         decisionCache.checked += 1;
@@ -1027,11 +1258,123 @@ export async function runHolderResearch(
           });
         }
       }
+      cacheEligibleCandidates.push(
+        applyHolderResearchPreviousDecisionContext(candidate, cacheEvaluation),
+      );
+    }
 
+    const finalCandidates: HolderResearchCandidate[] = [];
+    const triageCanRun =
+      policy.triageEnabled &&
+      args.callModel &&
+      cacheEligibleCandidates.length > 0;
+    if (triageCanRun) {
+      triage.status = "ok";
+      for (
+        let batchIndex = 0;
+        batchIndex < policy.triageMaxBatchesPerRun &&
+        finalCandidates.length < policy.maxAgentCallsPerRun;
+        batchIndex += 1
+      ) {
+        const offset = batchIndex * policy.triageBatchSize;
+        const batch = cacheEligibleCandidates.slice(
+          offset,
+          offset + policy.triageBatchSize,
+        );
+        if (batch.length === 0) break;
+
+        let result: HolderResearchTriageModelResult;
+        try {
+          result = await callHolderResearchTriageModel({
+            candidates: batch,
+            policy,
+            maxInvestigate: policy.maxAgentCallsPerRun - finalCandidates.length,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (
+            message.includes("OPENROUTER_API_KEY missing") ||
+            message.startsWith("OpenRouter 401") ||
+            message.startsWith("OpenRouter 403")
+          ) {
+            throw error;
+          }
+          triage.status = "error";
+          triage.errors += 1;
+          console.warn("[holder-research] triage failed", {
+            batchIndex,
+            error: message,
+          });
+          break;
+        }
+        triage.calls += 1;
+        triageCost = addResolvedCosts(triageCost, result.cost);
+
+        const decisionsByKey = new Map(
+          result.decisions.map((decision) => [decision.key, decision]),
+        );
+        for (const candidate of batch) {
+          const triageDecision =
+            decisionsByKey.get(candidate.key) ??
+            ({
+              key: candidate.key,
+              action: "watch",
+              priority: 0,
+              needs_external_search: false,
+              reason: "Triage did not return this candidate.",
+            } satisfies HolderResearchTriageDecision);
+          triageByKey.set(candidate.key, triageDecision);
+          triageDecisions.push({
+            key: triageDecision.key,
+            action: triageDecision.action,
+            priority: triageDecision.priority,
+            needsExternalSearch: triageDecision.needs_external_search,
+            reason: triageDecision.reason,
+          });
+          if (
+            triageDecision.action === "investigate" &&
+            triageDecision.priority >= policy.minTriageInvestigatePriority &&
+            finalCandidates.length < policy.maxAgentCallsPerRun
+          ) {
+            finalCandidates.push(candidate);
+            triage.investigate += 1;
+            continue;
+          }
+          if (triageDecision.action === "skip") {
+            triage.skip += 1;
+          } else {
+            triage.watch += 1;
+          }
+          await maybeWriteDecisionCache({
+            redis: options.decisionCacheRedis,
+            policy,
+            callModel: args.callModel,
+            candidate,
+            output: triageCacheOutput(triageDecision),
+            decisionCache,
+          });
+        }
+      }
+    } else {
+      finalCandidates.push(
+        ...cacheEligibleCandidates.slice(0, policy.maxAgentCallsPerRun),
+      );
+    }
+
+    let publishCount = 0;
+    let consecutiveSkips = 0;
+    for (const candidate of finalCandidates) {
+      if (decisions.length >= policy.maxAgentCallsPerRun) break;
+      if (publishCount >= policy.maxPublishPerRun) break;
+      if (consecutiveSkips >= policy.maxConsecutiveSkips) break;
+
+      const triageDecision = triageByKey.get(candidate.key);
       let externalResearch: ExternalResearchResult | null = null;
       if (
         policy.externalSearchEnabled &&
-        externalSearchCalls < policy.maxExternalSearchCallsPerRun
+        externalSearchCalls < policy.maxExternalSearchCallsPerRun &&
+        (triageDecision == null || triageDecision.needs_external_search)
       ) {
         externalResearch = await runExternalResearch({
           candidate,
@@ -1063,9 +1406,13 @@ export async function runHolderResearch(
         output: gatedOutput,
         modelMeta:
           gatedOutput === rawDecision.output
-            ? rawDecision.modelMeta
+            ? {
+                ...rawDecision.modelMeta,
+                triage: triageDecision ?? null,
+              }
             : {
                 ...rawDecision.modelMeta,
+                triage: triageDecision ?? null,
                 publish_quality_gate: {
                   originalStatus: rawDecision.output.status,
                   originalRationale: rawDecision.output.rationale,
@@ -1075,34 +1422,14 @@ export async function runHolderResearch(
               },
       };
       decisions.push(decision);
-      if (
-        policy.decisionCacheEnabled &&
-        options.decisionCacheRedis &&
-        !policy.dryRun &&
-        args.callModel
-      ) {
-        try {
-          const cacheRecord = buildHolderResearchDecisionCacheRecord({
-            candidate,
-            output: decision.output,
-            model: policy.model,
-            policy,
-          });
-          await options.decisionCacheRedis.set(
-            buildHolderResearchDecisionCacheKey(candidate.key),
-            JSON.stringify(cacheRecord),
-            { EX: policy.decisionCacheTtlHours * 3_600 },
-          );
-          decisionCache.written += 1;
-        } catch (error) {
-          decisionCache.status = "error";
-          decisionCache.errors += 1;
-          console.warn("[holder-research] decision_cache write skipped", {
-            key: candidate.key,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+      await maybeWriteDecisionCache({
+        redis: options.decisionCacheRedis,
+        policy,
+        callModel: args.callModel,
+        candidate,
+        output: decision.output,
+        decisionCache,
+      });
       if (decision.output.status === "PUBLISH") {
         publishCount += 1;
         consecutiveSkips = 0;
@@ -1120,6 +1447,16 @@ export async function runHolderResearch(
         ? options.decisionCacheRedis
           ? `skipped=${decisionCache.skipped} rechecked=${decisionCache.rechecked} written=${decisionCache.written} errors=${decisionCache.errors}`
           : "redis unavailable"
+        : "policy disabled",
+    });
+    toolCalls.push({
+      name: "triage",
+      count: triage.calls,
+      status: triage.status,
+      detail: policy.triageEnabled
+        ? args.callModel
+          ? `investigate=${triage.investigate} watch=${triage.watch} skip=${triage.skip} errors=${triage.errors}`
+          : "callModel=false"
         : "policy disabled",
     });
     toolCalls.push({
@@ -1183,6 +1520,9 @@ export async function runHolderResearch(
     const providerReportedCosts = decisions
       .map((decision) => decision.cost.providerCostUsd)
       .filter((cost): cost is number => cost != null);
+    if (triageCost.providerCostUsd != null) {
+      providerReportedCosts.push(triageCost.providerCostUsd);
+    }
 
     const report: HolderResearchRunReport = {
       runId,
@@ -1198,6 +1538,7 @@ export async function runHolderResearch(
         maxCandidatePool: policy.maxCandidatePool,
         externalSearchEnabled: policy.externalSearchEnabled,
         maxExternalSearchCallsPerRun: policy.maxExternalSearchCallsPerRun,
+        triageEnabled: policy.triageEnabled,
         decisionCacheEnabled: policy.decisionCacheEnabled,
       },
       totals: {
@@ -1217,9 +1558,16 @@ export async function runHolderResearch(
         chargedCostUsd,
         externalSearchEstimatedCostUsd,
         externalSearchChargedCostUsd,
+        triageEstimatedCostUsd: triageCost.estimatedCostUsd,
+        triageChargedCostUsd: args.callModel ? triageCost.chargedCostUsd : 0,
         totalEstimatedCostUsd:
-          estimatedCostUsd + externalSearchEstimatedCostUsd,
-        totalChargedCostUsd: chargedCostUsd + externalSearchChargedCostUsd,
+          estimatedCostUsd +
+          externalSearchEstimatedCostUsd +
+          triageCost.estimatedCostUsd,
+        totalChargedCostUsd:
+          chargedCostUsd +
+          externalSearchChargedCostUsd +
+          (args.callModel ? triageCost.chargedCostUsd : 0),
         providerReportedCostUsd:
           providerReportedCosts.length > 0
             ? providerReportedCosts.reduce((sum, cost) => sum + cost, 0)
@@ -1230,6 +1578,8 @@ export async function runHolderResearch(
       decisionCache,
       decisionCacheSkipped,
       decisionCacheRechecked,
+      triage,
+      triageDecisions,
       selected: selectedWithContext.map((candidate) => ({
         key: candidate.key,
         bucket: candidate.bucket,

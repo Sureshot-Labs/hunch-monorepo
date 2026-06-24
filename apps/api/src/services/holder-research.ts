@@ -34,6 +34,23 @@ export type HolderResearchRelatedPosition = {
   snapshotAt: string | null;
 };
 
+export type HolderResearchMarketMovementContext = {
+  yesProbabilityNow: number | null;
+  yesChange24h: number | null;
+  volume24h: number | null;
+  volumeChange24h: number | null;
+  volumeChangePct24h: number | null;
+  liquidity: number | null;
+  liquidityChange24h: number | null;
+  liquidityChangePct24h: number | null;
+  openInterestChange24h: number | null;
+  openInterestChangePct24h: number | null;
+  updatedAt: string | null;
+  previousDecisionYesProbability: number | null;
+  yesChangeSincePreviousDecision: number | null;
+  previousDecisionCheckedAt: string | null;
+};
+
 export type HolderResearchHolder = {
   walletId: string;
   address: string;
@@ -41,7 +58,16 @@ export type HolderResearchHolder = {
   label: string | null;
   side: HolderResearchSideKey;
   positionUsd: number;
+  positionShares: number | null;
   openPnlUsd: number | null;
+  realizedPnlUsd: number | null;
+  totalPnlUsd: number | null;
+  avgEntryPrice: number | null;
+  currentPrice: number | null;
+  entryToCurrentDelta: number | null;
+  approxReliable: boolean | null;
+  approxPnlSource: "activity" | "snapshot" | null;
+  positionSnapshotAt: string | null;
   pnl30dUsd: number | null;
   resolvedWinRateEdge30d: number | null;
   resolvedEdgeZScore30d: number | null;
@@ -90,6 +116,7 @@ export type HolderResearchMarketInput = {
   yesProbability: number | null;
   volume24h: number | null;
   liquidity: number | null;
+  marketMovementContext: HolderResearchMarketMovementContext;
   sides: Record<HolderResearchSideKey, HolderResearchSide>;
   holders: HolderResearchHolder[];
   recentActivityUsd: number;
@@ -244,6 +271,16 @@ export type HolderResearchDecisionCacheEvaluation = {
   meaningfulDeltaReasons: string[];
 };
 
+type HolderResearchActorPolicy = Parameters<
+  typeof buildHolderResearchActorSummary
+>[0]["policy"];
+
+type HolderResearchPromptPolicy = HolderResearchActorPolicy &
+  Pick<
+    HolderResearchPolicy,
+    "holderEntryContextEnabled" | "movementContextEnabled"
+  >;
+
 type HolderResearchMarketRow = {
   market_id: string;
   event_id: string | null;
@@ -265,6 +302,14 @@ type HolderResearchMarketRow = {
   last_price: string | number | null;
   volume_24h: string | number | null;
   liquidity: string | number | null;
+  market_change_24h: string | number | null;
+  volume_last_24h_change: string | number | null;
+  volume_last_24h_change_pct: string | number | null;
+  liquidity_change_24h: string | number | null;
+  liquidity_change_pct_24h: string | number | null;
+  open_interest_change_24h: string | number | null;
+  open_interest_change_pct_24h: string | number | null;
+  market_activity_metrics_updated_at: Date | string | null;
   yes_usd: string | number | null;
   no_usd: string | number | null;
   yes_wallets: string | number | null;
@@ -517,7 +562,9 @@ function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
   };
 }
 
-function buildHolderEvidenceId(holder: Pick<HolderResearchHolder, "walletId" | "side">): string {
+function buildHolderEvidenceId(
+  holder: Pick<HolderResearchHolder, "walletId" | "side">,
+): string {
   return `holder:${holder.walletId}:${holder.side}`;
 }
 
@@ -541,12 +588,26 @@ function bestHolderForSide(
 export function buildHolderResearchInputDigest(
   candidate: Omit<HolderResearchCandidate, "inputDigest">,
 ): string {
+  const movement = candidate.market.marketMovementContext;
   const digestInput = {
     bucket: candidate.bucket,
     side: candidate.side,
     marketId: candidate.market.marketId,
     eventId: candidate.market.eventId,
     yesProbability: candidate.market.yesProbability,
+    marketMovementContext: {
+      yesProbabilityNow: movement.yesProbabilityNow,
+      yesChange24h: movement.yesChange24h,
+      volume24h: movement.volume24h,
+      volumeChange24h: movement.volumeChange24h,
+      volumeChangePct24h: movement.volumeChangePct24h,
+      liquidity: movement.liquidity,
+      liquidityChange24h: movement.liquidityChange24h,
+      liquidityChangePct24h: movement.liquidityChangePct24h,
+      openInterestChange24h: movement.openInterestChange24h,
+      openInterestChangePct24h: movement.openInterestChangePct24h,
+      updatedAt: movement.updatedAt,
+    },
     sides: candidate.market.sides,
     recentActivityUsd: candidate.market.recentActivityUsd,
     crossMarketWalletCount: candidate.market.crossMarketWalletCount,
@@ -554,7 +615,16 @@ export function buildHolderResearchInputDigest(
       walletId: holder.walletId,
       side: holder.side,
       positionUsd: holder.positionUsd,
+      positionShares: holder.positionShares,
       openPnlUsd: holder.openPnlUsd,
+      realizedPnlUsd: holder.realizedPnlUsd,
+      totalPnlUsd: holder.totalPnlUsd,
+      avgEntryPrice: holder.avgEntryPrice,
+      currentPrice: holder.currentPrice,
+      entryToCurrentDelta: holder.entryToCurrentDelta,
+      approxReliable: holder.approxReliable,
+      approxPnlSource: holder.approxPnlSource,
+      positionSnapshotAt: holder.positionSnapshotAt,
       pnl30dUsd: holder.pnl30dUsd,
       edge: holder.resolvedWinRateEdge30d,
       z: holder.resolvedEdgeZScore30d,
@@ -570,7 +640,10 @@ export function buildHolderResearchInputDigest(
   return createHash("sha256").update(JSON.stringify(digestInput)).digest("hex");
 }
 
-function roundDecisionNumber(value: number | null, digits: number): number | null {
+function roundDecisionNumber(
+  value: number | null,
+  digits: number,
+): number | null {
   if (value == null || !Number.isFinite(value)) return null;
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
@@ -622,8 +695,9 @@ function selectedEvidenceHolders(
   const evidenceKeys = new Set(
     candidate.evidence
       .map((evidence) => parseHolderEvidenceId(evidence.id))
-      .filter((entry): entry is { walletId: string; side: HolderResearchSideKey } =>
-        entry != null,
+      .filter(
+        (entry): entry is { walletId: string; side: HolderResearchSideKey } =>
+          entry != null,
       )
       .map((entry) => `${entry.walletId}:${entry.side}`),
   );
@@ -638,6 +712,27 @@ function selectedEvidenceHolders(
   return [...candidate.market.holders]
     .sort((a, b) => b.positionUsd - a.positionUsd)
     .slice(0, 2);
+}
+
+function buildHolderEntryContext(candidate: HolderResearchCandidate) {
+  return selectedEvidenceHolders(candidate)
+    .slice(0, 3)
+    .map((holder) => ({
+      walletId: holder.walletId,
+      label: holder.label,
+      side: holder.side,
+      positionUsd: holder.positionUsd,
+      positionShares: holder.positionShares,
+      avgEntryPrice: holder.avgEntryPrice,
+      currentPrice: holder.currentPrice,
+      entryToCurrentDelta: holder.entryToCurrentDelta,
+      openPnlUsd: holder.openPnlUsd,
+      realizedPnlUsd: holder.realizedPnlUsd,
+      totalPnlUsd: holder.totalPnlUsd,
+      approxReliable: holder.approxReliable,
+      approxPnlSource: holder.approxPnlSource,
+      snapshotAt: holder.positionSnapshotAt,
+    }));
 }
 
 function previousNoteTargetHolders(
@@ -688,13 +783,15 @@ function formatPointDelta(value: number): string {
   return `${points} point${points === 1 ? "" : "s"}`;
 }
 
-function plural(value: number, singular: string, pluralLabel = `${singular}s`): string {
+function plural(
+  value: number,
+  singular: string,
+  pluralLabel = `${singular}s`,
+): string {
   return `${value} ${value === 1 ? singular : pluralLabel}`;
 }
 
-function buildHolderCredentialBullets(
-  holder: HolderResearchHolder,
-): string[] {
+function buildHolderCredentialBullets(holder: HolderResearchHolder): string[] {
   const bullets: string[] = [];
   if (holder.pnl30dUsd != null && holder.pnl30dUsd >= 1_000) {
     bullets.push(`Up ${formatUsd(holder.pnl30dUsd)} over the last 30 days`);
@@ -704,7 +801,9 @@ function buildHolderCredentialBullets(
     holder.winRate30d >= 0.55 &&
     (holder.trades30d ?? 0) >= 5
   ) {
-    bullets.push(`Won ${formatWholePercent(holder.winRate30d)} of recent trades`);
+    bullets.push(
+      `Won ${formatWholePercent(holder.winRate30d)} of recent trades`,
+    );
   }
   if (
     holder.resolvedWinRateEdge30d != null &&
@@ -720,7 +819,9 @@ function buildHolderCredentialBullets(
     holder.volume30dUsd != null &&
     holder.volume30dUsd >= 25_000
   ) {
-    bullets.push(`Traded ${formatUsd(holder.volume30dUsd)} over the last 30 days`);
+    bullets.push(
+      `Traded ${formatUsd(holder.volume30dUsd)} over the last 30 days`,
+    );
   }
   return bullets.slice(0, 3);
 }
@@ -745,7 +846,8 @@ function buildClusterCredentialBullets(input: {
 } {
   const sideData = input.candidate.market.sides[input.side];
   const availableSharpHolders = input.candidate.market.holders.filter(
-    (holder) => holder.side === input.side && isSharpHolder(holder, input.policy),
+    (holder) =>
+      holder.side === input.side && isSharpHolder(holder, input.policy),
   );
   const hasCompletePnl =
     availableSharpHolders.length >= sideData.sharpHolders &&
@@ -761,7 +863,9 @@ function buildClusterCredentialBullets(input: {
   if (pnl30dUsd != null && pnl30dUsd >= 1_000) {
     bullets.push(`Up ${formatUsd(pnl30dUsd)} combined over the last 30 days`);
   }
-  bullets.push(`${plural(sideData.sharpHolders, "strong wallet")} on the same side`);
+  bullets.push(
+    `${plural(sideData.sharpHolders, "strong wallet")} on the same side`,
+  );
   bullets.push(`${formatUsd(sideData.sharpUsd)} tracked by sharp wallets`);
   return {
     availableSharpHolders: availableSharpHolders.length,
@@ -901,7 +1005,8 @@ export function buildHolderResearchDecisionSnapshot(
       .sort((a, b) =>
         `${a.walletId}:${a.side}`.localeCompare(`${b.walletId}:${b.side}`),
       ),
-    recentActivityUsd: roundDecisionUsd(candidate.market.recentActivityUsd) ?? 0,
+    recentActivityUsd:
+      roundDecisionUsd(candidate.market.recentActivityUsd) ?? 0,
     recentActivityAt: toIso(candidate.market.recentActivityAt),
     crossMarketWalletCount: candidate.market.crossMarketWalletCount,
   };
@@ -1053,7 +1158,10 @@ export function diffHolderResearchDecisionSnapshots(
 
   const previousRelated = materialRelatedPositions(previous, policy);
   const currentRelated = materialRelatedPositions(current, policy);
-  const relatedKeys = new Set([...previousRelated.keys(), ...currentRelated.keys()]);
+  const relatedKeys = new Set([
+    ...previousRelated.keys(),
+    ...currentRelated.keys(),
+  ]);
   for (const key of relatedKeys) {
     const previousUsd = previousRelated.get(key) ?? 0;
     const currentUsd = currentRelated.get(key) ?? 0;
@@ -1129,8 +1237,7 @@ export function parseHolderResearchCachedDecision(
           : null,
       snapshot,
       digest: record.digest,
-      rationale:
-        typeof record.rationale === "string" ? record.rationale : null,
+      rationale: typeof record.rationale === "string" ? record.rationale : null,
     };
   } catch {
     return null;
@@ -1255,6 +1362,30 @@ export function evaluateHolderResearchDecisionCache(input: {
   };
 }
 
+export function applyHolderResearchPreviousDecisionContext(
+  candidate: HolderResearchCandidate,
+  evaluation: HolderResearchDecisionCacheEvaluation | null,
+): HolderResearchCandidate {
+  const cached = evaluation?.cachedDecision;
+  if (!cached) return candidate;
+  const previousYes = cached.snapshot.yesProbability;
+  const currentYes = candidate.market.yesProbability;
+  const yesChangeSincePreviousDecision =
+    previousYes != null && currentYes != null ? currentYes - previousYes : null;
+  return {
+    ...candidate,
+    market: {
+      ...candidate.market,
+      marketMovementContext: {
+        ...candidate.market.marketMovementContext,
+        previousDecisionYesProbability: previousYes,
+        yesChangeSincePreviousDecision,
+        previousDecisionCheckedAt: cached.checkedAt,
+      },
+    },
+  };
+}
+
 export function buildHolderResearchDecisionCacheRecord(input: {
   candidate: HolderResearchCandidate;
   output: Pick<HolderResearchAgentOutputV1, "rationale" | "status">;
@@ -1276,8 +1407,7 @@ export function buildHolderResearchDecisionCacheRecord(input: {
     status: input.output.status,
     model: input.model,
     checkedAt: now.toISOString(),
-    nextEligibleAt:
-      cooldownHours > 0 ? addHoursIso(now, cooldownHours) : null,
+    nextEligibleAt: cooldownHours > 0 ? addHoursIso(now, cooldownHours) : null,
     forceEligibleAt: addHoursIso(now, input.policy.forceRecheckAfterHours),
     snapshot,
     digest: buildHolderResearchDecisionDigest(snapshot),
@@ -1766,7 +1896,16 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
         label: safeText(record.label),
         side,
         positionUsd,
+        positionShares: null,
         openPnlUsd: null,
+        realizedPnlUsd: null,
+        totalPnlUsd: null,
+        avgEntryPrice: null,
+        currentPrice: null,
+        entryToCurrentDelta: null,
+        approxReliable: null,
+        approxPnlSource: null,
+        positionSnapshotAt: null,
         pnl30dUsd: toNumber(record.pnl30dUsd),
         resolvedWinRateEdge30d: toNumber(record.resolvedWinRateEdge30d),
         resolvedEdgeZScore30d: toNumber(record.resolvedEdgeZScore30d),
@@ -1785,7 +1924,30 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
     .filter((holder): holder is HolderResearchHolder => holder != null);
 }
 
+function buildMarketMovementContext(
+  row: HolderResearchMarketRow,
+  yesProbability: number | null,
+): HolderResearchMarketMovementContext {
+  return {
+    yesProbabilityNow: yesProbability,
+    yesChange24h: toNumber(row.market_change_24h),
+    volume24h: toNumber(row.volume_24h),
+    volumeChange24h: toNumber(row.volume_last_24h_change),
+    volumeChangePct24h: toNumber(row.volume_last_24h_change_pct),
+    liquidity: toNumber(row.liquidity),
+    liquidityChange24h: toNumber(row.liquidity_change_24h),
+    liquidityChangePct24h: toNumber(row.liquidity_change_pct_24h),
+    openInterestChange24h: toNumber(row.open_interest_change_24h),
+    openInterestChangePct24h: toNumber(row.open_interest_change_pct_24h),
+    updatedAt: toIso(row.market_activity_metrics_updated_at),
+    previousDecisionYesProbability: null,
+    yesChangeSincePreviousDecision: null,
+    previousDecisionCheckedAt: null,
+  };
+}
+
 function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
+  const yesProbability = calculateYesProbability(row);
   return {
     marketId: row.market_id,
     eventId: row.event_id,
@@ -1802,9 +1964,10 @@ function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
     category: row.category,
     closeTime: toIso(row.close_time),
     expirationTime: toIso(row.expiration_time),
-    yesProbability: calculateYesProbability(row),
+    yesProbability,
     volume24h: toNumber(row.volume_24h),
     liquidity: toNumber(row.liquidity),
+    marketMovementContext: buildMarketMovementContext(row, yesProbability),
     sides: {
       YES: buildSideFromRow("YES", row),
       NO: buildSideFromRow("NO", row),
@@ -2073,6 +2236,14 @@ export async function loadHolderResearchCandidateMarkets(
         um.last_price,
         um.volume_24h,
         um.liquidity,
+        mc.change_24h as market_change_24h,
+        mam.volume_last_24h_change,
+        mam.volume_last_24h_change_pct,
+        mam.liquidity_change_24h,
+        mam.liquidity_change_pct_24h,
+        mam.open_interest_change_24h,
+        mam.open_interest_change_pct_24h,
+        mam.updated_at as market_activity_metrics_updated_at,
         coalesce(yes.usd, 0) as yes_usd,
         coalesce(no.usd, 0) as no_usd,
         coalesce(yes.wallets, 0) as yes_wallets,
@@ -2103,6 +2274,8 @@ export async function loadHolderResearchCandidateMarkets(
       left join side_agg no on no.market_id = um.id and no.side = 'NO'
       left join recent_activity ra on ra.market_id = um.id
       left join event_bridge eb on eb.event_id = um.event_id
+      left join unified_market_change_24h mc on mc.market_id = um.id
+      left join unified_market_activity_metrics_24h mam on mam.market_id = um.id
       where ${trackableSql}
         and (coalesce(yes.usd, 0) + coalesce(no.usd, 0)) >= $9::numeric
       order by
@@ -2276,7 +2449,20 @@ export async function enrichHolderResearchLivePositions(
       return {
         ...holder,
         openPnlUsd: live?.openPnlUsd ?? holder.openPnlUsd,
+        realizedPnlUsd: live?.realizedPnlUsd ?? holder.realizedPnlUsd,
+        totalPnlUsd: live?.totalPnlUsd ?? holder.totalPnlUsd,
         positionUsd: live?.positionSizeUsd ?? holder.positionUsd,
+        positionShares: live?.positionShares ?? holder.positionShares,
+        avgEntryPrice: live?.approxEntryPrice ?? holder.avgEntryPrice,
+        currentPrice: live?.currentPrice ?? holder.currentPrice,
+        entryToCurrentDelta:
+          live?.approxEntryPrice != null && live.currentPrice != null
+            ? live.currentPrice - live.approxEntryPrice
+            : holder.entryToCurrentDelta,
+        approxReliable: live ? live.approxReliable : holder.approxReliable,
+        approxPnlSource: live?.approxPnlSource ?? holder.approxPnlSource,
+        positionSnapshotAt:
+          toIso(live?.snapshotAt) ?? holder.positionSnapshotAt,
       };
     });
 
@@ -2446,7 +2632,7 @@ export async function enrichHolderResearchHolderContext(
 
 export function buildHolderResearchCandidatePromptJson(
   candidate: HolderResearchCandidate,
-  policy?: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"],
+  policy?: HolderResearchPromptPolicy,
 ): Record<string, unknown> {
   const totalUsd =
     candidate.market.sides.YES.usd + candidate.market.sides.NO.usd;
@@ -2487,10 +2673,81 @@ export function buildHolderResearchCandidatePromptJson(
       crossMarketWalletCount: candidate.market.crossMarketWalletCount,
       previousNote: candidate.market.previousNote,
     },
+    marketMovementContext:
+      policy?.movementContextEnabled === false
+        ? null
+        : candidate.market.marketMovementContext,
+    holderEntryContext:
+      policy?.holderEntryContextEnabled === false
+        ? []
+        : buildHolderEntryContext(candidate),
     actor,
     sides: candidate.market.sides,
     holders: candidate.market.holders.slice(0, 8),
     evidence: candidate.evidence,
+  };
+}
+
+function thinSide(side: HolderResearchSide) {
+  return {
+    usd: side.usd,
+    wallets: side.wallets,
+    openPnlUsd: side.openPnlUsd,
+    sharpHolders: side.sharpHolders,
+    sharpUsd: side.sharpUsd,
+    bestEdge: side.bestEdge,
+    bestSampleCount: side.bestSampleCount,
+  };
+}
+
+export function buildHolderResearchTriageCandidatePromptJson(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPromptPolicy,
+): Record<string, unknown> {
+  const totalUsd =
+    candidate.market.sides.YES.usd + candidate.market.sides.NO.usd;
+  const actor = buildHolderResearchActorSummary({
+    candidate,
+    evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+    policy,
+  });
+  return {
+    key: candidate.key,
+    bucket: candidate.bucket,
+    score: candidate.score,
+    side: candidate.side,
+    direction: candidate.direction,
+    signalType: candidate.signalType,
+    reasons: candidate.reasons,
+    market: {
+      marketId: candidate.market.marketId,
+      eventId: candidate.market.eventId,
+      title: candidate.market.marketTitle,
+      eventTitle: candidate.market.eventTitle,
+      closeTime: candidate.market.closeTime,
+      yesProbability: candidate.market.yesProbability,
+      trackedUsd: totalUsd,
+      recentActivityUsd: candidate.market.recentActivityUsd,
+      recentActivityAt: candidate.market.recentActivityAt,
+      previousNote: candidate.market.previousNote
+        ? {
+            createdAt: candidate.market.previousNote.createdAt,
+            title: candidate.market.previousNote.title,
+            cooldownUntil: candidate.market.previousNote.cooldownUntil,
+          }
+        : null,
+    },
+    marketMovementContext: policy.movementContextEnabled
+      ? candidate.market.marketMovementContext
+      : null,
+    holderEntryContext: policy.holderEntryContextEnabled
+      ? buildHolderEntryContext(candidate)
+      : [],
+    actor,
+    sides: {
+      YES: thinSide(candidate.market.sides.YES),
+      NO: thinSide(candidate.market.sides.NO),
+    },
   };
 }
 
@@ -2622,36 +2879,35 @@ export function buildHolderResearchWalletTargets(
   const actor = policy
     ? buildHolderResearchActorSummary({ candidate, evidenceIds, policy })
     : null;
-  return holders
-    .map((holder, index) => ({
-      walletId: holder.walletId,
-      rank: 10 + index,
-      affinityScore: candidate.score,
-      meta: {
-        evidenceId: buildHolderEvidenceId(holder),
-        actorMode: actor?.mode ?? null,
-        credentialBullets:
-          actor?.primaryHolder?.walletId === holder.walletId
-            ? actor.credentialBullets
-            : [],
-        holderDescriptor: holder.label ?? "tracked wallet",
-        clusterSharpHolders: actor?.cluster?.sharpHolders ?? null,
-        clusterSharpUsd: actor?.cluster?.sharpUsd ?? null,
-        clusterPnl30dUsd: actor?.cluster?.pnl30dUsd ?? null,
-        side: holder.side,
-        positionUsd: holder.positionUsd,
-        openPnlUsd: holder.openPnlUsd,
-        pnl30dUsd: holder.pnl30dUsd,
-        resolvedWinRateEdge30d: holder.resolvedWinRateEdge30d,
-        resolvedEdgeZScore30d: holder.resolvedEdgeZScore30d,
-        resolvedEdgeSampleCount30d: holder.resolvedEdgeSampleCount30d,
-        resolvedStakeUsd30d: holder.resolvedStakeUsd30d,
-        trades30d: holder.trades30d,
-        winRate30d: holder.winRate30d,
-        walletKind: holder.walletKind,
-        ownerAddress: holder.ownerAddress,
-      },
-    }));
+  return holders.map((holder, index) => ({
+    walletId: holder.walletId,
+    rank: 10 + index,
+    affinityScore: candidate.score,
+    meta: {
+      evidenceId: buildHolderEvidenceId(holder),
+      actorMode: actor?.mode ?? null,
+      credentialBullets:
+        actor?.primaryHolder?.walletId === holder.walletId
+          ? actor.credentialBullets
+          : [],
+      holderDescriptor: holder.label ?? "tracked wallet",
+      clusterSharpHolders: actor?.cluster?.sharpHolders ?? null,
+      clusterSharpUsd: actor?.cluster?.sharpUsd ?? null,
+      clusterPnl30dUsd: actor?.cluster?.pnl30dUsd ?? null,
+      side: holder.side,
+      positionUsd: holder.positionUsd,
+      openPnlUsd: holder.openPnlUsd,
+      pnl30dUsd: holder.pnl30dUsd,
+      resolvedWinRateEdge30d: holder.resolvedWinRateEdge30d,
+      resolvedEdgeZScore30d: holder.resolvedEdgeZScore30d,
+      resolvedEdgeSampleCount30d: holder.resolvedEdgeSampleCount30d,
+      resolvedStakeUsd30d: holder.resolvedStakeUsd30d,
+      trades30d: holder.trades30d,
+      winRate30d: holder.winRate30d,
+      walletKind: holder.walletKind,
+      ownerAddress: holder.ownerAddress,
+    },
+  }));
 }
 
 function asContextHolderResearchOutput(

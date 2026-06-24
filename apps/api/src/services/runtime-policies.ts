@@ -141,6 +141,13 @@ export type HolderResearchPolicy = {
   externalSearchWindowHours: number;
   externalSearchMaxOutputTokens: number;
   estimatedExternalSearchCostUsd: number;
+  triageEnabled: boolean;
+  triageBatchSize: number;
+  triageMaxBatchesPerRun: number;
+  triageMaxOutputTokens: number;
+  movementContextEnabled: boolean;
+  holderEntryContextEnabled: boolean;
+  minTriageInvestigatePriority: number;
   decisionCacheEnabled: boolean;
   decisionCacheTtlHours: number;
   skipCooldownHours: number;
@@ -850,6 +857,13 @@ const holderResearchSchema = z
     externalSearchWindowHours: positiveInt.max(24 * 365),
     externalSearchMaxOutputTokens: positiveInt.max(8_000),
     estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
+    triageEnabled: strictBoolean,
+    triageBatchSize: positiveInt.max(50),
+    triageMaxBatchesPerRun: positiveInt.max(20),
+    triageMaxOutputTokens: positiveInt.max(8_000),
+    movementContextEnabled: strictBoolean,
+    holderEntryContextEnabled: strictBoolean,
+    minTriageInvestigatePriority: ratio,
     decisionCacheEnabled: strictBoolean,
     decisionCacheTtlHours: positiveInt.max(24 * 365),
     skipCooldownHours: positiveInt.max(24 * 365),
@@ -1540,6 +1554,13 @@ function getDefaults(): IntelPolicyMap {
       externalSearchWindowHours: 72,
       externalSearchMaxOutputTokens: 700,
       estimatedExternalSearchCostUsd: 0.03,
+      triageEnabled: true,
+      triageBatchSize: 8,
+      triageMaxBatchesPerRun: 1,
+      triageMaxOutputTokens: 1_200,
+      movementContextEnabled: true,
+      holderEntryContextEnabled: true,
+      minTriageInvestigatePriority: 0.6,
       decisionCacheEnabled: true,
       decisionCacheTtlHours: 336,
       skipCooldownHours: 12,
@@ -2412,17 +2433,32 @@ function normalizeHolderResearchPolicy(
       0,
       10_000,
     ),
+    triageEnabled: Boolean(policy.triageEnabled),
+    triageBatchSize: clamp(Math.trunc(policy.triageBatchSize), 1, 50),
+    triageMaxBatchesPerRun: clamp(
+      Math.trunc(policy.triageMaxBatchesPerRun),
+      1,
+      20,
+    ),
+    triageMaxOutputTokens: clamp(
+      Math.trunc(policy.triageMaxOutputTokens),
+      100,
+      8_000,
+    ),
+    movementContextEnabled: Boolean(policy.movementContextEnabled),
+    holderEntryContextEnabled: Boolean(policy.holderEntryContextEnabled),
+    minTriageInvestigatePriority: clamp(
+      policy.minTriageInvestigatePriority,
+      0,
+      1,
+    ),
     decisionCacheEnabled: Boolean(policy.decisionCacheEnabled),
     decisionCacheTtlHours: clamp(
       Math.trunc(policy.decisionCacheTtlHours),
       1,
       24 * 365,
     ),
-    skipCooldownHours: clamp(
-      Math.trunc(policy.skipCooldownHours),
-      1,
-      24 * 365,
-    ),
+    skipCooldownHours: clamp(Math.trunc(policy.skipCooldownHours), 1, 24 * 365),
     contextCooldownHours: clamp(
       Math.trunc(policy.contextCooldownHours),
       1,
