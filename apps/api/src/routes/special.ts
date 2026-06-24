@@ -226,8 +226,10 @@ function isFixtureRefreshDue(
 
 function isFixtureLiveNow(
   fixture: SportsFixtureApi | null | undefined,
+  now: Date,
 ): boolean {
   if (!fixture || isTerminalFixtureStatus(fixture.status)) return false;
+  if (!isFixtureInRefreshWindow(fixture, now)) return false;
   return isLiveFixtureStatus(fixture.status);
 }
 
@@ -674,6 +676,7 @@ function buildFacetsForRows(rows: FifaSpecialRow[]): FifaSpecialFacets {
 function filterRowsToLiveFixtures(input: {
   rows: FifaSpecialRow[];
   fixturesByFixtureKey: Map<string, SportsFixtureApi>;
+  now: Date;
 }): FifaSpecialRow[] {
   const liveEventIds = new Set<string>();
   for (const row of input.rows) {
@@ -681,7 +684,7 @@ function filterRowsToLiveFixtures(input: {
     const fixture = fixtureKey
       ? input.fixturesByFixtureKey.get(fixtureKey)
       : null;
-    if (isFixtureLiveNow(fixture)) {
+    if (isFixtureLiveNow(fixture, input.now)) {
       liveEventIds.add(row.event_id);
     }
   }
@@ -800,6 +803,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       const liveRows = filterRowsToLiveFixtures({
         rows: page.rows,
         fixturesByFixtureKey: fixtureLoad.fixturesByFixtureKey,
+        now,
       });
       const facets = buildFacetsForRows(liveRows);
       const liveEventCount = new Set(liveRows.map((row) => row.event_id)).size;

@@ -1472,6 +1472,50 @@ async function main() {
     }
 
     {
+      const previousFeedTtlForLive = env.feedTtlSec;
+      env.feedTtlSec = 0;
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => new Date("2026-06-24T20:32:00.000Z"),
+        getRedisStatus: async () =>
+          ({
+            status: "disabled",
+            redis: null,
+          }) as never,
+        fetchFifaSpecialPage: async () => livePage(),
+        fetchSportsFixturesByKeys: async () =>
+          new Map([
+            [
+              liveFixtureKey,
+              fixtureRow({
+                status: "HT",
+                fetchedAt: "2026-06-23T18:08:14.502Z",
+                homeScore: 3,
+                awayScore: 0,
+              }),
+            ],
+          ]),
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/special/fifa-2026/live",
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const payload = response.json<{
+          count: number;
+          total: number;
+          data: unknown[];
+        }>();
+        assert.equal(payload.count, 0);
+        assert.equal(payload.total, 0);
+        assert.deepEqual(payload.data, []);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForLive;
+      }
+    }
+
+    {
       const previousFeedTtlForPage = env.feedTtlSec;
       env.feedTtlSec = 0;
       let fixtureRefreshes = 0;
