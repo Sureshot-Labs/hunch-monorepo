@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { BuilderSigner } from "@polymarket/builder-signing-sdk";
 import crypto from "node:crypto";
 import bs58 from "bs58";
 import { PublicKey } from "@solana/web3.js";
@@ -48,6 +47,7 @@ import {
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import { validatePolymarketFunderSelection } from "../services/polymarket-funder.js";
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
+import { createPolymarketRelayerHeaderPayload } from "../services/polymarket-relayer-signing.js";
 import {
   buildEmbeddedPolymarketConnectRequest,
   executeEmbeddedPolymarketConnectRequest,
@@ -1204,21 +1204,17 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const { method, path, body, timestamp } = request.body;
-      const bodyString =
-        typeof body === "string"
-          ? body
-          : body == null
-            ? ""
-            : JSON.stringify(body);
 
       try {
-        const signer = new BuilderSigner({ key, secret, passphrase });
-        const headers = signer.createBuilderHeaderPayload(
+        const headers = createPolymarketRelayerHeaderPayload({
+          key,
+          secret,
+          passphrase,
           method,
           path,
-          bodyString,
+          body,
           timestamp,
-        );
+        });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(headers);

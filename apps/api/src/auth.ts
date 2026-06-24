@@ -705,7 +705,7 @@ export class AuthService {
     _privyClaims: PrivyClaims,
   ): Promise<User> {
     // Extract user data from Privy
-    const email = privyUser.email?.address?.trim() ?? null;
+    const email = PrivyService.getPrimaryEmailAddress(privyUser);
     const privyUserId = privyUser.id;
     const privyWallets = PrivyService.extractWallets(privyUser);
     const primaryWallet = privyWallets[0];

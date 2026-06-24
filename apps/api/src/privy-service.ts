@@ -1,16 +1,29 @@
 import {
   PrivyClient,
-  type AuthTokenClaims,
   type User,
-} from "@privy-io/server-auth";
+  type VerifyAccessTokenResponse,
+} from "@privy-io/node";
 import bs58 from "bs58";
 import { env } from "./env.js";
 
-// Initialize Privy client
-const privyClient = new PrivyClient(env.privyAppId, env.privyAppSecret);
+const privyClient = new PrivyClient({
+  appId: env.privyAppId,
+  appSecret: env.privyAppSecret,
+});
 
-export type PrivyUser = User;
-export type PrivyClaims = AuthTokenClaims;
+export type PrivyUser = User & {
+  email?: {
+    address?: string | null;
+  } | null;
+};
+export type PrivyClaims = {
+  appId: string;
+  issuer: string;
+  issuedAt: number;
+  expiration: number;
+  sessionId: string;
+  userId: string;
+};
 export type PrivyTokenKind = "access" | "identity";
 
 export type PrivyWalletType = "ethereum" | "solana";
@@ -28,6 +41,79 @@ export type PrivyWebhookHeaders = {
   id: string;
   timestamp: string;
   signature: string;
+};
+export type PrivyWalletApiRequestSignatureInput = {
+  version: 1;
+  method: "POST" | "PUT" | "PATCH" | "DELETE";
+  url: string;
+  body: Record<string, unknown>;
+  headers: {
+    "privy-app-id": string;
+    "privy-idempotency-key"?: string;
+    "privy-request-expiry"?: string;
+  };
+};
+
+type PrivyAuthorizationContext = {
+  authorization_private_keys?: string[];
+  user_jwts?: string[];
+  signatures?: string[];
+  sign_fns?: Array<(payload: Uint8Array) => Promise<string>>;
+};
+
+type PrivyClientOptions = {
+  walletAuthorizationKey?: string;
+  userJwt?: string;
+};
+
+type PrivyTransactionQuantity = string | number;
+type PrivyEthereumTransaction = {
+  from?: string;
+  to?: string;
+  data?: string | null;
+  value?: PrivyTransactionQuantity | null;
+  gas?: PrivyTransactionQuantity | null;
+  gas_limit?: PrivyTransactionQuantity | null;
+};
+type PrivyEthereumNormalizedTransaction = {
+  from?: string;
+  to?: string;
+  data?: string;
+  value?: PrivyTransactionQuantity;
+  gas_limit?: PrivyTransactionQuantity;
+};
+type PrivyTypedDataField = { name: string; type: string };
+type PrivyEthereumTypedData = {
+  domain: Record<string, unknown>;
+  types: Record<string, readonly PrivyTypedDataField[]>;
+  message: Record<string, unknown>;
+  primaryType: string;
+};
+type PrivyEthereumSendTransactionInput = {
+  walletId?: string;
+  address?: string;
+  chainType?: "ethereum";
+  caip2: string;
+  sponsor?: boolean;
+  transaction: PrivyEthereumTransaction;
+};
+type PrivyEthereumSignTypedDataInput = {
+  walletId?: string;
+  address?: string;
+  chainType?: "ethereum";
+  typedData: PrivyEthereumTypedData;
+};
+export type PrivyWalletApiClient = {
+  walletApi: {
+    ethereum: {
+      sendTransaction(
+        input: PrivyEthereumSendTransactionInput,
+      ): Promise<{ hash: string }>;
+      signTypedData(
+        input: PrivyEthereumSignTypedDataInput,
+      ): Promise<{ signature: string }>;
+    };
+  };
 };
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -102,6 +188,66 @@ function readArray(
   return Array.isArray(value) ? value : [];
 }
 
+function mapPrivyClaims(claims: VerifyAccessTokenResponse): PrivyClaims {
+  return {
+    appId: claims.app_id,
+    issuer: claims.issuer,
+    issuedAt: claims.issued_at,
+    expiration: claims.expiration,
+    sessionId: claims.session_id,
+    userId: claims.user_id,
+  };
+}
+
+function buildAuthorizationContext(
+  options?: PrivyClientOptions,
+): PrivyAuthorizationContext | undefined {
+  const authorization_private_keys = options?.walletAuthorizationKey
+    ? [options.walletAuthorizationKey]
+    : undefined;
+  const user_jwts = options?.userJwt ? [options.userJwt] : undefined;
+  if (!authorization_private_keys && !user_jwts) return undefined;
+  return {
+    ...(authorization_private_keys ? { authorization_private_keys } : {}),
+    ...(user_jwts ? { user_jwts } : {}),
+  };
+}
+
+function requireWalletId(walletId: string | null | undefined): string {
+  const trimmed = walletId?.trim() ?? "";
+  if (!trimmed) {
+    throw new Error("Privy wallet id is required for wallet API requests.");
+  }
+  return trimmed;
+}
+
+function normalizePrivyTransaction(
+  transaction: PrivyEthereumTransaction,
+): PrivyEthereumNormalizedTransaction {
+  const normalized: PrivyEthereumNormalizedTransaction = {};
+  if (transaction.from !== undefined) normalized.from = transaction.from;
+  if (transaction.to !== undefined) normalized.to = transaction.to;
+  if (transaction.data !== null && transaction.data !== undefined)
+    normalized.data = transaction.data;
+  if (transaction.value !== null && transaction.value !== undefined)
+    normalized.value = transaction.value;
+  const gasLimit = transaction.gas_limit ?? transaction.gas;
+  if (gasLimit !== null && gasLimit !== undefined)
+    normalized.gas_limit = gasLimit;
+  return normalized;
+}
+
+function normalizeTypedDataTypes(
+  types: Record<string, readonly PrivyTypedDataField[]>,
+): Record<string, PrivyTypedDataField[]> {
+  return Object.fromEntries(
+    Object.entries(types).map(([key, fields]) => [
+      key,
+      fields.map((field) => ({ name: field.name, type: field.type })),
+    ]),
+  );
+}
+
 function readWalletType(record: UnknownRecord): PrivyWalletType | null {
   const chainType = readString(record, "chainType", "chain_type");
   return chainType === "ethereum" || chainType === "solana"
@@ -117,6 +263,13 @@ function readLinkedAccounts(privyUser: PrivyUser): unknown[] {
 function readPrimaryWallet(privyUser: PrivyUser): UnknownRecord | null {
   const wallet = (privyUser as unknown as UnknownRecord).wallet;
   return isRecord(wallet) ? wallet : null;
+}
+
+function readTopLevelEmail(privyUser: PrivyUser): string | null {
+  const email = (privyUser as unknown as UnknownRecord).email;
+  if (typeof email === "string") return email.trim() || null;
+  if (!isRecord(email)) return null;
+  return readString(email, "address");
 }
 
 function addWallet(
@@ -180,16 +333,45 @@ export class PrivyUpstreamError extends Error {
 }
 
 export class PrivyService {
-  static createClient(options?: { walletAuthorizationKey?: string }) {
-    return new PrivyClient(env.privyAppId, env.privyAppSecret, {
-      ...(options?.walletAuthorizationKey
-        ? {
-            walletApi: {
-              authorizationPrivateKey: options.walletAuthorizationKey,
-            },
-          }
-        : {}),
-    });
+  static createClient(options?: PrivyClientOptions): PrivyWalletApiClient {
+    const authorization_context = buildAuthorizationContext(options);
+    return {
+      walletApi: {
+        ethereum: {
+          async sendTransaction(input) {
+            return await privyClient.wallets().ethereum().sendTransaction(
+              requireWalletId(input.walletId),
+              {
+                address: input.address,
+                caip2: input.caip2,
+                sponsor: input.sponsor,
+                params: {
+                  transaction: normalizePrivyTransaction(input.transaction),
+                },
+                ...(authorization_context ? { authorization_context } : {}),
+              },
+            );
+          },
+          async signTypedData(input) {
+            return await privyClient.wallets().ethereum().signTypedData(
+              requireWalletId(input.walletId),
+              {
+                address: input.address,
+                params: {
+                  typed_data: {
+                    domain: input.typedData.domain,
+                    types: normalizeTypedDataTypes(input.typedData.types),
+                    message: input.typedData.message,
+                    primary_type: input.typedData.primaryType,
+                  },
+                },
+                ...(authorization_context ? { authorization_context } : {}),
+              },
+            );
+          },
+        },
+      },
+    };
   }
 
   /**
@@ -197,7 +379,11 @@ export class PrivyService {
    */
   static async verifyAccessToken(accessToken: string): Promise<PrivyClaims> {
     try {
-      return await privyClient.verifyAuthToken(accessToken);
+      const claims = await privyClient
+        .utils()
+        .auth()
+        .verifyAccessToken(accessToken);
+      return mapPrivyClaims(claims);
     } catch (error) {
       throw new PrivyAccessTokenError(
         `Invalid Privy access token: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -211,7 +397,15 @@ export class PrivyService {
     signingKey: string,
   ): Promise<unknown> {
     try {
-      return await privyClient.verifyWebhook(payload, headers, signingKey);
+      return privyClient.webhooks().verify({
+        payload,
+        headers: {
+          "svix-id": headers.id,
+          "svix-timestamp": headers.timestamp,
+          "svix-signature": headers.signature,
+        },
+        signing_secret: signingKey,
+      });
     } catch (error) {
       throw new PrivyAccessTokenError(
         `Invalid Privy webhook signature: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -224,7 +418,7 @@ export class PrivyService {
    */
   static async getUserData(privyClaims: PrivyClaims): Promise<PrivyUser> {
     try {
-      return await privyClient.getUser(privyClaims.userId);
+      return await privyClient.users()._get(privyClaims.userId);
     } catch (error) {
       throw new PrivyUpstreamError(
         `Failed to fetch user data from Privy: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -234,7 +428,7 @@ export class PrivyService {
 
   static async getUserById(privyUserId: string): Promise<PrivyUser> {
     try {
-      return await privyClient.getUser(privyUserId);
+      return await privyClient.users()._get(privyUserId);
     } catch (error) {
       throw new PrivyUpstreamError(
         `Failed to fetch Privy user by id: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -297,6 +491,16 @@ export class PrivyService {
     }
 
     return out;
+  }
+
+  static getPrimaryEmailAddress(privyUser: PrivyUser): string | null {
+    for (const accountRaw of readLinkedAccounts(privyUser)) {
+      if (!isRecord(accountRaw)) continue;
+      if (readString(accountRaw, "type") !== "email") continue;
+      const address = readString(accountRaw, "address");
+      if (address) return address;
+    }
+    return readTopLevelEmail(privyUser);
   }
 
   /**
@@ -513,7 +717,7 @@ export class PrivyService {
 
   static async deleteUser(privyUserId: string): Promise<void> {
     try {
-      await privyClient.deleteUser(privyUserId);
+      await privyClient.users().delete(privyUserId);
     } catch (error) {
       throw new Error(
         `Failed to delete Privy user: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -525,17 +729,14 @@ export class PrivyService {
     claims: PrivyClaims;
     user: PrivyUser;
     walletProfiles: PrivyWalletProfile[];
-    walletClient: PrivyClient;
+    walletClient: PrivyWalletApiClient;
     authorizationKey: string;
     authorizationExpiresAt: number;
   }> {
     const claims = await this.verifyAccessToken(accessToken);
     const user = await this.getUserData(claims);
-    const userSigner = await privyClient.walletApi.generateUserSigner({
-      userJwt: accessToken,
-    });
     const walletClient = this.createClient({
-      walletAuthorizationKey: userSigner.authorizationKey,
+      userJwt: accessToken,
     });
 
     return {
@@ -543,11 +744,8 @@ export class PrivyService {
       user,
       walletProfiles: this.classifyWallets(user),
       walletClient,
-      authorizationKey: userSigner.authorizationKey,
-      authorizationExpiresAt:
-        userSigner.expiresAt instanceof Date
-          ? userSigner.expiresAt.getTime()
-          : userSigner.expiresAt,
+      authorizationKey: "",
+      authorizationExpiresAt: claims.expiration * 1000,
     };
   }
 
@@ -558,7 +756,7 @@ export class PrivyService {
     claims: PrivyClaims | null;
     user: PrivyUser;
     walletProfiles: PrivyWalletProfile[];
-    walletClient: PrivyClient;
+    walletClient: PrivyWalletApiClient;
     authorizationKey: string;
     authorizationExpiresAt: number;
     authUserId: string;
@@ -596,12 +794,11 @@ export class PrivyService {
           };
         }
 
-        const user = await privyClient.getUser({ idToken: candidate.token });
-        const userSigner = await privyClient.walletApi.generateUserSigner({
-          userJwt: candidate.token,
+        const user = await privyClient.users().get({
+          id_token: candidate.token,
         });
         const walletClient = this.createClient({
-          walletAuthorizationKey: userSigner.authorizationKey,
+          userJwt: candidate.token,
         });
 
         return {
@@ -609,11 +806,8 @@ export class PrivyService {
           user,
           walletProfiles: this.classifyWallets(user),
           walletClient,
-          authorizationKey: userSigner.authorizationKey,
-          authorizationExpiresAt:
-            userSigner.expiresAt instanceof Date
-              ? userSigner.expiresAt.getTime()
-              : userSigner.expiresAt,
+          authorizationKey: "",
+          authorizationExpiresAt: 0,
           authUserId: user.id,
           tokenKind: "identity",
         };

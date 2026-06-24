@@ -439,6 +439,31 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "getPrimaryEmailAddress handles new linked account and legacy email shapes",
+    run: () => {
+      const newShapeUser = {
+        linked_accounts: [
+          {
+            type: "email",
+            address: "user@example.com",
+          },
+        ],
+      } as unknown as PrivyUser;
+      const legacyShapeUser = {
+        email: { address: "legacy@example.com" },
+      } as unknown as PrivyUser;
+
+      assert.equal(
+        PrivyService.getPrimaryEmailAddress(newShapeUser),
+        "user@example.com",
+      );
+      assert.equal(
+        PrivyService.getPrimaryEmailAddress(legacyShapeUser),
+        "legacy@example.com",
+      );
+    },
+  },
+  {
     name: "verifyTokenAndGetUser waits for expected added wallets to appear",
     run: async () => {
       const privyAny = PrivyService as unknown as {

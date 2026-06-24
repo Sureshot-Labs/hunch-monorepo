@@ -1,16 +1,19 @@
-import { type WalletApiRequestSignatureInput } from "@privy-io/server-auth";
 import { ethers } from "ethers";
 
 import type { User } from "../auth.js";
 import { env } from "../env.js";
-import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
+import {
+  type PrivyWalletApiRequestSignatureInput,
+  type PrivyWalletProfile,
+  PrivyService,
+} from "../privy-service.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 
 export type EmbeddedPrivyAuthorizationRequest = {
   id: string;
   label: string;
-  input: WalletApiRequestSignatureInput;
+  input: PrivyWalletApiRequestSignatureInput;
 };
 
 export type EmbeddedPrivyAuthorizationSignature = {
@@ -37,7 +40,7 @@ function buildPrivyWalletRpcUrl(walletId: string): string {
 }
 
 function buildPrivyWalletHeaders(
-  signatureInput: WalletApiRequestSignatureInput,
+  signatureInput: PrivyWalletApiRequestSignatureInput,
   authorizationSignature: string,
 ): HeadersInit {
   return {

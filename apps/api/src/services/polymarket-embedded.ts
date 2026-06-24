@@ -1,8 +1,12 @@
-import { type WalletApiRequestSignatureInput } from "@privy-io/server-auth";
 import { Interface, ethers } from "ethers";
 import type { User } from "../auth.js";
 import { env } from "../env.js";
-import { type PrivyWalletProfile, PrivyService } from "../privy-service.js";
+import {
+  type PrivyWalletApiRequestSignatureInput,
+  type PrivyWalletApiClient,
+  type PrivyWalletProfile,
+  PrivyService,
+} from "../privy-service.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "./polymarket-onchain.js";
 
@@ -199,7 +203,7 @@ export type EmbeddedPolymarketExecutionSummary = {
 export type EmbeddedPrivyAuthorizationRequest = {
   id: string;
   label: string;
-  input: WalletApiRequestSignatureInput;
+  input: PrivyWalletApiRequestSignatureInput;
 };
 
 export type EmbeddedPrivyAuthorizationSignature = {
@@ -226,7 +230,8 @@ export type EmbeddedPolymarketWalletContext = {
 export type EmbeddedPolymarketContext = {
   signer: string;
   walletProfile: PrivyWalletProfile;
-  walletApiClient: ReturnType<typeof PrivyService.createClient>;
+  walletId: string;
+  walletApiClient: PrivyWalletApiClient;
 };
 
 function normalizeAddress(value: string | null | undefined): string | null {
@@ -327,7 +332,7 @@ function buildPrivyWalletRpcUrl(walletId: string): string {
 }
 
 function buildPrivyWalletHeaders(
-  signatureInput: WalletApiRequestSignatureInput,
+  signatureInput: PrivyWalletApiRequestSignatureInput,
   authorizationSignature: string,
 ): HeadersInit {
   return {
@@ -633,7 +638,8 @@ async function waitForPolygonTransaction(txHash: string, context: string) {
 }
 
 async function sendSponsoredPolygonTransaction(inputs: {
-  walletApiClient: ReturnType<typeof PrivyService.createClient>;
+  walletApiClient: PrivyWalletApiClient;
+  walletId: string;
   signer: string;
   to: string;
   data: string;
@@ -643,6 +649,7 @@ async function sendSponsoredPolygonTransaction(inputs: {
   const to = requireAddress(inputs.to, "Invalid Polygon target address.");
   const result =
     await inputs.walletApiClient.walletApi.ethereum.sendTransaction({
+      walletId: inputs.walletId,
       address: signer,
       chainType: "ethereum",
       caip2: POLY_CAIP2,
@@ -658,17 +665,19 @@ async function sendSponsoredPolygonTransaction(inputs: {
 }
 
 async function signTypedDataWithEmbeddedWallet(inputs: {
-  walletApiClient: ReturnType<typeof PrivyService.createClient>;
+  walletApiClient: PrivyWalletApiClient;
+  walletId: string;
   signer: string;
   typedData: {
     domain: Record<string, unknown>;
-    types: Record<string, unknown>;
+    types: Record<string, readonly { name: string; type: string }[]>;
     message: Record<string, unknown>;
     primaryType: string;
   };
 }) {
   const signer = requireAddress(inputs.signer, "Invalid signer address.");
   const result = await inputs.walletApiClient.walletApi.ethereum.signTypedData({
+    walletId: inputs.walletId,
     address: signer,
     chainType: "ethereum",
     typedData: inputs.typedData,
@@ -1493,9 +1502,16 @@ export async function resolveEmbeddedPolymarketContext(inputs: {
       "Embedded Polymarket automation is only available for internal Trading Wallets.",
     );
   }
+  const walletId = walletProfile.walletId?.trim() ?? "";
+  if (!walletId) {
+    throw new Error(
+      "Embedded Trading Wallet is missing a Privy wallet id. Refresh your session and try again.",
+    );
+  }
   return {
     signer,
     walletProfile,
+    walletId,
     walletApiClient: walletClient,
   };
 }
@@ -1533,6 +1549,7 @@ export async function signEmbeddedPolymarketConnect(inputs: {
 }) {
   return signTypedDataWithEmbeddedWallet({
     walletApiClient: inputs.context.walletApiClient,
+    walletId: inputs.context.walletId,
     signer: inputs.context.signer,
     typedData: buildEmbeddedPolymarketConnectPayload({
       signer: inputs.context.signer,
@@ -1564,6 +1581,7 @@ export async function signEmbeddedPolymarketOrder(inputs: {
   }
   return signTypedDataWithEmbeddedWallet({
     walletApiClient: inputs.context.walletApiClient,
+    walletId: inputs.context.walletId,
     signer: inputs.context.signer,
     typedData: {
       domain: {
@@ -1601,6 +1619,7 @@ export async function signEmbeddedPolymarketFeeAuth(inputs: {
   }
   return signTypedDataWithEmbeddedWallet({
     walletApiClient: inputs.context.walletApiClient,
+    walletId: inputs.context.walletId,
     signer: inputs.context.signer,
     typedData: {
       domain: {
@@ -1647,6 +1666,7 @@ export async function deployEmbeddedPolymarketSafe(inputs: {
 
   const signature = await signTypedDataWithEmbeddedWallet({
     walletApiClient: inputs.context.walletApiClient,
+    walletId: inputs.context.walletId,
     signer: inputs.context.signer,
     typedData,
   });
@@ -1660,6 +1680,7 @@ export async function deployEmbeddedPolymarketSafe(inputs: {
 
   return sendSponsoredPolygonTransaction({
     walletApiClient: inputs.context.walletApiClient,
+    walletId: inputs.context.walletId,
     signer: inputs.context.signer,
     to: env.polymarketSafeFactoryAddress,
     data,
@@ -1922,6 +1943,7 @@ async function executeSafeApprovalTasks(inputs: {
     } as const;
     const signature = await signTypedDataWithEmbeddedWallet({
       walletApiClient: inputs.context.walletApiClient,
+      walletId: inputs.context.walletId,
       signer: inputs.context.signer,
       typedData,
     });
@@ -1939,6 +1961,7 @@ async function executeSafeApprovalTasks(inputs: {
     ]);
     const txHash = await sendSponsoredPolygonTransaction({
       walletApiClient: inputs.context.walletApiClient,
+      walletId: inputs.context.walletId,
       signer: inputs.context.signer,
       to: safeAddress,
       data: execData,
@@ -1968,6 +1991,7 @@ async function executeMagicApprovalTasks(inputs: {
     ]);
     const txHash = await sendSponsoredPolygonTransaction({
       walletApiClient: inputs.context.walletApiClient,
+      walletId: inputs.context.walletId,
       signer: inputs.context.signer,
       to: env.polymarketMagicProxyFactoryAddress,
       data: proxyData,
@@ -1986,6 +2010,7 @@ async function executeSignerApprovalTasks(inputs: {
   for (const task of inputs.tasks) {
     const txHash = await sendSponsoredPolygonTransaction({
       walletApiClient: inputs.context.walletApiClient,
+      walletId: inputs.context.walletId,
       signer: inputs.context.signer,
       to: task.target,
       data: task.data,
