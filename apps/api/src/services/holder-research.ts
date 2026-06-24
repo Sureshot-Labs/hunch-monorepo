@@ -2248,8 +2248,14 @@ export function buildHolderResearchWalletTargets(
   const referencedHolderIds = new Set(
     evidenceIds.filter((evidenceId) => evidenceId.startsWith("holder:")),
   );
-  return candidate.market.holders
-    .filter((holder) => referencedHolderIds.has(buildHolderEvidenceId(holder)))
+  const referencedHolders = candidate.market.holders.filter((holder) =>
+    referencedHolderIds.has(buildHolderEvidenceId(holder)),
+  );
+  const holders =
+    referencedHolders.length > 0
+      ? referencedHolders
+      : selectedEvidenceHolders(candidate).slice(0, 1);
+  return holders
     .map((holder, index) => ({
       walletId: holder.walletId,
       rank: 10 + index,

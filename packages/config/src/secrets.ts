@@ -44,7 +44,8 @@ type BundleName =
   | "ai"
   | "indexer-dflow"
   | "indexer-limitless"
-  | "ops";
+  | "ops"
+  | "signal-bot";
 
 export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   shared: [
@@ -111,6 +112,10 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "LIMITLESS_API_KEY",
     "LIMITLESS_SESSION",
     "POLYGON_DEPLOYER_KEY",
+  ],
+  "signal-bot": [
+    "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS",
+    "HUNCH_SIGNAL_BOT_TOKEN",
   ],
 };
 
@@ -589,6 +594,7 @@ export function buildSecretBundles(
     "indexer-dflow": {},
     "indexer-limitless": {},
     ops: {},
+    "signal-bot": {},
   };
 
   for (const [key, value] of Object.entries(parsed)) {

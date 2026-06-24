@@ -268,6 +268,8 @@ test("bundle builder writes only allowlisted secret keys", () => {
     [
       "DATABASE_URL=postgres://secret",
       "DFLOW_API_KEY=dflow-secret",
+      "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS=123,456",
+      "HUNCH_SIGNAL_BOT_TOKEN=signal-bot-secret",
       "JWT_SECRET=secret",
       "#JWT_SECRET=commented-secret",
       "LIMITLESS_WS_SESSION=limitless-ws-secret",
@@ -299,7 +301,13 @@ test("bundle builder writes only allowlisted secret keys", () => {
   assert.deepEqual(result.bundles["polymarket-builder"], [
     "POLYMARKET_RELAYER_PRIVATE_KEY",
   ]);
+  assert.deepEqual(result.bundles["signal-bot"].sort(), [
+    "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS",
+    "HUNCH_SIGNAL_BOT_TOKEN",
+  ]);
   const sanitized = fs.readFileSync(result.sanitizedEnvPath, "utf8");
+  assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_ADMIN_USER_IDS="), false);
+  assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_TOKEN="), false);
   assert.equal(sanitized.includes("JWT_SECRET="), false);
   assert.equal(sanitized.includes("#JWT_SECRET="), false);
   assert.equal(sanitized.includes("DFLOW_API_KEY="), false);

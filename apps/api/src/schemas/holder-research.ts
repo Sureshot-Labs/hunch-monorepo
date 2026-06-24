@@ -137,6 +137,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "User-facing style:",
     "- headline: 4-8 words, natural, market-facing, no tag list.",
     "- summary: 18-40 words, 1-2 short sentences, explain the takeaway and why it matters now.",
+    "- Write publication copy, not debug output. Do not use labels like 'Context:' or 'Why:' in headline or summary.",
     "- rationale: exactly 1 short sentence, internal-quality explanation for why the status was chosen.",
     "- caveats: 0-2 short caveats, only if they materially change trust in the signal.",
     "Avoid: metric dumps, source lists, long background, internal field names, 'z-score', 'n=', 'sample count', wallet addresses, and phrases like 'candidate', 'bucket', or 'edge metric' in headline/summary.",

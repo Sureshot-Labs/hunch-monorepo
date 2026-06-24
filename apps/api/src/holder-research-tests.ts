@@ -568,6 +568,52 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder research wallet targets fall back to strongest candidate holder",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          sides: {
+            YES: side("YES", {
+              usd: 32_000,
+              wallets: 2,
+              sharpHolders: 1,
+              sharpUsd: 12_000,
+              bestEdge: 0.18,
+              bestZScore: 2.2,
+              bestSampleCount: 24,
+              bestResolvedStakeUsd: 6_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 120_000, wallets: 5 }),
+          },
+          holders: [
+            holder("YES", {
+              walletId: "00000000-0000-4000-8000-000000000021",
+              positionUsd: 12_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000022",
+              positionUsd: 60_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const targets = buildHolderResearchWalletTargets(candidate, [
+        "market:polymarket:test-market",
+      ]);
+      assert.equal(targets.length, 1);
+      assert.equal(
+        targets[0]?.walletId,
+        "00000000-0000-4000-8000-000000000021",
+      );
+      assert.equal(targets[0]?.meta.side, "YES");
+    },
+  },
+  {
     name: "holder research signal schemas accept wallet scope and batch wallet notes",
     run: () => {
       const query = signalsQuerySchema.parse({

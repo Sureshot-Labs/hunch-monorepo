@@ -33,6 +33,10 @@ export type SignalBotChatState = {
 
 export type SignalBotRedisLike = {
   del(key: string): Promise<unknown>;
+  eval(
+    script: string,
+    options: { arguments: string[]; keys: string[] },
+  ): Promise<unknown>;
   get(key: string): Promise<string | null>;
   hGetAll(key: string): Promise<Record<string, string>>;
   hSet(key: string, value: Record<string, string>): Promise<unknown>;
@@ -121,6 +125,11 @@ export type SignalBotNote = {
   bestBid: number | null;
   bestAsk: number | null;
   lastPrice: number | null;
+  holderAddress: string | null;
+  holderChain: string | null;
+  holderOpenPnlUsd: number | null;
+  holderPositionUsd: number | null;
+  holderSide: "NO" | "YES" | null;
 };
 
 type SignalBotNoteRow = {
@@ -142,6 +151,15 @@ type SignalBotNoteRow = {
   best_bid: string | number | null;
   best_ask: string | number | null;
   last_price: string | number | null;
+  holder_address: string | null;
+  holder_chain: string | null;
+  holder_target_meta: unknown;
+};
+
+type SignalBotEligibilityCountRow = {
+  below_min_confidence: string | number | null;
+  eligible: string | number | null;
+  total: string | number | null;
 };
 
 const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
@@ -152,6 +170,18 @@ const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
+const RELEASE_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+const REFRESH_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
 
 export function signalBotChatKey(chatId: string): string {
   return `tg:signal_bot:v1:chat:${chatId}`;
@@ -281,6 +311,36 @@ export function buildSignalBotOpenMarketUrl(input: {
   return url.toString();
 }
 
+export function buildSignalBotHolderUrl(input: {
+  address: string | null | undefined;
+  chain: string | null | undefined;
+}): string | null {
+  const address = input.address?.trim();
+  const chain = input.chain?.trim().toLowerCase();
+  if (!address || !chain) return null;
+  switch (chain) {
+    case "polygon":
+      return `https://polygonscan.com/address/${encodeURIComponent(address)}`;
+    case "base":
+      return `https://basescan.org/address/${encodeURIComponent(address)}`;
+    case "ethereum":
+    case "mainnet":
+      return `https://etherscan.io/address/${encodeURIComponent(address)}`;
+    case "arbitrum":
+      return `https://arbiscan.io/address/${encodeURIComponent(address)}`;
+    case "optimism":
+      return `https://optimistic.etherscan.io/address/${encodeURIComponent(address)}`;
+    case "avalanche":
+      return `https://snowtrace.io/address/${encodeURIComponent(address)}`;
+    case "bsc":
+      return `https://bscscan.com/address/${encodeURIComponent(address)}`;
+    case "solana":
+      return `https://solscan.io/account/${encodeURIComponent(address)}`;
+    default:
+      return null;
+  }
+}
+
 export function buildSignalBotMessage(input: {
   amountsUsd: number[];
   appBaseUrl: string;
@@ -295,9 +355,8 @@ export function buildSignalBotMessage(input: {
   const title = escapeTelegramMarkdownV2(note.title);
   const summary = escapeTelegramMarkdownV2(note.description);
   const contextLine = formatSignalContextLine(note);
-  const marketTitle = formatMarketTitleLine(note);
+  const marketTitleLine = formatMarketTitleLine(note);
   const priceLine = formatPriceLine(note);
-  const marketLine = [marketTitle, priceLine].filter(Boolean).join(" · ");
   const marketUrl = note.eventId
     ? buildSignalBotOpenMarketUrl({
         appBaseUrl: input.appBaseUrl,
@@ -306,16 +365,27 @@ export function buildSignalBotMessage(input: {
         side: buySide,
       })
     : null;
-  const marketLineMarkdown = marketUrl
-    ? `[${escapeTelegramMarkdownV2(marketLine)}](${escapeTelegramMarkdownV2Url(marketUrl)})`
-    : escapeTelegramMarkdownV2(marketLine);
+  const holderUrl = buildSignalBotHolderUrl({
+    address: note.holderAddress,
+    chain: note.holderChain,
+  });
+  const titleMarkdown = marketUrl
+    ? `*[${title}](${escapeTelegramMarkdownV2Url(marketUrl)})*`
+    : `*${title}*`;
+  const metaLine = [
+    formatSignalBotSignalLabel(note),
+    note.confidence == null ? null : `🎯 ${formatPercent(note.confidence)}`,
+    priceLine,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" · ");
   const lines = [
-    `*${title}*`,
+    titleMarkdown,
+    escapeTelegramMarkdownV2(metaLine),
+    ...(marketTitleLine ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)] : []),
     "",
     summary,
     ...(contextLine ? ["", escapeTelegramMarkdownV2(contextLine)] : []),
-    "",
-    marketLineMarkdown,
   ];
 
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
@@ -346,29 +416,40 @@ export function buildSignalBotMessage(input: {
         })),
       );
     }
-    keyboardRows.push([
-      {
-        text: "↗️ Open market",
-        url: buildSignalBotOpenMarketUrl({
-          appBaseUrl: input.appBaseUrl,
-          eventId: note.eventId,
-          marketId: note.marketId,
-          side: buySide,
-        }),
-      },
-    ]);
+    keyboardRows.push(
+      buildSignalBotLinkRow({
+        holderSide: note.holderSide,
+        holderOpenPnlUsd: note.holderOpenPnlUsd,
+        holderPositionUsd: note.holderPositionUsd,
+        holderUrl,
+        marketUrl: marketUrl ?? baseTradeUrl,
+      }),
+    );
   } else if (note.eventId) {
-    keyboardRows.push([
-      {
-        text: "↗️ Open market",
-        url: buildSignalBotOpenMarketUrl({
+    keyboardRows.push(
+      buildSignalBotLinkRow({
+        holderSide: note.holderSide,
+        holderOpenPnlUsd: note.holderOpenPnlUsd,
+        holderPositionUsd: note.holderPositionUsd,
+        holderUrl,
+        marketUrl: buildSignalBotOpenMarketUrl({
           appBaseUrl: input.appBaseUrl,
           eventId: note.eventId,
           marketId: note.marketId,
           side: buySide,
         }),
-      },
-    ]);
+      }),
+    );
+  } else if (holderUrl) {
+    keyboardRows.push(
+      buildSignalBotLinkRow({
+        holderSide: note.holderSide,
+        holderOpenPnlUsd: note.holderOpenPnlUsd,
+        holderPositionUsd: note.holderPositionUsd,
+        holderUrl,
+        marketUrl: null,
+      }),
+    );
   }
 
   return {
@@ -376,6 +457,43 @@ export function buildSignalBotMessage(input: {
       keyboardRows.length > 0 ? { inline_keyboard: keyboardRows } : undefined,
     text: lines.join("\n"),
   };
+}
+
+function buildSignalBotLinkRow(input: {
+  holderOpenPnlUsd: number | null;
+  holderPositionUsd: number | null;
+  holderSide: "NO" | "YES" | null;
+  holderUrl: string | null;
+  marketUrl: string | null;
+}): TelegramInlineKeyboard["inline_keyboard"][number] {
+  const row: TelegramInlineKeyboard["inline_keyboard"][number] = [];
+  if (input.holderUrl) {
+    row.push({
+      text: formatHolderButtonText(input),
+      url: input.holderUrl,
+    });
+  }
+  if (input.marketUrl) {
+    row.push({
+      text: "↗️ Open market",
+      url: input.marketUrl,
+    });
+  }
+  return row;
+}
+
+function formatHolderButtonText(input: {
+  holderOpenPnlUsd: number | null;
+  holderPositionUsd: number | null;
+  holderSide: "NO" | "YES" | null;
+}): string {
+  const parts = ["👤", input.holderSide ?? "Holder"];
+  if (input.holderPositionUsd != null) {
+    parts.push(formatCompactUsd(input.holderPositionUsd));
+  }
+  const label = parts.join(" ");
+  if (input.holderOpenPnlUsd == null) return label;
+  return `${label} (${formatSignedCompactUsd(input.holderOpenPnlUsd)})`;
 }
 
 export async function enableSignalBotChat(input: {
@@ -446,20 +564,21 @@ export async function releaseSignalBotLock(input: {
   owner: string;
   redis: SignalBotRedisLike;
 }): Promise<void> {
-  const current = await input.redis.get(LOCK_KEY);
-  if (current === input.owner) await input.redis.del(LOCK_KEY);
+  await input.redis.eval(RELEASE_LOCK_SCRIPT, {
+    arguments: [input.owner],
+    keys: [LOCK_KEY],
+  });
 }
 
 export async function refreshSignalBotLock(input: {
   owner: string;
   redis: SignalBotRedisLike;
 }): Promise<boolean> {
-  const current = await input.redis.get(LOCK_KEY);
-  if (current !== input.owner) return false;
-  const result = await input.redis.set(LOCK_KEY, input.owner, {
-    PX: LOCK_TTL_MS,
+  const result = await input.redis.eval(REFRESH_LOCK_SCRIPT, {
+    arguments: [input.owner, String(LOCK_TTL_MS)],
+    keys: [LOCK_KEY],
   });
-  return result === "OK";
+  return Number(result) === 1;
 }
 
 export async function readSignalBotUpdateOffset(
@@ -522,7 +641,13 @@ export async function handleSignalBotCommand(input: {
   if (command === "status") {
     const state = await getSignalBotChatState(input.redis, chatId);
     await input.sendMessage(
-      buildPlainReply(chatId, state ? "Signals are enabled here." : "Signals are disabled here."),
+      buildPlainReply(
+        chatId,
+        [
+          state ? "Signals are enabled here." : "Signals are disabled here.",
+          `Min confidence: ${formatPercent(input.config.minConfidence)}.`,
+        ].join("\n"),
+      ),
     );
     return true;
   }
@@ -572,19 +697,30 @@ export async function publishSignalBotTick(input: {
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
 }): Promise<{
+  belowConfidenceNotes: number;
   blockedChats: number;
   chats: number;
+  eligibleNotes: number;
   sent: number;
 }> {
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
   let sent = 0;
   let blockedChats = 0;
+  let belowConfidenceNotes = 0;
+  let eligibleNotes = 0;
   for (const chatId of chatIds) {
     const state = await getSignalBotChatState(input.redis, chatId);
     if (!state) {
       await input.redis.sRem(CHAT_SET_KEY, chatId);
       continue;
     }
+    const counts = await loadSignalBotEligibilityCounts(input.db, {
+      afterCreatedAt: state.cursorCreatedAt,
+      afterId: state.cursorId,
+      minConfidence: input.config.minConfidence,
+    });
+    belowConfidenceNotes += counts.belowConfidence;
+    eligibleNotes += counts.eligible;
     const notes = await loadSignalBotNotes(input.db, {
       afterCreatedAt: state.cursorCreatedAt,
       afterId: state.cursorId,
@@ -622,7 +758,13 @@ export async function publishSignalBotTick(input: {
       break;
     }
   }
-  return { blockedChats, chats: chatIds.length, sent };
+  return {
+    belowConfidenceNotes,
+    blockedChats,
+    chats: chatIds.length,
+    eligibleNotes,
+    sent,
+  };
 }
 
 export async function sendLatestSignalBotTestSignal(input: {
@@ -687,7 +829,10 @@ export async function loadSignalBotNotes(
         e.title as event_title,
         m.best_bid,
         m.best_ask,
-        m.last_price
+        m.last_price,
+        holder.address as holder_address,
+        holder.chain as holder_chain,
+        holder.target_meta as holder_target_meta
       from ai_notes n
       join ai_note_targets pt
         on pt.note_id = n.id
@@ -695,6 +840,18 @@ export async function loadSignalBotNotes(
        and pt.target_kind = 'market'
       join unified_markets m on m.id = pt.target_id
       left join unified_events e on e.id = m.event_id
+      left join lateral (
+        select
+          w.address,
+          w.chain,
+          t.target_meta
+        from ai_note_targets t
+        join wallets w on w.id::text = t.target_id
+        where t.note_id = n.id
+          and t.target_kind = 'wallet'
+        order by t.target_rank asc, t.target_id asc
+        limit 1
+      ) holder on true
       where n.note_type = 'signal'
         and n.status = 'active'
         and n.producer_type = 'holder_research'
@@ -713,6 +870,49 @@ export async function loadSignalBotNotes(
     [input.minConfidence, input.afterCreatedAt, input.afterId, input.limit],
   );
   return rows.map(rowToSignalBotNote);
+}
+
+async function loadSignalBotEligibilityCounts(
+  db: DbQuery,
+  input: {
+    afterCreatedAt: string;
+    afterId: string;
+    minConfidence: number;
+  },
+): Promise<{ belowConfidence: number; eligible: number; total: number }> {
+  const { rows } = await db.query<SignalBotEligibilityCountRow>(
+    `
+      select
+        count(*) filter (where coalesce(n.confidence, 0) >= $1)::int as eligible,
+        count(*) filter (where coalesce(n.confidence, 0) < $1)::int as below_min_confidence,
+        count(*)::int as total
+      from ai_notes n
+      join ai_note_targets pt
+        on pt.note_id = n.id
+       and pt.is_primary = true
+       and pt.target_kind = 'market'
+      join unified_markets m on m.id = pt.target_id
+      left join unified_events e on e.id = m.event_id
+      where n.note_type = 'signal'
+        and n.status = 'active'
+        and n.producer_type = 'holder_research'
+        and ${buildWalletIntelAcceptingOrdersSql({
+          eventAlias: "e",
+          marketAlias: "m",
+        })}
+        and (
+          n.created_at > $2::timestamptz
+          or (n.created_at = $2::timestamptz and n.id > $3::uuid)
+        )
+    `,
+    [input.minConfidence, input.afterCreatedAt, input.afterId],
+  );
+  const row = rows[0];
+  return {
+    belowConfidence: Math.max(0, Math.trunc(toNumber(row?.below_min_confidence) ?? 0)),
+    eligible: Math.max(0, Math.trunc(toNumber(row?.eligible) ?? 0)),
+    total: Math.max(0, Math.trunc(toNumber(row?.total) ?? 0)),
+  };
 }
 
 export class TelegramBotApiClient implements SignalBotTelegramClient {
@@ -854,6 +1054,8 @@ function toIso(value: Date | string): string {
 }
 
 function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
+  const holderMeta = asObject(row.holder_target_meta);
+  const holderSide = String(holderMeta.side ?? "").toUpperCase();
   return {
     id: row.id,
     noteKey: row.note_key,
@@ -873,6 +1075,11 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     bestBid: toNumber(row.best_bid),
     bestAsk: toNumber(row.best_ask),
     lastPrice: toNumber(row.last_price),
+    holderAddress: row.holder_address,
+    holderChain: row.holder_chain,
+    holderOpenPnlUsd: toNumber(holderMeta.openPnlUsd),
+    holderPositionUsd: toNumber(holderMeta.positionUsd),
+    holderSide: holderSide === "YES" || holderSide === "NO" ? holderSide : null,
   };
 }
 
@@ -889,10 +1096,68 @@ function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
 }
 
+function formatPercent(value: number): string {
+  return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`;
+}
+
+function formatCompactUsd(value: number): string {
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  if (abs >= 1_000_000_000) return `${sign}$${formatCompactAmount(abs / 1_000_000_000)}B`;
+  if (abs >= 1_000_000) return `${sign}$${formatCompactAmount(abs / 1_000_000)}M`;
+  if (abs >= 1_000) return `${sign}$${formatCompactAmount(abs / 1_000)}K`;
+  return `${sign}$${Math.round(abs)}`;
+}
+
+function formatSignedCompactUsd(value: number): string {
+  return value > 0 ? `+${formatCompactUsd(value)}` : formatCompactUsd(value);
+}
+
+function formatCompactAmount(value: number): string {
+  const decimals = value >= 100 ? 0 : 1;
+  return value.toFixed(decimals).replace(/\.0$/, "");
+}
+
 function formatPriceLine(note: SignalBotNote): string | null {
   const yes = resolveSidePrice(note, "YES");
   if (yes == null) return null;
   return `YES ${formatCents(yes)} / NO ${formatCents(1 - yes)}`;
+}
+
+function formatSignalBotSignalLabel(note: SignalBotNote): string {
+  const bucket = String(note.primaryTargetMeta.bucket ?? "").toLowerCase();
+  switch (bucket) {
+    case "sharp_minority":
+    case "sharp_side":
+      return "⚡ Sharp holder";
+    case "sharp_split":
+      return "⚡ Sharp split";
+    case "clean_disagreement":
+      return "⚖️ Split holders";
+    case "recent_flow":
+      return "🌊 Recent flow";
+    case "event_bridge":
+      return "🔗 Cross-market";
+    case "concentration_risk":
+      return "⚠️ Concentrated holder";
+    case "followup_existing":
+      return "🔄 Holder update";
+    default:
+      return "🔎 Holder signal";
+  }
+}
+
+function formatMarketTitleLine(note: SignalBotNote): string | null {
+  const unique: string[] = [];
+  for (const raw of [note.eventTitle, note.marketTitle]) {
+    const title = raw?.trim().replace(/\s+/g, " ");
+    if (!title) continue;
+    if (unique.some((existing) => existing.toLowerCase() === title.toLowerCase())) {
+      continue;
+    }
+    unique.push(title);
+  }
+  return unique.join(" · ") || null;
 }
 
 function formatSignalContextLine(note: SignalBotNote): string | null {
@@ -903,30 +1168,18 @@ function formatSignalContextLine(note: SignalBotNote): string | null {
     /public (?:info|information|context|news) ([^.]{0,80})\./i,
   );
   if (timingMatch?.[0]) {
-    return `Context: ${truncateAtBoundary(timingMatch[0], 120)}`;
+    return `📰 ${truncateAtBoundary(timingMatch[0], 120)}`;
   }
+  if (summary) return `📰 ${truncateAtBoundary(summary, 120)}`;
   const caveats = Array.isArray(note.modelMeta.caveats)
     ? note.modelMeta.caveats.filter(
         (value): value is string => typeof value === "string" && value.trim().length > 0,
       )
     : [];
   const caveat = caveats[0]?.trim();
-  if (caveat) return `Context: ${truncateAtBoundary(caveat, 120)}`;
-  if (note.rationale) return `Why: ${truncateAtBoundary(note.rationale, 120)}`;
+  if (caveat) return `⚠️ ${truncateAtBoundary(caveat, 120)}`;
+  if (note.rationale) return `💡 ${truncateAtBoundary(note.rationale, 120)}`;
   return null;
-}
-
-function formatMarketTitleLine(note: SignalBotNote): string {
-  const unique: string[] = [];
-  for (const raw of [note.eventTitle, note.marketTitle]) {
-    const title = raw?.trim().replace(/\s+/g, " ");
-    if (!title) continue;
-    if (unique.some((existing) => existing.toLowerCase() === title.toLowerCase())) {
-      continue;
-    }
-    unique.push(title);
-  }
-  return unique.join(" · ") || "Market";
 }
 
 function stripMarkdown(value: string): string {
