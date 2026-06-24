@@ -2,10 +2,13 @@
 
 import { randomUUID } from "node:crypto";
 
-import { createRedisClient, ensureRedis } from "@hunch/infra";
+import {
+  createPgPool,
+  createRedisClient,
+  ensureRedis,
+  type Pool,
+} from "@hunch/infra";
 
-import { pool } from "./db.js";
-import { env } from "./env.js";
 import {
   acquireSignalBotLock,
   parseSignalBotConfig,
@@ -29,6 +32,32 @@ function log(event: string, fields?: Record<string, unknown>): void {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} is required when signal bot is enabled`);
+  }
+  return value;
+}
+
+function createSignalBotDbPool(): Pool {
+  const pool = createPgPool({
+    connectionString: requiredEnv("DATABASE_URL"),
+    connectionTimeoutMillis: 2_000,
+    idleTimeoutMillis: 30_000,
+    max: 5,
+  });
+  pool.on("connect", (client) => {
+    void client.query("set jit = off").catch((error: unknown) => {
+      console.error("[signal-bot] failed to set jit=off", error);
+    });
+  });
+  pool.on("error", (error: unknown) =>
+    console.error("[signal-bot] pg error", error),
+  );
+  return pool;
 }
 
 async function keepAliveDisabled(): Promise<never> {
@@ -72,16 +101,14 @@ export async function runSignalBotRunner(): Promise<void> {
   if (!config.token) {
     throw new Error("HUNCH_SIGNAL_BOT_TOKEN is required when signal bot is enabled");
   }
-  if (!env.redisUrl) {
-    throw new Error("REDIS_URL is required when signal bot is enabled");
-  }
+  const redisUrl = requiredEnv("REDIS_URL");
   if (config.adminUserIds.size === 0) {
     throw new Error(
       "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS is required when signal bot is enabled",
     );
   }
 
-  const redis = createRedisClient({ url: env.redisUrl });
+  const redis = createRedisClient({ url: redisUrl });
   await ensureRedis(redis, {
     logLabel: "signal-bot",
     waitForReady: true,
@@ -105,6 +132,7 @@ export async function runSignalBotRunner(): Promise<void> {
     return;
   }
 
+  let dbPool: Pool | null = null;
   const telegram = new TelegramBotApiClient(config.token);
   const botUsername = await telegram
     .getMe()
@@ -127,6 +155,8 @@ export async function runSignalBotRunner(): Promise<void> {
   let nextPublishAt = 0;
   let nextLockRefreshAt = Date.now() + 20_000;
   try {
+    dbPool = createSignalBotDbPool();
+    const db = dbPool;
     while (!shuttingDown) {
       try {
         if (Date.now() >= nextLockRefreshAt) {
@@ -146,7 +176,7 @@ export async function runSignalBotRunner(): Promise<void> {
             sendLatestSignalBotTestSignal({
               chatId,
               config,
-              db: pool,
+              db,
               telegram,
             }),
           telegram,
@@ -159,7 +189,7 @@ export async function runSignalBotRunner(): Promise<void> {
         if (now >= nextPublishAt) {
           const result = await publishSignalBotTick({
             config,
-            db: pool,
+            db,
             redis,
             telegram,
           });
@@ -175,14 +205,11 @@ export async function runSignalBotRunner(): Promise<void> {
     }
   } finally {
     await releaseSignalBotLock({ owner, redis }).catch(() => undefined);
+    await dbPool?.end().catch(() => undefined);
     await redis.quit().catch(() => undefined);
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  try {
-    await runSignalBotRunner();
-  } finally {
-    await pool.end();
-  }
+  await runSignalBotRunner();
 }

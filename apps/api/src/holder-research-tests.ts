@@ -212,8 +212,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     name: "holder research loader keeps holder 30d pnl",
     run: async () => {
       const p = policy();
+      let querySql = "";
+      let queryParams: unknown[] = [];
       const client = {
-        query: async () => ({
+        query: async (sql: unknown, params?: unknown[]) => {
+          querySql = String(sql ?? "");
+          queryParams = Array.isArray(params) ? params : [];
+          return {
           command: "SELECT",
           fields: [],
           oid: 0,
@@ -286,11 +291,28 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
               ],
             },
           ],
-        }),
+          };
+        },
       };
 
-      const markets = await loadHolderResearchCandidateMarkets(client, p);
+      const markets = await loadHolderResearchCandidateMarkets(
+        client as unknown as Parameters<
+          typeof loadHolderResearchCandidateMarkets
+        >[0],
+        p,
+      );
       assert.equal(markets[0]?.holders[0]?.pnl30dUsd, 12_345);
+      assert.match(querySql, /candidate_wallets as materialized/);
+      assert.match(querySql, /from wallet_intel_selector_snapshot sel/);
+      assert.match(querySql, /join lateral/);
+      assert.doesNotMatch(
+        querySql,
+        /from wallet_position_snapshots ws\s+where ws\.snapshot_at/s,
+      );
+      assert.equal(
+        queryParams[10],
+        Math.min(5_000, Math.max(1_000, p.maxCandidatePool * 25)),
+      );
     },
   },
   {

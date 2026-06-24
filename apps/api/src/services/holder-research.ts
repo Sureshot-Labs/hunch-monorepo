@@ -1825,26 +1825,16 @@ export async function loadHolderResearchCandidateMarkets(
     marketAlias: "um",
     eventAlias: "ue",
   });
+  const candidateWalletLimit = Math.min(
+    5_000,
+    Math.max(1_000, policy.maxCandidatePool * 25),
+  );
 
   const { rows } = await client.query<HolderResearchMarketRow>(
     `
-      with latest_wallet_snapshots as materialized (
+      with candidate_wallets as materialized (
         select
-          ws.wallet_id,
-          ws.venue,
-          max(ws.snapshot_at) as snapshot_at
-        from wallet_position_snapshots ws
-        where ws.snapshot_at >= now() - ($1::numeric * interval '1 hour')
-        group by ws.wallet_id, ws.venue
-      ),
-      open_positions as materialized (
-        select
-          ws.wallet_id,
-          ws.venue,
-          ws.market_id,
-          upper(coalesce(ws.outcome_side, '')) as side,
-          abs(coalesce(ws.size_usd, 0))::numeric as position_usd,
-          ws.snapshot_at,
+          w.id as wallet_id,
           w.address,
           w.chain,
           w.label,
@@ -1860,6 +1850,77 @@ export async function loadHolderResearchCandidateMarkets(
           ons.owner_address,
           ons.wallet_usd_like_balance,
           ons.owner_usd_like_balance
+        from wallet_intel_selector_snapshot sel
+        join wallets w on w.id = sel.wallet_id
+        left join wallet_onchain_state ons
+          on ons.wallet_id = sel.wallet_id
+        where
+          coalesce(sel.exposure_usd, 0) >= $2::numeric
+          or coalesce(sel.metrics_volume_30d, 0) >= $2::numeric
+          or coalesce(sel.metrics_pnl_30d, 0) > 0
+          or coalesce(sel.metrics_trades_30d, 0) >= $7::integer
+          or sel.last_activity_at >= now() - ($1::numeric * interval '1 hour')
+          or (
+            coalesce(sel.metrics_resolved_win_rate_edge_30d, -1000) >= $3::numeric
+            and coalesce(sel.metrics_resolved_edge_z_score_30d, -1000) >= $4::numeric
+            and coalesce(sel.metrics_resolved_edge_sample_count_30d, -1) >= $5::integer
+            and coalesce(sel.metrics_resolved_stake_usd_30d, 0) >= $6::numeric
+            and coalesce(sel.metrics_trades_30d, -1) >= $7::integer
+          )
+        order by
+          (
+            coalesce(sel.metrics_resolved_win_rate_edge_30d, -1000) >= $3::numeric
+            and coalesce(sel.metrics_resolved_edge_z_score_30d, -1000) >= $4::numeric
+            and coalesce(sel.metrics_resolved_edge_sample_count_30d, -1) >= $5::integer
+            and coalesce(sel.metrics_resolved_stake_usd_30d, 0) >= $6::numeric
+            and coalesce(sel.metrics_trades_30d, -1) >= $7::integer
+          ) desc,
+          coalesce(sel.exposure_usd, 0) desc,
+          coalesce(sel.metrics_pnl_30d, 0) desc,
+          coalesce(sel.metrics_volume_30d, 0) desc,
+          sel.last_activity_at desc nulls last,
+          sel.wallet_id asc
+        limit $11::integer
+      ),
+      latest_wallet_snapshots as materialized (
+        select
+          cw.*,
+          latest.venue,
+          latest.snapshot_at
+        from candidate_wallets cw
+        join lateral (
+          select distinct on (ws.venue)
+            ws.venue,
+            ws.snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = cw.wallet_id
+            and ws.snapshot_at >= now() - ($1::numeric * interval '1 hour')
+          order by ws.venue, ws.snapshot_at desc
+        ) latest on true
+      ),
+      open_positions as materialized (
+        select
+          latest.wallet_id,
+          latest.venue,
+          ws.market_id,
+          upper(coalesce(ws.outcome_side, '')) as side,
+          abs(coalesce(ws.size_usd, 0))::numeric as position_usd,
+          ws.snapshot_at,
+          latest.address,
+          latest.chain,
+          latest.label,
+          latest.metrics_volume_30d,
+          latest.metrics_pnl_30d,
+          latest.metrics_trades_30d,
+          latest.metrics_win_rate_30d,
+          latest.metrics_resolved_win_rate_edge_30d,
+          latest.metrics_resolved_edge_z_score_30d,
+          latest.metrics_resolved_edge_sample_count_30d,
+          latest.metrics_resolved_stake_usd_30d,
+          latest.wallet_kind,
+          latest.owner_address,
+          latest.wallet_usd_like_balance,
+          latest.owner_usd_like_balance
         from latest_wallet_snapshots latest
         join wallet_position_snapshots ws
           on ws.wallet_id = latest.wallet_id
@@ -1867,14 +1928,13 @@ export async function loadHolderResearchCandidateMarkets(
          and ws.snapshot_at = latest.snapshot_at
         join unified_markets um on um.id = ws.market_id
         left join unified_events ue on ue.id = um.event_id
-        join wallets w on w.id = ws.wallet_id
-        left join wallet_intel_selector_snapshot sel
-          on sel.wallet_id = ws.wallet_id
-        left join wallet_onchain_state ons
-          on ons.wallet_id = ws.wallet_id
         where ${trackableSql}
           and upper(coalesce(ws.outcome_side, '')) in ('YES', 'NO')
           and abs(coalesce(ws.size_usd, 0)) >= $2::numeric
+      ),
+      candidate_markets as materialized (
+        select distinct market_id, venue
+        from open_positions
       ),
       side_agg as (
         select
@@ -1911,7 +1971,10 @@ export async function loadHolderResearchCandidateMarkets(
           wa.market_id,
           sum(abs(coalesce(wa.size_usd, 0))) as recent_activity_usd,
           max(wa.occurred_at) as recent_activity_at
-        from wallet_activity_events wa
+        from candidate_markets cm
+        join wallet_activity_events wa
+          on wa.market_id = cm.market_id
+         and wa.venue = cm.venue
         join unified_markets um on um.id = wa.market_id
         left join unified_events ue on ue.id = um.event_id
         where wa.occurred_at >= now() - ($8::numeric * interval '1 hour')
@@ -2058,6 +2121,7 @@ export async function loadHolderResearchCandidateMarkets(
       policy.activityLookbackHours,
       Math.min(policy.minSidePositionUsd, policy.minMinorityUsd),
       policy.maxCandidatePool,
+      candidateWalletLimit,
     ],
   );
 

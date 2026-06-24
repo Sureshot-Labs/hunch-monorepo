@@ -873,7 +873,7 @@ export async function loadSignalBotNotes(
           w.chain,
           t.target_meta
         from ai_note_targets t
-        join wallets w on w.id::text = t.target_id
+        join wallets w on w.id = t.target_id::uuid
         where t.note_id = n.id
           and t.target_kind = 'wallet'
         order by t.target_rank asc, t.target_id asc

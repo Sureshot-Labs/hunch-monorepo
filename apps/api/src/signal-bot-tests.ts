@@ -12,6 +12,7 @@ import {
   escapeTelegramMarkdownV2,
   getSignalBotChatState,
   handleSignalBotCommand,
+  loadSignalBotNotes,
   parseSignalBotCommand,
   parseSignalBotConfig,
   publishSignalBotTick,
@@ -590,6 +591,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[2]?.length, 1);
       assert.equal(rows[2]?.[0]?.text, "↗️ Open market");
+    },
+  },
+  {
+    name: "signal note loader joins holder wallet target by uuid primary key",
+    run: async () => {
+      const db = new FakeDb();
+      await loadSignalBotNotes(db, {
+        afterCreatedAt: "1970-01-01T00:00:00.000Z",
+        afterId: "00000000-0000-0000-0000-000000000000",
+        limit: 1,
+        minConfidence: 0.7,
+      });
+      const sql = db.queries[0]?.sql ?? "";
+      assert.match(sql, /join wallets w on w\.id = t\.target_id::uuid/);
+      assert.doesNotMatch(sql, /w\.id::text = t\.target_id/);
     },
   },
   {
