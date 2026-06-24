@@ -1391,6 +1391,122 @@ async function main() {
     }
 
     {
+      const previousFeedTtlForLive = env.feedTtlSec;
+      const previousFixtureTtl = env.sportsFixturesRefreshTtlSec;
+      env.feedTtlSec = 30;
+      env.sportsFixturesRefreshTtlSec = 900;
+      let fixtureFetches = 0;
+      let fixtureRefreshes = 0;
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => liveFixtureNow,
+        getRedisStatus: async () =>
+          ({
+            status: "ready",
+            redis: {
+              get: async () => null,
+              set: async () => "OK",
+            },
+          }) as never,
+        fetchFifaSpecialPage: async () => livePage(),
+        fetchSportsFixturesByKeys: async () => {
+          fixtureFetches += 1;
+          return fixtureFetches === 1
+            ? new Map()
+            : new Map([
+                [
+                  liveFixtureKey,
+                  fixtureRow({
+                    status: "2H",
+                    fetchedAt: "2026-06-23T17:55:00.000Z",
+                    homeScore: 2,
+                    awayScore: 1,
+                  }),
+                ],
+              ]);
+        },
+        refreshSportsFixtures: async (_pool, input) => {
+          fixtureRefreshes += 1;
+          assert.equal(input.fixtureKey, liveFixtureKey);
+          return {
+            provider: "thesportsdb",
+            sport: "soccer",
+            competitionKey: "fifa_world_cup",
+            season: "2026",
+            fetched: 1,
+            upserted: 1,
+            dryRun: false,
+          };
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/special/fifa-2026/live",
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(fixtureFetches, 2);
+        assert.equal(fixtureRefreshes, 1);
+        const payload = response.json<{
+          count: number;
+          total: number;
+          data: Array<{
+            fifa: {
+              fixture: {
+                status: string | null;
+                homeScore: number | null;
+                awayScore: number | null;
+              } | null;
+            };
+          }>;
+        }>();
+        assert.equal(payload.count, 1);
+        assert.equal(payload.total, 1);
+        assert.equal(payload.data[0]?.fifa.fixture?.status, "2H");
+        assert.equal(payload.data[0]?.fifa.fixture?.homeScore, 2);
+        assert.equal(payload.data[0]?.fifa.fixture?.awayScore, 1);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForLive;
+        env.sportsFixturesRefreshTtlSec = previousFixtureTtl;
+      }
+    }
+
+    {
+      const previousFeedTtlForPage = env.feedTtlSec;
+      env.feedTtlSec = 0;
+      let fixtureRefreshes = 0;
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        now: () => liveFixtureNow,
+        getRedisStatus: async () =>
+          ({
+            status: "disabled",
+            redis: null,
+          }) as never,
+        fetchFifaSpecialPage: async () => livePage(),
+        fetchSportsFixturesByKeys: async () => new Map(),
+        refreshSportsFixtures: async () => {
+          fixtureRefreshes += 1;
+          throw new Error("regular FIFA page should not sync-refresh missing fixtures");
+        },
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/special/fifa-2026?${query({ view: "events", section: "match_result", limit: 80, sort: "time" })}`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(fixtureRefreshes, 0);
+        const payload = response.json<{
+          data: Array<{ fifa: { fixture: unknown | null } }>;
+        }>();
+        assert.equal(payload.data[0]?.fifa.fixture, null);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForPage;
+      }
+    }
+
+    {
       const response = await app.inject({
         method: "GET",
         url: "/special/fifa-2026?limit=1",

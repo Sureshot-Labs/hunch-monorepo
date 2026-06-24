@@ -132,12 +132,17 @@ const FIFA_2026: SportsCompetitionConfig = {
   theSportsDbLeagueId: "4429",
 };
 
-const SEARCH_TEAM_ALIASES: Record<string, string> = {
-  "united-states": "USA",
-  turkiye: "Turkey",
-  "south-korea": "South Korea",
-  "congo-dr": "DR Congo",
-  "ivory-coast": "Cote d'Ivoire",
+const SEARCH_TEAM_ALIASES: Record<string, string[]> = {
+  "bosnia-and-herzegovina": ["Bosnia-Herzegovina", "Bosnia and Herzegovina"],
+  "cape-verde": ["Cape Verde", "Cabo Verde"],
+  "congo-dr": ["DR Congo", "Congo DR"],
+  curacao: ["Curacao", "Curaçao"],
+  czechia: ["Czech Republic", "Czechia"],
+  iran: ["Iran", "IR Iran"],
+  "ivory-coast": ["Ivory Coast", "Côte d'Ivoire", "Cote d'Ivoire"],
+  "south-korea": ["South Korea", "Korea Republic", "Republic of Korea"],
+  turkiye: ["Turkey", "Turkiye", "Türkiye"],
+  "united-states": ["USA", "United States"],
 };
 
 const MONTHS: Record<string, string> = {
@@ -156,6 +161,7 @@ const MONTHS: Record<string, string> = {
 };
 
 const THESPORTSDB_TIMEOUT_MS = 10_000;
+const THESPORTSDB_FIXTURE_SEARCH_QUERY_LIMIT = 8;
 
 export function resolveSportsCompetition(input: {
   sport: string;
@@ -286,18 +292,48 @@ export function normalizeTheSportsDbEvent(
   };
 }
 
-function fixtureKeyToSearchTeams(fixtureKey: string): { home: string; away: string } | null {
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(trimmed);
+  }
+  return unique;
+}
+
+function humanizeTeamKey(key: string): string {
+  return key
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+export function sportsFixtureSearchNameCandidates(teamKey: string): string[] {
+  return dedupeStrings([
+    ...(SEARCH_TEAM_ALIASES[teamKey] ?? []),
+    humanizeTeamKey(teamKey),
+  ]);
+}
+
+export function fixtureKeyToSearchQueries(fixtureKey: string): string[] {
   const parts = fixtureKey.split(":");
-  if (parts.length !== 4 || parts[0] !== "match") return null;
+  if (parts.length !== 4 || parts[0] !== "match") return [];
   const [, , homeKey, awayKey] = parts;
-  const humanize = (key: string): string =>
-    SEARCH_TEAM_ALIASES[key] ??
-    key
-      .split("-")
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ");
-  return { home: humanize(homeKey), away: humanize(awayKey) };
+  const homeCandidates = sportsFixtureSearchNameCandidates(homeKey);
+  const awayCandidates = sportsFixtureSearchNameCandidates(awayKey);
+  const queries: string[] = [];
+  for (const home of homeCandidates) {
+    for (const away of awayCandidates) {
+      queries.push(`${home}_vs_${away}`.replace(/\s+/g, "_"));
+    }
+  }
+  return dedupeStrings(queries).slice(0, THESPORTSDB_FIXTURE_SEARCH_QUERY_LIMIT);
 }
 
 async function fetchTheSportsDbJson(path: string, params: Record<string, string>) {
@@ -335,25 +371,111 @@ function normalizeEventsPayload(
     .filter((fixture): fixture is NormalizedSportsFixture => fixture != null);
 }
 
+function dedupeFixturesByProviderId(
+  fixtures: NormalizedSportsFixture[],
+): NormalizedSportsFixture[] {
+  const byProviderId = new Map<string, NormalizedSportsFixture>();
+  for (const fixture of fixtures) {
+    byProviderId.set(`${fixture.provider}:${fixture.providerFixtureId}`, fixture);
+  }
+  return Array.from(byProviderId.values());
+}
+
+async function fetchTheSportsDbEndpointFixtures(
+  competition: SportsCompetitionConfig,
+  path: string,
+  params: Record<string, string>,
+): Promise<NormalizedSportsFixture[]> {
+  const payload = await fetchTheSportsDbJson(path, params);
+  return normalizeEventsPayload(payload, competition);
+}
+
+async function fetchTheSportsDbOptionalEndpoints(
+  endpoints: Array<{ path: string; params: Record<string, string> }>,
+  competition: SportsCompetitionConfig,
+): Promise<NormalizedSportsFixture[]> {
+  const settled = await Promise.allSettled(
+    endpoints.map((endpoint) =>
+      fetchTheSportsDbEndpointFixtures(competition, endpoint.path, endpoint.params),
+    ),
+  );
+  const fulfilled = settled.flatMap((result) =>
+    result.status === "fulfilled" ? result.value : [],
+  );
+  if (settled.some((result) => result.status === "fulfilled")) {
+    return fulfilled;
+  }
+  const firstRejected = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  throw firstRejected?.reason ?? new Error("TheSportsDB fixture request failed");
+}
+
+function filterFixturesByKey(
+  fixtures: NormalizedSportsFixture[],
+  fixtureKey: string,
+): NormalizedSportsFixture[] {
+  return dedupeFixturesByProviderId(
+    fixtures.filter((fixture) => fixture.fixtureKey === fixtureKey),
+  );
+}
+
 export const theSportsDbProvider: SportsFixtureProvider = {
   async fetchCompetitionSeason(competition) {
-    const payload = await fetchTheSportsDbJson("eventsseason.php", {
-      id: competition.theSportsDbLeagueId,
-      s: competition.season,
-    });
-    return normalizeEventsPayload(payload, competition);
+    return dedupeFixturesByProviderId(
+      await fetchTheSportsDbOptionalEndpoints(
+        [
+          {
+            path: "eventsseason.php",
+            params: {
+              id: competition.theSportsDbLeagueId,
+              s: competition.season,
+            },
+          },
+          {
+            path: "eventspastleague.php",
+            params: { id: competition.theSportsDbLeagueId },
+          },
+          {
+            path: "eventsnextleague.php",
+            params: { id: competition.theSportsDbLeagueId },
+          },
+        ],
+        competition,
+      ),
+    );
   },
   async searchFixture(competition, fixtureKey) {
-    const teams = fixtureKeyToSearchTeams(fixtureKey);
-    if (!teams) return [];
-    const query = `${teams.home}_vs_${teams.away}`.replace(/\s+/g, "_");
-    const payload = await fetchTheSportsDbJson("searchevents.php", {
-      e: query,
-      s: competition.season,
-    });
-    return normalizeEventsPayload(payload, competition).filter(
-      (fixture) => fixture.fixtureKey === fixtureKey,
+    const queries = fixtureKeyToSearchQueries(fixtureKey);
+    if (!queries.length) return [];
+
+    for (const query of queries) {
+      const fixtures = await fetchTheSportsDbEndpointFixtures(
+        competition,
+        "searchevents.php",
+        {
+          e: query,
+          s: competition.season,
+        },
+      );
+      const matched = filterFixturesByKey(fixtures, fixtureKey);
+      if (matched.length > 0) return matched;
+    }
+
+    const leagueFixtures = await fetchTheSportsDbOptionalEndpoints(
+      [
+        {
+          path: "eventspastleague.php",
+          params: { id: competition.theSportsDbLeagueId },
+        },
+        {
+          path: "eventsnextleague.php",
+          params: { id: competition.theSportsDbLeagueId },
+        },
+      ],
+      competition,
     );
+    return filterFixturesByKey(leagueFixtures, fixtureKey);
   },
 };
 
@@ -568,6 +690,15 @@ export async function refreshSportsFixtures(
   const fixtures = input.fixtureKey
     ? await provider.searchFixture(competition, input.fixtureKey)
     : await provider.fetchCompetitionSeason(competition);
+  if (input.fixtureKey && fixtures.length === 0) {
+    console.warn("[sports-fixtures] fixture refresh returned no rows", {
+      provider: competition.provider,
+      sport: competition.sport,
+      competitionKey: competition.competitionKey,
+      season: competition.season,
+      fixtureKey: input.fixtureKey,
+    });
+  }
   const upserted = input.dryRun ? 0 : await upsertSportsFixtures(pool, fixtures);
   return {
     provider: competition.provider,

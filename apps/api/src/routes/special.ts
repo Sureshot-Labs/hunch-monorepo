@@ -82,6 +82,7 @@ type FixtureRefreshRedis = {
 
 const FIFA_FIXTURE_REFRESH_BEFORE_MS = 2 * 60 * 60 * 1000;
 const FIFA_FIXTURE_REFRESH_AFTER_MS = 4 * 60 * 60 * 1000;
+const FIFA_LIVE_MISSING_FIXTURE_REFRESH_LIMIT = 12;
 const FIFA_LIVE_CACHE_TTL_SEC = 10;
 const FIFA_LIVE_STALE_TTL_SEC = 60;
 
@@ -318,6 +319,7 @@ async function loadFifaFixturesForRows(input: {
   redis: FixtureRefreshRedis | null;
   now: Date;
   log: FixtureRefreshLog;
+  refreshMissingFixtures?: boolean;
 }): Promise<{
   fixtureKeys: string[];
   fixturesByFixtureKey: Map<string, SportsFixtureApi>;
@@ -347,10 +349,31 @@ async function loadFifaFixturesForRows(input: {
       fixtureKeys,
     });
   }
-  const fixturesByFixtureKey = toFixtureApiMap(fixtureRows);
-  const missingFixtureKeys = fixtureKeys.filter(
-    (fixtureKey) => !fixturesByFixtureKey.has(fixtureKey),
+  let missingFixtureKeys = fixtureKeys.filter(
+    (fixtureKey) => !fixtureRows.has(fixtureKey),
   );
+  if (input.refreshMissingFixtures && missingFixtureKeys.length > 0) {
+    const refreshedMissingKeys = await refreshFixtureKeys({
+      fixtureKeys: missingFixtureKeys.slice(
+        0,
+        FIFA_LIVE_MISSING_FIXTURE_REFRESH_LIMIT,
+      ),
+      redis: input.redis,
+      log: input.log,
+    });
+    if (refreshedMissingKeys.length > 0) {
+      fixtureRows = await fetchSportsFixturesByKeys(pool, {
+        sport: "soccer",
+        competitionKey: "fifa_world_cup",
+        season: "2026",
+        fixtureKeys,
+      });
+      missingFixtureKeys = fixtureKeys.filter(
+        (fixtureKey) => !fixtureRows.has(fixtureKey),
+      );
+    }
+  }
+  const fixturesByFixtureKey = toFixtureApiMap(fixtureRows);
   return { fixtureKeys, fixturesByFixtureKey, missingFixtureKeys };
 }
 
@@ -772,6 +795,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
           : null,
         now,
         log: req.log,
+        refreshMissingFixtures: true,
       });
       const liveRows = filterRowsToLiveFixtures({
         rows: page.rows,

@@ -6,9 +6,12 @@ import { pool } from "./db.js";
 import {
   deriveFifa2026FixtureKeyFromEvent,
   fetchSportsFixturesByKeys,
+  fixtureKeyToSearchQueries,
   formatSportsFixtureForApi,
   normalizeTheSportsDbEvent,
   refreshSportsFixtures,
+  sportsFixtureSearchNameCandidates,
+  theSportsDbProvider,
   upsertSportsFixtures,
   type SportsCompetitionConfig,
 } from "./services/sports-fixtures.js";
@@ -24,6 +27,29 @@ const competition: SportsCompetitionConfig = {
   provider: "thesportsdb",
   theSportsDbLeagueId: "4429",
 };
+
+type FetchRoute = (url: URL) => Record<string, unknown>;
+
+async function withFakeFetch<T>(route: FetchRoute, fn: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? new URL(input)
+        : input instanceof URL
+          ? input
+          : new URL(input.url);
+    return new Response(JSON.stringify(route(url)), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
 
 function sampleEvent(id: string) {
   return {
@@ -52,7 +78,228 @@ function sampleEvent(id: string) {
   };
 }
 
+function sportsDbEvent(input: {
+  id: string;
+  home: string;
+  away: string;
+  localDate: string;
+  timestamp: string;
+  status?: string | null;
+}) {
+  return {
+    idEvent: input.id,
+    strTimestamp: input.timestamp,
+    strEvent: `${input.home} vs ${input.away}`,
+    strSeason: "2026",
+    idLeague: "4429",
+    strLeague: "FIFA World Cup",
+    strSport: "Soccer",
+    strHomeTeam: input.home,
+    strAwayTeam: input.away,
+    intHomeScore: null,
+    intAwayScore: null,
+    dateEvent: input.localDate,
+    dateEventLocal: input.localDate,
+    strTime: "19:00:00",
+    strTimeLocal: "12:00:00",
+    strGroup: "A",
+    strStatus: input.status ?? "NS",
+  };
+}
+
 async function main() {
+  assert.deepEqual(sportsFixtureSearchNameCandidates("czechia").slice(0, 2), [
+    "Czech Republic",
+    "Czechia",
+  ]);
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-24:bosnia-and-herzegovina:qatar")
+      .includes("Bosnia-Herzegovina_vs_Qatar"),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-24:czechia:mexico").includes(
+      "Czech_Republic_vs_Mexico",
+    ),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-25:curacao:ivory-coast").includes(
+      "Curacao_vs_Ivory_Coast",
+    ),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-26:cape-verde:saudi-arabia")
+      .includes("Cape_Verde_vs_Saudi_Arabia"),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-24:colombia:congo-dr").includes(
+      "Colombia_vs_DR_Congo",
+    ),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-24:south-africa:south-korea")
+      .includes("South_Africa_vs_South_Korea"),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-25:turkiye:united-states")
+      .includes("Turkey_vs_USA"),
+  );
+  assert.ok(
+    fixtureKeyToSearchQueries("match:2026-06-26:egypt:iran").includes(
+      "Egypt_vs_Iran",
+    ),
+  );
+
+  await withFakeFetch(
+    (url) => {
+      if (
+        url.pathname.endsWith("/searchevents.php") &&
+        url.searchParams.get("e") === "Czech_Republic_vs_Mexico"
+      ) {
+        return {
+          event: [
+            sportsDbEvent({
+              id: "czechia-mexico",
+              home: "Czech Republic",
+              away: "Mexico",
+              localDate: "2026-06-24",
+              timestamp: "2026-06-25T01:00:00",
+            }),
+          ],
+        };
+      }
+      return { event: [] };
+    },
+    async () => {
+      const fixtures = await theSportsDbProvider.searchFixture(
+        competition,
+        "match:2026-06-24:czechia:mexico",
+      );
+      assert.equal(fixtures.length, 1);
+      assert.equal(fixtures[0]?.providerFixtureId, "czechia-mexico");
+    },
+  );
+
+  await withFakeFetch(
+    (url) => {
+      if (
+        url.pathname.endsWith("/searchevents.php") &&
+        url.searchParams.get("e") === "Curacao_vs_Ivory_Coast"
+      ) {
+        return {
+          event: [
+            sportsDbEvent({
+              id: "curacao-ivory-coast",
+              home: "Curaçao",
+              away: "Ivory Coast",
+              localDate: "2026-06-25",
+              timestamp: "2026-06-25T20:00:00",
+            }),
+          ],
+        };
+      }
+      return { event: [] };
+    },
+    async () => {
+      const fixtures = await theSportsDbProvider.searchFixture(
+        competition,
+        "match:2026-06-25:curacao:ivory-coast",
+      );
+      assert.equal(fixtures.length, 1);
+      assert.equal(fixtures[0]?.providerFixtureId, "curacao-ivory-coast");
+    },
+  );
+
+  await withFakeFetch(
+    (url) => {
+      if (url.pathname.endsWith("/eventspastleague.php")) {
+        return {
+          events: [
+            sportsDbEvent({
+              id: "bosnia-qatar",
+              home: "Bosnia-Herzegovina",
+              away: "Qatar",
+              localDate: "2026-06-24",
+              timestamp: "2026-06-24T19:00:00",
+              status: "2H",
+            }),
+          ],
+        };
+      }
+      return { event: [] };
+    },
+    async () => {
+      const fixtures = await theSportsDbProvider.searchFixture(
+        competition,
+        "match:2026-06-24:bosnia-and-herzegovina:qatar",
+      );
+      assert.equal(fixtures.length, 1);
+      assert.equal(fixtures[0]?.providerFixtureId, "bosnia-qatar");
+      assert.equal(fixtures[0]?.status, "2H");
+    },
+  );
+
+  await withFakeFetch(
+    (url) => {
+      if (url.pathname.endsWith("/eventsseason.php")) {
+        return {
+          events: [
+            sportsDbEvent({
+              id: "shared-fixture",
+              home: "Switzerland",
+              away: "Canada",
+              localDate: "2026-06-24",
+              timestamp: "2026-06-24T19:00:00",
+              status: "NS",
+            }),
+          ],
+        };
+      }
+      if (url.pathname.endsWith("/eventspastleague.php")) {
+        return {
+          events: [
+            sportsDbEvent({
+              id: "shared-fixture",
+              home: "Switzerland",
+              away: "Canada",
+              localDate: "2026-06-24",
+              timestamp: "2026-06-24T19:00:00",
+              status: "2H",
+            }),
+          ],
+        };
+      }
+      if (url.pathname.endsWith("/eventsnextleague.php")) {
+        return {
+          events: [
+            sportsDbEvent({
+              id: "next-fixture",
+              home: "Morocco",
+              away: "Haiti",
+              localDate: "2026-06-24",
+              timestamp: "2026-06-24T22:00:00",
+              status: "NS",
+            }),
+          ],
+        };
+      }
+      return { events: [] };
+    },
+    async () => {
+      const fixtures = await theSportsDbProvider.fetchCompetitionSeason(
+        competition,
+      );
+      assert.equal(fixtures.length, 2);
+      assert.equal(
+        fixtures.find((fixture) => fixture.providerFixtureId === "shared-fixture")
+          ?.status,
+        "2H",
+      );
+      assert.ok(
+        fixtures.some((fixture) => fixture.providerFixtureId === "next-fixture"),
+      );
+    },
+  );
+
   const providerId = `test-${crypto.randomUUID()}`;
   const fixture = normalizeTheSportsDbEvent(
     sampleEvent(providerId),
@@ -212,7 +459,6 @@ async function main() {
       "delete from sports_fixtures where provider = 'thesportsdb' and provider_fixture_id = $1",
       [providerId],
     );
-    await pool.end();
   }
 }
 
