@@ -24,11 +24,11 @@
     "@hunch/shared": "workspace:*",
     "fast-json-stable-stringify": "^2.1.0",
     "p-queue": "^8.0.1",
-    "pg": "^8.16.3",
+    "pg": "^8.22.0",
     "redis": "^4.7.0",
-    "undici": "^6.19.8",
+    "undici": "^6.27.0",
     "uuid": "^9.0.1",
-    "ws": "^8.18.0",
+    "ws": "^8.21.0",
     "zod": "^3.23.8"
   }
 }

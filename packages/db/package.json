@@ -24,11 +24,11 @@
     "@hunch/config": "workspace:*",
     "@hunch/shared": "workspace:*",
     "globby": "^14.1.0",
-    "pg": "8.16.3"
+    "pg": "8.22.0"
   },
   "devDependencies": {
-    "@types/node": "^24.3.1",
-    "@types/pg": "^8.15.5",
+    "@types/node": "^24.13.2",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.22.4",
     "typescript": "^5.9.2"
   }

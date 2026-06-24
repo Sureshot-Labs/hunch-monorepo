@@ -156,11 +156,11 @@ function dbRow(args: {
     liquidity: args.liquidity ?? 20,
     open_interest: 5,
     close_time:
-      "closeTime" in args ? args.closeTime : "2026-06-01T00:00:00.000Z",
+      "closeTime" in args ? args.closeTime : "2099-01-01T00:00:00.000Z",
     expiration_time:
       "expirationTime" in args
         ? args.expirationTime
-        : "2026-06-01T00:00:00.000Z",
+        : "2099-01-01T00:00:00.000Z",
     condition_id: args.conditionId ?? null,
     event_venue_event_id: args.venueEventId ?? null,
     event_title: args.eventTitle ?? "Event title",
@@ -717,6 +717,7 @@ await test("returns alternatives symmetrically for each seed in a three-venue gr
       query: { limit: 5 },
       client,
       db,
+      now: new Date("2026-05-11T12:00:00.000Z"),
     });
 
     assert.ok(response);

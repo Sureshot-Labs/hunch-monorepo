@@ -45,14 +45,10 @@ function requiredEnv(name: string): string {
 function createSignalBotDbPool(): Pool {
   const pool = createPgPool({
     connectionString: requiredEnv("DATABASE_URL"),
+    options: "-c jit=off",
     connectionTimeoutMillis: 2_000,
     idleTimeoutMillis: 30_000,
     max: 5,
-  });
-  pool.on("connect", (client) => {
-    void client.query("set jit = off").catch((error: unknown) => {
-      console.error("[signal-bot] failed to set jit=off", error);
-    });
   });
   pool.on("error", (error: unknown) =>
     console.error("[signal-bot] pg error", error),

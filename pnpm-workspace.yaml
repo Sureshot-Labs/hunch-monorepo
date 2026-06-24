@@ -2,6 +2,14 @@ packages:
   - apps/*
   - packages/*
 
+allowBuilds:
+  bigint-buffer: false
+  bufferutil: false
+  esbuild: true
+  keccak: false
+  secp256k1: false
+  utf-8-validate: false
+
 onlyBuiltDependencies:
   - esbuild
 

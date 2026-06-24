@@ -17,7 +17,7 @@
   "dependencies": {
     "@hunch/db": "workspace:*",
     "@hunch/infra": "workspace:*",
-    "axios": "^1.7.2",
+    "axios": "^1.18.1",
     "bottleneck": "^2.19.5",
     "p-queue": "^8.0.1",
     "pino": "^9.9.4",
