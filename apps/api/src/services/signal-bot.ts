@@ -1281,7 +1281,9 @@ function formatMarketTitleLine(note: SignalBotNote): string | null {
 function formatSignalContextLine(note: SignalBotNote): string | null {
   const external = asObject(note.modelMeta.external_research);
   const summary =
-    typeof external.summary === "string" ? stripMarkdown(external.summary) : "";
+    typeof external.summary === "string"
+      ? stripMarkdownAndSources(external.summary)
+      : "";
   const timingMatch = summary.match(
     /public (?:info|information|context|news) ([^.]{0,80})\./i,
   );
@@ -1301,11 +1303,17 @@ function formatSignalContextLine(note: SignalBotNote): string | null {
   return null;
 }
 
-function stripMarkdown(value: string): string {
+function stripMarkdownAndSources(value: string): string {
   return value
+    .replace(/\[\[?\d+\]?\]\([^)]*$/g, "")
+    .replace(/\[[^\]]+\]\(https?:\/\/[^)\s]*$/gi, "")
     .replace(/\[\[?\d+\]?\]\([^)]+\)/g, "")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\[(\d+)\]\(https?:\/\/[^)]+\)/gi, "")
+    .replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/gi, "$1")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\[\[?\d+\]?\]?/g, "")
     .replace(/[*_`~>#]/g, "")
+    .replace(/\s+([,.;:!?])/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }

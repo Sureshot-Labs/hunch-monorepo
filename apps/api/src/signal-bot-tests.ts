@@ -464,6 +464,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "message strips markdown citations and incomplete URLs from public context",
+    run: () => {
+      const message = buildSignalBotMessage({
+        amountsUsd: [5],
+        appBaseUrl: "https://app.hunch.trade",
+        note: note({
+          modelMeta: {
+            external_research: {
+              summary:
+                "**Public previews (Mexico -115 to win, predictions like 0-2 Mexico) preceded/coincided with sharp NO activity; positioning is contrarian to favorites.**[[1]](https://www.cbssports.com/soccer/news/mexico-vs-czechia)[[2]](https://www.usatoday.c...",
+            },
+          },
+        }),
+      });
+
+      assert.ok(
+        message.text.includes(
+          "📰 Public previews \\(Mexico \\-115 to win, predictions like 0\\-2 Mexico\\) preceded/coincided with sharp NO activity; positioning is contrarian to favorites\\.",
+        ),
+      );
+      const contextLine = message.text
+        .split("\n")
+        .find((line) => line.startsWith("📰"));
+      assert.ok(contextLine);
+      assert.doesNotMatch(contextLine, /https?:/);
+      assert.doesNotMatch(contextLine, /\[\[|\]\(/);
+      assert.doesNotMatch(contextLine, /usatoday|cbssports/i);
+      assert.doesNotMatch(contextLine, /\\.\\.\\./);
+    },
+  },
+  {
     name: "message omits holder button when no wallet target is available",
     run: () => {
       const message = buildSignalBotMessage({

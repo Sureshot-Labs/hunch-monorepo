@@ -346,8 +346,12 @@ function extractMarkdownCitations(
 ): ExternalResearchResult["citations"] {
   const citations: ExternalResearchResult["citations"] = [];
   const seen = new Set<string>();
-  for (const match of text.matchAll(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g)) {
-    const title = match[1]?.trim() || null;
+  for (const match of text.matchAll(
+    /\[(\[?\d+\]?|[^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+  )) {
+    const rawTitle =
+      match[1]?.replaceAll("[", "").replaceAll("]", "").trim() || null;
+    const title = rawTitle && !/^\d+$/.test(rawTitle) ? rawTitle : null;
     const url = match[2]?.trim() || null;
     if (!url || seen.has(url)) continue;
     seen.add(url);
@@ -363,11 +367,23 @@ function extractMarkdownCitations(
   return citations;
 }
 
-function compactExternalResearchSummary(text: string): string {
-  const cleaned = text
-    .replace(/\[[^\]]+\]\((https?:\/\/[^)]+)\)/g, "")
+function stripExternalResearchSourceMarkup(text: string): string {
+  return text
+    .replace(/\[\[?\d+\]?\]\([^)]*$/g, "")
+    .replace(/\[[^\]]+\]\(https?:\/\/[^)\s]*$/gi, "")
+    .replace(/\[\[?\d+\]?\]\([^)]+\)/g, "")
+    .replace(/\[(\d+)\]\(https?:\/\/[^)]+\)/gi, "")
+    .replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/gi, "$1")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\[\[?\d+\]?\]?/g, "")
+    .replace(/[*_`~>#]/g, "")
+    .replace(/\s+([,.;:!?])/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function compactExternalResearchSummary(text: string): string {
+  const cleaned = stripExternalResearchSourceMarkup(text);
   if (!cleaned) return "No public context found.";
   const sentences = cleaned
     .split(/(?<=[.!?])\s+/)
@@ -385,7 +401,12 @@ function compactExternalResearchSummary(text: string): string {
       (sentence, index, all) => sentence && all.indexOf(sentence) === index,
     )
     .join(" ");
-  return summary.length <= 360 ? summary : `${summary.slice(0, 340).trim()}...`;
+  if (summary.length <= 280) return summary;
+  const clipped = summary.slice(0, 280);
+  const boundary = Math.max(clipped.lastIndexOf(". "), clipped.lastIndexOf("; "));
+  if (boundary >= 160) return clipped.slice(0, boundary + 1).trim();
+  const space = clipped.lastIndexOf(" ");
+  return `${clipped.slice(0, space > 0 ? space : 277).trimEnd()}...`;
 }
 
 function extractServerToolCallCount(payload: unknown): number {
@@ -480,7 +501,7 @@ async function runExternalResearch(params: {
           {
             role: "system",
             content:
-              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return a very compact public-context read, not a news memo. Compare dated headlines/posts to the supplied holder activity/snapshot timing. Answer only: did public information precede the holder move, coincide with it, follow it, or not explain it? Include at most 2 short sentences and a few source links. Do not invent a catalyst.",
+              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return a very compact public-context read, not a news memo. Compare dated headlines/posts to the supplied holder activity/snapshot timing. Answer only: did public information precede the holder move, coincide with it, follow it, or not explain it? Include at most 2 short plain-text sentences. Do not use markdown, footnotes, bracket citations, or raw URLs in the text. Do not invent a catalyst.",
           },
           {
             role: "user",
