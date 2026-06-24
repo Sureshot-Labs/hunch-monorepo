@@ -130,6 +130,11 @@ export type SignalBotNote = {
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
+  holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
+  holderCredentialBullets: string[];
+  holderClusterPnl30dUsd: number | null;
+  holderClusterSharpHolders: number | null;
+  holderClusterSharpUsd: number | null;
 };
 
 type SignalBotNoteRow = {
@@ -354,6 +359,7 @@ export function buildSignalBotMessage(input: {
   const title = escapeTelegramMarkdownV2(note.title);
   const summary = escapeTelegramMarkdownV2(note.description);
   const contextLine = formatSignalContextLine(note);
+  const credentialLines = formatSignalCredentialLines(note);
   const marketTitleLine = formatMarketTitleLine(note);
   const priceLine = formatPriceLine(note);
   const marketUrl = note.eventId
@@ -377,7 +383,6 @@ export function buildSignalBotMessage(input: {
     : `*${title}*`;
   const metaLine = [
     formatSignalBotSignalLabel(note),
-    note.confidence == null ? null : `🎯 ${formatPercent(note.confidence)}`,
     priceLine,
   ]
     .filter((value): value is string => Boolean(value))
@@ -388,6 +393,9 @@ export function buildSignalBotMessage(input: {
     ...(marketTitleLine ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)] : []),
     "",
     summary,
+    ...(credentialLines.length > 0
+      ? ["", ...credentialLines.map(escapeTelegramMarkdownV2)]
+      : []),
     ...(contextLine ? ["", escapeTelegramMarkdownV2(contextLine)] : []),
   ];
 
@@ -421,6 +429,7 @@ export function buildSignalBotMessage(input: {
     }
     keyboardRows.push(
       buildSignalBotLinkRow({
+        holderActorMode: note.holderActorMode,
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
@@ -431,6 +440,7 @@ export function buildSignalBotMessage(input: {
   } else if (note.eventId) {
     keyboardRows.push(
       buildSignalBotLinkRow({
+        holderActorMode: note.holderActorMode,
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
@@ -446,6 +456,7 @@ export function buildSignalBotMessage(input: {
   } else if (holderUrl) {
     keyboardRows.push(
       buildSignalBotLinkRow({
+        holderActorMode: note.holderActorMode,
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
@@ -463,6 +474,7 @@ export function buildSignalBotMessage(input: {
 }
 
 function buildSignalBotLinkRow(input: {
+  holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
@@ -486,11 +498,18 @@ function buildSignalBotLinkRow(input: {
 }
 
 function formatHolderButtonText(input: {
+  holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
 }): string {
-  const parts = ["👤", input.holderSide ?? "Holder"];
+  const sideLabel = input.holderSide ?? "Holder";
+  const parts = [
+    "👤",
+    input.holderActorMode === "sharp_cluster" && input.holderSide
+      ? `Top ${sideLabel}`
+      : sideLabel,
+  ];
   if (input.holderPositionUsd != null) {
     parts.push(formatCompactUsd(input.holderPositionUsd));
   }
@@ -1073,6 +1092,14 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function asStringArray(value: unknown, maxItems: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0)
+    .slice(0, maxItems);
+}
+
 function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
 }
@@ -1080,6 +1107,7 @@ function toIso(value: Date | string): string {
 function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
   const holderMeta = asObject(row.holder_target_meta);
   const holderSide = String(holderMeta.side ?? "").toUpperCase();
+  const holderActorMode = String(holderMeta.actorMode ?? "");
   return {
     id: row.id,
     noteKey: row.note_key,
@@ -1104,6 +1132,16 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     holderOpenPnlUsd: toNumber(holderMeta.openPnlUsd),
     holderPositionUsd: toNumber(holderMeta.positionUsd),
     holderSide: holderSide === "YES" || holderSide === "NO" ? holderSide : null,
+    holderActorMode:
+      holderActorMode === "single_holder" || holderActorMode === "sharp_cluster"
+        ? holderActorMode
+        : holderActorMode === "none"
+          ? "none"
+          : null,
+    holderCredentialBullets: asStringArray(holderMeta.credentialBullets, 3),
+    holderClusterPnl30dUsd: toNumber(holderMeta.clusterPnl30dUsd),
+    holderClusterSharpHolders: toNumber(holderMeta.clusterSharpHolders),
+    holderClusterSharpUsd: toNumber(holderMeta.clusterSharpUsd),
   };
 }
 
@@ -1148,7 +1186,18 @@ function formatPriceLine(note: SignalBotNote): string | null {
   return `YES ${formatCents(yes)} / NO ${formatCents(1 - yes)}`;
 }
 
+function formatSignalCredentialLines(note: SignalBotNote): string[] {
+  const bullets = note.holderCredentialBullets.slice(0, 2);
+  if (bullets.length === 0) return [];
+  const header =
+    note.holderActorMode === "sharp_cluster"
+      ? "Why this cluster matters:"
+      : "Why this wallet matters:";
+  return [header, ...bullets.map((bullet) => `• ${bullet}`)];
+}
+
 function formatSignalBotSignalLabel(note: SignalBotNote): string {
+  if (note.holderActorMode === "sharp_cluster") return "⚡ Sharp cluster";
   const bucket = String(note.primaryTargetMeta.bucket ?? "").toLowerCase();
   switch (bucket) {
     case "sharp_minority":

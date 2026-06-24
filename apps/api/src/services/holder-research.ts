@@ -42,6 +42,7 @@ export type HolderResearchHolder = {
   side: HolderResearchSideKey;
   positionUsd: number;
   openPnlUsd: number | null;
+  pnl30dUsd: number | null;
   resolvedWinRateEdge30d: number | null;
   resolvedEdgeZScore30d: number | null;
   resolvedEdgeSampleCount30d: number | null;
@@ -121,6 +122,31 @@ export type HolderResearchCandidate = {
   market: HolderResearchMarketInput;
   evidence: HolderResearchEvidence[];
   cooldownUntil: string | null;
+};
+
+export type HolderResearchActorMode =
+  | "none"
+  | "sharp_cluster"
+  | "single_holder";
+
+export type HolderResearchActorSummary = {
+  mode: HolderResearchActorMode;
+  side: HolderResearchSideKey | null;
+  credentialBullets: string[];
+  primaryHolder: {
+    walletId: string;
+    label: string | null;
+    side: HolderResearchSideKey;
+    positionUsd: number;
+    openPnlUsd: number | null;
+    pnl30dUsd: number | null;
+  } | null;
+  cluster: {
+    sharpHolders: number;
+    sharpUsd: number;
+    pnl30dUsd: number | null;
+    availableSharpHolders: number;
+  } | null;
 };
 
 export type HolderResearchSelectionResult = {
@@ -529,6 +555,7 @@ export function buildHolderResearchInputDigest(
       side: holder.side,
       positionUsd: holder.positionUsd,
       openPnlUsd: holder.openPnlUsd,
+      pnl30dUsd: holder.pnl30dUsd,
       edge: holder.resolvedWinRateEdge30d,
       z: holder.resolvedEdgeZScore30d,
       samples: holder.resolvedEdgeSampleCount30d,
@@ -633,6 +660,204 @@ function previousNoteTargetHolders(
     holders.push(holder);
   }
   return holders;
+}
+
+function selectHolderResearchTargetHolders(
+  candidate: HolderResearchCandidate,
+  evidenceIds: string[],
+): HolderResearchHolder[] {
+  const referencedHolderIds = new Set(
+    evidenceIds.filter((evidenceId) => evidenceId.startsWith("holder:")),
+  );
+  const referencedHolders = candidate.market.holders.filter((holder) =>
+    referencedHolderIds.has(buildHolderEvidenceId(holder)),
+  );
+  if (referencedHolders.length > 0) return referencedHolders;
+  if (candidate.bucket === "followup_existing") {
+    return previousNoteTargetHolders(candidate).slice(0, 1);
+  }
+  return candidate.side ? selectedEvidenceHolders(candidate).slice(0, 1) : [];
+}
+
+function formatWholePercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatPointDelta(value: number): string {
+  const points = Math.round(Math.abs(value) * 100);
+  return `${points} point${points === 1 ? "" : "s"}`;
+}
+
+function plural(value: number, singular: string, pluralLabel = `${singular}s`): string {
+  return `${value} ${value === 1 ? singular : pluralLabel}`;
+}
+
+function buildHolderCredentialBullets(
+  holder: HolderResearchHolder,
+): string[] {
+  const bullets: string[] = [];
+  if (holder.pnl30dUsd != null && holder.pnl30dUsd >= 1_000) {
+    bullets.push(`Up ${formatUsd(holder.pnl30dUsd)} over the last 30 days`);
+  }
+  if (
+    holder.winRate30d != null &&
+    holder.winRate30d >= 0.55 &&
+    (holder.trades30d ?? 0) >= 5
+  ) {
+    bullets.push(`Won ${formatWholePercent(holder.winRate30d)} of recent trades`);
+  }
+  if (
+    holder.resolvedWinRateEdge30d != null &&
+    holder.resolvedWinRateEdge30d >= 0.05 &&
+    (holder.resolvedEdgeSampleCount30d ?? 0) >= 5
+  ) {
+    bullets.push(
+      `Beat market prices by ${formatPointDelta(holder.resolvedWinRateEdge30d)} on recent resolved bets`,
+    );
+  }
+  if (
+    bullets.length > 0 &&
+    holder.volume30dUsd != null &&
+    holder.volume30dUsd >= 25_000
+  ) {
+    bullets.push(`Traded ${formatUsd(holder.volume30dUsd)} over the last 30 days`);
+  }
+  return bullets.slice(0, 3);
+}
+
+function buildClusterCredentialBullets(input: {
+  candidate: HolderResearchCandidate;
+  policy: Pick<
+    HolderResearchPolicy,
+    | "minHolderPositionUsd"
+    | "minResolvedEdgeSampleCount30d"
+    | "minResolvedEdgeZScore30d"
+    | "minResolvedStakeUsd30d"
+    | "minResolvedWinRateEdge30d"
+    | "minTrades30d"
+    | "minSidePositionUsd"
+  >;
+  side: HolderResearchSideKey;
+}): {
+  availableSharpHolders: number;
+  bullets: string[];
+  pnl30dUsd: number | null;
+} {
+  const sideData = input.candidate.market.sides[input.side];
+  const availableSharpHolders = input.candidate.market.holders.filter(
+    (holder) => holder.side === input.side && isSharpHolder(holder, input.policy),
+  );
+  const hasCompletePnl =
+    availableSharpHolders.length >= sideData.sharpHolders &&
+    availableSharpHolders.length > 0 &&
+    availableSharpHolders.every((holder) => holder.pnl30dUsd != null);
+  const pnl30dUsd = hasCompletePnl
+    ? availableSharpHolders.reduce(
+        (sum, holder) => sum + (holder.pnl30dUsd ?? 0),
+        0,
+      )
+    : null;
+  const bullets: string[] = [];
+  if (pnl30dUsd != null && pnl30dUsd >= 1_000) {
+    bullets.push(`Up ${formatUsd(pnl30dUsd)} combined over the last 30 days`);
+  }
+  bullets.push(`${plural(sideData.sharpHolders, "strong wallet")} on the same side`);
+  bullets.push(`${formatUsd(sideData.sharpUsd)} tracked by sharp wallets`);
+  return {
+    availableSharpHolders: availableSharpHolders.length,
+    bullets: bullets.slice(0, 3),
+    pnl30dUsd,
+  };
+}
+
+export function buildHolderResearchActorSummary(input: {
+  candidate: HolderResearchCandidate;
+  evidenceIds: string[];
+  policy: Pick<
+    HolderResearchPolicy,
+    | "minHolderPositionUsd"
+    | "minResolvedEdgeSampleCount30d"
+    | "minResolvedEdgeZScore30d"
+    | "minResolvedStakeUsd30d"
+    | "minResolvedWinRateEdge30d"
+    | "minTrades30d"
+    | "minSidePositionUsd"
+  >;
+}): HolderResearchActorSummary {
+  const targetHolders = selectHolderResearchTargetHolders(
+    input.candidate,
+    input.evidenceIds,
+  );
+  const primaryHolder = targetHolders[0] ?? null;
+  const side = input.candidate.side ?? primaryHolder?.side ?? null;
+  if (!side) {
+    return {
+      mode: "none",
+      side: null,
+      credentialBullets: [],
+      primaryHolder: null,
+      cluster: null,
+    };
+  }
+
+  const sideData = input.candidate.market.sides[side];
+  if (
+    sideData.sharpHolders >= 2 &&
+    sideData.sharpUsd >= input.policy.minSidePositionUsd
+  ) {
+    const cluster = buildClusterCredentialBullets({
+      candidate: input.candidate,
+      policy: input.policy,
+      side,
+    });
+    return {
+      mode: "sharp_cluster",
+      side,
+      credentialBullets: cluster.bullets,
+      primaryHolder: primaryHolder
+        ? {
+            walletId: primaryHolder.walletId,
+            label: primaryHolder.label,
+            side: primaryHolder.side,
+            positionUsd: primaryHolder.positionUsd,
+            openPnlUsd: primaryHolder.openPnlUsd,
+            pnl30dUsd: primaryHolder.pnl30dUsd,
+          }
+        : null,
+      cluster: {
+        sharpHolders: sideData.sharpHolders,
+        sharpUsd: sideData.sharpUsd,
+        pnl30dUsd: cluster.pnl30dUsd,
+        availableSharpHolders: cluster.availableSharpHolders,
+      },
+    };
+  }
+
+  if (!primaryHolder) {
+    return {
+      mode: "none",
+      side,
+      credentialBullets: [],
+      primaryHolder: null,
+      cluster: null,
+    };
+  }
+
+  const credentialBullets = buildHolderCredentialBullets(primaryHolder);
+  return {
+    mode: credentialBullets.length > 0 ? "single_holder" : "none",
+    side,
+    credentialBullets,
+    primaryHolder: {
+      walletId: primaryHolder.walletId,
+      label: primaryHolder.label,
+      side: primaryHolder.side,
+      positionUsd: primaryHolder.positionUsd,
+      openPnlUsd: primaryHolder.openPnlUsd,
+      pnl30dUsd: primaryHolder.pnl30dUsd,
+    },
+    cluster: null,
+  };
 }
 
 export function buildHolderResearchDecisionSnapshot(
@@ -1542,6 +1767,7 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
         side,
         positionUsd,
         openPnlUsd: null,
+        pnl30dUsd: toNumber(record.pnl30dUsd),
         resolvedWinRateEdge30d: toNumber(record.resolvedWinRateEdge30d),
         resolvedEdgeZScore30d: toNumber(record.resolvedEdgeZScore30d),
         resolvedEdgeSampleCount30d: toNumber(record.resolvedEdgeSampleCount30d),
@@ -1623,6 +1849,7 @@ export async function loadHolderResearchCandidateMarkets(
           w.chain,
           w.label,
           sel.metrics_volume_30d,
+          sel.metrics_pnl_30d,
           sel.metrics_trades_30d,
           sel.metrics_win_rate_30d,
           sel.metrics_resolved_win_rate_edge_30d,
@@ -1738,6 +1965,7 @@ export async function loadHolderResearchCandidateMarkets(
               'side', side,
               'positionUsd', position_usd,
               'volume30dUsd', metrics_volume_30d,
+              'pnl30dUsd', metrics_pnl_30d,
               'trades30d', metrics_trades_30d,
               'winRate30d', metrics_win_rate_30d,
               'resolvedWinRateEdge30d', metrics_resolved_win_rate_edge_30d,
@@ -2154,9 +2382,17 @@ export async function enrichHolderResearchHolderContext(
 
 export function buildHolderResearchCandidatePromptJson(
   candidate: HolderResearchCandidate,
+  policy?: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"],
 ): Record<string, unknown> {
   const totalUsd =
     candidate.market.sides.YES.usd + candidate.market.sides.NO.usd;
+  const actor = policy
+    ? buildHolderResearchActorSummary({
+        candidate,
+        evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+        policy,
+      })
+    : null;
   return {
     key: candidate.key,
     inputDigest: candidate.inputDigest,
@@ -2187,6 +2423,7 @@ export function buildHolderResearchCandidatePromptJson(
       crossMarketWalletCount: candidate.market.crossMarketWalletCount,
       previousNote: candidate.market.previousNote,
     },
+    actor,
     sides: candidate.market.sides,
     holders: candidate.market.holders.slice(0, 8),
     evidence: candidate.evidence,
@@ -2310,26 +2547,17 @@ export function buildHolderResearchNoteKey(
 export function buildHolderResearchWalletTargets(
   candidate: HolderResearchCandidate,
   evidenceIds: string[],
+  policy?: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"],
 ): Array<{
   walletId: string;
   rank: number;
   affinityScore: number;
   meta: Record<string, unknown>;
 }> {
-  const referencedHolderIds = new Set(
-    evidenceIds.filter((evidenceId) => evidenceId.startsWith("holder:")),
-  );
-  const referencedHolders = candidate.market.holders.filter((holder) =>
-    referencedHolderIds.has(buildHolderEvidenceId(holder)),
-  );
-  const holders =
-    referencedHolders.length > 0
-      ? referencedHolders
-      : candidate.bucket === "followup_existing"
-        ? previousNoteTargetHolders(candidate).slice(0, 1)
-        : candidate.side
-          ? selectedEvidenceHolders(candidate).slice(0, 1)
-          : [];
+  const holders = selectHolderResearchTargetHolders(candidate, evidenceIds);
+  const actor = policy
+    ? buildHolderResearchActorSummary({ candidate, evidenceIds, policy })
+    : null;
   return holders
     .map((holder, index) => ({
       walletId: holder.walletId,
@@ -2337,9 +2565,19 @@ export function buildHolderResearchWalletTargets(
       affinityScore: candidate.score,
       meta: {
         evidenceId: buildHolderEvidenceId(holder),
+        actorMode: actor?.mode ?? null,
+        credentialBullets:
+          actor?.primaryHolder?.walletId === holder.walletId
+            ? actor.credentialBullets
+            : [],
+        holderDescriptor: holder.label ?? "tracked wallet",
+        clusterSharpHolders: actor?.cluster?.sharpHolders ?? null,
+        clusterSharpUsd: actor?.cluster?.sharpUsd ?? null,
+        clusterPnl30dUsd: actor?.cluster?.pnl30dUsd ?? null,
         side: holder.side,
         positionUsd: holder.positionUsd,
         openPnlUsd: holder.openPnlUsd,
+        pnl30dUsd: holder.pnl30dUsd,
         resolvedWinRateEdge30d: holder.resolvedWinRateEdge30d,
         resolvedEdgeZScore30d: holder.resolvedEdgeZScore30d,
         resolvedEdgeSampleCount30d: holder.resolvedEdgeSampleCount30d,
@@ -2366,6 +2604,7 @@ function asContextHolderResearchOutput(
 export function applyHolderResearchPublishQualityGate(input: {
   candidate: HolderResearchCandidate;
   output: HolderResearchAgentOutputV1;
+  policy: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"];
 }): HolderResearchAgentOutputV1 {
   const { candidate, output } = input;
   if (output.status !== "PUBLISH") return output;
@@ -2387,6 +2626,7 @@ export function applyHolderResearchPublishQualityGate(input: {
   const walletTargets = buildHolderResearchWalletTargets(
     candidate,
     output.evidence_ids,
+    input.policy,
   );
   const holderSide = normalizeSide(walletTargets[0]?.meta.side);
   const actionSide = candidate.side ?? holderSide;
@@ -2411,6 +2651,18 @@ export function applyHolderResearchPublishQualityGate(input: {
     );
   }
 
+  const actor = buildHolderResearchActorSummary({
+    candidate,
+    evidenceIds: output.evidence_ids,
+    policy: input.policy,
+  });
+  if (actor.mode === "none" || actor.credentialBullets.length === 0) {
+    return asContextHolderResearchOutput(
+      output,
+      "No strong holder credential was available for publication.",
+    );
+  }
+
   return output;
 }
 
@@ -2423,6 +2675,7 @@ export async function persistHolderResearchNotes(
   params: {
     runnerRunId: string;
     decisions: HolderResearchPersistDecision[];
+    policy: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"];
   },
 ): Promise<HolderResearchPersistStats> {
   const stats: HolderResearchPersistStats = {
@@ -2437,6 +2690,11 @@ export async function persistHolderResearchNotes(
     if (decision.output.status !== "PUBLISH") continue;
     const candidate = decision.candidate;
     const noteKey = buildHolderResearchNoteKey(candidate);
+    const actorSummary = buildHolderResearchActorSummary({
+      candidate,
+      evidenceIds: decision.output.evidence_ids,
+      policy: params.policy,
+    });
 
     try {
       await client.query("begin");
@@ -2504,6 +2762,7 @@ export async function persistHolderResearchNotes(
           JSON.stringify({
             ...decision.modelMeta,
             caveats: decision.output.caveats,
+            primary_holder_credentials: actorSummary,
             evidence_refs: candidate.evidence.map((evidence) => ({
               evidence_id: evidence.id,
               headline: evidence.title,
@@ -2582,6 +2841,7 @@ export async function persistHolderResearchNotes(
       for (const target of buildHolderResearchWalletTargets(
         candidate,
         decision.output.evidence_ids,
+        params.policy,
       )) {
         await client.query(
           `

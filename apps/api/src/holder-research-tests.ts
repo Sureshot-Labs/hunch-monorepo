@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  buildHolderResearchSystemPrompt,
   holderResearchAgentOutputV1Schema,
   parseHolderResearchAgentOutputV1,
   type HolderResearchAgentOutputV1,
@@ -11,6 +12,7 @@ import {
 } from "./schemas/signals.js";
 import {
   applyHolderResearchPublishQualityGate,
+  buildHolderResearchActorSummary,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchDecisionCacheRecord,
   buildHolderResearchDecisionSnapshot,
@@ -21,6 +23,7 @@ import {
   diffHolderResearchDecisionSnapshots,
   evaluateHolderResearchDecisionCache,
   isSharpHolder,
+  loadHolderResearchCandidateMarkets,
   selectHolderResearchCandidates,
   type HolderResearchHolder,
   type HolderResearchMarketInput,
@@ -71,6 +74,7 @@ function holder(
     side: sideName,
     positionUsd: 10_000,
     openPnlUsd: null,
+    pnl30dUsd: 2_500,
     resolvedWinRateEdge30d: 0.16,
     resolvedEdgeZScore30d: 2.1,
     resolvedEdgeSampleCount30d: 24,
@@ -202,6 +206,91 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy(),
       );
       assert.equal(candidates.length, 0);
+    },
+  },
+  {
+    name: "holder research loader keeps holder 30d pnl",
+    run: async () => {
+      const p = policy();
+      const client = {
+        query: async () => ({
+          command: "SELECT",
+          fields: [],
+          oid: 0,
+          rowCount: 1,
+          rows: [
+            {
+              market_id: "polymarket:pnl-market",
+              event_id: "polymarket:pnl-event",
+              venue: "polymarket",
+              market_title: "Pnl market",
+              market_slug: null,
+              market_description: null,
+              event_title: "Pnl event",
+              event_slug: null,
+              event_description: null,
+              series_key: null,
+              series_title: null,
+              resolution_source: null,
+              category: null,
+              close_time: null,
+              expiration_time: null,
+              best_bid: "0.30",
+              best_ask: "0.32",
+              last_price: null,
+              volume_24h: null,
+              liquidity: null,
+              yes_usd: "0",
+              no_usd: "25000",
+              yes_wallets: "0",
+              no_wallets: "1",
+              yes_sharp_holders: "0",
+              no_sharp_holders: "1",
+              yes_sharp_usd: "0",
+              no_sharp_usd: "25000",
+              yes_best_edge: null,
+              no_best_edge: "0.16",
+              yes_best_z_score: null,
+              no_best_z_score: "2.1",
+              yes_best_sample_count: null,
+              no_best_sample_count: "24",
+              yes_best_resolved_stake_usd: null,
+              no_best_resolved_stake_usd: "6000",
+              yes_best_trades_30d: null,
+              no_best_trades_30d: "18",
+              largest_holder_usd: "25000",
+              recent_activity_usd: "0",
+              recent_activity_at: null,
+              cross_market_wallet_count: "0",
+              top_holders: [
+                {
+                  address: "0xabc",
+                  chain: "polygon",
+                  label: null,
+                  ownerAddress: null,
+                  ownerUsdLikeBalance: null,
+                  pnl30dUsd: 12_345,
+                  positionUsd: 25_000,
+                  resolvedEdgeSampleCount30d: 24,
+                  resolvedEdgeZScore30d: 2.1,
+                  resolvedStakeUsd30d: 6_000,
+                  resolvedWinRateEdge30d: 0.16,
+                  side: "NO",
+                  trades30d: 18,
+                  volume30dUsd: 90_000,
+                  walletId: "00000000-0000-4000-8000-000000000061",
+                  walletKind: "safe",
+                  walletUsdLikeBalance: null,
+                  winRate30d: 0.65,
+                },
+              ],
+            },
+          ],
+        }),
+      };
+
+      const markets = await loadHolderResearchCandidateMarkets(client, p);
+      assert.equal(markets[0]?.holders[0]?.pnl30dUsd, 12_345);
     },
   },
   {
@@ -724,6 +813,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const gated = applyHolderResearchPublishQualityGate({
         candidate,
         output,
+        policy: p,
       });
       assert.equal(gated.status, "PUBLISH");
     },
@@ -744,6 +834,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const gated = applyHolderResearchPublishQualityGate({
         candidate,
         output: publishOutput(candidate, { direction: "mixed" }),
+        policy: p,
       });
       assert.equal(gated.status, "CONTEXT");
       assert.match(gated.rationale, /Mixed holder reads/);
@@ -762,6 +853,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const gated = applyHolderResearchPublishQualityGate({
         candidate,
         output: publishOutput(candidate, { direction: "down" }),
+        policy: p,
       });
       assert.equal(gated.status, "CONTEXT");
       assert.match(gated.rationale, /not a directional publish signal/);
@@ -780,9 +872,216 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const gated = applyHolderResearchPublishQualityGate({
         candidate,
         output: publishOutput(candidate, { direction: "up" }),
+        policy: p,
       });
       assert.equal(gated.status, "CONTEXT");
       assert.match(gated.rationale, /did not match/);
+    },
+  },
+  {
+    name: "holder research actor summary uses plain-language credentials",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const actor = buildHolderResearchActorSummary({
+        candidate,
+        evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+        policy: p,
+      });
+      assert.equal(actor.mode, "single_holder");
+      assert.deepEqual(actor.credentialBullets.slice(0, 3), [
+        "Up $2.5K over the last 30 days",
+        "Won 65% of recent trades",
+        "Beat market prices by 16 points on recent resolved bets",
+      ]);
+      assert.equal(
+        actor.credentialBullets.some((bullet) => /sample|n=|resolved edge/i.test(bullet)),
+        false,
+      );
+    },
+  },
+  {
+    name: "holder research actor summary ignores non-positive pnl as profit",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("NO", {
+              pnl30dUsd: -500,
+              winRate30d: 0.5,
+              resolvedWinRateEdge30d: 0.01,
+              resolvedEdgeSampleCount30d: 24,
+              volume30dUsd: 1_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const actor = buildHolderResearchActorSummary({
+        candidate,
+        evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+        policy: p,
+      });
+      assert.equal(actor.mode, "none");
+      assert.equal(
+        actor.credentialBullets.some((bullet) => /Up /i.test(bullet)),
+        false,
+      );
+    },
+  },
+  {
+    name: "holder research actor summary detects sharp clusters",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          sides: {
+            YES: side("YES", { usd: 120_000, wallets: 5 }),
+            NO: side("NO", {
+              usd: 45_000,
+              wallets: 2,
+              sharpHolders: 2,
+              sharpUsd: 45_000,
+              bestEdge: 0.16,
+              bestZScore: 2.1,
+              bestSampleCount: 24,
+              bestResolvedStakeUsd: 6_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000051",
+              positionUsd: 25_000,
+              pnl30dUsd: 10_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000052",
+              positionUsd: 20_000,
+              pnl30dUsd: 4_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const actor = buildHolderResearchActorSummary({
+        candidate,
+        evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+        policy: p,
+      });
+      assert.equal(actor.mode, "sharp_cluster");
+      assert.equal(actor.cluster?.sharpHolders, 2);
+      assert.equal(actor.cluster?.pnl30dUsd, 14_000);
+      assert.deepEqual(actor.credentialBullets.slice(0, 2), [
+        "Up $14.0K combined over the last 30 days",
+        "2 strong wallets on the same side",
+      ]);
+    },
+  },
+  {
+    name: "holder research actor summary omits incomplete cluster pnl",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          sides: {
+            YES: side("YES", { usd: 120_000, wallets: 5 }),
+            NO: side("NO", {
+              usd: 45_000,
+              wallets: 3,
+              sharpHolders: 3,
+              sharpUsd: 45_000,
+              bestEdge: 0.16,
+              bestZScore: 2.1,
+              bestSampleCount: 24,
+              bestResolvedStakeUsd: 6_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000061",
+              positionUsd: 20_000,
+              pnl30dUsd: 10_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000062",
+              positionUsd: 15_000,
+              pnl30dUsd: null,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000063",
+              positionUsd: 10_000,
+              pnl30dUsd: 4_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const actor = buildHolderResearchActorSummary({
+        candidate,
+        evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+        policy: p,
+      });
+      assert.equal(actor.mode, "sharp_cluster");
+      assert.equal(actor.cluster?.sharpHolders, 3);
+      assert.equal(actor.cluster?.pnl30dUsd, null);
+      assert.deepEqual(actor.credentialBullets.slice(0, 2), [
+        "3 strong wallets on the same side",
+        "$45.0K tracked by sharp wallets",
+      ]);
+      assert.equal(
+        actor.credentialBullets.some((bullet) => /combined/i.test(bullet)),
+        false,
+      );
+    },
+  },
+  {
+    name: "holder research quality gate downgrades sharp signals without credentials",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("NO", {
+              pnl30dUsd: 0,
+              winRate30d: 0.5,
+              resolvedWinRateEdge30d: 0.01,
+              volume30dUsd: 90_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output: publishOutput(candidate),
+        policy: p,
+      });
+      assert.equal(gated.status, "CONTEXT");
+      assert.match(gated.rationale, /No strong holder credential/);
+    },
+  },
+  {
+    name: "holder research prompt keeps credential facts out of summary copy",
+    run: () => {
+      const prompt = buildHolderResearchSystemPrompt();
+      assert.match(prompt, /do not repeat the bullets verbatim/i);
+      assert.match(prompt, /do not invent credentials/i);
     },
   },
   {
@@ -854,6 +1153,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   {
     name: "holder research policy is a separate runtime policy with external search budget",
     run: async () => {
+      assert.equal(getIntelPolicyDefaults("holder_research").model, "openai/gpt-5.5");
+
       const db = {
         query: async (_sql: string) => ({
           rows: [
@@ -881,6 +1182,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effective.enabled, true);
       assert.equal(resolved.effective.dryRun, false);
+      assert.equal(resolved.defaults.maxOutputTokens, 2_000);
+      assert.equal(resolved.defaults.model, "openai/gpt-5.5");
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);

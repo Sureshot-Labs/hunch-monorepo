@@ -199,6 +199,14 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     holderOpenPnlUsd: -123,
     holderPositionUsd: 12_345,
     holderSide: "YES",
+    holderActorMode: "single_holder",
+    holderCredentialBullets: [
+      "Up $2.5K over the last 30 days",
+      "Won 65% of recent trades",
+    ],
+    holderClusterPnl30dUsd: null,
+    holderClusterSharpHolders: null,
+    holderClusterSharpUsd: null,
     ...overrides,
   };
 }
@@ -230,7 +238,16 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     last_price: null,
     holder_address: "0xa022ba0a68e11a78348382ff168601012d4d77f8",
     holder_chain: "polygon",
-    holder_target_meta: { openPnlUsd: -123, positionUsd: 12_345, side: "YES" },
+    holder_target_meta: {
+      actorMode: "single_holder",
+      credentialBullets: [
+        "Up $2.5K over the last 30 days",
+        "Won 65% of recent trades",
+      ],
+      openPnlUsd: -123,
+      positionUsd: 12_345,
+      side: "YES",
+    },
     ...overrides,
   };
 }
@@ -405,8 +422,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         /^\*\[Sharp YES interest\]\(https:\/\/app\.hunch\.trade\/events\/polymarket%3Aevent-1\?/,
       );
-      assert.match(message.text, /⚡ Sharp holder · 🎯 82% · YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(message.text, /🎯 82%/);
       assert.match(message.text, /📍 Test event · Will test resolve Yes\?/);
+      assert.match(message.text, /Why this wallet matters:/);
+      assert.match(message.text, /• Up \$2\\.5K over the last 30 days/);
+      assert.match(message.text, /• Won 65% of recent trades/);
+      assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
       assert.match(message.text, /📰 Public info followed the holder activity\\\./);
       assert.doesNotMatch(message.text, /confidence/i);
     },
@@ -428,6 +450,52 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[2]?.length, 1);
       assert.equal(rows[2]?.[0]?.text, "↗️ Open market");
+    },
+  },
+  {
+    name: "message renders sharp cluster credentials with representative holder",
+    run: () => {
+      const message = buildSignalBotMessage({
+        amountsUsd: [5],
+        appBaseUrl: "https://app.hunch.trade",
+        note: note({
+          holderActorMode: "sharp_cluster",
+          holderClusterPnl30dUsd: 14_000,
+          holderClusterSharpHolders: 2,
+          holderClusterSharpUsd: 45_000,
+          holderCredentialBullets: [
+            "Up $14.0K combined over the last 30 days",
+            "2 strong wallets on the same side",
+          ],
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[2]?.[0]?.text, "👤 Top YES $12.3K (-$123)");
+      assert.match(message.text, /⚡ Sharp cluster · YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /Why this cluster matters:/);
+      assert.match(
+        message.text,
+        /• Up \$14\\.0K combined over the last 30 days/,
+      );
+    },
+  },
+  {
+    name: "message omits credential section for legacy notes",
+    run: () => {
+      const message = buildSignalBotMessage({
+        amountsUsd: [5],
+        appBaseUrl: "https://app.hunch.trade",
+        note: note({
+          holderActorMode: null,
+          holderCredentialBullets: [],
+        }),
+      });
+      assert.doesNotMatch(
+        message.text,
+        /Why this wallet matters|Why this cluster matters/,
+      );
+      assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(message.text, /confidence/i);
     },
   },
   {

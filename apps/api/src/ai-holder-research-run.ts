@@ -561,6 +561,15 @@ function zeroCost(): ResolvedCost {
   });
 }
 
+function estimatedFailedModelCost(policy: HolderResearchPolicy): ResolvedCost {
+  return {
+    ...zeroCost(),
+    estimatedCostUsd: policy.estimatedCallCostUsd,
+    chargedCostUsd: policy.estimatedCallCostUsd,
+    costSource: "estimated",
+  };
+}
+
 function estimateDryRunCost(params: {
   systemPrompt: string;
   userPrompt: string;
@@ -627,7 +636,7 @@ async function callHolderResearchModel(params: {
   }
 
   const candidateJson = {
-    ...buildHolderResearchCandidatePromptJson(params.candidate),
+    ...buildHolderResearchCandidatePromptJson(params.candidate, params.policy),
     externalResearch: params.externalResearch,
   };
   const allowedEvidenceIds = params.candidate.evidence.map(
@@ -725,6 +734,43 @@ async function callHolderResearchModel(params: {
   }
 }
 
+function buildHolderResearchModelErrorDecision(input: {
+  candidate: HolderResearchCandidate;
+  error: unknown;
+  externalResearch: ExternalResearchResult | null;
+  policy: HolderResearchPolicy;
+}): HolderResearchModelDecision {
+  const message = input.error instanceof Error ? input.error.message : String(input.error);
+  const evidenceId =
+    input.candidate.evidence[0]?.id ?? `market:${input.candidate.market.marketId}`;
+  return {
+    candidate: input.candidate,
+    output: {
+      version: "holder_research_v1",
+      status: "SKIP",
+      bucket: input.candidate.bucket,
+      confidence: 0,
+      signal_type: "update",
+      direction: "mixed",
+      headline: "Holder research model failed",
+      summary:
+        "The model response could not be parsed, so this candidate was skipped instead of publishing an incomplete signal.",
+      rationale: "Model synthesis failed; candidate skipped without publishing.",
+      evidence_ids: [evidenceId],
+      caveats: ["No user-facing signal was produced for this run."],
+    },
+    cost: estimatedFailedModelCost(input.policy),
+    modelMeta: {
+      model: input.policy.model,
+      external_research: input.externalResearch,
+      mode: "openrouter_error",
+      error: message.slice(0, 500),
+      estimated_cost_usd: input.policy.estimatedCallCostUsd,
+      charged_cost_usd: input.policy.estimatedCallCostUsd,
+    },
+  };
+}
+
 async function synthesizeCandidate(params: {
   candidate: HolderResearchCandidate;
   policy: HolderResearchPolicy;
@@ -732,15 +778,36 @@ async function synthesizeCandidate(params: {
   externalResearch: ExternalResearchResult | null;
 }): Promise<HolderResearchModelDecision> {
   if (params.callModel) {
-    return callHolderResearchModel({
-      candidate: params.candidate,
-      policy: params.policy,
-      externalResearch: params.externalResearch,
-    });
+    try {
+      return await callHolderResearchModel({
+        candidate: params.candidate,
+        policy: params.policy,
+        externalResearch: params.externalResearch,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes("OPENROUTER_API_KEY missing") ||
+        message.startsWith("OpenRouter 401") ||
+        message.startsWith("OpenRouter 403")
+      ) {
+        throw error;
+      }
+      console.warn("[holder-research] model synthesis failed", {
+        key: params.candidate.key,
+        error: message,
+      });
+      return buildHolderResearchModelErrorDecision({
+        candidate: params.candidate,
+        error,
+        externalResearch: params.externalResearch,
+        policy: params.policy,
+      });
+    }
   }
 
   const candidateJson = {
-    ...buildHolderResearchCandidatePromptJson(params.candidate),
+    ...buildHolderResearchCandidatePromptJson(params.candidate, params.policy),
     externalResearch: params.externalResearch,
   };
   const systemPrompt = buildHolderResearchSystemPrompt();
@@ -968,6 +1035,7 @@ export async function runHolderResearch(
       const gatedOutput = applyHolderResearchPublishQualityGate({
         candidate,
         output: rawDecision.output,
+        policy,
       });
       const decision: HolderResearchModelDecision = {
         ...rawDecision,
@@ -1057,6 +1125,7 @@ export async function runHolderResearch(
     if (shouldPersist) {
       persistence = await persistHolderResearchNotes(client, {
         runnerRunId: runId,
+        policy,
         decisions: decisions.map<HolderResearchPersistDecision>((decision) => ({
           candidate: decision.candidate,
           output: decision.output,
