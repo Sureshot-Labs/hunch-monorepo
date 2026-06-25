@@ -4557,11 +4557,15 @@ async function refreshWalletOnchainState(
   const identities = new Map<string, WalletOnchainIdentityState>();
   const identityKindCounts: Record<string, number> = {};
   const inspectRows = selectedRows.filter(shouldInspectPolymarketIdentity);
+  type WalletMetadataUpdate = {
+    metadata: Record<string, unknown>;
+    walletId: string;
+  };
   for (const chunk of chunkArray(inspectRows, 8)) {
-    await Promise.all(
-      chunk.map(async (row) => {
+    const metadataUpdates = await Promise.all(
+      chunk.map(async (row): Promise<WalletMetadataUpdate | null> => {
         const address = normalizeAddress(row.address, row.chain);
-        if (!address) return;
+        if (!address) return null;
         result.identitiesInspected += 1;
         const checkedAt = new Date().toISOString();
         try {
@@ -4577,24 +4581,31 @@ async function refreshWalletOnchainState(
           };
           identities.set(row.wallet_id, state);
           incrementCount(identityKindCounts, state.walletKind);
-          await updateWalletMetadata(
-            client,
-            row.wallet_id,
-            buildPolymarketIdentityMetadata(state),
-          );
+          return {
+            walletId: row.wallet_id,
+            metadata: buildPolymarketIdentityMetadata(state),
+          };
         } catch (error) {
           result.identityErrors += 1;
-          await updateWalletMetadata(client, row.wallet_id, {
-            walletOnchainIdentityCheckStatus: "error",
-            walletOnchainIdentityCheckedAt: checkedAt,
-            walletOnchainIdentityCheckError:
-              error instanceof Error
-                ? error.message.slice(0, 240)
-                : String(error),
-          });
+          return {
+            walletId: row.wallet_id,
+            metadata: {
+              walletOnchainIdentityCheckStatus: "error",
+              walletOnchainIdentityCheckedAt: checkedAt,
+              walletOnchainIdentityCheckError:
+                error instanceof Error
+                  ? error.message.slice(0, 240)
+                  : String(error),
+            },
+          };
         }
       }),
     );
+
+    for (const update of metadataUpdates) {
+      if (!update) continue;
+      await updateWalletMetadata(client, update.walletId, update.metadata);
+    }
   }
 
   const ownerWalletIds = new Map<string, string>();
