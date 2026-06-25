@@ -351,11 +351,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           typeof loadHolderResearchCandidateMarkets
         >[0],
         p,
+        { whaleUsd: 100_000, whaleUsdSolana: 50_000 },
       );
       assert.equal(markets[0]?.holders[0]?.pnl30dUsd, 12_345);
       assert.match(querySql, /candidate_wallets as materialized/);
       assert.match(querySql, /from wallet_intel_selector_snapshot sel/);
       assert.match(querySql, /join lateral/);
+      assert.match(querySql, /when w\.chain = 'solana' then \$13::numeric/);
+      assert.match(querySql, /else \$12::numeric/);
       assert.doesNotMatch(
         querySql,
         /from wallet_position_snapshots ws\s+where ws\.snapshot_at/s,
@@ -364,6 +367,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         queryParams[10],
         Math.min(5_000, Math.max(1_000, p.maxCandidatePool * 25)),
       );
+      assert.equal(queryParams[11], 100_000);
+      assert.equal(queryParams[12], 50_000);
     },
   },
   {

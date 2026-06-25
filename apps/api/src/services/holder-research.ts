@@ -32,6 +32,11 @@ type Queryable = Pick<PoolClient, "query">;
 
 export type HolderResearchSideKey = "YES" | "NO";
 
+export type HolderResearchMmThresholds = {
+  whaleUsd: number;
+  whaleUsdSolana: number;
+};
+
 export type HolderResearchEvidence = {
   id: string;
   kind: "market" | "event" | "side" | "holder" | "activity" | "note";
@@ -2224,6 +2229,7 @@ function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
 export async function loadHolderResearchCandidateMarkets(
   client: Queryable,
   policy: HolderResearchPolicy,
+  mmThresholds?: HolderResearchMmThresholds,
 ): Promise<HolderResearchMarketInput[]> {
   const trackableSql = buildWalletIntelTrackableMarketSql({
     marketAlias: "um",
@@ -2232,6 +2238,14 @@ export async function loadHolderResearchCandidateMarkets(
   const candidateWalletLimit = Math.min(
     5_000,
     Math.max(1_000, policy.maxCandidatePool * 25),
+  );
+  const mmWhaleUsd = Math.max(
+    0,
+    mmThresholds?.whaleUsd ?? policy.minSidePositionUsd,
+  );
+  const mmWhaleUsdSolana = Math.max(
+    0,
+    mmThresholds?.whaleUsdSolana ?? mmWhaleUsd,
   );
 
   const { rows } = await client.query<HolderResearchMarketRow>(
@@ -2259,7 +2273,10 @@ export async function loadHolderResearchCandidateMarkets(
             hedgedNotionalUsdSql: "sel.hedged_notional_usd",
             hedgeRatioSql: "sel.hedge_ratio",
             twoSidedMarketsSql: "sel.two_sided_markets",
-            exposureThresholdSql: "$2::numeric",
+            exposureThresholdSql: `case
+              when w.chain = 'solana' then $13::numeric
+              else $12::numeric
+            end`,
           })} as mm_suspected,
           ons.wallet_kind,
           ons.owner_address,
@@ -2566,6 +2583,8 @@ export async function loadHolderResearchCandidateMarkets(
       Math.min(policy.minSidePositionUsd, policy.minMinorityUsd),
       policy.maxCandidatePool,
       candidateWalletLimit,
+      mmWhaleUsd,
+      mmWhaleUsdSolana,
     ],
   );
 
@@ -2675,10 +2694,11 @@ export function applyHolderResearchCooldowns(
 export async function loadHolderResearchCandidates(
   client: Queryable,
   policy: HolderResearchPolicy,
+  mmThresholds?: HolderResearchMmThresholds,
 ): Promise<HolderResearchCandidate[]> {
   const markets = await attachHolderResearchHistory(
     client,
-    await loadHolderResearchCandidateMarkets(client, policy),
+    await loadHolderResearchCandidateMarkets(client, policy, mmThresholds),
     policy,
   );
   const candidates = markets.flatMap((market) =>

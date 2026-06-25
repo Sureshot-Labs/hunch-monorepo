@@ -46,6 +46,7 @@ import {
 } from "./services/holder-research.js";
 import {
   resolveHolderResearchPolicy,
+  resolveWalletIntelRefreshPolicy,
   type HolderResearchPolicy,
 } from "./services/runtime-policies.js";
 
@@ -1323,7 +1324,12 @@ export async function runHolderResearch(
   const startedAt = Date.now();
   const runId = `holder_research:${new Date().toISOString()}:${randomUUID()}`;
   const policyResult = await resolveHolderResearchPolicy(pool);
+  const walletIntelPolicyResult = await resolveWalletIntelRefreshPolicy(pool);
   const policy = withPolicyOverrides(policyResult.effective, args);
+  const mmThresholds = {
+    whaleUsd: walletIntelPolicyResult.effective.whaleUsd,
+    whaleUsdSolana: walletIntelPolicyResult.effective.whaleUsdSolana,
+  };
   const selectionPolicy = buildSelectionPolicy(policy);
   const toolCalls: HolderResearchRunReport["toolCalls"] = [];
   const decisionCache = {
@@ -1345,7 +1351,11 @@ export async function runHolderResearch(
 
   const client = await pool.connect();
   try {
-    const candidates = await loadHolderResearchCandidates(client, policy);
+    const candidates = await loadHolderResearchCandidates(
+      client,
+      policy,
+      mmThresholds,
+    );
     toolCalls.push({
       name: "candidate_scan",
       count: candidates.length,
