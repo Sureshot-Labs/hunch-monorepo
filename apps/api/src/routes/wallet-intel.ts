@@ -43,9 +43,11 @@ import {
 import {
   buildEmptyWalletActivitySparkline,
   fetchWalletActivitySparklines,
+  fetchWalletPerformanceSparklines,
   fetchWalletPerformanceSeries,
   fetchWalletPortfolioPnlSeries,
   loadWalletPortfolioPerformanceMap,
+  type WalletSparklineMetric,
   type WalletActivitySparkline,
   type WalletPortfolioPerformance,
 } from "../services/wallet-intel-series.js";
@@ -831,6 +833,35 @@ type WalletOpenPositionOverlay = {
   avgOpenEntryPrice: number | null;
   avgOpenEntryApprox: boolean | null;
 };
+
+async function fetchWalletSparklineMap(
+  client: PoolClient,
+  walletIds: string[],
+  input: {
+    metric: WalletSparklineMetric;
+    windowHours: number;
+  },
+): Promise<Map<string, WalletActivitySparkline>> {
+  if (walletIds.length === 0) return new Map<string, WalletActivitySparkline>();
+  if (input.metric === "trade_pnl") {
+    return fetchWalletPerformanceSparklines(client, walletIds, {
+      windowHours: input.windowHours,
+    });
+  }
+  return fetchWalletActivitySparklines(client, walletIds, {
+    windowHours: input.windowHours,
+  });
+}
+
+function buildEmptyWalletSparkline(input: {
+  metric: WalletSparklineMetric;
+  windowHours: number;
+}): WalletActivitySparkline {
+  return buildEmptyWalletActivitySparkline({
+    metric: input.metric,
+    windowHours: input.windowHours,
+  });
+}
 
 function normalizeAddress(address: string): string {
   const trimmed = address.trim();
@@ -8971,7 +9002,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               ),
               loadWalletFollowerCountsMap(client, pagedIds),
               query.includeSparkline
-                ? fetchWalletActivitySparklines(client, pagedIds, {
+                ? fetchWalletSparklineMap(client, pagedIds, {
+                    metric: query.sparklineMetric,
                     windowHours,
                   })
                 : Promise.resolve(new Map<string, WalletActivitySparkline>()),
@@ -9022,7 +9054,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     ...hydrated,
                     sparkline:
                       sparklineMap.get(row.walletId) ??
-                      buildEmptyWalletActivitySparkline({ windowHours }),
+                      buildEmptyWalletSparkline({
+                        metric: query.sparklineMetric,
+                        windowHours,
+                      }),
                   }
                 : hydrated;
               const withAttribution = includeAttributionInResponse
@@ -9730,7 +9765,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   attributionSummaryOptions,
                 ),
                 query.includeSparkline
-                  ? fetchWalletActivitySparklines(client, pagedIds, {
+                  ? fetchWalletSparklineMap(client, pagedIds, {
+                      metric: query.sparklineMetric,
                       windowHours,
                     })
                   : Promise.resolve(new Map<string, WalletActivitySparkline>()),
@@ -9830,7 +9866,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                           ...baseItem,
                           sparkline:
                             sparklineMap.get(row.id) ??
-                            buildEmptyWalletActivitySparkline({ windowHours }),
+                            buildEmptyWalletSparkline({
+                              metric: query.sparklineMetric,
+                              windowHours,
+                            }),
                         }
                       : baseItem;
                     const withAttribution = includeAttributionInResponse
@@ -10006,7 +10045,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               portfolioPerformanceMap,
             ] = await Promise.all([
               query.includeSparkline
-                ? fetchWalletActivitySparklines(client, pagedIds, {
+                ? fetchWalletSparklineMap(client, pagedIds, {
+                    metric: query.sparklineMetric,
                     windowHours,
                   })
                 : Promise.resolve(new Map<string, WalletActivitySparkline>()),
@@ -10073,7 +10113,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                     ...withTopChanges,
                     sparkline:
                       sparklineMap.get(row.walletId) ??
-                      buildEmptyWalletActivitySparkline({ windowHours }),
+                      buildEmptyWalletSparkline({
+                        metric: query.sparklineMetric,
+                        windowHours,
+                      }),
                   }
                 : withTopChanges;
               const withAttribution = includeAttributionInResponse

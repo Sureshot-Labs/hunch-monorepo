@@ -4,6 +4,9 @@ import { zVenue } from "./common.js";
 
 const zChain = z.enum(["polygon", "base", "solana"]);
 const filterModeSchema = z.enum(["any", "all"]).default("any");
+const walletSparklineMetricSchema = z
+  .enum(["activity", "trade_pnl"])
+  .default("activity");
 const signalSeveritySchema = z.enum(["low", "medium", "high", "critical"]);
 const uppercaseEnum = <T extends [string, ...string[]]>(values: T) =>
   z.preprocess(
@@ -198,6 +201,7 @@ export const walletActivitySummaryQuerySchema = z.object({
   labelMode: filterModeSchema,
   includeAttribution: queryBooleanSchema.default(true),
   includeSparkline: queryBooleanSchema.default(false),
+  sparklineMetric: walletSparklineMetricSchema,
 });
 
 export const walletActivitySummaryStatsQuerySchema = z.object({
@@ -453,6 +457,7 @@ export const walletWhalesQuerySchema = z.object({
   labelMode: filterModeSchema,
   includeAttribution: queryBooleanSchema.default(true),
   includeSparkline: queryBooleanSchema.default(false),
+  sparklineMetric: walletSparklineMetricSchema,
 });
 
 export const walletSeriesQuerySchema = z.object({

@@ -70,6 +70,7 @@ import {
 } from "./services/wallet-activity-summary.js";
 import { fetchEvmBalance } from "./services/polygon-rpc.js";
 import {
+  fetchWalletPerformanceSparklines,
   fetchWalletPerformanceSeries,
   resolveSparklineBucketHours,
 } from "./services/wallet-intel-series.js";
@@ -1486,9 +1487,11 @@ const tests: TestCase[] = [
     run: () => {
       const whales = walletWhalesQuerySchema.parse({
         includeSparkline: "true",
+        sparklineMetric: "trade_pnl",
       });
       const summary = walletActivitySummaryQuerySchema.parse({
         includeSparkline: "1",
+        sparklineMetric: "activity",
         sort: "importance",
         q: "Elon Musk",
         marketId: "polymarket:123",
@@ -1497,7 +1500,9 @@ const tests: TestCase[] = [
       const series = walletSeriesQuerySchema.parse({});
 
       assert.equal(whales.includeSparkline, true);
+      assert.equal(whales.sparklineMetric, "trade_pnl");
       assert.equal(summary.includeSparkline, true);
+      assert.equal(summary.sparklineMetric, "activity");
       assert.equal(summary.sort, "importance");
       assert.equal(summary.q, "Elon Musk");
       assert.equal(summary.marketId, "polymarket:123");
@@ -1506,6 +1511,34 @@ const tests: TestCase[] = [
       assert.equal(series.bucketHours, undefined);
       assert.equal(series.period, "30d");
       assert.equal(series.limit, 120);
+    },
+  },
+  {
+    name: "wallet performance sparklines use one batch 30d metrics query",
+    run: async () => {
+      const calls: Array<{ sql: string; params: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params: unknown[]) => {
+          calls.push({ sql, params });
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+      const walletIds = [
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+      ];
+
+      const result = await fetchWalletPerformanceSparklines(client, walletIds, {
+        asOf: new Date("2026-01-02T00:00:00.000Z"),
+        windowHours: 168,
+      });
+
+      assert.equal(calls.length, 1);
+      assert.match(calls[0]?.sql ?? "", /wallet_metrics_snapshots/);
+      assert.match(calls[0]?.sql ?? "", /s\.period = '30d'/);
+      assert.deepEqual(calls[0]?.params[0], walletIds);
+      assert.equal(result.get(walletIds[0])?.metric, "trade_pnl");
+      assert.equal(result.get(walletIds[1])?.metric, "trade_pnl");
     },
   },
   {

@@ -6,14 +6,19 @@ import {
   aggregateWalletMetricsPreferenceSql,
 } from "./wallet-metrics-constants.js";
 
+export type WalletSparklineMetric = "activity" | "trade_pnl";
+
 export type WalletActivitySparklinePoint = {
   bucketStart: Date;
-  netChangeUsd: number;
-  grossChangeUsd: number;
-  eventCount: number;
+  netChangeUsd?: number;
+  grossChangeUsd?: number;
+  eventCount?: number;
+  pnlUsd?: number | null;
+  roi?: number | null;
 };
 
 export type WalletActivitySparkline = {
+  metric: WalletSparklineMetric;
   windowHours: number;
   bucketHours: number;
   points: WalletActivitySparklinePoint[];
@@ -74,6 +79,13 @@ type WalletActivitySparklineDbRow = {
   net_change_usd: string | null;
   gross_change_usd: string | null;
   event_count: number | null;
+};
+
+type WalletPerformanceSparklineDbRow = {
+  wallet_id: string;
+  bucket_start: Date;
+  pnl_usd: string | null;
+  roi: string | null;
 };
 
 type WalletPerformanceSeriesDbRow = {
@@ -150,12 +162,14 @@ export function resolveSparklineBucketHours(
 export function buildEmptyWalletActivitySparkline(input: {
   windowHours: number;
   bucketHours?: number | null;
+  metric?: WalletSparklineMetric;
 }): WalletActivitySparkline {
   const bucketHours = resolveSparklineBucketHours(
     input.windowHours,
     input.bucketHours,
   );
   return {
+    metric: input.metric ?? "activity",
     windowHours: Math.max(1, Math.trunc(input.windowHours)),
     bucketHours,
     points: [],
@@ -260,9 +274,99 @@ export async function fetchWalletActivitySparklines(
       );
     }
     byWallet.set(walletId, {
+      metric: "activity",
       windowHours,
       bucketHours,
       points,
+    });
+  }
+
+  return byWallet;
+}
+
+export async function fetchWalletPerformanceSparklines(
+  client: PoolClient,
+  walletIds: string[],
+  input: {
+    windowHours: number;
+    bucketHours?: number | null;
+    asOf?: Date;
+  },
+): Promise<Map<string, WalletActivitySparkline>> {
+  const byWallet = new Map<string, WalletActivitySparkline>();
+  if (walletIds.length === 0) return byWallet;
+
+  const windowHours = Math.max(1, Math.trunc(input.windowHours));
+  const bucketHours = resolveSparklineBucketHours(
+    windowHours,
+    input.bucketHours,
+  );
+  const asOf = input.asOf ?? new Date();
+  const start = new Date(asOf.getTime() - windowHours * 60 * 60 * 1000);
+
+  const rows = await client.query<WalletPerformanceSparklineDbRow>(
+    `
+      with wallet_set as (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      filtered as (
+        select
+          s.wallet_id,
+          s.as_of,
+          s.pnl_usd,
+          s.roi,
+          floor(
+            extract(epoch from s.as_of) / ($4::int * 3600)
+          )::bigint as bucket_index,
+          ${aggregateWalletMetricsPreferenceExpressionSql("s")}
+            as preferred_metric
+        from wallet_metrics_snapshots s
+        join wallet_set ws on ws.wallet_id = s.wallet_id
+        where s.period = '30d'
+          and ${aggregateWalletMetricsFilterSql("s")}
+          and s.as_of >= $2::timestamptz
+          and s.as_of <= $3::timestamptz
+          and (s.pnl_usd is not null or s.roi is not null)
+      ),
+      bucketed as (
+        select distinct on (wallet_id, bucket_index)
+          wallet_id,
+          bucket_index,
+          pnl_usd,
+          roi
+        from filtered
+        order by wallet_id, bucket_index, as_of desc, preferred_metric desc
+      )
+      select
+        bucketed.wallet_id,
+        timestamptz 'epoch'
+          + (bucketed.bucket_index * $4::int * 3600) * interval '1 second'
+            as bucket_start,
+        bucketed.pnl_usd::text,
+        bucketed.roi::text
+      from bucketed
+      order by bucketed.wallet_id, bucket_start
+    `,
+    [walletIds, start, asOf, bucketHours],
+  );
+
+  const rowsByWallet = new Map<string, WalletActivitySparklinePoint[]>();
+  for (const row of rows.rows) {
+    const walletRows = rowsByWallet.get(row.wallet_id) ?? [];
+    walletRows.push({
+      bucketStart: new Date(row.bucket_start),
+      pnlUsd: nullableNumber(row.pnl_usd),
+      roi: nullableNumber(row.roi),
+    });
+    rowsByWallet.set(row.wallet_id, walletRows);
+  }
+
+  for (const walletId of walletIds) {
+    byWallet.set(walletId, {
+      metric: "trade_pnl",
+      windowHours,
+      bucketHours,
+      points: rowsByWallet.get(walletId) ?? [],
     });
   }
 
