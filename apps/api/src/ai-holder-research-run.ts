@@ -32,7 +32,9 @@ import {
   buildHolderResearchTriageCandidatePromptJson,
   enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
+  evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
+  loadHolderResearchCalibrationMemo,
   loadHolderResearchCandidates,
   parseHolderResearchCachedDecision,
   persistHolderResearchNotes,
@@ -56,6 +58,8 @@ export type HolderResearchRunArgs = {
   maxAgentCalls: number | null;
   maxOutputTokens: number | null;
   outPath: string | null;
+  triageBatchSize: number | null;
+  triageMaxBatches: number | null;
   verbose: boolean;
 };
 
@@ -212,6 +216,9 @@ type HolderResearchRunReport = {
     externalSearchCitations: ExternalResearchResult["citations"];
   }>;
   persistence: Awaited<ReturnType<typeof persistHolderResearchNotes>> | null;
+  resolvedEvaluation: Awaited<
+    ReturnType<typeof evaluateResolvedHolderResearchNotes>
+  > | null;
 };
 
 type HolderResearchDecisionCacheStats =
@@ -246,7 +253,9 @@ function parsePositiveInt(raw: string | undefined): number | null {
   return asInt > 0 ? asInt : null;
 }
 
-function parseArgs(argv: string[]): HolderResearchRunArgs {
+export function parseHolderResearchRunArgs(
+  argv: string[],
+): HolderResearchRunArgs {
   return {
     dryRun: hasFlag(argv, "--dry-run")
       ? true
@@ -269,6 +278,8 @@ function parseArgs(argv: string[]): HolderResearchRunArgs {
     maxAgentCalls: parsePositiveInt(parseFlag(argv, "--max-agent-calls")),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens")),
     outPath: parseFlag(argv, "--out")?.trim() || null,
+    triageBatchSize: parsePositiveInt(parseFlag(argv, "--triage-batch-size")),
+    triageMaxBatches: parsePositiveInt(parseFlag(argv, "--triage-max-batches")),
     verbose: hasFlag(argv, "--verbose"),
   };
 }
@@ -290,6 +301,9 @@ function withPolicyOverrides(
     maxOutputTokens: args.maxOutputTokens ?? policy.maxOutputTokens,
     maxAgentCallsPerRun,
     maxCandidatesPerRun,
+    triageBatchSize: args.triageBatchSize ?? policy.triageBatchSize,
+    triageMaxBatchesPerRun:
+      args.triageMaxBatches ?? policy.triageMaxBatchesPerRun,
   };
 }
 
@@ -722,6 +736,7 @@ async function callHolderResearchTriageModel(params: {
   candidates: HolderResearchCandidate[];
   policy: HolderResearchPolicy;
   maxInvestigate: number;
+  calibrationMemo: string[];
 }): Promise<HolderResearchTriageModelResult> {
   const candidateJson = params.candidates.map((candidate) =>
     buildHolderResearchTriageCandidatePromptJson(candidate, params.policy),
@@ -730,6 +745,7 @@ async function callHolderResearchTriageModel(params: {
   const userPrompt = buildHolderResearchTriageUserPrompt({
     candidates: candidateJson,
     maxInvestigate: params.maxInvestigate,
+    calibrationMemo: params.calibrationMemo,
   });
 
   if (!env.openRouterKey) {
@@ -1113,7 +1129,7 @@ function triageCacheOutput(
 }
 
 export async function runHolderResearch(
-  args: HolderResearchRunArgs = parseArgs(process.argv.slice(2)),
+  args: HolderResearchRunArgs = parseHolderResearchRunArgs(process.argv.slice(2)),
   options: HolderResearchRunOptions = {},
 ): Promise<HolderResearchRunReport> {
   const startedAt = Date.now();
@@ -1173,6 +1189,9 @@ export async function runHolderResearch(
       selectedWithLive,
       policy,
     );
+    const calibrationMemo = policy.calibrationMemoEnabled
+      ? await loadHolderResearchCalibrationMemo(client, policy)
+      : [];
     toolCalls.push({
       name: "holder_context",
       count:
@@ -1192,6 +1211,17 @@ export async function runHolderResearch(
         policy.maxHolderContextPositionsPerHolder > 0
           ? "ok"
           : "skipped",
+    });
+    toolCalls.push({
+      name: "calibration_memo",
+      count: calibrationMemo.length,
+      status: policy.calibrationMemoEnabled ? "ok" : "skipped",
+      detail:
+        calibrationMemo.length > 0
+          ? calibrationMemo.join(" ")
+          : policy.calibrationMemoEnabled
+            ? "no evaluated notes yet"
+            : "policy disabled",
     });
 
     const decisions: HolderResearchModelDecision[] = [];
@@ -1289,6 +1319,7 @@ export async function runHolderResearch(
             candidates: batch,
             policy,
             maxInvestigate: policy.maxAgentCallsPerRun - finalCandidates.length,
+            calibrationMemo,
           });
         } catch (error) {
           const message =
@@ -1400,6 +1431,12 @@ export async function runHolderResearch(
         candidate,
         output: rawDecision.output,
         policy,
+        publishedRunDecisions: decisions
+          .filter((decision) => decision.output.status === "PUBLISH")
+          .map((decision) => ({
+            candidate: decision.candidate,
+            output: decision.output,
+          })),
       });
       const decision: HolderResearchModelDecision = {
         ...rawDecision,
@@ -1498,6 +1535,25 @@ export async function runHolderResearch(
       detail: shouldPersist
         ? undefined
         : "dry-run, persistNotes=false, or callModel=false",
+    });
+
+    let resolvedEvaluation: HolderResearchRunReport["resolvedEvaluation"] =
+      null;
+    const shouldEvaluateResolved =
+      policy.resolvedEvaluationEnabled && !policy.dryRun;
+    if (shouldEvaluateResolved) {
+      resolvedEvaluation = await evaluateResolvedHolderResearchNotes(
+        client,
+        policy,
+      );
+    }
+    toolCalls.push({
+      name: "resolved_signal_evaluator",
+      count: resolvedEvaluation?.evaluated ?? 0,
+      status: shouldEvaluateResolved ? "ok" : "skipped",
+      detail: shouldEvaluateResolved
+        ? `considered=${resolvedEvaluation?.considered ?? 0} correct=${resolvedEvaluation?.correct ?? 0} wrong=${resolvedEvaluation?.wrong ?? 0} unknown=${resolvedEvaluation?.unknown ?? 0} errors=${resolvedEvaluation?.errors ?? 0}`
+        : "dry-run or policy disabled",
     });
 
     const estimatedCostUsd = decisions.reduce(
@@ -1614,6 +1670,7 @@ export async function runHolderResearch(
           externalResearchByKey.get(decision.candidate.key)?.citations ?? [],
       })),
       persistence,
+      resolvedEvaluation,
     };
 
     if (args.outPath) {

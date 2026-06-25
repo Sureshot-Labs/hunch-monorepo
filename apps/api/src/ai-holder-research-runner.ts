@@ -90,6 +90,8 @@ function parseRunnerArgs(argv: string[]): RunnerArgs {
     maxAgentCalls: parsePositiveInt(parseFlag(argv, "--max-agent-calls")),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens")),
     outPath: parseFlag(argv, "--out")?.trim() || null,
+    triageBatchSize: parsePositiveInt(parseFlag(argv, "--triage-batch-size")),
+    triageMaxBatches: parsePositiveInt(parseFlag(argv, "--triage-max-batches")),
     verbose: hasFlag(argv, "--verbose"),
   };
 }

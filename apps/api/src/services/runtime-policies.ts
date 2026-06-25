@@ -148,6 +148,17 @@ export type HolderResearchPolicy = {
   movementContextEnabled: boolean;
   holderEntryContextEnabled: boolean;
   minTriageInvestigatePriority: number;
+  qualityGateEnabled: boolean;
+  resolvedEvaluationEnabled: boolean;
+  resolvedEvaluationLookbackHours: number;
+  calibrationMemoEnabled: boolean;
+  singleGameSportsStrictMode: boolean;
+  singleGameSportsMinHolderUsd: number;
+  singleGameSportsMinEdge: number;
+  singleGameSportsMinSamples: number;
+  singleGameSportsMinWinRate: number;
+  singleGameSportsRequirePositivePnl: boolean;
+  priceAgainstSignalBlockPp: number;
   decisionCacheEnabled: boolean;
   decisionCacheTtlHours: number;
   skipCooldownHours: number;
@@ -864,6 +875,17 @@ const holderResearchSchema = z
     movementContextEnabled: strictBoolean,
     holderEntryContextEnabled: strictBoolean,
     minTriageInvestigatePriority: ratio,
+    qualityGateEnabled: strictBoolean,
+    resolvedEvaluationEnabled: strictBoolean,
+    resolvedEvaluationLookbackHours: positiveInt.max(24 * 365),
+    calibrationMemoEnabled: strictBoolean,
+    singleGameSportsStrictMode: strictBoolean,
+    singleGameSportsMinHolderUsd: nonNegativeNumber,
+    singleGameSportsMinEdge: ratio,
+    singleGameSportsMinSamples: nonNegativeInt.max(100_000),
+    singleGameSportsMinWinRate: ratio,
+    singleGameSportsRequirePositivePnl: strictBoolean,
+    priceAgainstSignalBlockPp: ratio,
     decisionCacheEnabled: strictBoolean,
     decisionCacheTtlHours: positiveInt.max(24 * 365),
     skipCooldownHours: positiveInt.max(24 * 365),
@@ -1561,6 +1583,17 @@ function getDefaults(): IntelPolicyMap {
       movementContextEnabled: true,
       holderEntryContextEnabled: true,
       minTriageInvestigatePriority: 0.6,
+      qualityGateEnabled: true,
+      resolvedEvaluationEnabled: true,
+      resolvedEvaluationLookbackHours: 168,
+      calibrationMemoEnabled: true,
+      singleGameSportsStrictMode: true,
+      singleGameSportsMinHolderUsd: 25_000,
+      singleGameSportsMinEdge: 0.15,
+      singleGameSportsMinSamples: 20,
+      singleGameSportsMinWinRate: 0.65,
+      singleGameSportsRequirePositivePnl: true,
+      priceAgainstSignalBlockPp: 0.05,
       decisionCacheEnabled: true,
       decisionCacheTtlHours: 336,
       skipCooldownHours: 12,
@@ -2452,6 +2485,29 @@ function normalizeHolderResearchPolicy(
       0,
       1,
     ),
+    qualityGateEnabled: Boolean(policy.qualityGateEnabled),
+    resolvedEvaluationEnabled: Boolean(policy.resolvedEvaluationEnabled),
+    resolvedEvaluationLookbackHours: clamp(
+      Math.trunc(policy.resolvedEvaluationLookbackHours),
+      1,
+      24 * 365,
+    ),
+    calibrationMemoEnabled: Boolean(policy.calibrationMemoEnabled),
+    singleGameSportsStrictMode: Boolean(policy.singleGameSportsStrictMode),
+    singleGameSportsMinHolderUsd: Math.max(
+      0,
+      policy.singleGameSportsMinHolderUsd,
+    ),
+    singleGameSportsMinEdge: clamp(policy.singleGameSportsMinEdge, 0, 1),
+    singleGameSportsMinSamples: Math.max(
+      0,
+      Math.trunc(policy.singleGameSportsMinSamples),
+    ),
+    singleGameSportsMinWinRate: clamp(policy.singleGameSportsMinWinRate, 0, 1),
+    singleGameSportsRequirePositivePnl: Boolean(
+      policy.singleGameSportsRequirePositivePnl,
+    ),
+    priceAgainstSignalBlockPp: clamp(policy.priceAgainstSignalBlockPp, 0, 1),
     decisionCacheEnabled: Boolean(policy.decisionCacheEnabled),
     decisionCacheTtlHours: clamp(
       Math.trunc(policy.decisionCacheTtlHours),

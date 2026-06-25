@@ -10,7 +10,7 @@ export type SignalBotConfig = {
   pollTimeoutSec: number;
   minConfidence: number;
   maxSignalsPerTick: number;
-  amountsUsd: number[];
+  buyAmountUsd: number;
 };
 
 export type SignalBotCommand =
@@ -221,7 +221,7 @@ export function parseSignalBotConfig(
       env.HUNCH_SIGNAL_BOT_MAX_SIGNALS_PER_TICK,
       5,
     ),
-    amountsUsd: parseAmountList(env.HUNCH_SIGNAL_BOT_AMOUNTS_USD, [5, 20, 50]),
+    buyAmountUsd: parsePositiveInt(env.HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD, 10),
   };
 }
 
@@ -331,37 +331,32 @@ export function buildSignalBotOpenMarketUrl(input: {
 
 export function buildSignalBotHolderUrl(input: {
   address: string | null | undefined;
+  appBaseUrl?: string | null | undefined;
   chain: string | null | undefined;
+  eventId?: string | null | undefined;
+  marketId?: string | null | undefined;
+  noteId?: string | null | undefined;
+  side?: "NO" | "YES" | null | undefined;
 }): string | null {
   const address = input.address?.trim();
   const chain = input.chain?.trim().toLowerCase();
   if (!address || !chain) return null;
-  switch (chain) {
-    case "polygon":
-      return `https://polygonscan.com/address/${encodeURIComponent(address)}`;
-    case "base":
-      return `https://basescan.org/address/${encodeURIComponent(address)}`;
-    case "ethereum":
-    case "mainnet":
-      return `https://etherscan.io/address/${encodeURIComponent(address)}`;
-    case "arbitrum":
-      return `https://arbiscan.io/address/${encodeURIComponent(address)}`;
-    case "optimism":
-      return `https://optimistic.etherscan.io/address/${encodeURIComponent(address)}`;
-    case "avalanche":
-      return `https://snowtrace.io/address/${encodeURIComponent(address)}`;
-    case "bsc":
-      return `https://bscscan.com/address/${encodeURIComponent(address)}`;
-    case "solana":
-      return `https://solscan.io/account/${encodeURIComponent(address)}`;
-    default:
-      return null;
-  }
+  const url = new URL(
+    `/tracking/wallet/${encodeURIComponent(address)}`,
+    input.appBaseUrl ?? "https://app.hunch.trade",
+  );
+  url.searchParams.set("chain", chain);
+  url.searchParams.set("utm_source", "telegram_signal_bot");
+  if (input.eventId) url.searchParams.set("eventId", input.eventId);
+  if (input.marketId) url.searchParams.set("marketId", input.marketId);
+  if (input.side) url.searchParams.set("side", input.side);
+  if (input.noteId) url.searchParams.set("noteId", input.noteId);
+  return url.toString();
 }
 
 export function buildSignalBotMessage(input: {
-  amountsUsd: number[];
   appBaseUrl: string;
+  buyAmountUsd: number;
   note: SignalBotNote;
 }): {
   keyboard: TelegramInlineKeyboard | undefined;
@@ -386,7 +381,12 @@ export function buildSignalBotMessage(input: {
     : null;
   const rawHolderUrl = buildSignalBotHolderUrl({
     address: note.holderAddress,
+    appBaseUrl: input.appBaseUrl,
     chain: note.holderChain,
+    eventId: note.eventId,
+    marketId: note.marketId,
+    noteId: note.id,
+    side: note.holderSide,
   });
   const holderUrl =
     rawHolderUrl && (!buySide || !note.holderSide || note.holderSide === buySide)
@@ -416,6 +416,7 @@ export function buildSignalBotMessage(input: {
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
   if (note.eventId && note.marketId && buySide) {
     const baseTradeUrl = buildSignalBotTradeUrl({
+      amountUsd: input.buyAmountUsd,
       appBaseUrl: input.appBaseUrl,
       eventId: note.eventId,
       marketId: note.marketId,
@@ -423,24 +424,10 @@ export function buildSignalBotMessage(input: {
     });
     keyboardRows.push([
       {
-        text: `${buySide === "YES" ? "🟢" : "🔴"} Buy ${buySide}${price == null ? "" : ` ${formatCents(price)}`}`,
+        text: `${buySide === "YES" ? "🟠" : "⚪"} Buy ${buySide} $${input.buyAmountUsd}${price == null ? "" : ` · ${formatCents(price)}`}`,
         url: baseTradeUrl,
       },
     ]);
-    if (input.amountsUsd.length > 0) {
-      keyboardRows.push(
-        input.amountsUsd.map((amountUsd) => ({
-          text: `💵 ${amountUsd}`,
-          url: buildSignalBotTradeUrl({
-            amountUsd,
-            appBaseUrl: input.appBaseUrl,
-            eventId: note.eventId as string,
-            marketId: note.marketId as string,
-            side: buySide,
-          }),
-        })),
-      );
-    }
     keyboardRows.push(
       buildSignalBotLinkRow({
         holderActorMode: note.holderActorMode,
@@ -799,8 +786,8 @@ export async function publishSignalBotTick(input: {
     });
     for (const note of notes) {
       const { keyboard, text } = buildSignalBotMessage({
-        amountsUsd: input.config.amountsUsd,
         appBaseUrl: input.config.appBaseUrl,
+        buyAmountUsd: input.config.buyAmountUsd,
         note,
       });
       const result = await input.telegram.sendMessage({
@@ -854,8 +841,8 @@ export async function sendLatestSignalBotTestSignal(input: {
   const note = notes[0];
   if (!note) return false;
   const { keyboard, text } = buildSignalBotMessage({
-    amountsUsd: input.config.amountsUsd,
     appBaseUrl: input.config.appBaseUrl,
+    buyAmountUsd: input.config.buyAmountUsd,
     note,
   });
   const result = await input.telegram.sendMessage({
@@ -1100,14 +1087,6 @@ function parseIntegerList(value: string | undefined): number[] {
     .map((entry) => Number(entry.trim()))
     .filter((entry) => Number.isFinite(entry))
     .map((entry) => Math.trunc(entry));
-}
-
-function parseAmountList(
-  value: string | undefined,
-  fallback: number[],
-): number[] {
-  const parsed = parseIntegerList(value).filter((entry) => entry > 0);
-  return parsed.length > 0 ? parsed : fallback;
 }
 
 function normalizeBaseUrl(value: string): string {

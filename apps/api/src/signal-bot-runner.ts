@@ -142,7 +142,7 @@ export async function runSignalBotRunner(): Promise<void> {
 
   log("signal_bot_started", {
     adminCount: config.adminUserIds.size,
-    amountsUsd: config.amountsUsd,
+    buyAmountUsd: config.buyAmountUsd,
     maxSignalsPerTick: config.maxSignalsPerTick,
     minConfidence: config.minConfidence,
     publishIntervalSec: config.publishIntervalSec,

@@ -255,18 +255,18 @@ function noteRow(overrides: Record<string, unknown> = {}) {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
-    name: "env parser handles admins and default amount buttons",
+    name: "env parser handles admins and default buy amount",
     run: () => {
       const config = parseSignalBotConfig({
         HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123, 456, nope",
-        HUNCH_SIGNAL_BOT_AMOUNTS_USD: "",
+        HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD: "",
         HUNCH_SIGNAL_BOT_ENABLED: "true",
         HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.8",
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
       assert.equal(config.enabled, true);
       assert.deepEqual([...config.adminUserIds], [123, 456]);
-      assert.deepEqual(config.amountsUsd, [5, 20, 50]);
+      assert.equal(config.buyAmountUsd, 10);
       assert.equal(config.minConfidence, 0.8);
     },
   },
@@ -406,48 +406,57 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "holder URL uses chain-specific explorers",
+    name: "holder URL uses Hunch tracker with signal context",
     run: () => {
+      const url = buildSignalBotHolderUrl({
+        address: "0xa022ba0a68e11a78348382ff168601012d4d77f8",
+        appBaseUrl: "https://app.hunch.trade",
+        chain: "polygon",
+        eventId: "polymarket:event-1",
+        marketId: "polymarket:market-1",
+        noteId: "00000000-0000-4000-8000-000000000001",
+        side: "YES",
+      });
+      assert.ok(url);
+      const parsed = new URL(url);
       assert.equal(
-        buildSignalBotHolderUrl({
-          address: "0xa022ba0a68e11a78348382ff168601012d4d77f8",
-          chain: "polygon",
-        }),
-        "https://polygonscan.com/address/0xa022ba0a68e11a78348382ff168601012d4d77f8",
+        parsed.pathname,
+        "/tracking/wallet/0xa022ba0a68e11a78348382ff168601012d4d77f8",
       );
+      assert.equal(parsed.searchParams.get("chain"), "polygon");
+      assert.equal(parsed.searchParams.get("eventId"), "polymarket:event-1");
+      assert.equal(parsed.searchParams.get("marketId"), "polymarket:market-1");
+      assert.equal(parsed.searchParams.get("side"), "YES");
       assert.equal(
-        buildSignalBotHolderUrl({
-          address: "So11111111111111111111111111111111111111112",
-          chain: "solana",
-        }),
-        "https://solscan.io/account/So11111111111111111111111111111111111111112",
+        parsed.searchParams.get("noteId"),
+        "00000000-0000-4000-8000-000000000001",
       );
-      assert.equal(buildSignalBotHolderUrl({ address: "0xabc", chain: "unknown" }), null);
+      assert.equal(parsed.searchParams.get("utm_source"), "telegram_signal_bot");
+      assert.equal(buildSignalBotHolderUrl({ address: "", chain: "polygon" }), null);
     },
   },
   {
-    name: "message buttons include primary buy without amount and amount shortcuts",
+    name: "message buttons include primary buy with default amount",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5, 20, 50],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟢 Buy YES 31¢");
-      assert.equal(new URL(rows[0]?.[0]?.url ?? "").searchParams.has("amountUsd"), false);
-      assert.deepEqual(rows[1]?.map((button) => button.text), [
-        "💵 5",
-        "💵 20",
-        "💵 50",
-      ]);
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · 31¢");
+      assert.equal(new URL(rows[0]?.[0]?.url ?? "").searchParams.get("amountUsd"), "10");
+      assert.equal(rows.length, 2);
+      assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
+      const holderButtonUrl = new URL(rows[1]?.[0]?.url ?? "");
       assert.equal(
-        new URL(rows[1]?.[0]?.url ?? "").searchParams.get("amountUsd"),
-        "5",
+        holderButtonUrl.pathname,
+        "/tracking/wallet/0xa022ba0a68e11a78348382ff168601012d4d77f8",
       );
-      assert.equal(rows[2]?.[0]?.text, "👤 YES $12.3K (-$123)");
-      assert.match(rows[2]?.[0]?.url ?? "", /^https:\/\/polygonscan\.com\/address\//);
-      assert.equal(rows[2]?.[1]?.text, "↗️ Open market");
+      assert.equal(holderButtonUrl.searchParams.get("chain"), "polygon");
+      assert.equal(holderButtonUrl.searchParams.get("marketId"), "polymarket:market-1");
+      assert.equal(holderButtonUrl.searchParams.get("side"), "YES");
+      assert.equal(rows[1]?.[1]?.text, "↗️ Open market");
       assert.match(
         message.text,
         /^\*\[Sharp YES interest\]\(https:\/\/app\.hunch\.trade\/events\/polymarket%3Aevent-1\?/,
@@ -467,8 +476,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message strips markdown citations and incomplete URLs from public context",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           modelMeta: {
             external_research: {
@@ -498,8 +507,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message omits holder button when no wallet target is available",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           holderAddress: null,
           holderChain: null,
@@ -509,16 +518,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[2]?.length, 1);
-      assert.equal(rows[2]?.[0]?.text, "↗️ Open market");
+      assert.equal(rows[1]?.length, 1);
+      assert.equal(rows[1]?.[0]?.text, "↗️ Open market");
     },
   },
   {
     name: "message renders sharp cluster credentials with representative holder",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           holderActorMode: "sharp_cluster",
           holderClusterPnl30dUsd: 14_000,
@@ -531,7 +540,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[2]?.[0]?.text, "👤 Top YES $12.3K (-$123)");
+      assert.equal(rows[1]?.[0]?.text, "👤 Top YES $12.3K (-$123)");
       assert.match(message.text, /⚡ Sharp cluster · YES 31¢ \/ NO 69¢/);
       assert.match(message.text, /Why this cluster matters:/);
       assert.match(
@@ -544,8 +553,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message omits credential section for legacy notes",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           holderActorMode: null,
           holderCredentialBullets: [],
@@ -563,8 +572,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message title link avoids duplicate event and market titles",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           eventTitle: "Same market title",
           marketTitle: " Same   market title ",
@@ -578,8 +587,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message uses generic external summary before internal rationale",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           modelMeta: {
             external_research: {
@@ -598,8 +607,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message keeps public context sentence from being clipped",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           modelMeta: {
             external_research: {
@@ -640,8 +649,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "message hides holder button when old note holder conflicts with buy side",
     run: () => {
       const message = buildSignalBotMessage({
-        amountsUsd: [5],
         appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
         note: note({
           direction: "up",
           holderSide: "NO",
@@ -649,8 +658,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[2]?.length, 1);
-      assert.equal(rows[2]?.[0]?.text, "↗️ Open market");
+      assert.equal(rows[1]?.length, 1);
+      assert.equal(rows[1]?.[0]?.text, "↗️ Open market");
     },
   },
   {

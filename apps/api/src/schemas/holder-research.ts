@@ -28,6 +28,14 @@ export const holderResearchAgentOutputV1Schema = z
     headline: z.string().trim().min(8).max(140),
     summary: z.string().trim().min(24).max(320),
     rationale: z.string().trim().min(8).max(260),
+    public_context_risk: z
+      .enum([
+        "confirms_holder",
+        "fully_explains_move",
+        "conflicts_holder",
+        "unknown",
+      ])
+      .optional(),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
     caveats: z.array(z.string().trim().min(1).max(180)).max(3),
   })
@@ -139,6 +147,7 @@ export function parseHolderResearchAgentOutputV1(
       "Internal holder evidence passed the configured research gates.",
       260,
     ),
+    public_context_risk: record.public_context_risk,
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
     caveats: asStringArray(record.caveats, 3, 180),
   };
@@ -185,7 +194,8 @@ export function buildHolderResearchTriageSystemPrompt(): string {
     "Return exactly one JSON object matching holder_research_triage_v1.",
     "Your job is to choose which deterministic holder candidates deserve deeper research, not to write the final signal.",
     "Prefer candidates where a sharp holder or sharp cluster has a clear side, movement context suggests the holder was early or still useful, and the signal adds something beyond public news or raw odds.",
-    "Downgrade mixed/conflicted reads, stale exposure, weak single-holder reads without credentials, already-priced moves, and cases where public news fully explains the positioning.",
+    "Use candidate.quality. Prefer exceptional_single or cluster actor strength. Downgrade weak_single, contradicted credentials, price_against_signal, already_priced, and cases where public news fully explains the positioning.",
+    "For single_game_sports, be stricter: investigate only sharp clusters or exceptional single holders. Weak one-wallet sports fades, public-favorite confirmation, and conflicting same-event reads should be watch or skip.",
     "Use marketMovementContext to judge whether price moved with or ahead of the holder read. Use holderEntryContext to judge whether the holder is early, chasing, or still holding through a move.",
     "Use investigate for candidates worth final synthesis. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
     "Do not invent candidate keys. Return one decision per supplied candidate.",
@@ -195,6 +205,7 @@ export function buildHolderResearchTriageSystemPrompt(): string {
 export function buildHolderResearchTriageUserPrompt(input: {
   candidates: unknown[];
   maxInvestigate: number;
+  calibrationMemo?: string[];
 }): string {
   return JSON.stringify(
     {
@@ -215,11 +226,14 @@ export function buildHolderResearchTriageUserPrompt(input: {
       selection_rules: [
         "Prefer early or still-informative sharp holder positioning.",
         "Prefer clear single-side sharp holders or sharp clusters with credible credentials.",
+        "Use candidate.quality as the deterministic quality baseline.",
         "Prefer candidates where odds moved in the holder direction but not so much that the signal is already obvious.",
-        "Downgrade mixed holder reads, concentration-only reads, stale positions, and public-news-only moves.",
+        "Downgrade mixed holder reads, concentration-only reads, stale positions, public-news-only moves, and single-game sports singles with weak or contradicted credentials.",
+        "For single-game sports, investigate only sharp clusters or exceptional single holders unless the candidate is clearly unusual.",
         "Use watch when useful for memory/cooldown but not worth final synthesis now.",
         `Return at most ${input.maxInvestigate} investigate decisions unless more are clearly exceptional.`,
       ],
+      recent_calibration: input.calibrationMemo ?? [],
       candidates: input.candidates,
     },
     null,
@@ -237,6 +251,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "Use at most one important number in headline/summary unless a second number is essential.",
     "Mention 'sharp' only if it helps the user understand the read. Prefer simple phrases like 'informed wallets', 'unusual holder interest', or 'public news does not explain it'.",
     "Use the supplied actor.credentialBullets to understand why the holder or cluster matters, but do not repeat the bullets verbatim in the summary. Do not invent credentials, biographies, or profit claims.",
+    "Use candidate.quality as deterministic guardrails. If credentialStrength is contradicted or weak, do not call the holder informed or capable.",
     "Write credentials in normal language: say 'won recent trades' or 'beat market prices', not 'winRate', 'resolved edge', 'z-score', 'n=', or 'sample count'.",
     "Use 'is holding' or 'backs' by default. Only say 'entered' when supplied evidence explicitly proves a recent open or increase.",
     "Edge is supporting evidence only when sample count, stake, trades, and open exposure are strong. Never publish an edge-only claim.",
@@ -249,6 +264,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "If public news partly explains the move, still choose PUBLISH when holder data adds incremental directional information: informed confirmation, unusual side selection, or early positioning.",
     "Pay close attention to timing. Compare holder snapshot/activity times with dated public headlines. If a holder moved before the public catalyst or before consensus odds reacted, that increases signal value.",
     "Use marketMovementContext and holderEntryContext when supplied. Translate them plainly: 'in from lower prices', 'still holding after the move', or 'price already moved before the holder read'.",
+    "For single-game sports, publish only when there is a sharp cluster or an exceptional single holder with concrete positive credentials. Downgrade weak one-wallet sports fades, public-favorite confirmation, and same-event conflicts.",
     "Do not say public news explains the holder move unless the public information was available before or around the holder activity. Later headlines may validate an early holder signal.",
     "Choose CONTEXT when the candidate is interesting but not feed-worthy: holder data mostly repeats public news, the read is too balanced, the signal is too concentrated, the read is mixed, or the incremental takeaway is weak.",
     "Choose SKIP when the evidence is weak, stale, untradeable, tiny, already obvious from odds alone, or mostly noise.",
@@ -287,6 +303,8 @@ export function buildHolderResearchUserPrompt(input: {
         headline: "4-8 word user-facing title",
         summary: "18-40 word plain-English takeaway",
         rationale: "one short sentence explaining the decision quality",
+        public_context_risk:
+          "confirms_holder | fully_explains_move | conflicts_holder | unknown",
         evidence_ids: "subset of allowedEvidenceIds",
         caveats: "0-2 short important limitations",
       },

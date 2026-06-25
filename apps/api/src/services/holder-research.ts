@@ -8,7 +8,10 @@ import type {
   HolderResearchStatus,
 } from "../schemas/holder-research.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
-import { buildWalletIntelTrackableMarketSql } from "./wallet-intel-market-eligibility.js";
+import {
+  buildWalletIntelAcceptingOrdersSql,
+  buildWalletIntelTrackableMarketSql,
+} from "./wallet-intel-market-eligibility.js";
 import { loadLatestWalletPositionNowMap } from "./wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "./wallet-position-ledger.js";
 
@@ -176,6 +179,48 @@ export type HolderResearchActorSummary = {
   } | null;
 };
 
+export type HolderResearchMarketType =
+  | "single_game_sports"
+  | "sports_outright"
+  | "politics_geo"
+  | "crypto_macro"
+  | "other";
+
+export type HolderResearchActorStrength =
+  | "cluster"
+  | "exceptional_single"
+  | "solid_single"
+  | "weak_single";
+
+export type HolderResearchCredentialStrength =
+  | "strong"
+  | "medium"
+  | "weak"
+  | "contradicted";
+
+export type HolderResearchPriceContext =
+  | "with_signal"
+  | "against_signal"
+  | "already_priced"
+  | "flat"
+  | "unknown";
+
+export type HolderResearchPublicContextRisk =
+  | "confirms_holder"
+  | "fully_explains_move"
+  | "conflicts_holder"
+  | "unknown";
+
+export type HolderResearchQualityAssessment = {
+  marketType: HolderResearchMarketType;
+  hoursToClose: number | null;
+  actorStrength: HolderResearchActorStrength;
+  credentialStrength: HolderResearchCredentialStrength;
+  priceContext: HolderResearchPriceContext;
+  publicContextRisk: HolderResearchPublicContextRisk;
+  reasons: string[];
+};
+
 export type HolderResearchSelectionResult = {
   selected: HolderResearchCandidate[];
   skipped: Array<{
@@ -195,6 +240,15 @@ export type HolderResearchPersistStats = {
   persisted: number;
   skippedExisting: number;
   superseded: number;
+  errors: number;
+};
+
+export type HolderResearchResolvedEvaluationStats = {
+  considered: number;
+  evaluated: number;
+  correct: number;
+  wrong: number;
+  unknown: number;
   errors: number;
 };
 
@@ -271,15 +325,7 @@ export type HolderResearchDecisionCacheEvaluation = {
   meaningfulDeltaReasons: string[];
 };
 
-type HolderResearchActorPolicy = Parameters<
-  typeof buildHolderResearchActorSummary
->[0]["policy"];
-
-type HolderResearchPromptPolicy = HolderResearchActorPolicy &
-  Pick<
-    HolderResearchPolicy,
-    "holderEntryContextEnabled" | "movementContextEnabled"
-  >;
+type HolderResearchPromptPolicy = HolderResearchPolicy;
 
 type HolderResearchMarketRow = {
   market_id: string;
@@ -346,6 +392,27 @@ type HolderResearchRelatedPositionRow = {
   best_bid: string | number | null;
   best_ask: string | number | null;
   last_price: string | number | null;
+};
+
+type HolderResearchResolvedNoteRow = {
+  note_id: string;
+  direction: string | null;
+  confidence: string | number | null;
+  created_at: Date | string;
+  metrics: unknown;
+  model_meta: unknown;
+  market_id: string;
+  market_title: string | null;
+  event_title: string | null;
+  category: string | null;
+  close_time: Date | string | null;
+  expiration_time: Date | string | null;
+  best_bid: string | number | null;
+  best_ask: string | number | null;
+  last_price: string | number | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: string | number | null;
+  accepting_orders: boolean | null;
 };
 
 const SIDE_KEYS: HolderResearchSideKey[] = ["YES", "NO"];
@@ -961,6 +1028,205 @@ export function buildHolderResearchActorSummary(input: {
       pnl30dUsd: primaryHolder.pnl30dUsd,
     },
     cluster: null,
+  };
+}
+
+function textForClassification(market: HolderResearchMarketInput): string {
+  return [
+    market.category,
+    market.seriesKey,
+    market.seriesTitle,
+    market.eventTitle,
+    market.marketTitle,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+}
+
+function computeHoursToClose(market: HolderResearchMarketInput): number | null {
+  const closeMs =
+    parseDateMs(market.closeTime) ?? parseDateMs(market.expirationTime);
+  if (closeMs == null) return null;
+  return (closeMs - Date.now()) / 3_600_000;
+}
+
+function classifyHolderResearchMarketType(
+  market: HolderResearchMarketInput,
+): HolderResearchMarketType {
+  const text = textForClassification(market);
+  return classifyHolderResearchMarketTypeFromText(
+    text,
+    computeHoursToClose(market),
+  );
+}
+
+function classifyHolderResearchMarketTypeFromText(
+  text: string,
+  hoursToClose: number | null,
+): HolderResearchMarketType {
+  const looksSports =
+    /\b(sports?|soccer|football|baseball|basketball|tennis|hockey|cricket|mma|boxing|esports?|counter-strike|league of legends|fifa|world cup|nba|nfl|mlb|nhl)\b/.test(
+      text,
+    );
+  if (looksSports) {
+    if (
+      /\b(winner|champion|championship|golden boot|top scorer|outright|tournament|world cup winner|league winner)\b/.test(
+        text,
+      )
+    ) {
+      return "sports_outright";
+    }
+
+    const looksHeadToHead =
+      /\b(vs\.?|v\.?|versus)\b/.test(text) ||
+      /\b(spread|handicap|moneyline|match winner|total goals|over\/under|o\/u)\b/.test(
+        text,
+      );
+    if (looksHeadToHead || (hoursToClose != null && hoursToClose <= 72)) {
+      return "single_game_sports";
+    }
+    return "sports_outright";
+  }
+
+  if (
+    /\b(bitcoin|btc|ethereum|eth|crypto|fed|inflation|cpi|rates?|treasury|oil|gold)\b/.test(
+      text,
+    )
+  ) {
+    return "crypto_macro";
+  }
+  if (
+    /\b(election|president|parliament|senate|congress|iran|hormuz|strait|shipping|china|taiwan|russia|ukraine|war|ceasefire|nuclear|invasion|tariff|politics|geopolitics)\b/.test(
+      text,
+    )
+  ) {
+    return "politics_geo";
+  }
+
+  return "other";
+}
+
+function selectedSignalPriceChange(
+  candidate: HolderResearchCandidate,
+): number | null {
+  const movement = candidate.market.marketMovementContext;
+  const rawChange =
+    movement.yesChangeSincePreviousDecision ?? movement.yesChange24h;
+  if (rawChange == null || candidate.side == null) return null;
+  return candidate.side === "YES" ? rawChange : -rawChange;
+}
+
+function classifyPriceContext(
+  candidate: HolderResearchCandidate,
+  policy: Pick<HolderResearchPolicy, "priceAgainstSignalBlockPp">,
+): HolderResearchPriceContext {
+  const signalChange = selectedSignalPriceChange(candidate);
+  if (signalChange == null) return "unknown";
+  const threshold = Math.max(0.01, policy.priceAgainstSignalBlockPp);
+  if (signalChange <= -threshold) return "against_signal";
+  if (signalChange >= threshold * 2) return "already_priced";
+  if (signalChange >= threshold) return "with_signal";
+  return "flat";
+}
+
+function holderHasStrongCredential(input: {
+  holder: HolderResearchHolder;
+  policy: Pick<
+    HolderResearchPolicy,
+    | "singleGameSportsMinEdge"
+    | "singleGameSportsMinHolderUsd"
+    | "singleGameSportsMinSamples"
+    | "singleGameSportsMinWinRate"
+    | "singleGameSportsRequirePositivePnl"
+    | "minTrades30d"
+  >;
+}): boolean {
+  const pnlOk =
+    !input.policy.singleGameSportsRequirePositivePnl ||
+    (input.holder.pnl30dUsd ?? 0) > 0;
+  if (!pnlOk) return false;
+  if (input.holder.positionUsd < input.policy.singleGameSportsMinHolderUsd) {
+    return false;
+  }
+  const winStrong =
+    (input.holder.winRate30d ?? -Infinity) >=
+      input.policy.singleGameSportsMinWinRate &&
+    (input.holder.trades30d ?? 0) >= input.policy.minTrades30d;
+  const edgeStrong =
+    (input.holder.resolvedWinRateEdge30d ?? -Infinity) >=
+      input.policy.singleGameSportsMinEdge &&
+    (input.holder.resolvedEdgeSampleCount30d ?? 0) >=
+      input.policy.singleGameSportsMinSamples;
+  return winStrong || edgeStrong;
+}
+
+export function buildHolderResearchQualityAssessment(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+  publicContextRisk: HolderResearchPublicContextRisk = "unknown",
+): HolderResearchQualityAssessment {
+  const actor = buildHolderResearchActorSummary({
+    candidate,
+    evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+    policy,
+  });
+  const marketType = classifyHolderResearchMarketType(candidate.market);
+  const hoursToClose = computeHoursToClose(candidate.market);
+  const reasons: string[] = [];
+  let credentialStrength: HolderResearchCredentialStrength = "weak";
+  let actorStrength: HolderResearchActorStrength = "weak_single";
+
+  if (actor.mode === "sharp_cluster" && actor.cluster) {
+    actorStrength = "cluster";
+    credentialStrength =
+      actor.cluster.sharpHolders >= 2 &&
+      actor.cluster.sharpUsd >= policy.minSidePositionUsd
+        ? "strong"
+        : "medium";
+    reasons.push("sharp_cluster");
+  } else if (actor.mode === "single_holder" && actor.primaryHolder) {
+    const holder = candidate.market.holders.find(
+      (entry) =>
+        entry.walletId === actor.primaryHolder?.walletId &&
+        entry.side === actor.primaryHolder.side,
+    );
+    if (holder?.pnl30dUsd != null && holder.pnl30dUsd < 0) {
+      credentialStrength = "contradicted";
+      reasons.push("negative_30d_pnl");
+    } else if (
+      holder &&
+      holderHasStrongCredential({
+        holder,
+        policy,
+      })
+    ) {
+      credentialStrength = "strong";
+      actorStrength = "exceptional_single";
+      reasons.push("exceptional_single_holder");
+    } else if (actor.credentialBullets.length > 0) {
+      credentialStrength = "medium";
+      actorStrength = "solid_single";
+      reasons.push("single_holder_credentials");
+    }
+  }
+
+  const priceContext = classifyPriceContext(candidate, policy);
+  if (marketType === "single_game_sports") reasons.push("single_game_sports");
+  if (priceContext === "against_signal") reasons.push("price_against_signal");
+  if (priceContext === "already_priced") reasons.push("already_priced");
+  if (publicContextRisk === "fully_explains_move") {
+    reasons.push("public_news_fully_explains_move");
+  }
+
+  return {
+    marketType,
+    hoursToClose,
+    actorStrength,
+    credentialStrength,
+    priceContext,
+    publicContextRisk,
+    reasons: [...new Set(reasons)],
   };
 }
 
@@ -2643,6 +2909,9 @@ export function buildHolderResearchCandidatePromptJson(
         policy,
       })
     : null;
+  const quality = policy
+    ? buildHolderResearchQualityAssessment(candidate, policy)
+    : null;
   return {
     key: candidate.key,
     inputDigest: candidate.inputDigest,
@@ -2682,6 +2951,7 @@ export function buildHolderResearchCandidatePromptJson(
         ? []
         : buildHolderEntryContext(candidate),
     actor,
+    quality,
     sides: candidate.market.sides,
     holders: candidate.market.holders.slice(0, 8),
     evidence: candidate.evidence,
@@ -2711,6 +2981,7 @@ export function buildHolderResearchTriageCandidatePromptJson(
     evidenceIds: candidate.evidence.map((evidence) => evidence.id),
     policy,
   });
+  const quality = buildHolderResearchQualityAssessment(candidate, policy);
   return {
     key: candidate.key,
     bucket: candidate.bucket,
@@ -2744,6 +3015,7 @@ export function buildHolderResearchTriageCandidatePromptJson(
       ? buildHolderEntryContext(candidate)
       : [],
     actor,
+    quality,
     sides: {
       YES: thinSide(candidate.market.sides.YES),
       NO: thinSide(candidate.market.sides.NO),
@@ -2921,10 +3193,70 @@ function asContextHolderResearchOutput(
   };
 }
 
+function normalizePublicContextRisk(
+  value: unknown,
+): HolderResearchPublicContextRisk {
+  return value === "confirms_holder" ||
+    value === "fully_explains_move" ||
+    value === "conflicts_holder"
+    ? value
+    : "unknown";
+}
+
+function hasSameEventConflict(input: {
+  candidate: HolderResearchCandidate;
+  output: HolderResearchAgentOutputV1;
+  policy: HolderResearchPolicy;
+  publishedRunDecisions?: Array<{
+    candidate: HolderResearchCandidate;
+    output: HolderResearchAgentOutputV1;
+  }>;
+}): boolean {
+  const eventId = input.candidate.market.eventId;
+  if (!eventId) return false;
+  const actionSide = candidateOutputActionSide(
+    input.candidate,
+    input.output,
+    input.policy,
+  );
+  if (!actionSide) return false;
+  return (input.publishedRunDecisions ?? []).some(({ candidate, output }) => {
+    if (output.status !== "PUBLISH") return false;
+    if (candidate.key === input.candidate.key) return false;
+    if (candidate.market.eventId !== eventId) return false;
+    if (candidate.market.marketId === input.candidate.market.marketId) {
+      return false;
+    }
+    if (
+      buildHolderResearchQualityAssessment(candidate, input.policy).marketType !==
+      "single_game_sports"
+    ) {
+      return false;
+    }
+    return candidateOutputActionSide(candidate, output, input.policy) === actionSide;
+  });
+}
+
+function candidateOutputActionSide(
+  candidate: HolderResearchCandidate,
+  output: HolderResearchAgentOutputV1 | null,
+  policy: HolderResearchPolicy,
+): HolderResearchSideKey | null {
+  const walletTargets = output
+    ? buildHolderResearchWalletTargets(candidate, output.evidence_ids, policy)
+    : [];
+  const holderSide = normalizeSide(walletTargets[0]?.meta.side);
+  return candidate.side ?? holderSide;
+}
+
 export function applyHolderResearchPublishQualityGate(input: {
   candidate: HolderResearchCandidate;
   output: HolderResearchAgentOutputV1;
-  policy: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"];
+  policy: HolderResearchPolicy;
+  publishedRunDecisions?: Array<{
+    candidate: HolderResearchCandidate;
+    output: HolderResearchAgentOutputV1;
+  }>;
 }): HolderResearchAgentOutputV1 {
   const { candidate, output } = input;
   if (output.status !== "PUBLISH") return output;
@@ -2983,6 +3315,55 @@ export function applyHolderResearchPublishQualityGate(input: {
     );
   }
 
+  if (!input.policy.qualityGateEnabled) return output;
+
+  const quality = buildHolderResearchQualityAssessment(
+    candidate,
+    input.policy,
+    normalizePublicContextRisk(output.public_context_risk),
+  );
+  if (quality.publicContextRisk === "fully_explains_move") {
+    return asContextHolderResearchOutput(
+      output,
+      "Public context fully explained the move, so the holder read is context-only.",
+    );
+  }
+  if (quality.priceContext === "against_signal") {
+    return asContextHolderResearchOutput(
+      output,
+      "Price moved materially against the holder side before publication.",
+    );
+  }
+  if (
+    quality.marketType === "single_game_sports" &&
+    input.policy.singleGameSportsStrictMode
+  ) {
+    if (hasSameEventConflict(input)) {
+      return asContextHolderResearchOutput(
+        output,
+        "Same-event sports signals were conflicting, so this is context-only.",
+      );
+    }
+    if (
+      actor.mode === "sharp_cluster" &&
+      quality.actorStrength === "cluster" &&
+      quality.credentialStrength === "strong"
+    ) {
+      return output;
+    }
+    if (
+      actor.mode === "single_holder" &&
+      quality.actorStrength === "exceptional_single" &&
+      quality.credentialStrength === "strong"
+    ) {
+      return output;
+    }
+    return asContextHolderResearchOutput(
+      output,
+      "Single-game sports requires a sharp cluster or exceptional single holder.",
+    );
+  }
+
   return output;
 }
 
@@ -2995,7 +3376,7 @@ export async function persistHolderResearchNotes(
   params: {
     runnerRunId: string;
     decisions: HolderResearchPersistDecision[];
-    policy: Parameters<typeof buildHolderResearchActorSummary>[0]["policy"];
+    policy: HolderResearchPolicy;
   },
 ): Promise<HolderResearchPersistStats> {
   const stats: HolderResearchPersistStats = {
@@ -3070,6 +3451,7 @@ export async function persistHolderResearchNotes(
             score: candidate.score,
             bucket: candidate.bucket,
             side: candidate.side,
+            quality: buildHolderResearchQualityAssessment(candidate, params.policy),
             market: {
               id: candidate.market.marketId,
               venue: candidate.market.venue,
@@ -3245,4 +3627,271 @@ export async function persistHolderResearchNotes(
   }
 
   return stats;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function finalYesProbabilityFromResolvedRow(
+  row: Pick<
+    HolderResearchResolvedNoteRow,
+    "resolved_outcome" | "resolved_outcome_pct" | "best_bid" | "best_ask" | "last_price"
+  >,
+): number | null {
+  const resolved = normalizeSide(row.resolved_outcome);
+  if (resolved === "YES") return 1;
+  if (resolved === "NO") return 0;
+  const pct = toNumber(row.resolved_outcome_pct);
+  if (pct != null) return clamp01(pct / 10_000);
+  return calculateYesProbability(row);
+}
+
+function noteYesProbability(metrics: unknown): number | null {
+  const root = objectRecord(metrics);
+  const market = objectRecord(root.market);
+  return toNumber(market.yesProbability);
+}
+
+function evaluationSide(direction: string | null): HolderResearchSideKey | null {
+  if (direction === "up") return "YES";
+  if (direction === "down") return "NO";
+  return null;
+}
+
+function evaluateResolvedSignalRow(
+  row: HolderResearchResolvedNoteRow,
+): Record<string, unknown> {
+  const modelMeta = objectRecord(row.model_meta);
+  const actor = objectRecord(modelMeta.primary_holder_credentials);
+  const side = evaluationSide(row.direction);
+  const noteYes = noteYesProbability(row.metrics);
+  const finalYes = finalYesProbabilityFromResolvedRow(row);
+  const priceDelta = noteYes != null && finalYes != null ? finalYes - noteYes : null;
+  const sideAdjustedDelta =
+    priceDelta != null && side != null
+      ? side === "YES"
+        ? priceDelta
+        : -priceDelta
+      : null;
+  const outcome =
+    side == null || finalYes == null
+      ? "unknown"
+      : side === "YES"
+        ? finalYes >= 0.5
+          ? "correct"
+          : "wrong"
+        : finalYes <= 0.5
+          ? "correct"
+          : "wrong";
+  const closeMs = toIso(row.close_time)
+    ? new Date(toIso(row.close_time) as string).getTime()
+    : null;
+  const createdMs = new Date(toIso(row.created_at) ?? Date.now()).getTime();
+  const hoursToCloseAtNote =
+    closeMs != null && Number.isFinite(createdMs)
+      ? (closeMs - createdMs) / 3_600_000
+      : null;
+  const text = [
+    row.category,
+    row.event_title,
+    row.market_title,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+
+  return {
+    version: 1,
+    evaluatedAt: new Date().toISOString(),
+    outcome,
+    signalSide: side,
+    direction: row.direction,
+    confidence: toNumber(row.confidence),
+    marketId: row.market_id,
+    marketType: classifyHolderResearchMarketTypeFromText(
+      text,
+      hoursToCloseAtNote,
+    ),
+    hoursToCloseAtNote,
+    noteYesProbability: noteYes,
+    finalYesProbability: finalYes,
+    priceDelta,
+    sideAdjustedPriceDelta: sideAdjustedDelta,
+    resolvedOutcome: normalizeSide(row.resolved_outcome),
+    resolvedOutcomePct: toNumber(row.resolved_outcome_pct),
+    acceptingOrders: row.accepting_orders,
+    actorMode: typeof actor.mode === "string" ? actor.mode : null,
+    primaryHolderPositionUsd: toNumber(
+      objectRecord(actor.primaryHolder).positionUsd,
+    ),
+    primaryHolderPnl30dUsd: toNumber(objectRecord(actor.primaryHolder).pnl30dUsd),
+    primaryHolderOpenPnlUsd: toNumber(
+      objectRecord(actor.primaryHolder).openPnlUsd,
+    ),
+  };
+}
+
+export async function evaluateResolvedHolderResearchNotes(
+  client: Queryable,
+  policy: HolderResearchPolicy,
+): Promise<HolderResearchResolvedEvaluationStats> {
+  const stats: HolderResearchResolvedEvaluationStats = {
+    considered: 0,
+    evaluated: 0,
+    correct: 0,
+    wrong: 0,
+    unknown: 0,
+    errors: 0,
+  };
+  if (!policy.resolvedEvaluationEnabled) return stats;
+
+  const acceptingSql = buildWalletIntelAcceptingOrdersSql({
+    marketAlias: "m",
+    eventAlias: "e",
+  });
+  const { rows } = await client.query<HolderResearchResolvedNoteRow>(
+    `
+      select
+        n.id as note_id,
+        n.direction,
+        n.confidence,
+        n.created_at,
+        n.metrics,
+        n.model_meta,
+        m.id as market_id,
+        m.title as market_title,
+        e.title as event_title,
+        coalesce(m.category, e.category) as category,
+        m.close_time,
+        m.expiration_time,
+        m.best_bid,
+        m.best_ask,
+        m.last_price,
+        m.resolved_outcome,
+        m.resolved_outcome_pct::text as resolved_outcome_pct,
+        ${acceptingSql} as accepting_orders
+      from ai_notes n
+      join ai_note_targets t
+        on t.note_id = n.id
+       and t.target_kind = 'market'
+       and t.is_primary = true
+      join unified_markets m on m.id = t.target_id
+      left join unified_events e on e.id = m.event_id
+      where n.note_type = 'signal'
+        and n.producer_type = 'holder_research'
+        and n.created_at >= now() - ($1::numeric * interval '1 hour')
+        and (
+          m.resolved_outcome is not null
+          or m.resolved_outcome_pct is not null
+          or not (${acceptingSql})
+        )
+      order by n.created_at desc, n.id desc
+      limit 500
+    `,
+    [policy.resolvedEvaluationLookbackHours],
+  );
+  stats.considered = rows.length;
+
+  for (const row of rows) {
+    const evaluation = evaluateResolvedSignalRow(row);
+    const outcome = evaluation.outcome;
+    if (outcome === "correct") stats.correct += 1;
+    else if (outcome === "wrong") stats.wrong += 1;
+    else stats.unknown += 1;
+    try {
+      await client.query(
+        `
+          update ai_notes
+          set
+            metrics = jsonb_set(
+              coalesce(metrics, '{}'::jsonb),
+              '{resolvedEvaluation}',
+              $2::jsonb,
+              true
+            ),
+            updated_at = now()
+          where id = $1::uuid
+        `,
+        [row.note_id, JSON.stringify(evaluation)],
+      );
+      stats.evaluated += 1;
+    } catch {
+      stats.errors += 1;
+    }
+  }
+
+  return stats;
+}
+
+export async function loadHolderResearchCalibrationMemo(
+  client: Queryable,
+  policy: HolderResearchPolicy,
+): Promise<string[]> {
+  if (!policy.calibrationMemoEnabled) return [];
+  const { rows } = await client.query<{
+    outcome: string | null;
+    market_type: string | null;
+    actor_mode: string | null;
+    primary_holder_pnl_30d_usd: string | number | null;
+    primary_holder_position_usd: string | number | null;
+  }>(
+    `
+      select
+        n.metrics #>> '{resolvedEvaluation,outcome}' as outcome,
+        n.metrics #>> '{resolvedEvaluation,marketType}' as market_type,
+        n.metrics #>> '{resolvedEvaluation,actorMode}' as actor_mode,
+        n.metrics #>> '{resolvedEvaluation,primaryHolderPnl30dUsd}' as primary_holder_pnl_30d_usd,
+        n.metrics #>> '{resolvedEvaluation,primaryHolderPositionUsd}' as primary_holder_position_usd
+      from ai_notes n
+      where n.note_type = 'signal'
+        and n.producer_type = 'holder_research'
+        and n.metrics ? 'resolvedEvaluation'
+        and n.created_at >= now() - ($1::numeric * interval '1 hour')
+      order by n.updated_at desc, n.created_at desc
+      limit 50
+    `,
+    [policy.resolvedEvaluationLookbackHours],
+  );
+
+  const failedSportsSingles = rows.filter(
+    (row) =>
+      row.outcome === "wrong" &&
+      row.market_type === "single_game_sports" &&
+      row.actor_mode === "single_holder",
+  );
+  const successfulSportsStrong = rows.filter(
+    (row) =>
+      row.outcome === "correct" &&
+      row.market_type === "single_game_sports" &&
+      (row.actor_mode === "sharp_cluster" ||
+        (row.actor_mode === "single_holder" &&
+          (toNumber(row.primary_holder_pnl_30d_usd) ?? 0) > 0 &&
+          (toNumber(row.primary_holder_position_usd) ?? 0) >=
+            policy.singleGameSportsMinHolderUsd)),
+  );
+  const memo: string[] = [];
+  if (failedSportsSingles.length > 0) {
+    memo.push(
+      `Recent failed pattern: ${failedSportsSingles.length} wrong single-game sports signals were single-holder reads; downgrade weak or public-favorite sports singles.`,
+    );
+  }
+  if (successfulSportsStrong.length > 0) {
+    memo.push(
+      `Recent successful pattern: ${successfulSportsStrong.length} single-game sports signals worked when they had a sharp cluster or an exceptional profitable holder.`,
+    );
+  }
+  const nonSportsCorrect = rows.filter(
+    (row) =>
+      row.outcome === "correct" &&
+      row.market_type !== "single_game_sports",
+  );
+  if (nonSportsCorrect.length > 0) {
+    memo.push(
+      `Recent non-sports wins: ${nonSportsCorrect.length} resolved notes were correct; do not apply sports-only caution to politics, crypto, or long-dated outrights.`,
+    );
+  }
+  return memo.slice(0, 4);
 }

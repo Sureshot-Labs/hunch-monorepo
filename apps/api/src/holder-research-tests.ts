@@ -9,6 +9,7 @@ import {
   parseHolderResearchTriageOutputV1,
   type HolderResearchAgentOutputV1,
 } from "./schemas/holder-research.js";
+import { parseHolderResearchRunArgs } from "./ai-holder-research-run.js";
 import {
   holderResearchWalletNotesBodySchema,
   signalsQuerySchema,
@@ -23,8 +24,10 @@ import {
   buildHolderResearchCandidatesFromMarket,
   buildHolderResearchExternalSearchInput,
   buildHolderResearchTriageCandidatePromptJson,
+  buildHolderResearchQualityAssessment,
   buildHolderResearchWalletTargets,
   diffHolderResearchDecisionSnapshots,
+  evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
@@ -187,6 +190,19 @@ function publishOutput(
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
+  {
+    name: "holder research CLI parses triage overrides separately from synthesis budget",
+    run: () => {
+      const args = parseHolderResearchRunArgs([
+        "--max-agent-calls=2",
+        "--triage-batch-size=6",
+        "--triage-max-batches=2",
+      ]);
+      assert.equal(args.maxAgentCalls, 2);
+      assert.equal(args.triageBatchSize, 6);
+      assert.equal(args.triageMaxBatches, 2);
+    },
+  },
   {
     name: "sharp holder requires exposure, edge, z-score, samples, stake, and trades",
     run: () => {
@@ -872,6 +888,355 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder research quality assessment classifies sports singles and contradicted credentials",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Czechia vs. Mexico",
+          marketTitle: "Mexico",
+          closeTime: new Date(Date.now() + 3 * 3_600_000).toISOString(),
+          holders: [
+            holder("NO", {
+              positionUsd: 32_000,
+              pnl30dUsd: -25_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.marketType, "single_game_sports");
+      assert.equal(quality.credentialStrength, "contradicted");
+      assert.equal(quality.actorStrength, "weak_single");
+      assert.equal(quality.reasons.includes("negative_30d_pnl"), true);
+    },
+  },
+  {
+    name: "holder research quality assessment prioritizes explicit sports context",
+    run: () => {
+      const p = policy();
+      const sportsSingle = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Iran vs. Russia",
+          marketTitle: "Iran",
+          closeTime: new Date(Date.now() + 3 * 3_600_000).toISOString(),
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(sportsSingle);
+      assert.equal(
+        buildHolderResearchQualityAssessment(sportsSingle, p).marketType,
+        "single_game_sports",
+      );
+
+      const sportsOutright = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "World Cup Winner",
+          marketTitle: "Ukraine",
+          closeTime: new Date(Date.now() + 120 * 24 * 3_600_000).toISOString(),
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(sportsOutright);
+      assert.equal(
+        buildHolderResearchQualityAssessment(sportsOutright, p).marketType,
+        "sports_outright",
+      );
+
+      const geo = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Politics",
+          eventTitle: "Strait of Hormuz traffic returns to normal",
+          marketTitle: "By July 31?",
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(geo);
+      assert.equal(
+        buildHolderResearchQualityAssessment(geo, p).marketType,
+        "politics_geo",
+      );
+    },
+  },
+  {
+    name: "holder research quality gate downgrades weak sports singles",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Morocco vs. Haiti",
+          marketTitle: "Morocco",
+          closeTime: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+          sides: {
+            YES: side("YES", { usd: 80_000, wallets: 4 }),
+            NO: side("NO", {
+              usd: 35_000,
+              wallets: 1,
+              sharpHolders: 1,
+              sharpUsd: 10_000,
+              bestEdge: 0.1,
+              bestZScore: 1.8,
+              bestSampleCount: 12,
+              bestResolvedStakeUsd: 2_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              positionUsd: 10_000,
+              pnl30dUsd: -500,
+              winRate30d: 0.6,
+              resolvedWinRateEdge30d: 0.1,
+              resolvedEdgeSampleCount30d: 12,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(candidate);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output: publishOutput(candidate),
+        policy: p,
+      });
+      assert.equal(gated.status, "CONTEXT");
+      assert.match(gated.rationale, /Single-game sports/);
+    },
+  },
+  {
+    name: "holder research quality gate allows exceptional sports singles and clusters",
+    run: () => {
+      const p = policy();
+      const exceptional = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "South Africa vs. Korea Republic",
+          marketTitle: "Korea Republic",
+          closeTime: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+          sides: {
+            YES: side("YES", { usd: 350_000, wallets: 5 }),
+            NO: side("NO", {
+              usd: 230_000,
+              wallets: 2,
+              sharpHolders: 1,
+              sharpUsd: 30_000,
+              bestEdge: 0.19,
+              bestZScore: 2.2,
+              bestSampleCount: 22,
+              bestResolvedStakeUsd: 6_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              positionUsd: 30_000,
+              pnl30dUsd: 310_000,
+              winRate30d: 0.7,
+              resolvedWinRateEdge30d: 0.19,
+              resolvedEdgeSampleCount30d: 22,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(exceptional);
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate: exceptional,
+          output: publishOutput(exceptional),
+          policy: p,
+        }).status,
+        "PUBLISH",
+      );
+
+      const cluster = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Apogee Esports vs OG",
+          marketTitle: "Match Winner",
+          closeTime: new Date(Date.now() + 1 * 3_600_000).toISOString(),
+          sides: {
+            YES: side("YES", {
+              usd: 50_000,
+              wallets: 3,
+              sharpHolders: 2,
+              sharpUsd: 35_000,
+              bestEdge: 0.18,
+              bestZScore: 2.3,
+              bestSampleCount: 40,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 20,
+            }),
+            NO: side("NO", { usd: 48_000, wallets: 3 }),
+          },
+          holders: [
+            holder("YES", {
+              walletId: "00000000-0000-4000-8000-000000000071",
+              positionUsd: 20_000,
+              pnl30dUsd: 250_000,
+            }),
+            holder("YES", {
+              walletId: "00000000-0000-4000-8000-000000000072",
+              positionUsd: 15_000,
+              pnl30dUsd: 150_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(cluster);
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate: cluster,
+          output: publishOutput(cluster),
+          policy: p,
+        }).status,
+        "PUBLISH",
+      );
+    },
+  },
+  {
+    name: "holder research quality gate downgrades same-event sports conflicts",
+    run: () => {
+      const p = policy();
+      const first = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:germany",
+          eventId: "polymarket:ecuador-germany",
+          category: "Sports",
+          eventTitle: "Ecuador vs. Germany",
+          marketTitle: "Germany",
+          closeTime: new Date(Date.now() + 8 * 3_600_000).toISOString(),
+          holders: [
+            holder("NO", {
+              positionUsd: 30_000,
+              pnl30dUsd: 250_000,
+              winRate30d: 0.7,
+              resolvedWinRateEdge30d: 0.18,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      const second = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:ecuador",
+          eventId: "polymarket:ecuador-germany",
+          category: "Sports",
+          eventTitle: "Ecuador vs. Germany",
+          marketTitle: "Ecuador",
+          closeTime: new Date(Date.now() + 8 * 3_600_000).toISOString(),
+          holders: [
+            holder("NO", {
+              positionUsd: 30_000,
+              pnl30dUsd: 250_000,
+              winRate30d: 0.7,
+              resolvedWinRateEdge30d: 0.18,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(first);
+      assert.ok(second);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate: first,
+        output: publishOutput(first),
+        policy: p,
+        publishedRunDecisions: [
+          {
+            candidate: second,
+            output: publishOutput(second),
+          },
+        ],
+      });
+      assert.equal(gated.status, "CONTEXT");
+      assert.match(gated.rationale, /Same-event sports/);
+    },
+  },
+  {
+    name: "holder research quality gate does not downgrade non-conflicting same-event sports",
+    run: () => {
+      const p = policy();
+      const first = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:germany",
+          eventId: "polymarket:ecuador-germany",
+          category: "Sports",
+          eventTitle: "Ecuador vs. Germany",
+          marketTitle: "Germany",
+          closeTime: new Date(Date.now() + 8 * 3_600_000).toISOString(),
+          holders: [
+            holder("NO", {
+              positionUsd: 30_000,
+              pnl30dUsd: 250_000,
+              winRate30d: 0.7,
+              resolvedWinRateEdge30d: 0.18,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      const second = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:ecuador",
+          eventId: "polymarket:ecuador-germany",
+          category: "Sports",
+          eventTitle: "Ecuador vs. Germany",
+          marketTitle: "Ecuador",
+          closeTime: new Date(Date.now() + 8 * 3_600_000).toISOString(),
+          sides: {
+            YES: side("YES", {
+              usd: 70_000,
+              wallets: 3,
+              sharpHolders: 1,
+              sharpUsd: 30_000,
+              bestEdge: 0.18,
+              bestZScore: 2.2,
+              bestSampleCount: 24,
+              bestResolvedStakeUsd: 6_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 40_000, wallets: 2 }),
+          },
+          holders: [
+            holder("YES", {
+              positionUsd: 30_000,
+              pnl30dUsd: 250_000,
+              winRate30d: 0.7,
+              resolvedWinRateEdge30d: 0.18,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side");
+      assert.ok(first);
+      assert.ok(second);
+
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate: first,
+        output: publishOutput(first),
+        policy: p,
+        publishedRunDecisions: [
+          {
+            candidate: second,
+            output: publishOutput(second),
+          },
+        ],
+      });
+      assert.equal(gated.status, "PUBLISH");
+    },
+  },
+  {
     name: "holder research quality gate downgrades mixed publishes",
     run: () => {
       const p = policy();
@@ -1174,6 +1539,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
 
       const promptJson = buildHolderResearchCandidatePromptJson(candidate, p);
       const record = promptJson as Record<string, unknown>;
+      assert.equal(
+        (record.quality as Record<string, unknown>).marketType,
+        "politics_geo",
+      );
       assert.deepEqual(
         (record.marketMovementContext as Record<string, unknown>).yesChange24h,
         0.08,
@@ -1204,12 +1573,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const serialized = JSON.stringify(triageCandidate);
       assert.match(serialized, /marketMovementContext/);
       assert.match(serialized, /holderEntryContext/);
+      assert.match(serialized, /quality/);
       assert.doesNotMatch(serialized, /0xno/i);
       const prompt = buildHolderResearchTriageUserPrompt({
         candidates: [triageCandidate],
         maxInvestigate: 1,
+        calibrationMemo: ["Recent failed pattern: weak sports singles."],
       });
       assert.match(prompt, /holder_research_triage_v1/);
+      assert.match(prompt, /Recent failed pattern/);
       assert.match(buildHolderResearchTriageSystemPrompt(), /investigate/);
 
       const parsed = parseHolderResearchTriageOutputV1(
@@ -1314,6 +1686,67 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "resolved evaluator writes outcome metadata for closed holder notes",
+    run: async () => {
+      const p = policy();
+      const updates: Array<Record<string, unknown>> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/select\s+n\.id\s+as\s+note_id/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  note_id: "00000000-0000-4000-8000-000000000081",
+                  direction: "down",
+                  confidence: 0.74,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  metrics: {
+                    market: { yesProbability: 0.52 },
+                  },
+                  model_meta: {
+                    primary_holder_credentials: {
+                      mode: "single_holder",
+                      primaryHolder: {
+                        positionUsd: 32_000,
+                        pnl30dUsd: 120_000,
+                        openPnlUsd: 1_000,
+                      },
+                    },
+                  },
+                  market_id: "polymarket:resolved",
+                  market_title: "Mexico",
+                  event_title: "Czechia vs. Mexico",
+                  category: "Sports",
+                  close_time: new Date("2026-01-01T03:00:00.000Z"),
+                  expiration_time: null,
+                  best_bid: 0.999,
+                  best_ask: 1,
+                  last_price: 1,
+                  resolved_outcome: "YES",
+                  resolved_outcome_pct: null,
+                  accepting_orders: false,
+                },
+              ],
+            };
+          }
+          if (/update\s+ai_notes/i.test(sql)) {
+            updates.push(JSON.parse(String(params?.[1])) as Record<string, unknown>);
+            return { rows: [] };
+          }
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+
+      const stats = await evaluateResolvedHolderResearchNotes(db, p);
+      assert.equal(stats.considered, 1);
+      assert.equal(stats.evaluated, 1);
+      assert.equal(stats.wrong, 1);
+      assert.equal(updates[0]?.outcome, "wrong");
+      assert.equal(updates[0]?.marketType, "single_game_sports");
+      assert.equal(updates[0]?.sideAdjustedPriceDelta, -0.48);
+    },
+  },
+  {
     name: "holder research policy is a separate runtime policy with external search budget",
     run: async () => {
       assert.equal(
@@ -1341,6 +1774,17 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 movementContextEnabled: "false",
                 holderEntryContextEnabled: "false",
                 minTriageInvestigatePriority: 0.7,
+                qualityGateEnabled: "true",
+                resolvedEvaluationEnabled: "true",
+                resolvedEvaluationLookbackHours: 72,
+                calibrationMemoEnabled: "false",
+                singleGameSportsStrictMode: "true",
+                singleGameSportsMinHolderUsd: 30_000,
+                singleGameSportsMinEdge: 0.2,
+                singleGameSportsMinSamples: 30,
+                singleGameSportsMinWinRate: 0.7,
+                singleGameSportsRequirePositivePnl: "false",
+                priceAgainstSignalBlockPp: 0.08,
                 maxAgentCallsPerRun: 100,
                 maxOutputTokens: 1,
               },
@@ -1369,6 +1813,16 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.movementContextEnabled, false);
       assert.equal(resolved.effective.holderEntryContextEnabled, false);
       assert.equal(resolved.effective.minTriageInvestigatePriority, 0.7);
+      assert.equal(resolved.defaults.qualityGateEnabled, true);
+      assert.equal(resolved.defaults.resolvedEvaluationEnabled, true);
+      assert.equal(resolved.effective.resolvedEvaluationLookbackHours, 72);
+      assert.equal(resolved.effective.calibrationMemoEnabled, false);
+      assert.equal(resolved.effective.singleGameSportsMinHolderUsd, 30_000);
+      assert.equal(resolved.effective.singleGameSportsMinEdge, 0.2);
+      assert.equal(resolved.effective.singleGameSportsMinSamples, 30);
+      assert.equal(resolved.effective.singleGameSportsMinWinRate, 0.7);
+      assert.equal(resolved.effective.singleGameSportsRequirePositivePnl, false);
+      assert.equal(resolved.effective.priceAgainstSignalBlockPp, 0.08);
       assert.equal(resolved.effective.maxAgentCallsPerRun, 100);
       assert.equal(resolved.effective.maxOutputTokens, 100);
     },
