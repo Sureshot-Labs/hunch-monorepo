@@ -180,7 +180,15 @@ type HolderResearchRunReport = {
     watch: number;
     skip: number;
     errors: number;
+    fallback: number;
   };
+  triageErrors: Array<{
+    batchIndex: number;
+    error: string;
+    contentLength: number | null;
+    finishReason: string | null;
+    fallback: number;
+  }>;
   triageDecisions: Array<{
     key: string;
     action: string;
@@ -699,11 +707,7 @@ function estimateDryRunCost(params: {
 }
 
 function parseModelJsonObject(content: string): unknown {
-  const trimmed = content.trim();
-  const unfenced = trimmed
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
+  const unfenced = unfenceModelJson(content);
   const firstBrace = unfenced.indexOf("{");
   const lastBrace = unfenced.lastIndexOf("}");
   const objectText =
@@ -714,23 +718,192 @@ function parseModelJsonObject(content: string): unknown {
   try {
     return JSON.parse(objectText) as unknown;
   } catch {
-    const repaired = objectText
-      .replace(/,\s*([}\]])/g, "$1")
-      .split("")
-      .map((char) => (char.charCodeAt(0) < 32 ? " " : char))
-      .join("");
-    return JSON.parse(repaired) as unknown;
+    return JSON.parse(repairJsonText(objectText)) as unknown;
+  }
+}
+
+function unfenceModelJson(content: string): string {
+  return content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function repairJsonText(text: string): string {
+  return text
+    .replace(/,\s*([}\]])/g, "$1")
+    .split("")
+    .map((char) => (char.charCodeAt(0) < 32 ? " " : char))
+    .join("");
+}
+
+function parseJsonObjectText(text: string): unknown {
+  return JSON.parse(repairJsonText(text)) as unknown;
+}
+
+function extractCompleteJsonObjectsFromArray(content: string): unknown[] {
+  const source = unfenceModelJson(content);
+  const decisionsIndex = source.search(/"decisions"\s*:/);
+  if (decisionsIndex < 0) return [];
+  const arrayStart = source.indexOf("[", decisionsIndex);
+  if (arrayStart < 0) return [];
+
+  const objects: unknown[] = [];
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let objectStart = -1;
+
+  for (let index = arrayStart + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) objectStart = index;
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      if (depth === 0) continue;
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        const objectText = source.slice(objectStart, index + 1);
+        try {
+          objects.push(parseJsonObjectText(objectText));
+        } catch {
+          // Ignore malformed entries. The triage schema parser will still
+          // reject unknown candidate keys from complete parsed objects.
+        }
+        objectStart = -1;
+      }
+    }
+  }
+
+  return objects;
+}
+
+export function parseHolderResearchTriageModelContent(
+  content: string,
+  allowedCandidateKeys: Iterable<string>,
+): HolderResearchTriageOutputV1 {
+  try {
+    return parseHolderResearchTriageOutputV1(
+      parseModelJsonObject(content),
+      allowedCandidateKeys,
+    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("unknown candidate keys")
+    ) {
+      throw error;
+    }
+    const decisions = extractCompleteJsonObjectsFromArray(content);
+    if (decisions.length === 0) throw error;
+    return parseHolderResearchTriageOutputV1(
+      {
+        version: "holder_research_triage_v1",
+        decisions,
+      },
+      allowedCandidateKeys,
+    );
+  }
+}
+
+class HolderResearchTriageParseError extends Error {
+  contentLength: number | null;
+  finishReason: string | null;
+
+  constructor(
+    message: string,
+    input: {
+      contentLength: number | null;
+      finishReason: string | null;
+      cause: unknown;
+    },
+  ) {
+    super(message);
+    this.name = "HolderResearchTriageParseError";
+    this.contentLength = input.contentLength;
+    this.finishReason = input.finishReason;
+    this.cause = input.cause;
   }
 }
 
 type OpenRouterResponse = {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: { content?: string }; finish_reason?: string | null }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
   };
 };
+
+const triageFallbackBucketRank = new Map<HolderResearchCandidate["bucket"], number>(
+  [
+    ["sharp_minority", 0],
+    ["sharp_side", 1],
+    ["followup_existing", 2],
+  ],
+);
+
+const triageFallbackExcludedBuckets = new Set<HolderResearchCandidate["bucket"]>([
+  "concentration_risk",
+  "event_bridge",
+  "recent_flow",
+]);
+
+function isClearSideCandidate(candidate: HolderResearchCandidate): boolean {
+  return (
+    (candidate.side === "YES" || candidate.side === "NO") &&
+    candidate.direction !== "mixed"
+  );
+}
+
+function sortTriageFallbackCandidates(
+  candidates: HolderResearchCandidate[],
+): HolderResearchCandidate[] {
+  return [...candidates].sort((left, right) => {
+    const leftRank = triageFallbackBucketRank.get(left.bucket) ?? 100;
+    const rightRank = triageFallbackBucketRank.get(right.bucket) ?? 100;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return right.score - left.score;
+  });
+}
+
+export function selectHolderResearchTriageFallbackCandidates(
+  candidates: HolderResearchCandidate[],
+  remaining: number,
+): HolderResearchCandidate[] {
+  if (remaining <= 0) return [];
+  const clearSide = candidates.filter(isClearSideCandidate);
+  const preferred = clearSide.filter((candidate) =>
+    triageFallbackBucketRank.has(candidate.bucket),
+  );
+  const secondary = clearSide.filter(
+    (candidate) => !triageFallbackExcludedBuckets.has(candidate.bucket),
+  );
+  const pool =
+    preferred.length > 0
+      ? preferred
+      : secondary.length > 0
+        ? secondary
+        : clearSide;
+  return sortTriageFallbackCandidates(pool).slice(0, remaining);
+}
 
 async function callHolderResearchTriageModel(params: {
   candidates: HolderResearchCandidate[];
@@ -785,13 +958,27 @@ async function callHolderResearchTriageModel(params: {
       );
     }
 
-    const content = payload.choices?.[0]?.message?.content;
+    const choice = payload.choices?.[0];
+    const content = choice?.message?.content;
     if (!content) throw new Error("OpenRouter triage response missing content");
-    const parsedJson = parseModelJsonObject(content);
-    const output = parseHolderResearchTriageOutputV1(
-      parsedJson,
-      params.candidates.map((candidate) => candidate.key),
-    );
+    let output: HolderResearchTriageOutputV1;
+    try {
+      output = parseHolderResearchTriageModelContent(
+        content,
+        params.candidates.map((candidate) => candidate.key),
+      );
+    } catch (error) {
+      throw new HolderResearchTriageParseError(
+        error instanceof Error
+          ? error.message
+          : "Unable to parse triage response",
+        {
+          contentLength: content.length,
+          finishReason: choice?.finish_reason ?? null,
+          cause: error,
+        },
+      );
+    }
     const pricing = getOpenRouterModelPricingPerM(params.policy.model);
     const provider = extractProviderCostUsd(payload);
     const promptTokens =
@@ -1236,7 +1423,9 @@ export async function runHolderResearch(
       watch: 0,
       skip: 0,
       errors: 0,
+      fallback: 0,
     };
+    const triageErrors: HolderResearchRunReport["triageErrors"] = [];
     let triageCost = zeroCost();
     let externalSearchCalls = 0;
 
@@ -1326,18 +1515,64 @@ export async function runHolderResearch(
             error instanceof Error ? error.message : String(error);
           if (
             message.includes("OPENROUTER_API_KEY missing") ||
-            message.startsWith("OpenRouter 401") ||
-            message.startsWith("OpenRouter 403")
+            message.startsWith("OpenRouter ")
           ) {
             throw error;
           }
           triage.status = "error";
           triage.errors += 1;
+          const fallbackCandidates =
+            selectHolderResearchTriageFallbackCandidates(
+              batch,
+              policy.maxAgentCallsPerRun - finalCandidates.length,
+            );
+          for (const candidate of fallbackCandidates) {
+            const triageDecision: HolderResearchTriageDecision = {
+              key: candidate.key,
+              action: "investigate",
+              priority: 1,
+              needs_external_search: true,
+              reason: "Deterministic fallback after triage error.",
+            };
+            triageByKey.set(candidate.key, triageDecision);
+            triageDecisions.push({
+              key: triageDecision.key,
+              action: triageDecision.action,
+              priority: triageDecision.priority,
+              needsExternalSearch: triageDecision.needs_external_search,
+              reason: triageDecision.reason,
+            });
+            finalCandidates.push(candidate);
+            triage.investigate += 1;
+            triage.fallback += 1;
+          }
+          triageErrors.push({
+            batchIndex,
+            error: message,
+            contentLength:
+              error instanceof HolderResearchTriageParseError
+                ? error.contentLength
+                : null,
+            finishReason:
+              error instanceof HolderResearchTriageParseError
+                ? error.finishReason
+                : null,
+            fallback: fallbackCandidates.length,
+          });
           console.warn("[holder-research] triage failed", {
             batchIndex,
             error: message,
+            contentLength:
+              error instanceof HolderResearchTriageParseError
+                ? error.contentLength
+                : null,
+            finishReason:
+              error instanceof HolderResearchTriageParseError
+                ? error.finishReason
+                : null,
+            fallback: fallbackCandidates.length,
           });
-          break;
+          continue;
         }
         triage.calls += 1;
         triageCost = addResolvedCosts(triageCost, result.cost);
@@ -1346,15 +1581,8 @@ export async function runHolderResearch(
           result.decisions.map((decision) => [decision.key, decision]),
         );
         for (const candidate of batch) {
-          const triageDecision =
-            decisionsByKey.get(candidate.key) ??
-            ({
-              key: candidate.key,
-              action: "watch",
-              priority: 0,
-              needs_external_search: false,
-              reason: "Triage did not return this candidate.",
-            } satisfies HolderResearchTriageDecision);
+          const triageDecision = decisionsByKey.get(candidate.key);
+          if (!triageDecision) continue;
           triageByKey.set(candidate.key, triageDecision);
           triageDecisions.push({
             key: triageDecision.key,
@@ -1492,7 +1720,7 @@ export async function runHolderResearch(
       status: triage.status,
       detail: policy.triageEnabled
         ? args.callModel
-          ? `investigate=${triage.investigate} watch=${triage.watch} skip=${triage.skip} errors=${triage.errors}`
+          ? `investigate=${triage.investigate} watch=${triage.watch} skip=${triage.skip} fallback=${triage.fallback} errors=${triage.errors}`
           : "callModel=false"
         : "policy disabled",
     });
@@ -1635,6 +1863,7 @@ export async function runHolderResearch(
       decisionCacheSkipped,
       decisionCacheRechecked,
       triage,
+      triageErrors,
       triageDecisions,
       selected: selectedWithContext.map((candidate) => ({
         key: candidate.key,

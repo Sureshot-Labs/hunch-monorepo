@@ -1579,7 +1579,7 @@ function getDefaults(): IntelPolicyMap {
       triageEnabled: true,
       triageBatchSize: 8,
       triageMaxBatchesPerRun: 1,
-      triageMaxOutputTokens: 1_200,
+      triageMaxOutputTokens: 2_000,
       movementContextEnabled: true,
       holderEntryContextEnabled: true,
       minTriageInvestigatePriority: 0.6,

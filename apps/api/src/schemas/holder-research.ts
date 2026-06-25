@@ -160,31 +160,49 @@ export function parseHolderResearchTriageOutputV1(
 ): HolderResearchTriageOutputV1 {
   const record = asRecord(value);
   const rawDecisions = Array.isArray(record.decisions) ? record.decisions : [];
+  const allowed = allowedCandidateKeys
+    ? new Set(allowedCandidateKeys)
+    : null;
+  const unknown: string[] = [];
   const repaired = {
-    version: record.version,
-    decisions: rawDecisions.map((entry) => {
-      const item = asRecord(entry);
-      return {
-        key: asTrimmedString(item.key, "", 240),
-        action: item.action,
-        priority: item.priority,
-        needs_external_search: item.needs_external_search,
-        reason: asTrimmedString(item.reason, "No reason supplied.", 220),
-      };
-    }),
+    version: record.version ?? "holder_research_triage_v1",
+    decisions: rawDecisions
+      .map((entry) => {
+        const item = asRecord(entry);
+        const key = asTrimmedString(item.key, "", 240);
+        if (!key) return null;
+        if (allowed && !allowed.has(key)) {
+          unknown.push(key);
+          return null;
+        }
+        const actionResult = holderResearchTriageActionSchema.safeParse(
+          item.action,
+        );
+        if (!actionResult.success) return null;
+        const priority = Number(item.priority);
+        if (!Number.isFinite(priority)) return null;
+        const needsExternalSearch =
+          typeof item.needs_external_search === "boolean"
+            ? item.needs_external_search
+            : typeof item.needs_external_search === "string"
+              ? item.needs_external_search.trim().toLowerCase() === "true"
+              : Boolean(item.needs_external_search);
+        return {
+          key,
+          action: actionResult.data,
+          priority,
+          needs_external_search: needsExternalSearch,
+          reason: asTrimmedString(item.reason, "No reason supplied.", 220),
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
   };
-  const parsed = holderResearchTriageOutputV1Schema.parse(repaired);
-  if (allowedCandidateKeys) {
-    const allowed = new Set(allowedCandidateKeys);
-    const unknown = parsed.decisions
-      .map((decision) => decision.key)
-      .filter((key) => !allowed.has(key));
-    if (unknown.length > 0) {
-      throw new Error(
-        `Triage returned unknown candidate keys: ${unknown.join(", ")}`,
-      );
-    }
+  if (unknown.length > 0) {
+    throw new Error(
+      `Triage returned unknown candidate keys: ${unknown.join(", ")}`,
+    );
   }
+  const parsed = holderResearchTriageOutputV1Schema.parse(repaired);
   return parsed;
 }
 

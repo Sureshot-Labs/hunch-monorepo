@@ -9,7 +9,11 @@ import {
   parseHolderResearchTriageOutputV1,
   type HolderResearchAgentOutputV1,
 } from "./schemas/holder-research.js";
-import { parseHolderResearchRunArgs } from "./ai-holder-research-run.js";
+import {
+  parseHolderResearchRunArgs,
+  parseHolderResearchTriageModelContent,
+  selectHolderResearchTriageFallbackCandidates,
+} from "./ai-holder-research-run.js";
 import {
   holderResearchWalletNotesBodySchema,
   signalsQuerySchema,
@@ -1600,6 +1604,54 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         [candidate.key],
       );
       assert.equal(parsed.decisions[0]?.action, "investigate");
+      const fenced = parseHolderResearchTriageModelContent(
+        [
+          "```json",
+          JSON.stringify({
+            version: "holder_research_triage_v1",
+            decisions: [
+              {
+                key: candidate.key,
+                action: "watch",
+                priority: 0.4,
+                needs_external_search: false,
+                reason: "Interesting but not strong enough.",
+              },
+            ],
+          }).replace(/}]}$/, "},]}"),
+          "```",
+        ].join("\n"),
+        [candidate.key],
+      );
+      assert.equal(fenced.decisions[0]?.action, "watch");
+      const truncated = parseHolderResearchTriageModelContent(
+        `Here is JSON: {"version":"holder_research_triage_v1","decisions":[{"key":"${candidate.key}","action":"investigate","priority":0.91,"needs_external_search":true,"reason":"Clear sharp holder read."},{"key":"${candidate.key}","action":"watch"`,
+        [candidate.key],
+      );
+      assert.equal(truncated.decisions.length, 1);
+      assert.equal(truncated.decisions[0]?.action, "investigate");
+      const ignoredIncomplete = parseHolderResearchTriageOutputV1(
+        {
+          version: "holder_research_triage_v1",
+          decisions: [
+            {
+              key: candidate.key,
+              action: "skip",
+              reason: "Missing priority should be ignored.",
+            },
+            {
+              key: candidate.key,
+              action: "investigate",
+              priority: 0.8,
+              needs_external_search: true,
+              reason: "Complete entry is kept.",
+            },
+          ],
+        },
+        [candidate.key],
+      );
+      assert.equal(ignoredIncomplete.decisions.length, 1);
+      assert.equal(ignoredIncomplete.decisions[0]?.action, "investigate");
       assert.throws(() =>
         parseHolderResearchTriageOutputV1(
           {
@@ -1616,6 +1668,66 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           },
           [candidate.key],
         ),
+      );
+      assert.throws(() =>
+        parseHolderResearchTriageModelContent(
+          '{"version":"holder_research_triage_v1","decisions":[{"key":"unknown","action":"watch","priority":0.5,"needs_external_search":false,"reason":"Unknown key."}]}',
+          [candidate.key],
+        ),
+      );
+    },
+  },
+  {
+    name: "triage fallback selects clear-side deterministic candidates",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const followup = {
+        ...candidate,
+        key: "holder_research:v1:followup:test:YES",
+        bucket: "followup_existing" as const,
+        score: candidate.score + 100,
+        side: "YES" as const,
+        direction: "up" as const,
+      };
+      const recentFlow = {
+        ...candidate,
+        key: "holder_research:v1:recent_flow:test:YES",
+        bucket: "recent_flow" as const,
+        score: candidate.score + 200,
+        side: "YES" as const,
+        direction: "up" as const,
+      };
+      const mixed = {
+        ...candidate,
+        key: "holder_research:v1:sharp_side:test:mixed",
+        bucket: "sharp_side" as const,
+        side: null,
+        direction: "mixed" as const,
+      };
+
+      const selected = selectHolderResearchTriageFallbackCandidates(
+        [recentFlow, followup, mixed, candidate],
+        2,
+      );
+      assert.deepEqual(
+        selected.map((item) => item.bucket),
+        ["sharp_minority", "followup_existing"],
+      );
+
+      const excludedOnly = selectHolderResearchTriageFallbackCandidates(
+        [recentFlow],
+        1,
+      );
+      assert.equal(excludedOnly[0]?.bucket, "recent_flow");
+      assert.equal(
+        selectHolderResearchTriageFallbackCandidates([mixed], 1).length,
+        0,
       );
     },
   },
@@ -1806,6 +1918,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);
       assert.equal(resolved.defaults.triageEnabled, true);
       assert.equal(resolved.defaults.triageBatchSize, 8);
+      assert.equal(resolved.defaults.triageMaxOutputTokens, 2_000);
       assert.equal(resolved.effective.triageEnabled, true);
       assert.equal(resolved.effective.triageBatchSize, 12);
       assert.equal(resolved.effective.triageMaxBatchesPerRun, 3);
