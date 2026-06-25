@@ -153,6 +153,10 @@ export const walletProfileParamsSchema = z.object({
   walletId: z.string().uuid(),
 });
 
+export const walletProfileQuerySchema = z.object({
+  includeMarketTypeMetrics: queryBooleanSchema.default(false),
+});
+
 export const walletActivityQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   q: z.string().trim().min(1).max(160).optional(),
@@ -168,6 +172,7 @@ export const walletActivityQuerySchema = z.object({
   marketStatus: walletMarketStatusSchema.optional(),
   acceptingOrders: queryBooleanSchema.optional(),
   includePositionNow: queryBooleanSchema.default(false),
+  includeMarketTypeMetrics: queryBooleanSchema.default(false),
   since: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),

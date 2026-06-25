@@ -215,6 +215,7 @@ export function buildHolderResearchTriageSystemPrompt(): string {
     "Use candidate.quality. Prefer exceptional_single or cluster actor strength. Downgrade weak_single, contradicted credentials, price_against_signal, already_priced, and cases where public news fully explains the positioning.",
     "For single_game_sports, be stricter: investigate only sharp clusters or exceptional single holders. Weak one-wallet sports fades, public-favorite confirmation, and conflicting same-event reads should be watch or skip.",
     "Use marketMovementContext to judge whether price moved with or ahead of the holder read. Use holderEntryContext to judge whether the holder is early, chasing, or still holding through a move.",
+    "When holderEntryContext includes marketTypeMetrics30d, treat it as same-type history for this market type. Prefer it when it reinforces overall credentials; downgrade when same-type evidence is absent or weaker.",
     "Use investigate for candidates worth final synthesis. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
     "Do not invent candidate keys. Return one decision per supplied candidate.",
   ].join("\n");
@@ -282,6 +283,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "If public news partly explains the move, still choose PUBLISH when holder data adds incremental directional information: informed confirmation, unusual side selection, or early positioning.",
     "Pay close attention to timing. Compare holder snapshot/activity times with dated public headlines. If a holder moved before the public catalyst or before consensus odds reacted, that increases signal value.",
     "Use marketMovementContext and holderEntryContext when supplied. Translate them plainly: 'in from lower prices', 'still holding after the move', or 'price already moved before the holder read'.",
+    "If holderEntryContext includes marketTypeMetrics30d, use it as supporting same-market-type evidence. In user copy, say simple phrases like 'has been strong in sports outrights' only when the same-type metrics support that.",
     "For single-game sports, publish only when there is a sharp cluster or an exceptional single holder with concrete positive credentials. Downgrade weak one-wallet sports fades, public-favorite confirmation, and same-event conflicts.",
     "Do not say public news explains the holder move unless the public information was available before or around the holder activity. Later headlines may validate an early holder signal.",
     "Choose CONTEXT when the candidate is interesting but not feed-worthy: holder data mostly repeats public news, the read is too balanced, the signal is too concentrated, the read is mixed, or the incremental takeaway is weak.",
@@ -334,6 +336,7 @@ export function buildHolderResearchUserPrompt(input: {
         "Use delegated search only to answer: does public information explain this holder move?",
         "Do not demote only because public information partly explains the move; ask whether holder data adds something useful.",
         "Compare holder activity/snapshot timing against dated public headlines; early holder positioning can be a publishable signal even if later news supports it.",
+        "Use same-market-type metrics only as supporting evidence. Do not overstate a wallet's skill when marketTypeMetrics30d is missing or weak.",
         "For high-score candidates, still choose CONTEXT when direction is mixed or the takeaway is mostly risk/context.",
         "Do not choose PUBLISH with direction=mixed.",
         "PUBLISH should be a directional holder-backed signal with actor.mode single_holder or sharp_cluster; disagreement or risk-only reads are CONTEXT unless they clearly support one side.",

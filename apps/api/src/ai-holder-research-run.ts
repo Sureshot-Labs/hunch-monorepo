@@ -32,6 +32,7 @@ import {
   buildHolderResearchTriageCandidatePromptJson,
   enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
+  enrichHolderResearchMarketTypeMetrics,
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
   loadHolderResearchCalibrationMemo,
@@ -1376,6 +1377,8 @@ export async function runHolderResearch(
       selectedWithLive,
       policy,
     );
+    const selectedWithTypeMetrics =
+      await enrichHolderResearchMarketTypeMetrics(client, selectedWithContext);
     const calibrationMemo = policy.calibrationMemoEnabled
       ? await loadHolderResearchCalibrationMemo(client, policy)
       : [];
@@ -1398,6 +1401,18 @@ export async function runHolderResearch(
         policy.maxHolderContextPositionsPerHolder > 0
           ? "ok"
           : "skipped",
+    });
+    toolCalls.push({
+      name: "market_type_metrics",
+      count: selectedWithTypeMetrics.reduce(
+        (sum, candidate) =>
+          sum +
+          candidate.market.holders.filter(
+            (holder) => holder.marketTypeMetrics30d != null,
+          ).length,
+        0,
+      ),
+      status: "ok",
     });
     toolCalls.push({
       name: "calibration_memo",
@@ -1430,7 +1445,7 @@ export async function runHolderResearch(
     let externalSearchCalls = 0;
 
     const cacheEligibleCandidates: HolderResearchCandidate[] = [];
-    for (const candidate of selectedWithContext) {
+    for (const candidate of selectedWithTypeMetrics) {
       let cacheEvaluation: HolderResearchDecisionCacheEvaluation | null = null;
       if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
         decisionCache.checked += 1;
@@ -1827,7 +1842,7 @@ export async function runHolderResearch(
       },
       totals: {
         candidatesLoaded: candidates.length,
-        selected: selectedWithContext.length,
+        selected: selectedWithTypeMetrics.length,
         published: decisions.filter(
           (decision) => decision.output.status === "PUBLISH",
         ).length,
@@ -1865,7 +1880,7 @@ export async function runHolderResearch(
       triage,
       triageErrors,
       triageDecisions,
-      selected: selectedWithContext.map((candidate) => ({
+      selected: selectedWithTypeMetrics.map((candidate) => ({
         key: candidate.key,
         bucket: candidate.bucket,
         score: candidate.score,

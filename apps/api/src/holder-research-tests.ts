@@ -1508,10 +1508,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /do not invent credentials/i);
       assert.match(prompt, /marketMovementContext/i);
       assert.match(prompt, /holderEntryContext/i);
+      assert.match(prompt, /marketTypeMetrics30d/i);
     },
   },
   {
-    name: "candidate prompt includes movement and holder entry context",
+    name: "candidate prompt includes movement, entry, and market-type context",
     run: () => {
       const p = policy();
       const candidate = buildHolderResearchCandidatesFromMarket(
@@ -1534,6 +1535,28 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
               approxReliable: true,
               approxPnlSource: "activity",
               positionSnapshotAt: "2026-01-01T00:00:00.000Z",
+              marketTypeMetrics30d: {
+                walletId: "00000000-0000-0000-0000-000000000002",
+                marketType: "politics_geo",
+                period: "30d",
+                asOf: "2026-01-02T00:00:00.000Z",
+                tradesCount: 8,
+                volumeUsd: 40_000,
+                pnlUsd: 4_000,
+                roi: 0.1,
+                winRate: 0.75,
+                resolvedEdgeSampleCount: 6,
+                resolvedActualWinRate: 0.75,
+                resolvedExpectedWinRate: 0.55,
+                resolvedWinRateEdge: 0.2,
+                resolvedEdgeZScore: 1.4,
+                resolvedBrierScore: 0.08,
+                resolvedStakeWeightedEdge: 0.16,
+                resolvedStakeUsd: 15_000,
+                lastTradeAt: "2026-01-01T12:00:00.000Z",
+                approximate: false,
+                unmarkedOpenLegCount: 0,
+              },
             }),
           ],
         }),
@@ -1558,6 +1581,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(entry?.currentPrice, 0.4);
       assert.equal(entry?.entryToCurrentDelta, 0.1);
       assert.equal(entry?.approxReliable, true);
+      assert.deepEqual(
+        (entry?.marketTypeMetrics30d as Record<string, unknown>).marketType,
+        "politics_geo",
+      );
+      assert.equal(
+        (entry?.marketTypeMetrics30d as Record<string, unknown>).pnlUsd,
+        4_000,
+      );
     },
   },
   {

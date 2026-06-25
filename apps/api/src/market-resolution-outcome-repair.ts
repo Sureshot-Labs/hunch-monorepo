@@ -17,7 +17,10 @@ import {
   type PolymarketSourceRepair,
   type SafeResolutionOutcome,
 } from "./services/market-resolution-outcomes.js";
-import { refreshWalletMetricsForMarkets } from "./services/market-repair-wallet-metrics.js";
+import {
+  type RepairMarketRef,
+  refreshWalletMetricsForMarkets,
+} from "./services/market-repair-wallet-metrics.js";
 
 type Venue = "polymarket" | "limitless" | "kalshi";
 
@@ -772,10 +775,10 @@ async function materializeRepairSet(
   ];
 }
 
-async function updateOutcomesAndReturnMarketIds(
+async function updateOutcomesAndReturnMarketRefs(
   client: PoolClient,
-): Promise<string[]> {
-  const { rows } = await client.query<{ id: string }>(
+): Promise<RepairMarketRef[]> {
+  const { rows } = await client.query<{ id: string; venue: string | null }>(
     `
       update unified_markets m
       set resolved_outcome = r.resolved_outcome,
@@ -786,10 +789,10 @@ async function updateOutcomesAndReturnMarketIds(
         and (r.resolved_outcome is not null or r.resolved_outcome_pct is not null)
         and m.resolved_outcome is null
         and m.resolved_outcome_pct is null
-      returning m.id
+      returning m.id, m.venue::text as venue
     `,
   );
-  return rows.map((row) => row.id);
+  return rows.map((row) => ({ marketId: row.id, venue: row.venue }));
 }
 
 async function runSourceUpdate(client: PoolClient): Promise<CountRow> {
@@ -829,6 +832,7 @@ async function executeRepair(
   args: Args,
   validations: ValidationRow[],
 ): Promise<{
+  repairedMarketRefs: RepairMarketRef[];
   repairedMarketIds: string[];
   selectionCounts: CountRow[];
   updateCounts: CountRow[];
@@ -847,11 +851,13 @@ async function executeRepair(
     }
 
     const selectionCounts = await materializeRepairSet(client, validations);
-    const repairedMarketIds = await updateOutcomesAndReturnMarketIds(client);
+    const repairedMarketRefs = await updateOutcomesAndReturnMarketRefs(client);
+    const repairedMarketIds = repairedMarketRefs.map((ref) => ref.marketId);
     const sourceCount = await runSourceUpdate(client);
     await client.query("commit");
 
     return {
+      repairedMarketRefs,
       repairedMarketIds,
       selectionCounts,
       updateCounts: [
@@ -906,7 +912,7 @@ async function main(): Promise<void> {
     const execution = await executeRepair(args, validations);
     const metricsCounts = await refreshWalletMetricsForMarkets(pool, {
       enabled: args.refreshWalletMetrics,
-      marketIds: execution.repairedMarketIds,
+      marketRefs: execution.repairedMarketRefs,
       statementTimeoutSec: args.statementTimeoutSec,
       logPrefix: "[market:resolution-outcome-repair]",
     });
@@ -914,7 +920,9 @@ async function main(): Promise<void> {
       console.log(
         JSON.stringify(
           jsonReport(args, validations, startedAt, {
-            ...execution,
+            repairedMarketIds: execution.repairedMarketIds,
+            selectionCounts: execution.selectionCounts,
+            updateCounts: execution.updateCounts,
             metricsCounts,
           }),
           null,

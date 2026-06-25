@@ -16,7 +16,10 @@ import {
   type PolymarketSourceRepair,
   type SafeResolutionOutcome,
 } from "./services/market-resolution-outcomes.js";
-import { refreshWalletMetricsForMarkets } from "./services/market-repair-wallet-metrics.js";
+import {
+  type RepairMarketRef,
+  refreshWalletMetricsForMarkets,
+} from "./services/market-repair-wallet-metrics.js";
 
 type UnifiedStatus = "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -1335,10 +1338,10 @@ async function materializeRepairSet(
   ];
 }
 
-async function updateOutcomesAndReturnMarketIds(
+async function updateOutcomesAndReturnMarketRefs(
   client: PoolClient,
-): Promise<string[]> {
-  const { rows } = await client.query<{ id: string }>(
+): Promise<RepairMarketRef[]> {
+  const { rows } = await client.query<{ id: string; venue: string | null }>(
     `
       update unified_markets m
       set resolved_outcome = r.resolved_outcome,
@@ -1350,15 +1353,19 @@ async function updateOutcomesAndReturnMarketIds(
         and m.status = r.target_status::unified_status
         and m.resolved_outcome is null
         and m.resolved_outcome_pct is null
-      returning m.id
+      returning m.id, m.venue::text as venue
     `,
   );
-  return rows.map((row) => row.id);
+  return rows.map((row) => ({ marketId: row.id, venue: row.venue }));
 }
 
 async function runUpdates(
   client: PoolClient,
-): Promise<{ outcomeMarketIds: string[]; updateCounts: CountRow[] }> {
+): Promise<{
+  outcomeMarketIds: string[];
+  outcomeMarketRefs: RepairMarketRef[];
+  updateCounts: CountRow[];
+}> {
   const marketCount = await updateAndCount(
     client,
     "unified_markets_status",
@@ -1373,7 +1380,8 @@ async function runUpdates(
     `,
   );
 
-  const outcomeMarketIds = await updateOutcomesAndReturnMarketIds(client);
+  const outcomeMarketRefs = await updateOutcomesAndReturnMarketRefs(client);
+  const outcomeMarketIds = outcomeMarketRefs.map((ref) => ref.marketId);
   const outcomeCount = {
     label: "unified_markets_outcome",
     rows: String(outcomeMarketIds.length),
@@ -1438,6 +1446,7 @@ async function runUpdates(
 
   return {
     outcomeMarketIds,
+    outcomeMarketRefs,
     updateCounts: [marketCount, outcomeCount, polymarketSourceCount, eventCount],
   };
 }
@@ -1447,6 +1456,7 @@ async function executeRepair(
   validations: ValidationRow[],
 ): Promise<{
   outcomeMarketIds: string[];
+  outcomeMarketRefs: RepairMarketRef[];
   selectionCounts: CountRow[];
   updateCounts: CountRow[];
 }> {
@@ -1464,10 +1474,11 @@ async function executeRepair(
     }
 
     const selectionCounts = await materializeRepairSet(client, validations);
-    const { outcomeMarketIds, updateCounts } = await runUpdates(client);
+    const { outcomeMarketIds, outcomeMarketRefs, updateCounts } =
+      await runUpdates(client);
 
     await client.query("commit");
-    return { outcomeMarketIds, selectionCounts, updateCounts };
+    return { outcomeMarketIds, outcomeMarketRefs, selectionCounts, updateCounts };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -1512,13 +1523,11 @@ async function main(): Promise<void> {
   const validations = await validateCandidates(candidates, args);
 
   if (args.execute) {
-    const { outcomeMarketIds, ...execution } = await executeRepair(
-      args,
-      validations,
-    );
+    const { outcomeMarketIds, outcomeMarketRefs, ...execution } =
+      await executeRepair(args, validations);
     const metricsCounts = await refreshWalletMetricsForMarkets(pool, {
       enabled: !args.skipRefreshWalletMetrics,
-      marketIds: outcomeMarketIds,
+      marketRefs: outcomeMarketRefs,
       statementTimeoutSec: args.statementTimeoutSec,
       logPrefix: "[market:active-status-repair]",
     });

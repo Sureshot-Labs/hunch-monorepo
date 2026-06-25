@@ -9,9 +9,21 @@ import type {
 } from "../schemas/holder-research.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import {
+  buildMarketTypeText,
+  classifyMarketType,
+  classifyMarketTypeFromText,
+  computeMarketHoursToClose,
+  type MarketType,
+} from "./market-type-classifier.js";
+import {
   buildWalletIntelAcceptingOrdersSql,
   buildWalletIntelTrackableMarketSql,
 } from "./wallet-intel-market-eligibility.js";
+import {
+  loadWalletMarketTypeMetricsMap,
+  makeWalletMarketTypeMetricKey,
+  type WalletMarketTypeMetric,
+} from "./wallet-market-type-metrics.js";
 import { loadLatestWalletPositionNowMap } from "./wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "./wallet-position-ledger.js";
 
@@ -83,6 +95,7 @@ export type HolderResearchHolder = {
   ownerAddress: string | null;
   walletUsdLikeBalance: number | null;
   ownerUsdLikeBalance: number | null;
+  marketTypeMetrics30d?: WalletMarketTypeMetric | null;
   relatedOpenPositions: HolderResearchRelatedPosition[];
 };
 
@@ -179,12 +192,7 @@ export type HolderResearchActorSummary = {
   } | null;
 };
 
-export type HolderResearchMarketType =
-  | "single_game_sports"
-  | "sports_outright"
-  | "politics_geo"
-  | "crypto_macro"
-  | "other";
+export type HolderResearchMarketType = MarketType;
 
 export type HolderResearchActorStrength =
   | "cluster"
@@ -811,6 +819,7 @@ function buildHolderEntryContext(candidate: HolderResearchCandidate) {
       approxReliable: holder.approxReliable,
       approxPnlSource: holder.approxPnlSource,
       snapshotAt: holder.positionSnapshotAt,
+      marketTypeMetrics30d: holder.marketTypeMetrics30d,
     }));
 }
 
@@ -1043,80 +1052,25 @@ export function buildHolderResearchActorSummary(input: {
   };
 }
 
-function textForClassification(market: HolderResearchMarketInput): string {
-  return [
-    market.category,
-    market.seriesKey,
-    market.seriesTitle,
-    market.eventTitle,
-    market.marketTitle,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(" ")
-    .toLowerCase();
-}
-
 function computeHoursToClose(market: HolderResearchMarketInput): number | null {
-  const closeMs =
-    parseDateMs(market.closeTime) ?? parseDateMs(market.expirationTime);
-  if (closeMs == null) return null;
-  return (closeMs - Date.now()) / 3_600_000;
+  return computeMarketHoursToClose({
+    closeTime: market.closeTime,
+    expirationTime: market.expirationTime,
+  });
 }
 
 function classifyHolderResearchMarketType(
   market: HolderResearchMarketInput,
 ): HolderResearchMarketType {
-  const text = textForClassification(market);
-  return classifyHolderResearchMarketTypeFromText(
-    text,
-    computeHoursToClose(market),
-  );
-}
-
-function classifyHolderResearchMarketTypeFromText(
-  text: string,
-  hoursToClose: number | null,
-): HolderResearchMarketType {
-  const looksSports =
-    /\b(sports?|soccer|football|baseball|basketball|tennis|hockey|cricket|mma|boxing|esports?|counter-strike|league of legends|fifa|world cup|nba|nfl|mlb|nhl)\b/.test(
-      text,
-    );
-  if (looksSports) {
-    if (
-      /\b(winner|champion|championship|golden boot|top scorer|outright|tournament|world cup winner|league winner)\b/.test(
-        text,
-      )
-    ) {
-      return "sports_outright";
-    }
-
-    const looksHeadToHead =
-      /\b(vs\.?|v\.?|versus)\b/.test(text) ||
-      /\b(spread|handicap|moneyline|match winner|total goals|over\/under|o\/u)\b/.test(
-        text,
-      );
-    if (looksHeadToHead || (hoursToClose != null && hoursToClose <= 72)) {
-      return "single_game_sports";
-    }
-    return "sports_outright";
-  }
-
-  if (
-    /\b(bitcoin|btc|ethereum|eth|crypto|fed|inflation|cpi|rates?|treasury|oil|gold)\b/.test(
-      text,
-    )
-  ) {
-    return "crypto_macro";
-  }
-  if (
-    /\b(election|president|parliament|senate|congress|iran|hormuz|strait|shipping|china|taiwan|russia|ukraine|war|ceasefire|nuclear|invasion|tariff|politics|geopolitics)\b/.test(
-      text,
-    )
-  ) {
-    return "politics_geo";
-  }
-
-  return "other";
+  return classifyMarketType({
+    category: market.category,
+    seriesKey: market.seriesKey,
+    seriesTitle: market.seriesTitle,
+    eventTitle: market.eventTitle,
+    marketTitle: market.marketTitle,
+    closeTime: market.closeTime,
+    expirationTime: market.expirationTime,
+  });
 }
 
 function selectedSignalPriceChange(
@@ -2196,6 +2150,7 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
         ownerAddress: safeText(record.ownerAddress),
         walletUsdLikeBalance: toNumber(record.walletUsdLikeBalance),
         ownerUsdLikeBalance: toNumber(record.ownerUsdLikeBalance),
+        marketTypeMetrics30d: null,
         relatedOpenPositions: [],
       };
     })
@@ -2908,6 +2863,53 @@ export async function enrichHolderResearchHolderContext(
   });
 }
 
+export async function enrichHolderResearchMarketTypeMetrics(
+  client: Queryable,
+  candidates: HolderResearchCandidate[],
+): Promise<HolderResearchCandidate[]> {
+  if (candidates.length === 0) return candidates;
+
+  const walletIds = Array.from(
+    new Set(
+      candidates.flatMap((candidate) =>
+        candidate.market.holders.map((holder) => holder.walletId),
+      ),
+    ),
+  );
+  if (walletIds.length === 0) return candidates;
+
+  let metricsByKey: Awaited<ReturnType<typeof loadWalletMarketTypeMetricsMap>>;
+  try {
+    metricsByKey = await loadWalletMarketTypeMetricsMap(client, {
+      walletIds,
+    });
+  } catch (error) {
+    console.warn("[holder-research] market-type metrics skipped", {
+      walletCount: walletIds.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return candidates;
+  }
+  if (metricsByKey.size === 0) return candidates;
+
+  return candidates.map((candidate) => {
+    const marketType = classifyHolderResearchMarketType(candidate.market);
+    const holders = candidate.market.holders.map((holder) => ({
+      ...holder,
+      marketTypeMetrics30d:
+        metricsByKey.get(
+          makeWalletMarketTypeMetricKey(holder.walletId, marketType),
+        ) ?? null,
+    }));
+    const market = { ...candidate.market, holders };
+    const withoutDigest = { ...candidate, market };
+    return {
+      ...withoutDigest,
+      inputDigest: buildHolderResearchInputDigest(withoutDigest),
+    };
+  });
+}
+
 export function buildHolderResearchCandidatePromptJson(
   candidate: HolderResearchCandidate,
   policy?: HolderResearchPromptPolicy,
@@ -3190,6 +3192,7 @@ export function buildHolderResearchWalletTargets(
       winRate30d: holder.winRate30d,
       walletKind: holder.walletKind,
       ownerAddress: holder.ownerAddress,
+      marketTypeMetrics30d: holder.marketTypeMetrics30d,
     },
   }));
 }
@@ -3706,14 +3709,11 @@ function evaluateResolvedSignalRow(
     closeMs != null && Number.isFinite(createdMs)
       ? (closeMs - createdMs) / 3_600_000
       : null;
-  const text = [
-    row.category,
-    row.event_title,
-    row.market_title,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(" ")
-    .toLowerCase();
+  const text = buildMarketTypeText({
+    category: row.category,
+    eventTitle: row.event_title,
+    marketTitle: row.market_title,
+  });
 
   return {
     version: 1,
@@ -3723,10 +3723,7 @@ function evaluateResolvedSignalRow(
     direction: row.direction,
     confidence: toNumber(row.confidence),
     marketId: row.market_id,
-    marketType: classifyHolderResearchMarketTypeFromText(
-      text,
-      hoursToCloseAtNote,
-    ),
+    marketType: classifyMarketTypeFromText(text, hoursToCloseAtNote),
     hoursToCloseAtNote,
     noteYesProbability: noteYes,
     finalYesProbability: finalYes,

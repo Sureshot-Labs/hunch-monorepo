@@ -73,6 +73,11 @@ import {
   buildSnapshotDeltaTrackableActivitySql,
   buildWalletIntelTrackableMarketSql,
 } from "../services/wallet-intel-market-eligibility.js";
+import { classifyMarketType } from "../services/market-type-classifier.js";
+import {
+  loadWalletMarketTypeMetricsMap,
+  makeWalletMarketTypeMetricKey,
+} from "../services/wallet-market-type-metrics.js";
 import {
   aggregateWalletMetricsFilterSql,
   aggregateWalletMetricsPreferenceSql,
@@ -122,6 +127,7 @@ import {
   walletPositioningQuerySchema,
   walletPositionsQuerySchema,
   walletProfileParamsSchema,
+  walletProfileQuerySchema,
   walletResolverParamsSchema,
   walletResolverQuerySchema,
   walletSeriesQuerySchema,
@@ -343,6 +349,10 @@ type WalletActivityRouteRow = {
   event_title: string | null;
   event_image: string | null;
   event_icon: string | null;
+  category: string | null;
+  event_category: string | null;
+  series_key: string | null;
+  series_title: string | null;
   best_bid: string | null;
   best_ask: string | null;
   last_price: string | null;
@@ -6304,6 +6314,16 @@ function mapWalletActivityRouteItems(rows: WalletActivityRouteRow[]) {
     eventTitle: row.event_title,
     eventImage: row.event_image,
     eventIcon: row.event_icon,
+    category: row.category ?? row.event_category,
+    marketType: classifyMarketType({
+      category: row.category ?? row.event_category,
+      seriesKey: row.series_key,
+      seriesTitle: row.series_title,
+      eventTitle: row.event_title,
+      marketTitle: row.market_title,
+      closeTime: row.close_time,
+      expirationTime: row.expiration_time,
+    }),
     bestBid: row.best_bid ? Number(row.best_bid) : null,
     bestAsk: row.best_ask ? Number(row.best_ask) : null,
     lastPrice: row.last_price ? Number(row.last_price) : null,
@@ -6363,6 +6383,27 @@ async function enrichWalletActivityRouteItemsWithPositionNow(
           item.marketId,
           item.outcomeSide,
         ),
+      ) ?? null,
+  }));
+}
+
+async function enrichWalletActivityRouteItemsWithMarketTypeMetrics<
+  T extends WalletActivityRouteItem,
+>(
+  client: PoolClient,
+  items: T[],
+): Promise<Array<T & { marketTypeMetrics30d: unknown | null }>> {
+  if (items.length === 0) return [];
+  const walletIds = Array.from(new Set(items.map((item) => item.walletId)));
+  const metricsByKey = await loadWalletMarketTypeMetricsMap(client, {
+    walletIds,
+  });
+
+  return items.map((item) => ({
+    ...item,
+    marketTypeMetrics30d:
+      metricsByKey.get(
+        makeWalletMarketTypeMetricKey(item.walletId, item.marketType),
       ) ?? null,
   }));
 }
@@ -8915,12 +8956,16 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
     "/wallets/:walletId",
     {
       preHandler: createAuthMiddleware({ optional: true }),
-      schema: { params: walletProfileParamsSchema },
+      schema: {
+        params: walletProfileParamsSchema,
+        querystring: walletProfileQuerySchema,
+      },
     },
     async (request, reply) => {
       const userId = request.user?.id ?? null;
 
       const walletId = request.params.walletId;
+      const query = request.query;
       const client = await pool.connect();
       try {
         const wallet =
@@ -8964,6 +9009,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           loadWalletCategoryMix(client, walletId),
           loadWalletOnchainStateByIds(client, [walletId]),
         ]);
+        const marketTypeMetricsMap = query.includeMarketTypeMetrics
+          ? await loadWalletMarketTypeMetricsMap(client, {
+              walletIds: [walletId],
+            })
+          : new Map();
         const openPositionStats = openPositionStatsMap.get(walletId) ?? null;
         const signalSummaryOptions = {
           windowHours: 720,
@@ -9098,6 +9148,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             attribution,
             categoryMix,
             entryBracketStats,
+            marketTypeMetrics30d: query.includeMarketTypeMetrics
+              ? Array.from(marketTypeMetricsMap.values()).sort((a, b) => {
+                  const sampleDelta =
+                    b.resolvedEdgeSampleCount - a.resolvedEdgeSampleCount;
+                  if (sampleDelta !== 0) return sampleDelta;
+                  return (b.volumeUsd ?? 0) - (a.volumeUsd ?? 0);
+                })
+              : undefined,
           },
         });
       } catch (error) {
@@ -10491,6 +10549,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               ue.title as event_title,
               ue.image as event_image,
               ue.icon as event_icon,
+              um.category,
+              ue.category as event_category,
+              ue.series_key,
+              ue.series_title,
               um.best_bid,
               um.best_ask,
               um.last_price,
@@ -10565,10 +10627,17 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 }
                 return true;
               });
+        const responseItems =
+          query.includeMarketTypeMetrics && query.walletId
+            ? await enrichWalletActivityRouteItemsWithMarketTypeMetrics(
+                client,
+                filteredItems,
+              )
+            : filteredItems;
 
         return reply.send({
           ok: true,
-          items: filteredItems,
+          items: responseItems,
         });
       } catch (error) {
         app.log.error(
@@ -10821,6 +10890,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               ue.title as event_title,
               ue.image as event_image,
               ue.icon as event_icon,
+              um.category,
+              ue.category as event_category,
+              ue.series_key,
+              ue.series_title,
               um.best_bid,
               um.best_ask,
               um.last_price,
