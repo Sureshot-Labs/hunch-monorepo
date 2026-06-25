@@ -17,7 +17,7 @@ import {
   type PolymarketSourceRepair,
   type SafeResolutionOutcome,
 } from "./services/market-resolution-outcomes.js";
-import { refreshWalletMetrics } from "./services/wallet-metrics-refresh.js";
+import { refreshWalletMetricsForMarkets } from "./services/market-repair-wallet-metrics.js";
 
 type Venue = "polymarket" | "limitless" | "kalshi";
 
@@ -64,7 +64,6 @@ const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_API_TIMEOUT_SEC = 15;
 const DEFAULT_STATEMENT_TIMEOUT_SEC = 300;
 const DFLOW_BATCH_SIZE = 100;
-const WALLET_METRICS_BATCH_SIZE = 250;
 const ALLOWED_VENUES = new Set<Venue>([
   "polymarket",
   "limitless",
@@ -868,60 +867,6 @@ async function executeRepair(
   }
 }
 
-async function loadWalletIdsForMarkets(marketIds: string[]): Promise<string[]> {
-  if (marketIds.length === 0) return [];
-  const { rows } = await pool.query<{ wallet_id: string }>(
-    `
-      select distinct wallet_id::text as wallet_id
-      from (
-        select wallet_id
-        from wallet_position_snapshots
-        where market_id = any($1::text[])
-        union
-        select wallet_id
-        from wallet_activity_events
-        where market_id = any($1::text[])
-      ) wallets
-      order by wallet_id
-    `,
-    [marketIds],
-  );
-  return rows.map((row) => row.wallet_id);
-}
-
-async function refreshMetricsForRepairedMarkets(
-  args: Args,
-  marketIds: string[],
-): Promise<CountRow[]> {
-  if (!args.refreshWalletMetrics || marketIds.length === 0) return [];
-  const walletIds = await loadWalletIdsForMarkets(marketIds);
-  if (walletIds.length === 0) {
-    return [{ label: "wallet_metrics_wallets", rows: "0" }];
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("select set_config('statement_timeout', $1, false)", [
-      `${args.statementTimeoutSec}s`,
-    ]);
-    for (const batch of chunkArray(walletIds, WALLET_METRICS_BATCH_SIZE)) {
-      await refreshWalletMetrics(client, {
-        walletIds: batch,
-        asOf: new Date(),
-        logPrefix: "[market:resolution-outcome-repair]",
-      });
-    }
-    await client.query("select refresh_wallet_intel_selector_snapshot()");
-  } finally {
-    client.release();
-  }
-
-  return [
-    { label: "wallet_metrics_wallets", rows: String(walletIds.length) },
-    { label: "wallet_intel_selector_snapshot", rows: "1" },
-  ];
-}
-
 function jsonReport(
   args: Args,
   validations: ValidationRow[],
@@ -959,10 +904,12 @@ async function main(): Promise<void> {
 
   if (args.execute) {
     const execution = await executeRepair(args, validations);
-    const metricsCounts = await refreshMetricsForRepairedMarkets(
-      args,
-      execution.repairedMarketIds,
-    );
+    const metricsCounts = await refreshWalletMetricsForMarkets(pool, {
+      enabled: args.refreshWalletMetrics,
+      marketIds: execution.repairedMarketIds,
+      statementTimeoutSec: args.statementTimeoutSec,
+      logPrefix: "[market:resolution-outcome-repair]",
+    });
     if (args.json) {
       console.log(
         JSON.stringify(

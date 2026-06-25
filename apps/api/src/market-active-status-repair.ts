@@ -16,6 +16,7 @@ import {
   type PolymarketSourceRepair,
   type SafeResolutionOutcome,
 } from "./services/market-resolution-outcomes.js";
+import { refreshWalletMetricsForMarkets } from "./services/market-repair-wallet-metrics.js";
 
 type UnifiedStatus = "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -29,6 +30,7 @@ type Args = {
   json: boolean;
   limit: number;
   sampleLimit: number;
+  skipRefreshWalletMetrics: boolean;
   statementTimeoutSec: number;
   venues: Venue[];
 };
@@ -164,6 +166,7 @@ function parseArgs(argvInput: string[]): Args {
     json: hasFlag(argv, "json"),
     limit: readPositiveInt(argv, "limit", DEFAULT_LIMIT),
     sampleLimit: readPositiveInt(argv, "sample", DEFAULT_SAMPLE_LIMIT),
+    skipRefreshWalletMetrics: hasFlag(argv, "skip-refresh-wallet-metrics"),
     statementTimeoutSec: readPositiveInt(argv, "statement-timeout-sec", 180),
     venues: normalizeVenues([
       ...readValues(argv, "venue"),
@@ -184,6 +187,9 @@ Options:
   --concurrency <count>         Live API request concurrency. Default: ${DEFAULT_CONCURRENCY}
   --api-timeout-sec <sec>       Live API timeout per request. Default: ${DEFAULT_API_TIMEOUT_SEC}
   --statement-timeout-sec <sec> DB query timeout. Default: 180
+  --skip-refresh-wallet-metrics
+                               Do not refresh wallet metrics for newly
+                               outcome-repaired markets.
   --json                        Emit one JSON report.
   --execute                     Update live-validated rows. Requires --confirm-update.
   --confirm-update              Required together with --execute.
@@ -202,7 +208,8 @@ Live sources:
           for stale/missing DFlow rows
 
 Update mode also fills safe resolved outcomes from the same validated live
-payloads and refreshes Polymarket source rows touched by Gamma validation.
+payloads, refreshes Polymarket source rows touched by Gamma validation, and
+refreshes wallet metrics for markets whose outcome was newly filled.
 
 Dry-run is the default. Update mode only runs when both --execute and
 --confirm-update are present.`);
@@ -1328,7 +1335,30 @@ async function materializeRepairSet(
   ];
 }
 
-async function runUpdates(client: PoolClient): Promise<CountRow[]> {
+async function updateOutcomesAndReturnMarketIds(
+  client: PoolClient,
+): Promise<string[]> {
+  const { rows } = await client.query<{ id: string }>(
+    `
+      update unified_markets m
+      set resolved_outcome = r.resolved_outcome,
+          resolved_outcome_pct = r.resolved_outcome_pct,
+          updated_at_db = now()
+      from tmp_market_active_status_repair r
+      where m.id = r.market_id
+        and (r.resolved_outcome is not null or r.resolved_outcome_pct is not null)
+        and m.status = r.target_status::unified_status
+        and m.resolved_outcome is null
+        and m.resolved_outcome_pct is null
+      returning m.id
+    `,
+  );
+  return rows.map((row) => row.id);
+}
+
+async function runUpdates(
+  client: PoolClient,
+): Promise<{ outcomeMarketIds: string[]; updateCounts: CountRow[] }> {
   const marketCount = await updateAndCount(
     client,
     "unified_markets_status",
@@ -1343,22 +1373,11 @@ async function runUpdates(client: PoolClient): Promise<CountRow[]> {
     `,
   );
 
-  const outcomeCount = await updateAndCount(
-    client,
-    "unified_markets_outcome",
-    `
-      update unified_markets m
-      set resolved_outcome = r.resolved_outcome,
-          resolved_outcome_pct = r.resolved_outcome_pct,
-          updated_at_db = now()
-      from tmp_market_active_status_repair r
-      where m.id = r.market_id
-        and (r.resolved_outcome is not null or r.resolved_outcome_pct is not null)
-        and m.status = r.target_status::unified_status
-        and m.resolved_outcome is null
-        and m.resolved_outcome_pct is null
-    `,
-  );
+  const outcomeMarketIds = await updateOutcomesAndReturnMarketIds(client);
+  const outcomeCount = {
+    label: "unified_markets_outcome",
+    rows: String(outcomeMarketIds.length),
+  };
 
   const polymarketSourceCount = await updateAndCount(
     client,
@@ -1417,13 +1436,20 @@ async function runUpdates(client: PoolClient): Promise<CountRow[]> {
     `,
   );
 
-  return [marketCount, outcomeCount, polymarketSourceCount, eventCount];
+  return {
+    outcomeMarketIds,
+    updateCounts: [marketCount, outcomeCount, polymarketSourceCount, eventCount],
+  };
 }
 
 async function executeRepair(
   args: Args,
   validations: ValidationRow[],
-): Promise<{ selectionCounts: CountRow[]; updateCounts: CountRow[] }> {
+): Promise<{
+  outcomeMarketIds: string[];
+  selectionCounts: CountRow[];
+  updateCounts: CountRow[];
+}> {
   const client = await pool.connect();
   try {
     await client.query("begin");
@@ -1438,10 +1464,10 @@ async function executeRepair(
     }
 
     const selectionCounts = await materializeRepairSet(client, validations);
-    const updateCounts = await runUpdates(client);
+    const { outcomeMarketIds, updateCounts } = await runUpdates(client);
 
     await client.query("commit");
-    return { selectionCounts, updateCounts };
+    return { outcomeMarketIds, selectionCounts, updateCounts };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -1454,7 +1480,11 @@ function jsonReport(
   args: Args,
   validations: ValidationRow[],
   startedAt: number,
-  execution?: { selectionCounts: CountRow[]; updateCounts: CountRow[] },
+  execution?: {
+    metricsCounts?: CountRow[];
+    selectionCounts: CountRow[];
+    updateCounts: CountRow[];
+  },
 ) {
   const report = buildReport(args, validations);
   return {
@@ -1482,9 +1512,27 @@ async function main(): Promise<void> {
   const validations = await validateCandidates(candidates, args);
 
   if (args.execute) {
-    const execution = await executeRepair(args, validations);
+    const { outcomeMarketIds, ...execution } = await executeRepair(
+      args,
+      validations,
+    );
+    const metricsCounts = await refreshWalletMetricsForMarkets(pool, {
+      enabled: !args.skipRefreshWalletMetrics,
+      marketIds: outcomeMarketIds,
+      statementTimeoutSec: args.statementTimeoutSec,
+      logPrefix: "[market:active-status-repair]",
+    });
     if (args.json) {
-      console.log(JSON.stringify(jsonReport(args, validations, startedAt, execution), null, 2));
+      console.log(
+        JSON.stringify(
+          jsonReport(args, validations, startedAt, {
+            ...execution,
+            metricsCounts,
+          }),
+          null,
+          2,
+        ),
+      );
       return;
     }
 
@@ -1509,6 +1557,7 @@ async function main(): Promise<void> {
       concurrency: args.concurrency,
       apiTimeoutSec: args.apiTimeoutSec,
       statementTimeoutSec: args.statementTimeoutSec,
+      refreshWalletMetrics: !args.skipRefreshWalletMetrics,
     });
     logSection("summary");
     console.table(buildReport(args, validations).summary);
@@ -1516,6 +1565,10 @@ async function main(): Promise<void> {
     console.table(execution.selectionCounts);
     logSection("update counts");
     console.table(execution.updateCounts);
+    if (metricsCounts.length > 0) {
+      logSection("wallet metrics");
+      console.table(metricsCounts);
+    }
     console.log("[market:active-status-repair] done", {
       durationMs: Date.now() - startedAt,
       readOnly: false,
