@@ -202,6 +202,25 @@ async function runWithPgWriteConflictRetry(
   }
 }
 
+function mergedMarketStatusSql(incomingAlias: string): string {
+  const incomingTerminalTime = `coalesce(${incomingAlias}.close_time, ${incomingAlias}.expiration_time)`;
+  return `
+    CASE
+      WHEN unified_markets.venue = 'kalshi'
+        AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
+        AND ${incomingAlias}.status = 'ACTIVE'
+        AND NOT (
+          unified_markets.status = 'CLOSED'
+          AND unified_markets.resolved_outcome is null
+          AND unified_markets.resolved_outcome_pct is null
+          AND ${incomingTerminalTime} > now()
+        )
+      THEN unified_markets.status
+      ELSE ${incomingAlias}.status
+    END
+  `;
+}
+
 export interface UnifiedMarketRow {
   id: string; // venue:venue_market_id
   venue: string;
@@ -484,13 +503,7 @@ export async function upsertUnifiedMarket(
       title = EXCLUDED.title,
       description = EXCLUDED.description,
       category = EXCLUDED.category,
-      status = CASE
-        WHEN unified_markets.venue = 'kalshi'
-          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
-          AND EXCLUDED.status = 'ACTIVE'
-        THEN unified_markets.status
-        ELSE EXCLUDED.status
-      END,
+      status = ${mergedMarketStatusSql("EXCLUDED")},
       market_type = EXCLUDED.market_type,
       duration_minutes = EXCLUDED.duration_minutes,
       open_time = EXCLUDED.open_time,
@@ -699,13 +712,7 @@ export async function upsertUnifiedMarkets(
       title = excluded.title,
       description = excluded.description,
       category = excluded.category,
-      status = CASE
-        WHEN unified_markets.venue = 'kalshi'
-          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
-          AND excluded.status = 'ACTIVE'
-        THEN unified_markets.status
-        ELSE excluded.status
-      END,
+      status = ${mergedMarketStatusSql("excluded")},
       market_type = excluded.market_type,
       duration_minutes = excluded.duration_minutes,
       open_time = excluded.open_time,
@@ -782,7 +789,7 @@ export async function upsertUnifiedMarkets(
        unified_markets.created_at, unified_markets.updated_at)
       is distinct from
       (excluded.event_id, excluded.title, excluded.description,
-       excluded.category, excluded.status, excluded.market_type,
+       excluded.category, ${mergedMarketStatusSql("excluded")}, excluded.market_type,
        excluded.duration_minutes,
        excluded.open_time, excluded.close_time, excluded.expiration_time,
        excluded.best_bid, excluded.best_ask, excluded.last_price,
@@ -845,13 +852,7 @@ export async function upsertUnifiedMarkets(
       title = input.title,
       description = input.description,
       category = input.category,
-      status = CASE
-        WHEN unified_markets.venue = 'kalshi'
-          AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
-          AND input.status = 'ACTIVE'
-        THEN unified_markets.status
-        ELSE input.status
-      END,
+      status = ${mergedMarketStatusSql("input")},
       market_type = input.market_type,
       duration_minutes = input.duration_minutes,
       open_time = input.open_time,
@@ -932,13 +933,7 @@ export async function upsertUnifiedMarkets(
       ) is distinct from (
         input.event_id, input.title, input.description,
         input.category,
-        CASE
-          WHEN unified_markets.venue = 'kalshi'
-            AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
-            AND input.status = 'ACTIVE'
-          THEN unified_markets.status
-          ELSE input.status
-        END,
+        ${mergedMarketStatusSql("input")},
         input.market_type,
         input.duration_minutes,
         input.open_time, input.close_time, input.expiration_time,
@@ -1165,13 +1160,7 @@ async function filterChangedUnifiedMarketRows(
         ) is distinct from (
           input.event_id, input.title, input.description,
           input.category,
-          CASE
-            WHEN unified_markets.venue = 'kalshi'
-              AND unified_markets.status in ('CLOSED','SETTLED','ARCHIVED')
-              AND input.status = 'ACTIVE'
-            THEN unified_markets.status
-            ELSE input.status
-          END,
+          ${mergedMarketStatusSql("input")},
           input.market_type,
           input.duration_minutes,
           input.open_time, input.close_time, input.expiration_time,

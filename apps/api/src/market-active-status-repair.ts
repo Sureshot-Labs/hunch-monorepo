@@ -7,6 +7,15 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "./services/limitless-client.js";
+import {
+  buildPolymarketSourceRepair,
+  hasSafeResolutionOutcome,
+  resolveDflowOutcome,
+  resolveLimitlessOutcome,
+  resolvePolymarketGammaOutcome,
+  type PolymarketSourceRepair,
+  type SafeResolutionOutcome,
+} from "./services/market-resolution-outcomes.js";
 
 type UnifiedStatus = "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -38,6 +47,9 @@ type ValidationRow = CandidateRow & {
   current_status: "ACTIVE";
   target_status: Exclude<UnifiedStatus, "ACTIVE"> | null;
   reason: string;
+  resolved_outcome: "YES" | "NO" | null;
+  resolved_outcome_pct: number | null;
+  polymarket_source: PolymarketSourceRepair | null;
 };
 
 type KalshiPublicLookup =
@@ -188,6 +200,9 @@ Live sources:
   limitless: Limitless /markets/:slug API
   kalshi: DFlow /api/v1/markets/batch API, then Kalshi public API fallback
           for stale/missing DFlow rows
+
+Update mode also fills safe resolved outcomes from the same validated live
+payloads and refreshes Polymarket source rows touched by Gamma validation.
 
 Dry-run is the default. Update mode only runs when both --execute and
 --confirm-update are present.`);
@@ -410,7 +425,13 @@ async function validatePolymarket(
       return buildValidation(candidate, null, "gamma_not_found");
     }
     const status = mapGammaMarketStatus(market);
-    return buildValidation(candidate, status.target_status, status.reason);
+    return buildValidation(
+      candidate,
+      status.target_status,
+      status.reason,
+      resolvePolymarketGammaOutcome(market),
+      buildPolymarketSourceRepair(market),
+    );
   } catch (error) {
     return buildValidation(candidate, null, `gamma_error:${errorMessage(error)}`);
   }
@@ -475,10 +496,20 @@ async function validateLimitless(
     const status = stringValue(market.status)?.toUpperCase() ?? "";
     const expired = boolValue(market, ["expired"]);
     if (status === "RESOLVED") {
-      return buildValidation(candidate, "SETTLED", "limitless_resolved");
+      return buildValidation(
+        candidate,
+        "SETTLED",
+        "limitless_resolved",
+        resolveLimitlessOutcome(market),
+      );
     }
     if (expired === true) {
-      return buildValidation(candidate, "CLOSED", "limitless_expired");
+      return buildValidation(
+        candidate,
+        "CLOSED",
+        "limitless_expired",
+        resolveLimitlessOutcome(market),
+      );
     }
     return buildValidation(candidate, null, "limitless_active");
   }
@@ -773,6 +804,7 @@ async function applyKalshiPublicFallbacks(
             candidate,
             targetStatus,
             mapKalshiPublicReason(targetStatus, rawStatus, lookup.source),
+            resolveDflowOutcome(lookup.market),
           ),
         );
       }
@@ -845,6 +877,7 @@ async function validateKalshiChunk(
         candidate,
         targetStatus,
         mapDflowReason(targetStatus, rawStatus),
+        resolveDflowOutcome(market),
       );
     });
     return applyKalshiPublicFallbacks(candidates, rows, timeoutMs, concurrency);
@@ -859,12 +892,20 @@ function buildValidation(
   candidate: CandidateRow,
   targetStatus: Exclude<UnifiedStatus, "ACTIVE"> | null,
   reason: string,
+  outcome: SafeResolutionOutcome = {
+    resolvedOutcome: null,
+    resolvedOutcomePct: null,
+  },
+  polymarketSource: PolymarketSourceRepair | null = null,
 ): ValidationRow {
   return {
     ...candidate,
     current_status: "ACTIVE",
     target_status: targetStatus,
     reason,
+    resolved_outcome: outcome.resolvedOutcome,
+    resolved_outcome_pct: outcome.resolvedOutcomePct,
+    polymarket_source: polymarketSource,
   };
 }
 
@@ -1084,6 +1125,21 @@ function summarizeRows(rows: ValidationRow[]): SummaryRow[] {
     } else {
       add("skipped_by_venue_reason", row.venue, null, row.reason, row);
     }
+    if (
+      row.target_status &&
+      hasSafeResolutionOutcome({
+        resolvedOutcome: row.resolved_outcome,
+        resolvedOutcomePct: row.resolved_outcome_pct,
+      })
+    ) {
+      add(
+        "repair_by_venue_outcome",
+        row.venue,
+        row.resolved_outcome ?? "SCALAR",
+        row.reason,
+        row,
+      );
+    }
   }
 
   return [...groups.values()]
@@ -1113,6 +1169,9 @@ function formatSampleRow(row: ValidationRow): Record<string, string | null> {
     currentStatus: row.current_status,
     targetStatus: row.target_status,
     reason: row.reason,
+    resolvedOutcome: row.resolved_outcome,
+    resolvedOutcomePct:
+      row.resolved_outcome_pct == null ? null : String(row.resolved_outcome_pct),
     eventId: row.event_id,
     terminalAt: dateToString(row.terminal_at),
     title: row.title,
@@ -1121,10 +1180,21 @@ function formatSampleRow(row: ValidationRow): Record<string, string | null> {
 
 function buildReport(args: Args, validations: ValidationRow[]) {
   const repairable = validations.filter((row) => row.target_status !== null);
+  const outcomeRepairable = repairable.filter((row) =>
+    hasSafeResolutionOutcome({
+      resolvedOutcome: row.resolved_outcome,
+      resolvedOutcomePct: row.resolved_outcome_pct,
+    }),
+  );
+  const polymarketSourceRepairable = repairable.filter(
+    (row) => row.polymarket_source !== null,
+  );
   return {
     args,
     candidateCount: validations.length,
     repairableCount: repairable.length,
+    outcomeRepairableCount: outcomeRepairable.length,
+    polymarketSourceRepairableCount: polymarketSourceRepairable.length,
     skippedCount: validations.length - repairable.length,
     summary: summarizeRows(validations),
     repairableSamples: repairable.slice(0, args.sampleLimit),
@@ -1140,6 +1210,15 @@ async function countTempRows(
   const { rows } = await client.query<{ rows: string }>(
     `select count(*)::text as rows from ${tableName}`,
   );
+  return { label, rows: rows[0]?.rows ?? "0" };
+}
+
+async function countRows(
+  client: PoolClient,
+  label: string,
+  sql: string,
+): Promise<CountRow> {
+  const { rows } = await client.query<{ rows: string }>(sql);
   return { label, rows: rows[0]?.rows ?? "0" };
 }
 
@@ -1168,10 +1247,15 @@ async function materializeRepairSet(
   const payload = JSON.stringify(
     repairable.map((row) => ({
       market_id: row.market_id,
+      venue: row.venue,
+      venue_market_id: row.venue_market_id,
       event_id: row.event_id,
       current_status: row.current_status,
       target_status: row.target_status,
       reason: row.reason,
+      resolved_outcome: row.resolved_outcome,
+      resolved_outcome_pct: row.resolved_outcome_pct,
+      polymarket_source: row.polymarket_source,
     })),
   );
 
@@ -1180,10 +1264,22 @@ async function materializeRepairSet(
       create temp table tmp_market_active_status_repair on commit drop as
       select
         value->>'market_id' as market_id,
+        value->>'venue' as venue,
+        value->>'venue_market_id' as venue_market_id,
         value->>'event_id' as event_id,
         value->>'current_status' as current_status,
         value->>'target_status' as target_status,
-        value->>'reason' as reason
+        value->>'reason' as reason,
+        nullif(value->>'resolved_outcome', '') as resolved_outcome,
+        (value->>'resolved_outcome_pct')::numeric as resolved_outcome_pct,
+        (value->'polymarket_source')->>'outcome_prices' as polymarket_source_outcome_prices,
+        ((value->'polymarket_source')->>'active')::boolean as polymarket_source_active,
+        ((value->'polymarket_source')->>'closed')::boolean as polymarket_source_closed,
+        ((value->'polymarket_source')->>'archived')::boolean as polymarket_source_archived,
+        ((value->'polymarket_source')->>'accepting_orders')::boolean as polymarket_source_accepting_orders,
+        (value->'polymarket_source')->>'resolution_source' as polymarket_source_resolution_source,
+        (value->'polymarket_source')->>'resolved_by' as polymarket_source_resolved_by,
+        (value->'polymarket_source')->'raw' as polymarket_source_raw
       from jsonb_array_elements($1::jsonb) as value
       where value->>'target_status' is not null
     `,
@@ -1209,13 +1305,33 @@ async function materializeRepairSet(
       "events_touched",
       "tmp_market_active_status_repair_events",
     ),
+    await countRows(
+      client,
+      "live_validated_repairable_outcomes",
+      `
+        select count(*)::text as rows
+        from tmp_market_active_status_repair
+        where resolved_outcome is not null
+           or resolved_outcome_pct is not null
+      `,
+    ),
+    await countRows(
+      client,
+      "polymarket_source_repairable",
+      `
+        select count(*)::text as rows
+        from tmp_market_active_status_repair
+        where venue = 'polymarket'
+          and polymarket_source_raw is not null
+      `,
+    ),
   ];
 }
 
 async function runUpdates(client: PoolClient): Promise<CountRow[]> {
   const marketCount = await updateAndCount(
     client,
-    "unified_markets",
+    "unified_markets_status",
     `
       update unified_markets m
       set status = r.target_status::unified_status,
@@ -1224,6 +1340,54 @@ async function runUpdates(client: PoolClient): Promise<CountRow[]> {
       where m.id = r.market_id
         and m.status = r.current_status::unified_status
         and r.target_status in ('CLOSED', 'SETTLED', 'ARCHIVED')
+    `,
+  );
+
+  const outcomeCount = await updateAndCount(
+    client,
+    "unified_markets_outcome",
+    `
+      update unified_markets m
+      set resolved_outcome = r.resolved_outcome,
+          resolved_outcome_pct = r.resolved_outcome_pct,
+          updated_at_db = now()
+      from tmp_market_active_status_repair r
+      where m.id = r.market_id
+        and (r.resolved_outcome is not null or r.resolved_outcome_pct is not null)
+        and m.status = r.target_status::unified_status
+        and m.resolved_outcome is null
+        and m.resolved_outcome_pct is null
+    `,
+  );
+
+  const polymarketSourceCount = await updateAndCount(
+    client,
+    "polymarket_markets_source",
+    `
+      update polymarket_markets pm
+      set outcome_prices = coalesce(r.polymarket_source_outcome_prices, pm.outcome_prices),
+          active = coalesce(r.polymarket_source_active, pm.active),
+          closed = coalesce(r.polymarket_source_closed, pm.closed),
+          archived = coalesce(r.polymarket_source_archived, pm.archived),
+          accepting_orders = coalesce(r.polymarket_source_accepting_orders, pm.accepting_orders),
+          resolution_source = coalesce(r.polymarket_source_resolution_source, pm.resolution_source),
+          resolved_by = coalesce(r.polymarket_source_resolved_by, pm.resolved_by),
+          raw = coalesce(r.polymarket_source_raw, pm.raw),
+          updated_at_db = now()
+      from tmp_market_active_status_repair r
+      where r.venue = 'polymarket'
+        and r.polymarket_source_raw is not null
+        and pm.id = r.venue_market_id
+        and (
+          pm.outcome_prices is distinct from coalesce(r.polymarket_source_outcome_prices, pm.outcome_prices)
+          or pm.active is distinct from coalesce(r.polymarket_source_active, pm.active)
+          or pm.closed is distinct from coalesce(r.polymarket_source_closed, pm.closed)
+          or pm.archived is distinct from coalesce(r.polymarket_source_archived, pm.archived)
+          or pm.accepting_orders is distinct from coalesce(r.polymarket_source_accepting_orders, pm.accepting_orders)
+          or pm.resolution_source is distinct from coalesce(r.polymarket_source_resolution_source, pm.resolution_source)
+          or pm.resolved_by is distinct from coalesce(r.polymarket_source_resolved_by, pm.resolved_by)
+          or pm.raw is distinct from coalesce(r.polymarket_source_raw, pm.raw)
+        )
     `,
   );
 
@@ -1253,7 +1417,7 @@ async function runUpdates(client: PoolClient): Promise<CountRow[]> {
     `,
   );
 
-  return [marketCount, eventCount];
+  return [marketCount, outcomeCount, polymarketSourceCount, eventCount];
 }
 
 async function executeRepair(
@@ -1330,6 +1494,17 @@ async function main(): Promise<void> {
       candidateCount: validations.length,
       repairableCount: validations.filter((row) => row.target_status !== null)
         .length,
+      outcomeRepairableCount: validations.filter(
+        (row) =>
+          row.target_status !== null &&
+          hasSafeResolutionOutcome({
+            resolvedOutcome: row.resolved_outcome,
+            resolvedOutcomePct: row.resolved_outcome_pct,
+          }),
+      ).length,
+      polymarketSourceRepairableCount: validations.filter(
+        (row) => row.target_status !== null && row.polymarket_source !== null,
+      ).length,
       venues: args.venues.length > 0 ? args.venues : "all",
       concurrency: args.concurrency,
       apiTimeoutSec: args.apiTimeoutSec,
@@ -1360,6 +1535,8 @@ async function main(): Promise<void> {
     sampleLimit: args.sampleLimit,
     candidateCount: report.candidateCount,
     repairableCount: report.repairableCount,
+    outcomeRepairableCount: report.outcomeRepairableCount,
+    polymarketSourceRepairableCount: report.polymarketSourceRepairableCount,
     skippedCount: report.skippedCount,
     venues: args.venues.length > 0 ? args.venues : "all",
     concurrency: args.concurrency,

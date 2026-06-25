@@ -1944,6 +1944,67 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "resolved evaluator does not infer outcome from non-terminal closed price",
+    run: async () => {
+      const p = policy();
+      const updates: Array<Record<string, unknown>> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/select\s+n\.id\s+as\s+note_id/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  note_id: "00000000-0000-4000-8000-000000000083",
+                  direction: "up",
+                  confidence: 0.74,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  metrics: {
+                    market: { yesProbability: 0.48 },
+                  },
+                  model_meta: {
+                    primary_holder_credentials: {
+                      mode: "single_holder",
+                      primaryHolder: {
+                        positionUsd: 32_000,
+                        pnl30dUsd: 120_000,
+                        openPnlUsd: 1_000,
+                      },
+                    },
+                  },
+                  market_id: "polymarket:closed-without-resolution",
+                  market_title: "Closed without resolution",
+                  event_title: "Closed event",
+                  category: "Sports",
+                  close_time: new Date("2026-01-01T03:00:00.000Z"),
+                  expiration_time: null,
+                  best_bid: 0.58,
+                  best_ask: 0.62,
+                  last_price: 0.6,
+                  resolved_outcome: null,
+                  resolved_outcome_pct: null,
+                  accepting_orders: false,
+                },
+              ],
+            };
+          }
+          if (/update\s+ai_notes/i.test(sql)) {
+            updates.push(JSON.parse(String(params?.[1])) as Record<string, unknown>);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+
+      const stats = await evaluateResolvedHolderResearchNotes(db, p);
+      assert.equal(stats.considered, 1);
+      assert.equal(stats.evaluated, 1);
+      assert.equal(stats.unknown, 1);
+      assert.equal(updates[0]?.outcome, "unknown");
+      assert.equal(updates[0]?.finalYesProbability, null);
+      assert.equal(updates[0]?.sideAdjustedPriceDelta, null);
+    },
+  },
+  {
     name: "holder research policy is a separate runtime policy with external search budget",
     run: async () => {
       assert.equal(

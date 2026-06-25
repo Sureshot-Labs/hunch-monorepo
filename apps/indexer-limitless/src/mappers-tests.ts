@@ -4,6 +4,7 @@ import {
   resolveLimitlessEventContext,
 } from "./grouping.js";
 import {
+  mapLimitlessMarketRow,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
   resolveLimitlessCategory,
@@ -426,6 +427,31 @@ test("mapToUnifiedMarket preserves non-AMM liquidity when provided", () => {
 
   const unified = mapToUnifiedMarket(market, "1");
   assert.equal(unified.liquidity, 123.45);
+});
+
+test("mapToUnifiedMarket resolves from winning outcome index even before source status flips", () => {
+  const market = makeMarket({
+    status: "FUNDED",
+    expired: false,
+    winningOutcomeIndex: 1,
+  });
+
+  const unified = mapToUnifiedMarket(market, "1");
+  assert.equal(unified.status, "SETTLED");
+  assert.equal(unified.resolved_outcome, "NO");
+});
+
+test("mapLimitlessMarketRow preserves zero winning outcome index", () => {
+  const market = makeMarket({
+    status: "RESOLVED",
+    winningOutcomeIndex: 0,
+  });
+
+  const sourceRow = mapLimitlessMarketRow("1", market);
+  const unified = mapToUnifiedMarket(market, "1");
+  assert.equal(sourceRow.winning_outcome_index, 0);
+  assert.equal(unified.status, "SETTLED");
+  assert.equal(unified.resolved_outcome, "YES");
 });
 
 test("normalizeLimitlessPricePair scales percent-style AMM prices", () => {

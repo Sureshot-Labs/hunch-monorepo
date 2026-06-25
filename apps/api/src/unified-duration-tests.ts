@@ -107,6 +107,239 @@ async function insertMarket(input: {
   ]);
 }
 
+async function upsertTestEvent(input: {
+  category: string;
+  id: string;
+  title: string;
+  venue: "kalshi" | "polymarket";
+  venueEventId: string;
+}) {
+  await upsertUnifiedEvents(pool, [
+    {
+      id: input.id,
+      venue: input.venue,
+      venue_event_id: input.venueEventId,
+      title: input.title,
+      category: input.category,
+      status: "ACTIVE",
+      start_date: new Date(Date.now() - 60_000),
+      end_date: new Date(Date.now() + 60 * 60 * 1000),
+      volume_total: 100,
+      volume_24h: 10,
+      liquidity: 100,
+      slug: makeId("slug"),
+    },
+  ]);
+}
+
+async function upsertTestMarket(input: {
+  closeTime: Date;
+  eventId: string;
+  filterUnchanged?: boolean;
+  id: string;
+  resolvedOutcome?: string;
+  resolvedOutcomePct?: number;
+  status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
+  title: string;
+  venue: "kalshi" | "polymarket";
+  venueMarketId: string;
+}) {
+  await upsertUnifiedMarkets(
+    pool,
+    [
+      {
+        id: input.id,
+        venue: input.venue,
+        venue_market_id: input.venueMarketId,
+        event_id: input.eventId,
+        title: input.title,
+        category: "status-merge-test",
+        status: input.status,
+        market_type: "binary",
+        open_time: new Date(Date.now() - 60_000),
+        close_time: input.closeTime,
+        expiration_time: input.closeTime,
+        best_bid: 0.45,
+        best_ask: 0.55,
+        last_price: 0.5,
+        volume_total: 100,
+        volume_24h: 10,
+        liquidity: 100,
+        open_interest: 50,
+        outcomes: JSON.stringify(["YES", "NO"]),
+        token_yes: input.venue === "kalshi" ? makeId("sol:yes") : undefined,
+        token_no: input.venue === "kalshi" ? makeId("sol:no") : undefined,
+        resolved_outcome: input.resolvedOutcome,
+        resolved_outcome_pct: input.resolvedOutcomePct,
+        slug: makeId("slug"),
+      },
+    ],
+    input.filterUnchanged ? { filterUnchanged: true } : undefined,
+  );
+}
+
+async function loadMarketStatus(id: string): Promise<string | null> {
+  const { rows } = await pool.query<{ status: string }>(
+    "select status::text as status from unified_markets where id = $1",
+    [id],
+  );
+  return rows[0]?.status ?? null;
+}
+
+async function assertKalshiActiveReopenPolicy() {
+  const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  const futureClose = new Date(Date.now() + 60 * 60 * 1000);
+  const pastClose = new Date(Date.now() - 60 * 60 * 1000);
+  const eventIds = {
+    kalshi: makeId("kalshi:event"),
+    polymarket: makeId("polymarket:event"),
+  };
+  const venueEventIds = {
+    kalshi: `KXSTATUSMERGE-${suffix}`,
+    polymarket: makeId("status-merge-event"),
+  };
+  const marketIds = {
+    kalshiFuture: makeId("kalshi:market"),
+    kalshiPast: makeId("kalshi:market"),
+    kalshiSettled: makeId("kalshi:market"),
+    kalshiOutcome: makeId("kalshi:market"),
+    polymarket: makeId("polymarket:market"),
+  };
+  const venueMarketIds = {
+    kalshiFuture: `KXSTATUSMERGE-${suffix}-FUTURE`,
+    kalshiPast: `KXSTATUSMERGE-${suffix}-PAST`,
+    kalshiSettled: `KXSTATUSMERGE-${suffix}-SETTLED`,
+    kalshiOutcome: `KXSTATUSMERGE-${suffix}-OUTCOME`,
+    polymarket: makeId("status-merge-market"),
+  };
+
+  try {
+    await upsertTestEvent({
+      id: eventIds.kalshi,
+      venue: "kalshi",
+      venueEventId: venueEventIds.kalshi,
+      title: "Kalshi status merge test",
+      category: "status-merge-test",
+    });
+    await upsertTestEvent({
+      id: eventIds.polymarket,
+      venue: "polymarket",
+      venueEventId: venueEventIds.polymarket,
+      title: "Polymarket status merge test",
+      category: "status-merge-test",
+    });
+
+    await upsertTestMarket({
+      id: marketIds.kalshiFuture,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiFuture,
+      eventId: eventIds.kalshi,
+      title: "Kalshi future stale closed",
+      status: "CLOSED",
+      closeTime: futureClose,
+    });
+    await upsertTestMarket({
+      id: marketIds.kalshiFuture,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiFuture,
+      eventId: eventIds.kalshi,
+      title: "Kalshi future stale closed",
+      status: "ACTIVE",
+      closeTime: futureClose,
+      filterUnchanged: true,
+    });
+    assert.equal(await loadMarketStatus(marketIds.kalshiFuture), "ACTIVE");
+
+    await upsertTestMarket({
+      id: marketIds.kalshiPast,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiPast,
+      eventId: eventIds.kalshi,
+      title: "Kalshi past stale closed",
+      status: "CLOSED",
+      closeTime: pastClose,
+    });
+    await upsertTestMarket({
+      id: marketIds.kalshiPast,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiPast,
+      eventId: eventIds.kalshi,
+      title: "Kalshi past stale closed",
+      status: "ACTIVE",
+      closeTime: pastClose,
+    });
+    assert.equal(await loadMarketStatus(marketIds.kalshiPast), "CLOSED");
+
+    await upsertTestMarket({
+      id: marketIds.kalshiSettled,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiSettled,
+      eventId: eventIds.kalshi,
+      title: "Kalshi settled",
+      status: "SETTLED",
+      closeTime: futureClose,
+    });
+    await upsertTestMarket({
+      id: marketIds.kalshiSettled,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiSettled,
+      eventId: eventIds.kalshi,
+      title: "Kalshi settled",
+      status: "ACTIVE",
+      closeTime: futureClose,
+    });
+    assert.equal(await loadMarketStatus(marketIds.kalshiSettled), "SETTLED");
+
+    await upsertTestMarket({
+      id: marketIds.kalshiOutcome,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiOutcome,
+      eventId: eventIds.kalshi,
+      title: "Kalshi closed with outcome",
+      status: "CLOSED",
+      closeTime: futureClose,
+      resolvedOutcome: "YES",
+    });
+    await upsertTestMarket({
+      id: marketIds.kalshiOutcome,
+      venue: "kalshi",
+      venueMarketId: venueMarketIds.kalshiOutcome,
+      eventId: eventIds.kalshi,
+      title: "Kalshi closed with outcome",
+      status: "ACTIVE",
+      closeTime: futureClose,
+    });
+    assert.equal(await loadMarketStatus(marketIds.kalshiOutcome), "CLOSED");
+
+    await upsertTestMarket({
+      id: marketIds.polymarket,
+      venue: "polymarket",
+      venueMarketId: venueMarketIds.polymarket,
+      eventId: eventIds.polymarket,
+      title: "Polymarket closed",
+      status: "CLOSED",
+      closeTime: futureClose,
+    });
+    await upsertTestMarket({
+      id: marketIds.polymarket,
+      venue: "polymarket",
+      venueMarketId: venueMarketIds.polymarket,
+      eventId: eventIds.polymarket,
+      title: "Polymarket closed",
+      status: "ACTIVE",
+      closeTime: futureClose,
+    });
+    assert.equal(await loadMarketStatus(marketIds.polymarket), "ACTIVE");
+  } finally {
+    await pool.query("delete from unified_markets where id = any($1::text[])", [
+      Object.values(marketIds),
+    ]);
+    await pool.query("delete from unified_events where id = any($1::text[])", [
+      Object.values(eventIds),
+    ]);
+  }
+}
+
 async function main() {
   assert.equal(derivePolymarketDurationMinutes("btc-up-or-down-5m"), 5);
   assert.equal(derivePolymarketDurationMinutes("eth-up-or-down-15m"), 15);
@@ -179,6 +412,7 @@ async function main() {
     assert.ok(sql?.includes("dflowNativeAcceptingOrders"));
     assert.deepEqual(params, [[5, 15]]);
   }
+  await assertKalshiActiveReopenPolicy();
 
   const app = await buildApp();
   const previousFeedTtl = env.feedTtlSec;

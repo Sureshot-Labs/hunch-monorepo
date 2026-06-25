@@ -526,6 +526,18 @@ function calculateYesProbability(row: {
   return last != null ? clamp01(last) : null;
 }
 
+function terminalYesProbabilityFromPrice(row: {
+  best_bid: string | number | null;
+  best_ask: string | number | null;
+  last_price: string | number | null;
+}): number | null {
+  const yesProbability = calculateYesProbability(row);
+  if (yesProbability == null) return null;
+  if (yesProbability <= 0.01) return 0;
+  if (yesProbability >= 0.99) return 1;
+  return null;
+}
+
 function isExtremeOdds(
   yesProbability: number | null,
   policy: Pick<HolderResearchPolicy, "maxExtremeOdds">,
@@ -3646,7 +3658,7 @@ function finalYesProbabilityFromResolvedRow(
   if (resolved === "NO") return 0;
   const pct = toNumber(row.resolved_outcome_pct);
   if (pct != null) return clamp01(pct / 10_000);
-  return calculateYesProbability(row);
+  return terminalYesProbabilityFromPrice(row);
 }
 
 function noteYesProbability(metrics: unknown): number | null {

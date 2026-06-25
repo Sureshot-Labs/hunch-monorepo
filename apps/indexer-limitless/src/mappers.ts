@@ -518,7 +518,6 @@ function resolveLimitlessOutcome(
   market: TLimitlessMarketItem | TLimitlessMarket,
   outcomeTokens: { yes?: string; no?: string },
 ): "YES" | "NO" | undefined {
-  if (market.status !== "RESOLVED") return undefined;
   const winningOutcomeIndex = market.winningOutcomeIndex;
   if (winningOutcomeIndex == null) return undefined;
 
@@ -537,6 +536,12 @@ function resolveLimitlessOutcome(
   if (winningOutcomeIndex === 0) return "YES";
   if (winningOutcomeIndex === 1) return "NO";
   return undefined;
+}
+
+function isLimitlessResolved(
+  market: TLimitlessMarketItem | TLimitlessMarket,
+): boolean {
+  return market.status === "RESOLVED" || market.winningOutcomeIndex != null;
 }
 
 export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
@@ -585,7 +590,7 @@ export function mapLimitlessEventRow(lm: TLimitlessMarket): LimitlessEventRow {
     collateral_token_decimals: lm.collateralToken?.decimals || 6,
     neg_risk_request_id: lm.negRiskRequestId || null,
     neg_risk_market_id: lm.negRiskMarketId || null,
-    winning_outcome_index: lm.winningOutcomeIndex || null,
+    winning_outcome_index: lm.winningOutcomeIndex ?? null,
     og_image_uri: lm.ogImageURI || null,
     daily_reward: lm.dailyReward || null,
     outcome_tokens: lm.outcomeTokens || [],
@@ -650,7 +655,7 @@ export function mapLimitlessMarketRow(
     collateral_token_address: market.collateralToken?.address || null,
     collateral_token_decimals: market.collateralToken?.decimals || 6,
     neg_risk_request_id: market.negRiskRequestId || null,
-    winning_outcome_index: market.winningOutcomeIndex || null,
+    winning_outcome_index: market.winningOutcomeIndex ?? null,
     trade_type: market.tradeType ?? "clob",
     created_at: parseDate(market.createdAt),
     updated_at: parseDate(market.updatedAt),
@@ -744,8 +749,8 @@ export function mapTokens(marketUuid: string, yes: string, no: string) {
 export function mapToUnifiedEvent(lm: TLimitlessMarket): UnifiedEventRow {
   // Map Limitless status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
-  if (lm.expired) status = "CLOSED";
-  else if (lm.status === "RESOLVED") status = "SETTLED";
+  if (isLimitlessResolved(lm)) status = "SETTLED";
+  else if (lm.expired) status = "CLOSED";
 
   const volumeTotal =
     parseVolume(lm.volume, lm.volumeFormatted, lm.collateralToken?.decimals) ??
@@ -824,8 +829,8 @@ export function mapToUnifiedMarket(
 ): UnifiedMarketRow {
   // Map Limitless status to unified status
   let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
-  if (market.expired) status = "CLOSED";
-  else if (market.status === "RESOLVED") status = "SETTLED";
+  if (isLimitlessResolved(market)) status = "SETTLED";
+  else if (market.expired) status = "CLOSED";
 
   const volumeTotal = market.volumeFormatted
     ? parseFloat(market.volumeFormatted)
