@@ -1802,9 +1802,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     run: async () => {
       const p = policy();
       const updates: Array<Record<string, unknown>> = [];
+      let selectSql = "";
       const db = {
         query: async (sql: string, params?: unknown[]) => {
           if (/select\s+n\.id\s+as\s+note_id/i.test(sql)) {
+            selectSql = sql;
             return {
               rows: [
                 {
@@ -1853,9 +1855,92 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(stats.considered, 1);
       assert.equal(stats.evaluated, 1);
       assert.equal(stats.wrong, 1);
+      assert.match(selectSql, /not \(coalesce\(n\.metrics/i);
+      assert.match(selectSql, /resolvedEvaluation,outcome/i);
       assert.equal(updates[0]?.outcome, "wrong");
       assert.equal(updates[0]?.marketType, "single_game_sports");
       assert.equal(updates[0]?.sideAdjustedPriceDelta, -0.48);
+    },
+  },
+  {
+    name: "resolved evaluator skips unchanged evaluation writes",
+    run: async () => {
+      const p = policy();
+      let updateCount = 0;
+      const db = {
+        query: async (sql: string) => {
+          if (/select\s+n\.id\s+as\s+note_id/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  note_id: "00000000-0000-4000-8000-000000000082",
+                  direction: "down",
+                  confidence: 0.74,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  metrics: {
+                    market: { yesProbability: 0.52 },
+                    resolvedEvaluation: {
+                      version: 1,
+                      evaluatedAt: "2026-01-02T00:00:00.000Z",
+                      outcome: "wrong",
+                      signalSide: "NO",
+                      direction: "down",
+                      confidence: 0.74,
+                      marketId: "polymarket:resolved",
+                      marketType: "single_game_sports",
+                      hoursToCloseAtNote: 3,
+                      noteYesProbability: 0.52,
+                      finalYesProbability: 1,
+                      priceDelta: 0.48,
+                      sideAdjustedPriceDelta: -0.48,
+                      resolvedOutcome: "YES",
+                      resolvedOutcomePct: null,
+                      acceptingOrders: false,
+                      actorMode: "single_holder",
+                      primaryHolderPositionUsd: 32_000,
+                      primaryHolderPnl30dUsd: 120_000,
+                      primaryHolderOpenPnlUsd: 1_000,
+                    },
+                  },
+                  model_meta: {
+                    primary_holder_credentials: {
+                      mode: "single_holder",
+                      primaryHolder: {
+                        positionUsd: 32_000,
+                        pnl30dUsd: 120_000,
+                        openPnlUsd: 1_000,
+                      },
+                    },
+                  },
+                  market_id: "polymarket:resolved",
+                  market_title: "Mexico",
+                  event_title: "Czechia vs. Mexico",
+                  category: "Sports",
+                  close_time: new Date("2026-01-01T03:00:00.000Z"),
+                  expiration_time: null,
+                  best_bid: 0.999,
+                  best_ask: 1,
+                  last_price: 1,
+                  resolved_outcome: "YES",
+                  resolved_outcome_pct: null,
+                  accepting_orders: false,
+                },
+              ],
+            };
+          }
+          if (/update\s+ai_notes/i.test(sql)) {
+            updateCount += 1;
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+
+      const stats = await evaluateResolvedHolderResearchNotes(db, p);
+      assert.equal(stats.considered, 1);
+      assert.equal(stats.evaluated, 0);
+      assert.equal(stats.wrong, 1);
+      assert.equal(updateCount, 0);
     },
   },
   {

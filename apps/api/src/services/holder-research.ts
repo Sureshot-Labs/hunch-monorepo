@@ -3734,6 +3734,29 @@ function evaluateResolvedSignalRow(
   };
 }
 
+function stableEvaluationString(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(normalize);
+    if (!input || typeof input !== "object") return input;
+    return Object.fromEntries(
+      Object.entries(input as Record<string, unknown>)
+        .filter(([key]) => key !== "evaluatedAt")
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, normalize(nested)]),
+    );
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function hasSameResolvedEvaluation(
+  metrics: unknown,
+  evaluation: Record<string, unknown>,
+): boolean {
+  const previous = objectRecord(objectRecord(metrics).resolvedEvaluation);
+  if (Object.keys(previous).length === 0) return false;
+  return stableEvaluationString(previous) === stableEvaluationString(evaluation);
+}
+
 export async function evaluateResolvedHolderResearchNotes(
   client: Queryable,
   policy: HolderResearchPolicy,
@@ -3784,6 +3807,13 @@ export async function evaluateResolvedHolderResearchNotes(
         and n.producer_type = 'holder_research'
         and n.created_at >= now() - ($1::numeric * interval '1 hour')
         and (
+          not (coalesce(n.metrics, '{}'::jsonb) ? 'resolvedEvaluation')
+          or (
+            n.metrics #>> '{resolvedEvaluation,outcome}' = 'unknown'
+            and n.updated_at <= now() - interval '24 hours'
+          )
+        )
+        and (
           m.resolved_outcome is not null
           or m.resolved_outcome_pct is not null
           or not (${acceptingSql})
@@ -3801,8 +3831,9 @@ export async function evaluateResolvedHolderResearchNotes(
     if (outcome === "correct") stats.correct += 1;
     else if (outcome === "wrong") stats.wrong += 1;
     else stats.unknown += 1;
+    if (hasSameResolvedEvaluation(row.metrics, evaluation)) continue;
     try {
-      await client.query(
+      const result = await client.query(
         `
           update ai_notes
           set
@@ -3817,7 +3848,9 @@ export async function evaluateResolvedHolderResearchNotes(
         `,
         [row.note_id, JSON.stringify(evaluation)],
       );
-      stats.evaluated += 1;
+      const rowCount =
+        typeof result.rowCount === "number" ? result.rowCount : 1;
+      if (rowCount > 0) stats.evaluated += 1;
     } catch {
       stats.errors += 1;
     }
