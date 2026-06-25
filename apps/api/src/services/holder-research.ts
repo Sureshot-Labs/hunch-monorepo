@@ -24,6 +24,7 @@ import {
   makeWalletMarketTypeMetricKey,
   type WalletMarketTypeMetric,
 } from "./wallet-market-type-metrics.js";
+import { buildWalletMmSuspectedSql } from "./wallet-intel-mm.js";
 import { loadLatestWalletPositionNowMap } from "./wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "./wallet-position-ledger.js";
 
@@ -95,6 +96,7 @@ export type HolderResearchHolder = {
   ownerAddress: string | null;
   walletUsdLikeBalance: number | null;
   ownerUsdLikeBalance: number | null;
+  mmSuspected: boolean;
   marketTypeMetrics30d?: WalletMarketTypeMetric | null;
   relatedOpenPositions: HolderResearchRelatedPosition[];
 };
@@ -564,6 +566,7 @@ export function isSharpHolder(
     | "resolvedEdgeSampleCount30d"
     | "resolvedStakeUsd30d"
     | "trades30d"
+    | "mmSuspected"
   >,
   policy: Pick<
     HolderResearchPolicy,
@@ -576,6 +579,7 @@ export function isSharpHolder(
   >,
 ): boolean {
   return (
+    !holder.mmSuspected &&
     holder.positionUsd >= policy.minHolderPositionUsd &&
     (holder.resolvedWinRateEdge30d ?? -Infinity) >=
       policy.minResolvedWinRateEdge30d &&
@@ -659,16 +663,17 @@ function bestHolderForSide(
   market: HolderResearchMarketInput,
   side: HolderResearchSideKey,
 ): HolderResearchHolder | null {
+  const sideHolders = market.holders.filter((holder) => holder.side === side);
+  const nonMmHolders = sideHolders.filter((holder) => !holder.mmSuspected);
+  const ranked = nonMmHolders.length > 0 ? nonMmHolders : sideHolders;
   return (
-    market.holders
-      .filter((holder) => holder.side === side)
-      .sort((a, b) => {
-        const edgeDelta =
-          (b.resolvedWinRateEdge30d ?? -Infinity) -
-          (a.resolvedWinRateEdge30d ?? -Infinity);
-        if (edgeDelta !== 0) return edgeDelta;
-        return b.positionUsd - a.positionUsd;
-      })[0] ?? null
+    ranked.sort((a, b) => {
+      const edgeDelta =
+        (b.resolvedWinRateEdge30d ?? -Infinity) -
+        (a.resolvedWinRateEdge30d ?? -Infinity);
+      if (edgeDelta !== 0) return edgeDelta;
+      return b.positionUsd - a.positionUsd;
+    })[0] ?? null
   );
 }
 
@@ -722,6 +727,7 @@ export function buildHolderResearchInputDigest(
       ownerAddress: holder.ownerAddress,
       walletUsdLikeBalance: holder.walletUsdLikeBalance,
       ownerUsdLikeBalance: holder.ownerUsdLikeBalance,
+      mmSuspected: holder.mmSuspected,
     })),
   };
   return createHash("sha256").update(JSON.stringify(digestInput)).digest("hex");
@@ -819,6 +825,7 @@ function buildHolderEntryContext(candidate: HolderResearchCandidate) {
       approxReliable: holder.approxReliable,
       approxPnlSource: holder.approxPnlSource,
       snapshotAt: holder.positionSnapshotAt,
+      mmSuspected: holder.mmSuspected,
       marketTypeMetrics30d: holder.marketTypeMetrics30d,
     }));
 }
@@ -2150,6 +2157,7 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
         ownerAddress: safeText(record.ownerAddress),
         walletUsdLikeBalance: toNumber(record.walletUsdLikeBalance),
         ownerUsdLikeBalance: toNumber(record.ownerUsdLikeBalance),
+        mmSuspected: record.mmSuspected === true,
         marketTypeMetrics30d: null,
         relatedOpenPositions: [],
       };
@@ -2242,6 +2250,17 @@ export async function loadHolderResearchCandidateMarkets(
           sel.metrics_resolved_edge_z_score_30d,
           sel.metrics_resolved_edge_sample_count_30d,
           sel.metrics_resolved_stake_usd_30d,
+          sel.exposure_usd,
+          sel.hedged_notional_usd,
+          sel.hedge_ratio,
+          sel.two_sided_markets,
+          ${buildWalletMmSuspectedSql({
+            exposureUsdSql: "sel.exposure_usd",
+            hedgedNotionalUsdSql: "sel.hedged_notional_usd",
+            hedgeRatioSql: "sel.hedge_ratio",
+            twoSidedMarketsSql: "sel.two_sided_markets",
+            exposureThresholdSql: "$2::numeric",
+          })} as mm_suspected,
           ons.wallet_kind,
           ons.owner_address,
           ons.wallet_usd_like_balance,
@@ -2313,6 +2332,11 @@ export async function loadHolderResearchCandidateMarkets(
           latest.metrics_resolved_edge_z_score_30d,
           latest.metrics_resolved_edge_sample_count_30d,
           latest.metrics_resolved_stake_usd_30d,
+          latest.exposure_usd,
+          latest.hedged_notional_usd,
+          latest.hedge_ratio,
+          latest.two_sided_markets,
+          latest.mm_suspected,
           latest.wallet_kind,
           latest.owner_address,
           latest.wallet_usd_like_balance,
@@ -2340,6 +2364,7 @@ export async function loadHolderResearchCandidateMarkets(
           count(distinct wallet_id) as wallets,
           count(*) filter (
             where position_usd >= $2::numeric
+              and not coalesce(mm_suspected, false)
               and coalesce(metrics_resolved_win_rate_edge_30d, -1000) >= $3::numeric
               and coalesce(metrics_resolved_edge_z_score_30d, -1000) >= $4::numeric
               and coalesce(metrics_resolved_edge_sample_count_30d, -1) >= $5::integer
@@ -2348,17 +2373,28 @@ export async function loadHolderResearchCandidateMarkets(
           ) as sharp_holders,
           sum(position_usd) filter (
             where position_usd >= $2::numeric
+              and not coalesce(mm_suspected, false)
               and coalesce(metrics_resolved_win_rate_edge_30d, -1000) >= $3::numeric
               and coalesce(metrics_resolved_edge_z_score_30d, -1000) >= $4::numeric
               and coalesce(metrics_resolved_edge_sample_count_30d, -1) >= $5::integer
               and coalesce(metrics_resolved_stake_usd_30d, 0) >= $6::numeric
               and coalesce(metrics_trades_30d, -1) >= $7::integer
           ) as sharp_usd,
-          max(metrics_resolved_win_rate_edge_30d) as best_edge,
-          max(metrics_resolved_edge_z_score_30d) as best_z_score,
-          max(metrics_resolved_edge_sample_count_30d) as best_sample_count,
-          max(metrics_resolved_stake_usd_30d) as best_resolved_stake_usd,
-          max(metrics_trades_30d) as best_trades_30d
+          max(metrics_resolved_win_rate_edge_30d) filter (
+            where not coalesce(mm_suspected, false)
+          ) as best_edge,
+          max(metrics_resolved_edge_z_score_30d) filter (
+            where not coalesce(mm_suspected, false)
+          ) as best_z_score,
+          max(metrics_resolved_edge_sample_count_30d) filter (
+            where not coalesce(mm_suspected, false)
+          ) as best_sample_count,
+          max(metrics_resolved_stake_usd_30d) filter (
+            where not coalesce(mm_suspected, false)
+          ) as best_resolved_stake_usd,
+          max(metrics_trades_30d) filter (
+            where not coalesce(mm_suspected, false)
+          ) as best_trades_30d
         from open_positions
         group by market_id, side
       ),
@@ -2402,6 +2438,7 @@ export async function loadHolderResearchCandidateMarkets(
             order by
               (
                 op.position_usd >= $2::numeric
+                and not coalesce(op.mm_suspected, false)
                 and coalesce(op.metrics_resolved_win_rate_edge_30d, -1000) >= $3::numeric
                 and coalesce(op.metrics_resolved_edge_z_score_30d, -1000) >= $4::numeric
                 and coalesce(op.metrics_resolved_edge_sample_count_30d, -1) >= $5::integer
@@ -2434,7 +2471,8 @@ export async function loadHolderResearchCandidateMarkets(
               'walletKind', wallet_kind,
               'ownerAddress', owner_address,
               'walletUsdLikeBalance', wallet_usd_like_balance,
-              'ownerUsdLikeBalance', owner_usd_like_balance
+              'ownerUsdLikeBalance', owner_usd_like_balance,
+              'mmSuspected', mm_suspected
             )
             order by holder_rank asc
           ) filter (where holder_rank <= 8) as top_holders,
@@ -3192,6 +3230,7 @@ export function buildHolderResearchWalletTargets(
       winRate30d: holder.winRate30d,
       walletKind: holder.walletKind,
       ownerAddress: holder.ownerAddress,
+      mmSuspected: holder.mmSuspected,
       marketTypeMetrics30d: holder.marketTypeMetrics30d,
     },
   }));

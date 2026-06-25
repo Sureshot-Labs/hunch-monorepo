@@ -91,6 +91,9 @@ import {
 } from "./services/wallet-intel-internal-hunch.js";
 import {
   MM_HEDGE_RATIO_MIN,
+  MM_LARGE_SINGLE_MARKET_HEDGED_USD_MIN,
+  MM_MATERIAL_HEDGED_NOTIONAL_USD_MIN,
+  MM_MATERIAL_HEDGE_RATIO_MIN,
   MM_TWO_SIDED_MARKETS_MIN,
   buildWalletMmDiagnostics,
   computeMmSuspected,
@@ -3112,6 +3115,7 @@ const tests: TestCase[] = [
       assert.equal(
         computeMmSuspected({
           hedgeRatio: MM_HEDGE_RATIO_MIN,
+          hedgedNotionalUsd: 0,
           twoSidedMarkets: MM_TWO_SIDED_MARKETS_MIN,
           exposureUsd: 100_000,
           chain: "polygon",
@@ -3122,8 +3126,42 @@ const tests: TestCase[] = [
       assert.equal(
         computeMmSuspected({
           hedgeRatio: MM_HEDGE_RATIO_MIN - 0.01,
+          hedgedNotionalUsd: 0,
           twoSidedMarkets: MM_TWO_SIDED_MARKETS_MIN,
           exposureUsd: 100_000,
+          chain: "polygon",
+          refreshPolicy,
+        }),
+        false,
+      );
+      assert.equal(
+        computeMmSuspected({
+          hedgeRatio: MM_MATERIAL_HEDGE_RATIO_MIN,
+          hedgedNotionalUsd: MM_MATERIAL_HEDGED_NOTIONAL_USD_MIN,
+          twoSidedMarkets: 2,
+          exposureUsd: 100_000,
+          chain: "polygon",
+          refreshPolicy,
+        }),
+        true,
+      );
+      assert.equal(
+        computeMmSuspected({
+          hedgeRatio: MM_MATERIAL_HEDGE_RATIO_MIN,
+          hedgedNotionalUsd: MM_LARGE_SINGLE_MARKET_HEDGED_USD_MIN,
+          twoSidedMarkets: 1,
+          exposureUsd: 100_000,
+          chain: "polygon",
+          refreshPolicy,
+        }),
+        true,
+      );
+      assert.equal(
+        computeMmSuspected({
+          hedgeRatio: 0.99,
+          hedgedNotionalUsd: 100,
+          twoSidedMarkets: 10,
+          exposureUsd: 100,
           chain: "polygon",
           refreshPolicy,
         }),
@@ -3140,6 +3178,10 @@ const tests: TestCase[] = [
       });
       assert.equal(diagnostics.mmSuspected, true);
       assert.equal(diagnostics.thresholds.exposureUsdMin, 100_000);
+      assert.equal(
+        diagnostics.thresholds.materialHedgedNotionalUsdMin,
+        MM_MATERIAL_HEDGED_NOTIONAL_USD_MIN,
+      );
     },
   },
   {

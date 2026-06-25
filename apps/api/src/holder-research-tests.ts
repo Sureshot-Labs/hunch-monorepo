@@ -106,6 +106,7 @@ function holder(
     ownerAddress: "0xowner",
     walletUsdLikeBalance: 500,
     ownerUsdLikeBalance: 10_000,
+    mmSuspected: false,
     relatedOpenPositions: [],
     ...overrides,
   };
@@ -228,6 +229,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         ),
         false,
       );
+      assert.equal(isSharpHolder(holder("YES", { mmSuspected: true }), p), false);
     },
   },
   {

@@ -21,6 +21,10 @@ import {
   type RepairMarketRef,
   refreshWalletMetricsForMarkets,
 } from "./services/market-repair-wallet-metrics.js";
+import {
+  SHARED_RATE_LIMIT_MAX_ATTEMPTS,
+  SharedRateLimitBackoff,
+} from "./services/shared-rate-limit-backoff.js";
 
 type Venue = "polymarket" | "limitless" | "kalshi";
 
@@ -67,6 +71,7 @@ const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_API_TIMEOUT_SEC = 15;
 const DEFAULT_STATEMENT_TIMEOUT_SEC = 300;
 const DFLOW_BATCH_SIZE = 100;
+const LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS = SHARED_RATE_LIMIT_MAX_ATTEMPTS;
 const ALLOWED_VENUES = new Set<Venue>([
   "polymarket",
   "limitless",
@@ -321,20 +326,42 @@ async function validatePolymarket(
 async function validateLimitless(
   candidate: CandidateRow,
   timeoutMs: number,
+  rateLimitBackoff: SharedRateLimitBackoff,
 ): Promise<ValidationRow> {
   const marketRef = candidate.slug ?? candidate.venue_market_id;
   if (!marketRef) return buildValidation(candidate, "limitless_missing_ref");
 
-  try {
-    const res = await limitlessRequest({
-      method: "GET",
-      requestPath: `/markets/${encodeURIComponent(marketRef)}`,
-      auth: "none",
-      allowRetry: false,
-      timeoutMs,
-    });
+  for (
+    let attempt = 0;
+    attempt < LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS;
+    attempt += 1
+  ) {
+    let res: Awaited<ReturnType<typeof limitlessRequest>>;
+    try {
+      await rateLimitBackoff.wait();
+      res = await limitlessRequest({
+        method: "GET",
+        requestPath: `/markets/${encodeURIComponent(marketRef)}`,
+        auth: "none",
+        allowRetry: false,
+        timeoutMs,
+      });
+    } catch (error) {
+      return buildValidation(
+        candidate,
+        `limitless_error:${errorMessage(error)}`,
+      );
+    }
 
     if (!res.ok) {
+      if (
+        res.status === 429 &&
+        attempt < LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS - 1
+      ) {
+        rateLimitBackoff.noteRateLimit();
+        continue;
+      }
+
       const message = extractLimitlessMessage(res.payload);
       return buildValidation(
         candidate,
@@ -342,6 +369,7 @@ async function validateLimitless(
       );
     }
 
+    rateLimitBackoff.noteSuccess();
     const market = firstRecord(res.payload);
     if (!market) return buildValidation(candidate, "limitless_not_found");
     return buildValidation(
@@ -349,12 +377,9 @@ async function validateLimitless(
       "limitless_checked",
       resolveLimitlessOutcome(market),
     );
-  } catch (error) {
-    return buildValidation(
-      candidate,
-      `limitless_error:${errorMessage(error)}`,
-    );
   }
+
+  return buildValidation(candidate, "limitless_error:429");
 }
 
 function findDflowMarket(
@@ -476,13 +501,17 @@ async function validateCandidates(
     (candidate) => candidate.venue === "limitless",
   );
   const kalshi = candidates.filter((candidate) => candidate.venue === "kalshi");
+  const limitlessRateLimitBackoff = new SharedRateLimitBackoff({
+    label: "limitless",
+    logPrefix: "[market:resolution-outcome-repair]",
+  });
 
   const [polymarketRows, limitlessRows, kalshiRows] = await Promise.all([
     mapWithConcurrency(polymarket, args.concurrency, (candidate) =>
       validatePolymarket(candidate, timeoutMs),
     ),
     mapWithConcurrency(limitless, args.concurrency, (candidate) =>
-      validateLimitless(candidate, timeoutMs),
+      validateLimitless(candidate, timeoutMs, limitlessRateLimitBackoff),
     ),
     mapWithConcurrency(
       chunkArray(kalshi, DFLOW_BATCH_SIZE),

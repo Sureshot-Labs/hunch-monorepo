@@ -20,6 +20,10 @@ import {
   type RepairMarketRef,
   refreshWalletMetricsForMarkets,
 } from "./services/market-repair-wallet-metrics.js";
+import {
+  SHARED_RATE_LIMIT_MAX_ATTEMPTS,
+  SharedRateLimitBackoff,
+} from "./services/shared-rate-limit-backoff.js";
 
 type UnifiedStatus = "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -83,10 +87,7 @@ const DEFAULT_SAMPLE_LIMIT = 20;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_API_TIMEOUT_SEC = 15;
 const DFLOW_BATCH_SIZE = 100;
-const LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS = 5;
-const LIMITLESS_RATE_LIMIT_BASE_BACKOFF_MS = 2_000;
-const LIMITLESS_RATE_LIMIT_MAX_BACKOFF_MS = 30_000;
-const LIMITLESS_RATE_LIMIT_JITTER_MS = 500;
+const LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS = SHARED_RATE_LIMIT_MAX_ATTEMPTS;
 const ALLOWED_VENUES = new Set<Venue>([
   "polymarket",
   "limitless",
@@ -242,10 +243,6 @@ function logSection(title: string): void {
   console.log(`\n[market:active-status-repair] ${title}`);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -295,45 +292,6 @@ function recordArray(value: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(value.markets)) return value.markets.filter(isRecord);
   if (Array.isArray(value.data)) return value.data.filter(isRecord);
   return [];
-}
-
-class SharedRateLimitBackoff {
-  private consecutiveRateLimits = 0;
-  private nextAllowedAtMs = 0;
-  private lastLoggedUntilMs = 0;
-
-  constructor(private readonly label: string) {}
-
-  async wait(): Promise<void> {
-    const waitMs = Math.ceil(this.nextAllowedAtMs - Date.now());
-    if (waitMs <= 0) return;
-    const jitterMs = Math.floor(Math.random() * LIMITLESS_RATE_LIMIT_JITTER_MS);
-    await sleep(waitMs + jitterMs);
-  }
-
-  noteRateLimit(): void {
-    this.consecutiveRateLimits += 1;
-    const backoffMs = Math.min(
-      LIMITLESS_RATE_LIMIT_MAX_BACKOFF_MS,
-      LIMITLESS_RATE_LIMIT_BASE_BACKOFF_MS *
-        2 ** Math.max(0, this.consecutiveRateLimits - 1),
-    );
-    const blockedUntilMs = Date.now() + backoffMs;
-    if (blockedUntilMs <= this.nextAllowedAtMs) return;
-
-    this.nextAllowedAtMs = blockedUntilMs;
-    if (blockedUntilMs - this.lastLoggedUntilMs < 1_000) return;
-
-    this.lastLoggedUntilMs = blockedUntilMs;
-    console.warn(`[market:active-status-repair] ${this.label} rate limited`, {
-      backoffMs,
-      until: new Date(blockedUntilMs).toISOString(),
-    });
-  }
-
-  noteSuccess(): void {
-    this.consecutiveRateLimits = 0;
-  }
 }
 
 async function fetchJsonWithTimeout(
@@ -964,7 +922,10 @@ async function validateCandidates(
     (candidate) => candidate.venue === "limitless",
   );
   const kalshi = candidates.filter((candidate) => candidate.venue === "kalshi");
-  const limitlessRateLimitBackoff = new SharedRateLimitBackoff("limitless");
+  const limitlessRateLimitBackoff = new SharedRateLimitBackoff({
+    label: "limitless",
+    logPrefix: "[market:active-status-repair]",
+  });
 
   const [polymarketRows, limitlessRows, kalshiRows] = await Promise.all([
     mapWithConcurrency(polymarket, args.concurrency, (candidate) =>

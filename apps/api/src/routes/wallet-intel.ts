@@ -91,8 +91,7 @@ import {
 import { makeWalletPositionLedgerKey } from "../services/wallet-position-ledger.js";
 import {
   buildWalletMmDiagnostics,
-  MM_HEDGE_RATIO_MIN,
-  MM_TWO_SIDED_MARKETS_MIN,
+  buildWalletMmSuspectedSql,
   type WalletMmDiagnostics,
 } from "../services/wallet-intel-mm.js";
 import {
@@ -2492,16 +2491,16 @@ async function loadTrackedWalletPositioning(input: {
     const whaleUsdSolanaParam = addParam(
       refreshPolicy.effective.whaleUsdSolana,
     );
-    const candidateMmSql = `
-      (
-        coalesce(wis.hedge_ratio, 0) >= ${MM_HEDGE_RATIO_MIN}
-        and coalesce(wis.two_sided_markets, 0) >= ${MM_TWO_SIDED_MARKETS_MIN}
-        and coalesce(wis.exposure_usd, 0) >= case
-          when w.chain = 'solana' then ${whaleUsdSolanaParam}::numeric
-          else ${whaleUsdParam}::numeric
-        end
-      )
-    `;
+    const candidateMmSql = buildWalletMmSuspectedSql({
+      exposureUsdSql: "wis.exposure_usd",
+      hedgedNotionalUsdSql: "wis.hedged_notional_usd",
+      hedgeRatioSql: "wis.hedge_ratio",
+      twoSidedMarketsSql: "wis.two_sided_markets",
+      exposureThresholdSql: `case
+        when w.chain = 'solana' then ${whaleUsdSolanaParam}::numeric
+        else ${whaleUsdParam}::numeric
+      end`,
+    });
     if (query.mmMode === "exclude") {
       candidateClauses.push(`not ${candidateMmSql}`);
     } else {
@@ -4104,6 +4103,7 @@ function buildWalletOwnerResolutionJoinSql(includeDetails = false): string {
                 from wallets w2
                 where w.chain <> 'solana'
                   and ${linkedOwnerAddressSql} ~* '^0x[0-9a-f]{40}$'
+                  and w2.chain <> 'solana'
                   and w2.chain = w.chain
                   and lower(w2.address) = lower(${linkedOwnerAddressSql})
                 limit 1
@@ -5469,22 +5469,18 @@ async function filterWalletIdsByMmExclusion(
       from wallet_set ws
       join wallets w on w.id = ws.wallet_id
       left join wallet_position_exposure wpe on wpe.wallet_id = ws.wallet_id
-      where not (
-        coalesce(wpe.hedge_ratio, 0) >= $2::numeric
-        and coalesce(wpe.two_sided_markets, 0) >= $3::int
-        and coalesce(wpe.exposure_usd, 0) >= case
-          when w.chain = 'solana' then $5::numeric
-          else $4::numeric
-        end
-      )
+      where not ${buildWalletMmSuspectedSql({
+        exposureUsdSql: "wpe.exposure_usd",
+        hedgedNotionalUsdSql: "wpe.hedged_notional_usd",
+        hedgeRatioSql: "wpe.hedge_ratio",
+        twoSidedMarketsSql: "wpe.two_sided_markets",
+        exposureThresholdSql: `case
+          when w.chain = 'solana' then $3::numeric
+          else $2::numeric
+        end`,
+      })}
     `,
-    [
-      walletIds,
-      MM_HEDGE_RATIO_MIN,
-      MM_TWO_SIDED_MARKETS_MIN,
-      refreshPolicy.whaleUsd,
-      refreshPolicy.whaleUsdSolana,
-    ],
+    [walletIds, refreshPolicy.whaleUsd, refreshPolicy.whaleUsdSolana],
   );
   return rows.rows.map((row) => row.wallet_id);
 }
