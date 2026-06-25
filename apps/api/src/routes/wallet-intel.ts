@@ -84,6 +84,9 @@ import {
 } from "../services/wallet-metrics-constants.js";
 import { loadWalletOpenPositionStatsPreferRollupMap } from "../services/wallet-open-position-stats.js";
 import {
+  extractWalletIdentityDisplayFields,
+} from "../services/wallet-identity-names.js";
+import {
   loadLatestWalletPositionNowMap,
   loadWalletPositionApproxMetrics,
   type WalletPositionNow,
@@ -138,6 +141,7 @@ type WalletRow = {
   address: string;
   chain: string;
   label: string | null;
+  metadata?: unknown | null;
   is_system_flagged: boolean;
   first_seen_at: Date;
   last_seen_at: Date;
@@ -337,6 +341,7 @@ type WalletActivityRouteRow = {
   user_name: string | null;
   user_label: string | null;
   user_label_color: WalletLabelColor | null;
+  wallet_metadata: unknown | null;
   profile_label: string | null;
   venue: string;
   market_id: string;
@@ -379,6 +384,7 @@ type WalletPositionRouteRow = {
   user_name: string | null;
   user_label: string | null;
   user_label_color: WalletLabelColor | null;
+  wallet_metadata: unknown | null;
   profile_label: string | null;
   venue: string;
   market_id: string;
@@ -415,6 +421,9 @@ type WalletPositionBaseRouteItem = {
   userName: string | null;
   userLabel: string | null;
   userLabelColor: WalletLabelColor | null;
+  identityDisplayName: string | null;
+  identityDisplayNameSource: string | null;
+  identityProfileUrl: string | null;
   profileLabel: string | null;
   venue: string;
   marketId: string;
@@ -515,6 +524,9 @@ type WhaleWalletItem = {
   userName: string | null;
   userLabel: string | null;
   userLabelColor: WalletLabelColor | null;
+  identityDisplayName: string | null;
+  identityDisplayNameSource: string | null;
+  identityProfileUrl: string | null;
   followersCount: number | null;
   isSystemFlagged: boolean;
   firstSeenAt: Date;
@@ -681,6 +693,9 @@ type WalletActivitySummaryItem = {
   userName: string | null;
   userLabel: string | null;
   userLabelColor: WalletLabelColor | null;
+  identityDisplayName: string | null;
+  identityDisplayNameSource: string | null;
+  identityProfileUrl: string | null;
   followersCount: number | null;
   isSystemFlagged: boolean;
   firstSeenAt: Date;
@@ -729,6 +744,9 @@ type WalletActivitySignalItem = {
   userName: string | null;
   userLabel: string | null;
   userLabelColor: WalletLabelColor | null;
+  identityDisplayName: string | null;
+  identityDisplayNameSource: string | null;
+  identityProfileUrl: string | null;
   isSystemFlagged: boolean;
   firstSeenAt: Date;
   lastSeenAt: Date;
@@ -871,7 +889,7 @@ async function findWalletByAddressAndChain(
 ): Promise<WalletRow | null> {
   const result = await client.query<WalletRow>(
     `
-      select id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+      select id, address, chain, label, metadata, is_system_flagged, first_seen_at, last_seen_at
       from wallets
       where address = $1 and chain = $2
       limit 1
@@ -893,6 +911,7 @@ async function findWalletsByAddress(
         w.address,
         w.chain,
         w.label,
+        w.metadata,
         w.is_system_flagged,
         w.first_seen_at,
         w.last_seen_at,
@@ -930,7 +949,7 @@ async function ensureWalletByAddressAndChain(
       values ($1, $2, null)
       on conflict (address, chain)
       do nothing
-      returning id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+      returning id, address, chain, label, metadata, is_system_flagged, first_seen_at, last_seen_at
     `,
     [address, chain],
   );
@@ -1545,6 +1564,7 @@ type WalletPositioningRow = {
   address: string;
   chain: string;
   wallet_label: string | null;
+  wallet_metadata: unknown | null;
   profile_label: string | null;
   wallet_kind: string | null;
   owner_address: string | null;
@@ -1658,6 +1678,9 @@ type PositioningHolder = {
   address: string;
   chain: string;
   label: string | null;
+  identityDisplayName: string | null;
+  identityDisplayNameSource: string | null;
+  identityProfileUrl: string | null;
   profileLabel: string | null;
   walletKind: string | null;
   ownerAddress: string | null;
@@ -2634,10 +2657,11 @@ async function loadTrackedWalletPositioning(input: {
       candidate_wallets as materialized (
         select
           w.id as wallet_id,
-          w.address,
-          w.chain,
-          w.label as wallet_label,
-          wp.profile->>'label_short' as profile_label,
+	          w.address,
+	          w.chain,
+	          w.label as wallet_label,
+	          w.metadata as wallet_metadata,
+	          wp.profile->>'label_short' as profile_label,
           wos.wallet_kind,
           coalesce(wos.owner_address, owner.owner_address) as owner_address,
           coalesce(wos.owner_wallet_id, owner.owner_wallet_id) as owner_wallet_id,
@@ -2727,10 +2751,11 @@ async function loadTrackedWalletPositioning(input: {
       )
       select
         lp.wallet_id,
-        lp.address,
-        lp.chain,
-        lp.wallet_label,
-        lp.profile_label,
+	        lp.address,
+	        lp.chain,
+	        lp.wallet_label,
+	        lp.wallet_metadata,
+	        lp.profile_label,
         lp.wallet_kind,
         lp.owner_address,
         lp.owner_wallet_id,
@@ -2853,6 +2878,7 @@ async function loadTrackedWalletPositioning(input: {
       address: row.address,
       chain: row.chain,
       label: row.wallet_label,
+      ...extractWalletIdentityDisplayFields(row.wallet_metadata, row.wallet_label),
       profileLabel: row.profile_label,
       ...buildWalletOnchainFields({
         chain: row.chain,
@@ -3923,10 +3949,13 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 
 function walletIntelCacheKey(
   routeKey:
+    | "wallets-profile"
     | "wallets-whales"
     | "wallets-activity-summary"
     | "wallets-activity-summary-stats"
-    | "wallets-activity-signals",
+    | "wallets-activity-signals"
+    | "wallets-positions"
+    | "wallets-positions-history",
   userId: string,
   query: unknown,
 ): string {
@@ -4165,6 +4194,7 @@ function buildSlimWhaleSelectorSql(
                 w.address,
                 w.chain,
                 w.label,
+                w.metadata,
                 null::text as user_name,
                 null::text as user_label_color,
                 w.is_system_flagged,
@@ -4211,6 +4241,7 @@ function buildSlimWhaleSelectorSql(
                 w.address,
                 w.chain,
                 w.label,
+                w.metadata,
                 null::text as user_name,
                 null::text as user_label_color,
                 w.is_system_flagged,
@@ -4290,6 +4321,7 @@ function buildSlimWhaleSelectorWithSnapshotShortlistSql(
                 w.address,
                 w.chain,
                 w.label,
+                w.metadata,
                 null::text as user_name,
                 null::text as user_label_color,
                 w.is_system_flagged,
@@ -4484,6 +4516,7 @@ function mapWhaleRowToItem(
     userName: row.user_name ?? null,
     userLabel: row.user_label ?? null,
     userLabelColor: row.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(row.metadata, row.label),
     followersCount: null,
     isSystemFlagged: row.is_system_flagged,
     firstSeenAt: row.first_seen_at,
@@ -4608,6 +4641,7 @@ function hydrateWhaleItemMetadata(
     userName: row.user_name ?? null,
     userLabel: row.user_label ?? null,
     userLabelColor: row.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(row.metadata, row.label),
     isSystemFlagged: row.is_system_flagged,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
@@ -4701,6 +4735,7 @@ export function buildWalletSummaryItem(
     userName: row.user_name ?? null,
     userLabel: row.user_label ?? null,
     userLabelColor: row.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(row.metadata, row.label),
     followersCount: options?.followersCount ?? null,
     isSystemFlagged: row.is_system_flagged,
     firstSeenAt: row.first_seen_at,
@@ -4781,6 +4816,11 @@ async function withWalletIntelQuerySettings<T>(
     throw error;
   }
 }
+
+export const walletPositionRouteQuerySettings = {
+  workMem: "48MB",
+  disableJit: true,
+} as const;
 
 type WalletIntelCacheStatusResult = Awaited<ReturnType<typeof getRedisStatus>>;
 
@@ -4883,6 +4923,10 @@ export function buildWalletSignalItemFromSignalRow(input: {
     userName: input.candidate.user_name ?? null,
     userLabel: input.candidate.user_label ?? null,
     userLabelColor: input.candidate.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(
+      input.candidate.metadata,
+      input.candidate.label,
+    ),
     isSystemFlagged: input.candidate.is_system_flagged,
     firstSeenAt: input.candidate.first_seen_at,
     lastSeenAt: input.candidate.last_seen_at,
@@ -4958,6 +5002,10 @@ export function buildWalletSignalItemFromTopChange(input: {
     userName: input.candidate.user_name ?? null,
     userLabel: input.candidate.user_label ?? null,
     userLabelColor: input.candidate.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(
+      input.candidate.metadata,
+      input.candidate.label,
+    ),
     isSystemFlagged: input.candidate.is_system_flagged,
     firstSeenAt: input.candidate.first_seen_at,
     lastSeenAt: input.candidate.last_seen_at,
@@ -5985,10 +6033,11 @@ async function loadWalletRowsByIds(
       )
       select
         w.id,
-        w.address,
-        w.chain,
-        w.label,
-        wn.name as user_name,
+	        w.address,
+	        w.chain,
+	        w.label,
+	        w.metadata,
+	        wn.name as user_name,
         wl.label as user_label,
         wl.color as user_label_color,
         w.is_system_flagged,
@@ -6299,6 +6348,7 @@ function mapWalletActivityRouteItems(rows: WalletActivityRouteRow[]) {
     userName: row.user_name ?? null,
     userLabel: row.user_label ?? null,
     userLabelColor: row.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(row.wallet_metadata, row.label),
     profileLabel: row.profile_label,
     venue: row.venue,
     marketId: row.market_id,
@@ -6415,6 +6465,7 @@ function mapWalletPositionBaseItems(
     userName: row.user_name ?? null,
     userLabel: row.user_label ?? null,
     userLabelColor: row.user_label_color ?? null,
+    ...extractWalletIdentityDisplayFields(row.wallet_metadata, row.label),
     profileLabel: row.profile_label,
     venue: row.venue,
     marketId: row.market_id,
@@ -7083,6 +7134,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
             isSystemFlagged: wallet.is_system_flagged,
             firstSeenAt: wallet.first_seen_at,
             lastSeenAt: wallet.last_seen_at,
@@ -7150,7 +7202,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       try {
         const walletResult = await client.query<WalletRow>(
           `
-            select id, address, chain, label, is_system_flagged, first_seen_at, last_seen_at
+            select id, address, chain, label, metadata, is_system_flagged, first_seen_at, last_seen_at
             from wallets
             where address = $1 and chain = $2
           `,
@@ -7207,6 +7259,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
             userLabel: label,
           },
           followed: true,
@@ -7344,6 +7397,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               address,
               chain,
               label: null,
+              identityDisplayName: null,
+              identityDisplayNameSource: null,
+              identityProfileUrl: null,
             },
             followed: false,
             userName: null,
@@ -7363,6 +7419,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
           },
           followed: meta.followed,
           userName: meta.user_name,
@@ -7452,6 +7509,9 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               address,
               chain,
               label: null,
+              identityDisplayName: null,
+              identityDisplayNameSource: null,
+              identityProfileUrl: null,
             },
             followed: false,
             userName: null,
@@ -7554,6 +7614,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
           },
           followed: meta.followed,
           userName: meta.user_name,
@@ -7646,6 +7707,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             walletId: wallet.id,
             address: wallet.address,
             chain: wallet.chain,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
           },
           note: {
             id: insertResult.rows[0].id,
@@ -7736,6 +7798,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             walletId: wallet.id,
             address: wallet.address,
             chain: wallet.chain,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
           },
           note: {
             id: updateResult.rows[0].id,
@@ -7875,6 +7938,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             userName: meta?.user_name ?? null,
             userLabel: meta?.user_label ?? null,
             userLabelColor: meta?.user_label_color ?? null,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
           };
         });
         const preferredWallet = preferredChain
@@ -8396,10 +8460,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                   `
                   select
                     w.id,
-                    w.address,
-                    w.chain,
-                    w.label,
-                    wn.name as user_name,
+	              w.address,
+	              w.chain,
+	              w.label,
+	              w.metadata,
+	              wn.name as user_name,
                     wl.label as user_label,
                     wl.color as user_label_color,
                     w.is_system_flagged,
@@ -8962,6 +9027,30 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const walletId = request.params.walletId;
       const query = request.query;
+      const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
+      const cacheKey = walletIntelCacheKey(
+        "wallets-profile",
+        userId ?? "anon",
+        { walletId, query },
+      );
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
+      }
+
       const client = await pool.connect();
       try {
         const wallet =
@@ -9103,7 +9192,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             }
           : (wallet.profile ?? null);
 
-        return reply.send({
+        const payload = {
           ok: true,
           wallet: {
             walletId: wallet.id,
@@ -9113,6 +9202,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             userName: wallet.user_name ?? null,
             userLabel: wallet.user_label ?? null,
             userLabelColor: wallet.user_label_color ?? null,
+            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
             followersCount: followerCountsMap.get(wallet.id) ?? 0,
             topLabelVariant: presentation.topLabelVariant,
             headlineTag: presentation.headlineTag,
@@ -9153,7 +9243,24 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 })
               : undefined,
           },
+        };
+        const body = JSON.stringify(payload);
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            body,
+            cacheTtlSec,
+          );
+        }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
         });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(body);
       } catch (error) {
         app.log.error({ error, walletId, userId }, "Failed to load wallet");
         reply.code(500);
@@ -10528,10 +10635,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           `
             select
               wa.wallet_id,
-              w.address,
-              w.chain,
-              w.label,
-              wn.name as user_name,
+	                w.address,
+	                w.chain,
+	                w.label,
+	                w.metadata as wallet_metadata,
+	                wn.name as user_name,
               wl.label as user_label,
               wl.color as user_label_color,
               wp.profile->>'label_short' as profile_label,
@@ -10872,6 +10980,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               w.address,
               w.chain,
               w.label,
+              w.metadata as wallet_metadata,
               null::text as user_name,
               null::text as user_label,
               null::text as user_label_color,
@@ -10973,6 +11082,30 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           error: "Authentication required when walletId is omitted",
         });
       }
+      const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
+      const cacheKey = walletIntelCacheKey(
+        "wallets-positions",
+        userId ?? "anon",
+        query,
+      );
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
+      }
+
       const params: Array<string | number | boolean | null> = [userId];
       let where = "";
       let idx = 2;
@@ -11071,10 +11204,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const client = await pool.connect();
       try {
-        const latestOnly = query.latest ?? true;
-        const sql = latestOnly
-          ? walletParam != null
-            ? `
+        const payload = await withWalletIntelQuerySettings(
+          client,
+          walletPositionRouteQuerySettings,
+          async () => {
+            const latestOnly = query.latest ?? true;
+            const sql = latestOnly
+              ? walletParam != null
+                ? `
               with candidate_venues(venue) as (
                 ${
                   venueParam != null
@@ -11106,6 +11243,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 w.address,
                 w.chain,
                 w.label,
+                w.metadata as wallet_metadata,
                 wn.name as user_name,
                 wl.label as user_label,
                 wl.color as user_label_color,
@@ -11168,7 +11306,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               limit $${limitParam}::integer
               offset $${offsetParam}::integer
             `
-            : `
+                : `
               with latest_snapshots as (
                 select
                   ws.wallet_id,
@@ -11183,6 +11321,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 w.address,
                 w.chain,
                 w.label,
+                w.metadata as wallet_metadata,
                 wn.name as user_name,
                 wl.label as user_label,
                 wl.color as user_label_color,
@@ -11245,12 +11384,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               limit $${limitParam}::integer
               offset $${offsetParam}::integer
             `
-          : `
+              : `
               select
                 ws.wallet_id,
                 w.address,
                 w.chain,
                 w.label,
+                w.metadata as wallet_metadata,
                 wn.name as user_name,
                 wl.label as user_label,
                 wl.color as user_label_color,
@@ -11311,17 +11451,41 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               offset $${offsetParam}::integer
             `;
 
-        const rows = await client.query<WalletPositionRouteRow>(sql, params);
+            const rows = await client.query<WalletPositionRouteRow>(
+              sql,
+              params,
+            );
 
-        const hasMore = rows.rows.length > query.limit;
-        const pageRows = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
-        const items = await buildWalletPositionRouteItems(client, pageRows);
+            const hasMore = rows.rows.length > query.limit;
+            const pageRows = hasMore
+              ? rows.rows.slice(0, query.limit)
+              : rows.rows;
+            const items = await buildWalletPositionRouteItems(client, pageRows);
 
-        return reply.send({
-          ok: true,
-          items,
-          hasMore,
+            return {
+              ok: true,
+              items,
+              hasMore,
+            };
+          },
+        );
+        const body = JSON.stringify(payload);
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            body,
+            cacheTtlSec,
+          );
+        }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
         });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(body);
       } catch (error) {
         app.log.error(
           { error, userId, query },
@@ -11345,6 +11509,30 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       const userId = request.user?.id ?? null;
 
       const query = request.query;
+      const cacheTtlSec = Math.max(0, Math.trunc(env.walletIntelTtlSec));
+      const cacheContext = await resolveWalletIntelCacheContext(cacheTtlSec);
+      const cacheClient = cacheContext.redis;
+      const cacheKey = walletIntelCacheKey(
+        "wallets-positions-history",
+        userId ?? "anon",
+        query,
+      );
+      const cached = await readWalletIntelCachedBody(
+        cacheClient,
+        cacheKey,
+        cacheTtlSec,
+      );
+      if (cached) {
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: true,
+          layer: cached.layer,
+          cacheStatus: cacheContext.status,
+        });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(cached.body);
+      }
+
       const params: Array<string | number | boolean | null> = [
         userId,
         query.walletId,
@@ -11448,8 +11636,12 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
 
       const client = await pool.connect();
       try {
-        const rows = await client.query<WalletPositionRouteRow>(
-          `
+        const payload = await withWalletIntelQuerySettings(
+          client,
+          walletPositionRouteQuerySettings,
+          async () => {
+            const rows = await client.query<WalletPositionRouteRow>(
+              `
             with position_keys as (
               select distinct
                 ws.venue,
@@ -11525,6 +11717,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               w.address,
               w.chain,
               w.label,
+              w.metadata as wallet_metadata,
               wn.name as user_name,
               wl.label as user_label,
               wl.color as user_label_color,
@@ -11577,18 +11770,39 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             limit $${limitParam}::integer
             offset $${offsetParam}::integer
           `,
-          params,
+              params,
+            );
+
+            const hasMore = rows.rows.length > query.limit;
+            const pageRows = hasMore
+              ? rows.rows.slice(0, query.limit)
+              : rows.rows;
+            const items = await buildWalletPositionRouteItems(client, pageRows);
+
+            return {
+              ok: true,
+              items,
+              hasMore,
+            };
+          },
         );
-
-        const hasMore = rows.rows.length > query.limit;
-        const pageRows = hasMore ? rows.rows.slice(0, query.limit) : rows.rows;
-        const items = await buildWalletPositionRouteItems(client, pageRows);
-
-        return reply.send({
-          ok: true,
-          items,
-          hasMore,
+        const body = JSON.stringify(payload);
+        if (cacheTtlSec > 0) {
+          await writeWalletIntelCachedBody(
+            cacheClient,
+            cacheKey,
+            body,
+            cacheTtlSec,
+          );
+        }
+        applyWalletIntelCacheHeaders({
+          reply,
+          hit: false,
+          layer: "none",
+          cacheStatus: cacheContext.status,
         });
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(body);
       } catch (error) {
         app.log.error(
           { error, userId, query },

@@ -6,9 +6,11 @@ import crypto from "node:crypto";
 import { AuthService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
+import { env } from "./env.js";
 import {
   assertSqlParamPlaceholders,
   scoreWalletAddressResolutionCandidate,
+  walletPositionRouteQuerySettings,
 } from "./routes/wallet-intel.js";
 
 type TestContext = {
@@ -508,19 +510,29 @@ async function cleanup(context: TestContext): Promise<void> {
 
 async function main() {
   assertAddressResolverScoring();
+  assert.deepEqual(walletPositionRouteQuerySettings, {
+    workMem: "48MB",
+    disableJit: true,
+  });
   await assertPrivateWalletTablesExist();
-  const app = await buildApp();
-  const { userId, authHeaders } = await createTestUser();
-  const context: TestContext = {
-    userId,
-    authHeaders,
-    createdWallets: [],
-    createdMarketIds: [],
-    createdEventIds: [],
-    createdTokenIds: [],
-  };
+  const previousWalletIntelTtlSec = env.walletIntelTtlSec;
+  env.walletIntelTtlSec = 30;
+  let app!: Awaited<ReturnType<typeof buildApp>>;
+  let appStarted = false;
+  let context: TestContext | null = null;
 
   try {
+    app = await buildApp();
+    appStarted = true;
+    const { userId, authHeaders } = await createTestUser();
+    context = {
+      userId,
+      authHeaders,
+      createdWallets: [],
+      createdMarketIds: [],
+      createdEventIds: [],
+      createdTokenIds: [],
+    };
     const unknownAddress = randomEvmAddress();
 
     {
@@ -692,12 +704,38 @@ async function main() {
         url: `/wallets/${labeledWalletId}`,
       });
       assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["x-cache"], "miss");
       const body = response.json();
       assert.equal(body.ok, true);
       assert.equal(body.wallet.walletId, labeledWalletId);
       assert.equal(body.wallet.userName, null);
       assert.equal(body.wallet.userLabel, null);
       assert.equal(body.wallet.userLabelColor, null);
+
+      const cachedResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/${labeledWalletId}`,
+      });
+      assert.equal(cachedResponse.statusCode, 200);
+      assert.equal(cachedResponse.headers["x-cache"], "hit");
+      assert.deepEqual(cachedResponse.json(), body);
+    }
+
+    {
+      const missingWalletId = crypto.randomUUID();
+      const firstResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/${missingWalletId}`,
+      });
+      assert.equal(firstResponse.statusCode, 404);
+      assert.equal(firstResponse.headers["x-cache"], undefined);
+
+      const secondResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/${missingWalletId}`,
+      });
+      assert.equal(secondResponse.statusCode, 404);
+      assert.equal(secondResponse.headers["x-cache"], undefined);
     }
 
     {
@@ -2224,7 +2262,17 @@ async function main() {
         url: `/wallets/positions?walletId=${labeledWalletId}&limit=5&offset=0`,
       });
       assert.equal(response.statusCode, 200);
-      assert.equal(response.json().ok, true);
+      assert.equal(response.headers["x-cache"], "miss");
+      const body = response.json();
+      assert.equal(body.ok, true);
+
+      const cachedResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positions?walletId=${labeledWalletId}&limit=5&offset=0`,
+      });
+      assert.equal(cachedResponse.statusCode, 200);
+      assert.equal(cachedResponse.headers["x-cache"], "hit");
+      assert.deepEqual(cachedResponse.json(), body);
     }
 
     {
@@ -2245,7 +2293,17 @@ async function main() {
         url: `/wallets/positions/history?walletId=${labeledWalletId}&limit=5&offset=0`,
       });
       assert.equal(response.statusCode, 200);
-      assert.equal(response.json().ok, true);
+      assert.equal(response.headers["x-cache"], "miss");
+      const body = response.json();
+      assert.equal(body.ok, true);
+
+      const cachedResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positions/history?walletId=${labeledWalletId}&limit=5&offset=0`,
+      });
+      assert.equal(cachedResponse.statusCode, 200);
+      assert.equal(cachedResponse.headers["x-cache"], "hit");
+      assert.deepEqual(cachedResponse.json(), body);
     }
 
     {
@@ -2303,11 +2361,21 @@ async function main() {
         headers: authHeaders,
       });
       assert.equal(profileResponse.statusCode, 200);
+      assert.equal(profileResponse.headers["x-cache"], "miss");
       const profileBody = profileResponse.json();
       assert.equal(profileBody.wallet.userName, "Custom whale");
       assert.equal(profileBody.wallet.userLabel, "Renamed whale again");
       assert.equal(profileBody.wallet.userLabelColor, "pink");
       assert.equal(profileBody.wallet.followersCount, 1);
+
+      const cachedProfileResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/${labeledWalletId}`,
+        headers: authHeaders,
+      });
+      assert.equal(cachedProfileResponse.statusCode, 200);
+      assert.equal(cachedProfileResponse.headers["x-cache"], "hit");
+      assert.deepEqual(cachedProfileResponse.json(), profileBody);
 
       const unfollowResponse = await app.inject({
         method: "DELETE",
@@ -2459,8 +2527,13 @@ async function main() {
       assert.deepEqual(body.notes, []);
     }
   } finally {
-    await cleanup(context);
-    await app.close();
+    env.walletIntelTtlSec = previousWalletIntelTtlSec;
+    if (context) {
+      await cleanup(context);
+    }
+    if (appStarted) {
+      await app.close();
+    }
   }
 }
 

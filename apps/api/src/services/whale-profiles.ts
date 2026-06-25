@@ -38,6 +38,7 @@ import {
   aggregateWalletMetricsFilterSql,
   aggregateWalletMetricsPreferenceSql,
 } from "./wallet-metrics-constants.js";
+import { extractWalletIdentityDisplayFields } from "./wallet-identity-names.js";
 
 const PROFILE_VERSION = "v12";
 const CATEGORY_VALUES = [
@@ -108,6 +109,9 @@ type WhaleProfileInput = {
     chain: string;
     source_label: string | null;
     source_label_quality: "descriptive" | "generic" | "missing";
+    identity_name: string | null;
+    identity_name_source: string | null;
+    identity_profile_url: string | null;
     owner_label: string | null;
     kind: "eoa" | "safe" | "contract" | "unknown";
     role: "trading_wallet" | "signer_wallet" | "unknown";
@@ -293,6 +297,7 @@ type WhaleRow = {
   address: string;
   chain: string;
   label: string | null;
+  metadata: unknown | null;
   is_safe: boolean;
   owner_address: string | null;
   owner_label: string | null;
@@ -1669,6 +1674,7 @@ async function loadWhaleRowsByIds(
         w.address,
         w.chain,
         w.label,
+        w.metadata,
         (w.metadata->>'kind' = 'safe') as is_safe,
         owner.owner_address,
         owner.owner_label,
@@ -2356,6 +2362,7 @@ function buildProfileInput(
     : "eoa";
   const walletRole: WhaleProfileInput["wallet"]["role"] = "trading_wallet";
   const sourceLabel = normalizeText(wallet.label);
+  const identityDisplay = extractWalletIdentityDisplayFields(wallet.metadata);
   const volume30d = parseNumber(wallet.metrics_volume);
   const pnl30d = parseNumber(wallet.metrics_pnl);
   const trades30d = wallet.metrics_trades ?? null;
@@ -2391,6 +2398,9 @@ function buildProfileInput(
         sourceLabel,
         wallet.address,
       ),
+      identity_name: identityDisplay.identityDisplayName,
+      identity_name_source: identityDisplay.identityDisplayNameSource,
+      identity_profile_url: identityDisplay.identityProfileUrl,
       owner_label: normalizeText(wallet.owner_label),
       kind: walletKind,
       role: walletRole,
@@ -3266,6 +3276,10 @@ Rules:
   - wallet.role: "trading_wallet" for the wallet holding positions.
   - wallet.owner_role: "signer_wallet" when the owner address controls a Safe.
   - These fields are context only. Never put Safe, Gnosis, multisig, signer, owner, or wallet-type terms into label_short.
+- Public identity:
+  - wallet.identity_name is a factual public handle/name from a venue or ENS. Preserve it verbatim as factual context.
+  - Do not invent, rewrite, shorten, or replace public handles.
+  - label_short is still an archetype/profile label unless wallet.source_label_quality is "descriptive" and should anchor the name.
 - Naming:
   - If wallet.source_label_quality is "descriptive", preserve the semantics of wallet.source_label.
   - Do not replace a meaningful existing label with a completely unrelated nickname.

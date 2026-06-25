@@ -77,6 +77,9 @@ export type HolderResearchHolder = {
   address: string;
   chain: string;
   label: string | null;
+  identityDisplayName: string | null;
+  identityDisplayNameSource: string | null;
+  identityProfileUrl: string | null;
   side: HolderResearchSideKey;
   positionUsd: number;
   positionShares: number | null;
@@ -644,7 +647,7 @@ function buildBaseEvidence(
 }
 
 function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
-  const label = holder.label ?? holder.address;
+  const label = holder.identityDisplayName ?? holder.label ?? holder.address;
   const edge =
     holder.resolvedWinRateEdge30d == null
       ? "edge unknown"
@@ -818,6 +821,9 @@ function buildHolderEntryContext(candidate: HolderResearchCandidate) {
     .map((holder) => ({
       walletId: holder.walletId,
       label: holder.label,
+      identityDisplayName: holder.identityDisplayName,
+      identityDisplayNameSource: holder.identityDisplayNameSource,
+      identityProfileUrl: holder.identityProfileUrl,
       side: holder.side,
       positionUsd: holder.positionUsd,
       positionShares: holder.positionShares,
@@ -2138,6 +2144,9 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
         address,
         chain,
         label: safeText(record.label),
+        identityDisplayName: safeText(record.identityDisplayName),
+        identityDisplayNameSource: safeText(record.identityDisplayNameSource),
+        identityProfileUrl: safeText(record.identityProfileUrl),
         side,
         positionUsd,
         positionShares: null,
@@ -2256,6 +2265,9 @@ export async function loadHolderResearchCandidateMarkets(
           w.address,
           w.chain,
           w.label,
+          nullif(w.metadata #>> '{identityNames,primary,name}', '') as identity_display_name,
+          nullif(w.metadata #>> '{identityNames,primary,source}', '') as identity_display_name_source,
+          nullif(w.metadata #>> '{identityNames,primary,profileUrl}', '') as identity_profile_url,
           sel.metrics_volume_30d,
           sel.metrics_pnl_30d,
           sel.metrics_trades_30d,
@@ -2341,6 +2353,9 @@ export async function loadHolderResearchCandidateMarkets(
           latest.address,
           latest.chain,
           latest.label,
+          latest.identity_display_name,
+          latest.identity_display_name_source,
+          latest.identity_profile_url,
           latest.metrics_volume_30d,
           latest.metrics_pnl_30d,
           latest.metrics_trades_30d,
@@ -2475,6 +2490,9 @@ export async function loadHolderResearchCandidateMarkets(
               'address', address,
               'chain', chain,
               'label', label,
+              'identityDisplayName', identity_display_name,
+              'identityDisplayNameSource', identity_display_name_source,
+              'identityProfileUrl', identity_profile_url,
               'side', side,
               'positionUsd', position_usd,
               'volume30dUsd', metrics_volume_30d,
@@ -3234,7 +3252,11 @@ export function buildHolderResearchWalletTargets(
         actor?.primaryHolder?.walletId === holder.walletId
           ? actor.credentialBullets
           : [],
-      holderDescriptor: holder.label ?? "tracked wallet",
+      holderDescriptor:
+        holder.identityDisplayName ?? holder.label ?? "tracked wallet",
+      identityDisplayName: holder.identityDisplayName,
+      identityDisplayNameSource: holder.identityDisplayNameSource,
+      identityProfileUrl: holder.identityProfileUrl,
       clusterSharpHolders: actor?.cluster?.sharpHolders ?? null,
       clusterSharpUsd: actor?.cluster?.sharpUsd ?? null,
       clusterPnl30dUsd: actor?.cluster?.pnl30dUsd ?? null,

@@ -55,6 +55,7 @@ import {
   type WalletIntelRetryTelemetry,
 } from "./services/wallet-intel-retry.js";
 import { refreshWalletMetrics } from "./services/wallet-metrics-refresh.js";
+import { resolveWalletIdentityNames } from "./services/wallet-identity-names.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
 import {
   getIntelPolicyDefaults,
@@ -3829,6 +3830,14 @@ type WalletOnchainStateRefreshResult = {
   selected: number;
   identitiesInspected: number;
   identityErrors: number;
+  identityNamesSelected: number;
+  identityNamesUpdated: number;
+  identityNamesPolymarketErrors: number;
+  identityNamesPolymarketFresh: number;
+  identityNamesPolymarketNotFound: number;
+  identityNamesPolymarketResolved: number;
+  identityNamesEnsResolved: number;
+  identityNamesEnsSkipped: number;
   ownersUpserted: number;
   balancesFetched: number;
   balanceSubjectsFetched: number;
@@ -3853,6 +3862,13 @@ type WalletOnchainIdentityState = {
   safeOwners: string[] | null;
   safeThreshold: number | null;
   identityResolvedAt: string | null;
+};
+
+type WalletIdentityNameCandidate = {
+  walletId: string;
+  address: string;
+  chain: Chain;
+  venue: Venue;
 };
 
 function emptySafeOwnerLinkResult(): SafeOwnerLinkResult {
@@ -3881,6 +3897,14 @@ function emptyWalletOnchainStateRefreshResult(): WalletOnchainStateRefreshResult
     selected: 0,
     identitiesInspected: 0,
     identityErrors: 0,
+    identityNamesSelected: 0,
+    identityNamesUpdated: 0,
+    identityNamesPolymarketErrors: 0,
+    identityNamesPolymarketFresh: 0,
+    identityNamesPolymarketNotFound: 0,
+    identityNamesPolymarketResolved: 0,
+    identityNamesEnsResolved: 0,
+    identityNamesEnsSkipped: 0,
     ownersUpserted: 0,
     balancesFetched: 0,
     balanceSubjectsFetched: 0,
@@ -3904,6 +3928,129 @@ async function updateWalletMetadata(
     `,
     [walletId, metadata],
   );
+}
+
+async function refreshWalletIdentityNames(
+  client: Queryable,
+  candidates: WalletIdentityNameCandidate[],
+): Promise<
+  Pick<
+    WalletOnchainStateRefreshResult,
+    | "identityNamesSelected"
+    | "identityNamesUpdated"
+    | "identityNamesPolymarketErrors"
+    | "identityNamesPolymarketFresh"
+    | "identityNamesPolymarketNotFound"
+    | "identityNamesPolymarketResolved"
+    | "identityNamesEnsResolved"
+    | "identityNamesEnsSkipped"
+  >
+> {
+  const uniqueByWalletId = new Map<string, WalletIdentityNameCandidate>();
+  for (const candidate of candidates) {
+    if (candidate.chain === "solana") continue;
+    const address = normalizeAddress(candidate.address, candidate.chain);
+    if (!address) continue;
+    if (uniqueByWalletId.has(candidate.walletId)) continue;
+    uniqueByWalletId.set(candidate.walletId, { ...candidate, address });
+  }
+  const selected = Array.from(uniqueByWalletId.values());
+  const result = {
+    identityNamesSelected: selected.length,
+    identityNamesUpdated: 0,
+    identityNamesPolymarketErrors: 0,
+    identityNamesPolymarketFresh: 0,
+    identityNamesPolymarketNotFound: 0,
+    identityNamesPolymarketResolved: 0,
+    identityNamesEnsResolved: 0,
+    identityNamesEnsSkipped: 0,
+  };
+  if (selected.length === 0) return result;
+
+  const metadataRows = await client.query<{
+    id: string;
+    metadata: Record<string, unknown> | null;
+  }>(
+    `
+      select id, metadata
+      from wallets
+      where id = any($1::uuid[])
+    `,
+    [selected.map((candidate) => candidate.walletId)],
+  );
+  const metadataByWalletId = new Map(
+    metadataRows.rows.map((row) => [row.id, row.metadata]),
+  );
+
+  let skipEnsForRun = false;
+  let loggedEnsRunSkip = false;
+  const polymarketErrorSamples = new Map<string, number>();
+  for (const chunk of chunkArray(selected, 4)) {
+    const reports = await Promise.all(
+      chunk.map(async (candidate) => {
+        const metadata = metadataByWalletId.get(candidate.walletId) ?? null;
+        const report = await resolveWalletIdentityNames({
+          address: candidate.address,
+          chain: candidate.chain,
+          venue: candidate.venue,
+          metadata,
+          skipEns: skipEnsForRun,
+        });
+        return { candidate, report };
+      }),
+    );
+
+    for (const { candidate, report } of reports) {
+      if (report.ensSkipReason) {
+        skipEnsForRun = true;
+        if (!loggedEnsRunSkip) {
+          loggedEnsRunSkip = true;
+          console.warn("[wallets:intel:refresh] ENS identity names skipped", {
+            reason: report.ensSkipReason,
+          });
+        }
+      }
+      if (report.polymarketStatus === "resolved") {
+        result.identityNamesPolymarketResolved += 1;
+      }
+      if (report.polymarketStatus === "not_found") {
+        result.identityNamesPolymarketNotFound += 1;
+      }
+      if (report.polymarketStatus === "fresh") {
+        result.identityNamesPolymarketFresh += 1;
+      }
+      if (report.polymarketStatus === "error") {
+        result.identityNamesPolymarketErrors += 1;
+        const sample = report.polymarketError ?? "unknown";
+        polymarketErrorSamples.set(
+          sample,
+          (polymarketErrorSamples.get(sample) ?? 0) + 1,
+        );
+      }
+      if (report.ensStatus === "resolved") {
+        result.identityNamesEnsResolved += 1;
+      }
+      if (report.ensStatus === "skipped") {
+        result.identityNamesEnsSkipped += 1;
+      }
+      if (!report.changed || !report.identityNames) continue;
+      await updateWalletMetadata(client, candidate.walletId, {
+        identityNames: report.identityNames,
+      });
+      result.identityNamesUpdated += 1;
+    }
+  }
+
+  if (result.identityNamesPolymarketErrors > 0) {
+    console.warn("[wallets:intel:refresh] Polymarket identity names errors", {
+      errors: result.identityNamesPolymarketErrors,
+      samples: Array.from(polymarketErrorSamples.entries())
+        .slice(0, 5)
+        .map(([error, count]) => ({ error, count })),
+    });
+  }
+
+  return result;
 }
 
 async function linkSafeOwnersForWhales(
@@ -4547,6 +4694,14 @@ async function refreshWalletOnchainState(
       balanceFetchedByChain: {},
       balanceSubjectsFetched: 0,
       ownerBalanceSubjects: 0,
+      identityNamesSelected: 0,
+      identityNamesUpdated: 0,
+      identityNamesPolymarketErrors: 0,
+      identityNamesPolymarketFresh: 0,
+      identityNamesPolymarketNotFound: 0,
+      identityNamesPolymarketResolved: 0,
+      identityNamesEnsResolved: 0,
+      identityNamesEnsSkipped: 0,
       skippedInvalidAddresses,
       skippedRecentIdentityErrors,
       durationMs: Date.now() - refreshStartedAtMs,
@@ -4609,6 +4764,7 @@ async function refreshWalletOnchainState(
   }
 
   const ownerWalletIds = new Map<string, string>();
+  const ownerIdentityNameCandidates: WalletIdentityNameCandidate[] = [];
   for (const row of selectedRows) {
     const identity = identities.get(row.wallet_id);
     const ownerAddress = identity?.ownerAddress;
@@ -4631,8 +4787,36 @@ async function refreshWalletOnchainState(
       walletOnchainBalanceKey(row.chain, ownerAddress),
       ownerWalletId,
     );
+    ownerIdentityNameCandidates.push({
+      walletId: ownerWalletId,
+      address: ownerAddress,
+      chain: row.chain,
+      venue: row.venue,
+    });
     result.ownersUpserted += 1;
   }
+
+  const identityNameResult = await refreshWalletIdentityNames(client, [
+    ...selectedRows.map((row) => ({
+      walletId: row.wallet_id,
+      address: row.address,
+      chain: row.chain,
+      venue: row.venue,
+    })),
+    ...ownerIdentityNameCandidates,
+  ]);
+  result.identityNamesSelected = identityNameResult.identityNamesSelected;
+  result.identityNamesUpdated = identityNameResult.identityNamesUpdated;
+  result.identityNamesPolymarketErrors =
+    identityNameResult.identityNamesPolymarketErrors;
+  result.identityNamesPolymarketFresh =
+    identityNameResult.identityNamesPolymarketFresh;
+  result.identityNamesPolymarketNotFound =
+    identityNameResult.identityNamesPolymarketNotFound;
+  result.identityNamesPolymarketResolved =
+    identityNameResult.identityNamesPolymarketResolved;
+  result.identityNamesEnsResolved = identityNameResult.identityNamesEnsResolved;
+  result.identityNamesEnsSkipped = identityNameResult.identityNamesEnsSkipped;
 
   const balanceInputs = new Map<string, { address: string; chain: Chain }>();
   const ownerBalanceSubjectKeys = new Set<string>();
@@ -4725,6 +4909,14 @@ async function refreshWalletOnchainState(
     identitiesInspected: result.identitiesInspected,
     identityErrors: result.identityErrors,
     identityKindCounts,
+    identityNamesSelected: result.identityNamesSelected,
+    identityNamesUpdated: result.identityNamesUpdated,
+    identityNamesPolymarketErrors: result.identityNamesPolymarketErrors,
+    identityNamesPolymarketFresh: result.identityNamesPolymarketFresh,
+    identityNamesPolymarketNotFound: result.identityNamesPolymarketNotFound,
+    identityNamesPolymarketResolved: result.identityNamesPolymarketResolved,
+    identityNamesEnsResolved: result.identityNamesEnsResolved,
+    identityNamesEnsSkipped: result.identityNamesEnsSkipped,
     ownersUpserted: result.ownersUpserted,
     balanceInputsByChain,
     balanceFetchedByChain,
@@ -5529,7 +5721,7 @@ async function runSnapshot(snapshotAt: Date) {
 
     const runFinishedAt = new Date();
     console.log(
-      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors} onchainStateSelected=${onchainStateRefresh.selected} onchainIdentitiesInspected=${onchainStateRefresh.identitiesInspected} onchainIdentityErrors=${onchainStateRefresh.identityErrors} onchainOwnersUpserted=${onchainStateRefresh.ownersUpserted} onchainBalancesFetched=${onchainStateRefresh.balancesFetched} onchainBalanceSubjectsFetched=${onchainStateRefresh.balanceSubjectsFetched} onchainOwnerBalanceSubjects=${onchainStateRefresh.ownerBalanceSubjects} onchainSkippedInvalidAddresses=${onchainStateRefresh.skippedInvalidAddresses} onchainStateUpserts=${onchainStateRefresh.stateUpserts}`,
+      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors} onchainStateSelected=${onchainStateRefresh.selected} onchainIdentitiesInspected=${onchainStateRefresh.identitiesInspected} onchainIdentityErrors=${onchainStateRefresh.identityErrors} identityNamesSelected=${onchainStateRefresh.identityNamesSelected} identityNamesUpdated=${onchainStateRefresh.identityNamesUpdated} identityNamesPolymarketResolved=${onchainStateRefresh.identityNamesPolymarketResolved} identityNamesPolymarketNotFound=${onchainStateRefresh.identityNamesPolymarketNotFound} identityNamesPolymarketFresh=${onchainStateRefresh.identityNamesPolymarketFresh} identityNamesPolymarketErrors=${onchainStateRefresh.identityNamesPolymarketErrors} identityNamesEnsSkipped=${onchainStateRefresh.identityNamesEnsSkipped} onchainOwnersUpserted=${onchainStateRefresh.ownersUpserted} onchainBalancesFetched=${onchainStateRefresh.balancesFetched} onchainBalanceSubjectsFetched=${onchainStateRefresh.balanceSubjectsFetched} onchainOwnerBalanceSubjects=${onchainStateRefresh.ownerBalanceSubjects} onchainSkippedInvalidAddresses=${onchainStateRefresh.skippedInvalidAddresses} onchainStateUpserts=${onchainStateRefresh.stateUpserts}`,
     );
   } finally {
     client.release();
