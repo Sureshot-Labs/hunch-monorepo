@@ -24,7 +24,17 @@ type WalletActivitySummaryDbRow = {
 type WalletActivitySummaryStatsDbRow = Omit<
   WalletActivitySummaryDbRow,
   "top_changes"
->;
+> & {
+  metrics_pnl_30d?: string | null;
+  metrics_roi_30d?: string | null;
+  metrics_trades_30d?: number | null;
+  metrics_volume_30d?: string | null;
+  metrics_win_rate_30d?: string | null;
+  metrics_resolved_edge_sample_count_30d?: number | null;
+  metrics_resolved_win_rate_edge_30d?: string | null;
+  metrics_resolved_edge_z_score_30d?: string | null;
+  metrics_resolved_stake_usd_30d?: string | null;
+};
 
 type WalletActivityTopChangesDbRow = {
   wallet_id: string;
@@ -145,7 +155,17 @@ export type WalletActivitySummary = {
 export type WalletActivitySummaryStats = Omit<
   WalletActivitySummary,
   "topChanges"
->;
+> & {
+  metricsPnl30d?: number | null;
+  metricsRoi30d?: number | null;
+  metricsTrades30d?: number | null;
+  metricsVolume30d?: number | null;
+  metricsWinRate30d?: number | null;
+  metricsResolvedEdgeSampleCount30d?: number | null;
+  metricsResolvedWinRateEdge30d?: number | null;
+  metricsResolvedEdgeZScore30d?: number | null;
+  metricsResolvedStakeUsd30d?: number | null;
+};
 
 export type WalletActivitySignalSummary = {
   criticalSignals30d: number;
@@ -206,6 +226,13 @@ export type WalletActivitySummarySortMode =
 const IMPORTANCE_MAGNITUDE_USD = 250_000;
 const IMPORTANCE_UNUSUAL_SCORE_MAX = 3;
 const IMPORTANCE_ACTIVITY_COUNT_MAX = 8;
+const IMPORTANCE_PNL_USD = 250_000;
+const IMPORTANCE_ROI_CAP = 0.5;
+const IMPORTANCE_EDGE_CAP = 0.2;
+const IMPORTANCE_EDGE_Z_SCORE_CAP = 3;
+const IMPORTANCE_MIN_METRIC_TRADES = 10;
+const IMPORTANCE_MIN_METRIC_VOLUME_USD = 10_000;
+const IMPORTANCE_MIN_RESOLVED_EDGE_SAMPLES = 10;
 
 function clampUnit(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -227,6 +254,20 @@ function countSummaryActions(row: WalletActivitySummaryStats): number {
     Math.max(0, row.countsIncrease) +
     Math.max(0, row.countsReduce) +
     Math.max(0, row.countsExit)
+  );
+}
+
+function hasMeaningfulMetricActivity(row: WalletActivitySummaryStats): boolean {
+  return (
+    (row.metricsTrades30d ?? 0) >= IMPORTANCE_MIN_METRIC_TRADES &&
+    (row.metricsVolume30d ?? 0) >= IMPORTANCE_MIN_METRIC_VOLUME_USD
+  );
+}
+
+function hasMeaningfulResolvedMetrics(row: WalletActivitySummaryStats): boolean {
+  return (
+    (row.metricsResolvedEdgeSampleCount30d ?? 0) >=
+    IMPORTANCE_MIN_RESOLVED_EDGE_SAMPLES
   );
 }
 
@@ -254,12 +295,43 @@ export function computeWalletActivityImportanceScore(
       ? (nowMs - activityMs) / (60 * 60 * 1000)
       : windowHours;
   const recency = clampUnit(1 - ageHours / windowHours);
+  const hasMetricsActivity = hasMeaningfulMetricActivity(row);
+  const hasResolvedMetrics = hasMeaningfulResolvedMetrics(row);
+  const pnl = clampUnit(
+    Math.log1p(Math.max(0, row.metricsPnl30d ?? 0)) /
+      Math.log1p(IMPORTANCE_PNL_USD),
+  );
+  const roi =
+    hasMetricsActivity && (row.metricsRoi30d ?? 0) > 0
+      ? clampUnit((row.metricsRoi30d ?? 0) / IMPORTANCE_ROI_CAP)
+      : 0;
+  const edge =
+    hasResolvedMetrics
+      ? Math.max(
+          clampUnit(
+            Math.max(0, row.metricsResolvedWinRateEdge30d ?? 0) /
+              IMPORTANCE_EDGE_CAP,
+          ),
+          clampUnit(
+            Math.max(0, row.metricsResolvedEdgeZScore30d ?? 0) /
+              IMPORTANCE_EDGE_Z_SCORE_CAP,
+          ),
+        )
+      : 0;
+  const winRate =
+    hasResolvedMetrics && (row.metricsWinRate30d ?? 0) > 0.5
+      ? clampUnit(((row.metricsWinRate30d ?? 0) - 0.5) / 0.25)
+      : 0;
 
   return (
-    0.45 * magnitude +
-    0.35 * unusual +
+    0.3 * magnitude +
+    0.25 * unusual +
     0.1 * actionDensity +
-    0.1 * recency
+    0.1 * recency +
+    0.1 * pnl +
+    0.06 * roi +
+    0.06 * edge +
+    0.03 * winRate
   );
 }
 
@@ -615,6 +687,22 @@ function parseSummaryStatsRow(
     countsFlip: row.counts_flip ?? 0,
     unusualScore,
     unusualTier: resolveUnusualTier(unusualScore),
+    metricsPnl30d: parseNumber(row.metrics_pnl_30d),
+    metricsRoi30d: parseNumber(row.metrics_roi_30d),
+    metricsTrades30d: row.metrics_trades_30d,
+    metricsVolume30d: parseNumber(row.metrics_volume_30d),
+    metricsWinRate30d: parseNumber(row.metrics_win_rate_30d),
+    metricsResolvedEdgeSampleCount30d:
+      row.metrics_resolved_edge_sample_count_30d,
+    metricsResolvedWinRateEdge30d: parseNumber(
+      row.metrics_resolved_win_rate_edge_30d,
+    ),
+    metricsResolvedEdgeZScore30d: parseNumber(
+      row.metrics_resolved_edge_z_score_30d,
+    ),
+    metricsResolvedStakeUsd30d: parseNumber(
+      row.metrics_resolved_stake_usd_30d,
+    ),
   };
 }
 
@@ -1142,9 +1230,19 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
     s.counts_flip,
     s.max_abs_delta_usd_window,
     b.p90_usd as baseline_p90_usd,
-    b.baseline_sample_count::int as baseline_sample_count
+    b.baseline_sample_count::int as baseline_sample_count,
+    wis.metrics_pnl_30d,
+    wis.metrics_roi_30d,
+    wis.metrics_trades_30d,
+    wis.metrics_volume_30d,
+    wis.metrics_win_rate_30d,
+    wis.metrics_resolved_edge_sample_count_30d,
+    wis.metrics_resolved_win_rate_edge_30d,
+    wis.metrics_resolved_edge_z_score_30d,
+    wis.metrics_resolved_stake_usd_30d
   from summary s
   left join baseline b on b.wallet_id = s.wallet_id
+  left join wallet_intel_selector_snapshot wis on wis.wallet_id = s.wallet_id
 `;
 
 const FETCH_WALLET_ACTIVITY_SUMMARY_TOP_CHANGES_SQL = `

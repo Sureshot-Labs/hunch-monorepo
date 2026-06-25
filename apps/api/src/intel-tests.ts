@@ -151,6 +151,15 @@ function createWalletActivitySummaryStats(
     countsFlip: 0,
     unusualScore: null,
     unusualTier: null,
+    metricsPnl30d: null,
+    metricsRoi30d: null,
+    metricsTrades30d: null,
+    metricsVolume30d: null,
+    metricsWinRate30d: null,
+    metricsResolvedEdgeSampleCount30d: null,
+    metricsResolvedWinRateEdge30d: null,
+    metricsResolvedEdgeZScore30d: null,
+    metricsResolvedStakeUsd30d: null,
     ...overrides,
   };
 }
@@ -903,6 +912,99 @@ const tests: TestCase[] = [
       assert.ok(lowScore >= 0 && lowScore <= 1);
       assert.ok(highScore >= 0 && highScore <= 1);
       assert.ok(highScore > lowScore);
+    },
+  },
+  {
+    name: "activity summary importance uses proven tracker metrics without tiny sample noise",
+    run: () => {
+      const fixedNow = new Date("2026-06-08T12:00:00.000Z").getTime();
+      const base = createWalletActivitySummaryStats({
+        lastActivityAt: new Date("2026-06-08T11:00:00.000Z"),
+        netChangeUsd: 10_000,
+        countsIncrease: 1,
+      });
+      const profitable = createWalletActivitySummaryStats({
+        ...base,
+        walletId: "profitable",
+        metricsPnl30d: 250_000,
+      });
+
+      assert.ok(
+        computeWalletActivityImportanceScore(profitable, fixedNow) >
+          computeWalletActivityImportanceScore(base, fixedNow),
+      );
+
+      const tinyRoi = createWalletActivitySummaryStats({
+        ...base,
+        walletId: "tiny-roi",
+        metricsRoi30d: 5,
+        metricsTrades30d: 1,
+        metricsVolume30d: 100,
+      });
+      assert.equal(
+        computeWalletActivityImportanceScore(tinyRoi, fixedNow),
+        computeWalletActivityImportanceScore(base, fixedNow),
+      );
+
+      const tinyWinRate = createWalletActivitySummaryStats({
+        ...base,
+        walletId: "tiny-win-rate",
+        metricsWinRate30d: 1,
+        metricsResolvedEdgeSampleCount30d: 3,
+      });
+      assert.equal(
+        computeWalletActivityImportanceScore(tinyWinRate, fixedNow),
+        computeWalletActivityImportanceScore(base, fixedNow),
+      );
+
+      const strongEdge = createWalletActivitySummaryStats({
+        ...base,
+        walletId: "strong-edge",
+        metricsWinRate30d: 0.7,
+        metricsResolvedEdgeSampleCount30d: 25,
+        metricsResolvedWinRateEdge30d: 0.15,
+        metricsResolvedEdgeZScore30d: 2,
+      });
+      assert.ok(
+        computeWalletActivityImportanceScore(strongEdge, fixedNow) >
+          computeWalletActivityImportanceScore(base, fixedNow),
+      );
+
+      const activeWithNegativePnl = createWalletActivitySummaryStats({
+        walletId: "active-negative-pnl",
+        lastActivityAt: new Date("2026-06-08T11:00:00.000Z"),
+        netChangeUsd: 250_000,
+        unusualScore: 3,
+        countsNew: 4,
+        countsIncrease: 4,
+        metricsPnl30d: -100_000,
+      });
+      assert.ok(
+        computeWalletActivityImportanceScore(activeWithNegativePnl, fixedNow) >
+          computeWalletActivityImportanceScore(base, fixedNow),
+      );
+    },
+  },
+  {
+    name: "activity summary card item uses summary trade pnl when row metrics are missing",
+    run: () => {
+      const row = createTestCandidateWalletRow({ metrics: null });
+      const item = buildWalletSummaryItem(
+        row,
+        createWalletActivitySummaryStats({
+          metricsPnl30d: 39_780.31,
+          metricsRoi30d: 0.0531,
+          metricsTrades30d: 25,
+          metricsVolume30d: 748_800,
+          metricsWinRate30d: 1,
+        }),
+      );
+
+      assert.equal(item.metrics?.pnl_usd, "39780.31");
+      assert.equal(item.metrics?.roi, "0.0531");
+      assert.equal(item.metrics?.trades_count, 25);
+      assert.equal(item.metrics?.volume_usd, "748800");
+      assert.equal(item.metrics?.win_rate, "1");
     },
   },
   {

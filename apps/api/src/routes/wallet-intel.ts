@@ -4716,6 +4716,80 @@ export function buildWalletAttributionInput(
   };
 }
 
+type WalletSummaryMetricOverlay = Partial<
+  Pick<
+    WalletActivitySummaryStats,
+    | "metricsPnl30d"
+    | "metricsRoi30d"
+    | "metricsTrades30d"
+    | "metricsVolume30d"
+    | "metricsWinRate30d"
+    | "metricsResolvedEdgeSampleCount30d"
+    | "metricsResolvedWinRateEdge30d"
+    | "metricsResolvedEdgeZScore30d"
+    | "metricsResolvedStakeUsd30d"
+  >
+>;
+
+function metricNumberToString(value: number | null | undefined): string | null {
+  return value != null && Number.isFinite(value) ? String(value) : null;
+}
+
+function mergeWalletSummaryMetrics(
+  metrics: WalletMetricsRow | null,
+  summary: WalletActivitySummary | WalletActivitySummaryStats,
+  asOfFallback: Date,
+): WalletMetricsRow | null {
+  const overlay = summary as WalletSummaryMetricOverlay;
+  const hasOverlayMetrics =
+    overlay.metricsPnl30d != null ||
+    overlay.metricsRoi30d != null ||
+    overlay.metricsTrades30d != null ||
+    overlay.metricsVolume30d != null ||
+    overlay.metricsWinRate30d != null ||
+    overlay.metricsResolvedEdgeSampleCount30d != null ||
+    overlay.metricsResolvedWinRateEdge30d != null ||
+    overlay.metricsResolvedEdgeZScore30d != null ||
+    overlay.metricsResolvedStakeUsd30d != null;
+
+  if (!hasOverlayMetrics) return metrics ?? null;
+
+  return {
+    period: metrics?.period ?? "30d",
+    as_of: metrics?.as_of ?? asOfFallback,
+    trades_count: metrics?.trades_count ?? overlay.metricsTrades30d ?? null,
+    volume_usd:
+      metrics?.volume_usd ?? metricNumberToString(overlay.metricsVolume30d),
+    pnl_usd: metrics?.pnl_usd ?? metricNumberToString(overlay.metricsPnl30d),
+    roi: metrics?.roi ?? metricNumberToString(overlay.metricsRoi30d),
+    win_rate:
+      metrics?.win_rate ?? metricNumberToString(overlay.metricsWinRate30d),
+    resolved_edge_sample_count:
+      metrics?.resolved_edge_sample_count ??
+      overlay.metricsResolvedEdgeSampleCount30d ??
+      null,
+    resolved_actual_win_rate: metrics?.resolved_actual_win_rate ?? null,
+    resolved_expected_win_rate: metrics?.resolved_expected_win_rate ?? null,
+    resolved_win_rate_edge:
+      metrics?.resolved_win_rate_edge ??
+      metricNumberToString(overlay.metricsResolvedWinRateEdge30d),
+    resolved_edge_z_score:
+      metrics?.resolved_edge_z_score ??
+      metricNumberToString(overlay.metricsResolvedEdgeZScore30d),
+    resolved_brier_score: metrics?.resolved_brier_score ?? null,
+    resolved_stake_weighted_edge:
+      metrics?.resolved_stake_weighted_edge ?? null,
+    resolved_stake_usd:
+      metrics?.resolved_stake_usd ??
+      metricNumberToString(overlay.metricsResolvedStakeUsd30d),
+    avg_hold_hours: metrics?.avg_hold_hours ?? null,
+    last_trade_at: metrics?.last_trade_at ?? null,
+    winning_count: metrics?.winning_count ?? null,
+    losing_count: metrics?.losing_count ?? null,
+    resolved_count: metrics?.resolved_count ?? null,
+  };
+}
+
 export function buildWalletSummaryItem(
   row: CandidateWalletRow,
   summary: WalletActivitySummary | WalletActivitySummaryStats,
@@ -4741,7 +4815,11 @@ export function buildWalletSummaryItem(
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
     tags: row.tags ?? [],
-    metrics: row.metrics ?? null,
+    metrics: mergeWalletSummaryMetrics(
+      row.metrics ?? null,
+      summary,
+      row.last_seen_at,
+    ),
     portfolioPerformance30d: options?.portfolioPerformance30d ?? null,
     inferredWinRate: null,
     inferredResolvedCount: null,
