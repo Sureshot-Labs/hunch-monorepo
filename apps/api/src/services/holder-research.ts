@@ -27,6 +27,10 @@ import {
 import { buildWalletMmSuspectedSql } from "./wallet-intel-mm.js";
 import { loadLatestWalletPositionNowMap } from "./wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "./wallet-position-ledger.js";
+import {
+  buildHolderResearchSignalSnapshot,
+  loadHolderResearchPerformanceCalibrationMemo,
+} from "./holder-research-performance.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -345,6 +349,12 @@ export type HolderResearchDecisionCacheEvaluation = {
 
 type HolderResearchPromptPolicy = HolderResearchPolicy;
 
+type HolderResearchPromptMode = "final" | "triage" | "search";
+
+const PROMPT_TEXT_MARKET_MAX = 700;
+const PROMPT_TEXT_RESOLUTION_MAX = 500;
+const PROMPT_TEXT_EVIDENCE_MAX = 320;
+
 type HolderResearchMarketRow = {
   market_id: string;
   event_id: string | null;
@@ -648,15 +658,28 @@ function buildBaseEvidence(
 
 function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
   const label = holder.identityDisplayName ?? holder.label ?? holder.address;
-  const edge =
-    holder.resolvedWinRateEdge30d == null
-      ? "edge unknown"
-      : `${(holder.resolvedWinRateEdge30d * 100).toFixed(1)}pp edge`;
+  const facts: string[] = [`${formatUsd(holder.positionUsd)} open`];
+  if (holder.winRate30d != null && holder.trades30d != null) {
+    facts.push(
+      `won ${formatWholePercent(holder.winRate30d)} of ${holder.trades30d} recent trades`,
+    );
+  }
+  if (
+    holder.resolvedWinRateEdge30d != null &&
+    holder.resolvedEdgeSampleCount30d != null
+  ) {
+    facts.push(
+      `beat market prices by ${formatPointDelta(holder.resolvedWinRateEdge30d)} across ${holder.resolvedEdgeSampleCount30d} resolved bets`,
+    );
+  }
+  if (facts.length === 1 && holder.pnl30dUsd != null) {
+    facts.push(`${formatUsd(holder.pnl30dUsd)} 30d PnL`);
+  }
   return {
     id: buildHolderEvidenceId(holder),
     kind: "holder",
     title: `${label} ${holder.side}`,
-    summary: `${formatUsd(holder.positionUsd)} open, ${edge}, z=${holder.resolvedEdgeZScore30d?.toFixed(1) ?? "n/a"}, n=${holder.resolvedEdgeSampleCount30d ?? "n/a"}.`,
+    summary: `${facts.join(", ")}.`,
     relevance: 0.9,
   };
 }
@@ -790,6 +813,26 @@ function parsePreviousNoteWalletTargets(
     );
 }
 
+export function clipPromptText(
+  value: string | null | undefined,
+  maxChars: number,
+): string | null {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  if (normalized.length <= maxChars) return normalized;
+  const clipped = normalized.slice(0, Math.max(0, maxChars - 1));
+  const boundary = Math.max(
+    clipped.lastIndexOf(". "),
+    clipped.lastIndexOf("; "),
+    clipped.lastIndexOf(", "),
+  );
+  if (boundary >= Math.floor(maxChars * 0.55)) {
+    return `${clipped.slice(0, boundary + 1).trimEnd()}...`;
+  }
+  const space = clipped.lastIndexOf(" ");
+  return `${clipped.slice(0, space > 0 ? space : maxChars - 1).trimEnd()}...`;
+}
+
 function selectedEvidenceHolders(
   candidate: HolderResearchCandidate,
 ): HolderResearchHolder[] {
@@ -815,30 +858,79 @@ function selectedEvidenceHolders(
     .slice(0, 2);
 }
 
+function compactPromptMarketTypeMetrics(
+  metrics: WalletMarketTypeMetric | null | undefined,
+) {
+  if (!metrics) return null;
+  return {
+    type: metrics.marketType,
+    trades: metrics.tradesCount,
+    volUsd: metrics.volumeUsd,
+    pnlUsd: metrics.pnlUsd,
+    roi: metrics.roi,
+    win: metrics.winRate,
+    edge30d: metrics.resolvedWinRateEdge,
+    edgeBets: metrics.resolvedEdgeSampleCount,
+    stakeUsd: metrics.resolvedStakeUsd,
+    lastTradeAt: metrics.lastTradeAt,
+    approx: metrics.approximate,
+  };
+}
+
+function compactPromptRelatedPosition(position: HolderResearchRelatedPosition) {
+  return {
+    mktId: position.marketId,
+    title: position.marketTitle,
+    evt: position.eventTitle,
+    side: position.side,
+    posUsd: position.positionUsd,
+    pYes: position.yesProbability,
+    at: position.snapshotAt,
+  };
+}
+
+function compactPromptHolder(
+  holder: HolderResearchHolder,
+  mode: "holder" | "entry",
+) {
+  const base: Record<string, unknown> = {
+    walletId: holder.walletId,
+    addr: holder.address,
+    name: holder.identityDisplayName ?? holder.label ?? null,
+    kind: holder.walletKind,
+    side: holder.side,
+    posUsd: holder.positionUsd,
+    openPnl: holder.openPnlUsd,
+    pnl30d: holder.pnl30dUsd,
+    entry: holder.avgEntryPrice,
+    cur: holder.currentPrice,
+    dEntry: holder.entryToCurrentDelta,
+    trades30d: holder.trades30d,
+    win30d: holder.winRate30d,
+    edge30d: holder.resolvedWinRateEdge30d,
+    edgeBets: holder.resolvedEdgeSampleCount30d,
+    stake30d: holder.resolvedStakeUsd30d,
+    vol30d: holder.volume30dUsd,
+    mm: holder.mmSuspected,
+    sameType: compactPromptMarketTypeMetrics(holder.marketTypeMetrics30d),
+  };
+  if (mode === "entry") {
+    base.realizedPnl = holder.realizedPnlUsd;
+    base.totalPnl = holder.totalPnlUsd;
+    base.pnlReliable = holder.approxReliable;
+    base.pnlSrc = holder.approxPnlSource;
+    base.at = holder.positionSnapshotAt;
+    base.relPos = holder.relatedOpenPositions
+      .slice(0, 2)
+      .map(compactPromptRelatedPosition);
+  }
+  return base;
+}
+
 function buildHolderEntryContext(candidate: HolderResearchCandidate) {
   return selectedEvidenceHolders(candidate)
     .slice(0, 3)
-    .map((holder) => ({
-      walletId: holder.walletId,
-      label: holder.label,
-      identityDisplayName: holder.identityDisplayName,
-      identityDisplayNameSource: holder.identityDisplayNameSource,
-      identityProfileUrl: holder.identityProfileUrl,
-      side: holder.side,
-      positionUsd: holder.positionUsd,
-      positionShares: holder.positionShares,
-      avgEntryPrice: holder.avgEntryPrice,
-      currentPrice: holder.currentPrice,
-      entryToCurrentDelta: holder.entryToCurrentDelta,
-      openPnlUsd: holder.openPnlUsd,
-      realizedPnlUsd: holder.realizedPnlUsd,
-      totalPnlUsd: holder.totalPnlUsd,
-      approxReliable: holder.approxReliable,
-      approxPnlSource: holder.approxPnlSource,
-      snapshotAt: holder.positionSnapshotAt,
-      mmSuspected: holder.mmSuspected,
-      marketTypeMetrics30d: holder.marketTypeMetrics30d,
-    }));
+    .map((holder) => compactPromptHolder(holder, "entry"));
 }
 
 function previousNoteTargetHolders(
@@ -3004,60 +3096,175 @@ export function buildHolderResearchCandidatePromptJson(
     : null;
   return {
     key: candidate.key,
-    inputDigest: candidate.inputDigest,
+    digest: candidate.inputDigest,
     bucket: candidate.bucket,
     score: candidate.score,
     side: candidate.side,
-    reasons: candidate.reasons,
-    market: {
-      marketId: candidate.market.marketId,
-      eventId: candidate.market.eventId,
-      venue: candidate.market.venue,
-      marketTitle: candidate.market.marketTitle,
-      marketSlug: candidate.market.marketSlug,
-      marketDescription: candidate.market.marketDescription,
-      eventTitle: candidate.market.eventTitle,
-      eventSlug: candidate.market.eventSlug,
-      eventDescription: candidate.market.eventDescription,
-      seriesKey: candidate.market.seriesKey,
-      seriesTitle: candidate.market.seriesTitle,
-      resolutionSource: candidate.market.resolutionSource,
-      category: candidate.market.category,
-      closeTime: candidate.market.closeTime,
-      expirationTime: candidate.market.expirationTime,
-      yesProbability: candidate.market.yesProbability,
-      trackedUsd: totalUsd,
-      recentActivityUsd: candidate.market.recentActivityUsd,
-      recentActivityAt: candidate.market.recentActivityAt,
-      crossMarketWalletCount: candidate.market.crossMarketWalletCount,
-      previousNote: candidate.market.previousNote,
-    },
-    marketMovementContext:
+    dir: candidate.direction,
+    type: candidate.signalType,
+    why: candidate.reasons,
+    mkt: compactPromptMarket(candidate, "final", totalUsd),
+    move:
       policy?.movementContextEnabled === false
         ? null
-        : candidate.market.marketMovementContext,
-    holderEntryContext:
+        : compactPromptMovement(candidate.market.marketMovementContext),
+    holderEntry:
       policy?.holderEntryContextEnabled === false
         ? []
         : buildHolderEntryContext(candidate),
     actor,
     quality,
-    sides: candidate.market.sides,
-    holders: candidate.market.holders.slice(0, 8),
-    evidence: candidate.evidence,
+    sides: {
+      YES: compactPromptSide(candidate.market.sides.YES),
+      NO: compactPromptSide(candidate.market.sides.NO),
+    },
+    holders: selectPromptHolders(candidate, policy).map((holder) =>
+      compactPromptHolder(holder, "holder"),
+    ),
+    evidence: candidate.evidence.map(compactPromptEvidence),
   };
 }
 
-function thinSide(side: HolderResearchSide) {
+function compactPromptSide(side: HolderResearchSide) {
   return {
     usd: side.usd,
     wallets: side.wallets,
-    openPnlUsd: side.openPnlUsd,
+    openPnl: side.openPnlUsd,
     sharpHolders: side.sharpHolders,
     sharpUsd: side.sharpUsd,
     bestEdge: side.bestEdge,
-    bestSampleCount: side.bestSampleCount,
+    bestBets: side.bestSampleCount,
   };
+}
+
+function compactPromptMovement(movement: HolderResearchMarketMovementContext) {
+  return {
+    pYes: movement.yesProbabilityNow,
+    dYes24h: movement.yesChange24h,
+    vol24h: movement.volume24h,
+    dVol24h: movement.volumeChange24h,
+    dVolPct24h: movement.volumeChangePct24h,
+    liq: movement.liquidity,
+    dLiq24h: movement.liquidityChange24h,
+    dLiqPct24h: movement.liquidityChangePct24h,
+    dOi24h: movement.openInterestChange24h,
+    dOiPct24h: movement.openInterestChangePct24h,
+    updatedAt: movement.updatedAt,
+    prevPYes: movement.previousDecisionYesProbability,
+    dYesPrev: movement.yesChangeSincePreviousDecision,
+    prevAt: movement.previousDecisionCheckedAt,
+  };
+}
+
+function compactPromptMarket(
+  candidate: HolderResearchCandidate,
+  mode: HolderResearchPromptMode,
+  totalUsd?: number,
+) {
+  const market = candidate.market;
+  const result: Record<string, unknown> = {
+    id: market.marketId,
+    evtId: market.eventId,
+    venue: market.venue,
+    title: market.marketTitle,
+    evt: market.eventTitle,
+    series: market.seriesTitle,
+    cat: market.category,
+    close: market.closeTime,
+    expires: market.expirationTime,
+    pYes: market.yesProbability,
+    usdTracked:
+      totalUsd ?? market.sides.YES.usd + market.sides.NO.usd,
+    recentUsd: market.recentActivityUsd,
+    recentAt: market.recentActivityAt,
+    crossWallets: market.crossMarketWalletCount,
+  };
+  if (mode !== "triage") {
+    result.desc = clipPromptText(
+      market.marketDescription,
+      PROMPT_TEXT_MARKET_MAX,
+    );
+    result.evtDesc = clipPromptText(
+      market.eventDescription,
+      PROMPT_TEXT_MARKET_MAX,
+    );
+    result.resolve = clipPromptText(
+      market.resolutionSource,
+      PROMPT_TEXT_RESOLUTION_MAX,
+    );
+  }
+  if (market.previousNote) {
+    result.prevNote = {
+      at: market.previousNote.createdAt,
+      title: market.previousNote.title,
+      cooldownUntil: market.previousNote.cooldownUntil,
+    };
+  }
+  return result;
+}
+
+function compactPromptEvidence(evidence: HolderResearchEvidence) {
+  return {
+    id: evidence.id,
+    kind: evidence.kind,
+    title: evidence.title,
+    text: clipPromptText(evidence.summary, PROMPT_TEXT_EVIDENCE_MAX),
+    rel: evidence.relevance,
+  };
+}
+
+function selectPromptHolders(
+  candidate: HolderResearchCandidate,
+  policy?: HolderResearchPromptPolicy,
+): HolderResearchHolder[] {
+  const limit = policy?.promptHoldersLimit ?? 8;
+  if (limit <= 0) return [];
+  const selected: HolderResearchHolder[] = [];
+  const seen = new Set<string>();
+  const add = (holder: HolderResearchHolder | null | undefined) => {
+    if (!holder || selected.length >= limit) return;
+    const key = `${holder.walletId}:${holder.side}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    selected.push(holder);
+  };
+
+  for (const holder of selectedEvidenceHolders(candidate)) add(holder);
+
+  if (candidate.side) {
+    const sideHolders = candidate.market.holders
+      .filter((holder) => holder.side === candidate.side)
+      .sort((a, b) => promptHolderRank(b, policy) - promptHolderRank(a, policy));
+    for (const holder of sideHolders) {
+      if (policy && !isSharpHolder(holder, policy)) continue;
+      add(holder);
+    }
+
+    const opposingSide = candidate.side === "YES" ? "NO" : "YES";
+    const opposingHolder = [...candidate.market.holders]
+      .filter(
+        (holder) =>
+          holder.side === opposingSide &&
+          holder.positionUsd >= (policy?.minHolderPositionUsd ?? 0),
+      )
+      .sort((a, b) => b.positionUsd - a.positionUsd)[0];
+    add(opposingHolder);
+  }
+
+  const remaining = [...candidate.market.holders].sort(
+    (a, b) => promptHolderRank(b, policy) - promptHolderRank(a, policy),
+  );
+  for (const holder of remaining) add(holder);
+  return selected;
+}
+
+function promptHolderRank(
+  holder: HolderResearchHolder,
+  policy?: HolderResearchPromptPolicy,
+): number {
+  const sharpBoost = policy && isSharpHolder(holder, policy) ? 1_000_000_000 : 0;
+  const edgeBoost = (holder.resolvedWinRateEdge30d ?? 0) * 1_000_000;
+  return sharpBoost + edgeBoost + holder.positionUsd;
 }
 
 export function buildHolderResearchTriageCandidatePromptJson(
@@ -3077,38 +3284,21 @@ export function buildHolderResearchTriageCandidatePromptJson(
     bucket: candidate.bucket,
     score: candidate.score,
     side: candidate.side,
-    direction: candidate.direction,
-    signalType: candidate.signalType,
-    reasons: candidate.reasons,
-    market: {
-      marketId: candidate.market.marketId,
-      eventId: candidate.market.eventId,
-      title: candidate.market.marketTitle,
-      eventTitle: candidate.market.eventTitle,
-      closeTime: candidate.market.closeTime,
-      yesProbability: candidate.market.yesProbability,
-      trackedUsd: totalUsd,
-      recentActivityUsd: candidate.market.recentActivityUsd,
-      recentActivityAt: candidate.market.recentActivityAt,
-      previousNote: candidate.market.previousNote
-        ? {
-            createdAt: candidate.market.previousNote.createdAt,
-            title: candidate.market.previousNote.title,
-            cooldownUntil: candidate.market.previousNote.cooldownUntil,
-          }
-        : null,
-    },
-    marketMovementContext: policy.movementContextEnabled
-      ? candidate.market.marketMovementContext
+    dir: candidate.direction,
+    type: candidate.signalType,
+    why: candidate.reasons,
+    mkt: compactPromptMarket(candidate, "triage", totalUsd),
+    move: policy.movementContextEnabled
+      ? compactPromptMovement(candidate.market.marketMovementContext)
       : null,
-    holderEntryContext: policy.holderEntryContextEnabled
+    holderEntry: policy.holderEntryContextEnabled
       ? buildHolderEntryContext(candidate)
       : [],
     actor,
     quality,
     sides: {
-      YES: thinSide(candidate.market.sides.YES),
-      NO: thinSide(candidate.market.sides.NO),
+      YES: compactPromptSide(candidate.market.sides.YES),
+      NO: compactPromptSide(candidate.market.sides.NO),
     },
   };
 }
@@ -3128,38 +3318,44 @@ export function buildHolderResearchExternalSearchInput(
     : null;
 
   return {
-    market: {
+    mkt: {
       id: candidate.market.marketId,
       title: candidate.market.marketTitle,
-      eventTitle: candidate.market.eventTitle,
+      evt: candidate.market.eventTitle,
       venue: candidate.market.venue,
-      category: candidate.market.category,
-      seriesTitle: candidate.market.seriesTitle,
-      closeTime: candidate.market.closeTime,
-      yesProbability: candidate.market.yesProbability,
-      description:
-        candidate.market.marketDescription ??
-        candidate.market.eventDescription ??
-        null,
-      resolutionSource: candidate.market.resolutionSource,
+      cat: candidate.market.category,
+      series: candidate.market.seriesTitle,
+      close: candidate.market.closeTime,
+      pYes: candidate.market.yesProbability,
+      desc:
+        clipPromptText(
+          candidate.market.marketDescription ??
+            candidate.market.eventDescription ??
+            null,
+          PROMPT_TEXT_MARKET_MAX,
+        ),
+      resolve: clipPromptText(
+        candidate.market.resolutionSource,
+        PROMPT_TEXT_RESOLUTION_MAX,
+      ),
     },
-    holderSignal: {
+    signal: {
       bucket: candidate.bucket,
       side: targetSide,
       score: candidate.score,
-      reasons: candidate.reasons,
+      why: candidate.reasons,
       sideUsd: target?.usd ?? null,
       sideWallets: target?.wallets ?? null,
-      opposingSideUsd: other?.usd ?? null,
-      opposingSideWallets: other?.wallets ?? null,
-      sideOpenPnlUsd: target?.openPnlUsd ?? null,
-      opposingSideOpenPnlUsd: other?.openPnlUsd ?? null,
-      sideSharpHolders: target?.sharpHolders ?? null,
+      oppUsd: other?.usd ?? null,
+      oppWallets: other?.wallets ?? null,
+      sideOpenPnl: target?.openPnlUsd ?? null,
+      oppOpenPnl: other?.openPnlUsd ?? null,
+      sideSharp: target?.sharpHolders ?? null,
       sideSharpUsd: target?.sharpUsd ?? null,
-      topHolderPositionUsd: topTargetHolder?.positionUsd ?? null,
-      topHolderOpenPnlUsd: topTargetHolder?.openPnlUsd ?? null,
-      recentActivityUsd: candidate.market.recentActivityUsd,
-      recentActivityAt: candidate.market.recentActivityAt,
+      topHolderUsd: topTargetHolder?.positionUsd ?? null,
+      topHolderOpenPnl: topTargetHolder?.openPnlUsd ?? null,
+      recentUsd: candidate.market.recentActivityUsd,
+      recentAt: candidate.market.recentActivityAt,
     },
     instruction:
       "Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.",
@@ -3495,6 +3691,11 @@ export async function persistHolderResearchNotes(
 
     try {
       await client.query("begin");
+      const signalSnapshot = await buildHolderResearchSignalSnapshot(client, {
+        marketId: candidate.market.marketId,
+        side: candidate.side,
+        direction: decision.output.direction,
+      });
       const inserted = await client.query<{ id: string }>(
         `
           insert into ai_notes (
@@ -3555,6 +3756,7 @@ export async function persistHolderResearchNotes(
               recentActivityUsd: candidate.market.recentActivityUsd,
               crossMarketWalletCount: candidate.market.crossMarketWalletCount,
             },
+            signalSnapshot,
             sides: candidate.market.sides,
           }),
           JSON.stringify({
@@ -3953,68 +4155,5 @@ export async function loadHolderResearchCalibrationMemo(
   client: Queryable,
   policy: HolderResearchPolicy,
 ): Promise<string[]> {
-  if (!policy.calibrationMemoEnabled) return [];
-  const { rows } = await client.query<{
-    outcome: string | null;
-    market_type: string | null;
-    actor_mode: string | null;
-    primary_holder_pnl_30d_usd: string | number | null;
-    primary_holder_position_usd: string | number | null;
-  }>(
-    `
-      select
-        n.metrics #>> '{resolvedEvaluation,outcome}' as outcome,
-        n.metrics #>> '{resolvedEvaluation,marketType}' as market_type,
-        n.metrics #>> '{resolvedEvaluation,actorMode}' as actor_mode,
-        n.metrics #>> '{resolvedEvaluation,primaryHolderPnl30dUsd}' as primary_holder_pnl_30d_usd,
-        n.metrics #>> '{resolvedEvaluation,primaryHolderPositionUsd}' as primary_holder_position_usd
-      from ai_notes n
-      where n.note_type = 'signal'
-        and n.producer_type = 'holder_research'
-        and n.metrics ? 'resolvedEvaluation'
-        and n.created_at >= now() - ($1::numeric * interval '1 hour')
-      order by n.updated_at desc, n.created_at desc
-      limit 50
-    `,
-    [policy.resolvedEvaluationLookbackHours],
-  );
-
-  const failedSportsSingles = rows.filter(
-    (row) =>
-      row.outcome === "wrong" &&
-      row.market_type === "single_game_sports" &&
-      row.actor_mode === "single_holder",
-  );
-  const successfulSportsStrong = rows.filter(
-    (row) =>
-      row.outcome === "correct" &&
-      row.market_type === "single_game_sports" &&
-      (row.actor_mode === "sharp_cluster" ||
-        (row.actor_mode === "single_holder" &&
-          (toNumber(row.primary_holder_pnl_30d_usd) ?? 0) > 0 &&
-          (toNumber(row.primary_holder_position_usd) ?? 0) >=
-            policy.singleGameSportsMinHolderUsd)),
-  );
-  const memo: string[] = [];
-  if (failedSportsSingles.length > 0) {
-    memo.push(
-      `Recent failed pattern: ${failedSportsSingles.length} wrong single-game sports signals were single-holder reads; downgrade weak or public-favorite sports singles.`,
-    );
-  }
-  if (successfulSportsStrong.length > 0) {
-    memo.push(
-      `Recent successful pattern: ${successfulSportsStrong.length} single-game sports signals worked when they had a sharp cluster or an exceptional profitable holder.`,
-    );
-  }
-  const nonSportsCorrect = rows.filter(
-    (row) =>
-      row.outcome === "correct" &&
-      row.market_type !== "single_game_sports",
-  );
-  if (nonSportsCorrect.length > 0) {
-    memo.push(
-      `Recent non-sports wins: ${nonSportsCorrect.length} resolved notes were correct; do not apply sports-only caution to politics, crypto, or long-dated outrights.`,
-    );
-  }
-  return memo.slice(0, 4);
+  return loadHolderResearchPerformanceCalibrationMemo(client, policy);
 }

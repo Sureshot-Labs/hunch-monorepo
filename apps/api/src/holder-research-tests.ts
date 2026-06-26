@@ -4,6 +4,7 @@ import {
   buildHolderResearchSystemPrompt,
   buildHolderResearchTriageSystemPrompt,
   buildHolderResearchTriageUserPrompt,
+  buildHolderResearchUserPrompt,
   holderResearchAgentOutputV1Schema,
   parseHolderResearchAgentOutputV1,
   parseHolderResearchTriageOutputV1,
@@ -45,10 +46,57 @@ import {
   resolveIntelPolicy,
   type HolderResearchPolicy,
 } from "./services/runtime-policies.js";
+import {
+  auditHolderResearchSignalPerformance,
+  loadHolderResearchPerformanceCalibrationMemo,
+  resolveHolderResearchFinalYesProbability,
+  resolveHolderResearchSignalQuote,
+} from "./services/holder-research-performance.js";
 
 function policy(overrides: Partial<HolderResearchPolicy> = {}) {
   return {
     ...getIntelPolicyDefaults("holder_research"),
+    ...overrides,
+  };
+}
+
+function calibrationRow(
+  overrides: Partial<{
+    note_id: string;
+    created_at: Date;
+    outcome: string;
+    market_type: string;
+    actor_mode: string;
+    bucket: string;
+    market_id: string;
+    signal_side: string;
+    entry_quality: string;
+    entry_approx_distance_minutes: number | null;
+    pnl_per_dollar: number | null;
+    state: string;
+    primary_holder_wallet_id: string | null;
+    primary_holder_label: string | null;
+    primary_holder_pnl_30d_usd: number | null;
+    primary_holder_position_usd: number | null;
+  }> = {},
+) {
+  return {
+    note_id: "00000000-0000-4000-8000-000000000100",
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
+    outcome: "wrong",
+    market_type: "single_game_sports",
+    actor_mode: "single_holder",
+    bucket: "sharp_side",
+    market_id: "polymarket:sports",
+    signal_side: "YES",
+    entry_quality: "exact_snapshot",
+    entry_approx_distance_minutes: null,
+    pnl_per_dollar: -1,
+    state: "resolved",
+    primary_holder_wallet_id: "wallet-sports",
+    primary_holder_label: null,
+    primary_holder_pnl_30d_usd: -1_000,
+    primary_holder_position_usd: 12_000,
     ...overrides,
   };
 }
@@ -198,6 +246,357 @@ function publishOutput(
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
+  {
+    name: "holder research performance quote math handles YES and NO prices",
+    run: () => {
+      const yes = resolveHolderResearchSignalQuote(
+        { best_bid: 0.3, best_ask: 0.34, last_price: 0.32 },
+        "YES",
+      );
+      assert.equal(yes.buyPrice, 0.34);
+      assert.equal(yes.buyPriceSource, "yes_ask");
+      assert.equal(yes.markPrice, 0.3);
+      assert.equal(yes.markPriceSource, "yes_bid");
+
+      const no = resolveHolderResearchSignalQuote(
+        { best_bid: 0.3, best_ask: 0.34, last_price: 0.32 },
+        "NO",
+      );
+      assert.equal(no.buyPrice, 0.7);
+      assert.equal(no.buyPriceSource, "no_from_yes_bid");
+      assert.equal(no.markPrice, 0.6599999999999999);
+      assert.equal(no.markPriceSource, "no_from_yes_ask");
+    },
+  },
+  {
+    name: "holder research performance outcome uses explicit resolution before terminal price",
+    run: () => {
+      assert.deepEqual(
+        resolveHolderResearchFinalYesProbability({
+          resolved_outcome: "NO",
+          resolved_outcome_pct: null,
+          best_bid: 0.999,
+          best_ask: 1,
+          last_price: 1,
+        }),
+        { finalYesProbability: 0, source: "resolved_outcome" },
+      );
+      assert.deepEqual(
+        resolveHolderResearchFinalYesProbability({
+          resolved_outcome: null,
+          resolved_outcome_pct: 2500,
+          best_bid: 0.999,
+          best_ask: 1,
+          last_price: 1,
+        }),
+        { finalYesProbability: 0.25, source: "resolved_outcome_pct" },
+      );
+      assert.deepEqual(
+        resolveHolderResearchFinalYesProbability({
+          resolved_outcome: null,
+          resolved_outcome_pct: null,
+          best_bid: 0.58,
+          best_ask: 0.62,
+          last_price: 0.6,
+        }),
+        { finalYesProbability: null, source: "missing" },
+      );
+    },
+  },
+  {
+    name: "holder research performance audit uses exact signal snapshot before trade fallback",
+    run: async () => {
+      const updates: Array<Record<string, unknown>> = [];
+      let tradeFallbackQueried = false;
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/from\s+ai_notes\s+n/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  note_id: "00000000-0000-4000-8000-000000000091",
+                  direction: "up",
+                  confidence: 0.82,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  metrics: {
+                    bucket: "sharp_side",
+                    market: { yesProbability: 0.32 },
+                    signalSnapshot: {
+                      version: 1,
+                      recordedAt: "2026-01-01T00:00:00.000Z",
+                      marketId: "polymarket:perf",
+                      eventId: "polymarket:event",
+                      venue: "polymarket",
+                      side: "YES",
+                      direction: "up",
+                      marketStatus: "ACTIVE",
+                      acceptingOrders: true,
+                      tokens: { yes: "yes-token", no: "no-token" },
+                      quote: {
+                        buyPrice: 0.35,
+                        buyPriceSource: "yes_ask",
+                      },
+                    },
+                  },
+                  model_meta: {
+                    primary_holder_credentials: { mode: "single_holder" },
+                  },
+                  target_meta: { side: "YES", bucket: "sharp_side" },
+                  market_id: "polymarket:perf",
+                  event_id: "polymarket:event",
+                  venue: "polymarket",
+                  market_status: "CLOSED",
+                  market_title: "Test winner",
+                  event_title: "Test event",
+                  category: "Politics",
+                  close_time: new Date("2026-01-01T03:00:00.000Z"),
+                  expiration_time: null,
+                  best_bid: 0.999,
+                  best_ask: 1,
+                  last_price: 1,
+                  resolved_outcome: "YES",
+                  resolved_outcome_pct: null,
+                  accepting_orders: false,
+                  yes_token_id: "yes-token",
+                  no_token_id: "no-token",
+                },
+              ],
+            };
+          }
+          if (/from\s+jsonb_to_recordset/i.test(sql)) {
+            tradeFallbackQueried = true;
+            return { rows: [] };
+          }
+          if (/update\s+ai_notes/i.test(sql)) {
+            updates.push(JSON.parse(String(params?.[1])) as Record<string, unknown>);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [] };
+        },
+      } as unknown as import("./db.js").DbQuery;
+
+      const result = await auditHolderResearchSignalPerformance(db, {
+        lookbackHours: 168,
+        limit: 10,
+        persist: true,
+        includeOpen: true,
+        includeResolved: true,
+      });
+      assert.equal(tradeFallbackQueried, false);
+      assert.equal(result.evaluated, 1);
+      assert.equal(result.written, 1);
+      assert.equal(result.correct, 1);
+      assert.equal(updates[0]?.entryPrice, 0.35);
+      assert.equal(updates[0]?.entryPriceSource, "signal_snapshot");
+      assert.equal(updates[0]?.pnlPerDollar, (1 - 0.35) / 0.35);
+    },
+  },
+  {
+    name: "holder research performance audit falls back to Polymarket clob side token trade",
+    run: async () => {
+      let fallbackPayload: unknown = null;
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/from\s+ai_notes\s+n/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  note_id: "00000000-0000-4000-8000-000000000092",
+                  direction: "down",
+                  confidence: 0.72,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  metrics: {
+                    bucket: "sharp_minority",
+                    market: { yesProbability: 0.52 },
+                  },
+                  model_meta: {
+                    primary_holder_credentials: { mode: "single_holder" },
+                  },
+                  target_meta: { side: "NO", bucket: "sharp_minority" },
+                  market_id: "polymarket:perf-no",
+                  event_id: "polymarket:event",
+                  venue: "polymarket",
+                  market_status: "CLOSED",
+                  market_title: "Mexico",
+                  event_title: "Czechia vs. Mexico",
+                  category: "Sports",
+                  close_time: new Date("2026-01-01T03:00:00.000Z"),
+                  expiration_time: null,
+                  best_bid: 1,
+                  best_ask: 1,
+                  last_price: 1,
+                  resolved_outcome: "YES",
+                  resolved_outcome_pct: null,
+                  accepting_orders: false,
+                  yes_token_id: null,
+                  no_token_id: null,
+                  market_token_yes: null,
+                  market_token_no: null,
+                  clob_token_ids: JSON.stringify(["clob-yes-token", "clob-no-token"]),
+                },
+              ],
+            };
+          }
+          if (/from\s+jsonb_to_recordset/i.test(sql)) {
+            fallbackPayload = params?.[0];
+            return {
+              rows: [
+                {
+                  note_id: "00000000-0000-4000-8000-000000000092",
+                  price: 0.48,
+                  ts: new Date("2026-01-01T00:10:00.000Z"),
+                  distance_minutes: 10,
+                },
+              ],
+            };
+          }
+          return { rows: [], rowCount: 0 };
+        },
+      } as unknown as import("./db.js").DbQuery;
+
+      const result = await auditHolderResearchSignalPerformance(db, {
+        lookbackHours: 168,
+        limit: 10,
+        persist: false,
+        includeOpen: true,
+        includeResolved: true,
+      });
+      assert.match(String(fallbackPayload), /clob-no-token/);
+      assert.match(String(fallbackPayload), /note_id/);
+      assert.match(String(fallbackPayload), /token_id/);
+      assert.doesNotMatch(String(fallbackPayload), /noteId/);
+      assert.equal(result.items[0]?.entryPrice, 0.48);
+      assert.equal(result.items[0]?.entryPriceSource, "nearest_trade");
+      assert.equal(result.items[0]?.entryApproxDistanceMinutes, 10);
+      assert.equal(result.items[0]?.outcome, "wrong");
+    },
+  },
+  {
+    name: "holder research performance calibration skips tiny resolved samples",
+    run: async () => {
+      const db = {
+        query: async () => ({
+          rows: [
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000101",
+              outcome: "wrong",
+              market_id: "polymarket:sports-1",
+            }),
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000102",
+              outcome: "wrong",
+              market_id: "polymarket:sports-2",
+            }),
+          ],
+        }),
+      } as unknown as import("./db.js").DbQuery;
+
+      const memo = await loadHolderResearchPerformanceCalibrationMemo(
+        db,
+        policy({
+          calibrationMemoEnabled: true,
+          performanceCalibrationMinSamples: 3,
+          performanceCalibrationMinResolvedSamples: 3,
+          performanceCalibrationMinPatternSamples: 2,
+        }),
+      );
+      assert.deepEqual(memo, []);
+    },
+  },
+  {
+    name: "holder research performance calibration emits concrete wallet caution",
+    run: async () => {
+      const db = {
+        query: async () => ({
+          rows: [
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000111",
+              market_id: "polymarket:sports-1",
+              primary_holder_wallet_id: "wallet-sports-same",
+              primary_holder_label: "SportsWallet",
+              primary_holder_pnl_30d_usd: -1_000,
+              primary_holder_position_usd: 12_000,
+            }),
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000112",
+              market_id: "polymarket:sports-2",
+              primary_holder_wallet_id: "wallet-sports-same",
+              primary_holder_label: "SportsWallet",
+              primary_holder_pnl_30d_usd: 0,
+              primary_holder_position_usd: 18_000,
+            }),
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000113",
+              outcome: "correct",
+              market_type: "politics_geo",
+              actor_mode: "single_holder",
+              market_id: "polymarket:geo-1",
+              primary_holder_wallet_id: "wallet-geo",
+              primary_holder_pnl_30d_usd: 40_000,
+              primary_holder_position_usd: 60_000,
+            }),
+          ],
+        }),
+      } as unknown as import("./db.js").DbQuery;
+
+      const memo = await loadHolderResearchPerformanceCalibrationMemo(
+        db,
+        policy({
+          calibrationMemoEnabled: true,
+          performanceCalibrationMinSamples: 3,
+          performanceCalibrationMinResolvedSamples: 3,
+          performanceCalibrationMinPatternSamples: 2,
+          singleGameSportsMinHolderUsd: 25_000,
+        }),
+      );
+      assert.equal(memo.length, 1);
+      assert.match(memo[0] ?? "", /SportsWallet in 2\/2/);
+      assert.match(memo[0] ?? "", /2\/2 lacked positive 30d holder PnL/);
+      assert.match(memo[0] ?? "", /2\/2 were below the sports holder-size bar/);
+    },
+  },
+  {
+    name: "holder research performance calibration dedupes same market side",
+    run: async () => {
+      const db = {
+        query: async () => ({
+          rows: [
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000121",
+              market_id: "polymarket:sports-duplicate",
+              signal_side: "YES",
+              entry_quality: "distant_trade",
+            }),
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000122",
+              market_id: "polymarket:sports-duplicate",
+              signal_side: "YES",
+              entry_quality: "exact_snapshot",
+            }),
+            calibrationRow({
+              note_id: "00000000-0000-4000-8000-000000000123",
+              outcome: "correct",
+              market_type: "politics_geo",
+              actor_mode: "single_holder",
+              market_id: "polymarket:geo-2",
+            }),
+          ],
+        }),
+      } as unknown as import("./db.js").DbQuery;
+
+      const memo = await loadHolderResearchPerformanceCalibrationMemo(
+        db,
+        policy({
+          calibrationMemoEnabled: true,
+          performanceCalibrationMinSamples: 2,
+          performanceCalibrationMinResolvedSamples: 2,
+          performanceCalibrationMinPatternSamples: 2,
+          performanceCalibrationDedupMarketSide: true,
+        }),
+      );
+      assert.deepEqual(memo, []);
+    },
+  },
   {
     name: "holder research CLI parses triage overrides separately from synthesis budget",
     run: () => {
@@ -512,11 +911,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serializedExternal, /public context/i);
       assert.doesNotMatch(serializedExternal, /public news/i);
 
-      const internalInput = buildHolderResearchCandidatePromptJson(candidate);
+      const internalInput = buildHolderResearchCandidatePromptJson(candidate, p);
       const serializedInternal = JSON.stringify(internalInput);
       assert.match(serializedInternal, /0xabc/i);
-      assert.match(serializedInternal, /0xowner/i);
-      assert.match(serializedInternal, /walletUsdLikeBalance/i);
+      assert.doesNotMatch(serializedInternal, /0xowner/i);
+      assert.doesNotMatch(serializedInternal, /ownerAddress/i);
+      assert.doesNotMatch(serializedInternal, /walletUsdLikeBalance/i);
+      assert.doesNotMatch(serializedInternal, /ownerUsdLikeBalance/i);
+      assert.doesNotMatch(serializedInternal, /relatedOpenPositions/i);
       assert.match(serializedInternal, /Other hidden bet/i);
     },
   },
@@ -1519,14 +1921,17 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const prompt = buildHolderResearchSystemPrompt();
       assert.match(prompt, /do not repeat the bullets verbatim/i);
       assert.match(prompt, /do not invent credentials/i);
-      assert.match(prompt, /marketMovementContext/i);
-      assert.match(prompt, /holderEntryContext/i);
-      assert.match(prompt, /marketTypeMetrics30d/i);
+      assert.match(prompt, /candidate\.move/i);
+      assert.match(prompt, /candidate\.holderEntry/i);
+      assert.match(prompt, /sameType/i);
       assert.match(prompt, /understand the signal in 2 seconds/i);
       assert.match(prompt, /which side the wallet\(s\) are on/i);
       assert.match(prompt, /compressed signal thesis/i);
       assert.match(prompt, /Prefer outcome meaning over raw YES\/NO wording/i);
+      assert.match(prompt, /Avoid generic headline nouns/i);
       assert.match(prompt, /Avoid in headline\/summary/i);
+      assert.match(prompt, /France money fights the NO crowd/i);
+      assert.match(prompt, /France backers buck heavy NO money/i);
       assert.match(prompt, /Bad headline examples/i);
       assert.doesNotMatch(prompt, /Prefer simple phrases like 'informed wallets'/i);
     },
@@ -1591,24 +1996,80 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "politics_geo",
       );
       assert.deepEqual(
-        (record.marketMovementContext as Record<string, unknown>).yesChange24h,
+        (record.move as Record<string, unknown>).dYes24h,
         0.08,
       );
       const entry = (
-        record.holderEntryContext as Array<Record<string, unknown>>
+        record.holderEntry as Array<Record<string, unknown>>
       )[0];
-      assert.equal(entry?.avgEntryPrice, 0.3);
-      assert.equal(entry?.currentPrice, 0.4);
-      assert.equal(entry?.entryToCurrentDelta, 0.1);
-      assert.equal(entry?.approxReliable, true);
+      assert.equal(entry?.entry, 0.3);
+      assert.equal(entry?.cur, 0.4);
+      assert.equal(entry?.dEntry, 0.1);
+      assert.equal(entry?.pnlReliable, true);
       assert.deepEqual(
-        (entry?.marketTypeMetrics30d as Record<string, unknown>).marketType,
+        (entry?.sameType as Record<string, unknown>).type,
         "politics_geo",
       );
       assert.equal(
-        (entry?.marketTypeMetrics30d as Record<string, unknown>).pnlUsd,
+        (entry?.sameType as Record<string, unknown>).pnlUsd,
         4_000,
       );
+      const serialized = JSON.stringify(record);
+      assert.match(serialized, /"mkt"/);
+      assert.match(serialized, /"addr"/);
+      assert.doesNotMatch(serialized, /identityProfileUrl/);
+      assert.doesNotMatch(serialized, /ownerAddress/);
+      assert.doesNotMatch(serialized, /walletUsdLikeBalance/);
+      assert.doesNotMatch(serialized, /resolvedEdgeZScore30d/);
+    },
+  },
+  {
+    name: "candidate prompt uses compact holders with limit and address",
+    run: () => {
+      const p = policy({ promptHoldersLimit: 2 });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("NO", {
+              walletId: "00000000-0000-0000-0000-000000000011",
+              address: "0xprimary",
+              positionUsd: 30_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-0000-0000-000000000012",
+              address: "0xsecondary",
+              positionUsd: 20_000,
+            }),
+            holder("YES", {
+              walletId: "00000000-0000-0000-0000-000000000013",
+              address: "0xopposing",
+              positionUsd: 200_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const promptJson = buildHolderResearchCandidatePromptJson(candidate, p);
+      const holders = (promptJson as Record<string, unknown>).holders as Array<
+        Record<string, unknown>
+      >;
+      assert.equal(holders.length, 2);
+      assert.equal(holders[0]?.addr, "0xprimary");
+      assert.equal(holders[1]?.addr, "0xsecondary");
+      const serialized = JSON.stringify(promptJson);
+      assert.match(serialized, /"addr"/);
+      assert.doesNotMatch(serialized, /0xowner/);
+      assert.doesNotMatch(serialized, /walletUsdLikeBalance/);
+      assert.doesNotMatch(serialized, /identityProfileUrl/);
+      assert.doesNotMatch(serialized, /positionShares/);
+
+      const finalPrompt = buildHolderResearchUserPrompt({
+        candidateJson: promptJson,
+        allowedEvidenceIds: candidate.evidence.map((entry) => entry.id),
+      });
+      assert.doesNotMatch(finalPrompt, /\n\s+"/);
     },
   },
   {
@@ -1626,10 +2087,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         p,
       );
       const serialized = JSON.stringify(triageCandidate);
-      assert.match(serialized, /marketMovementContext/);
-      assert.match(serialized, /holderEntryContext/);
+      assert.match(serialized, /"mkt"/);
+      assert.match(serialized, /"move"/);
+      assert.match(serialized, /"holderEntry"/);
       assert.match(serialized, /quality/);
-      assert.doesNotMatch(serialized, /0xno/i);
+      assert.match(serialized, /"addr"/);
       const prompt = buildHolderResearchTriageUserPrompt({
         candidates: [triageCandidate],
         maxInvestigate: 1,
@@ -1637,6 +2099,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       });
       assert.match(prompt, /holder_research_triage_v1/);
       assert.match(prompt, /Recent failed pattern/);
+      assert.doesNotMatch(prompt, /\n\s+"/);
       assert.match(buildHolderResearchTriageSystemPrompt(), /investigate/);
 
       const parsed = parseHolderResearchTriageOutputV1(
@@ -2082,10 +2545,26 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 triageMaxOutputTokens: 900,
                 movementContextEnabled: "false",
                 holderEntryContextEnabled: "false",
+                promptHoldersLimit: 3,
+                promptFormat: "compact_json",
                 minTriageInvestigatePriority: 0.7,
                 qualityGateEnabled: "true",
                 resolvedEvaluationEnabled: "true",
                 resolvedEvaluationLookbackHours: 72,
+                performanceAuditEnabled: "true",
+                performanceAuditLookbackHours: 96,
+                performanceAuditMaxNotesPerRun: 250,
+                performanceAuditIncludeOpen: "true",
+                performanceAuditApproxEntryBeforeHours: 12,
+                performanceAuditApproxEntryAfterHours: 1,
+                performanceCalibrationMinSamples: 10,
+                performanceCalibrationMinResolvedSamples: 12,
+                performanceCalibrationMinPatternSamples: 4,
+                performanceCalibrationMaxNearTradeMinutes: 90,
+                performanceCalibrationUseOpenNotes: "true",
+                performanceCalibrationMinOpenAgeHours: 36,
+                performanceCalibrationMinOpenMovePp: 0.08,
+                performanceCalibrationDedupMarketSide: "false",
                 calibrationMemoEnabled: "false",
                 singleGameSportsStrictMode: "true",
                 singleGameSportsMinHolderUsd: 30_000,
@@ -2122,10 +2601,26 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.triageMaxOutputTokens, 900);
       assert.equal(resolved.effective.movementContextEnabled, false);
       assert.equal(resolved.effective.holderEntryContextEnabled, false);
+      assert.equal(resolved.effective.promptHoldersLimit, 3);
+      assert.equal(resolved.effective.promptFormat, "compact_json");
       assert.equal(resolved.effective.minTriageInvestigatePriority, 0.7);
       assert.equal(resolved.defaults.qualityGateEnabled, true);
       assert.equal(resolved.defaults.resolvedEvaluationEnabled, true);
       assert.equal(resolved.effective.resolvedEvaluationLookbackHours, 72);
+      assert.equal(resolved.effective.performanceAuditEnabled, true);
+      assert.equal(resolved.effective.performanceAuditLookbackHours, 96);
+      assert.equal(resolved.effective.performanceAuditMaxNotesPerRun, 250);
+      assert.equal(resolved.effective.performanceAuditIncludeOpen, true);
+      assert.equal(resolved.effective.performanceAuditApproxEntryBeforeHours, 12);
+      assert.equal(resolved.effective.performanceAuditApproxEntryAfterHours, 1);
+      assert.equal(resolved.effective.performanceCalibrationMinSamples, 10);
+      assert.equal(resolved.effective.performanceCalibrationMinResolvedSamples, 12);
+      assert.equal(resolved.effective.performanceCalibrationMinPatternSamples, 4);
+      assert.equal(resolved.effective.performanceCalibrationMaxNearTradeMinutes, 90);
+      assert.equal(resolved.effective.performanceCalibrationUseOpenNotes, true);
+      assert.equal(resolved.effective.performanceCalibrationMinOpenAgeHours, 36);
+      assert.equal(resolved.effective.performanceCalibrationMinOpenMovePp, 0.08);
+      assert.equal(resolved.effective.performanceCalibrationDedupMarketSide, false);
       assert.equal(resolved.effective.calibrationMemoEnabled, false);
       assert.equal(resolved.effective.singleGameSportsMinHolderUsd, 30_000);
       assert.equal(resolved.effective.singleGameSportsMinEdge, 0.2);

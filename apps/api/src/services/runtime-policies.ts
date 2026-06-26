@@ -147,10 +147,26 @@ export type HolderResearchPolicy = {
   triageMaxOutputTokens: number;
   movementContextEnabled: boolean;
   holderEntryContextEnabled: boolean;
+  promptHoldersLimit: number;
+  promptFormat: "compact_json";
   minTriageInvestigatePriority: number;
   qualityGateEnabled: boolean;
   resolvedEvaluationEnabled: boolean;
   resolvedEvaluationLookbackHours: number;
+  performanceAuditEnabled: boolean;
+  performanceAuditLookbackHours: number;
+  performanceAuditMaxNotesPerRun: number;
+  performanceAuditIncludeOpen: boolean;
+  performanceAuditApproxEntryBeforeHours: number;
+  performanceAuditApproxEntryAfterHours: number;
+  performanceCalibrationMinSamples: number;
+  performanceCalibrationMinResolvedSamples: number;
+  performanceCalibrationMinPatternSamples: number;
+  performanceCalibrationMaxNearTradeMinutes: number;
+  performanceCalibrationUseOpenNotes: boolean;
+  performanceCalibrationMinOpenAgeHours: number;
+  performanceCalibrationMinOpenMovePp: number;
+  performanceCalibrationDedupMarketSide: boolean;
   calibrationMemoEnabled: boolean;
   singleGameSportsStrictMode: boolean;
   singleGameSportsMinHolderUsd: number;
@@ -874,10 +890,26 @@ const holderResearchSchema = z
     triageMaxOutputTokens: positiveInt.max(8_000),
     movementContextEnabled: strictBoolean,
     holderEntryContextEnabled: strictBoolean,
+    promptHoldersLimit: nonNegativeInt.max(12),
+    promptFormat: z.literal("compact_json"),
     minTriageInvestigatePriority: ratio,
     qualityGateEnabled: strictBoolean,
     resolvedEvaluationEnabled: strictBoolean,
     resolvedEvaluationLookbackHours: positiveInt.max(24 * 365),
+    performanceAuditEnabled: strictBoolean,
+    performanceAuditLookbackHours: positiveInt.max(24 * 365),
+    performanceAuditMaxNotesPerRun: positiveInt.max(10_000),
+    performanceAuditIncludeOpen: strictBoolean,
+    performanceAuditApproxEntryBeforeHours: nonNegativeInt.max(24 * 30),
+    performanceAuditApproxEntryAfterHours: nonNegativeInt.max(24 * 30),
+    performanceCalibrationMinSamples: positiveInt.max(1_000),
+    performanceCalibrationMinResolvedSamples: positiveInt.max(1_000),
+    performanceCalibrationMinPatternSamples: positiveInt.max(1_000),
+    performanceCalibrationMaxNearTradeMinutes: nonNegativeInt.max(24 * 60),
+    performanceCalibrationUseOpenNotes: strictBoolean,
+    performanceCalibrationMinOpenAgeHours: nonNegativeInt.max(24 * 365),
+    performanceCalibrationMinOpenMovePp: ratio,
+    performanceCalibrationDedupMarketSide: strictBoolean,
     calibrationMemoEnabled: strictBoolean,
     singleGameSportsStrictMode: strictBoolean,
     singleGameSportsMinHolderUsd: nonNegativeNumber,
@@ -1582,10 +1614,26 @@ function getDefaults(): IntelPolicyMap {
       triageMaxOutputTokens: 2_000,
       movementContextEnabled: true,
       holderEntryContextEnabled: true,
+      promptHoldersLimit: 8,
+      promptFormat: "compact_json",
       minTriageInvestigatePriority: 0.6,
       qualityGateEnabled: true,
       resolvedEvaluationEnabled: true,
       resolvedEvaluationLookbackHours: 168,
+      performanceAuditEnabled: true,
+      performanceAuditLookbackHours: 168,
+      performanceAuditMaxNotesPerRun: 500,
+      performanceAuditIncludeOpen: true,
+      performanceAuditApproxEntryBeforeHours: 24,
+      performanceAuditApproxEntryAfterHours: 2,
+      performanceCalibrationMinSamples: 5,
+      performanceCalibrationMinResolvedSamples: 8,
+      performanceCalibrationMinPatternSamples: 3,
+      performanceCalibrationMaxNearTradeMinutes: 120,
+      performanceCalibrationUseOpenNotes: false,
+      performanceCalibrationMinOpenAgeHours: 24,
+      performanceCalibrationMinOpenMovePp: 0.05,
+      performanceCalibrationDedupMarketSide: true,
       calibrationMemoEnabled: true,
       singleGameSportsStrictMode: true,
       singleGameSportsMinHolderUsd: 25_000,
@@ -2480,6 +2528,8 @@ function normalizeHolderResearchPolicy(
     ),
     movementContextEnabled: Boolean(policy.movementContextEnabled),
     holderEntryContextEnabled: Boolean(policy.holderEntryContextEnabled),
+    promptHoldersLimit: clamp(Math.trunc(policy.promptHoldersLimit), 0, 12),
+    promptFormat: "compact_json",
     minTriageInvestigatePriority: clamp(
       policy.minTriageInvestigatePriority,
       0,
@@ -2491,6 +2541,64 @@ function normalizeHolderResearchPolicy(
       Math.trunc(policy.resolvedEvaluationLookbackHours),
       1,
       24 * 365,
+    ),
+    performanceAuditEnabled: Boolean(policy.performanceAuditEnabled),
+    performanceAuditLookbackHours: clamp(
+      Math.trunc(policy.performanceAuditLookbackHours),
+      1,
+      24 * 365,
+    ),
+    performanceAuditMaxNotesPerRun: clamp(
+      Math.trunc(policy.performanceAuditMaxNotesPerRun),
+      1,
+      10_000,
+    ),
+    performanceAuditIncludeOpen: Boolean(policy.performanceAuditIncludeOpen),
+    performanceAuditApproxEntryBeforeHours: clamp(
+      Math.trunc(policy.performanceAuditApproxEntryBeforeHours),
+      0,
+      24 * 30,
+    ),
+    performanceAuditApproxEntryAfterHours: clamp(
+      Math.trunc(policy.performanceAuditApproxEntryAfterHours),
+      0,
+      24 * 30,
+    ),
+    performanceCalibrationMinSamples: clamp(
+      Math.trunc(policy.performanceCalibrationMinSamples),
+      1,
+      1_000,
+    ),
+    performanceCalibrationMinResolvedSamples: clamp(
+      Math.trunc(policy.performanceCalibrationMinResolvedSamples),
+      1,
+      1_000,
+    ),
+    performanceCalibrationMinPatternSamples: clamp(
+      Math.trunc(policy.performanceCalibrationMinPatternSamples),
+      1,
+      1_000,
+    ),
+    performanceCalibrationMaxNearTradeMinutes: clamp(
+      Math.trunc(policy.performanceCalibrationMaxNearTradeMinutes),
+      0,
+      24 * 60,
+    ),
+    performanceCalibrationUseOpenNotes: Boolean(
+      policy.performanceCalibrationUseOpenNotes,
+    ),
+    performanceCalibrationMinOpenAgeHours: clamp(
+      Math.trunc(policy.performanceCalibrationMinOpenAgeHours),
+      0,
+      24 * 365,
+    ),
+    performanceCalibrationMinOpenMovePp: clamp(
+      policy.performanceCalibrationMinOpenMovePp,
+      0,
+      1,
+    ),
+    performanceCalibrationDedupMarketSide: Boolean(
+      policy.performanceCalibrationDedupMarketSide,
     ),
     calibrationMemoEnabled: Boolean(policy.calibrationMemoEnabled),
     singleGameSportsStrictMode: Boolean(policy.singleGameSportsStrictMode),

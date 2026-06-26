@@ -44,6 +44,7 @@ import {
   type HolderResearchDecisionCacheEvaluation,
   type HolderResearchPersistDecision,
 } from "./services/holder-research.js";
+import { auditHolderResearchSignalPerformance } from "./services/holder-research-performance.js";
 import {
   resolveHolderResearchPolicy,
   resolveWalletIntelRefreshPolicy,
@@ -228,6 +229,9 @@ type HolderResearchRunReport = {
   persistence: Awaited<ReturnType<typeof persistHolderResearchNotes>> | null;
   resolvedEvaluation: Awaited<
     ReturnType<typeof evaluateResolvedHolderResearchNotes>
+  > | null;
+  performanceAudit: Awaited<
+    ReturnType<typeof auditHolderResearchSignalPerformance>
   > | null;
 };
 
@@ -1809,6 +1813,30 @@ export async function runHolderResearch(
         : "dry-run or policy disabled",
     });
 
+    let performanceAudit: HolderResearchRunReport["performanceAudit"] = null;
+    const shouldAuditPerformance =
+      policy.performanceAuditEnabled && !policy.dryRun;
+    if (shouldAuditPerformance) {
+      const auditResult = await auditHolderResearchSignalPerformance(client, {
+        lookbackHours: policy.performanceAuditLookbackHours,
+        limit: policy.performanceAuditMaxNotesPerRun,
+        persist: true,
+        includeOpen: policy.performanceAuditIncludeOpen,
+        includeResolved: true,
+        approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
+        approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
+      });
+      performanceAudit = { ...auditResult, items: [] };
+    }
+    toolCalls.push({
+      name: "signal_performance_audit",
+      count: performanceAudit?.evaluated ?? 0,
+      status: shouldAuditPerformance ? "ok" : "skipped",
+      detail: shouldAuditPerformance
+        ? `considered=${performanceAudit?.considered ?? 0} written=${performanceAudit?.written ?? 0} open=${performanceAudit?.open ?? 0} resolved=${performanceAudit?.resolved ?? 0} correct=${performanceAudit?.correct ?? 0} wrong=${performanceAudit?.wrong ?? 0} missingEntry=${performanceAudit?.missingEntry ?? 0}`
+        : "dry-run or policy disabled",
+    });
+
     const estimatedCostUsd = decisions.reduce(
       (sum, decision) => sum + decision.cost.estimatedCostUsd,
       0,
@@ -1925,6 +1953,7 @@ export async function runHolderResearch(
       })),
       persistence,
       resolvedEvaluation,
+      performanceAudit,
     };
 
     if (args.outPath) {
