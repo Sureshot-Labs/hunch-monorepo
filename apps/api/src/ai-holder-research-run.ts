@@ -57,6 +57,7 @@ export type HolderResearchRunArgs = {
   externalSearch: boolean | null;
   persistNotes: boolean | null;
   model: string | null;
+  triageModel: string | null;
   limit: number | null;
   maxAgentCalls: number | null;
   maxOutputTokens: number | null;
@@ -114,6 +115,7 @@ type HolderResearchRunReport = {
   callModel: boolean;
   persistNotes: boolean;
   model: string;
+  triageModel: string;
   policy: {
     enabled: boolean;
     source: "env" | "db";
@@ -123,6 +125,7 @@ type HolderResearchRunReport = {
     externalSearchEnabled: boolean;
     maxExternalSearchCallsPerRun: number;
     triageEnabled: boolean;
+    triageModel: string;
     decisionCacheEnabled: boolean;
   };
   totals: {
@@ -288,6 +291,7 @@ export function parseHolderResearchRunArgs(
         ? false
         : parseBool(parseFlag(argv, "--persist")),
     model: parseFlag(argv, "--model")?.trim() || null,
+    triageModel: parseFlag(argv, "--triage-model")?.trim() || null,
     limit: parsePositiveInt(parseFlag(argv, "--limit")),
     maxAgentCalls: parsePositiveInt(parseFlag(argv, "--max-agent-calls")),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens")),
@@ -312,6 +316,7 @@ function withPolicyOverrides(
     persistNotes: args.persistNotes ?? policy.persistNotes,
     externalSearchEnabled: args.externalSearch ?? policy.externalSearchEnabled,
     model: args.model ?? policy.model,
+    triageModel: args.triageModel ?? policy.triageModel,
     maxOutputTokens: args.maxOutputTokens ?? policy.maxOutputTokens,
     maxAgentCallsPerRun,
     maxCandidatesPerRun,
@@ -944,7 +949,7 @@ async function callHolderResearchTriageModel(params: {
           Authorization: `Bearer ${env.openRouterKey}`,
         },
         body: JSON.stringify({
-          model: params.policy.model,
+          model: params.policy.triageModel,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
@@ -985,7 +990,7 @@ async function callHolderResearchTriageModel(params: {
         },
       );
     }
-    const pricing = getOpenRouterModelPricingPerM(params.policy.model);
+    const pricing = getOpenRouterModelPricingPerM(params.policy.triageModel);
     const provider = extractProviderCostUsd(payload);
     const promptTokens =
       payload.usage?.prompt_tokens ?? estimateTokens(systemPrompt + userPrompt);
@@ -1005,7 +1010,7 @@ async function callHolderResearchTriageModel(params: {
       decisions: output.decisions,
       cost,
       modelMeta: {
-        model: params.policy.model,
+        model: params.policy.triageModel,
         mode: "openrouter_triage",
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
@@ -1609,6 +1614,10 @@ export async function runHolderResearch(
         const decisionsByKey = new Map(
           result.decisions.map((decision) => [decision.key, decision]),
         );
+        const eligibleInvestigations: Array<{
+          candidate: HolderResearchCandidate;
+          decision: HolderResearchTriageDecision;
+        }> = [];
         for (const candidate of batch) {
           const triageDecision = decisionsByKey.get(candidate.key);
           if (!triageDecision) continue;
@@ -1622,11 +1631,9 @@ export async function runHolderResearch(
           });
           if (
             triageDecision.action === "investigate" &&
-            triageDecision.priority >= policy.minTriageInvestigatePriority &&
-            finalCandidates.length < policy.maxAgentCallsPerRun
+            triageDecision.priority >= policy.minTriageInvestigatePriority
           ) {
-            finalCandidates.push(candidate);
-            triage.investigate += 1;
+            eligibleInvestigations.push({ candidate, decision: triageDecision });
             continue;
           }
           if (triageDecision.action === "skip") {
@@ -1642,6 +1649,17 @@ export async function runHolderResearch(
             output: triageCacheOutput(triageDecision),
             decisionCache,
           });
+        }
+        const remainingBudget = Math.max(
+          0,
+          policy.maxAgentCallsPerRun - finalCandidates.length,
+        );
+        const selectedInvestigations = eligibleInvestigations
+          .sort((left, right) => right.decision.priority - left.decision.priority)
+          .slice(0, remainingBudget);
+        for (const { candidate } of selectedInvestigations) {
+          finalCandidates.push(candidate);
+          triage.investigate += 1;
         }
       }
     } else {
@@ -1797,7 +1815,7 @@ export async function runHolderResearch(
     let resolvedEvaluation: HolderResearchRunReport["resolvedEvaluation"] =
       null;
     const shouldEvaluateResolved =
-      policy.resolvedEvaluationEnabled && !policy.dryRun;
+      policy.resolvedEvaluationEnabled && shouldPersist;
     if (shouldEvaluateResolved) {
       resolvedEvaluation = await evaluateResolvedHolderResearchNotes(
         client,
@@ -1810,12 +1828,12 @@ export async function runHolderResearch(
       status: shouldEvaluateResolved ? "ok" : "skipped",
       detail: shouldEvaluateResolved
         ? `considered=${resolvedEvaluation?.considered ?? 0} correct=${resolvedEvaluation?.correct ?? 0} wrong=${resolvedEvaluation?.wrong ?? 0} unknown=${resolvedEvaluation?.unknown ?? 0} errors=${resolvedEvaluation?.errors ?? 0}`
-        : "dry-run or policy disabled",
+        : "dry-run, persistNotes=false, callModel=false, or policy disabled",
     });
 
     let performanceAudit: HolderResearchRunReport["performanceAudit"] = null;
     const shouldAuditPerformance =
-      policy.performanceAuditEnabled && !policy.dryRun;
+      policy.performanceAuditEnabled && shouldPersist;
     if (shouldAuditPerformance) {
       const auditResult = await auditHolderResearchSignalPerformance(client, {
         lookbackHours: policy.performanceAuditLookbackHours,
@@ -1834,7 +1852,7 @@ export async function runHolderResearch(
       status: shouldAuditPerformance ? "ok" : "skipped",
       detail: shouldAuditPerformance
         ? `considered=${performanceAudit?.considered ?? 0} written=${performanceAudit?.written ?? 0} open=${performanceAudit?.open ?? 0} resolved=${performanceAudit?.resolved ?? 0} correct=${performanceAudit?.correct ?? 0} wrong=${performanceAudit?.wrong ?? 0} missingEntry=${performanceAudit?.missingEntry ?? 0}`
-        : "dry-run or policy disabled",
+        : "dry-run, persistNotes=false, callModel=false, or policy disabled",
     });
 
     const estimatedCostUsd = decisions.reduce(
@@ -1867,6 +1885,7 @@ export async function runHolderResearch(
       callModel: args.callModel,
       persistNotes: policy.persistNotes,
       model: policy.model,
+      triageModel: policy.triageModel,
       policy: {
         enabled: policy.enabled,
         source: policyResult.source,
@@ -1876,6 +1895,7 @@ export async function runHolderResearch(
         externalSearchEnabled: policy.externalSearchEnabled,
         maxExternalSearchCallsPerRun: policy.maxExternalSearchCallsPerRun,
         triageEnabled: policy.triageEnabled,
+        triageModel: policy.triageModel,
         decisionCacheEnabled: policy.decisionCacheEnabled,
       },
       totals: {

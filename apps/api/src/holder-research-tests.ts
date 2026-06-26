@@ -604,10 +604,12 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "--max-agent-calls=2",
         "--triage-batch-size=6",
         "--triage-max-batches=2",
+        "--triage-model=openai/gpt-5.4-mini",
       ]);
       assert.equal(args.maxAgentCalls, 2);
       assert.equal(args.triageBatchSize, 6);
       assert.equal(args.triageMaxBatches, 2);
+      assert.equal(args.triageModel, "openai/gpt-5.4-mini");
     },
   },
   {
@@ -2540,6 +2542,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 maxExternalSearchCallsPerRun: 5,
                 externalSearchMinScore: 0.8,
                 triageEnabled: "true",
+                triageModel: "openai/gpt-5.4",
                 triageBatchSize: 12,
                 triageMaxBatchesPerRun: 3,
                 triageMaxOutputTokens: 900,
@@ -2574,6 +2577,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 singleGameSportsRequirePositivePnl: "false",
                 priceAgainstSignalBlockPp: 0.08,
                 maxAgentCallsPerRun: 100,
+                estimatedTriageCallCostUsd: 0.02,
                 maxOutputTokens: 1,
               },
               created_by: null,
@@ -2588,7 +2592,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.enabled, true);
       assert.equal(resolved.effective.dryRun, false);
       assert.equal(resolved.defaults.maxOutputTokens, 2_000);
+      assert.equal(resolved.defaults.estimatedCallCostUsd, 0.08);
+      assert.equal(resolved.defaults.estimatedTriageCallCostUsd, 0.01);
       assert.equal(resolved.defaults.model, "openai/gpt-5.5");
+      assert.equal(resolved.defaults.triageModel, "openai/gpt-5.4-mini");
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);
@@ -2596,6 +2603,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.defaults.triageBatchSize, 8);
       assert.equal(resolved.defaults.triageMaxOutputTokens, 2_000);
       assert.equal(resolved.effective.triageEnabled, true);
+      assert.equal(resolved.effective.triageModel, "openai/gpt-5.4");
       assert.equal(resolved.effective.triageBatchSize, 12);
       assert.equal(resolved.effective.triageMaxBatchesPerRun, 3);
       assert.equal(resolved.effective.triageMaxOutputTokens, 900);
@@ -2617,9 +2625,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.performanceCalibrationMinResolvedSamples, 12);
       assert.equal(resolved.effective.performanceCalibrationMinPatternSamples, 4);
       assert.equal(resolved.effective.performanceCalibrationMaxNearTradeMinutes, 90);
-      assert.equal(resolved.effective.performanceCalibrationUseOpenNotes, true);
-      assert.equal(resolved.effective.performanceCalibrationMinOpenAgeHours, 36);
-      assert.equal(resolved.effective.performanceCalibrationMinOpenMovePp, 0.08);
+      assert.equal(
+        "performanceCalibrationUseOpenNotes" in resolved.effective,
+        false,
+      );
+      assert.equal(
+        "performanceCalibrationMinOpenAgeHours" in resolved.effective,
+        false,
+      );
+      assert.equal(
+        "performanceCalibrationMinOpenMovePp" in resolved.effective,
+        false,
+      );
       assert.equal(resolved.effective.performanceCalibrationDedupMarketSide, false);
       assert.equal(resolved.effective.calibrationMemoEnabled, false);
       assert.equal(resolved.effective.singleGameSportsMinHolderUsd, 30_000);
@@ -2627,6 +2644,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.singleGameSportsMinSamples, 30);
       assert.equal(resolved.effective.singleGameSportsMinWinRate, 0.7);
       assert.equal(resolved.effective.singleGameSportsRequirePositivePnl, false);
+      assert.equal(resolved.effective.estimatedTriageCallCostUsd, 0.02);
       assert.equal(resolved.effective.priceAgainstSignalBlockPp, 0.08);
       assert.equal(resolved.effective.maxAgentCallsPerRun, 100);
       assert.equal(resolved.effective.maxOutputTokens, 100);

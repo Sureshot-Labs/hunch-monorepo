@@ -142,6 +142,7 @@ export type HolderResearchPolicy = {
   externalSearchMaxOutputTokens: number;
   estimatedExternalSearchCostUsd: number;
   triageEnabled: boolean;
+  triageModel: string;
   triageBatchSize: number;
   triageMaxBatchesPerRun: number;
   triageMaxOutputTokens: number;
@@ -163,9 +164,6 @@ export type HolderResearchPolicy = {
   performanceCalibrationMinResolvedSamples: number;
   performanceCalibrationMinPatternSamples: number;
   performanceCalibrationMaxNearTradeMinutes: number;
-  performanceCalibrationUseOpenNotes: boolean;
-  performanceCalibrationMinOpenAgeHours: number;
-  performanceCalibrationMinOpenMovePp: number;
   performanceCalibrationDedupMarketSide: boolean;
   calibrationMemoEnabled: boolean;
   singleGameSportsStrictMode: boolean;
@@ -198,6 +196,7 @@ export type HolderResearchPolicy = {
   maxRunsPerDay: number;
   dayBudgetUsd: number;
   estimatedCallCostUsd: number;
+  estimatedTriageCallCostUsd: number;
   maxOutputTokens: number;
   candidateLookbackHours: number;
   activityLookbackHours: number;
@@ -885,6 +884,7 @@ const holderResearchSchema = z
     externalSearchMaxOutputTokens: positiveInt.max(8_000),
     estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
     triageEnabled: strictBoolean,
+    triageModel: z.string().trim().min(1).max(200),
     triageBatchSize: positiveInt.max(50),
     triageMaxBatchesPerRun: positiveInt.max(20),
     triageMaxOutputTokens: positiveInt.max(8_000),
@@ -906,9 +906,6 @@ const holderResearchSchema = z
     performanceCalibrationMinResolvedSamples: positiveInt.max(1_000),
     performanceCalibrationMinPatternSamples: positiveInt.max(1_000),
     performanceCalibrationMaxNearTradeMinutes: nonNegativeInt.max(24 * 60),
-    performanceCalibrationUseOpenNotes: strictBoolean,
-    performanceCalibrationMinOpenAgeHours: nonNegativeInt.max(24 * 365),
-    performanceCalibrationMinOpenMovePp: ratio,
     performanceCalibrationDedupMarketSide: strictBoolean,
     calibrationMemoEnabled: strictBoolean,
     singleGameSportsStrictMode: strictBoolean,
@@ -941,6 +938,7 @@ const holderResearchSchema = z
     maxRunsPerDay: positiveInt.max(1_000),
     dayBudgetUsd: nonNegativeNumber.max(1_000_000),
     estimatedCallCostUsd: nonNegativeNumber.max(10_000),
+    estimatedTriageCallCostUsd: nonNegativeNumber.max(10_000),
     maxOutputTokens: positiveInt.max(8_000),
     candidateLookbackHours: positiveInt.max(24 * 90),
     activityLookbackHours: positiveInt.max(24 * 30),
@@ -1609,6 +1607,7 @@ function getDefaults(): IntelPolicyMap {
       externalSearchMaxOutputTokens: 700,
       estimatedExternalSearchCostUsd: 0.03,
       triageEnabled: true,
+      triageModel: "openai/gpt-5.4-mini",
       triageBatchSize: 8,
       triageMaxBatchesPerRun: 1,
       triageMaxOutputTokens: 2_000,
@@ -1630,9 +1629,6 @@ function getDefaults(): IntelPolicyMap {
       performanceCalibrationMinResolvedSamples: 8,
       performanceCalibrationMinPatternSamples: 3,
       performanceCalibrationMaxNearTradeMinutes: 120,
-      performanceCalibrationUseOpenNotes: false,
-      performanceCalibrationMinOpenAgeHours: 24,
-      performanceCalibrationMinOpenMovePp: 0.05,
       performanceCalibrationDedupMarketSide: true,
       calibrationMemoEnabled: true,
       singleGameSportsStrictMode: true,
@@ -1664,7 +1660,8 @@ function getDefaults(): IntelPolicyMap {
       maxRuntimeSeconds: 5 * 60,
       maxRunsPerDay: 24,
       dayBudgetUsd: 10,
-      estimatedCallCostUsd: 0.05,
+      estimatedCallCostUsd: 0.08,
+      estimatedTriageCallCostUsd: 0.01,
       maxOutputTokens: 2_000,
       candidateLookbackHours: 72,
       activityLookbackHours: 24,
@@ -2515,6 +2512,7 @@ function normalizeHolderResearchPolicy(
       10_000,
     ),
     triageEnabled: Boolean(policy.triageEnabled),
+    triageModel: policy.triageModel.trim() || "openai/gpt-5.4-mini",
     triageBatchSize: clamp(Math.trunc(policy.triageBatchSize), 1, 50),
     triageMaxBatchesPerRun: clamp(
       Math.trunc(policy.triageMaxBatchesPerRun),
@@ -2583,19 +2581,6 @@ function normalizeHolderResearchPolicy(
       Math.trunc(policy.performanceCalibrationMaxNearTradeMinutes),
       0,
       24 * 60,
-    ),
-    performanceCalibrationUseOpenNotes: Boolean(
-      policy.performanceCalibrationUseOpenNotes,
-    ),
-    performanceCalibrationMinOpenAgeHours: clamp(
-      Math.trunc(policy.performanceCalibrationMinOpenAgeHours),
-      0,
-      24 * 365,
-    ),
-    performanceCalibrationMinOpenMovePp: clamp(
-      policy.performanceCalibrationMinOpenMovePp,
-      0,
-      1,
     ),
     performanceCalibrationDedupMarketSide: Boolean(
       policy.performanceCalibrationDedupMarketSide,
@@ -2670,6 +2655,11 @@ function normalizeHolderResearchPolicy(
     maxRunsPerDay: clamp(Math.trunc(policy.maxRunsPerDay), 1, 1_000),
     dayBudgetUsd: clamp(policy.dayBudgetUsd, 0, 1_000_000),
     estimatedCallCostUsd: clamp(policy.estimatedCallCostUsd, 0, 10_000),
+    estimatedTriageCallCostUsd: clamp(
+      policy.estimatedTriageCallCostUsd,
+      0,
+      10_000,
+    ),
     maxOutputTokens: clamp(Math.trunc(policy.maxOutputTokens), 100, 8_000),
     candidateLookbackHours: clamp(
       Math.trunc(policy.candidateLookbackHours),
@@ -2868,6 +2858,9 @@ function sanitizeOverridePayload(
       return record;
     }
     case "holder_research": {
+      delete record.performanceCalibrationUseOpenNotes;
+      delete record.performanceCalibrationMinOpenAgeHours;
+      delete record.performanceCalibrationMinOpenMovePp;
       return record;
     }
     case "ai_whale_profiles": {

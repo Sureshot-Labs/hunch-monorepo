@@ -40,6 +40,11 @@ const OPENROUTER_MODEL_PRICING_PER_M: Record<
     outputPerM: 1.25,
     webSearchPerCallUsd: 0.01,
   },
+  "openai/gpt-5.5": {
+    inputPerM: 5,
+    outputPerM: 30,
+    webSearchPerCallUsd: 0.01,
+  },
 };
 
 // Verified from live usage.cost probe for openai/text-embedding-3-small.

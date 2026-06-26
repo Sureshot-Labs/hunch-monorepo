@@ -320,6 +320,7 @@ const tests: TestCase[] = [
       const gpt54 = getOpenRouterModelPricingPerM("openai/gpt-5.4");
       const gpt54mini = getOpenRouterModelPricingPerM("openai/gpt-5.4-mini");
       const gpt54nano = getOpenRouterModelPricingPerM("openai/gpt-5.4-nano");
+      const gpt55 = getOpenRouterModelPricingPerM("openai/gpt-5.5");
       const embed = getOpenRouterEmbeddingPricingPerM(
         "openai/text-embedding-3-small",
       );
@@ -333,6 +334,8 @@ const tests: TestCase[] = [
       assert.equal(gpt54mini?.outputPerM, 4.5);
       assert.equal(gpt54nano?.inputPerM, 0.2);
       assert.equal(gpt54nano?.outputPerM, 1.25);
+      assert.equal(gpt55?.inputPerM, 5);
+      assert.equal(gpt55?.outputPerM, 30);
       assert.equal(embed?.inputPerM, 0.02);
       assert.equal(embed?.outputPerM, 0);
     },

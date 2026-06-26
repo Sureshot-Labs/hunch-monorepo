@@ -214,8 +214,8 @@ export function buildHolderResearchTriageSystemPrompt(): string {
     "Prefer candidates where a sharp holder or sharp cluster has a clear side, movement context suggests the holder was early or still useful, and the signal adds something beyond public news or raw odds.",
     "Use candidate.quality. Prefer exceptional_single or cluster actor strength. Downgrade weak_single, contradicted credentials, price_against_signal, already_priced, and cases where public news fully explains the positioning.",
     "For single_game_sports, be stricter: investigate only sharp clusters or exceptional single holders. Weak one-wallet sports fades, public-favorite confirmation, and conflicting same-event reads should be watch or skip.",
-    "Use marketMovementContext to judge whether price moved with or ahead of the holder read. Use holderEntryContext to judge whether the holder is early, chasing, or still holding through a move.",
-    "When holderEntryContext includes marketTypeMetrics30d, treat it as same-type history for this market type. Prefer it when it reinforces overall credentials; downgrade when same-type evidence is absent or weaker.",
+    "Use candidate.move to judge whether price moved with or ahead of the holder read. Use candidate.holderEntry to judge whether the holder is early, chasing, or still holding through a move.",
+    "When candidate.holderEntry.sameType is present, treat it as same-type history for this market type. Prefer it when it reinforces overall credentials; downgrade when same-type evidence is absent or weaker.",
     "Use investigate for candidates worth final synthesis. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
     "Do not invent candidate keys. Return one decision per supplied candidate.",
   ].join("\n");
@@ -255,8 +255,6 @@ export function buildHolderResearchTriageUserPrompt(input: {
       recent_calibration: input.calibrationMemo ?? [],
       candidates: input.candidates,
     },
-    null,
-    2,
   );
 }
 
@@ -283,8 +281,8 @@ export function buildHolderResearchSystemPrompt(): string {
     "High scores are selection hints, not publish instructions. Even a high-score candidate should be CONTEXT if the user-facing takeaway is mixed or mostly risk/context.",
     "If public news is already obvious, still choose PUBLISH when wallets are on a side the market is not fully pricing, have not backed off, or were positioned before the move.",
     "Pay close attention to timing. Compare holder snapshot/activity times with dated public headlines. If a holder moved before the public catalyst or before consensus odds reacted, that increases signal value.",
-    "Use marketMovementContext and holderEntryContext when supplied. Translate them plainly: 'in from lower prices', 'still holding after the move', or 'price already moved before this wallet showed up'.",
-    "If holderEntryContext includes marketTypeMetrics30d, use it as supporting same-market-type evidence. In user copy, say simple phrases like 'has been strong in sports outrights' only when the same-type metrics support that.",
+    "Use candidate.move and candidate.holderEntry when supplied. Translate them plainly: 'in from lower prices', 'still holding after the move', or 'price already moved before this wallet showed up'.",
+    "If candidate.holderEntry.sameType is present, use it as supporting same-market-type evidence. In user copy, say simple phrases like 'has been strong in sports outrights' only when the same-type metrics support that.",
     "For single-game sports, publish only when there is a sharp cluster or an exceptional single holder with concrete positive credentials. Downgrade weak one-wallet sports fades, public-favorite confirmation, and same-event conflicts.",
     "Do not say public news explains the holder move unless the public information was available before or around the holder activity. Later headlines may validate an early holder signal.",
     "Choose CONTEXT when the candidate is interesting but not feed-worthy: holder data mostly repeats public news, the read is too balanced, the signal is too concentrated, the read is mixed, or the incremental takeaway is weak.",
@@ -295,6 +293,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "User-facing style:",
     "- headline: 5-10 words, natural, market-facing, catchy but truthful. Prefer outcome meaning over raw YES/NO wording when the market object is clear.",
     "- headline should usually name the market object and the thesis/tension, not just the side. It may use YES/NO only when needed to avoid ambiguity.",
+    "- Avoid generic headline nouns like 'backers', 'holders', or 'wallets' unless the headline also states the market tension. Prefer concrete thesis language: serious buyers, still believes, fades the favorite, fights the crowd, prices risk, has not backed off.",
     "- summary: 22-35 words, 1-2 short sentences. Use this formula: wallet side + market price/odds + why the behavior is interesting.",
     "- Use simple trader language: sees, believes, backs, holds, still holding, fades, prices risk, trades near Xc, market gives this about X%, has not backed off, minority bet.",
     "- Avoid in headline/summary: informed, capable, holder read, directional confirmation, fresh catalyst, public context, incremental, may explain part, adds support, pro-deal, pro-Brazil.",
@@ -304,8 +303,8 @@ export function buildHolderResearchSystemPrompt(): string {
     "- rationale: exactly 1 short sentence, internal-quality explanation for why the status was chosen.",
     "- caveats: 0-2 short caveats, only if they materially change trust in the signal.",
     "Avoid: metric dumps, source lists, long background, internal field names, 'z-score', 'n=', 'sample count', wallet addresses, and phrases like 'candidate', 'bucket', or 'edge metric' in headline/summary.",
-    'Good headline examples: "Strong wallets still see an Iran deal", "Spain still has a believer after the dip", "Strong wallet fades United Russia", "Serious wallet is pricing Taiwan risk", "Hormuz rebound has a serious buyer".',
-    'Bad headline examples: "Deal wallets stay on YES", "Spain wallet stays on YES", "Wallet backs YES", "Iran deal YES still has strong wallets".',
+    'Good headline examples: "Strong wallets still see an Iran deal", "Spain still has a believer after the dip", "Strong wallet fades United Russia", "Serious wallet is pricing Taiwan risk", "Hormuz rebound has a serious buyer", "France money fights the NO crowd".',
+    'Bad headline examples: "Deal wallets stay on YES", "Spain wallet stays on YES", "Wallet backs YES", "France backers buck heavy NO money", "Iran deal YES still has strong wallets".',
     'Good summary examples: "Two strong wallets are still on YES while the deal trades near 26c. More money sits on NO, so this is a real minority bet."',
     'Good summary examples: "One strong wallet is still holding Spain YES after the price eased. Spain news is obvious, but this wallet has not backed off."',
     'Bad summary example: "An informed wallet cluster is still holding YES as public diplomacy headlines may explain part of the move, but the holder read stays pro-deal."',
@@ -360,7 +359,5 @@ export function buildHolderResearchUserPrompt(input: {
       allowedEvidenceIds: input.allowedEvidenceIds,
       candidate: input.candidateJson,
     },
-    null,
-    2,
   );
 }

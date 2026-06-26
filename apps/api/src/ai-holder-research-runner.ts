@@ -86,6 +86,7 @@ function parseRunnerArgs(argv: string[]): RunnerArgs {
         ? false
         : parseBool(parseFlag(argv, "--persist")),
     model: parseFlag(argv, "--model")?.trim() || null,
+    triageModel: parseFlag(argv, "--triage-model")?.trim() || null,
     limit: parsePositiveInt(parseFlag(argv, "--limit")),
     maxAgentCalls: parsePositiveInt(parseFlag(argv, "--max-agent-calls")),
     maxOutputTokens: parsePositiveInt(parseFlag(argv, "--max-output-tokens")),
@@ -146,7 +147,7 @@ export async function runHolderResearchRunner(
       : 0;
     const triageEstimate =
       args.callModel && policy.triageEnabled
-        ? policy.triageMaxBatchesPerRun * policy.estimatedCallCostUsd
+        ? policy.triageMaxBatchesPerRun * policy.estimatedTriageCallCostUsd
         : 0;
     const externalSearchEstimate =
       (args.externalSearch ?? policy.externalSearchEnabled)
