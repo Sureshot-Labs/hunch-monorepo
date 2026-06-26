@@ -190,6 +190,7 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     primaryTargetMeta: { bucket: "sharp_side", side: "YES" },
     marketId: "polymarket:market-1",
     eventId: "polymarket:event-1",
+    marketVenue: "polymarket",
     marketTitle: "Will test resolve Yes?",
     eventTitle: "Test event",
     bestBid: 0.3,
@@ -232,6 +233,7 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     primary_target_meta: { bucket: "sharp_side", side: "YES" },
     market_id: "polymarket:market-1",
     event_id: "polymarket:event-1",
+    market_venue: "polymarket",
     market_title: "Will test resolve Yes?",
     event_title: "Test event",
     best_bid: "0.30",
@@ -444,7 +446,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · 31¢");
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
       assert.equal(new URL(rows[0]?.[0]?.url ?? "").searchParams.get("amountUsd"), "10");
       assert.equal(rows.length, 2);
       assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
@@ -470,6 +472,66 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
       assert.match(message.text, /📰 Public info followed the holder activity\\\./);
       assert.doesNotMatch(message.text, /confidence/i);
+    },
+  },
+  {
+    name: "message includes cheaper alternative button when provided",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        cheaperAlternative: {
+          eventId: "kalshi:event-1",
+          marketId: "kalshi:market-1",
+          price: 0.29,
+          side: "YES",
+          venue: "kalshi",
+        },
+        note: note(),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
+      assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi YES 29¢");
+      const url = new URL(rows[1]?.[0]?.url ?? "");
+      assert.equal(url.pathname, "/events/kalshi%3Aevent-1");
+      assert.equal(url.searchParams.get("market"), "kalshi:market-1");
+      assert.equal(url.searchParams.get("side"), "YES");
+      assert.equal(url.searchParams.get("amountUsd"), "10");
+      assert.equal(rows[2]?.[0]?.text, "👤 YES $12.3K (-$123)");
+    },
+  },
+  {
+    name: "message suppresses cheaper alternative for opposite side",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        cheaperAlternative: {
+          eventId: "kalshi:event-1",
+          marketId: "kalshi:market-1",
+          price: 0.7,
+          side: "NO",
+          venue: "kalshi",
+        },
+        note: note(),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
+      assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
+    },
+  },
+  {
+    name: "message uses bid-derived buy price for NO",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ direction: "down" }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO $10 · Poly 70¢");
+      assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -674,7 +736,45 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const sql = db.queries[0]?.sql ?? "";
       assert.match(sql, /join wallets w on w\.id = t\.target_id::uuid/);
+      assert.match(sql, /m\.venue as market_venue/);
       assert.doesNotMatch(sql, /w\.id::text = t\.target_id/);
+    },
+  },
+  {
+    name: "publish renders cheaper alternative from resolver",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        resolveCheaperAlternative: async () => ({
+          eventId: "kalshi:event-1",
+          marketId: "kalshi:market-1",
+          price: 0.29,
+          side: "YES",
+          venue: "kalshi",
+        }),
+        telegram,
+      });
+      assert.equal(result.cheaperAlternatives, 1);
+      assert.equal(result.sent, 1);
+      assert.equal(
+        telegram.messages[0]?.reply_markup?.inline_keyboard[1]?.[0]?.text,
+        "💸 Cheaper: Kalshi YES 29¢",
+      );
     },
   },
   {

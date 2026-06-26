@@ -173,6 +173,7 @@ export async function runSignalBotRunner(): Promise<void> {
               chatId,
               config,
               db,
+              redis,
               telegram,
             }),
           telegram,

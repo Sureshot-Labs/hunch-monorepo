@@ -15,6 +15,7 @@ import {
   buildAggClusterListResponse,
   clearAggClustersCacheForTests,
   getAggMarketAlternativesResponseCached,
+  getAggMarketAlternativesResponseCachedWithMetadata,
   getAggClusterListResponseCached,
   getAggClusterListResponseCachedWithMetadata,
 } from "./services/agg-market-clusters.js";
@@ -943,6 +944,55 @@ await test("does not cache not_found market alternatives", async () => {
   assert.equal(first?.status, "not_found");
   assert.equal(second?.status, "not_found");
   assert.ok(calls.venueMarkets > callsAfterFirst);
+});
+
+await test("caches not_found market alternatives in Redis helper", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const cacheClient = new FakeAggClusterCache();
+  const client = fakeClient({
+    markets: [],
+    midpoints: [],
+    calls,
+  });
+  const db = fakeDb([
+    dbRow({
+      id: "polymarket:101",
+      venue: "polymarket",
+      venueMarketId: "101",
+      title: "PSG",
+      eventTitle: "Champions League Winner",
+    }),
+  ]);
+
+  const first = await getAggMarketAlternativesResponseCachedWithMetadata({
+    cacheClient,
+    client,
+    db,
+    marketId: "polymarket:101",
+    matchedTtlSec: 60,
+    notFoundTtlSec: 30,
+    query: { limit: 5 },
+  });
+  const callsAfterFirst = calls.venueMarkets;
+
+  const second = await getAggMarketAlternativesResponseCachedWithMetadata({
+    cacheClient,
+    client,
+    db,
+    marketId: "polymarket:101",
+    matchedTtlSec: 60,
+    notFoundTtlSec: 30,
+    query: { limit: 5 },
+  });
+
+  assert.equal(first.response?.status, "not_found");
+  assert.equal(first.cache.status, "miss");
+  assert.equal(cacheClient.lastSet?.ttl, 30);
+  assert.equal(second.response?.status, "not_found");
+  assert.equal(second.cache.status, "hit");
+  assert.equal(second.cache.kind, "not_found");
+  assert.equal(calls.venueMarkets, callsAfterFirst);
 });
 
 await test("rejects unsupported market alternatives venues before AGG calls", async () => {

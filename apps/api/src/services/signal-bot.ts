@@ -1,4 +1,11 @@
 import type { DbQuery } from "../db.js";
+import { env as appEnv } from "../env.js";
+import { createAggMarketClient } from "./agg-market-client.js";
+import {
+  getAggMarketAlternativesResponseCachedWithMetadata,
+  type AggMarketAlternativesCacheClient,
+} from "./agg-market-clusters.js";
+import type { ClusterMarketSummary } from "./clusters.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 
 export type SignalBotConfig = {
@@ -49,6 +56,19 @@ export type SignalBotRedisLike = {
     options?: { EX?: number; PX?: number; NX?: boolean },
   ): Promise<unknown>;
 };
+
+export type SignalBotCheaperAlternative = {
+  eventId: string;
+  marketId: string;
+  price: number;
+  side: "NO" | "YES";
+  venue: string;
+};
+
+export type SignalBotCheaperAlternativeResolver = (input: {
+  buySide: "NO" | "YES";
+  note: SignalBotNote;
+}) => Promise<SignalBotCheaperAlternative | null>;
 
 export type TelegramBotChat = {
   id: number | string;
@@ -120,6 +140,7 @@ export type SignalBotNote = {
   primaryTargetMeta: Record<string, unknown>;
   marketId: string | null;
   eventId: string | null;
+  marketVenue: string | null;
   marketTitle: string | null;
   eventTitle: string | null;
   bestBid: number | null;
@@ -151,6 +172,7 @@ type SignalBotNoteRow = {
   primary_target_meta: unknown;
   market_id: string | null;
   event_id: string | null;
+  market_venue: string | null;
   market_title: string | null;
   event_title: string | null;
   best_bid: string | number | null;
@@ -357,6 +379,7 @@ export function buildSignalBotHolderUrl(input: {
 export function buildSignalBotMessage(input: {
   appBaseUrl: string;
   buyAmountUsd: number;
+  cheaperAlternative?: SignalBotCheaperAlternative | null;
   note: SignalBotNote;
 }): {
   keyboard: TelegramInlineKeyboard | undefined;
@@ -364,7 +387,7 @@ export function buildSignalBotMessage(input: {
 } {
   const note = input.note;
   const buySide = resolveSignalBotBuySide(note);
-  const price = buySide ? resolveSidePrice(note, buySide) : null;
+  const price = buySide ? resolveSignalBotBuyPrice(note, buySide) : null;
   const title = escapeTelegramMarkdownV2(note.title);
   const summary = escapeTelegramMarkdownV2(note.description);
   const contextLine = formatSignalContextLine(note);
@@ -424,10 +447,32 @@ export function buildSignalBotMessage(input: {
     });
     keyboardRows.push([
       {
-        text: `${buySide === "YES" ? "🟠" : "⚪"} Buy ${buySide} $${input.buyAmountUsd}${price == null ? "" : ` · ${formatCents(price)}`}`,
+        text: formatSignalBotBuyButtonText({
+          amountUsd: input.buyAmountUsd,
+          price,
+          side: buySide,
+          venue: note.marketVenue,
+        }),
         url: baseTradeUrl,
       },
     ]);
+    if (
+      input.cheaperAlternative &&
+      input.cheaperAlternative.side === buySide
+    ) {
+      keyboardRows.push([
+        {
+          text: formatSignalBotCheaperButtonText(input.cheaperAlternative),
+          url: buildSignalBotTradeUrl({
+            amountUsd: input.buyAmountUsd,
+            appBaseUrl: input.appBaseUrl,
+            eventId: input.cheaperAlternative.eventId,
+            marketId: input.cheaperAlternative.marketId,
+            side: input.cheaperAlternative.side,
+          }),
+        },
+      ]);
+    }
     keyboardRows.push(
       buildSignalBotLinkRow({
         holderActorMode: note.holderActorMode,
@@ -745,15 +790,112 @@ export async function pollSignalBotCommands(input: {
   return handled;
 }
 
+const SIGNAL_BOT_ALTERNATIVES_QUERY = { limit: 8, sourceLimit: 50 };
+const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
+
+function isStrictlyCheaperDisplayedPrice(params: {
+  alternativePrice: number;
+  primaryPrice: number;
+}): boolean {
+  const primaryCents = Math.round(params.primaryPrice * 100);
+  const alternativeCents = Math.round(params.alternativePrice * 100);
+  return (
+    alternativeCents < primaryCents &&
+    params.primaryPrice - params.alternativePrice >= MIN_CHEAPER_ALTERNATIVE_DELTA
+  );
+}
+
+function pickCheaperSignalBotAlternative(input: {
+  buySide: "NO" | "YES";
+  note: SignalBotNote;
+  response: {
+    alternatives: ClusterMarketSummary[];
+    status: string;
+  };
+}): SignalBotCheaperAlternative | null {
+  if (input.response.status !== "matched") return null;
+  const primaryPrice = resolveSignalBotBuyPrice(input.note, input.buySide);
+  if (primaryPrice == null) return null;
+
+  const candidates = input.response.alternatives
+    .map((market): SignalBotCheaperAlternative | null => {
+      const price = resolveMarketBuyPrice(market, input.buySide);
+      if (
+        price == null ||
+        !market.eventId ||
+        !market.marketId ||
+        market.marketId === input.note.marketId ||
+        !isStrictlyCheaperDisplayedPrice({
+          alternativePrice: price,
+          primaryPrice,
+        })
+      ) {
+        return null;
+      }
+      return {
+        eventId: market.eventId,
+        marketId: market.marketId,
+        price,
+        side: input.buySide,
+        venue: market.venue,
+      };
+    })
+    .filter(
+      (candidate): candidate is SignalBotCheaperAlternative => candidate != null,
+    );
+
+  return (
+    candidates.sort((left, right) => {
+      if (left.price !== right.price) return left.price - right.price;
+      return left.marketId.localeCompare(right.marketId);
+    })[0] ?? null
+  );
+}
+
+async function resolveDefaultSignalBotCheaperAlternative(input: {
+  buySide: "NO" | "YES";
+  db: DbQuery;
+  note: SignalBotNote;
+  redis: SignalBotRedisLike;
+}): Promise<SignalBotCheaperAlternative | null> {
+  if (!appEnv.aggMarketAppId || !input.note.marketId) return null;
+  try {
+    const client = createAggMarketClient({
+      appId: appEnv.aggMarketAppId,
+      baseUrl: appEnv.aggMarketBaseUrl,
+      timeoutMs: appEnv.aggMarketTimeoutMs,
+    });
+    const { response } = await getAggMarketAlternativesResponseCachedWithMetadata({
+      cacheClient: input.redis as AggMarketAlternativesCacheClient,
+      client,
+      db: input.db,
+      marketId: input.note.marketId,
+      matchedTtlSec: appEnv.aggClustersCacheTtlSec,
+      notFoundTtlSec: appEnv.aggMarketAlternativesNotFoundCacheTtlSec,
+      query: SIGNAL_BOT_ALTERNATIVES_QUERY,
+    });
+    if (!response) return null;
+    return pickCheaperSignalBotAlternative({
+      buySide: input.buySide,
+      note: input.note,
+      response,
+    });
+  } catch {
+    return null;
+  }
+}
+
 export async function publishSignalBotTick(input: {
   config: SignalBotConfig;
   db: DbQuery;
+  resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
 }): Promise<{
   belowConfidenceNotes: number;
   blockedChats: number;
   chats: number;
+  cheaperAlternatives: number;
   eligibleNotes: number;
   nonDirectionalNotes: number;
   sent: number;
@@ -762,6 +904,7 @@ export async function publishSignalBotTick(input: {
   let sent = 0;
   let blockedChats = 0;
   let belowConfidenceNotes = 0;
+  let cheaperAlternatives = 0;
   let eligibleNotes = 0;
   let nonDirectionalNotes = 0;
   for (const chatId of chatIds) {
@@ -785,9 +928,22 @@ export async function publishSignalBotTick(input: {
       minConfidence: input.config.minConfidence,
     });
     for (const note of notes) {
+      const buySide = resolveSignalBotBuySide(note);
+      const cheaperAlternative = buySide
+        ? await (input.resolveCheaperAlternative ??
+            ((resolverInput) =>
+              resolveDefaultSignalBotCheaperAlternative({
+                buySide: resolverInput.buySide,
+                db: input.db,
+                note: resolverInput.note,
+                redis: input.redis,
+              })))({ buySide, note })
+        : null;
+      if (cheaperAlternative) cheaperAlternatives += 1;
       const { keyboard, text } = buildSignalBotMessage({
         appBaseUrl: input.config.appBaseUrl,
         buyAmountUsd: input.config.buyAmountUsd,
+        cheaperAlternative,
         note,
       });
       const result = await input.telegram.sendMessage({
@@ -819,6 +975,7 @@ export async function publishSignalBotTick(input: {
     belowConfidenceNotes,
     blockedChats,
     chats: chatIds.length,
+    cheaperAlternatives,
     eligibleNotes,
     nonDirectionalNotes,
     sent,
@@ -829,6 +986,8 @@ export async function sendLatestSignalBotTestSignal(input: {
   chatId: string;
   config: SignalBotConfig;
   db: DbQuery;
+  redis?: SignalBotRedisLike;
+  resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
   telegram: SignalBotTelegramClient;
 }): Promise<boolean> {
   const notes = await loadSignalBotNotes(input.db, {
@@ -840,9 +999,23 @@ export async function sendLatestSignalBotTestSignal(input: {
   });
   const note = notes[0];
   if (!note) return false;
+  const buySide = resolveSignalBotBuySide(note);
+  const cheaperAlternative = buySide
+    ? await (input.resolveCheaperAlternative ??
+        (input.redis
+          ? (resolverInput) =>
+              resolveDefaultSignalBotCheaperAlternative({
+                buySide: resolverInput.buySide,
+                db: input.db,
+                note: resolverInput.note,
+                redis: input.redis as SignalBotRedisLike,
+              })
+          : async () => null))({ buySide, note })
+    : null;
   const { keyboard, text } = buildSignalBotMessage({
     appBaseUrl: input.config.appBaseUrl,
     buyAmountUsd: input.config.buyAmountUsd,
+    cheaperAlternative,
     note,
   });
   const result = await input.telegram.sendMessage({
@@ -883,6 +1056,7 @@ export async function loadSignalBotNotes(
         pt.target_meta as primary_target_meta,
         m.id as market_id,
         m.event_id,
+        m.venue as market_venue,
         m.title as market_title,
         e.title as event_title,
         m.best_bid,
@@ -1146,6 +1320,7 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     primaryTargetMeta: asObject(row.primary_target_meta),
     marketId: row.market_id,
     eventId: row.event_id,
+    marketVenue: row.market_venue,
     marketTitle: row.market_title,
     eventTitle: row.event_title,
     bestBid: toNumber(row.best_bid),
@@ -1178,8 +1353,70 @@ function resolveSidePrice(note: SignalBotNote, side: "NO" | "YES"): number | nul
   return side === "YES" ? yesPrice : 1 - yesPrice;
 }
 
+function normalizeProbability(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : null;
+}
+
+function resolveSignalBotBuyPrice(
+  note: Pick<SignalBotNote, "bestAsk" | "bestBid" | "lastPrice">,
+  side: "NO" | "YES",
+): number | null {
+  const bid = normalizeProbability(note.bestBid);
+  const ask = normalizeProbability(note.bestAsk);
+  const last = normalizeProbability(note.lastPrice);
+  const midpoint = bid != null && ask != null ? (bid + ask) / 2 : last;
+  return side === "YES" ? (ask ?? midpoint ?? bid) : bid != null ? 1 - bid : midpoint == null ? null : 1 - midpoint;
+}
+
+function resolveMarketBuyPrice(
+  market: Pick<ClusterMarketSummary, "noMid" | "yesAsk" | "yesBid" | "yesMid">,
+  side: "NO" | "YES",
+): number | null {
+  const bid = normalizeProbability(market.yesBid);
+  const ask = normalizeProbability(market.yesAsk);
+  const yesMid = normalizeProbability(market.yesMid);
+  const noMid = normalizeProbability(market.noMid);
+  return side === "YES" ? (ask ?? yesMid ?? bid) : bid != null ? 1 - bid : noMid;
+}
+
 function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
+}
+
+function formatVenueLabel(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  switch (normalized) {
+    case "polymarket":
+      return "Poly";
+    case "kalshi":
+      return "Kalshi";
+    case "limitless":
+      return "Limitless";
+    default:
+      return value?.trim() || null;
+  }
+}
+
+function formatSignalBotBuyButtonText(input: {
+  amountUsd: number;
+  price: number | null;
+  side: "NO" | "YES";
+  venue: string | null;
+}): string {
+  const marker = input.side === "YES" ? "🟠" : "⚪";
+  const venue = formatVenueLabel(input.venue);
+  const price = input.price == null ? null : formatCents(input.price);
+  const marketLabel =
+    venue && price ? `${venue} ${price}` : venue ?? price ?? null;
+  return `${marker} Buy ${input.side} $${input.amountUsd}${marketLabel ? ` · ${marketLabel}` : ""}`;
+}
+
+function formatSignalBotCheaperButtonText(
+  alternative: SignalBotCheaperAlternative,
+): string {
+  return `💸 Cheaper: ${formatVenueLabel(alternative.venue) ?? alternative.venue} ${alternative.side} ${formatCents(alternative.price)}`;
 }
 
 function formatPercent(value: number): string {

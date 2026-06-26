@@ -50,9 +50,8 @@ import {
   createAggMarketClient,
 } from "../services/agg-market-client.js";
 import {
-  buildAggMarketAlternativesCacheKey,
-  type AggMarketAlternativesResponse,
-  getAggMarketAlternativesResponseCached,
+  type AggMarketAlternativesCacheClient,
+  getAggMarketAlternativesResponseCachedWithMetadata,
 } from "../services/agg-market-clusters.js";
 import {
   extractLimitlessMessage,
@@ -177,7 +176,7 @@ type MarketRoutesOptions = {
   aggMarketAlternativesNotFoundCacheTtlSec?: number;
   aggMarketAlternativesDb?: DbQuery;
   getAggMarketAlternativesRedis?: () => Promise<
-    AggAlternativesCacheClient | null
+    AggMarketAlternativesCacheClient | null
   >;
   createAggMarketClient?: (config: {
     appId: string;
@@ -185,48 +184,6 @@ type MarketRoutesOptions = {
     timeoutMs?: number;
   }) => AggMarketClient;
 };
-
-type AggAlternativesCacheClient = {
-  get(key: string): Promise<string | null>;
-  set(key: string, value: string, options: { EX: number }): Promise<unknown>;
-};
-
-const AGG_ALTERNATIVES_REDIS_CACHE_PREFIX = "agg:market-alternatives:v1";
-
-function buildAggAlternativesRedisCacheKey(
-  marketId: string,
-  query: { venues?: string; limit?: number; sourceLimit?: number },
-): string {
-  const normalized = buildAggMarketAlternativesCacheKey(marketId, query);
-  const hash = createHash("sha256").update(normalized).digest("hex");
-  return `${AGG_ALTERNATIVES_REDIS_CACHE_PREFIX}:${hash}`;
-}
-
-function readAggAlternativesCacheKind(
-  body: string,
-): AggMarketAlternativesResponse["status"] | null {
-  try {
-    const parsed = JSON.parse(body) as unknown;
-    if (!isRecord(parsed)) return null;
-    return parsed.status === "matched" || parsed.status === "not_found"
-      ? parsed.status
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function aggAlternativesCacheTtlForResponse(
-  response: AggMarketAlternativesResponse,
-  options: {
-    matchedTtlSec: number;
-    notFoundTtlSec: number;
-  },
-): number {
-  if (response.status === "matched") return options.matchedTtlSec;
-  if (response.status === "not_found") return options.notFoundTtlSec;
-  return 0;
-}
 
 function extractTokenIdsFromTokenPair(value: unknown): string[] {
   if (!isRecord(value)) return [];
@@ -671,35 +628,17 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         const notFoundCacheTtlSec =
           options.aggMarketAlternativesNotFoundCacheTtlSec ??
           env.aggMarketAlternativesNotFoundCacheTtlSec;
-        const redisCacheKey = buildAggAlternativesRedisCacheKey(
-          request.params.marketId,
-          request.query,
-        );
-        let cacheClient: AggAlternativesCacheClient | null = null;
-        let cacheHeader: "miss" | "skip" = "skip";
+        let cacheClient: AggMarketAlternativesCacheClient | null = null;
         try {
           cacheClient = options.getAggMarketAlternativesRedis
             ? await options.getAggMarketAlternativesRedis()
             : await getRedis();
-          if (cacheClient) {
-            const cached = await cacheClient.get(redisCacheKey);
-            const cachedKind =
-              cached == null ? null : readAggAlternativesCacheKind(cached);
-            if (cached && cachedKind) {
-              reply.header("x-alternatives-cache", "hit");
-              reply.header("x-alternatives-cache-kind", cachedKind);
-              reply.header("Content-Type", "application/json; charset=utf-8");
-              return reply.send(cached);
-            }
-            cacheHeader = "miss";
-          }
         } catch (cacheError) {
           request.log.warn(
             { error: cacheError },
             "AGG Market alternatives Redis cache read failed",
           );
           cacheClient = null;
-          cacheHeader = "skip";
         }
 
         const client = createAggClient({
@@ -707,42 +646,28 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           baseUrl: options.aggMarketBaseUrl ?? env.aggMarketBaseUrl,
           timeoutMs: options.aggMarketTimeoutMs ?? env.aggMarketTimeoutMs,
         });
-        const response = await getAggMarketAlternativesResponseCached({
-          marketId: request.params.marketId,
-          query: request.query,
-          client,
-          db: aggAlternativesDb,
-          ttlSec: matchedCacheTtlSec,
-        });
-        if (!response) {
-          reply.header("x-alternatives-cache", cacheHeader);
-          return reply.code(404).send({ error: "Market not found" });
-        }
-        const responseBody = JSON.stringify(response);
-        const responseCacheTtlSec = aggAlternativesCacheTtlForResponse(
-          response,
-          {
+        const { cache, response } =
+          await getAggMarketAlternativesResponseCachedWithMetadata({
+            cacheClient,
+            client,
+            db: aggAlternativesDb,
+            marketId: request.params.marketId,
             matchedTtlSec: matchedCacheTtlSec,
             notFoundTtlSec: notFoundCacheTtlSec,
-          },
-        );
-        reply.header(
-          "x-alternatives-cache",
-          cacheClient && responseCacheTtlSec > 0 ? cacheHeader : "skip",
-        );
-        reply.header("x-alternatives-cache-kind", response.status);
-        if (cacheClient && responseCacheTtlSec > 0) {
-          try {
-            await cacheClient.set(redisCacheKey, responseBody, {
-              EX: responseCacheTtlSec,
-            });
-          } catch (cacheError) {
-            request.log.warn(
-              { error: cacheError },
-              "AGG Market alternatives Redis cache write failed",
-            );
-          }
+            onCacheError: (operation, cacheError) => {
+              request.log.warn(
+                { error: cacheError, operation },
+                "AGG Market alternatives Redis cache failed",
+              );
+            },
+            query: request.query,
+          });
+        if (!response) {
+          reply.header("x-alternatives-cache", cache.status);
+          return reply.code(404).send({ error: "Market not found" });
         }
+        reply.header("x-alternatives-cache", cache.status);
+        reply.header("x-alternatives-cache-kind", response.status);
         return response;
       } catch (error) {
         if (

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { DbQuery } from "../db.js";
+import { isRecord } from "../lib/type-guards.js";
 import {
   buildMarketSummary,
   computeClusterMetrics,
@@ -137,6 +138,21 @@ export type AggMarketAlternativesResponse = {
   matchDiagnostics: AggClusterSummary["matchDiagnostics"] | null;
 };
 
+export type AggMarketAlternativesCacheClient = {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, options: { EX: number }): Promise<unknown>;
+};
+
+export type AggMarketAlternativesCacheStatus = "hit" | "miss" | "skip";
+export type AggMarketAlternativesCacheLayer = "local" | "redis" | "none";
+export type AggMarketAlternativesCacheKind = AggMarketAlternativesResponse["status"];
+
+export type AggMarketAlternativesCacheMetadata = {
+  kind: AggMarketAlternativesCacheKind | null;
+  layer: AggMarketAlternativesCacheLayer;
+  status: AggMarketAlternativesCacheStatus;
+};
+
 type NormalizedAggMarket = {
   aggMarketId: string;
   venue: AggSupportedVenue;
@@ -250,6 +266,7 @@ const alternativesCache = new Map<
   CacheEntry<AggMarketAlternativesResponse>
 >();
 const AGG_CLUSTER_REDIS_CACHE_PREFIX = "agg:clusters:v1";
+const AGG_ALTERNATIVES_REDIS_CACHE_PREFIX = "agg:market-alternatives:v1";
 const MAX_ALTERNATIVES_CACHE_ENTRIES = 500;
 const supportedVenueSet = new Set<string>(AGG_SUPPORTED_VENUES);
 
@@ -1450,6 +1467,55 @@ export function buildAggMarketAlternativesCacheKey(
   });
 }
 
+export function buildAggMarketAlternativesRedisCacheKey(
+  marketId: string,
+  query: AggMarketAlternativesQueryInput,
+): string {
+  const normalized = buildAggMarketAlternativesCacheKey(marketId, query);
+  const hash = crypto.createHash("sha256").update(normalized).digest("hex");
+  return `${AGG_ALTERNATIVES_REDIS_CACHE_PREFIX}:${hash}`;
+}
+
+export function readAggMarketAlternativesCacheKind(
+  body: string,
+): AggMarketAlternativesCacheKind | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed)) return null;
+    return parsed.status === "matched" || parsed.status === "not_found"
+      ? parsed.status
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseAggMarketAlternativesResponse(
+  body: string,
+): AggMarketAlternativesResponse | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed)) return null;
+    return parsed.status === "matched" || parsed.status === "not_found"
+      ? (parsed as AggMarketAlternativesResponse)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function aggMarketAlternativesCacheTtlForResponse(
+  response: AggMarketAlternativesResponse,
+  options: {
+    matchedTtlSec: number;
+    notFoundTtlSec: number;
+  },
+): number {
+  if (response.status === "matched") return options.matchedTtlSec;
+  if (response.status === "not_found") return options.notFoundTtlSec;
+  return 0;
+}
+
 function pruneAlternativesCache(now: number): void {
   for (const [key, entry] of alternativesCache.entries()) {
     if (entry.expiresAt <= now) alternativesCache.delete(key);
@@ -1496,4 +1562,87 @@ export async function getAggMarketAlternativesResponseCached(params: {
   }
 
   return value;
+}
+
+export async function getAggMarketAlternativesResponseCachedWithMetadata(params: {
+  cacheClient?: AggMarketAlternativesCacheClient | null;
+  client: AggMarketClient;
+  db: DbQuery;
+  marketId: string;
+  matchedTtlSec: number;
+  notFoundTtlSec: number;
+  onCacheError?: (operation: "read" | "write", error: unknown) => void;
+  query: AggMarketAlternativesQueryInput;
+}): Promise<{
+  cache: AggMarketAlternativesCacheMetadata;
+  response: AggMarketAlternativesResponse | null;
+}> {
+  let cacheStatus: AggMarketAlternativesCacheStatus = "skip";
+  let cacheLayer: AggMarketAlternativesCacheLayer = "none";
+  let cacheKind: AggMarketAlternativesCacheKind | null = null;
+  const redisCacheKey = buildAggMarketAlternativesRedisCacheKey(
+    params.marketId,
+    params.query,
+  );
+
+  if (params.cacheClient) {
+    cacheLayer = "redis";
+    try {
+      const cached = await params.cacheClient.get(redisCacheKey);
+      const parsed = cached == null ? null : parseAggMarketAlternativesResponse(cached);
+      if (parsed) {
+        return {
+          cache: {
+            kind: parsed.status,
+            layer: "redis",
+            status: "hit",
+          },
+          response: parsed,
+        };
+      }
+      cacheStatus = "miss";
+    } catch (error) {
+      params.onCacheError?.("read", error);
+      cacheLayer = "none";
+      cacheStatus = "skip";
+    }
+  }
+
+  const response = await getAggMarketAlternativesResponseCached({
+    client: params.client,
+    db: params.db,
+    marketId: params.marketId,
+    query: params.query,
+    ttlSec: params.matchedTtlSec,
+  });
+  if (!response) {
+    return {
+      cache: { kind: null, layer: cacheLayer, status: cacheStatus },
+      response,
+    };
+  }
+
+  cacheKind = response.status;
+  const ttlSec = aggMarketAlternativesCacheTtlForResponse(response, {
+    matchedTtlSec: params.matchedTtlSec,
+    notFoundTtlSec: params.notFoundTtlSec,
+  });
+  if (params.cacheClient && ttlSec > 0) {
+    try {
+      await params.cacheClient.set(redisCacheKey, JSON.stringify(response), {
+        EX: ttlSec,
+      });
+    } catch (error) {
+      params.onCacheError?.("write", error);
+    }
+  }
+
+  return {
+    cache: {
+      kind: cacheKind,
+      layer: cacheLayer,
+      status: params.cacheClient && ttlSec > 0 ? cacheStatus : "skip",
+    },
+    response,
+  };
 }
