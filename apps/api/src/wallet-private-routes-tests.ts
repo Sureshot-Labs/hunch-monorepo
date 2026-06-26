@@ -1148,6 +1148,54 @@ async function main() {
         roi: 0.026,
         trades30d: 12,
       });
+      const polymarketIdentityWalletId = await createWhaleFixtureWallet(
+        context,
+        {
+          address: randomEvmAddress(),
+          chain: "polygon",
+          metadata: {
+            identityNames: {
+              primary: {
+                name: "@coin-flip-scout",
+                source: "polymarket",
+                profileUrl: "https://polymarket.com/@coin-flip-scout",
+                resolvedAt: "2026-06-26T00:00:00.000Z",
+              },
+              polymarket: {
+                username: "coin-flip-scout",
+                pseudonym: "Coin Flip Scout",
+                profileUrl: "https://polymarket.com/@coin-flip-scout",
+                resolvedAt: "2026-06-26T00:00:00.000Z",
+              },
+            },
+          },
+          volumeUsd: 4_200,
+          pnlUsd: 120,
+          roi: 0.027,
+          trades30d: 13,
+        },
+      );
+      const ensIdentityWalletId = await createWhaleFixtureWallet(context, {
+        address: randomEvmAddress(),
+        chain: "polygon",
+        metadata: {
+          identityNames: {
+            primary: {
+              name: "coinflip-scout.eth",
+              source: "ens",
+              resolvedAt: "2026-06-26T00:00:00.000Z",
+            },
+            ens: {
+              name: "coinflip-scout.eth",
+              resolvedAt: "2026-06-26T00:00:00.000Z",
+            },
+          },
+        },
+        volumeUsd: 4_300,
+        pnlUsd: 130,
+        roi: 0.028,
+        trades30d: 14,
+      });
       await pool.query(
         `
           insert into wallet_activity_hourly (
@@ -1165,7 +1213,9 @@ async function main() {
           values
             ($1, 'polymarket', $2, 'YES', 'trade', date_trunc('hour', now()), 11, 11, 1, now()),
             ($1, 'polymarket', $3, 'NO', 'trade', date_trunc('hour', now()), 7, 7, 1, now()),
-            ($4, 'polymarket', $3, 'YES', 'trade', date_trunc('hour', now()), 19, 19, 1, now())
+            ($4, 'polymarket', $3, 'YES', 'trade', date_trunc('hour', now()), 19, 19, 1, now()),
+            ($5, 'polymarket', $3, 'YES', 'trade', date_trunc('hour', now()), 13, 13, 1, now()),
+            ($6, 'polymarket', $3, 'NO', 'trade', date_trunc('hour', now()), 17, 17, 1, now())
           on conflict (wallet_id, venue, market_id, outcome_side, activity_type, hour_bucket)
           do update set
             signed_delta_usd = excluded.signed_delta_usd,
@@ -1178,6 +1228,8 @@ async function main() {
           matching.marketId,
           unrelated.marketId,
           otherWalletId,
+          polymarketIdentityWalletId,
+          ensIdentityWalletId,
         ],
       );
 
@@ -1206,6 +1258,34 @@ async function main() {
         );
         assert.equal(item?.netChangeUsd, 18);
       }
+
+      const identityResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/activity/summary?scope=whales&q=${encodeURIComponent("coin flip")}&limit=100&offset=0&includeAttribution=false`,
+      });
+      assert.equal(identityResponse.statusCode, 200);
+      const identityBody = identityResponse.json() as {
+        ok: boolean;
+        items: Array<{
+          walletId: string;
+          identityDisplayName: string | null;
+        }>;
+      };
+      assert.equal(identityBody.ok, true);
+      assert.equal(
+        identityBody.items.some(
+          (item) => item.walletId === polymarketIdentityWalletId,
+        ),
+        true,
+      );
+      assert.equal(
+        identityBody.items.some((item) => item.walletId === ensIdentityWalletId),
+        true,
+      );
+      assert.equal(
+        identityBody.items.some((item) => item.walletId === otherWalletId),
+        false,
+      );
     }
 
     {

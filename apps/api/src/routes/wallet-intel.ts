@@ -5528,6 +5528,10 @@ async function filterWalletIdsByActivitySummarySearch(
       w.label,
       wl.label,
       wn.name,
+      w.metadata #>> '{identityNames,primary,name}',
+      w.metadata #>> '{identityNames,polymarket,username}',
+      w.metadata #>> '{identityNames,polymarket,pseudonym}',
+      w.metadata #>> '{identityNames,ens,name}',
       wp.profile->>'label',
       wp.profile->>'label_short'
     )
