@@ -1,5 +1,4 @@
 import type { DbQuery } from "../db.js";
-import { env as appEnv } from "../env.js";
 import { createAggMarketClient } from "./agg-market-client.js";
 import {
   getAggMarketAlternativesResponseCachedWithMetadata,
@@ -793,6 +792,47 @@ export async function pollSignalBotCommands(input: {
 const SIGNAL_BOT_ALTERNATIVES_QUERY = { limit: 8, sourceLimit: 50 };
 const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
 
+type SignalBotAggMarketConfig = {
+  appId: string;
+  baseUrl: string;
+  matchedTtlSec: number;
+  notFoundTtlSec: number;
+  timeoutMs: number;
+};
+
+function normalizeServiceBaseUrl(value: string | undefined, fallback: string) {
+  const raw = value?.trim() || fallback;
+  try {
+    const url = new URL(raw);
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return fallback;
+  }
+}
+
+export function parseSignalBotAggMarketConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): SignalBotAggMarketConfig | null {
+  const appId = (env.AGG_APP_ID ?? env.AGG_API_KEY)?.trim() ?? "";
+  if (!appId) return null;
+  return {
+    appId,
+    baseUrl: normalizeServiceBaseUrl(
+      env.AGG_MARKET_BASE_URL,
+      "https://api.agg.market",
+    ),
+    matchedTtlSec: parseNonNegativeInt(env.AGG_CLUSTERS_CACHE_TTL_SEC, 30),
+    notFoundTtlSec: parseNonNegativeInt(
+      env.AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC,
+      60,
+    ),
+    timeoutMs: parsePositiveInt(env.AGG_MARKET_TIMEOUT_MS, 5_000),
+  };
+}
+
 function isStrictlyCheaperDisplayedPrice(params: {
   alternativePrice: number;
   primaryPrice: number;
@@ -858,20 +898,21 @@ async function resolveDefaultSignalBotCheaperAlternative(input: {
   note: SignalBotNote;
   redis: SignalBotRedisLike;
 }): Promise<SignalBotCheaperAlternative | null> {
-  if (!appEnv.aggMarketAppId || !input.note.marketId) return null;
+  const aggConfig = parseSignalBotAggMarketConfig();
+  if (!aggConfig || !input.note.marketId) return null;
   try {
     const client = createAggMarketClient({
-      appId: appEnv.aggMarketAppId,
-      baseUrl: appEnv.aggMarketBaseUrl,
-      timeoutMs: appEnv.aggMarketTimeoutMs,
+      appId: aggConfig.appId,
+      baseUrl: aggConfig.baseUrl,
+      timeoutMs: aggConfig.timeoutMs,
     });
     const { response } = await getAggMarketAlternativesResponseCachedWithMetadata({
       cacheClient: input.redis as AggMarketAlternativesCacheClient,
       client,
       db: input.db,
       marketId: input.note.marketId,
-      matchedTtlSec: appEnv.aggClustersCacheTtlSec,
-      notFoundTtlSec: appEnv.aggMarketAlternativesNotFoundCacheTtlSec,
+      matchedTtlSec: aggConfig.matchedTtlSec,
+      notFoundTtlSec: aggConfig.notFoundTtlSec,
       query: SIGNAL_BOT_ALTERNATIVES_QUERY,
     });
     if (!response) return null;
@@ -1245,6 +1286,17 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!Number.isFinite(parsed)) return fallback;
   const asInt = Math.trunc(parsed);
   return asInt > 0 ? asInt : fallback;
+}
+
+function parseNonNegativeInt(
+  value: string | undefined,
+  fallback: number,
+): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const asInt = Math.trunc(parsed);
+  return asInt >= 0 ? asInt : fallback;
 }
 
 function parseRatio(value: string | undefined, fallback: number): number {

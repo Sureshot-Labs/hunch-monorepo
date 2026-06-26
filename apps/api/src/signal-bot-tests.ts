@@ -13,6 +13,7 @@ import {
   getSignalBotChatState,
   handleSignalBotCommand,
   loadSignalBotNotes,
+  parseSignalBotAggMarketConfig,
   parseSignalBotCommand,
   parseSignalBotConfig,
   publishSignalBotTick,
@@ -270,6 +271,38 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual([...config.adminUserIds], [123, 456]);
       assert.equal(config.buyAmountUsd, 10);
       assert.equal(config.minConfidence, 0.8);
+    },
+  },
+  {
+    name: "bot env parsing does not require api-only privy secrets",
+    run: () => {
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+        HUNCH_SIGNAL_BOT_ENABLED: "true",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      assert.equal(config.enabled, true);
+      assert.equal(config.token, "token");
+      assert.equal(parseSignalBotAggMarketConfig({}), null);
+    },
+  },
+  {
+    name: "agg alternatives env accepts prod api key alias",
+    run: () => {
+      const config = parseSignalBotAggMarketConfig({
+        AGG_API_KEY: "agg-key",
+        AGG_CLUSTERS_CACHE_TTL_SEC: "45",
+        AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC: "90",
+        AGG_MARKET_BASE_URL: "https://agg.example.com/",
+        AGG_MARKET_TIMEOUT_MS: "2500",
+      });
+      assert.deepEqual(config, {
+        appId: "agg-key",
+        baseUrl: "https://agg.example.com/",
+        matchedTtlSec: 45,
+        notFoundTtlSec: 90,
+        timeoutMs: 2500,
+      });
     },
   },
   {
