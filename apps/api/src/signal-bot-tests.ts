@@ -6,6 +6,7 @@ import {
   acquireSignalBotLock,
   buildSignalBotHolderUrl,
   buildSignalBotMessage,
+  buildSignalBotStatsReport,
   buildSignalBotTradeUrl,
   disableSignalBotChat,
   enableSignalBotChat,
@@ -16,11 +17,13 @@ import {
   parseSignalBotAggMarketConfig,
   parseSignalBotCommand,
   parseSignalBotConfig,
+  parseSignalBotStatsPeriod,
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
   resolveSignalBotBuySide,
   sendLatestSignalBotTestSignal,
+  sendSignalBotStatsReport,
   signalBotLockKey,
   type SignalBotNote,
   type SignalBotRedisLike,
@@ -256,6 +259,60 @@ function noteRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function performanceNoteRow(overrides: Record<string, unknown> = {}) {
+  return {
+    note_id: "00000000-0000-4000-8000-000000000201",
+    direction: "up",
+    confidence: 0.82,
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
+    metrics: {
+      bucket: "sharp_side",
+      market: { yesProbability: 0.5 },
+      signalSnapshot: {
+        version: 1,
+        recordedAt: "2026-01-01T00:00:00.000Z",
+        marketId: "polymarket:stats-1",
+        eventId: "polymarket:event-1",
+        venue: "polymarket",
+        side: "YES",
+        direction: "up",
+        marketStatus: "ACTIVE",
+        acceptingOrders: true,
+        tokens: { yes: "yes-token", no: "no-token" },
+        quote: {
+          buyPrice: 0.5,
+          buyPriceSource: "yes_ask",
+        },
+      },
+    },
+    model_meta: {
+      primary_holder_credentials: { mode: "single_holder" },
+    },
+    target_meta: { bucket: "sharp_side", side: "YES" },
+    market_id: "polymarket:stats-1",
+    event_id: "polymarket:event-1",
+    venue: "polymarket",
+    market_status: "ACTIVE",
+    market_title: "Stats market",
+    event_title: "Stats event",
+    category: "Politics",
+    close_time: new Date("2026-01-01T03:00:00.000Z"),
+    expiration_time: null,
+    best_bid: 0.6,
+    best_ask: 0.62,
+    last_price: null,
+    resolved_outcome: null,
+    resolved_outcome_pct: null,
+    accepting_orders: true,
+    yes_token_id: "yes-token",
+    no_token_id: "no-token",
+    market_token_yes: null,
+    market_token_no: null,
+    clob_token_ids: null,
+    ...overrides,
+  };
+}
+
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
     name: "env parser handles admins and default buy amount",
@@ -320,6 +377,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "stats period parser supports default and allowed windows",
+    run: () => {
+      assert.equal(parseSignalBotCommand("/stats", null), "stats");
+      assert.equal(parseSignalBotStatsPeriod("/stats"), "7d");
+      assert.equal(parseSignalBotStatsPeriod("/stats 24h"), "24h");
+      assert.equal(parseSignalBotStatsPeriod("/stats 7d"), "7d");
+      assert.equal(parseSignalBotStatsPeriod("/stats 30d"), "30d");
+      assert.equal(parseSignalBotStatsPeriod("/stats 3d"), null);
+    },
+  },
+  {
     name: "unauthorized user cannot enable chat",
     run: async () => {
       const redis = new FakeRedis();
@@ -341,6 +409,117 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.equal(await getSignalBotChatState(redis, "-1"), null);
       assert.match(telegram.messages[0]?.text ?? "", /Not authorized/);
+    },
+  },
+  {
+    name: "unauthorized user cannot request stats",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      let statsCalled = false;
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 999 },
+          text: "/stats",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendStatsReport: async () => {
+          statsCalled = true;
+          return true;
+        },
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.equal(statsCalled, false);
+      assert.match(telegram.messages[0]?.text ?? "", /Not authorized/);
+    },
+  },
+  {
+    name: "authorized stats command passes selected period",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const periods: string[] = [];
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 123 },
+          text: "/stats 30d",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendStatsReport: async (_chatId, period) => {
+          periods.push(period);
+          return true;
+        },
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.deepEqual(periods, ["30d"]);
+      assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
+    name: "invalid stats period returns usage",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 123 },
+          text: "/stats 3d",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendStatsReport: async () => true,
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.match(telegram.messages[0]?.text ?? "", /Usage: \/stats/);
+    },
+  },
+  {
+    name: "stats command catches report failure",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 123 },
+          text: "/stats",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendStatsReport: async () => {
+          throw new Error("db timeout");
+        },
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Stats are unavailable right now/,
+      );
     },
   },
   {
@@ -755,6 +934,189 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[1]?.length, 1);
       assert.equal(rows[1]?.[0]?.text, "↗️ Open market");
+    },
+  },
+  {
+    name: "stats report renders shareable performance copy",
+    run: () => {
+      const report = buildSignalBotStatsReport({
+        buyAmountUsd: 10,
+        period: "7d",
+        result: {
+          aggregates: {
+            byActorMode: {},
+            byBucket: {},
+            byConfidenceBand: {},
+            byMarketType: {},
+            bySide: {},
+            byState: {},
+            byVenue: {},
+            overall: {
+              averageRoi: 0.062,
+              correct: 3,
+              flat: 0,
+              hitRate: 0.75,
+              medianRoi: 0.04,
+              missingEntry: 0,
+              negative: 4,
+              notes: 12,
+              open: 9,
+              positive: 8,
+              resolved: 4,
+              totalPnlPerDollar: 0.744,
+              unknown: 0,
+              withEntry: 12,
+              wrong: 1,
+            },
+          },
+          considered: 12,
+          correct: 3,
+          errors: 0,
+          evaluated: 12,
+          items: [],
+          missingEntry: 0,
+          open: 9,
+          resolved: 4,
+          unchanged: 0,
+          unknown: 0,
+          written: 0,
+          wrong: 1,
+        },
+      });
+      assert.match(report, /📊 Hunch signals · 7D/);
+      assert.match(report, /💰 \$10 each: \+\$7\.44 \(\+6\.2%\)/);
+      assert.match(report, /🎯 Resolved: 3W \/ 1L \(75%\)/);
+      assert.doesNotMatch(report, /evaluated|missingEntry|entryQuality|note_id/i);
+    },
+  },
+  {
+    name: "stats report handles no eligible signals",
+    run: () => {
+      const report = buildSignalBotStatsReport({
+        buyAmountUsd: 10,
+        period: "24h",
+        result: {
+          aggregates: {
+            byActorMode: {},
+            byBucket: {},
+            byConfidenceBand: {},
+            byMarketType: {},
+            bySide: {},
+            byState: {},
+            byVenue: {},
+            overall: {
+              averageRoi: null,
+              correct: 0,
+              flat: 0,
+              hitRate: null,
+              medianRoi: null,
+              missingEntry: 0,
+              negative: 0,
+              notes: 0,
+              open: 0,
+              positive: 0,
+              resolved: 0,
+              totalPnlPerDollar: 0,
+              unknown: 0,
+              withEntry: 0,
+              wrong: 0,
+            },
+          },
+          considered: 0,
+          correct: 0,
+          errors: 0,
+          evaluated: 0,
+          items: [],
+          missingEntry: 0,
+          open: 0,
+          resolved: 0,
+          unchanged: 0,
+          unknown: 0,
+          written: 0,
+          wrong: 0,
+        },
+      });
+      assert.equal(report, "No bot-eligible signals for 24H yet.");
+    },
+  },
+  {
+    name: "stats command sends audit-backed report",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          queries.push({ params: params ?? [], sql });
+          if (/from\s+ai_notes\s+n/i.test(sql)) {
+            return {
+              rows: [
+                performanceNoteRow(),
+                performanceNoteRow({
+                  accepting_orders: false,
+                  best_ask: 1,
+                  best_bid: 0.999,
+                  last_price: 1,
+                  market_id: "polymarket:stats-2",
+                  market_status: "CLOSED",
+                  metrics: {
+                    bucket: "sharp_side",
+                    market: { yesProbability: 0.5 },
+                    signalSnapshot: {
+                      version: 1,
+                      recordedAt: "2026-01-01T00:00:00.000Z",
+                      marketId: "polymarket:stats-2",
+                      eventId: "polymarket:event-2",
+                      venue: "polymarket",
+                      side: "YES",
+                      direction: "up",
+                      marketStatus: "ACTIVE",
+                      acceptingOrders: true,
+                      tokens: { yes: "yes-token-2", no: "no-token-2" },
+                      quote: {
+                        buyPrice: 0.5,
+                        buyPriceSource: "yes_ask",
+                      },
+                    },
+                  },
+                  note_id: "00000000-0000-4000-8000-000000000202",
+                  resolved_outcome: "YES",
+                }),
+              ],
+            };
+          }
+          if (/from\s+jsonb_to_recordset/i.test(sql)) return { rows: [] };
+          return { rows: [] };
+        },
+      } as unknown as import("./db.js").DbQuery;
+
+      const sent = await sendSignalBotStatsReport({
+        chatId: "-1",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD: "10",
+          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.7",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        period: "7d",
+        telegram,
+      });
+
+      assert.equal(sent, true);
+      assert.equal(telegram.messages.length, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Hunch signals/);
+      assert.match(telegram.messages[0]?.text ?? "", /\$10 each/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Open signals use current market marks/,
+      );
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /evaluated|missingEntry|entryQuality|note_id/i,
+      );
+      assert.match(queries[0]?.sql ?? "", /n\.confidence >=/);
+      assert.match(queries[0]?.sql ?? "", /n\.status = 'active'/);
+      assert.match(queries[0]?.sql ?? "", /n\.direction in \('up', 'down'\)/);
+      assert.equal(queries[0]?.params.includes(0.7), true);
     },
   },
   {

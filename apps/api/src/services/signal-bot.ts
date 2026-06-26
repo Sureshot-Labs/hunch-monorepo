@@ -5,6 +5,12 @@ import {
   type AggMarketAlternativesCacheClient,
 } from "./agg-market-clusters.js";
 import type { ClusterMarketSummary } from "./clusters.js";
+import {
+  auditHolderResearchSignalPerformance,
+  HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
+  HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
+  type HolderResearchPerformanceAuditResult,
+} from "./holder-research-performance.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 
 export type SignalBotConfig = {
@@ -24,6 +30,7 @@ export type SignalBotCommand =
   | "enable_signals"
   | "help"
   | "start"
+  | "stats"
   | "status"
   | "test_signal";
 
@@ -68,6 +75,8 @@ export type SignalBotCheaperAlternativeResolver = (input: {
   buySide: "NO" | "YES";
   note: SignalBotNote;
 }) => Promise<SignalBotCheaperAlternative | null>;
+
+export type SignalBotStatsPeriod = "24h" | "30d" | "7d";
 
 export type TelegramBotChat = {
   id: number | string;
@@ -272,6 +281,8 @@ export function parseSignalBotCommand(
       return "help";
     case "start":
       return "start";
+    case "stats":
+      return "stats";
     case "status":
       return "status";
     case "test_signal":
@@ -279,6 +290,29 @@ export function parseSignalBotCommand(
     default:
       return null;
   }
+}
+
+export function parseSignalBotStatsPeriod(
+  text: string | null | undefined,
+): SignalBotStatsPeriod | null {
+  if (!text) return "7d";
+  const [, rawPeriod] = text.trim().split(/\s+/, 2);
+  if (!rawPeriod) return "7d";
+  const normalized = rawPeriod.trim().toLowerCase();
+  if (normalized === "24h" || normalized === "7d" || normalized === "30d") {
+    return normalized;
+  }
+  return null;
+}
+
+function signalBotStatsPeriodHours(period: SignalBotStatsPeriod): number {
+  if (period === "24h") return 24;
+  if (period === "30d") return 24 * 30;
+  return 24 * 7;
+}
+
+function formatSignalBotStatsPeriodLabel(period: SignalBotStatsPeriod): string {
+  return period.toUpperCase();
 }
 
 function parseSignalBotCommandTargetChatId(
@@ -670,6 +704,10 @@ export async function handleSignalBotCommand(input: {
   message: TelegramBotMessage;
   redis: SignalBotRedisLike;
   sendMessage: (message: TelegramSendMessageInput) => Promise<TelegramSendResult>;
+  sendStatsReport?: (
+    chatId: string,
+    period: SignalBotStatsPeriod,
+  ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
 }): Promise<boolean> {
   const command = parseSignalBotCommand(input.message.text, input.botUsername);
@@ -682,6 +720,7 @@ export async function handleSignalBotCommand(input: {
     !isAdmin &&
     (command === "disable_signals" ||
       command === "enable_signals" ||
+      command === "stats" ||
       command === "test_signal")
   ) {
     await input.sendMessage(buildPlainReply(chatId, "Not authorized."));
@@ -749,6 +788,28 @@ export async function handleSignalBotCommand(input: {
     );
     return true;
   }
+  if (command === "stats") {
+    const period = parseSignalBotStatsPeriod(input.message.text);
+    if (!period) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Usage: /stats [24h|7d|30d]"),
+      );
+      return true;
+    }
+    let sent = false;
+    try {
+      sent = await (input.sendStatsReport?.(chatId, period) ??
+        Promise.resolve(false));
+    } catch {
+      sent = false;
+    }
+    if (!sent) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Stats are unavailable right now."),
+      );
+    }
+    return true;
+  }
   if (command === "test_signal") {
     const sent = await input.sendTestSignal(targetChatId ?? chatId);
     await input.sendMessage(
@@ -763,6 +824,10 @@ export async function pollSignalBotCommands(input: {
   botUsername?: string | null;
   config: SignalBotConfig;
   redis: SignalBotRedisLike;
+  sendStatsReport?: (
+    chatId: string,
+    period: SignalBotStatsPeriod,
+  ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
   telegram: SignalBotTelegramClient;
 }): Promise<number> {
@@ -780,6 +845,7 @@ export async function pollSignalBotCommands(input: {
         message: update.message,
         redis: input.redis,
         sendMessage: (message) => input.telegram.sendMessage(message),
+        sendStatsReport: input.sendStatsReport,
         sendTestSignal: input.sendTestSignal,
       });
       if (didHandle) handled += 1;
@@ -790,6 +856,7 @@ export async function pollSignalBotCommands(input: {
 }
 
 const SIGNAL_BOT_ALTERNATIVES_QUERY = { limit: 8, sourceLimit: 50 };
+const SIGNAL_BOT_STATS_AUDIT_LIMIT = 500;
 const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
 
 type SignalBotAggMarketConfig = {
@@ -1067,6 +1134,73 @@ export async function sendLatestSignalBotTestSignal(input: {
     text,
   });
   return result.ok;
+}
+
+export function buildSignalBotStatsReport(input: {
+  buyAmountUsd: number;
+  period: SignalBotStatsPeriod;
+  result: HolderResearchPerformanceAuditResult;
+}): string {
+  const periodLabel = formatSignalBotStatsPeriodLabel(input.period);
+  const overall = input.result.aggregates.overall;
+  if (input.result.evaluated === 0 || overall.notes === 0) {
+    return `No bot-eligible signals for ${periodLabel} yet.`;
+  }
+
+  const measuredSignals = overall.withEntry;
+  const totalPnlUsd = overall.totalPnlPerDollar * input.buyAmountUsd;
+  const totalStakeUsd = measuredSignals * input.buyAmountUsd;
+  const roi = totalStakeUsd > 0 ? totalPnlUsd / totalStakeUsd : null;
+  const knownResolved = overall.correct + overall.wrong;
+  const resolvedLine =
+    knownResolved > 0
+      ? `🎯 Resolved: ${overall.correct}W / ${overall.wrong}L (${formatPercent(overall.correct / knownResolved)})`
+      : "🎯 Resolved: not enough yet";
+  const pnlLine =
+    measuredSignals > 0
+      ? `💰 $${input.buyAmountUsd} each: ${formatSignedUsd(totalPnlUsd)} (${formatSignedPercent(roi)})`
+      : `💰 $${input.buyAmountUsd} each: waiting for price data`;
+
+  return [
+    `📊 Hunch signals · ${periodLabel}`,
+    "",
+    pnlLine,
+    resolvedLine,
+    `📈 Marked up: ${overall.positive} · down: ${overall.negative}`,
+    `⏳ Open: ${overall.open} · 🏁 Resolved: ${overall.resolved}`,
+    "",
+    "Open signals use current market marks.",
+  ].join("\n");
+}
+
+export async function sendSignalBotStatsReport(input: {
+  chatId: string;
+  config: SignalBotConfig;
+  db: DbQuery;
+  period: SignalBotStatsPeriod;
+  telegram: SignalBotTelegramClient;
+}): Promise<boolean> {
+  const result = await auditHolderResearchSignalPerformance(input.db, {
+    activeOnly: true,
+    approxEntryAfterHours: HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
+    approxEntryBeforeHours: HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
+    directionalOnly: true,
+    includeOpen: true,
+    includeResolved: true,
+    limit: SIGNAL_BOT_STATS_AUDIT_LIMIT,
+    lookbackHours: signalBotStatsPeriodHours(input.period),
+    minConfidence: input.config.minConfidence,
+    persist: false,
+  });
+  const message = buildSignalBotStatsReport({
+    buyAmountUsd: input.config.buyAmountUsd,
+    period: input.period,
+    result,
+  });
+  const sendResult = await input.telegram.sendMessage(
+    buildPlainReply(input.chatId, message),
+  );
+  return sendResult.ok;
 }
 
 export async function loadSignalBotNotes(
@@ -1475,6 +1609,17 @@ function formatPercent(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`;
 }
 
+function formatSignedPercent(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "n/a";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${(value * 100).toFixed(1)}%`;
+}
+
+function formatSignedUsd(value: number): string {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
+}
+
 function formatCompactUsd(value: number): string {
   const abs = Math.abs(value);
   const sign = value < 0 ? "-" : "";
@@ -1655,6 +1800,7 @@ function helpText(): string {
     "/enable_signals <channel_id> - enable a channel",
     "/disable_signals - disable this chat",
     "/status - show chat status",
+    "/stats [24h|7d|30d] - show signal performance",
     "/test_signal - send latest eligible signal",
   ].join("\n");
 }

@@ -304,6 +304,69 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder research performance audit applies minimum confidence filter",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          queries.push({ params: params ?? [], sql });
+          return { rows: [] };
+        },
+      } as unknown as import("./db.js").DbQuery;
+
+      const result = await auditHolderResearchSignalPerformance(db, {
+        includeOpen: true,
+        includeResolved: true,
+        limit: 10,
+        lookbackHours: 168,
+        minConfidence: 0.7,
+        persist: false,
+      });
+
+      assert.equal(result.considered, 0);
+      assert.match(queries[0]?.sql ?? "", /n\.confidence >=/);
+      assert.equal(queries[0]?.params.includes(0.7), true);
+    },
+  },
+  {
+    name: "holder research performance audit eligibility filters are opt-in",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          queries.push({ params: params ?? [], sql });
+          return { rows: [] };
+        },
+      } as unknown as import("./db.js").DbQuery;
+
+      await auditHolderResearchSignalPerformance(db, {
+        includeOpen: true,
+        includeResolved: true,
+        limit: 10,
+        lookbackHours: 168,
+        persist: false,
+      });
+      assert.doesNotMatch(queries[0]?.sql ?? "", /n\.status = 'active'/);
+      assert.doesNotMatch(
+        queries[0]?.sql ?? "",
+        /n\.direction in \('up', 'down'\)/,
+      );
+
+      queries.length = 0;
+      await auditHolderResearchSignalPerformance(db, {
+        activeOnly: true,
+        directionalOnly: true,
+        includeOpen: true,
+        includeResolved: true,
+        limit: 10,
+        lookbackHours: 168,
+        persist: false,
+      });
+      assert.match(queries[0]?.sql ?? "", /n\.status = 'active'/);
+      assert.match(queries[0]?.sql ?? "", /n\.direction in \('up', 'down'\)/);
+    },
+  },
+  {
     name: "holder research performance audit uses exact signal snapshot before trade fallback",
     run: async () => {
       const updates: Array<Record<string, unknown>> = [];

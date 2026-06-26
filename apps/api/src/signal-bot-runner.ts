@@ -16,6 +16,7 @@ import {
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
+  sendSignalBotStatsReport,
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
@@ -168,6 +169,14 @@ export async function runSignalBotRunner(): Promise<void> {
           botUsername,
           config,
           redis,
+          sendStatsReport: (chatId, period) =>
+            sendSignalBotStatsReport({
+              chatId,
+              config,
+              db,
+              period,
+              telegram,
+            }),
           sendTestSignal: (chatId) =>
             sendLatestSignalBotTestSignal({
               chatId,

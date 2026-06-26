@@ -150,6 +150,9 @@ export type HolderResearchPerformanceAuditOptions = {
   includeOpen?: boolean;
   includeResolved?: boolean;
   force?: boolean;
+  activeOnly?: boolean;
+  directionalOnly?: boolean;
+  minConfidence?: number | null;
   approxEntryBeforeHours?: number;
   approxEntryAfterHours?: number;
 };
@@ -202,6 +205,8 @@ type MutableAggregate = HolderResearchPerformanceAggregate & {
 };
 
 const DEFAULT_NEAR_TRADE_MAX_MINUTES = 120;
+export const HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS = 2;
+export const HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS = 24;
 
 function toNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -1007,12 +1012,25 @@ export async function auditHolderResearchSignalPerformance(
     "n.note_type = 'signal'",
     "n.producer_type = 'holder_research'",
   ];
+  if (options.activeOnly) {
+    where.push("n.status = 'active'");
+  }
+  if (options.directionalOnly) {
+    where.push("n.direction in ('up', 'down')");
+  }
   if (noteIds.length > 0) {
     params.push(noteIds);
     where.push(`n.id = any($${params.length}::uuid[])`);
   } else {
     params.push(Math.max(1, Math.trunc(options.lookbackHours)));
     where.push(`n.created_at >= now() - ($${params.length}::numeric * interval '1 hour')`);
+  }
+  if (
+    options.minConfidence != null &&
+    Number.isFinite(options.minConfidence)
+  ) {
+    params.push(Math.max(0, Math.min(1, options.minConfidence)));
+    where.push(`n.confidence >= $${params.length}::numeric`);
   }
   params.push(limit);
   const limitParam = params.length;
