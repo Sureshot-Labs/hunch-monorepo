@@ -10,9 +10,12 @@ import type {
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import {
   buildMarketTypeText,
+  classifyMarketSegment,
+  classifyMarketSegmentFromText,
   classifyMarketType,
   classifyMarketTypeFromText,
   computeMarketHoursToClose,
+  type MarketSegment,
   type MarketType,
 } from "./market-type-classifier.js";
 import {
@@ -20,8 +23,10 @@ import {
   buildWalletIntelTrackableMarketSql,
 } from "./wallet-intel-market-eligibility.js";
 import {
-  loadWalletMarketTypeMetricsMap,
+  loadWalletMarketTaxonomyMetricsMaps,
+  makeWalletMarketSegmentMetricKey,
   makeWalletMarketTypeMetricKey,
+  type WalletMarketSegmentMetric,
   type WalletMarketTypeMetric,
 } from "./wallet-market-type-metrics.js";
 import { buildWalletMmSuspectedSql } from "./wallet-intel-mm.js";
@@ -31,6 +36,10 @@ import {
   buildHolderResearchSignalSnapshot,
   loadHolderResearchPerformanceCalibrationMemo,
 } from "./holder-research-performance.js";
+import {
+  outcomeLabelOrSide,
+  parseMarketOutcomes,
+} from "./wallet-intel-helpers.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -110,6 +119,7 @@ export type HolderResearchHolder = {
   ownerUsdLikeBalance: number | null;
   mmSuspected: boolean;
   marketTypeMetrics30d?: WalletMarketTypeMetric | null;
+  marketSegmentMetrics30d?: WalletMarketSegmentMetric | null;
   relatedOpenPositions: HolderResearchRelatedPosition[];
 };
 
@@ -134,6 +144,7 @@ export type HolderResearchMarketInput = {
   marketTitle: string;
   marketSlug: string | null;
   marketDescription: string | null;
+  outcomes: string[] | null;
   eventTitle: string | null;
   eventSlug: string | null;
   eventDescription: string | null;
@@ -207,6 +218,7 @@ export type HolderResearchActorSummary = {
 };
 
 export type HolderResearchMarketType = MarketType;
+export type HolderResearchMarketSegment = MarketSegment;
 
 export type HolderResearchActorStrength =
   | "cluster"
@@ -235,6 +247,7 @@ export type HolderResearchPublicContextRisk =
 
 export type HolderResearchQualityAssessment = {
   marketType: HolderResearchMarketType;
+  marketSegment: HolderResearchMarketSegment;
   hoursToClose: number | null;
   actorStrength: HolderResearchActorStrength;
   credentialStrength: HolderResearchCredentialStrength;
@@ -362,6 +375,7 @@ type HolderResearchMarketRow = {
   market_title: string | null;
   market_slug: string | null;
   market_description: string | null;
+  outcomes: string | null;
   event_title: string | null;
   event_slug: string | null;
   event_description: string | null;
@@ -877,6 +891,26 @@ function compactPromptMarketTypeMetrics(
   };
 }
 
+function compactPromptMarketSegmentMetrics(
+  metrics: WalletMarketSegmentMetric | null | undefined,
+) {
+  if (!metrics) return null;
+  return {
+    segment: metrics.marketSegment,
+    type: metrics.marketType,
+    trades: metrics.tradesCount,
+    volUsd: metrics.volumeUsd,
+    pnlUsd: metrics.pnlUsd,
+    roi: metrics.roi,
+    win: metrics.winRate,
+    edge30d: metrics.resolvedWinRateEdge,
+    edgeBets: metrics.resolvedEdgeSampleCount,
+    stakeUsd: metrics.resolvedStakeUsd,
+    lastTradeAt: metrics.lastTradeAt,
+    approx: metrics.approximate,
+  };
+}
+
 function compactPromptRelatedPosition(position: HolderResearchRelatedPosition) {
   return {
     mktId: position.marketId,
@@ -913,6 +947,9 @@ function compactPromptHolder(
     vol30d: holder.volume30dUsd,
     mm: holder.mmSuspected,
     sameType: compactPromptMarketTypeMetrics(holder.marketTypeMetrics30d),
+    sameSegment: compactPromptMarketSegmentMetrics(
+      holder.marketSegmentMetrics30d,
+    ),
   };
   if (mode === "entry") {
     base.realizedPnl = holder.realizedPnlUsd;
@@ -1183,6 +1220,20 @@ function classifyHolderResearchMarketType(
   });
 }
 
+function classifyHolderResearchMarketSegment(
+  market: HolderResearchMarketInput,
+): HolderResearchMarketSegment {
+  return classifyMarketSegment({
+    category: market.category,
+    seriesKey: market.seriesKey,
+    seriesTitle: market.seriesTitle,
+    eventTitle: market.eventTitle,
+    marketTitle: market.marketTitle,
+    closeTime: market.closeTime,
+    expirationTime: market.expirationTime,
+  });
+}
+
 function selectedSignalPriceChange(
   candidate: HolderResearchCandidate,
 ): number | null {
@@ -1248,6 +1299,7 @@ export function buildHolderResearchQualityAssessment(
     policy,
   });
   const marketType = classifyHolderResearchMarketType(candidate.market);
+  const marketSegment = classifyHolderResearchMarketSegment(candidate.market);
   const hoursToClose = computeHoursToClose(candidate.market);
   const reasons: string[] = [];
   let credentialStrength: HolderResearchCredentialStrength = "weak";
@@ -1297,6 +1349,7 @@ export function buildHolderResearchQualityAssessment(
 
   return {
     marketType,
+    marketSegment,
     hoursToClose,
     actorStrength,
     credentialStrength,
@@ -2101,11 +2154,11 @@ function bucketPriority(bucket: HolderResearchBucket): number {
   switch (bucket) {
     case "followup_existing":
       return 0;
-    case "sharp_minority":
-      return 1;
-    case "sharp_split":
-      return 2;
     case "sharp_side":
+      return 1;
+    case "sharp_minority":
+      return 2;
+    case "sharp_split":
       return 3;
     case "clean_disagreement":
       return 4;
@@ -2116,6 +2169,50 @@ function bucketPriority(bucket: HolderResearchBucket): number {
     case "concentration_risk":
       return 7;
   }
+}
+
+function adjustedSelectionScore(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+): number {
+  let score = candidate.score;
+  const quality = buildHolderResearchQualityAssessment(candidate, policy);
+  if (quality.actorStrength === "cluster") score += 0.18;
+  if (quality.actorStrength === "exceptional_single") score += 0.08;
+  if (candidate.bucket === "sharp_side") score += 0.06;
+  if (candidate.bucket === "sharp_minority") score -= 0.08;
+  if (quality.marketType !== "single_game_sports") score += 0.03;
+  if (
+    quality.marketType === "single_game_sports" &&
+    quality.actorStrength !== "cluster" &&
+    quality.actorStrength !== "exceptional_single"
+  ) {
+    score -= 0.18;
+  }
+  if (
+    quality.marketType === "single_game_sports" &&
+    candidate.bucket === "sharp_minority" &&
+    quality.actorStrength !== "cluster"
+  ) {
+    score -= 0.12;
+  }
+  if (quality.credentialStrength === "contradicted") score -= 0.2;
+  if (quality.priceContext === "against_signal") score -= 0.12;
+  if (quality.priceContext === "already_priced") score -= 0.06;
+  return score;
+}
+
+function compareHolderResearchCandidates(
+  policy: HolderResearchPolicy,
+): (a: HolderResearchCandidate, b: HolderResearchCandidate) => number {
+  return (a, b) => {
+    const scoreDelta =
+      adjustedSelectionScore(b, policy) - adjustedSelectionScore(a, policy);
+    if (Math.abs(scoreDelta) > 0.0001) return scoreDelta;
+    const priorityDelta = bucketPriority(a.bucket) - bucketPriority(b.bucket);
+    if (priorityDelta !== 0) return priorityDelta;
+    return b.score - a.score;
+  };
 }
 
 export function selectHolderResearchCandidates(
@@ -2132,11 +2229,7 @@ export function selectHolderResearchCandidates(
   const usedMarkets = new Set<string>();
   const usedKeys = new Set<string>();
   const quotaUsed = new Map<HolderResearchBucket, number>();
-  const sorted = [...candidates].sort((a, b) => {
-    const priorityDelta = bucketPriority(a.bucket) - bucketPriority(b.bucket);
-    if (priorityDelta !== 0) return priorityDelta;
-    return b.score - a.score;
-  });
+  const sorted = [...candidates].sort(compareHolderResearchCandidates(policy));
 
   const isEligible = (candidate: HolderResearchCandidate): boolean => {
     if (candidate.score < policy.minScore) {
@@ -2169,7 +2262,7 @@ export function selectHolderResearchCandidates(
     quotaUsed.set(candidate.bucket, used + 1);
   }
 
-  const refill = [...candidates].sort((a, b) => b.score - a.score);
+  const refill = [...candidates].sort(compareHolderResearchCandidates(policy));
   for (const candidate of refill) {
     if (selected.length >= maxSelected) break;
     if (usedKeys.has(candidate.key)) continue;
@@ -2265,6 +2358,7 @@ function parseHolderRows(row: HolderResearchMarketRow): HolderResearchHolder[] {
         ownerUsdLikeBalance: toNumber(record.ownerUsdLikeBalance),
         mmSuspected: record.mmSuspected === true,
         marketTypeMetrics30d: null,
+        marketSegmentMetrics30d: null,
         relatedOpenPositions: [],
       };
     })
@@ -2302,6 +2396,7 @@ function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
     marketTitle: row.market_title ?? row.market_id,
     marketSlug: safeText(row.market_slug),
     marketDescription: compactText(row.market_description, 1_200),
+    outcomes: parseMarketOutcomes(row.outcomes),
     eventTitle: row.event_title,
     eventSlug: safeText(row.event_slug),
     eventDescription: compactText(row.event_description, 1_200),
@@ -2614,6 +2709,7 @@ export async function loadHolderResearchCandidateMarkets(
         um.title as market_title,
         um.slug as market_slug,
         um.description as market_description,
+        um.outcomes,
         ue.title as event_title,
         ue.slug as event_slug,
         ue.description as event_description,
@@ -3046,11 +3142,18 @@ export async function enrichHolderResearchMarketTypeMetrics(
   );
   if (walletIds.length === 0) return candidates;
 
-  let metricsByKey: Awaited<ReturnType<typeof loadWalletMarketTypeMetricsMap>>;
+  let metricsByKey: Awaited<
+    ReturnType<typeof loadWalletMarketTaxonomyMetricsMaps>
+  >["marketTypeMetricsByKey"];
+  let segmentMetricsByKey: Awaited<
+    ReturnType<typeof loadWalletMarketTaxonomyMetricsMaps>
+  >["marketSegmentMetricsByKey"];
   try {
-    metricsByKey = await loadWalletMarketTypeMetricsMap(client, {
+    const taxonomyMetrics = await loadWalletMarketTaxonomyMetricsMaps(client, {
       walletIds,
     });
+    metricsByKey = taxonomyMetrics.marketTypeMetricsByKey;
+    segmentMetricsByKey = taxonomyMetrics.marketSegmentMetricsByKey;
   } catch (error) {
     console.warn("[holder-research] market-type metrics skipped", {
       walletCount: walletIds.length,
@@ -3062,11 +3165,16 @@ export async function enrichHolderResearchMarketTypeMetrics(
 
   return candidates.map((candidate) => {
     const marketType = classifyHolderResearchMarketType(candidate.market);
+    const marketSegment = classifyHolderResearchMarketSegment(candidate.market);
     const holders = candidate.market.holders.map((holder) => ({
       ...holder,
       marketTypeMetrics30d:
         metricsByKey.get(
           makeWalletMarketTypeMetricKey(holder.walletId, marketType),
+        ) ?? null,
+      marketSegmentMetrics30d:
+        segmentMetricsByKey.get(
+          makeWalletMarketSegmentMetricKey(holder.walletId, marketSegment),
         ) ?? null,
     }));
     const market = { ...candidate.market, holders };
@@ -3162,13 +3270,21 @@ function compactPromptMarket(
   totalUsd?: number,
 ) {
   const market = candidate.market;
+  const yesLabel = outcomeLabelOrSide(market.outcomes, "YES");
+  const noLabel = outcomeLabelOrSide(market.outcomes, "NO");
   const result: Record<string, unknown> = {
     id: market.marketId,
     evtId: market.eventId,
     venue: market.venue,
+    marketType: classifyHolderResearchMarketType(market),
+    marketSegment: classifyHolderResearchMarketSegment(market),
     title: market.marketTitle,
     evt: market.eventTitle,
     series: market.seriesTitle,
+    labels: {
+      YES: yesLabel,
+      NO: noLabel,
+    },
     cat: market.category,
     close: market.closeTime,
     expires: market.expirationTime,
@@ -3325,6 +3441,10 @@ export function buildHolderResearchExternalSearchInput(
       venue: candidate.market.venue,
       cat: candidate.market.category,
       series: candidate.market.seriesTitle,
+      labels: {
+        YES: outcomeLabelOrSide(candidate.market.outcomes, "YES"),
+        NO: outcomeLabelOrSide(candidate.market.outcomes, "NO"),
+      },
       close: candidate.market.closeTime,
       pYes: candidate.market.yesProbability,
       desc:
@@ -3470,6 +3590,7 @@ export function buildHolderResearchWalletTargets(
       ownerAddress: holder.ownerAddress,
       mmSuspected: holder.mmSuspected,
       marketTypeMetrics30d: holder.marketTypeMetrics30d,
+      marketSegmentMetrics30d: holder.marketSegmentMetrics30d,
     },
   }));
 }
@@ -4007,6 +4128,7 @@ function evaluateResolvedSignalRow(
     confidence: toNumber(row.confidence),
     marketId: row.market_id,
     marketType: classifyMarketTypeFromText(text, hoursToCloseAtNote),
+    marketSegment: classifyMarketSegmentFromText(text, hoursToCloseAtNote),
     hoursToCloseAtNote,
     noteYesProbability: noteYes,
     finalYesProbability: finalYes,

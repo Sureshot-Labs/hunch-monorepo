@@ -52,6 +52,7 @@ import {
   resolveHolderResearchFinalYesProbability,
   resolveHolderResearchSignalQuote,
 } from "./services/holder-research-performance.js";
+import { classifyMarketTaxonomy } from "./services/market-type-classifier.js";
 
 function policy(overrides: Partial<HolderResearchPolicy> = {}) {
   return {
@@ -65,6 +66,7 @@ function calibrationRow(
     note_id: string;
     created_at: Date;
     outcome: string;
+    market_segment: string | null;
     market_type: string;
     actor_mode: string;
     bucket: string;
@@ -84,6 +86,7 @@ function calibrationRow(
     note_id: "00000000-0000-4000-8000-000000000100",
     created_at: new Date("2026-01-01T00:00:00.000Z"),
     outcome: "wrong",
+    market_segment: "sports_soccer_game",
     market_type: "single_game_sports",
     actor_mode: "single_holder",
     bucket: "sharp_side",
@@ -173,6 +176,7 @@ function market(
     marketTitle: "Will the test market resolve Yes?",
     marketSlug: "will-the-test-market-resolve-yes",
     marketDescription: null,
+    outcomes: null,
     eventTitle: "Test event",
     eventSlug: "test-event",
     eventDescription: null,
@@ -481,7 +485,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   venue: "polymarket",
                   market_status: "CLOSED",
                   market_title: "Mexico",
-                  event_title: "Czechia vs. Mexico",
+                  event_title: "World Cup: Czechia vs. Mexico",
                   category: "Sports",
                   close_time: new Date("2026-01-01T03:00:00.000Z"),
                   expiration_time: null,
@@ -668,11 +672,83 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "--triage-batch-size=6",
         "--triage-max-batches=2",
         "--triage-model=openai/gpt-5.4-mini",
+        "--include-performance-report",
       ]);
       assert.equal(args.maxAgentCalls, 2);
       assert.equal(args.triageBatchSize, 6);
       assert.equal(args.triageMaxBatches, 2);
       assert.equal(args.triageModel, "openai/gpt-5.4-mini");
+      assert.equal(args.includePerformanceReport, true);
+    },
+  },
+  {
+    name: "market taxonomy keeps coarse type and adds granular segment",
+    run: () => {
+      assert.deepEqual(
+        classifyMarketTaxonomy({
+          category: "Sports",
+          eventTitle: "World Cup Winner",
+          marketTitle: "Brazil",
+        }),
+        {
+          marketSegment: "sports_outright",
+          marketType: "sports_outright",
+        },
+      );
+      assert.deepEqual(
+        classifyMarketTaxonomy({
+          category: "Esports",
+          eventTitle: "Dota 2: Liquid vs Falcons BO3",
+          marketTitle: "Game 1 Winner",
+        }),
+        {
+          marketSegment: "sports_esports_game",
+          marketType: "single_game_sports",
+        },
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          category: "Sports",
+          eventTitle: "Lexus Eastbourne Open: Maria vs Valentova",
+        }).marketSegment,
+        "sports_tennis_game",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          eventTitle: "Bitcoin above $100K by Friday?",
+        }).marketSegment,
+        "crypto_btc",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          eventTitle: "Fed cuts rates in July?",
+        }).marketSegment,
+        "macro_rates",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          eventTitle: "Gold above $2500?",
+        }).marketSegment,
+        "macro_commodities",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          eventTitle: "MSFT above $500?",
+        }).marketSegment,
+        "macro_equities",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          eventTitle: "OpenAI releases GPT-6 this year?",
+        }).marketSegment,
+        "tech_ai",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          eventTitle: "Biden mentions Taylor Swift in an X post?",
+        }).marketSegment,
+        "mentions",
+      );
     },
   },
   {
@@ -908,6 +984,90 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(concentrationOnly.length, 1);
       const selected = selectHolderResearchCandidates(concentrationOnly, p);
       assert.equal(selected.selected.length, 0);
+    },
+  },
+  {
+    name: "candidate ranking prefers sharp-side evidence over weaker sports minority singles",
+    run: () => {
+      const p = policy({
+        maxAgentCallsPerRun: 1,
+        maxCandidatesPerRun: 1,
+        quotaSharpMinority: 1,
+        quotaSharpSide: 1,
+      });
+      const sharpSide = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:sharp-side",
+          sides: {
+            YES: side("YES", {
+              usd: 90_000,
+              wallets: 3,
+              sharpHolders: 2,
+              sharpUsd: 45_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 30,
+              bestResolvedStakeUsd: 10_000,
+              bestTrades30d: 24,
+            }),
+            NO: side("NO", { usd: 35_000, wallets: 2 }),
+          },
+          holders: [
+            holder("YES", {
+              positionUsd: 28_000,
+              walletId: "00000000-0000-0000-0000-000000000021",
+            }),
+            holder("YES", {
+              positionUsd: 24_000,
+              walletId: "00000000-0000-0000-0000-000000000022",
+            }),
+          ],
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_side");
+      assert.ok(sharpSide);
+
+      const weakSportsMinority = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          closeTime: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+          eventTitle: "Mexico vs. Czechia",
+          marketId: "polymarket:weak-sports-minority",
+          marketTitle: "Mexico",
+          sides: {
+            YES: side("YES", { usd: 95_000, wallets: 4 }),
+            NO: side("NO", {
+              usd: 30_000,
+              wallets: 1,
+              sharpHolders: 1,
+              sharpUsd: 10_000,
+              bestEdge: 0.11,
+              bestZScore: 1.7,
+              bestSampleCount: 12,
+              bestResolvedStakeUsd: 2_000,
+              bestTrades30d: 12,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              positionUsd: 10_000,
+              pnl30dUsd: -1_000,
+              walletId: "00000000-0000-0000-0000-000000000023",
+            }),
+          ],
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      assert.ok(weakSportsMinority);
+
+      const selected = selectHolderResearchCandidates(
+        [
+          { ...weakSportsMinority, score: sharpSide.score + 0.05 },
+          sharpSide,
+        ],
+        p,
+      );
+      assert.equal(selected.selected[0]?.key, sharpSide.key);
     },
   },
   {
@@ -1995,8 +2155,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /Prefer outcome meaning over raw YES\/NO wording/i);
       assert.match(prompt, /Avoid generic headline nouns/i);
       assert.match(prompt, /Avoid in headline\/summary/i);
-      assert.match(prompt, /France money fights the NO crowd/i);
-      assert.match(prompt, /France backers buck heavy NO money/i);
+      assert.match(prompt, /Team Nova money fights the NO crowd/i);
+      assert.match(prompt, /Backers buck heavy NO money/i);
       assert.match(prompt, /Bad headline examples/i);
       assert.doesNotMatch(prompt, /Prefer simple phrases like 'informed wallets'/i);
     },
@@ -2047,6 +2207,29 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 approximate: false,
                 unmarkedOpenLegCount: 0,
               },
+              marketSegmentMetrics30d: {
+                walletId: "00000000-0000-0000-0000-000000000002",
+                marketType: "politics_geo",
+                marketSegment: "politics_geo",
+                period: "30d",
+                asOf: "2026-01-02T00:00:00.000Z",
+                tradesCount: 5,
+                volumeUsd: 25_000,
+                pnlUsd: 2_500,
+                roi: 0.1,
+                winRate: 0.8,
+                resolvedEdgeSampleCount: 4,
+                resolvedActualWinRate: 0.8,
+                resolvedExpectedWinRate: 0.6,
+                resolvedWinRateEdge: 0.2,
+                resolvedEdgeZScore: 1.2,
+                resolvedBrierScore: 0.1,
+                resolvedStakeWeightedEdge: 0.14,
+                resolvedStakeUsd: 9_000,
+                lastTradeAt: "2026-01-01T13:00:00.000Z",
+                approximate: false,
+                unmarkedOpenLegCount: 0,
+              },
             }),
           ],
         }),
@@ -2058,6 +2241,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const record = promptJson as Record<string, unknown>;
       assert.equal(
         (record.quality as Record<string, unknown>).marketType,
+        "politics_geo",
+      );
+      assert.equal(
+        (record.quality as Record<string, unknown>).marketSegment,
         "politics_geo",
       );
       assert.deepEqual(
@@ -2079,6 +2266,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         (entry?.sameType as Record<string, unknown>).pnlUsd,
         4_000,
       );
+      assert.equal(
+        (entry?.sameSegment as Record<string, unknown>).segment,
+        "politics_geo",
+      );
+      assert.equal(
+        (entry?.sameSegment as Record<string, unknown>).pnlUsd,
+        2_500,
+      );
       const serialized = JSON.stringify(record);
       assert.match(serialized, /"mkt"/);
       assert.match(serialized, /"addr"/);
@@ -2094,6 +2289,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const p = policy({ promptHoldersLimit: 2 });
       const candidate = buildHolderResearchCandidatesFromMarket(
         market({
+          outcomes: ["Alpha Team", "Beta Team"],
           holders: [
             holder("NO", {
               walletId: "00000000-0000-0000-0000-000000000011",
@@ -2125,6 +2321,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(holders[1]?.addr, "0xsecondary");
       const serialized = JSON.stringify(promptJson);
       assert.match(serialized, /"addr"/);
+      assert.match(
+        serialized,
+        /"labels":\{"YES":"Alpha Team","NO":"Beta Team"\}/,
+      );
       assert.doesNotMatch(serialized, /0xowner/);
       assert.doesNotMatch(serialized, /walletUsdLikeBalance/);
       assert.doesNotMatch(serialized, /identityProfileUrl/);
@@ -2156,6 +2356,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(serialized, /"move"/);
       assert.match(serialized, /"holderEntry"/);
       assert.match(serialized, /quality/);
+      assert.match(serialized, /marketSegment/);
       assert.match(serialized, /"addr"/);
       const prompt = buildHolderResearchTriageUserPrompt({
         candidates: [triageCandidate],
@@ -2408,7 +2609,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   },
                   market_id: "polymarket:resolved",
                   market_title: "Mexico",
-                  event_title: "Czechia vs. Mexico",
+                  event_title: "World Cup: Czechia vs. Mexico",
                   category: "Sports",
                   close_time: new Date("2026-01-01T03:00:00.000Z"),
                   expiration_time: null,
@@ -2438,6 +2639,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(selectSql, /resolvedEvaluation,outcome/i);
       assert.equal(updates[0]?.outcome, "wrong");
       assert.equal(updates[0]?.marketType, "single_game_sports");
+      assert.equal(updates[0]?.marketSegment, "sports_soccer_game");
       assert.equal(updates[0]?.sideAdjustedPriceDelta, -0.48);
     },
   },
@@ -2466,6 +2668,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                       direction: "down",
                       confidence: 0.74,
                       marketId: "polymarket:resolved",
+                      marketSegment: "sports_soccer_game",
                       marketType: "single_game_sports",
                       hoursToCloseAtNote: 3,
                       noteYesProbability: 0.52,
@@ -2493,7 +2696,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   },
                   market_id: "polymarket:resolved",
                   market_title: "Mexico",
-                  event_title: "Czechia vs. Mexico",
+                  event_title: "World Cup: Czechia vs. Mexico",
                   category: "Sports",
                   close_time: new Date("2026-01-01T03:00:00.000Z"),
                   expiration_time: null,

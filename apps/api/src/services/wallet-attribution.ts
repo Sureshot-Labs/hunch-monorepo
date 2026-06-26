@@ -4,6 +4,11 @@ import type {
   WalletActivitySignalSummary,
   WalletActivityTopChange,
 } from "./wallet-activity-summary.js";
+import {
+  classifyMarketTaxonomy,
+  marketSegmentCategoryFamily,
+  type MarketCategoryFamily,
+} from "./market-type-classifier.js";
 import type { WalletIntelAttributionPolicy } from "./runtime-policies.js";
 
 export type WalletAttributionPrimaryKey =
@@ -143,6 +148,14 @@ type VenueStatsRow = {
 };
 
 type CategoryVolumeRow = {
+  close_time: Date | null;
+  event_category: string | null;
+  event_title: string | null;
+  expiration_time: Date | null;
+  market_category: string | null;
+  market_title: string | null;
+  series_key: string | null;
+  series_title: string | null;
   wallet_id: string;
   venue: string;
   raw_category: string | null;
@@ -170,16 +183,7 @@ type InferredOutcomeRow = {
   total: number;
 };
 
-type SpecialistFamily =
-  | "sports"
-  | "politics"
-  | "crypto"
-  | "macro"
-  | "technology"
-  | "weather"
-  | "health"
-  | "culture"
-  | "mentions";
+type SpecialistFamily = MarketCategoryFamily;
 
 const SPECIALIST_LABEL_BY_FAMILY: Record<
   SpecialistFamily,
@@ -634,7 +638,10 @@ async function loadVenueStats(
                 select
                   um.id as market_id,
                   lower(um.category) as market_category,
-                  um.event_id
+                  um.event_id,
+                  um.title as market_title,
+                  um.close_time,
+                  um.expiration_time
                 from unified_markets um
                 join (
                   select distinct market_id
@@ -644,24 +651,33 @@ async function loadVenueStats(
               event_lookup as (
                 select
                   ue.id as event_id,
-                  lower(ue.category) as event_category
+                  lower(ue.category) as event_category,
+                  ue.title as event_title,
+                  ue.series_key,
+                  ue.series_title
                 from unified_events ue
                 join (
                   select distinct mm.event_id
                   from market_meta mm
-                  where mm.market_category is null
-                    and mm.event_id is not null
+                  where mm.event_id is not null
                 ) ev on ev.event_id = ue.id
               )
               select
                 wm.wallet_id,
                 wm.venue,
                 coalesce(mm.market_category, el.event_category) as raw_category,
-                sum(wm.volume_usd) as volume_usd
+                mm.market_category,
+                el.event_category,
+                el.series_key,
+                el.series_title,
+                el.event_title,
+                mm.market_title,
+                mm.close_time,
+                mm.expiration_time,
+                wm.volume_usd
               from wallet_market wm
               left join market_meta mm on mm.market_id = wm.market_id
               left join event_lookup el on el.event_id = mm.event_id
-              group by wm.wallet_id, wm.venue, coalesce(mm.market_category, el.event_category)
             `,
             [walletIds],
           )
@@ -760,7 +776,18 @@ async function loadVenueStats(
       familyTotals: new Map<SpecialistFamily, number>(),
     };
     bucket.totals += volume;
-    const family = mapCategoryToFamily(row.raw_category);
+    const taxonomy = classifyMarketTaxonomy({
+      category: row.market_category ?? row.event_category ?? row.raw_category,
+      closeTime: row.close_time,
+      eventTitle: row.event_title,
+      expirationTime: row.expiration_time,
+      marketTitle: row.market_title,
+      seriesKey: row.series_key,
+      seriesTitle: row.series_title,
+    });
+    const family =
+      marketSegmentCategoryFamily(taxonomy.marketSegment) ??
+      mapCategoryToFamily(row.raw_category);
     if (family) {
       bucket.familyTotals.set(
         family,

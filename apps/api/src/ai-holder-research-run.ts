@@ -44,7 +44,10 @@ import {
   type HolderResearchDecisionCacheEvaluation,
   type HolderResearchPersistDecision,
 } from "./services/holder-research.js";
-import { auditHolderResearchSignalPerformance } from "./services/holder-research-performance.js";
+import {
+  auditHolderResearchSignalPerformance,
+  type HolderResearchPerformanceAuditResult,
+} from "./services/holder-research-performance.js";
 import {
   resolveHolderResearchPolicy,
   resolveWalletIntelRefreshPolicy,
@@ -64,8 +67,29 @@ export type HolderResearchRunArgs = {
   outPath: string | null;
   triageBatchSize: number | null;
   triageMaxBatches: number | null;
+  includePerformanceReport: boolean;
   verbose: boolean;
 };
+
+type HolderResearchRunPerformanceAuditReport =
+  | (Pick<
+      HolderResearchPerformanceAuditResult,
+      | "considered"
+      | "correct"
+      | "errors"
+      | "evaluated"
+      | "missingEntry"
+      | "open"
+      | "resolved"
+      | "unchanged"
+      | "unknown"
+      | "written"
+      | "wrong"
+    > & {
+      aggregates?: HolderResearchPerformanceAuditResult["aggregates"];
+      items?: HolderResearchPerformanceAuditResult["items"];
+    })
+  | null;
 
 type HolderResearchModelDecision = {
   candidate: HolderResearchCandidate;
@@ -233,9 +257,7 @@ type HolderResearchRunReport = {
   resolvedEvaluation: Awaited<
     ReturnType<typeof evaluateResolvedHolderResearchNotes>
   > | null;
-  performanceAudit: Awaited<
-    ReturnType<typeof auditHolderResearchSignalPerformance>
-  > | null;
+  performanceAudit: HolderResearchRunPerformanceAuditReport;
 };
 
 type HolderResearchDecisionCacheStats =
@@ -298,6 +320,7 @@ export function parseHolderResearchRunArgs(
     outPath: parseFlag(argv, "--out")?.trim() || null,
     triageBatchSize: parsePositiveInt(parseFlag(argv, "--triage-batch-size")),
     triageMaxBatches: parsePositiveInt(parseFlag(argv, "--triage-max-batches")),
+    includePerformanceReport: hasFlag(argv, "--include-performance-report"),
     verbose: hasFlag(argv, "--verbose"),
   };
 }
@@ -323,6 +346,31 @@ function withPolicyOverrides(
     triageBatchSize: args.triageBatchSize ?? policy.triageBatchSize,
     triageMaxBatchesPerRun:
       args.triageMaxBatches ?? policy.triageMaxBatchesPerRun,
+  };
+}
+
+function compactPerformanceAuditReport(
+  result: HolderResearchPerformanceAuditResult,
+  includeDetails: boolean,
+): Exclude<HolderResearchRunPerformanceAuditReport, null> {
+  const compact = {
+    considered: result.considered,
+    evaluated: result.evaluated,
+    written: result.written,
+    unchanged: result.unchanged,
+    errors: result.errors,
+    missingEntry: result.missingEntry,
+    open: result.open,
+    resolved: result.resolved,
+    unknown: result.unknown,
+    correct: result.correct,
+    wrong: result.wrong,
+  };
+  if (!includeDetails) return compact;
+  return {
+    ...compact,
+    aggregates: result.aggregates,
+    items: [],
   };
 }
 
@@ -1844,7 +1892,10 @@ export async function runHolderResearch(
         approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
         approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
       });
-      performanceAudit = { ...auditResult, items: [] };
+      performanceAudit = compactPerformanceAuditReport(
+        auditResult,
+        args.includePerformanceReport,
+      );
     }
     toolCalls.push({
       name: "signal_performance_audit",

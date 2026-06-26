@@ -93,6 +93,7 @@ function parseRunnerArgs(argv: string[]): RunnerArgs {
     outPath: parseFlag(argv, "--out")?.trim() || null,
     triageBatchSize: parsePositiveInt(parseFlag(argv, "--triage-batch-size")),
     triageMaxBatches: parsePositiveInt(parseFlag(argv, "--triage-max-batches")),
+    includePerformanceReport: hasFlag(argv, "--include-performance-report"),
     verbose: hasFlag(argv, "--verbose"),
   };
 }

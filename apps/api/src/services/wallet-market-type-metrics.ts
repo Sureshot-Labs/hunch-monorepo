@@ -1,7 +1,9 @@
 import type { PoolClient } from "pg";
 
 import {
+  classifyMarketSegment,
   classifyMarketType,
+  type MarketSegment,
   type MarketType,
 } from "./market-type-classifier.js";
 import {
@@ -41,6 +43,10 @@ export type WalletMarketTypeMetric = {
   lastTradeAt: string | null;
   approximate: boolean;
   unmarkedOpenLegCount: number;
+};
+
+export type WalletMarketSegmentMetric = WalletMarketTypeMetric & {
+  marketSegment: MarketSegment;
 };
 
 type WalletMarketTypeActivityRow = {
@@ -93,8 +99,8 @@ function periodStart(asOf: Date, days: number): Date {
   return new Date(asOf.getTime() - days * 24 * 60 * 60 * 1000);
 }
 
-function keyFor(walletId: string, marketType: MarketType): string {
-  return `${walletId}:${marketType}`;
+function keyFor(walletId: string, marketClass: string): string {
+  return `${walletId}:${marketClass}`;
 }
 
 export function makeWalletMarketTypeMetricKey(
@@ -104,8 +110,30 @@ export function makeWalletMarketTypeMetricKey(
   return keyFor(walletId, marketType);
 }
 
+export function makeWalletMarketSegmentMetricKey(
+  walletId: string,
+  marketSegment: MarketSegment,
+): string {
+  return keyFor(walletId, marketSegment);
+}
+
 function rowMarketType(row: WalletMarketTypeActivityRow, asOf: Date) {
   return classifyMarketType(
+    {
+      category: row.market_category ?? row.event_category,
+      seriesKey: row.series_key,
+      seriesTitle: row.series_title,
+      eventTitle: row.event_title,
+      marketTitle: row.market_title,
+      closeTime: row.close_time,
+      expirationTime: row.expiration_time,
+    },
+    asOf,
+  );
+}
+
+function rowMarketSegment(row: WalletMarketTypeActivityRow, asOf: Date) {
+  return classifyMarketSegment(
     {
       category: row.market_category ?? row.event_category,
       seriesKey: row.series_key,
@@ -161,11 +189,92 @@ export async function loadWalletMarketTypeMetricsMap(
     periodDays?: number;
   },
 ): Promise<Map<string, WalletMarketTypeMetric>> {
+  return loadWalletClassifiedMetricsMap(client, inputs, "marketType");
+}
+
+export async function loadWalletMarketSegmentMetricsMap(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf?: Date;
+    periodDays?: number;
+  },
+): Promise<Map<string, WalletMarketSegmentMetric>> {
+  return loadWalletClassifiedMetricsMap(client, inputs, "marketSegment") as Promise<
+    Map<string, WalletMarketSegmentMetric>
+  >;
+}
+
+export async function loadWalletMarketTaxonomyMetricsMaps(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf?: Date;
+    periodDays?: number;
+  },
+): Promise<{
+  marketSegmentMetricsByKey: Map<string, WalletMarketSegmentMetric>;
+  marketTypeMetricsByKey: Map<string, WalletMarketTypeMetric>;
+}> {
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  if (walletIds.length === 0) {
+    return {
+      marketSegmentMetricsByKey: new Map(),
+      marketTypeMetricsByKey: new Map(),
+    };
+  }
+
+  const asOf = inputs.asOf ?? new Date();
+  const since = periodStart(asOf, Math.max(1, inputs.periodDays ?? 30));
+  const rows = await loadWalletMarketTypeActivityRows(
+    client,
+    walletIds,
+    asOf,
+    since,
+  );
+  return {
+    marketSegmentMetricsByKey: buildWalletClassifiedMetricsMapFromRows(
+      rows,
+      asOf,
+      "marketSegment",
+    ) as Map<string, WalletMarketSegmentMetric>,
+    marketTypeMetricsByKey: buildWalletClassifiedMetricsMapFromRows(
+      rows,
+      asOf,
+      "marketType",
+    ),
+  };
+}
+
+async function loadWalletClassifiedMetricsMap(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf?: Date;
+    periodDays?: number;
+  },
+  classification: "marketSegment" | "marketType",
+): Promise<Map<string, WalletMarketTypeMetric>> {
   const walletIds = Array.from(new Set(inputs.walletIds));
   if (walletIds.length === 0) return new Map();
 
   const asOf = inputs.asOf ?? new Date();
   const since = periodStart(asOf, Math.max(1, inputs.periodDays ?? 30));
+  const rows = await loadWalletMarketTypeActivityRows(
+    client,
+    walletIds,
+    asOf,
+    since,
+  );
+  return buildWalletClassifiedMetricsMapFromRows(rows, asOf, classification);
+}
+
+async function loadWalletMarketTypeActivityRows(
+  client: Queryable,
+  walletIds: string[],
+  asOf: Date,
+  since: Date,
+): Promise<WalletMarketTypeActivityRow[]> {
   const { rows } = await client.query<WalletMarketTypeActivityRow>(
     `
       select
@@ -214,9 +323,17 @@ export async function loadWalletMarketTypeMetricsMap(
     `,
     [walletIds, asOf, since],
   );
+  return rows;
+}
 
+function buildWalletClassifiedMetricsMapFromRows(
+  rows: WalletMarketTypeActivityRow[],
+  asOf: Date,
+  classification: "marketSegment" | "marketType",
+): Map<string, WalletMarketTypeMetric> {
   const aggregateByKey = new Map<string, MetricAggregate>();
   const ledgerRowsByTypeKey = new Map<string, WalletPositionLedgerRow[]>();
+  const marketTypeByClass = new Map<string, MarketType>();
   const marketMarksById = new Map<
     string,
     ReturnType<typeof metricMarkFromRow>
@@ -224,7 +341,13 @@ export async function loadWalletMarketTypeMetricsMap(
 
   for (const row of rows) {
     const marketType = rowMarketType(row, asOf);
-    const aggregateKey = keyFor(row.wallet_id, marketType);
+    const marketSegment = rowMarketSegment(row, asOf);
+    const marketClass =
+      classification === "marketSegment" ? marketSegment : marketType;
+    if (!marketTypeByClass.has(marketClass)) {
+      marketTypeByClass.set(marketClass, marketType);
+    }
+    const aggregateKey = keyFor(row.wallet_id, marketClass);
     const aggregate = aggregateByKey.get(aggregateKey) ?? {
       walletId: row.wallet_id,
       tradesCount: 0,
@@ -258,7 +381,7 @@ export async function loadWalletMarketTypeMetricsMap(
     }
     if (outcomeSide !== "YES" && outcomeSide !== "NO") continue;
 
-    const ledgerKey = `${marketType}:${makeWalletPositionLedgerKey(
+    const ledgerKey = `${marketClass}:${makeWalletPositionLedgerKey(
       row.wallet_id,
       row.market_id,
       outcomeSide,
@@ -289,11 +412,11 @@ export async function loadWalletMarketTypeMetricsMap(
   >();
 
   for (const [ledgerKey, ledgerRows] of ledgerRowsByTypeKey.entries()) {
-    const marketType = ledgerKey.slice(0, ledgerKey.indexOf(":")) as MarketType;
+    const marketClass = ledgerKey.slice(0, ledgerKey.indexOf(":"));
     const ledger = replayWalletPositionLedgerRows(ledgerRows);
     if (ledger.eventCount <= 0) continue;
     const first = ledgerRows[0];
-    const metricKey = keyFor(first.walletId, marketType);
+    const metricKey = keyFor(first.walletId, marketClass);
     const existing = ledgersByMetricKey.get(metricKey) ?? [];
     existing.push({
       marketId: first.marketId,
@@ -304,17 +427,17 @@ export async function loadWalletMarketTypeMetricsMap(
   }
 
   const metrics = new Map<string, WalletMarketTypeMetric>();
-  const marketTypes = Array.from(
+  const marketClasses = Array.from(
     new Set(
       [...aggregateByKey.keys(), ...ledgersByMetricKey.keys()].map(
-        (entry) => entry.split(":").at(-1) as MarketType,
+        (entry) => entry.split(":").at(-1) as string,
       ),
     ),
   );
 
-  for (const marketType of marketTypes) {
+  for (const marketClass of marketClasses) {
     const aggregates = Array.from(aggregateByKey.entries())
-      .filter(([entryKey]) => entryKey.endsWith(`:${marketType}`))
+      .filter(([entryKey]) => entryKey.endsWith(`:${marketClass}`))
       .map(([, aggregate]) => ({
         walletId: aggregate.walletId,
         tradesCount: aggregate.tradesCount,
@@ -327,7 +450,7 @@ export async function loadWalletMarketTypeMetricsMap(
       new Set([
         ...aggregates.map((aggregate) => aggregate.walletId),
         ...Array.from(ledgersByMetricKey.keys())
-          .filter((entryKey) => entryKey.endsWith(`:${marketType}`))
+          .filter((entryKey) => entryKey.endsWith(`:${marketClass}`))
           .map((entryKey) => entryKey.slice(0, entryKey.lastIndexOf(":"))),
       ]),
     );
@@ -343,7 +466,7 @@ export async function loadWalletMarketTypeMetricsMap(
     >();
     for (const walletId of typeWalletIds) {
       const entries =
-        ledgersByMetricKey.get(keyFor(walletId, marketType)) ?? [];
+        ledgersByMetricKey.get(keyFor(walletId, marketClass)) ?? [];
       if (entries.length > 0) ledgersByWallet.set(walletId, entries);
     }
 
@@ -362,9 +485,15 @@ export async function loadWalletMarketTypeMetricsMap(
       ) {
         continue;
       }
-      metrics.set(keyFor(row.walletId, marketType), {
+      const metricMarketType =
+        marketTypeByClass.get(marketClass) ??
+        (classification === "marketType" ? (marketClass as MarketType) : "other");
+      metrics.set(keyFor(row.walletId, marketClass), {
         walletId: row.walletId,
-        marketType,
+        marketType: metricMarketType,
+        ...(classification === "marketSegment"
+          ? { marketSegment: marketClass as MarketSegment }
+          : {}),
         period: "30d",
         asOf: asOf.toISOString(),
         tradesCount: row.tradesCount,

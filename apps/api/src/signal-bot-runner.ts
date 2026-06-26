@@ -169,11 +169,12 @@ export async function runSignalBotRunner(): Promise<void> {
           botUsername,
           config,
           redis,
-          sendStatsReport: (chatId, period) =>
+          sendStatsReport: (chatId, period, detail) =>
             sendSignalBotStatsReport({
               chatId,
               config,
               db,
+              detail,
               period,
               telegram,
             }),

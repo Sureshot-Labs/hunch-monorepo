@@ -75,9 +75,13 @@ import {
   buildSnapshotDeltaTrackableActivitySql,
   buildWalletIntelTrackableMarketSql,
 } from "../services/wallet-intel-market-eligibility.js";
-import { classifyMarketType } from "../services/market-type-classifier.js";
 import {
-  loadWalletMarketTypeMetricsMap,
+  classifyMarketSegment,
+  classifyMarketType,
+} from "../services/market-type-classifier.js";
+import {
+  loadWalletMarketTaxonomyMetricsMaps,
+  makeWalletMarketSegmentMetricKey,
   makeWalletMarketTypeMetricKey,
 } from "../services/wallet-market-type-metrics.js";
 import {
@@ -6483,6 +6487,15 @@ function mapWalletActivityRouteItems(rows: WalletActivityRouteRow[]) {
       closeTime: row.close_time,
       expirationTime: row.expiration_time,
     }),
+    marketSegment: classifyMarketSegment({
+      category: row.category ?? row.event_category,
+      seriesKey: row.series_key,
+      seriesTitle: row.series_title,
+      eventTitle: row.event_title,
+      marketTitle: row.market_title,
+      closeTime: row.close_time,
+      expirationTime: row.expiration_time,
+    }),
     bestBid: row.best_bid ? Number(row.best_bid) : null,
     bestAsk: row.best_ask ? Number(row.best_ask) : null,
     lastPrice: row.last_price ? Number(row.last_price) : null,
@@ -6551,15 +6564,29 @@ async function enrichWalletActivityRouteItemsWithMarketTypeMetrics<
 >(
   client: PoolClient,
   items: T[],
-): Promise<Array<T & { marketTypeMetrics30d: unknown | null }>> {
+): Promise<
+  Array<
+    T & {
+      marketSegmentMetrics30d: unknown | null;
+      marketTypeMetrics30d: unknown | null;
+    }
+  >
+> {
   if (items.length === 0) return [];
   const walletIds = Array.from(new Set(items.map((item) => item.walletId)));
-  const metricsByKey = await loadWalletMarketTypeMetricsMap(client, {
+  const {
+    marketSegmentMetricsByKey: segmentMetricsByKey,
+    marketTypeMetricsByKey: metricsByKey,
+  } = await loadWalletMarketTaxonomyMetricsMaps(client, {
     walletIds,
   });
 
   return items.map((item) => ({
     ...item,
+    marketSegmentMetrics30d:
+      segmentMetricsByKey.get(
+        makeWalletMarketSegmentMetricKey(item.walletId, item.marketSegment),
+      ) ?? null,
     marketTypeMetrics30d:
       metricsByKey.get(
         makeWalletMarketTypeMetricKey(item.walletId, item.marketType),
@@ -9211,11 +9238,15 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           loadWalletCategoryMix(client, walletId),
           loadWalletOnchainStateByIds(client, [walletId]),
         ]);
-        const marketTypeMetricsMap = query.includeMarketTypeMetrics
-          ? await loadWalletMarketTypeMetricsMap(client, {
+        const taxonomyMetricsMap = query.includeMarketTypeMetrics
+          ? await loadWalletMarketTaxonomyMetricsMaps(client, {
               walletIds: [walletId],
             })
-          : new Map();
+          : null;
+        const marketTypeMetricsMap =
+          taxonomyMetricsMap?.marketTypeMetricsByKey ?? new Map();
+        const marketSegmentMetricsMap =
+          taxonomyMetricsMap?.marketSegmentMetricsByKey ?? new Map();
         const openPositionStats = openPositionStatsMap.get(walletId) ?? null;
         const signalSummaryOptions = {
           windowHours: 720,
@@ -9353,6 +9384,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             entryBracketStats,
             marketTypeMetrics30d: query.includeMarketTypeMetrics
               ? Array.from(marketTypeMetricsMap.values()).sort((a, b) => {
+                  const sampleDelta =
+                    b.resolvedEdgeSampleCount - a.resolvedEdgeSampleCount;
+                  if (sampleDelta !== 0) return sampleDelta;
+                  return (b.volumeUsd ?? 0) - (a.volumeUsd ?? 0);
+                })
+              : undefined,
+            marketSegmentMetrics30d: query.includeMarketTypeMetrics
+              ? Array.from(marketSegmentMetricsMap.values()).sort((a, b) => {
                   const sampleDelta =
                     b.resolvedEdgeSampleCount - a.resolvedEdgeSampleCount;
                   if (sampleDelta !== 0) return sampleDelta;

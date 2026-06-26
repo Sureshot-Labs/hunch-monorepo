@@ -11,7 +11,16 @@ import {
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
   type HolderResearchPerformanceAuditResult,
 } from "./holder-research-performance.js";
+import {
+  classifyMarketSegment,
+  formatMarketSegmentLabel,
+  formatMarketTypeLabel,
+} from "./market-type-classifier.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
+import {
+  outcomeLabelOrSide,
+  parseMarketOutcomes,
+} from "./wallet-intel-helpers.js";
 
 export type SignalBotConfig = {
   enabled: boolean;
@@ -77,6 +86,11 @@ export type SignalBotCheaperAlternativeResolver = (input: {
 }) => Promise<SignalBotCheaperAlternative | null>;
 
 export type SignalBotStatsPeriod = "24h" | "30d" | "7d";
+
+export type SignalBotStatsRequest = {
+  detail: boolean;
+  period: SignalBotStatsPeriod;
+};
 
 export type TelegramBotChat = {
   id: number | string;
@@ -151,6 +165,8 @@ export type SignalBotNote = {
   marketVenue: string | null;
   marketTitle: string | null;
   eventTitle: string | null;
+  outcomes: string[] | null;
+  marketSegment: string | null;
   bestBid: number | null;
   bestAsk: number | null;
   lastPrice: number | null;
@@ -183,6 +199,14 @@ type SignalBotNoteRow = {
   market_venue: string | null;
   market_title: string | null;
   event_title: string | null;
+  category: string | null;
+  event_category: string | null;
+  series_key: string | null;
+  series_title: string | null;
+  close_time: Date | string | null;
+  expiration_time: Date | string | null;
+  outcomes: string | null;
+  market_segment: string | null;
   best_bid: string | number | null;
   best_ask: string | number | null;
   last_price: string | number | null;
@@ -203,10 +227,12 @@ const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
+const OUTCOME_LABEL_MAX_CHARS = 3;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
+const OUTCOME_LABEL_VOWELS = /[AEIOUY]/g;
 const RELEASE_LOCK_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -295,14 +321,30 @@ export function parseSignalBotCommand(
 export function parseSignalBotStatsPeriod(
   text: string | null | undefined,
 ): SignalBotStatsPeriod | null {
-  if (!text) return "7d";
-  const [, rawPeriod] = text.trim().split(/\s+/, 2);
-  if (!rawPeriod) return "7d";
-  const normalized = rawPeriod.trim().toLowerCase();
-  if (normalized === "24h" || normalized === "7d" || normalized === "30d") {
-    return normalized;
+  return parseSignalBotStatsRequest(text)?.period ?? null;
+}
+
+export function parseSignalBotStatsRequest(
+  text: string | null | undefined,
+): SignalBotStatsRequest | null {
+  if (!text) return { detail: false, period: "7d" };
+  const [, ...rawArgs] = text.trim().split(/\s+/);
+  let period: SignalBotStatsPeriod = "7d";
+  let detail = false;
+  for (const rawArg of rawArgs) {
+    const normalized = rawArg.trim().toLowerCase();
+    if (!normalized) continue;
+    if (normalized === "detail" || normalized === "details") {
+      detail = true;
+      continue;
+    }
+    if (normalized === "24h" || normalized === "7d" || normalized === "30d") {
+      period = normalized;
+      continue;
+    }
+    return null;
   }
-  return null;
+  return { detail, period };
 }
 
 function signalBotStatsPeriodHours(period: SignalBotStatsPeriod): number {
@@ -451,6 +493,10 @@ export function buildSignalBotMessage(input: {
   const titleMarkdown = marketUrl
     ? `*[${title}](${escapeTelegramMarkdownV2Url(marketUrl)})*`
     : `*${title}*`;
+  const categoryEmoji = formatSignalBotMarketEmoji(note);
+  const titleLine = categoryEmoji
+    ? `${categoryEmoji} ${titleMarkdown}`
+    : titleMarkdown;
   const metaLine = [
     formatSignalBotSignalLabel(note),
     priceLine,
@@ -458,7 +504,7 @@ export function buildSignalBotMessage(input: {
     .filter((value): value is string => Boolean(value))
     .join(" · ");
   const lines = [
-    titleMarkdown,
+    titleLine,
     escapeTelegramMarkdownV2(metaLine),
     ...(marketTitleLine ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)] : []),
     "",
@@ -484,6 +530,7 @@ export function buildSignalBotMessage(input: {
           amountUsd: input.buyAmountUsd,
           price,
           side: buySide,
+          sideLabel: formatSignalBotOutcomeDisplayLabel(note, buySide),
           venue: note.marketVenue,
         }),
         url: baseTradeUrl,
@@ -495,7 +542,10 @@ export function buildSignalBotMessage(input: {
     ) {
       keyboardRows.push([
         {
-          text: formatSignalBotCheaperButtonText(input.cheaperAlternative),
+          text: formatSignalBotCheaperButtonText({
+            alternative: input.cheaperAlternative,
+            sideLabel: formatSignalBotOutcomeDisplayLabel(note, buySide),
+          }),
           url: buildSignalBotTradeUrl({
             amountUsd: input.buyAmountUsd,
             appBaseUrl: input.appBaseUrl,
@@ -513,6 +563,9 @@ export function buildSignalBotMessage(input: {
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
         holderUrl,
+        holderSideLabel: note.holderSide
+          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide)
+          : null,
         marketUrl: marketUrl ?? baseTradeUrl,
       }),
     );
@@ -524,6 +577,9 @@ export function buildSignalBotMessage(input: {
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
         holderUrl,
+        holderSideLabel: note.holderSide
+          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide)
+          : null,
         marketUrl: buildSignalBotOpenMarketUrl({
           appBaseUrl: input.appBaseUrl,
           eventId: note.eventId,
@@ -539,6 +595,9 @@ export function buildSignalBotMessage(input: {
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
+        holderSideLabel: note.holderSide
+          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide)
+          : null,
         holderUrl,
         marketUrl: null,
       }),
@@ -557,6 +616,7 @@ function buildSignalBotLinkRow(input: {
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
+  holderSideLabel: string | null;
   holderUrl: string | null;
   marketUrl: string | null;
 }): TelegramInlineKeyboard["inline_keyboard"][number] {
@@ -581,8 +641,9 @@ function formatHolderButtonText(input: {
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
+  holderSideLabel: string | null;
 }): string {
-  const sideLabel = input.holderSide ?? "Holder";
+  const sideLabel = input.holderSideLabel ?? input.holderSide ?? "Holder";
   const parts = [
     "👤",
     input.holderActorMode === "sharp_cluster" && input.holderSide
@@ -707,6 +768,7 @@ export async function handleSignalBotCommand(input: {
   sendStatsReport?: (
     chatId: string,
     period: SignalBotStatsPeriod,
+    detail: boolean,
   ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
 }): Promise<boolean> {
@@ -789,16 +851,20 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
   if (command === "stats") {
-    const period = parseSignalBotStatsPeriod(input.message.text);
-    if (!period) {
+    const statsRequest = parseSignalBotStatsRequest(input.message.text);
+    if (!statsRequest) {
       await input.sendMessage(
-        buildPlainReply(chatId, "Usage: /stats [24h|7d|30d]"),
+        buildPlainReply(chatId, "Usage: /stats [24h|7d|30d] [detail]"),
       );
       return true;
     }
     let sent = false;
     try {
-      sent = await (input.sendStatsReport?.(chatId, period) ??
+      sent = await (input.sendStatsReport?.(
+        chatId,
+        statsRequest.period,
+        statsRequest.detail,
+      ) ??
         Promise.resolve(false));
     } catch {
       sent = false;
@@ -827,6 +893,7 @@ export async function pollSignalBotCommands(input: {
   sendStatsReport?: (
     chatId: string,
     period: SignalBotStatsPeriod,
+    detail: boolean,
   ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
   telegram: SignalBotTelegramClient;
@@ -1138,6 +1205,7 @@ export async function sendLatestSignalBotTestSignal(input: {
 
 export function buildSignalBotStatsReport(input: {
   buyAmountUsd: number;
+  detail?: boolean;
   period: SignalBotStatsPeriod;
   result: HolderResearchPerformanceAuditResult;
 }): string {
@@ -1161,22 +1229,139 @@ export function buildSignalBotStatsReport(input: {
       ? `💰 $${input.buyAmountUsd} each: ${formatSignedUsd(totalPnlUsd)} (${formatSignedPercent(roi)})`
       : `💰 $${input.buyAmountUsd} each: waiting for price data`;
 
-  return [
+  const lines = [
     `📊 Hunch signals · ${periodLabel}`,
     "",
     pnlLine,
     resolvedLine,
     `📈 Marked up: ${overall.positive} · down: ${overall.negative}`,
     `⏳ Open: ${overall.open} · 🏁 Resolved: ${overall.resolved}`,
-    "",
-    "Open signals use current market marks.",
-  ].join("\n");
+  ];
+
+  if (input.detail) {
+    const detailLines = buildSignalBotStatsDetailLines(input.result, {
+      buyAmountUsd: input.buyAmountUsd,
+    });
+    if (detailLines.length > 0) {
+      lines.push("", ...detailLines);
+    }
+  }
+
+  lines.push("", "Open signals use current market marks.");
+  return lines.join("\n");
+}
+
+function buildSignalBotStatsDetailLines(
+  result: HolderResearchPerformanceAuditResult,
+  input: { buyAmountUsd: number },
+): string[] {
+  const lines: string[] = ["Details"];
+  const segmentLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatMarketSegmentLabel,
+    group: result.aggregates.byMarketSegment,
+    title: "By category",
+  });
+  if (segmentLines.length > 0) lines.push(...segmentLines);
+  const typeLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatMarketTypeLabel,
+    group: result.aggregates.byMarketType,
+    title: "By market type",
+  });
+  if (typeLines.length > 0) lines.push(...typeLines);
+  const bucketLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatStatsBucketLabel,
+    group: result.aggregates.byBucket,
+    title: "By setup",
+  });
+  if (bucketLines.length > 0) lines.push(...bucketLines);
+  const actorLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatStatsActorLabel,
+    group: result.aggregates.byActorMode,
+    title: "By wallet read",
+  });
+  if (actorLines.length > 0) lines.push(...actorLines);
+  return lines.length > 1 ? lines : [];
+}
+
+function formatStatsAggregateGroup(input: {
+  amountUsd: number;
+  formatter: (key: string) => string;
+  group: Record<string, HolderResearchPerformanceAuditResult["aggregates"]["overall"]>;
+  title: string;
+}): string[] {
+  const rows = Object.entries(input.group)
+    .filter(([, aggregate]) => aggregate.notes > 0)
+    .sort((left, right) => {
+      const leftPnl = Math.abs(left[1].totalPnlPerDollar);
+      const rightPnl = Math.abs(right[1].totalPnlPerDollar);
+      if (leftPnl !== rightPnl) return rightPnl - leftPnl;
+      return right[1].notes - left[1].notes;
+    })
+    .slice(0, 4);
+  if (rows.length === 0) return [];
+  return [
+    input.title,
+    ...rows.map(([key, aggregate]) => {
+      const pnlUsd = aggregate.totalPnlPerDollar * input.amountUsd;
+      const knownResolved = aggregate.correct + aggregate.wrong;
+      const resolved =
+        knownResolved > 0
+          ? `${aggregate.correct}W / ${aggregate.wrong}L`
+          : "open only";
+      return `• ${input.formatter(key)}: ${formatSignedUsd(pnlUsd)} · ${resolved} · ${aggregate.notes} signals`;
+    }),
+  ];
+}
+
+function formatStatsBucketLabel(value: string): string {
+  switch (value) {
+    case "followup_existing":
+      return "Follow-ups";
+    case "sharp_side":
+      return "Strong same-side wallets";
+    case "sharp_minority":
+      return "Minority wallet reads";
+    case "sharp_split":
+      return "Split strong wallets";
+    case "clean_disagreement":
+      return "Clean disagreement";
+    case "recent_flow":
+      return "Recent flow";
+    case "event_bridge":
+      return "Event bridge";
+    case "concentration_risk":
+      return "Concentration risk";
+    case "unknown":
+      return "Unknown setup";
+    default:
+      return value.replace(/_/g, " ");
+  }
+}
+
+function formatStatsActorLabel(value: string): string {
+  switch (value) {
+    case "sharp_cluster":
+      return "Wallet clusters";
+    case "single_holder":
+      return "Single wallets";
+    case "none":
+      return "No clear wallet";
+    case "unknown":
+      return "Unknown read";
+    default:
+      return value.replace(/_/g, " ");
+  }
 }
 
 export async function sendSignalBotStatsReport(input: {
   chatId: string;
   config: SignalBotConfig;
   db: DbQuery;
+  detail?: boolean;
   period: SignalBotStatsPeriod;
   telegram: SignalBotTelegramClient;
 }): Promise<boolean> {
@@ -1194,6 +1379,7 @@ export async function sendSignalBotStatsReport(input: {
   });
   const message = buildSignalBotStatsReport({
     buyAmountUsd: input.config.buyAmountUsd,
+    detail: input.detail ?? false,
     period: input.period,
     result,
   });
@@ -1234,6 +1420,18 @@ export async function loadSignalBotNotes(
         m.venue as market_venue,
         m.title as market_title,
         e.title as event_title,
+        m.category,
+        e.category as event_category,
+        e.series_key,
+        e.series_title,
+        m.close_time,
+        m.expiration_time,
+        m.outcomes,
+        coalesce(
+          n.metrics #>> '{quality,marketSegment}',
+          n.metrics #>> '{signalPerformance,marketSegment}',
+          n.metrics #>> '{resolvedEvaluation,marketSegment}'
+        ) as market_segment,
         m.best_bid,
         m.best_ask,
         m.last_price,
@@ -1492,6 +1690,17 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
   const holderMeta = asObject(row.holder_target_meta);
   const holderSide = String(holderMeta.side ?? "").toUpperCase();
   const holderActorMode = String(holderMeta.actorMode ?? "");
+  const marketSegment =
+    row.market_segment ??
+    classifyMarketSegment({
+      category: row.category ?? row.event_category,
+      closeTime: row.close_time,
+      eventTitle: row.event_title,
+      expirationTime: row.expiration_time,
+      marketTitle: row.market_title,
+      seriesKey: row.series_key,
+      seriesTitle: row.series_title,
+    });
   return {
     id: row.id,
     noteKey: row.note_key,
@@ -1509,6 +1718,8 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     marketVenue: row.market_venue,
     marketTitle: row.market_title,
     eventTitle: row.event_title,
+    outcomes: parseMarketOutcomes(row.outcomes),
+    marketSegment,
     bestBid: toNumber(row.best_bid),
     bestAsk: toNumber(row.best_ask),
     lastPrice: toNumber(row.last_price),
@@ -1571,6 +1782,93 @@ function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
 }
 
+function normalizeAlnumUpper(value: string): string {
+  return value.replace(/[^0-9A-Za-z]+/g, "").toUpperCase();
+}
+
+function abbreviateOutcomeLabel(label: string, maxLength = OUTCOME_LABEL_MAX_CHARS): string {
+  const trimmed = label.trim();
+  if (!trimmed) return "";
+  if (trimmed.length <= maxLength) return trimmed;
+
+  const words = trimmed
+    .split(/[\s/_-]+/g)
+    .map(normalizeAlnumUpper)
+    .filter(Boolean);
+  if (words.length > 1) {
+    const initials = words.map((word) => word[0]).join("");
+    if (initials.length >= maxLength) return initials.slice(0, maxLength);
+    const consonantTail = words
+      .map((word) => word.slice(1).replace(OUTCOME_LABEL_VOWELS, ""))
+      .join("");
+    const fallbackTail = words.map((word) => word.slice(1)).join("");
+    return `${initials}${consonantTail}${fallbackTail}`.slice(0, maxLength);
+  }
+
+  const normalized = words[0] ?? normalizeAlnumUpper(trimmed);
+  if (!normalized) return trimmed.toUpperCase().slice(0, maxLength);
+  const consonants = normalized.replace(OUTCOME_LABEL_VOWELS, "");
+  if (consonants.length >= maxLength) return consonants.slice(0, maxLength);
+  if (normalized.length >= maxLength) return normalized.slice(0, maxLength);
+  return normalized;
+}
+
+function formatSignalBotOutcomeDisplayLabel(
+  note: Pick<SignalBotNote, "outcomes">,
+  side: "NO" | "YES",
+): string {
+  const label = outcomeLabelOrSide(note.outcomes, side);
+  const upper = label.trim().toUpperCase();
+  if (upper === "YES" || upper === "NO") return side;
+  return abbreviateOutcomeLabel(label);
+}
+
+function formatSignalBotMarketEmoji(note: Pick<SignalBotNote, "marketSegment">): string | null {
+  switch (note.marketSegment) {
+    case "sports_soccer_game":
+      return "⚽";
+    case "sports_tennis_game":
+      return "🎾";
+    case "sports_baseball_game":
+      return "⚾";
+    case "sports_basketball_game":
+      return "🏀";
+    case "sports_cricket_game":
+      return "🏏";
+    case "sports_esports_game":
+      return "🎮";
+    case "sports_outright":
+      return "🏆";
+    case "sports_other_game":
+      return "🏟️";
+    case "crypto_btc":
+      return "₿";
+    case "crypto_eth":
+    case "crypto_alt":
+      return "🪙";
+    case "macro_rates":
+      return "🏦";
+    case "macro_commodities":
+      return "🛢️";
+    case "macro_equities":
+      return "📈";
+    case "politics_geo":
+      return "🌐";
+    case "tech_ai":
+      return "🤖";
+    case "mentions":
+      return "📣";
+    case "entertainment":
+      return "🎬";
+    case "weather":
+      return "🌦️";
+    case "health":
+      return "🏥";
+    default:
+      return null;
+  }
+}
+
 function formatVenueLabel(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase();
   switch (normalized) {
@@ -1589,6 +1887,7 @@ function formatSignalBotBuyButtonText(input: {
   amountUsd: number;
   price: number | null;
   side: "NO" | "YES";
+  sideLabel: string;
   venue: string | null;
 }): string {
   const marker = input.side === "YES" ? "🟠" : "⚪";
@@ -1596,13 +1895,16 @@ function formatSignalBotBuyButtonText(input: {
   const price = input.price == null ? null : formatCents(input.price);
   const marketLabel =
     venue && price ? `${venue} ${price}` : venue ?? price ?? null;
-  return `${marker} Buy ${input.side} $${input.amountUsd}${marketLabel ? ` · ${marketLabel}` : ""}`;
+  return `${marker} Buy ${input.sideLabel} $${input.amountUsd}${marketLabel ? ` · ${marketLabel}` : ""}`;
 }
 
-function formatSignalBotCheaperButtonText(
-  alternative: SignalBotCheaperAlternative,
-): string {
-  return `💸 Cheaper: ${formatVenueLabel(alternative.venue) ?? alternative.venue} ${alternative.side} ${formatCents(alternative.price)}`;
+function formatSignalBotCheaperButtonText(input: {
+  alternative: SignalBotCheaperAlternative;
+  sideLabel: string;
+}): string {
+  const venue =
+    formatVenueLabel(input.alternative.venue) ?? input.alternative.venue;
+  return `💸 Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
 }
 
 function formatPercent(value: number): string {
@@ -1641,7 +1943,9 @@ function formatCompactAmount(value: number): string {
 function formatPriceLine(note: SignalBotNote): string | null {
   const yes = resolveSidePrice(note, "YES");
   if (yes == null) return null;
-  return `YES ${formatCents(yes)} / NO ${formatCents(1 - yes)}`;
+  const yesLabel = formatSignalBotOutcomeDisplayLabel(note, "YES");
+  const noLabel = formatSignalBotOutcomeDisplayLabel(note, "NO");
+  return `${yesLabel} ${formatCents(yes)} / ${noLabel} ${formatCents(1 - yes)}`;
 }
 
 function formatSignalCredentialLines(note: SignalBotNote): string[] {
@@ -1800,7 +2104,7 @@ function helpText(): string {
     "/enable_signals <channel_id> - enable a channel",
     "/disable_signals - disable this chat",
     "/status - show chat status",
-    "/stats [24h|7d|30d] - show signal performance",
+    "/stats [24h|7d|30d] [detail] - show signal performance",
     "/test_signal - send latest eligible signal",
   ].join("\n");
 }

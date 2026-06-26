@@ -1,7 +1,10 @@
 import type { DbQuery } from "../db.js";
 import {
   buildMarketTypeText,
+  classifyMarketSegmentFromText,
   classifyMarketTypeFromText,
+  formatMarketSegmentLabel,
+  type MarketSegment,
   type MarketType,
 } from "./market-type-classifier.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
@@ -64,6 +67,7 @@ export type HolderResearchSignalPerformance = {
   venue: string;
   bucket: string | null;
   marketType: MarketType;
+  marketSegment: MarketSegment;
   actorMode: string | null;
   confidence: number | null;
   confidenceBand: string;
@@ -134,6 +138,7 @@ export type HolderResearchPerformanceAuditResult = {
     byVenue: Record<string, HolderResearchPerformanceAggregate>;
     byBucket: Record<string, HolderResearchPerformanceAggregate>;
     byMarketType: Record<string, HolderResearchPerformanceAggregate>;
+    byMarketSegment: Record<string, HolderResearchPerformanceAggregate>;
     byActorMode: Record<string, HolderResearchPerformanceAggregate>;
     byConfidenceBand: Record<string, HolderResearchPerformanceAggregate>;
     bySide: Record<string, HolderResearchPerformanceAggregate>;
@@ -688,6 +693,23 @@ function rowMarketType(row: HolderResearchPerformanceNoteRow): MarketType {
   return classifyMarketTypeFromText(text, hoursToClose);
 }
 
+function rowMarketSegment(row: HolderResearchPerformanceNoteRow): MarketSegment {
+  const createdAt = toIso(row.created_at);
+  const closeAt = toIso(row.close_time);
+  const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
+  const closeMs = closeAt ? new Date(closeAt).getTime() : NaN;
+  const hoursToClose =
+    Number.isFinite(createdMs) && Number.isFinite(closeMs)
+      ? (closeMs - createdMs) / 3_600_000
+      : null;
+  const text = buildMarketTypeText({
+    category: row.category,
+    eventTitle: row.event_title,
+    marketTitle: row.market_title,
+  });
+  return classifyMarketSegmentFromText(text, hoursToClose);
+}
+
 function hoursToCloseAtNote(row: HolderResearchPerformanceNoteRow): number | null {
   const createdAt = toIso(row.created_at);
   const closeAt = toIso(row.close_time);
@@ -842,6 +864,7 @@ function buildPerformanceForRow(input: {
             : "wrong";
   const confidence = toNumber(input.row.confidence);
   const marketType = rowMarketType(input.row);
+  const marketSegment = rowMarketSegment(input.row);
   const primaryHolder = primaryHolderRecord(input.row.model_meta);
   return {
     version: 1,
@@ -851,6 +874,7 @@ function buildPerformanceForRow(input: {
     venue: input.row.venue,
     bucket: metricBucket(input.row.metrics, input.row.target_meta),
     marketType,
+    marketSegment,
     actorMode: actorMode(input.row.model_meta),
     confidence,
     confidenceBand: confidenceBand(confidence),
@@ -960,6 +984,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
   const byVenue = new Map<string, MutableAggregate>();
   const byBucket = new Map<string, MutableAggregate>();
   const byMarketType = new Map<string, MutableAggregate>();
+  const byMarketSegment = new Map<string, MutableAggregate>();
   const byActorMode = new Map<string, MutableAggregate>();
   const byConfidenceBand = new Map<string, MutableAggregate>();
   const bySide = new Map<string, MutableAggregate>();
@@ -977,6 +1002,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
     addAggregateItem(addGroup(byVenue, item.venue || "unknown"), item);
     addAggregateItem(addGroup(byBucket, item.bucket ?? "unknown"), item);
     addAggregateItem(addGroup(byMarketType, item.marketType), item);
+    addAggregateItem(addGroup(byMarketSegment, item.marketSegment), item);
     addAggregateItem(addGroup(byActorMode, item.actorMode ?? "unknown"), item);
     addAggregateItem(addGroup(byConfidenceBand, item.confidenceBand), item);
     addAggregateItem(addGroup(bySide, item.signalSide ?? "unknown"), item);
@@ -994,6 +1020,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
     byVenue: finishMap(byVenue),
     byBucket: finishMap(byBucket),
     byMarketType: finishMap(byMarketType),
+    byMarketSegment: finishMap(byMarketSegment),
     byActorMode: finishMap(byActorMode),
     byConfidenceBand: finishMap(byConfidenceBand),
     bySide: finishMap(bySide),
@@ -1205,6 +1232,7 @@ export async function loadHolderResearchPerformanceCalibrationMemo(
     created_at: Date | string | null;
     outcome: string | null;
     market_type: string | null;
+    market_segment: string | null;
     actor_mode: string | null;
     bucket: string | null;
     market_id: string | null;
@@ -1230,6 +1258,10 @@ export async function loadHolderResearchPerformanceCalibrationMemo(
           n.metrics #>> '{signalPerformance,marketType}',
           n.metrics #>> '{resolvedEvaluation,marketType}'
         ) as market_type,
+        coalesce(
+          n.metrics #>> '{signalPerformance,marketSegment}',
+          n.metrics #>> '{resolvedEvaluation,marketSegment}'
+        ) as market_segment,
         coalesce(
           n.metrics #>> '{signalPerformance,actorMode}',
           n.metrics #>> '{resolvedEvaluation,actorMode}'
@@ -1326,7 +1358,7 @@ export async function loadHolderResearchPerformanceCalibrationMemo(
   const memo: string[] = [];
   if (failedSportsSingles.length >= minPatternSamples) {
     memo.push(
-      `Early caution: ${failedSportsSingles.length} resolved single-game sports single-holder notes lost (${describeCalibrationWalletBasis(failedSportsSingles)}; ${describeWeakSportsEvidence(failedSportsSingles, policy)}). For similar sports singles, require exceptional holder history or a same-side wallet cluster before publishing.`,
+      `Early caution: ${failedSportsSingles.length} resolved ${describeCalibrationSegmentBasis(failedSportsSingles)} single-holder notes lost (${describeCalibrationWalletBasis(failedSportsSingles)}; ${describeWeakSportsEvidence(failedSportsSingles, policy)}). For similar sports singles, require exceptional holder history or a same-side wallet cluster before publishing.`,
     );
   }
   if (successfulSportsStrong.length >= minPatternSamples) {
@@ -1352,6 +1384,7 @@ type HolderResearchCalibrationRow = {
   created_at: Date | string | null;
   outcome: string | null;
   market_type: string | null;
+  market_segment: string | null;
   actor_mode: string | null;
   bucket: string | null;
   market_id: string | null;
@@ -1455,6 +1488,23 @@ function describeCalibrationWalletBasis(
     return `same tracked wallet ${formatCalibrationWallet(top)} in ${top.count}/${rows.length}`;
   }
   return `${sorted.length} tracked wallets`;
+}
+
+function describeCalibrationSegmentBasis(
+  rows: HolderResearchCalibrationRow[],
+): string {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = row.market_segment ?? row.market_type ?? "unknown";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const sorted = [...counts.entries()].sort((left, right) => {
+    if (right[1] !== left[1]) return right[1] - left[1];
+    return left[0].localeCompare(right[0]);
+  });
+  const top = sorted[0];
+  if (!top || top[0] === "unknown") return "sports";
+  return formatMarketSegmentLabel(top[0]).toLowerCase();
 }
 
 function formatCalibrationWallet(input: {

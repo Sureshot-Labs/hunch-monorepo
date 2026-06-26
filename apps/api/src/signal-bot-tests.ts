@@ -17,6 +17,7 @@ import {
   parseSignalBotAggMarketConfig,
   parseSignalBotCommand,
   parseSignalBotConfig,
+  parseSignalBotStatsRequest,
   parseSignalBotStatsPeriod,
   publishSignalBotTick,
   refreshSignalBotLock,
@@ -197,6 +198,8 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     marketVenue: "polymarket",
     marketTitle: "Will test resolve Yes?",
     eventTitle: "Test event",
+    outcomes: null,
+    marketSegment: null,
     bestBid: 0.3,
     bestAsk: 0.32,
     lastPrice: null,
@@ -240,6 +243,14 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     market_venue: "polymarket",
     market_title: "Will test resolve Yes?",
     event_title: "Test event",
+    category: null,
+    event_category: null,
+    series_key: null,
+    series_title: null,
+    close_time: null,
+    expiration_time: null,
+    outcomes: null,
+    market_segment: null,
     best_bid: "0.30",
     best_ask: "0.32",
     last_price: null,
@@ -384,6 +395,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(parseSignalBotStatsPeriod("/stats 24h"), "24h");
       assert.equal(parseSignalBotStatsPeriod("/stats 7d"), "7d");
       assert.equal(parseSignalBotStatsPeriod("/stats 30d"), "30d");
+      assert.deepEqual(parseSignalBotStatsRequest("/stats detail"), {
+        detail: true,
+        period: "7d",
+      });
+      assert.deepEqual(parseSignalBotStatsRequest("/stats 24h detail"), {
+        detail: true,
+        period: "24h",
+      });
       assert.equal(parseSignalBotStatsPeriod("/stats 3d"), null);
     },
   },
@@ -445,7 +464,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
-      const periods: string[] = [];
+      const requests: Array<{ detail: boolean; period: string }> = [];
       const handled = await handleSignalBotCommand({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
@@ -458,14 +477,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         redis,
         sendMessage: (message) => telegram.sendMessage(message),
-        sendStatsReport: async (_chatId, period) => {
-          periods.push(period);
+        sendStatsReport: async (_chatId, period, detail) => {
+          requests.push({ detail, period });
           return true;
         },
         sendTestSignal: async () => false,
       });
       assert.equal(handled, true);
-      assert.deepEqual(periods, ["30d"]);
+      assert.deepEqual(requests, [{ detail: false, period: "30d" }]);
       assert.equal(telegram.messages.length, 0);
     },
   },
@@ -747,6 +766,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "message renders category emoji and named outcome labels",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        cheaperAlternative: {
+          eventId: "kalshi:event-1",
+          marketId: "kalshi:market-1",
+          price: 0.48,
+          side: "NO",
+          venue: "kalshi",
+        },
+        note: note({
+          direction: "down",
+          eventTitle: "Esports: Alpha Team vs Beta Team (BO3)",
+          holderSide: "NO",
+          marketSegment: "sports_esports_game",
+          marketTitle: "Game 1 Winner",
+          outcomes: ["Alpha Team", "Beta Team"],
+          title: "@TestWallet backs Beta Team in coin-flip opener",
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.match(message.text, /^🎮 \*\[@TestWallet backs Beta Team/);
+      assert.match(message.text, /⚡ Sharp holder · ATL 31¢ \/ BTT 69¢/);
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy BTT $10 · Poly 70¢");
+      assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi BTT 48¢");
+      assert.equal(rows[2]?.[0]?.text, "👤 BTT $12.3K (-$123)");
+    },
+  },
+  {
     name: "message strips markdown citations and incomplete URLs from public context",
     run: () => {
       const message = buildSignalBotMessage({
@@ -947,6 +997,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             byActorMode: {},
             byBucket: {},
             byConfidenceBand: {},
+            byMarketSegment: {},
             byMarketType: {},
             bySide: {},
             byState: {},
@@ -990,6 +1041,63 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "stats detail report renders readable breakdowns",
+    run: () => {
+      const aggregate = {
+        averageRoi: 0.1,
+        correct: 1,
+        flat: 0,
+        hitRate: 1,
+        medianRoi: 0.1,
+        missingEntry: 0,
+        negative: 0,
+        notes: 2,
+        open: 1,
+        positive: 2,
+        resolved: 1,
+        totalPnlPerDollar: 0.2,
+        unknown: 0,
+        withEntry: 2,
+        wrong: 0,
+      };
+      const report = buildSignalBotStatsReport({
+        buyAmountUsd: 10,
+        detail: true,
+        period: "7d",
+        result: {
+          aggregates: {
+            byActorMode: { sharp_cluster: aggregate },
+            byBucket: { sharp_side: aggregate },
+            byConfidenceBand: {},
+            byMarketSegment: { sports_soccer_game: aggregate },
+            byMarketType: { single_game_sports: aggregate },
+            bySide: {},
+            byState: {},
+            byVenue: {},
+            overall: aggregate,
+          },
+          considered: 2,
+          correct: 1,
+          errors: 0,
+          evaluated: 2,
+          items: [],
+          missingEntry: 0,
+          open: 1,
+          resolved: 1,
+          unchanged: 0,
+          unknown: 0,
+          written: 0,
+          wrong: 0,
+        },
+      });
+      assert.match(report, /By category/);
+      assert.match(report, /Soccer games/);
+      assert.match(report, /Wallet clusters/);
+      assert.match(report, /Strong same-side wallets/);
+      assert.doesNotMatch(report, /sports_soccer_game|sharp_cluster|note_id/i);
+    },
+  },
+  {
     name: "stats report handles no eligible signals",
     run: () => {
       const report = buildSignalBotStatsReport({
@@ -1000,6 +1108,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             byActorMode: {},
             byBucket: {},
             byConfidenceBand: {},
+            byMarketSegment: {},
             byMarketType: {},
             bySide: {},
             byState: {},
