@@ -508,6 +508,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serializedExternal, /walletUsdLikeBalance/i);
       assert.doesNotMatch(serializedExternal, /ownerUsdLikeBalance/i);
       assert.doesNotMatch(serializedExternal, /Other hidden bet/i);
+      assert.match(serializedExternal, /one short sentence/i);
+      assert.doesNotMatch(serializedExternal, /public context/i);
+      assert.doesNotMatch(serializedExternal, /public news/i);
 
       const internalInput = buildHolderResearchCandidatePromptJson(candidate);
       const serializedInternal = JSON.stringify(internalInput);
@@ -1519,6 +1522,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /marketMovementContext/i);
       assert.match(prompt, /holderEntryContext/i);
       assert.match(prompt, /marketTypeMetrics30d/i);
+      assert.match(prompt, /understand the signal in 2 seconds/i);
+      assert.match(prompt, /which side the wallet\(s\) are on/i);
+      assert.match(prompt, /compressed signal thesis/i);
+      assert.match(prompt, /Prefer outcome meaning over raw YES\/NO wording/i);
+      assert.match(prompt, /Avoid in headline\/summary/i);
+      assert.match(prompt, /Bad headline examples/i);
+      assert.doesNotMatch(prompt, /Prefer simple phrases like 'informed wallets'/i);
     },
   },
   {

@@ -565,7 +565,7 @@ async function runExternalResearch(params: {
           {
             role: "system",
             content:
-              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return a very compact public-context read, not a news memo. Compare dated headlines/posts to the supplied holder activity/snapshot timing. Answer only: did public information precede the holder move, coincide with it, follow it, or not explain it? Include at most 2 short plain-text sentences. Do not use markdown, footnotes, bracket citations, or raw URLs in the text. Do not invent a catalyst.",
+              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return one short, plain sentence for a signal feed, not a news memo. Compare dated headlines/posts to the supplied holder activity/snapshot timing. Answer only: was the news already known, did it support the move, did it conflict with the move, or did it not explain it? Do not start with phrases like 'Public info', 'Public context', or 'Public news'. Do not use markdown, footnotes, bracket citations, or raw URLs in the text. Do not invent a catalyst.",
           },
           {
             role: "user",

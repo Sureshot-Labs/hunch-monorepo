@@ -3162,7 +3162,7 @@ export function buildHolderResearchExternalSearchInput(
       recentActivityAt: candidate.market.recentActivityAt,
     },
     instruction:
-      "Find public context that could explain this holder positioning. Compare dated public context with holder activity/snapshot timing. Keep the answer under 70 words. If public context came after the holder activity, say later public news may validate early positioning. If public context is missing, say public news does not explain it yet; do not accuse anyone of insider trading.",
+      "Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.",
   };
 }
 
