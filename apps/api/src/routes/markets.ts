@@ -169,16 +169,16 @@ function extractLimitlessMeta(
 }
 
 type MarketRoutesOptions = {
+  aggMarketApiKey?: string;
   aggMarketAppId?: string;
   aggMarketBaseUrl?: string;
   aggMarketTimeoutMs?: number;
   aggMarketAlternativesCacheTtlSec?: number;
   aggMarketAlternativesNotFoundCacheTtlSec?: number;
   aggMarketAlternativesDb?: DbQuery;
-  getAggMarketAlternativesRedis?: () => Promise<
-    AggMarketAlternativesCacheClient | null
-  >;
+  getAggMarketAlternativesRedis?: () => Promise<AggMarketAlternativesCacheClient | null>;
   createAggMarketClient?: (config: {
+    apiKey?: string | null;
     appId: string;
     baseUrl?: string;
     timeoutMs?: number;
@@ -617,6 +617,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
     },
     async (request, reply) => {
       const aggMarketAppId = options.aggMarketAppId ?? env.aggMarketAppId;
+      const aggMarketApiKey = options.aggMarketApiKey ?? env.aggMarketApiKey;
       if (!aggMarketAppId) {
         return reply.code(503).send({ error: "AGG Market is not configured" });
       }
@@ -642,6 +643,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         }
 
         const client = createAggClient({
+          apiKey: aggMarketApiKey,
           appId: aggMarketAppId,
           baseUrl: options.aggMarketBaseUrl ?? env.aggMarketBaseUrl,
           timeoutMs: options.aggMarketTimeoutMs ?? env.aggMarketTimeoutMs,
@@ -1211,9 +1213,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                 : {
                     fallbackReason: "upstream_error",
                     upstreamStatus: upstream.status,
-                    upstreamMessage: extractDflowErrorMessage(
-                      upstream.payload,
-                    ),
+                    upstreamMessage: extractDflowErrorMessage(upstream.payload),
                   }),
             };
             const responseBody = JSON.stringify(response);
@@ -1388,9 +1388,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
                 : {
                     fallbackReason: "upstream_error",
                     upstreamStatus: upstream.status,
-                    upstreamMessage: extractLimitlessMessage(
-                      upstream.payload,
-                    ),
+                    upstreamMessage: extractLimitlessMessage(upstream.payload),
                   }),
             };
             const responseBody = JSON.stringify(response);

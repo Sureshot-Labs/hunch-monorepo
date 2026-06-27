@@ -275,6 +275,7 @@ export type HolderResearchActionabilityBlocker =
   | "live_price_invalid_spread"
   | "live_price_missing_side"
   | "live_price_no_book"
+  | "live_price_stale"
   | "live_price_terminal"
   | "live_price_too_high"
   | "support_only_bucket"
@@ -1434,6 +1435,8 @@ function livePriceBlockerToActionabilityBlocker(
       return "live_price_too_high";
     case "invalid_spread":
       return "live_price_invalid_spread";
+    case "live_price_stale":
+      return "live_price_stale";
     case "missing_side_price":
       return "live_price_missing_side";
     case "no_book":
@@ -1521,7 +1524,8 @@ export function buildHolderResearchCandidateActionability(
   }
   if (quality.credentialStrength === "strong") strengths.push("strong_history");
   if (candidate.bucket === "sharp_side") strengths.push("sharp_side");
-  if (quality.priceContext === "with_signal") strengths.push("price_confirming");
+  if (quality.priceContext === "with_signal")
+    strengths.push("price_confirming");
   if (quality.marketType !== "single_game_sports") {
     strengths.push("non_single_game_sports");
   }
@@ -2382,7 +2386,10 @@ function adjustedSelectionScore(
   if (candidate.bucket === "sharp_side") score += 0.06;
   if (candidate.bucket === "sharp_minority") score -= 0.08;
   score += actionability.expiryBoost;
-  if (policy.preTriageActionabilityEnabled && !actionability.isPrimaryResearchCandidate) {
+  if (
+    policy.preTriageActionabilityEnabled &&
+    !actionability.isPrimaryResearchCandidate
+  ) {
     score -= 0.3;
   }
   if (quality.marketType !== "single_game_sports") score += 0.03;
@@ -2456,7 +2463,8 @@ function attachSupportEvidenceToSelected(
   const supportCandidates = candidates
     .filter(
       (candidate) =>
-        buildHolderResearchCandidateActionability(candidate, policy).supportOnly,
+        buildHolderResearchCandidateActionability(candidate, policy)
+          .supportOnly,
     )
     .sort(compareHolderResearchCandidates(policy));
   if (supportCandidates.length === 0) return selected;
@@ -2474,7 +2482,9 @@ function attachSupportEvidenceToSelected(
       .slice(0, 3)
       .map(buildSupportOnlyEvidence);
     if (supportEvidence.length === 0) return candidate;
-    const existingIds = new Set(candidate.evidence.map((evidence) => evidence.id));
+    const existingIds = new Set(
+      candidate.evidence.map((evidence) => evidence.id),
+    );
     const appended = supportEvidence.filter(
       (evidence) => !existingIds.has(evidence.id),
     );
@@ -2512,7 +2522,10 @@ function markSelectedEvent(
 ): void {
   const eventKey = holderResearchCandidateEventKey(candidate);
   if (!eventKey) return;
-  selectedEventCounts.set(eventKey, (selectedEventCounts.get(eventKey) ?? 0) + 1);
+  selectedEventCounts.set(
+    eventKey,
+    (selectedEventCounts.get(eventKey) ?? 0) + 1,
+  );
 }
 
 export function selectHolderResearchCandidates(
@@ -3598,10 +3611,13 @@ export function applyHolderResearchLivePriceChecks(
     if (!state) return candidate;
     const yes = getMarketPriceSideState(state.priceState, "YES");
     const no = getMarketPriceSideState(state.priceState, "NO");
+    const staleBlockers: MarketPriceBlocker[] = state.fresh
+      ? []
+      : ["live_price_stale"];
     const livePriceCheck: HolderResearchLivePriceCheck = {
       blockersBySide: {
-        YES: yes.blockers,
-        NO: no.blockers,
+        YES: [...yes.blockers, ...staleBlockers],
+        NO: [...no.blockers, ...staleBlockers],
       },
       checkedAt,
       fresh: state.fresh,
@@ -3737,8 +3753,7 @@ function compactPromptMarket(
           blockers: market.livePriceCheck.blockersBySide,
         }
       : null,
-    usdTracked:
-      totalUsd ?? market.sides.YES.usd + market.sides.NO.usd,
+    usdTracked: totalUsd ?? market.sides.YES.usd + market.sides.NO.usd,
     recentUsd: market.recentActivityUsd,
     recentAt: market.recentActivityAt,
     crossWallets: market.crossMarketWalletCount,
@@ -3798,7 +3813,9 @@ function selectPromptHolders(
   if (candidate.side) {
     const sideHolders = candidate.market.holders
       .filter((holder) => holder.side === candidate.side)
-      .sort((a, b) => promptHolderRank(b, policy) - promptHolderRank(a, policy));
+      .sort(
+        (a, b) => promptHolderRank(b, policy) - promptHolderRank(a, policy),
+      );
     for (const holder of sideHolders) {
       if (policy && !isSharpHolder(holder, policy)) continue;
       add(holder);
@@ -3826,7 +3843,8 @@ function promptHolderRank(
   holder: HolderResearchHolder,
   policy?: HolderResearchPromptPolicy,
 ): number {
-  const sharpBoost = policy && isSharpHolder(holder, policy) ? 1_000_000_000 : 0;
+  const sharpBoost =
+    policy && isSharpHolder(holder, policy) ? 1_000_000_000 : 0;
   const edgeBoost = (holder.resolvedWinRateEdge30d ?? 0) * 1_000_000;
   return sharpBoost + edgeBoost + holder.positionUsd;
 }
@@ -3910,13 +3928,12 @@ export function buildHolderResearchExternalSearchInput(
       },
       close: candidate.market.closeTime,
       pYes: candidate.market.yesProbability,
-      desc:
-        clipPromptText(
-          candidate.market.marketDescription ??
-            candidate.market.eventDescription ??
-            null,
-          PROMPT_TEXT_MARKET_MAX,
-        ),
+      desc: clipPromptText(
+        candidate.market.marketDescription ??
+          candidate.market.eventDescription ??
+          null,
+        PROMPT_TEXT_MARKET_MAX,
+      ),
       resolve: clipPromptText(
         candidate.market.resolutionSource,
         PROMPT_TEXT_RESOLUTION_MAX,
@@ -4104,12 +4121,14 @@ function hasSameEventConflict(input: {
       return false;
     }
     if (
-      buildHolderResearchQualityAssessment(candidate, input.policy).marketType !==
-      "single_game_sports"
+      buildHolderResearchQualityAssessment(candidate, input.policy)
+        .marketType !== "single_game_sports"
     ) {
       return false;
     }
-    return candidateOutputActionSide(candidate, output, input.policy) === actionSide;
+    return (
+      candidateOutputActionSide(candidate, output, input.policy) === actionSide
+    );
   });
 }
 
@@ -4332,7 +4351,10 @@ export async function persistHolderResearchNotes(
             score: candidate.score,
             bucket: candidate.bucket,
             side: candidate.side,
-            quality: buildHolderResearchQualityAssessment(candidate, params.policy),
+            quality: buildHolderResearchQualityAssessment(
+              candidate,
+              params.policy,
+            ),
             market: {
               id: candidate.market.marketId,
               venue: candidate.market.venue,
@@ -4520,7 +4542,11 @@ function objectRecord(value: unknown): Record<string, unknown> {
 function finalYesProbabilityFromResolvedRow(
   row: Pick<
     HolderResearchResolvedNoteRow,
-    "resolved_outcome" | "resolved_outcome_pct" | "best_bid" | "best_ask" | "last_price"
+    | "resolved_outcome"
+    | "resolved_outcome_pct"
+    | "best_bid"
+    | "best_ask"
+    | "last_price"
   >,
 ): number | null {
   const resolved = normalizeSide(row.resolved_outcome);
@@ -4537,7 +4563,9 @@ function noteYesProbability(metrics: unknown): number | null {
   return toNumber(market.yesProbability);
 }
 
-function evaluationSide(direction: string | null): HolderResearchSideKey | null {
+function evaluationSide(
+  direction: string | null,
+): HolderResearchSideKey | null {
   if (direction === "up") return "YES";
   if (direction === "down") return "NO";
   return null;
@@ -4551,7 +4579,8 @@ function evaluateResolvedSignalRow(
   const side = evaluationSide(row.direction);
   const noteYes = noteYesProbability(row.metrics);
   const finalYes = finalYesProbabilityFromResolvedRow(row);
-  const priceDelta = noteYes != null && finalYes != null ? finalYes - noteYes : null;
+  const priceDelta =
+    noteYes != null && finalYes != null ? finalYes - noteYes : null;
   const sideAdjustedDelta =
     priceDelta != null && side != null
       ? side === "YES"
@@ -4604,7 +4633,9 @@ function evaluateResolvedSignalRow(
     primaryHolderPositionUsd: toNumber(
       objectRecord(actor.primaryHolder).positionUsd,
     ),
-    primaryHolderPnl30dUsd: toNumber(objectRecord(actor.primaryHolder).pnl30dUsd),
+    primaryHolderPnl30dUsd: toNumber(
+      objectRecord(actor.primaryHolder).pnl30dUsd,
+    ),
     primaryHolderOpenPnlUsd: toNumber(
       objectRecord(actor.primaryHolder).openPnlUsd,
     ),
@@ -4631,7 +4662,9 @@ function hasSameResolvedEvaluation(
 ): boolean {
   const previous = objectRecord(objectRecord(metrics).resolvedEvaluation);
   if (Object.keys(previous).length === 0) return false;
-  return stableEvaluationString(previous) === stableEvaluationString(evaluation);
+  return (
+    stableEvaluationString(previous) === stableEvaluationString(evaluation)
+  );
 }
 
 export async function evaluateResolvedHolderResearchNotes(

@@ -83,7 +83,9 @@ function normalizeId(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-function normalizeSide(value: string | null | undefined): MarketPriceSide | null {
+function normalizeSide(
+  value: string | null | undefined,
+): MarketPriceSide | null {
   const upper = value?.trim().toUpperCase();
   return upper === "YES" || upper === "NO" ? upper : null;
 }
@@ -127,7 +129,10 @@ function tokenTopIsFresh(
 ): boolean {
   if (!row?.ts) return false;
   const tsMs = row.ts instanceof Date ? row.ts.getTime() : Date.parse(row.ts);
-  return Number.isFinite(tsMs) && tsMs >= minFreshAt.getTime();
+  if (!Number.isFinite(tsMs) || tsMs < minFreshAt.getTime()) return false;
+  const bid = row.best_bid == null ? null : Number(row.best_bid);
+  const ask = row.best_ask == null ? null : Number(row.best_ask);
+  return Number.isFinite(bid) || Number.isFinite(ask);
 }
 
 function delay(ms: number): Promise<void> {
@@ -320,6 +325,8 @@ function buildMarketStates(input: {
     const tokenIds = Array.from(
       new Set([yesToken, noToken].filter(Boolean) as string[]),
     );
+    const yesTop = yesToken ? input.tokenTops.get(yesToken) : null;
+    const noTop = noToken ? input.tokenTops.get(noToken) : null;
     const fresh =
       tokenIds.length > 0 &&
       tokenIds.every((tokenId) => input.freshTokenIds.has(tokenId));
@@ -331,9 +338,21 @@ function buildMarketStates(input: {
         marketBestBid: market.best_bid,
         lastPrice: market.last_price,
         maxBuyPrice: input.priceOptions?.maxBuyPrice,
-        noTop: noToken ? input.tokenTops.get(noToken) : null,
+        noTop: noTop
+          ? {
+              bestAsk: noTop.best_ask,
+              bestBid: noTop.best_bid,
+              ts: noTop.ts,
+            }
+          : null,
         terminalPp: input.priceOptions?.terminalPp,
-        yesTop: yesToken ? input.tokenTops.get(yesToken) : null,
+        yesTop: yesTop
+          ? {
+              bestAsk: yesTop.best_ask,
+              bestBid: yesTop.best_bid,
+              ts: yesTop.ts,
+            }
+          : null,
       }),
       tokenIds,
       venue: market.venue,
@@ -404,7 +423,9 @@ export async function requestFreshMarketPrices(input: {
   );
   const tokenIds = Array.from(
     new Set(
-      tokenRefs.map((ref) => normalizeId(ref.tokenId)).filter(Boolean) as string[],
+      tokenRefs
+        .map((ref) => normalizeId(ref.tokenId))
+        .filter(Boolean) as string[],
     ),
   );
   const grouped = groupTokensByVenue(tokenRefs);

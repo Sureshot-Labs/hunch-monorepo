@@ -37,6 +37,15 @@ class FakeRedis implements SignalBotRedisLike {
   readonly strings = new Map<string, string>();
   readonly hashes = new Map<string, Record<string, string>>();
   readonly sets = new Map<string, Set<string>>();
+  readonly sortedSets = new Map<string, Map<string, number>>();
+
+  private getSortedSet(key: string): Map<string, number> {
+    const existing = this.sortedSets.get(key);
+    if (existing) return existing;
+    const created = new Map<string, number>();
+    this.sortedSets.set(key, created);
+    return created;
+  }
 
   async del(key: string): Promise<number> {
     const existed =
@@ -51,6 +60,21 @@ class FakeRedis implements SignalBotRedisLike {
     options: { arguments: string[]; keys: string[] },
   ): Promise<number> {
     const key = options.keys[0] ?? "";
+    if (script.includes("ZSCORE")) {
+      const score = Number(options.arguments[0] ?? 0);
+      const set = this.getSortedSet(key);
+      let added = 0;
+      for (const item of options.arguments.slice(1)) {
+        const existing = set.get(item);
+        if (existing == null) {
+          added += 1;
+          set.set(item, score);
+        } else if (score < existing) {
+          set.set(item, score);
+        }
+      }
+      return added;
+    }
     const owner = options.arguments[0] ?? "";
     const current = this.strings.get(key);
     if (script.includes("DEL")) {
@@ -99,11 +123,31 @@ class FakeRedis implements SignalBotRedisLike {
   async set(
     key: string,
     value: string,
-    options?: { NX?: boolean; PX?: number },
+    options?: { EX?: number; NX?: boolean; PX?: number },
   ): Promise<"OK" | null> {
     if (options?.NX && this.strings.has(key)) return null;
     this.strings.set(key, value);
     return "OK";
+  }
+
+  async zCard(key: string): Promise<number> {
+    return this.getSortedSet(key).size;
+  }
+
+  async zRemRangeByRank(
+    key: string,
+    start: number,
+    stop: number,
+  ): Promise<number> {
+    const set = this.getSortedSet(key);
+    const entries = Array.from(set.entries()).sort(
+      (a, b) => a[1] - b[1] || a[0].localeCompare(b[0]),
+    );
+    const normalizedStart = start < 0 ? entries.length + start : start;
+    const normalizedStop = stop < 0 ? entries.length + stop : stop;
+    const slice = entries.slice(normalizedStart, normalizedStop + 1);
+    for (const [item] of slice) set.delete(item);
+    return slice.length;
   }
 }
 
@@ -124,10 +168,34 @@ class FakeTelegram {
 }
 
 class FakeDb {
-  marketRows: unknown[] = [];
+  marketRows: unknown[] = [
+    {
+      best_ask: null,
+      best_bid: null,
+      clob_token_ids: null,
+      id: "polymarket:market-1",
+      last_price: null,
+      token_no: "no-token",
+      token_yes: "yes-token",
+      venue: "polymarket",
+    },
+  ];
   marketTokenRows: unknown[] = [];
   rows: unknown[] = [];
-  tokenTopRows: unknown[] = [];
+  tokenTopRows: unknown[] = [
+    {
+      best_ask: "0.41",
+      best_bid: "0.4",
+      token_id: "yes-token",
+      ts: "2999-01-01T00:00:00.000Z",
+    },
+    {
+      best_ask: "0.61",
+      best_bid: "0.6",
+      token_id: "no-token",
+      ts: "2999-01-01T00:00:00.000Z",
+    },
+  ];
   readonly queries: Array<{ params: unknown[]; sql: string }> = [];
 
   query<T extends QueryResultRow = QueryResultRow>(): Promise<QueryResult<T>>;
@@ -169,11 +237,15 @@ class FakeDb {
     }
     const minConfidence = Number(params[0] ?? 0);
     const directionEligibleRows = this.rows.filter((row) => {
-      const direction = String((row as { direction?: unknown }).direction ?? "");
+      const direction = String(
+        (row as { direction?: unknown }).direction ?? "",
+      );
       return direction === "up" || direction === "down";
     });
     const rows = directionEligibleRows.filter((row) => {
-      const confidence = Number((row as { confidence?: unknown }).confidence ?? 0);
+      const confidence = Number(
+        (row as { confidence?: unknown }).confidence ?? 0,
+      );
       return !Number.isFinite(minConfidence) || confidence >= minConfidence;
     });
     if (sql.includes("below_min_confidence")) {
@@ -410,6 +482,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         AGG_MARKET_TIMEOUT_MS: "2500",
       });
       assert.deepEqual(config, {
+        apiKey: null,
         appId: "agg-app",
         baseUrl: "https://agg.example.com/",
         credentialSource: "AGG_APP_ID",
@@ -420,12 +493,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "agg alternatives env ignores api key for AGG Market client",
+    name: "agg alternatives env keeps app id and api key distinct",
     run: () => {
       const config = parseSignalBotAggMarketConfig({
         AGG_API_KEY: "real-key",
         AGG_APP_ID: "app-id",
       });
+      assert.equal(config?.apiKey, "real-key");
       assert.equal(config?.appId, "app-id");
       assert.equal(config?.credentialSource, "AGG_APP_ID");
     },
@@ -436,6 +510,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const config = parseSignalBotAggMarketConfig({
         AGG_APP_ID: "fallback-id",
       });
+      assert.equal(config?.apiKey, null);
       assert.equal(config?.appId, "fallback-id");
       assert.equal(config?.credentialSource, "AGG_APP_ID");
     },
@@ -506,7 +581,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "command parser accepts bot mentions and ignores other bots",
     run: () => {
       assert.equal(
-        parseSignalBotCommand("/enable_signals@HunchSignalBot", "HunchSignalBot"),
+        parseSignalBotCommand(
+          "/enable_signals@HunchSignalBot",
+          "HunchSignalBot",
+        ),
         "enable_signals",
       );
       assert.equal(
@@ -754,7 +832,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sendTestSignal: async () => false,
       });
       assert.equal(handled, true);
-      assert.match(telegram.messages[0]?.text ?? "", /Signals are disabled here/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Signals are disabled here/,
+      );
       assert.match(telegram.messages[0]?.text ?? "", /Min confidence: 80%/);
     },
   },
@@ -770,7 +851,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(state.cursorCreatedAt, "2026-01-01T00:00:00.000Z");
       assert.equal(state.cursorId, "00000000-0000-0000-0000-000000000000");
-      assert.equal((await getSignalBotChatState(redis, "-100"))?.chatTitle, "Signals");
+      assert.equal(
+        (await getSignalBotChatState(redis, "-100"))?.chatTitle,
+        "Signals",
+      );
       await disableSignalBotChat(redis, "-100");
       assert.equal(await getSignalBotChatState(redis, "-100"), null);
     },
@@ -827,8 +911,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         parsed.searchParams.get("noteId"),
         "00000000-0000-4000-8000-000000000001",
       );
-      assert.equal(parsed.searchParams.get("utm_source"), "telegram_signal_bot");
-      assert.equal(buildSignalBotHolderUrl({ address: "", chain: "polygon" }), null);
+      assert.equal(
+        parsed.searchParams.get("utm_source"),
+        "telegram_signal_bot",
+      );
+      assert.equal(
+        buildSignalBotHolderUrl({ address: "", chain: "polygon" }),
+        null,
+      );
     },
   },
   {
@@ -841,7 +931,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
-      assert.equal(new URL(rows[0]?.[0]?.url ?? "").searchParams.get("amountUsd"), "10");
+      assert.equal(
+        new URL(rows[0]?.[0]?.url ?? "").searchParams.get("amountUsd"),
+        "10",
+      );
       assert.equal(rows.length, 2);
       assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
       const holderButtonUrl = new URL(rows[1]?.[0]?.url ?? "");
@@ -850,7 +943,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "/tracking/wallet/0xa022ba0a68e11a78348382ff168601012d4d77f8",
       );
       assert.equal(holderButtonUrl.searchParams.get("chain"), "polygon");
-      assert.equal(holderButtonUrl.searchParams.get("marketId"), "polymarket:market-1");
+      assert.equal(
+        holderButtonUrl.searchParams.get("marketId"),
+        "polymarket:market-1",
+      );
       assert.equal(holderButtonUrl.searchParams.get("side"), "YES");
       assert.equal(rows[1]?.[1]?.text, "↗️ Open market");
       assert.match(
@@ -864,7 +960,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /• Up \$2\\.5K over the last 30 days/);
       assert.match(message.text, /• Won 65% of recent trades/);
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
-      assert.match(message.text, /📰 Public info followed the holder activity\\\./);
+      assert.match(
+        message.text,
+        /📰 Public info followed the holder activity\\\./,
+      );
       assert.doesNotMatch(message.text, /confidence/i);
     },
   },
@@ -1109,7 +1208,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       assert.match(message.text, /^\*\[Sharp YES interest\]/);
-      assert.doesNotMatch(message.text, /Same market title · Same market title/);
+      assert.doesNotMatch(
+        message.text,
+        /Same market title · Same market title/,
+      );
     },
   },
   {
@@ -1156,11 +1258,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "buy side resolves from final note direction only",
     run: () => {
       assert.equal(
-        resolveSignalBotBuySide(note({ primaryTargetMeta: { side: "YES" }, direction: "down" })),
+        resolveSignalBotBuySide(
+          note({ primaryTargetMeta: { side: "YES" }, direction: "down" }),
+        ),
         "NO",
       );
       assert.equal(
-        resolveSignalBotBuySide(note({ primaryTargetMeta: {}, direction: "mixed" })),
+        resolveSignalBotBuySide(
+          note({ primaryTargetMeta: {}, direction: "mixed" }),
+        ),
         null,
       );
       assert.equal(
@@ -1242,7 +1348,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(report, /📊 Hunch signals · 7D/);
       assert.match(report, /💰 \$10 each: \+\$7\.44 \(\+6\.2%\)/);
       assert.match(report, /🎯 Resolved: 3W \/ 1L \(75%\)/);
-      assert.doesNotMatch(report, /evaluated|missingEntry|entryQuality|note_id/i);
+      assert.doesNotMatch(
+        report,
+        /evaluated|missingEntry|entryQuality|note_id/i,
+      );
     },
   },
   {
@@ -1504,12 +1613,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         {
           id: "polymarket:market-1",
           venue: "polymarket",
-          token_yes: null,
-          token_no: null,
+          token_yes: "yes-token",
+          token_no: "no-token",
           clob_token_ids: null,
           best_bid: "0.99",
           best_ask: "1.00",
           last_price: null,
+        },
+      ];
+      db.tokenTopRows = [
+        {
+          token_id: "yes-token",
+          best_bid: "0.99",
+          best_ask: "1.00",
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+        {
+          token_id: "no-token",
+          best_bid: "0",
+          best_ask: "0.01",
+          ts: "2999-01-01T00:00:00.000Z",
         },
       ];
       const telegram = new FakeTelegram();
@@ -1527,6 +1650,63 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.priceGuardSkipped, 1);
       assert.equal(result.priceGuardTerminalPrice, 1);
       assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
+    name: "publish defers stale price guard without advancing cursor",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      db.marketRows = [
+        {
+          id: "polymarket:market-1",
+          venue: "polymarket",
+          token_yes: "yes-token",
+          token_no: "no-token",
+          clob_token_ids: null,
+          best_bid: "0.99",
+          best_ask: "1.00",
+          last_price: null,
+        },
+      ];
+      db.tokenTopRows = [
+        {
+          token_id: "yes-token",
+          best_bid: null,
+          best_ask: null,
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+        {
+          token_id: "no-token",
+          best_bid: null,
+          best_ask: null,
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.priceGuardDeferred, 1);
+      assert.equal(result.priceGuardLivePriceStale, 1);
+      assert.equal(telegram.messages.length, 0);
+      const state = await getSignalBotChatState(redis, "-100");
+      assert.equal(state?.cursorId, "00000000-0000-0000-0000-000000000000");
     },
   },
   {

@@ -772,29 +772,35 @@ async function requestFreshWalletIntelMarketPrices(
   const requestedAt = new Date();
   try {
     const redis = await getRedis();
+    if (!redis) {
+      console.log("[wallets:intel:refresh] fresh price check skipped", {
+        reason: "redis_unavailable",
+      });
+      return;
+    }
     const result = await requestFreshMarketPrices({
       db: client,
-      enqueue: Boolean(redis),
+      enqueue: true,
       marketIds: marketRows.map((row) => row.id),
       maxTokens,
       minFreshAt: requestedAt,
-	      pollMs: 1_000,
-	      priority: "high",
-	      redis: redis as unknown as PriceRefreshRedis | null,
-	      timeoutMs: WALLET_INTEL_FRESH_PRICE_CHECK_TIMEOUT_MS,
-	    });
-	    console.log("[wallets:intel:refresh] fresh price check", {
-	      enqueued: result.enqueued,
-	      fresh: result.freshTokenIds.length,
-	      markets: result.marketStates.size,
-	      requested: result.requestedTokenIds.length,
-	      stale: Math.max(
-	        0,
-	        result.requestedTokenIds.length - result.freshTokenIds.length,
-	      ),
-	      timedOut: result.timedOut,
-	      timeoutMs: WALLET_INTEL_FRESH_PRICE_CHECK_TIMEOUT_MS,
-	    });
+      pollMs: 1_000,
+      priority: "high",
+      redis: redis as unknown as PriceRefreshRedis,
+      timeoutMs: WALLET_INTEL_FRESH_PRICE_CHECK_TIMEOUT_MS,
+    });
+    console.log("[wallets:intel:refresh] fresh price check", {
+      enqueued: result.enqueued,
+      fresh: result.freshTokenIds.length,
+      markets: result.marketStates.size,
+      requested: result.requestedTokenIds.length,
+      stale: Math.max(
+        0,
+        result.requestedTokenIds.length - result.freshTokenIds.length,
+      ),
+      timedOut: result.timedOut,
+      timeoutMs: WALLET_INTEL_FRESH_PRICE_CHECK_TIMEOUT_MS,
+    });
   } catch (error) {
     console.warn("[wallets:intel:refresh] fresh price check skipped", {
       error: error instanceof Error ? error.message : String(error),

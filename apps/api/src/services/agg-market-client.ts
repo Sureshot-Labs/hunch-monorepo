@@ -69,6 +69,7 @@ type FetchLike = typeof fetch;
 
 type AggMarketClientConfig = {
   appId: string;
+  apiKey?: string | null;
   baseUrl?: string;
   timeoutMs?: number;
   fetchImpl?: FetchLike;
@@ -249,6 +250,7 @@ export function createAggMarketClient(
   if (!appId) {
     throw new Error("AGG_APP_ID is required");
   }
+  const apiKey = config.apiKey?.trim() || null;
 
   const baseUrl = normalizeBaseUrl(config.baseUrl ?? "https://api.agg.market");
   const timeoutMs = Math.max(1, config.timeoutMs ?? 5_000);
@@ -271,6 +273,7 @@ export function createAggMarketClient(
         headers: {
           accept: "application/json",
           "user-agent": "Hunch-API/1.0",
+          ...(apiKey ? { "x-api-key": apiKey } : {}),
           "x-app-id": appId,
         },
         signal: controller.signal,

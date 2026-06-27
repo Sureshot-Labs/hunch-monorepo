@@ -438,7 +438,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             return { rows: [] };
           }
           if (/update\s+ai_notes/i.test(sql)) {
-            updates.push(JSON.parse(String(params?.[1])) as Record<string, unknown>);
+            updates.push(
+              JSON.parse(String(params?.[1])) as Record<string, unknown>,
+            );
             return { rows: [], rowCount: 1 };
           }
           return { rows: [] };
@@ -502,7 +504,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   no_token_id: null,
                   market_token_yes: null,
                   market_token_no: null,
-                  clob_token_ids: JSON.stringify(["clob-yes-token", "clob-no-token"]),
+                  clob_token_ids: JSON.stringify([
+                    "clob-yes-token",
+                    "clob-no-token",
+                  ]),
                 },
               ],
             };
@@ -775,7 +780,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         ),
         false,
       );
-      assert.equal(isSharpHolder(holder("YES", { mmSuspected: true }), p), false);
+      assert.equal(
+        isSharpHolder(holder("YES", { mmSuspected: true }), p),
+        false,
+      );
     },
   },
   {
@@ -1064,10 +1072,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.ok(weakSportsMinority);
 
       const selected = selectHolderResearchCandidates(
-        [
-          { ...weakSportsMinority, score: sharpSide.score + 0.05 },
-          sharpSide,
-        ],
+        [{ ...weakSportsMinority, score: sharpSide.score + 0.05 }, sharpSide],
         p,
       );
       assert.equal(selected.selected[0]?.key, sharpSide.key);
@@ -1089,8 +1094,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         p,
       ).find((candidate) => candidate.bucket === "recent_flow");
       assert.ok(recentFlow);
-      const recentFlowActionability =
-        buildHolderResearchCandidateActionability(recentFlow, p);
+      const recentFlowActionability = buildHolderResearchCandidateActionability(
+        recentFlow,
+        p,
+      );
       assert.equal(recentFlowActionability.supportOnly, true);
       assert.equal(recentFlowActionability.isPrimaryResearchCandidate, false);
       assert.deepEqual(
@@ -1108,8 +1115,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       ).find((candidate) => candidate.bucket === "sharp_minority");
       assert.ok(highPrice);
       assert.equal(highPrice.side, "NO");
-      const highPriceActionability =
-        buildHolderResearchCandidateActionability(highPrice, p);
+      const highPriceActionability = buildHolderResearchCandidateActionability(
+        highPrice,
+        p,
+      );
       assert.equal(highPriceActionability.estimatedActionPrice, 0.96);
       assert.equal(
         highPriceActionability.likelyFinalGateBlockers.includes(
@@ -1149,6 +1158,39 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         true,
       );
       assert.equal(liveBlockedActionability.isPrimaryResearchCandidate, false);
+
+      const staleLiveBlocked = buildHolderResearchCandidatesFromMarket(
+        market({
+          livePriceCheck: {
+            blockersBySide: {
+              YES: ["live_price_stale"],
+              NO: ["live_price_stale"],
+            },
+            checkedAt: new Date().toISOString(),
+            fresh: false,
+            sideBuyPrices: {
+              YES: 0.4,
+              NO: 0.6,
+            },
+            tokenIds: ["yes-token", "no-token"],
+            yesProbability: 0.4,
+          },
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      assert.ok(staleLiveBlocked);
+      const staleLiveBlockedActionability =
+        buildHolderResearchCandidateActionability(staleLiveBlocked, p);
+      assert.equal(
+        staleLiveBlockedActionability.likelyFinalGateBlockers.includes(
+          "live_price_stale",
+        ),
+        true,
+      );
+      assert.equal(
+        staleLiveBlockedActionability.isPrimaryResearchCandidate,
+        false,
+      );
     },
   },
   {
@@ -1299,7 +1341,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         }),
         p,
       );
-      assert.ok(candidates.some((candidate) => candidate.bucket === "recent_flow"));
+      assert.ok(
+        candidates.some((candidate) => candidate.bucket === "recent_flow"),
+      );
       const selected = selectHolderResearchCandidates(candidates, p);
       assert.equal(selected.selected.length, 1);
       assert.ok(
@@ -1411,11 +1455,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.deepEqual(
         onlySameEvent.selected.map((candidate) => candidate.market.eventId),
-        [
-          "polymarket:event-a",
-          "polymarket:event-a",
-          "polymarket:event-a",
-        ],
+        ["polymarket:event-a", "polymarket:event-a", "polymarket:event-a"],
       );
     },
   },
@@ -1485,7 +1525,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serializedExternal, /public context/i);
       assert.doesNotMatch(serializedExternal, /public news/i);
 
-      const internalInput = buildHolderResearchCandidatePromptJson(candidate, p);
+      const internalInput = buildHolderResearchCandidatePromptJson(
+        candidate,
+        p,
+      );
       const serializedInternal = JSON.stringify(internalInput);
       assert.match(serializedInternal, /0xabc/i);
       assert.doesNotMatch(serializedInternal, /0xowner/i);
@@ -2548,7 +2591,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /Team Nova money fights the NO crowd/i);
       assert.match(prompt, /Backers buck heavy NO money/i);
       assert.match(prompt, /Bad headline examples/i);
-      assert.doesNotMatch(prompt, /Prefer simple phrases like 'informed wallets'/i);
+      assert.doesNotMatch(
+        prompt,
+        /Prefer simple phrases like 'informed wallets'/i,
+      );
     },
   },
   {
@@ -2637,13 +2683,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         (record.quality as Record<string, unknown>).marketSegment,
         "politics_geo",
       );
-      assert.deepEqual(
-        (record.move as Record<string, unknown>).dYes24h,
-        0.08,
-      );
-      const entry = (
-        record.holderEntry as Array<Record<string, unknown>>
-      )[0];
+      assert.deepEqual((record.move as Record<string, unknown>).dYes24h, 0.08);
+      const entry = (record.holderEntry as Array<Record<string, unknown>>)[0];
       assert.equal(entry?.entry, 0.3);
       assert.equal(entry?.cur, 0.4);
       assert.equal(entry?.dEntry, 0.1);
@@ -2652,10 +2693,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         (entry?.sameType as Record<string, unknown>).type,
         "politics_geo",
       );
-      assert.equal(
-        (entry?.sameType as Record<string, unknown>).pnlUsd,
-        4_000,
-      );
+      assert.equal((entry?.sameType as Record<string, unknown>).pnlUsd, 4_000);
       assert.equal(
         (entry?.sameSegment as Record<string, unknown>).segment,
         "politics_geo",
@@ -3020,7 +3058,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             };
           }
           if (/update\s+ai_notes/i.test(sql)) {
-            updates.push(JSON.parse(String(params?.[1])) as Record<string, unknown>);
+            updates.push(
+              JSON.parse(String(params?.[1])) as Record<string, unknown>,
+            );
             return { rows: [] };
           }
           return { rows: [] };
@@ -3166,7 +3206,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             };
           }
           if (/update\s+ai_notes/i.test(sql)) {
-            updates.push(JSON.parse(String(params?.[1])) as Record<string, unknown>);
+            updates.push(
+              JSON.parse(String(params?.[1])) as Record<string, unknown>,
+            );
             return { rows: [], rowCount: 1 };
           }
           return { rows: [] };
@@ -3270,8 +3312,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.defaults.triageModel, "openai/gpt-5.4-mini");
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
-      assert.equal(resolved.defaults.forceExternalSearchForInvestigations, true);
-      assert.equal(resolved.effective.forceExternalSearchForInvestigations, false);
+      assert.equal(
+        resolved.defaults.forceExternalSearchForInvestigations,
+        true,
+      );
+      assert.equal(
+        resolved.effective.forceExternalSearchForInvestigations,
+        false,
+      );
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);
       assert.equal(resolved.defaults.triageEnabled, true);
       assert.equal(resolved.defaults.triageBatchSize, 8);
@@ -3293,12 +3341,24 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.performanceAuditLookbackHours, 96);
       assert.equal(resolved.effective.performanceAuditMaxNotesPerRun, 250);
       assert.equal(resolved.effective.performanceAuditIncludeOpen, true);
-      assert.equal(resolved.effective.performanceAuditApproxEntryBeforeHours, 12);
+      assert.equal(
+        resolved.effective.performanceAuditApproxEntryBeforeHours,
+        12,
+      );
       assert.equal(resolved.effective.performanceAuditApproxEntryAfterHours, 1);
       assert.equal(resolved.effective.performanceCalibrationMinSamples, 10);
-      assert.equal(resolved.effective.performanceCalibrationMinResolvedSamples, 12);
-      assert.equal(resolved.effective.performanceCalibrationMinPatternSamples, 4);
-      assert.equal(resolved.effective.performanceCalibrationMaxNearTradeMinutes, 90);
+      assert.equal(
+        resolved.effective.performanceCalibrationMinResolvedSamples,
+        12,
+      );
+      assert.equal(
+        resolved.effective.performanceCalibrationMinPatternSamples,
+        4,
+      );
+      assert.equal(
+        resolved.effective.performanceCalibrationMaxNearTradeMinutes,
+        90,
+      );
       assert.equal(
         "performanceCalibrationUseOpenNotes" in resolved.effective,
         false,
@@ -3311,7 +3371,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "performanceCalibrationMinOpenMovePp" in resolved.effective,
         false,
       );
-      assert.equal(resolved.effective.performanceCalibrationDedupMarketSide, false);
+      assert.equal(
+        resolved.effective.performanceCalibrationDedupMarketSide,
+        false,
+      );
       assert.equal(resolved.effective.calibrationMemoEnabled, false);
       assert.equal(resolved.defaults.preTriageActionabilityEnabled, true);
       assert.deepEqual(resolved.defaults.supportOnlyBuckets, [
@@ -3347,7 +3410,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.singleGameSportsMinEdge, 0.2);
       assert.equal(resolved.effective.singleGameSportsMinSamples, 30);
       assert.equal(resolved.effective.singleGameSportsMinWinRate, 0.7);
-      assert.equal(resolved.effective.singleGameSportsRequirePositivePnl, false);
+      assert.equal(
+        resolved.effective.singleGameSportsRequirePositivePnl,
+        false,
+      );
       assert.equal(resolved.effective.estimatedTriageCallCostUsd, 0.02);
       assert.equal(resolved.effective.priceAgainstSignalBlockPp, 0.08);
       assert.equal(resolved.effective.maxAgentCallsPerRun, 100);

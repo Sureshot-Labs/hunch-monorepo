@@ -201,7 +201,9 @@ async function trimQueue(
   if (maxQueueSize == null || maxQueueSize <= 0) return;
   const size = await redis.zCard(key);
   if (size <= maxQueueSize) return;
-  await redis.zRemRangeByRank(key, 0, size - maxQueueSize - 1);
+  // Lower scores are more urgent, especially high-priority items with score
+  // bias. Trim from the high-rank end so urgent work survives pressure.
+  await redis.zRemRangeByRank(key, maxQueueSize, -1);
 }
 
 async function enqueueTokensPreservingEarliestScore(
@@ -342,10 +344,15 @@ export async function enqueuePriceRefreshTokens(
     const tokens = Array.from(tokenSet);
     if (!tokens.length) continue;
     const key = getPriceRefreshQueueKey(venue);
-    await enqueueTokensPreservingEarliestScore(redis, key, tokens, queueScore);
+    const added = await enqueueTokensPreservingEarliestScore(
+      redis,
+      key,
+      tokens,
+      queueScore,
+    );
     await trimQueue(redis, key, inputs.maxQueueSize);
-    result.byVenue[venue] += tokens.length;
-    result.enqueued += tokens.length;
+    result.byVenue[venue] += added;
+    result.enqueued += added;
   }
 
   return result;

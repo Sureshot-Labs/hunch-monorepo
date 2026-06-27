@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { resolveAggMarketCredential } from "./lib/agg-market-credentials.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
 
 const envPath = resolve(
@@ -713,6 +714,7 @@ function resolvePolymarketPusdAddress(): string {
 }
 
 const polymarketPusdAddress = resolvePolymarketPusdAddress();
+const aggMarketCredential = resolveAggMarketCredential();
 
 export const env = {
   host: process.env.HOST || "0.0.0.0",
@@ -798,7 +800,9 @@ export const env = {
     "API_SIMILAR_CACHE_TTL_SEC",
     300,
   ),
-  aggMarketAppId: process.env.AGG_APP_ID?.trim() || "",
+  aggMarketApiKey: aggMarketCredential?.apiKey ?? "",
+  aggMarketAppId: aggMarketCredential?.appId ?? "",
+  aggMarketCredentialSource: aggMarketCredential?.source ?? "none",
   aggMarketBaseUrl:
     process.env.AGG_MARKET_BASE_URL?.trim() || "https://api.agg.market",
   aggMarketTimeoutMs: optionalPositiveInt("AGG_MARKET_TIMEOUT_MS", 5_000),

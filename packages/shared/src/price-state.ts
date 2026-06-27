@@ -3,6 +3,7 @@ export type MarketPriceSide = "YES" | "NO";
 export type MarketPriceBlocker =
   | "buy_price_too_high"
   | "invalid_spread"
+  | "live_price_stale"
   | "missing_side_price"
   | "no_book"
   | "terminal_price";
@@ -99,8 +100,10 @@ export function buildMarketPriceState(
 
   const yesBid = normalizePriceValue(input.yesTop?.bestBid) ?? marketBid;
   const yesAsk = normalizePriceValue(input.yesTop?.bestAsk) ?? marketAsk;
-  const noBid = normalizePriceValue(input.noTop?.bestBid) ?? inverted(marketAsk);
-  const noAsk = normalizePriceValue(input.noTop?.bestAsk) ?? inverted(marketBid);
+  const noBid =
+    normalizePriceValue(input.noTop?.bestBid) ?? inverted(marketAsk);
+  const noAsk =
+    normalizePriceValue(input.noTop?.bestAsk) ?? inverted(marketBid);
 
   const invalidSpread =
     hasInvalidSpread(yesBid, yesAsk) || hasInvalidSpread(noBid, noAsk);

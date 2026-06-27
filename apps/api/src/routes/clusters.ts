@@ -349,6 +349,7 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
       try {
         const client = createAggMarketClient({
           appId: env.aggMarketAppId,
+          apiKey: env.aggMarketApiKey,
           baseUrl: env.aggMarketBaseUrl,
           timeoutMs: env.aggMarketTimeoutMs,
         });

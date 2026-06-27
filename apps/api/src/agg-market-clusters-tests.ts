@@ -249,6 +249,28 @@ await test("chunks midpoint ids at the AGG limit", () => {
   assert.equal(chunks[2]?.length, 1);
 });
 
+await test("AGG client sends app id and optional api key headers separately", async () => {
+  const capturedHeaders: Headers[] = [];
+  const client = createAggMarketClient({
+    apiKey: "test-key",
+    appId: "test-app",
+    baseUrl: "https://agg.example",
+    fetchImpl: async (_input, init) => {
+      capturedHeaders.push(new Headers(init?.headers));
+      return new Response(JSON.stringify({ data: [] }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+
+  await client.getMidpoints(["agg-poly"]);
+
+  const headers = capturedHeaders[0];
+  assert.ok(headers);
+  assert.equal(headers?.get("x-app-id"), "test-app");
+  assert.equal(headers?.get("x-api-key"), "test-key");
+});
+
 await test("parses top-level AGG midpoint fields when outcomes are empty", async () => {
   const requested: string[] = [];
   const client = createAggMarketClient({

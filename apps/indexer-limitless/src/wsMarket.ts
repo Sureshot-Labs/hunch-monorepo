@@ -177,7 +177,10 @@ function uniqueAddresses(values: string[]): string[] {
   );
 }
 
-function isActiveDemandSlug(value?: string | null, nowMs = Date.now()): boolean {
+function isActiveDemandSlug(
+  value?: string | null,
+  nowMs = Date.now(),
+): boolean {
   if (!value) return false;
   const expiresAt = demandSlugExpiresAt.get(normalizeSlug(value));
   return expiresAt != null && expiresAt > nowMs;
@@ -261,10 +264,7 @@ function normalizeLimitlessMarketId(value: unknown): string | null {
   return text.startsWith("limitless:") ? text.slice("limitless:".length) : text;
 }
 
-function readResolvedPayloadField(
-  payload: unknown,
-  keys: string[],
-): unknown {
+function readResolvedPayloadField(payload: unknown, keys: string[]): unknown {
   if (!isRecord(payload)) return undefined;
   for (const key of keys) {
     if (payload[key] != null) return payload[key];
@@ -413,7 +413,9 @@ async function publishClobTopWithSibling(input: {
   });
   if (!sibling) return;
 
-  if (limitlessClobDirectTopTracker.shouldSkipDerivedTop(sibling.tokenId, tsMs)) {
+  if (
+    limitlessClobDirectTopTracker.shouldSkipDerivedTop(sibling.tokenId, tsMs)
+  ) {
     recordLimitlessClobDerivedSiblingTopSkippedRecentDirect();
     return;
   }
@@ -627,7 +629,10 @@ export function parseLimitlessWsTimestamp(value: unknown): Date {
 }
 
 async function resolveMarketForResolution(
-  inputs: Pick<ApplyLimitlessResolvedMarketTopInputs, "slug" | "address" | "marketId">,
+  inputs: Pick<
+    ApplyLimitlessResolvedMarketTopInputs,
+    "slug" | "address" | "marketId"
+  >,
 ): Promise<ResolvedMarketRef | null> {
   const slug = inputs.slug?.trim() || null;
   const address = inputs.address?.trim().toLowerCase() || null;
@@ -762,7 +767,11 @@ export async function applyLimitlessResolvedMarketTop(
 ): Promise<ApplyLimitlessResolvedMarketTopResult> {
   const ref = await resolveMarketForResolution(inputs);
   if (!ref) {
-    return { updated: false, ignoredReason: "market_not_found", tokensUpdated: 0 };
+    return {
+      updated: false,
+      ignoredReason: "market_not_found",
+      tokensUpdated: 0,
+    };
   }
 
   const resolvedOutcome = inferLimitlessResolvedOutcome({
@@ -852,7 +861,10 @@ async function handleMarketResolved(
     return;
   }
 
-  if (isActiveDemandSlug(resolvedSlug) || isActiveDemandAddress(resolvedAddress)) {
+  if (
+    isActiveDemandSlug(resolvedSlug) ||
+    isActiveDemandAddress(resolvedAddress)
+  ) {
     wsDemandEventStats.resolvedDemandEvents += 1;
   }
 
@@ -890,8 +902,8 @@ function trimDemandMap(map: Map<string, number>, maxEntries: number): void {
 function recomputeDesiredTargets(nowMs = Date.now()): WsTargets {
   pruneExpiredDemand(nowMs);
   desiredTargets = normalizeTargets({
-    slugs: [...demandSlugExpiresAt.keys(), ...baseTargets.slugs],
-    addresses: [...demandAddressExpiresAt.keys(), ...baseTargets.addresses],
+    slugs: [...baseTargets.slugs, ...demandSlugExpiresAt.keys()],
+    addresses: [...baseTargets.addresses, ...demandAddressExpiresAt.keys()],
   });
   return desiredTargets;
 }
@@ -1008,7 +1020,9 @@ function createSocket(kind: WsSocketKind): Socket {
   const onMarketResolved = (payload: unknown) => {
     void mq
       .add(() => handleMarketResolved(kind, payload))
-      .catch((err) => log.warn("WS marketResolved handler error", { kind, err }));
+      .catch((err) =>
+        log.warn("WS marketResolved handler error", { kind, err }),
+      );
   };
   socket.on("marketResolved", onMarketResolved);
   socket.on("market_resolved", onMarketResolved);
@@ -1156,13 +1170,13 @@ export function startMarketWS(initialTargets: WsTargets): void {
 }
 
 export function updateMarketWSSubscriptions(nextTargets: WsTargets): void {
-  const previousBaseTargets = baseTargets;
+  const previousDesiredTargets = desiredTargets;
   baseTargets = normalizeTargets(nextTargets);
   desiredTargets = recomputeDesiredTargets();
   const clobSocket = currentSockets.clob;
   if (
     clobSocket?.connected &&
-    hasRemovedTargets(previousBaseTargets.slugs, baseTargets.slugs)
+    hasRemovedTargets(previousDesiredTargets.slugs, desiredTargets.slugs)
   ) {
     restartSocket("clob", "target_shrink");
   } else if (clobSocket?.connected) {
@@ -1171,7 +1185,10 @@ export function updateMarketWSSubscriptions(nextTargets: WsTargets): void {
   const ammSocket = currentSockets.amm;
   if (
     ammSocket?.connected &&
-    hasRemovedTargets(previousBaseTargets.addresses, baseTargets.addresses)
+    hasRemovedTargets(
+      previousDesiredTargets.addresses,
+      desiredTargets.addresses,
+    )
   ) {
     restartSocket("amm", "target_shrink");
   } else if (ammSocket?.connected) {
@@ -1218,13 +1235,24 @@ export function addMarketWSDemandTargets(
 }
 
 export function resubscribeMarketWSSubscriptions(): void {
+  const previousDesiredTargets = desiredTargets;
   const next = recomputeDesiredTargets();
   const clobSocket = currentSockets.clob;
-  if (clobSocket?.connected) {
+  if (
+    clobSocket?.connected &&
+    hasRemovedTargets(previousDesiredTargets.slugs, next.slugs)
+  ) {
+    restartSocket("clob", "target_shrink");
+  } else if (clobSocket?.connected) {
     syncSubscriptions("clob", clobSocket, next, { force: true });
   }
   const ammSocket = currentSockets.amm;
-  if (ammSocket?.connected) {
+  if (
+    ammSocket?.connected &&
+    hasRemovedTargets(previousDesiredTargets.addresses, next.addresses)
+  ) {
+    restartSocket("amm", "target_shrink");
+  } else if (ammSocket?.connected) {
     syncSubscriptions("amm", ammSocket, next, { force: true });
   }
 }

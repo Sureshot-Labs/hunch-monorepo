@@ -369,6 +369,38 @@ await test("high priority price refresh jumps ahead of normal queued tokens", as
   assert.deepEqual(claimed, ["system-now", "normal-old", "normal-new"]);
 });
 
+await test("queue trim preserves urgent high-priority tokens", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    maxQueueSize: 2,
+    nowMs: 1_000,
+    tokenIds: ["normal-old"],
+    venue: "polymarket",
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    maxQueueSize: 2,
+    nowMs: 2_000,
+    tokenIds: ["normal-new"],
+    venue: "polymarket",
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    maxQueueSize: 2,
+    nowMs: 3_000,
+    priority: "high",
+    tokenIds: ["system-now"],
+    venue: "polymarket",
+  });
+
+  const claimed = await claimDuePriceRefreshTokens(redis, {
+    limit: 10,
+    nowMs: 3_000,
+    side: "oldest",
+    venue: "polymarket",
+  });
+
+  assert.deepEqual(claimed, ["system-now", "normal-old"]);
+});
+
 await test("normal re-enqueue does not demote an existing high-priority token", async () => {
   const redis = new FakeRedis();
   await enqueuePriceRefreshTokens(redis, {
@@ -382,11 +414,13 @@ await test("normal re-enqueue does not demote an existing high-priority token", 
     venue: "polymarket",
     nowMs: 1_000,
   });
-  await enqueuePriceRefreshTokens(redis, {
+  const result = await enqueuePriceRefreshTokens(redis, {
     tokenIds: ["system-now"],
     venue: "polymarket",
     nowMs: 4_000,
   });
+  assert.equal(result.enqueued, 0);
+  assert.equal(result.byVenue.polymarket, 0);
 
   const claimed = await claimDuePriceRefreshTokens(redis, {
     venue: "polymarket",
@@ -458,6 +492,61 @@ await test("requestFreshMarketPrices is safe for single-client DB callers", asyn
   assert.deepEqual(result.requestedTokenIds, ["yes-token", "no-token"]);
   assert.equal(result.timedOut, false);
   assert.equal(result.marketStates.get("polymarket:test")?.fresh, true);
+});
+
+await test("requestFreshMarketPrices does not treat unpriced tops as fresh", async () => {
+  const db = {
+    async query<T = Record<string, unknown>>(sql: string) {
+      if (sql.includes("from unified_market_tokens")) {
+        return { rows: [] as T[] };
+      }
+      if (sql.includes("from unified_token_top_latest")) {
+        return {
+          rows: [
+            {
+              best_ask: null,
+              best_bid: null,
+              token_id: "yes-token",
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              best_ask: null,
+              best_bid: null,
+              token_id: "no-token",
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+          ] as T[],
+        };
+      }
+      return {
+        rows: [
+          {
+            best_ask: null,
+            best_bid: null,
+            clob_token_ids: JSON.stringify(["yes-token", "no-token"]),
+            id: "polymarket:test",
+            last_price: null,
+            token_no: null,
+            token_yes: null,
+            venue: "polymarket",
+          },
+        ] as T[],
+      };
+    },
+  };
+
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+  });
+
+  assert.deepEqual(result.freshTokenIds, []);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.marketStates.get("polymarket:test")?.fresh, false);
 });
 
 await test("parallel claimDuePriceRefreshTokens calls do not duplicate tokens", async () => {

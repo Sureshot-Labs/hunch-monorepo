@@ -1,7 +1,11 @@
-import { requestFreshMarketPrices } from "@hunch/infra";
-import { getMarketPriceSideState, type MarketPriceBlocker } from "@hunch/shared";
+import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
+import {
+  getMarketPriceSideState,
+  type MarketPriceBlocker,
+} from "@hunch/shared";
 
 import type { DbQuery } from "../db.js";
+import { resolveAggMarketCredential } from "../lib/agg-market-credentials.js";
 import { createAggMarketClient } from "./agg-market-client.js";
 import {
   getAggMarketAlternativesResponseCachedWithMetadata,
@@ -73,6 +77,8 @@ export type SignalBotRedisLike = {
     value: string,
     options?: { EX?: number; PX?: number; NX?: boolean },
   ): Promise<unknown>;
+  zCard?(key: string): Promise<number>;
+  zRemRangeByRank?(key: string, start: number, stop: number): Promise<number>;
 };
 
 export type SignalBotCheaperAlternative = {
@@ -265,7 +271,9 @@ export function parseSignalBotConfig(
   return {
     enabled: parseBool(env.HUNCH_SIGNAL_BOT_ENABLED, false),
     token: env.HUNCH_SIGNAL_BOT_TOKEN?.trim() ?? "",
-    adminUserIds: new Set(parseIntegerList(env.HUNCH_SIGNAL_BOT_ADMIN_USER_IDS)),
+    adminUserIds: new Set(
+      parseIntegerList(env.HUNCH_SIGNAL_BOT_ADMIN_USER_IDS),
+    ),
     appBaseUrl: normalizeBaseUrl(
       env.HUNCH_SIGNAL_BOT_APP_BASE_URL?.trim() || "https://app.hunch.trade",
     ),
@@ -273,10 +281,7 @@ export function parseSignalBotConfig(
       env.HUNCH_SIGNAL_BOT_PUBLISH_INTERVAL_SEC,
       60,
     ),
-    pollTimeoutSec: parsePositiveInt(
-      env.HUNCH_SIGNAL_BOT_POLL_TIMEOUT_SEC,
-      25,
-    ),
+    pollTimeoutSec: parsePositiveInt(env.HUNCH_SIGNAL_BOT_POLL_TIMEOUT_SEC, 25),
     minConfidence: parseRatio(env.HUNCH_SIGNAL_BOT_MIN_CONFIDENCE, 0.7),
     maxSignalsPerTick: parsePositiveInt(
       env.HUNCH_SIGNAL_BOT_MAX_SIGNALS_PER_TICK,
@@ -405,7 +410,10 @@ export function buildSignalBotTradeUrl(input: {
   marketId: string;
   side: "NO" | "YES";
 }): string {
-  const url = new URL(`/events/${encodeURIComponent(input.eventId)}`, input.appBaseUrl);
+  const url = new URL(
+    `/events/${encodeURIComponent(input.eventId)}`,
+    input.appBaseUrl,
+  );
   url.searchParams.set("market", input.marketId);
   url.searchParams.set("side", input.side);
   url.searchParams.set("tradeSide", "BUY");
@@ -424,7 +432,10 @@ export function buildSignalBotOpenMarketUrl(input: {
   marketId: string | null;
   side?: "NO" | "YES" | null;
 }): string {
-  const url = new URL(`/events/${encodeURIComponent(input.eventId)}`, input.appBaseUrl);
+  const url = new URL(
+    `/events/${encodeURIComponent(input.eventId)}`,
+    input.appBaseUrl,
+  );
   if (input.marketId) url.searchParams.set("market", input.marketId);
   if (input.side) url.searchParams.set("side", input.side);
   url.searchParams.set("utm_source", "telegram_signal_bot");
@@ -493,7 +504,8 @@ export function buildSignalBotMessage(input: {
     side: note.holderSide,
   });
   const holderUrl =
-    rawHolderUrl && (!buySide || !note.holderSide || note.holderSide === buySide)
+    rawHolderUrl &&
+    (!buySide || !note.holderSide || note.holderSide === buySide)
       ? rawHolderUrl
       : null;
   const titleMarkdown = marketUrl
@@ -503,17 +515,15 @@ export function buildSignalBotMessage(input: {
   const titleLine = categoryEmoji
     ? `${categoryEmoji} ${titleMarkdown}`
     : titleMarkdown;
-  const metaLine = [
-    formatSignalBotSignalLabel(note),
-    priceLine,
-    timeLeftLine,
-  ]
+  const metaLine = [formatSignalBotSignalLabel(note), priceLine, timeLeftLine]
     .filter((value): value is string => Boolean(value))
     .join(" · ");
   const lines = [
     titleLine,
     escapeTelegramMarkdownV2(metaLine),
-    ...(marketTitleLine ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)] : []),
+    ...(marketTitleLine
+      ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)]
+      : []),
     "",
     summary,
     ...(credentialLines.length > 0
@@ -543,10 +553,7 @@ export function buildSignalBotMessage(input: {
         url: baseTradeUrl,
       },
     ]);
-    if (
-      input.cheaperAlternative &&
-      input.cheaperAlternative.side === buySide
-    ) {
+    if (input.cheaperAlternative && input.cheaperAlternative.side === buySide) {
       keyboardRows.push([
         {
           text: formatSignalBotCheaperButtonText({
@@ -771,7 +778,9 @@ export async function handleSignalBotCommand(input: {
   config: SignalBotConfig;
   message: TelegramBotMessage;
   redis: SignalBotRedisLike;
-  sendMessage: (message: TelegramSendMessageInput) => Promise<TelegramSendResult>;
+  sendMessage: (
+    message: TelegramSendMessageInput,
+  ) => Promise<TelegramSendResult>;
   sendStatsReport?: (
     chatId: string,
     period: SignalBotStatsPeriod,
@@ -871,8 +880,7 @@ export async function handleSignalBotCommand(input: {
         chatId,
         statsRequest.period,
         statsRequest.detail,
-      ) ??
-        Promise.resolve(false));
+      ) ?? Promise.resolve(false));
     } catch {
       sent = false;
     }
@@ -886,7 +894,10 @@ export async function handleSignalBotCommand(input: {
   if (command === "test_signal") {
     const sent = await input.sendTestSignal(targetChatId ?? chatId);
     await input.sendMessage(
-      buildPlainReply(chatId, sent ? "Sent latest eligible signal." : "No eligible signal found."),
+      buildPlainReply(
+        chatId,
+        sent ? "Sent latest eligible signal." : "No eligible signal found.",
+      ),
     );
     return true;
   }
@@ -934,9 +945,10 @@ const SIGNAL_BOT_STATS_AUDIT_LIMIT = 500;
 const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
 
 type SignalBotAggMarketConfig = {
+  apiKey: string | null;
   appId: string;
   baseUrl: string;
-  credentialSource: "AGG_API_KEY" | "AGG_APP_ID";
+  credentialSource: "AGG_APP_ID";
   matchedTtlSec: number;
   notFoundTtlSec: number;
   timeoutMs: number;
@@ -954,11 +966,19 @@ export type SignalBotCheaperAlternativeDiagnostics = {
 
 export type SignalBotPriceGuardDiagnostics = {
   priceGuardBuyPriceTooHigh: number;
+  priceGuardDeferred: number;
   priceGuardInvalidSpread: number;
+  priceGuardLivePriceStale: number;
   priceGuardMissingSidePrice: number;
   priceGuardNoBook: number;
   priceGuardSkipped: number;
   priceGuardTerminalPrice: number;
+};
+
+type SignalBotPriceGuardResult = {
+  blockers: MarketPriceBlocker[];
+  defer: boolean;
+  timedOut: boolean;
 };
 
 type SignalBotCheaperAlternativeResult = {
@@ -982,15 +1002,16 @@ function normalizeServiceBaseUrl(value: string | undefined, fallback: string) {
 export function parseSignalBotAggMarketConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotAggMarketConfig | null {
-  const appId = env.AGG_APP_ID?.trim() ?? "";
-  if (!appId) return null;
+  const credential = resolveAggMarketCredential(env);
+  if (!credential) return null;
   return {
-    appId,
+    apiKey: credential.apiKey,
+    appId: credential.appId,
     baseUrl: normalizeServiceBaseUrl(
       env.AGG_MARKET_BASE_URL,
       "https://api.agg.market",
     ),
-    credentialSource: "AGG_APP_ID",
+    credentialSource: credential.source,
     matchedTtlSec: parseNonNegativeInt(env.AGG_CLUSTERS_CACHE_TTL_SEC, 30),
     notFoundTtlSec: parseNonNegativeInt(
       env.AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC,
@@ -1028,7 +1049,9 @@ function addSignalBotCheaperAlternativeDiagnostics(
 function createSignalBotPriceGuardDiagnostics(): SignalBotPriceGuardDiagnostics {
   return {
     priceGuardBuyPriceTooHigh: 0,
+    priceGuardDeferred: 0,
     priceGuardInvalidSpread: 0,
+    priceGuardLivePriceStale: 0,
     priceGuardMissingSidePrice: 0,
     priceGuardNoBook: 0,
     priceGuardSkipped: 0,
@@ -1048,6 +1071,9 @@ function addSignalBotPriceGuardBlockers(
       case "invalid_spread":
         target.priceGuardInvalidSpread += 1;
         break;
+      case "live_price_stale":
+        target.priceGuardLivePriceStale += 1;
+        break;
       case "missing_side_price":
         target.priceGuardMissingSidePrice += 1;
         break;
@@ -1065,30 +1091,51 @@ async function loadSignalBotPriceGuardBlockers(input: {
   buySide: "NO" | "YES";
   db: DbQuery;
   note: SignalBotNote;
-}): Promise<MarketPriceBlocker[]> {
-  if (!input.note.marketId) return [];
+  redis: SignalBotRedisLike;
+}): Promise<SignalBotPriceGuardResult> {
+  if (!input.note.marketId) {
+    return { blockers: [], defer: false, timedOut: false };
+  }
   try {
+    const priceRedis =
+      typeof input.redis.zCard === "function" &&
+      typeof input.redis.zRemRangeByRank === "function"
+        ? (input.redis as unknown as PriceRefreshRedis)
+        : null;
     const result = await requestFreshMarketPrices({
       db: input.db,
-      enqueue: false,
+      enqueue: Boolean(priceRedis),
       marketIds: [input.note.marketId],
       maxBuyPrice: 0.95,
       maxTokens: 2,
       pollMs: 100,
-      timeoutMs: 0,
+      priority: "high",
+      redis: priceRedis,
+      timeoutMs: priceRedis ? 5_000 : 0,
     });
     const marketState = result.marketStates.get(input.note.marketId);
-    if (!marketState) return [];
-    return getMarketPriceSideState(
-      marketState.priceState,
-      input.buySide,
-    ).blockers;
+    if (!marketState) {
+      return { blockers: [], defer: true, timedOut: result.timedOut };
+    }
+    if (!marketState.fresh || result.timedOut) {
+      return {
+        blockers: ["live_price_stale"],
+        defer: true,
+        timedOut: result.timedOut,
+      };
+    }
+    return {
+      blockers: getMarketPriceSideState(marketState.priceState, input.buySide)
+        .blockers,
+      defer: false,
+      timedOut: false,
+    };
   } catch (error) {
     console.warn("[signal-bot] price guard skipped", {
       error: error instanceof Error ? error.message : String(error),
       marketId: input.note.marketId,
     });
-    return [];
+    return { blockers: [], defer: false, timedOut: false };
   }
 }
 
@@ -1100,7 +1147,8 @@ function isStrictlyCheaperDisplayedPrice(params: {
   const alternativeCents = Math.round(params.alternativePrice * 100);
   return (
     alternativeCents < primaryCents &&
-    params.primaryPrice - params.alternativePrice >= MIN_CHEAPER_ALTERNATIVE_DELTA
+    params.primaryPrice - params.alternativePrice >=
+      MIN_CHEAPER_ALTERNATIVE_DELTA
   );
 }
 
@@ -1140,7 +1188,8 @@ function pickCheaperSignalBotAlternative(input: {
       };
     })
     .filter(
-      (candidate): candidate is SignalBotCheaperAlternative => candidate != null,
+      (candidate): candidate is SignalBotCheaperAlternative =>
+        candidate != null,
     );
 
   return (
@@ -1205,19 +1254,21 @@ async function resolveDefaultSignalBotCheaperAlternative(input: {
   }
   try {
     const client = createAggMarketClient({
+      apiKey: aggConfig.apiKey,
       appId: aggConfig.appId,
       baseUrl: aggConfig.baseUrl,
       timeoutMs: aggConfig.timeoutMs,
     });
-    const { response } = await getAggMarketAlternativesResponseCachedWithMetadata({
-      cacheClient: input.redis as AggMarketAlternativesCacheClient,
-      client,
-      db: input.db,
-      marketId: input.note.marketId,
-      matchedTtlSec: aggConfig.matchedTtlSec,
-      notFoundTtlSec: aggConfig.notFoundTtlSec,
-      query: SIGNAL_BOT_ALTERNATIVES_QUERY,
-    });
+    const { response } =
+      await getAggMarketAlternativesResponseCachedWithMetadata({
+        cacheClient: input.redis as AggMarketAlternativesCacheClient,
+        client,
+        db: input.db,
+        marketId: input.note.marketId,
+        matchedTtlSec: aggConfig.matchedTtlSec,
+        notFoundTtlSec: aggConfig.notFoundTtlSec,
+        query: SIGNAL_BOT_ALTERNATIVES_QUERY,
+      });
     return resolveSignalBotCheaperAlternativeFromAggResponse({
       buySide: input.buySide,
       note: input.note,
@@ -1235,16 +1286,18 @@ export async function publishSignalBotTick(input: {
   resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
-}): Promise<{
-  belowConfidenceNotes: number;
-  blockedChats: number;
-  chats: number;
-  cheaperAlternatives: number;
-  eligibleNotes: number;
-  nonDirectionalNotes: number;
-  sent: number;
-} & SignalBotCheaperAlternativeDiagnostics &
-  SignalBotPriceGuardDiagnostics> {
+}): Promise<
+  {
+    belowConfidenceNotes: number;
+    blockedChats: number;
+    chats: number;
+    cheaperAlternatives: number;
+    eligibleNotes: number;
+    nonDirectionalNotes: number;
+    sent: number;
+  } & SignalBotCheaperAlternativeDiagnostics &
+    SignalBotPriceGuardDiagnostics
+> {
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
   let sent = 0;
   let blockedChats = 0;
@@ -1277,17 +1330,24 @@ export async function publishSignalBotTick(input: {
     for (const note of notes) {
       const buySide = resolveSignalBotBuySide(note);
       if (buySide) {
-        const priceBlockers = await loadSignalBotPriceGuardBlockers({
+        const priceGuard = await loadSignalBotPriceGuardBlockers({
           buySide,
           db: input.db,
           note,
+          redis: input.redis,
         });
-        if (priceBlockers.length > 0) {
-          priceGuardDiagnostics.priceGuardSkipped += 1;
+        if (priceGuard.defer) {
+          priceGuardDiagnostics.priceGuardDeferred += 1;
           addSignalBotPriceGuardBlockers(
             priceGuardDiagnostics,
-            priceBlockers,
+            priceGuard.blockers,
           );
+          break;
+        }
+        const priceBlockers = priceGuard.blockers;
+        if (priceBlockers.length > 0) {
+          priceGuardDiagnostics.priceGuardSkipped += 1;
+          addSignalBotPriceGuardBlockers(priceGuardDiagnostics, priceBlockers);
           await updateSignalBotChatCursor({
             chatId,
             createdAt: note.createdAt,
@@ -1382,7 +1442,8 @@ export async function sendLatestSignalBotTestSignal(input: {
   if (!note) return false;
   const buySide = resolveSignalBotBuySide(note);
   const cheaperAlternative = buySide
-    ? await (input.resolveCheaperAlternative ??
+    ? await (
+        input.resolveCheaperAlternative ??
         (input.redis
           ? async (resolverInput) =>
               (
@@ -1393,7 +1454,8 @@ export async function sendLatestSignalBotTestSignal(input: {
                   redis: input.redis as SignalBotRedisLike,
                 })
               ).alternative
-          : async () => null))({ buySide, note })
+          : async () => null)
+      )({ buySide, note })
     : null;
   const { keyboard, text } = buildSignalBotMessage({
     appBaseUrl: input.config.appBaseUrl,
@@ -1498,7 +1560,10 @@ function buildSignalBotStatsDetailLines(
 function formatStatsAggregateGroup(input: {
   amountUsd: number;
   formatter: (key: string) => string;
-  group: Record<string, HolderResearchPerformanceAuditResult["aggregates"]["overall"]>;
+  group: Record<
+    string,
+    HolderResearchPerformanceAuditResult["aggregates"]["overall"]
+  >;
   title: string;
 }): string[] {
   const rows = Object.entries(input.group)
@@ -1576,7 +1641,8 @@ export async function sendSignalBotStatsReport(input: {
   const result = await auditHolderResearchSignalPerformance(input.db, {
     activeOnly: true,
     approxEntryAfterHours: HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
-    approxEntryBeforeHours: HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
+    approxEntryBeforeHours:
+      HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
     directionalOnly: true,
     includeOpen: true,
     includeResolved: true,
@@ -1738,9 +1804,15 @@ async function loadSignalBotEligibilityCounts(
   );
   const row = rows[0];
   return {
-    belowConfidence: Math.max(0, Math.trunc(toNumber(row?.below_min_confidence) ?? 0)),
+    belowConfidence: Math.max(
+      0,
+      Math.trunc(toNumber(row?.below_min_confidence) ?? 0),
+    ),
     eligible: Math.max(0, Math.trunc(toNumber(row?.eligible) ?? 0)),
-    nonDirectional: Math.max(0, Math.trunc(toNumber(row?.non_directional) ?? 0)),
+    nonDirectional: Math.max(
+      0,
+      Math.trunc(toNumber(row?.non_directional) ?? 0),
+    ),
     total: Math.max(0, Math.trunc(toNumber(row?.total) ?? 0)),
   };
 }
@@ -1774,7 +1846,8 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     const url = new URL(`${this.baseUrl}/getUpdates`);
     url.searchParams.set("timeout", String(input.timeoutSec));
     url.searchParams.set("allowed_updates", JSON.stringify(["message"]));
-    if (input.offset != null) url.searchParams.set("offset", String(input.offset));
+    if (input.offset != null)
+      url.searchParams.set("offset", String(input.offset));
     const response = await fetch(url);
     const payload = (await response.json().catch(() => null)) as {
       ok?: boolean;
@@ -1951,7 +2024,10 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
   };
 }
 
-function resolveSidePrice(note: SignalBotNote, side: "NO" | "YES"): number | null {
+function resolveSidePrice(
+  note: SignalBotNote,
+  side: "NO" | "YES",
+): number | null {
   const yesPrice =
     note.bestBid != null && note.bestAsk != null
       ? (note.bestBid + note.bestAsk) / 2
@@ -1974,7 +2050,13 @@ function resolveSignalBotBuyPrice(
   const ask = normalizeProbability(note.bestAsk);
   const last = normalizeProbability(note.lastPrice);
   const midpoint = bid != null && ask != null ? (bid + ask) / 2 : last;
-  return side === "YES" ? (ask ?? midpoint ?? bid) : bid != null ? 1 - bid : midpoint == null ? null : 1 - midpoint;
+  return side === "YES"
+    ? (ask ?? midpoint ?? bid)
+    : bid != null
+      ? 1 - bid
+      : midpoint == null
+        ? null
+        : 1 - midpoint;
 }
 
 function resolveMarketBuyPrice(
@@ -1985,7 +2067,11 @@ function resolveMarketBuyPrice(
   const ask = normalizeProbability(market.yesAsk);
   const yesMid = normalizeProbability(market.yesMid);
   const noMid = normalizeProbability(market.noMid);
-  return side === "YES" ? (ask ?? yesMid ?? bid) : bid != null ? 1 - bid : noMid;
+  return side === "YES"
+    ? (ask ?? yesMid ?? bid)
+    : bid != null
+      ? 1 - bid
+      : noMid;
 }
 
 function formatCents(value: number): string {
@@ -1996,7 +2082,10 @@ function normalizeAlnumUpper(value: string): string {
   return value.replace(/[^0-9A-Za-z]+/g, "").toUpperCase();
 }
 
-function abbreviateOutcomeLabel(label: string, maxLength = OUTCOME_LABEL_MAX_CHARS): string {
+function abbreviateOutcomeLabel(
+  label: string,
+  maxLength = OUTCOME_LABEL_MAX_CHARS,
+): string {
   const trimmed = label.trim();
   if (!trimmed) return "";
   if (trimmed.length <= maxLength) return trimmed;
@@ -2033,7 +2122,9 @@ function formatSignalBotOutcomeDisplayLabel(
   return abbreviateOutcomeLabel(label);
 }
 
-function formatSignalBotMarketEmoji(note: Pick<SignalBotNote, "marketSegment">): string | null {
+function formatSignalBotMarketEmoji(
+  note: Pick<SignalBotNote, "marketSegment">,
+): string | null {
   switch (note.marketSegment) {
     case "sports_soccer_game":
       return "⚽";
@@ -2104,7 +2195,7 @@ function formatSignalBotBuyButtonText(input: {
   const venue = formatVenueLabel(input.venue);
   const price = input.price == null ? null : formatCents(input.price);
   const marketLabel =
-    venue && price ? `${venue} ${price}` : venue ?? price ?? null;
+    venue && price ? `${venue} ${price}` : (venue ?? price ?? null);
   return `${marker} Buy ${input.sideLabel} $${input.amountUsd}${marketLabel ? ` · ${marketLabel}` : ""}`;
 }
 
@@ -2135,8 +2226,10 @@ function formatSignedUsd(value: number): string {
 function formatCompactUsd(value: number): string {
   const abs = Math.abs(value);
   const sign = value < 0 ? "-" : "";
-  if (abs >= 1_000_000_000) return `${sign}$${formatCompactAmount(abs / 1_000_000_000)}B`;
-  if (abs >= 1_000_000) return `${sign}$${formatCompactAmount(abs / 1_000_000)}M`;
+  if (abs >= 1_000_000_000)
+    return `${sign}$${formatCompactAmount(abs / 1_000_000_000)}B`;
+  if (abs >= 1_000_000)
+    return `${sign}$${formatCompactAmount(abs / 1_000_000)}M`;
   if (abs >= 1_000) return `${sign}$${formatCompactAmount(abs / 1_000)}K`;
   return `${sign}$${Math.round(abs)}`;
 }
@@ -2165,7 +2258,11 @@ function formatTimeLeftLine(
   if (!raw) return null;
   const endMs = new Date(raw).getTime();
   const startMs = new Date(note.createdAt).getTime();
-  if (!Number.isFinite(endMs) || !Number.isFinite(startMs) || endMs <= startMs) {
+  if (
+    !Number.isFinite(endMs) ||
+    !Number.isFinite(startMs) ||
+    endMs <= startMs
+  ) {
     return null;
   }
 
@@ -2220,7 +2317,9 @@ function formatMarketTitleLine(note: SignalBotNote): string | null {
   for (const raw of [note.eventTitle, note.marketTitle]) {
     const title = raw?.trim().replace(/\s+/g, " ");
     if (!title) continue;
-    if (unique.some((existing) => existing.toLowerCase() === title.toLowerCase())) {
+    if (
+      unique.some((existing) => existing.toLowerCase() === title.toLowerCase())
+    ) {
       continue;
     }
     unique.push(title);
@@ -2240,14 +2339,17 @@ function formatSignalContextLine(note: SignalBotNote): string | null {
   if (timingMatch?.[0]) {
     return `📰 ${truncateAtBoundary(timingMatch[0], SIGNAL_CONTEXT_MAX_CHARS)}`;
   }
-  if (summary) return `📰 ${truncateAtBoundary(summary, SIGNAL_CONTEXT_MAX_CHARS)}`;
+  if (summary)
+    return `📰 ${truncateAtBoundary(summary, SIGNAL_CONTEXT_MAX_CHARS)}`;
   const caveats = Array.isArray(note.modelMeta.caveats)
     ? note.modelMeta.caveats.filter(
-        (value): value is string => typeof value === "string" && value.trim().length > 0,
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
       )
     : [];
   const caveat = caveats[0]?.trim();
-  if (caveat) return `⚠️ ${truncateAtBoundary(caveat, SIGNAL_CONTEXT_MAX_CHARS)}`;
+  if (caveat)
+    return `⚠️ ${truncateAtBoundary(caveat, SIGNAL_CONTEXT_MAX_CHARS)}`;
   if (note.rationale)
     return `💡 ${truncateAtBoundary(note.rationale, SIGNAL_CONTEXT_MAX_CHARS)}`;
   return null;
@@ -2271,7 +2373,10 @@ function stripMarkdownAndSources(value: string): string {
 function truncateAtBoundary(value: string, max: number): string {
   if (value.length <= max) return value;
   const clipped = value.slice(0, max);
-  const boundary = Math.max(clipped.lastIndexOf(". "), clipped.lastIndexOf("; "));
+  const boundary = Math.max(
+    clipped.lastIndexOf(". "),
+    clipped.lastIndexOf("; "),
+  );
   if (boundary >= Math.floor(max * 0.5)) return clipped.slice(0, boundary + 1);
   const space = clipped.lastIndexOf(" ");
   return `${clipped.slice(0, space > 0 ? space : max - 3).trimEnd()}...`;
