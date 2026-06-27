@@ -2233,6 +2233,7 @@ function helpText(): string {
     "/enable_signals - enable this chat",
     "/enable_signals <channel_id> - enable a channel",
     "/disable_signals - disable this chat",
+    "/disable_signals <channel_id> - disable a channel",
     "/status - show chat status",
     "/stats [24h|7d|30d] [detail] - show signal performance",
     "/test_signal - send latest eligible signal",

@@ -667,6 +667,40 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "authorized user can disable channel by peer id",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      await enableSignalBotChat({
+        chat: { id: "-1004249870297", title: "Channel", type: "channel" },
+        enabledBy: 123,
+        redis,
+      });
+      const handled = await handleSignalBotCommand({
+        config,
+        message: {
+          chat: { id: 123, title: "Admin DM", type: "private" },
+          from: { id: 123 },
+          text: "/disable_signals 4249870297",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      const state = await getSignalBotChatState(redis, "-1004249870297");
+      assert.equal(state, null);
+      assert.equal(
+        telegram.messages[0]?.text,
+        "Signals disabled for \\-1004249870297\\.",
+      );
+    },
+  },
+  {
     name: "status reports enabled state and minimum confidence",
     run: async () => {
       const redis = new FakeRedis();
