@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 
 import {
+  createRedisClient,
+  ensureRedis,
   requestFreshMarketPrices,
   type PriceRefreshRedis,
 } from "@hunch/infra";
@@ -128,6 +130,8 @@ export type HolderResearchRunOptions = {
   decisionCacheRedis?: HolderResearchDecisionCacheRedis | null;
   priceRefreshRedis?: PriceRefreshRedis | null;
 };
+
+const CLI_REDIS_CONNECT_TIMEOUT_MS = 5_000;
 
 type ExternalResearchResult = {
   status: "skipped" | "dry_run" | "ok" | "no_public_context" | "error";
@@ -301,6 +305,48 @@ function parsePositiveInt(raw: string | undefined): number | null {
   if (!Number.isFinite(parsed)) return null;
   const asInt = Math.trunc(parsed);
   return asInt > 0 ? asInt : null;
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+async function connectHolderResearchCliRedis(): Promise<ReturnType<
+  typeof createRedisClient
+> | null> {
+  if (!env.redisUrl) return null;
+  const redis = createRedisClient({ url: env.redisUrl });
+  redis.on("error", () => undefined);
+  try {
+    await withTimeout(
+      ensureRedis(redis, {
+        logLabel: "holder-research-run",
+        maxWaitMs: CLI_REDIS_CONNECT_TIMEOUT_MS,
+        waitForReady: true,
+      }),
+      CLI_REDIS_CONNECT_TIMEOUT_MS,
+      "Redis connection",
+    );
+    return redis;
+  } catch (error) {
+    console.warn("[holder-research] Redis unavailable for CLI run", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await redis.quit().catch(() => undefined);
+    return null;
+  }
 }
 
 export function parseHolderResearchRunArgs(
@@ -1857,12 +1903,18 @@ export async function runHolderResearch(
       if (publishCount >= policy.maxPublishPerRun) break;
       if (consecutiveSkips >= policy.maxConsecutiveSkips) break;
 
-      const finalPriceCheck = await applyFreshPriceChecksToCandidates({
-        candidates: [selectedCandidate],
-        client,
-        policy,
-        redis: options.priceRefreshRedis,
-      });
+      const finalPriceCheck = args.callModel
+        ? await applyFreshPriceChecksToCandidates({
+            candidates: [selectedCandidate],
+            client,
+            policy,
+            redis: options.priceRefreshRedis,
+          })
+        : {
+            candidates: [selectedCandidate],
+            detail: "callModel=false",
+            status: "skipped" as const,
+          };
       toolCalls.push({
         name: "live_price_final_check",
         count: 1,
@@ -2230,9 +2282,15 @@ export async function runHolderResearch(
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  let redis: ReturnType<typeof createRedisClient> | null = null;
   try {
-    await runHolderResearch();
+    redis = await connectHolderResearchCliRedis();
+    await runHolderResearch(undefined, {
+      decisionCacheRedis: redis,
+      priceRefreshRedis: redis,
+    });
   } finally {
+    if (redis) await redis.quit().catch(() => undefined);
     await pool.end();
   }
 }
