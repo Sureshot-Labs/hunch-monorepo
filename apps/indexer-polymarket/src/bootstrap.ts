@@ -29,6 +29,7 @@ import {
   buildTopMarketsText,
   claimDuePriceRefreshTokens,
   enqueueEmbedItems,
+  filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
   isPgSetupIssue,
   publishMarketState,
@@ -1401,6 +1402,12 @@ export async function processPriceRefreshQueue(
   failed: number;
   backlog: number;
   side: PriceRefreshQueueClaimSide;
+  freshSkipped?: number;
+  stale?: number;
+  marketRefreshed?: number;
+  topRefreshed?: number;
+  httpFallback?: number;
+  durationMs?: number;
 }> {
   const side = options.side ?? "oldest";
   if (!env.priceRefreshQueueEnabled) {
@@ -1430,13 +1437,63 @@ export async function processPriceRefreshQueue(
   let snapshotTokens = 0;
   let refreshTimings: Record<string, number> = {};
   let bookTimings: Record<string, number> = {};
+  let freshSkipped = 0;
+  let staleTokenIds = tokenIds;
   const timings = createTimings();
   try {
+    const freshness = await filterStalePriceRefreshTokens(pool, tokenIds, {
+      maxAgeMs: env.priceRefreshFreshTopMaxAgeMs,
+      now: new Date(startedAt),
+    });
+    freshSkipped = freshness.freshTokenIds.length;
+    staleTokenIds = freshness.staleTokenIds;
+    if (!staleTokenIds.length) {
+      const backlog = await getPriceRefreshQueueBacklog(
+        redisClient,
+        "polymarket",
+      );
+      if (options.logSuccess !== false) {
+        log.info("Polymarket price refresh queue processed", {
+          side,
+          claimed: tokenIds.length,
+          freshSkipped,
+          stale: 0,
+          refreshed: 0,
+          marketRefs: 0,
+          marketRefreshed: 0,
+          eventsFetched: 0,
+          fallbackMarketFetches: 0,
+          snapshotTokens: 0,
+          bookRefreshed: 0,
+          topRefreshed: 0,
+          httpFallback: 0,
+          failed: 0,
+          skippedBookTokens: 0,
+          backlog,
+          durationMs: Date.now() - startedAt,
+          timings,
+        });
+      }
+      return {
+        claimed: tokenIds.length,
+        refreshed: 0,
+        failed: 0,
+        backlog,
+        side,
+        freshSkipped,
+        stale: 0,
+        marketRefreshed: 0,
+        topRefreshed: 0,
+        httpFallback: 0,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
     const refs = await timedPhase(
       timings,
       "priceRefresh.fetchMarketRefs",
-      () => fetchMarketRefsForTokenIds(tokenIds),
-      { tokens: tokenIds.length },
+      () => fetchMarketRefsForTokenIds(staleTokenIds),
+      { tokens: staleTokenIds.length },
     );
     const marketResult = await refreshMarketRefs(refs);
     marketRefs = marketResult.requestedMarkets;
@@ -1448,11 +1505,14 @@ export async function processPriceRefreshQueue(
     const snapshotTokenIds = await timedPhase(
       timings,
       "priceRefresh.fetchTradableSnapshotTokens",
-      () => fetchTradableTokenIdsForSnapshot(tokenIds),
-      { tokens: tokenIds.length },
+      () => fetchTradableTokenIdsForSnapshot(staleTokenIds),
+      { tokens: staleTokenIds.length },
     );
     snapshotTokens = snapshotTokenIds.length;
-    skippedBookTokens = Math.max(0, tokenIds.length - snapshotTokenIds.length);
+    skippedBookTokens = Math.max(
+      0,
+      staleTokenIds.length - snapshotTokenIds.length,
+    );
     if (snapshotTokenIds.length) {
       const result = await snapshotBooks(snapshotTokenIds);
       bookTimings = result.timings;
@@ -1469,10 +1529,10 @@ export async function processPriceRefreshQueue(
     }
     refreshed = marketRefreshed + bookRefreshed;
   } catch (error) {
-    failed = tokenIds.length;
+    failed = staleTokenIds.length;
     await requeuePriceRefreshTokens(redisClient, {
       venue: "polymarket",
-      tokenIds,
+      tokenIds: staleTokenIds,
       delayMs: env.priceRefreshRetryDelayMs,
       maxQueueSize: env.priceRefreshQueueMax,
     });
@@ -1484,6 +1544,8 @@ export async function processPriceRefreshQueue(
     log.info("Polymarket price refresh queue processed", {
       side,
       claimed: tokenIds.length,
+      freshSkipped,
+      stale: staleTokenIds.length,
       refreshed,
       marketRefs,
       marketRefreshed,
@@ -1491,6 +1553,8 @@ export async function processPriceRefreshQueue(
       fallbackMarketFetches,
       snapshotTokens,
       bookRefreshed,
+      topRefreshed: bookRefreshed,
+      httpFallback: marketRefs + snapshotTokens,
       failed,
       skippedBookTokens,
       backlog,
@@ -1502,7 +1566,19 @@ export async function processPriceRefreshQueue(
       },
     });
   }
-  return { claimed: tokenIds.length, refreshed, failed, backlog, side };
+  return {
+    claimed: tokenIds.length,
+    refreshed,
+    failed,
+    backlog,
+    side,
+    freshSkipped,
+    stale: staleTokenIds.length,
+    marketRefreshed,
+    topRefreshed: bookRefreshed,
+    httpFallback: marketRefs + snapshotTokens,
+    durationMs: Date.now() - startedAt,
+  };
 }
 
 function parseJsonStringArray(raw: unknown): string[] {

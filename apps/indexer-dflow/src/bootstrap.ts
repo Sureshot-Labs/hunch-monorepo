@@ -5,6 +5,7 @@ import {
   buildTopMarketsText,
   claimDuePriceRefreshTokens,
   enqueueEmbedItems,
+  filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
   createTopTickGate,
   publishMarketState,
@@ -1427,6 +1428,12 @@ export async function processPriceRefreshQueue(
   failed: number;
   backlog: number;
   side: PriceRefreshQueueClaimSide;
+  freshSkipped?: number;
+  stale?: number;
+  marketRefreshed?: number;
+  topRefreshed?: number;
+  httpFallback?: number;
+  durationMs?: number;
 }> {
   const side = options.side ?? "oldest";
   if (!env.priceRefreshQueueEnabled || !env.dflowEnabled) {
@@ -1449,20 +1456,60 @@ export async function processPriceRefreshQueue(
   let failed = 0;
   let marketRefreshed = 0;
   let topRefreshed = 0;
+  let freshSkipped = 0;
+  let staleTokenIds = tokenIds;
   try {
+    const freshness = await filterStalePriceRefreshTokens(pool, tokenIds, {
+      maxAgeMs: env.priceRefreshFreshTopMaxAgeMs,
+      now: new Date(startedAt),
+    });
+    freshSkipped = freshness.freshTokenIds.length;
+    staleTokenIds = freshness.staleTokenIds;
+    if (!staleTokenIds.length) {
+      const backlog = await getPriceRefreshQueueBacklog(redisClient, "dflow");
+      if (options.logSuccess !== false) {
+        log.info("DFlow price refresh queue processed", {
+          side,
+          claimed: tokenIds.length,
+          freshSkipped,
+          stale: 0,
+          refreshed: 0,
+          marketRefreshed: 0,
+          topRefreshed: 0,
+          httpFallback: 0,
+          failed: 0,
+          backlog,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      return {
+        claimed: tokenIds.length,
+        refreshed: 0,
+        failed: 0,
+        backlog,
+        side,
+        freshSkipped,
+        stale: 0,
+        marketRefreshed: 0,
+        topRefreshed: 0,
+        httpFallback: 0,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
     const result = await syncMarketStatusesForTokenIds(
-      tokenIds,
+      staleTokenIds,
       "price-refresh",
       { includeSiblings: false, publishMarketState: true },
     );
     marketRefreshed = result.processedMarkets;
-    topRefreshed = await publishTokenTopsForTokenIds(tokenIds);
+    topRefreshed = await publishTokenTopsForTokenIds(staleTokenIds);
     refreshed = marketRefreshed + topRefreshed;
   } catch (error) {
-    failed = tokenIds.length;
+    failed = staleTokenIds.length;
     await requeuePriceRefreshTokens(redisClient, {
       venue: "dflow",
-      tokenIds,
+      tokenIds: staleTokenIds,
       delayMs: env.priceRefreshRetryDelayMs,
       maxQueueSize: env.priceRefreshQueueMax,
     });
@@ -1474,15 +1521,30 @@ export async function processPriceRefreshQueue(
     log.info("DFlow price refresh queue processed", {
       side,
       claimed: tokenIds.length,
+      freshSkipped,
+      stale: staleTokenIds.length,
       refreshed,
       marketRefreshed,
       topRefreshed,
+      httpFallback: staleTokenIds.length,
       failed,
       backlog,
       durationMs: Date.now() - startedAt,
     });
   }
-  return { claimed: tokenIds.length, refreshed, failed, backlog, side };
+  return {
+    claimed: tokenIds.length,
+    refreshed,
+    failed,
+    backlog,
+    side,
+    freshSkipped,
+    stale: staleTokenIds.length,
+    marketRefreshed,
+    topRefreshed,
+    httpFallback: staleTokenIds.length,
+    durationMs: Date.now() - startedAt,
+  };
 }
 
 async function processEvents(

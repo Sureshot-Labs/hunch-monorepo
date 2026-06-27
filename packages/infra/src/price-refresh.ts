@@ -57,6 +57,23 @@ export type RequeuePriceRefreshInputs = {
   maxQueueSize?: number;
 };
 
+export type PriceRefreshFreshnessDb = {
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: readonly unknown[],
+  ): Promise<{ rows: T[] }>;
+};
+
+export type FilterStalePriceRefreshTokensInputs = {
+  maxAgeMs: number;
+  now?: Date;
+};
+
+export type FilterStalePriceRefreshTokensResult = {
+  freshTokenIds: string[];
+  staleTokenIds: string[];
+};
+
 export const PRICE_REFRESH_QUEUE_KEYS: Record<PriceRefreshVenue, string> = {
   polymarket: "price-refresh:tokens:polymarket",
   dflow: "price-refresh:tokens:dflow",
@@ -98,6 +115,24 @@ const HIGH_PRIORITY_SCORE_BIAS_MS = 31 * 24 * 60 * 60 * 1_000;
 function normalizeTokenId(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function parseTimestampMs(value: unknown): number | null {
+  if (value instanceof Date) {
+    const time = value.getTime();
+    return Number.isFinite(time) ? time : null;
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    const time = new Date(value).getTime();
+    return Number.isFinite(time) ? time : null;
+  }
+  return null;
+}
+
+function hasFiniteTopPrice(value: unknown): boolean {
+  if (value == null) return false;
+  const n = Number(value);
+  return Number.isFinite(n);
 }
 
 export function inferPriceRefreshVenue(
@@ -232,4 +267,58 @@ export async function getPriceRefreshQueueBacklog(
   venue: PriceRefreshVenue,
 ): Promise<number> {
   return redis.zCard(getPriceRefreshQueueKey(venue));
+}
+
+export async function filterStalePriceRefreshTokens(
+  db: PriceRefreshFreshnessDb,
+  tokenIds: Array<string | null | undefined>,
+  inputs: FilterStalePriceRefreshTokensInputs,
+): Promise<FilterStalePriceRefreshTokensResult> {
+  const orderedTokenIds: string[] = [];
+  const seen = new Set<string>();
+  for (const rawTokenId of tokenIds) {
+    const tokenId = normalizeTokenId(rawTokenId);
+    if (!tokenId || seen.has(tokenId)) continue;
+    seen.add(tokenId);
+    orderedTokenIds.push(tokenId);
+  }
+
+  if (!orderedTokenIds.length) {
+    return { freshTokenIds: [], staleTokenIds: [] };
+  }
+
+  const maxAgeMs = Math.max(0, Math.trunc(inputs.maxAgeMs));
+  const nowMs = (inputs.now ?? new Date()).getTime();
+  const cutoffMs = nowMs - maxAgeMs;
+
+  const { rows } = await db.query<{
+    token_id: string;
+    ts: Date | string | number | null;
+    best_bid: number | string | null;
+    best_ask: number | string | null;
+  }>(
+    `
+      select token_id, ts, best_bid, best_ask
+      from unified_token_top_latest
+      where token_id = any($1::text[])
+    `,
+    [orderedTokenIds],
+  );
+
+  const byTokenId = new Map(rows.map((row) => [row.token_id, row]));
+  const freshTokenIds: string[] = [];
+  const staleTokenIds: string[] = [];
+  for (const tokenId of orderedTokenIds) {
+    const row = byTokenId.get(tokenId);
+    const tsMs = parseTimestampMs(row?.ts ?? null);
+    const hasTop =
+      hasFiniteTopPrice(row?.best_bid) || hasFiniteTopPrice(row?.best_ask);
+    if (tsMs != null && tsMs >= cutoffMs && hasTop) {
+      freshTokenIds.push(tokenId);
+    } else {
+      staleTokenIds.push(tokenId);
+    }
+  }
+
+  return { freshTokenIds, staleTokenIds };
 }

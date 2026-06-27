@@ -15,6 +15,8 @@ import {
 import { env } from "./env.js";
 import { ensureRedis, redis } from "./redis.js";
 import {
+  diffLimitlessWsDemandEventStats,
+  getLimitlessWsDemandEventStats,
   resubscribeMarketWSSubscriptions,
   startMarketWS,
   updateMarketWSSubscriptions,
@@ -26,6 +28,66 @@ let wsRefreshRunning = false;
 let priceRefreshRunning = false;
 
 type PriceRefreshResult = Awaited<ReturnType<typeof processPriceRefreshQueue>>;
+type PriceRefreshAggregate = {
+  claimed: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+  freshSkipped: number;
+  stale: number;
+  marketRefreshed: number;
+  topRefreshed: number;
+  httpFallback: number;
+  wsDemandRequested: number;
+  wsDemandFilled: number;
+  resolvedTopUpdated: number;
+  resolvedEventsHandled: number;
+  derivedSiblingTopUpdated: number;
+  derivedSiblingTopSkippedRecentDirect: number;
+  wsDemandTargetsByTradeType: Record<string, number>;
+  wsDemandTokensByTradeType: Record<string, number>;
+  wsDemandFilledByTradeType: Record<string, number>;
+  wsDemandStillStaleByTradeType: Record<string, number>;
+  httpFallbackByTradeType: Record<string, number>;
+  httpFallbackReasons: Record<string, number>;
+  httpFallbackNoTopSamples: NonNullable<
+    PriceRefreshResult["httpFallbackNoTopSamples"]
+  >;
+  claimedBySide: { oldest: number; newest: number };
+};
+
+function mergeCountRecords(
+  left: Record<string, number>,
+  right: Record<string, number> | undefined,
+): Record<string, number> {
+  const out = { ...left };
+  for (const [key, value] of Object.entries(right ?? {})) {
+    out[key] = (out[key] ?? 0) + value;
+  }
+  return out;
+}
+
+function noTopSampleKey(
+  sample: NonNullable<PriceRefreshResult["httpFallbackNoTopSamples"]>[number],
+): string {
+  return `${sample.marketId}:${sample.reason}`;
+}
+
+function mergeNoTopSamples(
+  left: NonNullable<PriceRefreshResult["httpFallbackNoTopSamples"]>,
+  right: PriceRefreshResult["httpFallbackNoTopSamples"],
+): NonNullable<PriceRefreshResult["httpFallbackNoTopSamples"]> {
+  const out = [...left];
+  const seen = new Set(out.map(noTopSampleKey));
+  for (const sample of right ?? []) {
+    const key = noTopSampleKey(sample);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(sample);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
 
 async function writeStats(
   patch: Parameters<typeof updateIndexerStats>[2],
@@ -39,12 +101,59 @@ async function writeStats(
 }
 
 function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
-  return results.reduce(
+  return results.reduce<PriceRefreshAggregate>(
     (acc, result) => ({
       claimed: acc.claimed + result.claimed,
       refreshed: acc.refreshed + result.refreshed,
       failed: acc.failed + result.failed,
       backlog: Math.max(acc.backlog, result.backlog),
+      freshSkipped: acc.freshSkipped + (result.freshSkipped ?? 0),
+      stale: acc.stale + (result.stale ?? 0),
+      marketRefreshed:
+        acc.marketRefreshed + (result.marketRefreshed ?? 0),
+      topRefreshed: acc.topRefreshed + (result.topRefreshed ?? 0),
+      httpFallback: acc.httpFallback + (result.httpFallback ?? 0),
+      wsDemandRequested:
+        acc.wsDemandRequested + (result.wsDemandRequested ?? 0),
+      wsDemandFilled: acc.wsDemandFilled + (result.wsDemandFilled ?? 0),
+      resolvedTopUpdated:
+        acc.resolvedTopUpdated + (result.resolvedTopUpdated ?? 0),
+      resolvedEventsHandled:
+        acc.resolvedEventsHandled + (result.resolvedEventsHandled ?? 0),
+      derivedSiblingTopUpdated:
+        acc.derivedSiblingTopUpdated +
+        (result.derivedSiblingTopUpdated ?? 0),
+      derivedSiblingTopSkippedRecentDirect:
+        acc.derivedSiblingTopSkippedRecentDirect +
+        (result.derivedSiblingTopSkippedRecentDirect ?? 0),
+      wsDemandTargetsByTradeType: mergeCountRecords(
+        acc.wsDemandTargetsByTradeType,
+        result.wsDemandTargetsByTradeType,
+      ),
+      wsDemandTokensByTradeType: mergeCountRecords(
+        acc.wsDemandTokensByTradeType,
+        result.wsDemandTokensByTradeType,
+      ),
+      wsDemandFilledByTradeType: mergeCountRecords(
+        acc.wsDemandFilledByTradeType,
+        result.wsDemandFilledByTradeType,
+      ),
+      wsDemandStillStaleByTradeType: mergeCountRecords(
+        acc.wsDemandStillStaleByTradeType,
+        result.wsDemandStillStaleByTradeType,
+      ),
+      httpFallbackByTradeType: mergeCountRecords(
+        acc.httpFallbackByTradeType,
+        result.httpFallbackByTradeType,
+      ),
+      httpFallbackReasons: mergeCountRecords(
+        acc.httpFallbackReasons,
+        result.httpFallbackReasons,
+      ),
+      httpFallbackNoTopSamples: mergeNoTopSamples(
+        acc.httpFallbackNoTopSamples,
+        result.httpFallbackNoTopSamples,
+      ),
       claimedBySide: {
         oldest:
           acc.claimedBySide.oldest +
@@ -59,6 +168,24 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       refreshed: 0,
       failed: 0,
       backlog: 0,
+      freshSkipped: 0,
+      stale: 0,
+      marketRefreshed: 0,
+      topRefreshed: 0,
+      httpFallback: 0,
+      wsDemandRequested: 0,
+      wsDemandFilled: 0,
+      resolvedTopUpdated: 0,
+      resolvedEventsHandled: 0,
+      derivedSiblingTopUpdated: 0,
+      derivedSiblingTopSkippedRecentDirect: 0,
+      wsDemandTargetsByTradeType: {},
+      wsDemandTokensByTradeType: {},
+      wsDemandFilledByTradeType: {},
+      wsDemandStillStaleByTradeType: {},
+      httpFallbackByTradeType: {},
+      httpFallbackReasons: {},
+      httpFallbackNoTopSamples: [],
       claimedBySide: { oldest: 0, newest: 0 },
     },
   );
@@ -81,6 +208,7 @@ async function periodicHotRefresh() {
     }
     log.info("Limitless hot refresh finished", {
       markets: marketResult.processedMarkets,
+      resolvedTopUpdated: marketResult.resolvedTopUpdated,
       ammDemandedMarkets: ammResult.demandedMarkets,
       ammScannedMarkets: ammResult.scannedMarkets,
       ammUpdatedMarkets: ammResult.updatedMarkets,
@@ -92,6 +220,7 @@ async function periodicHotRefresh() {
         lastRunAt: new Date(startedAt).toISOString(),
         durationMs: Date.now() - startedAt,
         processedMarkets: marketResult.processedMarkets,
+        resolvedTopUpdated: marketResult.resolvedTopUpdated,
         ammDemandedMarkets: ammResult.demandedMarkets,
         ammScannedMarkets: ammResult.scannedMarkets,
         ammUpdatedMarkets: ammResult.updatedMarkets,
@@ -197,6 +326,7 @@ async function periodicPriceRefresh() {
   const startedAt = Date.now();
   try {
     const consumers = env.priceRefreshQueueConsumers;
+    const wsDemandEventStatsBefore = getLimitlessWsDemandEventStats();
     const results = await Promise.all(
       Array.from({ length: consumers }, (_, consumerIndex) =>
         processPriceRefreshQueue({
@@ -206,6 +336,9 @@ async function periodicPriceRefresh() {
       ),
     );
     const aggregate = aggregatePriceRefreshResults(results);
+    const wsDemandEvents = diffLimitlessWsDemandEventStats(
+      wsDemandEventStatsBefore,
+    );
     const durationMs = Date.now() - startedAt;
     if (
       aggregate.claimed > 0 ||
@@ -217,7 +350,28 @@ async function periodicPriceRefresh() {
         batch: env.priceRefreshQueueBatch,
         claimed: aggregate.claimed,
         claimedBySide: aggregate.claimedBySide,
+        freshSkipped: aggregate.freshSkipped,
+        stale: aggregate.stale,
         refreshed: aggregate.refreshed,
+        marketRefreshed: aggregate.marketRefreshed,
+        topRefreshed: aggregate.topRefreshed,
+        httpFallback: aggregate.httpFallback,
+        wsDemandRequested: aggregate.wsDemandRequested,
+        wsDemandFilled: aggregate.wsDemandFilled,
+        resolvedTopUpdated: aggregate.resolvedTopUpdated,
+        resolvedEventsHandled: aggregate.resolvedEventsHandled,
+        derivedSiblingTopUpdated: aggregate.derivedSiblingTopUpdated,
+        derivedSiblingTopSkippedRecentDirect:
+          aggregate.derivedSiblingTopSkippedRecentDirect,
+        wsDemandTargetsByTradeType: aggregate.wsDemandTargetsByTradeType,
+        wsDemandTokensByTradeType: aggregate.wsDemandTokensByTradeType,
+        wsDemandFilledByTradeType: aggregate.wsDemandFilledByTradeType,
+        wsDemandStillStaleByTradeType:
+          aggregate.wsDemandStillStaleByTradeType,
+        wsDemandEvents,
+        httpFallbackByTradeType: aggregate.httpFallbackByTradeType,
+        httpFallbackReasons: aggregate.httpFallbackReasons,
+        httpFallbackNoTopSamples: aggregate.httpFallbackNoTopSamples,
         failed: aggregate.failed,
         backlog: aggregate.backlog,
         durationMs,
@@ -229,6 +383,7 @@ async function periodicPriceRefresh() {
         durationMs,
         consumers,
         batch: env.priceRefreshQueueBatch,
+        wsDemandEvents,
         ...aggregate,
       },
       lastError: null,

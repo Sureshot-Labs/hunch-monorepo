@@ -311,6 +311,13 @@ const priceRefreshRetryDelayMs = clampInt(
   parseOptionalInt(process.env.PRICE_REFRESH_RETRY_DELAY_MS),
   { min: 1000, max: 60 * 60 * 1000, fallback: 60_000 },
 );
+const priceRefreshFreshTopMaxAgeMs = clampInt(
+  parseOptionalInt(
+    process.env.DFLOW_PRICE_REFRESH_FRESH_TOP_MAX_AGE_MS ??
+      process.env.PRICE_REFRESH_FRESH_TOP_MAX_AGE_MS,
+  ),
+  { min: 1_000, max: 10 * 60 * 1000, fallback: 60_000 },
+);
 
 const isInitializedSetting = parseOptionalBool(
   process.env.DFLOW_IS_INITIALIZED,
@@ -450,6 +457,7 @@ export const env = {
   priceRefreshQueueIntervalMs,
   priceRefreshQueueMax,
   priceRefreshRetryDelayMs,
+  priceRefreshFreshTopMaxAgeMs,
   isInitializedSetting,
   isInitialized: isInitializedSetting,
   requireInitializedSetting,

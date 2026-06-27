@@ -12,7 +12,7 @@
     "start": "node dist/main.js",
     "start:bun": "bun dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm run build && node dist/mappers-tests.js && node dist/bootstrap-tests.js && node dist/clobBook-tests.js",
+    "test": "pnpm run build && node dist/mappers-tests.js && node dist/bootstrap-tests.js && node dist/clobBook-tests.js && node dist/wsMarket-tests.js",
     "category:backfill": "tsx src/category-backfill.ts",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

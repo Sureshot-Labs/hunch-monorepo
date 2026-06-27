@@ -44,6 +44,12 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       refreshed: acc.refreshed + result.refreshed,
       failed: acc.failed + result.failed,
       backlog: Math.max(acc.backlog, result.backlog),
+      freshSkipped: acc.freshSkipped + (result.freshSkipped ?? 0),
+      stale: acc.stale + (result.stale ?? 0),
+      marketRefreshed:
+        acc.marketRefreshed + (result.marketRefreshed ?? 0),
+      topRefreshed: acc.topRefreshed + (result.topRefreshed ?? 0),
+      httpFallback: acc.httpFallback + (result.httpFallback ?? 0),
       claimedBySide: {
         oldest:
           acc.claimedBySide.oldest +
@@ -58,6 +64,11 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       refreshed: 0,
       failed: 0,
       backlog: 0,
+      freshSkipped: 0,
+      stale: 0,
+      marketRefreshed: 0,
+      topRefreshed: 0,
+      httpFallback: 0,
       claimedBySide: { oldest: 0, newest: 0 },
     },
   );
@@ -186,7 +197,12 @@ async function periodicPriceRefresh() {
         batch: env.priceRefreshQueueBatch,
         claimed: aggregate.claimed,
         claimedBySide: aggregate.claimedBySide,
+        freshSkipped: aggregate.freshSkipped,
+        stale: aggregate.stale,
         refreshed: aggregate.refreshed,
+        marketRefreshed: aggregate.marketRefreshed,
+        topRefreshed: aggregate.topRefreshed,
+        httpFallback: aggregate.httpFallback,
         failed: aggregate.failed,
         backlog: aggregate.backlog,
         durationMs,

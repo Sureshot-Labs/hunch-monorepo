@@ -591,9 +591,8 @@ async function loadVenueStats(
   const includeCategoryStats = options?.includeCategoryStats ?? true;
   const includeRatioStats = options?.includeRatioStats ?? true;
 
-  const [statsResult, categoryRows, ratioRows] = await Promise.all([
-    client.query<VenueStatsRow>(
-      `
+  const statsResult = await client.query<VenueStatsRow>(
+    `
         select
           wah.wallet_id,
           wah.venue,
@@ -616,12 +615,12 @@ async function loadVenueStats(
           and wah.hour_bucket >= now() - interval '30 days'
         group by wah.wallet_id, wah.venue
       `,
-      [walletIds],
-    ),
-    includeCategoryStats
-      ? client
-          .query<CategoryVolumeRow>(
-            `
+    [walletIds],
+  );
+  const categoryRows = includeCategoryStats
+    ? (
+        await client.query<CategoryVolumeRow>(
+          `
               with wallet_market as (
                 select
                   wah.wallet_id,
@@ -679,14 +678,14 @@ async function loadVenueStats(
               left join market_meta mm on mm.market_id = wm.market_id
               left join event_lookup el on el.event_id = mm.event_id
             `,
-            [walletIds],
-          )
-          .then((result) => result.rows)
-      : Promise.resolve([] as CategoryVolumeRow[]),
-    includeRatioStats
-      ? client
-          .query<RatioRow>(
-            `
+          [walletIds],
+        )
+      ).rows
+    : [];
+  const ratioRows = includeRatioStats
+    ? (
+        await client.query<RatioRow>(
+          `
               with wallet_market as (
                 select
                   wah.wallet_id,
@@ -732,11 +731,10 @@ async function loadVenueStats(
                and mt.market_id = wm.market_id
               group by wm.wallet_id, wm.venue
             `,
-            [walletIds],
-          )
-          .then((result) => result.rows)
-      : Promise.resolve([] as RatioRow[]),
-  ]);
+          [walletIds],
+        )
+      ).rows
+    : [];
 
   for (const row of statsResult.rows) {
     const venue = parseVenue(row.venue);
@@ -839,9 +837,8 @@ async function loadComputedStats(
   if (wallets.length === 0) return map;
   const walletIds = wallets.map((wallet) => wallet.walletId);
 
-  const [exposureResult, inferredResult] = await Promise.all([
-    client.query<ExposureRow>(
-      `
+  const exposureResult = await client.query<ExposureRow>(
+    `
         select
           wallet_id,
           exposure_usd,
@@ -852,17 +849,16 @@ async function loadComputedStats(
         from wallet_position_exposure
         where wallet_id = any($1::uuid[])
       `,
-      [walletIds],
-    ),
-    client.query<InferredOutcomeRow>(
-      `
+    [walletIds],
+  );
+  const inferredResult = await client.query<InferredOutcomeRow>(
+    `
         select wallet_id, wins, total
         from wallet_inferred_outcomes
         where wallet_id = any($1::uuid[])
       `,
-      [walletIds],
-    ),
-  ]);
+    [walletIds],
+  );
 
   const exposureByWallet = new Map<
     string,
@@ -1316,13 +1312,11 @@ export async function buildWalletAttributionMap(
   const includeRatioStats =
     mode === "full" || requestedLabels.has("market_mover");
   const walletIds = wallets.map((wallet) => wallet.walletId);
-  const [venueStatsByWallet, computedStatsByWallet] = await Promise.all([
-    loadVenueStats(client, walletIds, {
-      includeCategoryStats,
-      includeRatioStats,
-    }),
-    loadComputedStats(client, wallets),
-  ]);
+  const venueStatsByWallet = await loadVenueStats(client, walletIds, {
+    includeCategoryStats,
+    includeRatioStats,
+  });
+  const computedStatsByWallet = await loadComputedStats(client, wallets);
 
   const tieBreak = normalizeTieBreakOrder(policy);
   for (const wallet of wallets) {

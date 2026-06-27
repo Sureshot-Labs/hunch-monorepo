@@ -1207,11 +1207,13 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
 
     pingInterval = setInterval(() => {
       try {
-        ws.ping();
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send("PING");
+        }
       } catch {
         // ignore
       }
-    }, 20_000);
+    }, 10_000);
 
     resubscribeInterval = setInterval(() => {
       try {

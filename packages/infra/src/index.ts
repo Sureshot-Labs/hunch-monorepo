@@ -26,6 +26,7 @@ export {
 export {
   claimDuePriceRefreshTokens,
   enqueuePriceRefreshTokens,
+  filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
   getPriceRefreshQueueKey,
   inferPriceRefreshVenue,
@@ -58,6 +59,9 @@ export type {
   ClaimPriceRefreshInputs,
   EnqueuePriceRefreshInputs,
   EnqueuePriceRefreshResult,
+  FilterStalePriceRefreshTokensInputs,
+  FilterStalePriceRefreshTokensResult,
+  PriceRefreshFreshnessDb,
   PriceRefreshRedis,
   PriceRefreshQueueClaimSide,
   PriceRefreshPriority,

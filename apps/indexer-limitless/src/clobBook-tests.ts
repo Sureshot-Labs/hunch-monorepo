@@ -8,6 +8,10 @@ import {
   createClobBookState,
   getClobBookTop,
 } from "./clobBook.js";
+import {
+  deriveLimitlessClobSiblingTop,
+  LimitlessClobDirectTopTracker,
+} from "./clobComplement.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -90,4 +94,90 @@ test("book snapshot is sorted and capped", () => {
     ],
     timestamp: "123",
   });
+});
+
+test("YES direct top derives complementary NO top", () => {
+  assert.deepEqual(
+    deriveLimitlessClobSiblingTop({
+      directTokenId: "limitless:yes",
+      pair: { yesTokenId: "limitless:yes", noTokenId: "limitless:no" },
+      bestBid: 0.2,
+      bestAsk: 0.3,
+    }),
+    { tokenId: "limitless:no", bestBid: 0.7, bestAsk: 0.8 },
+  );
+});
+
+test("NO direct top derives complementary YES top", () => {
+  assert.deepEqual(
+    deriveLimitlessClobSiblingTop({
+      directTokenId: "limitless:no",
+      pair: { yesTokenId: "limitless:yes", noTokenId: "limitless:no" },
+      bestBid: 0.4,
+      bestAsk: 0.55,
+    }),
+    { tokenId: "limitless:yes", bestBid: 0.44999999999999996, bestAsk: 0.6 },
+  );
+});
+
+test("missing direct bid or ask derives only computable sibling side", () => {
+  assert.deepEqual(
+    deriveLimitlessClobSiblingTop({
+      directTokenId: "yes",
+      pair: { yesTokenId: "yes", noTokenId: "no" },
+      bestBid: null,
+      bestAsk: 0.72,
+    }),
+    { tokenId: "limitless:no", bestBid: 0.28, bestAsk: null },
+  );
+
+  assert.deepEqual(
+    deriveLimitlessClobSiblingTop({
+      directTokenId: "yes",
+      pair: { yesTokenId: "yes", noTokenId: "no" },
+      bestBid: 0.31,
+      bestAsk: null,
+    }),
+    { tokenId: "limitless:no", bestBid: null, bestAsk: 0.69 },
+  );
+});
+
+test("invalid direct top skips sibling derivation", () => {
+  assert.equal(
+    deriveLimitlessClobSiblingTop({
+      directTokenId: "limitless:yes",
+      pair: { yesTokenId: "limitless:yes", noTokenId: "limitless:no" },
+      bestBid: 0.8,
+      bestAsk: 0.2,
+    }),
+    null,
+  );
+
+  assert.equal(
+    deriveLimitlessClobSiblingTop({
+      directTokenId: "limitless:other",
+      pair: { yesTokenId: "limitless:yes", noTokenId: "limitless:no" },
+      bestBid: 0.2,
+      bestAsk: 0.3,
+    }),
+    null,
+  );
+});
+
+test("recent direct sibling top blocks derived overwrite", () => {
+  const tracker = new LimitlessClobDirectTopTracker();
+  tracker.markDirectTop("limitless:no", 1_000);
+
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 30_000), true);
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 61_000), false);
+});
+
+test("derived sibling check does not mark direct top", () => {
+  const tracker = new LimitlessClobDirectTopTracker();
+
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 30_000), false);
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 31_000), false);
+
+  tracker.markDirectTop("limitless:no", 32_000);
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 33_000), true);
 });

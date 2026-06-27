@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   claimDuePriceRefreshTokens,
   enqueuePriceRefreshTokens,
+  filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
   inferPriceRefreshVenue,
   requeuePriceRefreshTokens,
@@ -342,6 +343,51 @@ await test("normal re-enqueue does not demote an existing high-priority token", 
   });
 
   assert.deepEqual(claimed, ["system-now", "normal-old"]);
+});
+
+await test("filterStalePriceRefreshTokens preserves order and requires recent priced tops", async () => {
+  const now = new Date("2026-01-01T00:01:00.000Z");
+  const db = {
+    async query<T = Record<string, unknown>>() {
+      return {
+        rows: [
+          {
+            best_ask: null,
+            best_bid: "0.4",
+            token_id: "fresh-bid",
+            ts: "2026-01-01T00:00:30.000Z",
+          },
+          {
+            best_ask: "0.6",
+            best_bid: null,
+            token_id: "fresh-ask",
+            ts: "2026-01-01T00:00:59.000Z",
+          },
+          {
+            best_ask: "0.6",
+            best_bid: "0.4",
+            token_id: "old",
+            ts: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            best_ask: null,
+            best_bid: null,
+            token_id: "unpriced",
+            ts: "2026-01-01T00:00:59.000Z",
+          },
+        ] as T[],
+      };
+    },
+  };
+
+  const result = await filterStalePriceRefreshTokens(
+    db,
+    ["fresh-bid", "old", "missing", "unpriced", "fresh-ask", "fresh-bid"],
+    { maxAgeMs: 45_000, now },
+  );
+
+  assert.deepEqual(result.freshTokenIds, ["fresh-bid", "fresh-ask"]);
+  assert.deepEqual(result.staleTokenIds, ["old", "missing", "unpriced"]);
 });
 
 await test("requestFreshMarketPrices is safe for single-client DB callers", async () => {

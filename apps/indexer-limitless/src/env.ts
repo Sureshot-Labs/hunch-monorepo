@@ -135,7 +135,7 @@ const wsRefreshSec = clampInt(
   { min: 10, max: 3600, fallback: 10 },
 );
 
-const httpDelayRaw = Number(process.env.LIMITLESS_HTTP_MIN_DELAY_MS ?? "500");
+const httpDelayRaw = Number(process.env.LIMITLESS_HTTP_MIN_DELAY_MS ?? "250");
 const limitlessHttpMinDelayMs = Math.max(
   0,
   Number.isFinite(httpDelayRaw) ? httpDelayRaw : 500,
@@ -204,6 +204,31 @@ const priceRefreshQueueMax = clampInt(
 const priceRefreshRetryDelayMs = clampInt(
   parseOptionalInt(process.env.PRICE_REFRESH_RETRY_DELAY_MS),
   { min: 1000, max: 60 * 60 * 1000, fallback: 60_000 },
+);
+const priceRefreshFreshTopMaxAgeMs = clampInt(
+  parseOptionalInt(
+    process.env.LIMITLESS_PRICE_REFRESH_FRESH_TOP_MAX_AGE_MS ??
+      process.env.PRICE_REFRESH_FRESH_TOP_MAX_AGE_MS,
+  ),
+  { min: 1_000, max: 10 * 60 * 1000, fallback: 60_000 },
+);
+const priceRefreshWsDemandEnabled =
+  parseOptionalBool(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_ENABLED) ??
+  true;
+const priceRefreshWsDemandAmmEnabled =
+  parseOptionalBool(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_AMM_ENABLED) ??
+  false;
+const priceRefreshWsDemandTtlMs = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_TTL_MS),
+  { min: 5_000, max: 10 * 60 * 1000, fallback: 60_000 },
+);
+const priceRefreshWsDemandWaitMs = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_WAIT_MS),
+  { min: 0, max: 10_000, fallback: 2_000 },
+);
+const priceRefreshWsDemandMaxTargets = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_MAX_TARGETS),
+  { min: 1, max: 5_000, fallback: 250 },
 );
 
 const wsHotShareRaw = parseOptionalFloat(
@@ -280,6 +305,12 @@ export const env = {
   priceRefreshQueueIntervalMs,
   priceRefreshQueueMax,
   priceRefreshRetryDelayMs,
+  priceRefreshFreshTopMaxAgeMs,
+  priceRefreshWsDemandEnabled,
+  priceRefreshWsDemandAmmEnabled,
+  priceRefreshWsDemandTtlMs,
+  priceRefreshWsDemandWaitMs,
+  priceRefreshWsDemandMaxTargets,
   hotAmmQuoteCooldownMs,
   hotAmmQuoteMaxMarkets,
 
