@@ -207,6 +207,7 @@ function market(
       yesChangeSincePreviousDecision: null,
       previousDecisionCheckedAt: null,
     },
+    livePriceCheck: null,
     sides: {
       YES: side("YES", { usd: 120_000, wallets: 5 }),
       NO: side("NO", {
@@ -1117,6 +1118,37 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         true,
       );
       assert.equal(highPriceActionability.isPrimaryResearchCandidate, false);
+
+      const liveBlocked = buildHolderResearchCandidatesFromMarket(
+        market({
+          livePriceCheck: {
+            blockersBySide: {
+              YES: [],
+              NO: ["terminal_price"],
+            },
+            checkedAt: new Date().toISOString(),
+            fresh: true,
+            sideBuyPrices: {
+              YES: 0.01,
+              NO: 0.99,
+            },
+            tokenIds: ["yes-token", "no-token"],
+            yesProbability: 0.01,
+          },
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      assert.ok(liveBlocked);
+      assert.equal(liveBlocked.side, "NO");
+      const liveBlockedActionability =
+        buildHolderResearchCandidateActionability(liveBlocked, p);
+      assert.equal(
+        liveBlockedActionability.likelyFinalGateBlockers.includes(
+          "live_price_terminal",
+        ),
+        true,
+      );
+      assert.equal(liveBlockedActionability.isPrimaryResearchCandidate, false);
     },
   },
   {

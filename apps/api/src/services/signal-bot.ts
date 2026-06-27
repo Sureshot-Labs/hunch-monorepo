@@ -1,3 +1,6 @@
+import { requestFreshMarketPrices } from "@hunch/infra";
+import { getMarketPriceSideState, type MarketPriceBlocker } from "@hunch/shared";
+
 import type { DbQuery } from "../db.js";
 import { createAggMarketClient } from "./agg-market-client.js";
 import {
@@ -949,6 +952,15 @@ export type SignalBotCheaperAlternativeDiagnostics = {
   aggNotFound: number;
 };
 
+export type SignalBotPriceGuardDiagnostics = {
+  priceGuardBuyPriceTooHigh: number;
+  priceGuardInvalidSpread: number;
+  priceGuardMissingSidePrice: number;
+  priceGuardNoBook: number;
+  priceGuardSkipped: number;
+  priceGuardTerminalPrice: number;
+};
+
 type SignalBotCheaperAlternativeResult = {
   alternative: SignalBotCheaperAlternative | null;
   diagnostics: SignalBotCheaperAlternativeDiagnostics;
@@ -1011,6 +1023,73 @@ function addSignalBotCheaperAlternativeDiagnostics(
   target.aggMatchedNotCheaper += source.aggMatchedNotCheaper;
   target.aggNoResponse += source.aggNoResponse;
   target.aggNotFound += source.aggNotFound;
+}
+
+function createSignalBotPriceGuardDiagnostics(): SignalBotPriceGuardDiagnostics {
+  return {
+    priceGuardBuyPriceTooHigh: 0,
+    priceGuardInvalidSpread: 0,
+    priceGuardMissingSidePrice: 0,
+    priceGuardNoBook: 0,
+    priceGuardSkipped: 0,
+    priceGuardTerminalPrice: 0,
+  };
+}
+
+function addSignalBotPriceGuardBlockers(
+  target: SignalBotPriceGuardDiagnostics,
+  blockers: MarketPriceBlocker[],
+): void {
+  for (const blocker of blockers) {
+    switch (blocker) {
+      case "buy_price_too_high":
+        target.priceGuardBuyPriceTooHigh += 1;
+        break;
+      case "invalid_spread":
+        target.priceGuardInvalidSpread += 1;
+        break;
+      case "missing_side_price":
+        target.priceGuardMissingSidePrice += 1;
+        break;
+      case "no_book":
+        target.priceGuardNoBook += 1;
+        break;
+      case "terminal_price":
+        target.priceGuardTerminalPrice += 1;
+        break;
+    }
+  }
+}
+
+async function loadSignalBotPriceGuardBlockers(input: {
+  buySide: "NO" | "YES";
+  db: DbQuery;
+  note: SignalBotNote;
+}): Promise<MarketPriceBlocker[]> {
+  if (!input.note.marketId) return [];
+  try {
+    const result = await requestFreshMarketPrices({
+      db: input.db,
+      enqueue: false,
+      marketIds: [input.note.marketId],
+      maxBuyPrice: 0.95,
+      maxTokens: 2,
+      pollMs: 100,
+      timeoutMs: 0,
+    });
+    const marketState = result.marketStates.get(input.note.marketId);
+    if (!marketState) return [];
+    return getMarketPriceSideState(
+      marketState.priceState,
+      input.buySide,
+    ).blockers;
+  } catch (error) {
+    console.warn("[signal-bot] price guard skipped", {
+      error: error instanceof Error ? error.message : String(error),
+      marketId: input.note.marketId,
+    });
+    return [];
+  }
 }
 
 function isStrictlyCheaperDisplayedPrice(params: {
@@ -1164,7 +1243,8 @@ export async function publishSignalBotTick(input: {
   eligibleNotes: number;
   nonDirectionalNotes: number;
   sent: number;
-} & SignalBotCheaperAlternativeDiagnostics> {
+} & SignalBotCheaperAlternativeDiagnostics &
+  SignalBotPriceGuardDiagnostics> {
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
   let sent = 0;
   let blockedChats = 0;
@@ -1173,6 +1253,7 @@ export async function publishSignalBotTick(input: {
   let eligibleNotes = 0;
   let nonDirectionalNotes = 0;
   const alternativeDiagnostics = createSignalBotCheaperAlternativeDiagnostics();
+  const priceGuardDiagnostics = createSignalBotPriceGuardDiagnostics();
   for (const chatId of chatIds) {
     const state = await getSignalBotChatState(input.redis, chatId);
     if (!state) {
@@ -1195,6 +1276,27 @@ export async function publishSignalBotTick(input: {
     });
     for (const note of notes) {
       const buySide = resolveSignalBotBuySide(note);
+      if (buySide) {
+        const priceBlockers = await loadSignalBotPriceGuardBlockers({
+          buySide,
+          db: input.db,
+          note,
+        });
+        if (priceBlockers.length > 0) {
+          priceGuardDiagnostics.priceGuardSkipped += 1;
+          addSignalBotPriceGuardBlockers(
+            priceGuardDiagnostics,
+            priceBlockers,
+          );
+          await updateSignalBotChatCursor({
+            chatId,
+            createdAt: note.createdAt,
+            id: note.id,
+            redis: input.redis,
+          });
+          continue;
+        }
+      }
       let cheaperAlternative: SignalBotCheaperAlternative | null = null;
       if (buySide) {
         if (input.resolveCheaperAlternative) {
@@ -1250,6 +1352,7 @@ export async function publishSignalBotTick(input: {
   }
   return {
     ...alternativeDiagnostics,
+    ...priceGuardDiagnostics,
     belowConfidenceNotes,
     blockedChats,
     chats: chatIds.length,

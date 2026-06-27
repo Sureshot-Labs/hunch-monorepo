@@ -8,6 +8,20 @@ export {
   isRpcRateLimit,
   parseRetryAfterMs,
 } from "./errors.js";
+export {
+  buildMarketPriceState,
+  clampProbability,
+  getMarketPriceSideState,
+  normalizePriceValue,
+} from "./price-state.js";
+export type {
+  MarketPriceBlocker,
+  MarketPriceSide,
+  MarketPriceState,
+  MarketPriceStateInput,
+  MarketSidePriceState,
+  PriceTopInput,
+} from "./price-state.js";
 
 export type EventEnvelope<T> = {
   type: string;

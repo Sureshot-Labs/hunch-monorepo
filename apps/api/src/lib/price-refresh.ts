@@ -1,6 +1,7 @@
 import {
   enqueuePriceRefreshTokens,
   type PriceRefreshRedis,
+  type PriceRefreshPriority,
   type PriceRefreshVenue,
 } from "@hunch/infra";
 
@@ -11,6 +12,7 @@ export type RequestPriceRefreshInputs = {
   tokenIds: Array<string | null | undefined>;
   venue?: PriceRefreshVenue;
   maxTokens?: number;
+  priority?: PriceRefreshPriority;
 };
 
 export async function requestPriceRefreshForTokens(
@@ -28,6 +30,7 @@ export async function requestPriceRefreshForTokens(
       venue: inputs.venue,
       maxQueueSize: env.priceRefreshQueueMax,
       maxTokens: inputs.maxTokens ?? env.priceRefreshEnqueueMaxPerRequest,
+      priority: inputs.priority,
     });
   } catch (error) {
     console.warn("[price-refresh] failed to enqueue tokens", error);

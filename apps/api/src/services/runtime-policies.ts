@@ -180,6 +180,12 @@ export type HolderResearchPolicy = {
   selectionExpiryNearHours: number;
   selectionExpiryFarHours: number;
   selectionExpiryBoostMax: number;
+  livePriceCheckEnabled: boolean;
+  livePriceCheckMaxCandidatesPerRun: number;
+  livePriceCheckTimeoutMs: number;
+  livePriceCheckPollMs: number;
+  livePriceMaxBuyPrice: number;
+  livePriceTerminalPp: number;
   singleGameSportsStrictMode: boolean;
   singleGameSportsMinHolderUsd: number;
   singleGameSportsMinEdge: number;
@@ -932,6 +938,12 @@ const holderResearchSchema = z
     selectionExpiryNearHours: positiveInt.max(24 * 365),
     selectionExpiryFarHours: positiveInt.max(24 * 365),
     selectionExpiryBoostMax: ratio,
+    livePriceCheckEnabled: strictBoolean,
+    livePriceCheckMaxCandidatesPerRun: positiveInt.max(500),
+    livePriceCheckTimeoutMs: nonNegativeInt.max(300_000),
+    livePriceCheckPollMs: positiveInt.max(5_000),
+    livePriceMaxBuyPrice: ratio,
+    livePriceTerminalPp: ratio,
     singleGameSportsStrictMode: strictBoolean,
     singleGameSportsMinHolderUsd: nonNegativeNumber,
     singleGameSportsMinEdge: ratio,
@@ -1670,6 +1682,12 @@ function getDefaults(): IntelPolicyMap {
       selectionExpiryNearHours: 168,
       selectionExpiryFarHours: 720,
       selectionExpiryBoostMax: 0.08,
+      livePriceCheckEnabled: true,
+      livePriceCheckMaxCandidatesPerRun: 16,
+      livePriceCheckTimeoutMs: 120_000,
+      livePriceCheckPollMs: 1_000,
+      livePriceMaxBuyPrice: 0.95,
+      livePriceTerminalPp: 0.01,
       singleGameSportsStrictMode: true,
       singleGameSportsMinHolderUsd: 25_000,
       singleGameSportsMinEdge: 0.15,
@@ -2657,6 +2675,24 @@ function normalizeHolderResearchPolicy(
       24 * 365,
     ),
     selectionExpiryBoostMax: clamp(policy.selectionExpiryBoostMax, 0, 1),
+    livePriceCheckEnabled: Boolean(policy.livePriceCheckEnabled),
+    livePriceCheckMaxCandidatesPerRun: clamp(
+      Math.trunc(policy.livePriceCheckMaxCandidatesPerRun),
+      1,
+      500,
+    ),
+    livePriceCheckTimeoutMs: clamp(
+      Math.trunc(policy.livePriceCheckTimeoutMs),
+      0,
+      300_000,
+    ),
+    livePriceCheckPollMs: clamp(
+      Math.trunc(policy.livePriceCheckPollMs),
+      25,
+      5_000,
+    ),
+    livePriceMaxBuyPrice: clamp(policy.livePriceMaxBuyPrice, 0, 1),
+    livePriceTerminalPp: clamp(policy.livePriceTerminalPp, 0, 1),
     singleGameSportsStrictMode: Boolean(policy.singleGameSportsStrictMode),
     singleGameSportsMinHolderUsd: Math.max(
       0,

@@ -3,6 +3,11 @@
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 
+import {
+  requestFreshMarketPrices,
+  type PriceRefreshRedis,
+} from "@hunch/infra";
+
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
@@ -23,6 +28,7 @@ import {
 } from "./schemas/holder-research.js";
 import {
   applyHolderResearchPreviousDecisionContext,
+  applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
@@ -120,6 +126,7 @@ type HolderResearchDecisionCacheRedis = {
 
 export type HolderResearchRunOptions = {
   decisionCacheRedis?: HolderResearchDecisionCacheRedis | null;
+  priceRefreshRedis?: PriceRefreshRedis | null;
 };
 
 type ExternalResearchResult = {
@@ -1316,6 +1323,98 @@ function buildSelectionPolicy(
   };
 }
 
+async function applyFreshPriceChecksToCandidates(params: {
+  candidates: HolderResearchCandidate[];
+  client: {
+    query<T = Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ): Promise<{ rows: T[] }>;
+  };
+  policy: HolderResearchPolicy;
+  redis: PriceRefreshRedis | null | undefined;
+}): Promise<{
+  candidates: HolderResearchCandidate[];
+  detail: string;
+  status: "ok" | "skipped" | "error";
+}> {
+  if (!params.policy.livePriceCheckEnabled) {
+    return {
+      candidates: params.candidates,
+      detail: "policy disabled",
+      status: "skipped",
+    };
+  }
+  if (params.candidates.length === 0) {
+    return {
+      candidates: params.candidates,
+      detail: "no candidates",
+      status: "skipped",
+    };
+  }
+  const checkedAt = new Date();
+  const candidatesToCheck = params.candidates.slice(
+    0,
+    params.policy.livePriceCheckMaxCandidatesPerRun,
+  );
+  try {
+    const result = await requestFreshMarketPrices({
+      db: params.client,
+      enqueue: Boolean(params.redis),
+      marketIds: candidatesToCheck.map((candidate) => candidate.market.marketId),
+      maxBuyPrice: params.policy.livePriceMaxBuyPrice,
+      maxTokens: candidatesToCheck.length * 2,
+      minFreshAt: checkedAt,
+      pollMs: params.policy.livePriceCheckPollMs,
+      priority: "high",
+      redis: params.redis ?? null,
+      terminalPp: params.policy.livePriceTerminalPp,
+      timeoutMs: params.policy.livePriceCheckTimeoutMs,
+    });
+    const checkedCandidates = applyHolderResearchLivePriceChecks(
+      candidatesToCheck,
+      {
+        checkedAt,
+        marketStates: result.marketStates,
+      },
+    );
+    const checkedByKey = new Map(
+      checkedCandidates.map((candidate) => [candidate.key, candidate]),
+    );
+    const candidates = params.candidates.map(
+      (candidate) => checkedByKey.get(candidate.key) ?? candidate,
+    );
+    const priceGuardBlocked = checkedCandidates.filter((candidate) => {
+      if (!candidate.side) return false;
+      return (
+        candidate.market.livePriceCheck?.blockersBySide[candidate.side]
+          .length ?? 0
+      ) > 0;
+    }).length;
+    return {
+      candidates,
+      detail: [
+        `requested=${result.requestedTokenIds.length}`,
+        `fresh=${result.freshTokenIds.length}`,
+        `markets=${result.marketStates.size}`,
+        `enqueued=${result.enqueued}`,
+        `blocked=${priceGuardBlocked}`,
+        `timedOut=${result.timedOut ? 1 : 0}`,
+      ].join(" "),
+      status: "ok",
+    };
+  } catch (error) {
+    console.warn("[holder-research] live_price_check skipped", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      candidates: params.candidates,
+      detail: error instanceof Error ? error.message : String(error),
+      status: "error",
+    };
+  }
+}
+
 function decisionCacheReportEntry(
   candidate: HolderResearchCandidate,
   evaluation: HolderResearchDecisionCacheEvaluation,
@@ -1450,9 +1549,16 @@ export async function runHolderResearch(
     );
     const selectedWithTypeMetrics =
       await enrichHolderResearchMarketTypeMetrics(client, selectedWithContext);
+    const priceCheck = await applyFreshPriceChecksToCandidates({
+      candidates: selectedWithTypeMetrics,
+      client,
+      policy,
+      redis: options.priceRefreshRedis,
+    });
+    const selectedWithFreshPrices = priceCheck.candidates;
     const selectionDiagnostics = buildHolderResearchSelectionDiagnostics(
       candidates,
-      selectedWithTypeMetrics,
+      selectedWithFreshPrices,
       selectionPolicy,
     );
     const calibrationMemo = policy.calibrationMemoEnabled
@@ -1493,7 +1599,7 @@ export async function runHolderResearch(
     });
     toolCalls.push({
       name: "market_type_metrics",
-      count: selectedWithTypeMetrics.reduce(
+      count: selectedWithFreshPrices.reduce(
         (sum, candidate) =>
           sum +
           candidate.market.holders.filter(
@@ -1502,6 +1608,12 @@ export async function runHolderResearch(
         0,
       ),
       status: "ok",
+    });
+    toolCalls.push({
+      name: "live_price_check",
+      count: selectedWithFreshPrices.length,
+      status: priceCheck.status,
+      detail: priceCheck.detail,
     });
     toolCalls.push({
       name: "calibration_memo",
@@ -1534,7 +1646,7 @@ export async function runHolderResearch(
     let externalSearchCalls = 0;
 
     const cacheEligibleCandidates: HolderResearchCandidate[] = [];
-    for (const candidate of selectedWithTypeMetrics) {
+    for (const candidate of selectedWithFreshPrices) {
       let cacheEvaluation: HolderResearchDecisionCacheEvaluation | null = null;
       if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
         decisionCache.checked += 1;
@@ -1740,10 +1852,61 @@ export async function runHolderResearch(
 
     let publishCount = 0;
     let consecutiveSkips = 0;
-    for (const candidate of finalCandidates) {
+    for (const selectedCandidate of finalCandidates) {
       if (decisions.length >= policy.maxAgentCallsPerRun) break;
       if (publishCount >= policy.maxPublishPerRun) break;
       if (consecutiveSkips >= policy.maxConsecutiveSkips) break;
+
+      const finalPriceCheck = await applyFreshPriceChecksToCandidates({
+        candidates: [selectedCandidate],
+        client,
+        policy,
+        redis: options.priceRefreshRedis,
+      });
+      toolCalls.push({
+        name: "live_price_final_check",
+        count: 1,
+        status: finalPriceCheck.status,
+        detail: finalPriceCheck.detail,
+      });
+      const candidate = finalPriceCheck.candidates[0] ?? selectedCandidate;
+      const finalPriceBlockers = candidate.side
+        ? (candidate.market.livePriceCheck?.blockersBySide[candidate.side] ??
+          [])
+        : [];
+      if (policy.livePriceCheckEnabled && finalPriceBlockers.length > 0) {
+        const output = buildDeterministicHolderResearchDecision(
+          candidate,
+          policy,
+        );
+        output.status = "SKIP";
+        output.rationale = `Skipped before synthesis because current price state is not actionable: ${finalPriceBlockers.join(", ")}.`;
+        output.caveats = [
+          `Current price state blocked this signal: ${finalPriceBlockers.join(", ")}.`,
+        ];
+        const decision: HolderResearchModelDecision = {
+          candidate,
+          cost: zeroCost(),
+          modelMeta: {
+            live_price_guard: {
+              blockers: finalPriceBlockers,
+              detail: finalPriceCheck.detail,
+            },
+          },
+          output,
+        };
+        decisions.push(decision);
+        await maybeWriteDecisionCache({
+          redis: options.decisionCacheRedis,
+          policy,
+          callModel: args.callModel,
+          candidate,
+          output: decision.output,
+          decisionCache,
+        });
+        consecutiveSkips += 1;
+        continue;
+      }
 
       const triageDecision = triageByKey.get(candidate.key);
       let externalResearch: ExternalResearchResult | null = null;

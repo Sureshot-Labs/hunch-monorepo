@@ -1,4 +1,4 @@
-import { chunkArray } from "@hunch/shared";
+import { chunkArray, normalizePriceValue } from "@hunch/shared";
 import { Pool } from "pg";
 
 type BookTopCacheEntry = {
@@ -1562,17 +1562,28 @@ export async function writeUnifiedBookTop(
   bestAsk: number | null,
   ts: Date,
 ): Promise<void> {
+  const normalizedBestBid = normalizePriceValue(bestBid);
+  const normalizedBestAsk = normalizePriceValue(bestAsk);
   const runWrite = async (): Promise<void> => {
     const tsMs = ts.getTime();
-    if (shouldSkipBookTopWrite(tokenId, bestBid, bestAsk, tsMs)) {
+    if (
+      shouldSkipBookTopWrite(
+        tokenId,
+        normalizedBestBid,
+        normalizedBestAsk,
+        tsMs,
+      )
+    ) {
       return;
     }
 
     const mid =
-      bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+      normalizedBestBid != null && normalizedBestAsk != null
+        ? (normalizedBestBid + normalizedBestAsk) / 2
+        : null;
     const spread =
-      bestBid != null && bestAsk != null
-        ? Math.max(0, bestAsk - bestBid)
+      normalizedBestBid != null && normalizedBestAsk != null
+        ? Math.max(0, normalizedBestAsk - normalizedBestBid)
         : null;
 
     await pool.query(
@@ -1585,8 +1596,8 @@ export async function writeUnifiedBookTop(
         tokenId,
         venueFromUnifiedTokenId(tokenId),
         ts.toISOString(),
-        bestBid,
-        bestAsk,
+        normalizedBestBid,
+        normalizedBestAsk,
         mid,
         spread,
       ],
@@ -1619,16 +1630,16 @@ export async function writeUnifiedBookTop(
         tokenId,
         venueFromUnifiedTokenId(tokenId),
         ts.toISOString(),
-        bestBid,
-        bestAsk,
+        normalizedBestBid,
+        normalizedBestAsk,
         mid,
         spread,
       ],
     );
 
     setBookTopCache(tokenId, {
-      bestBid,
-      bestAsk,
+      bestBid: normalizedBestBid,
+      bestAsk: normalizedBestAsk,
       lastWrittenAtMs: tsMs,
     });
   };
@@ -1664,19 +1675,21 @@ export async function writeUnifiedBookTops(
 
   const payload = inputs.flatMap((input) => {
     const tsMs = input.ts.getTime();
+    const bestBid = normalizePriceValue(input.bestBid);
+    const bestAsk = normalizePriceValue(input.bestAsk);
     if (
-      shouldSkipBookTopWrite(input.tokenId, input.bestBid, input.bestAsk, tsMs)
+      shouldSkipBookTopWrite(input.tokenId, bestBid, bestAsk, tsMs)
     ) {
       return [];
     }
 
     const mid =
-      input.bestBid != null && input.bestAsk != null
-        ? (input.bestBid + input.bestAsk) / 2
+      bestBid != null && bestAsk != null
+        ? (bestBid + bestAsk) / 2
         : null;
     const spread =
-      input.bestBid != null && input.bestAsk != null
-        ? Math.max(0, input.bestAsk - input.bestBid)
+      bestBid != null && bestAsk != null
+        ? Math.max(0, bestAsk - bestBid)
         : null;
 
     return [
@@ -1684,8 +1697,8 @@ export async function writeUnifiedBookTops(
         token_id: input.tokenId,
         venue: venueFromUnifiedTokenId(input.tokenId),
         ts: input.ts.toISOString(),
-        best_bid: input.bestBid,
-        best_ask: input.bestAsk,
+        best_bid: bestBid,
+        best_ask: bestAsk,
         mid,
         spread,
         ts_ms: tsMs,

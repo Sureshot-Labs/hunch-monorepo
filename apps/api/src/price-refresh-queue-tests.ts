@@ -6,6 +6,7 @@ import {
   getPriceRefreshQueueBacklog,
   inferPriceRefreshVenue,
   requeuePriceRefreshTokens,
+  requestFreshMarketPrices,
   type PriceRefreshRedis,
 } from "@hunch/infra";
 
@@ -89,8 +90,23 @@ class FakeRedis implements PriceRefreshRedis {
   async eval(
     _script: string,
     options: { keys: string[]; arguments: string[] },
-  ): Promise<string[]> {
+  ): Promise<unknown> {
     const key = options.keys[0];
+    if (_script.includes("ZSCORE")) {
+      const score = Number(options.arguments[0]);
+      const set = this.getSet(key);
+      let added = 0;
+      for (const token of options.arguments.slice(1)) {
+        const existing = set.get(token);
+        if (existing == null) {
+          added += 1;
+          set.set(token, score);
+        } else if (score < existing) {
+          set.set(token, score);
+        }
+      }
+      return added;
+    }
     const maxScore = Number(options.arguments[0]);
     const limit = Number(options.arguments[1]);
     const side = options.arguments[2] === "newest" ? "newest" : "oldest";
@@ -106,6 +122,67 @@ class FakeRedis implements PriceRefreshRedis {
       .map(([tokenId]) => tokenId);
     for (const token of tokens) set.delete(token);
     return tokens;
+  }
+}
+
+class SingleClientFreshPriceDb {
+  readonly queryOrder: string[] = [];
+  private inFlight = 0;
+
+  async query<T = Record<string, unknown>>(
+    sql: string,
+  ): Promise<{ rows: T[] }> {
+    if (this.inFlight > 0) {
+      throw new Error("concurrent single-client query");
+    }
+    this.inFlight += 1;
+    await Promise.resolve();
+    try {
+      if (sql.includes("from unified_market_tokens")) {
+        this.queryOrder.push("market_tokens");
+        return { rows: [] };
+      }
+      if (sql.includes("from unified_token_top_latest")) {
+        this.queryOrder.push("token_tops");
+        return {
+          rows: [
+            {
+              best_ask: "0.41",
+              best_bid: "0.4",
+              token_id: "yes-token",
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              best_ask: "0.6",
+              best_bid: "0.59",
+              token_id: "no-token",
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+          ] as T[],
+        };
+      }
+      if (sql.includes("from unified_markets")) {
+        this.queryOrder.push("markets");
+        return {
+          rows: [
+            {
+              best_ask: null,
+              best_bid: null,
+              clob_token_ids: JSON.stringify(["yes-token", "no-token"]),
+              id: "polymarket:test",
+              last_price: null,
+              token_no: null,
+              token_yes: null,
+              venue: "polymarket",
+            },
+          ] as T[],
+        };
+      }
+      this.queryOrder.push("unknown");
+      return { rows: [] };
+    } finally {
+      this.inFlight -= 1;
+    }
   }
 }
 
@@ -207,6 +284,81 @@ await test("claimDuePriceRefreshTokens newest returns latest due tokens", async 
   });
 
   assert.deepEqual(claimed, ["3", "2"]);
+});
+
+await test("high priority price refresh jumps ahead of normal queued tokens", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["normal-old"],
+    venue: "polymarket",
+    nowMs: 1_000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["normal-new"],
+    venue: "polymarket",
+    nowMs: 2_000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["system-now"],
+    venue: "polymarket",
+    nowMs: 3_000,
+    priority: "high",
+  });
+
+  const claimed = await claimDuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    nowMs: 3_000,
+    limit: 3,
+    side: "oldest",
+  });
+
+  assert.deepEqual(claimed, ["system-now", "normal-old", "normal-new"]);
+});
+
+await test("normal re-enqueue does not demote an existing high-priority token", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["system-now"],
+    venue: "polymarket",
+    nowMs: 3_000,
+    priority: "high",
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["normal-old"],
+    venue: "polymarket",
+    nowMs: 1_000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    tokenIds: ["system-now"],
+    venue: "polymarket",
+    nowMs: 4_000,
+  });
+
+  const claimed = await claimDuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    nowMs: 4_000,
+    limit: 2,
+    side: "oldest",
+  });
+
+  assert.deepEqual(claimed, ["system-now", "normal-old"]);
+});
+
+await test("requestFreshMarketPrices is safe for single-client DB callers", async () => {
+  const db = new SingleClientFreshPriceDb();
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+  });
+
+  assert.deepEqual(db.queryOrder, ["markets", "market_tokens", "token_tops"]);
+  assert.deepEqual(result.requestedTokenIds, ["yes-token", "no-token"]);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.marketStates.get("polymarket:test")?.fresh, true);
 });
 
 await test("parallel claimDuePriceRefreshTokens calls do not duplicate tokens", async () => {

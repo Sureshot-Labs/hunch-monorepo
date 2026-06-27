@@ -32,6 +32,7 @@ export {
   PRICE_REFRESH_QUEUE_KEYS,
   requeuePriceRefreshTokens,
 } from "./price-refresh.js";
+export { requestFreshMarketPrices } from "./fresh-market-prices.js";
 export {
   INDEXER_STATS_KEYS,
   INDEXER_STATS_TTL_SEC,
@@ -59,9 +60,18 @@ export type {
   EnqueuePriceRefreshResult,
   PriceRefreshRedis,
   PriceRefreshQueueClaimSide,
+  PriceRefreshPriority,
   PriceRefreshVenue,
   RequeuePriceRefreshInputs,
 } from "./price-refresh.js";
+export type {
+  FreshMarketPriceDb,
+  FreshMarketPriceMarketState,
+  FreshMarketPriceOptions,
+  FreshMarketPriceResult,
+  FreshMarketPriceTokenRef,
+  VenuePriceRefreshAdapter,
+} from "./fresh-market-prices.js";
 export type {
   IndexerStatsPatch,
   IndexerStatsRedis,

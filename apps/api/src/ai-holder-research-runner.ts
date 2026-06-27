@@ -221,6 +221,7 @@ export async function runHolderResearchRunner(
     try {
       const report = await runHolderResearch(args, {
         decisionCacheRedis: redis,
+        priceRefreshRedis: redis,
       });
       const entry: RunHistoryEntry = {
         runId: report.runId,

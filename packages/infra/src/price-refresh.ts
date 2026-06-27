@@ -1,5 +1,6 @@
 export type PriceRefreshVenue = "polymarket" | "dflow" | "limitless";
 export type PriceRefreshQueueClaimSide = "oldest" | "newest";
+export type PriceRefreshPriority = "high" | "normal";
 
 export type PriceRefreshRedis = {
   zAdd: (
@@ -32,6 +33,7 @@ export type EnqueuePriceRefreshInputs = {
   delayMs?: number;
   maxQueueSize?: number;
   maxTokens?: number;
+  priority?: PriceRefreshPriority;
 };
 
 export type EnqueuePriceRefreshResult = {
@@ -75,6 +77,24 @@ end
 return tokens
 `;
 
+const ENQUEUE_PRICE_REFRESH_TOKENS_SCRIPT = `
+local score = tonumber(ARGV[1])
+local added = 0
+for i = 2, #ARGV do
+  local token = ARGV[i]
+  local existing = redis.call('ZSCORE', KEYS[1], token)
+  if not existing then
+    redis.call('ZADD', KEYS[1], score, token)
+    added = added + 1
+  elseif score < tonumber(existing) then
+    redis.call('ZADD', KEYS[1], score, token)
+  end
+end
+return added
+`;
+
+const HIGH_PRIORITY_SCORE_BIAS_MS = 31 * 24 * 60 * 60 * 1_000;
+
 function normalizeTokenId(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -112,6 +132,19 @@ async function trimQueue(
   await redis.zRemRangeByRank(key, 0, size - maxQueueSize - 1);
 }
 
+async function enqueueTokensPreservingEarliestScore(
+  redis: PriceRefreshRedis,
+  key: string,
+  tokenIds: string[],
+  score: number,
+): Promise<number> {
+  const result = await redis.eval(ENQUEUE_PRICE_REFRESH_TOKENS_SCRIPT, {
+    keys: [key],
+    arguments: [String(score), ...tokenIds],
+  });
+  return typeof result === "number" && Number.isFinite(result) ? result : 0;
+}
+
 export async function enqueuePriceRefreshTokens(
   redis: PriceRefreshRedis,
   inputs: EnqueuePriceRefreshInputs,
@@ -147,15 +180,15 @@ export async function enqueuePriceRefreshTokens(
     if (set.size > before) accepted += 1;
   }
 
+  const priorityBiasMs =
+    inputs.priority === "high" ? HIGH_PRIORITY_SCORE_BIAS_MS : 0;
   const dueAtMs = (inputs.nowMs ?? Date.now()) + (inputs.delayMs ?? 0);
+  const queueScore = dueAtMs - priorityBiasMs;
   for (const [venue, tokenSet] of byVenue.entries()) {
     const tokens = Array.from(tokenSet);
     if (!tokens.length) continue;
     const key = getPriceRefreshQueueKey(venue);
-    await redis.zAdd(
-      key,
-      tokens.map((tokenId) => ({ score: dueAtMs, value: tokenId })),
-    );
+    await enqueueTokensPreservingEarliestScore(redis, key, tokens, queueScore);
     await trimQueue(redis, key, inputs.maxQueueSize);
     result.byVenue[venue] += tokens.length;
     result.enqueued += tokens.length;

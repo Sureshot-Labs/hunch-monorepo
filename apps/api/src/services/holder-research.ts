@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 
+import {
+  getMarketPriceSideState,
+  type MarketPriceBlocker,
+  type MarketPriceState,
+} from "@hunch/shared";
 import type { PoolClient } from "pg";
 
 import type {
@@ -85,6 +90,15 @@ export type HolderResearchMarketMovementContext = {
   previousDecisionCheckedAt: string | null;
 };
 
+export type HolderResearchLivePriceCheck = {
+  blockersBySide: Record<HolderResearchSideKey, MarketPriceBlocker[]>;
+  checkedAt: string;
+  fresh: boolean;
+  sideBuyPrices: Record<HolderResearchSideKey, number | null>;
+  tokenIds: string[];
+  yesProbability: number | null;
+};
+
 export type HolderResearchHolder = {
   walletId: string;
   address: string;
@@ -158,6 +172,7 @@ export type HolderResearchMarketInput = {
   volume24h: number | null;
   liquidity: number | null;
   marketMovementContext: HolderResearchMarketMovementContext;
+  livePriceCheck: HolderResearchLivePriceCheck | null;
   sides: Record<HolderResearchSideKey, HolderResearchSide>;
   holders: HolderResearchHolder[];
   recentActivityUsd: number;
@@ -257,6 +272,11 @@ export type HolderResearchQualityAssessment = {
 };
 
 export type HolderResearchActionabilityBlocker =
+  | "live_price_invalid_spread"
+  | "live_price_missing_side"
+  | "live_price_no_book"
+  | "live_price_terminal"
+  | "live_price_too_high"
   | "support_only_bucket"
   | "no_clear_side"
   | "non_actionable_bucket"
@@ -1396,12 +1416,32 @@ export function buildHolderResearchQualityAssessment(
 function estimatedHolderResearchActionPrice(
   candidate: HolderResearchCandidate,
 ): number | null {
-  if (candidate.side == null || candidate.market.yesProbability == null) {
-    return null;
-  }
+  if (candidate.side == null) return null;
+  const liveBuyPrice =
+    candidate.market.livePriceCheck?.sideBuyPrices[candidate.side] ?? null;
+  if (liveBuyPrice != null) return liveBuyPrice;
+  if (candidate.market.yesProbability == null) return null;
   return candidate.side === "YES"
     ? candidate.market.yesProbability
     : 1 - candidate.market.yesProbability;
+}
+
+function livePriceBlockerToActionabilityBlocker(
+  blocker: MarketPriceBlocker,
+): HolderResearchActionabilityBlocker {
+  switch (blocker) {
+    case "buy_price_too_high":
+      return "live_price_too_high";
+    case "invalid_spread":
+      return "live_price_invalid_spread";
+    case "missing_side_price":
+      return "live_price_missing_side";
+    case "no_book":
+      return "live_price_no_book";
+    case "terminal_price":
+      return "live_price_terminal";
+  }
+  return "live_price_no_book";
 }
 
 function selectionExpiryBoostForHours(
@@ -1450,8 +1490,18 @@ export function buildHolderResearchCandidateActionability(
   ) {
     pushUnique(blockers, "non_actionable_bucket");
   }
-  if (estimatedActionPrice != null && estimatedActionPrice >= 0.95) {
+  if (
+    estimatedActionPrice != null &&
+    estimatedActionPrice >= policy.livePriceMaxBuyPrice
+  ) {
     pushUnique(blockers, "action_price_too_high");
+  }
+  if (candidate.side != null && candidate.market.livePriceCheck) {
+    for (const blocker of candidate.market.livePriceCheck.blockersBySide[
+      candidate.side
+    ]) {
+      pushUnique(blockers, livePriceBlockerToActionabilityBlocker(blocker));
+    }
   }
   if (quality.credentialStrength === "contradicted") {
     pushUnique(blockers, "credential_contradicted");
@@ -2751,6 +2801,7 @@ function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
     volume24h: toNumber(row.volume_24h),
     liquidity: toNumber(row.liquidity),
     marketMovementContext: buildMarketMovementContext(row, yesProbability),
+    livePriceCheck: null,
     sides: {
       YES: buildSideFromRow("YES", row),
       NO: buildSideFromRow("NO", row),
@@ -3527,6 +3578,54 @@ export async function enrichHolderResearchMarketTypeMetrics(
   });
 }
 
+export function applyHolderResearchLivePriceChecks(
+  candidates: HolderResearchCandidate[],
+  input: {
+    checkedAt?: Date;
+    marketStates: Map<
+      string,
+      {
+        fresh: boolean;
+        priceState: MarketPriceState;
+        tokenIds: string[];
+      }
+    >;
+  },
+): HolderResearchCandidate[] {
+  const checkedAt = (input.checkedAt ?? new Date()).toISOString();
+  return candidates.map((candidate) => {
+    const state = input.marketStates.get(candidate.market.marketId);
+    if (!state) return candidate;
+    const yes = getMarketPriceSideState(state.priceState, "YES");
+    const no = getMarketPriceSideState(state.priceState, "NO");
+    const livePriceCheck: HolderResearchLivePriceCheck = {
+      blockersBySide: {
+        YES: yes.blockers,
+        NO: no.blockers,
+      },
+      checkedAt,
+      fresh: state.fresh,
+      sideBuyPrices: {
+        YES: yes.buyPrice,
+        NO: no.buyPrice,
+      },
+      tokenIds: state.tokenIds,
+      yesProbability: state.priceState.yesProbability,
+    };
+    const market = {
+      ...candidate.market,
+      livePriceCheck,
+      yesProbability:
+        livePriceCheck.yesProbability ?? candidate.market.yesProbability,
+    };
+    const withoutDigest = { ...candidate, market };
+    return {
+      ...withoutDigest,
+      inputDigest: buildHolderResearchInputDigest(withoutDigest),
+    };
+  });
+}
+
 export function buildHolderResearchCandidatePromptJson(
   candidate: HolderResearchCandidate,
   policy?: HolderResearchPromptPolicy,
@@ -3630,6 +3729,14 @@ function compactPromptMarket(
     close: market.closeTime,
     expires: market.expirationTime,
     pYes: market.yesProbability,
+    live: market.livePriceCheck
+      ? {
+          fresh: market.livePriceCheck.fresh,
+          pYes: market.livePriceCheck.yesProbability,
+          buy: market.livePriceCheck.sideBuyPrices,
+          blockers: market.livePriceCheck.blockersBySide,
+        }
+      : null,
     usdTracked:
       totalUsd ?? market.sides.YES.usd + market.sides.NO.usd,
     recentUsd: market.recentActivityUsd,

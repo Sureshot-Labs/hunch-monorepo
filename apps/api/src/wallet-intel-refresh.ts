@@ -1,10 +1,12 @@
 import type { PoolClient } from "pg";
 
+import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
 import { ethers } from "ethers";
 import { chunkArray, isAbortError, isRpcRateLimit } from "@hunch/shared";
 
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { getRedis } from "./redis.js";
 import { fetchMarketHolderDataBatch } from "./services/holders-core.js";
 import { isRecord } from "./lib/type-guards.js";
 import { limitlessRequest } from "./services/limitless-client.js";
@@ -752,6 +754,45 @@ async function enqueueWalletIntelMarketRefresh(
 
   if (counts.polymarket || counts.limitless || counts.kalshi) {
     console.log("[wallets:intel:refresh] market refresh queued", counts);
+  }
+}
+
+async function requestFreshWalletIntelMarketPrices(
+  client: PoolClient,
+  marketRows: Array<{ id: string }>,
+): Promise<void> {
+  if (!env.priceRefreshQueueEnabled || marketRows.length === 0) return;
+  const maxTokens =
+    walletIntelRefreshPolicy.tokenLimitPoly +
+    walletIntelRefreshPolicy.tokenLimitLimitless +
+    walletIntelRefreshPolicy.tokenLimitKalshi;
+  if (maxTokens <= 0) return;
+
+  const requestedAt = new Date();
+  try {
+    const redis = await getRedis();
+    const result = await requestFreshMarketPrices({
+      db: client,
+      enqueue: Boolean(redis),
+      marketIds: marketRows.map((row) => row.id),
+      maxTokens,
+      minFreshAt: requestedAt,
+      pollMs: 1_000,
+      priority: "high",
+      redis: redis as unknown as PriceRefreshRedis | null,
+      timeoutMs: 120_000,
+    });
+    console.log("[wallets:intel:refresh] fresh price check", {
+      enqueued: result.enqueued,
+      fresh: result.freshTokenIds.length,
+      markets: result.marketStates.size,
+      requested: result.requestedTokenIds.length,
+      timedOut: result.timedOut,
+    });
+  } catch (error) {
+    console.warn("[wallets:intel:refresh] fresh price check skipped", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -5442,6 +5483,7 @@ async function runSnapshot(snapshotAt: Date) {
         `[wallets:intel:refresh] limitless price backfills=${limitlessPriceBackfills}`,
       );
     }
+    await requestFreshWalletIntelMarketPrices(client, marketRows);
 
     const walletCache = new Map<string, string>();
     const snapshottedWalletVenueKeys = new Set<string>();

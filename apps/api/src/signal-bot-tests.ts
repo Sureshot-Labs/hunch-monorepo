@@ -124,7 +124,10 @@ class FakeTelegram {
 }
 
 class FakeDb {
+  marketRows: unknown[] = [];
+  marketTokenRows: unknown[] = [];
   rows: unknown[] = [];
+  tokenTopRows: unknown[] = [];
   readonly queries: Array<{ params: unknown[]; sql: string }> = [];
 
   query<T extends QueryResultRow = QueryResultRow>(): Promise<QueryResult<T>>;
@@ -134,6 +137,36 @@ class FakeDb {
     const sql = String(args[0] ?? "");
     const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
     this.queries.push({ params, sql });
+    if (sql.includes("from unified_market_tokens")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.marketTokenRows.length,
+        rows: this.marketTokenRows as T[],
+      };
+    }
+    if (sql.includes("from unified_token_top_latest")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.tokenTopRows.length,
+        rows: this.tokenTopRows as T[],
+      };
+    }
+    if (
+      sql.includes("from unified_markets") &&
+      sql.includes("where id = any")
+    ) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.marketRows.length,
+        rows: this.marketRows as T[],
+      };
+    }
     const minConfidence = Number(params[0] ?? 0);
     const directionEligibleRows = this.rows.filter((row) => {
       const direction = String((row as { direction?: unknown }).direction ?? "");
@@ -1453,6 +1486,47 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.reply_markup?.inline_keyboard[1]?.[0]?.text,
         "💸 Cheaper: Kalshi YES 29¢",
       );
+    },
+  },
+  {
+    name: "publish skips terminal-price notes before sending",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      db.marketRows = [
+        {
+          id: "polymarket:market-1",
+          venue: "polymarket",
+          token_yes: null,
+          token_no: null,
+          clob_token_ids: null,
+          best_bid: "0.99",
+          best_ask: "1.00",
+          last_price: null,
+        },
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.priceGuardSkipped, 1);
+      assert.equal(result.priceGuardTerminalPrice, 1);
+      assert.equal(telegram.messages.length, 0);
     },
   },
   {
