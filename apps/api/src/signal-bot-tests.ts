@@ -201,6 +201,8 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     eventTitle: "Test event",
     outcomes: null,
     marketSegment: null,
+    closeTime: null,
+    expirationTime: null,
     bestBid: 0.3,
     bestAsk: 0.32,
     lastPrice: null,
@@ -857,6 +859,48 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO $10 · Poly 70¢");
       assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
+    },
+  },
+  {
+    name: "message renders time left from close or expiration",
+    run: () => {
+      const minuteMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ closeTime: "2026-01-01T00:45:00.000Z" }),
+      });
+      assert.match(
+        minuteMessage.text,
+        /⚡ Sharp holder · YES 31¢ \/ NO 69¢ · ⏳ 45m left/,
+      );
+
+      const hourMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ closeTime: "2026-01-01T05:00:00.000Z" }),
+      });
+      assert.match(hourMessage.text, /⏳ 5h left/);
+
+      const dayMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ expirationTime: "2026-01-04T00:00:00.000Z" }),
+      });
+      assert.match(dayMessage.text, /⏳ 3d left/);
+
+      const weekMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ closeTime: "2026-02-05T00:00:00.000Z" }),
+      });
+      assert.match(weekMessage.text, /⏳ 5w left/);
+
+      const expiredMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ closeTime: "2025-12-31T23:59:00.000Z" }),
+      });
+      assert.doesNotMatch(expiredMessage.text, /left/);
     },
   },
   {

@@ -167,6 +167,8 @@ export type SignalBotNote = {
   eventTitle: string | null;
   outcomes: string[] | null;
   marketSegment: string | null;
+  closeTime: string | null;
+  expirationTime: string | null;
   bestBid: number | null;
   bestAsk: number | null;
   lastPrice: number | null;
@@ -469,6 +471,7 @@ export function buildSignalBotMessage(input: {
   const credentialLines = formatSignalCredentialLines(note);
   const marketTitleLine = formatMarketTitleLine(note);
   const priceLine = formatPriceLine(note);
+  const timeLeftLine = formatTimeLeftLine(note);
   const marketUrl = note.eventId
     ? buildSignalBotOpenMarketUrl({
         appBaseUrl: input.appBaseUrl,
@@ -500,6 +503,7 @@ export function buildSignalBotMessage(input: {
   const metaLine = [
     formatSignalBotSignalLabel(note),
     priceLine,
+    timeLeftLine,
   ]
     .filter((value): value is string => Boolean(value))
     .join(" · ");
@@ -1821,6 +1825,8 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     eventTitle: row.event_title,
     outcomes: parseMarketOutcomes(row.outcomes),
     marketSegment,
+    closeTime: row.close_time ? toIso(row.close_time) : null,
+    expirationTime: row.expiration_time ? toIso(row.expiration_time) : null,
     bestBid: toNumber(row.best_bid),
     bestAsk: toNumber(row.best_ask),
     lastPrice: toNumber(row.last_price),
@@ -2047,6 +2053,29 @@ function formatPriceLine(note: SignalBotNote): string | null {
   const yesLabel = formatSignalBotOutcomeDisplayLabel(note, "YES");
   const noLabel = formatSignalBotOutcomeDisplayLabel(note, "NO");
   return `${yesLabel} ${formatCents(yes)} / ${noLabel} ${formatCents(1 - yes)}`;
+}
+
+function formatTimeLeftLine(
+  note: Pick<SignalBotNote, "closeTime" | "createdAt" | "expirationTime">,
+): string | null {
+  const raw = note.closeTime ?? note.expirationTime;
+  if (!raw) return null;
+  const endMs = new Date(raw).getTime();
+  const startMs = new Date(note.createdAt).getTime();
+  if (!Number.isFinite(endMs) || !Number.isFinite(startMs) || endMs <= startMs) {
+    return null;
+  }
+
+  const minutes = Math.max(1, Math.round((endMs - startMs) / 60_000));
+  if (minutes < 60) return `⏳ ${minutes}m left`;
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `⏳ ${hours}h left`;
+
+  const days = Math.round(hours / 24);
+  if (days < 14) return `⏳ ${days}d left`;
+
+  return `⏳ ${Math.round(days / 7)}w left`;
 }
 
 function formatSignalCredentialLines(note: SignalBotNote): string[] {
