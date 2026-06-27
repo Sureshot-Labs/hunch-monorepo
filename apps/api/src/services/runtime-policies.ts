@@ -3,6 +3,10 @@ import { z } from "zod";
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 import {
+  holderResearchBucketSchema,
+  type HolderResearchBucket,
+} from "../schemas/holder-research.js";
+import {
   fetchActiveRuntimePolicy,
   listActiveRuntimePolicies,
   type RuntimePolicyRow,
@@ -167,6 +171,15 @@ export type HolderResearchPolicy = {
   performanceCalibrationMaxNearTradeMinutes: number;
   performanceCalibrationDedupMarketSide: boolean;
   calibrationMemoEnabled: boolean;
+  preTriageActionabilityEnabled: boolean;
+  supportOnlyBuckets: HolderResearchBucket[];
+  selectionEventDiversityEnabled: boolean;
+  selectionEventSoftCapPerEvent: number;
+  selectionExpiryBoostEnabled: boolean;
+  selectionExpirySoonHours: number;
+  selectionExpiryNearHours: number;
+  selectionExpiryFarHours: number;
+  selectionExpiryBoostMax: number;
   singleGameSportsStrictMode: boolean;
   singleGameSportsMinHolderUsd: number;
   singleGameSportsMinEdge: number;
@@ -910,6 +923,15 @@ const holderResearchSchema = z
     performanceCalibrationMaxNearTradeMinutes: nonNegativeInt.max(24 * 60),
     performanceCalibrationDedupMarketSide: strictBoolean,
     calibrationMemoEnabled: strictBoolean,
+    preTriageActionabilityEnabled: strictBoolean,
+    supportOnlyBuckets: z.array(holderResearchBucketSchema).max(8),
+    selectionEventDiversityEnabled: strictBoolean,
+    selectionEventSoftCapPerEvent: positiveInt.max(20),
+    selectionExpiryBoostEnabled: strictBoolean,
+    selectionExpirySoonHours: positiveInt.max(24 * 365),
+    selectionExpiryNearHours: positiveInt.max(24 * 365),
+    selectionExpiryFarHours: positiveInt.max(24 * 365),
+    selectionExpiryBoostMax: ratio,
     singleGameSportsStrictMode: strictBoolean,
     singleGameSportsMinHolderUsd: nonNegativeNumber,
     singleGameSportsMinEdge: ratio,
@@ -1634,6 +1656,20 @@ function getDefaults(): IntelPolicyMap {
       performanceCalibrationMaxNearTradeMinutes: 120,
       performanceCalibrationDedupMarketSide: true,
       calibrationMemoEnabled: true,
+      preTriageActionabilityEnabled: true,
+      supportOnlyBuckets: [
+        "recent_flow",
+        "event_bridge",
+        "concentration_risk",
+        "clean_disagreement",
+      ],
+      selectionEventDiversityEnabled: true,
+      selectionEventSoftCapPerEvent: 2,
+      selectionExpiryBoostEnabled: true,
+      selectionExpirySoonHours: 72,
+      selectionExpiryNearHours: 168,
+      selectionExpiryFarHours: 720,
+      selectionExpiryBoostMax: 0.08,
       singleGameSportsStrictMode: true,
       singleGameSportsMinHolderUsd: 25_000,
       singleGameSportsMinEdge: 0.15,
@@ -1696,8 +1732,8 @@ function getDefaults(): IntelPolicyMap {
       quotaSharpSide: 2,
       quotaSharpSplit: 1,
       quotaCleanDisagreement: 1,
-      quotaRecentFlow: 1,
-      quotaEventBridge: 1,
+      quotaRecentFlow: 0,
+      quotaEventBridge: 0,
       quotaConcentrationRisk: 0,
     },
     arbitrage_defaults: {
@@ -2592,6 +2628,35 @@ function normalizeHolderResearchPolicy(
       policy.performanceCalibrationDedupMarketSide,
     ),
     calibrationMemoEnabled: Boolean(policy.calibrationMemoEnabled),
+    preTriageActionabilityEnabled: Boolean(
+      policy.preTriageActionabilityEnabled,
+    ),
+    supportOnlyBuckets: [...new Set(policy.supportOnlyBuckets)],
+    selectionEventDiversityEnabled: Boolean(
+      policy.selectionEventDiversityEnabled,
+    ),
+    selectionEventSoftCapPerEvent: clamp(
+      Math.trunc(policy.selectionEventSoftCapPerEvent),
+      1,
+      20,
+    ),
+    selectionExpiryBoostEnabled: Boolean(policy.selectionExpiryBoostEnabled),
+    selectionExpirySoonHours: clamp(
+      Math.trunc(policy.selectionExpirySoonHours),
+      1,
+      24 * 365,
+    ),
+    selectionExpiryNearHours: clamp(
+      Math.trunc(policy.selectionExpiryNearHours),
+      1,
+      24 * 365,
+    ),
+    selectionExpiryFarHours: clamp(
+      Math.trunc(policy.selectionExpiryFarHours),
+      1,
+      24 * 365,
+    ),
+    selectionExpiryBoostMax: clamp(policy.selectionExpiryBoostMax, 0, 1),
     singleGameSportsStrictMode: Boolean(policy.singleGameSportsStrictMode),
     singleGameSportsMinHolderUsd: Math.max(
       0,

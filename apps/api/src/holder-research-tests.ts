@@ -28,6 +28,8 @@ import {
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchCandidatesFromMarket,
   buildHolderResearchExternalSearchInput,
+  buildHolderResearchCandidateActionability,
+  buildHolderResearchSelectionDiagnostics,
   buildHolderResearchTriageCandidatePromptJson,
   buildHolderResearchQualityAssessment,
   buildHolderResearchWalletTargets,
@@ -1071,6 +1073,321 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "pre-triage actionability blocks support-only and high-price candidates",
+    run: () => {
+      const p = policy({
+        maxAgentCallsPerRun: 1,
+        maxCandidatesPerRun: 1,
+        quotaRecentFlow: 10,
+      });
+      const recentFlow = buildHolderResearchCandidatesFromMarket(
+        market({
+          recentActivityUsd: p.minRecentActivityUsd * 2,
+          recentActivityAt: new Date().toISOString(),
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "recent_flow");
+      assert.ok(recentFlow);
+      const recentFlowActionability =
+        buildHolderResearchCandidateActionability(recentFlow, p);
+      assert.equal(recentFlowActionability.supportOnly, true);
+      assert.equal(recentFlowActionability.isPrimaryResearchCandidate, false);
+      assert.deepEqual(
+        recentFlowActionability.likelyFinalGateBlockers.includes(
+          "support_only_bucket",
+        ),
+        true,
+      );
+      const selectedSupport = selectHolderResearchCandidates([recentFlow], p);
+      assert.equal(selectedSupport.selected.length, 0);
+
+      const highPrice = buildHolderResearchCandidatesFromMarket(
+        market({ yesProbability: 0.04 }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      assert.ok(highPrice);
+      assert.equal(highPrice.side, "NO");
+      const highPriceActionability =
+        buildHolderResearchCandidateActionability(highPrice, p);
+      assert.equal(highPriceActionability.estimatedActionPrice, 0.96);
+      assert.equal(
+        highPriceActionability.likelyFinalGateBlockers.includes(
+          "action_price_too_high",
+        ),
+        true,
+      );
+      assert.equal(highPriceActionability.isPrimaryResearchCandidate, false);
+    },
+  },
+  {
+    name: "single-game sports strict mode blocks weak singles but allows clusters",
+    run: () => {
+      const p = policy();
+      const weakSports = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Alpha vs Beta",
+          marketTitle: "Alpha wins",
+          sides: {
+            YES: side("YES", { usd: 90_000, wallets: 4 }),
+            NO: side("NO", {
+              usd: 32_000,
+              wallets: 1,
+              sharpHolders: 1,
+              sharpUsd: 11_000,
+              bestEdge: 0.12,
+              bestZScore: 1.7,
+              bestSampleCount: 12,
+              bestResolvedStakeUsd: 2_000,
+              bestTrades30d: 12,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              pnl30dUsd: 0,
+              positionUsd: 11_000,
+              resolvedWinRateEdge30d: 0.1,
+              resolvedEdgeSampleCount30d: 12,
+            }),
+          ],
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      assert.ok(weakSports);
+      const weakActionability = buildHolderResearchCandidateActionability(
+        weakSports,
+        p,
+      );
+      assert.equal(
+        weakActionability.likelyFinalGateBlockers.includes(
+          "single_game_sports_weak_single",
+        ),
+        true,
+      );
+
+      const clusterSports = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Gamma vs Delta",
+          marketId: "polymarket:sports-cluster",
+          marketTitle: "Gamma wins",
+          sides: {
+            YES: side("YES", {
+              usd: 95_000,
+              wallets: 3,
+              sharpHolders: 2,
+              sharpUsd: 55_000,
+              bestEdge: 0.19,
+              bestZScore: 2.5,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 22,
+            }),
+            NO: side("NO", { usd: 20_000, wallets: 2 }),
+          },
+          holders: [
+            holder("YES", {
+              walletId: "00000000-0000-0000-0000-000000000031",
+              positionUsd: 30_000,
+            }),
+            holder("YES", {
+              walletId: "00000000-0000-0000-0000-000000000032",
+              positionUsd: 25_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_side");
+      assert.ok(clusterSports);
+      const clusterActionability = buildHolderResearchCandidateActionability(
+        clusterSports,
+        p,
+      );
+      assert.equal(clusterActionability.isPrimaryResearchCandidate, true);
+      assert.deepEqual(clusterActionability.likelyFinalGateBlockers, []);
+    },
+  },
+  {
+    name: "expiry boost ranks only otherwise primary candidates",
+    run: () => {
+      const p = policy({
+        maxAgentCallsPerRun: 1,
+        maxCandidatesPerRun: 1,
+        quotaSharpMinority: 1,
+      });
+      const near = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:near",
+          closeTime: new Date(Date.now() + 24 * 3_600_000).toISOString(),
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      const far = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "polymarket:far",
+          closeTime: new Date(Date.now() + 60 * 24 * 3_600_000).toISOString(),
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_minority");
+      assert.ok(near);
+      assert.ok(far);
+      const selected = selectHolderResearchCandidates(
+        [
+          { ...far, score: 0.8 },
+          { ...near, score: 0.8 },
+        ],
+        p,
+      );
+      assert.equal(selected.selected[0]?.market.marketId, "polymarket:near");
+      assert.ok(
+        buildHolderResearchCandidateActionability(near, p).expiryBoost > 0,
+      );
+
+      const longDatedPolitics = { ...far, score: 0.8 };
+      const actionability = buildHolderResearchCandidateActionability(
+        longDatedPolitics,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, true);
+      assert.equal(actionability.expiryBoost, 0);
+    },
+  },
+  {
+    name: "support facts attach to selected directional candidates",
+    run: () => {
+      const p = policy({
+        maxAgentCallsPerRun: 1,
+        maxCandidatesPerRun: 1,
+        quotaRecentFlow: 0,
+      });
+      const candidates = buildHolderResearchCandidatesFromMarket(
+        market({
+          recentActivityUsd: p.minRecentActivityUsd * 2,
+          recentActivityAt: new Date().toISOString(),
+        }),
+        p,
+      );
+      assert.ok(candidates.some((candidate) => candidate.bucket === "recent_flow"));
+      const selected = selectHolderResearchCandidates(candidates, p);
+      assert.equal(selected.selected.length, 1);
+      assert.ok(
+        selected.selected[0]?.evidence.some((evidence) =>
+          evidence.id.startsWith("support:recent_flow:"),
+        ),
+      );
+      const diagnostics = buildHolderResearchSelectionDiagnostics(
+        candidates,
+        selected.selected,
+        p,
+      );
+      assert.equal(diagnostics.supportOnly >= 1, true);
+      assert.equal(diagnostics.selectedForTriage, 1);
+      assert.equal(diagnostics.expiryBoosted >= 0, true);
+    },
+  },
+  {
+    name: "event diversity soft cap prefers other events but still refills when needed",
+    run: () => {
+      const p = policy({
+        maxAgentCallsPerRun: 3,
+        maxCandidatesPerRun: 3,
+        quotaSharpSide: 10,
+        selectionEventSoftCapPerEvent: 2,
+      });
+      const sameEventCandidates = [1, 2, 3].map((index) => {
+        const candidate = buildHolderResearchCandidatesFromMarket(
+          market({
+            eventId: "polymarket:event-a",
+            marketId: `polymarket:event-a-${index}`,
+            marketTitle: `Team ${index}`,
+            sides: {
+              YES: side("YES", {
+                usd: 95_000,
+                wallets: 3,
+                sharpHolders: 2,
+                sharpUsd: 50_000,
+                bestEdge: 0.19,
+                bestZScore: 2.5,
+                bestSampleCount: 28,
+                bestResolvedStakeUsd: 8_000,
+                bestTrades30d: 22,
+              }),
+              NO: side("NO", { usd: 20_000, wallets: 2 }),
+            },
+            holders: [
+              holder("YES", {
+                walletId: `00000000-0000-0000-0000-00000000004${index}`,
+                positionUsd: 30_000,
+              }),
+              holder("YES", {
+                walletId: `00000000-0000-0000-0000-00000000005${index}`,
+                positionUsd: 25_000,
+              }),
+            ],
+          }),
+          p,
+        ).find((candidate) => candidate.bucket === "sharp_side");
+        assert.ok(candidate);
+        return { ...candidate, score: 0.99 - index * 0.01 };
+      });
+      const otherEvent = buildHolderResearchCandidatesFromMarket(
+        market({
+          eventId: "polymarket:event-b",
+          marketId: "polymarket:event-b-1",
+          marketTitle: "Other team",
+          sides: {
+            YES: side("YES", {
+              usd: 80_000,
+              wallets: 3,
+              sharpHolders: 2,
+              sharpUsd: 45_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 25,
+              bestResolvedStakeUsd: 7_000,
+              bestTrades30d: 20,
+            }),
+            NO: side("NO", { usd: 25_000, wallets: 2 }),
+          },
+          holders: [
+            holder("YES", {
+              walletId: "00000000-0000-0000-0000-000000000061",
+              positionUsd: 28_000,
+            }),
+            holder("YES", {
+              walletId: "00000000-0000-0000-0000-000000000062",
+              positionUsd: 22_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((candidate) => candidate.bucket === "sharp_side");
+      assert.ok(otherEvent);
+
+      const selected = selectHolderResearchCandidates(
+        [...sameEventCandidates, { ...otherEvent, score: 0.7 }],
+        p,
+      );
+      assert.deepEqual(
+        selected.selected.map((candidate) => candidate.market.eventId),
+        ["polymarket:event-a", "polymarket:event-a", "polymarket:event-b"],
+      );
+
+      const onlySameEvent = selectHolderResearchCandidates(
+        sameEventCandidates,
+        p,
+      );
+      assert.deepEqual(
+        onlySameEvent.selected.map((candidate) => candidate.market.eventId),
+        [
+          "polymarket:event-a",
+          "polymarket:event-a",
+          "polymarket:event-a",
+        ],
+      );
+    },
+  },
+  {
     name: "external search input is redacted but keeps public market context",
     run: () => {
       const p = policy();
@@ -1339,6 +1656,47 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       });
       assert.equal(contextBeforeCooldown.action, "skip");
       assert.equal(contextBeforeCooldown.cachedStatus, "CONTEXT");
+    },
+  },
+  {
+    name: "decision cache does not recheck non-actionable candidates from generic flow alone",
+    run: () => {
+      const p = policy({
+        skipCooldownHours: 12,
+        forceRecheckAfterHours: 48,
+      });
+      const previous = buildHolderResearchCandidatesFromMarket(
+        market({
+          recentActivityUsd: p.minRecentActivityUsd,
+          recentActivityAt: "2026-01-01T00:00:00.000Z",
+        }),
+        p,
+      ).find((item) => item.bucket === "recent_flow");
+      assert.ok(previous);
+      const cachedSkip = buildHolderResearchDecisionCacheRecord({
+        candidate: previous,
+        output: { status: "SKIP", rationale: "Support context only." },
+        model: p.model,
+        policy: p,
+        now: new Date("2026-01-01T00:30:00.000Z"),
+      });
+      const current = {
+        ...previous,
+        market: {
+          ...previous.market,
+          recentActivityUsd: p.minRecentActivityUsd * 2,
+          recentActivityAt: "2026-01-01T02:00:00.000Z",
+        },
+      };
+      const evaluation = evaluateHolderResearchDecisionCache({
+        candidate: current,
+        cachedDecision: cachedSkip,
+        policy: p,
+        now: new Date("2026-01-01T02:10:00.000Z"),
+      });
+      assert.equal(evaluation.action, "skip");
+      assert.equal(evaluation.reason, "decision_cache");
+      assert.deepEqual(evaluation.meaningfulDeltaReasons, []);
     },
   },
   {
@@ -2357,6 +2715,12 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(serialized, /"holderEntry"/);
       assert.match(serialized, /quality/);
       assert.match(serialized, /marketSegment/);
+      assert.match(serialized, /triageGate/);
+      assert.equal(
+        (triageCandidate.triageGate as Record<string, unknown>)
+          .canLikelyPublish,
+        true,
+      );
       assert.match(serialized, /"addr"/);
       const prompt = buildHolderResearchTriageUserPrompt({
         candidates: [triageCandidate],
@@ -2836,6 +3200,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 performanceCalibrationMinOpenMovePp: 0.08,
                 performanceCalibrationDedupMarketSide: "false",
                 calibrationMemoEnabled: "false",
+                preTriageActionabilityEnabled: "false",
+                supportOnlyBuckets: ["recent_flow", "event_bridge"],
+                selectionEventDiversityEnabled: "false",
+                selectionEventSoftCapPerEvent: 4,
+                selectionExpiryBoostEnabled: "false",
+                selectionExpirySoonHours: 24,
+                selectionExpiryNearHours: 96,
+                selectionExpiryFarHours: 240,
+                selectionExpiryBoostMax: 0.04,
                 singleGameSportsStrictMode: "true",
                 singleGameSportsMinHolderUsd: 30_000,
                 singleGameSportsMinEdge: 0.2,
@@ -2908,6 +3281,36 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.equal(resolved.effective.performanceCalibrationDedupMarketSide, false);
       assert.equal(resolved.effective.calibrationMemoEnabled, false);
+      assert.equal(resolved.defaults.preTriageActionabilityEnabled, true);
+      assert.deepEqual(resolved.defaults.supportOnlyBuckets, [
+        "recent_flow",
+        "event_bridge",
+        "concentration_risk",
+        "clean_disagreement",
+      ]);
+      assert.equal(resolved.defaults.selectionEventDiversityEnabled, true);
+      assert.equal(resolved.defaults.selectionEventSoftCapPerEvent, 2);
+      assert.equal(resolved.defaults.selectionExpiryBoostEnabled, true);
+      assert.equal(resolved.defaults.selectionExpirySoonHours, 72);
+      assert.equal(resolved.defaults.selectionExpiryNearHours, 168);
+      assert.equal(resolved.defaults.selectionExpiryFarHours, 720);
+      assert.equal(resolved.defaults.selectionExpiryBoostMax, 0.08);
+      assert.equal(resolved.defaults.quotaSharpSide, 2);
+      assert.equal(resolved.defaults.quotaSharpMinority, 1);
+      assert.equal(resolved.defaults.quotaRecentFlow, 0);
+      assert.equal(resolved.defaults.quotaEventBridge, 0);
+      assert.equal(resolved.effective.preTriageActionabilityEnabled, false);
+      assert.deepEqual(resolved.effective.supportOnlyBuckets, [
+        "recent_flow",
+        "event_bridge",
+      ]);
+      assert.equal(resolved.effective.selectionEventDiversityEnabled, false);
+      assert.equal(resolved.effective.selectionEventSoftCapPerEvent, 4);
+      assert.equal(resolved.effective.selectionExpiryBoostEnabled, false);
+      assert.equal(resolved.effective.selectionExpirySoonHours, 24);
+      assert.equal(resolved.effective.selectionExpiryNearHours, 96);
+      assert.equal(resolved.effective.selectionExpiryFarHours, 240);
+      assert.equal(resolved.effective.selectionExpiryBoostMax, 0.04);
       assert.equal(resolved.effective.singleGameSportsMinHolderUsd, 30_000);
       assert.equal(resolved.effective.singleGameSportsMinEdge, 0.2);
       assert.equal(resolved.effective.singleGameSportsMinSamples, 30);

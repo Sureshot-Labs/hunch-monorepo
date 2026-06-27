@@ -29,6 +29,7 @@ import {
   buildHolderResearchDecisionCacheKey,
   buildHolderResearchDecisionCacheRecord,
   buildHolderResearchExternalSearchInput,
+  buildHolderResearchSelectionDiagnostics,
   buildHolderResearchTriageCandidatePromptJson,
   enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
@@ -43,6 +44,7 @@ import {
   type HolderResearchCandidate,
   type HolderResearchDecisionCacheEvaluation,
   type HolderResearchPersistDecision,
+  type HolderResearchSelectionDiagnostics,
 } from "./services/holder-research.js";
 import {
   auditHolderResearchSignalPerformance,
@@ -171,6 +173,7 @@ type HolderResearchRunReport = {
     providerReportedCostUsd: number | null;
     durationMs: number;
   };
+  selection: HolderResearchSelectionDiagnostics;
   toolCalls: Array<{
     name: string;
     count: number;
@@ -1447,9 +1450,27 @@ export async function runHolderResearch(
     );
     const selectedWithTypeMetrics =
       await enrichHolderResearchMarketTypeMetrics(client, selectedWithContext);
+    const selectionDiagnostics = buildHolderResearchSelectionDiagnostics(
+      candidates,
+      selectedWithTypeMetrics,
+      selectionPolicy,
+    );
     const calibrationMemo = policy.calibrationMemoEnabled
       ? await loadHolderResearchCalibrationMemo(client, policy)
       : [];
+    toolCalls.push({
+      name: "candidate_selection",
+      count: selectionDiagnostics.selectedForTriage,
+      status: "ok",
+      detail: [
+        `primary=${selectionDiagnostics.primaryEligible}/${selectionDiagnostics.loaded}`,
+        `supportOnly=${selectionDiagnostics.supportOnly}`,
+        `expiryBoosted=${selectionDiagnostics.expiryBoosted}`,
+        `blocked=${Object.entries(selectionDiagnostics.blockedByReason)
+          .map(([reason, count]) => `${reason}:${count}`)
+          .join(",")}`,
+      ].join(" "),
+    });
     toolCalls.push({
       name: "holder_context",
       count:
@@ -1987,6 +2008,7 @@ export async function runHolderResearch(
             : null,
         durationMs: Date.now() - startedAt,
       },
+      selection: selectionDiagnostics,
       toolCalls,
       decisionCache,
       decisionCacheSkipped,

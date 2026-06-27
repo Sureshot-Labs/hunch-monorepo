@@ -256,11 +256,45 @@ export type HolderResearchQualityAssessment = {
   reasons: string[];
 };
 
+export type HolderResearchActionabilityBlocker =
+  | "support_only_bucket"
+  | "no_clear_side"
+  | "non_actionable_bucket"
+  | "action_price_too_high"
+  | "credential_contradicted"
+  | "single_game_sports_weak_single";
+
+export type HolderResearchCandidateActionability = {
+  isPrimaryResearchCandidate: boolean;
+  supportOnly: boolean;
+  estimatedActionPrice: number | null;
+  hoursToClose: number | null;
+  likelyFinalGateBlockers: HolderResearchActionabilityBlocker[];
+  selectionStrengths: string[];
+  expiryBoost: number;
+};
+
+export type HolderResearchSelectionDiagnostics = {
+  loaded: number;
+  primaryEligible: number;
+  supportOnly: number;
+  selectedForTriage: number;
+  blockedByReason: Record<string, number>;
+  selectedByBucket: Record<string, number>;
+  expiryBoosted: number;
+};
+
 export type HolderResearchSelectionResult = {
   selected: HolderResearchCandidate[];
   skipped: Array<{
     candidate: HolderResearchCandidate;
-    reason: "below_score" | "cooldown" | "quota" | "duplicate_market";
+    reason:
+      | "below_score"
+      | "cooldown"
+      | "quota"
+      | "duplicate_market"
+      | "support_only"
+      | "actionability";
   }>;
 };
 
@@ -1359,6 +1393,108 @@ export function buildHolderResearchQualityAssessment(
   };
 }
 
+function estimatedHolderResearchActionPrice(
+  candidate: HolderResearchCandidate,
+): number | null {
+  if (candidate.side == null || candidate.market.yesProbability == null) {
+    return null;
+  }
+  return candidate.side === "YES"
+    ? candidate.market.yesProbability
+    : 1 - candidate.market.yesProbability;
+}
+
+function selectionExpiryBoostForHours(
+  hoursToClose: number | null,
+  policy: Pick<
+    HolderResearchPolicy,
+    | "selectionExpiryBoostEnabled"
+    | "selectionExpiryBoostMax"
+    | "selectionExpiryFarHours"
+    | "selectionExpiryNearHours"
+    | "selectionExpirySoonHours"
+  >,
+): number {
+  if (!policy.selectionExpiryBoostEnabled || hoursToClose == null) return 0;
+  if (hoursToClose <= 0) return 0;
+  const boostMax = Math.max(0, policy.selectionExpiryBoostMax);
+  if (boostMax <= 0) return 0;
+  if (hoursToClose <= policy.selectionExpirySoonHours) return boostMax;
+  if (hoursToClose <= policy.selectionExpiryNearHours) return boostMax * 0.6;
+  if (hoursToClose <= policy.selectionExpiryFarHours) return boostMax * 0.25;
+  return 0;
+}
+
+function pushUnique<T extends string>(items: T[], item: T): void {
+  if (!items.includes(item)) items.push(item);
+}
+
+export function buildHolderResearchCandidateActionability(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+): HolderResearchCandidateActionability {
+  const quality = buildHolderResearchQualityAssessment(candidate, policy);
+  const estimatedActionPrice = estimatedHolderResearchActionPrice(candidate);
+  const blockers: HolderResearchActionabilityBlocker[] = [];
+  const strengths: string[] = [];
+  const supportOnly = policy.supportOnlyBuckets.includes(candidate.bucket);
+  const hasClearSide =
+    candidate.side != null &&
+    (candidate.direction === "up" || candidate.direction === "down");
+
+  if (supportOnly) pushUnique(blockers, "support_only_bucket");
+  if (!hasClearSide) pushUnique(blockers, "no_clear_side");
+  if (
+    !supportOnly &&
+    !PUBLISHABLE_HOLDER_RESEARCH_BUCKETS.has(candidate.bucket)
+  ) {
+    pushUnique(blockers, "non_actionable_bucket");
+  }
+  if (estimatedActionPrice != null && estimatedActionPrice >= 0.95) {
+    pushUnique(blockers, "action_price_too_high");
+  }
+  if (quality.credentialStrength === "contradicted") {
+    pushUnique(blockers, "credential_contradicted");
+  }
+  if (
+    policy.singleGameSportsStrictMode &&
+    quality.marketType === "single_game_sports" &&
+    quality.actorStrength !== "cluster" &&
+    quality.actorStrength !== "exceptional_single"
+  ) {
+    pushUnique(blockers, "single_game_sports_weak_single");
+  }
+
+  if (quality.actorStrength === "cluster") strengths.push("sharp_cluster");
+  if (quality.actorStrength === "exceptional_single") {
+    strengths.push("exceptional_single");
+  }
+  if (quality.credentialStrength === "strong") strengths.push("strong_history");
+  if (candidate.bucket === "sharp_side") strengths.push("sharp_side");
+  if (quality.priceContext === "with_signal") strengths.push("price_confirming");
+  if (quality.marketType !== "single_game_sports") {
+    strengths.push("non_single_game_sports");
+  }
+
+  const actionabilityEnabled = Boolean(policy.preTriageActionabilityEnabled);
+  const isPrimaryResearchCandidate =
+    !actionabilityEnabled || blockers.length === 0;
+  const expiryBoost = isPrimaryResearchCandidate
+    ? selectionExpiryBoostForHours(quality.hoursToClose, policy)
+    : 0;
+  if (expiryBoost > 0) strengths.push("nearer_resolution");
+
+  return {
+    isPrimaryResearchCandidate,
+    supportOnly,
+    estimatedActionPrice,
+    hoursToClose: quality.hoursToClose,
+    likelyFinalGateBlockers: actionabilityEnabled ? blockers : [],
+    selectionStrengths: [...new Set(strengths)],
+    expiryBoost,
+  };
+}
+
 export function buildHolderResearchDecisionSnapshot(
   candidate: HolderResearchCandidate,
 ): HolderResearchDecisionSnapshot {
@@ -1689,12 +1825,22 @@ export function evaluateHolderResearchDecisionCache(input: {
     };
   }
 
-  const meaningfulDeltaReasons = diffHolderResearchDecisionSnapshots(
+  let meaningfulDeltaReasons = diffHolderResearchDecisionSnapshots(
     cached.snapshot,
     snapshot,
     input.policy,
     cached.checkedAt,
   );
+  const actionability = buildHolderResearchCandidateActionability(
+    input.candidate,
+    input.policy,
+  );
+  if (!actionability.isPrimaryResearchCandidate) {
+    meaningfulDeltaReasons = meaningfulDeltaReasons.filter(
+      (reason) =>
+        reason !== "fresh_flow" && reason !== "related_position_changed",
+    );
+  }
   if (meaningfulDeltaReasons.length > 0) {
     return {
       action: "analyze",
@@ -2177,10 +2323,18 @@ function adjustedSelectionScore(
 ): number {
   let score = candidate.score;
   const quality = buildHolderResearchQualityAssessment(candidate, policy);
+  const actionability = buildHolderResearchCandidateActionability(
+    candidate,
+    policy,
+  );
   if (quality.actorStrength === "cluster") score += 0.18;
   if (quality.actorStrength === "exceptional_single") score += 0.08;
   if (candidate.bucket === "sharp_side") score += 0.06;
   if (candidate.bucket === "sharp_minority") score -= 0.08;
+  score += actionability.expiryBoost;
+  if (policy.preTriageActionabilityEnabled && !actionability.isPrimaryResearchCandidate) {
+    score -= 0.3;
+  }
   if (quality.marketType !== "single_game_sports") score += 0.03;
   if (
     quality.marketType === "single_game_sports" &&
@@ -2215,6 +2369,102 @@ function compareHolderResearchCandidates(
   };
 }
 
+function buildSupportOnlyEvidence(
+  candidate: HolderResearchCandidate,
+): HolderResearchEvidence {
+  const titleByBucket: Record<HolderResearchBucket, string> = {
+    followup_existing: "Previous signal context",
+    sharp_minority: "Sharp minority context",
+    sharp_side: "Sharp side context",
+    sharp_split: "Sharp split context",
+    clean_disagreement: "Market disagreement context",
+    recent_flow: "Recent flow context",
+    event_bridge: "Cross-market holder context",
+    concentration_risk: "Holder concentration context",
+  };
+  const summary =
+    candidate.evidence
+      .filter((evidence) => evidence.kind !== "market")
+      .slice(0, 2)
+      .map((evidence) => evidence.summary)
+      .join(" ") ||
+    `${candidate.bucket.replace(/_/g, " ")} was detected on this market/event.`;
+  return {
+    id: `support:${candidate.bucket}:${candidate.key}`,
+    kind: candidate.bucket === "event_bridge" ? "event" : "market",
+    title: titleByBucket[candidate.bucket],
+    summary,
+    relevance: 0.45,
+  };
+}
+
+function attachSupportEvidenceToSelected(
+  selected: HolderResearchCandidate[],
+  candidates: HolderResearchCandidate[],
+  policy: HolderResearchPolicy,
+): HolderResearchCandidate[] {
+  const supportCandidates = candidates
+    .filter(
+      (candidate) =>
+        buildHolderResearchCandidateActionability(candidate, policy).supportOnly,
+    )
+    .sort(compareHolderResearchCandidates(policy));
+  if (supportCandidates.length === 0) return selected;
+
+  return selected.map((candidate) => {
+    const supportEvidence = supportCandidates
+      .filter((support) => {
+        if (support.key === candidate.key) return false;
+        if (support.market.marketId === candidate.market.marketId) return true;
+        return (
+          candidate.market.eventId != null &&
+          support.market.eventId === candidate.market.eventId
+        );
+      })
+      .slice(0, 3)
+      .map(buildSupportOnlyEvidence);
+    if (supportEvidence.length === 0) return candidate;
+    const existingIds = new Set(candidate.evidence.map((evidence) => evidence.id));
+    const appended = supportEvidence.filter(
+      (evidence) => !existingIds.has(evidence.id),
+    );
+    if (appended.length === 0) return candidate;
+    return {
+      ...candidate,
+      evidence: [...candidate.evidence, ...appended],
+    };
+  });
+}
+
+function holderResearchCandidateEventKey(
+  candidate: HolderResearchCandidate,
+): string | null {
+  return candidate.market.eventId ?? null;
+}
+
+function canSelectWithinEventSoftCap(
+  candidate: HolderResearchCandidate,
+  selectedEventCounts: Map<string, number>,
+  policy: HolderResearchPolicy,
+): boolean {
+  if (!policy.selectionEventDiversityEnabled) return true;
+  const eventKey = holderResearchCandidateEventKey(candidate);
+  if (!eventKey) return true;
+  return (
+    (selectedEventCounts.get(eventKey) ?? 0) <
+    policy.selectionEventSoftCapPerEvent
+  );
+}
+
+function markSelectedEvent(
+  candidate: HolderResearchCandidate,
+  selectedEventCounts: Map<string, number>,
+): void {
+  const eventKey = holderResearchCandidateEventKey(candidate);
+  if (!eventKey) return;
+  selectedEventCounts.set(eventKey, (selectedEventCounts.get(eventKey) ?? 0) + 1);
+}
+
 export function selectHolderResearchCandidates(
   candidates: HolderResearchCandidate[],
   policy: HolderResearchPolicy,
@@ -2229,7 +2479,19 @@ export function selectHolderResearchCandidates(
   const usedMarkets = new Set<string>();
   const usedKeys = new Set<string>();
   const quotaUsed = new Map<HolderResearchBucket, number>();
-  const sorted = [...candidates].sort(compareHolderResearchCandidates(policy));
+  const selectedEventCounts = new Map<string, number>();
+  const actionabilityByKey = new Map(
+    candidates.map((candidate) => [
+      candidate.key,
+      buildHolderResearchCandidateActionability(candidate, policy),
+    ]),
+  );
+  const sorted = [...candidates]
+    .filter((candidate) => {
+      const actionability = actionabilityByKey.get(candidate.key);
+      return actionability?.isPrimaryResearchCandidate === true;
+    })
+    .sort(compareHolderResearchCandidates(policy));
 
   const isEligible = (candidate: HolderResearchCandidate): boolean => {
     if (candidate.score < policy.minScore) {
@@ -2255,21 +2517,43 @@ export function selectHolderResearchCandidates(
     if (!isEligible(candidate)) continue;
     const quota = quotaForBucket(candidate.bucket, policy);
     const used = quotaUsed.get(candidate.bucket) ?? 0;
-    if (used >= quota) continue;
+    if (quota <= 0 || used >= quota) {
+      skipped.push({ candidate, reason: "quota" });
+      continue;
+    }
+    if (!canSelectWithinEventSoftCap(candidate, selectedEventCounts, policy)) {
+      continue;
+    }
     selected.push(candidate);
     usedKeys.add(candidate.key);
     usedMarkets.add(candidate.market.marketId);
+    markSelectedEvent(candidate, selectedEventCounts);
     quotaUsed.set(candidate.bucket, used + 1);
   }
 
-  const refill = [...candidates].sort(compareHolderResearchCandidates(policy));
-  for (const candidate of refill) {
+  const refillWithinEventCap = sorted;
+  for (const candidate of refillWithinEventCap) {
     if (selected.length >= maxSelected) break;
     if (usedKeys.has(candidate.key)) continue;
-    if (
-      quotaForBucket(candidate.bucket, policy) <= 0 &&
-      candidate.score < policy.publishMinScore
-    ) {
+    if (quotaForBucket(candidate.bucket, policy) <= 0) {
+      skipped.push({ candidate, reason: "quota" });
+      continue;
+    }
+    if (!isEligible(candidate)) continue;
+    if (!canSelectWithinEventSoftCap(candidate, selectedEventCounts, policy)) {
+      continue;
+    }
+    selected.push(candidate);
+    usedKeys.add(candidate.key);
+    usedMarkets.add(candidate.market.marketId);
+    markSelectedEvent(candidate, selectedEventCounts);
+  }
+
+  const unrestrictedRefill = sorted;
+  for (const candidate of unrestrictedRefill) {
+    if (selected.length >= maxSelected) break;
+    if (usedKeys.has(candidate.key)) continue;
+    if (quotaForBucket(candidate.bucket, policy) <= 0) {
       skipped.push({ candidate, reason: "quota" });
       continue;
     }
@@ -2277,16 +2561,73 @@ export function selectHolderResearchCandidates(
     selected.push(candidate);
     usedKeys.add(candidate.key);
     usedMarkets.add(candidate.market.marketId);
+    markSelectedEvent(candidate, selectedEventCounts);
   }
 
   for (const candidate of candidates) {
     if (usedKeys.has(candidate.key)) continue;
+    const actionability = actionabilityByKey.get(candidate.key);
+    if (actionability?.supportOnly) {
+      skipped.push({ candidate, reason: "support_only" });
+      continue;
+    }
+    if (actionability && !actionability.isPrimaryResearchCandidate) {
+      skipped.push({ candidate, reason: "actionability" });
+      continue;
+    }
     if (candidate.score >= policy.minScore) {
       skipped.push({ candidate, reason: "quota" });
     }
   }
 
-  return { selected, skipped };
+  return {
+    selected: attachSupportEvidenceToSelected(selected, candidates, policy),
+    skipped,
+  };
+}
+
+export function buildHolderResearchSelectionDiagnostics(
+  candidates: HolderResearchCandidate[],
+  selected: HolderResearchCandidate[],
+  policy: HolderResearchPolicy,
+): HolderResearchSelectionDiagnostics {
+  const blockedByReason: Record<string, number> = {};
+  let primaryEligible = 0;
+  let supportOnly = 0;
+  for (const candidate of candidates) {
+    const actionability = buildHolderResearchCandidateActionability(
+      candidate,
+      policy,
+    );
+    if (actionability.isPrimaryResearchCandidate) primaryEligible += 1;
+    if (actionability.supportOnly) supportOnly += 1;
+    for (const blocker of actionability.likelyFinalGateBlockers) {
+      blockedByReason[blocker] = (blockedByReason[blocker] ?? 0) + 1;
+    }
+  }
+
+  const selectedByBucket: Record<string, number> = {};
+  let expiryBoosted = 0;
+  for (const candidate of selected) {
+    selectedByBucket[candidate.bucket] =
+      (selectedByBucket[candidate.bucket] ?? 0) + 1;
+    if (
+      buildHolderResearchCandidateActionability(candidate, policy).expiryBoost >
+      0
+    ) {
+      expiryBoosted += 1;
+    }
+  }
+
+  return {
+    loaded: candidates.length,
+    primaryEligible,
+    supportOnly,
+    selectedForTriage: selected.length,
+    blockedByReason,
+    selectedByBucket,
+    expiryBoosted,
+  };
 }
 
 function buildSideFromRow(
@@ -3395,6 +3736,10 @@ export function buildHolderResearchTriageCandidatePromptJson(
     policy,
   });
   const quality = buildHolderResearchQualityAssessment(candidate, policy);
+  const actionability = buildHolderResearchCandidateActionability(
+    candidate,
+    policy,
+  );
   return {
     key: candidate.key,
     bucket: candidate.bucket,
@@ -3412,6 +3757,17 @@ export function buildHolderResearchTriageCandidatePromptJson(
       : [],
     actor,
     quality,
+    triageGate: {
+      canLikelyPublish: actionability.isPrimaryResearchCandidate,
+      supportOnly: actionability.supportOnly,
+      actionPrice: actionability.estimatedActionPrice,
+      hoursToClose: actionability.hoursToClose,
+      blockers: actionability.likelyFinalGateBlockers,
+      strengths: actionability.selectionStrengths,
+      expiryBoost: actionability.expiryBoost,
+      actorMode: actor.mode,
+      marketSegment: quality.marketSegment,
+    },
     sides: {
       YES: compactPromptSide(candidate.market.sides.YES),
       NO: compactPromptSide(candidate.market.sides.NO),
