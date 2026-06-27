@@ -356,19 +356,28 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "agg alternatives env accepts prod api key alias",
+    name: "agg alternatives env requires app id for AGG Market client",
     run: () => {
       const config = parseSignalBotAggMarketConfig({
         AGG_API_KEY: "agg-key",
+      });
+      assert.equal(config, null);
+    },
+  },
+  {
+    name: "agg alternatives env parses app id",
+    run: () => {
+      const config = parseSignalBotAggMarketConfig({
+        AGG_APP_ID: "agg-app",
         AGG_CLUSTERS_CACHE_TTL_SEC: "45",
         AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC: "90",
         AGG_MARKET_BASE_URL: "https://agg.example.com/",
         AGG_MARKET_TIMEOUT_MS: "2500",
       });
       assert.deepEqual(config, {
-        appId: "agg-key",
+        appId: "agg-app",
         baseUrl: "https://agg.example.com/",
-        credentialSource: "AGG_API_KEY",
+        credentialSource: "AGG_APP_ID",
         matchedTtlSec: 45,
         notFoundTtlSec: 90,
         timeoutMs: 2500,
@@ -376,14 +385,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "agg alternatives env prefers api key over app id",
+    name: "agg alternatives env ignores api key for AGG Market client",
     run: () => {
       const config = parseSignalBotAggMarketConfig({
         AGG_API_KEY: "real-key",
-        AGG_APP_ID: "fallback-id",
+        AGG_APP_ID: "app-id",
       });
-      assert.equal(config?.appId, "real-key");
-      assert.equal(config?.credentialSource, "AGG_API_KEY");
+      assert.equal(config?.appId, "app-id");
+      assert.equal(config?.credentialSource, "AGG_APP_ID");
     },
   },
   {

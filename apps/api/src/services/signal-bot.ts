@@ -966,9 +966,7 @@ function normalizeServiceBaseUrl(value: string | undefined, fallback: string) {
 export function parseSignalBotAggMarketConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotAggMarketConfig | null {
-  const apiKey = env.AGG_API_KEY?.trim() ?? "";
-  const appIdFallback = env.AGG_APP_ID?.trim() ?? "";
-  const appId = apiKey || appIdFallback;
+  const appId = env.AGG_APP_ID?.trim() ?? "";
   if (!appId) return null;
   return {
     appId,
@@ -976,7 +974,7 @@ export function parseSignalBotAggMarketConfig(
       env.AGG_MARKET_BASE_URL,
       "https://api.agg.market",
     ),
-    credentialSource: apiKey ? "AGG_API_KEY" : "AGG_APP_ID",
+    credentialSource: "AGG_APP_ID",
     matchedTtlSec: parseNonNegativeInt(env.AGG_CLUSTERS_CACHE_TTL_SEC, 30),
     notFoundTtlSec: parseNonNegativeInt(
       env.AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC,

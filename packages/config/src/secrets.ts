@@ -103,6 +103,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   "indexer-dflow": ["DFLOW_API_KEY"],
   "indexer-limitless": ["LIMITLESS_WS_SESSION"],
   ops: [
+    "AGG_APP_ID",
     "AGG_API_KEY",
     "AGG_HMAC_SIGNING_KEY",
     "OPINIONLABS_API_KEY",

@@ -267,6 +267,7 @@ test("bundle builder writes only allowlisted secret keys", () => {
     envPath,
     [
       "DATABASE_URL=postgres://secret",
+      "AGG_APP_ID=agg-app-id",
       "DFLOW_API_KEY=dflow-secret",
       "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS=123,456",
       "HUNCH_SIGNAL_BOT_TOKEN=signal-bot-secret",
@@ -294,6 +295,7 @@ test("bundle builder writes only allowlisted secret keys", () => {
     "JWT_SECRET",
   ]);
   assert.equal(result.bundles.api.includes("DFLOW_API_KEY"), true);
+  assert.equal(result.bundles.ops.includes("AGG_APP_ID"), true);
   assert.equal(result.bundles["indexer-dflow"].includes("DFLOW_API_KEY"), true);
   assert.deepEqual(result.bundles["indexer-limitless"], [
     "LIMITLESS_WS_SESSION",
@@ -310,6 +312,7 @@ test("bundle builder writes only allowlisted secret keys", () => {
   assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_TOKEN="), false);
   assert.equal(sanitized.includes("JWT_SECRET="), false);
   assert.equal(sanitized.includes("#JWT_SECRET="), false);
+  assert.equal(sanitized.includes("AGG_APP_ID="), false);
   assert.equal(sanitized.includes("DFLOW_API_KEY="), false);
   assert.equal(sanitized.includes("LIMITLESS_WS_SESSION="), false);
   assert.equal(sanitized.includes("POLYMARKET_BUILDER_API_SECRET="), false);
