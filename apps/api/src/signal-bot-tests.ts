@@ -22,6 +22,7 @@ import {
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
+  resolveSignalBotCheaperAlternativeFromAggResponse,
   resolveSignalBotBuySide,
   sendLatestSignalBotTestSignal,
   sendSignalBotStatsReport,
@@ -367,10 +368,94 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(config, {
         appId: "agg-key",
         baseUrl: "https://agg.example.com/",
+        credentialSource: "AGG_API_KEY",
         matchedTtlSec: 45,
         notFoundTtlSec: 90,
         timeoutMs: 2500,
       });
+    },
+  },
+  {
+    name: "agg alternatives env prefers api key over app id",
+    run: () => {
+      const config = parseSignalBotAggMarketConfig({
+        AGG_API_KEY: "real-key",
+        AGG_APP_ID: "fallback-id",
+      });
+      assert.equal(config?.appId, "real-key");
+      assert.equal(config?.credentialSource, "AGG_API_KEY");
+    },
+  },
+  {
+    name: "agg alternatives env falls back to app id",
+    run: () => {
+      const config = parseSignalBotAggMarketConfig({
+        AGG_APP_ID: "fallback-id",
+      });
+      assert.equal(config?.appId, "fallback-id");
+      assert.equal(config?.credentialSource, "AGG_APP_ID");
+    },
+  },
+  {
+    name: "agg alternatives diagnostics classify no response and not found",
+    run: () => {
+      const noResponse = resolveSignalBotCheaperAlternativeFromAggResponse({
+        buySide: "YES",
+        note: note(),
+        response: null,
+      });
+      assert.equal(noResponse.alternative, null);
+      assert.equal(noResponse.diagnostics.aggNoResponse, 1);
+
+      const notFound = resolveSignalBotCheaperAlternativeFromAggResponse({
+        buySide: "YES",
+        note: note(),
+        response: { alternatives: [], status: "not_found" },
+      });
+      assert.equal(notFound.alternative, null);
+      assert.equal(notFound.diagnostics.aggNotFound, 1);
+    },
+  },
+  {
+    name: "agg alternatives diagnostics classify matched prices",
+    run: () => {
+      const noCheaper = resolveSignalBotCheaperAlternativeFromAggResponse({
+        buySide: "YES",
+        note: note({ bestAsk: 0.32 }),
+        response: {
+          alternatives: [
+            {
+              eventId: "kalshi:event-1",
+              marketId: "kalshi:market-1",
+              venue: "kalshi",
+              yesAsk: 0.32,
+            },
+          ] as never,
+          status: "matched",
+        },
+      });
+      assert.equal(noCheaper.alternative, null);
+      assert.equal(noCheaper.diagnostics.aggMatched, 1);
+      assert.equal(noCheaper.diagnostics.aggMatchedNotCheaper, 1);
+
+      const cheaper = resolveSignalBotCheaperAlternativeFromAggResponse({
+        buySide: "YES",
+        note: note({ bestAsk: 0.32 }),
+        response: {
+          alternatives: [
+            {
+              eventId: "kalshi:event-1",
+              marketId: "kalshi:market-1",
+              venue: "kalshi",
+              yesAsk: 0.29,
+            },
+          ] as never,
+          status: "matched",
+        },
+      });
+      assert.equal(cheaper.alternative?.marketId, "kalshi:market-1");
+      assert.equal(cheaper.diagnostics.aggMatched, 1);
+      assert.equal(cheaper.diagnostics.aggCheaperFound, 1);
     },
   },
   {
@@ -1274,6 +1359,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
       assert.equal(result.cheaperAlternatives, 1);
+      assert.equal(result.aggCheaperFound, 0);
+      assert.equal(result.aggMatched, 0);
       assert.equal(result.sent, 1);
       assert.equal(
         telegram.messages[0]?.reply_markup?.inline_keyboard[1]?.[0]?.text,

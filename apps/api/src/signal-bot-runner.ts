@@ -11,6 +11,7 @@ import {
 
 import {
   acquireSignalBotLock,
+  parseSignalBotAggMarketConfig,
   parseSignalBotConfig,
   pollSignalBotCommands,
   publishSignalBotTick,
@@ -92,6 +93,7 @@ async function waitForSignalBotLock(input: {
 
 export async function runSignalBotRunner(): Promise<void> {
   const config = parseSignalBotConfig();
+  const aggConfig = parseSignalBotAggMarketConfig();
   if (!config.enabled) {
     await keepAliveDisabled();
   }
@@ -143,6 +145,8 @@ export async function runSignalBotRunner(): Promise<void> {
 
   log("signal_bot_started", {
     adminCount: config.adminUserIds.size,
+    aggAlternativesConfigured: aggConfig != null,
+    aggCredentialSource: aggConfig?.credentialSource ?? "none",
     buyAmountUsd: config.buyAmountUsd,
     maxSignalsPerTick: config.maxSignalsPerTick,
     minConfidence: config.minConfidence,

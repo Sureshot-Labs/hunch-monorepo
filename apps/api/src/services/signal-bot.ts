@@ -929,9 +929,25 @@ const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
 type SignalBotAggMarketConfig = {
   appId: string;
   baseUrl: string;
+  credentialSource: "AGG_API_KEY" | "AGG_APP_ID";
   matchedTtlSec: number;
   notFoundTtlSec: number;
   timeoutMs: number;
+};
+
+export type SignalBotCheaperAlternativeDiagnostics = {
+  aggCheaperFound: number;
+  aggDisabled: number;
+  aggErrors: number;
+  aggMatched: number;
+  aggMatchedNotCheaper: number;
+  aggNoResponse: number;
+  aggNotFound: number;
+};
+
+type SignalBotCheaperAlternativeResult = {
+  alternative: SignalBotCheaperAlternative | null;
+  diagnostics: SignalBotCheaperAlternativeDiagnostics;
 };
 
 function normalizeServiceBaseUrl(value: string | undefined, fallback: string) {
@@ -950,7 +966,9 @@ function normalizeServiceBaseUrl(value: string | undefined, fallback: string) {
 export function parseSignalBotAggMarketConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotAggMarketConfig | null {
-  const appId = (env.AGG_APP_ID ?? env.AGG_API_KEY)?.trim() ?? "";
+  const apiKey = env.AGG_API_KEY?.trim() ?? "";
+  const appIdFallback = env.AGG_APP_ID?.trim() ?? "";
+  const appId = apiKey || appIdFallback;
   if (!appId) return null;
   return {
     appId,
@@ -958,6 +976,7 @@ export function parseSignalBotAggMarketConfig(
       env.AGG_MARKET_BASE_URL,
       "https://api.agg.market",
     ),
+    credentialSource: apiKey ? "AGG_API_KEY" : "AGG_APP_ID",
     matchedTtlSec: parseNonNegativeInt(env.AGG_CLUSTERS_CACHE_TTL_SEC, 30),
     notFoundTtlSec: parseNonNegativeInt(
       env.AGG_MARKET_ALTERNATIVES_NOT_FOUND_CACHE_TTL_SEC,
@@ -965,6 +984,31 @@ export function parseSignalBotAggMarketConfig(
     ),
     timeoutMs: parsePositiveInt(env.AGG_MARKET_TIMEOUT_MS, 5_000),
   };
+}
+
+function createSignalBotCheaperAlternativeDiagnostics(): SignalBotCheaperAlternativeDiagnostics {
+  return {
+    aggCheaperFound: 0,
+    aggDisabled: 0,
+    aggErrors: 0,
+    aggMatched: 0,
+    aggMatchedNotCheaper: 0,
+    aggNoResponse: 0,
+    aggNotFound: 0,
+  };
+}
+
+function addSignalBotCheaperAlternativeDiagnostics(
+  target: SignalBotCheaperAlternativeDiagnostics,
+  source: SignalBotCheaperAlternativeDiagnostics,
+): void {
+  target.aggCheaperFound += source.aggCheaperFound;
+  target.aggDisabled += source.aggDisabled;
+  target.aggErrors += source.aggErrors;
+  target.aggMatched += source.aggMatched;
+  target.aggMatchedNotCheaper += source.aggMatchedNotCheaper;
+  target.aggNoResponse += source.aggNoResponse;
+  target.aggNotFound += source.aggNotFound;
 }
 
 function isStrictlyCheaperDisplayedPrice(params: {
@@ -1026,14 +1070,58 @@ function pickCheaperSignalBotAlternative(input: {
   );
 }
 
+export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
+  buySide: "NO" | "YES";
+  note: SignalBotNote;
+  response: {
+    alternatives: ClusterMarketSummary[];
+    status: string;
+  } | null;
+}): SignalBotCheaperAlternativeResult {
+  const diagnostics = createSignalBotCheaperAlternativeDiagnostics();
+  if (!input.response) {
+    diagnostics.aggNoResponse += 1;
+    return { alternative: null, diagnostics };
+  }
+  if (input.response.status === "not_found") {
+    diagnostics.aggNotFound += 1;
+    return { alternative: null, diagnostics };
+  }
+  if (input.response.status !== "matched") {
+    diagnostics.aggNoResponse += 1;
+    return { alternative: null, diagnostics };
+  }
+
+  diagnostics.aggMatched += 1;
+  const alternative = pickCheaperSignalBotAlternative({
+    buySide: input.buySide,
+    note: input.note,
+    response: input.response,
+  });
+  if (alternative) {
+    diagnostics.aggCheaperFound += 1;
+  } else {
+    diagnostics.aggMatchedNotCheaper += 1;
+  }
+  return { alternative, diagnostics };
+}
+
 async function resolveDefaultSignalBotCheaperAlternative(input: {
   buySide: "NO" | "YES";
   db: DbQuery;
   note: SignalBotNote;
   redis: SignalBotRedisLike;
-}): Promise<SignalBotCheaperAlternative | null> {
+}): Promise<SignalBotCheaperAlternativeResult> {
+  const diagnostics = createSignalBotCheaperAlternativeDiagnostics();
   const aggConfig = parseSignalBotAggMarketConfig();
-  if (!aggConfig || !input.note.marketId) return null;
+  if (!aggConfig) {
+    diagnostics.aggDisabled += 1;
+    return { alternative: null, diagnostics };
+  }
+  if (!input.note.marketId) {
+    diagnostics.aggNoResponse += 1;
+    return { alternative: null, diagnostics };
+  }
   try {
     const client = createAggMarketClient({
       appId: aggConfig.appId,
@@ -1049,14 +1137,14 @@ async function resolveDefaultSignalBotCheaperAlternative(input: {
       notFoundTtlSec: aggConfig.notFoundTtlSec,
       query: SIGNAL_BOT_ALTERNATIVES_QUERY,
     });
-    if (!response) return null;
-    return pickCheaperSignalBotAlternative({
+    return resolveSignalBotCheaperAlternativeFromAggResponse({
       buySide: input.buySide,
       note: input.note,
       response,
     });
   } catch {
-    return null;
+    diagnostics.aggErrors += 1;
+    return { alternative: null, diagnostics };
   }
 }
 
@@ -1074,7 +1162,7 @@ export async function publishSignalBotTick(input: {
   eligibleNotes: number;
   nonDirectionalNotes: number;
   sent: number;
-}> {
+} & SignalBotCheaperAlternativeDiagnostics> {
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
   let sent = 0;
   let blockedChats = 0;
@@ -1082,6 +1170,7 @@ export async function publishSignalBotTick(input: {
   let cheaperAlternatives = 0;
   let eligibleNotes = 0;
   let nonDirectionalNotes = 0;
+  const alternativeDiagnostics = createSignalBotCheaperAlternativeDiagnostics();
   for (const chatId of chatIds) {
     const state = await getSignalBotChatState(input.redis, chatId);
     if (!state) {
@@ -1104,16 +1193,27 @@ export async function publishSignalBotTick(input: {
     });
     for (const note of notes) {
       const buySide = resolveSignalBotBuySide(note);
-      const cheaperAlternative = buySide
-        ? await (input.resolveCheaperAlternative ??
-            ((resolverInput) =>
-              resolveDefaultSignalBotCheaperAlternative({
-                buySide: resolverInput.buySide,
-                db: input.db,
-                note: resolverInput.note,
-                redis: input.redis,
-              })))({ buySide, note })
-        : null;
+      let cheaperAlternative: SignalBotCheaperAlternative | null = null;
+      if (buySide) {
+        if (input.resolveCheaperAlternative) {
+          cheaperAlternative = await input.resolveCheaperAlternative({
+            buySide,
+            note,
+          });
+        } else {
+          const resolved = await resolveDefaultSignalBotCheaperAlternative({
+            buySide,
+            db: input.db,
+            note,
+            redis: input.redis,
+          });
+          cheaperAlternative = resolved.alternative;
+          addSignalBotCheaperAlternativeDiagnostics(
+            alternativeDiagnostics,
+            resolved.diagnostics,
+          );
+        }
+      }
       if (cheaperAlternative) cheaperAlternatives += 1;
       const { keyboard, text } = buildSignalBotMessage({
         appBaseUrl: input.config.appBaseUrl,
@@ -1147,6 +1247,7 @@ export async function publishSignalBotTick(input: {
     }
   }
   return {
+    ...alternativeDiagnostics,
     belowConfidenceNotes,
     blockedChats,
     chats: chatIds.length,
@@ -1178,13 +1279,15 @@ export async function sendLatestSignalBotTestSignal(input: {
   const cheaperAlternative = buySide
     ? await (input.resolveCheaperAlternative ??
         (input.redis
-          ? (resolverInput) =>
-              resolveDefaultSignalBotCheaperAlternative({
-                buySide: resolverInput.buySide,
-                db: input.db,
-                note: resolverInput.note,
-                redis: input.redis as SignalBotRedisLike,
-              })
+          ? async (resolverInput) =>
+              (
+                await resolveDefaultSignalBotCheaperAlternative({
+                  buySide: resolverInput.buySide,
+                  db: input.db,
+                  note: resolverInput.note,
+                  redis: input.redis as SignalBotRedisLike,
+                })
+              ).alternative
           : async () => null))({ buySide, note })
     : null;
   const { keyboard, text } = buildSignalBotMessage({
