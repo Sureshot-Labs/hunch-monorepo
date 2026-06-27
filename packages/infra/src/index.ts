@@ -24,13 +24,18 @@ export {
   resolveTopTickGateOptionsFromEnv,
 } from "./top-tick-gate.js";
 export {
+  claimDueSortedSetQueueItems,
   claimDuePriceRefreshTokens,
+  enqueueSortedSetQueueItems,
   enqueuePriceRefreshTokens,
   filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
   getPriceRefreshQueueKey,
+  getSortedSetQueueBacklog,
   inferPriceRefreshVenue,
+  LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
   PRICE_REFRESH_QUEUE_KEYS,
+  requeueSortedSetQueueItems,
   requeuePriceRefreshTokens,
 } from "./price-refresh.js";
 export { requestFreshMarketPrices } from "./fresh-market-prices.js";
@@ -57,8 +62,11 @@ export type {
 } from "./market-update.js";
 export type {
   ClaimPriceRefreshInputs,
+  ClaimSortedSetQueueItemsInputs,
   EnqueuePriceRefreshInputs,
   EnqueuePriceRefreshResult,
+  EnqueueSortedSetQueueItemsInputs,
+  EnqueueSortedSetQueueItemsResult,
   FilterStalePriceRefreshTokensInputs,
   FilterStalePriceRefreshTokensResult,
   PriceRefreshFreshnessDb,
@@ -67,6 +75,7 @@ export type {
   PriceRefreshPriority,
   PriceRefreshVenue,
   RequeuePriceRefreshInputs,
+  RequeueSortedSetQueueItemsInputs,
 } from "./price-refresh.js";
 export type {
   FreshMarketPriceDb,

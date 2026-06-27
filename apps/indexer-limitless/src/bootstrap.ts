@@ -39,15 +39,20 @@ import {
 } from "@hunch/db";
 import {
   buildTopMarketsText,
+  claimDueSortedSetQueueItems,
   claimDuePriceRefreshTokens,
   createTopTickGate,
   enqueueEmbedItems,
+  enqueueSortedSetQueueItems,
   filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
+  getSortedSetQueueBacklog,
   isPgSetupIssue,
+  LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
   publishMarketState,
   publishMarketUpdate,
   requeuePriceRefreshTokens,
+  requeueSortedSetQueueItems,
   type EmbedQueueItem,
   type PriceRefreshQueueClaimSide,
   type PriceRefreshRedis,
@@ -628,6 +633,48 @@ async function resolveLimitlessMarketRowsForTokenIds(
   return rows;
 }
 
+async function resolveLimitlessMarketRowsForMarketIds(
+  marketIds: string[],
+): Promise<HotLimitlessMarketRow[]> {
+  const orderedMarketIds: string[] = [];
+  const seen = new Set<string>();
+  for (const rawMarketId of marketIds) {
+    const marketId = rawMarketId.trim();
+    if (!marketId || seen.has(marketId)) continue;
+    seen.add(marketId);
+    orderedMarketIds.push(marketId);
+  }
+  if (!orderedMarketIds.length) return [];
+
+  const { rows } = await pool.query<HotLimitlessMarketRow>(
+    `
+      with requested_markets as (
+        select market_id, ord::int as ord
+        from unnest($1::text[]) with ordinality as t(market_id, ord)
+      )
+      select
+        m.id as market_id,
+        rm.ord as hot_rank,
+        m.slug,
+        lower(nullif(m.metadata->>'address', '')) as address,
+        nullif(m.metadata->>'tradeType', '') as trade_type,
+        m.token_yes,
+        m.token_no,
+        m.volume_total,
+        m.liquidity
+      from requested_markets rm
+      join unified_markets m on m.id = rm.market_id
+      where m.venue = 'limitless'
+      order by rm.ord asc,
+               m.volume_total desc nulls last,
+               m.liquidity desc nulls last
+    `,
+    [orderedMarketIds],
+  );
+
+  return rows;
+}
+
 function filterLimitlessRowsForTokenIds(
   rows: HotLimitlessMarketRow[],
   tokenIds: string[],
@@ -747,6 +794,38 @@ function tokenTradeTypeCounts(
     incrementCount(out, tradeType);
   }
   return out;
+}
+
+function rowTradeTypeCounts(
+  rows: ReadonlyArray<HotLimitlessMarketRow>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const row of rows) {
+    incrementCount(out, resolveLimitlessHttpFallbackTradeType(row));
+  }
+  return out;
+}
+
+async function enqueueLimitlessHttpFallbackRows(
+  redisClient: PriceRefreshRedis,
+  rows: ReadonlyArray<HotLimitlessMarketRow>,
+): Promise<number> {
+  const marketIds: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const marketId = row.market_id.trim();
+    if (!marketId || seen.has(marketId)) continue;
+    seen.add(marketId);
+    marketIds.push(marketId);
+  }
+  if (!marketIds.length) return 0;
+
+  const result = await enqueueSortedSetQueueItems(redisClient, {
+    key: LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+    items: marketIds,
+    maxQueueSize: env.priceRefreshHttpQueueMax,
+  });
+  return result.enqueued;
 }
 
 async function refreshLimitlessMarketTop(
@@ -955,11 +1034,14 @@ export async function processPriceRefreshQueue(
   wsDemandTokensByTradeType?: Record<string, number>;
   wsDemandFilledByTradeType?: Record<string, number>;
   wsDemandStillStaleByTradeType?: Record<string, number>;
-  wsDemandEvents?: ReturnType<typeof getLimitlessWsDemandEventStats>;
-  httpFallbackByTradeType?: Record<string, number>;
-  httpFallbackReasons?: Record<string, number>;
-  httpFallbackNoTopSamples?: LimitlessHttpFallbackSample[];
-  durationMs?: number;
+	  wsDemandEvents?: ReturnType<typeof getLimitlessWsDemandEventStats>;
+	  httpDeferred?: number;
+	  httpDeferredEnqueued?: number;
+	  httpDeferredByTradeType?: Record<string, number>;
+	  httpFallbackByTradeType?: Record<string, number>;
+	  httpFallbackReasons?: Record<string, number>;
+	  httpFallbackNoTopSamples?: LimitlessHttpFallbackSample[];
+	  durationMs?: number;
 }> {
   const side = options.side ?? "oldest";
   if (!env.priceRefreshQueueEnabled || !env.limitlessEnabled) {
@@ -994,6 +1076,9 @@ export async function processPriceRefreshQueue(
   let wsDemandTokensByTradeType: Record<string, number> = {};
   let wsDemandFilledByTradeType: Record<string, number> = {};
   let wsDemandStillStaleByTradeType: Record<string, number> = {};
+  let httpDeferred = 0;
+  let httpDeferredEnqueued = 0;
+  let httpDeferredByTradeType: Record<string, number> = {};
   const wsDemandEventStatsBefore = getLimitlessWsDemandEventStats();
   const httpFallbackByTradeType: Record<string, number> = {};
   const httpFallbackReasons: Record<string, number> = {};
@@ -1032,14 +1117,17 @@ export async function processPriceRefreshQueue(
           wsDemandTokensByTradeType: {},
           wsDemandFilledByTradeType: {},
           wsDemandStillStaleByTradeType: {},
-          wsDemandEvents: {
-            clobOrderbookDemandEvents: 0,
-            ammPriceDemandEvents: 0,
-            resolvedDemandEvents: 0,
-          },
-          httpFallbackByTradeType: {},
-          httpFallbackReasons: {},
-          httpFallbackNoTopSamples: [],
+	          wsDemandEvents: {
+	            clobOrderbookDemandEvents: 0,
+	            ammPriceDemandEvents: 0,
+	            resolvedDemandEvents: 0,
+	          },
+	          httpDeferred: 0,
+	          httpDeferredEnqueued: 0,
+	          httpDeferredByTradeType: {},
+	          httpFallbackByTradeType: {},
+	          httpFallbackReasons: {},
+	          httpFallbackNoTopSamples: [],
           failed: 0,
           backlog,
           durationMs: Date.now() - startedAt,
@@ -1066,14 +1154,17 @@ export async function processPriceRefreshQueue(
         wsDemandTokensByTradeType: {},
         wsDemandFilledByTradeType: {},
         wsDemandStillStaleByTradeType: {},
-        wsDemandEvents: {
-          clobOrderbookDemandEvents: 0,
-          ammPriceDemandEvents: 0,
-          resolvedDemandEvents: 0,
-        },
-        httpFallbackByTradeType: {},
-        httpFallbackReasons: {},
-        httpFallbackNoTopSamples: [],
+	        wsDemandEvents: {
+	          clobOrderbookDemandEvents: 0,
+	          ammPriceDemandEvents: 0,
+	          resolvedDemandEvents: 0,
+	        },
+	        httpDeferred: 0,
+	        httpDeferredEnqueued: 0,
+	        httpDeferredByTradeType: {},
+	        httpFallbackByTradeType: {},
+	        httpFallbackReasons: {},
+	        httpFallbackNoTopSamples: [],
         durationMs: Date.now() - startedAt,
       };
     }
@@ -1133,6 +1224,20 @@ export async function processPriceRefreshQueue(
         freshSkipped += afterWs.freshTokenIds.length;
         rows = filterLimitlessRowsForTokenIds(rows, staleTokenIds);
       }
+    }
+
+    if (
+      rows.length &&
+      env.priceRefreshDeferHttpFallback &&
+      env.priceRefreshHttpQueueEnabled
+    ) {
+      httpDeferred = rows.length;
+      httpDeferredEnqueued = await enqueueLimitlessHttpFallbackRows(
+        redisClient,
+        rows,
+      );
+      httpDeferredByTradeType = rowTradeTypeCounts(rows);
+      rows = [];
     }
 
     httpFallback = rows.length;
@@ -1219,6 +1324,8 @@ export async function processPriceRefreshQueue(
       marketRefreshed,
       topRefreshed,
       httpFallback,
+      httpDeferred,
+      httpDeferredEnqueued,
       wsDemandRequested,
       wsDemandFilled,
       resolvedTopUpdated,
@@ -1231,6 +1338,7 @@ export async function processPriceRefreshQueue(
       wsDemandFilledByTradeType,
       wsDemandStillStaleByTradeType,
       wsDemandEvents,
+      httpDeferredByTradeType,
       httpFallbackByTradeType,
       httpFallbackReasons,
       httpFallbackNoTopSamples,
@@ -1250,6 +1358,8 @@ export async function processPriceRefreshQueue(
     marketRefreshed,
     topRefreshed,
     httpFallback,
+    httpDeferred,
+    httpDeferredEnqueued,
     wsDemandRequested,
     wsDemandFilled,
     resolvedTopUpdated,
@@ -1262,11 +1372,185 @@ export async function processPriceRefreshQueue(
     wsDemandFilledByTradeType,
     wsDemandStillStaleByTradeType,
     wsDemandEvents,
+    httpDeferredByTradeType,
     httpFallbackByTradeType,
     httpFallbackReasons,
     httpFallbackNoTopSamples,
     durationMs: Date.now() - startedAt,
   };
+}
+
+export async function processPriceRefreshHttpFallbackQueue(
+  options: {
+    logSuccess?: boolean;
+  } = {},
+): Promise<{
+  claimed: number;
+  missingRows: number;
+  refreshed: number;
+  failed: number;
+  backlog: number;
+  marketRefreshed: number;
+  topRefreshed: number;
+  resolvedTopUpdated: number;
+  httpFallbackByTradeType: Record<string, number>;
+  httpFallbackReasons: Record<string, number>;
+  httpFallbackNoTopSamples: LimitlessHttpFallbackSample[];
+  durationMs?: number;
+}> {
+  if (
+    !env.priceRefreshQueueEnabled ||
+    !env.priceRefreshHttpQueueEnabled ||
+    !env.limitlessEnabled
+  ) {
+    return {
+      claimed: 0,
+      missingRows: 0,
+      refreshed: 0,
+      failed: 0,
+      backlog: 0,
+      marketRefreshed: 0,
+      topRefreshed: 0,
+      resolvedTopUpdated: 0,
+      httpFallbackByTradeType: {},
+      httpFallbackReasons: {},
+      httpFallbackNoTopSamples: [],
+    };
+  }
+
+  await ensureRedis();
+  await pool.query("select 1");
+
+  const startedAt = Date.now();
+  const redisClient = redis as unknown as PriceRefreshRedis;
+  const batch = env.priceRefreshHttpQueueBatch;
+  const oldestLimit = Math.ceil(batch / 2);
+  const newestLimit = Math.max(0, batch - oldestLimit);
+  const oldest = await claimDueSortedSetQueueItems(redisClient, {
+    key: LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+    limit: oldestLimit,
+    side: "oldest",
+  });
+  const newest =
+    newestLimit > 0
+      ? await claimDueSortedSetQueueItems(redisClient, {
+          key: LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+          limit: newestLimit,
+          side: "newest",
+        })
+      : [];
+  const marketIds = [...oldest, ...newest];
+  if (!marketIds.length) {
+    return {
+      claimed: 0,
+      missingRows: 0,
+      refreshed: 0,
+      failed: 0,
+      backlog: await getSortedSetQueueBacklog(
+        redisClient,
+        LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+      ),
+      marketRefreshed: 0,
+      topRefreshed: 0,
+      resolvedTopUpdated: 0,
+      httpFallbackByTradeType: {},
+      httpFallbackReasons: {},
+      httpFallbackNoTopSamples: [],
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  let refreshed = 0;
+  let failed = 0;
+  let marketRefreshed = 0;
+  let topRefreshed = 0;
+  let resolvedTopUpdated = 0;
+  const httpFallbackByTradeType: Record<string, number> = {};
+  const httpFallbackReasons: Record<string, number> = {};
+  const httpFallbackNoTopSamples: LimitlessHttpFallbackSample[] = [];
+  const failedMarketIds: string[] = [];
+
+  const rows = await resolveLimitlessMarketRowsForMarketIds(marketIds);
+  const missingRows = Math.max(0, marketIds.length - rows.length);
+  if (missingRows > 0) {
+    httpFallbackReasons.missing_ref = missingRows;
+  }
+
+  for (const row of rows) {
+    try {
+      const result = await refreshLimitlessQueuedMarket(row);
+      marketRefreshed += result.processedMarkets;
+      if (result.topUpdated) topRefreshed += 1;
+      if (result.resolvedTopUpdated) resolvedTopUpdated += 1;
+      incrementCount(httpFallbackByTradeType, result.fallbackTradeType);
+      incrementCount(httpFallbackReasons, result.fallbackReason);
+      if (
+        !result.topUpdated &&
+        !result.resolvedTopUpdated &&
+        httpFallbackNoTopSamples.length < 5
+      ) {
+        httpFallbackNoTopSamples.push(result.fallbackSample);
+      }
+    } catch (error) {
+      failed += 1;
+      incrementCount(
+        httpFallbackByTradeType,
+        resolveLimitlessHttpFallbackTradeType(row),
+      );
+      incrementCount(httpFallbackReasons, "error");
+      if (httpFallbackNoTopSamples.length < 5) {
+        httpFallbackNoTopSamples.push(
+          buildLimitlessHttpFallbackSample(row, null, "error"),
+        );
+      }
+      const permanent = isPermanentLimitlessPriceRefreshError(error);
+      if (!permanent) {
+        failedMarketIds.push(row.market_id);
+      }
+      log.warn(
+        permanent
+          ? "Limitless HTTP fallback market skipped permanently"
+          : "Limitless HTTP fallback market failed",
+        {
+          marketId: row.market_id,
+          slug: row.slug,
+          error,
+        },
+      );
+    }
+  }
+  refreshed = marketRefreshed + topRefreshed;
+  if (failedMarketIds.length) {
+    await requeueSortedSetQueueItems(redisClient, {
+      key: LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+      items: failedMarketIds,
+      delayMs: env.priceRefreshRetryDelayMs,
+      maxQueueSize: env.priceRefreshHttpQueueMax,
+    });
+  }
+
+  const backlog = await getSortedSetQueueBacklog(
+    redisClient,
+    LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+  );
+  const result = {
+    claimed: marketIds.length,
+    missingRows,
+    refreshed,
+    failed,
+    backlog,
+    marketRefreshed,
+    topRefreshed,
+    resolvedTopUpdated,
+    httpFallbackByTradeType,
+    httpFallbackReasons,
+    httpFallbackNoTopSamples,
+    durationMs: Date.now() - startedAt,
+  };
+  if (options.logSuccess !== false) {
+    log.info("Limitless price refresh HTTP fallback queue processed", result);
+  }
+  return result;
 }
 
 export async function backfillHotLimitlessAmmPrices(): Promise<{

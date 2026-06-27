@@ -2,6 +2,7 @@ import {
   backfillHotLimitlessAmmPrices,
   bootstrapLimitless,
   ensureStartupWsTargets,
+  processPriceRefreshHttpFallbackQueue,
   processPriceRefreshQueue,
   resolveHotWsTargets,
   syncHotLimitlessMarkets,
@@ -26,8 +27,12 @@ let fullBootstrapping = false;
 let hotRefreshing = false;
 let wsRefreshRunning = false;
 let priceRefreshRunning = false;
+let priceRefreshHttpFallbackRunning = false;
 
 type PriceRefreshResult = Awaited<ReturnType<typeof processPriceRefreshQueue>>;
+type PriceRefreshNoTopSample = NonNullable<
+  PriceRefreshResult["httpFallbackNoTopSamples"]
+>[number];
 type PriceRefreshAggregate = {
   claimed: number;
   refreshed: number;
@@ -38,6 +43,8 @@ type PriceRefreshAggregate = {
   marketRefreshed: number;
   topRefreshed: number;
   httpFallback: number;
+  httpDeferred: number;
+  httpDeferredEnqueued: number;
   wsDemandRequested: number;
   wsDemandFilled: number;
   resolvedTopUpdated: number;
@@ -48,6 +55,7 @@ type PriceRefreshAggregate = {
   wsDemandTokensByTradeType: Record<string, number>;
   wsDemandFilledByTradeType: Record<string, number>;
   wsDemandStillStaleByTradeType: Record<string, number>;
+  httpDeferredByTradeType: Record<string, number>;
   httpFallbackByTradeType: Record<string, number>;
   httpFallbackReasons: Record<string, number>;
   httpFallbackNoTopSamples: NonNullable<
@@ -67,9 +75,7 @@ function mergeCountRecords(
   return out;
 }
 
-function noTopSampleKey(
-  sample: NonNullable<PriceRefreshResult["httpFallbackNoTopSamples"]>[number],
-): string {
+function noTopSampleKey(sample: PriceRefreshNoTopSample): string {
   return `${sample.marketId}:${sample.reason}`;
 }
 
@@ -113,6 +119,9 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
         acc.marketRefreshed + (result.marketRefreshed ?? 0),
       topRefreshed: acc.topRefreshed + (result.topRefreshed ?? 0),
       httpFallback: acc.httpFallback + (result.httpFallback ?? 0),
+      httpDeferred: acc.httpDeferred + (result.httpDeferred ?? 0),
+      httpDeferredEnqueued:
+        acc.httpDeferredEnqueued + (result.httpDeferredEnqueued ?? 0),
       wsDemandRequested:
         acc.wsDemandRequested + (result.wsDemandRequested ?? 0),
       wsDemandFilled: acc.wsDemandFilled + (result.wsDemandFilled ?? 0),
@@ -141,6 +150,10 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       wsDemandStillStaleByTradeType: mergeCountRecords(
         acc.wsDemandStillStaleByTradeType,
         result.wsDemandStillStaleByTradeType,
+      ),
+      httpDeferredByTradeType: mergeCountRecords(
+        acc.httpDeferredByTradeType,
+        result.httpDeferredByTradeType,
       ),
       httpFallbackByTradeType: mergeCountRecords(
         acc.httpFallbackByTradeType,
@@ -173,6 +186,8 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       marketRefreshed: 0,
       topRefreshed: 0,
       httpFallback: 0,
+      httpDeferred: 0,
+      httpDeferredEnqueued: 0,
       wsDemandRequested: 0,
       wsDemandFilled: 0,
       resolvedTopUpdated: 0,
@@ -183,6 +198,7 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       wsDemandTokensByTradeType: {},
       wsDemandFilledByTradeType: {},
       wsDemandStillStaleByTradeType: {},
+      httpDeferredByTradeType: {},
       httpFallbackByTradeType: {},
       httpFallbackReasons: {},
       httpFallbackNoTopSamples: [],
@@ -356,6 +372,8 @@ async function periodicPriceRefresh() {
         marketRefreshed: aggregate.marketRefreshed,
         topRefreshed: aggregate.topRefreshed,
         httpFallback: aggregate.httpFallback,
+        httpDeferred: aggregate.httpDeferred,
+        httpDeferredEnqueued: aggregate.httpDeferredEnqueued,
         wsDemandRequested: aggregate.wsDemandRequested,
         wsDemandFilled: aggregate.wsDemandFilled,
         resolvedTopUpdated: aggregate.resolvedTopUpdated,
@@ -369,6 +387,7 @@ async function periodicPriceRefresh() {
         wsDemandStillStaleByTradeType:
           aggregate.wsDemandStillStaleByTradeType,
         wsDemandEvents,
+        httpDeferredByTradeType: aggregate.httpDeferredByTradeType,
         httpFallbackByTradeType: aggregate.httpFallbackByTradeType,
         httpFallbackReasons: aggregate.httpFallbackReasons,
         httpFallbackNoTopSamples: aggregate.httpFallbackNoTopSamples,
@@ -407,6 +426,73 @@ async function periodicPriceRefresh() {
   }
 }
 
+async function periodicPriceRefreshHttpFallback() {
+  if (
+    !env.priceRefreshQueueEnabled ||
+    !env.priceRefreshHttpQueueEnabled ||
+    priceRefreshHttpFallbackRunning
+  ) {
+    return;
+  }
+  priceRefreshHttpFallbackRunning = true;
+  const startedAt = Date.now();
+  try {
+    const result = await processPriceRefreshHttpFallbackQueue({
+      logSuccess: false,
+    });
+    const durationMs = Date.now() - startedAt;
+    if (result.claimed > 0 || result.failed > 0 || result.backlog > 0) {
+      log.info("Limitless price refresh HTTP fallback queue wave processed", {
+        batch: env.priceRefreshHttpQueueBatch,
+        claimed: result.claimed,
+        missingRows: result.missingRows,
+        refreshed: result.refreshed,
+        failed: result.failed,
+        marketRefreshed: result.marketRefreshed,
+        topRefreshed: result.topRefreshed,
+        resolvedTopUpdated: result.resolvedTopUpdated,
+        httpFallbackByTradeType: result.httpFallbackByTradeType,
+        httpFallbackReasons: result.httpFallbackReasons,
+        httpFallbackNoTopSamples: mergeNoTopSamples(
+          [],
+          result.httpFallbackNoTopSamples,
+        ),
+        backlog: result.backlog,
+        durationMs,
+      });
+    }
+    await writeStats({
+      priceRefreshHttpFallback: {
+        lastRunAt: new Date(startedAt).toISOString(),
+        durationMs,
+        batch: env.priceRefreshHttpQueueBatch,
+        ...result,
+        httpFallbackNoTopSamples: mergeNoTopSamples(
+          [],
+          result.httpFallbackNoTopSamples,
+        ),
+      },
+      lastError: null,
+    });
+  } catch (e) {
+    await writeStats({
+      lastError: {
+        phase: "price_refresh_http_fallback",
+        message: e instanceof Error ? e.message : String(e),
+        at: new Date().toISOString(),
+      },
+    });
+    if (isPgSetupIssue(e)) {
+      log.warn(`HTTP fallback price refresh blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("periodic HTTP fallback price refresh err", e);
+    }
+  } finally {
+    priceRefreshHttpFallbackRunning = false;
+  }
+}
+
 async function main() {
   if (!env.limitlessEnabled) {
     log.warn("Limitless indexer disabled (LIMITLESS_ENABLED=false)");
@@ -420,6 +506,7 @@ async function main() {
   });
   startMarketWS(targets);
   await periodicPriceRefresh();
+  void periodicPriceRefreshHttpFallback();
   void (async () => {
     log.info("Limitless startup: running initial hot refresh");
     try {
@@ -443,6 +530,10 @@ async function main() {
   // Refresh WS desired subscriptions independently from HTTP refresh cadence.
   setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
   setInterval(periodicPriceRefresh, env.priceRefreshQueueIntervalMs);
+  setInterval(
+    periodicPriceRefreshHttpFallback,
+    env.priceRefreshHttpQueueIntervalMs,
+  );
 }
 
 main().catch((e) => {

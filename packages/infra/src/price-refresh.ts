@@ -74,11 +74,43 @@ export type FilterStalePriceRefreshTokensResult = {
   staleTokenIds: string[];
 };
 
+export type EnqueueSortedSetQueueItemsInputs = {
+  key: string;
+  items: Array<string | null | undefined>;
+  nowMs?: number;
+  delayMs?: number;
+  maxQueueSize?: number;
+  maxItems?: number;
+  priority?: PriceRefreshPriority;
+};
+
+export type EnqueueSortedSetQueueItemsResult = {
+  enqueued: number;
+  ignored: number;
+};
+
+export type ClaimSortedSetQueueItemsInputs = {
+  key: string;
+  nowMs?: number;
+  limit: number;
+  side?: PriceRefreshQueueClaimSide;
+};
+
+export type RequeueSortedSetQueueItemsInputs = {
+  key: string;
+  items: string[];
+  nowMs?: number;
+  delayMs: number;
+  maxQueueSize?: number;
+};
+
 export const PRICE_REFRESH_QUEUE_KEYS: Record<PriceRefreshVenue, string> = {
   polymarket: "price-refresh:tokens:polymarket",
   dflow: "price-refresh:tokens:dflow",
   limitless: "price-refresh:tokens:limitless",
 };
+export const LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY =
+  "price-refresh:http-fallback:limitless";
 
 const CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT = `
 local side = ARGV[3]
@@ -113,6 +145,11 @@ return added
 const HIGH_PRIORITY_SCORE_BIAS_MS = 31 * 24 * 60 * 60 * 1_000;
 
 function normalizeTokenId(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeQueueItem(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
 }
@@ -180,6 +217,88 @@ async function enqueueTokensPreservingEarliestScore(
   return typeof result === "number" && Number.isFinite(result) ? result : 0;
 }
 
+export async function enqueueSortedSetQueueItems(
+  redis: PriceRefreshRedis,
+  inputs: EnqueueSortedSetQueueItemsInputs,
+): Promise<EnqueueSortedSetQueueItemsResult> {
+  const result: EnqueueSortedSetQueueItemsResult = {
+    enqueued: 0,
+    ignored: 0,
+  };
+  const maxItems =
+    inputs.maxItems != null && inputs.maxItems > 0
+      ? Math.trunc(inputs.maxItems)
+      : Number.POSITIVE_INFINITY;
+  if (maxItems <= 0) return result;
+
+  const items: string[] = [];
+  const seen = new Set<string>();
+  for (const rawItem of inputs.items) {
+    const item = normalizeQueueItem(rawItem);
+    if (!item) {
+      result.ignored += 1;
+      continue;
+    }
+    if (items.length >= maxItems) {
+      result.ignored += 1;
+      continue;
+    }
+    if (seen.has(item)) continue;
+    seen.add(item);
+    items.push(item);
+  }
+
+  if (!items.length) return result;
+  const priorityBiasMs =
+    inputs.priority === "high" ? HIGH_PRIORITY_SCORE_BIAS_MS : 0;
+  const dueAtMs = (inputs.nowMs ?? Date.now()) + (inputs.delayMs ?? 0);
+  const queueScore = dueAtMs - priorityBiasMs;
+  result.enqueued = await enqueueTokensPreservingEarliestScore(
+    redis,
+    inputs.key,
+    items,
+    queueScore,
+  );
+  await trimQueue(redis, inputs.key, inputs.maxQueueSize);
+  return result;
+}
+
+export async function claimDueSortedSetQueueItems(
+  redis: PriceRefreshRedis,
+  inputs: ClaimSortedSetQueueItemsInputs,
+): Promise<string[]> {
+  const limit = Math.max(0, Math.trunc(inputs.limit));
+  if (limit <= 0) return [];
+
+  const side = inputs.side === "newest" ? "newest" : "oldest";
+  const result = await redis.eval(CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT, {
+    keys: [inputs.key],
+    arguments: [String(inputs.nowMs ?? Date.now()), String(limit), side],
+  });
+  if (!Array.isArray(result)) return [];
+  return result.filter((value): value is string => typeof value === "string");
+}
+
+export async function requeueSortedSetQueueItems(
+  redis: PriceRefreshRedis,
+  inputs: RequeueSortedSetQueueItemsInputs,
+): Promise<EnqueueSortedSetQueueItemsResult> {
+  return enqueueSortedSetQueueItems(redis, {
+    key: inputs.key,
+    items: inputs.items,
+    nowMs: inputs.nowMs,
+    delayMs: inputs.delayMs,
+    maxQueueSize: inputs.maxQueueSize,
+  });
+}
+
+export async function getSortedSetQueueBacklog(
+  redis: PriceRefreshRedis,
+  key: string,
+): Promise<number> {
+  return redis.zCard(key);
+}
+
 export async function enqueuePriceRefreshTokens(
   redis: PriceRefreshRedis,
   inputs: EnqueuePriceRefreshInputs,
@@ -236,17 +355,12 @@ export async function claimDuePriceRefreshTokens(
   redis: PriceRefreshRedis,
   inputs: ClaimPriceRefreshInputs,
 ): Promise<string[]> {
-  const limit = Math.max(0, Math.trunc(inputs.limit));
-  if (limit <= 0) return [];
-
-  const key = getPriceRefreshQueueKey(inputs.venue);
-  const side = inputs.side === "newest" ? "newest" : "oldest";
-  const result = await redis.eval(CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT, {
-    keys: [key],
-    arguments: [String(inputs.nowMs ?? Date.now()), String(limit), side],
+  return claimDueSortedSetQueueItems(redis, {
+    key: getPriceRefreshQueueKey(inputs.venue),
+    nowMs: inputs.nowMs,
+    limit: inputs.limit,
+    side: inputs.side,
   });
-  if (!Array.isArray(result)) return [];
-  return result.filter((value): value is string => typeof value === "string");
 }
 
 export async function requeuePriceRefreshTokens(
@@ -266,7 +380,7 @@ export async function getPriceRefreshQueueBacklog(
   redis: PriceRefreshRedis,
   venue: PriceRefreshVenue,
 ): Promise<number> {
-  return redis.zCard(getPriceRefreshQueueKey(venue));
+  return getSortedSetQueueBacklog(redis, getPriceRefreshQueueKey(venue));
 }
 
 export async function filterStalePriceRefreshTokens(

@@ -14,6 +14,7 @@ export type IndexerStatsRedis = {
 export type IndexerStatsPatch = Partial<{
   hotRefresh: Record<string, unknown>;
   priceRefresh: Record<string, unknown>;
+  priceRefreshHttpFallback: Record<string, unknown>;
   ws: Record<string, unknown>;
   lastError: { message: string; phase?: string; at: string } | null;
 }>;

@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 
 import {
+  claimDueSortedSetQueueItems,
   claimDuePriceRefreshTokens,
+  enqueueSortedSetQueueItems,
   enqueuePriceRefreshTokens,
   filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
+  getSortedSetQueueBacklog,
   inferPriceRefreshVenue,
+  requeueSortedSetQueueItems,
   requeuePriceRefreshTokens,
   requestFreshMarketPrices,
   type PriceRefreshRedis,
@@ -285,6 +289,55 @@ await test("claimDuePriceRefreshTokens newest returns latest due tokens", async 
   });
 
   assert.deepEqual(claimed, ["3", "2"]);
+});
+
+await test("generic sorted-set queues support non-token queue items", async () => {
+  const redis = new FakeRedis();
+  const key = "price-refresh:http-fallback:limitless";
+  const enqueued = await enqueueSortedSetQueueItems(redis, {
+    key,
+    items: ["limitless:1", "limitless:1", "", "limitless:2"],
+    nowMs: 1000,
+  });
+
+  assert.deepEqual(enqueued, { enqueued: 2, ignored: 1 });
+  assert.equal(await getSortedSetQueueBacklog(redis, key), 2);
+  assert.deepEqual(
+    await claimDueSortedSetQueueItems(redis, {
+      key,
+      limit: 10,
+      nowMs: 1000,
+    }),
+    ["limitless:1", "limitless:2"],
+  );
+});
+
+await test("generic sorted-set requeue delays failed queue items", async () => {
+  const redis = new FakeRedis();
+  const key = "price-refresh:http-fallback:limitless";
+  await requeueSortedSetQueueItems(redis, {
+    key,
+    items: ["limitless:slow"],
+    nowMs: 1000,
+    delayMs: 60_000,
+  });
+
+  assert.deepEqual(
+    await claimDueSortedSetQueueItems(redis, {
+      key,
+      nowMs: 1000,
+      limit: 10,
+    }),
+    [],
+  );
+  assert.deepEqual(
+    await claimDueSortedSetQueueItems(redis, {
+      key,
+      nowMs: 61_000,
+      limit: 10,
+    }),
+    ["limitless:slow"],
+  );
 });
 
 await test("high priority price refresh jumps ahead of normal queued tokens", async () => {

@@ -183,8 +183,11 @@ const hotStreamTokensMax = clampInt(
 const priceRefreshQueueEnabled =
   parseOptionalBool(process.env.PRICE_REFRESH_QUEUE_ENABLED) ?? true;
 const priceRefreshQueueBatch = clampInt(
-  parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_BATCH),
-  { min: 1, max: 1000, fallback: 100 },
+  parseOptionalInt(
+    process.env.LIMITLESS_PRICE_REFRESH_QUEUE_BATCH ??
+      process.env.PRICE_REFRESH_QUEUE_BATCH,
+  ),
+  { min: 1, max: 1000, fallback: 200 },
 );
 const priceRefreshQueueConsumers = clampInt(
   parseOptionalInt(
@@ -201,6 +204,24 @@ const priceRefreshQueueMax = clampInt(
   parseOptionalInt(process.env.PRICE_REFRESH_QUEUE_MAX),
   { min: 100, max: 1_000_000, fallback: 20_000 },
 );
+const priceRefreshHttpQueueEnabled =
+  parseOptionalBool(process.env.LIMITLESS_PRICE_REFRESH_HTTP_QUEUE_ENABLED) ??
+  true;
+const priceRefreshHttpQueueBatch = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_HTTP_QUEUE_BATCH),
+  { min: 1, max: 1000, fallback: 20 },
+);
+const priceRefreshHttpQueueIntervalMs = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_HTTP_QUEUE_INTERVAL_MS),
+  { min: 100, max: 10 * 60 * 1000, fallback: 1000 },
+);
+const priceRefreshHttpQueueMax = clampInt(
+  parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_HTTP_QUEUE_MAX),
+  { min: 100, max: 1_000_000, fallback: 20_000 },
+);
+const priceRefreshDeferHttpFallback =
+  parseOptionalBool(process.env.LIMITLESS_PRICE_REFRESH_DEFER_HTTP_FALLBACK) ??
+  true;
 const priceRefreshRetryDelayMs = clampInt(
   parseOptionalInt(process.env.PRICE_REFRESH_RETRY_DELAY_MS),
   { min: 1000, max: 60 * 60 * 1000, fallback: 60_000 },
@@ -224,7 +245,7 @@ const priceRefreshWsDemandTtlMs = clampInt(
 );
 const priceRefreshWsDemandWaitMs = clampInt(
   parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_WAIT_MS),
-  { min: 0, max: 10_000, fallback: 2_000 },
+  { min: 0, max: 10_000, fallback: 1_000 },
 );
 const priceRefreshWsDemandMaxTargets = clampInt(
   parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_MAX_TARGETS),
@@ -304,6 +325,11 @@ export const env = {
   priceRefreshQueueConsumers,
   priceRefreshQueueIntervalMs,
   priceRefreshQueueMax,
+  priceRefreshHttpQueueEnabled,
+  priceRefreshHttpQueueBatch,
+  priceRefreshHttpQueueIntervalMs,
+  priceRefreshHttpQueueMax,
+  priceRefreshDeferHttpFallback,
   priceRefreshRetryDelayMs,
   priceRefreshFreshTopMaxAgeMs,
   priceRefreshWsDemandEnabled,
