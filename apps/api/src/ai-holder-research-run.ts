@@ -148,6 +148,7 @@ type HolderResearchRunReport = {
     maxCandidatePool: number;
     externalSearchEnabled: boolean;
     maxExternalSearchCallsPerRun: number;
+    forceExternalSearchForInvestigations: boolean;
     triageEnabled: boolean;
     triageModel: string;
     decisionCacheEnabled: boolean;
@@ -1728,7 +1729,9 @@ export async function runHolderResearch(
       if (
         policy.externalSearchEnabled &&
         externalSearchCalls < policy.maxExternalSearchCallsPerRun &&
-        (triageDecision == null || triageDecision.needs_external_search)
+        (policy.forceExternalSearchForInvestigations ||
+          triageDecision == null ||
+          triageDecision.needs_external_search)
       ) {
         externalResearch = await runExternalResearch({
           candidate,
@@ -1945,6 +1948,8 @@ export async function runHolderResearch(
         maxCandidatePool: policy.maxCandidatePool,
         externalSearchEnabled: policy.externalSearchEnabled,
         maxExternalSearchCallsPerRun: policy.maxExternalSearchCallsPerRun,
+        forceExternalSearchForInvestigations:
+          policy.forceExternalSearchForInvestigations,
         triageEnabled: policy.triageEnabled,
         triageModel: policy.triageModel,
         decisionCacheEnabled: policy.decisionCacheEnabled,

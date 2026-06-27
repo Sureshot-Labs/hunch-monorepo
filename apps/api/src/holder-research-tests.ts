@@ -2806,6 +2806,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 dryRun: "false",
                 externalSearchEnabled: "true",
                 maxExternalSearchCallsPerRun: 5,
+                forceExternalSearchForInvestigations: "false",
                 externalSearchMinScore: 0.8,
                 triageEnabled: "true",
                 triageModel: "openai/gpt-5.4",
@@ -2864,6 +2865,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.defaults.triageModel, "openai/gpt-5.4-mini");
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
+      assert.equal(resolved.defaults.forceExternalSearchForInvestigations, true);
+      assert.equal(resolved.effective.forceExternalSearchForInvestigations, false);
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);
       assert.equal(resolved.defaults.triageEnabled, true);
       assert.equal(resolved.defaults.triageBatchSize, 8);

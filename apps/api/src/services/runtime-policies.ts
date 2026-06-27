@@ -137,6 +137,7 @@ export type HolderResearchPolicy = {
   externalSearchEnabled: boolean;
   externalSearchModel: string;
   maxExternalSearchCallsPerRun: number;
+  forceExternalSearchForInvestigations: boolean;
   externalSearchMinScore: number;
   externalSearchWindowHours: number;
   externalSearchMaxOutputTokens: number;
@@ -879,6 +880,7 @@ const holderResearchSchema = z
     externalSearchEnabled: strictBoolean,
     externalSearchModel: z.string().trim().min(1).max(200),
     maxExternalSearchCallsPerRun: nonNegativeInt.max(100),
+    forceExternalSearchForInvestigations: strictBoolean,
     externalSearchMinScore: ratio,
     externalSearchWindowHours: positiveInt.max(24 * 365),
     externalSearchMaxOutputTokens: positiveInt.max(8_000),
@@ -1602,6 +1604,7 @@ function getDefaults(): IntelPolicyMap {
       externalSearchModel:
         process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
       maxExternalSearchCallsPerRun: 2,
+      forceExternalSearchForInvestigations: true,
       externalSearchMinScore: 0.7,
       externalSearchWindowHours: 72,
       externalSearchMaxOutputTokens: 700,
@@ -2494,6 +2497,9 @@ function normalizeHolderResearchPolicy(
       Math.trunc(policy.maxExternalSearchCallsPerRun),
       0,
       100,
+    ),
+    forceExternalSearchForInvestigations: Boolean(
+      policy.forceExternalSearchForInvestigations,
     ),
     externalSearchMinScore: clamp(policy.externalSearchMinScore, 0, 1),
     externalSearchWindowHours: clamp(
