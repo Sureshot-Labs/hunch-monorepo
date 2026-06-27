@@ -13,105 +13,11 @@ export type PolymarketMarketInfoRow = {
   maker_fee_bps: string | null;
 };
 
-export async function fetchPolymarketMarketInfo(
+async function queryPolymarketMarketInfo(
   pool: Pool,
-  inputs: { tokenId?: string; marketId?: string; conditionId?: string },
+  fromAndWhereSql: string,
+  params: unknown[],
 ): Promise<PolymarketMarketInfoRow | null> {
-  const tokenId = inputs.tokenId?.trim();
-  const marketId = inputs.marketId?.trim();
-  const conditionId = inputs.conditionId?.trim();
-
-  if (tokenId) {
-    const fastResult = await pool.query<PolymarketMarketInfoRow>(
-      `
-        select
-          pm.id as polymarket_id,
-          m.id as unified_market_id,
-          pm.condition_id,
-          pm.clob_token_ids,
-          pm.neg_risk,
-          pm.order_price_min_tick_size,
-          pm.order_min_size,
-          pm.accepting_orders,
-          coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
-          coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
-        from unified_tokens ut
-        join unified_markets m
-          on m.id = ut.market_id
-         and m.venue = 'polymarket'
-        join polymarket_markets pm
-          on pm.id = m.venue_market_id
-        where ut.token_id = $1
-          and ut.venue = 'polymarket'
-        limit 1
-      `,
-      [tokenId],
-    );
-
-    if (fastResult.rows[0]) return fastResult.rows[0];
-
-    const fallbackResult = await pool.query<PolymarketMarketInfoRow>(
-      `
-        select
-          pm.id as polymarket_id,
-          m.id as unified_market_id,
-          pm.condition_id,
-          pm.clob_token_ids,
-          pm.neg_risk,
-          pm.order_price_min_tick_size,
-          pm.order_min_size,
-          pm.accepting_orders,
-          coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
-          coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
-        from unified_markets m
-        join polymarket_markets pm
-          on pm.id = m.venue_market_id
-        where m.venue = 'polymarket'
-          and m.clob_token_ids is not null
-          and m.clob_token_ids <> ''
-          and m.clob_token_ids <> '[]'
-          and m.clob_token_ids::jsonb ? $1
-        limit 1
-      `,
-      [tokenId],
-    );
-
-    return fallbackResult.rows[0] ?? null;
-  }
-
-  if (conditionId) {
-    const { rows } = await pool.query<PolymarketMarketInfoRow>(
-      `
-        select
-          pm.id as polymarket_id,
-          m.id as unified_market_id,
-          pm.condition_id,
-          pm.clob_token_ids,
-          pm.neg_risk,
-          pm.order_price_min_tick_size,
-          pm.order_min_size,
-          pm.accepting_orders,
-          coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
-          coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
-        from polymarket_markets pm
-        left join unified_markets m
-          on m.venue = 'polymarket' and m.venue_market_id = pm.id
-        where pm.condition_id = $1
-           or m.condition_id = $1
-        limit 1
-      `,
-      [conditionId],
-    );
-
-    return rows[0] ?? null;
-  }
-
-  if (!marketId) return null;
-
-  const rawMarketId = marketId.startsWith("polymarket:")
-    ? marketId.slice("polymarket:".length)
-    : marketId;
-
   const { rows } = await pool.query<PolymarketMarketInfoRow>(
     `
       select
@@ -125,16 +31,118 @@ export async function fetchPolymarketMarketInfo(
         pm.accepting_orders,
         coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
         coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
-      from polymarket_markets pm
-      left join unified_markets m
-        on m.venue = 'polymarket' and m.venue_market_id = pm.id
-      where pm.id = $1
-         or m.id = $2
-         or m.venue_market_id = $1
+      ${fromAndWhereSql}
       limit 1
     `,
-    [rawMarketId, marketId],
+    params,
   );
 
   return rows[0] ?? null;
+}
+
+export async function fetchPolymarketMarketInfo(
+  pool: Pool,
+  inputs: { tokenId?: string; marketId?: string; conditionId?: string },
+): Promise<PolymarketMarketInfoRow | null> {
+  const tokenId = inputs.tokenId?.trim();
+  const marketId = inputs.marketId?.trim();
+  const conditionId = inputs.conditionId?.trim();
+
+  if (tokenId) {
+    const fastResult = await queryPolymarketMarketInfo(
+      pool,
+      `
+        from unified_tokens ut
+        join unified_markets m
+          on m.id = ut.market_id
+         and m.venue = 'polymarket'
+        join polymarket_markets pm
+          on pm.id = m.venue_market_id
+        where ut.token_id = $1
+          and ut.venue = 'polymarket'
+      `,
+      [tokenId],
+    );
+
+    if (fastResult) return fastResult;
+
+    return queryPolymarketMarketInfo(
+      pool,
+      `
+        from unified_markets m
+        join polymarket_markets pm
+          on pm.id = m.venue_market_id
+        where m.venue = 'polymarket'
+          and m.clob_token_ids is not null
+          and m.clob_token_ids <> ''
+          and m.clob_token_ids <> '[]'
+          and m.clob_token_ids::jsonb ? $1
+      `,
+      [tokenId],
+    );
+  }
+
+  if (conditionId) {
+    const byPolymarketCondition = await queryPolymarketMarketInfo(
+      pool,
+      `
+        from polymarket_markets pm
+        left join unified_markets m
+          on m.venue = 'polymarket' and m.venue_market_id = pm.id
+        where pm.condition_id = $1
+      `,
+      [conditionId],
+    );
+
+    if (byPolymarketCondition) return byPolymarketCondition;
+
+    return queryPolymarketMarketInfo(
+      pool,
+      `
+        from unified_markets m
+        join polymarket_markets pm
+          on pm.id = m.venue_market_id
+        where m.venue = 'polymarket'
+          and m.condition_id = $1
+      `,
+      [conditionId],
+    );
+  }
+
+  if (!marketId) return null;
+
+  const rawMarketId = marketId.startsWith("polymarket:")
+    ? marketId.slice("polymarket:".length)
+    : marketId;
+
+  const queryByUnifiedMarketId = () =>
+    queryPolymarketMarketInfo(
+      pool,
+      `
+        from unified_markets m
+        join polymarket_markets pm
+          on pm.id = m.venue_market_id
+        where m.id = $1
+          and m.venue = 'polymarket'
+      `,
+      [marketId],
+    );
+
+  const queryByPolymarketId = () =>
+    queryPolymarketMarketInfo(
+      pool,
+      `
+        from polymarket_markets pm
+        left join unified_markets m
+          on m.venue = 'polymarket' and m.venue_market_id = pm.id
+        where pm.id = $1
+      `,
+      [rawMarketId],
+    );
+
+  if (marketId.startsWith("polymarket:")) {
+    return (await queryByUnifiedMarketId()) ?? queryByPolymarketId();
+  }
+
+  return (await queryByPolymarketId()) ?? queryByUnifiedMarketId();
 }

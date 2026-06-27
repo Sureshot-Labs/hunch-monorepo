@@ -91,3 +91,35 @@ await test("fetchPolymarketMarketInfo returns null when token is unknown", async
   assert.equal(result, null);
   assert.equal(queries.length, 2);
 });
+
+await test("fetchPolymarketMarketInfo uses unified market id fast path", async () => {
+  const row = buildRow({ polymarket_id: "2323775" });
+  const { pool, queries } = createPoolMock([[row]]);
+
+  const result = await fetchPolymarketMarketInfo(pool, {
+    marketId: "polymarket:2323775",
+  });
+
+  assert.equal(result, row);
+  assert.equal(queries.length, 1);
+  assert.match(queries[0]?.sql ?? "", /from unified_markets m/i);
+  assert.match(queries[0]?.sql ?? "", /where m\.id = \$1/i);
+  assert.doesNotMatch(queries[0]?.sql ?? "", /\bor\b/i);
+  assert.deepEqual(queries[0]?.params, ["polymarket:2323775"]);
+});
+
+await test("fetchPolymarketMarketInfo falls back from unified id to raw Polymarket id", async () => {
+  const row = buildRow({ polymarket_id: "2323775" });
+  const { pool, queries } = createPoolMock([[], [row]]);
+
+  const result = await fetchPolymarketMarketInfo(pool, {
+    marketId: "polymarket:2323775",
+  });
+
+  assert.equal(result, row);
+  assert.equal(queries.length, 2);
+  assert.match(queries[0]?.sql ?? "", /where m\.id = \$1/i);
+  assert.match(queries[1]?.sql ?? "", /where pm\.id = \$1/i);
+  assert.doesNotMatch(queries[1]?.sql ?? "", /\bor\b/i);
+  assert.deepEqual(queries[1]?.params, ["2323775"]);
+});
