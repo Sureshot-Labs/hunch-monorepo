@@ -46,6 +46,8 @@ type PriceRefreshAggregate = {
   httpDeferred: number;
   httpDeferredEnqueued: number;
   wsDemandRequested: number;
+  wsDemandSubscribed: number;
+  wsDemandDroppedBySubset: number;
   wsDemandFilled: number;
   resolvedTopUpdated: number;
   resolvedEventsHandled: number;
@@ -115,8 +117,7 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       backlog: Math.max(acc.backlog, result.backlog),
       freshSkipped: acc.freshSkipped + (result.freshSkipped ?? 0),
       stale: acc.stale + (result.stale ?? 0),
-      marketRefreshed:
-        acc.marketRefreshed + (result.marketRefreshed ?? 0),
+      marketRefreshed: acc.marketRefreshed + (result.marketRefreshed ?? 0),
       topRefreshed: acc.topRefreshed + (result.topRefreshed ?? 0),
       httpFallback: acc.httpFallback + (result.httpFallback ?? 0),
       httpDeferred: acc.httpDeferred + (result.httpDeferred ?? 0),
@@ -124,14 +125,17 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
         acc.httpDeferredEnqueued + (result.httpDeferredEnqueued ?? 0),
       wsDemandRequested:
         acc.wsDemandRequested + (result.wsDemandRequested ?? 0),
+      wsDemandSubscribed:
+        acc.wsDemandSubscribed + (result.wsDemandSubscribed ?? 0),
+      wsDemandDroppedBySubset:
+        acc.wsDemandDroppedBySubset + (result.wsDemandDroppedBySubset ?? 0),
       wsDemandFilled: acc.wsDemandFilled + (result.wsDemandFilled ?? 0),
       resolvedTopUpdated:
         acc.resolvedTopUpdated + (result.resolvedTopUpdated ?? 0),
       resolvedEventsHandled:
         acc.resolvedEventsHandled + (result.resolvedEventsHandled ?? 0),
       derivedSiblingTopUpdated:
-        acc.derivedSiblingTopUpdated +
-        (result.derivedSiblingTopUpdated ?? 0),
+        acc.derivedSiblingTopUpdated + (result.derivedSiblingTopUpdated ?? 0),
       derivedSiblingTopSkippedRecentDirect:
         acc.derivedSiblingTopSkippedRecentDirect +
         (result.derivedSiblingTopSkippedRecentDirect ?? 0),
@@ -189,6 +193,8 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       httpDeferred: 0,
       httpDeferredEnqueued: 0,
       wsDemandRequested: 0,
+      wsDemandSubscribed: 0,
+      wsDemandDroppedBySubset: 0,
       wsDemandFilled: 0,
       resolvedTopUpdated: 0,
       resolvedEventsHandled: 0,
@@ -375,6 +381,8 @@ async function periodicPriceRefresh() {
         httpDeferred: aggregate.httpDeferred,
         httpDeferredEnqueued: aggregate.httpDeferredEnqueued,
         wsDemandRequested: aggregate.wsDemandRequested,
+        wsDemandSubscribed: aggregate.wsDemandSubscribed,
+        wsDemandDroppedBySubset: aggregate.wsDemandDroppedBySubset,
         wsDemandFilled: aggregate.wsDemandFilled,
         resolvedTopUpdated: aggregate.resolvedTopUpdated,
         resolvedEventsHandled: aggregate.resolvedEventsHandled,
@@ -384,8 +392,7 @@ async function periodicPriceRefresh() {
         wsDemandTargetsByTradeType: aggregate.wsDemandTargetsByTradeType,
         wsDemandTokensByTradeType: aggregate.wsDemandTokensByTradeType,
         wsDemandFilledByTradeType: aggregate.wsDemandFilledByTradeType,
-        wsDemandStillStaleByTradeType:
-          aggregate.wsDemandStillStaleByTradeType,
+        wsDemandStillStaleByTradeType: aggregate.wsDemandStillStaleByTradeType,
         wsDemandEvents,
         httpDeferredByTradeType: aggregate.httpDeferredByTradeType,
         httpFallbackByTradeType: aggregate.httpFallbackByTradeType,

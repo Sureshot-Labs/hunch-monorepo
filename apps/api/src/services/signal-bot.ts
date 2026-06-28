@@ -39,6 +39,8 @@ export type SignalBotConfig = {
   minConfidence: number;
   maxSignalsPerTick: number;
   buyAmountUsd: number;
+  priceGuardDeferTtlSec: number;
+  priceGuardMaxDefers: number;
 };
 
 export type SignalBotCommand =
@@ -236,6 +238,7 @@ type SignalBotEligibilityCountRow = {
 const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
 const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
+const PRICE_GUARD_DEFER_KEY_PREFIX = "tg:signal_bot:v1:price_guard_defer";
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
 const OUTCOME_LABEL_MAX_CHARS = 3;
@@ -265,6 +268,10 @@ export function signalBotLockKey(): string {
   return LOCK_KEY;
 }
 
+function signalBotPriceGuardDeferKey(chatId: string, noteId: string): string {
+  return `${PRICE_GUARD_DEFER_KEY_PREFIX}:${chatId}:${noteId}`;
+}
+
 export function parseSignalBotConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotConfig {
@@ -288,6 +295,14 @@ export function parseSignalBotConfig(
       5,
     ),
     buyAmountUsd: parsePositiveInt(env.HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD, 10),
+    priceGuardDeferTtlSec: parsePositiveInt(
+      env.SIGNAL_BOT_PRICE_GUARD_DEFER_TTL_SEC,
+      1_800,
+    ),
+    priceGuardMaxDefers: parsePositiveInt(
+      env.SIGNAL_BOT_PRICE_GUARD_MAX_DEFERS,
+      5,
+    ),
   };
 }
 
@@ -972,6 +987,7 @@ export type SignalBotPriceGuardDiagnostics = {
   priceGuardMissingSidePrice: number;
   priceGuardNoBook: number;
   priceGuardSkipped: number;
+  priceGuardStaleExpired: number;
   priceGuardTerminalPrice: number;
 };
 
@@ -1055,6 +1071,7 @@ function createSignalBotPriceGuardDiagnostics(): SignalBotPriceGuardDiagnostics 
     priceGuardMissingSidePrice: 0,
     priceGuardNoBook: 0,
     priceGuardSkipped: 0,
+    priceGuardStaleExpired: 0,
     priceGuardTerminalPrice: 0,
   };
 }
@@ -1137,6 +1154,21 @@ async function loadSignalBotPriceGuardBlockers(input: {
     });
     return { blockers: [], defer: false, timedOut: false };
   }
+}
+
+async function recordSignalBotPriceGuardDeferral(input: {
+  chatId: string;
+  noteId: string;
+  redis: SignalBotRedisLike;
+  ttlSec: number;
+}): Promise<number> {
+  const key = signalBotPriceGuardDeferKey(input.chatId, input.noteId);
+  const current = Number(input.redis ? await input.redis.get(key) : null);
+  const next = Number.isFinite(current) && current > 0 ? current + 1 : 1;
+  await input.redis.set(key, String(next), {
+    EX: Math.max(1, Math.trunc(input.ttlSec)),
+  });
+  return next;
 }
 
 function isStrictlyCheaperDisplayedPrice(params: {
@@ -1337,11 +1369,27 @@ export async function publishSignalBotTick(input: {
           redis: input.redis,
         });
         if (priceGuard.defer) {
-          priceGuardDiagnostics.priceGuardDeferred += 1;
+          const deferCount = await recordSignalBotPriceGuardDeferral({
+            chatId,
+            noteId: note.id,
+            redis: input.redis,
+            ttlSec: input.config.priceGuardDeferTtlSec,
+          });
           addSignalBotPriceGuardBlockers(
             priceGuardDiagnostics,
             priceGuard.blockers,
           );
+          if (deferCount > input.config.priceGuardMaxDefers) {
+            priceGuardDiagnostics.priceGuardStaleExpired += 1;
+            await updateSignalBotChatCursor({
+              chatId,
+              createdAt: note.createdAt,
+              id: note.id,
+              redis: input.redis,
+            });
+            continue;
+          }
+          priceGuardDiagnostics.priceGuardDeferred += 1;
           break;
         }
         const priceBlockers = priceGuard.blockers;

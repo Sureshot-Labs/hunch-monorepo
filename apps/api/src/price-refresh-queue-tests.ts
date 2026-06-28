@@ -132,6 +132,20 @@ class FakeRedis implements PriceRefreshRedis {
 
 class SingleClientFreshPriceDb {
   readonly queryOrder: string[] = [];
+  tokenTopRows: Array<Record<string, unknown>> = [
+    {
+      best_ask: "0.41",
+      best_bid: "0.4",
+      token_id: "yes-token",
+      ts: "2026-01-01T00:00:01.000Z",
+    },
+    {
+      best_ask: "0.6",
+      best_bid: "0.59",
+      token_id: "no-token",
+      ts: "2026-01-01T00:00:01.000Z",
+    },
+  ];
   private inFlight = 0;
 
   async query<T = Record<string, unknown>>(
@@ -150,20 +164,7 @@ class SingleClientFreshPriceDb {
       if (sql.includes("from unified_token_top_latest")) {
         this.queryOrder.push("token_tops");
         return {
-          rows: [
-            {
-              best_ask: "0.41",
-              best_bid: "0.4",
-              token_id: "yes-token",
-              ts: "2026-01-01T00:00:01.000Z",
-            },
-            {
-              best_ask: "0.6",
-              best_bid: "0.59",
-              token_id: "no-token",
-              ts: "2026-01-01T00:00:01.000Z",
-            },
-          ] as T[],
+          rows: this.tokenTopRows as T[],
         };
       }
       if (sql.includes("from unified_markets")) {
@@ -492,6 +493,88 @@ await test("requestFreshMarketPrices is safe for single-client DB callers", asyn
   assert.deepEqual(result.requestedTokenIds, ["yes-token", "no-token"]);
   assert.equal(result.timedOut, false);
   assert.equal(result.marketStates.get("polymarket:test")?.fresh, true);
+});
+
+await test("requestFreshMarketPrices does not enqueue already-fresh tokens", async () => {
+  const db = new SingleClientFreshPriceDb();
+  const redis = new FakeRedis();
+  const result = await requestFreshMarketPrices({
+    db,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    priority: "high",
+    redis,
+    timeoutMs: 0,
+  });
+
+  assert.equal(result.enqueued, 0);
+  assert.deepEqual(result.freshTokenIds, ["yes-token", "no-token"]);
+  assert.equal(await getPriceRefreshQueueBacklog(redis, "polymarket"), 0);
+});
+
+await test("requestFreshMarketPrices enqueues only stale tokens", async () => {
+  const db = new SingleClientFreshPriceDb();
+  db.tokenTopRows = [
+    {
+      best_ask: "0.41",
+      best_bid: "0.4",
+      token_id: "yes-token",
+      ts: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const redis = new FakeRedis();
+  const result = await requestFreshMarketPrices({
+    db,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    priority: "high",
+    redis,
+    timeoutMs: 0,
+  });
+
+  assert.equal(result.enqueued, 1);
+  assert.deepEqual(result.freshTokenIds, ["yes-token"]);
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(
+    await claimDuePriceRefreshTokens(redis, {
+      limit: 10,
+      nowMs: Date.now(),
+      venue: "polymarket",
+    }),
+    ["no-token"],
+  );
+});
+
+await test("requestFreshMarketPrices sends only stale tokens to venue adapters", async () => {
+  const db = new SingleClientFreshPriceDb();
+  db.tokenTopRows = [
+    {
+      best_ask: "0.41",
+      best_bid: "0.4",
+      token_id: "yes-token",
+      ts: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const adapterCalls: Array<{ marketIds: string[]; tokenIds: string[] }> = [];
+  await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+    venueAdapters: {
+      polymarket: async ({ marketIds, tokenIds }) => {
+        adapterCalls.push({ marketIds, tokenIds });
+      },
+    },
+  });
+
+  assert.deepEqual(adapterCalls, [
+    { marketIds: ["polymarket:test"], tokenIds: ["no-token"] },
+  ]);
 });
 
 await test("requestFreshMarketPrices does not treat unpriced tops as fresh", async () => {

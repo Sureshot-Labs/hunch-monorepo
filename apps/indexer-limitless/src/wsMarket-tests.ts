@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 
+import { env } from "./env.js";
 import {
+  addMarketWSDemandTargets,
   inferLimitlessResolvedOutcome,
   parseLimitlessWsTimestamp,
+  updateMarketWSSubscriptions,
 } from "./wsMarket.js";
 
 function test(name: string, fn: () => void) {
@@ -24,17 +27,11 @@ test("inferLimitlessResolvedOutcome maps winning indexes conservatively", () => 
     inferLimitlessResolvedOutcome({ winningOutcomeIndex: "1" }),
     "NO",
   );
-  assert.equal(
-    inferLimitlessResolvedOutcome({ winningOutcomeIndex: 2 }),
-    null,
-  );
+  assert.equal(inferLimitlessResolvedOutcome({ winningOutcomeIndex: 2 }), null);
 });
 
 test("inferLimitlessResolvedOutcome maps explicit YES/NO labels", () => {
-  assert.equal(
-    inferLimitlessResolvedOutcome({ winningOutcome: "YES" }),
-    "YES",
-  );
+  assert.equal(inferLimitlessResolvedOutcome({ winningOutcome: "YES" }), "YES");
   assert.equal(inferLimitlessResolvedOutcome({ winningOutcome: "no" }), "NO");
   assert.equal(
     inferLimitlessResolvedOutcome({ winningOutcome: "Team Alpha" }),
@@ -61,4 +58,30 @@ test("parseLimitlessWsTimestamp accepts seconds and milliseconds", () => {
     parseLimitlessWsTimestamp("1782595710000").toISOString(),
     new Date(1_782_595_710_000).toISOString(),
   );
+});
+
+test("addMarketWSDemandTargets reports subscribed and dropped demand", () => {
+  updateMarketWSSubscriptions({ addresses: [], slugs: [] });
+  const active = addMarketWSDemandTargets(
+    { addresses: [], slugs: ["demand-active"] },
+    { maxTargets: 10, ttlMs: 60_000 },
+  );
+  assert.equal(active.total, 1);
+  assert.equal(active.subscribedTotal, 1);
+  assert.equal(active.droppedBySubset, 0);
+
+  updateMarketWSSubscriptions({
+    addresses: [],
+    slugs: Array.from(
+      { length: Math.max(1, Math.trunc(env.wsSubset)) },
+      (_, index) => `base-${index}`,
+    ),
+  });
+  const saturated = addMarketWSDemandTargets(
+    { addresses: [], slugs: ["demand-dropped"] },
+    { maxTargets: 10, ttlMs: 60_000 },
+  );
+  assert.equal(saturated.total, 1);
+  assert.equal(saturated.subscribedTotal, 0);
+  assert.equal(saturated.droppedBySubset, 1);
 });

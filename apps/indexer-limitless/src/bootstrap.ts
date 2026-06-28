@@ -1027,6 +1027,8 @@ export async function processPriceRefreshQueue(
   topRefreshed?: number;
   httpFallback?: number;
   wsDemandRequested?: number;
+  wsDemandSubscribed?: number;
+  wsDemandDroppedBySubset?: number;
   wsDemandFilled?: number;
   resolvedTopUpdated?: number;
   resolvedEventsHandled?: number;
@@ -1072,6 +1074,8 @@ export async function processPriceRefreshQueue(
   let staleTokenIds = tokenIds;
   let httpFallback = 0;
   let wsDemandRequested = 0;
+  let wsDemandSubscribed = 0;
+  let wsDemandDroppedBySubset = 0;
   let wsDemandFilled = 0;
   let resolvedTopUpdated = 0;
   let wsDemandTargetsByTradeType: Record<string, number> = {};
@@ -1110,6 +1114,8 @@ export async function processPriceRefreshQueue(
           topRefreshed: 0,
           httpFallback: 0,
           wsDemandRequested: 0,
+          wsDemandSubscribed: 0,
+          wsDemandDroppedBySubset: 0,
           wsDemandFilled: 0,
           resolvedTopUpdated: 0,
           resolvedEventsHandled: 0,
@@ -1147,6 +1153,8 @@ export async function processPriceRefreshQueue(
         topRefreshed: 0,
         httpFallback: 0,
         wsDemandRequested: 0,
+        wsDemandSubscribed: 0,
+        wsDemandDroppedBySubset: 0,
         wsDemandFilled: 0,
         resolvedTopUpdated: 0,
         resolvedEventsHandled: 0,
@@ -1200,6 +1208,8 @@ export async function processPriceRefreshQueue(
         maxTargets: env.priceRefreshWsDemandMaxTargets,
       });
       wsDemandRequested = demand.total;
+      wsDemandSubscribed = demand.subscribedTotal;
+      wsDemandDroppedBySubset = demand.droppedBySubset;
       if (wsDemandRequested > 0) {
         await sleep(env.priceRefreshWsDemandWaitMs);
         const afterWs = await filterStalePriceRefreshTokens(
@@ -1329,9 +1339,11 @@ export async function processPriceRefreshQueue(
       httpDeferred,
       httpDeferredEnqueued,
       wsDemandRequested,
+      wsDemandSubscribed,
+      wsDemandDroppedBySubset,
       wsDemandFilled,
       resolvedTopUpdated,
-      resolvedEventsHandled: resolvedTopUpdated,
+      resolvedEventsHandled: wsDemandEvents.resolvedDemandEvents,
       derivedSiblingTopUpdated: complementStats.derivedSiblingTopUpdated,
       derivedSiblingTopSkippedRecentDirect:
         complementStats.derivedSiblingTopSkippedRecentDirect,
@@ -1363,9 +1375,11 @@ export async function processPriceRefreshQueue(
     httpDeferred,
     httpDeferredEnqueued,
     wsDemandRequested,
+    wsDemandSubscribed,
+    wsDemandDroppedBySubset,
     wsDemandFilled,
     resolvedTopUpdated,
-    resolvedEventsHandled: resolvedTopUpdated,
+    resolvedEventsHandled: wsDemandEvents.resolvedDemandEvents,
     derivedSiblingTopUpdated: complementStats.derivedSiblingTopUpdated,
     derivedSiblingTopSkippedRecentDirect:
       complementStats.derivedSiblingTopSkippedRecentDirect,

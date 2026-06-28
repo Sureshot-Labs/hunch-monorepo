@@ -1199,19 +1199,37 @@ export function updateMarketWSSubscriptions(nextTargets: WsTargets): void {
 export function addMarketWSDemandTargets(
   targets: WsTargets,
   options: { ttlMs: number; maxTargets: number },
-): { slugs: number; addresses: number; total: number } {
+): {
+  addresses: number;
+  droppedBySubset: number;
+  slugs: number;
+  subscribedAddresses: number;
+  subscribedSlugs: number;
+  subscribedTotal: number;
+  total: number;
+} {
   const normalized = normalizeTargets(targets);
   const ttlMs = Math.max(0, Math.trunc(options.ttlMs));
   const maxTargets = Math.max(0, Math.trunc(options.maxTargets));
   if (ttlMs <= 0 || maxTargets <= 0) {
-    return { slugs: 0, addresses: 0, total: 0 };
+    return {
+      addresses: 0,
+      droppedBySubset: 0,
+      slugs: 0,
+      subscribedAddresses: 0,
+      subscribedSlugs: 0,
+      subscribedTotal: 0,
+      total: 0,
+    };
   }
 
   const expiresAt = Date.now() + ttlMs;
-  for (const slug of normalized.slugs.slice(0, maxTargets)) {
+  const requestedSlugs = normalized.slugs.slice(0, maxTargets);
+  const requestedAddresses = normalized.addresses.slice(0, maxTargets);
+  for (const slug of requestedSlugs) {
     demandSlugExpiresAt.set(slug, expiresAt);
   }
-  for (const address of normalized.addresses.slice(0, maxTargets)) {
+  for (const address of requestedAddresses) {
     demandAddressExpiresAt.set(address, expiresAt);
   }
 
@@ -1229,9 +1247,27 @@ export function addMarketWSDemandTargets(
     syncSubscriptions("amm", ammSocket, next);
   }
 
-  const slugs = normalized.slugs.length;
-  const addresses = normalized.addresses.length;
-  return { slugs, addresses, total: slugs + addresses };
+  const activeSlugs = new Set(next.slugs);
+  const activeAddresses = new Set(next.addresses);
+  const subscribedSlugs = requestedSlugs.filter((slug) =>
+    activeSlugs.has(slug),
+  ).length;
+  const subscribedAddresses = requestedAddresses.filter((address) =>
+    activeAddresses.has(address),
+  ).length;
+  const slugs = requestedSlugs.length;
+  const addresses = requestedAddresses.length;
+  const total = slugs + addresses;
+  const subscribedTotal = subscribedSlugs + subscribedAddresses;
+  return {
+    addresses,
+    droppedBySubset: Math.max(0, total - subscribedTotal),
+    slugs,
+    subscribedAddresses,
+    subscribedSlugs,
+    subscribedTotal,
+    total,
+  };
 }
 
 export function resubscribeMarketWSSubscriptions(): void {

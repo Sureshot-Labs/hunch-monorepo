@@ -447,6 +447,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual([...config.adminUserIds], [123, 456]);
       assert.equal(config.buyAmountUsd, 10);
       assert.equal(config.minConfidence, 0.8);
+      assert.equal(config.priceGuardMaxDefers, 5);
+      assert.equal(config.priceGuardDeferTtlSec, 1_800);
     },
   },
   {
@@ -1707,6 +1709,88 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages.length, 0);
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorId, "00000000-0000-0000-0000-000000000000");
+    },
+  },
+  {
+    name: "publish expires repeatedly stale price guard and continues later notes",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000001",
+          market_id: "polymarket:market-1",
+          title: "Stale first signal",
+        }),
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000002",
+          market_id: null,
+          title: "Later valid signal",
+        }),
+      ];
+      db.marketRows = [
+        {
+          id: "polymarket:market-1",
+          venue: "polymarket",
+          token_yes: "yes-token",
+          token_no: "no-token",
+          clob_token_ids: null,
+          best_bid: null,
+          best_ask: null,
+          last_price: null,
+        },
+      ];
+      db.tokenTopRows = [
+        {
+          token_id: "yes-token",
+          best_bid: null,
+          best_ask: null,
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+        {
+          token_id: "no-token",
+          best_bid: null,
+          best_ask: null,
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+      ];
+      const telegram = new FakeTelegram();
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+        SIGNAL_BOT_PRICE_GUARD_MAX_DEFERS: "5",
+      });
+
+      for (let i = 0; i < 5; i += 1) {
+        const result = await publishSignalBotTick({
+          config,
+          db,
+          redis,
+          telegram,
+        });
+        assert.equal(result.sent, 0);
+        assert.equal(result.priceGuardDeferred, 1);
+        assert.equal(result.priceGuardStaleExpired, 0);
+      }
+
+      const result = await publishSignalBotTick({
+        config,
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.priceGuardDeferred, 0);
+      assert.equal(result.priceGuardStaleExpired, 1);
+      assert.equal(result.sent, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Later valid signal/);
+      const state = await getSignalBotChatState(redis, "-100");
+      assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000002");
     },
   },
   {

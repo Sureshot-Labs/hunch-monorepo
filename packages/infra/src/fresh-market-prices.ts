@@ -428,32 +428,7 @@ export async function requestFreshMarketPrices(input: {
         .filter(Boolean) as string[],
     ),
   );
-  const grouped = groupTokensByVenue(tokenRefs);
   let enqueued = 0;
-
-  await Promise.all(
-    Array.from(grouped.entries()).map(async ([venue, venueTokenIds]) => {
-      const adapter = input.venueAdapters?.[venue];
-      if (adapter) {
-        await adapter({
-          marketIds,
-          minFreshAt,
-          tokenIds: venueTokenIds,
-          venue,
-        });
-      }
-      if (input.enqueue !== false && input.redis) {
-        const result = await enqueuePriceRefreshTokens(input.redis, {
-          tokenIds: venueTokenIds,
-          venue,
-          maxTokens: venueTokenIds.length,
-          priority: input.priority,
-        });
-        enqueued += result.enqueued;
-      }
-    }),
-  );
-
   const timeoutMs = Math.max(0, Math.trunc(input.timeoutMs ?? 0));
   const pollMs = Math.max(25, Math.trunc(input.pollMs ?? 250));
   const deadline = Date.now() + timeoutMs;
@@ -471,6 +446,73 @@ export async function requestFreshMarketPrices(input: {
   const allFresh = () =>
     tokenIds.length === 0 ||
     tokenIds.every((tokenId) => snapshot.freshTokenIds.has(tokenId));
+
+  if (allFresh()) {
+    return {
+      enqueued,
+      freshTokenIds: Array.from(snapshot.freshTokenIds),
+      marketStates: snapshot.marketStates,
+      requestedTokenIds: tokenIds,
+      timedOut: false,
+    };
+  }
+
+  const staleTokenIds = new Set(
+    tokenIds.filter((tokenId) => !snapshot.freshTokenIds.has(tokenId)),
+  );
+  const staleTokenRefs = tokenRefs.filter((ref) => {
+    const tokenId = normalizeId(ref.tokenId);
+    return Boolean(tokenId && staleTokenIds.has(tokenId));
+  });
+  const groupedStale = groupTokensByVenue(staleTokenRefs);
+
+  await Promise.all(
+    Array.from(groupedStale.entries()).map(async ([venue, venueTokenIds]) => {
+      const adapter = input.venueAdapters?.[venue];
+      if (adapter) {
+        const venueMarketIds = Array.from(
+          new Set(
+            staleTokenRefs
+              .filter((ref) => {
+                const tokenId = normalizeId(ref.tokenId);
+                return Boolean(
+                  tokenId && venueForToken(tokenId, ref.venue) === venue,
+                );
+              })
+              .map((ref) => normalizeId(ref.marketId))
+              .filter(Boolean) as string[],
+          ),
+        );
+        await adapter({
+          marketIds: venueMarketIds.length ? venueMarketIds : marketIds,
+          minFreshAt,
+          tokenIds: venueTokenIds,
+          venue,
+        });
+      }
+      if (input.enqueue !== false && input.redis) {
+        const result = await enqueuePriceRefreshTokens(input.redis, {
+          tokenIds: venueTokenIds,
+          venue,
+          maxTokens: venueTokenIds.length,
+          priority: input.priority,
+        });
+        enqueued += result.enqueued;
+      }
+    }),
+  );
+
+  snapshot = await loadSnapshot({
+    db: input.db,
+    marketRows,
+    minFreshAt,
+    priceOptions: {
+      maxBuyPrice: input.maxBuyPrice,
+      terminalPp: input.terminalPp,
+    },
+    tokenIds,
+    tokenRefs,
+  });
 
   while (timeoutMs > 0 && !allFresh() && Date.now() < deadline) {
     await delay(Math.min(pollMs, Math.max(0, deadline - Date.now())));
