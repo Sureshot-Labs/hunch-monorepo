@@ -560,7 +560,6 @@ export function buildSignalBotMessage(input: {
     keyboardRows.push([
       {
         text: formatSignalBotBuyButtonText({
-          amountUsd: input.buyAmountUsd,
           price,
           side: buySide,
           sideLabel: formatSignalBotOutcomeDisplayLabel(note, buySide),
@@ -2235,7 +2234,6 @@ function formatVenueLabel(value: string | null | undefined): string | null {
 }
 
 function formatSignalBotBuyButtonText(input: {
-  amountUsd: number;
   price: number | null;
   side: "NO" | "YES";
   sideLabel: string;
@@ -2246,7 +2244,7 @@ function formatSignalBotBuyButtonText(input: {
   const price = input.price == null ? null : formatCents(input.price);
   const marketLabel =
     venue && price ? `${venue} ${price}` : (venue ?? price ?? null);
-  return `${marker} Buy ${input.sideLabel} $${input.amountUsd}${marketLabel ? ` · ${marketLabel}` : ""}`;
+  return `${marker} Buy ${input.sideLabel}${marketLabel ? ` · ${marketLabel}` : ""}`;
 }
 
 function formatSignalBotCheaperButtonText(input: {

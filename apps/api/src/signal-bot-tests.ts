@@ -924,7 +924,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message buttons include primary buy with default amount",
+    name: "message buttons include primary buy with market price",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -932,7 +932,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
       assert.equal(
         new URL(rows[0]?.[0]?.url ?? "").searchParams.get("amountUsd"),
         "10",
@@ -985,7 +985,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
       assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi YES 29¢");
       const url = new URL(rows[1]?.[0]?.url ?? "");
       assert.equal(url.pathname, "/events/kalshi%3Aevent-1");
@@ -1012,7 +1012,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows.length, 2);
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES $10 · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
       assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
     },
   },
@@ -1025,7 +1025,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note({ direction: "down" }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO $10 · Poly 70¢");
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
       assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
     },
   },
@@ -1097,7 +1097,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(message.text, /^🎮 \*\[@TestWallet backs Beta Team/);
       assert.match(message.text, /⚡ Sharp holder · ATL 31¢ \/ BTT 69¢/);
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy BTT $10 · Poly 70¢");
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy BTT · Poly 70¢");
       assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi BTT 48¢");
       assert.equal(rows[2]?.[0]?.text, "👤 BTT $12.3K (-$123)");
     },
