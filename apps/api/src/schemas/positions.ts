@@ -71,6 +71,10 @@ export const positionsQuerySchema = z.object({
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")
     .catch(false),
+  includeResolved: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
   includeMarkets: z
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")
@@ -92,6 +96,10 @@ export const positionsByTokenQuerySchema = z.object({
   wallets: zCsvString("wallets is required").optional(),
   minSize: zOptionalNumber,
   includeHidden: z
+    .union([z.boolean(), z.string(), z.undefined()])
+    .transform((v) => v === true || v === "true")
+    .catch(false),
+  includeResolved: z
     .union([z.boolean(), z.string(), z.undefined()])
     .transform((v) => v === true || v === "true")
     .catch(false),

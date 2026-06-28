@@ -12,6 +12,7 @@ import {
   syncWalletPositionsFromTokenBalances,
   updatePositionMetrics,
 } from "./repos/positions-repo.js";
+import { fetchMarketsByTokenIds } from "./repos/unified-read.js";
 import {
   createResolvedPositionNotificationIfVisible,
   notifyResolvedPositions,
@@ -276,6 +277,142 @@ async function insertResolvedLimitlessMarket(params: {
     `
       insert into unified_tokens(token_id, venue, market_id, side)
       values ($1, 'limitless', $2, $3)
+    `,
+    [params.tokenId, params.marketId, params.outcomeSide],
+  );
+
+  await pool.query(
+    `
+      insert into unified_market_tokens(token_id, venue, market_id, outcome_side)
+      values ($1, 'limitless', $2, $3)
+    `,
+    [params.tokenId, params.marketId, params.outcomeSide],
+  );
+}
+
+async function insertKalshiMarket(params: {
+  marketId: string;
+  tokenId: string;
+  outcomeSide: "YES" | "NO";
+  resolvedOutcome?: "YES" | "NO" | null;
+}): Promise<void> {
+  const eventId = `event-${params.marketId}`;
+  const status = params.resolvedOutcome ? "SETTLED" : "ACTIVE";
+  await pool.query(
+    `
+      insert into unified_events (
+        id,
+        venue,
+        venue_event_id,
+        title,
+        status,
+        start_date,
+        end_date,
+        volume_total,
+        volume_24h,
+        liquidity,
+        slug,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'kalshi',
+        $1,
+        'Kalshi test event',
+        $2,
+        now() - interval '2 days',
+        now() + interval '1 day',
+        0,
+        0,
+        0,
+        $3,
+        now(),
+        now()
+      )
+    `,
+    [eventId, status, `slug-${eventId}`],
+  );
+
+  await pool.query(
+    `
+      insert into unified_markets (
+        id,
+        venue,
+        venue_market_id,
+        event_id,
+        title,
+        status,
+        market_type,
+        open_time,
+        close_time,
+        expiration_time,
+        best_bid,
+        best_ask,
+        last_price,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        outcomes,
+        token_yes,
+        token_no,
+        slug,
+        resolved_outcome,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'kalshi',
+        $1,
+        $2,
+        'Kalshi test market',
+        $3,
+        'binary',
+        now() - interval '2 days',
+        now() + interval '1 day',
+        now() + interval '1 day',
+        0,
+        0,
+        null,
+        0,
+        0,
+        0,
+        0,
+        '["Yes","No"]',
+        case when $4 = 'YES' then $5 else $6 end,
+        case when $4 = 'NO' then $5 else $6 end,
+        $7,
+        $8,
+        now(),
+        now()
+      )
+    `,
+    [
+      params.marketId,
+      eventId,
+      status,
+      params.outcomeSide,
+      params.tokenId,
+      `other-${params.tokenId}`,
+      `slug-${params.marketId}`,
+      params.resolvedOutcome ?? null,
+    ],
+  );
+
+  await pool.query(
+    `
+      insert into unified_tokens(token_id, venue, market_id, side)
+      values ($1, 'kalshi', $2, $3)
+    `,
+    [params.tokenId, params.marketId, params.outcomeSide],
+  );
+
+  await pool.query(
+    `
+      insert into unified_market_tokens(token_id, venue, market_id, outcome_side)
+      values ($1, 'kalshi', $2, $3)
     `,
     [params.tokenId, params.marketId, params.outcomeSide],
   );
@@ -1699,6 +1836,484 @@ await test("active position reads exclude flat zero rows even with minSize zero"
   }
 });
 
+await test("includeResolved returns only redemption-marked resolved flat rows", async () => {
+  const walletAddress = randomEvmAddress();
+  const openTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const unresolvedFlatTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const soldResolvedTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const redeemedResolvedTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const soldMarketId = `limitless-test:${crypto.randomUUID()}`;
+  const redeemedMarketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId: soldMarketId,
+      tokenId: soldResolvedTokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+    await insertResolvedLimitlessMarket({
+      marketId: redeemedMarketId,
+      tokenId: redeemedResolvedTokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          ($1, $2, 'limitless', 'own', $3, 'LONG', 0.5, 0.4, 0, 0, now(), now(), now()),
+          ($1, $2, 'limitless', 'own', $4, 'FLAT', 0, 0.4, 0, 0.1, now(), now(), now()),
+          ($1, $2, 'limitless', 'own', $5, 'FLAT', 0, 0.4, 0, 0.2, now(), now(), now()),
+          ($1, $2, 'limitless', 'own', $6, 'FLAT', 0, 0.4, 0, 0.7, now(), now(), now())
+      `,
+      [
+        userId,
+        walletAddress,
+        openTokenId,
+        unresolvedFlatTokenId,
+        soldResolvedTokenId,
+        redeemedResolvedTokenId,
+      ],
+    );
+
+    await pool.query(
+      `
+        insert into notifications (
+          user_id,
+          type,
+          title,
+          body,
+          severity,
+          data,
+          dedupe_key
+        )
+        values (
+          $1,
+          'redemption_completed',
+          'Redemption completed',
+          'Limitless redemption',
+          'success',
+          jsonb_build_object(
+            'venue', 'limitless',
+            'tokenId', $2::text,
+            'walletAddress', $3::text
+          ),
+          $4
+        )
+      `,
+      [
+        userId,
+        redeemedResolvedTokenId,
+        walletAddress,
+        `redemption:test:${crypto.randomUUID()}`,
+      ],
+    );
+
+    const defaultPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.deepEqual(
+      defaultPositions.map((position) => position.tokenId),
+      [openTokenId],
+    );
+
+    const resolvedPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      resolvedPositions.map((position) => position.tokenId),
+      [redeemedResolvedTokenId],
+    );
+    assert.equal(resolvedPositions[0]?.side, "FLAT");
+    assert.equal(resolvedPositions[0]?.size, 0);
+    assertClose(resolvedPositions[0]?.realizedPnl ?? 0, 0.7);
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [
+        openTokenId,
+        unresolvedFlatTokenId,
+        soldResolvedTokenId,
+        redeemedResolvedTokenId,
+      ],
+      venue: "limitless",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      byToken.map((position) => position.tokenId),
+      [redeemedResolvedTokenId],
+    );
+  } finally {
+    await cleanupPositionTest(
+      userId,
+      [
+        openTokenId,
+        unresolvedFlatTokenId,
+        soldResolvedTokenId,
+        redeemedResolvedTokenId,
+        `other-${soldResolvedTokenId}`,
+        `other-${redeemedResolvedTokenId}`,
+      ],
+      [soldMarketId, redeemedMarketId],
+    );
+  }
+});
+
+await test("includeResolved maps Limitless scoped positions to raw market tokens", async () => {
+  const walletAddress = randomEvmAddress();
+  const rawTokenId = String(crypto.randomInt(1_000_000, 9_999_999));
+  const scopedTokenId = `limitless:${rawTokenId}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId,
+      tokenId: rawTokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values ($1, $2, 'limitless', 'own', $3, 'FLAT', 0, 0.4, 0, 0.6, now(), now(), now())
+      `,
+      [userId, walletAddress, scopedTokenId],
+    );
+
+    await pool.query(
+      `
+        insert into notifications (
+          user_id,
+          type,
+          title,
+          body,
+          severity,
+          data,
+          dedupe_key
+        )
+        values (
+          $1,
+          'redemption_completed',
+          'Redemption completed',
+          'Limitless redemption',
+          'success',
+          jsonb_build_object(
+            'venue', 'limitless',
+            'tokenId', $2::text,
+            'walletAddress', $3::text
+          ),
+          $4
+        )
+      `,
+      [
+        userId,
+        scopedTokenId,
+        walletAddress,
+        `redemption:test:${crypto.randomUUID()}`,
+      ],
+    );
+
+    const positions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "limitless",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      positions.map((position) => position.tokenId),
+      [scopedTokenId],
+    );
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [rawTokenId],
+      venue: "limitless",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      byToken.map((position) => position.tokenId),
+      [scopedTokenId],
+    );
+
+    const marketRows = await fetchMarketsByTokenIds(pool, {
+      tokenIds: [scopedTokenId],
+      venue: "limitless",
+      includeTop: false,
+    });
+    assert.equal(marketRows.length, 1);
+    assert.equal(marketRows[0]?.token_id, scopedTokenId);
+    assert.equal(marketRows[0]?.market_id, marketId);
+  } finally {
+    await cleanupPositionTest(
+      userId,
+      [scopedTokenId, rawTokenId, `other-${rawTokenId}`],
+      [marketId],
+    );
+  }
+});
+
+await test("markets by token supports Limitless variants without polymarket widening", async () => {
+  const rawToScopedTokenId = String(crypto.randomInt(10_000_000, 99_999_999));
+  const scopedToRawTokenId = String(crypto.randomInt(10_000_000, 99_999_999));
+  const scopedMarketId = `limitless-test:${crypto.randomUUID()}`;
+  const rawMarketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertResolvedLimitlessMarket({
+      marketId: scopedMarketId,
+      tokenId: `limitless:${rawToScopedTokenId}`,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+    await insertResolvedLimitlessMarket({
+      marketId: rawMarketId,
+      tokenId: scopedToRawTokenId,
+      outcomeSide: "NO",
+      resolvedOutcome: "NO",
+    });
+
+    const limitlessRows = await fetchMarketsByTokenIds(pool, {
+      tokenIds: [rawToScopedTokenId, `limitless:${scopedToRawTokenId}`],
+      venue: "limitless",
+      includeTop: false,
+    });
+    const marketsByToken = new Map(
+      limitlessRows.map((row) => [row.token_id, row.market_id]),
+    );
+    assert.equal(marketsByToken.get(rawToScopedTokenId), scopedMarketId);
+    assert.equal(
+      marketsByToken.get(`limitless:${scopedToRawTokenId}`),
+      rawMarketId,
+    );
+
+    const polymarketRows = await fetchMarketsByTokenIds(pool, {
+      tokenIds: [rawToScopedTokenId],
+      venue: "polymarket",
+      includeTop: false,
+    });
+    assert.deepEqual(polymarketRows, []);
+  } finally {
+    await cleanupPositionTest(
+      userId,
+      [
+        rawToScopedTokenId,
+        `limitless:${rawToScopedTokenId}`,
+        `other-limitless:${rawToScopedTokenId}`,
+        scopedToRawTokenId,
+        `limitless:${scopedToRawTokenId}`,
+        `other-${scopedToRawTokenId}`,
+      ],
+      [scopedMarketId, rawMarketId],
+    );
+  }
+});
+
+await test("includeResolved returns Kalshi flat resolved rows with meaningful pnl only", async () => {
+  const walletAddress = `kalshi-wallet-${crypto.randomUUID()}`;
+  const resolvedWinTokenId = `sol:${crypto.randomUUID()}`;
+  const resolvedZeroTokenId = `sol:${crypto.randomUUID()}`;
+  const hiddenZeroTokenId = `sol:${crypto.randomUUID()}`;
+  const unresolvedTokenId = `sol:${crypto.randomUUID()}`;
+  const resolvedWinMarketId = `kalshi-test:${crypto.randomUUID()}`;
+  const resolvedZeroMarketId = `kalshi-test:${crypto.randomUUID()}`;
+  const hiddenZeroMarketId = `kalshi-test:${crypto.randomUUID()}`;
+  const unresolvedMarketId = `kalshi-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertKalshiMarket({
+      marketId: resolvedWinMarketId,
+      tokenId: resolvedWinTokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+    await insertKalshiMarket({
+      marketId: resolvedZeroMarketId,
+      tokenId: resolvedZeroTokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: "YES",
+    });
+    await insertKalshiMarket({
+      marketId: hiddenZeroMarketId,
+      tokenId: hiddenZeroTokenId,
+      outcomeSide: "NO",
+      resolvedOutcome: "NO",
+    });
+    await insertKalshiMarket({
+      marketId: unresolvedMarketId,
+      tokenId: unresolvedTokenId,
+      outcomeSide: "YES",
+      resolvedOutcome: null,
+    });
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          is_hidden,
+          hidden_reason,
+          hidden_at,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          ($1, $2, 'kalshi', 'own', $3, 'FLAT', 0, 0.4, 0, 0.75, false, null, null, now(), now(), now()),
+          ($1, $2, 'kalshi', 'own', $4, 'FLAT', 0, 0.4, 0, 0, false, null, null, now(), now(), now()),
+          ($1, $2, 'kalshi', 'own', $5, 'FLAT', 0, 0.4, 0, 0, true, 'user', now(), now(), now(), now()),
+          ($1, $2, 'kalshi', 'own', $6, 'FLAT', 0, 0.4, 0, 0.5, false, null, null, now(), now(), now())
+      `,
+      [
+        userId,
+        walletAddress,
+        resolvedWinTokenId,
+        resolvedZeroTokenId,
+        hiddenZeroTokenId,
+        unresolvedTokenId,
+      ],
+    );
+
+    const defaultPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "kalshi",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.deepEqual(defaultPositions, []);
+
+    const resolvedPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "kalshi",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      new Set(resolvedPositions.map((position) => position.tokenId)),
+      new Set([resolvedWinTokenId, hiddenZeroTokenId]),
+    );
+    assertClose(
+      resolvedPositions.find(
+        (position) => position.tokenId === resolvedWinTokenId,
+      )?.realizedPnl ?? 0,
+      0.75,
+    );
+
+    const visibleResolvedPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "kalshi",
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      visibleResolvedPositions.map((position) => position.tokenId),
+      [resolvedWinTokenId],
+    );
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [
+        resolvedWinTokenId,
+        resolvedZeroTokenId,
+        hiddenZeroTokenId,
+        unresolvedTokenId,
+      ],
+      venue: "kalshi",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      new Set(byToken.map((position) => position.tokenId)),
+      new Set([resolvedWinTokenId, hiddenZeroTokenId]),
+    );
+  } finally {
+    await cleanupPositionTest(
+      userId,
+      [
+        resolvedWinTokenId,
+        `other-${resolvedWinTokenId}`,
+        resolvedZeroTokenId,
+        `other-${resolvedZeroTokenId}`,
+        hiddenZeroTokenId,
+        `other-${hiddenZeroTokenId}`,
+        unresolvedTokenId,
+        `other-${unresolvedTokenId}`,
+      ],
+      [
+        resolvedWinMarketId,
+        resolvedZeroMarketId,
+        hiddenZeroMarketId,
+        unresolvedMarketId,
+      ],
+    );
+  }
+});
+
 await test("resolved open position list pnl matches summary effective pnl", async () => {
   const walletAddress = randomEvmAddress();
   const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
@@ -1752,7 +2367,11 @@ await test("resolved open position list pnl matches summary effective pnl", asyn
     assertClose(byToken[0]?.realizedPnl ?? 0, 1.45);
     assertClose(byToken[0]?.unrealizedPnl ?? 0, 0);
   } finally {
-    await cleanupPositionTest(userId, [tokenId, `other-${tokenId}`], [marketId]);
+    await cleanupPositionTest(
+      userId,
+      [tokenId, `other-${tokenId}`],
+      [marketId],
+    );
   }
 });
 
@@ -1814,7 +2433,11 @@ await test("resolved winning balance sync flatten materializes payout pnl", asyn
     assertClose(summary.realizedPnlAllTime, 1.45);
     assertClose(summary.unrealizedPnlCurrent, 0);
   } finally {
-    await cleanupPositionTest(userId, [tokenId, `other-${tokenId}`], [marketId]);
+    await cleanupPositionTest(
+      userId,
+      [tokenId, `other-${tokenId}`],
+      [marketId],
+    );
   }
 });
 
@@ -1912,7 +2535,11 @@ await test("resolved losing exact balance flatten survives post-reconcile recomp
     assertClose(summary.realizedPnlAllTime, -0.6);
     assertClose(summary.unrealizedPnlCurrent, 0);
   } finally {
-    await cleanupPositionTest(userId, [tokenId, `other-${tokenId}`], [marketId]);
+    await cleanupPositionTest(
+      userId,
+      [tokenId, `other-${tokenId}`],
+      [marketId],
+    );
   }
 });
 

@@ -345,6 +345,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                   venue,
                   venues,
                   includeHidden: query.includeHidden,
+                  includeResolved: query.includeResolved,
                   minSize: effectiveMinSize,
                 })
             : await fetchPositionsForUserWallet(pool, {
@@ -353,6 +354,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 venue,
                 venues,
                 includeHidden: query.includeHidden,
+                includeResolved: query.includeResolved,
                 minSize: effectiveMinSize,
               });
 
@@ -559,6 +561,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           venue,
           venues,
           includeHidden: query.includeHidden,
+          includeResolved: query.includeResolved,
           minSize: effectiveMinSize,
         });
 

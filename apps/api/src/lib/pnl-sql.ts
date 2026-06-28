@@ -8,9 +8,22 @@ export const POSITION_MARKET_JOIN_SQL = `
         ut.market_id,
         upper(ut.side) as outcome_side,
         case when ut.venue = p.venue then 0 else 1 end as venue_rank,
-        ut.updated_at
-      from unified_tokens ut
-      where ut.token_id = p.token_id
+        token_lookup.lookup_rank,
+        ut.updated_at,
+        0 as source_rank
+      from (
+        select p.token_id as token_id, 0 as lookup_rank
+        union all
+        select substring(p.token_id from 11), 1
+        where p.venue = 'limitless'
+          and p.token_id like 'limitless:%'
+        union all
+        select 'limitless:' || p.token_id, 1
+        where p.venue = 'limitless'
+          and p.token_id not like '%:%'
+      ) token_lookup
+      join unified_tokens ut
+        on ut.token_id = token_lookup.token_id
 
       union all
 
@@ -18,14 +31,75 @@ export const POSITION_MARKET_JOIN_SQL = `
         umt.market_id,
         upper(umt.outcome_side) as outcome_side,
         case when umt.venue = p.venue then 0 else 1 end as venue_rank,
-        umt.updated_at
-      from unified_market_tokens umt
-      where umt.token_id = p.token_id
+        token_lookup.lookup_rank,
+        umt.updated_at,
+        1 as source_rank
+      from (
+        select p.token_id as token_id, 0 as lookup_rank
+        union all
+        select substring(p.token_id from 11), 1
+        where p.venue = 'limitless'
+          and p.token_id like 'limitless:%'
+        union all
+        select 'limitless:' || p.token_id, 1
+        where p.venue = 'limitless'
+          and p.token_id not like '%:%'
+      ) token_lookup
+      join unified_market_tokens umt
+        on umt.token_id = token_lookup.token_id
+
+      union all
+
+      select
+        m_yes.id as market_id,
+        'YES' as outcome_side,
+        case when m_yes.venue = p.venue then 0 else 1 end as venue_rank,
+        token_lookup.lookup_rank,
+        m_yes.updated_at,
+        2 as source_rank
+      from (
+        select p.token_id as token_id, 0 as lookup_rank
+        union all
+        select substring(p.token_id from 11), 1
+        where p.venue = 'limitless'
+          and p.token_id like 'limitless:%'
+        union all
+        select 'limitless:' || p.token_id, 1
+        where p.venue = 'limitless'
+          and p.token_id not like '%:%'
+      ) token_lookup
+      join unified_markets m_yes
+        on m_yes.token_yes = token_lookup.token_id
+
+      union all
+
+      select
+        m_no.id as market_id,
+        'NO' as outcome_side,
+        case when m_no.venue = p.venue then 0 else 1 end as venue_rank,
+        token_lookup.lookup_rank,
+        m_no.updated_at,
+        2 as source_rank
+      from (
+        select p.token_id as token_id, 0 as lookup_rank
+        union all
+        select substring(p.token_id from 11), 1
+        where p.venue = 'limitless'
+          and p.token_id like 'limitless:%'
+        union all
+        select 'limitless:' || p.token_id, 1
+        where p.venue = 'limitless'
+          and p.token_id not like '%:%'
+      ) token_lookup
+      join unified_markets m_no
+        on m_no.token_no = token_lookup.token_id
     ) token_market
     where token_market.outcome_side in ('YES', 'NO')
     order by
+      token_market.lookup_rank asc,
       token_market.venue_rank asc,
       token_market.updated_at desc nulls last,
+      token_market.source_rank asc,
       token_market.market_id asc
     limit 1
   ) umt on true

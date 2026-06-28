@@ -927,10 +927,7 @@ function buildFeedSearchContext(args: {
     "primary",
   );
   const fullEventSearchDocExpr = buildFeedSearchDocumentExpr("e", "full");
-  const fullMarketSearchDocExpr = buildFeedSearchDocumentExpr(
-    "m",
-    "full",
-  );
+  const fullMarketSearchDocExpr = buildFeedSearchDocumentExpr("m", "full");
   const effectiveMode = mode === "ranked" ? plan.rankMode : mode;
   const orderableMarketExpr = buildOrderableMarketSql({
     marketAlias: "m",
@@ -1490,7 +1487,10 @@ function feedSearchResultMatchLimit(): number {
 }
 
 function feedSearchResultMatchLimitForInputs(
-  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds" | "sort" | "filter">,
+  inputs: Pick<
+    FeedInputs,
+    "limit" | "offset" | "marketIds" | "sort" | "filter"
+  >,
 ): number | null {
   if (inputs.marketIds?.length) return null;
   if (
@@ -1504,7 +1504,10 @@ function feedSearchResultMatchLimitForInputs(
 }
 
 function feedSearchFallbackThresholdForInputs(
-  inputs: Pick<FeedInputs, "limit" | "offset" | "marketIds" | "sort" | "filter">,
+  inputs: Pick<
+    FeedInputs,
+    "limit" | "offset" | "marketIds" | "sort" | "filter"
+  >,
 ): number | null {
   const matchLimit = feedSearchResultMatchLimitForInputs(inputs);
   if (matchLimit == null) return null;
@@ -2797,8 +2800,7 @@ export async function fetchFeedMarketsDirect(
       `
     : null;
   const directMarketSearchCtes =
-    directMarketSearchPlan.hasSearch &&
-    directMarketSearchParam
+    directMarketSearchPlan.hasSearch && directMarketSearchParam
       ? [
           `
       direct_market_matches as materialized (
@@ -4064,11 +4066,26 @@ export async function fetchMarketsByTokenIds(
   if (inputs.tokenIds.length === 0) return [];
 
   const params: PgParams = [inputs.tokenIds];
+  const rawLimitlessLookupSql =
+    inputs.venue === "limitless"
+      ? `
+        union all
+        select
+          t.token_id,
+          'limitless:' || t.token_id as lookup_token_id,
+          t.ordinality,
+          1 as lookup_rank
+        from input_tokens t
+        where t.token_id not like '%:%'
+      `
+      : "";
   let venueClause = "";
   if (inputs.venue) {
     params.push(inputs.venue);
     venueClause = `and m.venue = $${params.length}`;
   }
+  const venueRankSql = (alias: string) =>
+    inputs.venue ? `case when ${alias}.venue = $2 then 0 else 1 end` : "0";
 
   const includeTop = inputs.includeTop ?? true;
   const topSelect = includeTop
@@ -4108,16 +4125,105 @@ export async function fetchMarketsByTokenIds(
       where token_id is not null and token_id <> ''
       group by token_id
     ),
-    token_matches as (
+    lookup_tokens as (
       select
         t.token_id,
-        umt.outcome_side as side,
-        umt.market_id,
-        t.ordinality
+        t.token_id as lookup_token_id,
+        t.ordinality,
+        0 as lookup_rank
       from input_tokens t
+
+      union all
+
+      select
+        t.token_id,
+        substring(t.token_id from 11) as lookup_token_id,
+        t.ordinality,
+        1 as lookup_rank
+      from input_tokens t
+      where t.token_id like 'limitless:%'
+
+      ${rawLimitlessLookupSql}
+    ),
+    token_matches as (
+      select
+        lt.token_id,
+        upper(umt.outcome_side) as side,
+        umt.market_id,
+        lt.ordinality,
+        lt.lookup_rank,
+        ${venueRankSql("umt")} as venue_rank,
+        umt.updated_at,
+        0 as source_rank
+      from lookup_tokens lt
       join unified_market_tokens umt
-        on umt.token_id = t.token_id
+        on umt.token_id = lt.lookup_token_id
       where umt.outcome_side is not null
+
+      union all
+
+      select
+        lt.token_id,
+        upper(ut.side) as side,
+        ut.market_id,
+        lt.ordinality,
+        lt.lookup_rank,
+        ${venueRankSql("ut")} as venue_rank,
+        ut.updated_at,
+        1 as source_rank
+      from lookup_tokens lt
+      join unified_tokens ut
+        on ut.token_id = lt.lookup_token_id
+      where ut.side is not null
+
+      union all
+
+      select
+        lt.token_id,
+        'YES' as side,
+        m_yes.id as market_id,
+        lt.ordinality,
+        lt.lookup_rank,
+        ${venueRankSql("m_yes")} as venue_rank,
+        m_yes.updated_at,
+        2 as source_rank
+      from lookup_tokens lt
+      join unified_markets m_yes
+        on m_yes.token_yes = lt.lookup_token_id
+
+      union all
+
+      select
+        lt.token_id,
+        'NO' as side,
+        m_no.id as market_id,
+        lt.ordinality,
+        lt.lookup_rank,
+        ${venueRankSql("m_no")} as venue_rank,
+        m_no.updated_at,
+        2 as source_rank
+      from lookup_tokens lt
+      join unified_markets m_no
+        on m_no.token_no = lt.lookup_token_id
+    ),
+    ranked_token_matches as (
+      select *
+      from (
+        select
+          token_matches.*,
+          row_number() over (
+            partition by token_matches.token_id
+            order by
+              token_matches.lookup_rank asc,
+              token_matches.venue_rank asc,
+              token_matches.updated_at desc nulls last,
+              token_matches.source_rank asc,
+              token_matches.market_id asc
+          ) as match_rank
+        from token_matches
+        where token_matches.side in ('YES', 'NO')
+      ) ranked
+      where ranked.match_rank = 1
     )
     select
       tm.token_id,
@@ -4183,7 +4289,7 @@ export async function fetchMarketsByTokenIds(
       e.image as event_image,
       e.icon as event_icon,
       e.metadata as event_metadata
-    from token_matches tm
+    from ranked_token_matches tm
     join unified_markets m on m.id = tm.market_id
     left join unified_market_tokens token_yes
       on token_yes.market_id = m.id
@@ -4196,6 +4302,7 @@ export async function fetchMarketsByTokenIds(
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
     ${negRiskParentJoin}
     left join unified_events e on e.id = m.event_id
+    where true
     ${venueClause}
     order by tm.ordinality
   `;

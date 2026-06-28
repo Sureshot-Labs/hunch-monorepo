@@ -94,6 +94,32 @@ const MATERIALIZABLE_RESOLVED_POSITION_SQL = `
   and ${RESOLVED_MARKET_SQL}
 `;
 
+const RESOLVED_FLAT_POSITION_SQL = `
+  (p.side = 'FLAT' or p.size <= 0)
+  and ${RESOLVED_MARKET_SQL}
+  and (
+    (
+      p.venue = 'kalshi'
+      and (
+        abs(coalesce(p.realized_pnl, 0)) > 0.000001
+        or p.is_hidden = true
+      )
+    )
+    or (
+      p.venue <> 'kalshi'
+      and exists (
+        select 1
+        from notifications n
+        where n.user_id = p.user_id
+          and n.type = 'redemption_completed'
+          and n.data->>'venue' = p.venue
+          and n.data->>'tokenId' = p.token_id
+          and lower(coalesce(n.data->>'walletAddress', '')) = lower(coalesce(p.wallet_address, ''))
+      )
+    )
+  )
+`;
+
 function isEthAddress(address: string | null | undefined): address is string {
   return isEvmAddress(address);
 }
@@ -192,14 +218,22 @@ function normalizeTokenIdsForLookup(
   venueList: string[] | null | undefined,
 ): string[] {
   if (venueList?.length === 1 && venueList[0] === "limitless") {
-    return Array.from(
-      new Map(
-        tokenIds
-          .map((tokenId) => normalizeLimitlessScopedTokenId(tokenId))
-          .filter((tokenId): tokenId is string => Boolean(tokenId))
-          .map((tokenId) => [tokenId, tokenId]),
-      ).values(),
-    );
+    const variants = new Map<string, string>();
+    for (const tokenId of tokenIds) {
+      if (!tokenId) continue;
+      variants.set(tokenId, tokenId);
+      const scopedTokenId = normalizeLimitlessScopedTokenId(tokenId);
+      if (scopedTokenId) {
+        variants.set(scopedTokenId, scopedTokenId);
+      }
+      if (tokenId.startsWith("limitless:")) {
+        const rawTokenId = tokenId.slice("limitless:".length);
+        if (rawTokenId) {
+          variants.set(rawTokenId, rawTokenId);
+        }
+      }
+    }
+    return Array.from(variants.values());
   }
 
   return tokenIds;
@@ -547,6 +581,7 @@ export async function fetchPositionsForUserWallet(
     venue?: string;
     venues?: string[];
     includeHidden?: boolean;
+    includeResolved?: boolean;
     minSize?: number;
   },
 ): Promise<Position[]> {
@@ -559,16 +594,19 @@ export async function fetchPositionsForUserWallet(
   const params: PgParams = [inputs.userId];
   let whereClause = `where p.user_id = $1
     and ${appendWalletAddressReadFilter(params, walletAddresses)}
-    and p.position_scope = 'own'
-    and p.side <> 'FLAT'
-    and p.size > 0`;
+    and p.position_scope = 'own'`;
   let paramCount = params.length;
+  const includeResolved = inputs.includeResolved === true;
 
   if (!inputs.includeHidden) {
     whereClause += " and (p.is_hidden is null or p.is_hidden = false)";
   }
 
-  if (inputs.minSize != null) {
+  if (!includeResolved) {
+    whereClause += "\n    and p.side <> 'FLAT'\n    and p.size > 0";
+  }
+
+  if (!includeResolved && inputs.minSize != null) {
     paramCount += 1;
     whereClause += ` and p.size >= $${paramCount}`;
     params.push(inputs.minSize);
@@ -579,6 +617,16 @@ export async function fetchPositionsForUserWallet(
     whereClause += ` and p.venue = any($${paramCount}::text[])`;
     params.push(venueList);
   }
+
+  let activePositionSql = "p.side <> 'FLAT' and p.size > 0";
+  if (includeResolved && inputs.minSize != null) {
+    paramCount += 1;
+    activePositionSql += ` and p.size >= $${paramCount}`;
+    params.push(inputs.minSize);
+  }
+  const positionReadFilterSql = includeResolved
+    ? `and ((${activePositionSql}) or (${RESOLVED_FLAT_POSITION_SQL}))`
+    : "";
 
   const { rows } = await pool.query<PositionRow>(
     `
@@ -613,6 +661,7 @@ export async function fetchPositionsForUserWallet(
       ${POSITION_ORDER_ACTIVITY_JOIN_SQL}
       ${POSITION_MARKET_JOIN_SQL}
       where p.wallet_case_rank = 1
+        ${positionReadFilterSql}
       order by
         position_order_activity.latest_order_at desc nulls last,
         p.last_updated_at desc nulls last,
@@ -637,6 +686,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
     venue?: string;
     venues?: string[];
     includeHidden?: boolean;
+    includeResolved?: boolean;
     minSize?: number;
   },
 ): Promise<Position[]> {
@@ -652,10 +702,9 @@ export async function fetchPositionsForUserWalletByTokenIds(
   const params: PgParams = [inputs.userId];
   let whereClause = `where p.user_id = $1
     and ${appendWalletAddressReadFilter(params, walletAddresses)}
-    and p.position_scope = 'own'
-    and p.side <> 'FLAT'
-    and p.size > 0`;
+    and p.position_scope = 'own'`;
   let paramCount = params.length;
+  const includeResolved = inputs.includeResolved === true;
 
   paramCount += 1;
   whereClause += ` and p.token_id = any($${paramCount}::text[])`;
@@ -665,7 +714,11 @@ export async function fetchPositionsForUserWalletByTokenIds(
     whereClause += " and (p.is_hidden is null or p.is_hidden = false)";
   }
 
-  if (inputs.minSize != null) {
+  if (!includeResolved) {
+    whereClause += "\n    and p.side <> 'FLAT'\n    and p.size > 0";
+  }
+
+  if (!includeResolved && inputs.minSize != null) {
     paramCount += 1;
     whereClause += ` and p.size >= $${paramCount}`;
     params.push(inputs.minSize);
@@ -676,6 +729,16 @@ export async function fetchPositionsForUserWalletByTokenIds(
     whereClause += ` and p.venue = any($${paramCount}::text[])`;
     params.push(venueList);
   }
+
+  let activePositionSql = "p.side <> 'FLAT' and p.size > 0";
+  if (includeResolved && inputs.minSize != null) {
+    paramCount += 1;
+    activePositionSql += ` and p.size >= $${paramCount}`;
+    params.push(inputs.minSize);
+  }
+  const positionReadFilterSql = includeResolved
+    ? `and ((${activePositionSql}) or (${RESOLVED_FLAT_POSITION_SQL}))`
+    : "";
 
   const { rows } = await pool.query<PositionRow>(
     `
@@ -710,6 +773,7 @@ export async function fetchPositionsForUserWalletByTokenIds(
       ${POSITION_ORDER_ACTIVITY_JOIN_SQL}
       ${POSITION_MARKET_JOIN_SQL}
       where p.wallet_case_rank = 1
+        ${positionReadFilterSql}
       order by
         position_order_activity.latest_order_at desc nulls last,
         p.last_updated_at desc nulls last,
@@ -1023,7 +1087,8 @@ async function markMissingPositionsFlatInTx(
   }
 
   whereClause += " and (p.side <> 'FLAT' or p.size <> 0)";
-  whereClause += " and not (p.is_hidden = true and p.hidden_reason = 'auto_lost')";
+  whereClause +=
+    " and not (p.is_hidden = true and p.hidden_reason = 'auto_lost')";
 
   const result = await client.query(
     `
