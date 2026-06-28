@@ -823,6 +823,8 @@ function allowedPolymarketOperators() {
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
       env.polymarketNegRiskAdapterAddress,
+      env.polymarketCtfCollateralAdapterAddress,
+      env.polymarketNegRiskCollateralAdapterAddress,
     ]
       .map((value) => normalizeAddress(value))
       .filter((value): value is string => Boolean(value))
@@ -959,13 +961,28 @@ function validateDepositWalletBatchCall(
     const negRiskAdapter = normalizeAddress(
       env.polymarketNegRiskAdapterAddress,
     );
+    const ctfCollateralAdapter = normalizeAddress(
+      env.polymarketCtfCollateralAdapterAddress,
+    );
+    const negRiskCollateralAdapter = normalizeAddress(
+      env.polymarketNegRiskCollateralAdapterAddress,
+    );
     if (decoded.name === "redeemPositions") {
       const inputCount = decoded.fragment.inputs.length;
       const standardCtfRedeem =
         addressesEqual(target, conditionalTokens) && inputCount === 4;
+      const ctfCollateralAdapterRedeem =
+        addressesEqual(target, ctfCollateralAdapter) && inputCount === 4;
+      const negRiskCollateralAdapterRedeem =
+        addressesEqual(target, negRiskCollateralAdapter) && inputCount === 4;
       const negRiskRedeem =
         addressesEqual(target, negRiskAdapter) && inputCount === 2;
-      if (!standardCtfRedeem && !negRiskRedeem) {
+      if (
+        !standardCtfRedeem &&
+        !ctfCollateralAdapterRedeem &&
+        !negRiskCollateralAdapterRedeem &&
+        !negRiskRedeem
+      ) {
         throw new Error("Unsupported deposit wallet redemption call.");
       }
       return;
@@ -1012,7 +1029,9 @@ function validateDepositWalletBatchCall(
         !addressesEqual(recipient, depositWallet) ||
         amount <= 0n
       ) {
-        throw new Error("Unsupported deposit wallet redemption pUSD wrap call.");
+        throw new Error(
+          "Unsupported deposit wallet redemption pUSD wrap call.",
+        );
       }
       return;
     }
@@ -1694,6 +1713,8 @@ function buildApprovalTasks(inputs: {
     exchangeApproved: boolean;
     negRiskExchangeApproved: boolean;
     negRiskAdapterApproved: boolean;
+    ctfCollateralAdapterApproved: boolean;
+    negRiskCollateralAdapterApproved: boolean;
     feeCollectorApproved: boolean;
     exchangeAllowanceOk: boolean;
     negRiskExchangeAllowanceOk: boolean;
@@ -1756,6 +1777,30 @@ function buildApprovalTasks(inputs: {
       description: "Conditional tokens neg-risk adapter approval",
     });
   }
+  if (
+    env.polymarketCtfCollateralAdapterAddress &&
+    !inputs.currentApprovals.ctfCollateralAdapterApproved
+  ) {
+    tasks.push({
+      kind: "erc1155_approve_all",
+      target: env.polymarketConditionalTokensAddress,
+      data: encodeSetApprovalForAll(env.polymarketCtfCollateralAdapterAddress),
+      description: "Conditional tokens collateral adapter approval",
+    });
+  }
+  if (
+    env.polymarketNegRiskCollateralAdapterAddress &&
+    !inputs.currentApprovals.negRiskCollateralAdapterApproved
+  ) {
+    tasks.push({
+      kind: "erc1155_approve_all",
+      target: env.polymarketConditionalTokensAddress,
+      data: encodeSetApprovalForAll(
+        env.polymarketNegRiskCollateralAdapterAddress,
+      ),
+      description: "Conditional tokens neg-risk collateral adapter approval",
+    });
+  }
   return tasks;
 }
 
@@ -1766,6 +1811,8 @@ export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
     exchangeApproved: boolean;
     negRiskExchangeApproved: boolean;
     negRiskAdapterApproved: boolean;
+    ctfCollateralAdapterApproved: boolean;
+    negRiskCollateralAdapterApproved: boolean;
     feeCollectorApproved: boolean;
     exchangeAllowanceOk: boolean;
     negRiskExchangeAllowanceOk: boolean;
@@ -2029,6 +2076,8 @@ export async function ensureEmbeddedPolymarketApprovals(inputs: {
     exchangeApproved: boolean;
     negRiskExchangeApproved: boolean;
     negRiskAdapterApproved: boolean;
+    ctfCollateralAdapterApproved: boolean;
+    negRiskCollateralAdapterApproved: boolean;
     feeCollectorApproved: boolean;
     exchangeAllowanceOk: boolean;
     negRiskExchangeAllowanceOk: boolean;

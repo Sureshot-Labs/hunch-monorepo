@@ -23,6 +23,8 @@ export type RedemptionPlan = {
   targetAddress: string | null;
   data: string | null;
   collateralTokenAddress?: string | null;
+  payoutTokenAddress?: string | null;
+  operatorApprovalAddress?: string | null;
   payoutAmountRaw?: string | null;
   conditionResolved: boolean | null;
   resolvedOutcome: RedemptionResolvedOutcome;
@@ -66,6 +68,8 @@ export function buildReadyRedemptionPlan(inputs: {
   targetAddress: string;
   data: string;
   collateralTokenAddress?: string | null;
+  payoutTokenAddress?: string | null;
+  operatorApprovalAddress?: string | null;
   payoutAmountRaw?: string | null;
   conditionResolved?: boolean | null;
   resolvedOutcome?: RedemptionResolvedOutcome;
@@ -82,6 +86,12 @@ export function buildReadyRedemptionPlan(inputs: {
     data: inputs.data,
     ...(inputs.collateralTokenAddress !== undefined
       ? { collateralTokenAddress: inputs.collateralTokenAddress }
+      : {}),
+    ...(inputs.payoutTokenAddress !== undefined
+      ? { payoutTokenAddress: inputs.payoutTokenAddress }
+      : {}),
+    ...(inputs.operatorApprovalAddress !== undefined
+      ? { operatorApprovalAddress: inputs.operatorApprovalAddress }
       : {}),
     ...(inputs.payoutAmountRaw !== undefined
       ? { payoutAmountRaw: inputs.payoutAmountRaw }

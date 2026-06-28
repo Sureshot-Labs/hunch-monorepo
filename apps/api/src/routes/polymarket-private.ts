@@ -1432,6 +1432,9 @@ async function resolveEmbeddedEnsureReadyState(inputs: {
     funder: effectiveFunder,
     includeFeeCollectorNonce: false,
     negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress,
+    ctfCollateralAdapterAddress: env.polymarketCtfCollateralAdapterAddress,
+    negRiskCollateralAdapterAddress:
+      env.polymarketNegRiskCollateralAdapterAddress,
     feeCollectorAddress: null,
   });
 
@@ -1444,6 +1447,13 @@ async function resolveEmbeddedEnsureReadyState(inputs: {
       negRiskAdapterApproved: env.polymarketNegRiskAdapterAddress
         ? (snapshot.okNegRiskAdapter ?? false)
         : true,
+      ctfCollateralAdapterApproved: env.polymarketCtfCollateralAdapterAddress
+        ? (snapshot.okCtfCollateralAdapter ?? false)
+        : true,
+      negRiskCollateralAdapterApproved:
+        env.polymarketNegRiskCollateralAdapterAddress
+          ? (snapshot.okNegRiskCollateralAdapter ?? false)
+          : true,
       feeCollectorApproved: true,
       exchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
         snapshot.allowanceExchange,
@@ -3827,7 +3837,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             log: request.log,
           }))
         ) {
-          return sendPolymarketCredentialsInvalidResponse(reply, error.upstream);
+          return sendPolymarketCredentialsInvalidResponse(
+            reply,
+            error.upstream,
+          );
         }
         request.log.warn(
           { error, userId: user.id, signer, funder },
@@ -4033,6 +4046,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       try {
         const negRiskAdapterAddress =
           env.polymarketNegRiskAdapterAddress?.trim() || "";
+        const ctfCollateralAdapterAddress =
+          env.polymarketCtfCollateralAdapterAddress?.trim() || "";
+        const negRiskCollateralAdapterAddress =
+          env.polymarketNegRiskCollateralAdapterAddress?.trim() || "";
         const funderDistinctFromSigner =
           normalizeEvmAddress(funder) !== normalizeEvmAddress(signer);
         const computePromise = (async (): Promise<PolymarketAccountPayload> => {
@@ -4050,6 +4067,8 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
               includeSignerUsdc: funderDistinctFromSigner,
               includeFeeCollectorNonce: false,
               negRiskAdapterAddress,
+              ctfCollateralAdapterAddress,
+              negRiskCollateralAdapterAddress,
               feeCollectorAddress: null,
             }),
           ]);
@@ -4068,6 +4087,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           const okExchange = snapshot.okExchange;
           const okNegRisk = snapshot.okNegRisk;
           const okNegRiskAdapter = snapshot.okNegRiskAdapter;
+          const okCtfCollateralAdapter = snapshot.okCtfCollateralAdapter;
+          const okNegRiskCollateralAdapter =
+            snapshot.okNegRiskCollateralAdapter;
           const allowanceNegRiskAdapter = snapshot.allowanceNegRiskAdapter;
 
           const isContract = typeof code === "string" && code.length > 2;
@@ -4113,6 +4135,9 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
             funderIsContract: isContract,
             rpcUrl: env.polygonRpcUrl,
             negRiskAdapterAddress: negRiskAdapterAddress || null,
+            ctfCollateralAdapterAddress: ctfCollateralAdapterAddress || null,
+            negRiskCollateralAdapterAddress:
+              negRiskCollateralAdapterAddress || null,
             pusd: pusdStatus,
             usdc: pusdStatus,
             nativeUsdc: {
@@ -4159,7 +4184,14 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
                 ...(negRiskAdapterAddress
                   ? { negRiskAdapter: okNegRiskAdapter }
                   : {}),
+                ...(ctfCollateralAdapterAddress
+                  ? { ctfCollateralAdapter: okCtfCollateralAdapter }
+                  : {}),
+                ...(negRiskCollateralAdapterAddress
+                  ? { negRiskCollateralAdapter: okNegRiskCollateralAdapter }
+                  : {}),
               },
+              operatorApprovals: snapshot.operatorApprovals,
             },
             hasCredentials: Boolean(credsInfo),
           };
@@ -4228,6 +4260,10 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           collateralTokenAddress: env.polymarketUsdcAddress,
           legacyCollateralTokenAddress: env.polymarketUsdceAddress,
           negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress ?? null,
+          ctfCollateralAdapterAddress:
+            env.polymarketCtfCollateralAdapterAddress ?? null,
+          negRiskCollateralAdapterAddress:
+            env.polymarketNegRiskCollateralAdapterAddress ?? null,
           outcome: request.query.outcome,
           positionTokenId: request.query.tokenId,
           conditionId: request.query.conditionId ?? null,

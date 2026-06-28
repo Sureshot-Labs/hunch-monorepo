@@ -22,7 +22,24 @@ const conditionalTokensIface = new Interface([
 
 const negRiskAdapterIface = new Interface([
   "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
+  "function col() view returns (address)",
   "function wcol() view returns (address)",
+]);
+
+const ctfCollateralAdapterIface = new Interface([
+  "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
+  "function COLLATERAL_TOKEN() view returns (address)",
+  "function USDCE() view returns (address)",
+  "function CONDITIONAL_TOKENS() view returns (address)",
+]);
+
+const negRiskCollateralAdapterIface = new Interface([
+  "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
+  "function COLLATERAL_TOKEN() view returns (address)",
+  "function USDCE() view returns (address)",
+  "function WRAPPED_COLLATERAL() view returns (address)",
+  "function NEG_RISK_ADAPTER() view returns (address)",
+  "function CONDITIONAL_TOKENS() view returns (address)",
 ]);
 
 type PolymarketRedemptionPlanInputs = {
@@ -33,6 +50,8 @@ type PolymarketRedemptionPlanInputs = {
   collateralTokenAddress: string;
   legacyCollateralTokenAddress?: string | null;
   negRiskAdapterAddress: string | null;
+  ctfCollateralAdapterAddress?: string | null;
+  negRiskCollateralAdapterAddress?: string | null;
   outcome: "YES" | "NO";
   positionTokenId: string;
   conditionId?: string | null;
@@ -160,6 +179,10 @@ async function buildStandardConditionalRedemptionPlan(inputs: {
   funderAddress: string;
   conditionalTokensAddress: string;
   collateralTokenAddress: string;
+  targetAddress?: string | null;
+  redeemCollateralTokenAddress?: string | null;
+  payoutTokenAddress?: string | null;
+  operatorApprovalAddress?: string | null;
   conditionId: `0x${string}`;
   indexSet: bigint;
   payout: Awaited<ReturnType<typeof readConditionPayout>>;
@@ -204,11 +227,13 @@ async function buildStandardConditionalRedemptionPlan(inputs: {
   }
 
   const data = conditionalTokensIface.encodeFunctionData("redeemPositions", [
-    inputs.collateralTokenAddress,
+    inputs.redeemCollateralTokenAddress ?? inputs.collateralTokenAddress,
     ZERO_BYTES32,
     inputs.conditionId,
     [inputs.indexSet],
   ]);
+  const payoutTokenAddress =
+    inputs.payoutTokenAddress ?? inputs.collateralTokenAddress;
   const payoutNumerator =
     inputs.indexSet === 1n
       ? inputs.payout.yesPayoutNumerator
@@ -220,14 +245,145 @@ async function buildStandardConditionalRedemptionPlan(inputs: {
   return buildReadyRedemptionPlan({
     venue: "polymarket",
     chainId: POLY_CHAIN_ID,
-    targetAddress: inputs.conditionalTokensAddress,
+    targetAddress: inputs.targetAddress ?? inputs.conditionalTokensAddress,
     data,
-    collateralTokenAddress: inputs.collateralTokenAddress,
+    collateralTokenAddress: payoutTokenAddress,
+    payoutTokenAddress,
+    operatorApprovalAddress: inputs.operatorApprovalAddress ?? null,
     payoutAmountRaw: payoutAmountRaw.toString(),
     conditionResolved: true,
     resolvedOutcome: inputs.payout.resolvedOutcome,
     resolvedOutcomePct: inputs.payout.resolvedOutcomePct,
   });
+}
+
+async function readValidatedCtfCollateralAdapter(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  adapterAddress: string | null;
+  collateralTokenAddress: string;
+  legacyCollateralTokenAddress: string | null;
+  conditionalTokensAddress: string;
+}): Promise<string | null> {
+  const adapterAddress = normalizeOptionalAddress(inputs.adapterAddress);
+  if (!adapterAddress || !inputs.legacyCollateralTokenAddress) return null;
+  try {
+    const [adapterCollateral, adapterUsdce, adapterConditionalTokens] =
+      await Promise.all([
+        safeEvmReadContract<`0x${string}`>({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          target: adapterAddress,
+          iface: ctfCollateralAdapterIface,
+          functionName: "COLLATERAL_TOKEN",
+          decode: decodeAddress,
+        }),
+        safeEvmReadContract<`0x${string}`>({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          target: adapterAddress,
+          iface: ctfCollateralAdapterIface,
+          functionName: "USDCE",
+          decode: decodeAddress,
+        }),
+        safeEvmReadContract<`0x${string}`>({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          target: adapterAddress,
+          iface: ctfCollateralAdapterIface,
+          functionName: "CONDITIONAL_TOKENS",
+          decode: decodeAddress,
+        }),
+      ]);
+    if (
+      adapterCollateral !== inputs.collateralTokenAddress ||
+      adapterUsdce !== inputs.legacyCollateralTokenAddress ||
+      adapterConditionalTokens !== inputs.conditionalTokensAddress
+    ) {
+      return null;
+    }
+    return adapterAddress;
+  } catch (error) {
+    if (error instanceof SafeEvmReadError) return null;
+    throw error;
+  }
+}
+
+async function readValidatedNegRiskCollateralAdapter(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  adapterAddress: string | null;
+  collateralTokenAddress: string;
+  legacyCollateralTokenAddress: string | null;
+  wrappedCollateralAddress: string;
+  legacyNegRiskAdapterAddress: string;
+  conditionalTokensAddress: string;
+}): Promise<string | null> {
+  const adapterAddress = normalizeOptionalAddress(inputs.adapterAddress);
+  if (!adapterAddress || !inputs.legacyCollateralTokenAddress) return null;
+  try {
+    const [
+      adapterCollateral,
+      adapterUsdce,
+      adapterWrappedCollateral,
+      adapterLegacyNegRisk,
+      adapterConditionalTokens,
+    ] = await Promise.all([
+      safeEvmReadContract<`0x${string}`>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        target: adapterAddress,
+        iface: negRiskCollateralAdapterIface,
+        functionName: "COLLATERAL_TOKEN",
+        decode: decodeAddress,
+      }),
+      safeEvmReadContract<`0x${string}`>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        target: adapterAddress,
+        iface: negRiskCollateralAdapterIface,
+        functionName: "USDCE",
+        decode: decodeAddress,
+      }),
+      safeEvmReadContract<`0x${string}`>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        target: adapterAddress,
+        iface: negRiskCollateralAdapterIface,
+        functionName: "WRAPPED_COLLATERAL",
+        decode: decodeAddress,
+      }),
+      safeEvmReadContract<`0x${string}`>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        target: adapterAddress,
+        iface: negRiskCollateralAdapterIface,
+        functionName: "NEG_RISK_ADAPTER",
+        decode: decodeAddress,
+      }),
+      safeEvmReadContract<`0x${string}`>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        target: adapterAddress,
+        iface: negRiskCollateralAdapterIface,
+        functionName: "CONDITIONAL_TOKENS",
+        decode: decodeAddress,
+      }),
+    ]);
+    if (
+      adapterCollateral !== inputs.collateralTokenAddress ||
+      adapterUsdce !== inputs.legacyCollateralTokenAddress ||
+      adapterWrappedCollateral !== inputs.wrappedCollateralAddress ||
+      adapterLegacyNegRisk !== inputs.legacyNegRiskAdapterAddress ||
+      adapterConditionalTokens !== inputs.conditionalTokensAddress
+    ) {
+      return null;
+    }
+    return adapterAddress;
+  } catch (error) {
+    if (error instanceof SafeEvmReadError) return null;
+    throw error;
+  }
 }
 
 export async function buildPolymarketRedemptionPlan(
@@ -281,13 +437,37 @@ export async function buildPolymarketRedemptionPlan(
         ...(includeLegacyCollateral ? [legacyCollateralTokenAddress] : []),
       ];
       let noBalancePlan: RedemptionPlan | null = null;
+      const ctfCollateralAdapterAddress =
+        await readValidatedCtfCollateralAdapter({
+          rpcUrl: inputs.rpcUrl,
+          timeoutMs: inputs.timeoutMs,
+          adapterAddress: inputs.ctfCollateralAdapterAddress ?? null,
+          collateralTokenAddress,
+          legacyCollateralTokenAddress,
+          conditionalTokensAddress,
+        });
       for (const candidateCollateral of collateralCandidates) {
+        const useCollateralAdapter =
+          candidateCollateral === legacyCollateralTokenAddress &&
+          ctfCollateralAdapterAddress != null;
         const plan = await buildStandardConditionalRedemptionPlan({
           rpcUrl: inputs.rpcUrl,
           timeoutMs: inputs.timeoutMs,
           funderAddress,
           conditionalTokensAddress,
           collateralTokenAddress: candidateCollateral,
+          targetAddress: useCollateralAdapter
+            ? ctfCollateralAdapterAddress
+            : null,
+          redeemCollateralTokenAddress: useCollateralAdapter
+            ? collateralTokenAddress
+            : null,
+          payoutTokenAddress: useCollateralAdapter
+            ? collateralTokenAddress
+            : candidateCollateral,
+          operatorApprovalAddress: useCollateralAdapter
+            ? ctfCollateralAdapterAddress
+            : null,
           conditionId,
           indexSet,
           payout,
@@ -393,6 +573,18 @@ export async function buildPolymarketRedemptionPlan(
       decode: decodeAddress,
     });
 
+    const negRiskCollateralAdapterAddress =
+      await readValidatedNegRiskCollateralAdapter({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        adapterAddress: inputs.negRiskCollateralAdapterAddress ?? null,
+        collateralTokenAddress,
+        legacyCollateralTokenAddress,
+        wrappedCollateralAddress,
+        legacyNegRiskAdapterAddress: negRiskAdapterAddress,
+        conditionalTokensAddress,
+      });
+
     let selectedConditionId: `0x${string}` | null = null;
     let selectedBalance: bigint | null = null;
     for (const candidateConditionId of candidateConditionIds) {
@@ -468,16 +660,42 @@ export async function buildPolymarketRedemptionPlan(
       payout.payoutDenominator > 0n && payoutNumerator > 0n
         ? (selectedBalance * payoutNumerator) / payout.payoutDenominator
         : 0n;
-    const data = negRiskAdapterIface.encodeFunctionData("redeemPositions", [
-      selectedConditionId,
-      amounts,
-    ]);
+    const usesCollateralAdapter = negRiskCollateralAdapterAddress != null;
+    let payoutTokenAddress = collateralTokenAddress;
+    if (!usesCollateralAdapter) {
+      payoutTokenAddress = await safeEvmReadContract<`0x${string}`>({
+        rpcUrl: inputs.rpcUrl,
+        timeoutMs: inputs.timeoutMs,
+        target: negRiskAdapterAddress,
+        iface: negRiskAdapterIface,
+        functionName: "col",
+        decode: decodeAddress,
+      });
+    }
+    const data = usesCollateralAdapter
+      ? conditionalTokensIface.encodeFunctionData("redeemPositions", [
+          collateralTokenAddress,
+          ZERO_BYTES32,
+          selectedConditionId,
+          [indexSet],
+        ])
+      : negRiskAdapterIface.encodeFunctionData("redeemPositions", [
+          selectedConditionId,
+          amounts,
+        ]);
+    const targetAddress = usesCollateralAdapter
+      ? negRiskCollateralAdapterAddress
+      : negRiskAdapterAddress;
     return buildReadyRedemptionPlan({
       venue: "polymarket",
       chainId: POLY_CHAIN_ID,
-      targetAddress: negRiskAdapterAddress,
+      targetAddress,
       data,
-      collateralTokenAddress: wrappedCollateralAddress,
+      collateralTokenAddress: payoutTokenAddress,
+      payoutTokenAddress,
+      operatorApprovalAddress: usesCollateralAdapter
+        ? negRiskCollateralAdapterAddress
+        : negRiskAdapterAddress,
       payoutAmountRaw: payoutAmountRaw.toString(),
       conditionResolved: true,
       resolvedOutcome: payout.resolvedOutcome,

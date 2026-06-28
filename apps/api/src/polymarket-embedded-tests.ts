@@ -33,6 +33,9 @@ const tokenInterface = new Interface([
   "function transfer(address to,uint256 value) returns (bool)",
   "function wrap(address _asset,address _to,uint256 _amount)",
   "function unwrap(address _asset,address _to,uint256 _amount)",
+  "function setApprovalForAll(address operator,bool approved)",
+  "function redeemPositions(address collateralToken,bytes32 parentCollectionId,bytes32 conditionId,uint256[] indexSets)",
+  "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
 ]);
 
 function buildDepositWalletBatchTypedData(
@@ -140,6 +143,8 @@ const tests: TestCase[] = [
           exchangeApproved: false,
           negRiskExchangeApproved: false,
           negRiskAdapterApproved: false,
+          ctfCollateralAdapterApproved: false,
+          negRiskCollateralAdapterApproved: false,
           feeCollectorApproved: false,
           exchangeAllowanceOk: false,
           negRiskExchangeAllowanceOk: false,
@@ -166,6 +171,8 @@ const tests: TestCase[] = [
           exchangeApproved: false,
           negRiskExchangeApproved: false,
           negRiskAdapterApproved: false,
+          ctfCollateralAdapterApproved: false,
+          negRiskCollateralAdapterApproved: false,
           feeCollectorApproved: false,
           exchangeAllowanceOk: false,
           negRiskExchangeAllowanceOk: false,
@@ -430,6 +437,54 @@ const tests: TestCase[] = [
           }),
         /Unsupported deposit wallet pUSD wrap call/,
       );
+    },
+  },
+  {
+    name: "embedded deposit wallet redeem batch allows direct and adapter redemption calls",
+    run: () => {
+      const pusd = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+      const conditionId =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+      const zeroParent =
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
+      const standardRedeemData = tokenInterface.encodeFunctionData(
+        "redeemPositions(address,bytes32,bytes32,uint256[])",
+        [pusd, zeroParent, conditionId, [1n]],
+      );
+      const legacyNegRiskRedeemData = tokenInterface.encodeFunctionData(
+        "redeemPositions(bytes32,uint256[])",
+        [conditionId, [1n, 0n]],
+      );
+      for (const call of [
+        {
+          target: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+          data: standardRedeemData,
+        },
+        {
+          target: "0xAdA100Db00Ca00073811820692005400218FcE1f",
+          data: standardRedeemData,
+        },
+        {
+          target: "0xadA2005600Dec949baf300f4C6120000bDB6eAab",
+          data: standardRedeemData,
+        },
+        {
+          target: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+          data: legacyNegRiskRedeemData,
+        },
+      ]) {
+        const request = buildEmbeddedPolymarketTypedDataRequest({
+          context: walletContext,
+          depositWalletBatchPurpose: "redeem",
+          typedData: buildDepositWalletBatchTypedData({
+            target: call.target,
+            value: "0",
+            data: call.data,
+          }),
+        });
+
+        assert.equal(request.id, "polymarket-typed-data-signature");
+      }
     },
   },
 ];

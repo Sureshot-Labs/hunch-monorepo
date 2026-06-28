@@ -39,6 +39,9 @@ type Snapshot = {
   okExchange: boolean;
   okNegRisk: boolean;
   okNegRiskAdapter: boolean | null;
+  okCtfCollateralAdapter: boolean | null;
+  okNegRiskCollateralAdapter: boolean | null;
+  operatorApprovals: Record<string, boolean>;
   feeCollectorNonce: bigint | null;
 };
 
@@ -76,11 +79,17 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   includeSignerUsdc?: boolean;
   includeFeeCollectorNonce?: boolean;
   negRiskAdapterAddress?: string | null;
+  ctfCollateralAdapterAddress?: string | null;
+  negRiskCollateralAdapterAddress?: string | null;
   feeCollectorAddress?: string | null;
 }): Promise<Snapshot> {
   const signer = ethers.getAddress(inputs.signer);
   const funder = ethers.getAddress(inputs.funder);
   const negRiskAdapterAddress = inputs.negRiskAdapterAddress?.trim() || "";
+  const ctfCollateralAdapterAddress =
+    inputs.ctfCollateralAdapterAddress?.trim() || "";
+  const negRiskCollateralAdapterAddress =
+    inputs.negRiskCollateralAdapterAddress?.trim() || "";
   const feeCollectorAddress = inputs.feeCollectorAddress?.trim() || "";
 
   const entries: Array<MulticallEntry<unknown>> = [];
@@ -187,6 +196,24 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     );
   }
 
+  const extraConditionalOperators = [
+    ctfCollateralAdapterAddress,
+    negRiskCollateralAdapterAddress,
+  ]
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  for (const operator of extraConditionalOperators) {
+    entries.push({
+      target: env.polymarketConditionalTokensAddress,
+      callData: erc1155Iface.encodeFunctionData("isApprovedForAll", [
+        funder,
+        operator,
+      ]),
+      decode: (data) => decodeBool(erc1155Iface, "isApprovedForAll", data),
+      fallback: false,
+    });
+  }
+
   if (feeCollectorAddress) {
     entries.push({
       target: env.polymarketUsdcAddress,
@@ -252,6 +279,14 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   const allowanceNegRiskAdapter = negRiskAdapterAddress
     ? (decoded[cursor++] as bigint)
     : null;
+  const extraOperatorApprovals = new Map<string, boolean>();
+  for (const operator of extraConditionalOperators) {
+    const normalized = ethers.getAddress(operator);
+    extraOperatorApprovals.set(
+      normalized.toLowerCase(),
+      decoded[cursor++] as boolean,
+    );
+  }
   const allowanceFeeCollector = feeCollectorAddress
     ? (decoded[cursor++] as bigint)
     : null;
@@ -278,6 +313,29 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     okExchange,
     okNegRisk,
     okNegRiskAdapter,
+    okCtfCollateralAdapter: ctfCollateralAdapterAddress
+      ? (extraOperatorApprovals.get(
+          ethers.getAddress(ctfCollateralAdapterAddress).toLowerCase(),
+        ) ?? false)
+      : null,
+    okNegRiskCollateralAdapter: negRiskCollateralAdapterAddress
+      ? (extraOperatorApprovals.get(
+          ethers.getAddress(negRiskCollateralAdapterAddress).toLowerCase(),
+        ) ?? false)
+      : null,
+    operatorApprovals: {
+      [ethers.getAddress(env.polymarketExchangeAddress).toLowerCase()]:
+        okExchange,
+      [ethers.getAddress(env.polymarketNegRiskExchangeAddress).toLowerCase()]:
+        okNegRisk,
+      ...(negRiskAdapterAddress
+        ? {
+            [ethers.getAddress(negRiskAdapterAddress).toLowerCase()]:
+              okNegRiskAdapter ?? false,
+          }
+        : {}),
+      ...Object.fromEntries(extraOperatorApprovals),
+    },
     feeCollectorNonce,
   };
 }
