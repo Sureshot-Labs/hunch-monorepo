@@ -228,9 +228,53 @@ const sourceCandidateCte = `
     order by terminal_at asc, venue asc, source_market_id asc
     limit $3::int
   ),
+  source_ref_tokens as materialized (
+    select distinct
+      c.venue,
+      c.source_market_id,
+      v.token_id
+    from bounded_candidates c
+    join limitless_markets lm
+      on c.venue = 'limitless'
+     and lm.id = c.source_market_id
+    cross join lateral (
+      values (lm.tokens_yes), (lm.tokens_no)
+    ) source_token(token_id)
+    cross join lateral (
+      select source_token.token_id
+      union all
+      select regexp_replace(source_token.token_id, '^limitless:', '')
+      where regexp_replace(source_token.token_id, '^limitless:', '') ~ '^[0-9]+$'
+      union all
+      select 'limitless:' || regexp_replace(source_token.token_id, '^limitless:', '')
+      where regexp_replace(source_token.token_id, '^limitless:', '') ~ '^[0-9]+$'
+    ) v(token_id)
+    where v.token_id is not null and v.token_id <> ''
+  ),
+  protected_source_refs as materialized (
+    select distinct s.venue, s.source_market_id, 'positions' as reason
+    from source_ref_tokens s
+    join positions p
+      on p.venue = s.venue
+     and p.token_id = s.token_id
+    union
+    select distinct s.venue, s.source_market_id, 'orders' as reason
+    from source_ref_tokens s
+    join orders o
+      on o.venue = s.venue
+     and o.token_id = s.token_id
+  ),
+  deletable_candidates as materialized (
+    select c.*
+    from bounded_candidates c
+    left join protected_source_refs p
+      on p.venue = c.venue
+     and p.source_market_id = c.source_market_id
+    where p.source_market_id is null
+  ),
   touched_events as materialized (
     select distinct venue, source_event_id
-    from bounded_candidates
+    from deletable_candidates
   ),
   orphan_events_if_deleted as materialized (
     select e.venue, e.source_event_id
@@ -243,7 +287,7 @@ const sourceCandidateCte = `
           where pm.event_id = e.source_event_id
             and not exists (
               select 1
-              from bounded_candidates c
+              from deletable_candidates c
               where c.venue = 'polymarket'
                 and c.source_market_id = pm.id
             )
@@ -263,7 +307,7 @@ const sourceCandidateCte = `
           where lm.event_id = e.source_event_id
             and not exists (
               select 1
-              from bounded_candidates c
+              from deletable_candidates c
               where c.venue = 'limitless'
                 and c.source_market_id = lm.id
             )
@@ -315,6 +359,38 @@ async function querySummary(
       group by venue
       union all
       select
+        'source_market_deletable_total' as section,
+        null::text as venue,
+        'all' as label,
+        count(*)::text as markets,
+        null::text as events,
+        min(terminal_at) as oldest_terminal_at,
+        max(terminal_at) as newest_terminal_at
+      from deletable_candidates
+      union all
+      select
+        'source_market_deletable_by_venue' as section,
+        venue,
+        'all' as label,
+        count(*)::text as markets,
+        null::text as events,
+        min(terminal_at) as oldest_terminal_at,
+        max(terminal_at) as newest_terminal_at
+      from deletable_candidates
+      group by venue
+      union all
+      select
+        'source_market_protected_by_reason' as section,
+        venue,
+        reason as label,
+        count(distinct source_market_id)::text as markets,
+        null::text as events,
+        null::timestamptz as oldest_terminal_at,
+        null::timestamptz as newest_terminal_at
+      from protected_source_refs
+      group by venue, reason
+      union all
+      select
         'source_events_touched' as section,
         venue,
         'all' as label,
@@ -355,7 +431,7 @@ async function querySamples(
         source_event_id,
         terminal_at,
         title
-      from bounded_candidates
+      from deletable_candidates
       order by terminal_at asc, venue asc, source_market_id asc
       limit $4::int
     `,
@@ -401,7 +477,7 @@ async function materializeDeletionSet(
       create temp table tmp_market_source_retention_markets on commit drop as
       ${sourceCandidateCte}
       select *
-      from bounded_candidates
+      from deletable_candidates
     `,
     queryParams(args),
   );
@@ -417,7 +493,7 @@ async function materializeDeletionSet(
   return [
     await countTempRows(
       client,
-      "source_markets",
+      "source_markets_deletable",
       "tmp_market_source_retention_markets",
     ),
     await countTempRows(

@@ -52,12 +52,7 @@ const DEFAULT_CUTOFF_DAYS = 30;
 const DEFAULT_LIMIT = 50_000;
 const DEFAULT_SAMPLE_LIMIT = 20;
 const DEFAULT_STATUSES = ["CLOSED", "SETTLED", "ARCHIVED"];
-const ALLOWED_STATUSES = new Set([
-  "ACTIVE",
-  "CLOSED",
-  "SETTLED",
-  "ARCHIVED",
-]);
+const ALLOWED_STATUSES = new Set(["ACTIVE", "CLOSED", "SETTLED", "ARCHIVED"]);
 
 function readValues(argv: string[], name: string): string[] {
   const key = `--${name}`;
@@ -192,15 +187,15 @@ function assertExecutionFlags(args: Args): void {
 
 function protectedRefsSql(
   candidatePoolTable: string,
-  candidateTokensTable: string,
+  candidateRefTokensTable: string,
 ): string {
   return `
     select distinct ct.market_id, 'orders' as reason
-    from ${candidateTokensTable} ct
+    from ${candidateRefTokensTable} ct
     join orders o on o.token_id = ct.token_id
     union
     select distinct ct.market_id, 'positions' as reason
-    from ${candidateTokensTable} ct
+    from ${candidateRefTokensTable} ct
     join positions p on p.token_id = ct.token_id
     union
     select distinct c.market_id, 'user_watchlist' as reason
@@ -240,12 +235,35 @@ function protectedRefsSql(
     join limitless_contract_fee_receivables lr on lr.event_id = c.event_id
     union
     select distinct ct.market_id, 'limitless_fee_receivables_token' as reason
-    from ${candidateTokensTable} ct
+    from ${candidateRefTokensTable} ct
     join limitless_contract_fee_receivables lr on lr.token_id = ct.token_id
     union
     select distinct ct.market_id, 'venue_fee_accruals' as reason
-    from ${candidateTokensTable} ct
+    from ${candidateRefTokensTable} ct
     join venue_fee_accruals vf on vf.token_id = ct.token_id
+  `;
+}
+
+function refTokensSql(
+  candidatePoolTable: string,
+  candidateTokensTable: string,
+): string {
+  return `
+    select distinct ct.market_id, v.token_id
+    from ${candidateTokensTable} ct
+    join ${candidatePoolTable} c on c.market_id = ct.market_id
+    cross join lateral (
+      select ct.token_id
+      union all
+      select regexp_replace(ct.token_id, '^limitless:', '')
+      where c.venue = 'limitless'
+        and regexp_replace(ct.token_id, '^limitless:', '') ~ '^[0-9]+$'
+      union all
+      select 'limitless:' || regexp_replace(ct.token_id, '^limitless:', '')
+      where c.venue = 'limitless'
+        and regexp_replace(ct.token_id, '^limitless:', '') ~ '^[0-9]+$'
+    ) v(token_id)
+    where v.token_id is not null and v.token_id <> ''
   `;
 }
 
@@ -313,10 +331,23 @@ const candidateCte = `
     from candidate_pool c
     join unified_tokens ut on ut.market_id = c.market_id
     where ut.token_id is not null and ut.token_id <> ''
+    union
+    select distinct c.market_id, m.token_yes as token_id
+    from candidate_pool c
+    join unified_markets m on m.id = c.market_id
+    where m.token_yes is not null and m.token_yes <> ''
+    union
+    select distinct c.market_id, m.token_no as token_id
+    from candidate_pool c
+    join unified_markets m on m.id = c.market_id
+    where m.token_no is not null and m.token_no <> ''
+  ),
+  candidate_ref_tokens as materialized (
+    ${refTokensSql("candidate_pool", "candidate_tokens")}
   ),
   -- Retention safety boundary: update this list, dry-run reports, and delete cleanup when adding persisted market/token/event user-visible references.
   protected_refs as materialized (
-    ${protectedRefsSql("candidate_pool", "candidate_tokens")}
+    ${protectedRefsSql("candidate_pool", "candidate_ref_tokens")}
   ),
   protected_market_ids as materialized (
     select distinct market_id from protected_refs
@@ -614,7 +645,9 @@ function dateToString(value: Date | null): string | null {
   return value ? value.toISOString() : null;
 }
 
-function formatSummaryRow(row: GlobalSummaryRow): Record<string, string | null> {
+function formatSummaryRow(
+  row: GlobalSummaryRow,
+): Record<string, string | null> {
   return {
     venue: row.venue,
     status: row.status,
@@ -771,6 +804,26 @@ async function materializeDeletionSet(
       from tmp_market_retention_removable_markets r
       join unified_tokens ut on ut.market_id = r.market_id
       where ut.token_id is not null and ut.token_id <> ''
+      union
+      select distinct r.market_id, m.token_yes as token_id
+      from tmp_market_retention_removable_markets r
+      join unified_markets m on m.id = r.market_id
+      where m.token_yes is not null and m.token_yes <> ''
+      union
+      select distinct r.market_id, m.token_no as token_id
+      from tmp_market_retention_removable_markets r
+      join unified_markets m on m.id = r.market_id
+      where m.token_no is not null and m.token_no <> ''
+    `,
+  );
+
+  await client.query(
+    `
+      create temp table tmp_market_retention_protected_ref_tokens on commit drop as
+      ${refTokensSql(
+        "tmp_market_retention_removable_markets",
+        "tmp_market_retention_removable_tokens",
+      )}
     `,
   );
 
@@ -779,7 +832,7 @@ async function materializeDeletionSet(
       create temp table tmp_market_retention_protected_refs on commit drop as
       ${protectedRefsSql(
         "tmp_market_retention_removable_markets",
-        "tmp_market_retention_removable_tokens",
+        "tmp_market_retention_protected_ref_tokens",
       )}
     `,
   );
@@ -918,7 +971,9 @@ async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
   return counts;
 }
 
-async function materializeOrphanEvents(client: PoolClient): Promise<DeleteCountRow> {
+async function materializeOrphanEvents(
+  client: PoolClient,
+): Promise<DeleteCountRow> {
   await client.query(
     `
       create temp table tmp_market_retention_orphan_events on commit drop as
@@ -1010,7 +1065,7 @@ async function queryPostDeleteValidation(
       create temp table tmp_market_retention_post_delete_protected_refs on commit drop as
       ${protectedRefsSql(
         "tmp_market_retention_removable_markets",
-        "tmp_market_retention_removable_tokens",
+        "tmp_market_retention_protected_ref_tokens",
       )}
     `,
   );
@@ -1168,9 +1223,8 @@ async function main(): Promise<void> {
           args: report.args,
           durationMs: Date.now() - startedAt,
           terminalSummary: report.terminalSummary.map(formatSummaryRow),
-          activePastTerminalSummary: report.activePastTerminalSummary.map(
-            formatSummaryRow,
-          ),
+          activePastTerminalSummary:
+            report.activePastTerminalSummary.map(formatSummaryRow),
           batchSummary: report.batchSummary.map(formatBatchRow),
           removableSamples: report.removableSamples.map(formatSampleRow),
         },
