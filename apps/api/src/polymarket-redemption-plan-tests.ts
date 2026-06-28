@@ -345,6 +345,7 @@ await test("standard legacy USDC.e redemption prefers collateral adapter and pUS
         plan.data ?? "0x",
       );
       assert.equal(ethers.getAddress(String(redeemArgs[0])), USDCE);
+      assert.deepEqual(Array.from(redeemArgs[3] as readonly bigint[]), [1n]);
       assert.equal(plan.collateralTokenAddress, PUSD);
       assert.equal(plan.payoutTokenAddress, PUSD);
       assert.equal(plan.operatorApprovalAddress, CTF_COLLATERAL_ADAPTER);
@@ -396,6 +397,7 @@ await test("neg-risk redemption prefers collateral adapter and pUSD payout", asy
         plan.data ?? "0x",
       );
       assert.equal(ethers.getAddress(String(redeemArgs[0])), WCOL);
+      assert.deepEqual(Array.from(redeemArgs[3] as readonly bigint[]), [2n]);
       assert.equal(plan.collateralTokenAddress, PUSD);
       assert.equal(plan.payoutTokenAddress, PUSD);
       assert.equal(plan.operatorApprovalAddress, NEG_RISK_COLLATERAL_ADAPTER);

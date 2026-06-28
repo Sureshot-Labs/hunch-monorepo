@@ -290,6 +290,135 @@ async function insertResolvedLimitlessMarket(params: {
   );
 }
 
+async function insertResolvedPolymarketMarket(params: {
+  marketId: string;
+  yesTokenId: string;
+  noTokenId: string;
+  resolvedOutcome: "YES" | "NO";
+}): Promise<void> {
+  const eventId = `event-${params.marketId}`;
+  await pool.query(
+    `
+      insert into unified_events (
+        id,
+        venue,
+        venue_event_id,
+        title,
+        status,
+        start_date,
+        end_date,
+        volume_total,
+        volume_24h,
+        liquidity,
+        slug,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'polymarket',
+        $1,
+        'Resolved Polymarket test event',
+        'SETTLED',
+        now() - interval '2 days',
+        now() - interval '1 day',
+        0,
+        0,
+        0,
+        $2,
+        now(),
+        now()
+      )
+    `,
+    [eventId, `slug-${eventId}`],
+  );
+
+  await pool.query(
+    `
+      insert into unified_markets (
+        id,
+        venue,
+        venue_market_id,
+        event_id,
+        title,
+        status,
+        market_type,
+        open_time,
+        close_time,
+        expiration_time,
+        best_bid,
+        best_ask,
+        last_price,
+        volume_total,
+        volume_24h,
+        liquidity,
+        open_interest,
+        outcomes,
+        token_yes,
+        token_no,
+        slug,
+        resolved_outcome,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        'polymarket',
+        $1,
+        $2,
+        'Resolved Polymarket test market',
+        'SETTLED',
+        'binary',
+        now() - interval '2 days',
+        now() - interval '1 day',
+        now() - interval '1 day',
+        0,
+        0,
+        null,
+        0,
+        0,
+        0,
+        0,
+        '["Yes","No"]',
+        $3,
+        $4,
+        $5,
+        $6,
+        now(),
+        now()
+      )
+    `,
+    [
+      params.marketId,
+      eventId,
+      params.yesTokenId,
+      params.noTokenId,
+      `slug-${params.marketId}`,
+      params.resolvedOutcome,
+    ],
+  );
+
+  await pool.query(
+    `
+      insert into unified_tokens(token_id, venue, market_id, side)
+      values
+        ($1, 'polymarket', $3, 'YES'),
+        ($2, 'polymarket', $3, 'NO')
+    `,
+    [params.yesTokenId, params.noTokenId, params.marketId],
+  );
+
+  await pool.query(
+    `
+      insert into unified_market_tokens(token_id, venue, market_id, outcome_side)
+      values
+        ($1, 'polymarket', $3, 'YES'),
+        ($2, 'polymarket', $3, 'NO')
+    `,
+    [params.yesTokenId, params.noTokenId, params.marketId],
+  );
+}
+
 async function insertKalshiMarket(params: {
   marketId: string;
   tokenId: string;
@@ -1836,7 +1965,7 @@ await test("active position reads exclude flat zero rows even with minSize zero"
   }
 });
 
-await test("includeResolved returns only redemption-marked resolved flat rows", async () => {
+await test("includeResolved returns redemption-marked resolved flat rows", async () => {
   const walletAddress = randomEvmAddress();
   const openTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
   const unresolvedFlatTokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
@@ -1984,6 +2113,186 @@ await test("includeResolved returns only redemption-marked resolved flat rows", 
         `other-${redeemedResolvedTokenId}`,
       ],
       [soldMarketId, redeemedMarketId],
+    );
+  }
+});
+
+await test("includeResolved returns same-market sibling flat rows after redemption", async () => {
+  const walletAddress = randomEvmAddress();
+  const userId = await createTestUser();
+  const redeemedMarketId = `polymarket-test:${crypto.randomUUID()}`;
+  const oldSoldMarketId = `polymarket-test:${crypto.randomUUID()}`;
+  const winningTokenId = String(crypto.randomInt(1_000_000, 9_999_999));
+  const losingTokenId = String(crypto.randomInt(1_000_000, 9_999_999));
+  const oldSoldTokenId = String(crypto.randomInt(1_000_000, 9_999_999));
+  const oldMarkerTokenId = String(crypto.randomInt(1_000_000, 9_999_999));
+  const redemptionCreatedAt = "2026-06-28T19:27:49.000Z";
+  const flattenedAt = "2026-06-28T19:27:51.000Z";
+  const oldSoldAt = "2026-06-28T18:00:00.000Z";
+
+  try {
+    await insertResolvedPolymarketMarket({
+      marketId: redeemedMarketId,
+      yesTokenId: winningTokenId,
+      noTokenId: losingTokenId,
+      resolvedOutcome: "YES",
+    });
+    await insertResolvedPolymarketMarket({
+      marketId: oldSoldMarketId,
+      yesTokenId: oldSoldTokenId,
+      noTokenId: oldMarkerTokenId,
+      resolvedOutcome: "YES",
+    });
+
+    await pool.query(
+      `
+        insert into positions (
+          user_id,
+          wallet_address,
+          venue,
+          position_scope,
+          token_id,
+          side,
+          size,
+          average_price,
+          unrealized_pnl,
+          realized_pnl,
+          last_updated_at,
+          created_at,
+          updated_at
+        )
+        values
+          ($1, $2, 'polymarket', 'own', $3, 'FLAT', 0, 0.92, 0, 0.086956, $6::timestamptz, $6::timestamptz, $6::timestamptz),
+          ($1, $2, 'polymarket', 'own', $4, 'FLAT', 0, 0.29, 0, -0.99999946, $6::timestamptz, $6::timestamptz, $6::timestamptz),
+          ($1, $2, 'polymarket', 'own', $5, 'FLAT', 0, 0.4, 0, -0.25, $7::timestamptz, $7::timestamptz, $7::timestamptz)
+      `,
+      [
+        userId,
+        walletAddress,
+        winningTokenId,
+        losingTokenId,
+        oldSoldTokenId,
+        flattenedAt,
+        oldSoldAt,
+      ],
+    );
+
+    await pool.query(
+      `
+        insert into notifications (
+          user_id,
+          type,
+          title,
+          body,
+          severity,
+          data,
+          dedupe_key,
+          created_at,
+          updated_at
+        )
+        values
+          (
+            $1,
+            'redemption_completed',
+            'Redemption completed',
+            'Polymarket redemption',
+            'success',
+            jsonb_build_object(
+              'venue', 'polymarket',
+              'tokenId', $2::text,
+              'marketId', $3::text,
+              'walletAddress', $4::text
+            ),
+            $5,
+            $7::timestamptz,
+            $7::timestamptz
+          ),
+          (
+            $1,
+            'redemption_completed',
+            'Redemption completed',
+            'Polymarket redemption',
+            'success',
+            jsonb_build_object(
+              'venue', 'polymarket',
+              'tokenId', $6::text,
+              'marketId', $8::text,
+              'walletAddress', $4::text
+            ),
+            $9,
+            $7::timestamptz,
+            $7::timestamptz
+          )
+      `,
+      [
+        userId,
+        winningTokenId,
+        redeemedMarketId,
+        walletAddress,
+        `redemption:test:${crypto.randomUUID()}`,
+        oldMarkerTokenId,
+        redemptionCreatedAt,
+        oldSoldMarketId,
+        `redemption:test:${crypto.randomUUID()}`,
+      ],
+    );
+
+    const defaultPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "polymarket",
+      includeHidden: true,
+      minSize: 0,
+    });
+    assert.deepEqual(defaultPositions, []);
+
+    const resolvedPositions = await fetchPositionsForUserWallet(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      venue: "polymarket",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      resolvedPositions
+        .map((position) => position.tokenId)
+        .sort((a, b) => a.localeCompare(b)),
+      [losingTokenId, winningTokenId].sort((a, b) => a.localeCompare(b)),
+    );
+    const positionsByToken = new Map(
+      resolvedPositions.map((position) => [position.tokenId, position]),
+    );
+    assertClose(
+      positionsByToken.get(winningTokenId)?.realizedPnl ?? 0,
+      0.086956,
+    );
+    assertClose(
+      positionsByToken.get(losingTokenId)?.realizedPnl ?? 0,
+      -0.99999946,
+    );
+    assert.equal(positionsByToken.has(oldSoldTokenId), false);
+
+    const byToken = await fetchPositionsForUserWalletByTokenIds(pool, {
+      userId,
+      walletAddresses: [walletAddress],
+      tokenIds: [winningTokenId, losingTokenId, oldSoldTokenId],
+      venue: "polymarket",
+      includeHidden: true,
+      includeResolved: true,
+      minSize: 1,
+    });
+    assert.deepEqual(
+      byToken
+        .map((position) => position.tokenId)
+        .sort((a, b) => a.localeCompare(b)),
+      [losingTokenId, winningTokenId].sort((a, b) => a.localeCompare(b)),
+    );
+  } finally {
+    await cleanupPositionTest(
+      userId,
+      [winningTokenId, losingTokenId, oldSoldTokenId, oldMarkerTokenId],
+      [redeemedMarketId, oldSoldMarketId],
     );
   }
 });

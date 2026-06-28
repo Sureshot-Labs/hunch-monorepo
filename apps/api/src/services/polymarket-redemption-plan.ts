@@ -446,22 +446,25 @@ export async function buildPolymarketRedemptionPlan(
           legacyCollateralTokenAddress,
           conditionalTokensAddress,
         });
-      for (const candidateCollateral of collateralCandidates) {
+      for (const positionCollateralTokenAddress of collateralCandidates) {
         const useCollateralAdapter =
-          candidateCollateral === legacyCollateralTokenAddress &&
+          positionCollateralTokenAddress === legacyCollateralTokenAddress &&
           ctfCollateralAdapterAddress != null;
         const plan = await buildStandardConditionalRedemptionPlan({
           rpcUrl: inputs.rpcUrl,
           timeoutMs: inputs.timeoutMs,
           funderAddress,
           conditionalTokensAddress,
-          collateralTokenAddress: candidateCollateral,
+          collateralTokenAddress: positionCollateralTokenAddress,
           targetAddress: useCollateralAdapter
             ? ctfCollateralAdapterAddress
             : null,
+          redeemCollateralTokenAddress: useCollateralAdapter
+            ? positionCollateralTokenAddress
+            : null,
           payoutTokenAddress: useCollateralAdapter
             ? collateralTokenAddress
-            : candidateCollateral,
+            : positionCollateralTokenAddress,
           operatorApprovalAddress: useCollateralAdapter
             ? ctfCollateralAdapterAddress
             : null,

@@ -107,14 +107,31 @@ const RESOLVED_FLAT_POSITION_SQL = `
     )
     or (
       p.venue <> 'kalshi'
-      and exists (
-        select 1
-        from notifications n
-        where n.user_id = p.user_id
-          and n.type = 'redemption_completed'
-          and n.data->>'venue' = p.venue
-          and n.data->>'tokenId' = p.token_id
-          and lower(coalesce(n.data->>'walletAddress', '')) = lower(coalesce(p.wallet_address, ''))
+      and (
+        exists (
+          select 1
+          from notifications n
+          where n.user_id = p.user_id
+            and n.type = 'redemption_completed'
+            and n.data->>'venue' = p.venue
+            and n.data->>'tokenId' = p.token_id
+            and lower(coalesce(n.data->>'walletAddress', '')) = lower(coalesce(p.wallet_address, ''))
+        )
+        or (
+          abs(coalesce(p.realized_pnl, 0)) > 0.000001
+          and exists (
+            select 1
+            from notifications n
+            where n.user_id = p.user_id
+              and n.type = 'redemption_completed'
+              and n.data->>'venue' = p.venue
+              and n.data->>'marketId' = m.id
+              and lower(coalesce(n.data->>'walletAddress', '')) = lower(coalesce(p.wallet_address, ''))
+              and n.created_at between
+                p.last_updated_at - interval '10 minutes'
+                and p.last_updated_at + interval '10 minutes'
+          )
+        )
       )
     )
   )
