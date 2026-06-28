@@ -237,8 +237,9 @@ const priceRefreshWsDemandEnabled =
   parseOptionalBool(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_ENABLED) ??
   true;
 const priceRefreshWsDemandAmmEnabled =
-  parseOptionalBool(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_AMM_ENABLED) ??
-  false;
+  parseOptionalBool(
+    process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_AMM_ENABLED,
+  ) ?? false;
 const priceRefreshWsDemandTtlMs = clampInt(
   parseOptionalInt(process.env.LIMITLESS_PRICE_REFRESH_WS_DEMAND_TTL_MS),
   { min: 5_000, max: 10 * 60 * 1000, fallback: 60_000 },

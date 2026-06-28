@@ -135,7 +135,11 @@ function isPolymarketFresh(
   }
   return (
     source.status === "not_found" &&
-    isFreshTimestamp(source.checkedAt ?? source.resolvedAt, nowMs, IDENTITY_NO_NAME_TTL_MS)
+    isFreshTimestamp(
+      source.checkedAt ?? source.resolvedAt,
+      nowMs,
+      IDENTITY_NO_NAME_TTL_MS,
+    )
   );
 }
 
@@ -144,16 +148,25 @@ function isEnsFresh(
   nowMs: number,
 ): boolean {
   if (!source) return false;
-  if (source.name && isFreshTimestamp(source.resolvedAt, nowMs, IDENTITY_SUCCESS_TTL_MS)) {
+  if (
+    source.name &&
+    isFreshTimestamp(source.resolvedAt, nowMs, IDENTITY_SUCCESS_TTL_MS)
+  ) {
     return true;
   }
   return (
     source.status === "not_found" &&
-    isFreshTimestamp(source.checkedAt ?? source.resolvedAt, nowMs, IDENTITY_NO_NAME_TTL_MS)
+    isFreshTimestamp(
+      source.checkedAt ?? source.resolvedAt,
+      nowMs,
+      IDENTITY_NO_NAME_TTL_MS,
+    )
   );
 }
 
-function parsePolymarketSource(value: unknown): PolymarketIdentityName | undefined {
+function parsePolymarketSource(
+  value: unknown,
+): PolymarketIdentityName | undefined {
   if (!isRecord(value)) return undefined;
   const username = trimNonEmpty(value.username);
   const pseudonym = trimNonEmpty(value.pseudonym);
@@ -186,7 +199,10 @@ function parsePolymarketSource(value: unknown): PolymarketIdentityName | undefin
 function parseEnsSource(value: unknown): EnsIdentityName | undefined {
   if (!isRecord(value)) return undefined;
   const name = trimNonEmpty(value.name);
-  const status = value.status === "ok" || value.status === "not_found" ? value.status : undefined;
+  const status =
+    value.status === "ok" || value.status === "not_found"
+      ? value.status
+      : undefined;
   const resolvedAt = trimNonEmpty(value.resolvedAt);
   const checkedAt = trimNonEmpty(value.checkedAt);
   return {
@@ -197,7 +213,9 @@ function parseEnsSource(value: unknown): EnsIdentityName | undefined {
   };
 }
 
-function parsePrimarySource(value: unknown): WalletIdentityPrimaryName | undefined {
+function parsePrimarySource(
+  value: unknown,
+): WalletIdentityPrimaryName | undefined {
   if (!isRecord(value)) return undefined;
   const name = trimNonEmpty(value.name);
   const source =
@@ -265,7 +283,8 @@ function buildDisplayIdentityName(
   const username = trimNonEmpty(polymarket?.username);
   if (username) {
     const handle = `@${username.replace(/^@+/, "")}`;
-    const resolvedAt = trimNonEmpty(polymarket?.resolvedAt) ?? new Date().toISOString();
+    const resolvedAt =
+      trimNonEmpty(polymarket?.resolvedAt) ?? new Date().toISOString();
     const profileUrl =
       trimNonEmpty(polymarket?.profileUrl) ??
       `${POLYMARKET_PROFILE_BASE_URL}/@${encodeURIComponent(username)}`;
@@ -293,7 +312,9 @@ function buildDisplayIdentityName(
     return {
       name: ensName,
       source: "ens",
-      resolvedAt: trimNonEmpty(identityNames?.ens?.resolvedAt) ?? new Date().toISOString(),
+      resolvedAt:
+        trimNonEmpty(identityNames?.ens?.resolvedAt) ??
+        new Date().toISOString(),
     };
   }
   const primary = identityNames?.primary;
@@ -338,7 +359,8 @@ export function buildPrimaryIdentityName(input: {
     return {
       name: ensName,
       source: "ens",
-      resolvedAt: trimNonEmpty(input.ens?.resolvedAt) ?? new Date().toISOString(),
+      resolvedAt:
+        trimNonEmpty(input.ens?.resolvedAt) ?? new Date().toISOString(),
     };
   }
   return undefined;
@@ -349,9 +371,12 @@ export function buildIdentityNamesMetadataPatch(input: {
   polymarket?: PolymarketIdentityName | null;
   ens?: EnsIdentityName | null;
 }): WalletIdentityNamesMetadata | null {
-  const existing = parseWalletIdentityNamesMetadata(input.existingMetadata) ?? {};
+  const existing =
+    parseWalletIdentityNamesMetadata(input.existingMetadata) ?? {};
   const polymarket =
-    input.polymarket === undefined ? existing.polymarket : (input.polymarket ?? undefined);
+    input.polymarket === undefined
+      ? existing.polymarket
+      : (input.polymarket ?? undefined);
   const ens = input.ens === undefined ? existing.ens : (input.ens ?? undefined);
   const primary = buildPrimaryIdentityName({ polymarket, ens });
   if (!primary && !polymarket && !ens) return null;
@@ -521,7 +546,9 @@ export async function resolveEnsIdentityName(input: {
       });
     const name = await Promise.race([
       client.lookupAddress(address),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), timeoutMs),
+      ),
     ]);
     if (!name) {
       return {
@@ -531,7 +558,9 @@ export async function resolveEnsIdentityName(input: {
     }
     const resolved = await Promise.race([
       client.resolveName(name),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), timeoutMs),
+      ),
     ]);
     const resolvedAddress = normalizeEvmAddress(resolved);
     if (resolvedAddress !== address) {
@@ -590,7 +619,8 @@ export async function resolveWalletIdentityNames(input: {
         nowIso,
         fetchImpl: input.fetchImpl,
       });
-      polymarketStatus = resolved.status === "ok" ? "resolved" : resolved.status;
+      polymarketStatus =
+        resolved.status === "ok" ? "resolved" : resolved.status;
       if (resolved.status === "error") {
         polymarketError = resolved.error;
         polymarket = {
@@ -598,11 +628,15 @@ export async function resolveWalletIdentityNames(input: {
           ...resolved.source,
           ...(polymarket?.username ? { username: polymarket.username } : {}),
           ...(polymarket?.pseudonym ? { pseudonym: polymarket.pseudonym } : {}),
-          ...(polymarket?.profileUrl ? { profileUrl: polymarket.profileUrl } : {}),
+          ...(polymarket?.profileUrl
+            ? { profileUrl: polymarket.profileUrl }
+            : {}),
           ...(polymarket?.verifiedBadge != null
             ? { verifiedBadge: polymarket.verifiedBadge }
             : {}),
-          ...(polymarket?.resolvedAt ? { resolvedAt: polymarket.resolvedAt } : {}),
+          ...(polymarket?.resolvedAt
+            ? { resolvedAt: polymarket.resolvedAt }
+            : {}),
         };
         changed = true;
       } else {

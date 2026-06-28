@@ -1819,7 +1819,8 @@ async function loadPrimaryLiveMarketDataForEvents(
   }
 
   const fallbackInputs = inputs.filter(
-    (input) => !primaryByEventVenue.has(eventVenueKey(input.eventId, input.venue)),
+    (input) =>
+      !primaryByEventVenue.has(eventVenueKey(input.eventId, input.venue)),
   );
   if (fallbackInputs.length > 0) {
     const fallbackRows = await selectRankedRepresentativeMarketsForEvents(

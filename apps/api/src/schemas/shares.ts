@@ -22,21 +22,24 @@ const zVenueList = z
     return Array.from(new Set(venues)).sort();
   });
 
-const zWalletList = z.preprocess((value) => {
-  if (Array.isArray(value)) {
-    return value
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-  return undefined;
-}, z.array(z.string().min(1)).optional());
+const zWalletList = z.preprocess(
+  (value) => {
+    if (Array.isArray(value)) {
+      return value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+    if (typeof value === "string") {
+      return value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+    return undefined;
+  },
+  z.array(z.string().min(1)).optional(),
+);
 
 const zOptionalReferralCode = z
   .string()

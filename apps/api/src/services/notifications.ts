@@ -148,9 +148,7 @@ function maybeRepairOrderNotificationBody(input: {
 
 function readNotificationDataNumber(data: unknown, key: string): number | null {
   if (!isRecord(data)) return null;
-  return readPositiveNumber(
-    data[key] as number | string | null | undefined,
-  );
+  return readPositiveNumber(data[key] as number | string | null | undefined);
 }
 
 function isIncompleteOrderFilledNotification(input: NotificationInput) {

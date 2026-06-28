@@ -367,22 +367,25 @@ async function cleanup(contexts: TestContext[], fixtures: MarketFixture[]) {
   ]);
 
   if (userIds.length) {
-    await pool.query("delete from share_snapshots where user_id = any($1::uuid[])", [
-      userIds,
-    ]);
+    await pool.query(
+      "delete from share_snapshots where user_id = any($1::uuid[])",
+      [userIds],
+    );
     await pool.query("delete from positions where user_id = any($1::uuid[])", [
       userIds,
     ]);
-    await pool.query("delete from user_sessions where user_id = any($1::uuid[])", [
-      userIds,
-    ]);
+    await pool.query(
+      "delete from user_sessions where user_id = any($1::uuid[])",
+      [userIds],
+    );
     await pool.query(
       "delete from user_venue_credentials where user_id = any($1::uuid[])",
       [userIds],
     );
-    await pool.query("delete from user_wallets where user_id = any($1::uuid[])", [
-      userIds,
-    ]);
+    await pool.query(
+      "delete from user_wallets where user_id = any($1::uuid[])",
+      [userIds],
+    );
     await pool.query(
       `
         with deleted_codes as (
@@ -409,9 +412,10 @@ async function cleanup(contexts: TestContext[], fixtures: MarketFixture[]) {
       "delete from unified_market_tokens where token_id = any($1::text[])",
       [tokenIds],
     );
-    await pool.query("delete from unified_tokens where token_id = any($1::text[])", [
-      tokenIds,
-    ]);
+    await pool.query(
+      "delete from unified_tokens where token_id = any($1::text[])",
+      [tokenIds],
+    );
   }
   if (marketIds.length) {
     await pool.query("delete from unified_markets where id = any($1::text[])", [
@@ -545,7 +549,10 @@ async function main() {
 
   await test("portfolio top-position override must stay inside requested venue scope", async () => {
     const context = await createTestContext();
-    const scopedFixture = await insertMarketFixture("override-scope-poly", "polymarket");
+    const scopedFixture = await insertMarketFixture(
+      "override-scope-poly",
+      "polymarket",
+    );
     const otherVenueFixture = await insertMarketFixture(
       "override-scope-limitless",
       "limitless",
@@ -589,7 +596,10 @@ async function main() {
 
   await test("portfolio share uses expanded Polymarket funder wallet scope", async () => {
     const context = await createTestContext();
-    const fixture = await insertMarketFixture("poly-funder-scope", "polymarket");
+    const fixture = await insertMarketFixture(
+      "poly-funder-scope",
+      "polymarket",
+    );
     const funderAddress = randomEvmAddress();
     try {
       await pool.query(
@@ -649,7 +659,10 @@ async function main() {
       });
 
       assert.equal(explicitResponse.statusCode, 200);
-      assert.equal(explicitResponse.json().topPosition.positionId, funderPositionId);
+      assert.equal(
+        explicitResponse.json().topPosition.positionId,
+        funderPositionId,
+      );
     } finally {
       await cleanup([context], [fixture]);
     }
@@ -961,9 +974,13 @@ async function main() {
 
   await test("trade share treats resolved losing non-flat position as closed realized loss", async () => {
     const context = await createTestContext();
-    const fixture = await insertMarketFixture("trade-resolved-loss", "limitless", {
-      resolvedOutcome: "NO",
-    });
+    const fixture = await insertMarketFixture(
+      "trade-resolved-loss",
+      "limitless",
+      {
+        resolvedOutcome: "NO",
+      },
+    );
     try {
       const positionId = await insertPosition({
         context,
@@ -999,9 +1016,13 @@ async function main() {
 
   await test("trade share treats resolved winning non-flat position as closed realized gain", async () => {
     const context = await createTestContext();
-    const fixture = await insertMarketFixture("trade-resolved-win", "limitless", {
-      resolvedOutcome: "YES",
-    });
+    const fixture = await insertMarketFixture(
+      "trade-resolved-win",
+      "limitless",
+      {
+        resolvedOutcome: "YES",
+      },
+    );
     try {
       const positionId = await insertPosition({
         context,

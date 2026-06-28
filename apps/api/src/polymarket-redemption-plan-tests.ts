@@ -340,6 +340,11 @@ await test("standard legacy USDC.e redemption prefers collateral adapter and pUS
 
       assert.equal(plan.redeemable, true);
       assert.equal(plan.targetAddress, CTF_COLLATERAL_ADAPTER);
+      const redeemArgs = ctfIface.decodeFunctionData(
+        "redeemPositions",
+        plan.data ?? "0x",
+      );
+      assert.equal(ethers.getAddress(String(redeemArgs[0])), USDCE);
       assert.equal(plan.collateralTokenAddress, PUSD);
       assert.equal(plan.payoutTokenAddress, PUSD);
       assert.equal(plan.operatorApprovalAddress, CTF_COLLATERAL_ADAPTER);
@@ -386,6 +391,11 @@ await test("neg-risk redemption prefers collateral adapter and pUSD payout", asy
 
       assert.equal(plan.redeemable, true);
       assert.equal(plan.targetAddress, NEG_RISK_COLLATERAL_ADAPTER);
+      const redeemArgs = ctfIface.decodeFunctionData(
+        "redeemPositions",
+        plan.data ?? "0x",
+      );
+      assert.equal(ethers.getAddress(String(redeemArgs[0])), WCOL);
       assert.equal(plan.collateralTokenAddress, PUSD);
       assert.equal(plan.payoutTokenAddress, PUSD);
       assert.equal(plan.operatorApprovalAddress, NEG_RISK_COLLATERAL_ADAPTER);

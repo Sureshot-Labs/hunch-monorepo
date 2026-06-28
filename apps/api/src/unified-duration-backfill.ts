@@ -104,7 +104,9 @@ function parseStatus(): string | null {
   const raw = parseArgValue("status")?.toUpperCase() ?? "ACTIVE";
   if (raw === "ALL") return null;
   if (!VALID_STATUSES.has(raw)) {
-    throw new Error("--status must be ACTIVE, CLOSED, SETTLED, ARCHIVED, or all");
+    throw new Error(
+      "--status must be ACTIVE, CLOSED, SETTLED, ARCHIVED, or all",
+    );
   }
   return raw;
 }
@@ -240,10 +242,12 @@ async function fetchMarketBatch(
   return result.rows;
 }
 
-async function applyUpdates(table: BackfillTable, updates: DurationUpdateRow[]) {
+async function applyUpdates(
+  table: BackfillTable,
+  updates: DurationUpdateRow[],
+) {
   if (updates.length === 0) return 0;
-  const tableName =
-    table === "events" ? "unified_events" : "unified_markets";
+  const tableName = table === "events" ? "unified_events" : "unified_markets";
   const result = await pool.query(
     `
       with input as (
@@ -265,7 +269,10 @@ async function applyUpdates(table: BackfillTable, updates: DurationUpdateRow[]) 
   return result.rowCount ?? 0;
 }
 
-async function runBackfillTable(table: BackfillTable, options: BackfillOptions) {
+async function runBackfillTable(
+  table: BackfillTable,
+  options: BackfillOptions,
+) {
   let after = options.after;
   let processed = 0;
   let changed = 0;
@@ -277,7 +284,8 @@ async function runBackfillTable(table: BackfillTable, options: BackfillOptions) 
     if (remaining != null && remaining <= 0) break;
     const batchOptions = {
       ...options,
-      batch: remaining == null ? options.batch : Math.min(options.batch, remaining),
+      batch:
+        remaining == null ? options.batch : Math.min(options.batch, remaining),
     };
     const rows =
       table === "events"

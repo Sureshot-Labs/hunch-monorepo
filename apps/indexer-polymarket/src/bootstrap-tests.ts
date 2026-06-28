@@ -6,9 +6,8 @@ process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
 process.env.REDIS_URL ??= "redis://localhost:6379";
 process.env.POLYMARKET_GAMMA_BASE ??= "https://gamma.test";
 
-const { appendUniqueWsTokenPairs, appendUniqueWsTokens } = await import(
-  "./bootstrap.js"
-);
+const { appendUniqueWsTokenPairs, appendUniqueWsTokens } =
+  await import("./bootstrap.js");
 
 function test(name: string, fn: () => void) {
   try {

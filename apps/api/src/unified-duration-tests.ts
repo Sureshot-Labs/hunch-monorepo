@@ -379,8 +379,7 @@ async function main() {
   );
   {
     assert.deepEqual(
-      feedQuerySchema.parse({ duration_minutes: "60,5,15,5" })
-        .duration_minutes,
+      feedQuerySchema.parse({ duration_minutes: "60,5,15,5" }).duration_minutes,
       [5, 15, 60],
     );
     assert.deepEqual(
@@ -527,7 +526,10 @@ async function main() {
       .sort();
     assert.deepEqual(
       returnedMarketIds,
-      [market15OtherEvent.venueMarketId, market15SameEvent.venueMarketId].sort(),
+      [
+        market15OtherEvent.venueMarketId,
+        market15SameEvent.venueMarketId,
+      ].sort(),
     );
     assert.deepEqual(
       marketPayload.data.flatMap((row) =>
@@ -575,14 +577,16 @@ async function main() {
     assert.equal(invalidResponse.statusCode, 400);
   } finally {
     if (seededMarketIds.length) {
-      await pool.query("delete from unified_markets where id = any($1::text[])", [
-        seededMarketIds,
-      ]);
+      await pool.query(
+        "delete from unified_markets where id = any($1::text[])",
+        [seededMarketIds],
+      );
     }
     if (seededEventIds.length) {
-      await pool.query("delete from unified_events where id = any($1::text[])", [
-        seededEventIds,
-      ]);
+      await pool.query(
+        "delete from unified_events where id = any($1::text[])",
+        [seededEventIds],
+      );
     }
     env.feedTtlSec = previousFeedTtl;
     await app.close();

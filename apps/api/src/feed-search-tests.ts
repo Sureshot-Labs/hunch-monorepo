@@ -1085,10 +1085,7 @@ async function main() {
       const uniqueEventIds = Array.from(
         new Set(payload.data.map((event) => event.eventId)),
       );
-      assert.deepEqual(
-        uniqueEventIds,
-        [events[1].id, events[0].id],
-      );
+      assert.deepEqual(uniqueEventIds, [events[1].id, events[0].id]);
     }
 
     {

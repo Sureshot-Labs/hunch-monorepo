@@ -958,10 +958,10 @@ export async function reconcileLimitlessContractFeeReceivables(
             { ...locked, ...row },
             resolvedRaw,
           );
-          const pendingFeeEventId = await linkPendingFeeEventIfPresent(
-            client,
-            { ...locked, ...row },
-          );
+          const pendingFeeEventId = await linkPendingFeeEventIfPresent(client, {
+            ...locked,
+            ...row,
+          });
           await client.query(
             `
               update limitless_contract_fee_receivables

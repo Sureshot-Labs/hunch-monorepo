@@ -33,8 +33,7 @@ function randomEvmAddress(): string {
 
 const KALSHI_SOLANA_TEST_WALLET =
   "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ";
-const KALSHI_SOLANA_TEST_TOKEN =
-  "sol:11111111111111111111111111111111";
+const KALSHI_SOLANA_TEST_TOKEN = "sol:11111111111111111111111111111111";
 
 async function createTestContext(
   options: CreateTestContextOptions = {},
@@ -279,10 +278,12 @@ async function main() {
         error: "prepare failed",
       },
     });
-    assert.equal(parsedPrepareFailed.closeLoss?.skippedReason, "prepare_failed");
     assert.equal(
-      parsedPrepareFailed.closeLoss &&
-        "error" in parsedPrepareFailed.closeLoss
+      parsedPrepareFailed.closeLoss?.skippedReason,
+      "prepare_failed",
+    );
+    assert.equal(
+      parsedPrepareFailed.closeLoss && "error" in parsedPrepareFailed.closeLoss
         ? parsedPrepareFailed.closeLoss.error
         : null,
       "prepare failed",

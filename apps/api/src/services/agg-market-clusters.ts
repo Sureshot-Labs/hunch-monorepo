@@ -145,7 +145,8 @@ export type AggMarketAlternativesCacheClient = {
 
 export type AggMarketAlternativesCacheStatus = "hit" | "miss" | "skip";
 export type AggMarketAlternativesCacheLayer = "local" | "redis" | "none";
-export type AggMarketAlternativesCacheKind = AggMarketAlternativesResponse["status"];
+export type AggMarketAlternativesCacheKind =
+  AggMarketAlternativesResponse["status"];
 
 export type AggMarketAlternativesCacheMetadata = {
   kind: AggMarketAlternativesCacheKind | null;
@@ -1106,7 +1107,9 @@ export function buildAggClusterListCacheKey(
   });
 }
 
-function buildAggClusterListRedisCacheKey(query: AggClustersQueryInput): string {
+function buildAggClusterListRedisCacheKey(
+  query: AggClustersQueryInput,
+): string {
   const hash = crypto
     .createHash("sha256")
     .update(buildAggClusterListCacheKey(query))
@@ -1537,10 +1540,7 @@ export async function getAggMarketAlternativesResponseCached(params: {
   db: DbQuery;
   ttlSec: number;
 }): Promise<AggMarketAlternativesResponse | null> {
-  const key = buildAggMarketAlternativesCacheKey(
-    params.marketId,
-    params.query,
-  );
+  const key = buildAggMarketAlternativesCacheKey(params.marketId, params.query);
   const now = Date.now();
   const cached = alternativesCache.get(key);
   if (cached && cached.expiresAt > now) return cached.value;
@@ -1589,7 +1589,8 @@ export async function getAggMarketAlternativesResponseCachedWithMetadata(params:
     cacheLayer = "redis";
     try {
       const cached = await params.cacheClient.get(redisCacheKey);
-      const parsed = cached == null ? null : parseAggMarketAlternativesResponse(cached);
+      const parsed =
+        cached == null ? null : parseAggMarketAlternativesResponse(cached);
       if (parsed) {
         return {
           cache: {

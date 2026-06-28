@@ -264,7 +264,9 @@ function hasMeaningfulMetricActivity(row: WalletActivitySummaryStats): boolean {
   );
 }
 
-function hasMeaningfulResolvedMetrics(row: WalletActivitySummaryStats): boolean {
+function hasMeaningfulResolvedMetrics(
+  row: WalletActivitySummaryStats,
+): boolean {
   return (
     (row.metricsResolvedEdgeSampleCount30d ?? 0) >=
     IMPORTANCE_MIN_RESOLVED_EDGE_SAMPLES
@@ -305,19 +307,18 @@ export function computeWalletActivityImportanceScore(
     hasMetricsActivity && (row.metricsRoi30d ?? 0) > 0
       ? clampUnit((row.metricsRoi30d ?? 0) / IMPORTANCE_ROI_CAP)
       : 0;
-  const edge =
-    hasResolvedMetrics
-      ? Math.max(
-          clampUnit(
-            Math.max(0, row.metricsResolvedWinRateEdge30d ?? 0) /
-              IMPORTANCE_EDGE_CAP,
-          ),
-          clampUnit(
-            Math.max(0, row.metricsResolvedEdgeZScore30d ?? 0) /
-              IMPORTANCE_EDGE_Z_SCORE_CAP,
-          ),
-        )
-      : 0;
+  const edge = hasResolvedMetrics
+    ? Math.max(
+        clampUnit(
+          Math.max(0, row.metricsResolvedWinRateEdge30d ?? 0) /
+            IMPORTANCE_EDGE_CAP,
+        ),
+        clampUnit(
+          Math.max(0, row.metricsResolvedEdgeZScore30d ?? 0) /
+            IMPORTANCE_EDGE_Z_SCORE_CAP,
+        ),
+      )
+    : 0;
   const winRate =
     hasResolvedMetrics && (row.metricsWinRate30d ?? 0) > 0.5
       ? clampUnit(((row.metricsWinRate30d ?? 0) - 0.5) / 0.25)
@@ -700,9 +701,7 @@ function parseSummaryStatsRow(
     metricsResolvedEdgeZScore30d: parseNumber(
       row.metrics_resolved_edge_z_score_30d,
     ),
-    metricsResolvedStakeUsd30d: parseNumber(
-      row.metrics_resolved_stake_usd_30d,
-    ),
+    metricsResolvedStakeUsd30d: parseNumber(row.metrics_resolved_stake_usd_30d),
   };
 }
 

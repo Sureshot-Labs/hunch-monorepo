@@ -121,7 +121,10 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
         }
         const statusCode = errorStatusCode(error);
         if (statusCode >= 500) {
-          app.log.error({ error, userId: user.id }, "Failed to create PnL share");
+          app.log.error(
+            { error, userId: user.id },
+            "Failed to create PnL share",
+          );
         }
         reply.code(statusCode);
         return reply.send({

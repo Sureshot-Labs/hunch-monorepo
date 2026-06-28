@@ -30,7 +30,10 @@ const competition: SportsCompetitionConfig = {
 
 type FetchRoute = (url: URL) => Record<string, unknown>;
 
-async function withFakeFetch<T>(route: FetchRoute, fn: () => Promise<T>): Promise<T> {
+async function withFakeFetch<T>(
+  route: FetchRoute,
+  fn: () => Promise<T>,
+): Promise<T> {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url =
@@ -113,8 +116,9 @@ async function main() {
     "Czechia",
   ]);
   assert.ok(
-    fixtureKeyToSearchQueries("match:2026-06-24:bosnia-and-herzegovina:qatar")
-      .includes("Bosnia-Herzegovina_vs_Qatar"),
+    fixtureKeyToSearchQueries(
+      "match:2026-06-24:bosnia-and-herzegovina:qatar",
+    ).includes("Bosnia-Herzegovina_vs_Qatar"),
   );
   assert.ok(
     fixtureKeyToSearchQueries("match:2026-06-24:czechia:mexico").includes(
@@ -127,8 +131,9 @@ async function main() {
     ),
   );
   assert.ok(
-    fixtureKeyToSearchQueries("match:2026-06-26:cape-verde:saudi-arabia")
-      .includes("Cape_Verde_vs_Saudi_Arabia"),
+    fixtureKeyToSearchQueries(
+      "match:2026-06-26:cape-verde:saudi-arabia",
+    ).includes("Cape_Verde_vs_Saudi_Arabia"),
   );
   assert.ok(
     fixtureKeyToSearchQueries("match:2026-06-24:colombia:congo-dr").includes(
@@ -136,12 +141,14 @@ async function main() {
     ),
   );
   assert.ok(
-    fixtureKeyToSearchQueries("match:2026-06-24:south-africa:south-korea")
-      .includes("South_Africa_vs_South_Korea"),
+    fixtureKeyToSearchQueries(
+      "match:2026-06-24:south-africa:south-korea",
+    ).includes("South_Africa_vs_South_Korea"),
   );
   assert.ok(
-    fixtureKeyToSearchQueries("match:2026-06-25:turkiye:united-states")
-      .includes("Turkey_vs_USA"),
+    fixtureKeyToSearchQueries(
+      "match:2026-06-25:turkiye:united-states",
+    ).includes("Turkey_vs_USA"),
   );
   assert.ok(
     fixtureKeyToSearchQueries("match:2026-06-26:egypt:iran").includes(
@@ -285,17 +292,19 @@ async function main() {
       return { events: [] };
     },
     async () => {
-      const fixtures = await theSportsDbProvider.fetchCompetitionSeason(
-        competition,
-      );
+      const fixtures =
+        await theSportsDbProvider.fetchCompetitionSeason(competition);
       assert.equal(fixtures.length, 2);
       assert.equal(
-        fixtures.find((fixture) => fixture.providerFixtureId === "shared-fixture")
-          ?.status,
+        fixtures.find(
+          (fixture) => fixture.providerFixtureId === "shared-fixture",
+        )?.status,
         "2H",
       );
       assert.ok(
-        fixtures.some((fixture) => fixture.providerFixtureId === "next-fixture"),
+        fixtures.some(
+          (fixture) => fixture.providerFixtureId === "next-fixture",
+        ),
       );
     },
   );

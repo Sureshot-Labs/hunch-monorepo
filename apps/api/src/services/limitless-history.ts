@@ -248,7 +248,9 @@ function shouldNotifyHistoryFill(previousStatus: string | null): boolean {
   return normalized !== "filled" && normalized !== "matched";
 }
 
-function normalizeLimitlessMarketContextId(marketId: string | null): string | null {
+function normalizeLimitlessMarketContextId(
+  marketId: string | null,
+): string | null {
   if (!marketId) return null;
   return marketId.startsWith("limitless:") ? marketId : `limitless:${marketId}`;
 }

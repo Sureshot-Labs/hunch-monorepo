@@ -119,26 +119,27 @@ function createAdminUsersDb(seedRows: FixtureUserRow[]): DbQuery & {
       );
     }
 
-    const metric =
-      /fees\.collected_fee_usd::numeric/i.test(sql)
-        ? "fee_usd_collected"
-        : /fees\.total_fee_usd::numeric/i.test(sql)
-          ? "fee_usd_total"
-          : /points\.public_points::numeric/i.test(sql)
-            ? "points"
-            : /points\.raw_points::numeric/i.test(sql)
-              ? "raw_points"
-              : /points\.tier_points::numeric/i.test(sql)
-                ? "tier_points"
-                : /points\.qualification_points::numeric/i.test(sql)
-                  ? "qualification_points"
-                  : /points\.volume_usd::numeric/i.test(sql)
-                    ? "volume_usd"
-                    : null;
+    const metric = /fees\.collected_fee_usd::numeric/i.test(sql)
+      ? "fee_usd_collected"
+      : /fees\.total_fee_usd::numeric/i.test(sql)
+        ? "fee_usd_total"
+        : /points\.public_points::numeric/i.test(sql)
+          ? "points"
+          : /points\.raw_points::numeric/i.test(sql)
+            ? "raw_points"
+            : /points\.tier_points::numeric/i.test(sql)
+              ? "tier_points"
+              : /points\.qualification_points::numeric/i.test(sql)
+                ? "qualification_points"
+                : /points\.volume_usd::numeric/i.test(sql)
+                  ? "volume_usd"
+                  : null;
     if (!metric) return copy;
 
-    const direction = new RegExp(`${metric.replaceAll("_", ".+")}.* asc`, "i")
-      .test(sql)
+    const direction = new RegExp(
+      `${metric.replaceAll("_", ".+")}.* asc`,
+      "i",
+    ).test(sql)
       ? "asc"
       : "desc";
     return copy.sort((a, b) => {
@@ -148,7 +149,11 @@ function createAdminUsersDb(seedRows: FixtureUserRow[]): DbQuery & {
     });
   }
 
-  function applyCursor(sql: string, rows: FixtureUserRow[], params?: unknown[]) {
+  function applyCursor(
+    sql: string,
+    rows: FixtureUserRow[],
+    params?: unknown[],
+  ) {
     if (!params?.length) return rows;
     if (/u\.created_at, u\.id\) </i.test(sql)) {
       const cursorCreatedAt = params[params.length - 3];
@@ -177,22 +182,21 @@ function createAdminUsersDb(seedRows: FixtureUserRow[]): DbQuery & {
       );
     }
 
-    const metric =
-      /fees\.collected_fee_usd::numeric/i.test(sql)
-        ? "fee_usd_collected"
-        : /fees\.total_fee_usd::numeric/i.test(sql)
-          ? "fee_usd_total"
-          : /points\.public_points::numeric/i.test(sql)
-            ? "points"
-            : /points\.raw_points::numeric/i.test(sql)
-              ? "raw_points"
-              : /points\.tier_points::numeric/i.test(sql)
-                ? "tier_points"
-                : /points\.qualification_points::numeric/i.test(sql)
-                  ? "qualification_points"
-                  : /points\.volume_usd::numeric/i.test(sql)
-                    ? "volume_usd"
-                    : null;
+    const metric = /fees\.collected_fee_usd::numeric/i.test(sql)
+      ? "fee_usd_collected"
+      : /fees\.total_fee_usd::numeric/i.test(sql)
+        ? "fee_usd_total"
+        : /points\.public_points::numeric/i.test(sql)
+          ? "points"
+          : /points\.raw_points::numeric/i.test(sql)
+            ? "raw_points"
+            : /points\.tier_points::numeric/i.test(sql)
+              ? "tier_points"
+              : /points\.qualification_points::numeric/i.test(sql)
+                ? "qualification_points"
+                : /points\.volume_usd::numeric/i.test(sql)
+                  ? "volume_usd"
+                  : null;
     if (!metric) return rows;
 
     const cursorValue = params[params.length - 3];
@@ -359,7 +363,9 @@ await test("GET /admin/users sorts by collected fees", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-b", "user-a", "user-c"],
   );
   await app.close();
@@ -374,7 +380,9 @@ await test("GET /admin/users sorts by total fees", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-c", "user-b", "user-a"],
   );
   await app.close();
@@ -410,7 +418,9 @@ await test("GET /admin/users sorts by raw points", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-c", "user-a", "user-b"],
   );
   await app.close();
@@ -425,7 +435,9 @@ await test("GET /admin/users sorts by tier points", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-c", "user-a", "user-b"],
   );
   await app.close();
@@ -440,7 +452,9 @@ await test("GET /admin/users sorts by qualification points", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-b", "user-a", "user-c"],
   );
   await app.close();
@@ -456,10 +470,15 @@ await test("GET /admin/users sorts by volume and supports asc", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-b", "user-a", "user-c"],
   );
-  assert.match(db.calls[1]?.sql ?? "", /order by points\.volume_usd::numeric asc/i);
+  assert.match(
+    db.calls[1]?.sql ?? "",
+    /order by points\.volume_usd::numeric asc/i,
+  );
   await app.close();
 });
 
@@ -472,7 +491,9 @@ await test("GET /admin/users combines search with metric sorting", async () => {
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-b"],
   );
   await app.close();
@@ -505,9 +526,9 @@ await test("GET /admin/users paginates metric desc sorts with cursor", async () 
 
   assert.equal(second.statusCode, 200);
   assert.deepEqual(
-    second.json<{ users: Array<{ id: string }>; hasMore: boolean }>().users.map(
-      (user) => user.id,
-    ),
+    second
+      .json<{ users: Array<{ id: string }>; hasMore: boolean }>()
+      .users.map((user) => user.id),
     ["user-b"],
   );
   assert.equal(second.json<{ hasMore: boolean }>().hasMore, false);
@@ -539,7 +560,9 @@ await test("GET /admin/users paginates metric asc sorts with cursor", async () =
 
   assert.equal(second.statusCode, 200);
   assert.deepEqual(
-    second.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    second
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-c"],
   );
   await app.close();
@@ -588,7 +611,9 @@ await test("GET /admin/users metric cursor uses id desc tie breaker", async () =
 
   assert.equal(second.statusCode, 200);
   assert.deepEqual(
-    second.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    second
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-a"],
   );
   await app.close();
@@ -645,7 +670,9 @@ await test("GET /admin/users keeps legacy createdAt cursor pagination", async ()
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(
-    response.json<{ users: Array<{ id: string }> }>().users.map((user) => user.id),
+    response
+      .json<{ users: Array<{ id: string }> }>()
+      .users.map((user) => user.id),
     ["user-a"],
   );
   await app.close();

@@ -38,12 +38,7 @@ export const embeddedPrivyAuthorizationRequestSchema = z.object({
 });
 
 const embeddedExecutionKeySchema = z.string().trim().min(1).max(160);
-const zSolanaBigintString = z
-  .string()
-  .trim()
-  .regex(/^\d+$/)
-  .min(1)
-  .max(80);
+const zSolanaBigintString = z.string().trim().regex(/^\d+$/).min(1).max(80);
 const zSolanaReadinessBlockingReason = z
   .enum([
     "market_not_initialized",

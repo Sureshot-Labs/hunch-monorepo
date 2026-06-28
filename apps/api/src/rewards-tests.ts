@@ -134,9 +134,7 @@ function createReferralDb(
         retired_at:
           user.codeRetiredAt === undefined ? null : user.codeRetiredAt,
         retired_reason:
-          user.codeRetiredReason === undefined
-            ? null
-            : user.codeRetiredReason,
+          user.codeRetiredReason === undefined ? null : user.codeRetiredReason,
         max_uses: null as number | null,
         referral_count: user.referralCount ?? 0,
         created_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -282,9 +280,7 @@ function createReferralDb(
           rows: [
             {
               referrals_moved: String(movedReferredUserIds.size),
-              first_trade_conversions_moved: String(
-                firstTradeConversionsMoved,
-              ),
+              first_trade_conversions_moved: String(firstTradeConversionsMoved),
             },
           ],
         };
@@ -1197,12 +1193,14 @@ async function createRewardsPnlFixture(inputs: {
     cleanup: async () => {
       await pool.query("delete from positions where user_id = $1", [userId]);
       await pool.query("delete from user_wallets where user_id = $1", [userId]);
-      await pool.query("delete from unified_token_top_latest where token_id = $1", [
-        tokenId,
-      ]);
-      await pool.query("delete from unified_market_tokens where token_id = $1", [
-        tokenId,
-      ]);
+      await pool.query(
+        "delete from unified_token_top_latest where token_id = $1",
+        [tokenId],
+      );
+      await pool.query(
+        "delete from unified_market_tokens where token_id = $1",
+        [tokenId],
+      );
       await pool.query("delete from unified_tokens where token_id = $1", [
         tokenId,
       ]);
@@ -2185,7 +2183,10 @@ const tests: TestCase[] = [
 
       assert.equal(points, 1250);
       assert.doesNotMatch(capture.sql ?? "", /source_id like 'manual:%'/);
-      assert.doesNotMatch(capture.sql ?? "", /source_id like 'referral-code-tier:%'/);
+      assert.doesNotMatch(
+        capture.sql ?? "",
+        /source_id like 'referral-code-tier:%'/,
+      );
       assert.deepEqual(capture.params, ["user-a"]);
     },
   },
@@ -2236,7 +2237,10 @@ const tests: TestCase[] = [
         capture.entriesSql ?? "",
         /sum\(ve\.points_awarded\).*as points/s,
       );
-      assert.match(capture.meSql ?? "", /sum\(ve\.points_awarded\).*as points/s);
+      assert.match(
+        capture.meSql ?? "",
+        /sum\(ve\.points_awarded\).*as points/s,
+      );
       assert.match(capture.rankSql ?? "", /where points > \$1/);
     },
   },

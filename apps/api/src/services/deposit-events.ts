@@ -147,10 +147,14 @@ export type PrivyFundsDepositedWebhook = zod.infer<
 >;
 
 function normalizeKnownAcrossSender(chainId: string, sender: string): string {
-  return chainId === HUNCH_SOLANA_CHAIN_ID ? sender.trim() : sender.toLowerCase();
+  return chainId === HUNCH_SOLANA_CHAIN_ID
+    ? sender.trim()
+    : sender.toLowerCase();
 }
 
-function isKnownAcrossBridgeDeposit(event: PrivyFundsDepositedWebhook): boolean {
+function isKnownAcrossBridgeDeposit(
+  event: PrivyFundsDepositedWebhook,
+): boolean {
   const chainId = resolveBridgeChainIdFromCaip2(event.caip2);
   const sender = event.sender?.trim();
   if (!chainId || !sender) return false;
@@ -232,8 +236,7 @@ function resolveBridgeChainIdFromCaip2(caip2: string): string | null {
 function resolveDepositAssetAddress(
   event: PrivyFundsDepositedWebhook,
 ): string | null {
-  const raw =
-    event.asset.address?.trim() || event.asset.mint?.trim() || null;
+  const raw = event.asset.address?.trim() || event.asset.mint?.trim() || null;
   return raw || null;
 }
 
@@ -377,7 +380,8 @@ async function findInternalDepositMovement(
     return {
       userId: funderMovement.user_id,
       walletAddress: input.recipientWallet?.wallet_address ?? input.recipient,
-      walletType: input.recipientWallet?.wallet_type ?? input.recipientWalletType,
+      walletType:
+        input.recipientWallet?.wallet_type ?? input.recipientWalletType,
       reason: `polymarket_${funderMovement.direction || "funder_movement"}`,
     };
   }
@@ -577,10 +581,12 @@ async function markBridgeOrderDestinationFill(
   },
 ): Promise<void> {
   const bridgeOrder = input.bridgeOrder;
-  const nextStatus =
-    shouldCompleteBridgeFromDeposit(bridgeOrder, input.eventChainId)
-      ? "fulfilled"
-      : bridgeOrder.status;
+  const nextStatus = shouldCompleteBridgeFromDeposit(
+    bridgeOrder,
+    input.eventChainId,
+  )
+    ? "fulfilled"
+    : bridgeOrder.status;
 
   await db.query(
     `
@@ -886,9 +892,10 @@ export async function handlePrivyDepositWebhook(
     recipient,
     logger,
   });
-  const execution = bridgeOrder || knownAcrossBridgeDeposit
-    ? null
-    : await findExecutionByTxHash(db, event.transaction_hash);
+  const execution =
+    bridgeOrder || knownAcrossBridgeDeposit
+      ? null
+      : await findExecutionByTxHash(db, event.transaction_hash);
   const venueCashDeposit =
     !bridgeOrder &&
     !knownAcrossBridgeDeposit &&
@@ -902,15 +909,16 @@ export async function handlePrivyDepositWebhook(
           recipient,
         })
       : null;
-  const status: DepositEventStatus = bridgeOrder || knownAcrossBridgeDeposit
-    ? "ignored_bridge"
-    : venueCashDeposit
-      ? "ignored_venue"
-      : internalMovement
-        ? "ignored_internal"
-        : wallet
-          ? "recorded"
-          : "unresolved";
+  const status: DepositEventStatus =
+    bridgeOrder || knownAcrossBridgeDeposit
+      ? "ignored_bridge"
+      : venueCashDeposit
+        ? "ignored_venue"
+        : internalMovement
+          ? "ignored_internal"
+          : wallet
+            ? "recorded"
+            : "unresolved";
 
   const insertedRow = await insertDepositEvent(db, {
     status,
@@ -922,7 +930,8 @@ export async function handlePrivyDepositWebhook(
       null,
     walletAddress:
       wallet?.wallet_address ?? internalMovement?.walletAddress ?? recipient,
-    walletType: wallet?.wallet_type ?? internalMovement?.walletType ?? walletType,
+    walletType:
+      wallet?.wallet_type ?? internalMovement?.walletType ?? walletType,
     bridgeOrderId: bridgeOrder?.id ?? null,
     payload: event,
   });

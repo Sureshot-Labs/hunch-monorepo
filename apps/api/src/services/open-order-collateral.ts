@@ -133,7 +133,8 @@ export function computeBuyCollateralLockedRaw(inputs: {
     return 0n;
   }
   const filledSizeRaw = parseDecimalToMicro(inputs.filledSize) ?? 0n;
-  const remainingSizeRaw = sizeRaw > filledSizeRaw ? sizeRaw - filledSizeRaw : 0n;
+  const remainingSizeRaw =
+    sizeRaw > filledSizeRaw ? sizeRaw - filledSizeRaw : 0n;
   if (remainingSizeRaw <= 0n) return 0n;
   return (remainingSizeRaw * priceRaw) / MICRO_SCALE;
 }
@@ -158,7 +159,9 @@ export async function fetchOpenOrderCollateralLocks(
 ): Promise<OpenOrderCollateralLocks> {
   const polymarketWallets = Array.from(
     new Set(
-      inputs.polymarketWallets.map(normalizeCollateralWalletKey).filter(Boolean),
+      inputs.polymarketWallets
+        .map(normalizeCollateralWalletKey)
+        .filter(Boolean),
     ),
   );
   const limitlessWallets = Array.from(

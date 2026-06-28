@@ -1317,8 +1317,7 @@ export class AuthService {
       dbFeatures.hasEncryptedPassphrase && passphrase
         ? encryptCredentialsString(passphrase, encryptionKey)
         : null;
-    const funderAddressValue =
-      normalizeOptionalWalletForStorage(funderAddress);
+    const funderAddressValue = normalizeOptionalWalletForStorage(funderAddress);
 
     const normalizedWallet = normalizeWalletForStorage(walletAddress);
     const isEthWallet = isEvmAddress(normalizedWallet);
@@ -1439,8 +1438,7 @@ export class AuthService {
       2,
       walletAddress,
     );
-    const funderAddressValue =
-      normalizeOptionalWalletForStorage(funderAddress);
+    const funderAddressValue = normalizeOptionalWalletForStorage(funderAddress);
 
     const result = await pool.query<{
       funder_address: string | null;

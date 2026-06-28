@@ -3,7 +3,10 @@
 import assert from "node:assert/strict";
 
 import type { Pool } from "@hunch/infra";
-import { markOrderPositionDeltaApplied, storeOrder } from "./repos/orders-repo.js";
+import {
+  markOrderPositionDeltaApplied,
+  storeOrder,
+} from "./repos/orders-repo.js";
 import { fetchUnifiedOrders } from "./repos/unified-orders.js";
 
 async function test(name: string, fn: () => Promise<void>) {

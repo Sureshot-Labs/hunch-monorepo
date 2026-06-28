@@ -114,10 +114,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "LIMITLESS_SESSION",
     "POLYGON_DEPLOYER_KEY",
   ],
-  "signal-bot": [
-    "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS",
-    "HUNCH_SIGNAL_BOT_TOKEN",
-  ],
+  "signal-bot": ["HUNCH_SIGNAL_BOT_ADMIN_USER_IDS", "HUNCH_SIGNAL_BOT_TOKEN"],
 };
 
 const DEFAULT_SECRET_PREFIX = "/hunch/prod";
@@ -738,9 +735,7 @@ function sanitizeEnv(
   let sawBundles = false;
   for (const line of raw.split(/\r?\n/u)) {
     const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u);
-    const commentedMatch = line.match(
-      /^\s*#+\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u,
-    );
+    const commentedMatch = line.match(/^\s*#+\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u);
     if (match && secretKeys.has(match[1])) continue;
     if (commentedMatch && secretKeys.has(commentedMatch[1])) continue;
     if (match?.[1] === "HUNCH_SECRETS_MODE") {

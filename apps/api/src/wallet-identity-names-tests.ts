@@ -40,7 +40,10 @@ const tests = [
       assert.equal(result.status, "ok");
       assert.equal(result.source.username, "helldfkdsf");
       assert.equal(result.source.pseudonym, "Nimble-Cornet");
-      assert.equal(result.source.profileUrl, "https://polymarket.com/@helldfkdsf");
+      assert.equal(
+        result.source.profileUrl,
+        "https://polymarket.com/@helldfkdsf",
+      );
       assert.equal(result.source.resolvedAt, NOW);
       assert.equal(calls.length, 1);
       assert.match(calls[0], /profile\/userData/);
@@ -103,7 +106,11 @@ const tests = [
         nowIso: NOW,
         rpcUrl: "https://eth.example.invalid",
         fetchImpl: (async () =>
-          jsonResponse({ jsonrpc: "2.0", id: 1, result: "0x1" })) as typeof fetch,
+          jsonResponse({
+            jsonrpc: "2.0",
+            id: 1,
+            result: "0x1",
+          })) as typeof fetch,
         client: {
           async lookupAddress(address: string) {
             assert.equal(address, WALLET);
@@ -218,7 +225,8 @@ const tests = [
           identityNames: {
             polymarket: {
               status: "ok",
-              username: "0x8c66E28FbE7Ede7F57bA6CBc70408DfF442944F3-1777220320442",
+              username:
+                "0x8c66E28FbE7Ede7F57bA6CBc70408DfF442944F3-1777220320442",
               pseudonym: "Solid-Airfare",
               profileUrl:
                 "https://polymarket.com/@0x8c66E28FbE7Ede7F57bA6CBc70408DfF442944F3-1777220320442",
@@ -246,7 +254,8 @@ const tests = [
           identityNames: {
             polymarket: {
               status: "ok",
-              username: "0x8c66E28FbE7Ede7F57bA6CBc70408DfF442944F3-1777220320442",
+              username:
+                "0x8c66E28FbE7Ede7F57bA6CBc70408DfF442944F3-1777220320442",
               pseudonym: "0x736c3A4b755444f7ce7f65C4158157862675BC72",
               resolvedAt: NOW,
             },

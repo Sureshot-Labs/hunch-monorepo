@@ -47,8 +47,7 @@ export class SharedRateLimitBackoff {
     this.consecutiveRateLimits += 1;
     const backoffMs = Math.min(
       this.maxBackoffMs,
-      this.baseBackoffMs *
-        2 ** Math.max(0, this.consecutiveRateLimits - 1),
+      this.baseBackoffMs * 2 ** Math.max(0, this.consecutiveRateLimits - 1),
     );
     const blockedUntilMs = Date.now() + backoffMs;
     if (blockedUntilMs <= this.nextAllowedAtMs) return;

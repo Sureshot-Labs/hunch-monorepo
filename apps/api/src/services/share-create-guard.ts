@@ -109,7 +109,11 @@ function checkLocalRateLimit(
   return true;
 }
 
-function acquireLocalSlot(key: string, maxSlots: number, ttlMs: number): boolean {
+function acquireLocalSlot(
+  key: string,
+  maxSlots: number,
+  ttlMs: number,
+): boolean {
   const nowMs = Date.now();
   pruneExpiredLocalEntries(nowMs);
   const existing = localSlots.get(key);
@@ -140,7 +144,8 @@ async function checkGuardRateLimit(
   maxRequests: number,
   windowMs: number,
 ): Promise<boolean> {
-  if (backend === "local") return checkLocalRateLimit(key, maxRequests, windowMs);
+  if (backend === "local")
+    return checkLocalRateLimit(key, maxRequests, windowMs);
   if (backend === "redis") {
     return checkRateLimit(key, maxRequests, windowMs, {
       onError: "fail_closed",
@@ -178,7 +183,9 @@ async function releaseGuardSlot(
   }
 }
 
-function normalizeReferralCacheKey(referralCode: string | null | undefined): string {
+function normalizeReferralCacheKey(
+  referralCode: string | null | undefined,
+): string {
   const normalized = referralCode?.trim().toUpperCase();
   return normalized && normalized.length > 0 ? normalized : "default";
 }
@@ -284,7 +291,11 @@ export async function withShareCreateGuard<T>(
     }
     releaseKeys.push(userSlotKey);
 
-    const globalSlotAcquired = await acquireGuardSlot(backend, globalSlotKey, 4);
+    const globalSlotAcquired = await acquireGuardSlot(
+      backend,
+      globalSlotKey,
+      4,
+    );
     if (!globalSlotAcquired) {
       throw new ShareCreateGuardError("global_inflight", 15);
     }

@@ -2,7 +2,10 @@ import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { isRecord } from "./lib/type-guards.js";
-import { dflowRequest, extractDflowErrorMessage } from "./services/dflow-client.js";
+import {
+  dflowRequest,
+  extractDflowErrorMessage,
+} from "./services/dflow-client.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -88,11 +91,7 @@ const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_API_TIMEOUT_SEC = 15;
 const DFLOW_BATCH_SIZE = 100;
 const LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS = SHARED_RATE_LIMIT_MAX_ATTEMPTS;
-const ALLOWED_VENUES = new Set<Venue>([
-  "polymarket",
-  "limitless",
-  "kalshi",
-]);
+const ALLOWED_VENUES = new Set<Venue>(["polymarket", "limitless", "kalshi"]);
 
 function readValues(argv: string[], name: string): string[] {
   const key = `--${name}`;
@@ -401,7 +400,11 @@ async function validatePolymarket(
       buildPolymarketSourceRepair(market),
     );
   } catch (error) {
-    return buildValidation(candidate, null, `gamma_error:${errorMessage(error)}`);
+    return buildValidation(
+      candidate,
+      null,
+      `gamma_error:${errorMessage(error)}`,
+    );
   }
 }
 
@@ -516,7 +519,10 @@ function mapDflowStatusToUnified(value: unknown): UnifiedStatus {
   return "ACTIVE";
 }
 
-function mapDflowReason(status: UnifiedStatus, rawStatus: string | null): string {
+function mapDflowReason(
+  status: UnifiedStatus,
+  rawStatus: string | null,
+): string {
   if (status === "ACTIVE") return "dflow_active";
   const suffix = rawStatus?.toLowerCase() || status.toLowerCase();
   return `dflow_${suffix}`;
@@ -682,7 +688,9 @@ async function lookupKalshiPublicMarket(
   );
   if (marketLookup.kind !== "error") return marketLookup;
 
-  const eventReason = eventTicker ? eventFailuresByEvent.get(eventTicker) : null;
+  const eventReason = eventTicker
+    ? eventFailuresByEvent.get(eventTicker)
+    : null;
   if (!eventReason) return marketLookup;
   return {
     kind: "error",
@@ -1061,18 +1069,18 @@ function summarizeRows(rows: ValidationRow[]): SummaryRow[] {
     reason: string,
     row: ValidationRow,
   ) {
-    const key = [section, venue ?? "", targetStatus ?? "", reason].join("\u0001");
-    const group =
-      groups.get(key) ??
-      {
-        section,
-        venue,
-        targetStatus,
-        reason,
-        markets: 0,
-        oldest: null,
-        newest: null,
-      };
+    const key = [section, venue ?? "", targetStatus ?? "", reason].join(
+      "\u0001",
+    );
+    const group = groups.get(key) ?? {
+      section,
+      venue,
+      targetStatus,
+      reason,
+      markets: 0,
+      oldest: null,
+      newest: null,
+    };
     group.markets += 1;
     if (!group.oldest || row.terminal_at < group.oldest) {
       group.oldest = row.terminal_at;
@@ -1114,13 +1122,14 @@ function summarizeRows(rows: ValidationRow[]): SummaryRow[] {
   }
 
   return [...groups.values()]
-    .sort((a, b) =>
-      [
-        a.section.localeCompare(b.section),
-        (a.venue ?? "").localeCompare(b.venue ?? ""),
-        (a.targetStatus ?? "").localeCompare(b.targetStatus ?? ""),
-        a.reason.localeCompare(b.reason),
-      ].find((value) => value !== 0) ?? 0,
+    .sort(
+      (a, b) =>
+        [
+          a.section.localeCompare(b.section),
+          (a.venue ?? "").localeCompare(b.venue ?? ""),
+          (a.targetStatus ?? "").localeCompare(b.targetStatus ?? ""),
+          a.reason.localeCompare(b.reason),
+        ].find((value) => value !== 0) ?? 0,
     )
     .map((row) => ({
       section: row.section,
@@ -1142,7 +1151,9 @@ function formatSampleRow(row: ValidationRow): Record<string, string | null> {
     reason: row.reason,
     resolvedOutcome: row.resolved_outcome,
     resolvedOutcomePct:
-      row.resolved_outcome_pct == null ? null : String(row.resolved_outcome_pct),
+      row.resolved_outcome_pct == null
+        ? null
+        : String(row.resolved_outcome_pct),
     eventId: row.event_id,
     terminalAt: dateToString(row.terminal_at),
     title: row.title,
@@ -1320,9 +1331,7 @@ async function updateOutcomesAndReturnMarketRefs(
   return rows.map((row) => ({ marketId: row.id, venue: row.venue }));
 }
 
-async function runUpdates(
-  client: PoolClient,
-): Promise<{
+async function runUpdates(client: PoolClient): Promise<{
   outcomeMarketIds: string[];
   outcomeMarketRefs: RepairMarketRef[];
   updateCounts: CountRow[];
@@ -1408,7 +1417,12 @@ async function runUpdates(
   return {
     outcomeMarketIds,
     outcomeMarketRefs,
-    updateCounts: [marketCount, outcomeCount, polymarketSourceCount, eventCount],
+    updateCounts: [
+      marketCount,
+      outcomeCount,
+      polymarketSourceCount,
+      eventCount,
+    ],
   };
 }
 
@@ -1439,7 +1453,12 @@ async function executeRepair(
       await runUpdates(client);
 
     await client.query("commit");
-    return { outcomeMarketIds, outcomeMarketRefs, selectionCounts, updateCounts };
+    return {
+      outcomeMarketIds,
+      outcomeMarketRefs,
+      selectionCounts,
+      updateCounts,
+    };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -1548,7 +1567,9 @@ async function main(): Promise<void> {
 
   const report = buildReport(args, validations);
   if (args.json) {
-    console.log(JSON.stringify(jsonReport(args, validations, startedAt), null, 2));
+    console.log(
+      JSON.stringify(jsonReport(args, validations, startedAt), null, 2),
+    );
     return;
   }
 

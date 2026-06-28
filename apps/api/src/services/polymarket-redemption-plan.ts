@@ -459,9 +459,6 @@ export async function buildPolymarketRedemptionPlan(
           targetAddress: useCollateralAdapter
             ? ctfCollateralAdapterAddress
             : null,
-          redeemCollateralTokenAddress: useCollateralAdapter
-            ? collateralTokenAddress
-            : null,
           payoutTokenAddress: useCollateralAdapter
             ? collateralTokenAddress
             : candidateCollateral,
@@ -674,7 +671,7 @@ export async function buildPolymarketRedemptionPlan(
     }
     const data = usesCollateralAdapter
       ? conditionalTokensIface.encodeFunctionData("redeemPositions", [
-          collateralTokenAddress,
+          wrappedCollateralAddress,
           ZERO_BYTES32,
           selectedConditionId,
           [indexSet],

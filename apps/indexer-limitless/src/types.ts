@@ -44,12 +44,14 @@ const Trends = z
   .optional();
 
 // Metadata schema
-const Metadata = z.object({
-  fee: optionalBool,
-  isBannered: optionalBool,
-  isPolyArbitrage: optionalBool,
-  shouldMarketMake: optionalBool,
-}).passthrough();
+const Metadata = z
+  .object({
+    fee: optionalBool,
+    isBannered: optionalBool,
+    isPolyArbitrage: optionalBool,
+    shouldMarketMake: optionalBool,
+  })
+  .passthrough();
 
 // Settings schema
 const Settings = z.object({

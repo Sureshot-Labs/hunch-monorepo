@@ -364,9 +364,7 @@ async function queryCount(
   };
 }
 
-async function materializePositionMergeSet(
-  client: Queryable,
-): Promise<void> {
+async function materializePositionMergeSet(client: Queryable): Promise<void> {
   await client.query(
     `
       create temp table wallet_casing_position_ranked on commit drop as
@@ -550,14 +548,13 @@ export async function runWalletCasingCleanupMutationsInTx(
     ),
   );
 
-  const { rows: affectedWallets } =
-    await client.query<AffectedWalletRow>(
-      `
+  const { rows: affectedWallets } = await client.query<AffectedWalletRow>(
+    `
         select user_id::text, wallet_address
         from wallet_casing_affected_polymarket
         order by user_id, wallet_address
       `,
-    );
+  );
 
   for (const wallet of affectedWallets) {
     await recomputePositionMetricsForWalletInTx(client, {
@@ -595,7 +592,9 @@ export async function executeWalletCasingCleanup(
       "select pg_try_advisory_xact_lock(hashtext('wallet_casing_cleanup')) as locked",
     );
     if (!lockResult.rows[0]?.locked) {
-      throw new Error("Wallet casing cleanup aborted: another cleanup is running");
+      throw new Error(
+        "Wallet casing cleanup aborted: another cleanup is running",
+      );
     }
 
     const before = await buildWalletCasingCleanupReport(client, args);

@@ -158,7 +158,9 @@ function decodeAdminUsersCursor(encoded: string | undefined): {
       typeof metricValue !== "number" ||
       !Number.isFinite(metricValue) ||
       !ADMIN_USERS_SORT_BY_VALUES.includes(sortByValue as AdminUsersSortBy) ||
-      !ADMIN_USERS_SORT_DIR_VALUES.includes(sortDirValue as AdminUsersSortDir) ||
+      !ADMIN_USERS_SORT_DIR_VALUES.includes(
+        sortDirValue as AdminUsersSortDir,
+      ) ||
       sortByValue === "createdAt"
     ) {
       return { cursor: null, error: "Invalid cursor" };
@@ -189,7 +191,10 @@ function encodeAdminKeysetCursor(row: AdminCursorRow): string {
   ).toString("base64url");
 }
 
-function adminMetricValue(row: AdminUsersRow, sortBy: AdminUsersSortBy): number {
+function adminMetricValue(
+  row: AdminUsersRow,
+  sortBy: AdminUsersSortBy,
+): number {
   switch (sortBy) {
     case "feeUsdCollected":
       return Number(row.fee_usd_collected ?? 0);
@@ -234,9 +239,7 @@ function buildAdminCursorPage<T extends AdminCursorRow>(
   const items = rows.slice(0, limit);
   const hasMore = rows.length > limit;
   const nextCursor =
-    hasMore && items.length
-      ? encodeCursor(items[items.length - 1])
-      : null;
+    hasMore && items.length ? encodeCursor(items[items.length - 1]) : null;
   return { hasMore, items, nextCursor };
 }
 

@@ -2427,9 +2427,7 @@ function buildProfileInput(
       resolved_win_rate_edge: parseNumber(
         wallet.metrics_resolved_win_rate_edge,
       ),
-      resolved_edge_z_score: parseNumber(
-        wallet.metrics_resolved_edge_z_score,
-      ),
+      resolved_edge_z_score: parseNumber(wallet.metrics_resolved_edge_z_score),
       resolved_brier_score: parseNumber(wallet.metrics_resolved_brier_score),
       resolved_stake_weighted_edge: parseNumber(
         wallet.metrics_resolved_stake_weighted_edge,

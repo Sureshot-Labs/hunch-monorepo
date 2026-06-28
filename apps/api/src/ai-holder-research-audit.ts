@@ -44,7 +44,9 @@ function parseNoteIds(argv: string[]): string[] {
     }
     return [];
   });
-  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  return Array.from(
+    new Set(values.map((value) => value.trim()).filter(Boolean)),
+  );
 }
 
 export function parseHolderResearchAuditArgs(argv: string[]): AuditArgs {
@@ -70,7 +72,9 @@ function formatPercent(value: number | null): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function formatResult(result: Awaited<ReturnType<typeof auditHolderResearchSignalPerformance>>) {
+function formatResult(
+  result: Awaited<ReturnType<typeof auditHolderResearchSignalPerformance>>,
+) {
   const overall = result.aggregates.overall;
   return [
     `[holder-research:audit] considered=${result.considered} evaluated=${result.evaluated} written=${result.written} unchanged=${result.unchanged} errors=${result.errors}`,
@@ -108,7 +112,9 @@ async function main() {
   } else {
     console.log(formatResult(result));
     if (!args.execute) {
-      console.log("[holder-research:audit] dry-run; pass --execute to persist metrics.signalPerformance");
+      console.log(
+        "[holder-research:audit] dry-run; pass --execute to persist metrics.signalPerformance",
+      );
     }
   }
 }

@@ -22,16 +22,18 @@ export type AdminUsersSortPlan = {
   supportsCursor: boolean;
 };
 
-const METRIC_SORT_SQL: Record<Exclude<AdminUsersSortBy, "createdAt">, string> =
-  {
-    feeUsdCollected: "fees.collected_fee_usd::numeric",
-    feeUsdTotal: "fees.total_fee_usd::numeric",
-    points: "points.public_points::numeric",
-    rawPoints: "points.raw_points::numeric",
-    tierPoints: "points.tier_points::numeric",
-    qualificationPoints: "points.qualification_points::numeric",
-    volumeUsd: "points.volume_usd::numeric",
-  };
+const METRIC_SORT_SQL: Record<
+  Exclude<AdminUsersSortBy, "createdAt">,
+  string
+> = {
+  feeUsdCollected: "fees.collected_fee_usd::numeric",
+  feeUsdTotal: "fees.total_fee_usd::numeric",
+  points: "points.public_points::numeric",
+  rawPoints: "points.raw_points::numeric",
+  tierPoints: "points.tier_points::numeric",
+  qualificationPoints: "points.qualification_points::numeric",
+  volumeUsd: "points.volume_usd::numeric",
+};
 
 export function buildAdminUsersSortPlan(
   sortBy: AdminUsersSortBy,

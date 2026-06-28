@@ -158,10 +158,7 @@ export async function fetchEventsPage(q: GammaEventsQuery) {
       return await fetchEventsPageOnce(q);
     } catch (error) {
       lastError = error;
-      if (
-        attempt >= env.gammaRetryAttempts ||
-        !isRetriableGammaError(error)
-      ) {
+      if (attempt >= env.gammaRetryAttempts || !isRetriableGammaError(error)) {
         throw error;
       }
       const delayMs = gammaRetryDelayMs(attempt);

@@ -73,8 +73,7 @@ const SOLANA_CHAIN_ID = "7565164";
 const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const SOL_DECIMALS = 9;
 const DEFAULT_SOLANA_PREFUND_SLIPPAGE = 0.5;
-const COMPUTE_BUDGET_PROGRAM_ID =
-  "ComputeBudget111111111111111111111111111111";
+const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
 const COMPUTE_BUDGET_SET_COMPUTE_UNIT_LIMIT = 2;
 const COMPUTE_BUDGET_SET_COMPUTE_UNIT_PRICE = 3;
 const SOLANA_PREFUND_MAX_COMPUTE_UNIT_LIMIT = 1_400_000;
@@ -202,10 +201,7 @@ type SolanaPrefundRouteAttemptDebug = {
 class SolanaPrefundRouteSelectionError extends Error {
   routeDebug: { attempts: SolanaPrefundRouteAttemptDebug[] };
 
-  constructor(
-    message: string,
-    attempts: SolanaPrefundRouteAttemptDebug[],
-  ) {
+  constructor(message: string, attempts: SolanaPrefundRouteAttemptDebug[]) {
     super(message);
     this.name = "SolanaPrefundRouteSelectionError";
     this.routeDebug = { attempts };
@@ -240,7 +236,9 @@ const SOLANA_PREFUND_OPERATION_FLOORS: Record<
   debridge: { minSolLamports: 3_000_000n, targetSolLamports: 10_000_000n },
 };
 
-function isSolanaPrefundOperation(value: string): value is SolanaPrefundOperation {
+function isSolanaPrefundOperation(
+  value: string,
+): value is SolanaPrefundOperation {
   return Object.prototype.hasOwnProperty.call(
     SOLANA_PREFUND_OPERATION_FLOORS,
     value,
@@ -287,11 +285,12 @@ function parsePositiveBigInt(value: string): bigint | null {
   return parsed > 0n ? parsed : null;
 }
 
-function readRecordString(record: Record<string, unknown>, key: string): string | null {
+function readRecordString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
   const value = record[key];
-  return typeof value === "string" && value.trim().length
-    ? value.trim()
-    : null;
+  return typeof value === "string" && value.trim().length ? value.trim() : null;
 }
 
 function readBridgeTokenAmountRaw(value: unknown): bigint | null {
@@ -435,12 +434,16 @@ function resolveTransactionAccounts(inputs: {
   for (const lookup of tx.message.addressTableLookups) {
     const table = lookupTables.get(lookup.accountKey.toBase58());
     if (!table) {
-      throw new Error("deBridge prefund transaction address lookup table was not resolved.");
+      throw new Error(
+        "deBridge prefund transaction address lookup table was not resolved.",
+      );
     }
     for (const index of lookup.writableIndexes) {
       const address = table.state.addresses[index];
       if (!address) {
-        throw new Error("deBridge prefund transaction references missing lookup table account.");
+        throw new Error(
+          "deBridge prefund transaction references missing lookup table account.",
+        );
       }
       resolved.push({
         address: address.toBase58(),
@@ -451,7 +454,9 @@ function resolveTransactionAccounts(inputs: {
     for (const index of lookup.readonlyIndexes) {
       const address = table.state.addresses[index];
       if (!address) {
-        throw new Error("deBridge prefund transaction references missing lookup table account.");
+        throw new Error(
+          "deBridge prefund transaction references missing lookup table account.",
+        );
       }
       resolved.push({
         address: address.toBase58(),
@@ -483,7 +488,9 @@ async function fetchSolanaAddressLookupTableAccounts(
     for (const rpcUrl of env.solanaRpcUrls) {
       try {
         const connection = new Connection(rpcUrl, "confirmed");
-        const response = await connection.getAddressLookupTable(lookup.accountKey);
+        const response = await connection.getAddressLookupTable(
+          lookup.accountKey,
+        );
         if (response.value) {
           results.push(response.value);
           lastError = null;
@@ -522,7 +529,9 @@ function assertSystemInstructionDoesNotSpendSignerLamports(inputs: {
     inputs.instruction,
   );
   if (!txInstruction) {
-    throw new Error("deBridge prefund transaction has malformed System instruction.");
+    throw new Error(
+      "deBridge prefund transaction has malformed System instruction.",
+    );
   }
 
   const feePayer = inputs.tx.message.staticAccountKeys[0]?.toBase58() ?? null;
@@ -548,25 +557,36 @@ function assertSystemInstructionDoesNotSpendSignerLamports(inputs: {
     if (instructionType === "Create") {
       const decoded = SystemInstruction.decodeCreateAccount(txInstruction);
       if (blockedSources.has(decoded.fromPubkey.toBase58())) {
-        throw new Error("deBridge prefund transaction creates rent-funded accounts.");
+        throw new Error(
+          "deBridge prefund transaction creates rent-funded accounts.",
+        );
       }
       return;
     }
     if (instructionType === "CreateWithSeed") {
       const decoded = SystemInstruction.decodeCreateWithSeed(txInstruction);
       if (blockedSources.has(decoded.fromPubkey.toBase58())) {
-        throw new Error("deBridge prefund transaction creates rent-funded accounts.");
+        throw new Error(
+          "deBridge prefund transaction creates rent-funded accounts.",
+        );
       }
       return;
     }
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("deBridge prefund")) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("deBridge prefund")
+    ) {
       throw error;
     }
-    throw new Error("deBridge prefund transaction has unsupported System instruction.");
+    throw new Error(
+      "deBridge prefund transaction has unsupported System instruction.",
+    );
   }
 
-  throw new Error("deBridge prefund transaction has unsupported System instruction.");
+  throw new Error(
+    "deBridge prefund transaction has unsupported System instruction.",
+  );
 }
 
 function bufferContainsU64LeExactlyOnce(data: Buffer, value: bigint): boolean {
@@ -600,16 +620,16 @@ function validateJupiterDirectUsdcToSolPrefundInstruction(inputs: {
   const discriminatorHex = data.subarray(0, 8).toString("hex");
   const layout = JUPITER_USDC_TO_SOL_PREFUND_LAYOUTS.get(discriminatorHex);
   if (!layout) {
-    throw new Error("deBridge prefund Jupiter instruction is not an allowed route.");
+    throw new Error(
+      "deBridge prefund Jupiter instruction is not an allowed route.",
+    );
   }
 
-  let decoded:
-    | {
-        quotedOutLamports: bigint;
-        decodedMinOutLamports: bigint;
-        slippageBps: number;
-      }
-    | null = null;
+  let decoded: {
+    quotedOutLamports: bigint;
+    decodedMinOutLamports: bigint;
+    slippageBps: number;
+  } | null = null;
   let sawMatchingAmount = false;
   for (const tailLayout of JUPITER_SHARED_ACCOUNTS_ROUTE_TAIL_LAYOUTS) {
     if (data.length < 8 + tailLayout.tailLength) continue;
@@ -665,7 +685,9 @@ function validateJupiterDirectUsdcToSolPrefundInstruction(inputs: {
     };
   }
   if (decoded.decodedMinOutLamports < inputs.minOutLamports) {
-    throw new Error("deBridge prefund Jupiter minimum output is below the required SOL amount.");
+    throw new Error(
+      "deBridge prefund Jupiter minimum output is below the required SOL amount.",
+    );
   }
 
   const account = (position: number): ResolvedSolanaAccount | null => {
@@ -683,27 +705,39 @@ function validateJupiterDirectUsdcToSolPrefundInstruction(inputs: {
   const sourceMint =
     layout.sourceMintPosition == null
       ? null
-      : account(layout.sourceMintPosition)?.address ?? null;
+      : (account(layout.sourceMintPosition)?.address ?? null);
   const destinationMint =
     account(layout.destinationMintPosition)?.address ?? null;
 
   if (tokenProgram !== TOKEN_PROGRAM_ID.toBase58()) {
-    throw new Error("deBridge prefund Jupiter route does not use classic SPL Token.");
+    throw new Error(
+      "deBridge prefund Jupiter route does not use classic SPL Token.",
+    );
   }
   if (userTransferAuthority !== inputs.signer) {
-    throw new Error("deBridge prefund Jupiter route authority does not match selected wallet.");
+    throw new Error(
+      "deBridge prefund Jupiter route authority does not match selected wallet.",
+    );
   }
   if (sourceTokenAccount !== inputs.expectedUsdcAta) {
-    throw new Error("deBridge prefund Jupiter route does not debit the selected wallet USDC account.");
+    throw new Error(
+      "deBridge prefund Jupiter route does not debit the selected wallet USDC account.",
+    );
   }
   if (sourceMint && sourceMint !== normalizeSolanaAddress(env.solanaUsdcMint)) {
-    throw new Error("deBridge prefund Jupiter route input mint does not match Solana USDC.");
+    throw new Error(
+      "deBridge prefund Jupiter route input mint does not match Solana USDC.",
+    );
   }
   if (destinationTokenAccount !== inputs.expectedWsolAta) {
-    throw new Error("deBridge prefund Jupiter route does not output to the selected wallet WSOL account.");
+    throw new Error(
+      "deBridge prefund Jupiter route does not output to the selected wallet WSOL account.",
+    );
   }
   if (destinationMint !== SOLANA_WRAPPED_SOL_MINT) {
-    throw new Error("deBridge prefund Jupiter route output mint does not match WSOL.");
+    throw new Error(
+      "deBridge prefund Jupiter route output mint does not match WSOL.",
+    );
   }
 
   return {
@@ -726,7 +760,9 @@ function validateAssociatedWsolAtaCreateIdempotent(inputs: {
     data[0] !== ASSOCIATED_TOKEN_CREATE_IDEMPOTENT_INSTRUCTION ||
     inputs.instruction.accountKeyIndexes.length !== 6
   ) {
-    throw new Error("deBridge prefund associated token instruction is not allowed.");
+    throw new Error(
+      "deBridge prefund associated token instruction is not allowed.",
+    );
   }
 
   const account = (position: number): ResolvedSolanaAccount | null => {
@@ -751,7 +787,9 @@ function validateAssociatedWsolAtaCreateIdempotent(inputs: {
     systemProgram?.address !== SystemProgram.programId.toBase58() ||
     tokenProgram?.address !== TOKEN_PROGRAM_ID.toBase58()
   ) {
-    throw new Error("deBridge prefund associated token instruction does not create the selected wallet WSOL account.");
+    throw new Error(
+      "deBridge prefund associated token instruction does not create the selected wallet WSOL account.",
+    );
   }
 
   return associatedAccount.address;
@@ -784,7 +822,9 @@ function validateSplTokenCloseAccountToSigner(inputs: {
     throw new Error("deBridge prefund close account instruction is malformed.");
   }
   if (destination !== inputs.signer || authority !== inputs.signer) {
-    throw new Error("deBridge prefund close account does not return SOL to selected wallet.");
+    throw new Error(
+      "deBridge prefund close account does not return SOL to selected wallet.",
+    );
   }
 
   return closedAccount;
@@ -794,7 +834,9 @@ function validateSolanaPrefundComputeBudgetInstruction(
   instruction: VersionedTransaction["message"]["compiledInstructions"][number],
 ): void {
   if (instruction.accountKeyIndexes.length > 0) {
-    throw new Error("deBridge prefund ComputeBudget instruction cannot reference accounts.");
+    throw new Error(
+      "deBridge prefund ComputeBudget instruction cannot reference accounts.",
+    );
   }
 
   const data = Buffer.from(instruction.data);
@@ -805,22 +847,30 @@ function validateSolanaPrefundComputeBudgetInstruction(
   const discriminator = data[0];
   if (discriminator === COMPUTE_BUDGET_SET_COMPUTE_UNIT_LIMIT) {
     if (data.length !== 5) {
-      throw new Error("deBridge prefund ComputeBudget limit instruction is malformed.");
+      throw new Error(
+        "deBridge prefund ComputeBudget limit instruction is malformed.",
+      );
     }
     const units = data.readUInt32LE(1);
     if (units > SOLANA_PREFUND_MAX_COMPUTE_UNIT_LIMIT) {
-      throw new Error("deBridge prefund compute unit limit exceeds sponsor cap.");
+      throw new Error(
+        "deBridge prefund compute unit limit exceeds sponsor cap.",
+      );
     }
     return;
   }
 
   if (discriminator === COMPUTE_BUDGET_SET_COMPUTE_UNIT_PRICE) {
     if (data.length !== 9) {
-      throw new Error("deBridge prefund ComputeBudget price instruction is malformed.");
+      throw new Error(
+        "deBridge prefund ComputeBudget price instruction is malformed.",
+      );
     }
     const microLamports = data.readBigUInt64LE(1);
     if (microLamports > SOLANA_PREFUND_MAX_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS) {
-      throw new Error("deBridge prefund compute unit price exceeds sponsor cap.");
+      throw new Error(
+        "deBridge prefund compute unit price exceeds sponsor cap.",
+      );
     }
     return;
   }
@@ -867,14 +917,18 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
         (accountIndex) => accountIndex >= resolvedAccounts.length,
       )
     ) {
-      throw new Error("deBridge prefund transaction references unresolved accounts.");
+      throw new Error(
+        "deBridge prefund transaction references unresolved accounts.",
+      );
     }
 
     const programIdBase58 =
-      getResolvedAccount(resolvedAccounts, instruction.programIdIndex)?.address ??
-      null;
+      getResolvedAccount(resolvedAccounts, instruction.programIdIndex)
+        ?.address ?? null;
     if (!programIdBase58) {
-      throw new Error("deBridge prefund transaction has malformed instruction program.");
+      throw new Error(
+        "deBridge prefund transaction has malformed instruction program.",
+      );
     }
 
     if (programIdBase58 === COMPUTE_BUDGET_PROGRAM_ID) {
@@ -888,7 +942,9 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
 
     if (programIdBase58 === ASSOCIATED_TOKEN_PROGRAM_ID.toBase58()) {
       if (createdWsolAccount) {
-        throw new Error("deBridge prefund transaction creates multiple token accounts.");
+        throw new Error(
+          "deBridge prefund transaction creates multiple token accounts.",
+        );
       }
       createdWsolAccount = validateAssociatedWsolAtaCreateIdempotent({
         instruction,
@@ -911,7 +967,9 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
 
     if (programIdBase58 === TOKEN_PROGRAM_ID.toBase58()) {
       if (closedWsolAccount) {
-        throw new Error("deBridge prefund transaction has multiple token close instructions.");
+        throw new Error(
+          "deBridge prefund transaction has multiple token close instructions.",
+        );
       }
       const closedAccount = validateSplTokenCloseAccountToSigner({
         instruction,
@@ -919,7 +977,9 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
         signer: inputs.signer,
       });
       if (closedAccount !== expectedWsolAta) {
-        throw new Error("deBridge prefund token close does not target the selected wallet WSOL account.");
+        throw new Error(
+          "deBridge prefund token close does not target the selected wallet WSOL account.",
+        );
       }
       closedWsolAccount = closedAccount;
       continue;
@@ -927,17 +987,19 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
 
     if (programIdBase58 === JUPITER_V6_PROGRAM_ID) {
       if (jupiterOutputWsolAccount) {
-        throw new Error("deBridge prefund transaction has multiple Jupiter swap instructions.");
+        throw new Error(
+          "deBridge prefund transaction has multiple Jupiter swap instructions.",
+        );
       }
       const decoded = validateJupiterDirectUsdcToSolPrefundInstruction({
-          instruction,
-          resolvedAccounts,
-          signer: inputs.signer,
-          amountInRaw: inputs.amountInRaw,
-          minOutLamports: inputs.minOutLamports,
-          envelopeOutLamports: inputs.envelopeOutLamports,
-          expectedUsdcAta,
-          expectedWsolAta,
+        instruction,
+        resolvedAccounts,
+        signer: inputs.signer,
+        amountInRaw: inputs.amountInRaw,
+        minOutLamports: inputs.minOutLamports,
+        envelopeOutLamports: inputs.envelopeOutLamports,
+        expectedUsdcAta,
+        expectedWsolAta,
       });
       jupiterOutputWsolAccount = decoded.outputWsolAccount;
       quotedOutLamports = decoded.quotedOutLamports;
@@ -946,30 +1008,44 @@ function validateDebridgeSolanaPrefundTransactionShape(inputs: {
       continue;
     }
 
-    throw new Error("deBridge prefund transaction contains an unsupported program instruction.");
+    throw new Error(
+      "deBridge prefund transaction contains an unsupported program instruction.",
+    );
   }
 
   if (!jupiterOutputWsolAccount) {
-    throw new Error("deBridge prefund transaction does not contain an allowed Jupiter prefund instruction.");
+    throw new Error(
+      "deBridge prefund transaction does not contain an allowed Jupiter prefund instruction.",
+    );
   }
   if (createdWsolAccount && createdWsolAccount !== jupiterOutputWsolAccount) {
-    throw new Error("deBridge prefund transaction creates a different WSOL account than Jupiter outputs to.");
+    throw new Error(
+      "deBridge prefund transaction creates a different WSOL account than Jupiter outputs to.",
+    );
   }
   if (!closedWsolAccount || closedWsolAccount !== jupiterOutputWsolAccount) {
-    throw new Error("deBridge prefund transaction does not close WSOL back to selected wallet.");
+    throw new Error(
+      "deBridge prefund transaction does not close WSOL back to selected wallet.",
+    );
   }
   if (createdWsolAccount && closedWsolAccount !== createdWsolAccount) {
-    throw new Error("deBridge prefund transaction does not close the created WSOL account.");
+    throw new Error(
+      "deBridge prefund transaction does not close the created WSOL account.",
+    );
   }
   if (
     quotedOutLamports == null ||
     decodedMinOutLamports == null ||
     slippageBps == null
   ) {
-    throw new Error("deBridge prefund transaction does not include decoded Jupiter output.");
+    throw new Error(
+      "deBridge prefund transaction does not include decoded Jupiter output.",
+    );
   }
   if (quotedOutLamports > inputs.maxOutLamports) {
-    throw new Error("SOL prefund transaction output exceeds the configured top-up cap.");
+    throw new Error(
+      "SOL prefund transaction output exceeds the configured top-up cap.",
+    );
   }
 
   return { quotedOutLamports, decodedMinOutLamports, slippageBps };
@@ -1087,16 +1163,19 @@ async function getSolanaPrefundReadiness(inputs: {
   const needsPrefund =
     !marketBlocksOperation && solBalanceLamports < floor.minSolLamports;
   const prefundAvailable =
-    needsPrefund && prefundPolicyEnabled && usdcAmount > 0n && !rateLimit.limited;
+    needsPrefund &&
+    prefundPolicyEnabled &&
+    usdcAmount > 0n &&
+    !rateLimit.limited;
   const blockingReason = marketBlocksOperation
     ? "market_not_initialized"
     : needsPrefund && !prefundPolicyEnabled
       ? "prefund_disabled"
       : needsPrefund && rateLimit.limited
         ? "prefund_rate_limited"
-      : needsPrefund && usdcAmount <= 0n
-        ? "insufficient_usdc_for_prefund"
-        : null;
+        : needsPrefund && usdcAmount <= 0n
+          ? "insufficient_usdc_for_prefund"
+          : null;
 
   return {
     floor,
@@ -1151,7 +1230,9 @@ function validateDebridgeSolanaPrefundPayload(inputs: {
 
   const envelopeOutLamports = readBridgeTokenAmountRaw(inputs.payload.tokenOut);
   if (!envelopeOutLamports || envelopeOutLamports <= 0n) {
-    throw new Error("deBridge prefund response did not include a SOL output amount.");
+    throw new Error(
+      "deBridge prefund response did not include a SOL output amount.",
+    );
   }
   if (envelopeOutLamports < inputs.minOutLamports) {
     throw new Error("SOL prefund amount is below the required minimum.");
@@ -1162,22 +1243,30 @@ function validateDebridgeSolanaPrefundPayload(inputs: {
 
   const upstreamTxData = readDebridgeTxData(inputs.payload);
   if (!upstreamTxData) {
-    throw new Error("deBridge prefund response did not include a Solana transaction.");
+    throw new Error(
+      "deBridge prefund response did not include a Solana transaction.",
+    );
   }
   const parsed = parseSerializedSolanaTransactionBase64(upstreamTxData);
   if (!parsed) {
-    throw new Error("deBridge prefund response did not include a valid serialized Solana transaction.");
+    throw new Error(
+      "deBridge prefund response did not include a valid serialized Solana transaction.",
+    );
   }
 
   const requiredSigners = getTransactionRequiredSigners(parsed.transaction);
   if (requiredSigners.length !== 1 || requiredSigners[0] !== inputs.signer) {
-    throw new Error("deBridge prefund transaction signer does not match selected wallet.");
+    throw new Error(
+      "deBridge prefund transaction signer does not match selected wallet.",
+    );
   }
 
   const feePayer =
     parsed.transaction.message.staticAccountKeys[0]?.toBase58() ?? null;
   if (feePayer !== inputs.signer) {
-    throw new Error("deBridge prefund transaction fee payer does not match selected wallet.");
+    throw new Error(
+      "deBridge prefund transaction fee payer does not match selected wallet.",
+    );
   }
 
   const decoded = validateDebridgeSolanaPrefundTransactionShape({
@@ -1265,7 +1354,9 @@ function summarizeDebridgeSolanaPrefundRouteAttempt(inputs: {
       return {
         index,
         programId,
-        dataPrefixHex: Buffer.from(instruction.data).toString("hex").slice(0, 16),
+        dataPrefixHex: Buffer.from(instruction.data)
+          .toString("hex")
+          .slice(0, 16),
         dataLength: instruction.data.length,
         accountCount: instruction.accountKeyIndexes.length,
       };
@@ -1287,9 +1378,9 @@ function isRetryableSolanaPrefundRouteError(error: unknown): boolean {
   );
 }
 
-function getSolanaPrefundRouteDebug(error: unknown):
-  | { attempts: SolanaPrefundRouteAttemptDebug[] }
-  | undefined {
+function getSolanaPrefundRouteDebug(
+  error: unknown,
+): { attempts: SolanaPrefundRouteAttemptDebug[] } | undefined {
   return error instanceof SolanaPrefundRouteSelectionError
     ? error.routeDebug
     : undefined;
@@ -1309,7 +1400,9 @@ function resolveSolanaPrefundTopUpBounds(inputs: {
       ? inputs.maxTopUpLamports
       : inputs.targetSolLamports;
   if (maxOutLamports < minOutLamports) {
-    throw new Error("Solana prefund maximum is below this operation's minimum.");
+    throw new Error(
+      "Solana prefund maximum is below this operation's minimum.",
+    );
   }
 
   return { minOutLamports, maxOutLamports };
@@ -1356,19 +1449,25 @@ function buildSolanaPrefundLimitKey(signer: string): string {
   return `solana-prefund:${SOLANA_PREFUND_RATE_LIMIT_VERSION}:limit:${digest}`;
 }
 
-function getMemoryPrefundRateLimitState(
-  signer: string,
-): { limited: boolean; retryAfterSec: number | null } {
+function getMemoryPrefundRateLimitState(signer: string): {
+  limited: boolean;
+  retryAfterSec: number | null;
+} {
   const now = Date.now();
   const limitKey = buildSolanaPrefundLimitKey(signer);
   const limit = solanaPrefundLimitMemory.get(limitKey);
-  if (limit && limit.expiresAt > now && limit.count >= SOLANA_PREFUND_DAILY_LIMIT) {
+  if (
+    limit &&
+    limit.expiresAt > now &&
+    limit.count >= SOLANA_PREFUND_DAILY_LIMIT
+  ) {
     return {
       limited: true,
       retryAfterSec: Math.ceil((limit.expiresAt - now) / 1000),
     };
   }
-  if (limit && limit.expiresAt <= now) solanaPrefundLimitMemory.delete(limitKey);
+  if (limit && limit.expiresAt <= now)
+    solanaPrefundLimitMemory.delete(limitKey);
   return { limited: false, retryAfterSec: null };
 }
 
@@ -1377,10 +1476,7 @@ function recordMemoryPrefundAttempt(signer: string): void {
   const limitKey = buildSolanaPrefundLimitKey(signer);
   const current = solanaPrefundLimitMemory.get(limitKey);
   solanaPrefundLimitMemory.set(limitKey, {
-    count:
-      current && current.expiresAt > now
-        ? current.count + 1
-        : 1,
+    count: current && current.expiresAt > now ? current.count + 1 : 1,
     expiresAt:
       current && current.expiresAt > now
         ? current.expiresAt
@@ -1761,7 +1857,9 @@ async function validateEmbeddedSolanaSponsoredLossCloseAtExecute(inputs: {
     }
     const transaction = readEmbeddedSolanaPreparedTransaction(request);
     if (!transaction) {
-      throw new Error("Kalshi loss close transaction is missing serialized transaction data.");
+      throw new Error(
+        "Kalshi loss close transaction is missing serialized transaction data.",
+      );
     }
     await validateKalshiLossCloseSponsoredTransaction({
       pool,
@@ -1823,9 +1921,9 @@ async function prepareSolanaPrefundRequest(inputs: {
         ? "Solana prefund is disabled."
         : readiness.blockingReason === "prefund_rate_limited"
           ? "SOL prefund is temporarily rate limited. Try again later."
-        : readiness.blockingReason === "insufficient_usdc_for_prefund"
-          ? "Insufficient Solana USDC for SOL prefund."
-          : "Solana prefund is not available for this operation.",
+          : readiness.blockingReason === "insufficient_usdc_for_prefund"
+            ? "Insufficient Solana USDC for SOL prefund."
+            : "Solana prefund is not available for this operation.",
     );
   }
   if (!readiness.needsPrefund) {
@@ -1849,7 +1947,11 @@ async function prepareSolanaPrefundRequest(inputs: {
   let lastRouteError: Error | null = null;
   const routeDebugAttempts: SolanaPrefundRouteAttemptDebug[] = [];
 
-  for (let attempt = 1; attempt <= SOLANA_PREFUND_ROUTE_ATTEMPTS; attempt += 1) {
+  for (
+    let attempt = 1;
+    attempt <= SOLANA_PREFUND_ROUTE_ATTEMPTS;
+    attempt += 1
+  ) {
     const upstream = await debridgeRequest({
       baseUrl,
       timeoutMs: 20_000,
@@ -1968,15 +2070,23 @@ async function validateSolanaPrefundPreparedEntryForExecute(inputs: {
     throw new Error("Prepared Solana prefund expired. Refresh and try again.");
   }
   if (inputs.entry.userId !== inputs.user.id) {
-    throw new Error("Prepared Solana prefund does not match the authenticated user.");
+    throw new Error(
+      "Prepared Solana prefund does not match the authenticated user.",
+    );
   }
   if (inputs.entry.signer !== inputs.signer) {
-    throw new Error("Prepared Solana prefund does not match the selected wallet.");
+    throw new Error(
+      "Prepared Solana prefund does not match the selected wallet.",
+    );
   }
   if (!inputs.signedRequestIds.includes(inputs.entry.request.id)) {
-    throw new Error("Solana prefund signature does not match the prepared request.");
+    throw new Error(
+      "Solana prefund signature does not match the prepared request.",
+    );
   }
-  const requestDigest = getPreparedSolanaTransactionDigest(inputs.entry.request);
+  const requestDigest = getPreparedSolanaTransactionDigest(
+    inputs.entry.request,
+  );
   if (!requestDigest || requestDigest !== inputs.entry.transactionDigest) {
     throw new Error("Prepared Solana prefund transaction digest changed.");
   }
@@ -2025,7 +2135,9 @@ async function validateSolanaPrefundPreparedEntryForExecute(inputs: {
     readiness.solBalanceLamports + decodedMinOutLamports <
     readiness.floor.minSolLamports
   ) {
-    throw new Error("Prepared Solana prefund no longer reaches the required SOL minimum.");
+    throw new Error(
+      "Prepared Solana prefund no longer reaches the required SOL minimum.",
+    );
   }
 
   const topUpBounds = resolveSolanaPrefundTopUpBounds({
@@ -2038,10 +2150,14 @@ async function validateSolanaPrefundPreparedEntryForExecute(inputs: {
     throw new Error("Solana wallet already has enough SOL for this operation.");
   }
   if (decodedMinOutLamports < topUpBounds.minOutLamports) {
-    throw new Error("Prepared Solana prefund no longer reaches the required SOL minimum.");
+    throw new Error(
+      "Prepared Solana prefund no longer reaches the required SOL minimum.",
+    );
   }
   if (estimatedOutLamports > topUpBounds.maxOutLamports) {
-    throw new Error("Prepared Solana prefund amount exceeds the required top-up.");
+    throw new Error(
+      "Prepared Solana prefund amount exceeds the required top-up.",
+    );
   }
 }
 
@@ -2101,7 +2217,10 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           walletAddress,
           operation,
           solBalanceLamports: readiness.solBalanceLamports.toString(),
-          solBalance: formatUiAmount(readiness.solBalanceLamports, SOL_DECIMALS),
+          solBalance: formatUiAmount(
+            readiness.solBalanceLamports,
+            SOL_DECIMALS,
+          ),
           usdcBalanceRaw: readiness.usdcAmount.toString(),
           usdcBalance: formatUiAmount(
             readiness.usdcAmount,
@@ -2302,7 +2421,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               signatures: request.body.signedRequests,
             });
             if (!signatures[0]?.trim()) {
-              throw new Error("Solana prefund did not return a transaction hash.");
+              throw new Error(
+                "Solana prefund did not return a transaction hash.",
+              );
             }
             await deleteCachedSolanaPrefundPreparedRequest({
               signer,

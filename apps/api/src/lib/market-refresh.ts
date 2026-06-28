@@ -60,7 +60,8 @@ function collectMarketIdsFromPayloadValue(
 
   const record = value as Record<string, unknown>;
   for (const field of input.fields) {
-    const id = typeof record[field] === "string" ? normalizeId(record[field]) : null;
+    const id =
+      typeof record[field] === "string" ? normalizeId(record[field]) : null;
     if (id) input.marketIds.add(id);
     if (input.marketIds.size >= input.maxMarkets) return;
   }
@@ -80,7 +81,9 @@ export function collectMarketRefreshMarketIdsFromPayload(
 ): string[] {
   const maxMarkets = Math.max(
     0,
-    Math.trunc(options.maxMarkets ?? DEFAULT_VISIBLE_MARKET_REFRESH_MAX_MARKETS),
+    Math.trunc(
+      options.maxMarkets ?? DEFAULT_VISIBLE_MARKET_REFRESH_MAX_MARKETS,
+    ),
   );
   if (maxMarkets <= 0) return [];
 

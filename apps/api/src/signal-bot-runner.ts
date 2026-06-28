@@ -98,7 +98,9 @@ export async function runSignalBotRunner(): Promise<void> {
     await keepAliveDisabled();
   }
   if (!config.token) {
-    throw new Error("HUNCH_SIGNAL_BOT_TOKEN is required when signal bot is enabled");
+    throw new Error(
+      "HUNCH_SIGNAL_BOT_TOKEN is required when signal bot is enabled",
+    );
   }
   const redisUrl = requiredEnv("REDIS_URL");
   if (config.adminUserIds.size === 0) {

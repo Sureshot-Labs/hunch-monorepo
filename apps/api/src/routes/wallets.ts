@@ -146,7 +146,10 @@ function resolvePolymarketFunderExecutionKind(
   if (candidate.source === "safe_proxy") return "safe";
   if (candidate.source === "stored") {
     if (candidate.signatureType === 3) return "deposit_wallet";
-    if (candidate.signatureType === 2 && candidate.contractKind === "SAFE_LIKE") {
+    if (
+      candidate.signatureType === 2 &&
+      candidate.contractKind === "SAFE_LIKE"
+    ) {
       return "safe";
     }
     if (candidate.signatureType === 1) return "magic";
@@ -229,10 +232,7 @@ function addLockedCollateralFields<T extends Record<string, unknown>>(
     lockedRaw: normalizedLockedRaw.toString(),
     locked: ethers.formatUnits(normalizedLockedRaw, decimals),
     availableAfterLockedRaw: availableAfterLockedRaw.toString(),
-    availableAfterLocked: ethers.formatUnits(
-      availableAfterLockedRaw,
-      decimals,
-    ),
+    availableAfterLocked: ethers.formatUnits(availableAfterLockedRaw, decimals),
   };
 }
 
@@ -1370,8 +1370,7 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
               if (venueCredentials?.error) {
                 throw venueCredentials.error;
               }
-              const polymarketCreds =
-                venueCredentials?.polymarketCreds ?? null;
+              const polymarketCreds = venueCredentials?.polymarketCreds ?? null;
               const limitlessCreds = venueCredentials?.limitlessCreds ?? null;
               const funder = polymarketCreds?.funderAddress ?? walletAddress;
               const funderSource = polymarketCreds?.funderAddress

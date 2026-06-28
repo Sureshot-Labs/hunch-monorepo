@@ -283,8 +283,7 @@ const tests: TestCase[] = [
           return {
             rows: [
               {
-                funder_address:
-                  "0xdef0000000000000000000000000000000000000",
+                funder_address: "0xdef0000000000000000000000000000000000000",
                 funder_updated_at: new Date("2026-01-04T00:00:00.000Z"),
               },
             ],
@@ -423,18 +422,17 @@ const tests: TestCase[] = [
       const profiles = PrivyService.classifyWallets(user);
       assert.equal(
         profiles.find(
-          profile =>
-            profile.address ===
-            "0x975c31c0cbcf8da36daba7a0d470bcf4c43377e5"
+          (profile) =>
+            profile.address === "0x975c31c0cbcf8da36daba7a0d470bcf4c43377e5",
         )?.source,
-        "embedded"
+        "embedded",
       );
       assert.equal(
         profiles.find(
-          profile =>
-            profile.address === "5zbXV4BrhBinAqyzv18rJod54WgK3Pfqb7m3XrHU69Fj"
+          (profile) =>
+            profile.address === "5zbXV4BrhBinAqyzv18rJod54WgK3Pfqb7m3XrHU69Fj",
         )?.source,
-        "embedded"
+        "embedded",
       );
     },
   },

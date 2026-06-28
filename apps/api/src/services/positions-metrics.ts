@@ -603,11 +603,7 @@ async function fetchPolymarketFills(
   if (inputs.tokenIds.length === 0) return [];
   const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
-  const params: PgParams = [
-    inputs.userId,
-    walletAddress,
-    inputs.tokenIds,
-  ];
+  const params: PgParams = [inputs.userId, walletAddress, inputs.tokenIds];
 
   const { rows } = await db.query<{
     token_id: string | null;

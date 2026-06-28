@@ -157,7 +157,9 @@ export function mapMarketsByTokenRows(
           ? "NO"
           : row.side;
     const resolvedOutcomePct =
-      row.resolved_outcome_pct != null ? Number(row.resolved_outcome_pct) : null;
+      row.resolved_outcome_pct != null
+        ? Number(row.resolved_outcome_pct)
+        : null;
 
     return {
       tokenId: row.token_id,

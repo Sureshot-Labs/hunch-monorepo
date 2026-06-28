@@ -106,7 +106,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
-function decimalToScaled(value: string | number | null | undefined): bigint | null {
+function decimalToScaled(
+  value: string | number | null | undefined,
+): bigint | null {
   if (value == null) return null;
   const text = String(value).trim();
   if (!/^\d+(\.\d+)?$/.test(text)) return null;
@@ -124,7 +126,9 @@ function multiplyDecimalToMicroFloor(
   const leftScaled = decimalToScaled(left);
   const rightScaled = decimalToScaled(right);
   if (leftScaled == null || rightScaled == null) return 0n;
-  return (leftScaled * rightScaled * USDC_SCALE) / (DECIMAL_SCALE * DECIMAL_SCALE);
+  return (
+    (leftScaled * rightScaled * USDC_SCALE) / (DECIMAL_SCALE * DECIMAL_SCALE)
+  );
 }
 
 export function calculatePolymarketBuilderFeeRaw(
@@ -360,8 +364,11 @@ export async function resolvePolymarketFeeCollectionMode(
 export async function resolvePolymarketFeePolicySnapshot(
   pool: Pool,
 ): Promise<PolymarketFeePolicySnapshot> {
-  const { config: localBuilderConfig, feePolicyId, legacyFeeBps } =
-    await resolveLocalPolymarketBuilderFeeConfig(pool);
+  const {
+    config: localBuilderConfig,
+    feePolicyId,
+    legacyFeeBps,
+  } = await resolveLocalPolymarketBuilderFeeConfig(pool);
   let builderConfig: PolymarketBuilderFeeConfig = localBuilderConfig;
   if (localBuilderConfig.active) {
     const live = await fetchLivePolymarketBuilderRates(
@@ -464,7 +471,8 @@ export function normalizePolymarketFeePolicySnapshot(
         ? value.builderEnabled
         : collectionMode === "builder",
     legacyFeeBps: clampBps(Number(value.legacyFeeBps ?? 0), 10_000),
-    feePolicyId: typeof value.feePolicyId === "string" ? value.feePolicyId : null,
+    feePolicyId:
+      typeof value.feePolicyId === "string" ? value.feePolicyId : null,
     capturedAt:
       typeof value.capturedAt === "string"
         ? value.capturedAt
@@ -486,12 +494,14 @@ export function validatePolymarketOrderBuilderCodeForConfig(
   if (expected === ZERO_BYTES32) {
     return {
       ok: false,
-      error: "Order builder code must be zero when Polymarket builder fees are disabled",
+      error:
+        "Order builder code must be zero when Polymarket builder fees are disabled",
     };
   }
   return {
     ok: false,
-    error: "Order builder code does not match the configured Polymarket builder policy",
+    error:
+      "Order builder code does not match the configured Polymarket builder policy",
   };
 }
 
@@ -515,7 +525,9 @@ export function buildPolymarketBuilderFeeAccrual(
   input: PolymarketBuilderFeeAccrualInput,
   fallbackConfig: PolymarketBuilderFeeConfig = getPolymarketBuilderFeeConfig(),
 ): VenueFeeAccrualInput | null {
-  const snapshot = normalizePolymarketFeePolicySnapshot(input.feePolicySnapshot);
+  const snapshot = normalizePolymarketFeePolicySnapshot(
+    input.feePolicySnapshot,
+  );
   if (snapshot && snapshot.collectionMode !== "builder") return null;
   const snapshotConfig = buildPolymarketBuilderFeeConfigFromSnapshot(snapshot);
   const config = snapshotConfig ?? fallbackConfig;
@@ -626,7 +638,12 @@ function verifiedPolymarketNotionalRaw(
 export async function verifyPolymarketBuilderFeeAccruals(
   pool: Pool,
   options: { limit?: number } = {},
-): Promise<{ checked: number; verified: number; failed: number; skipped: number }> {
+): Promise<{
+  checked: number;
+  verified: number;
+  failed: number;
+  skipped: number;
+}> {
   const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 250));
   const { rows } = await pool.query<BuilderFeeAccrualRow>(
     `
@@ -690,7 +707,9 @@ export async function verifyPolymarketBuilderFeeAccruals(
       }
 
       const matching = receipt.logs
-        .filter((log) => exchangeAddresses.has(normalizeAddress(log.address).toLowerCase()))
+        .filter((log) =>
+          exchangeAddresses.has(normalizeAddress(log.address).toLowerCase()),
+        )
         .map(parseOrderFilledLog)
         .find(
           (log) =>
@@ -788,7 +807,12 @@ export async function unlockPolymarketBuilderFeeAccruals(
     dryRun?: boolean;
     assumeRewardsChainLock?: boolean;
   } = {},
-): Promise<{ considered: number; unlocked: number; skipped: number; budgetMicro: string }> {
+): Promise<{
+  considered: number;
+  unlocked: number;
+  skipped: number;
+  budgetMicro: string;
+}> {
   return unlockVenueFeeAccruals(pool, {
     chainId: POLYGON_CHAIN_ID,
     venue: POLYMARKET_VENUE,

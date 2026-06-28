@@ -1530,7 +1530,9 @@ async function main() {
         fetchSportsFixturesByKeys: async () => new Map(),
         refreshSportsFixtures: async () => {
           fixtureRefreshes += 1;
-          throw new Error("regular FIFA page should not sync-refresh missing fixtures");
+          throw new Error(
+            "regular FIFA page should not sync-refresh missing fixtures",
+          );
         },
       });
       try {

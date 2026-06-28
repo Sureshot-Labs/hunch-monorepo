@@ -674,9 +674,7 @@ export async function runRewardsTreasurySweep(
         sweepableAfterFeeAccrualReserve: usdcMicroToDecimalString(
           sweepableAfterFeeAccrualReserveMicro,
         ),
-        feeAccrualReserve: usdcMicroToDecimalString(
-          feeAccrualReserveMicro,
-        ),
+        feeAccrualReserve: usdcMicroToDecimalString(feeAccrualReserveMicro),
         shouldSweep,
         reason,
         executed: false,

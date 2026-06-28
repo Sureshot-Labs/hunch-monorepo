@@ -1279,7 +1279,9 @@ async function main() {
         true,
       );
       assert.equal(
-        identityBody.items.some((item) => item.walletId === ensIdentityWalletId),
+        identityBody.items.some(
+          (item) => item.walletId === ensIdentityWalletId,
+        ),
         true,
       );
       assert.equal(

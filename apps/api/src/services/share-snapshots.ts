@@ -21,7 +21,8 @@ import {
 import { normalizeReferralCode } from "./rewards.js";
 
 const SHARE_ID_RANDOM_BYTES = 17;
-const SHARE_ID_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const SHARE_ID_BASE62 =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 export class ShareSnapshotError extends Error {
   constructor(
@@ -87,7 +88,8 @@ function randomBase62(length: number): string {
   while (value.length < length) {
     for (const byte of randomBytes(SHARE_ID_RANDOM_BYTES)) {
       if (value.length >= length) break;
-      const max = Math.floor(256 / SHARE_ID_BASE62.length) * SHARE_ID_BASE62.length;
+      const max =
+        Math.floor(256 / SHARE_ID_BASE62.length) * SHARE_ID_BASE62.length;
       if (byte >= max) continue;
       value += SHARE_ID_BASE62[byte % SHARE_ID_BASE62.length];
     }
@@ -119,7 +121,10 @@ function percentToBasisPoints(value: number | null): number | null {
   return Math.round(value * 100);
 }
 
-function ratioToBasisPoints(numerator: number, denominator: number): number | null {
+function ratioToBasisPoints(
+  numerator: number,
+  denominator: number,
+): number | null {
   if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
   if (denominator <= 0) return null;
   return Math.round((numerator / denominator) * 10_000);
@@ -135,12 +140,17 @@ function positionPnlPercentBasisPoints(inputs: {
   return ratioToBasisPoints(inputs.totalPnl, inputs.costBasis);
 }
 
-function normalizeOutcome(value: string | null | undefined): "YES" | "NO" | null {
+function normalizeOutcome(
+  value: string | null | undefined,
+): "YES" | "NO" | null {
   const normalized = value?.trim().toUpperCase();
   return normalized === "YES" || normalized === "NO" ? normalized : null;
 }
 
-function decimalString(value: number | null, maxFractionDigits = 6): string | null {
+function decimalString(
+  value: number | null,
+  maxFractionDigits = 6,
+): string | null {
   if (value == null || !Number.isFinite(value)) return null;
   const fixed = value.toFixed(maxFractionDigits);
   return fixed.replace(/\.?0+$/, "");
@@ -236,9 +246,7 @@ function buildPublicPositionSnapshot(
     averagePrice != null && size > 0 ? averagePrice * size : null;
   const isFlatPosition = row.side === "FLAT" || size <= 0;
   const positionStatus =
-    !isFlatPosition && !isResolved
-      ? ("open" as const)
-      : ("closed" as const);
+    !isFlatPosition && !isResolved ? ("open" as const) : ("closed" as const);
   const currentPrice = resolveCurrentPrice(row);
 
   return {
@@ -284,10 +292,9 @@ async function resolveShareReferralCode(
   inputs: { userId: string; referralCode?: string | null },
 ): Promise<string | null> {
   const supplied = inputs.referralCode !== undefined;
-  const rawCode =
-    supplied
-      ? inputs.referralCode
-      : await fetchUserReferralCode(pool, inputs.userId);
+  const rawCode = supplied
+    ? inputs.referralCode
+    : await fetchUserReferralCode(pool, inputs.userId);
   if (rawCode == null || rawCode.trim() === "") return null;
 
   const normalized = normalizeReferralCode(rawCode);

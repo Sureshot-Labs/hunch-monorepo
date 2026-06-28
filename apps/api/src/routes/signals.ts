@@ -736,7 +736,8 @@ async function fetchSignals(params: {
   );
   const producerType = params.producerType ?? "map_signals";
   const includeTraders =
-    producerType === "holder_research" && (params.query.includeTraders ?? false);
+    producerType === "holder_research" &&
+    (params.query.includeTraders ?? false);
   const traderLimit = Math.min(10, Math.max(1, params.query.traderLimit ?? 3));
 
   const statusFilter = params.query.status ?? "active";
@@ -1056,9 +1057,7 @@ async function fetchSignals(params: {
         image: candidate.image,
         icon: candidate.icon,
       })),
-      ...(includeTraders
-        ? { traders: tradersByNoteId.get(row.id) ?? [] }
-        : {}),
+      ...(includeTraders ? { traders: tradersByNoteId.get(row.id) ?? [] } : {}),
     };
   });
 

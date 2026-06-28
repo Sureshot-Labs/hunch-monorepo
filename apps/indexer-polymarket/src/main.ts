@@ -44,8 +44,7 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       backlog: Math.max(acc.backlog, result.backlog),
       freshSkipped: acc.freshSkipped + (result.freshSkipped ?? 0),
       stale: acc.stale + (result.stale ?? 0),
-      marketRefreshed:
-        acc.marketRefreshed + (result.marketRefreshed ?? 0),
+      marketRefreshed: acc.marketRefreshed + (result.marketRefreshed ?? 0),
       topRefreshed: acc.topRefreshed + (result.topRefreshed ?? 0),
       httpFallback: acc.httpFallback + (result.httpFallback ?? 0),
       claimedBySide: {

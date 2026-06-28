@@ -6,9 +6,7 @@ import {
   type MarketSegment,
   type MarketType,
 } from "./market-type-classifier.js";
-import {
-  buildSnapshotDeltaTrackableActivitySql,
-} from "./wallet-intel-market-eligibility.js";
+import { buildSnapshotDeltaTrackableActivitySql } from "./wallet-intel-market-eligibility.js";
 import {
   NET_SHARES_EPSILON,
   resolveApproxYesMarkPrice,
@@ -200,9 +198,11 @@ export async function loadWalletMarketSegmentMetricsMap(
     periodDays?: number;
   },
 ): Promise<Map<string, WalletMarketSegmentMetric>> {
-  return loadWalletClassifiedMetricsMap(client, inputs, "marketSegment") as Promise<
-    Map<string, WalletMarketSegmentMetric>
-  >;
+  return loadWalletClassifiedMetricsMap(
+    client,
+    inputs,
+    "marketSegment",
+  ) as Promise<Map<string, WalletMarketSegmentMetric>>;
 }
 
 export async function loadWalletMarketTaxonomyMetricsMaps(
@@ -487,7 +487,9 @@ function buildWalletClassifiedMetricsMapFromRows(
       }
       const metricMarketType =
         marketTypeByClass.get(marketClass) ??
-        (classification === "marketType" ? (marketClass as MarketType) : "other");
+        (classification === "marketType"
+          ? (marketClass as MarketType)
+          : "other");
       metrics.set(keyFor(row.walletId, marketClass), {
         walletId: row.walletId,
         marketType: metricMarketType,

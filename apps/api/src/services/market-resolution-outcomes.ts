@@ -105,7 +105,9 @@ function polymarketOutcomePricesValue(
 export function resolvePolymarketGammaOutcome(
   record: Record<string, unknown>,
 ): SafeResolutionOutcome {
-  const prices = readOutcomePrices(record.outcomePrices ?? record.outcome_prices);
+  const prices = readOutcomePrices(
+    record.outcomePrices ?? record.outcome_prices,
+  );
   if (!prices) return EMPTY_OUTCOME;
 
   const [yes, no] = prices;
@@ -197,5 +199,7 @@ export function resolveDflowOutcome(
 export function hasSafeResolutionOutcome(
   outcome: SafeResolutionOutcome,
 ): boolean {
-  return outcome.resolvedOutcome !== null || outcome.resolvedOutcomePct !== null;
+  return (
+    outcome.resolvedOutcome !== null || outcome.resolvedOutcomePct !== null
+  );
 }

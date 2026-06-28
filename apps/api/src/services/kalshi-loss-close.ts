@@ -82,7 +82,9 @@ export function parseKalshiLossCloseTransactionTokenId(
   if (!requestId.startsWith(KALSHI_LOSS_CLOSE_TRANSACTION_ID_PREFIX)) {
     return null;
   }
-  const tokenId = requestId.slice(KALSHI_LOSS_CLOSE_TRANSACTION_ID_PREFIX.length);
+  const tokenId = requestId.slice(
+    KALSHI_LOSS_CLOSE_TRANSACTION_ID_PREFIX.length,
+  );
   return tokenId.trim().length > 0 ? tokenId : null;
 }
 
@@ -414,7 +416,9 @@ export async function validateKalshiLossCloseSponsoredTransaction(inputs: {
 
   const feePayer = transaction.message.staticAccountKeys[0]?.toBase58() ?? null;
   if (feePayer !== walletAddress) {
-    throw new Error("Kalshi loss close fee payer does not match selected wallet.");
+    throw new Error(
+      "Kalshi loss close fee payer does not match selected wallet.",
+    );
   }
 
   const expectedProgram = candidate.tokenProgram.toBase58();
@@ -471,7 +475,9 @@ export async function validateKalshiLossCloseSponsoredTransaction(inputs: {
       continue;
     }
 
-    throw new Error("Kalshi loss close transaction has unsupported instruction.");
+    throw new Error(
+      "Kalshi loss close transaction has unsupported instruction.",
+    );
   }
 
   if (!sawClose) {

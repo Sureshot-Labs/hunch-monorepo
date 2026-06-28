@@ -1,6 +1,8 @@
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
-export function isEvmAddress(value: string | null | undefined): value is string {
+export function isEvmAddress(
+  value: string | null | undefined,
+): value is string {
   return typeof value === "string" && EVM_ADDRESS_RE.test(value.trim());
 }
 

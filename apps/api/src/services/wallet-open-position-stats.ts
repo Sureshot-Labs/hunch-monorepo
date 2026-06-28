@@ -293,7 +293,10 @@ export async function loadWalletOpenPositionStatsPreferRollupMap(
   });
   if (missingWalletIds.length === 0) return rollup;
 
-  const fallback = await loadWalletOpenPositionStatsMap(client, missingWalletIds);
+  const fallback = await loadWalletOpenPositionStatsMap(
+    client,
+    missingWalletIds,
+  );
   for (const [walletId, stats] of fallback.entries()) {
     rollup.set(walletId, stats);
   }

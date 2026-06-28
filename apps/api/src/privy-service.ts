@@ -250,9 +250,7 @@ function normalizeTypedDataTypes(
 
 function readWalletType(record: UnknownRecord): PrivyWalletType | null {
   const chainType = readString(record, "chainType", "chain_type");
-  return chainType === "ethereum" || chainType === "solana"
-    ? chainType
-    : null;
+  return chainType === "ethereum" || chainType === "solana" ? chainType : null;
 }
 
 function readLinkedAccounts(privyUser: PrivyUser): unknown[] {
@@ -339,9 +337,10 @@ export class PrivyService {
       walletApi: {
         ethereum: {
           async sendTransaction(input) {
-            return await privyClient.wallets().ethereum().sendTransaction(
-              requireWalletId(input.walletId),
-              {
+            return await privyClient
+              .wallets()
+              .ethereum()
+              .sendTransaction(requireWalletId(input.walletId), {
                 address: input.address,
                 caip2: input.caip2,
                 sponsor: input.sponsor,
@@ -349,13 +348,13 @@ export class PrivyService {
                   transaction: normalizePrivyTransaction(input.transaction),
                 },
                 ...(authorization_context ? { authorization_context } : {}),
-              },
-            );
+              });
           },
           async signTypedData(input) {
-            return await privyClient.wallets().ethereum().signTypedData(
-              requireWalletId(input.walletId),
-              {
+            return await privyClient
+              .wallets()
+              .ethereum()
+              .signTypedData(requireWalletId(input.walletId), {
                 address: input.address,
                 params: {
                   typed_data: {
@@ -366,8 +365,7 @@ export class PrivyService {
                   },
                 },
                 ...(authorization_context ? { authorization_context } : {}),
-              },
-            );
+              });
           },
         },
       },

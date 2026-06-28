@@ -210,8 +210,9 @@ function createMockDb(options: MockDbOptions): MockDb {
                 return false;
               }
               if (
-                (bridgeOrder.dstToken ?? basePayload.asset.address).toLowerCase() !==
-                dstToken.toLowerCase()
+                (
+                  bridgeOrder.dstToken ?? basePayload.asset.address
+                ).toLowerCase() !== dstToken.toLowerCase()
               ) {
                 return false;
               }

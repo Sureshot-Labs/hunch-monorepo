@@ -138,7 +138,8 @@ test("event mapping keeps active Polymarket events open after endDate", () => {
   const event = {
     id: "31876",
     title: "Netherlands vs Japan",
-    description: "A Polymarket event that can still accept orders after endDate.",
+    description:
+      "A Polymarket event that can still accept orders after endDate.",
     category: "sports",
     active: true,
     closed: false,

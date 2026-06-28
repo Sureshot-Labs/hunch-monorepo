@@ -12,10 +12,7 @@ function hasFlag(name: string): boolean {
   return process.argv.includes(name);
 }
 
-async function countRows(
-  client: Queryable,
-  sql: string,
-): Promise<number> {
+async function countRows(client: Queryable, sql: string): Promise<number> {
   const result = await client.query<{ count: string }>(sql);
   return Number(result.rows[0]?.count ?? 0);
 }
@@ -298,7 +295,9 @@ async function rebuildAffectedHourlyRows(client: Queryable) {
   );
 }
 
-async function deleteBadRows(client: Queryable): Promise<Record<string, number>> {
+async function deleteBadRows(
+  client: Queryable,
+): Promise<Record<string, number>> {
   const deletedSnapshots = await client.query(`
     delete from wallet_position_snapshots s
     using tmp_internal_hunch_bad_snapshots bad

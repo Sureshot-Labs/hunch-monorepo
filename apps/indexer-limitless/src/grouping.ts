@@ -37,7 +37,9 @@ export function resolveLimitlessEventContext(
     groupId != null &&
     groupId !== String(market.id);
   const hasMatchingParent =
-    isGroupedSingle && groupParent != null && String(groupParent.id) === groupId;
+    isGroupedSingle &&
+    groupParent != null &&
+    String(groupParent.id) === groupId;
 
   if (hasMatchingParent) {
     return {

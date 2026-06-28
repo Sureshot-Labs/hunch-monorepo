@@ -291,7 +291,9 @@ function resolveSideToken(
   );
 }
 
-function sideFromDirection(direction: string | null): HolderResearchSignalSide | null {
+function sideFromDirection(
+  direction: string | null,
+): HolderResearchSignalSide | null {
   if (direction === "up") return "YES";
   if (direction === "down") return "NO";
   return null;
@@ -342,11 +344,17 @@ export function resolveHolderResearchFinalYesProbability(row: {
   last_price: unknown;
 }): {
   finalYesProbability: number | null;
-  source: "resolved_outcome" | "resolved_outcome_pct" | "terminal_price" | "missing";
+  source:
+    | "resolved_outcome"
+    | "resolved_outcome_pct"
+    | "terminal_price"
+    | "missing";
 } {
   const resolved = normalizeSide(row.resolved_outcome ?? row.resolvedOutcome);
-  if (resolved === "YES") return { finalYesProbability: 1, source: "resolved_outcome" };
-  if (resolved === "NO") return { finalYesProbability: 0, source: "resolved_outcome" };
+  if (resolved === "YES")
+    return { finalYesProbability: 1, source: "resolved_outcome" };
+  if (resolved === "NO")
+    return { finalYesProbability: 0, source: "resolved_outcome" };
   const pct = toNumber(row.resolved_outcome_pct ?? row.resolvedOutcomePct);
   if (pct != null) {
     return {
@@ -547,7 +555,9 @@ function stableJson(value: unknown): string {
   return JSON.stringify(normalize(value));
 }
 
-function readSignalSnapshot(metrics: unknown): HolderResearchSignalSnapshot | null {
+function readSignalSnapshot(
+  metrics: unknown,
+): HolderResearchSignalSnapshot | null {
   const snapshot = objectRecord(objectRecord(metrics).signalSnapshot);
   if (toNumber(snapshot.version) !== 1) return null;
   const side = normalizeSide(snapshot.side);
@@ -556,7 +566,8 @@ function readSignalSnapshot(metrics: unknown): HolderResearchSignalSnapshot | nu
   const tokens = objectRecord(snapshot.tokens);
   return {
     version: 1,
-    recordedAt: typeof snapshot.recordedAt === "string" ? snapshot.recordedAt : "",
+    recordedAt:
+      typeof snapshot.recordedAt === "string" ? snapshot.recordedAt : "",
     marketId: String(snapshot.marketId ?? ""),
     eventId: typeof snapshot.eventId === "string" ? snapshot.eventId : null,
     venue: String(snapshot.venue ?? ""),
@@ -671,7 +682,9 @@ async function loadNearestTrades(
   );
 }
 
-function resolveSignalSide(row: HolderResearchPerformanceNoteRow): HolderResearchSignalSide | null {
+function resolveSignalSide(
+  row: HolderResearchPerformanceNoteRow,
+): HolderResearchSignalSide | null {
   const targetSide = normalizeSide(objectRecord(row.target_meta).side);
   return targetSide ?? sideFromDirection(row.direction);
 }
@@ -693,7 +706,9 @@ function rowMarketType(row: HolderResearchPerformanceNoteRow): MarketType {
   return classifyMarketTypeFromText(text, hoursToClose);
 }
 
-function rowMarketSegment(row: HolderResearchPerformanceNoteRow): MarketSegment {
+function rowMarketSegment(
+  row: HolderResearchPerformanceNoteRow,
+): MarketSegment {
   const createdAt = toIso(row.created_at);
   const closeAt = toIso(row.close_time);
   const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
@@ -710,11 +725,15 @@ function rowMarketSegment(row: HolderResearchPerformanceNoteRow): MarketSegment 
   return classifyMarketSegmentFromText(text, hoursToClose);
 }
 
-function hoursToCloseAtNote(row: HolderResearchPerformanceNoteRow): number | null {
+function hoursToCloseAtNote(
+  row: HolderResearchPerformanceNoteRow,
+): number | null {
   const createdAt = toIso(row.created_at);
   const closeAt = toIso(row.close_time);
   if (!createdAt || !closeAt) return null;
-  return (new Date(closeAt).getTime() - new Date(createdAt).getTime()) / 3_600_000;
+  return (
+    (new Date(closeAt).getTime() - new Date(createdAt).getTime()) / 3_600_000
+  );
 }
 
 function noteYesProbability(metrics: unknown): number | null {
@@ -732,12 +751,18 @@ function metricBucket(metrics: unknown, targetMeta: unknown): string | null {
 }
 
 function actorMode(modelMeta: unknown): string | null {
-  const actor = objectRecord(objectRecord(modelMeta).primary_holder_credentials);
-  return typeof actor.mode === "string" && actor.mode.trim() ? actor.mode : null;
+  const actor = objectRecord(
+    objectRecord(modelMeta).primary_holder_credentials,
+  );
+  return typeof actor.mode === "string" && actor.mode.trim()
+    ? actor.mode
+    : null;
 }
 
 function primaryHolderRecord(modelMeta: unknown): Record<string, unknown> {
-  const actor = objectRecord(objectRecord(modelMeta).primary_holder_credentials);
+  const actor = objectRecord(
+    objectRecord(modelMeta).primary_holder_credentials,
+  );
   return objectRecord(actor.primaryHolder);
 }
 
@@ -793,7 +818,11 @@ function resolveMarkPrice(input: {
   row: HolderResearchPerformanceNoteRow;
   side: HolderResearchSignalSide | null;
   finalYesProbability: number | null;
-  finalSource: "resolved_outcome" | "resolved_outcome_pct" | "terminal_price" | "missing";
+  finalSource:
+    | "resolved_outcome"
+    | "resolved_outcome_pct"
+    | "terminal_price"
+    | "missing";
   state: HolderResearchSignalPerformance["state"];
 }): {
   price: number | null;
@@ -900,7 +929,9 @@ function buildPerformanceForRow(input: {
     resolvedOutcome: normalizeSide(input.row.resolved_outcome),
     resolvedOutcomePct: toNumber(input.row.resolved_outcome_pct),
     primaryHolderWalletId:
-      typeof primaryHolder.walletId === "string" ? primaryHolder.walletId : null,
+      typeof primaryHolder.walletId === "string"
+        ? primaryHolder.walletId
+        : null,
     primaryHolderLabel:
       typeof primaryHolder.label === "string" ? primaryHolder.label : null,
     primaryHolderPositionUsd: toNumber(primaryHolder.positionUsd),
@@ -1050,12 +1081,11 @@ export async function auditHolderResearchSignalPerformance(
     where.push(`n.id = any($${params.length}::uuid[])`);
   } else {
     params.push(Math.max(1, Math.trunc(options.lookbackHours)));
-    where.push(`n.created_at >= now() - ($${params.length}::numeric * interval '1 hour')`);
+    where.push(
+      `n.created_at >= now() - ($${params.length}::numeric * interval '1 hour')`,
+    );
   }
-  if (
-    options.minConfidence != null &&
-    Number.isFinite(options.minConfidence)
-  ) {
+  if (options.minConfidence != null && Number.isFinite(options.minConfidence)) {
     params.push(Math.max(0, Math.min(1, options.minConfidence)));
     where.push(`n.confidence >= $${params.length}::numeric`);
   }
@@ -1169,10 +1199,7 @@ export async function auditHolderResearchSignalPerformance(
     });
     if (!performance) continue;
     if (performance.state === "open" && options.includeOpen === false) continue;
-    if (
-      performance.state !== "open" &&
-      options.includeResolved === false
-    ) {
+    if (performance.state !== "open" && options.includeResolved === false) {
       continue;
     }
     items.push(performance);
@@ -1318,9 +1345,7 @@ export async function loadHolderResearchPerformanceCalibrationMemo(
     [policy.performanceAuditLookbackHours],
   );
   const resolvedRows = dedupeCalibrationRows(
-    rows.filter(
-      (row) => row.outcome === "correct" || row.outcome === "wrong",
-    ),
+    rows.filter((row) => row.outcome === "correct" || row.outcome === "wrong"),
     policy,
   );
   const minResolvedSamples = Math.max(
@@ -1351,8 +1376,7 @@ export async function loadHolderResearchPerformanceCalibrationMemo(
   );
   const goodNonSports = resolvedRows.filter(
     (row) =>
-      row.outcome === "correct" &&
-      row.market_type !== "single_game_sports",
+      row.outcome === "correct" && row.market_type !== "single_game_sports",
   );
 
   const memo: string[] = [];
@@ -1451,8 +1475,7 @@ function calibrationEntryQualityRank(
   if (row.entry_quality === "exact_snapshot") return 0;
   if (
     row.entry_quality === "near_trade" &&
-    (toNumber(row.entry_approx_distance_minutes) ?? 0) <=
-      nearTradeMaxMinutes
+    (toNumber(row.entry_approx_distance_minutes) ?? 0) <= nearTradeMaxMinutes
   ) {
     return 1;
   }
@@ -1532,21 +1555,27 @@ function describeWeakSportsEvidence(
   ).length;
   const facts: string[] = [];
   if (nonPositivePnl > 0) {
-    facts.push(`${nonPositivePnl}/${rows.length} lacked positive 30d holder PnL`);
+    facts.push(
+      `${nonPositivePnl}/${rows.length} lacked positive 30d holder PnL`,
+    );
   }
   if (smallStake > 0) {
     facts.push(
       `${smallStake}/${rows.length} were below the sports holder-size bar`,
     );
   }
-  return facts.length > 0 ? facts.join(", ") : "holder evidence was not clearly exceptional";
+  return facts.length > 0
+    ? facts.join(", ")
+    : "holder evidence was not clearly exceptional";
 }
 
 function describeStrongSportsEvidence(
   rows: HolderResearchCalibrationRow[],
   policy: HolderResearchPolicy,
 ): string {
-  const clusters = rows.filter((row) => row.actor_mode === "sharp_cluster").length;
+  const clusters = rows.filter(
+    (row) => row.actor_mode === "sharp_cluster",
+  ).length;
   const positivePnl = rows.filter(
     (row) => (toNumber(row.primary_holder_pnl_30d_usd) ?? 0) > 0,
   ).length;

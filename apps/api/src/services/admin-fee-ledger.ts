@@ -1849,10 +1849,7 @@ export async function getAdminFeeLedgerTreasuryRun(pool: DbQuery, id: string) {
   return result.items[0] ?? null;
 }
 
-export async function getAdminFeeLedgerBuilderSweep(
-  pool: DbQuery,
-  id: string,
-) {
+export async function getAdminFeeLedgerBuilderSweep(pool: DbQuery, id: string) {
   const result = await listAdminFeeLedgerBuilderSweeps(pool, { id, limit: 1 });
   return result.items[0] ?? null;
 }

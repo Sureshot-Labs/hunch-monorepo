@@ -1197,8 +1197,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         status,
         srcChainId: row.src_chain_id,
         dstChainId: row.dst_chain_id,
-        bridgeOrderId:
-          provider === "across" ? row.id : (row.order_id ?? null),
+        bridgeOrderId: provider === "across" ? row.id : (row.order_id ?? null),
         txHash,
       }),
       app.log,
@@ -2098,7 +2097,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         let resolvedSourceTxSubmittedAt: string | null = null;
         let resolvedStoredStatus: string | null = null;
 
-        if (!resolvedSwapType || !resolvedChainId || !resolvedSourceTxSubmittedAt) {
+        if (
+          !resolvedSwapType ||
+          !resolvedChainId ||
+          !resolvedSourceTxSubmittedAt
+        ) {
           const { rows } = await pool.query<{
             swap_type: BridgeSwapType;
             src_chain_id: string;
@@ -2201,11 +2204,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             `,
             [payloadJson, inputs.orderId, inputs.txHash],
           );
-          await notifyBridgeStatusByOrder(
-            "debridge",
-            inputs.orderId,
-            "failed",
-          );
+          await notifyBridgeStatusByOrder("debridge", inputs.orderId, "failed");
           return { status: "failed", payload };
         }
         if (!inputs.txHash) return null;

@@ -146,12 +146,15 @@ function statusWithTotals(
 test("builds Limitless accrual from USD-denominated venue fee", () => {
   const accrual = buildLimitlessVenueShareAccrualFromStatus({
     order: baseOrder(),
-    status: statusWithTotals({
-      usdGross: "1000000",
-      usdFee: "10000",
-      contractsGross: "2000000",
-      contractsFee: "0",
-    }, { side: 1 }),
+    status: statusWithTotals(
+      {
+        usdGross: "1000000",
+        usdFee: "10000",
+        contractsGross: "2000000",
+        contractsFee: "0",
+      },
+      { side: 1 },
+    ),
     config,
   });
 
@@ -226,7 +229,10 @@ test("builds Limitless contract receivable from buy-side contracts fee status", 
   assert.ok(result.receivable);
   assert.equal(result.receivable.sourceKind, "status");
   assert.equal(result.receivable.sourceKey, undefined);
-  assert.equal(result.receivable.txHash, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  assert.equal(
+    result.receivable.txHash,
+    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  );
   assert.equal(result.receivable.logIndex, null);
   assert.equal(result.receivable.rawTokenId, "456");
   assert.equal(result.receivable.tokenId, "limitless:456");

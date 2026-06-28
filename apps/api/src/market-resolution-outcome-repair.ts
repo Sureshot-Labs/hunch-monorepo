@@ -3,7 +3,10 @@ import type { PoolClient } from "pg";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { isRecord } from "./lib/type-guards.js";
-import { dflowRequest, extractDflowErrorMessage } from "./services/dflow-client.js";
+import {
+  dflowRequest,
+  extractDflowErrorMessage,
+} from "./services/dflow-client.js";
 import {
   extractLimitlessMessage,
   limitlessRequest,
@@ -72,11 +75,7 @@ const DEFAULT_API_TIMEOUT_SEC = 15;
 const DEFAULT_STATEMENT_TIMEOUT_SEC = 300;
 const DFLOW_BATCH_SIZE = 100;
 const LIMITLESS_RATE_LIMIT_MAX_ATTEMPTS = SHARED_RATE_LIMIT_MAX_ATTEMPTS;
-const ALLOWED_VENUES = new Set<Venue>([
-  "polymarket",
-  "limitless",
-  "kalshi",
-]);
+const ALLOWED_VENUES = new Set<Venue>(["polymarket", "limitless", "kalshi"]);
 
 function readValues(argv: string[], name: string): string[] {
   const key = `--${name}`;
@@ -660,29 +659,30 @@ function summarizeRows(rows: ValidationRow[]) {
   >();
 
   for (const row of rows) {
-    const outcome = row.resolved_outcome ?? (row.resolved_outcome_pct == null ? "none" : "SCALAR");
+    const outcome =
+      row.resolved_outcome ??
+      (row.resolved_outcome_pct == null ? "none" : "SCALAR");
     const source = row.polymarket_source ? "source" : "no_source";
     const key = [row.venue, outcome, source, row.reason].join("\u0001");
-    const group =
-      groups.get(key) ??
-      {
-        markets: 0,
-        outcome,
-        reason: row.reason,
-        source,
-        venue: row.venue,
-      };
+    const group = groups.get(key) ?? {
+      markets: 0,
+      outcome,
+      reason: row.reason,
+      source,
+      venue: row.venue,
+    };
     group.markets += 1;
     groups.set(key, group);
   }
 
-  return [...groups.values()].sort((a, b) =>
-    [
-      a.venue.localeCompare(b.venue),
-      a.outcome.localeCompare(b.outcome),
-      a.source.localeCompare(b.source),
-      a.reason.localeCompare(b.reason),
-    ].find((value) => value !== 0) ?? 0,
+  return [...groups.values()].sort(
+    (a, b) =>
+      [
+        a.venue.localeCompare(b.venue),
+        a.outcome.localeCompare(b.outcome),
+        a.source.localeCompare(b.source),
+        a.reason.localeCompare(b.reason),
+      ].find((value) => value !== 0) ?? 0,
   );
 }
 
@@ -693,7 +693,9 @@ function formatSampleRow(row: ValidationRow): Record<string, string | null> {
     reason: row.reason,
     resolvedOutcome: row.resolved_outcome,
     resolvedOutcomePct:
-      row.resolved_outcome_pct == null ? null : String(row.resolved_outcome_pct),
+      row.resolved_outcome_pct == null
+        ? null
+        : String(row.resolved_outcome_pct),
     sourceRepair: row.polymarket_source ? "yes" : "no",
     eventId: row.event_id,
     terminalAt: dateToString(row.terminal_at),
@@ -876,7 +878,9 @@ async function executeRepair(
       "select pg_try_advisory_xact_lock(hashtext('market_resolution_outcome_repair')) as locked",
     );
     if (!lockResult.rows[0]?.locked) {
-      throw new Error("Resolution outcome repair aborted: another run is active");
+      throw new Error(
+        "Resolution outcome repair aborted: another run is active",
+      );
     }
 
     const selectionCounts = await materializeRepairSet(client, validations);
@@ -890,7 +894,10 @@ async function executeRepair(
       repairedMarketIds,
       selectionCounts,
       updateCounts: [
-        { label: "unified_markets_outcome", rows: String(repairedMarketIds.length) },
+        {
+          label: "unified_markets_outcome",
+          rows: String(repairedMarketIds.length),
+        },
         sourceCount,
       ],
     };
@@ -985,7 +992,9 @@ async function main(): Promise<void> {
 
   const report = buildReport(args, validations);
   if (args.json) {
-    console.log(JSON.stringify(jsonReport(args, validations, startedAt), null, 2));
+    console.log(
+      JSON.stringify(jsonReport(args, validations, startedAt), null, 2),
+    );
     return;
   }
 

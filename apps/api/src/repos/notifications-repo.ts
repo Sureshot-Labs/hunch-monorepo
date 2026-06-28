@@ -43,7 +43,10 @@ function decodeCursor(cursor?: string | null): NotificationCursor | null {
   }
 }
 
-function readNotificationStringData(row: NotificationRow, key: string): string | null {
+function readNotificationStringData(
+  row: NotificationRow,
+  key: string,
+): string | null {
   if (!row.data || typeof row.data !== "object" || Array.isArray(row.data)) {
     return null;
   }
@@ -355,7 +358,8 @@ export async function fetchNotifications(
     return !terminalOrderKeys.has(buildOrderKey(venue, orderId));
   });
 
-  const hasMore = visibleRows.length > inputs.limit || rows.length > inputs.limit + 20;
+  const hasMore =
+    visibleRows.length > inputs.limit || rows.length > inputs.limit + 20;
   const limitedRows = visibleRows.slice(0, inputs.limit);
   const last =
     limitedRows[limitedRows.length - 1] ??

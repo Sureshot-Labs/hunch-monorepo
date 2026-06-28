@@ -586,7 +586,9 @@ export function buildLimitlessVenueShareAccrualResult(inputs: {
   const notionalRaw = deriveUsdGrossRaw(totals);
   if (contractsFeeRaw != null && contractsFeeRaw > 0n) {
     if (venueFeeRaw != null && venueFeeRaw > 0n) {
-      return terminal("Limitless fee totals include both USD and contracts fees");
+      return terminal(
+        "Limitless fee totals include both USD and contracts fees",
+      );
     }
     if (side !== "BUY") {
       return terminal("Limitless contracts fee is only expected on buys");

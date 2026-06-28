@@ -89,9 +89,7 @@ import {
   aggregateWalletMetricsPreferenceSql,
 } from "../services/wallet-metrics-constants.js";
 import { loadWalletOpenPositionStatsPreferRollupMap } from "../services/wallet-open-position-stats.js";
-import {
-  extractWalletIdentityDisplayFields,
-} from "../services/wallet-identity-names.js";
+import { extractWalletIdentityDisplayFields } from "../services/wallet-identity-names.js";
 import {
   loadLatestWalletPositionNowMap,
   loadWalletPositionApproxMetrics,
@@ -2913,7 +2911,10 @@ async function loadTrackedWalletPositioning(input: {
       address: row.address,
       chain: row.chain,
       label: row.wallet_label,
-      ...extractWalletIdentityDisplayFields(row.wallet_metadata, row.wallet_label),
+      ...extractWalletIdentityDisplayFields(
+        row.wallet_metadata,
+        row.wallet_label,
+      ),
       profileLabel: row.profile_label,
       ...buildWalletOnchainFields({
         chain: row.chain,
@@ -4812,8 +4813,7 @@ function mergeWalletSummaryMetrics(
       metrics?.resolved_edge_z_score ??
       metricNumberToString(overlay.metricsResolvedEdgeZScore30d),
     resolved_brier_score: metrics?.resolved_brier_score ?? null,
-    resolved_stake_weighted_edge:
-      metrics?.resolved_stake_weighted_edge ?? null,
+    resolved_stake_weighted_edge: metrics?.resolved_stake_weighted_edge ?? null,
     resolved_stake_usd:
       metrics?.resolved_stake_usd ??
       metricNumberToString(overlay.metricsResolvedStakeUsd30d),
@@ -6042,14 +6042,10 @@ async function loadWalletActivitySummaryHeroStats(
 ): Promise<WalletActivitySummaryHeroStats> {
   const asOf = new Date();
   const followedWalletIds = await loadFollowingWalletIds(client, userId);
-  const activeWalletIds = await loadActiveWalletIds(
-    client,
-    input.windowHours,
-    {
-      minActivityUsd: input.refreshPolicy.minActivityUsd,
-      minActivityShares: input.refreshPolicy.minActivityShares,
-    },
-  );
+  const activeWalletIds = await loadActiveWalletIds(client, input.windowHours, {
+    minActivityUsd: input.refreshPolicy.minActivityUsd,
+    minActivityShares: input.refreshPolicy.minActivityShares,
+  });
   const walletIds = mergeWalletIdsForScope(
     "all",
     followedWalletIds,
@@ -6279,12 +6275,7 @@ async function loadWhalePageMetadataByIds(
 ): Promise<Map<string, WhalePageMetadataRow>> {
   const byId = new Map<string, WhalePageMetadataRow>();
   if (walletIds.length === 0) return byId;
-  const walletRows = await loadWalletRowsByIds(
-    client,
-    userId,
-    walletIds,
-    null,
-  );
+  const walletRows = await loadWalletRowsByIds(client, userId, walletIds, null);
   const walletPageStateById = await loadWalletPageStateByIds(
     client,
     userId,
@@ -7282,7 +7273,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
             isSystemFlagged: wallet.is_system_flagged,
             firstSeenAt: wallet.first_seen_at,
             lastSeenAt: wallet.last_seen_at,
@@ -7407,7 +7401,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
             userLabel: label,
           },
           followed: true,
@@ -7567,7 +7564,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
           },
           followed: meta.followed,
           userName: meta.user_name,
@@ -7762,7 +7762,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             address: wallet.address,
             chain: wallet.chain,
             label: wallet.label,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
           },
           followed: meta.followed,
           userName: meta.user_name,
@@ -7855,7 +7858,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             walletId: wallet.id,
             address: wallet.address,
             chain: wallet.chain,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
           },
           note: {
             id: insertResult.rows[0].id,
@@ -7946,7 +7952,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             walletId: wallet.id,
             address: wallet.address,
             chain: wallet.chain,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
           },
           note: {
             id: updateResult.rows[0].id,
@@ -8086,7 +8095,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             userName: meta?.user_name ?? null,
             userLabel: meta?.user_label ?? null,
             userLabelColor: meta?.user_label_color ?? null,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
           };
         });
         const preferredWallet = preferredChain
@@ -8371,10 +8383,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           [user.id, query.limit, query.offset],
         );
         const walletIds = rows.rows.map((row) => row.id);
-        const portfolioPerformanceMap =
-          await loadWalletPortfolioPerformanceMap(client, walletIds, {
+        const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
+          client,
+          walletIds,
+          {
             rangeHours: 720,
-          });
+          },
+        );
         const resolvedTradeStatsMap = await loadWalletResolvedTradeStatsMap(
           client,
           walletIds,
@@ -9222,10 +9237,13 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         ]);
         const openPositionStatsMap =
           await loadWalletOpenPositionStatsPreferRollupMap(client, [walletId]);
-        const portfolioPerformanceMap =
-          await loadWalletPortfolioPerformanceMap(client, [walletId], {
+        const portfolioPerformanceMap = await loadWalletPortfolioPerformanceMap(
+          client,
+          [walletId],
+          {
             rangeHours: 720,
-          });
+          },
+        );
         const refreshPolicy = await resolveWalletIntelRefreshPolicy(client);
         const attributionPolicy =
           await resolveWalletIntelAttributionPolicy(client);
@@ -9347,7 +9365,10 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             userName: wallet.user_name ?? null,
             userLabel: wallet.user_label ?? null,
             userLabelColor: wallet.user_label_color ?? null,
-            ...extractWalletIdentityDisplayFields(wallet.metadata, wallet.label),
+            ...extractWalletIdentityDisplayFields(
+              wallet.metadata,
+              wallet.label,
+            ),
             followersCount: followerCountsMap.get(wallet.id) ?? 0,
             topLabelVariant: presentation.topLabelVariant,
             headlineTag: presentation.headlineTag,
@@ -10007,12 +10028,11 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
             let filtered = mergedWithResolved;
 
             if (mergedWithResolved.length > 0) {
-              signalSummaryForFilters =
-                await fetchWalletActivitySignalSummary(
-                  client,
-                  mergedWithResolved.map((row) => row.walletId),
-                  attributionSummaryOptions,
-                );
+              signalSummaryForFilters = await fetchWalletActivitySignalSummary(
+                client,
+                mergedWithResolved.map((row) => row.walletId),
+                attributionSummaryOptions,
+              );
               mmDiagnosticsByWallet = await loadWalletMmDiagnosticsMap(
                 client,
                 mergedWithResolved.map((row) => ({

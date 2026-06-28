@@ -47,7 +47,9 @@ function parseNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizeOutcome(value: string | null | undefined): "YES" | "NO" | null {
+function normalizeOutcome(
+  value: string | null | undefined,
+): "YES" | "NO" | null {
   const normalized = value?.trim().toUpperCase();
   return normalized === "YES" || normalized === "NO" ? normalized : null;
 }
@@ -90,7 +92,9 @@ function buildStatus(
   };
 }
 
-function resolvedPayoutForOutcome(input: NormalizeRedemptionStatusInput): number | null {
+function resolvedPayoutForOutcome(
+  input: NormalizeRedemptionStatusInput,
+): number | null {
   const outcomeSide = normalizeOutcome(input.outcomeSide);
   if (!outcomeSide) return null;
 
@@ -129,7 +133,11 @@ export function normalizeRedemptionStatus(
     );
   }
 
-  if (/(redeemed|claimed|no_redeemable_balance|no redeemable balance)/i.test(rawLower)) {
+  if (
+    /(redeemed|claimed|no_redeemable_balance|no redeemable balance)/i.test(
+      rawLower,
+    )
+  ) {
     return buildStatus(
       input,
       "redeemed",
@@ -149,11 +157,15 @@ export function normalizeRedemptionStatus(
     );
   }
 
-  if (/(challenge|settlement|pending|processing|submitted|mined)/i.test(rawLower)) {
+  if (
+    /(challenge|settlement|pending|processing|submitted|mined)/i.test(rawLower)
+  ) {
     return buildStatus(
       input,
       "settlement_pending",
-      rawLower.includes("challenge") ? "challenge_window" : "settlement_pending",
+      rawLower.includes("challenge")
+        ? "challenge_window"
+        : "settlement_pending",
       rawLower.includes("challenge")
         ? "Resolution is in the challenge window."
         : "Settlement is still pending.",

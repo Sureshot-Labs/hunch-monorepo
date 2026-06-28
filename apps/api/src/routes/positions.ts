@@ -128,7 +128,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const escapeSqlLikePattern = (value: string): string =>
     value.replace(/[\\%_]/g, "\\$&");
 
-  type MappedMarketByTokenEntry = ReturnType<typeof mapMarketsByTokenRows>[number];
+  type MappedMarketByTokenEntry = ReturnType<
+    typeof mapMarketsByTokenRows
+  >[number];
 
   const normalizeSearchText = (value: unknown): string => {
     if (value == null) return "";
@@ -178,15 +180,13 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     return searchable.includes(needle);
   };
 
-  const resolveTokenIdsForFilter = async (
-    inputs: {
-      marketId?: string;
-      eventId?: string;
-      q?: string;
-      venue?: string;
-      venues?: string[];
-    },
-  ): Promise<string[] | null> => {
+  const resolveTokenIdsForFilter = async (inputs: {
+    marketId?: string;
+    eventId?: string;
+    q?: string;
+    venue?: string;
+    venues?: string[];
+  }): Promise<string[] | null> => {
     const { eventId, marketId, q, venue, venues } = inputs;
     const search = q?.trim();
     const venueList =
@@ -212,7 +212,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           )
         `;
       }
-      const { rows } = await pool.query<{ token_id: string }>(`
+      const { rows } = await pool.query<{ token_id: string }>(
+        `
         with matched_markets as (
           select m.id
           from unified_markets m
@@ -233,7 +234,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         )
         select distinct token_id
         from token_links
-      `, params);
+      `,
+        params,
+      );
       return rows.map((row) => row.token_id);
     }
 
@@ -257,7 +260,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           )
         `;
       }
-      const { rows } = await pool.query<{ token_id: string }>(`
+      const { rows } = await pool.query<{ token_id: string }>(
+        `
         with matched_markets as (
           select m.id
           from unified_markets m
@@ -278,7 +282,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         )
         select distinct token_id
         from token_links
-      `, params);
+      `,
+        params,
+      );
       return rows.map((row) => row.token_id);
     }
 

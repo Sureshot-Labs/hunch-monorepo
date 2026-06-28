@@ -224,9 +224,7 @@ await test("reuses run-local Polymarket ERC1155 balance cache", async () => {
       "balanceOfBatch",
       call.data,
     ) as unknown as [string[], bigint[]];
-    const balances = ids.map((id) =>
-      id.toString() === "1" ? 5_000_000n : 0n,
-    );
+    const balances = ids.map((id) => (id.toString() === "1" ? 5_000_000n : 0n));
     return new Response(
       JSON.stringify({
         jsonrpc: "2.0",
@@ -274,94 +272,91 @@ await test("reuses run-local Polymarket ERC1155 balance cache", async () => {
   }
 });
 
-await test(
-  "run-local Polymarket balance cache does not bypass hidden token filtering",
-  async () => {
-    const owner = "0x0000000000000000000000000000000000000001";
-    const originalFetch = globalThis.fetch;
-    let rpcCalls = 0;
-    resetPolymarketDataApiSnapshotCachesForTests();
+await test("run-local Polymarket balance cache does not bypass hidden token filtering", async () => {
+  const owner = "0x0000000000000000000000000000000000000001";
+  const originalFetch = globalThis.fetch;
+  let rpcCalls = 0;
+  resetPolymarketDataApiSnapshotCachesForTests();
 
-    const pool = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (sql.includes("with current_funders")) {
-          return { rows: [] };
-        }
-        if (sql.includes("with recent_order_tokens")) {
-          return { rows: [{ token_id: "1" }] };
-        }
-        if (sql.includes("and is_hidden = true")) {
-          return {
-            rows: params?.[0] === "user-2" ? [{ token_id: "1" }] : [],
-          };
-        }
-        throw new Error(`Unexpected query in test: ${sql.slice(0, 80)}`);
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (sql.includes("with current_funders")) {
+        return { rows: [] };
+      }
+      if (sql.includes("with recent_order_tokens")) {
+        return { rows: [{ token_id: "1" }] };
+      }
+      if (sql.includes("and is_hidden = true")) {
+        return {
+          rows: params?.[0] === "user-2" ? [{ token_id: "1" }] : [],
+        };
+      }
+      throw new Error(`Unexpected query in test: ${sql.slice(0, 80)}`);
+    },
+  } as unknown as import("@hunch/infra").Pool;
+
+  globalThis.fetch = (async (input, init) => {
+    if (input instanceof URL || String(input).includes("/positions")) {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      params?: Array<{ data?: string } | string>;
+    };
+    const call = body.params?.[0];
+    if (!call || typeof call === "string" || typeof call.data !== "string") {
+      throw new Error("Expected ERC1155 eth_call payload");
+    }
+    rpcCalls += 1;
+    const [_owners, ids] = testErc1155Iface.decodeFunctionData(
+      "balanceOfBatch",
+      call.data,
+    ) as unknown as [string[], bigint[]];
+    const balances = ids.map((id) => (id.toString() === "1" ? 5_000_000n : 0n));
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: testErc1155Iface.encodeFunctionResult("balanceOfBatch", [
+          balances,
+        ]),
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
       },
-    } as unknown as import("@hunch/infra").Pool;
+    );
+  }) as typeof fetch;
 
-    globalThis.fetch = (async (input, init) => {
-      if (input instanceof URL || String(input).includes("/positions")) {
-        return new Response(JSON.stringify([]), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-
-      const body = JSON.parse(String(init?.body ?? "{}")) as {
-        params?: Array<{ data?: string } | string>;
-      };
-      const call = body.params?.[0];
-      if (!call || typeof call === "string" || typeof call.data !== "string") {
-        throw new Error("Expected ERC1155 eth_call payload");
-      }
-      rpcCalls += 1;
-      const [_owners, ids] = testErc1155Iface.decodeFunctionData(
-        "balanceOfBatch",
-        call.data,
-      ) as unknown as [string[], bigint[]];
-      const balances = ids.map((id) =>
-        id.toString() === "1" ? 5_000_000n : 0n,
-      );
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          result: testErc1155Iface.encodeFunctionResult("balanceOfBatch", [
-            balances,
-          ]),
-        }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      );
-    }) as typeof fetch;
-
-    try {
-      const balanceCache = new Map<string, bigint>();
-      await prefetchPolymarketOwnerBalancesForWallets(pool, {
-        userId: "user-1",
+  try {
+    const balanceCache = new Map<string, bigint>();
+    await prefetchPolymarketOwnerBalancesForWallets(pool, {
+      userId: "user-1",
+      walletAddresses: [owner],
+      trackedTokenIds: ["2"],
+      balanceCache,
+    });
+    const hiddenForSecondUser = await prefetchPolymarketOwnerBalancesForWallets(
+      pool,
+      {
+        userId: "user-2",
         walletAddresses: [owner],
         trackedTokenIds: ["2"],
         balanceCache,
-      });
-      const hiddenForSecondUser =
-        await prefetchPolymarketOwnerBalancesForWallets(pool, {
-          userId: "user-2",
-          walletAddresses: [owner],
-          trackedTokenIds: ["2"],
-          balanceCache,
-        });
+      },
+    );
 
-      assert.equal(rpcCalls, 1);
-      assert.deepEqual(hiddenForSecondUser.candidateTokenIds, []);
-      assert.deepEqual(hiddenForSecondUser.unionTokenIds, ["2"]);
-      assert.equal(hiddenForSecondUser.rpcCallCount, 0);
-      assert.equal(hiddenForSecondUser.rpcBalanceCacheHits, 1);
-      assert.deepEqual(hiddenForSecondUser.balancesByOwner.get(owner), []);
-    } finally {
-      globalThis.fetch = originalFetch;
-      resetPolymarketDataApiSnapshotCachesForTests();
-    }
-  },
-);
+    assert.equal(rpcCalls, 1);
+    assert.deepEqual(hiddenForSecondUser.candidateTokenIds, []);
+    assert.deepEqual(hiddenForSecondUser.unionTokenIds, ["2"]);
+    assert.equal(hiddenForSecondUser.rpcCallCount, 0);
+    assert.equal(hiddenForSecondUser.rpcBalanceCacheHits, 1);
+    assert.deepEqual(hiddenForSecondUser.balancesByOwner.get(owner), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+    resetPolymarketDataApiSnapshotCachesForTests();
+  }
+});

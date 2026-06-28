@@ -197,7 +197,10 @@ await test("wallet casing cleanup reports and merges duplicate EVM storage rows"
       [userId, tokenId],
     );
     assert.equal(orderRows.rows[0]?.wallet_address, lowerWallet);
-    assert.equal(orderRows.rows[0]?.signer_address, signerAddress.toLowerCase());
+    assert.equal(
+      orderRows.rows[0]?.signer_address,
+      signerAddress.toLowerCase(),
+    );
 
     const credentialRows = await client.query<{ funder_address: string }>(
       `

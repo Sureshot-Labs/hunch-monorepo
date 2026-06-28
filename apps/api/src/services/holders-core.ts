@@ -463,7 +463,10 @@ async function loadMarketHolderContexts(
   >();
   const allTokenIds: string[] = [];
   for (const market of markets) {
-    const tokenIds = resolveTokenIds(tokensByMarket.get(market.id) ?? [], market);
+    const tokenIds = resolveTokenIds(
+      tokensByMarket.get(market.id) ?? [],
+      market,
+    );
     const yesToken = tokenIds.YES ?? null;
     const noToken = tokenIds.NO ?? null;
     rawTokenIdsByMarket.set(market.id, { YES: yesToken, NO: noToken });
@@ -485,13 +488,17 @@ async function loadMarketHolderContexts(
       [allTokenIds],
     );
     for (const row of topRows) {
-      priceByToken.set(row.token_id, resolveMidPrice(row.best_bid, row.best_ask));
+      priceByToken.set(
+        row.token_id,
+        resolveMidPrice(row.best_bid, row.best_ask),
+      );
     }
 
     const missingTokenIds = Array.from(
       new Set(
         allTokenIds.filter(
-          (tokenId) => !priceByToken.has(tokenId) || priceByToken.get(tokenId) == null,
+          (tokenId) =>
+            !priceByToken.has(tokenId) || priceByToken.get(tokenId) == null,
         ),
       ),
     );
@@ -512,7 +519,10 @@ async function loadMarketHolderContexts(
       );
 
       for (const row of lastRows) {
-        priceByToken.set(row.token_id, row.price != null ? Number(row.price) : null);
+        priceByToken.set(
+          row.token_id,
+          row.price != null ? Number(row.price) : null,
+        );
       }
     }
   }
@@ -524,8 +534,12 @@ async function loadMarketHolderContexts(
       NO: null,
     };
     const priceBySide: Record<"YES" | "NO", number | null> = {
-      YES: tokenIdsBySide.YES ? (priceByToken.get(tokenIdsBySide.YES) ?? null) : null,
-      NO: tokenIdsBySide.NO ? (priceByToken.get(tokenIdsBySide.NO) ?? null) : null,
+      YES: tokenIdsBySide.YES
+        ? (priceByToken.get(tokenIdsBySide.YES) ?? null)
+        : null,
+      NO: tokenIdsBySide.NO
+        ? (priceByToken.get(tokenIdsBySide.NO) ?? null)
+        : null,
     };
 
     if (priceBySide.YES == null || priceBySide.NO == null) {
@@ -1141,8 +1155,10 @@ export async function fetchMarketHolderDataBatch(inputs: {
   for (const context of kalshiContexts) {
     const yesMint = normalizeSolanaMint(context.tokenIdsBySide.YES);
     const noMint = normalizeSolanaMint(context.tokenIdsBySide.NO);
-    if (yesMint) solanaMintCandidates.push({ context, side: "YES", mint: yesMint });
-    if (noMint) solanaMintCandidates.push({ context, side: "NO", mint: noMint });
+    if (yesMint)
+      solanaMintCandidates.push({ context, side: "YES", mint: yesMint });
+    if (noMint)
+      solanaMintCandidates.push({ context, side: "NO", mint: noMint });
   }
 
   const solanaFailedMarkets = new Set<string>();
@@ -1155,7 +1171,8 @@ export async function fetchMarketHolderDataBatch(inputs: {
     concurrency,
     async (candidate) => {
       const aggregateBucket = inputs.telemetry?.holdersSolana ?? null;
-      const largestBucket = inputs.telemetry?.holdersSolanaLargestAccounts ?? null;
+      const largestBucket =
+        inputs.telemetry?.holdersSolanaLargestAccounts ?? null;
       recordTelemetryAttempt(aggregateBucket, 1);
       recordTelemetryAttempt(largestBucket, 1);
       recordTelemetryActualCall(aggregateBucket);
@@ -1168,7 +1185,10 @@ export async function fetchMarketHolderDataBatch(inputs: {
         });
         recordTelemetrySuccess(aggregateBucket);
         recordTelemetrySuccess(largestBucket);
-        solanaLargestByMint.set(candidate.mint, accounts.slice(0, inputs.limit));
+        solanaLargestByMint.set(
+          candidate.mint,
+          accounts.slice(0, inputs.limit),
+        );
       } catch (error) {
         if (isSolanaMintNotFound(error)) {
           recordTelemetrySuccess(aggregateBucket);
@@ -1219,7 +1239,10 @@ export async function fetchMarketHolderDataBatch(inputs: {
 
   for (const context of kalshiContexts) {
     const holderEntries: HolderEntry[] = [];
-    if (!solanaFailedMarkets.has(context.market.id) && !solanaOwnerLookupFailed) {
+    if (
+      !solanaFailedMarkets.has(context.market.id) &&
+      !solanaOwnerLookupFailed
+    ) {
       const appendSide = (side: "YES" | "NO", tokenId: string | null) => {
         const mint = normalizeSolanaMint(tokenId);
         if (!mint) return;

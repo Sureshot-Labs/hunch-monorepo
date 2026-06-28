@@ -160,9 +160,7 @@ export function parseHolderResearchTriageOutputV1(
 ): HolderResearchTriageOutputV1 {
   const record = asRecord(value);
   const rawDecisions = Array.isArray(record.decisions) ? record.decisions : [];
-  const allowed = allowedCandidateKeys
-    ? new Set(allowedCandidateKeys)
-    : null;
+  const allowed = allowedCandidateKeys ? new Set(allowedCandidateKeys) : null;
   const unknown: string[] = [];
   const repaired = {
     version: record.version ?? "holder_research_triage_v1",
@@ -228,39 +226,37 @@ export function buildHolderResearchTriageUserPrompt(input: {
   maxInvestigate: number;
   calibrationMemo?: string[];
 }): string {
-  return JSON.stringify(
-    {
-      task: "Triage holder-research candidates before expensive final synthesis.",
-      output_contract: {
-        version: "holder_research_triage_v1",
-        decisions: [
-          {
-            key: "one supplied candidate key",
-            action: "investigate | watch | skip",
-            priority: "0..1; higher means more worth final synthesis",
-            needs_external_search:
-              "true when public/news context is likely needed before final synthesis",
-            reason: "one short internal reason",
-          },
-        ],
-      },
-      selection_rules: [
-        "Prefer early or still-informative sharp holder positioning.",
-        "Prefer clear single-side sharp holders or sharp clusters with credible credentials.",
-        "Use candidate.quality as the deterministic quality baseline.",
-        "Prefer candidates where odds moved in the holder direction but not so much that the signal is already obvious.",
-        "Use candidate.triageGate first: canLikelyPublish=false means watch/skip unless there is a very clear reason not captured by deterministic facts.",
-        "Treat support-only buckets as supporting context, not independent investigation targets.",
-        "Give a modest priority bump to actionable candidates resolving soon, but never let expiry rescue weak single-game sports singles.",
-        "Downgrade mixed holder reads, concentration-only reads, stale positions, public-news-only moves, and single-game sports singles with weak or contradicted credentials.",
-        "For single-game sports, investigate only sharp clusters or exceptional single holders unless the candidate is clearly unusual.",
-        "Use watch when useful for memory/cooldown but not worth final synthesis now.",
-        `Return at most ${input.maxInvestigate} investigate decisions unless more are clearly exceptional.`,
+  return JSON.stringify({
+    task: "Triage holder-research candidates before expensive final synthesis.",
+    output_contract: {
+      version: "holder_research_triage_v1",
+      decisions: [
+        {
+          key: "one supplied candidate key",
+          action: "investigate | watch | skip",
+          priority: "0..1; higher means more worth final synthesis",
+          needs_external_search:
+            "true when public/news context is likely needed before final synthesis",
+          reason: "one short internal reason",
+        },
       ],
-      recent_calibration: input.calibrationMemo ?? [],
-      candidates: input.candidates,
     },
-  );
+    selection_rules: [
+      "Prefer early or still-informative sharp holder positioning.",
+      "Prefer clear single-side sharp holders or sharp clusters with credible credentials.",
+      "Use candidate.quality as the deterministic quality baseline.",
+      "Prefer candidates where odds moved in the holder direction but not so much that the signal is already obvious.",
+      "Use candidate.triageGate first: canLikelyPublish=false means watch/skip unless there is a very clear reason not captured by deterministic facts.",
+      "Treat support-only buckets as supporting context, not independent investigation targets.",
+      "Give a modest priority bump to actionable candidates resolving soon, but never let expiry rescue weak single-game sports singles.",
+      "Downgrade mixed holder reads, concentration-only reads, stale positions, public-news-only moves, and single-game sports singles with weak or contradicted credentials.",
+      "For single-game sports, investigate only sharp clusters or exceptional single holders unless the candidate is clearly unusual.",
+      "Use watch when useful for memory/cooldown but not worth final synthesis now.",
+      `Return at most ${input.maxInvestigate} investigate decisions unless more are clearly exceptional.`,
+    ],
+    recent_calibration: input.calibrationMemo ?? [],
+    candidates: input.candidates,
+  });
 }
 
 export function buildHolderResearchSystemPrompt(): string {
@@ -322,49 +318,47 @@ export function buildHolderResearchUserPrompt(input: {
   candidateJson: unknown;
   allowedEvidenceIds: string[];
 }): string {
-  return JSON.stringify(
-    {
-      task: "Judge whether this holder-positioning candidate deserves a concise holder_research signal card.",
-      output_contract: {
-        version: "holder_research_v1",
-        status: "PUBLISH | CONTEXT | SKIP",
-        bucket: "one supplied bucket",
-        confidence: "0..1",
-        signal_type: "catalyst | risk | update",
-        direction: "up | down | mixed",
-        headline: "5-10 word user-facing compressed thesis",
-        summary: "22-35 word plain-English takeaway",
-        rationale: "one short sentence explaining the decision quality",
-        public_context_risk:
-          "confirms_holder | fully_explains_move | conflicts_holder | unknown",
-        evidence_ids: "subset of allowedEvidenceIds",
-        caveats: "0-2 short important limitations",
-      },
-      style_rules: [
-        "Write for a normal prediction-market user scanning a signal feed; they should understand the point in 2 seconds.",
-        "Headline is the compressed signal thesis: what outcome the wallet behavior implies and why it is interesting.",
-        "Summary must answer: which side the wallet(s) are on, what the market is pricing, and why the wallet behavior is worth noticing.",
-        "Do not include wallet IDs, source lists, z-scores, sample counts, or more than one important number in the visible copy.",
-        "Do not repeat product labels in visible copy: avoid sharp, cluster, signal, and holder read in headline/summary unless unavoidable.",
-        "Avoid AI/analyst phrases in headline/summary: informed, capable, directional confirmation, fresh catalyst, public context, incremental, may explain part, adds support.",
-        "Headline should prefer outcome meaning over raw YES/NO wording when the market object is clear; use YES/NO only when needed to avoid ambiguity.",
-        "Use candidate.mkt.labels when present to translate YES/NO into team/player/outcome names.",
-        "Prefer simple trader language: sees, believes, backs, holds, still holding, fades, prices risk, trades near Xc, market gives this about X%, has not backed off, minority bet.",
-        "Use only candidate.actor.credentialBullets for holder credentials; do not invent track records or profit, and do not repeat the bullets verbatim in the summary.",
-        "Holder identityDisplayName is factual context only; preserve it verbatim if used and never infer a biography from it.",
-        "Use normal-user language for credentials; avoid analytics field names and jargon.",
-        "Use delegated search only to answer: was news already known, does news explain the move, does news support the move, or is evidence mixed?",
-        "Do not demote only because public information partly explains the move; ask whether wallets are still on a side the market is not fully pricing.",
-        "Compare holder activity/snapshot timing against dated public headlines; early holder positioning can be a publishable signal even if later news supports it.",
-        "Use same-market-type metrics only as supporting evidence. Do not overstate a wallet's skill when marketTypeMetrics30d is missing or weak.",
-        "For high-score candidates, still choose CONTEXT when direction is mixed or the takeaway is mostly risk/context.",
-        "Do not choose PUBLISH with direction=mixed.",
-        "PUBLISH should be a directional holder-backed signal with actor.mode single_holder or sharp_cluster; disagreement or risk-only reads are CONTEXT unless they clearly support one side.",
-        "If holder data adds a timely incremental directional read, choose PUBLISH.",
-        "If the signal is only mildly interesting, mostly repeats public news, or is too noisy/concentrated to be useful, choose CONTEXT or SKIP and say why briefly.",
-      ],
-      allowedEvidenceIds: input.allowedEvidenceIds,
-      candidate: input.candidateJson,
+  return JSON.stringify({
+    task: "Judge whether this holder-positioning candidate deserves a concise holder_research signal card.",
+    output_contract: {
+      version: "holder_research_v1",
+      status: "PUBLISH | CONTEXT | SKIP",
+      bucket: "one supplied bucket",
+      confidence: "0..1",
+      signal_type: "catalyst | risk | update",
+      direction: "up | down | mixed",
+      headline: "5-10 word user-facing compressed thesis",
+      summary: "22-35 word plain-English takeaway",
+      rationale: "one short sentence explaining the decision quality",
+      public_context_risk:
+        "confirms_holder | fully_explains_move | conflicts_holder | unknown",
+      evidence_ids: "subset of allowedEvidenceIds",
+      caveats: "0-2 short important limitations",
     },
-  );
+    style_rules: [
+      "Write for a normal prediction-market user scanning a signal feed; they should understand the point in 2 seconds.",
+      "Headline is the compressed signal thesis: what outcome the wallet behavior implies and why it is interesting.",
+      "Summary must answer: which side the wallet(s) are on, what the market is pricing, and why the wallet behavior is worth noticing.",
+      "Do not include wallet IDs, source lists, z-scores, sample counts, or more than one important number in the visible copy.",
+      "Do not repeat product labels in visible copy: avoid sharp, cluster, signal, and holder read in headline/summary unless unavoidable.",
+      "Avoid AI/analyst phrases in headline/summary: informed, capable, directional confirmation, fresh catalyst, public context, incremental, may explain part, adds support.",
+      "Headline should prefer outcome meaning over raw YES/NO wording when the market object is clear; use YES/NO only when needed to avoid ambiguity.",
+      "Use candidate.mkt.labels when present to translate YES/NO into team/player/outcome names.",
+      "Prefer simple trader language: sees, believes, backs, holds, still holding, fades, prices risk, trades near Xc, market gives this about X%, has not backed off, minority bet.",
+      "Use only candidate.actor.credentialBullets for holder credentials; do not invent track records or profit, and do not repeat the bullets verbatim in the summary.",
+      "Holder identityDisplayName is factual context only; preserve it verbatim if used and never infer a biography from it.",
+      "Use normal-user language for credentials; avoid analytics field names and jargon.",
+      "Use delegated search only to answer: was news already known, does news explain the move, does news support the move, or is evidence mixed?",
+      "Do not demote only because public information partly explains the move; ask whether wallets are still on a side the market is not fully pricing.",
+      "Compare holder activity/snapshot timing against dated public headlines; early holder positioning can be a publishable signal even if later news supports it.",
+      "Use same-market-type metrics only as supporting evidence. Do not overstate a wallet's skill when marketTypeMetrics30d is missing or weak.",
+      "For high-score candidates, still choose CONTEXT when direction is mixed or the takeaway is mostly risk/context.",
+      "Do not choose PUBLISH with direction=mixed.",
+      "PUBLISH should be a directional holder-backed signal with actor.mode single_holder or sharp_cluster; disagreement or risk-only reads are CONTEXT unless they clearly support one side.",
+      "If holder data adds a timely incremental directional read, choose PUBLISH.",
+      "If the signal is only mildly interesting, mostly repeats public news, or is too noisy/concentrated to be useful, choose CONTEXT or SKIP and say why briefly.",
+    ],
+    allowedEvidenceIds: input.allowedEvidenceIds,
+    candidate: input.candidateJson,
+  });
 }

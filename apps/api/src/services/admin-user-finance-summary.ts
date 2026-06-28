@@ -1,6 +1,9 @@
 import type { DbQuery } from "../db.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
-import { parseUsdcToMicroFloor, usdcMicroToDecimalString } from "../lib/usdc.js";
+import {
+  parseUsdcToMicroFloor,
+  usdcMicroToDecimalString,
+} from "../lib/usdc.js";
 import { getRewardsSummary } from "./rewards.js";
 
 type AmountTotal = {
@@ -659,8 +662,9 @@ export async function getAdminUserFinanceSummary(
     if (row.status !== "pending" && row.status !== "collected") return sum;
     return sum + decimalToMicro(row.cashback_earned_usdc);
   }, 0n);
-  const referralEarnedMicro =
-    BigInt(referrals.rewardsFromReferredUsers.totals.earned.amountUsdcRaw);
+  const referralEarnedMicro = BigInt(
+    referrals.rewardsFromReferredUsers.totals.earned.amountUsdcRaw,
+  );
 
   return {
     user: mapUser(user),

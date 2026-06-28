@@ -71,10 +71,7 @@ function fakePolicyPool(): Pool {
   } as unknown as Pool;
 }
 
-async function withMockFetch(
-  fetchImpl: typeof fetch,
-  fn: () => Promise<void>,
-) {
+async function withMockFetch(fetchImpl: typeof fetch, fn: () => Promise<void>) {
   const originalFetch = globalThis.fetch;
   clearPolymarketBuilderRateCacheForTests();
   globalThis.fetch = fetchImpl;
@@ -111,10 +108,7 @@ function baseInput() {
 }
 
 await test("uses frozen builder policy snapshot for accrual math", () => {
-  const accrual = buildPolymarketBuilderFeeAccrual(
-    baseInput(),
-    fallbackConfig,
-  );
+  const accrual = buildPolymarketBuilderFeeAccrual(baseInput(), fallbackConfig);
 
   assert.ok(accrual);
   assert.equal(accrual.attributionCode, builderSnapshot.builderCode);
@@ -164,9 +158,8 @@ await test("uses live Polymarket builder rates when enabled", async () => {
         { status: 200 },
       )) as typeof fetch,
     async () => {
-      const snapshot = await resolvePolymarketFeePolicySnapshot(
-        fakePolicyPool(),
-      );
+      const snapshot =
+        await resolvePolymarketFeePolicySnapshot(fakePolicyPool());
       assert.equal(snapshot.collectionMode, "builder");
       assert.equal(snapshot.builderRateSource, "polymarket");
       assert.equal(snapshot.builderEnabled, true);
@@ -182,9 +175,8 @@ await test("falls back to local builder bps on live rate errors", async () => {
       throw new Error("network unavailable");
     }) as typeof fetch,
     async () => {
-      const snapshot = await resolvePolymarketFeePolicySnapshot(
-        fakePolicyPool(),
-      );
+      const snapshot =
+        await resolvePolymarketFeePolicySnapshot(fakePolicyPool());
       assert.equal(snapshot.collectionMode, "builder");
       assert.equal(snapshot.builderRateSource, "fallback");
       assert.equal(snapshot.builderEnabled, true);
@@ -201,9 +193,8 @@ await test("disables builder mode when Polymarket disables the builder code", as
         status: 200,
       })) as typeof fetch,
     async () => {
-      const snapshot = await resolvePolymarketFeePolicySnapshot(
-        fakePolicyPool(),
-      );
+      const snapshot =
+        await resolvePolymarketFeePolicySnapshot(fakePolicyPool());
       assert.equal(snapshot.collectionMode, "none");
       assert.equal(snapshot.builderRateSource, "disabled");
       assert.equal(snapshot.builderEnabled, false);

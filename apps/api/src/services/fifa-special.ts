@@ -209,8 +209,14 @@ type FifaEventSortRow = {
 export type FifaSpecialPage = {
   rows: FifaSpecialRow[];
   total: number;
-  sectionFacets: Array<Required<Pick<FifaFacetRow, "section">> & Omit<FifaFacetRow, "section" | "venue">>;
-  venueFacets: Array<Required<Pick<FifaFacetRow, "venue">> & Omit<FifaFacetRow, "section" | "venue">>;
+  sectionFacets: Array<
+    Required<Pick<FifaFacetRow, "section">> &
+      Omit<FifaFacetRow, "section" | "venue">
+  >;
+  venueFacets: Array<
+    Required<Pick<FifaFacetRow, "venue">> &
+      Omit<FifaFacetRow, "section" | "venue">
+  >;
 };
 
 type ParamBuilder = {
@@ -282,7 +288,9 @@ const FIFA_WORLD_CUP_SERIES = [
   "KXWORLDCUPHALFTIME",
 ];
 
-export function normalizeFifaSpecialSearchQuery(q: string | undefined): string | undefined {
+export function normalizeFifaSpecialSearchQuery(
+  q: string | undefined,
+): string | undefined {
   const trimmed = q?.trim();
   if (!trimmed) return undefined;
   const normalized = trimmed
@@ -307,7 +315,9 @@ function buildLowerTextSql(parts: string[]): string {
   `;
 }
 
-function buildEventTextSql(options: { includeDescription?: boolean } = {}): string {
+function buildEventTextSql(
+  options: { includeDescription?: boolean } = {},
+): string {
   return buildLowerTextSql([
     "e.title",
     "e.slug",
@@ -315,7 +325,9 @@ function buildEventTextSql(options: { includeDescription?: boolean } = {}): stri
   ]);
 }
 
-function buildMarketTextSql(options: { includeDescription?: boolean } = {}): string {
+function buildMarketTextSql(
+  options: { includeDescription?: boolean } = {},
+): string {
   return buildLowerTextSql([
     "m.title",
     "m.slug",
@@ -370,15 +382,19 @@ function teamIntentPatterns(teamKey: string): string[] {
     .map(buildTeamIntentRegex);
 }
 
-function parseFifaMatchIntentQuery(q: string | undefined):
-  | { teamARegex: string; teamBRegex: string }
-  | null {
+function parseFifaMatchIntentQuery(
+  q: string | undefined,
+): { teamARegex: string; teamBRegex: string } | null {
   const terms = q?.toLowerCase().match(/[a-z0-9]+/g) ?? [];
   if (terms.length === 0) return null;
 
   const matched = new Map<string, { start: number; end: number }>();
   for (let start = 0; start < terms.length; start += 1) {
-    for (let end = start + 1; end <= Math.min(terms.length, start + 4); end += 1) {
+    for (
+      let end = start + 1;
+      end <= Math.min(terms.length, start + 4);
+      end += 1
+    ) {
       const phrase = terms.slice(start, end).join(" ");
       const key = canonicalSportsTeamKey(phrase);
       if (!TEAM_TO_GROUP.has(key)) continue;
@@ -390,7 +406,10 @@ function parseFifaMatchIntentQuery(q: string | undefined):
   }
 
   const teamKeys = Array.from(matched.entries())
-    .sort((left, right) => left[1].start - right[1].start || left[1].end - right[1].end)
+    .sort(
+      (left, right) =>
+        left[1].start - right[1].start || left[1].end - right[1].end,
+    )
     .map(([key]) => key);
   const uniqueTeamKeys = Array.from(new Set(teamKeys));
   if (uniqueTeamKeys.length !== 2) return null;
@@ -409,7 +428,9 @@ function buildFifaEventHasOrderableMarketSql(nowParam: string): string {
   });
 }
 
-function buildCombinedFifaTextSql(options: { includeDescription?: boolean } = {}): string {
+function buildCombinedFifaTextSql(
+  options: { includeDescription?: boolean } = {},
+): string {
   return `
     lower(
       coalesce(e.title, '') || ' ' ||
@@ -1035,7 +1056,10 @@ function hasMetadataFilters(inputs: FifaSpecialInputs): boolean {
   return Boolean(inputs.groupCodes?.length || inputs.teamGroupCodes?.length);
 }
 
-function rowMatchesMetadataFilters(row: FifaMetaRow, inputs: FifaSpecialInputs): boolean {
+function rowMatchesMetadataFilters(
+  row: FifaMetaRow,
+  inputs: FifaSpecialInputs,
+): boolean {
   if (!hasMetadataFilters(inputs)) return true;
   const fifa = buildFifaMeta(row, { scope: "market" });
   if (inputs.groupCodes?.length) {
@@ -1157,14 +1181,18 @@ function compareCandidateMarkets(
   return (
     compareNullableNumbers(a.match_intent_rank, b.match_intent_rank, "desc") ||
     compareNullableNumbers(a.search_rank, b.search_rank, "desc") ||
-    sectionFeaturedScore(b.fifa_section) - sectionFeaturedScore(a.fifa_section) ||
+    sectionFeaturedScore(b.fifa_section) -
+      sectionFeaturedScore(a.fifa_section) ||
     compareNullableNumbers(a.volume_display, b.volume_display, "desc") ||
     compareNullableTimes(a.sort_time, b.sort_time, "asc") ||
     compareText(a.market_uuid, b.market_uuid)
   );
 }
 
-function maxNullableNumber(current: number | null, value: unknown): number | null {
+function maxNullableNumber(
+  current: number | null,
+  value: unknown,
+): number | null {
   const next = candidateNumber(value);
   if (next == null) return current;
   return current == null || next > current ? next : current;
@@ -1197,7 +1225,10 @@ function buildEventSortRows(rows: FifaCandidateRow[]): FifaEventSortRow[] {
       });
       continue;
     }
-    existing.search_rank = maxNullableNumber(existing.search_rank, row.search_rank);
+    existing.search_rank = maxNullableNumber(
+      existing.search_rank,
+      row.search_rank,
+    );
     existing.match_intent_rank = maxNullableNumber(
       existing.match_intent_rank,
       row.match_intent_rank,
@@ -1218,7 +1249,10 @@ function buildEventSortRows(rows: FifaCandidateRow[]): FifaEventSortRow[] {
       candidateNumber(row.event_liquidity_display) ?? 0,
     );
     existing.sort_time = minNullableTime(existing.sort_time, row.sort_time);
-    existing.created_at = minNullableTime(existing.created_at, row.market_created_at);
+    existing.created_at = minNullableTime(
+      existing.created_at,
+      row.market_created_at,
+    );
   }
   return Array.from(events.values());
 }
@@ -1292,8 +1326,11 @@ function orderCandidateRows(
   for (const [eventIndex, event] of orderedEvents.entries()) {
     const eventRows = [...(rowsByEvent.get(event.event_id) ?? [])].sort(
       (a, b) =>
-        compareNullableNumbers(a.volume_display ?? 0, b.volume_display ?? 0, "desc") ||
-        compareText(a.market_uuid, b.market_uuid),
+        compareNullableNumbers(
+          a.volume_display ?? 0,
+          b.volume_display ?? 0,
+          "desc",
+        ) || compareText(a.market_uuid, b.market_uuid),
     );
     for (const [marketIndex, row] of eventRows.entries()) {
       orderedRows.push({
@@ -1315,7 +1352,11 @@ function rowMatchesRuntimeFilters(
     applyMetadata?: boolean;
   } = {},
 ): boolean {
-  if (!options.ignoreVenues && inputs.venues?.length && !inputs.venues.includes(row.venue)) {
+  if (
+    !options.ignoreVenues &&
+    inputs.venues?.length &&
+    !inputs.venues.includes(row.venue)
+  ) {
     return false;
   }
   if (
@@ -1655,9 +1696,10 @@ function buildSectionFacetsFromRows(
   >();
   for (const row of rows) {
     const key = row.fifa_section;
-    const entry =
-      counts.get(key) ??
-      { eventIds: new Set<string>(), marketIds: new Set<string>() };
+    const entry = counts.get(key) ?? {
+      eventIds: new Set<string>(),
+      marketIds: new Set<string>(),
+    };
     entry.eventIds.add(row.event_id);
     entry.marketIds.add(row.market_uuid);
     counts.set(key, entry);
@@ -1668,7 +1710,9 @@ function buildSectionFacetsFromRows(
       events: entry.eventIds.size,
       markets: entry.marketIds.size,
     }))
-    .sort((a, b) => b.markets - a.markets || a.section.localeCompare(b.section));
+    .sort(
+      (a, b) => b.markets - a.markets || a.section.localeCompare(b.section),
+    );
 }
 
 function buildVenueFacetsFromRows(
@@ -1680,9 +1724,10 @@ function buildVenueFacetsFromRows(
   >();
   for (const row of rows) {
     const key = row.venue;
-    const entry =
-      counts.get(key) ??
-      { eventIds: new Set<string>(), marketIds: new Set<string>() };
+    const entry = counts.get(key) ?? {
+      eventIds: new Set<string>(),
+      marketIds: new Set<string>(),
+    };
     entry.eventIds.add(row.event_id);
     entry.marketIds.add(row.market_uuid);
     counts.set(key, entry);
@@ -1762,7 +1807,10 @@ async function fetchMetadataFilteredFacets(
   pool: Pool,
   inputs: FifaSpecialInputs,
 ): Promise<Pick<FifaSpecialPage, "sectionFacets" | "venueFacets">> {
-  const buildRows = async (options: { ignoreSections?: boolean; ignoreVenues?: boolean }) => {
+  const buildRows = async (options: {
+    ignoreSections?: boolean;
+    ignoreVenues?: boolean;
+  }) => {
     const builder = createParamBuilder();
     const base = buildBaseSql({
       inputs,
@@ -1776,7 +1824,11 @@ async function fetchMetadataFilteredFacets(
       select *
       from candidate_markets
     `;
-    const rows = await queryFifaRows<FifaCandidateRow>(pool, sql, builder.params);
+    const rows = await queryFifaRows<FifaCandidateRow>(
+      pool,
+      sql,
+      builder.params,
+    );
     return rows.filter((row) => rowMatchesMetadataFilters(row, inputs));
   };
 
@@ -1817,7 +1869,9 @@ function selectedEventKeysFromJson(jsonParam: string): string {
   `;
 }
 
-function serializeSelectedEventRows(rows: Array<{ event_id: string; ord: unknown }>): string {
+function serializeSelectedEventRows(
+  rows: Array<{ event_id: string; ord: unknown }>,
+): string {
   return JSON.stringify(
     rows.map((row, index) => ({
       ord: candidateNumber(row.ord) ?? index + 1,
@@ -1872,7 +1926,11 @@ async function fetchCount(
     candidate_keys as materialized (${buildCandidateKeyProjection(base, "count")})
     ${totalSql};
   `;
-  const rows = await queryFifaRows<{ total: number }>(pool, sql, builder.params);
+  const rows = await queryFifaRows<{ total: number }>(
+    pool,
+    sql,
+    builder.params,
+  );
   return rows[0]?.total ?? 0;
 }
 
@@ -2160,7 +2218,9 @@ export const FIFA_2026_GROUPS: Record<string, string[]> = {
 
 const TEAM_TO_GROUP = new Map(
   Object.entries(FIFA_2026_GROUPS).flatMap(([groupCode, teams]) =>
-    teams.map((team) => [canonicalSportsTeamKey(team), { groupCode, team }] as const),
+    teams.map(
+      (team) => [canonicalSportsTeamKey(team), { groupCode, team }] as const,
+    ),
   ),
 );
 
@@ -2201,7 +2261,9 @@ function parseGroupCodeFromText(value: string): string | null {
 }
 
 function parseGroupCodeFromKalshiTicker(value: string | null): string | null {
-  const match = value?.match(/\bKXWCGROUP(?:WIN|QUAL|BOTTOM|ORDER|WINNER)-26([A-L])(?:-|$)/i);
+  const match = value?.match(
+    /\bKXWCGROUP(?:WIN|QUAL|BOTTOM|ORDER|WINNER)-26([A-L])(?:-|$)/i,
+  );
   return match?.[1]?.toUpperCase() ?? null;
 }
 
@@ -2215,7 +2277,9 @@ function parseGroupTeamsFromText(value: string): string[] | null {
   return teams.length ? teams : null;
 }
 
-function resolveGroupMarketType(value: string):
+function resolveGroupMarketType(
+  value: string,
+):
   | "winner"
   | "qualify"
   | "bottom"
@@ -2226,7 +2290,8 @@ function resolveGroupMarketType(value: string):
   | "highest_scoring_team"
   | "unknown" {
   if (/\bgroup\s+of\s+champion\b/i.test(value)) return "champion_group";
-  if (/\bhighest[-\s]scoring\s+team\b/i.test(value)) return "highest_scoring_team";
+  if (/\bhighest[-\s]scoring\s+team\b/i.test(value))
+    return "highest_scoring_team";
   if (/\bsecond\s+place\b/i.test(value)) return "second_place";
   if (/\b(last\s+place|bottom)\b/i.test(value)) return "last_place";
   if (/\bqualif/i.test(value)) return "qualify";
@@ -2236,7 +2301,10 @@ function resolveGroupMarketType(value: string):
   return "unknown";
 }
 
-function resolveGroupInfo(row: FifaMetaRow, scope: FifaMetaScope): {
+function resolveGroupInfo(
+  row: FifaMetaRow,
+  scope: FifaMetaScope,
+): {
   groupCode: string | null;
   groupTeams: string[] | null;
   groupMarketType: FifaMeta["groupMarketType"];
@@ -2253,7 +2321,7 @@ function resolveGroupInfo(row: FifaMetaRow, scope: FifaMetaScope): {
     (scope === "market" ? parseGroupCodeFromText(marketText) : null);
   const groupTeams =
     (scope === "market" ? parseGroupTeamsFromText(marketText) : null) ??
-    (groupCode ? FIFA_2026_GROUPS[groupCode] ?? null : null);
+    (groupCode ? (FIFA_2026_GROUPS[groupCode] ?? null) : null);
   return {
     groupCode,
     groupTeams,
@@ -2261,7 +2329,9 @@ function resolveGroupInfo(row: FifaMetaRow, scope: FifaMetaScope): {
   };
 }
 
-function resolveKnownTeamName(value: string | null): { teamName: string; teamGroupCode: string } | null {
+function resolveKnownTeamName(
+  value: string | null,
+): { teamName: string; teamGroupCode: string } | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed || /^draw\b/i.test(trimmed)) return null;
@@ -2296,14 +2366,17 @@ function buildGroupMeta(input: {
     const continent = /continent/i.test(title);
     return {
       groupType: "outright",
-      groupKey: continent ? "outright:continent-winner" : "outright:world-cup-winner",
+      groupKey: continent
+        ? "outright:continent-winner"
+        : "outright:world-cup-winner",
       groupLabel: continent ? "World Cup Continent Winner" : "World Cup Winner",
     };
   }
 
   if (input.section === "group") {
     const group =
-      input.groupCode ?? title.match(/\bgroup\s+([a-l])\b/i)?.[1]?.toUpperCase();
+      input.groupCode ??
+      title.match(/\bgroup\s+([a-l])\b/i)?.[1]?.toUpperCase();
     const kind =
       input.groupMarketType && input.groupMarketType !== "unknown"
         ? input.groupMarketType
@@ -2326,11 +2399,11 @@ function buildGroupMeta(input: {
                 ? "Second Place"
                 : kind === "highest_scoring_team"
                   ? "Highest-Scoring Team"
-            : kind === "order"
-              ? "Order"
-              : kind === "winner"
-                ? "Winner"
-                : "Markets";
+                  : kind === "order"
+                    ? "Order"
+                    : kind === "winner"
+                      ? "Winner"
+                      : "Markets";
     return {
       groupType: "group",
       groupKey,
@@ -2351,10 +2424,17 @@ function parseLine(row: FifaMetaRow): number | null {
   const subtype = row.fifa_subtype;
 
   if (subtype === "total" || subtype === "team_total") {
-    const titleMatch = title.match(/\b(?:O\/U|Over\/Under|Over|Under)\s*([0-9]+(?:\.[0-9]+)?)/i);
+    const titleMatch = title.match(
+      /\b(?:O\/U|Over\/Under|Over|Under)\s*([0-9]+(?:\.[0-9]+)?)/i,
+    );
     if (titleMatch) return Number(titleMatch[1]);
-    const slugMatch = slug.match(/\b(?:o-u|over-under|over|under)-(\d+)(?:pt(\d+))?\b/i);
-    if (slugMatch) return Number(slugMatch[2] ? `${slugMatch[1]}.${slugMatch[2]}` : slugMatch[1]);
+    const slugMatch = slug.match(
+      /\b(?:o-u|over-under|over|under)-(\d+)(?:pt(\d+))?\b/i,
+    );
+    if (slugMatch)
+      return Number(
+        slugMatch[2] ? `${slugMatch[1]}.${slugMatch[2]}` : slugMatch[1],
+      );
   }
 
   if (subtype === "spread") {
@@ -2363,7 +2443,9 @@ function parseLine(row: FifaMetaRow): number | null {
   }
 
   if (subtype === "player_goal_or_assist") {
-    const titleMatch = title.match(/\b([0-9]+(?:\.[0-9]+)?)\s+(?:or\s+more|goals?|assists?)\b/i);
+    const titleMatch = title.match(
+      /\b([0-9]+(?:\.[0-9]+)?)\s+(?:or\s+more|goals?|assists?)\b/i,
+    );
     if (titleMatch) return Number(titleMatch[1]);
   }
 
@@ -2392,12 +2474,11 @@ export function buildFifaMeta(
   const scope = options.scope ?? "event";
   const isRealMatchSection =
     row.fifa_section === "match_result" || row.fifa_section === "match_prop";
-  const matchDate =
-    isRealMatchSection
-      ? parseDateFromPolymarketSlug(row.event_slug) ??
-        parseDateFromKalshiTicker(row.venue_event_id) ??
-        parseDateFromPolymarketSlug(row.market_slug)
-      : null;
+  const matchDate = isRealMatchSection
+    ? (parseDateFromPolymarketSlug(row.event_slug) ??
+      parseDateFromKalshiTicker(row.venue_event_id) ??
+      parseDateFromPolymarketSlug(row.market_slug))
+    : null;
   const teams = parseTeamsFromTitle(row.event_title);
   const fixtureTeams = parseSportsMatchTeamsFromTitle(row.event_title);
   const matchKey =
@@ -2434,8 +2515,12 @@ export function buildFifaMeta(
     matchKey,
     matchFixtureKey,
     matchDate,
-    homeTeam: isRealMatchSection ? fixtureTeams.homeTeam ?? teams.homeTeam : null,
-    awayTeam: isRealMatchSection ? fixtureTeams.awayTeam ?? teams.awayTeam : null,
+    homeTeam: isRealMatchSection
+      ? (fixtureTeams.homeTeam ?? teams.homeTeam)
+      : null,
+    awayTeam: isRealMatchSection
+      ? (fixtureTeams.awayTeam ?? teams.awayTeam)
+      : null,
     teamName: team?.teamName ?? null,
     teamGroupCode: team?.teamGroupCode ?? null,
     entity,
@@ -2445,7 +2530,9 @@ export function buildFifaMeta(
   };
 }
 
-export function resolveTokenPair(row: Pick<FifaSpecialRow, "token_yes" | "token_no" | "clob_token_ids">): TokenPair {
+export function resolveTokenPair(
+  row: Pick<FifaSpecialRow, "token_yes" | "token_no" | "clob_token_ids">,
+): TokenPair {
   const tokens: TokenPair = {
     yes: row.token_yes != null ? String(row.token_yes) : null,
     no: row.token_no != null ? String(row.token_no) : null,

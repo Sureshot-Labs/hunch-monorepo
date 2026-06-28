@@ -1278,74 +1278,73 @@ async function buildAdminIndexerSystemStats() {
     },
   };
   if (!redis) {
-	    return {
-	      ...base,
-	      venues: ADMIN_SYSTEM_VENUES.map((venue) => ({
-	        venue,
-	        hotTokens: null,
-	        streamHotTokens: null,
-	        priceRefreshQueue: null,
-	        priceRefreshHttpFallbackQueue: null,
-	        heartbeat: null,
-	        error: error ?? "Redis unavailable",
-	      })),
+    return {
+      ...base,
+      venues: ADMIN_SYSTEM_VENUES.map((venue) => ({
+        venue,
+        hotTokens: null,
+        streamHotTokens: null,
+        priceRefreshQueue: null,
+        priceRefreshHttpFallbackQueue: null,
+        heartbeat: null,
+        error: error ?? "Redis unavailable",
+      })),
     };
   }
 
   const venues = await Promise.all(
     ADMIN_SYSTEM_VENUES.map(async (venue) => {
-	      try {
-	        const [
-	          hotTokens,
-	          streamHotTokens,
-	          priceRefreshQueue,
-	          priceRefreshHttpFallbackQueue,
-	          heartbeat,
-	        ] =
-	          await Promise.all([
-	            readRedisZsetStats(
-	              redis,
-              ADMIN_SYSTEM_HOT_KEYS[venue],
-              env.hotTokensTtlSec,
-              nowMs,
-            ),
-            readRedisZsetStats(
-              redis,
-              ADMIN_SYSTEM_HOT_STREAM_KEYS[venue],
-              env.hotStreamTokensTtlSec,
-              nowMs,
-            ),
-	            readRedisPriceRefreshQueueStats(
-	              redis,
-	              PRICE_REFRESH_QUEUE_KEYS[venue],
-	              nowMs,
-	            ),
-	            venue === "limitless"
-	              ? readRedisPriceRefreshQueueStats(
-	                  redis,
-	                  LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
-	                  nowMs,
-	                )
-	              : Promise.resolve(null),
-	            readIndexerHeartbeat(redis, venue),
-	          ]);
-	        return {
-	          venue,
-	          hotTokens,
-	          streamHotTokens,
-	          priceRefreshQueue,
-	          priceRefreshHttpFallbackQueue,
-	          heartbeat,
-	          error: null,
-	        };
+      try {
+        const [
+          hotTokens,
+          streamHotTokens,
+          priceRefreshQueue,
+          priceRefreshHttpFallbackQueue,
+          heartbeat,
+        ] = await Promise.all([
+          readRedisZsetStats(
+            redis,
+            ADMIN_SYSTEM_HOT_KEYS[venue],
+            env.hotTokensTtlSec,
+            nowMs,
+          ),
+          readRedisZsetStats(
+            redis,
+            ADMIN_SYSTEM_HOT_STREAM_KEYS[venue],
+            env.hotStreamTokensTtlSec,
+            nowMs,
+          ),
+          readRedisPriceRefreshQueueStats(
+            redis,
+            PRICE_REFRESH_QUEUE_KEYS[venue],
+            nowMs,
+          ),
+          venue === "limitless"
+            ? readRedisPriceRefreshQueueStats(
+                redis,
+                LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY,
+                nowMs,
+              )
+            : Promise.resolve(null),
+          readIndexerHeartbeat(redis, venue),
+        ]);
+        return {
+          venue,
+          hotTokens,
+          streamHotTokens,
+          priceRefreshQueue,
+          priceRefreshHttpFallbackQueue,
+          heartbeat,
+          error: null,
+        };
       } catch (venueError) {
         return {
           venue,
-	          hotTokens: null,
-	          streamHotTokens: null,
-	          priceRefreshQueue: null,
-	          priceRefreshHttpFallbackQueue: null,
-	          heartbeat: null,
+          hotTokens: null,
+          streamHotTokens: null,
+          priceRefreshQueue: null,
+          priceRefreshHttpFallbackQueue: null,
+          heartbeat: null,
           error:
             venueError instanceof Error
               ? venueError.message
@@ -3125,7 +3124,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     "/admin/users/:id/finance-summary",
     {
       preHandler: createAdminMiddleware({
-        requiredAdminPermissions: ["users:read", "finance:read", "rewards:read"],
+        requiredAdminPermissions: [
+          "users:read",
+          "finance:read",
+          "rewards:read",
+        ],
       }),
       schema: { params: adminUserParamsSchema },
     },
@@ -5798,10 +5801,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       schema: { params: adminFeeLedgerDetailParamsSchema },
     },
     async (request, reply) => {
-      const item = await getAdminFeeLedgerBuilderSweep(
-        pool,
-        request.params.id,
-      );
+      const item = await getAdminFeeLedgerBuilderSweep(pool, request.params.id);
       if (!item) {
         reply.code(404);
         return reply.send({ error: "Builder sweep not found" });

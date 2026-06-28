@@ -197,7 +197,10 @@ function parseKickoffUtc(value: string | null): string | null {
   return parsed.toISOString();
 }
 
-function eventLocalDate(event: TheSportsDbEvent, kickoffUtc: string | null): string | null {
+function eventLocalDate(
+  event: TheSportsDbEvent,
+  kickoffUtc: string | null,
+): string | null {
   const localDate = asString(event.dateEventLocal);
   if (localDate) return localDate;
   const dateEvent = asString(event.dateEvent);
@@ -209,7 +212,9 @@ function parseFifaDateFromSlug(slug: string | null | undefined): string | null {
   return slug?.match(/(20\d{2}-\d{2}-\d{2})/)?.[1] ?? null;
 }
 
-function parseFifaDateFromKalshiTicker(ticker: string | null | undefined): string | null {
+function parseFifaDateFromKalshiTicker(
+  ticker: string | null | undefined,
+): string | null {
   const match = ticker?.match(/-26([A-Z]{3})(\d{2})/);
   if (!match) return null;
   const month = MONTHS[match[1]];
@@ -333,10 +338,16 @@ export function fixtureKeyToSearchQueries(fixtureKey: string): string[] {
       queries.push(`${home}_vs_${away}`.replace(/\s+/g, "_"));
     }
   }
-  return dedupeStrings(queries).slice(0, THESPORTSDB_FIXTURE_SEARCH_QUERY_LIMIT);
+  return dedupeStrings(queries).slice(
+    0,
+    THESPORTSDB_FIXTURE_SEARCH_QUERY_LIMIT,
+  );
 }
 
-async function fetchTheSportsDbJson(path: string, params: Record<string, string>) {
+async function fetchTheSportsDbJson(
+  path: string,
+  params: Record<string, string>,
+) {
   const url = new URL(
     `https://www.thesportsdb.com/api/v1/json/${encodeURIComponent(env.theSportsDbApiKey)}/${path}`,
   );
@@ -376,7 +387,10 @@ function dedupeFixturesByProviderId(
 ): NormalizedSportsFixture[] {
   const byProviderId = new Map<string, NormalizedSportsFixture>();
   for (const fixture of fixtures) {
-    byProviderId.set(`${fixture.provider}:${fixture.providerFixtureId}`, fixture);
+    byProviderId.set(
+      `${fixture.provider}:${fixture.providerFixtureId}`,
+      fixture,
+    );
   }
   return Array.from(byProviderId.values());
 }
@@ -396,7 +410,11 @@ async function fetchTheSportsDbOptionalEndpoints(
 ): Promise<NormalizedSportsFixture[]> {
   const settled = await Promise.allSettled(
     endpoints.map((endpoint) =>
-      fetchTheSportsDbEndpointFixtures(competition, endpoint.path, endpoint.params),
+      fetchTheSportsDbEndpointFixtures(
+        competition,
+        endpoint.path,
+        endpoint.params,
+      ),
     ),
   );
   const fulfilled = settled.flatMap((result) =>
@@ -408,7 +426,9 @@ async function fetchTheSportsDbOptionalEndpoints(
   const firstRejected = settled.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
-  throw firstRejected?.reason ?? new Error("TheSportsDB fixture request failed");
+  throw (
+    firstRejected?.reason ?? new Error("TheSportsDB fixture request failed")
+  );
 }
 
 function filterFixturesByKey(
@@ -479,7 +499,9 @@ export const theSportsDbProvider: SportsFixtureProvider = {
   },
 };
 
-function resolveProvider(provider: SportsFixtureProviderName): SportsFixtureProvider {
+function resolveProvider(
+  provider: SportsFixtureProviderName,
+): SportsFixtureProvider {
   switch (provider) {
     case "thesportsdb":
       return theSportsDbProvider;
@@ -611,7 +633,9 @@ export async function fetchSportsFixturesByKeys(
   }
 }
 
-export function formatSportsFixtureForApi(row: SportsFixtureRow): SportsFixtureApi {
+export function formatSportsFixtureForApi(
+  row: SportsFixtureRow,
+): SportsFixtureApi {
   const toIsoTimestamp = (value: string | Date | null): string | null =>
     value instanceof Date ? value.toISOString() : value;
   const toDateOnly = (value: string | Date | null): string | null => {
@@ -699,7 +723,9 @@ export async function refreshSportsFixtures(
       fixtureKey: input.fixtureKey,
     });
   }
-  const upserted = input.dryRun ? 0 : await upsertSportsFixtures(pool, fixtures);
+  const upserted = input.dryRun
+    ? 0
+    : await upsertSportsFixtures(pool, fixtures);
   return {
     provider: competition.provider,
     sport: competition.sport,

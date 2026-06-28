@@ -287,11 +287,12 @@ function getEmbeddedSolanaUserPaidRequirementLamports(inputs: {
 
   let requiredLamports = EMBEDDED_SOLANA_USER_TX_FEE_BUFFER_LAMPORTS;
   for (const instruction of tx.message.compiledInstructions) {
-    requiredLamports += instructionTransfersNativeSolLamportsFromSignerOrFeePayer(
-      tx,
-      instruction,
-      inputs.signer,
-    );
+    requiredLamports +=
+      instructionTransfersNativeSolLamportsFromSignerOrFeePayer(
+        tx,
+        instruction,
+        inputs.signer,
+      );
     requiredLamports += instructionCreatesAccountWithSignerOrFeePayerLamports(
       tx,
       instruction,
@@ -692,11 +693,12 @@ function getEmbeddedSolanaRequiredSignerLamports(inputs: {
 }): bigint {
   let requiredLamports = BigInt(0);
   for (const transaction of inputs.transactions) {
-    const transactionRequirement =
-      getEmbeddedSolanaUserPaidRequirementLamports({
+    const transactionRequirement = getEmbeddedSolanaUserPaidRequirementLamports(
+      {
         signer: inputs.context.signer,
         transaction: transaction.transaction,
-      });
+      },
+    );
     requiredLamports += transactionRequirement;
   }
   return requiredLamports;

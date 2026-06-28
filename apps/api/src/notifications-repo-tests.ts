@@ -3,7 +3,10 @@
 import assert from "node:assert/strict";
 
 import type { DbQuery } from "./db.js";
-import { insertNotification, fetchNotifications } from "./repos/notifications-repo.js";
+import {
+  insertNotification,
+  fetchNotifications,
+} from "./repos/notifications-repo.js";
 import {
   buildOrderNotification,
   createNotificationSafe,
@@ -56,7 +59,10 @@ await test("order notification dedupe keys are venue scoped", async () => {
     limitlessNotification.dedupeKey,
     "order:limitless:shared-order-id",
   );
-  assert.notEqual(polymarketNotification.dedupeKey, limitlessNotification.dedupeKey);
+  assert.notEqual(
+    polymarketNotification.dedupeKey,
+    limitlessNotification.dedupeKey,
+  );
 });
 
 await test("venue-scoped order notifications migrate legacy dedupe keys", async () => {
@@ -92,7 +98,10 @@ await test("venue-scoped order notifications migrate legacy dedupe keys", async 
     "order:polymarket:0xabc",
     "polymarket",
   ]);
-  assert.match(queries[1] ?? "", /on conflict \(user_id, dedupe_key\) do update/i);
+  assert.match(
+    queries[1] ?? "",
+    /on conflict \(user_id, dedupe_key\) do update/i,
+  );
 });
 
 await test("incomplete order filled notifications are not inserted", async () => {
@@ -248,10 +257,7 @@ await test("fetchNotifications hides stale order_created rows with terminal sibl
   );
   assert.match(terminalStatusSql, /'unmatched'/);
   assert.equal(result.rows.length, 0);
-  assert.match(
-    listSql,
-    /terminal\.data->>'orderId' = n\.data->>'orderId'/,
-  );
+  assert.match(listSql, /terminal\.data->>'orderId' = n\.data->>'orderId'/);
   assert.match(
     listSql,
     /n\.type = 'order_filled'[\s\S]+n\.data->>'venue'[\s\S]+like 'history:%'/,

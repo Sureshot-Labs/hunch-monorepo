@@ -3104,8 +3104,7 @@ const tests: TestCase[] = [
 
       assert.equal(metrics.rows[0]?.resolvedEdgeSampleCount, 2);
       assert.ok(
-        Math.abs((metrics.rows[0]?.resolvedExpectedWinRate ?? 0) - 0.55) <
-          1e-9,
+        Math.abs((metrics.rows[0]?.resolvedExpectedWinRate ?? 0) - 0.55) < 1e-9,
       );
       assert.ok(
         Math.abs(

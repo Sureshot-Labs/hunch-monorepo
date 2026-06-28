@@ -125,10 +125,10 @@ function hasUsefulLimitlessProfile(
 ): profile is LimitlessProfile {
   return Boolean(
     profile &&
-      (profile.id != null ||
-        profile.account != null ||
-        profile.client != null ||
-        profile.rank != null),
+    (profile.id != null ||
+      profile.account != null ||
+      profile.client != null ||
+      profile.rank != null),
   );
 }
 
@@ -170,7 +170,8 @@ function collectLimitlessProfiles(
 
 function profileIdentityKey(profile: LimitlessProfile): string {
   const id = profile.id == null ? "" : String(profile.id);
-  const account = profile.account == null ? "" : normalizeAddress(profile.account);
+  const account =
+    profile.account == null ? "" : normalizeAddress(profile.account);
   return `${id}:${account}`;
 }
 

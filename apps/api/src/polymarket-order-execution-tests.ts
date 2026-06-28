@@ -262,7 +262,12 @@ const tests: TestCase[] = [
   {
     name: "stored fill sync preserves terminal partial fills",
     run: () => {
-      for (const currentStatus of ["cancelled", "expired", "unmatched", "rejected"]) {
+      for (const currentStatus of [
+        "cancelled",
+        "expired",
+        "unmatched",
+        "rejected",
+      ]) {
         const status = resolvePolymarketStoredFillSyncStatus({
           currentStatus,
           orderType: "GTC",
@@ -391,7 +396,10 @@ const tests: TestCase[] = [
       assert.equal(notification.type, "order_filled");
       assert.equal(notification.title, "Order filled");
       assert.equal(notification.body, "Polymarket SELL");
-      const data = notification.data as { size: number | null; price: number | null };
+      const data = notification.data as {
+        size: number | null;
+        price: number | null;
+      };
       assert.equal(data.size, null);
       assert.equal(data.price, null);
     },
@@ -410,7 +418,10 @@ const tests: TestCase[] = [
       });
       assert.equal(notification.type, "order_filled");
       assert.equal(notification.body, "Polymarket SELL 2.22 @ $0.43");
-      const data = notification.data as { size: number | null; price: number | null };
+      const data = notification.data as {
+        size: number | null;
+        price: number | null;
+      };
       assert.equal(data.size, 2.22);
       assert.equal(data.price, 0.43);
     },
@@ -429,7 +440,10 @@ const tests: TestCase[] = [
       });
       assert.equal(notification.type, "order_filled");
       assert.equal(notification.body, "Polymarket SELL @ $0.89");
-      const data = notification.data as { size: number | null; price: number | null };
+      const data = notification.data as {
+        size: number | null;
+        price: number | null;
+      };
       assert.equal(data.size, null);
       assert.equal(data.price, 0.89);
     },
@@ -555,7 +569,10 @@ const tests: TestCase[] = [
       const source = readApiSourceFile("routes", "polymarket-private.ts");
       assert.match(source, /hasPolymarketOrderExecutionEvidence\(row\.id\)/);
       assert.match(source, /markPolymarketDelayedOrderUnconfirmed/);
-      assert.match(source, /Polymarket trade sync before cancel reconcile failed/);
+      assert.match(
+        source,
+        /Polymarket trade sync before cancel reconcile failed/,
+      );
     },
   },
   {

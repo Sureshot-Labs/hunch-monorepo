@@ -556,7 +556,9 @@ async function insertReferralWithUsageLimit(
   inputs: { userId: string; referralCode: string },
 ): Promise<{
   status: "attached" | "already_attached" | "not_found" | "self_referral";
-  referralCode: Awaited<ReturnType<typeof findActiveReferralCodeForAttach>> | null;
+  referralCode: Awaited<
+    ReturnType<typeof findActiveReferralCodeForAttach>
+  > | null;
   referralId: string | null;
 }> {
   const referralCode = await findActiveReferralCodeForAttach(
@@ -579,7 +581,10 @@ async function insertReferralWithUsageLimit(
   const currentUses =
     maxUses == null
       ? 0
-      : await countReferralsForReferralCode(pool, referralCode.referral_code_id);
+      : await countReferralsForReferralCode(
+          pool,
+          referralCode.referral_code_id,
+        );
   if (maxUses != null && currentUses >= maxUses) {
     await retireReferralCodeForUsageLimit(pool, referralCode.referral_code_id);
     return { status: "not_found", referralCode, referralId: null };
@@ -801,11 +806,7 @@ export async function setReferralCodeForUser(
 
   if (codeRow && ownerId === targetId) {
     if (!codeRow.is_active || codeRow.retired_at) {
-      await retireActiveUserReferralCodes(
-        pool,
-        targetId,
-        "user_code_changed",
-      );
+      await retireActiveUserReferralCodes(pool, targetId, "user_code_changed");
       await pool.query(
         `
           update referral_codes
