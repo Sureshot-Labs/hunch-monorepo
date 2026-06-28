@@ -132,6 +132,7 @@ export type HolderResearchRunOptions = {
 };
 
 const CLI_REDIS_CONNECT_TIMEOUT_MS = 5_000;
+const HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
 
 type ExternalResearchResult = {
   status: "skipped" | "dry_run" | "ok" | "no_public_context" | "error";
@@ -1409,6 +1410,7 @@ async function applyFreshPriceChecksToCandidates(params: {
       enqueue: Boolean(params.redis),
       marketIds: candidatesToCheck.map((candidate) => candidate.market.marketId),
       maxBuyPrice: params.policy.livePriceMaxBuyPrice,
+      maxFreshAgeMs: HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS,
       maxTokens: candidatesToCheck.length * 2,
       minFreshAt: checkedAt,
       pollMs: params.policy.livePriceCheckPollMs,
@@ -1442,6 +1444,7 @@ async function applyFreshPriceChecksToCandidates(params: {
       detail: [
         `requested=${result.requestedTokenIds.length}`,
         `fresh=${result.freshTokenIds.length}`,
+        `maxAgeMs=${HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS}`,
         `markets=${result.marketStates.size}`,
         `enqueued=${result.enqueued}`,
         `blocked=${priceGuardBlocked}`,

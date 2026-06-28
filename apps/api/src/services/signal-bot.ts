@@ -239,6 +239,7 @@ const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
 const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
 const PRICE_GUARD_DEFER_KEY_PREFIX = "tg:signal_bot:v1:price_guard_defer";
+const PRICE_GUARD_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
 const OUTCOME_LABEL_MAX_CHARS = 3;
@@ -1124,6 +1125,7 @@ async function loadSignalBotPriceGuardBlockers(input: {
       enqueue: Boolean(priceRedis),
       marketIds: [input.note.marketId],
       maxBuyPrice: 0.95,
+      maxFreshAgeMs: PRICE_GUARD_MAX_FRESH_AGE_MS,
       maxTokens: 2,
       pollMs: 100,
       priority: "high",

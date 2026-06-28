@@ -77,6 +77,7 @@ type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
 type WalletIntelMarketRefreshVenue = "polymarket" | "dflow" | "limitless";
 const WALLET_INTEL_FRESH_PRICE_CHECK_TIMEOUT_MS = 30_000;
+const WALLET_INTEL_FRESH_PRICE_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
 type WalletIntelRefreshTelemetry = {
   holdersPolymarket: WalletIntelRetryTelemetry;
   holdersAlchemyPolygon: WalletIntelRetryTelemetry;
@@ -782,6 +783,7 @@ async function requestFreshWalletIntelMarketPrices(
       db: client,
       enqueue: true,
       marketIds: marketRows.map((row) => row.id),
+      maxFreshAgeMs: WALLET_INTEL_FRESH_PRICE_MAX_FRESH_AGE_MS,
       maxTokens,
       minFreshAt: requestedAt,
       pollMs: 1_000,
@@ -793,6 +795,7 @@ async function requestFreshWalletIntelMarketPrices(
       enqueued: result.enqueued,
       fresh: result.freshTokenIds.length,
       markets: result.marketStates.size,
+      maxAgeMs: WALLET_INTEL_FRESH_PRICE_MAX_FRESH_AGE_MS,
       requested: result.requestedTokenIds.length,
       stale: Math.max(
         0,

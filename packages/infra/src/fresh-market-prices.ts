@@ -135,6 +135,16 @@ function tokenTopIsFresh(
   return Number.isFinite(bid) || Number.isFinite(ask);
 }
 
+function resolveMinFreshAt(input: {
+  maxFreshAgeMs?: number;
+  minFreshAt?: Date;
+}): Date {
+  const reference = input.minFreshAt ?? new Date();
+  if (input.maxFreshAgeMs == null) return reference;
+  const maxFreshAgeMs = Math.max(0, Math.trunc(input.maxFreshAgeMs));
+  return new Date(reference.getTime() - maxFreshAgeMs);
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -396,6 +406,7 @@ export async function requestFreshMarketPrices(input: {
   db: FreshMarketPriceDb;
   enqueue?: boolean;
   marketIds?: string[];
+  maxFreshAgeMs?: number;
   maxTokens?: number;
   maxBuyPrice?: number;
   minFreshAt?: Date;
@@ -412,7 +423,7 @@ export async function requestFreshMarketPrices(input: {
       (input.marketIds ?? []).map(normalizeId).filter(Boolean) as string[],
     ),
   );
-  const minFreshAt = input.minFreshAt ?? new Date();
+  const minFreshAt = resolveMinFreshAt(input);
   // Callers may pass a single pg PoolClient, so DB reads here must stay
   // sequential unless the caller explicitly provides a pool-safe wrapper.
   const marketRows = await loadMarketRows(input.db, marketIds);

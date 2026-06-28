@@ -513,6 +513,27 @@ await test("requestFreshMarketPrices does not enqueue already-fresh tokens", asy
   assert.equal(await getPriceRefreshQueueBacklog(redis, "polymarket"), 0);
 });
 
+await test("requestFreshMarketPrices accepts recent tops by max age", async () => {
+  const db = new SingleClientFreshPriceDb();
+  const redis = new FakeRedis();
+  const result = await requestFreshMarketPrices({
+    db,
+    marketIds: ["polymarket:test"],
+    maxFreshAgeMs: 120_000,
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:02:00.000Z"),
+    priority: "high",
+    redis,
+    timeoutMs: 0,
+  });
+
+  assert.equal(result.enqueued, 0);
+  assert.deepEqual(result.freshTokenIds, ["yes-token", "no-token"]);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.marketStates.get("polymarket:test")?.fresh, true);
+  assert.equal(await getPriceRefreshQueueBacklog(redis, "polymarket"), 0);
+});
+
 await test("requestFreshMarketPrices enqueues only stale tokens", async () => {
   const db = new SingleClientFreshPriceDb();
   db.tokenTopRows = [
