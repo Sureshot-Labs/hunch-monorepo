@@ -250,7 +250,9 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             "Markets by token slow",
           );
         }
-        const response = mapMarketsByTokenRows(rows);
+        const response = mapMarketsByTokenRows(rows, {
+          polymarketOrderabilityMode: "trust_accepting_orders",
+        });
 
         if (tokenIds.length) {
           void markHotTokens({ tokenIds });
@@ -305,7 +307,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       }
 
       // Create cache key
-      const cacheKey = `market:v4:${marketId}`;
+      const cacheKey = `market:v5:${marketId}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for market data)
@@ -476,6 +478,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             expirationTime: market.expiration_time,
             eventEndTime: market.end_date,
             pmAcceptingOrders: market.pm_accepting_orders,
+            polymarketOrderabilityMode: "trust_accepting_orders",
             dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
               market.market_metadata,
             ),

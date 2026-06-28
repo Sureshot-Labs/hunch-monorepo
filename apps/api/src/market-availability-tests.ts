@@ -96,6 +96,33 @@ test("Polymarket accepting-orders does not override very old close time", () => 
   );
 });
 
+test("Polymarket detail mode trusts accepting-orders after grace window", () => {
+  assert.equal(
+    computeAcceptingOrders({
+      venue: "polymarket",
+      status: "ACTIVE",
+      closeTime: "2026-05-20T12:00:00Z",
+      expirationTime: "2026-05-20T12:00:00Z",
+      pmAcceptingOrders: true,
+      polymarketOrderabilityMode: "trust_accepting_orders",
+      nowMs: Date.parse("2026-05-21T12:00:00Z"),
+    }),
+    true,
+  );
+
+  assert.equal(
+    computeAcceptingOrders({
+      venue: "polymarket",
+      status: "CLOSED",
+      closeTime: "2026-05-20T12:00:00Z",
+      pmAcceptingOrders: true,
+      polymarketOrderabilityMode: "trust_accepting_orders",
+      nowMs: Date.parse("2026-05-21T12:00:00Z"),
+    }),
+    false,
+  );
+});
+
 test("Polymarket accepting-orders uses event end time in grace window", () => {
   const nowMs = Date.parse("2026-05-20T15:00:00Z");
   assert.equal(

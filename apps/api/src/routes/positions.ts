@@ -382,7 +382,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 venue: responseVenue,
                 includeTop: true,
               });
-              marketsByToken = mapMarketsByTokenRows(marketRows);
+              marketsByToken = mapMarketsByTokenRows(marketRows, {
+                polymarketOrderabilityMode: "trust_accepting_orders",
+              });
               const mappedTokenIds = new Set(
                 marketsByToken.map((entry) => entry.tokenId),
               );

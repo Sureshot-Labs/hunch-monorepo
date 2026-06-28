@@ -1,3 +1,5 @@
+export type PolymarketOrderabilityMode = "grace" | "trust_accepting_orders";
+
 type ComputeAcceptingOrdersInput = {
   venue?: string | null;
   status: string | null | undefined;
@@ -5,6 +7,7 @@ type ComputeAcceptingOrdersInput = {
   expirationTime?: unknown;
   eventEndTime?: unknown;
   pmAcceptingOrders?: boolean | null;
+  polymarketOrderabilityMode?: PolymarketOrderabilityMode;
   dflowNativeAcceptingOrders?: boolean | null;
   nowMs?: number;
 };
@@ -99,6 +102,7 @@ export function computeAcceptingOrders(
   if (input.pmAcceptingOrders === true) {
     if (inactiveByStatus) return false;
     if (
+      input.polymarketOrderabilityMode !== "trust_accepting_orders" &&
       terminalMs != null &&
       terminalMs <= nowMs - POLYMARKET_ACCEPTING_ORDERS_GRACE_MS
     ) {

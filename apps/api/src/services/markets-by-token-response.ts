@@ -1,4 +1,5 @@
 import {
+  type PolymarketOrderabilityMode,
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
@@ -83,7 +84,10 @@ function extractLimitlessMeta(
 
 export function mapMarketsByTokenRows(
   rows: MarketByTokenRow[],
-  options: { now?: Date } = {},
+  options: {
+    now?: Date;
+    polymarketOrderabilityMode?: PolymarketOrderabilityMode;
+  } = {},
 ) {
   const now = options.now ?? new Date();
 
@@ -140,6 +144,7 @@ export function mapMarketsByTokenRows(
       expirationTime: row.expiration_time,
       eventEndTime: row.end_date,
       pmAcceptingOrders: row.pm_accepting_orders,
+      polymarketOrderabilityMode: options.polymarketOrderabilityMode,
       dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
         row.market_metadata,
       ),

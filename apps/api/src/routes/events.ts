@@ -234,6 +234,7 @@ function isAcceptingOrders(row: EventDetailsRow): boolean {
     expirationTime: row.expiration_time,
     eventEndTime: row.end_date,
     pmAcceptingOrders: row.pm_accepting_orders,
+    polymarketOrderabilityMode: "trust_accepting_orders",
     dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
       row.market_metadata,
     ),
@@ -409,7 +410,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Create cache key
-      const cacheKey = `event:v3:${eventId}`;
+      const cacheKey = `event:v4:${eventId}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for event data)
@@ -606,6 +607,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             expirationTime: row.expiration_time,
             eventEndTime: row.end_date,
             pmAcceptingOrders: row.pm_accepting_orders,
+            polymarketOrderabilityMode: "trust_accepting_orders",
             dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
               row.market_metadata,
             ),
