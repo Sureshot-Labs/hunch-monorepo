@@ -10,6 +10,7 @@ import {
 } from "./clobBook.js";
 import {
   deriveLimitlessClobSiblingTop,
+  isLimitlessTopUsable,
   LimitlessClobDirectTopTracker,
 } from "./clobComplement.js";
 
@@ -143,6 +144,11 @@ test("missing direct bid or ask derives only computable sibling side", () => {
 });
 
 test("invalid direct top skips sibling derivation", () => {
+  assert.equal(isLimitlessTopUsable(0.8, 0.2), false);
+  assert.equal(isLimitlessTopUsable(0.2, 0.8), true);
+  assert.equal(isLimitlessTopUsable(null, 0.8), true);
+  assert.equal(isLimitlessTopUsable(1.2, null), false);
+
   assert.equal(
     deriveLimitlessClobSiblingTop({
       directTokenId: "limitless:yes",

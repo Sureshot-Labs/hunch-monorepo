@@ -657,12 +657,13 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
             timings,
             "snapshotBooks.persistBooks",
             async () => {
+              // /books timestamps can reflect last book-change time. For HTTP
+              // snapshots, freshness should mean when we verified the top.
+              const observedAt = new Date();
               const bookTops = books.map((b) => {
                 const bb = bestBid(b.bids);
                 const ba = bestAsk(b.asks);
-                const ts = b.timestamp
-                  ? new Date(Number(b.timestamp))
-                  : new Date();
+                const ts = observedAt;
                 return { book: b, bestBid: bb, bestAsk: ba, ts };
               });
 
@@ -673,6 +674,7 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
                   bestBid: entry.bestBid,
                   bestAsk: entry.bestAsk,
                   ts: entry.ts,
+                  touchLatestWhenUnchanged: true,
                 })),
               );
 

@@ -41,6 +41,21 @@ function finitePrice(value: number | null): number | null {
   return Math.max(0, Math.min(1, value));
 }
 
+function unitPrice(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return value >= 0 && value <= 1 ? value : null;
+}
+
+export function isLimitlessTopUsable(
+  bestBid: number | null,
+  bestAsk: number | null,
+): boolean {
+  const bid = unitPrice(bestBid);
+  const ask = unitPrice(bestAsk);
+  if (bid == null && ask == null) return false;
+  return bid == null || ask == null || bid <= ask;
+}
+
 export function resolveLimitlessClobSiblingToken(
   directTokenId: string,
   pair: LimitlessClobTokenPair,
@@ -59,9 +74,9 @@ export function resolveLimitlessClobSiblingToken(
 export function deriveLimitlessClobSiblingTop(
   input: DerivedSiblingInput,
 ): LimitlessClobTop | null {
-  const bestBid = finitePrice(input.bestBid);
-  const bestAsk = finitePrice(input.bestAsk);
-  if (bestBid != null && bestAsk != null && bestBid > bestAsk) return null;
+  const bestBid = unitPrice(input.bestBid);
+  const bestAsk = unitPrice(input.bestAsk);
+  if (!isLimitlessTopUsable(bestBid, bestAsk)) return null;
 
   const siblingTokenId = resolveLimitlessClobSiblingToken(
     input.directTokenId,

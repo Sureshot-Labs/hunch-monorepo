@@ -463,6 +463,12 @@ await test("filterStalePriceRefreshTokens preserves order and requires recent pr
             token_id: "unpriced",
             ts: "2026-01-01T00:00:59.000Z",
           },
+          {
+            best_ask: "0.4",
+            best_bid: "0.6",
+            token_id: "crossed",
+            ts: "2026-01-01T00:00:59.000Z",
+          },
         ] as T[],
       };
     },
@@ -470,12 +476,25 @@ await test("filterStalePriceRefreshTokens preserves order and requires recent pr
 
   const result = await filterStalePriceRefreshTokens(
     db,
-    ["fresh-bid", "old", "missing", "unpriced", "fresh-ask", "fresh-bid"],
+    [
+      "fresh-bid",
+      "old",
+      "missing",
+      "unpriced",
+      "crossed",
+      "fresh-ask",
+      "fresh-bid",
+    ],
     { maxAgeMs: 45_000, now },
   );
 
   assert.deepEqual(result.freshTokenIds, ["fresh-bid", "fresh-ask"]);
-  assert.deepEqual(result.staleTokenIds, ["old", "missing", "unpriced"]);
+  assert.deepEqual(result.staleTokenIds, [
+    "old",
+    "missing",
+    "unpriced",
+    "crossed",
+  ]);
 });
 
 await test("requestFreshMarketPrices is safe for single-client DB callers", async () => {
@@ -649,6 +668,61 @@ await test("requestFreshMarketPrices does not treat unpriced tops as fresh", asy
   });
 
   assert.deepEqual(result.freshTokenIds, []);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.marketStates.get("polymarket:test")?.fresh, false);
+});
+
+await test("requestFreshMarketPrices does not treat crossed tops as fresh", async () => {
+  const db = {
+    async query<T = Record<string, unknown>>(sql: string) {
+      if (sql.includes("from unified_market_tokens")) {
+        return { rows: [] as T[] };
+      }
+      if (sql.includes("from unified_token_top_latest")) {
+        return {
+          rows: [
+            {
+              best_ask: "0.40",
+              best_bid: "0.60",
+              token_id: "yes-token",
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              best_ask: "0.55",
+              best_bid: "0.45",
+              token_id: "no-token",
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+          ] as T[],
+        };
+      }
+      return {
+        rows: [
+          {
+            best_ask: null,
+            best_bid: null,
+            clob_token_ids: JSON.stringify(["yes-token", "no-token"]),
+            id: "polymarket:test",
+            last_price: null,
+            token_no: null,
+            token_yes: null,
+            venue: "polymarket",
+          },
+        ] as T[],
+      };
+    },
+  };
+
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+  });
+
+  assert.deepEqual(result.freshTokenIds, ["no-token"]);
   assert.equal(result.timedOut, true);
   assert.equal(result.marketStates.get("polymarket:test")?.fresh, false);
 });

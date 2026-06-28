@@ -6,6 +6,7 @@ import {
 
 import {
   enqueuePriceRefreshTokens,
+  hasUsableTopOfBook,
   inferPriceRefreshVenue,
   type PriceRefreshRedis,
   type PriceRefreshVenue,
@@ -130,9 +131,7 @@ function tokenTopIsFresh(
   if (!row?.ts) return false;
   const tsMs = row.ts instanceof Date ? row.ts.getTime() : Date.parse(row.ts);
   if (!Number.isFinite(tsMs) || tsMs < minFreshAt.getTime()) return false;
-  const bid = row.best_bid == null ? null : Number(row.best_bid);
-  const ask = row.best_ask == null ? null : Number(row.best_ask);
-  return Number.isFinite(bid) || Number.isFinite(ask);
+  return hasUsableTopOfBook(row.best_bid, row.best_ask);
 }
 
 function resolveMinFreshAt(input: {

@@ -961,7 +961,10 @@ class HolderResearchTriageParseError extends Error {
 }
 
 type OpenRouterResponse = {
-  choices?: Array<{ message?: { content?: string }; finish_reason?: string | null }>;
+  choices?: Array<{
+    message?: { content?: string };
+    finish_reason?: string | null;
+  }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -969,19 +972,18 @@ type OpenRouterResponse = {
   };
 };
 
-const triageFallbackBucketRank = new Map<HolderResearchCandidate["bucket"], number>(
-  [
-    ["sharp_minority", 0],
-    ["sharp_side", 1],
-    ["followup_existing", 2],
-  ],
-);
-
-const triageFallbackExcludedBuckets = new Set<HolderResearchCandidate["bucket"]>([
-  "concentration_risk",
-  "event_bridge",
-  "recent_flow",
+const triageFallbackBucketRank = new Map<
+  HolderResearchCandidate["bucket"],
+  number
+>([
+  ["sharp_minority", 0],
+  ["sharp_side", 1],
+  ["followup_existing", 2],
 ]);
+
+const triageFallbackExcludedBuckets = new Set<
+  HolderResearchCandidate["bucket"]
+>(["concentration_risk", "event_bridge", "recent_flow"]);
 
 function isClearSideCandidate(candidate: HolderResearchCandidate): boolean {
   return (
@@ -1408,7 +1410,9 @@ async function applyFreshPriceChecksToCandidates(params: {
     const result = await requestFreshMarketPrices({
       db: params.client,
       enqueue: Boolean(params.redis),
-      marketIds: candidatesToCheck.map((candidate) => candidate.market.marketId),
+      marketIds: candidatesToCheck.map(
+        (candidate) => candidate.market.marketId,
+      ),
       maxBuyPrice: params.policy.livePriceMaxBuyPrice,
       maxFreshAgeMs: HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS,
       maxTokens: candidatesToCheck.length * 2,
@@ -1435,9 +1439,9 @@ async function applyFreshPriceChecksToCandidates(params: {
     const priceGuardBlocked = checkedCandidates.filter((candidate) => {
       if (!candidate.side) return false;
       return (
-        candidate.market.livePriceCheck?.blockersBySide[candidate.side]
-          .length ?? 0
-      ) > 0;
+        (candidate.market.livePriceCheck?.blockersBySide[candidate.side]
+          .length ?? 0) > 0
+      );
     }).length;
     return {
       candidates,
@@ -1527,7 +1531,9 @@ function triageCacheOutput(
 }
 
 export async function runHolderResearch(
-  args: HolderResearchRunArgs = parseHolderResearchRunArgs(process.argv.slice(2)),
+  args: HolderResearchRunArgs = parseHolderResearchRunArgs(
+    process.argv.slice(2),
+  ),
   options: HolderResearchRunOptions = {},
 ): Promise<HolderResearchRunReport> {
   const startedAt = Date.now();
@@ -1596,8 +1602,10 @@ export async function runHolderResearch(
       selectedWithLive,
       policy,
     );
-    const selectedWithTypeMetrics =
-      await enrichHolderResearchMarketTypeMetrics(client, selectedWithContext);
+    const selectedWithTypeMetrics = await enrichHolderResearchMarketTypeMetrics(
+      client,
+      selectedWithContext,
+    );
     const priceCheck = await applyFreshPriceChecksToCandidates({
       candidates: selectedWithTypeMetrics,
       client,
@@ -1864,7 +1872,10 @@ export async function runHolderResearch(
             triageDecision.action === "investigate" &&
             triageDecision.priority >= policy.minTriageInvestigatePriority
           ) {
-            eligibleInvestigations.push({ candidate, decision: triageDecision });
+            eligibleInvestigations.push({
+              candidate,
+              decision: triageDecision,
+            });
             continue;
           }
           if (triageDecision.action === "skip") {
@@ -1886,7 +1897,9 @@ export async function runHolderResearch(
           policy.maxAgentCallsPerRun - finalCandidates.length,
         );
         const selectedInvestigations = eligibleInvestigations
-          .sort((left, right) => right.decision.priority - left.decision.priority)
+          .sort(
+            (left, right) => right.decision.priority - left.decision.priority,
+          )
           .slice(0, remainingBudget);
         for (const { candidate } of selectedInvestigations) {
           finalCandidates.push(candidate);

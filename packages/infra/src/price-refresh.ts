@@ -166,10 +166,21 @@ function parseTimestampMs(value: unknown): number | null {
   return null;
 }
 
-function hasFiniteTopPrice(value: unknown): boolean {
-  if (value == null) return false;
+function parseUnitTopPrice(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   const n = Number(value);
-  return Number.isFinite(n);
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
+}
+
+export function hasUsableTopOfBook(
+  bestBid: unknown,
+  bestAsk: unknown,
+): boolean {
+  const bid = parseUnitTopPrice(bestBid);
+  const ask = parseUnitTopPrice(bestAsk);
+  if (bid == null && ask == null) return false;
+  return bid == null || ask == null || bid <= ask;
 }
 
 export function inferPriceRefreshVenue(
@@ -432,8 +443,7 @@ export async function filterStalePriceRefreshTokens(
   for (const tokenId of orderedTokenIds) {
     const row = byTokenId.get(tokenId);
     const tsMs = parseTimestampMs(row?.ts ?? null);
-    const hasTop =
-      hasFiniteTopPrice(row?.best_bid) || hasFiniteTopPrice(row?.best_ask);
+    const hasTop = hasUsableTopOfBook(row?.best_bid, row?.best_ask);
     if (tsMs != null && tsMs >= cutoffMs && hasTop) {
       freshTokenIds.push(tokenId);
     } else {

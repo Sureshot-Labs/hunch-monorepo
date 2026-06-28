@@ -75,6 +75,7 @@ import {
   deriveLimitlessClobSiblingTop,
   diffLimitlessClobComplementStats,
   getLimitlessClobComplementStats,
+  isLimitlessTopUsable,
   limitlessClobDirectTopTracker,
   recordLimitlessClobDerivedSiblingTopSkippedRecentDirect,
   recordLimitlessClobDerivedSiblingTopUpdated,
@@ -148,6 +149,7 @@ async function publishTokenTop(
   snapshot?: unknown,
 ): Promise<boolean> {
   if (bestBid == null && bestAsk == null) return false;
+  if (!isLimitlessTopUsable(bestBid, bestAsk)) return false;
   const tsMs = ts.getTime();
   if (!topTickGate.shouldPublish({ tokenId, bestBid, bestAsk, tsMs })) {
     return false;
@@ -201,6 +203,7 @@ async function publishClobTopWithSibling(input: {
   pair: LimitlessClobTokenPair | null;
 }): Promise<void> {
   const tsMs = input.ts.getTime();
+  if (!isLimitlessTopUsable(input.bestBid, input.bestAsk)) return;
   limitlessClobDirectTopTracker.markDirectTop(input.directTokenId, tsMs);
   await publishTokenTop(
     input.directTokenId,

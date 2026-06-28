@@ -7,6 +7,14 @@ type BookTopCacheEntry = {
   lastWrittenAtMs: number;
 };
 
+type UnifiedBookTopWriteInput = {
+  bestAsk: number | null;
+  bestBid: number | null;
+  tokenId: string;
+  touchLatestWhenUnchanged?: boolean;
+  ts: Date;
+};
+
 const BOOK_TOP_DEDUPE_EPSILON = 1e-9;
 const BOOK_TOP_CACHE_MAX = 200_000;
 const BOOK_TOP_CACHE_PRUNE_BATCH = 20_000;
@@ -1664,29 +1672,55 @@ export async function writeUnifiedBookTop(
 
 export async function writeUnifiedBookTops(
   pool: Pool,
-  inputs: Array<{
-    tokenId: string;
-    bestBid: number | null;
-    bestAsk: number | null;
-    ts: Date;
-  }>,
+  inputs: UnifiedBookTopWriteInput[],
 ): Promise<number> {
   if (inputs.length === 0) return 0;
+
+  const touchLatestPayload: Array<{
+    token_id: string;
+    venue: string;
+    ts: string;
+    best_bid: number | null;
+    best_ask: number | null;
+    mid: number | null;
+    spread: number | null;
+    ts_ms: number;
+  }> = [];
 
   const payload = inputs.flatMap((input) => {
     const tsMs = input.ts.getTime();
     const bestBid = normalizePriceValue(input.bestBid);
     const bestAsk = normalizePriceValue(input.bestAsk);
-    if (
-      shouldSkipBookTopWrite(input.tokenId, bestBid, bestAsk, tsMs)
-    ) {
+    if (shouldSkipBookTopWrite(input.tokenId, bestBid, bestAsk, tsMs)) {
+      const previous = bookTopWriteCache.get(input.tokenId);
+      const unchanged =
+        previous != null &&
+        tsMs >= previous.lastWrittenAtMs &&
+        isBookTopValueEqual(previous.bestBid, bestBid) &&
+        isBookTopValueEqual(previous.bestAsk, bestAsk);
+      if (input.touchLatestWhenUnchanged && unchanged) {
+        const mid =
+          bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+        const spread =
+          bestBid != null && bestAsk != null
+            ? Math.max(0, bestAsk - bestBid)
+            : null;
+        touchLatestPayload.push({
+          token_id: input.tokenId,
+          venue: venueFromUnifiedTokenId(input.tokenId),
+          ts: input.ts.toISOString(),
+          best_bid: bestBid,
+          best_ask: bestAsk,
+          mid,
+          spread,
+          ts_ms: tsMs,
+        });
+      }
       return [];
     }
 
     const mid =
-      bestBid != null && bestAsk != null
-        ? (bestBid + bestAsk) / 2
-        : null;
+      bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
     const spread =
       bestBid != null && bestAsk != null
         ? Math.max(0, bestAsk - bestBid)
@@ -1706,18 +1740,19 @@ export async function writeUnifiedBookTops(
     ];
   });
 
-  if (payload.length === 0) return 0;
+  if (payload.length === 0 && touchLatestPayload.length === 0) return 0;
 
   const latestByToken = new Map<string, (typeof payload)[number]>();
-  for (const row of payload) {
+  for (const row of [...payload, ...touchLatestPayload]) {
     const existing = latestByToken.get(row.token_id);
     if (!existing || row.ts_ms >= existing.ts_ms) {
       latestByToken.set(row.token_id, row);
     }
   }
 
-  await pool.query(
-    `
+  if (payload.length > 0) {
+    await pool.query(
+      `
       insert into unified_book_top(token_id, venue, ts, best_bid, best_ask, mid, spread)
       select token_id, venue, ts, best_bid, best_ask, mid, spread
       from jsonb_to_recordset($1::jsonb) as x(
@@ -1731,8 +1766,9 @@ export async function writeUnifiedBookTops(
       )
       on conflict do nothing
     `,
-    [JSON.stringify(payload)],
-  );
+      [JSON.stringify(payload)],
+    );
+  }
 
   await pool.query(
     `
@@ -1769,7 +1805,7 @@ export async function writeUnifiedBookTops(
     [JSON.stringify(Array.from(latestByToken.values()))],
   );
 
-  for (const row of payload) {
+  for (const row of latestByToken.values()) {
     setBookTopCache(row.token_id, {
       bestBid: row.best_bid,
       bestAsk: row.best_ask,
