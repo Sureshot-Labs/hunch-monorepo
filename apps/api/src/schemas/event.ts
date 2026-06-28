@@ -5,6 +5,10 @@ export const eventParamsSchema = z.object({
   eventId: zRequiredString("eventId parameter is required"),
 });
 
+export const eventDetailsQuerySchema = z.object({
+  market: z.string().trim().min(1).optional(),
+});
+
 const zVenueOptional = z.preprocess(
   (v) => (typeof v === "string" ? v.toLowerCase() : v),
   zVenue.optional(),

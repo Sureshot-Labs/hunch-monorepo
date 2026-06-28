@@ -3815,6 +3815,7 @@ export type MarketSignalPricingRow = {
 export async function fetchEventDetails(
   pool: Pool,
   eventId: string,
+  selectedMarketId?: string | null,
 ): Promise<EventDetailsRow[]> {
   // Query for event details with all associated markets
   const supportedLimitlessMarketExpr = "true";
@@ -3884,7 +3885,18 @@ export async function fetchEventDetails(
       m.updated_at as market_updated_at
     FROM unified_events e
     LEFT JOIN unified_markets m ON m.event_id = e.id
-      AND (e.status <> 'ACTIVE' OR m.status = 'ACTIVE')
+      AND (
+        e.status <> 'ACTIVE'
+        OR m.status = 'ACTIVE'
+        OR (
+          $2::text is not null
+          AND (
+            m.id = $2::text
+            OR m.slug = $2::text
+            OR m.venue_market_id = $2::text
+          )
+        )
+      )
       AND ${supportedLimitlessMarketExpr}
     LEFT JOIN LATERAL (
       select
@@ -3919,7 +3931,10 @@ export async function fetchEventDetails(
     ORDER BY m.volume_24h DESC NULLS LAST, m.liquidity DESC NULLS LAST, m.venue_market_id
   `;
 
-  const { rows } = await pool.query<EventDetailsRow>(eventSql, [eventId]);
+  const { rows } = await pool.query<EventDetailsRow>(eventSql, [
+    eventId,
+    selectedMarketId?.trim() || null,
+  ]);
   return rows;
 }
 

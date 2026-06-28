@@ -60,6 +60,7 @@ import {
 } from "../services/sports-fixtures.js";
 import { candlesticksQuerySchema } from "../schemas/candlesticks.js";
 import {
+  eventDetailsQuerySchema,
   eventParamsSchema,
   eventSeriesQuerySchema,
   eventSimilarQuerySchema,
@@ -393,9 +394,15 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
    */
   z.get(
     "/events/:eventId",
-    { schema: { params: eventParamsSchema } },
+    {
+      schema: {
+        params: eventParamsSchema,
+        querystring: eventDetailsQuerySchema,
+      },
+    },
     async (request, reply) => {
       const { eventId } = request.params;
+      const selectedMarketId = request.query.market ?? null;
 
       // Check client rate limiting
       const clientIp = resolveSecurityClientIp(request);
@@ -410,7 +417,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Create cache key
-      const cacheKey = `event:v4:${eventId}`;
+      const cacheKey = `event:v5:${eventId}:${selectedMarketId ?? "default"}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for event data)
@@ -429,7 +436,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const rows = await fetchEventDetails(pool, eventId);
+        const rows = await fetchEventDetails(pool, eventId, selectedMarketId);
 
         if (rows.length === 0) {
           reply.code(404);
