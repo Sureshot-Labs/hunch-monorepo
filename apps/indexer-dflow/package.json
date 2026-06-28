@@ -6,7 +6,7 @@
   "scripts": {
     "predev": "pnpm -C ../../packages/db build",
     "dev": "tsx src/main.ts",
-    "dev:bun": "pnpm -C ../../packages/db build && bun src/main.ts",
+    "dev:bun": "pnpm -C ../../packages/db build && bun --conditions=source src/main.ts",
     "prestart": "pnpm -C ../../packages/db build",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",

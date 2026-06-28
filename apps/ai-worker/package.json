@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/main.ts",
-    "dev:bun": "bun src/main.ts",
+    "dev:bun": "bun --conditions=source src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "start:bun": "bun dist/main.js",

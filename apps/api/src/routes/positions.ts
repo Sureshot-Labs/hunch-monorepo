@@ -413,6 +413,9 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 },
                 "Failed to include market metadata with positions",
               );
+              if (query.includeMarkets) {
+                throw marketError;
+              }
               if (query.q) {
                 const needle = query.q.trim().toLowerCase();
                 positions = positions.filter((position) =>
