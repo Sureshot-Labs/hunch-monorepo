@@ -83,6 +83,37 @@ export function validatePolymarketRelayerSignRequestForWallet(input: {
   }
 }
 
+export function validatePolymarketRelayerSignRequestForLinkedWallets(input: {
+  method: string;
+  path: string;
+  body?: unknown;
+  walletAddresses: readonly string[];
+}): string {
+  const normalizedFrom = getPolymarketRelayerSubmitFromAddress(input.body);
+  const ownsFromWallet = input.walletAddresses.some((walletAddress) => {
+    try {
+      return ethers.getAddress(walletAddress) === normalizedFrom;
+    } catch {
+      return false;
+    }
+  });
+
+  if (!ownsFromWallet) {
+    throw new Error(
+      "Polymarket relayer submit body does not match an authenticated user wallet",
+    );
+  }
+
+  validatePolymarketRelayerSignRequestForWallet({
+    method: input.method,
+    path: input.path,
+    body: input.body,
+    walletAddress: normalizedFrom,
+  });
+
+  return normalizedFrom;
+}
+
 export function normalizePolymarketRelayerBody(body: unknown): string {
   return typeof body === "string"
     ? body

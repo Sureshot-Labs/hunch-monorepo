@@ -49,7 +49,7 @@ import { validatePolymarketFunderSelection } from "../services/polymarket-funder
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
 import {
   createPolymarketRelayerHeaderPayload,
-  validatePolymarketRelayerSignRequestForWallet,
+  validatePolymarketRelayerSignRequestForLinkedWallets,
 } from "../services/polymarket-relayer-signing.js";
 import {
   buildEmbeddedPolymarketConnectRequest,
@@ -1210,11 +1210,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const { method, path, body, timestamp } = request.body;
 
       try {
-        validatePolymarketRelayerSignRequestForWallet({
+        const wallets = await AuthService.getUserWallets(user.id);
+        validatePolymarketRelayerSignRequestForLinkedWallets({
           method,
           path,
           body,
-          walletAddress,
+          walletAddresses: wallets.map((wallet) => wallet.walletAddress),
         });
       } catch (error) {
         reply.code(400);

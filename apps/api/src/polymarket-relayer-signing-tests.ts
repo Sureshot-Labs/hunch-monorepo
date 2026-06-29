@@ -3,6 +3,7 @@ import {
   createPolymarketRelayerHeaderPayload,
   normalizePolymarketRelayerBody,
   parsePolymarketRelayerSubmitBody,
+  validatePolymarketRelayerSignRequestForLinkedWallets,
   validatePolymarketRelayerSignRequestForWallet,
 } from "./services/polymarket-relayer-signing.js";
 
@@ -49,6 +50,18 @@ assert.doesNotThrow(() =>
     walletAddress: walletAddress.toLowerCase(),
   }),
 );
+assert.equal(
+  validatePolymarketRelayerSignRequestForLinkedWallets({
+    method: "POST",
+    path: "/submit",
+    body: validSubmitBody,
+    walletAddresses: [
+      "8FFUP3mx74jfGydszMaZUXfNd9WiFMWF94V73kDCVvaG",
+      walletAddress.toLowerCase(),
+    ],
+  }),
+  walletAddress,
+);
 assert.throws(
   () =>
     validatePolymarketRelayerSignRequestForWallet({
@@ -62,6 +75,19 @@ assert.throws(
       walletAddress,
     }),
   /does not match authenticated wallet/,
+);
+assert.throws(
+  () =>
+    validatePolymarketRelayerSignRequestForLinkedWallets({
+      method: "POST",
+      path: "/submit",
+      body: validSubmitBody,
+      walletAddresses: [
+        "8FFUP3mx74jfGydszMaZUXfNd9WiFMWF94V73kDCVvaG",
+        "0x0000000000000000000000000000000000000001",
+      ],
+    }),
+  /does not match an authenticated user wallet/,
 );
 assert.throws(
   () =>
