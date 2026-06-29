@@ -7,6 +7,7 @@ import {
   type MarketType,
 } from "./market-type-classifier.js";
 import { buildSnapshotDeltaTrackableActivitySql } from "./wallet-intel-market-eligibility.js";
+import { isWalletFinalOutcomeSampleAction } from "./wallet-final-outcome-samples.js";
 import {
   NET_SHARES_EPSILON,
   resolveApproxYesMarkPrice,
@@ -81,8 +82,6 @@ type MetricAggregate = {
   resolvedCount: number;
   winningCount: number;
 };
-
-const METRIC_ACTIONS = new Set(["OPENED", "INCREASED", "BUY", "SELL"]);
 
 function nullableNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -363,11 +362,10 @@ function buildWalletClassifiedMetricsMapFromRows(
       aggregate.lastTradeAt = row.occurred_at;
     }
 
-    const action = row.action?.toUpperCase() ?? "";
     const outcomeSide = row.outcome_side?.toUpperCase() ?? "";
     const resolvedOutcome = row.resolved_outcome?.toUpperCase() ?? "";
     if (
-      METRIC_ACTIONS.has(action) &&
+      isWalletFinalOutcomeSampleAction(row.action) &&
       (outcomeSide === "YES" || outcomeSide === "NO") &&
       (resolvedOutcome === "YES" || resolvedOutcome === "NO")
     ) {

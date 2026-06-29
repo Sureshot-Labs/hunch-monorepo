@@ -728,17 +728,22 @@ function buildBaseEvidence(
 function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
   const label = holder.identityDisplayName ?? holder.label ?? holder.address;
   const facts: string[] = [`${formatUsd(holder.positionUsd)} open`];
-  if (holder.winRate30d != null && holder.trades30d != null) {
+  const resolvedEdge = holder.resolvedWinRateEdge30d;
+  const resolvedEdgeSamples = holder.resolvedEdgeSampleCount30d;
+  const hasEdgeFact =
+    resolvedEdge != null && resolvedEdgeSamples != null;
+  if (hasEdgeFact) {
     facts.push(
-      `won ${formatWholePercent(holder.winRate30d)} of ${holder.trades30d} recent trades`,
+      `beat market prices by ${formatPointDelta(resolvedEdge)} across ${resolvedEdgeSamples} resolved bets`,
     );
   }
   if (
-    holder.resolvedWinRateEdge30d != null &&
-    holder.resolvedEdgeSampleCount30d != null
+    !hasEdgeFact &&
+    holder.winRate30d != null &&
+    holder.trades30d != null
   ) {
     facts.push(
-      `beat market prices by ${formatPointDelta(holder.resolvedWinRateEdge30d)} across ${holder.resolvedEdgeSampleCount30d} resolved bets`,
+      `final outcomes favored this wallet in ${formatWholePercent(holder.winRate30d)} of ${holder.trades30d} samples`,
     );
   }
   if (facts.length === 1 && holder.pnl30dUsd != null) {
@@ -1086,22 +1091,25 @@ function buildHolderCredentialBullets(holder: HolderResearchHolder): string[] {
   if (holder.pnl30dUsd != null && holder.pnl30dUsd >= 1_000) {
     bullets.push(`Up ${formatUsd(holder.pnl30dUsd)} over the last 30 days`);
   }
-  if (
-    holder.winRate30d != null &&
-    holder.winRate30d >= 0.55 &&
-    (holder.trades30d ?? 0) >= 5
-  ) {
-    bullets.push(
-      `Won ${formatWholePercent(holder.winRate30d)} of recent trades`,
-    );
-  }
+  let hasEdgeCredential = false;
   if (
     holder.resolvedWinRateEdge30d != null &&
     holder.resolvedWinRateEdge30d >= 0.05 &&
     (holder.resolvedEdgeSampleCount30d ?? 0) >= 5
   ) {
+    hasEdgeCredential = true;
     bullets.push(
-      `Beat market prices by ${formatPointDelta(holder.resolvedWinRateEdge30d)} on recent resolved bets`,
+      `Beat market prices by ${formatPointDelta(holder.resolvedWinRateEdge30d)} across ${holder.resolvedEdgeSampleCount30d} resolved bets`,
+    );
+  }
+  if (
+    !hasEdgeCredential &&
+    holder.winRate30d != null &&
+    holder.winRate30d >= 0.55 &&
+    (holder.trades30d ?? 0) >= 5
+  ) {
+    bullets.push(
+      `Final outcomes favored this wallet in ${formatWholePercent(holder.winRate30d)} of recent samples`,
     );
   }
   if (
@@ -1319,8 +1327,8 @@ function holderHasStrongCredential(input: {
     | "singleGameSportsMinEdge"
     | "singleGameSportsMinHolderUsd"
     | "singleGameSportsMinSamples"
-    | "singleGameSportsMinWinRate"
     | "singleGameSportsRequirePositivePnl"
+    | "minResolvedStakeUsd30d"
     | "minTrades30d"
   >;
 }): boolean {
@@ -1331,16 +1339,15 @@ function holderHasStrongCredential(input: {
   if (input.holder.positionUsd < input.policy.singleGameSportsMinHolderUsd) {
     return false;
   }
-  const winStrong =
-    (input.holder.winRate30d ?? -Infinity) >=
-      input.policy.singleGameSportsMinWinRate &&
-    (input.holder.trades30d ?? 0) >= input.policy.minTrades30d;
   const edgeStrong =
     (input.holder.resolvedWinRateEdge30d ?? -Infinity) >=
       input.policy.singleGameSportsMinEdge &&
     (input.holder.resolvedEdgeSampleCount30d ?? 0) >=
-      input.policy.singleGameSportsMinSamples;
-  return winStrong || edgeStrong;
+      input.policy.singleGameSportsMinSamples &&
+    (input.holder.resolvedStakeUsd30d ?? 0) >=
+      input.policy.minResolvedStakeUsd30d &&
+    (input.holder.trades30d ?? 0) >= input.policy.minTrades30d;
+  return edgeStrong;
 }
 
 export function buildHolderResearchQualityAssessment(

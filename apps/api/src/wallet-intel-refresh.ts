@@ -57,6 +57,7 @@ import {
   type WalletIntelRetryTelemetry,
 } from "./services/wallet-intel-retry.js";
 import { refreshWalletMetrics } from "./services/wallet-metrics-refresh.js";
+import { buildWalletFinalOutcomeSampleActionSql } from "./services/wallet-final-outcome-samples.js";
 import { resolveWalletIdentityNames } from "./services/wallet-identity-names.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
 import {
@@ -3727,7 +3728,7 @@ async function refreshWalletInferredOutcomes(
         where wa.activity_type in ('delta', 'trade')
           and upper(coalesce(m.resolved_outcome::text, '')) in ('YES', 'NO')
           and wa.outcome_side in ('YES', 'NO')
-          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+          and ${buildWalletFinalOutcomeSampleActionSql("wa.action")}
           and ${buildSnapshotDeltaTrackableActivitySql({
             activityAlias: "wa",
             marketAlias: "m",

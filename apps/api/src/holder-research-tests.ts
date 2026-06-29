@@ -2391,12 +2391,12 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(actor.mode, "single_holder");
       assert.deepEqual(actor.credentialBullets.slice(0, 3), [
         "Up $2.5K over the last 30 days",
-        "Won 65% of recent trades",
-        "Beat market prices by 16 points on recent resolved bets",
+        "Beat market prices by 16 points across 24 resolved bets",
+        "Traded $90.0K over the last 30 days",
       ]);
       assert.equal(
         actor.credentialBullets.some((bullet) =>
-          /sample|n=|resolved edge/i.test(bullet),
+          /won .*recent trades|sample|n=|resolved edge/i.test(bullet),
         ),
         false,
       );

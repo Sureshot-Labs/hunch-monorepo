@@ -4,6 +4,7 @@ import {
   fetchWalletPerformanceSeries,
   fetchWalletPortfolioPnlSeries,
 } from "./wallet-intel-series.js";
+import { buildWalletFinalOutcomeSampleActionSql } from "./wallet-final-outcome-samples.js";
 
 export type WalletCategoryMixItem = {
   category: string;
@@ -215,7 +216,7 @@ export async function loadWalletEntryBracketStats(
         left join unified_markets um on um.id = wa.market_id
         where wa.wallet_id = $1::uuid
           and wa.activity_type in ('delta', 'trade')
-          and upper(coalesce(wa.action, '')) in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+          and ${buildWalletFinalOutcomeSampleActionSql("wa.action")}
           and wa.occurred_at >= now() - ($2::text || ' days')::interval
           and wa.size_usd is not null
           and wa.price is not null

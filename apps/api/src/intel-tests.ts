@@ -34,6 +34,7 @@ import {
   replayWalletPositionLedgerRows,
   resolveApproxOpenEntryFromLedger,
 } from "./services/wallet-position-ledger.js";
+import { isWalletFinalOutcomeSampleAction } from "./services/wallet-final-outcome-samples.js";
 import {
   buildWalletThirtyDayMetricsUpsertRows,
   computeWalletResolvedEdgeMetrics,
@@ -2785,6 +2786,17 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "wallet final-outcome sample actions exclude exits",
+    run: () => {
+      assert.equal(isWalletFinalOutcomeSampleAction("OPENED"), true);
+      assert.equal(isWalletFinalOutcomeSampleAction("INCREASED"), true);
+      assert.equal(isWalletFinalOutcomeSampleAction("BUY"), true);
+      assert.equal(isWalletFinalOutcomeSampleAction("SELL"), false);
+      assert.equal(isWalletFinalOutcomeSampleAction("REDUCED"), false);
+      assert.equal(isWalletFinalOutcomeSampleAction("CLOSED"), false);
+    },
+  },
+  {
     name: "wallet position ledger preserves remaining basis across partial sells",
     run: () => {
       const ledger = replayWalletPositionLedgerRows([
@@ -2837,6 +2849,50 @@ const tests: TestCase[] = [
       assert.ok(
         Math.abs(ledger.realizedPnlUsd + (openLegPnl ?? 0) - 1.5) < 1e-9,
       );
+    },
+  },
+  {
+    name: "wallet ledger can realize profit even when final outcome loses",
+    run: () => {
+      const ledger = replayWalletPositionLedgerRows([
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "BUY",
+          deltaShares: "10",
+          sizeUsd: "4",
+          price: "0.4",
+          occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:01.000Z"),
+          id: "buy-1",
+        },
+        {
+          walletId: "wallet-1",
+          marketId: "market-1",
+          outcomeSide: "YES",
+          action: "SELL",
+          deltaShares: "10",
+          sizeUsd: "6",
+          price: "0.6",
+          occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+          createdAt: new Date("2026-01-02T00:00:01.000Z"),
+          id: "sell-1",
+        },
+      ]);
+
+      const totals = computeWalletLedgerApproxMetricTotals([
+        {
+          outcomeSide: "YES",
+          ledger,
+          resolvedOutcome: "NO",
+          yesMarkPrice: null,
+        },
+      ]);
+
+      assert.ok(Math.abs(ledger.realizedPnlUsd - 2) < 1e-9);
+      assert.equal(isWalletFinalOutcomeSampleAction("SELL"), false);
+      assert.equal(totals.pnlUsd, 2);
     },
   },
   {

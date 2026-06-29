@@ -77,6 +77,9 @@ export type WalletAttributionMetrics = {
   pnl_usd?: number | string | null;
   trades_count?: number | null;
   win_rate?: number | string | null;
+  resolved_edge_sample_count?: number | null;
+  resolved_win_rate_edge?: number | string | null;
+  resolved_edge_z_score?: number | string | null;
 };
 
 export type WalletAttributionInput = {
@@ -121,6 +124,9 @@ type WalletComputedStats = {
   twoSidedMarkets: number;
   inferredWinRate: number | null;
   inferredResolvedCount: number | null;
+  resolvedEdgeSampleCount: number | null;
+  resolvedWinRateEdge: number | null;
+  resolvedEdgeZScore: number | null;
   pnl30dUsd: number | null;
   trades30dTotal: number;
   maxStakeUsdAnyVenue: number;
@@ -913,6 +919,13 @@ async function loadComputedStats(
         : (inferred?.winRate ?? null);
     const pnl30dUsd =
       toNumber(wallet.portfolioPnl30dUsd) ?? toNumber(wallet.metrics?.pnl_usd);
+    const resolvedEdgeSampleCount =
+      wallet.metrics?.resolved_edge_sample_count != null
+        ? Math.max(
+            0,
+            Math.trunc(Number(wallet.metrics.resolved_edge_sample_count)),
+          )
+        : null;
     const trades30dTotal = Math.max(
       0,
       Math.trunc(toNumber(wallet.metrics?.trades_count) ?? 0),
@@ -925,6 +938,9 @@ async function loadComputedStats(
       twoSidedMarkets: exposureRecord?.twoSidedMarkets ?? 0,
       inferredWinRate,
       inferredResolvedCount,
+      resolvedEdgeSampleCount,
+      resolvedWinRateEdge: toNumber(wallet.metrics?.resolved_win_rate_edge),
+      resolvedEdgeZScore: toNumber(wallet.metrics?.resolved_edge_z_score),
       pnl30dUsd,
       trades30dTotal,
       maxStakeUsdAnyVenue: 0,
@@ -1229,11 +1245,19 @@ function deriveSecondaryAndSupportingLabels(inputs: {
 
   const winRate = inputs.computed.inferredWinRate;
   const resolvedCount = inputs.computed.inferredResolvedCount;
+  const hasResolvedEdgeStats =
+    inputs.computed.resolvedEdgeSampleCount != null &&
+    inputs.computed.resolvedEdgeSampleCount > 0;
+  const hasPositiveResolvedEdge =
+    !hasResolvedEdgeStats ||
+    ((inputs.computed.resolvedWinRateEdge ?? -Infinity) >= 0.05 &&
+      (inputs.computed.resolvedEdgeZScore ?? -Infinity) >= 1);
   if (
     winRate != null &&
     resolvedCount != null &&
     resolvedCount >= 20 &&
-    winRate >= 0.75
+    winRate >= 0.75 &&
+    hasPositiveResolvedEdge
   ) {
     secondary.add("high_win_rate");
     reasons.add("high_win_rate");
@@ -1243,7 +1267,8 @@ function deriveSecondaryAndSupportingLabels(inputs: {
     winRate != null &&
     inputs.computed.trades30dTotal >= 30 &&
     winRate >= 0.6 &&
-    (inputs.computed.pnl30dUsd ?? 0) >= 0
+    (inputs.computed.pnl30dUsd ?? 0) >= 0 &&
+    hasPositiveResolvedEdge
   ) {
     secondary.add("consistent_performer");
     reasons.add("consistent_performer");
@@ -1333,6 +1358,9 @@ export async function buildWalletAttributionMap(
         twoSidedMarkets: 0,
         inferredWinRate: null,
         inferredResolvedCount: null,
+        resolvedEdgeSampleCount: null,
+        resolvedWinRateEdge: null,
+        resolvedEdgeZScore: null,
         pnl30dUsd: null,
         trades30dTotal: 0,
         maxStakeUsdAnyVenue: 0,

@@ -281,6 +281,10 @@ type WalletMetricsResponse = {
   winningCount: number | null;
   losingCount: number | null;
   resolvedCount: number | null;
+  finalOutcomeWinRate: number | null;
+  finalOutcomeSampleCount: number | null;
+  finalOutcomeWinningCount: number | null;
+  finalOutcomeLosingCount: number | null;
 };
 
 type WalletResolvedTradeStats = {
@@ -6413,6 +6417,13 @@ function serializeWalletMetrics(
   metrics: WalletMetricsRow | null | undefined,
 ): WalletMetricsResponse | null {
   if (!metrics) return null;
+  const winRate = nullableNumber(metrics.win_rate);
+  const winningCount =
+    metrics.winning_count != null ? Number(metrics.winning_count) : null;
+  const losingCount =
+    metrics.losing_count != null ? Number(metrics.losing_count) : null;
+  const resolvedCount =
+    metrics.resolved_count != null ? Number(metrics.resolved_count) : null;
   return {
     period: metrics.period,
     asOf: metrics.as_of,
@@ -6421,7 +6432,7 @@ function serializeWalletMetrics(
     volumeUsd: nullableNumber(metrics.volume_usd),
     pnlUsd: nullableNumber(metrics.pnl_usd),
     roi: nullableNumber(metrics.roi),
-    winRate: nullableNumber(metrics.win_rate),
+    winRate,
     resolvedEdgeSampleCount:
       metrics.resolved_edge_sample_count != null
         ? Number(metrics.resolved_edge_sample_count)
@@ -6437,12 +6448,13 @@ function serializeWalletMetrics(
     resolvedStakeUsd: nullableNumber(metrics.resolved_stake_usd),
     avgHoldHours: nullableNumber(metrics.avg_hold_hours),
     lastTradeAt: metrics.last_trade_at ?? null,
-    winningCount:
-      metrics.winning_count != null ? Number(metrics.winning_count) : null,
-    losingCount:
-      metrics.losing_count != null ? Number(metrics.losing_count) : null,
-    resolvedCount:
-      metrics.resolved_count != null ? Number(metrics.resolved_count) : null,
+    winningCount,
+    losingCount,
+    resolvedCount,
+    finalOutcomeWinRate: winRate,
+    finalOutcomeSampleCount: resolvedCount,
+    finalOutcomeWinningCount: winningCount,
+    finalOutcomeLosingCount: losingCount,
   };
 }
 

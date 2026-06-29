@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 
 import { buildSnapshotDeltaTrackableActivitySql } from "./wallet-intel-market-eligibility.js";
+import { buildWalletFinalOutcomeSampleActionSql } from "./wallet-final-outcome-samples.js";
 import { AGGREGATE_WALLET_METRICS_VENUE } from "./wallet-metrics-constants.js";
 import {
   makeWalletPositionLedgerKey,
@@ -99,12 +100,12 @@ async function loadWalletMetricsAggregateRows(
         count(*) filter (
           where upper(coalesce(um.resolved_outcome::text, '')) in ('YES', 'NO')
             and b.outcome_side in ('YES', 'NO')
-            and b.action in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+            and ${buildWalletFinalOutcomeSampleActionSql("b.action")}
         )::int as resolved_count,
         count(*) filter (
           where upper(coalesce(um.resolved_outcome::text, '')) in ('YES', 'NO')
             and b.outcome_side = upper(coalesce(um.resolved_outcome::text, ''))
-            and b.action in ('OPENED', 'INCREASED', 'BUY', 'SELL')
+            and ${buildWalletFinalOutcomeSampleActionSql("b.action")}
         )::int as winning_count
       from base_events b
       left join unified_markets um on um.id = b.market_id
