@@ -47,7 +47,10 @@ import {
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
 import { validatePolymarketFunderSelection } from "../services/polymarket-funder.js";
 import { requestPolymarketCredentials } from "../services/polymarket-credentials.js";
-import { createPolymarketRelayerHeaderPayload } from "../services/polymarket-relayer-signing.js";
+import {
+  createPolymarketRelayerHeaderPayload,
+  validatePolymarketRelayerSignRequestForWallet,
+} from "../services/polymarket-relayer-signing.js";
 import {
   buildEmbeddedPolymarketConnectRequest,
   executeEmbeddedPolymarketConnectRequest,
@@ -1187,7 +1190,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request, reply) => {
       const user = request.user;
-      if (!user) {
+      const walletAddress = request.walletAddress;
+      if (!user || !walletAddress) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
@@ -1204,6 +1208,23 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const { method, path, body, timestamp } = request.body;
+
+      try {
+        validatePolymarketRelayerSignRequestForWallet({
+          method,
+          path,
+          body,
+          walletAddress,
+        });
+      } catch (error) {
+        reply.code(400);
+        return reply.send({
+          error:
+            error instanceof Error
+              ? error.message
+              : "Invalid Polymarket relayer signing request",
+        });
+      }
 
       try {
         const headers = createPolymarketRelayerHeaderPayload({
