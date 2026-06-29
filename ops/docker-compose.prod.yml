@@ -100,6 +100,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://127.0.0.1:3001/health'').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     command:
       - /bin/sh
       - /app/ops/run-js-runtime.sh
@@ -287,5 +297,5 @@ services:
       - ${NGINX_LOG_DIR:-/opt/hunch-data/nginx}:/var/log/nginx
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     command: ["/bin/sh", "/etc/nginx/entrypoint.sh"]
