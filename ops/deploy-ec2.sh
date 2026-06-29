@@ -37,6 +37,9 @@ project_name="hunch-monorepo"
 if ! docker network inspect hunch-edge >/dev/null 2>&1; then
   docker network create hunch-edge
 fi
+if ! docker network inspect hunch-internal >/dev/null 2>&1; then
+  docker network create hunch-internal
+fi
 
 "${compose[@]}" down --remove-orphans || true
 stale_containers=$(docker ps -aq --filter "label=com.docker.compose.project=${project_name}")

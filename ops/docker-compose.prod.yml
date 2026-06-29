@@ -3,6 +3,8 @@ networks:
     driver: bridge
   hunch-edge:
     external: true
+  hunch-internal:
+    external: true
 
 services:
   postgres:
@@ -82,7 +84,10 @@ services:
     container_name: hunch-api
     restart: unless-stopped
     networks:
-      - hunch-net
+      hunch-net:
+      hunch-internal:
+        aliases:
+          - api
     env_file:
       - /opt/hunch/.env
     environment:

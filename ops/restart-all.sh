@@ -8,6 +8,13 @@ ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 REMOTE_CMD=$(cat <<'EOF'
 set -euo pipefail
 
+if ! docker network inspect hunch-edge >/dev/null 2>&1; then
+  docker network create hunch-edge
+fi
+if ! docker network inspect hunch-internal >/dev/null 2>&1; then
+  docker network create hunch-internal
+fi
+
 docker-compose --project-directory "${APP_DIR}" \
   -f "${APP_DIR}/ops/docker-compose.prod.yml" \
   --env-file "${ENV_FILE}" down --remove-orphans

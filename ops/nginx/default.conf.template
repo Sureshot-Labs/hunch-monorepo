@@ -46,7 +46,7 @@ server {
   ssl_certificate_key __APP_SSL_KEY__;
 
   location = /api/hunch/meta/categories {
-    limit_req zone=app_meta_categories burst=600 nodelay;
+    limit_req zone=app_meta_categories burst=120 nodelay;
     limit_req zone=app_api burst=120 nodelay;
     limit_req_status 429;
     proxy_pass http://api:3001/meta/categories;

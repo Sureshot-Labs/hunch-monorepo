@@ -34,6 +34,13 @@ compose() {
     "$@"
 }
 
+if ! docker network inspect hunch-edge >/dev/null 2>&1; then
+  docker network create hunch-edge
+fi
+if ! docker network inspect hunch-internal >/dev/null 2>&1; then
+  docker network create hunch-internal
+fi
+
 find_backend_image() {
   if [ -n "${BACKEND_IMAGE}" ]; then
     echo "${BACKEND_IMAGE}"
