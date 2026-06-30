@@ -50,6 +50,9 @@ type Queryable = Pick<PoolClient, "query">;
 
 export type HolderResearchSideKey = "YES" | "NO";
 
+export const HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING =
+  "For sports, say known odds, team news, betting coverage, or public news. Do not say previews or pick articles.";
+
 export type HolderResearchMmThresholds = {
   whaleUsd: number;
   whaleUsdSolana: number;
@@ -3977,7 +3980,7 @@ export function buildHolderResearchExternalSearchInput(
       recentAt: candidate.market.recentActivityAt,
     },
     instruction:
-      "Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.",
+      `Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. ${HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING} If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.`,
   };
 }
 

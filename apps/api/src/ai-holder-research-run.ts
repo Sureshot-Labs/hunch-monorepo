@@ -44,6 +44,7 @@ import {
   enrichHolderResearchMarketTypeMetrics,
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
+  HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   loadHolderResearchCalibrationMemo,
   loadHolderResearchCandidates,
   parseHolderResearchCachedDecision,
@@ -606,6 +607,21 @@ function extractServerToolCallCount(payload: unknown): number {
   return 0;
 }
 
+export function buildHolderResearchExternalSearchSystemPrompt(): string {
+  return [
+    "You investigate public context for prediction-market holder signals.",
+    "Use web_search and x_search.",
+    "The holder data is intentionally redacted; do not ask for wallet identities.",
+    "Return one short, plain sentence for a signal feed, not a news memo.",
+    "Compare dated headlines/posts to the supplied holder activity/snapshot timing.",
+    "Answer only: was the news already known, did it support the move, did it conflict with the move, or did it not explain it?",
+    HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
+    "Do not start with phrases like 'Public info', 'Public context', or 'Public news'.",
+    "Do not use markdown, footnotes, bracket citations, or raw URLs in the text.",
+    "Do not invent a catalyst.",
+  ].join(" ");
+}
+
 async function runExternalResearch(params: {
   candidate: HolderResearchCandidate;
   policy: HolderResearchPolicy;
@@ -679,8 +695,7 @@ async function runExternalResearch(params: {
         input: [
           {
             role: "system",
-            content:
-              "You investigate public context for prediction-market holder signals. Use web_search and x_search. The holder data is intentionally redacted; do not ask for wallet identities. Return one short, plain sentence for a signal feed, not a news memo. Compare dated headlines/posts to the supplied holder activity/snapshot timing. Answer only: was the news already known, did it support the move, did it conflict with the move, or did it not explain it? Do not start with phrases like 'Public info', 'Public context', or 'Public news'. Do not use markdown, footnotes, bracket citations, or raw URLs in the text. Do not invent a catalyst.",
+            content: buildHolderResearchExternalSearchSystemPrompt(),
           },
           {
             role: "user",

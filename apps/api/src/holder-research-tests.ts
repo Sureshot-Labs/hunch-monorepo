@@ -11,6 +11,7 @@ import {
   type HolderResearchAgentOutputV1,
 } from "./schemas/holder-research.js";
 import {
+  buildHolderResearchExternalSearchSystemPrompt,
   parseHolderResearchRunArgs,
   parseHolderResearchTriageModelContent,
   selectHolderResearchTriageFallbackCandidates,
@@ -36,6 +37,7 @@ import {
   diffHolderResearchDecisionSnapshots,
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
+  HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
   selectHolderResearchCandidates,
@@ -1522,8 +1524,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serializedExternal, /ownerUsdLikeBalance/i);
       assert.doesNotMatch(serializedExternal, /Other hidden bet/i);
       assert.match(serializedExternal, /one short sentence/i);
+      assert.match(
+        serializedExternal,
+        new RegExp(HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING),
+      );
       assert.doesNotMatch(serializedExternal, /public context/i);
-      assert.doesNotMatch(serializedExternal, /public news/i);
+
+      const externalSystemPrompt =
+        buildHolderResearchExternalSearchSystemPrompt();
+      assert.match(
+        externalSystemPrompt,
+        new RegExp(HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING),
+      );
 
       const internalInput = buildHolderResearchCandidatePromptJson(
         candidate,
@@ -2594,6 +2606,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /Avoid in headline\/summary/i);
       assert.match(prompt, /Strong wallets are fading Norway/i);
       assert.match(prompt, /Market signal detected/i);
+      assert.match(prompt, /Known odds and team news already lean France/i);
+      assert.doesNotMatch(prompt, /pick articles/i);
+      assert.doesNotMatch(prompt, /\bpreviews\b/i);
       assert.doesNotMatch(prompt, /@/);
       assert.match(prompt, /Bad headline examples/i);
       assert.doesNotMatch(
