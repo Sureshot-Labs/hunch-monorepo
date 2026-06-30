@@ -2537,7 +2537,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(actor.cluster?.pnl30dUsd, null);
       assert.deepEqual(actor.credentialBullets.slice(0, 2), [
         "3 strong wallets on the same side",
-        "$45.0K tracked by sharp wallets",
+        "$45.0K tracked by strong wallets",
       ]);
       assert.equal(
         actor.credentialBullets.some((bullet) => /combined/i.test(bullet)),
@@ -2582,14 +2582,19 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /candidate\.move/i);
       assert.match(prompt, /candidate\.holderEntry/i);
       assert.match(prompt, /sameType/i);
-      assert.match(prompt, /understand the signal in 2 seconds/i);
+      assert.match(prompt, /private trading group/i);
+      assert.match(prompt, /understand the setup in 2 seconds/i);
       assert.match(prompt, /which side the wallet\(s\) are on/i);
       assert.match(prompt, /compressed signal thesis/i);
-      assert.match(prompt, /Prefer outcome meaning over raw YES\/NO wording/i);
-      assert.match(prompt, /Avoid generic headline nouns/i);
+      assert.match(prompt, /Lead with what strong wallets are doing/i);
+      assert.match(prompt, /Use 'smart wallets' only when credentials are strong/i);
+      assert.match(prompt, /flexible checklist, not a fixed template/i);
+      assert.match(prompt, /Avoid overusing 'serious buyer\(s\)'/i);
+      assert.match(prompt, /Do not reuse the same sentence shape/i);
       assert.match(prompt, /Avoid in headline\/summary/i);
-      assert.match(prompt, /Team Nova money fights the NO crowd/i);
-      assert.match(prompt, /Backers buck heavy NO money/i);
+      assert.match(prompt, /Strong wallets are fading Norway/i);
+      assert.match(prompt, /Market signal detected/i);
+      assert.doesNotMatch(prompt, /@/);
       assert.match(prompt, /Bad headline examples/i);
       assert.doesNotMatch(
         prompt,
