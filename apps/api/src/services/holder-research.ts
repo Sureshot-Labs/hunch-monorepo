@@ -726,7 +726,7 @@ function buildBaseEvidence(
 }
 
 function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
-  const label = holder.identityDisplayName ?? holder.label ?? holder.address;
+  const label = holderPromptDisplayName(holder) ?? holder.address;
   const facts: string[] = [`${formatUsd(holder.positionUsd)} open`];
   const resolvedEdge = holder.resolvedWinRateEdge30d;
   const resolvedEdgeSamples = holder.resolvedEdgeSampleCount30d;
@@ -990,7 +990,7 @@ function compactPromptHolder(
   const base: Record<string, unknown> = {
     walletId: holder.walletId,
     addr: holder.address,
-    name: holder.identityDisplayName ?? holder.label ?? null,
+    name: holderPromptDisplayName(holder),
     kind: holder.walletKind,
     side: holder.side,
     posUsd: holder.positionUsd,
@@ -1086,6 +1086,18 @@ function plural(
   return `${value} ${value === 1 ? singular : pluralLabel}`;
 }
 
+function stripLeadingTelegramMention(
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith("@") ? trimmed.slice(1).trim() || trimmed : trimmed;
+}
+
+function holderPromptDisplayName(holder: HolderResearchHolder): string | null {
+  return stripLeadingTelegramMention(holder.identityDisplayName ?? holder.label);
+}
+
 function buildHolderCredentialBullets(holder: HolderResearchHolder): string[] {
   const bullets: string[] = [];
   if (holder.pnl30dUsd != null && holder.pnl30dUsd >= 1_000) {
@@ -1164,7 +1176,7 @@ function buildClusterCredentialBullets(input: {
   bullets.push(
     `${plural(sideData.sharpHolders, "strong wallet")} on the same side`,
   );
-  bullets.push(`${formatUsd(sideData.sharpUsd)} tracked by sharp wallets`);
+  bullets.push(`${formatUsd(sideData.sharpUsd)} tracked by strong wallets`);
   return {
     availableSharpHolders: availableSharpHolders.length,
     bullets: bullets.slice(0, 3),
@@ -1219,7 +1231,7 @@ export function buildHolderResearchActorSummary(input: {
       primaryHolder: primaryHolder
         ? {
             walletId: primaryHolder.walletId,
-            label: primaryHolder.label,
+            label: holderPromptDisplayName(primaryHolder) ?? primaryHolder.label,
             side: primaryHolder.side,
             positionUsd: primaryHolder.positionUsd,
             openPnlUsd: primaryHolder.openPnlUsd,
@@ -1252,7 +1264,7 @@ export function buildHolderResearchActorSummary(input: {
     credentialBullets,
     primaryHolder: {
       walletId: primaryHolder.walletId,
-      label: primaryHolder.label,
+      label: holderPromptDisplayName(primaryHolder) ?? primaryHolder.label,
       side: primaryHolder.side,
       positionUsd: primaryHolder.positionUsd,
       openPnlUsd: primaryHolder.openPnlUsd,
@@ -2438,9 +2450,9 @@ function buildSupportOnlyEvidence(
 ): HolderResearchEvidence {
   const titleByBucket: Record<HolderResearchBucket, string> = {
     followup_existing: "Previous signal context",
-    sharp_minority: "Sharp minority context",
-    sharp_side: "Sharp side context",
-    sharp_split: "Sharp split context",
+    sharp_minority: "Strong minority context",
+    sharp_side: "Strong side context",
+    sharp_split: "Split holder context",
     clean_disagreement: "Market disagreement context",
     recent_flow: "Recent flow context",
     event_bridge: "Cross-market holder context",
@@ -3984,11 +3996,11 @@ export function buildDeterministicHolderResearchDecision(
   const sideLabel = candidate.side ? `${candidate.side} ` : "";
   const titlePrefix =
     candidate.bucket === "sharp_minority"
-      ? `Sharp minority ${sideLabel.trim()}`
+      ? `Strong minority ${sideLabel.trim()}`
       : candidate.bucket === "sharp_split"
-        ? "Sharp holders on both sides"
+        ? "Strong holders on both sides"
         : candidate.bucket === "sharp_side"
-          ? `Sharp ${sideLabel.trim()} holders`
+          ? `Strong ${sideLabel.trim()} holders`
           : candidate.bucket === "clean_disagreement"
             ? "Clean two-sided disagreement"
             : candidate.bucket === "recent_flow"
@@ -4056,7 +4068,7 @@ export function buildHolderResearchWalletTargets(
           ? actor.credentialBullets
           : [],
       holderDescriptor:
-        holder.identityDisplayName ?? holder.label ?? "tracked wallet",
+        holderPromptDisplayName(holder) ?? "tracked wallet",
       identityDisplayName: holder.identityDisplayName,
       identityDisplayNameSource: holder.identityDisplayNameSource,
       identityProfileUrl: holder.identityProfileUrl,

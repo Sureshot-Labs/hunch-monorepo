@@ -2337,14 +2337,13 @@ function formatSignalCredentialLines(note: SignalBotNote): string[] {
 }
 
 function formatSignalBotSignalLabel(note: SignalBotNote): string {
-  if (note.holderActorMode === "sharp_cluster") return "⚡ Sharp cluster";
+  if (note.holderActorMode === "sharp_cluster") return "⚡ Strong wallets";
   const bucket = String(note.primaryTargetMeta.bucket ?? "").toLowerCase();
   switch (bucket) {
     case "sharp_minority":
     case "sharp_side":
-      return "⚡ Sharp holder";
+      return "⚡ Strong holder";
     case "sharp_split":
-      return "⚡ Sharp split";
     case "clean_disagreement":
       return "⚖️ Split holders";
     case "recent_flow":

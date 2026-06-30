@@ -955,7 +955,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         /^\*\[Sharp YES interest\]\(https:\/\/app\.hunch\.trade\/events\/polymarket%3Aevent-1\?/,
       );
-      assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /🎯 82%/);
       assert.match(message.text, /📍 Test event · Will test resolve Yes\?/);
       assert.match(message.text, /Why this wallet matters:/);
@@ -1026,7 +1026,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
-      assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -1039,7 +1039,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         minuteMessage.text,
-        /⚡ Sharp holder · YES 31¢ \/ NO 69¢ · ⏳ 45m left/,
+        /⚡ Strong holder · YES 31¢ \/ NO 69¢ · ⏳ 45m left/,
       );
 
       const hourMessage = buildSignalBotMessage({
@@ -1096,7 +1096,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(message.text, /^🎮 \*\[@TestWallet backs Beta Team/);
-      assert.match(message.text, /⚡ Sharp holder · ATL 31¢ \/ BTT 69¢/);
+      assert.match(message.text, /⚡ Strong holder · ATL 31¢ \/ BTT 69¢/);
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy BTT · Poly 70¢");
       assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi BTT 48¢");
       assert.equal(rows[2]?.[0]?.text, "👤 BTT $12.3K (-$123)");
@@ -1171,7 +1171,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[1]?.[0]?.text, "👤 Top YES $12.3K (-$123)");
-      assert.match(message.text, /⚡ Sharp cluster · YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /⚡ Strong wallets · YES 31¢ \/ NO 69¢/);
       assert.match(message.text, /Why this cluster matters:/);
       assert.match(
         message.text,
@@ -1194,7 +1194,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         /Why this wallet matters|Why this cluster matters/,
       );
-      assert.match(message.text, /⚡ Sharp holder · YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /confidence/i);
     },
   },
