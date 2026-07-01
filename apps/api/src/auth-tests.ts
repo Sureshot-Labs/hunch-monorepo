@@ -7,11 +7,17 @@ import {
   PrivyAccountRecoveryRequiredError,
   PrivyTerminalAuthError,
   WalletNotFoundError,
+  resolveWalletRemovalPolicy,
   resetAuthDbFeatureCachesForTests,
+  type UserWallet,
 } from "./auth.js";
 import { pool } from "./db.js";
 import { parseJwtExpiresInToMs } from "./env.js";
-import { PrivyService, type PrivyUser } from "./privy-service.js";
+import {
+  PrivyService,
+  type PrivyUser,
+  type PrivyWalletProfile,
+} from "./privy-service.js";
 import {
   MAX_WALLET_NAME_LENGTH,
   normalizeWalletNameInput,
@@ -34,7 +40,141 @@ type UserWalletRow = {
   updated_at: Date;
 };
 
+function makeUserWallet(overrides: Partial<UserWallet> = {}): UserWallet {
+  return {
+    id: "w-1",
+    userId: "u-1",
+    walletAddress: "0xabc0000000000000000000000000000000000000",
+    walletType: "ethereum",
+    name: null,
+    isPrimary: false,
+    isVerified: true,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+function makeWalletProfile(
+  overrides: Partial<PrivyWalletProfile> = {},
+): PrivyWalletProfile {
+  const source = overrides.source ?? "external";
+  return {
+    address: overrides.address ?? "0xabc0000000000000000000000000000000000000",
+    walletId: overrides.walletId,
+    walletType: overrides.walletType ?? "ethereum",
+    source,
+    isInternalWallet:
+      overrides.isInternalWallet ??
+      (source === "embedded" || source === "smart"),
+  };
+}
+
 const tests: TestCase[] = [
+  {
+    name: "wallet removal policy protects Privy-managed wallets",
+    run: () => {
+      const wallet = makeUserWallet({
+        walletAddress: "0xabc0000000000000000000000000000000000000",
+      });
+      const profile = makeWalletProfile({
+        address: wallet.walletAddress,
+        source: "embedded",
+      });
+
+      const policy = resolveWalletRemovalPolicy({
+        targetWalletAddress: wallet.walletAddress,
+        userEmail: "user@example.com",
+        walletProfiles: [profile],
+        wallets: [
+          wallet,
+          makeUserWallet({
+            id: "w-2",
+            walletAddress: "0xdef0000000000000000000000000000000000000",
+          }),
+        ],
+      });
+
+      assert.equal(policy.allowed, false);
+      assert.match(policy.reason ?? "", /privy-managed/i);
+    },
+  },
+  {
+    name: "wallet removal policy requires email before removing the only external sign-in wallet",
+    run: () => {
+      const externalWallet = makeUserWallet({
+        walletAddress: "0xabc0000000000000000000000000000000000000",
+      });
+      const internalWallet = makeUserWallet({
+        id: "w-2",
+        walletAddress: "0xdef0000000000000000000000000000000000000",
+      });
+
+      const policy = resolveWalletRemovalPolicy({
+        targetWalletAddress: externalWallet.walletAddress,
+        userEmail: null,
+        walletProfiles: [
+          makeWalletProfile({
+            address: internalWallet.walletAddress,
+            source: "embedded",
+          }),
+        ],
+        wallets: [externalWallet, internalWallet],
+      });
+
+      assert.equal(policy.allowed, false);
+      assert.match(policy.reason ?? "", /connect email/i);
+    },
+  },
+  {
+    name: "wallet removal policy allows removing the last external sign-in wallet when email exists",
+    run: () => {
+      const externalWallet = makeUserWallet({
+        walletAddress: "0xabc0000000000000000000000000000000000000",
+      });
+      const internalWallet = makeUserWallet({
+        id: "w-2",
+        walletAddress: "0xdef0000000000000000000000000000000000000",
+      });
+
+      const policy = resolveWalletRemovalPolicy({
+        targetWalletAddress: externalWallet.walletAddress,
+        userEmail: "user@example.com",
+        walletProfiles: [
+          makeWalletProfile({
+            address: internalWallet.walletAddress,
+            source: "embedded",
+          }),
+        ],
+        wallets: [externalWallet, internalWallet],
+      });
+
+      assert.equal(policy.allowed, true);
+    },
+  },
+  {
+    name: "wallet removal policy allows removing one external wallet when another external sign-in wallet remains",
+    run: () => {
+      const targetWallet = makeUserWallet({
+        walletAddress: "0xabc0000000000000000000000000000000000000",
+      });
+
+      const policy = resolveWalletRemovalPolicy({
+        targetWalletAddress: targetWallet.walletAddress,
+        userEmail: null,
+        walletProfiles: [],
+        wallets: [
+          targetWallet,
+          makeUserWallet({
+            id: "w-2",
+            walletAddress: "0xdef0000000000000000000000000000000000000",
+          }),
+        ],
+      });
+
+      assert.equal(policy.allowed, true);
+    },
+  },
   {
     name: "normalize wallet name trims and clears empty input",
     run: () => {

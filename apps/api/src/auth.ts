@@ -10,6 +10,7 @@ import {
   type PrivyClaims,
   type PrivyUser,
   type PrivyWallet,
+  type PrivyWalletProfile,
 } from "./privy-service.js";
 import {
   decryptCredentialsString,
@@ -111,6 +112,95 @@ export class WalletUnlinkNotAllowedError extends Error {
   constructor(message = "Cannot unlink the only wallet") {
     super(message);
   }
+}
+
+type WalletRemovalPolicyOptions = {
+  userEmail?: string | null;
+  walletProfiles?: PrivyWalletProfile[] | null;
+};
+
+function walletLookupKey(walletType: string, walletAddress: string): string {
+  const normalizedType = walletType.trim().toLowerCase() || "ethereum";
+  return `${normalizedType}:${normalizeWalletAddress(walletAddress)}`;
+}
+
+function buildWalletProfileLookup(
+  walletProfiles: PrivyWalletProfile[] | null | undefined,
+): Map<string, PrivyWalletProfile> {
+  const lookup = new Map<string, PrivyWalletProfile>();
+  for (const profile of walletProfiles ?? []) {
+    lookup.set(walletLookupKey(profile.walletType, profile.address), profile);
+  }
+  return lookup;
+}
+
+function getWalletProfile(
+  wallet: Pick<UserWallet, "walletAddress" | "walletType">,
+  lookup: Map<string, PrivyWalletProfile>,
+): PrivyWalletProfile | null {
+  return (
+    lookup.get(walletLookupKey(wallet.walletType, wallet.walletAddress)) ?? null
+  );
+}
+
+function isPrivyManagedWalletProfile(
+  profile: PrivyWalletProfile | null,
+): boolean {
+  return (
+    profile?.isInternalWallet === true ||
+    profile?.source === "embedded" ||
+    profile?.source === "smart"
+  );
+}
+
+function walletAddressesMatch(left: string, right: string): boolean {
+  return normalizeWalletAddress(left) === normalizeWalletAddress(right);
+}
+
+export function resolveWalletRemovalPolicy(input: {
+  targetWalletAddress: string;
+  userEmail?: string | null;
+  walletProfiles?: PrivyWalletProfile[] | null;
+  wallets: UserWallet[];
+}): { allowed: boolean; reason?: string } {
+  const targetWallet = input.wallets.find((wallet) =>
+    walletAddressesMatch(wallet.walletAddress, input.targetWalletAddress),
+  );
+  if (!targetWallet) return { allowed: true };
+
+  const profileLookup = buildWalletProfileLookup(input.walletProfiles);
+  const targetProfile = getWalletProfile(targetWallet, profileLookup);
+  const targetIsPrivyManaged = isPrivyManagedWalletProfile(targetProfile);
+  if (targetIsPrivyManaged) {
+    return {
+      allowed: false,
+      reason: "Cannot remove a Privy-managed trading wallet",
+    };
+  }
+
+  if (input.wallets.length <= 1) {
+    return {
+      allowed: false,
+      reason: "Cannot remove the only wallet",
+    };
+  }
+
+  const hasEmail = Boolean(input.userEmail?.trim());
+  if (!hasEmail) {
+    const externalSignInWalletCount = input.wallets.filter((wallet) => {
+      const profile = getWalletProfile(wallet, profileLookup);
+      return !isPrivyManagedWalletProfile(profile);
+    }).length;
+
+    if (externalSignInWalletCount <= 1) {
+      return {
+        allowed: false,
+        reason: "Connect email before removing your only wallet sign-in method",
+      };
+    }
+  }
+
+  return { allowed: true };
 }
 
 export type PrivyTerminalAuthErrorCode =
@@ -1180,6 +1270,7 @@ export class AuthService {
   static async removeWallet(
     userId: string,
     walletAddress: string,
+    options: WalletRemovalPolicyOptions = {},
   ): Promise<{
     removed: UserWallet;
     nextPrimaryWalletAddress: string | null;
@@ -1215,19 +1306,31 @@ export class AuthService {
         [userId],
       );
 
-      if (walletsResult.rows.length <= 1) {
-        throw new WalletUnlinkNotAllowedError();
+      const walletRemovalPolicy = resolveWalletRemovalPolicy({
+        targetWalletAddress: walletAddress,
+        userEmail: options.userEmail,
+        walletProfiles: options.walletProfiles,
+        wallets: walletsResult.rows.map((row: UserWalletRow) =>
+          mapUserWalletRow(row),
+        ),
+      });
+      if (!walletRemovalPolicy.allowed) {
+        throw new WalletUnlinkNotAllowedError(walletRemovalPolicy.reason);
       }
 
-      const remainingRows = walletsResult.rows.filter(
-        (row) => row.id !== target.id,
+      const remainingRows: UserWalletRow[] = walletsResult.rows.filter(
+        (row: UserWalletRow) => row.id !== target.id,
       );
-      let nextPrimary = remainingRows.find((row) => row.is_primary);
+      let nextPrimary = remainingRows.find(
+        (row: UserWalletRow) => row.is_primary,
+      );
       if (!nextPrimary) {
         nextPrimary = remainingRows[0];
       }
 
-      const hasPrimary = remainingRows.some((row) => row.is_primary);
+      const hasPrimary = remainingRows.some(
+        (row: UserWalletRow) => row.is_primary,
+      );
       if (target.is_primary || !hasPrimary) {
         await client.query(
           "UPDATE user_wallets SET is_primary = false WHERE user_id = $1",

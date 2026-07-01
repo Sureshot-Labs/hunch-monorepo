@@ -1701,9 +1701,30 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Rate limit exceeded" });
         }
 
+        let walletProfiles: PrivyWalletProfile[] | null = null;
+        if (user.privyUserId) {
+          try {
+            const privyUser = await PrivyService.getUserById(user.privyUserId);
+            walletProfiles = PrivyService.classifyWallets(privyUser);
+          } catch (error) {
+            app.log.warn(
+              { error, userId: user.id, privyUserId: user.privyUserId },
+              "Failed to verify Privy wallet profiles before wallet removal",
+            );
+            reply.code(503);
+            return reply.send({
+              error: "Unable to verify wallet sign-in methods",
+            });
+          }
+        }
+
         const result = await AuthService.removeWallet(
           user.id,
           body.walletAddress,
+          {
+            userEmail: user.email ?? null,
+            walletProfiles,
+          },
         );
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -1711,16 +1732,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           ok: true,
           removed: result.removed.walletAddress,
           nextPrimaryWalletAddress: result.nextPrimaryWalletAddress,
-          remainingWallets: result.remainingWallets.map((wallet) => ({
-            id: wallet.id,
-            walletAddress: wallet.walletAddress,
-            walletType: wallet.walletType,
-            name: wallet.name,
-            isPrimary: wallet.isPrimary,
-            isVerified: wallet.isVerified,
-            createdAt: wallet.createdAt,
-            updatedAt: wallet.updatedAt,
-          })),
+          remainingWallets: buildAuthWalletPayloads(
+            result.remainingWallets,
+            walletProfiles,
+          ),
         });
       } catch (error) {
         if (error instanceof WalletNotFoundError) {
