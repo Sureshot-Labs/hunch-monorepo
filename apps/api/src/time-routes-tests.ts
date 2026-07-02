@@ -22,12 +22,12 @@ await test("GET /time returns server time without database dependency", async ()
     }>();
 
     assert.equal(payload.ok, true);
-    assert.equal(typeof payload.nowMs, "number");
-    assert.equal(typeof payload.nowSec, "number");
-    assert.equal(typeof payload.iso, "string");
     const nowMs = payload.nowMs;
     const nowSec = payload.nowSec;
     const iso = payload.iso;
+    assert.ok(typeof nowMs === "number");
+    assert.ok(typeof nowSec === "number");
+    assert.ok(typeof iso === "string");
     assert.ok(nowMs >= beforeMs);
     assert.ok(nowMs <= afterMs + 1000);
     assert.equal(nowSec, Math.floor(nowMs / 1000));
