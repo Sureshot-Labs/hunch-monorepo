@@ -938,7 +938,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "10",
       );
       assert.equal(rows.length, 2);
-      assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
+      assert.equal(rows[1]?.[0]?.text, "👤 Wallet · YES $12.3K (-$123 PnL)");
       const holderButtonUrl = new URL(rows[1]?.[0]?.url ?? "");
       assert.equal(
         holderButtonUrl.pathname,
@@ -992,7 +992,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(url.searchParams.get("market"), "kalshi:market-1");
       assert.equal(url.searchParams.get("side"), "YES");
       assert.equal(url.searchParams.get("amountUsd"), "10");
-      assert.equal(rows[2]?.[0]?.text, "👤 YES $12.3K (-$123)");
+      assert.equal(rows[2]?.[0]?.text, "👤 Wallet · YES $12.3K (-$123 PnL)");
     },
   },
   {
@@ -1013,7 +1013,24 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows.length, 2);
       assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
-      assert.equal(rows[1]?.[0]?.text, "👤 YES $12.3K (-$123)");
+      assert.equal(rows[1]?.[0]?.text, "👤 Wallet · YES $12.3K (-$123 PnL)");
+    },
+  },
+  {
+    name: "message uses short market title for generic outcome buttons",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          eventTitle: "World Cup Winner",
+          marketTitle: "France",
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy France · Poly 32¢");
+      assert.equal(rows[1]?.[0]?.text, "👤 Wallet · France $12.3K (-$123 PnL)");
+      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -1027,6 +1044,88 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
       assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
+    },
+  },
+  {
+    name: "message linkifies a safe holder display name once in body text",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "TB14 is still holding France after the move. TB14 has not backed off.",
+          holderIdentityDisplayName: "@TB14",
+          title: "TB14 is still riding France higher",
+        }),
+      });
+      const firstLine = message.text.split("\n")[0] ?? "";
+      const holderLinks =
+        message.text.match(
+          /\[TB14\]\(https:\/\/app\.hunch\.trade\/tracking\/wallet\//g,
+        ) ?? [];
+      assert.equal(holderLinks.length, 1);
+      assert.doesNotMatch(firstLine, /tracking\/wallet/);
+    },
+  },
+  {
+    name: "message linkifies standalone numeric holder names",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "$24124 was a value, 24124.50 was not a holder, 24124% was a percent, then 24124.",
+          holderDisplayName: "24124",
+        }),
+      });
+      assert.doesNotMatch(message.text, /\$\[24124\]/);
+      assert.doesNotMatch(message.text, /\[24124\]\.50/);
+      assert.doesNotMatch(message.text, /\[24124\]%/);
+      assert.match(
+        message.text,
+        /then \[24124\]\(https:\/\/app\.hunch\.trade\/tracking\/wallet\//,
+      );
+      assert.equal((message.text.match(/\[24124\]\(/g) ?? []).length, 1);
+    },
+  },
+  {
+    name: "message skips ambiguous holder display names",
+    run: () => {
+      for (const displayName of ["that", "1", "YES", "France"]) {
+        const message = buildSignalBotMessage({
+          appBaseUrl: "https://app.hunch.trade",
+          buyAmountUsd: 10,
+          note: note({
+            description: `${displayName} added size after the latest move.`,
+            holderDisplayName: displayName,
+            marketTitle:
+              displayName === "France" ? "France" : "Will test resolve Yes?",
+          }),
+        });
+        assert.doesNotMatch(
+          message.text,
+          new RegExp(`\\[${displayName}\\]\\(`),
+        );
+      }
+    },
+  },
+  {
+    name: "message escapes markdown in linked holder display names",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description: "A_Bot added again after the dip.",
+          holderDisplayName: "A_Bot",
+        }),
+      });
+      assert.match(
+        message.text,
+        /\[A\\_Bot\]\(https:\/\/app\.hunch\.trade\/tracking\/wallet\//,
+      );
     },
   },
   {
@@ -1096,10 +1195,34 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(message.text, /^🎮 \*\[@TestWallet backs Beta Team/);
-      assert.match(message.text, /⚡ Strong holder · ATL 31¢ \/ BTT 69¢/);
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy BTT · Poly 70¢");
-      assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi BTT 48¢");
-      assert.equal(rows[2]?.[0]?.text, "👤 BTT $12.3K (-$123)");
+      assert.match(
+        message.text,
+        /⚡ Strong holder · Alpha Team 31¢ \/ Beta Team 69¢/,
+      );
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy Beta Team · Poly 70¢");
+      assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi Beta Team 48¢");
+      assert.equal(
+        rows[2]?.[0]?.text,
+        "👤 Wallet · Beta Team $12.3K (-$123 PnL)",
+      );
+    },
+  },
+  {
+    name: "message abbreviates long named outcome labels",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          direction: "down",
+          holderSide: "NO",
+          outcomes: ["Very Long Alpha Team", "Very Long Beta Team"],
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.match(message.text, /⚡ Strong holder · VLA 31¢ \/ VLB 69¢/);
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy VLB · Poly 70¢");
+      assert.equal(rows[1]?.[0]?.text, "👤 Wallet · VLB $12.3K (-$123 PnL)");
     },
   },
   {
@@ -1170,7 +1293,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[1]?.[0]?.text, "👤 Top YES $12.3K (-$123)");
+      assert.equal(
+        rows[1]?.[0]?.text,
+        "👥 Top wallet · YES $12.3K (-$123 PnL)",
+      );
       assert.match(message.text, /⚡ Strong wallets · YES 31¢ \/ NO 69¢/);
       assert.match(message.text, /Why this cluster matters:/);
       assert.match(
@@ -1548,12 +1674,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "signal note loader joins holder wallet target by uuid primary key",
     run: async () => {
       const db = new FakeDb();
-      await loadSignalBotNotes(db, {
+      db.rows = [
+        noteRow({
+          holder_target_meta: {
+            actorMode: "single_holder",
+            holderDescriptor: "TB14",
+            identityDisplayName: "@TB14",
+            openPnlUsd: -123,
+            positionUsd: 12_345,
+            side: "YES",
+          },
+        }),
+      ];
+      const notes = await loadSignalBotNotes(db, {
         afterCreatedAt: "1970-01-01T00:00:00.000Z",
         afterId: "00000000-0000-0000-0000-000000000000",
         limit: 1,
         minConfidence: 0.7,
       });
+      assert.equal(notes[0]?.holderDisplayName, "TB14");
+      assert.equal(notes[0]?.holderIdentityDisplayName, "@TB14");
       const sql = db.queries[0]?.sql ?? "";
       assert.match(sql, /join wallets w on w\.id = t\.target_id::uuid/);
       assert.match(sql, /m\.venue as market_venue/);

@@ -185,6 +185,8 @@ export type SignalBotNote = {
   lastPrice: number | null;
   holderAddress: string | null;
   holderChain: string | null;
+  holderDisplayName?: string | null;
+  holderIdentityDisplayName?: string | null;
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
@@ -243,11 +245,42 @@ const PRICE_GUARD_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
 const OUTCOME_LABEL_MAX_CHARS = 3;
+const OUTCOME_LABEL_FULL_MAX_CHARS = 14;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
 const OUTCOME_LABEL_VOWELS = /[AEIOUY]/g;
+const HOLDER_LINK_STOP_LABELS = new Set([
+  "ATRACKEDWALLET",
+  "TRACKEDWALLET",
+  "THISWALLET",
+]);
+const HOLDER_LINK_STOP_WORDS = new Set([
+  "A",
+  "AN",
+  "AND",
+  "AT",
+  "FOR",
+  "FROM",
+  "HAS",
+  "HOLDER",
+  "IT",
+  "ITS",
+  "MARKET",
+  "NO",
+  "NOT",
+  "ON",
+  "OR",
+  "THAT",
+  "THE",
+  "THEIR",
+  "THIS",
+  "TO",
+  "WALLET",
+  "WE",
+  "YES",
+]);
 const RELEASE_LOCK_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -483,6 +516,201 @@ export function buildSignalBotHolderUrl(input: {
   return url.toString();
 }
 
+type SignalBotHolderLinkMatch = {
+  index: number;
+  label: string;
+};
+
+function createSignalBotBodyTextRenderer(
+  note: SignalBotNote,
+  holderUrl: string | null,
+): (value: string) => string {
+  const candidates = holderUrl ? buildSignalBotHolderLinkCandidates(note) : [];
+  let didLinkHolder = false;
+  return (value: string) => {
+    if (!holderUrl || didLinkHolder || candidates.length === 0) {
+      return escapeTelegramMarkdownV2(value);
+    }
+    const match = findSignalBotHolderLinkMatch(value, candidates);
+    if (!match) return escapeTelegramMarkdownV2(value);
+    didLinkHolder = true;
+    return renderSignalBotHolderLinkedText(value, match, holderUrl);
+  };
+}
+
+function buildSignalBotHolderLinkCandidates(note: SignalBotNote): string[] {
+  const collisionLabels = buildSignalBotHolderLinkCollisionLabels(note);
+  const candidates: string[] = [];
+  for (const raw of [note.holderIdentityDisplayName, note.holderDisplayName]) {
+    const label = normalizeSignalBotHolderLinkLabel(raw);
+    if (!label) continue;
+    candidates.push(label);
+    const stripped = normalizeSignalBotHolderLinkLabel(
+      label.replace(/^@+/, ""),
+    );
+    if (stripped && stripped !== label) candidates.push(stripped);
+  }
+  const unique = new Set<string>();
+  const safeCandidates: string[] = [];
+  for (const candidate of candidates) {
+    const key = normalizeSignalBotHolderLinkKey(candidate);
+    if (!key || unique.has(candidate)) continue;
+    if (!isSafeSignalBotHolderLinkLabel(candidate, collisionLabels)) continue;
+    unique.add(candidate);
+    safeCandidates.push(candidate);
+  }
+  return safeCandidates.sort((a, b) => b.length - a.length);
+}
+
+function buildSignalBotHolderLinkCollisionLabels(
+  note: SignalBotNote,
+): Set<string> {
+  const labels = new Set<string>();
+  const addLabel = (value: string | null | undefined) => {
+    const key = normalizeSignalBotHolderLinkKey(value);
+    if (key) labels.add(key);
+    for (const token of tokenizeSignalBotHolderLinkCollisionLabel(value)) {
+      const tokenKey = normalizeSignalBotHolderLinkKey(token);
+      if (tokenKey) labels.add(tokenKey);
+    }
+  };
+
+  addLabel("YES");
+  addLabel("NO");
+  addLabel(note.marketVenue);
+  addLabel(formatVenueLabel(note.marketVenue));
+  addLabel(note.marketTitle);
+  addLabel(note.eventTitle);
+  if (note.marketSegment)
+    addLabel(formatMarketSegmentLabel(note.marketSegment));
+  for (const outcome of note.outcomes ?? []) addLabel(outcome);
+  return labels;
+}
+
+function tokenizeSignalBotHolderLinkCollisionLabel(
+  value: string | null | undefined,
+): string[] {
+  return (value ?? "")
+    .split(/[^0-9A-Za-z@]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function normalizeSignalBotHolderLinkLabel(
+  value: string | null | undefined,
+): string | null {
+  const label = value?.trim().replace(/\s+/g, " ");
+  return label ? label : null;
+}
+
+function normalizeSignalBotHolderLinkKey(
+  value: string | null | undefined,
+): string {
+  return (value ?? "")
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/[^0-9A-Za-z]+/g, "")
+    .toUpperCase();
+}
+
+function isSafeSignalBotHolderLinkLabel(
+  label: string,
+  collisionLabels: Set<string>,
+): boolean {
+  const key = normalizeSignalBotHolderLinkKey(label);
+  if (key.length < 3) return false;
+  if (HOLDER_LINK_STOP_LABELS.has(key)) return false;
+  if (HOLDER_LINK_STOP_WORDS.has(key)) return false;
+  return !collisionLabels.has(key);
+}
+
+function findSignalBotHolderLinkMatch(
+  value: string,
+  candidates: string[],
+): SignalBotHolderLinkMatch | null {
+  let best: SignalBotHolderLinkMatch | null = null;
+  for (const label of candidates) {
+    let start = 0;
+    while (start < value.length) {
+      const index = value.indexOf(label, start);
+      if (index < 0) break;
+      if (isSignalBotHolderLinkMatchAllowed(value, label, index)) {
+        if (
+          !best ||
+          index < best.index ||
+          (index === best.index && label.length > best.label.length)
+        ) {
+          best = { index, label };
+        }
+        break;
+      }
+      start = index + Math.max(label.length, 1);
+    }
+  }
+  return best;
+}
+
+function isSignalBotHolderLinkMatchAllowed(
+  value: string,
+  label: string,
+  index: number,
+): boolean {
+  const before = index > 0 ? value[index - 1] : "";
+  const after = value[index + label.length] ?? "";
+  if (!isSignalBotHolderLinkBoundary(before)) return false;
+  if (!isSignalBotHolderLinkBoundary(after)) return false;
+  if (/^\d+$/.test(label)) {
+    if (isSignalBotNumericLinkBlockedBefore(value, index)) return false;
+    if (isSignalBotNumericLinkBlockedAfter(value, index + label.length)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSignalBotHolderLinkBoundary(char: string): boolean {
+  return !char || !/[0-9A-Za-z_@]/.test(char);
+}
+
+function isSignalBotNumericLinkBlockedBefore(
+  value: string,
+  index: number,
+): boolean {
+  const before = index > 0 ? value[index - 1] : "";
+  const beforeBefore = index > 1 ? value[index - 2] : "";
+  if (!before) return false;
+  if ("$+-%¢".includes(before)) return true;
+  if ("./:,".includes(before) && /\d/.test(beforeBefore)) return true;
+  return false;
+}
+
+function isSignalBotNumericLinkBlockedAfter(
+  value: string,
+  index: number,
+): boolean {
+  const after = value[index] ?? "";
+  const afterAfter = value[index + 1] ?? "";
+  if (!after) return false;
+  if ("$+-%¢".includes(after)) return true;
+  if ("./:,".includes(after) && /\d/.test(afterAfter)) return true;
+  return false;
+}
+
+function renderSignalBotHolderLinkedText(
+  value: string,
+  match: SignalBotHolderLinkMatch,
+  holderUrl: string,
+): string {
+  const before = value.slice(0, match.index);
+  const label = value.slice(match.index, match.index + match.label.length);
+  const after = value.slice(match.index + match.label.length);
+  return [
+    escapeTelegramMarkdownV2(before),
+    `[${escapeTelegramMarkdownV2(label)}](${escapeTelegramMarkdownV2Url(holderUrl)})`,
+    escapeTelegramMarkdownV2(after),
+  ].join("");
+}
+
 export function buildSignalBotMessage(input: {
   appBaseUrl: string;
   buyAmountUsd: number;
@@ -496,7 +724,6 @@ export function buildSignalBotMessage(input: {
   const buySide = resolveSignalBotBuySide(note);
   const price = buySide ? resolveSignalBotBuyPrice(note, buySide) : null;
   const title = escapeTelegramMarkdownV2(note.title);
-  const summary = escapeTelegramMarkdownV2(note.description);
   const contextLine = formatSignalContextLine(note);
   const credentialLines = formatSignalCredentialLines(note);
   const marketTitleLine = formatMarketTitleLine(note);
@@ -527,6 +754,8 @@ export function buildSignalBotMessage(input: {
   const titleMarkdown = marketUrl
     ? `*[${title}](${escapeTelegramMarkdownV2Url(marketUrl)})*`
     : `*${title}*`;
+  const renderBodyText = createSignalBotBodyTextRenderer(note, holderUrl);
+  const summary = renderBodyText(note.description);
   const categoryEmoji = formatSignalBotMarketEmoji(note);
   const titleLine = categoryEmoji
     ? `${categoryEmoji} ${titleMarkdown}`
@@ -545,7 +774,7 @@ export function buildSignalBotMessage(input: {
     ...(credentialLines.length > 0
       ? ["", ...credentialLines.map(escapeTelegramMarkdownV2)]
       : []),
-    ...(contextLine ? ["", escapeTelegramMarkdownV2(contextLine)] : []),
+    ...(contextLine ? ["", renderBodyText(contextLine)] : []),
   ];
 
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
@@ -562,7 +791,11 @@ export function buildSignalBotMessage(input: {
         text: formatSignalBotBuyButtonText({
           price,
           side: buySide,
-          sideLabel: formatSignalBotOutcomeDisplayLabel(note, buySide),
+          sideLabel: formatSignalBotOutcomeDisplayLabel(
+            note,
+            buySide,
+            "button",
+          ),
           venue: note.marketVenue,
         }),
         url: baseTradeUrl,
@@ -573,7 +806,11 @@ export function buildSignalBotMessage(input: {
         {
           text: formatSignalBotCheaperButtonText({
             alternative: input.cheaperAlternative,
-            sideLabel: formatSignalBotOutcomeDisplayLabel(note, buySide),
+            sideLabel: formatSignalBotOutcomeDisplayLabel(
+              note,
+              buySide,
+              "button",
+            ),
           }),
           url: buildSignalBotTradeUrl({
             amountUsd: input.buyAmountUsd,
@@ -593,7 +830,7 @@ export function buildSignalBotMessage(input: {
         holderPositionUsd: note.holderPositionUsd,
         holderUrl,
         holderSideLabel: note.holderSide
-          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide)
+          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
         marketUrl: marketUrl ?? baseTradeUrl,
       }),
@@ -607,7 +844,7 @@ export function buildSignalBotMessage(input: {
         holderPositionUsd: note.holderPositionUsd,
         holderUrl,
         holderSideLabel: note.holderSide
-          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide)
+          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
         marketUrl: buildSignalBotOpenMarketUrl({
           appBaseUrl: input.appBaseUrl,
@@ -625,7 +862,7 @@ export function buildSignalBotMessage(input: {
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
         holderSideLabel: note.holderSide
-          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide)
+          ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
         holderUrl,
         marketUrl: null,
@@ -672,19 +909,16 @@ function formatHolderButtonText(input: {
   holderSide: "NO" | "YES" | null;
   holderSideLabel: string | null;
 }): string {
-  const sideLabel = input.holderSideLabel ?? input.holderSide ?? "Holder";
-  const parts = [
-    "👤",
-    input.holderActorMode === "sharp_cluster" && input.holderSide
-      ? `Top ${sideLabel}`
-      : sideLabel,
-  ];
+  const prefix =
+    input.holderActorMode === "sharp_cluster" ? "👥 Top wallet" : "👤 Wallet";
+  const sideLabel = input.holderSideLabel ?? input.holderSide;
+  const parts = [sideLabel ? `${prefix} · ${sideLabel}` : prefix];
   if (input.holderPositionUsd != null) {
     parts.push(formatCompactUsd(input.holderPositionUsd));
   }
   const label = parts.join(" ");
   if (input.holderOpenPnlUsd == null) return label;
-  return `${label} (${formatSignedCompactUsd(input.holderOpenPnlUsd)})`;
+  return `${label} (${formatSignedCompactUsd(input.holderOpenPnlUsd)} PnL)`;
 }
 
 export async function enableSignalBotChat(input: {
@@ -2004,6 +2238,12 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function asTrimmedString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
 function asStringArray(value: unknown, maxItems: number): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -2057,6 +2297,8 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     lastPrice: toNumber(row.last_price),
     holderAddress: row.holder_address,
     holderChain: row.holder_chain,
+    holderDisplayName: asTrimmedString(holderMeta.holderDescriptor),
+    holderIdentityDisplayName: asTrimmedString(holderMeta.identityDisplayName),
     holderOpenPnlUsd: toNumber(holderMeta.openPnlUsd),
     holderPositionUsd: toNumber(holderMeta.positionUsd),
     holderSide: holderSide === "YES" || holderSide === "NO" ? holderSide : null,
@@ -2161,14 +2403,49 @@ function abbreviateOutcomeLabel(
   return normalized;
 }
 
-function formatSignalBotOutcomeDisplayLabel(
-  note: Pick<SignalBotNote, "outcomes">,
+type SignalBotOutcomeLabelMode = "button" | "price";
+
+function formatReadableOutcomeLabel(label: string): string {
+  const trimmed = label.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "";
+  if (trimmed.length <= OUTCOME_LABEL_FULL_MAX_CHARS) return trimmed;
+  return abbreviateOutcomeLabel(trimmed);
+}
+
+function formatShortSignalBotMarketLabel(
+  value: string | null | undefined,
+): string | null {
+  const label = value?.trim().replace(/\s+/g, " ");
+  if (!label || label.length > OUTCOME_LABEL_FULL_MAX_CHARS) return null;
+  const upper = label.toUpperCase();
+  if (upper === "YES" || upper === "NO") return null;
+  return label;
+}
+
+function formatSignalBotGenericOutcomeButtonLabel(
+  note: Pick<SignalBotNote, "marketTitle">,
   side: "NO" | "YES",
+): string | null {
+  const base = formatShortSignalBotMarketLabel(note.marketTitle);
+  if (!base) return null;
+  const label = side === "YES" ? base : `NO ${base}`;
+  return label.length <= OUTCOME_LABEL_FULL_MAX_CHARS ? label : null;
+}
+
+function formatSignalBotOutcomeDisplayLabel(
+  note: Pick<SignalBotNote, "eventTitle" | "marketTitle" | "outcomes">,
+  side: "NO" | "YES",
+  mode: SignalBotOutcomeLabelMode,
 ): string {
   const label = outcomeLabelOrSide(note.outcomes, side);
   const upper = label.trim().toUpperCase();
-  if (upper === "YES" || upper === "NO") return side;
-  return abbreviateOutcomeLabel(label);
+  if (upper === "YES" || upper === "NO") {
+    if (mode === "button") {
+      return formatSignalBotGenericOutcomeButtonLabel(note, side) ?? side;
+    }
+    return side;
+  }
+  return formatReadableOutcomeLabel(label);
 }
 
 function formatSignalBotMarketEmoji(
@@ -2294,8 +2571,8 @@ function formatCompactAmount(value: number): string {
 function formatPriceLine(note: SignalBotNote): string | null {
   const yes = resolveSidePrice(note, "YES");
   if (yes == null) return null;
-  const yesLabel = formatSignalBotOutcomeDisplayLabel(note, "YES");
-  const noLabel = formatSignalBotOutcomeDisplayLabel(note, "NO");
+  const yesLabel = formatSignalBotOutcomeDisplayLabel(note, "YES", "price");
+  const noLabel = formatSignalBotOutcomeDisplayLabel(note, "NO", "price");
   return `${yesLabel} ${formatCents(yes)} / ${noLabel} ${formatCents(1 - yes)}`;
 }
 
