@@ -51,7 +51,7 @@ type Queryable = Pick<PoolClient, "query">;
 export type HolderResearchSideKey = "YES" | "NO";
 
 export const HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING =
-  "For sports, say known odds, team news, betting coverage, or public news. Do not say previews or pick articles.";
+  "For sports, say whether known odds, team news, betting coverage, or public news supports the holder side, supports the opposite side, or mostly shows the move was already public. Do not say previews or pick articles.";
 
 export type HolderResearchMmThresholds = {
   whaleUsd: number;
@@ -263,6 +263,20 @@ export type HolderResearchPublicContextRisk =
   | "conflicts_holder"
   | "unknown";
 
+export type HolderResearchFlowProfile =
+  | "aligned"
+  | "mixed"
+  | "raw_opposed"
+  | "sharp_opposed"
+  | "credential_weighted_minority"
+  | "unknown";
+
+export type HolderResearchRepeatProfile =
+  | "none"
+  | "same_wallet_side"
+  | "same_market_side"
+  | "independent_persistence";
+
 export type HolderResearchQualityAssessment = {
   marketType: HolderResearchMarketType;
   marketSegment: HolderResearchMarketSegment;
@@ -271,6 +285,9 @@ export type HolderResearchQualityAssessment = {
   credentialStrength: HolderResearchCredentialStrength;
   priceContext: HolderResearchPriceContext;
   publicContextRisk: HolderResearchPublicContextRisk;
+  flowProfile: HolderResearchFlowProfile;
+  repeatProfile: HolderResearchRepeatProfile;
+  riskTags: string[];
   reasons: string[];
 };
 
@@ -286,7 +303,9 @@ export type HolderResearchActionabilityBlocker =
   | "non_actionable_bucket"
   | "action_price_too_high"
   | "credential_contradicted"
-  | "single_game_sports_weak_single";
+  | "single_game_sports_weak_single"
+  | "unsupported_crypto_single"
+  | "negative_single_minority";
 
 export type HolderResearchCandidateActionability = {
   isPrimaryResearchCandidate: boolean;
@@ -733,18 +752,13 @@ function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
   const facts: string[] = [`${formatUsd(holder.positionUsd)} open`];
   const resolvedEdge = holder.resolvedWinRateEdge30d;
   const resolvedEdgeSamples = holder.resolvedEdgeSampleCount30d;
-  const hasEdgeFact =
-    resolvedEdge != null && resolvedEdgeSamples != null;
+  const hasEdgeFact = resolvedEdge != null && resolvedEdgeSamples != null;
   if (hasEdgeFact) {
     facts.push(
       `beat market prices by ${formatPointDelta(resolvedEdge)} across ${resolvedEdgeSamples} resolved bets`,
     );
   }
-  if (
-    !hasEdgeFact &&
-    holder.winRate30d != null &&
-    holder.trades30d != null
-  ) {
+  if (!hasEdgeFact && holder.winRate30d != null && holder.trades30d != null) {
     facts.push(
       `final outcomes favored this wallet in ${formatWholePercent(holder.winRate30d)} of ${holder.trades30d} samples`,
     );
@@ -1098,7 +1112,9 @@ function stripLeadingTelegramMention(
 }
 
 function holderPromptDisplayName(holder: HolderResearchHolder): string | null {
-  return stripLeadingTelegramMention(holder.identityDisplayName ?? holder.label);
+  return stripLeadingTelegramMention(
+    holder.identityDisplayName ?? holder.label,
+  );
 }
 
 function buildHolderCredentialBullets(holder: HolderResearchHolder): string[] {
@@ -1234,7 +1250,8 @@ export function buildHolderResearchActorSummary(input: {
       primaryHolder: primaryHolder
         ? {
             walletId: primaryHolder.walletId,
-            label: holderPromptDisplayName(primaryHolder) ?? primaryHolder.label,
+            label:
+              holderPromptDisplayName(primaryHolder) ?? primaryHolder.label,
             side: primaryHolder.side,
             positionUsd: primaryHolder.positionUsd,
             openPnlUsd: primaryHolder.openPnlUsd,
@@ -1365,6 +1382,231 @@ function holderHasStrongCredential(input: {
   return edgeStrong;
 }
 
+function oppositeSideKey(side: HolderResearchSideKey): HolderResearchSideKey {
+  return side === "YES" ? "NO" : "YES";
+}
+
+function hasSameSideCluster(
+  side: HolderResearchSide,
+  policy: Pick<HolderResearchPolicy, "minSidePositionUsd">,
+): boolean {
+  return side.sharpHolders >= 2 && side.sharpUsd >= policy.minSidePositionUsd;
+}
+
+function isCryptoHolderResearchMarket(input: {
+  marketType: HolderResearchMarketType;
+  marketSegment: HolderResearchMarketSegment;
+  category: string | null;
+}): boolean {
+  return (
+    input.marketType === "crypto_macro" ||
+    input.marketSegment.startsWith("crypto_") ||
+    input.category?.trim().toLowerCase() === "crypto"
+  );
+}
+
+function classifyHolderResearchFlowProfile(input: {
+  candidate: HolderResearchCandidate;
+  actor: HolderResearchActorSummary;
+  policy: Pick<
+    HolderResearchPolicy,
+    | "minMeaningfulSidePctDelta"
+    | "minMeaningfulSideUsdDelta"
+    | "minSidePositionUsd"
+    | "minSideWallets"
+  >;
+}): HolderResearchFlowProfile {
+  const side = input.candidate.side;
+  if (!side) return "unknown";
+  const target = input.candidate.market.sides[side];
+  const opposite = input.candidate.market.sides[oppositeSideKey(side)];
+  const totalUsd = target.usd + opposite.usd;
+  if (totalUsd <= 0) return "unknown";
+
+  const targetCluster = hasSameSideCluster(target, input.policy);
+  const oppositeCluster = hasSameSideCluster(opposite, input.policy);
+  const sharpOpposed =
+    oppositeCluster &&
+    (!targetCluster ||
+      opposite.sharpUsd - target.sharpUsd >=
+        diffThreshold(target.sharpUsd, input.policy));
+  if (sharpOpposed) return "sharp_opposed";
+
+  const rawOpposed =
+    opposite.usd - target.usd >= diffThreshold(target.usd, input.policy) &&
+    opposite.wallets >= input.policy.minSideWallets;
+  if (rawOpposed && targetCluster) return "credential_weighted_minority";
+  if (rawOpposed) return "raw_opposed";
+
+  const bothSidesMaterial =
+    target.usd >= input.policy.minSidePositionUsd &&
+    opposite.usd >= input.policy.minSidePositionUsd;
+  const targetShare = target.usd / totalUsd;
+  const rawClose =
+    bothSidesMaterial &&
+    Math.abs(target.usd - opposite.usd) <=
+      diffThreshold(Math.max(target.usd, opposite.usd), input.policy);
+  const sharpClose =
+    target.sharpUsd > 0 &&
+    opposite.sharpUsd > 0 &&
+    Math.abs(target.sharpUsd - opposite.sharpUsd) <=
+      diffThreshold(Math.max(target.sharpUsd, opposite.sharpUsd), input.policy);
+  if (
+    rawClose ||
+    sharpClose ||
+    (bothSidesMaterial && targetShare >= 0.4 && targetShare <= 0.6)
+  ) {
+    return "mixed";
+  }
+
+  if (
+    input.actor.mode === "single_holder" &&
+    !targetCluster &&
+    oppositeCluster
+  ) {
+    return "sharp_opposed";
+  }
+
+  return "aligned";
+}
+
+function classifyHolderResearchRepeatProfile(input: {
+  candidate: HolderResearchCandidate;
+  actor: HolderResearchActorSummary;
+}): HolderResearchRepeatProfile {
+  const previous = input.candidate.market.previousNote;
+  const side = input.candidate.side;
+  if (!previous || !side || previous.walletTargets.length === 0) {
+    return "none";
+  }
+
+  const selectedWalletIds = new Set(
+    selectedEvidenceHolders(input.candidate)
+      .filter((holder) => holder.side === side)
+      .map((holder) => holder.walletId),
+  );
+  const hasSameWalletSide = previous.walletTargets.some(
+    (target) =>
+      selectedWalletIds.has(target.walletId) &&
+      (target.side == null || target.side === side),
+  );
+  if (hasSameWalletSide) return "same_wallet_side";
+
+  const hasSameMarketSide = previous.walletTargets.some(
+    (target) => target.side === side,
+  );
+  if (!hasSameMarketSide) return "none";
+
+  if (
+    input.actor.mode === "sharp_cluster" &&
+    input.actor.cluster &&
+    input.actor.cluster.sharpHolders >= 2
+  ) {
+    return "independent_persistence";
+  }
+
+  return "same_market_side";
+}
+
+function holderResearchRiskTags(input: {
+  candidate: HolderResearchCandidate;
+  actor: HolderResearchActorSummary;
+  marketType: HolderResearchMarketType;
+  marketSegment: HolderResearchMarketSegment;
+  hoursToClose: number | null;
+  credentialStrength: HolderResearchCredentialStrength;
+  priceContext: HolderResearchPriceContext;
+  publicContextRisk: HolderResearchPublicContextRisk;
+  flowProfile: HolderResearchFlowProfile;
+  repeatProfile: HolderResearchRepeatProfile;
+  estimatedActionPrice: number | null;
+  policy: Pick<HolderResearchPolicy, "minSidePositionUsd">;
+}): string[] {
+  const tags: string[] = [];
+  const actorMode = input.actor.mode;
+  const targetSide = input.candidate.side
+    ? input.candidate.market.sides[input.candidate.side]
+    : null;
+  const hasCluster = targetSide
+    ? hasSameSideCluster(targetSide, input.policy)
+    : false;
+  const crypto = isCryptoHolderResearchMarket({
+    marketType: input.marketType,
+    marketSegment: input.marketSegment,
+    category: input.candidate.market.category,
+  });
+
+  if (input.flowProfile === "mixed") tags.push("mixed_flow");
+  if (input.flowProfile === "raw_opposed") tags.push("raw_opposed_flow");
+  if (input.flowProfile === "sharp_opposed") tags.push("sharp_opposed_flow");
+  if (input.flowProfile === "credential_weighted_minority") {
+    tags.push("credential_weighted_minority");
+  }
+  if (input.repeatProfile === "same_wallet_side") {
+    tags.push("same_wallet_side_repeat", "risky_repeat");
+  }
+  if (input.repeatProfile === "same_market_side") {
+    tags.push("same_market_side_repeat");
+  }
+  if (input.repeatProfile === "independent_persistence") {
+    tags.push("independent_persistence");
+  }
+  if (
+    crypto &&
+    actorMode === "single_holder" &&
+    !hasCluster &&
+    input.flowProfile !== "aligned"
+  ) {
+    tags.push("unsupported_crypto_single");
+  }
+  if (
+    input.candidate.bucket === "sharp_minority" &&
+    actorMode === "single_holder" &&
+    input.credentialStrength === "contradicted"
+  ) {
+    tags.push("negative_single_minority");
+  }
+  if (
+    input.marketType === "single_game_sports" &&
+    actorMode === "single_holder" &&
+    input.hoursToClose != null &&
+    input.hoursToClose > 6 &&
+    input.hoursToClose <= 24
+  ) {
+    tags.push("sports_single_6_24h");
+  }
+  if (
+    input.priceContext === "already_priced" ||
+    input.publicContextRisk === "fully_explains_move"
+  ) {
+    tags.push("public_priced");
+  }
+  if (
+    input.estimatedActionPrice != null &&
+    input.estimatedActionPrice >= 0.8 &&
+    tags.includes("public_priced")
+  ) {
+    tags.push("public_priced_high_entry");
+  }
+  if (input.actor.primaryHolder) {
+    const holder = input.candidate.market.holders.find(
+      (entry) =>
+        entry.walletId === input.actor.primaryHolder?.walletId &&
+        entry.side === input.actor.primaryHolder.side,
+    );
+    if (
+      holder &&
+      (holder.avgEntryPrice == null ||
+        holder.currentPrice == null ||
+        holder.approxReliable === false)
+    ) {
+      tags.push("uncertain_holder_entry");
+    }
+  }
+
+  return [...new Set(tags)];
+}
+
 export function buildHolderResearchQualityAssessment(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
@@ -1423,6 +1665,35 @@ export function buildHolderResearchQualityAssessment(
   if (publicContextRisk === "fully_explains_move") {
     reasons.push("public_news_fully_explains_move");
   }
+  const flowProfile = classifyHolderResearchFlowProfile({
+    actor,
+    candidate,
+    policy,
+  });
+  const repeatProfile = classifyHolderResearchRepeatProfile({
+    actor,
+    candidate,
+  });
+  const estimatedActionPrice = estimatedHolderResearchActionPrice(candidate);
+  const riskTags = holderResearchRiskTags({
+    actor,
+    candidate,
+    credentialStrength,
+    estimatedActionPrice,
+    flowProfile,
+    hoursToClose,
+    marketSegment,
+    marketType,
+    policy,
+    priceContext,
+    publicContextRisk,
+    repeatProfile,
+  });
+  if (flowProfile !== "aligned" && flowProfile !== "unknown") {
+    reasons.push(flowProfile);
+  }
+  if (repeatProfile !== "none") reasons.push(repeatProfile);
+  reasons.push(...riskTags);
 
   return {
     marketType,
@@ -1432,6 +1703,9 @@ export function buildHolderResearchQualityAssessment(
     credentialStrength,
     priceContext,
     publicContextRisk,
+    flowProfile,
+    repeatProfile,
+    riskTags,
     reasons: [...new Set(reasons)],
   };
 }
@@ -1530,6 +1804,12 @@ export function buildHolderResearchCandidateActionability(
   }
   if (quality.credentialStrength === "contradicted") {
     pushUnique(blockers, "credential_contradicted");
+  }
+  if (quality.riskTags.includes("unsupported_crypto_single")) {
+    pushUnique(blockers, "unsupported_crypto_single");
+  }
+  if (quality.riskTags.includes("negative_single_minority")) {
+    pushUnique(blockers, "negative_single_minority");
   }
   if (
     policy.singleGameSportsStrictMode &&
@@ -2432,6 +2712,15 @@ function adjustedSelectionScore(
   if (quality.credentialStrength === "contradicted") score -= 0.2;
   if (quality.priceContext === "against_signal") score -= 0.12;
   if (quality.priceContext === "already_priced") score -= 0.06;
+  if (quality.flowProfile === "mixed") score -= 0.06;
+  if (quality.flowProfile === "raw_opposed") score -= 0.1;
+  if (quality.flowProfile === "sharp_opposed") score -= 0.14;
+  if (quality.repeatProfile === "same_wallet_side") score -= 0.08;
+  if (quality.repeatProfile === "same_market_side") score -= 0.05;
+  if (quality.repeatProfile === "independent_persistence") score += 0.03;
+  if (quality.riskTags.includes("sports_single_6_24h")) score -= 0.08;
+  if (quality.riskTags.includes("public_priced_high_entry")) score -= 0.04;
+  if (quality.riskTags.includes("uncertain_holder_entry")) score -= 0.03;
   return score;
 }
 
@@ -3979,8 +4268,7 @@ export function buildHolderResearchExternalSearchInput(
       recentUsd: candidate.market.recentActivityUsd,
       recentAt: candidate.market.recentActivityAt,
     },
-    instruction:
-      `Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. ${HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING} If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.`,
+    instruction: `Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. Say whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, or does not explain the move. ${HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING} If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.`,
   };
 }
 
@@ -4070,8 +4358,7 @@ export function buildHolderResearchWalletTargets(
         actor?.primaryHolder?.walletId === holder.walletId
           ? actor.credentialBullets
           : [],
-      holderDescriptor:
-        holderPromptDisplayName(holder) ?? "tracked wallet",
+      holderDescriptor: holderPromptDisplayName(holder) ?? "tracked wallet",
       identityDisplayName: holder.identityDisplayName,
       identityDisplayNameSource: holder.identityDisplayNameSource,
       identityProfileUrl: holder.identityProfileUrl,
@@ -4239,6 +4526,30 @@ export function applyHolderResearchPublishQualityGate(input: {
     input.policy,
     normalizePublicContextRisk(output.public_context_risk),
   );
+  if (quality.riskTags.includes("unsupported_crypto_single")) {
+    return asContextHolderResearchOutput(
+      output,
+      "Single-holder crypto reads need aligned aggregate flow or a same-side cluster before publication.",
+    );
+  }
+  if (quality.riskTags.includes("negative_single_minority")) {
+    return asContextHolderResearchOutput(
+      output,
+      "Single-holder minority fades with negative recent holder PnL are context-only.",
+    );
+  }
+  if (
+    quality.publicContextRisk === "conflicts_holder" &&
+    actor.mode === "single_holder" &&
+    (candidate.bucket === "sharp_minority" ||
+      quality.flowProfile === "raw_opposed" ||
+      quality.flowProfile === "sharp_opposed")
+  ) {
+    return asContextHolderResearchOutput(
+      output,
+      "Public context conflicts with this single-holder minority or opposed-flow read.",
+    );
+  }
   if (quality.publicContextRisk === "fully_explains_move") {
     return asContextHolderResearchOutput(
       output,

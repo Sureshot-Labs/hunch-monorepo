@@ -609,12 +609,12 @@ function extractServerToolCallCount(payload: unknown): number {
 
 export function buildHolderResearchExternalSearchSystemPrompt(): string {
   return [
-    "You investigate public context for prediction-market holder signals.",
+    "You investigate outside information for prediction-market holder signals.",
     "Use web_search and x_search.",
     "The holder data is intentionally redacted; do not ask for wallet identities.",
     "Return one short, plain sentence for a signal feed, not a news memo.",
     "Compare dated headlines/posts to the supplied holder activity/snapshot timing.",
-    "Answer only: was the news already known, did it support the move, did it conflict with the move, or did it not explain it?",
+    "Answer only whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain the move, or is mixed.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
     "Do not start with phrases like 'Public info', 'Public context', or 'Public news'.",
     "Do not use markdown, footnotes, bracket citations, or raw URLs in the text.",

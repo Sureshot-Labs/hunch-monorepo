@@ -233,6 +233,19 @@ function market(
   };
 }
 
+function previousNote(
+  walletTargets: Array<{ walletId: string; side: "YES" | "NO" | null }>,
+) {
+  return {
+    noteId: "00000000-0000-4000-8000-000000000090",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    title: "Previous holder research note",
+    inputDigest: null,
+    cooldownUntil: null,
+    walletTargets,
+  };
+}
+
 function publishOutput(
   candidate: ReturnType<typeof buildHolderResearchCandidatesFromMarket>[number],
   overrides: Partial<HolderResearchAgentOutputV1> = {},
@@ -1524,6 +1537,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serializedExternal, /ownerUsdLikeBalance/i);
       assert.doesNotMatch(serializedExternal, /Other hidden bet/i);
       assert.match(serializedExternal, /one short sentence/i);
+      assert.match(serializedExternal, /supports the holder side/i);
       assert.match(
         serializedExternal,
         new RegExp(HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING),
@@ -1536,6 +1550,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         externalSystemPrompt,
         new RegExp(HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING),
       );
+      assert.match(externalSystemPrompt, /supports the holder side/i);
+      assert.match(externalSystemPrompt, /supports the opposite side/i);
 
       const internalInput = buildHolderResearchCandidatePromptJson(
         candidate,
@@ -2054,6 +2070,330 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder research quality blocks unsupported crypto single-holder opposed flow",
+    run: () => {
+      const p = policy({ preTriageActionabilityEnabled: true });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Crypto",
+          eventTitle: "Bitcoin above 120000",
+          marketTitle: "Bitcoin above 120000 by Friday?",
+          yesProbability: 0.42,
+          sides: {
+            YES: side("YES", {
+              usd: 32_000,
+              wallets: 1,
+              sharpHolders: 1,
+              sharpUsd: 32_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 125_000, wallets: 3 }),
+          },
+          holders: [
+            holder("YES", {
+              positionUsd: 32_000,
+              pnl30dUsd: 25_000,
+              resolvedWinRateEdge30d: 0.18,
+              resolvedEdgeZScore30d: 2.4,
+              resolvedEdgeSampleCount30d: 28,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side" && item.side === "YES");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.flowProfile, "raw_opposed");
+      assert.equal(
+        quality.riskTags.includes("unsupported_crypto_single"),
+        true,
+      );
+      const actionability = buildHolderResearchCandidateActionability(
+        candidate,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, false);
+      assert.equal(
+        actionability.likelyFinalGateBlockers.includes(
+          "unsupported_crypto_single",
+        ),
+        true,
+      );
+    },
+  },
+  {
+    name: "holder research quality allows crypto single-holder aligned aggregate support",
+    run: () => {
+      const p = policy({ preTriageActionabilityEnabled: true });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Crypto",
+          eventTitle: "Ethereum above 5000",
+          marketTitle: "Ethereum above 5000 by Friday?",
+          yesProbability: 0.48,
+          sides: {
+            YES: side("YES", {
+              usd: 125_000,
+              wallets: 3,
+              sharpHolders: 1,
+              sharpUsd: 32_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 32_000, wallets: 2 }),
+          },
+          holders: [
+            holder("YES", {
+              positionUsd: 32_000,
+              pnl30dUsd: 25_000,
+              resolvedWinRateEdge30d: 0.18,
+              resolvedEdgeZScore30d: 2.4,
+              resolvedEdgeSampleCount30d: 28,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side" && item.side === "YES");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.flowProfile, "aligned");
+      assert.equal(
+        quality.riskTags.includes("unsupported_crypto_single"),
+        false,
+      );
+      const actionability = buildHolderResearchCandidateActionability(
+        candidate,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, true);
+      assert.equal(actionability.likelyFinalGateBlockers.length, 0);
+    },
+  },
+  {
+    name: "holder research quality blocks negative-PnL sharp-minority single holder",
+    run: () => {
+      const p = policy({ preTriageActionabilityEnabled: true });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("NO", {
+              positionUsd: 32_000,
+              pnl30dUsd: -25_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.credentialStrength, "contradicted");
+      assert.equal(quality.riskTags.includes("negative_single_minority"), true);
+      const actionability = buildHolderResearchCandidateActionability(
+        candidate,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, false);
+      assert.equal(
+        actionability.likelyFinalGateBlockers.includes(
+          "negative_single_minority",
+        ),
+        true,
+      );
+    },
+  },
+  {
+    name: "holder research quality tags mixed-flow clusters without blocking them",
+    run: () => {
+      const p = policy({ preTriageActionabilityEnabled: true });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          sides: {
+            YES: side("YES", {
+              usd: 55_000,
+              wallets: 2,
+              sharpHolders: 2,
+              sharpUsd: 55_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 45_000, wallets: 3 }),
+          },
+          holders: [
+            holder("YES", {
+              walletId: "00000000-0000-4000-8000-000000000081",
+              positionUsd: 30_000,
+              pnl30dUsd: 12_000,
+            }),
+            holder("YES", {
+              walletId: "00000000-0000-4000-8000-000000000082",
+              positionUsd: 25_000,
+              pnl30dUsd: 8_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side" && item.side === "YES");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.actorStrength, "cluster");
+      assert.equal(quality.flowProfile, "mixed");
+      assert.equal(quality.riskTags.includes("mixed_flow"), true);
+      const actionability = buildHolderResearchCandidateActionability(
+        candidate,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, true);
+      assert.equal(actionability.likelyFinalGateBlockers.length, 0);
+    },
+  },
+  {
+    name: "holder research quality treats credential-weighted minority clusters as supported",
+    run: () => {
+      const p = policy({ preTriageActionabilityEnabled: true });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          sides: {
+            YES: side("YES", { usd: 140_000, wallets: 3 }),
+            NO: side("NO", {
+              usd: 45_000,
+              wallets: 2,
+              sharpHolders: 2,
+              sharpUsd: 45_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000083",
+              positionUsd: 25_000,
+              pnl30dUsd: 12_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000084",
+              positionUsd: 20_000,
+              pnl30dUsd: 8_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.actorStrength, "cluster");
+      assert.equal(quality.flowProfile, "credential_weighted_minority");
+      assert.equal(
+        quality.riskTags.includes("credential_weighted_minority"),
+        true,
+      );
+      assert.equal(
+        quality.riskTags.includes("unsupported_crypto_single"),
+        false,
+      );
+      const actionability = buildHolderResearchCandidateActionability(
+        candidate,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, true);
+      assert.equal(actionability.likelyFinalGateBlockers.length, 0);
+    },
+  },
+  {
+    name: "holder research quality tags same-wallet side repeats as risky",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          previousNote: previousNote([
+            {
+              walletId: "00000000-0000-0000-0000-000000000002",
+              side: "NO",
+            },
+          ]),
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side" && item.side === "NO");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.repeatProfile, "same_wallet_side");
+      assert.equal(quality.riskTags.includes("same_wallet_side_repeat"), true);
+      assert.equal(quality.riskTags.includes("risky_repeat"), true);
+    },
+  },
+  {
+    name: "holder research quality keeps independent persistence distinct from duplicate repeats",
+    run: () => {
+      const p = policy({ preTriageActionabilityEnabled: true });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          previousNote: previousNote([
+            {
+              walletId: "00000000-0000-4000-8000-000000000099",
+              side: "NO",
+            },
+          ]),
+          sides: {
+            YES: side("YES", { usd: 120_000, wallets: 4 }),
+            NO: side("NO", {
+              usd: 45_000,
+              wallets: 2,
+              sharpHolders: 2,
+              sharpUsd: 45_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000085",
+              positionUsd: 25_000,
+              pnl30dUsd: 12_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000086",
+              positionUsd: 20_000,
+              pnl30dUsd: 8_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side" && item.side === "NO");
+      assert.ok(candidate);
+
+      const quality = buildHolderResearchQualityAssessment(candidate, p);
+      assert.equal(quality.repeatProfile, "independent_persistence");
+      assert.equal(quality.riskTags.includes("independent_persistence"), true);
+      assert.equal(quality.riskTags.includes("risky_repeat"), false);
+      const actionability = buildHolderResearchCandidateActionability(
+        candidate,
+        p,
+      );
+      assert.equal(actionability.isPrimaryResearchCandidate, true);
+    },
+  },
+  {
     name: "holder research quality gate downgrades weak sports singles",
     run: () => {
       const p = policy();
@@ -2386,6 +2726,137 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder research quality gate downgrades hard quality blockers",
+    run: () => {
+      const p = policy();
+      const unsupportedCrypto = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Crypto",
+          eventTitle: "Bitcoin above 120000",
+          marketTitle: "Bitcoin above 120000 by Friday?",
+          yesProbability: 0.42,
+          sides: {
+            YES: side("YES", {
+              usd: 32_000,
+              wallets: 1,
+              sharpHolders: 1,
+              sharpUsd: 32_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 125_000, wallets: 3 }),
+          },
+          holders: [
+            holder("YES", {
+              positionUsd: 32_000,
+              pnl30dUsd: 25_000,
+              resolvedWinRateEdge30d: 0.18,
+              resolvedEdgeZScore30d: 2.4,
+              resolvedEdgeSampleCount30d: 28,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_side" && item.side === "YES");
+      assert.ok(unsupportedCrypto);
+
+      const cryptoGated = applyHolderResearchPublishQualityGate({
+        candidate: unsupportedCrypto,
+        output: publishOutput(unsupportedCrypto),
+        policy: p,
+      });
+      assert.equal(cryptoGated.status, "CONTEXT");
+      assert.match(cryptoGated.rationale, /Single-holder crypto/);
+
+      const negativeMinority = buildHolderResearchCandidatesFromMarket(
+        market({
+          holders: [
+            holder("NO", {
+              positionUsd: 32_000,
+              pnl30dUsd: -25_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(negativeMinority);
+
+      const negativeGated = applyHolderResearchPublishQualityGate({
+        candidate: negativeMinority,
+        output: publishOutput(negativeMinority),
+        policy: p,
+      });
+      assert.equal(negativeGated.status, "CONTEXT");
+      assert.match(negativeGated.rationale, /negative recent holder PnL/);
+    },
+  },
+  {
+    name: "holder research quality gate blocks conflicting public context only for weak single reads",
+    run: () => {
+      const p = policy();
+      const singleMinority = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(singleMinority);
+
+      const singleGated = applyHolderResearchPublishQualityGate({
+        candidate: singleMinority,
+        output: publishOutput(singleMinority, {
+          public_context_risk: "conflicts_holder",
+        }),
+        policy: p,
+      });
+      assert.equal(singleGated.status, "CONTEXT");
+      assert.match(singleGated.rationale, /Public context conflicts/);
+
+      const clusterMinority = buildHolderResearchCandidatesFromMarket(
+        market({
+          sides: {
+            YES: side("YES", { usd: 140_000, wallets: 3 }),
+            NO: side("NO", {
+              usd: 45_000,
+              wallets: 2,
+              sharpHolders: 2,
+              sharpUsd: 45_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+          },
+          holders: [
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000087",
+              positionUsd: 25_000,
+              pnl30dUsd: 12_000,
+            }),
+            holder("NO", {
+              walletId: "00000000-0000-4000-8000-000000000088",
+              positionUsd: 20_000,
+              pnl30dUsd: 8_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(clusterMinority);
+
+      const clusterGated = applyHolderResearchPublishQualityGate({
+        candidate: clusterMinority,
+        output: publishOutput(clusterMinority, {
+          public_context_risk: "conflicts_holder",
+        }),
+        policy: p,
+      });
+      assert.equal(clusterGated.status, "PUBLISH");
+    },
+  },
+  {
     name: "holder research actor summary uses plain-language credentials",
     run: () => {
       const p = policy();
@@ -2593,13 +3064,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /do not invent credentials/i);
       assert.match(prompt, /candidate\.move/i);
       assert.match(prompt, /candidate\.holderEntry/i);
+      assert.match(prompt, /flowProfile/i);
+      assert.match(prompt, /riskTags/i);
       assert.match(prompt, /sameType/i);
       assert.match(prompt, /private trading group/i);
       assert.match(prompt, /understand the setup in 2 seconds/i);
       assert.match(prompt, /which side the wallet\(s\) are on/i);
       assert.match(prompt, /compressed signal thesis/i);
       assert.match(prompt, /Lead with what strong wallets are doing/i);
-      assert.match(prompt, /Use 'smart wallets' only when credentials are strong/i);
+      assert.match(
+        prompt,
+        /Use 'smart wallets' only when credentials are strong/i,
+      );
       assert.match(prompt, /flexible checklist, not a fixed template/i);
       assert.match(prompt, /Avoid overusing 'serious buyer\(s\)'/i);
       assert.match(prompt, /Do not reuse the same sentence shape/i);
@@ -2703,6 +3179,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         (record.quality as Record<string, unknown>).marketSegment,
         "politics_geo",
       );
+      assert.equal(
+        typeof (record.quality as Record<string, unknown>).flowProfile,
+        "string",
+      );
+      assert.equal(
+        typeof (record.quality as Record<string, unknown>).repeatProfile,
+        "string",
+      );
+      assert.equal(
+        Array.isArray((record.quality as Record<string, unknown>).riskTags),
+        true,
+      );
       assert.deepEqual((record.move as Record<string, unknown>).dYes24h, 0.08);
       const entry = (record.holderEntry as Array<Record<string, unknown>>)[0];
       assert.equal(entry?.entry, 0.3);
@@ -2724,6 +3212,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       const serialized = JSON.stringify(record);
       assert.match(serialized, /"mkt"/);
+      assert.match(serialized, /"flowProfile"/);
+      assert.match(serialized, /"repeatProfile"/);
+      assert.match(serialized, /"riskTags"/);
       assert.match(serialized, /"addr"/);
       assert.doesNotMatch(serialized, /identityProfileUrl/);
       assert.doesNotMatch(serialized, /ownerAddress/);
@@ -2805,6 +3296,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(serialized, /"holderEntry"/);
       assert.match(serialized, /quality/);
       assert.match(serialized, /marketSegment/);
+      assert.match(serialized, /flowProfile/);
+      assert.match(serialized, /repeatProfile/);
+      assert.match(serialized, /riskTags/);
       assert.match(serialized, /triageGate/);
       assert.equal(
         (triageCandidate.triageGate as Record<string, unknown>)
@@ -2821,6 +3315,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /Recent failed pattern/);
       assert.doesNotMatch(prompt, /\n\s+"/);
       assert.match(buildHolderResearchTriageSystemPrompt(), /investigate/);
+      assert.match(buildHolderResearchTriageSystemPrompt(), /flowProfile/);
 
       const parsed = parseHolderResearchTriageOutputV1(
         {
