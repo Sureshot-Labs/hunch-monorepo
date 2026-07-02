@@ -1781,11 +1781,18 @@ export function buildSignalBotStatsReport(input: {
     measuredSignals > 0
       ? `💰 $${input.buyAmountUsd} each: ${formatSignedUsd(totalPnlUsd)} (${formatSignedPercent(roi)})`
       : `💰 $${input.buyAmountUsd} each: waiting for price data`;
+  const highConviction =
+    input.result.aggregates.byExecutionPriority?.high_conviction;
+  const highConvictionLine =
+    highConviction?.notes && highConviction.averageRoi != null
+      ? `🔥 High conviction: ${formatSignedPercent(highConviction.averageRoi)} avg vs all ${formatSignedPercent(overall.averageRoi)}`
+      : null;
 
   const lines = [
     `📊 Hunch signals · ${periodLabel}`,
     "",
     pnlLine,
+    ...(highConvictionLine ? [highConvictionLine] : []),
     resolvedLine,
     `📈 Marked up: ${overall.positive} · down: ${overall.negative}`,
     `⏳ Open: ${overall.open} · 🏁 Resolved: ${overall.resolved}`,
@@ -1809,6 +1816,13 @@ function buildSignalBotStatsDetailLines(
   input: { buyAmountUsd: number },
 ): string[] {
   const lines: string[] = ["Details"];
+  const convictionLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatStatsExecutionPriorityLabel,
+    group: result.aggregates.byExecutionPriority ?? {},
+    title: "By conviction",
+  });
+  if (convictionLines.length > 0) lines.push(...convictionLines);
   const segmentLines = formatStatsAggregateGroup({
     amountUsd: input.buyAmountUsd,
     formatter: formatMarketSegmentLabel,
@@ -1908,6 +1922,17 @@ function formatStatsActorLabel(value: string): string {
       return "No clear wallet";
     case "unknown":
       return "Unknown read";
+    default:
+      return value.replace(/_/g, " ");
+  }
+}
+
+function formatStatsExecutionPriorityLabel(value: string): string {
+  switch (value) {
+    case "high_conviction":
+      return "🔥 High conviction";
+    case "normal":
+      return "Normal";
     default:
       return value.replace(/_/g, " ");
   }
@@ -2613,27 +2638,47 @@ function formatSignalCredentialLines(note: SignalBotNote): string[] {
   return [header, ...bullets.map((bullet) => `• ${bullet}`)];
 }
 
+function isHighConvictionSignal(
+  note: Pick<SignalBotNote, "modelMeta">,
+): boolean {
+  return (
+    note.modelMeta.execution_priority === "high_conviction" ||
+    note.modelMeta.executionPriority === "high_conviction"
+  );
+}
+
 function formatSignalBotSignalLabel(note: SignalBotNote): string {
-  if (note.holderActorMode === "sharp_cluster") return "⚡ Strong wallets";
-  const bucket = String(note.primaryTargetMeta.bucket ?? "").toLowerCase();
-  switch (bucket) {
-    case "sharp_minority":
-    case "sharp_side":
-      return "⚡ Strong holder";
-    case "sharp_split":
-    case "clean_disagreement":
-      return "⚖️ Split holders";
-    case "recent_flow":
-      return "🌊 Recent flow";
-    case "event_bridge":
-      return "🔗 Cross-market";
-    case "concentration_risk":
-      return "⚠️ Concentrated holder";
-    case "followup_existing":
-      return "🔄 Signal update";
-    default:
-      return "🔎 Holder signal";
+  let label: string;
+  if (note.holderActorMode === "sharp_cluster") label = "⚡ Strong wallets";
+  else {
+    const bucket = String(note.primaryTargetMeta.bucket ?? "").toLowerCase();
+    switch (bucket) {
+      case "sharp_minority":
+      case "sharp_side":
+        label = "⚡ Strong holder";
+        break;
+      case "sharp_split":
+      case "clean_disagreement":
+        label = "⚖️ Split holders";
+        break;
+      case "recent_flow":
+        label = "🌊 Recent flow";
+        break;
+      case "event_bridge":
+        label = "🔗 Cross-market";
+        break;
+      case "concentration_risk":
+        label = "⚠️ Concentrated holder";
+        break;
+      case "followup_existing":
+        label = "🔄 Signal update";
+        break;
+      default:
+        label = "🔎 Holder signal";
+        break;
+    }
   }
+  return isHighConvictionSignal(note) ? label.replace(/^\S+/, "🔥") : label;
 }
 
 function formatMarketTitleLine(note: SignalBotNote): string | null {

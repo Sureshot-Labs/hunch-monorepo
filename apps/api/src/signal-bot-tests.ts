@@ -970,6 +970,30 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "message swaps label icon for high-conviction notes",
+    run: () => {
+      const single = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          modelMeta: { execution_priority: "high_conviction" },
+        }),
+      });
+      assert.match(single.text, /🔥 Strong holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(single.text, /High conviction|Top signal/i);
+
+      const cluster = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          holderActorMode: "sharp_cluster",
+          modelMeta: { execution_priority: "high_conviction" },
+        }),
+      });
+      assert.match(cluster.text, /🔥 Strong wallets · YES 31¢ \/ NO 69¢/);
+    },
+  },
+  {
     name: "message includes cheaper alternative button when provided",
     run: () => {
       const message = buildSignalBotMessage({
@@ -1436,6 +1460,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             byActorMode: {},
             byBucket: {},
             byConfidenceBand: {},
+            byExecutionPriority: {
+              high_conviction: {
+                averageRoi: 0.18,
+                correct: 1,
+                flat: 0,
+                hitRate: 1,
+                medianRoi: 0.18,
+                missingEntry: 0,
+                negative: 0,
+                notes: 2,
+                open: 1,
+                positive: 2,
+                resolved: 1,
+                totalPnlPerDollar: 0.36,
+                unknown: 0,
+                withEntry: 2,
+                wrong: 0,
+              },
+            },
             byMarketSegment: {},
             byMarketType: {},
             bySide: {},
@@ -1475,6 +1518,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(report, /📊 Hunch signals · 7D/);
       assert.match(report, /💰 \$10 each: \+\$7\.44 \(\+6\.2%\)/);
+      assert.match(report, /🔥 High conviction: \+18\.0% avg vs all \+6\.2%/);
       assert.match(report, /🎯 Resolved: 3W \/ 1L \(75%\)/);
       assert.doesNotMatch(
         report,
@@ -1511,6 +1555,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             byActorMode: { sharp_cluster: aggregate },
             byBucket: { sharp_side: aggregate },
             byConfidenceBand: {},
+            byExecutionPriority: { high_conviction: aggregate },
             byMarketSegment: { sports_soccer_game: aggregate },
             byMarketType: { single_game_sports: aggregate },
             bySide: {},
@@ -1533,6 +1578,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
       });
       assert.match(report, /By category/);
+      assert.match(report, /By conviction/);
+      assert.match(report, /🔥 High conviction/);
       assert.match(report, /Soccer games/);
       assert.match(report, /Wallet clusters/);
       assert.match(report, /Strong same-side wallets/);
@@ -1550,6 +1597,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             byActorMode: {},
             byBucket: {},
             byConfidenceBand: {},
+            byExecutionPriority: {},
             byMarketSegment: {},
             byMarketType: {},
             bySide: {},

@@ -261,6 +261,8 @@ function publishOutput(
     summary:
       "A capable holder side adds a concise directional read for this market.",
     rationale: "Holder evidence clears the publish quality gate.",
+    execution_priority: "normal",
+    execution_priority_reason: "",
     evidence_ids: candidate.evidence.map((evidence) => evidence.id).slice(0, 3),
     caveats: [],
     ...overrides,
@@ -424,6 +426,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                     },
                   },
                   model_meta: {
+                    execution_priority: "high_conviction",
                     primary_holder_credentials: { mode: "single_holder" },
                   },
                   target_meta: { side: "YES", bucket: "sharp_side" },
@@ -474,8 +477,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(result.written, 1);
       assert.equal(result.correct, 1);
       assert.equal(updates[0]?.entryPrice, 0.35);
+      assert.equal(updates[0]?.executionPriority, "high_conviction");
       assert.equal(updates[0]?.entryPriceSource, "signal_snapshot");
       assert.equal(updates[0]?.pnlPerDollar, (1 - 0.35) / 0.35);
+      assert.equal(
+        result.aggregates.byExecutionPriority.high_conviction.notes,
+        1,
+      );
     },
   },
   {
@@ -3066,6 +3074,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /candidate\.holderEntry/i);
       assert.match(prompt, /flowProfile/i);
       assert.match(prompt, /riskTags/i);
+      assert.match(prompt, /execution_priority/i);
+      assert.match(prompt, /high_conviction/i);
       assert.match(prompt, /sameType/i);
       assert.match(prompt, /private trading group/i);
       assert.match(prompt, /understand the setup in 2 seconds/i);
@@ -3273,6 +3283,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         candidateJson: promptJson,
         allowedEvidenceIds: candidate.evidence.map((entry) => entry.id),
       });
+      assert.match(finalPrompt, /execution_priority/);
+      assert.match(finalPrompt, /high_conviction/);
       assert.doesNotMatch(finalPrompt, /\n\s+"/);
     },
   },
@@ -3499,6 +3511,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(parsed.version, "holder_research_v1");
       assert.equal(parsed.status, "PUBLISH");
       assert.equal(parsed.evidence_ids.length > 0, true);
+      assert.equal(parsed.execution_priority, "normal");
     },
   },
   {
@@ -3521,9 +3534,45 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         extra: "ignored",
       });
       assert.equal(parsed.rationale.length <= 260, true);
+      assert.equal(parsed.execution_priority, "normal");
       assert.deepEqual(parsed.caveats, [
         "No public context found; this may be private information or noise.",
       ]);
+    },
+  },
+  {
+    name: "model output parser accepts high-conviction execution priority only for publish",
+    run: () => {
+      const parsed = parseHolderResearchAgentOutputV1({
+        version: "holder_research_v1",
+        status: "PUBLISH",
+        bucket: "sharp_side",
+        confidence: 0.82,
+        signal_type: "update",
+        direction: "up",
+        headline: "Sharp holder signal",
+        summary:
+          "A strong holder is backing the market side while price remains actionable.",
+        rationale: "Holder evidence clears the publish quality gate.",
+        execution_priority: "high_conviction",
+        execution_priority_reason:
+          "Clean holder evidence, aligned side, and actionable price.",
+        evidence_ids: ["market:1"],
+        caveats: [],
+      });
+      assert.equal(parsed.execution_priority, "high_conviction");
+      assert.equal(
+        parsed.execution_priority_reason,
+        "Clean holder evidence, aligned side, and actionable price.",
+      );
+
+      const context = parseHolderResearchAgentOutputV1({
+        ...parsed,
+        status: "CONTEXT",
+        execution_priority: "high_conviction",
+      });
+      assert.equal(context.execution_priority, "normal");
+      assert.equal(context.execution_priority_reason, "");
     },
   },
   {

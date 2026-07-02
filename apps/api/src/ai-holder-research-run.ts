@@ -266,6 +266,8 @@ type HolderResearchRunReport = {
     evidenceIds: string[];
     costUsd: number;
     costSource: string;
+    executionPriority: string;
+    executionPriorityReason: string;
     externalSearchStatus: string;
     externalSearchSummary: string | null;
     externalSearchCitations: ExternalResearchResult["citations"];
@@ -1282,6 +1284,8 @@ function buildHolderResearchModelErrorDecision(input: {
         "The model response could not be parsed, so this candidate was skipped instead of publishing an incomplete signal.",
       rationale:
         "Model synthesis failed; candidate skipped without publishing.",
+      execution_priority: "normal",
+      execution_priority_reason: "",
       evidence_ids: [evidenceId],
       caveats: ["No user-facing signal was produced for this run."],
     },
@@ -2287,6 +2291,8 @@ export async function runHolderResearch(
           ? decision.cost.chargedCostUsd
           : decision.cost.estimatedCostUsd,
         costSource: args.callModel ? decision.cost.costSource : "estimated",
+        executionPriority: decision.output.execution_priority,
+        executionPriorityReason: decision.output.execution_priority_reason,
         externalSearchStatus:
           externalResearchByKey.get(decision.candidate.key)?.status ??
           "skipped",

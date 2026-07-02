@@ -4319,6 +4319,8 @@ export function buildDeterministicHolderResearchDecision(
       status === "PUBLISH"
         ? "Internal holder data passes the configured exposure and quality gates."
         : "Candidate is useful context but does not clear the publish gate.",
+    execution_priority: "normal",
+    execution_priority_reason: "",
     evidence_ids: topEvidence.map((evidence) => evidence.id),
     caveats: [
       "Holder data is snapshot-based and may lag live venue state.",
@@ -4390,6 +4392,8 @@ function asContextHolderResearchOutput(
 ): HolderResearchAgentOutputV1 {
   return {
     ...output,
+    execution_priority: "normal",
+    execution_priority_reason: "",
     rationale,
     status: "CONTEXT",
   };
@@ -4701,6 +4705,9 @@ export async function persistHolderResearchNotes(
           JSON.stringify({
             ...decision.modelMeta,
             caveats: decision.output.caveats,
+            execution_priority: decision.output.execution_priority,
+            execution_priority_reason:
+              decision.output.execution_priority_reason,
             primary_holder_credentials: actorSummary,
             evidence_refs: candidate.evidence.map((evidence) => ({
               evidence_id: evidence.id,

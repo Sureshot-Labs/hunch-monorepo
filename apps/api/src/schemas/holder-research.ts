@@ -17,6 +17,11 @@ export const holderResearchStatusSchema = z.enum([
   "SKIP",
 ]);
 
+export const holderResearchExecutionPrioritySchema = z.enum([
+  "normal",
+  "high_conviction",
+]);
+
 export const holderResearchAgentOutputV1Schema = z
   .object({
     version: z.literal("holder_research_v1"),
@@ -36,6 +41,8 @@ export const holderResearchAgentOutputV1Schema = z
         "unknown",
       ])
       .optional(),
+    execution_priority: holderResearchExecutionPrioritySchema,
+    execution_priority_reason: z.string().trim().max(180),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
     caveats: z.array(z.string().trim().min(1).max(180)).max(3),
   })
@@ -43,6 +50,9 @@ export const holderResearchAgentOutputV1Schema = z
 
 export type HolderResearchBucket = z.infer<typeof holderResearchBucketSchema>;
 export type HolderResearchStatus = z.infer<typeof holderResearchStatusSchema>;
+export type HolderResearchExecutionPriority = z.infer<
+  typeof holderResearchExecutionPrioritySchema
+>;
 export type HolderResearchAgentOutputV1 = z.infer<
   typeof holderResearchAgentOutputV1Schema
 >;
@@ -129,6 +139,11 @@ export function parseHolderResearchAgentOutputV1(
   value: unknown,
 ): HolderResearchAgentOutputV1 {
   const record = asRecord(value);
+  const executionPriority =
+    record.status === "PUBLISH" &&
+    record.execution_priority === "high_conviction"
+      ? "high_conviction"
+      : "normal";
   const repaired = {
     version: record.version,
     status: record.status,
@@ -148,6 +163,11 @@ export function parseHolderResearchAgentOutputV1(
       260,
     ),
     public_context_risk: record.public_context_risk,
+    execution_priority: executionPriority,
+    execution_priority_reason:
+      executionPriority === "high_conviction"
+        ? asTrimmedString(record.execution_priority_reason, "", 180)
+        : "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
     caveats: asStringArray(record.caveats, 3, 180),
   };
@@ -274,6 +294,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "Use candidate.mkt.labels when present. It maps internal YES/NO sides to real outcome names. Prefer those outcome names in headline/summary when clearer than raw YES/NO, especially for team/player markets.",
     "Use candidate.quality as deterministic guardrails. If credentialStrength is contradicted or weak, do not call the wallet smart, strong, skilled, proven, or good.",
     "Use candidate.quality.flowProfile, repeatProfile, and riskTags: unsupported_crypto_single and negative_single_minority should not be PUBLISH; mixed/opposed flow, risky repeats, public-priced high entry, and uncertain holder-entry context lower confidence and need a clear reason to publish.",
+    "Set execution_priority=high_conviction only for rare PUBLISH signals where the wallet evidence is unusually clean, directional, and actionable. Use normal for ordinary publishable signals and all CONTEXT/SKIP outputs.",
     "Write credentials in normal language: say 'won recent trades' or 'beat market prices', not 'winRate', 'resolved edge', 'z-score', 'n=', or 'sample count'.",
     "Use 'is holding' or 'backs' by default. Only say 'entered' when supplied evidence explicitly proves a recent open or increase.",
     "Edge is supporting evidence only when sample count, stake, trades, and open exposure are strong. Never publish an edge-only claim.",
@@ -339,6 +360,9 @@ export function buildHolderResearchUserPrompt(input: {
       rationale: "one short sentence explaining the decision quality",
       public_context_risk:
         "confirms_holder | fully_explains_move | conflicts_holder | unknown",
+      execution_priority: "normal | high_conviction",
+      execution_priority_reason:
+        "short internal reason when execution_priority is high_conviction, else empty string",
       evidence_ids: "subset of allowedEvidenceIds",
       caveats: "0-2 short important limitations",
     },
@@ -357,6 +381,7 @@ export function buildHolderResearchUserPrompt(input: {
       "Holder identityDisplayName is factual context only; preserve it verbatim if used and never infer a biography from it.",
       "Use normal-user language for credentials; avoid analytics field names and jargon.",
       "Use candidate.quality.flowProfile, repeatProfile, and riskTags when deciding status. Treat unsupported_crypto_single and negative_single_minority as non-publishable.",
+      "Use execution_priority=high_conviction rarely, only for PUBLISH with a clear side, strong wallet or wallet-cluster evidence, fresh/actionable pricing, and no hard quality blockers. Otherwise use normal.",
       "Use delegated search only to answer whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain it, or is mixed.",
       "Do not demote only because public information partly explains the move; ask whether wallets are still on a side the market is not fully pricing.",
       "Compare holder activity/snapshot timing against dated public headlines; early holder positioning can be a publishable signal even if later news supports it.",

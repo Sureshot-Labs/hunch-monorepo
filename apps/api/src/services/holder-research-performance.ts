@@ -11,6 +11,7 @@ import type { HolderResearchPolicy } from "./runtime-policies.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 
 export type HolderResearchSignalSide = "YES" | "NO";
+export type HolderResearchExecutionPriority = "normal" | "high_conviction";
 
 export type HolderResearchSignalSnapshot = {
   version: 1;
@@ -69,6 +70,7 @@ export type HolderResearchSignalPerformance = {
   marketType: MarketType;
   marketSegment: MarketSegment;
   actorMode: string | null;
+  executionPriority: HolderResearchExecutionPriority;
   confidence: number | null;
   confidenceBand: string;
   signalSide: HolderResearchSignalSide | null;
@@ -140,6 +142,7 @@ export type HolderResearchPerformanceAuditResult = {
     byMarketType: Record<string, HolderResearchPerformanceAggregate>;
     byMarketSegment: Record<string, HolderResearchPerformanceAggregate>;
     byActorMode: Record<string, HolderResearchPerformanceAggregate>;
+    byExecutionPriority: Record<string, HolderResearchPerformanceAggregate>;
     byConfidenceBand: Record<string, HolderResearchPerformanceAggregate>;
     bySide: Record<string, HolderResearchPerformanceAggregate>;
     byState: Record<string, HolderResearchPerformanceAggregate>;
@@ -759,6 +762,16 @@ function actorMode(modelMeta: unknown): string | null {
     : null;
 }
 
+function executionPriority(
+  modelMeta: unknown,
+): HolderResearchExecutionPriority {
+  const meta = objectRecord(modelMeta);
+  return meta.execution_priority === "high_conviction" ||
+    meta.executionPriority === "high_conviction"
+    ? "high_conviction"
+    : "normal";
+}
+
 function primaryHolderRecord(modelMeta: unknown): Record<string, unknown> {
   const actor = objectRecord(
     objectRecord(modelMeta).primary_holder_credentials,
@@ -905,6 +918,7 @@ function buildPerformanceForRow(input: {
     marketType,
     marketSegment,
     actorMode: actorMode(input.row.model_meta),
+    executionPriority: executionPriority(input.row.model_meta),
     confidence,
     confidenceBand: confidenceBand(confidence),
     signalSide: side,
@@ -1017,6 +1031,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
   const byMarketType = new Map<string, MutableAggregate>();
   const byMarketSegment = new Map<string, MutableAggregate>();
   const byActorMode = new Map<string, MutableAggregate>();
+  const byExecutionPriority = new Map<string, MutableAggregate>();
   const byConfidenceBand = new Map<string, MutableAggregate>();
   const bySide = new Map<string, MutableAggregate>();
   const byState = new Map<string, MutableAggregate>();
@@ -1035,6 +1050,10 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
     addAggregateItem(addGroup(byMarketType, item.marketType), item);
     addAggregateItem(addGroup(byMarketSegment, item.marketSegment), item);
     addAggregateItem(addGroup(byActorMode, item.actorMode ?? "unknown"), item);
+    addAggregateItem(
+      addGroup(byExecutionPriority, item.executionPriority),
+      item,
+    );
     addAggregateItem(addGroup(byConfidenceBand, item.confidenceBand), item);
     addAggregateItem(addGroup(bySide, item.signalSide ?? "unknown"), item);
     addAggregateItem(addGroup(byState, item.state), item);
@@ -1053,6 +1072,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
     byMarketType: finishMap(byMarketType),
     byMarketSegment: finishMap(byMarketSegment),
     byActorMode: finishMap(byActorMode),
+    byExecutionPriority: finishMap(byExecutionPriority),
     byConfidenceBand: finishMap(byConfidenceBand),
     bySide: finishMap(bySide),
     byState: finishMap(byState),
