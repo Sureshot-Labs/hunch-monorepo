@@ -5,6 +5,7 @@ export const healthRoutes: FastifyPluginAsync = async (app) => {
   app.get("/time", async (_request, reply) => {
     const nowMs = Date.now();
     reply.header("Content-Type", "application/json; charset=utf-8");
+    reply.header("Cache-Control", "no-store");
     return {
       ok: true,
       nowMs,

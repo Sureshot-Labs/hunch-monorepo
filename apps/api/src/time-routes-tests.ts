@@ -13,21 +13,25 @@ await test("GET /time returns server time without database dependency", async ()
     const afterMs = Date.now();
 
     assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["cache-control"], "no-store");
     const payload = response.json<{
-      ok?: boolean;
-      nowMs?: number;
-      nowSec?: number;
-      iso?: string;
+      ok: unknown;
+      nowMs: unknown;
+      nowSec: unknown;
+      iso: unknown;
     }>();
 
     assert.equal(payload.ok, true);
     assert.equal(typeof payload.nowMs, "number");
     assert.equal(typeof payload.nowSec, "number");
     assert.equal(typeof payload.iso, "string");
-    assert.ok(payload.nowMs! >= beforeMs);
-    assert.ok(payload.nowMs! <= afterMs + 1000);
-    assert.equal(payload.nowSec, Math.floor(payload.nowMs! / 1000));
-    assert.equal(new Date(payload.iso!).getTime(), payload.nowMs);
+    const nowMs = payload.nowMs;
+    const nowSec = payload.nowSec;
+    const iso = payload.iso;
+    assert.ok(nowMs >= beforeMs);
+    assert.ok(nowMs <= afterMs + 1000);
+    assert.equal(nowSec, Math.floor(nowMs / 1000));
+    assert.equal(new Date(iso).getTime(), nowMs);
   } finally {
     await app.close();
   }
