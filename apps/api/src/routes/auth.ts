@@ -746,14 +746,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const wallets = await AuthService.getUserWallets(user.id);
-        let hasTelegram = false;
         let walletProfiles: PrivyWalletProfile[] | null = null;
         if (user.privyUserId) {
           try {
             const privyUser = await PrivyService.getUserById(user.privyUserId);
-            hasTelegram = Boolean(
-              PrivyService.extractTelegramAccount(privyUser),
-            );
             walletProfiles = PrivyService.classifyWallets(privyUser);
           } catch (error) {
             app.log.warn(
@@ -1731,10 +1727,14 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "Rate limit exceeded" });
         }
 
+        let hasTelegram = false;
         let walletProfiles: PrivyWalletProfile[] | null = null;
         if (user.privyUserId) {
           try {
             const privyUser = await PrivyService.getUserById(user.privyUserId);
+            hasTelegram = Boolean(
+              PrivyService.extractTelegramAccount(privyUser),
+            );
             walletProfiles = PrivyService.classifyWallets(privyUser);
           } catch (error) {
             app.log.warn(
