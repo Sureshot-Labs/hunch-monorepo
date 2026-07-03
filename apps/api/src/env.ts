@@ -379,6 +379,34 @@ const authAccessState = parseEnum(
   ["off", "prompt", "required"] as const,
   "off",
 );
+const telegramMiniAppEnabled =
+  parseOptionalBool(process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED) ?? false;
+const telegramBotToken = process.env.HUNCH_TELEGRAM_BOT_TOKEN?.trim() || "";
+const telegramBotId = process.env.HUNCH_TELEGRAM_BOT_ID?.trim() || "";
+const telegramBotUsername =
+  process.env.HUNCH_TELEGRAM_BOT_USERNAME?.trim() || "";
+const telegramContextCookieName =
+  process.env.HUNCH_TELEGRAM_CONTEXT_COOKIE_NAME?.trim() ||
+  "hunch_tg_mini_app";
+const telegramContextTtlSeconds = optionalPositiveInt(
+  "HUNCH_TELEGRAM_CONTEXT_TTL_SECONDS",
+  1_800,
+);
+const telegramInitDataMaxAgeSeconds = optionalPositiveInt(
+  "HUNCH_TELEGRAM_INIT_DATA_MAX_AGE_SECONDS",
+  300,
+);
+const telegramNewUsersEnabled =
+  parseOptionalBool(process.env.HUNCH_TELEGRAM_NEW_USERS_ENABLED) ?? false;
+if (
+  nodeEnv.toLowerCase() === "production" &&
+  telegramMiniAppEnabled &&
+  !telegramBotToken
+) {
+  throw new Error(
+    "[env] HUNCH_TELEGRAM_BOT_TOKEN is required when HUNCH_TELEGRAM_MINI_APP_ENABLED=true in production",
+  );
+}
 const embeddedSolanaSponsorshipEnabled =
   parseOptionalBool(process.env.EMBEDDED_SOLANA_SPONSORSHIP_ENABLED) ?? false;
 const solanaLossCloseSponsorshipEnabled =
@@ -778,6 +806,14 @@ export const env = {
     parseOptionalBool(process.env.SPORTS_FIXTURES_BACKGROUND_FILL_ENABLED) ??
     true,
   authAccessState,
+  telegramMiniAppEnabled,
+  telegramBotToken,
+  telegramBotId,
+  telegramBotUsername,
+  telegramContextCookieName,
+  telegramContextTtlSeconds,
+  telegramInitDataMaxAgeSeconds,
+  telegramNewUsersEnabled,
   embeddedSolanaSponsorshipEnabled,
   solanaLossCloseSponsorshipEnabled,
   solanaPrefundEnabled:

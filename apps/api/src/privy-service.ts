@@ -37,6 +37,13 @@ export type PrivyWalletProfile = PrivyWallet & {
   isInternalWallet: boolean;
   walletId?: string | null;
 };
+export type PrivyTelegramAccount = {
+  telegramUserId: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  username?: string | null;
+  photoUrl?: string | null;
+};
 export type PrivyWebhookHeaders = {
   id: string;
   timestamp: string;
@@ -170,6 +177,20 @@ function readString(
     : null;
 }
 
+function readStringOrNumber(
+  record: UnknownRecord,
+  camelKey: string,
+  snakeKey?: string,
+): string | null {
+  const value = record[camelKey] ?? (snakeKey ? record[snakeKey] : undefined);
+  if (typeof value === "string" && value.trim().length > 0)
+    return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value).toString();
+  }
+  return null;
+}
+
 function readBoolean(
   record: UnknownRecord,
   camelKey: string,
@@ -268,6 +289,30 @@ function readTopLevelEmail(privyUser: PrivyUser): string | null {
   if (typeof email === "string") return email.trim() || null;
   if (!isRecord(email)) return null;
   return readString(email, "address");
+}
+
+function readTopLevelTelegram(privyUser: PrivyUser): UnknownRecord | null {
+  const telegram = (privyUser as unknown as UnknownRecord).telegram;
+  return isRecord(telegram) ? telegram : null;
+}
+
+function mapTelegramAccount(
+  account: UnknownRecord,
+): PrivyTelegramAccount | null {
+  const telegramUserId = readStringOrNumber(
+    account,
+    "telegramUserId",
+    "telegram_user_id",
+  );
+  if (!telegramUserId) return null;
+
+  return {
+    telegramUserId,
+    firstName: readString(account, "firstName", "first_name"),
+    lastName: readString(account, "lastName", "last_name"),
+    username: readString(account, "username"),
+    photoUrl: readString(account, "photoUrl", "photo_url"),
+  };
 }
 
 function addWallet(
@@ -499,6 +544,20 @@ export class PrivyService {
       if (address) return address;
     }
     return readTopLevelEmail(privyUser);
+  }
+
+  static extractTelegramAccount(
+    privyUser: PrivyUser,
+  ): PrivyTelegramAccount | null {
+    for (const accountRaw of readLinkedAccounts(privyUser)) {
+      if (!isRecord(accountRaw)) continue;
+      if (readString(accountRaw, "type") !== "telegram") continue;
+      const telegramAccount = mapTelegramAccount(accountRaw);
+      if (telegramAccount) return telegramAccount;
+    }
+
+    const topLevelTelegram = readTopLevelTelegram(privyUser);
+    return topLevelTelegram ? mapTelegramAccount(topLevelTelegram) : null;
   }
 
   /**

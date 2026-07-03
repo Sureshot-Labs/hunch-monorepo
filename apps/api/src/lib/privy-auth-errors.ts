@@ -13,6 +13,10 @@ const PRIVY_TERMINAL_AUTH_MESSAGES: Record<PrivyTerminalAuthErrorCode, string> =
       "This email is already linked to another Hunch account. Please contact support to recover or merge the account.",
     wallet_conflict:
       "One of this Privy account's wallets is already linked to another Hunch account. Please contact support to recover or merge the account.",
+    telegram_conflict:
+      "This Telegram account is already linked to another Hunch account. Please contact support to recover or merge the account.",
+    telegram_signup_blocked:
+      "Telegram-only signup is not enabled yet. Sign in with an existing wallet or email account, then link Telegram.",
   };
 
 export function getPrivyTerminalAuthMessage(

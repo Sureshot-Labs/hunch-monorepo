@@ -33,11 +33,14 @@ export const authPrivyTerminalErrorCodeSchema = z.enum([
   "account_merge_required",
   "email_conflict",
   "wallet_conflict",
+  "telegram_conflict",
+  "telegram_signup_blocked",
 ]);
 
 export const authPrivyTerminalErrorResponseSchema = z.object({
   error: authPrivyTerminalErrorCodeSchema,
   message: z.string().optional(),
+  conflictTelegramUserId: z.string().optional(),
   conflictWalletAddress: z.string().optional(),
   conflictWalletAddresses: z.array(z.string()).optional(),
 });

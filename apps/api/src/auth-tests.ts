@@ -993,6 +993,257 @@ const tests: TestCase[] = [
       );
     },
   },
+  {
+    name: "extractTelegramAccount reads snake and camel Privy fields",
+    run: () => {
+      const snakeUser = {
+        id: "did:privy:user-1",
+        linkedAccounts: [
+          {
+            type: "telegram",
+            telegram_user_id: "123456789012345678",
+            first_name: "Ada",
+            last_name: "Lovelace",
+            username: "ada",
+            photo_url: "https://t.me/i/userpic/ada.svg",
+          },
+        ],
+      } as unknown as PrivyUser;
+      const camelUser = {
+        id: "did:privy:user-2",
+        telegram: {
+          telegramUserId: "987654321",
+          firstName: "Grace",
+          lastName: "Hopper",
+          username: "grace",
+          photoUrl: "https://t.me/i/userpic/grace.svg",
+        },
+        linkedAccounts: [],
+      } as unknown as PrivyUser;
+
+      assert.deepEqual(PrivyService.extractTelegramAccount(snakeUser), {
+        telegramUserId: "123456789012345678",
+        firstName: "Ada",
+        lastName: "Lovelace",
+        username: "ada",
+        photoUrl: "https://t.me/i/userpic/ada.svg",
+      });
+      assert.deepEqual(PrivyService.extractTelegramAccount(camelUser), {
+        telegramUserId: "987654321",
+        firstName: "Grace",
+        lastName: "Hopper",
+        username: "grace",
+        photoUrl: "https://t.me/i/userpic/grace.svg",
+      });
+    },
+  },
+  {
+    name: "upsertTelegramAccountForUserWithClient rejects Telegram account conflicts as terminal",
+    run: async () => {
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM user_telegram_accounts\s+WHERE telegram_user_id = \$1/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  user_id: "other-user",
+                  telegram_user_id: "123456789",
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.upsertTelegramAccountForUserWithClient(client, {
+            userId: "user-1",
+            privyUserId: "did:privy:user-1",
+            telegramAccount: {
+              telegramUserId: "123456789",
+              firstName: "Ada",
+            },
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof PrivyTerminalAuthError);
+          assert.equal(error.code, "telegram_conflict");
+          assert.equal(error.details?.conflictTelegramUserId, "123456789");
+          return true;
+        },
+      );
+    },
+  },
+  {
+    name: "createOrUpdateUserFromPrivyWithClient stores Telegram identity",
+    run: async () => {
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      const privyUser = {
+        id: "did:privy:user-telegram",
+        linkedAccounts: [
+          {
+            type: "telegram",
+            telegram_user_id: "123456789",
+            first_name: "Ada",
+            username: "ada",
+          },
+          {
+            type: "wallet",
+            chainType: "ethereum",
+            address: "0xabc0000000000000000000000000000000000000",
+          },
+        ],
+        wallet: {
+          chainType: "ethereum",
+          address: "0xabc0000000000000000000000000000000000000",
+        },
+      } as unknown as PrivyUser;
+
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          calls.push({ sql, params });
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/INSERT INTO users/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  id: "user-telegram",
+                  privy_user_id: "did:privy:user-telegram",
+                  email: null,
+                  username: null,
+                  display_name: null,
+                  avatar_url: null,
+                  is_active: true,
+                  is_verified: false,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  updated_at: new Date("2026-01-01T00:00:00.000Z"),
+                  last_login_at: new Date("2026-01-01T00:00:00.000Z"),
+                },
+              ],
+            };
+          }
+          if (/INSERT INTO user_wallets/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/INSERT INTO user_trading_preferences/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/INSERT INTO user_trading_stats/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts\s+WHERE telegram_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts\s+WHERE user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/INSERT INTO user_telegram_accounts/i.test(sql)) {
+            return { rows: [{ user_id: "user-telegram" }] };
+          }
+          if (/SELECT id, privy_user_id, email/i.test(sql)) {
+            return {
+              rows: [
+                {
+                  id: "user-telegram",
+                  privy_user_id: "did:privy:user-telegram",
+                  email: null,
+                  username: null,
+                  display_name: null,
+                  avatar_url: null,
+                  is_admin: false,
+                  kalshi_proof_bypass: false,
+                  is_active: true,
+                  is_verified: false,
+                  created_at: new Date("2026-01-01T00:00:00.000Z"),
+                  updated_at: new Date("2026-01-01T00:00:00.000Z"),
+                  last_login_at: new Date("2026-01-01T00:00:00.000Z"),
+                },
+              ],
+            };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      const user = await AuthService.createOrUpdateUserFromPrivyWithClient(
+        client,
+        privyUser,
+        {} as never,
+      );
+
+      assert.equal(user.id, "user-telegram");
+      const telegramInsert = calls.find((call) =>
+        /INSERT INTO user_telegram_accounts/i.test(call.sql),
+      );
+      assert.ok(telegramInsert);
+      assert.deepEqual(telegramInsert.params?.slice(0, 5), [
+        "user-telegram",
+        "did:privy:user-telegram",
+        "123456789",
+        "ada",
+        "Ada",
+      ]);
+    },
+  },
+  {
+    name: "createOrUpdateUserFromPrivyWithClient blocks new Telegram-only users by default",
+    run: async () => {
+      const privyUser = {
+        id: "did:privy:user-telegram-only",
+        linkedAccounts: [
+          {
+            type: "telegram",
+            telegram_user_id: "123456789",
+            first_name: "Ada",
+          },
+          {
+            type: "wallet",
+            chainType: "ethereum",
+            address: "0xabc0000000000000000000000000000000000000",
+            walletClientType: "privy",
+            connectorType: "embedded",
+            imported: false,
+          },
+        ],
+        wallet: {
+          chainType: "ethereum",
+          address: "0xabc0000000000000000000000000000000000000",
+        },
+      } as unknown as PrivyUser;
+
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.createOrUpdateUserFromPrivyWithClient(
+            client,
+            privyUser,
+            {} as never,
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof PrivyTerminalAuthError);
+          assert.equal(error.code, "telegram_signup_blocked");
+          return true;
+        },
+      );
+    },
+  },
 ];
 
 let passed = 0;

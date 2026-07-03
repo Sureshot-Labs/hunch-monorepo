@@ -8,6 +8,7 @@ import { env } from "./env.js";
 import {
   PrivyService,
   type PrivyClaims,
+  type PrivyTelegramAccount,
   type PrivyUser,
   type PrivyWallet,
   type PrivyWalletProfile,
@@ -153,6 +154,12 @@ function isPrivyManagedWalletProfile(
   );
 }
 
+function hasExternalPrivyWalletProfile(
+  walletProfiles: PrivyWalletProfile[],
+): boolean {
+  return walletProfiles.some((profile) => !isPrivyManagedWalletProfile(profile));
+}
+
 function walletAddressesMatch(left: string, right: string): boolean {
   return normalizeWalletAddress(left) === normalizeWalletAddress(right);
 }
@@ -207,9 +214,12 @@ export type PrivyTerminalAuthErrorCode =
   | "account_recovery_required"
   | "account_merge_required"
   | "email_conflict"
-  | "wallet_conflict";
+  | "wallet_conflict"
+  | "telegram_conflict"
+  | "telegram_signup_blocked";
 
 export type PrivyTerminalAuthErrorDetails = {
+  conflictTelegramUserId?: string;
   conflictWalletAddress?: string;
   conflictWalletAddresses?: string[];
 };
@@ -786,6 +796,122 @@ export class AuthService {
     return { userId: null, consumeBindGrant: false };
   }
 
+  private static normalizeTelegramProfileField(
+    value: string | null | undefined,
+    maxLength: number,
+  ): string | null {
+    const trimmed = value?.trim() ?? "";
+    return trimmed ? trimmed.slice(0, maxLength) : null;
+  }
+
+  static async upsertTelegramAccountForUserWithClient(
+    client: Pick<PoolClient, "query">,
+    params: {
+      userId: string;
+      privyUserId: string;
+      telegramAccount: PrivyTelegramAccount;
+    },
+  ): Promise<void> {
+    const telegramUserId = params.telegramAccount.telegramUserId.trim();
+    if (!telegramUserId) return;
+
+    const existingByTelegram = await client.query<{
+      user_id: string;
+      telegram_user_id: string;
+    }>(
+      `SELECT user_id, telegram_user_id
+         FROM user_telegram_accounts
+        WHERE telegram_user_id = $1
+        LIMIT 1`,
+      [telegramUserId],
+    );
+    const telegramOwner = existingByTelegram.rows[0];
+    if (telegramOwner && telegramOwner.user_id !== params.userId) {
+      throw new PrivyTerminalAuthError(
+        "telegram_conflict",
+        "Telegram account already linked to another account",
+        { conflictTelegramUserId: telegramUserId },
+      );
+    }
+
+    const existingByUser = await client.query<{
+      telegram_user_id: string;
+    }>(
+      `SELECT telegram_user_id
+         FROM user_telegram_accounts
+        WHERE user_id = $1
+        LIMIT 1`,
+      [params.userId],
+    );
+    const currentTelegramUserId = existingByUser.rows[0]?.telegram_user_id;
+    if (currentTelegramUserId && currentTelegramUserId !== telegramUserId) {
+      throw new PrivyTerminalAuthError(
+        "telegram_conflict",
+        "Hunch account already has a different Telegram account linked",
+        { conflictTelegramUserId: telegramUserId },
+      );
+    }
+
+    const username = AuthService.normalizeTelegramProfileField(
+      params.telegramAccount.username,
+      256,
+    );
+    const firstName = AuthService.normalizeTelegramProfileField(
+      params.telegramAccount.firstName,
+      256,
+    );
+    const lastName = AuthService.normalizeTelegramProfileField(
+      params.telegramAccount.lastName,
+      256,
+    );
+    const photoUrl = AuthService.normalizeTelegramProfileField(
+      params.telegramAccount.photoUrl,
+      2_048,
+    );
+
+    const upsertResult = await client.query<{ user_id: string }>(
+      `INSERT INTO user_telegram_accounts (
+         user_id,
+         privy_user_id,
+         telegram_user_id,
+         username,
+         first_name,
+         last_name,
+         photo_url,
+         linked_at,
+         updated_at,
+         last_seen_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now(), now())
+       ON CONFLICT (telegram_user_id) DO UPDATE SET
+         privy_user_id = EXCLUDED.privy_user_id,
+         username = EXCLUDED.username,
+         first_name = EXCLUDED.first_name,
+         last_name = EXCLUDED.last_name,
+         photo_url = EXCLUDED.photo_url,
+         updated_at = now(),
+         last_seen_at = now()
+       WHERE user_telegram_accounts.user_id = EXCLUDED.user_id
+       RETURNING user_id`,
+      [
+        params.userId,
+        params.privyUserId,
+        telegramUserId,
+        username,
+        firstName,
+        lastName,
+        photoUrl,
+      ],
+    );
+    if (upsertResult.rows[0]?.user_id !== params.userId) {
+      throw new PrivyTerminalAuthError(
+        "telegram_conflict",
+        "Telegram account already linked to another account",
+        { conflictTelegramUserId: telegramUserId },
+      );
+    }
+  }
+
   /**
    * Create or update user from Privy authentication
    */
@@ -798,6 +924,10 @@ export class AuthService {
     const email = PrivyService.getPrimaryEmailAddress(privyUser);
     const privyUserId = privyUser.id;
     const privyWallets = PrivyService.extractWallets(privyUser);
+    const telegramAccount = PrivyService.extractTelegramAccount(privyUser);
+    const walletProfiles = telegramAccount
+      ? PrivyService.classifyWallets(privyUser)
+      : [];
     const primaryWallet = privyWallets[0];
     if (!primaryWallet) {
       throw new Error("No wallet address found in Privy user data");
@@ -812,6 +942,19 @@ export class AuthService {
         email,
       });
     let userId = resolvedExistingUser.userId;
+
+    if (
+      !userId &&
+      telegramAccount &&
+      !env.telegramNewUsersEnabled &&
+      !email &&
+      !hasExternalPrivyWalletProfile(walletProfiles)
+    ) {
+      throw new PrivyTerminalAuthError(
+        "telegram_signup_blocked",
+        "Telegram-only account creation is disabled",
+      );
+    }
 
     if (userId) {
       if (email) {
@@ -988,6 +1131,14 @@ export class AuthService {
         `INSERT INTO user_trading_stats (user_id) VALUES ($1)`,
         [userId],
       );
+    }
+
+    if (telegramAccount && userId) {
+      await AuthService.upsertTelegramAccountForUserWithClient(client, {
+        userId,
+        privyUserId,
+        telegramAccount,
+      });
     }
 
     // Get the user data

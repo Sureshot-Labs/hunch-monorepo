@@ -638,6 +638,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             error: error.code,
             message: terminalMessage,
+            conflictTelegramUserId: error.details?.conflictTelegramUserId,
             conflictWalletAddress: error.details?.conflictWalletAddress,
             conflictWalletAddresses: error.details?.conflictWalletAddresses,
           });
