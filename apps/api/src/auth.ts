@@ -936,9 +936,10 @@ export class AuthService {
       return;
     }
 
-    await client.query("DELETE FROM user_telegram_accounts WHERE user_id = $1", [
-      params.userId,
-    ]);
+    await client.query(
+      "DELETE FROM user_telegram_accounts WHERE user_id = $1",
+      [params.userId],
+    );
   }
 
   /**

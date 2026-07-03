@@ -751,7 +751,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         if (user.privyUserId) {
           try {
             const privyUser = await PrivyService.getUserById(user.privyUserId);
-            hasTelegram = Boolean(PrivyService.extractTelegramAccount(privyUser));
+            hasTelegram = Boolean(
+              PrivyService.extractTelegramAccount(privyUser),
+            );
             walletProfiles = PrivyService.classifyWallets(privyUser);
           } catch (error) {
             app.log.warn(

@@ -1213,7 +1213,11 @@ const tests: TestCase[] = [
     run: async () => {
       const client = {
         query: async (sql: string) => {
-          if (/FROM user_telegram_accounts\s+WHERE telegram_user_id = \$1/i.test(sql)) {
+          if (
+            /FROM user_telegram_accounts\s+WHERE telegram_user_id = \$1/i.test(
+              sql,
+            )
+          ) {
             return {
               rows: [
                 {
@@ -1308,7 +1312,11 @@ const tests: TestCase[] = [
           if (/INSERT INTO user_trading_stats/i.test(sql)) {
             return { rows: [] };
           }
-          if (/FROM user_telegram_accounts\s+WHERE telegram_user_id = \$1/i.test(sql)) {
+          if (
+            /FROM user_telegram_accounts\s+WHERE telegram_user_id = \$1/i.test(
+              sql,
+            )
+          ) {
             return { rows: [] };
           }
           if (/FROM user_telegram_accounts\s+WHERE user_id = \$1/i.test(sql)) {
@@ -1501,7 +1509,9 @@ const tests: TestCase[] = [
               ],
             };
           }
-          if (/SELECT id, wallet_type, is_verified FROM user_wallets/i.test(sql)) {
+          if (
+            /SELECT id, wallet_type, is_verified FROM user_wallets/i.test(sql)
+          ) {
             return {
               rows: [
                 {
@@ -1518,7 +1528,9 @@ const tests: TestCase[] = [
           if (/UPDATE user_wallets SET is_primary = true/i.test(sql)) {
             return { rows: [] };
           }
-          if (/DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(sql)) {
+          if (
+            /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(sql)
+          ) {
             return { rows: [] };
           }
           if (/SELECT id, privy_user_id, email/i.test(sql)) {
@@ -1554,7 +1566,9 @@ const tests: TestCase[] = [
 
       assert.equal(user.id, "user-existing");
       const telegramDelete = calls.find((call) =>
-        /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(call.sql),
+        /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(
+          call.sql,
+        ),
       );
       assert.ok(telegramDelete);
       assert.deepEqual(telegramDelete.params, ["user-existing"]);
