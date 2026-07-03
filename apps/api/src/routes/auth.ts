@@ -163,6 +163,23 @@ function buildAuthWalletPayloads(
   });
 }
 
+export async function resolveRemoveWalletPrivyContext(
+  user: Pick<User, "privyUserId">,
+): Promise<{
+  hasTelegram: boolean;
+  walletProfiles: PrivyWalletProfile[] | null;
+}> {
+  if (!user.privyUserId) {
+    return { hasTelegram: false, walletProfiles: null };
+  }
+
+  const privyUser = await PrivyService.getUserById(user.privyUserId);
+  return {
+    hasTelegram: Boolean(PrivyService.extractTelegramAccount(privyUser)),
+    walletProfiles: PrivyService.classifyWallets(privyUser),
+  };
+}
+
 function getPolymarketConnectFailureResponse(error: unknown): {
   status: number;
   body: { error: string; message?: string };
@@ -1731,11 +1748,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         let walletProfiles: PrivyWalletProfile[] | null = null;
         if (user.privyUserId) {
           try {
-            const privyUser = await PrivyService.getUserById(user.privyUserId);
-            hasTelegram = Boolean(
-              PrivyService.extractTelegramAccount(privyUser),
-            );
-            walletProfiles = PrivyService.classifyWallets(privyUser);
+            const privyContext = await resolveRemoveWalletPrivyContext(user);
+            hasTelegram = privyContext.hasTelegram;
+            walletProfiles = privyContext.walletProfiles;
           } catch (error) {
             app.log.warn(
               { error, userId: user.id, privyUserId: user.privyUserId },

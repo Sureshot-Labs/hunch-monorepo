@@ -11,6 +11,7 @@ import {
   resetAuthDbFeatureCachesForTests,
   type UserWallet,
 } from "./auth.js";
+import { resolveRemoveWalletPrivyContext } from "./routes/auth.js";
 import { pool } from "./db.js";
 import { parseJwtExpiresInToMs } from "./env.js";
 import {
@@ -201,6 +202,58 @@ const tests: TestCase[] = [
       });
 
       assert.equal(policy.allowed, true);
+    },
+  },
+  {
+    name: "remove wallet route Privy context includes Telegram identity",
+    run: async () => {
+      const privyUser = {
+        id: "did:privy:user-with-telegram",
+        telegram: {
+          telegramUserId: "123456",
+          username: "hunch_user",
+        },
+        linkedAccounts: [],
+      } as unknown as PrivyUser;
+      const walletProfiles = [
+        makeWalletProfile({
+          address: "0xabc0000000000000000000000000000000000000",
+          source: "external",
+        }),
+      ];
+      const privyAny = PrivyService as unknown as {
+        classifyWallets: typeof PrivyService.classifyWallets;
+        extractTelegramAccount: typeof PrivyService.extractTelegramAccount;
+        getUserById: typeof PrivyService.getUserById;
+      };
+      const originalGetUserById = privyAny.getUserById;
+      const originalExtractTelegramAccount = privyAny.extractTelegramAccount;
+      const originalClassifyWallets = privyAny.classifyWallets;
+      try {
+        privyAny.getUserById = async (privyUserId: string) => {
+          assert.equal(privyUserId, "did:privy:user-with-telegram");
+          return privyUser;
+        };
+        privyAny.extractTelegramAccount = (input: PrivyUser) => {
+          assert.equal(input, privyUser);
+          return { telegramUserId: "123456", username: "hunch_user" };
+        };
+        privyAny.classifyWallets = (input: PrivyUser) => {
+          assert.equal(input, privyUser);
+          return walletProfiles;
+        };
+
+        const context = await resolveRemoveWalletPrivyContext({
+          privyUserId: "did:privy:user-with-telegram",
+        });
+
+        assert.equal(context.hasTelegram, true);
+        assert.deepEqual(context.walletProfiles, walletProfiles);
+      } finally {
+        privyAny.getUserById = originalGetUserById;
+        privyAny.extractTelegramAccount = originalExtractTelegramAccount;
+        privyAny.classifyWallets = originalClassifyWallets;
+      }
     },
   },
   {
