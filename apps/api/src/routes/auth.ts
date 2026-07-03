@@ -746,10 +746,12 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       try {
         const wallets = await AuthService.getUserWallets(user.id);
+        let hasTelegram = false;
         let walletProfiles: PrivyWalletProfile[] | null = null;
         if (user.privyUserId) {
           try {
             const privyUser = await PrivyService.getUserById(user.privyUserId);
+            hasTelegram = Boolean(PrivyService.extractTelegramAccount(privyUser));
             walletProfiles = PrivyService.classifyWallets(privyUser);
           } catch (error) {
             app.log.warn(
@@ -1748,6 +1750,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           user.id,
           body.walletAddress,
           {
+            hasTelegram,
             userEmail: user.email ?? null,
             walletProfiles,
           },

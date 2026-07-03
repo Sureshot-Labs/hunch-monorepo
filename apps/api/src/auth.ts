@@ -116,6 +116,7 @@ export class WalletUnlinkNotAllowedError extends Error {
 }
 
 type WalletRemovalPolicyOptions = {
+  hasTelegram?: boolean | null;
   userEmail?: string | null;
   walletProfiles?: PrivyWalletProfile[] | null;
 };
@@ -165,6 +166,7 @@ function walletAddressesMatch(left: string, right: string): boolean {
 }
 
 export function resolveWalletRemovalPolicy(input: {
+  hasTelegram?: boolean | null;
   targetWalletAddress: string;
   userEmail?: string | null;
   walletProfiles?: PrivyWalletProfile[] | null;
@@ -192,19 +194,21 @@ export function resolveWalletRemovalPolicy(input: {
     };
   }
 
-  const hasEmail = Boolean(input.userEmail?.trim());
-  if (!hasEmail) {
-    const externalSignInWalletCount = input.wallets.filter((wallet) => {
-      const profile = getWalletProfile(wallet, profileLookup);
-      return !isPrivyManagedWalletProfile(profile);
-    }).length;
+  const externalSignInWalletCount = input.wallets.filter((wallet) => {
+    const profile = getWalletProfile(wallet, profileLookup);
+    return !isPrivyManagedWalletProfile(profile);
+  }).length;
+  const authMethodCount =
+    externalSignInWalletCount +
+    Number(Boolean(input.userEmail?.trim())) +
+    Number(Boolean(input.hasTelegram));
 
-    if (externalSignInWalletCount <= 1) {
-      return {
-        allowed: false,
-        reason: "Connect email before removing your only wallet sign-in method",
-      };
-    }
+  if (authMethodCount <= 1) {
+    return {
+      allowed: false,
+      reason:
+        "Connect email or Telegram before removing your only wallet sign-in method",
+    };
   }
 
   return { allowed: true };
@@ -1483,6 +1487,7 @@ export class AuthService {
       );
 
       const walletRemovalPolicy = resolveWalletRemovalPolicy({
+        hasTelegram: options.hasTelegram,
         targetWalletAddress: walletAddress,
         userEmail: options.userEmail,
         walletProfiles: options.walletProfiles,

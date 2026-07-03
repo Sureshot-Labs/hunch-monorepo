@@ -101,7 +101,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "wallet removal policy requires email before removing the only external sign-in wallet",
+    name: "wallet removal policy requires another sign-in method before removing the only external wallet",
     run: () => {
       const externalWallet = makeUserWallet({
         walletAddress: "0xabc0000000000000000000000000000000000000",
@@ -124,7 +124,34 @@ const tests: TestCase[] = [
       });
 
       assert.equal(policy.allowed, false);
-      assert.match(policy.reason ?? "", /connect email/i);
+      assert.match(policy.reason ?? "", /connect email or Telegram/i);
+    },
+  },
+  {
+    name: "wallet removal policy allows removing the last external sign-in wallet when Telegram exists",
+    run: () => {
+      const externalWallet = makeUserWallet({
+        walletAddress: "0xabc0000000000000000000000000000000000000",
+      });
+      const internalWallet = makeUserWallet({
+        id: "w-2",
+        walletAddress: "0xdef0000000000000000000000000000000000000",
+      });
+
+      const policy = resolveWalletRemovalPolicy({
+        hasTelegram: true,
+        targetWalletAddress: externalWallet.walletAddress,
+        userEmail: null,
+        walletProfiles: [
+          makeWalletProfile({
+            address: internalWallet.walletAddress,
+            source: "embedded",
+          }),
+        ],
+        wallets: [externalWallet, internalWallet],
+      });
+
+      assert.equal(policy.allowed, true);
     },
   },
   {
