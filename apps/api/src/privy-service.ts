@@ -158,6 +158,7 @@ function sleep(ms: number): Promise<void> {
 type VerifyTokenAndGetUserOptions = {
   expectedAddedWalletAddresses?: string[];
   expectedRemovedWalletAddresses?: string[];
+  expectedTelegramUserId?: string | null;
   maxSyncAttempts?: number;
   syncRetryDelayMs?: number;
 };
@@ -372,6 +373,20 @@ export class PrivyAccessTokenError extends Error {
 export class PrivyUpstreamError extends Error {
   constructor(message = "Privy service is unavailable") {
     super(message);
+  }
+}
+
+export class PrivyTelegramIdentityMismatchError extends Error {
+  readonly actualTelegramUserId: string | null;
+  readonly expectedTelegramUserId: string;
+
+  constructor(input: {
+    actualTelegramUserId: string | null;
+    expectedTelegramUserId: string;
+  }) {
+    super("Privy Telegram account did not match expected Telegram user");
+    this.actualTelegramUserId = input.actualTelegramUserId;
+    this.expectedTelegramUserId = input.expectedTelegramUserId;
   }
 }
 
@@ -686,6 +701,17 @@ export class PrivyService {
     return out;
   }
 
+  private static normalizeExpectedTelegramUserId(
+    value: string | null | undefined,
+  ): string | null {
+    const trimmed = value?.trim() ?? "";
+    return /^\d+$/.test(trimmed) ? trimmed : null;
+  }
+
+  private static getTelegramUserId(privyUser: PrivyUser): string | null {
+    return this.extractTelegramAccount(privyUser)?.telegramUserId.trim() || null;
+  }
+
   private static hasExpectedWalletDelta(
     walletAddresses: string[],
     options: {
@@ -714,6 +740,30 @@ export class PrivyService {
     return !this.hasExpectedWalletDelta(walletAddresses, options);
   }
 
+  private static shouldRetryPrivyUserSync(
+    privyUser: PrivyUser,
+    walletAddresses: string[],
+    options: {
+      expectedAddedWalletAddresses: string[];
+      expectedRemovedWalletAddresses: string[];
+      expectedTelegramUserId: string | null;
+    },
+  ): boolean {
+    if (
+      this.shouldRetryWalletSync(walletAddresses, {
+        expectedAddedWalletAddresses: options.expectedAddedWalletAddresses,
+        expectedRemovedWalletAddresses: options.expectedRemovedWalletAddresses,
+      })
+    ) {
+      return true;
+    }
+
+    return (
+      options.expectedTelegramUserId !== null &&
+      this.getTelegramUserId(privyUser) !== options.expectedTelegramUserId
+    );
+  }
+
   /**
    * Verify Privy token and get user data in one call
    */
@@ -734,6 +784,9 @@ export class PrivyService {
       this.normalizeExpectedWalletAddresses(
         options?.expectedRemovedWalletAddresses,
       );
+    const expectedTelegramUserId = this.normalizeExpectedTelegramUserId(
+      options?.expectedTelegramUserId,
+    );
     const maxSyncAttempts = Math.max(
       1,
       options?.maxSyncAttempts ?? PRIVY_USER_SYNC_MAX_ATTEMPTS,
@@ -749,9 +802,10 @@ export class PrivyService {
     for (
       let attempt = 1;
       attempt < maxSyncAttempts &&
-      this.shouldRetryWalletSync(walletAddresses, {
+      this.shouldRetryPrivyUserSync(user, walletAddresses, {
         expectedAddedWalletAddresses,
         expectedRemovedWalletAddresses,
+        expectedTelegramUserId,
       });
       attempt += 1
     ) {
@@ -763,6 +817,16 @@ export class PrivyService {
     }
 
     const primaryWalletAddress = this.getPrimaryWalletAddress(user);
+    const actualTelegramUserId = this.getTelegramUserId(user);
+    if (
+      expectedTelegramUserId !== null &&
+      actualTelegramUserId !== expectedTelegramUserId
+    ) {
+      throw new PrivyTelegramIdentityMismatchError({
+        actualTelegramUserId,
+        expectedTelegramUserId,
+      });
+    }
 
     return {
       claims,

@@ -79,6 +79,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "LIMITLESS_HMAC_TOKEN_ID",
     "LIMITLESS_HMAC_SECRET",
     "ACROSS_API_KEY",
+    "HUNCH_TELEGRAM_BOT_TOKEN",
     "XAI_API_KEY",
     "XAI_MANAGEMENT_API_KEY",
     "OPENROUTER_API_KEY",

@@ -18,6 +18,12 @@ export const telegramRoutes: FastifyPluginAsync = async (app) => {
   z.post(
     "/telegram/context",
     {
+      onRequest: async (_request, reply) => {
+        if (!env.telegramMiniAppEnabled) {
+          reply.code(404);
+          return reply.send({ error: "telegram_mini_app_disabled" });
+        }
+      },
       schema: {
         body: telegramContextBodySchema,
         response: {

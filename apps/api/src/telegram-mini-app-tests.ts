@@ -2,6 +2,11 @@
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import Fastify from "fastify";
+import {
+  serializerCompiler,
+  validatorCompiler,
+} from "fastify-type-provider-zod";
 import {
   TelegramInitDataValidationError,
   normalizeTelegramStartParam,
@@ -143,6 +148,73 @@ const tests: TestCase[] = [
       assert.equal(normalizeTelegramStartParam("https://example.com"), null);
       assert.equal(normalizeTelegramStartParam("event_../admin"), null);
       assert.equal(normalizeTelegramStartParam("unknown_value"), null);
+    },
+  },
+  {
+    name: "telegram context route handles disabled and unconfigured states",
+    run: async () => {
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalEnabled = process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED;
+      const originalToken = process.env.HUNCH_TELEGRAM_BOT_TOKEN;
+      process.env.NODE_ENV = "test";
+      process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED = "true";
+      delete process.env.HUNCH_TELEGRAM_BOT_TOKEN;
+
+      const { telegramRoutes } = await import("./routes/telegram.js");
+      const { env } = await import("./env.js");
+      const mutableEnv = env as typeof env & {
+        telegramMiniAppEnabled: boolean;
+      };
+      const originalEnvTelegramMiniAppEnabled =
+        mutableEnv.telegramMiniAppEnabled;
+      const app = Fastify({ logger: false });
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      await app.register(telegramRoutes);
+
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/telegram/context",
+          payload: { initDataRaw: "auth_date=1&hash=00" },
+        });
+
+        assert.equal(response.statusCode, 503);
+        assert.deepEqual(response.json(), {
+          error: "telegram_mini_app_unconfigured",
+        });
+
+        mutableEnv.telegramMiniAppEnabled = false;
+        const disabledApp = Fastify({ logger: false });
+        disabledApp.setValidatorCompiler(validatorCompiler);
+        disabledApp.setSerializerCompiler(serializerCompiler);
+        await disabledApp.register(telegramRoutes);
+        try {
+          const disabledResponse = await disabledApp.inject({
+            method: "POST",
+            url: "/telegram/context",
+            headers: { "content-type": "application/json" },
+            payload: "{",
+          });
+
+          assert.equal(disabledResponse.statusCode, 404);
+          assert.deepEqual(disabledResponse.json(), {
+            error: "telegram_mini_app_disabled",
+          });
+        } finally {
+          await disabledApp.close();
+        }
+      } finally {
+        await app.close();
+        mutableEnv.telegramMiniAppEnabled = originalEnvTelegramMiniAppEnabled;
+        if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalNodeEnv;
+        if (originalEnabled === undefined)
+          delete process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED;
+        else process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED = originalEnabled;
+        if (originalToken === undefined) delete process.env.HUNCH_TELEGRAM_BOT_TOKEN;
+        else process.env.HUNCH_TELEGRAM_BOT_TOKEN = originalToken;
+      }
     },
   },
 ];

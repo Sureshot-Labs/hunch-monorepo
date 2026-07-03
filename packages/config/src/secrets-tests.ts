@@ -271,6 +271,7 @@ test("bundle builder writes only allowlisted secret keys", () => {
       "DFLOW_API_KEY=dflow-secret",
       "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS=123,456",
       "HUNCH_SIGNAL_BOT_TOKEN=signal-bot-secret",
+      "HUNCH_TELEGRAM_BOT_TOKEN=telegram-mini-app-secret",
       "JWT_SECRET=secret",
       "#JWT_SECRET=commented-secret",
       "LIMITLESS_WS_SESSION=limitless-ws-secret",
@@ -295,6 +296,7 @@ test("bundle builder writes only allowlisted secret keys", () => {
     "JWT_SECRET",
   ]);
   assert.equal(result.bundles.api.includes("DFLOW_API_KEY"), true);
+  assert.equal(result.bundles.api.includes("HUNCH_TELEGRAM_BOT_TOKEN"), true);
   assert.equal(result.bundles.ops.includes("AGG_APP_ID"), true);
   assert.equal(result.bundles["indexer-dflow"].includes("DFLOW_API_KEY"), true);
   assert.deepEqual(result.bundles["indexer-limitless"], [
@@ -310,6 +312,7 @@ test("bundle builder writes only allowlisted secret keys", () => {
   const sanitized = fs.readFileSync(result.sanitizedEnvPath, "utf8");
   assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_ADMIN_USER_IDS="), false);
   assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_TOKEN="), false);
+  assert.equal(sanitized.includes("HUNCH_TELEGRAM_BOT_TOKEN="), false);
   assert.equal(sanitized.includes("JWT_SECRET="), false);
   assert.equal(sanitized.includes("#JWT_SECRET="), false);
   assert.equal(sanitized.includes("AGG_APP_ID="), false);

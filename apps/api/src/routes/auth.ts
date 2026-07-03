@@ -22,6 +22,7 @@ import { env } from "../env.js";
 import {
   PrivyAccessTokenError,
   PrivyService,
+  PrivyTelegramIdentityMismatchError,
   type PrivyWalletProfile,
   PrivyUpstreamError,
 } from "../privy-service.js";
@@ -419,6 +420,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         } = await PrivyService.verifyTokenAndGetUser(body.accessToken, {
           expectedAddedWalletAddresses: body.expectedAddedWalletAddresses,
           expectedRemovedWalletAddresses: body.expectedRemovedWalletAddresses,
+          expectedTelegramUserId: body.expectedTelegramUserId,
         });
         primaryWalletAddress = resolvedPrimaryWalletAddress ?? "unknown";
 
@@ -619,6 +621,27 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         const authFailureMessage =
           error instanceof Error ? error.message : "Unknown error";
 
+        if (error instanceof PrivyTelegramIdentityMismatchError) {
+          app.log.warn({ error }, "Privy Telegram identity did not match");
+
+          await AuthService.recordAuthAttempt(
+            primaryWalletAddress,
+            "privy-auth",
+            false,
+            clientIp,
+            userAgent,
+            authFailureMessage,
+          );
+
+          reply.code(409);
+          return reply.send({
+            error: "telegram_identity_mismatch",
+            message: getPrivyTerminalAuthMessage("telegram_identity_mismatch"),
+            actualTelegramUserId: error.actualTelegramUserId ?? undefined,
+            expectedTelegramUserId: error.expectedTelegramUserId,
+          });
+        }
+
         if (error instanceof PrivyTerminalAuthError) {
           app.log.warn({ error }, "Privy authentication requires user action");
 
@@ -638,9 +661,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({
             error: error.code,
             message: terminalMessage,
+            actualTelegramUserId: error.details?.actualTelegramUserId,
             conflictTelegramUserId: error.details?.conflictTelegramUserId,
             conflictWalletAddress: error.details?.conflictWalletAddress,
             conflictWalletAddresses: error.details?.conflictWalletAddresses,
+            expectedTelegramUserId: error.details?.expectedTelegramUserId,
           });
         }
 

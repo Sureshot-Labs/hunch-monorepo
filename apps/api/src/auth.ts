@@ -154,10 +154,10 @@ function isPrivyManagedWalletProfile(
   );
 }
 
-function hasExternalPrivyWalletProfile(
+function hasConfirmedExternalPrivyWalletProfile(
   walletProfiles: PrivyWalletProfile[],
 ): boolean {
-  return walletProfiles.some((profile) => !isPrivyManagedWalletProfile(profile));
+  return walletProfiles.some((profile) => profile.source === "external");
 }
 
 function walletAddressesMatch(left: string, right: string): boolean {
@@ -216,12 +216,15 @@ export type PrivyTerminalAuthErrorCode =
   | "email_conflict"
   | "wallet_conflict"
   | "telegram_conflict"
+  | "telegram_identity_mismatch"
   | "telegram_signup_blocked";
 
 export type PrivyTerminalAuthErrorDetails = {
+  actualTelegramUserId?: string;
   conflictTelegramUserId?: string;
   conflictWalletAddress?: string;
   conflictWalletAddresses?: string[];
+  expectedTelegramUserId?: string;
 };
 
 export class PrivyTerminalAuthError extends Error {
@@ -912,6 +915,28 @@ export class AuthService {
     }
   }
 
+  static async syncTelegramAccountForUserWithClient(
+    client: Pick<PoolClient, "query">,
+    params: {
+      userId: string;
+      privyUserId: string;
+      telegramAccount: PrivyTelegramAccount | null;
+    },
+  ): Promise<void> {
+    if (params.telegramAccount) {
+      await AuthService.upsertTelegramAccountForUserWithClient(client, {
+        userId: params.userId,
+        privyUserId: params.privyUserId,
+        telegramAccount: params.telegramAccount,
+      });
+      return;
+    }
+
+    await client.query("DELETE FROM user_telegram_accounts WHERE user_id = $1", [
+      params.userId,
+    ]);
+  }
+
   /**
    * Create or update user from Privy authentication
    */
@@ -948,7 +973,7 @@ export class AuthService {
       telegramAccount &&
       !env.telegramNewUsersEnabled &&
       !email &&
-      !hasExternalPrivyWalletProfile(walletProfiles)
+      !hasConfirmedExternalPrivyWalletProfile(walletProfiles)
     ) {
       throw new PrivyTerminalAuthError(
         "telegram_signup_blocked",
@@ -1133,8 +1158,8 @@ export class AuthService {
       );
     }
 
-    if (telegramAccount && userId) {
-      await AuthService.upsertTelegramAccountForUserWithClient(client, {
+    if (userId) {
+      await AuthService.syncTelegramAccountForUserWithClient(client, {
         userId,
         privyUserId,
         telegramAccount,

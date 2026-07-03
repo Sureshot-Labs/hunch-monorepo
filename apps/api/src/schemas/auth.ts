@@ -7,6 +7,7 @@ export const authPrivyBodySchema = z.object({
   inviteConfirmed: z.boolean().optional(),
   expectedAddedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
   expectedRemovedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
+  expectedTelegramUserId: z.string().trim().regex(/^\d+$/).optional(),
 });
 
 export const inviteReasonSchema = z.enum([
@@ -34,15 +35,18 @@ export const authPrivyTerminalErrorCodeSchema = z.enum([
   "email_conflict",
   "wallet_conflict",
   "telegram_conflict",
+  "telegram_identity_mismatch",
   "telegram_signup_blocked",
 ]);
 
 export const authPrivyTerminalErrorResponseSchema = z.object({
   error: authPrivyTerminalErrorCodeSchema,
   message: z.string().optional(),
+  actualTelegramUserId: z.string().optional(),
   conflictTelegramUserId: z.string().optional(),
   conflictWalletAddress: z.string().optional(),
   conflictWalletAddresses: z.array(z.string()).optional(),
+  expectedTelegramUserId: z.string().optional(),
 });
 
 export const authUserSchema = z.object({
