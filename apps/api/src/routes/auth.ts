@@ -165,6 +165,7 @@ function buildAuthWalletPayloads(
 
 export async function resolveRemoveWalletPrivyContext(
   user: Pick<User, "privyUserId">,
+  options: { telegramSignInEnabled?: boolean } = {},
 ): Promise<{
   hasTelegram: boolean;
   walletProfiles: PrivyWalletProfile[] | null;
@@ -174,8 +175,12 @@ export async function resolveRemoveWalletPrivyContext(
   }
 
   const privyUser = await PrivyService.getUserById(user.privyUserId);
+  const telegramSignInEnabled =
+    options.telegramSignInEnabled ?? env.telegramMiniAppEnabled;
   return {
-    hasTelegram: Boolean(PrivyService.extractTelegramAccount(privyUser)),
+    hasTelegram:
+      telegramSignInEnabled &&
+      Boolean(PrivyService.extractTelegramAccount(privyUser)),
     walletProfiles: PrivyService.classifyWallets(privyUser),
   };
 }

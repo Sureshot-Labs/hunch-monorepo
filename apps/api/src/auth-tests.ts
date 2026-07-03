@@ -72,6 +72,57 @@ function makeWalletProfile(
   };
 }
 
+async function withRemoveWalletPrivyContextStub<T>(
+  run: (input: {
+    privyUserId: string;
+    walletProfiles: PrivyWalletProfile[];
+  }) => Promise<T>,
+): Promise<T> {
+  const privyUserId = "did:privy:user-with-telegram";
+  const privyUser = {
+    id: privyUserId,
+    telegram: {
+      telegramUserId: "123456",
+      username: "hunch_user",
+    },
+    linkedAccounts: [],
+  } as unknown as PrivyUser;
+  const walletProfiles = [
+    makeWalletProfile({
+      address: "0xabc0000000000000000000000000000000000000",
+      source: "external",
+    }),
+  ];
+  const privyAny = PrivyService as unknown as {
+    classifyWallets: typeof PrivyService.classifyWallets;
+    extractTelegramAccount: typeof PrivyService.extractTelegramAccount;
+    getUserById: typeof PrivyService.getUserById;
+  };
+  const originalGetUserById = privyAny.getUserById;
+  const originalExtractTelegramAccount = privyAny.extractTelegramAccount;
+  const originalClassifyWallets = privyAny.classifyWallets;
+  try {
+    privyAny.getUserById = async (inputPrivyUserId: string) => {
+      assert.equal(inputPrivyUserId, privyUserId);
+      return privyUser;
+    };
+    privyAny.extractTelegramAccount = (input: PrivyUser) => {
+      assert.equal(input, privyUser);
+      return { telegramUserId: "123456", username: "hunch_user" };
+    };
+    privyAny.classifyWallets = (input: PrivyUser) => {
+      assert.equal(input, privyUser);
+      return walletProfiles;
+    };
+
+    return await run({ privyUserId, walletProfiles });
+  } finally {
+    privyAny.getUserById = originalGetUserById;
+    privyAny.extractTelegramAccount = originalExtractTelegramAccount;
+    privyAny.classifyWallets = originalClassifyWallets;
+  }
+}
+
 const tests: TestCase[] = [
   {
     name: "wallet removal policy protects Privy-managed wallets",
@@ -205,55 +256,46 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "remove wallet route Privy context includes Telegram identity",
+    name: "remove wallet route Privy context counts Telegram when sign-in is enabled",
     run: async () => {
-      const privyUser = {
-        id: "did:privy:user-with-telegram",
-        telegram: {
-          telegramUserId: "123456",
-          username: "hunch_user",
+      await withRemoveWalletPrivyContextStub(
+        async ({ privyUserId, walletProfiles }) => {
+          const context = await resolveRemoveWalletPrivyContext(
+            { privyUserId },
+            { telegramSignInEnabled: true },
+          );
+
+          assert.equal(context.hasTelegram, true);
+          assert.deepEqual(context.walletProfiles, walletProfiles);
         },
-        linkedAccounts: [],
-      } as unknown as PrivyUser;
-      const walletProfiles = [
-        makeWalletProfile({
-          address: "0xabc0000000000000000000000000000000000000",
-          source: "external",
-        }),
-      ];
-      const privyAny = PrivyService as unknown as {
-        classifyWallets: typeof PrivyService.classifyWallets;
-        extractTelegramAccount: typeof PrivyService.extractTelegramAccount;
-        getUserById: typeof PrivyService.getUserById;
-      };
-      const originalGetUserById = privyAny.getUserById;
-      const originalExtractTelegramAccount = privyAny.extractTelegramAccount;
-      const originalClassifyWallets = privyAny.classifyWallets;
-      try {
-        privyAny.getUserById = async (privyUserId: string) => {
-          assert.equal(privyUserId, "did:privy:user-with-telegram");
-          return privyUser;
-        };
-        privyAny.extractTelegramAccount = (input: PrivyUser) => {
-          assert.equal(input, privyUser);
-          return { telegramUserId: "123456", username: "hunch_user" };
-        };
-        privyAny.classifyWallets = (input: PrivyUser) => {
-          assert.equal(input, privyUser);
-          return walletProfiles;
-        };
+      );
+    },
+  },
+  {
+    name: "remove wallet route Privy context ignores Telegram when sign-in is disabled",
+    run: async () => {
+      await withRemoveWalletPrivyContextStub(
+        async ({ privyUserId, walletProfiles }) => {
+          const context = await resolveRemoveWalletPrivyContext(
+            { privyUserId },
+            { telegramSignInEnabled: false },
+          );
 
-        const context = await resolveRemoveWalletPrivyContext({
-          privyUserId: "did:privy:user-with-telegram",
-        });
+          assert.equal(context.hasTelegram, false);
+          assert.deepEqual(context.walletProfiles, walletProfiles);
+        },
+      );
+    },
+  },
+  {
+    name: "remove wallet route Privy context is empty without a Privy user",
+    run: async () => {
+      const context = await resolveRemoveWalletPrivyContext({
+        privyUserId: undefined,
+      });
 
-        assert.equal(context.hasTelegram, true);
-        assert.deepEqual(context.walletProfiles, walletProfiles);
-      } finally {
-        privyAny.getUserById = originalGetUserById;
-        privyAny.extractTelegramAccount = originalExtractTelegramAccount;
-        privyAny.classifyWallets = originalClassifyWallets;
-      }
+      assert.equal(context.hasTelegram, false);
+      assert.equal(context.walletProfiles, null);
     },
   },
   {
