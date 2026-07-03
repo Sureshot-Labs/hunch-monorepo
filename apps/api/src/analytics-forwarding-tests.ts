@@ -273,9 +273,40 @@ const tests: TestCase[] = [
               source: "home",
             },
           },
+          {
+            event: "hf_telegram_context_validation",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              page: "telegram",
+              source: "init_data",
+              status: "success",
+            },
+          },
+          {
+            event: "hf_telegram_mini_app_entry",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              page: "telegram",
+              source: "runtime",
+              status: "webapp_ready",
+            },
+          },
+          {
+            event: "hf_telegram_privy_link",
+            payload: {
+              analytics_schema_version: "frontend-v1",
+              page: "telegram",
+              source: "linkTelegram",
+              status: "attempt",
+            },
+          },
         ];
 
         for (const entry of browserEvents) {
+          assert.equal(
+            forwardedAnalyticsEventNameSchema.safeParse(entry.event).success,
+            true,
+          );
           const result = await collectAnalyticsEvent(pool, {
             event: entry.event,
             origin: "browser",
