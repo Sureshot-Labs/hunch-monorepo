@@ -18,6 +18,7 @@ import {
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
+  sendSignalBotFollowthroughPreview,
   sendSignalBotStatsReport,
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
@@ -190,6 +191,15 @@ export async function runSignalBotRunner(): Promise<void> {
               db,
               detail,
               period,
+              telegram,
+            }),
+          sendTestFollowthrough: (chatId, kind) =>
+            sendSignalBotFollowthroughPreview({
+              chatId,
+              config,
+              db,
+              kind,
+              redis,
               telegram,
             }),
           sendTestSignal: (chatId) =>

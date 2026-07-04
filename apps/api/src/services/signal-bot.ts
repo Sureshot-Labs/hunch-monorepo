@@ -66,7 +66,18 @@ export type SignalBotCommand =
   | "start"
   | "stats"
   | "status"
+  | "test_followthrough"
   | "test_signal";
+
+export type SignalBotFollowthroughPreviewKind =
+  | "resolved_loss"
+  | "resolved_win"
+  | "stats";
+
+export type SignalBotFollowthroughPreviewRequest = {
+  kind: SignalBotFollowthroughPreviewKind;
+  targetChatId: string | null;
+};
 
 export type SignalBotChatState = {
   chatId: string;
@@ -501,8 +512,27 @@ export function parseSignalBotCommand(
       return "stats";
     case "status":
       return "status";
+    case "test_followthrough":
+      return "test_followthrough";
     case "test_signal":
       return "test_signal";
+    default:
+      return null;
+  }
+}
+
+function parseSignalBotFollowthroughPreviewKind(
+  value: string | null | undefined,
+): SignalBotFollowthroughPreviewKind | null {
+  switch (value?.trim().toLowerCase()) {
+    case "stats":
+      return "stats";
+    case "resolved_win":
+    case "win":
+      return "resolved_win";
+    case "resolved_loss":
+    case "loss":
+      return "resolved_loss";
     default:
       return null;
   }
@@ -552,12 +582,43 @@ function parseSignalBotCommandTargetChatId(
 ): string | null {
   if (!text) return null;
   const [, rawTarget] = text.trim().split(/\s+/, 2);
+  return normalizeSignalBotCommandTargetChatId(rawTarget);
+}
+
+function normalizeSignalBotCommandTargetChatId(
+  rawTarget: string | null | undefined,
+): string | null {
   if (!rawTarget) return null;
   const target = rawTarget.trim();
   if (/^-100\d{5,}$/.test(target)) return target;
   if (/^-\d{5,}$/.test(target)) return target;
   if (/^\d{5,}$/.test(target)) return `-100${target}`;
   return null;
+}
+
+export function parseSignalBotFollowthroughPreviewRequest(
+  text: string | null | undefined,
+): SignalBotFollowthroughPreviewRequest | null {
+  if (!text) return { kind: "stats", targetChatId: null };
+  const [, ...args] = text.trim().split(/\s+/);
+  let kind: SignalBotFollowthroughPreviewKind = "stats";
+  let sawKind = false;
+  let targetChatId: string | null = null;
+  for (const rawArg of args) {
+    const parsedKind = parseSignalBotFollowthroughPreviewKind(rawArg);
+    if (parsedKind && !sawKind) {
+      kind = parsedKind;
+      sawKind = true;
+      continue;
+    }
+    const parsedTarget = normalizeSignalBotCommandTargetChatId(rawArg);
+    if (parsedTarget && !targetChatId) {
+      targetChatId = parsedTarget;
+      continue;
+    }
+    return null;
+  }
+  return { kind, targetChatId };
 }
 
 export function isSignalBotAdmin(
@@ -1073,6 +1134,168 @@ function buildSignalBotLinkRow(input: {
   return row;
 }
 
+function resolveSignalBotFollowthroughBuyPrice(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  side: "NO" | "YES";
+}): number | null {
+  return resolveSignalBotBuyPrice(
+    {
+      bestAsk: toNumber(input.candidate.best_ask),
+      bestBid: toNumber(input.candidate.best_bid),
+      lastPrice: toNumber(input.candidate.last_price),
+    },
+    input.side,
+  );
+}
+
+function isSignalBotFollowthroughBuyCtaEligible(input: {
+  allowBuyCta: boolean;
+  buyPrice: number | null;
+  stats: SignalBotFollowthroughStats;
+}): boolean {
+  if (!input.allowBuyCta) return false;
+  if (input.stats.state !== "open") return false;
+  if (!input.stats.signalSide) return false;
+  if (input.buyPrice == null || input.buyPrice > 0.95) return false;
+  const hasWalletEvidence =
+    input.stats.joinedOrAddedWallets > 0 ||
+    input.stats.netSignalSideFlowUsd > 0;
+  if (!hasWalletEvidence) return false;
+  return input.stats.priceMoveCents == null || input.stats.priceMoveCents >= 0;
+}
+
+function buildSignalBotFollowthroughKeyboard(input: {
+  allowBuyCta: boolean;
+  appBaseUrl: string;
+  buyAmountUsd: number;
+  candidate: SignalBotFollowthroughCandidateRow;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  stats: SignalBotFollowthroughStats;
+  telegramMiniAppLinkBase?: string | null;
+}): TelegramInlineKeyboard | undefined {
+  if (
+    input.kind !== "followthrough_stats" ||
+    input.stats.state !== "open" ||
+    !input.candidate.event_id
+  ) {
+    return undefined;
+  }
+
+  const eventId = input.candidate.event_id;
+  const marketId = input.candidate.market_id;
+  const side = input.stats.signalSide;
+  const rows: TelegramInlineKeyboard["inline_keyboard"] = [];
+
+  if (side) {
+    const buyPrice = resolveSignalBotFollowthroughBuyPrice({
+      candidate: input.candidate,
+      side,
+    });
+    if (
+      input.candidate.accepting_orders === true &&
+      isSignalBotFollowthroughBuyCtaEligible({
+        allowBuyCta: input.allowBuyCta,
+        buyPrice,
+        stats: input.stats,
+      })
+    ) {
+      const webTradeUrl = buildSignalBotTradeUrl({
+        amountUsd: input.buyAmountUsd,
+        appBaseUrl: input.appBaseUrl,
+        eventId,
+        marketId,
+        side,
+      });
+      rows.push([
+        {
+          text: formatSignalBotBuyButtonText({
+            price: buyPrice,
+            side,
+            sideLabel: formatSignalBotOutcomeDisplayLabel(
+              {
+                eventTitle: input.candidate.event_title,
+                marketTitle: input.candidate.market_title,
+                outcomes: null,
+              },
+              side,
+              "button",
+            ),
+            venue: input.candidate.venue,
+          }),
+          url:
+            buildSignalBotMiniAppTradeUrl({
+              amountUsd: input.buyAmountUsd,
+              eventId,
+              marketId,
+              miniAppLinkBase: input.telegramMiniAppLinkBase,
+              side,
+            }) ?? webTradeUrl,
+        },
+      ]);
+    }
+  }
+
+  const webMarketUrl = buildSignalBotOpenMarketUrl({
+    appBaseUrl: input.appBaseUrl,
+    eventId,
+    marketId,
+    side,
+  });
+  rows.push([
+    {
+      text: "↗️ Open market",
+      url:
+        buildSignalBotMiniAppEventUrl({
+          eventId,
+          marketId,
+          miniAppLinkBase: input.telegramMiniAppLinkBase,
+          side,
+        }) ?? webMarketUrl,
+    },
+  ]);
+
+  return rows.length > 0 ? { inline_keyboard: rows } : undefined;
+}
+
+async function shouldAllowSignalBotFollowthroughBuyCta(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  db: DbQuery;
+  redis: SignalBotRedisLike;
+  stats: SignalBotFollowthroughStats;
+}): Promise<boolean> {
+  const side = input.stats.signalSide;
+  if (
+    !side ||
+    input.stats.state !== "open" ||
+    input.candidate.accepting_orders !== true
+  ) {
+    return false;
+  }
+  const buyPrice = resolveSignalBotFollowthroughBuyPrice({
+    candidate: input.candidate,
+    side,
+  });
+  if (
+    !isSignalBotFollowthroughBuyCtaEligible({
+      allowBuyCta: true,
+      buyPrice,
+      stats: input.stats,
+    })
+  ) {
+    return false;
+  }
+  const priceGuard = await loadSignalBotPriceGuardBlockers({
+    buySide: side,
+    db: input.db,
+    note: { marketId: input.candidate.market_id },
+    redis: input.redis,
+  });
+  return !priceGuard.defer && priceGuard.blockers.length === 0;
+}
+
 function formatHolderButtonText(input: {
   holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
   holderOpenPnlUsd: number | null;
@@ -1206,6 +1429,10 @@ export async function handleSignalBotCommand(input: {
     period: SignalBotStatsPeriod,
     detail: boolean,
   ) => Promise<boolean>;
+  sendTestFollowthrough?: (
+    chatId: string,
+    kind: SignalBotFollowthroughPreviewKind,
+  ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
 }): Promise<boolean> {
   const command = parseSignalBotCommand(input.message.text, input.botUsername);
@@ -1219,6 +1446,7 @@ export async function handleSignalBotCommand(input: {
     (command === "disable_signals" ||
       command === "enable_signals" ||
       command === "stats" ||
+      command === "test_followthrough" ||
       command === "test_signal")
   ) {
     await input.sendMessage(buildPlainReply(chatId, "Not authorized."));
@@ -1330,6 +1558,38 @@ export async function handleSignalBotCommand(input: {
     }
     return true;
   }
+  if (command === "test_followthrough") {
+    const request = parseSignalBotFollowthroughPreviewRequest(
+      input.message.text,
+    );
+    if (!request) {
+      await input.sendMessage(
+        buildPlainReply(
+          chatId,
+          "Usage: /test_followthrough [stats|win|loss] [channel_id]",
+        ),
+      );
+      return true;
+    }
+    let sent = false;
+    try {
+      sent = await (input.sendTestFollowthrough?.(
+        request.targetChatId ?? chatId,
+        request.kind,
+      ) ?? Promise.resolve(false));
+    } catch {
+      sent = false;
+    }
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        sent
+          ? "Sent follow-through preview."
+          : "No eligible follow-through preview found.",
+      ),
+    );
+    return true;
+  }
   if (command === "test_signal") {
     const sent = await input.sendTestSignal(targetChatId ?? chatId);
     await input.sendMessage(
@@ -1352,6 +1612,10 @@ export async function pollSignalBotCommands(input: {
     period: SignalBotStatsPeriod,
     detail: boolean,
   ) => Promise<boolean>;
+  sendTestFollowthrough?: (
+    chatId: string,
+    kind: SignalBotFollowthroughPreviewKind,
+  ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
   telegram: SignalBotTelegramClient;
 }): Promise<number> {
@@ -1370,6 +1634,7 @@ export async function pollSignalBotCommands(input: {
         redis: input.redis,
         sendMessage: (message) => input.telegram.sendMessage(message),
         sendStatsReport: input.sendStatsReport,
+        sendTestFollowthrough: input.sendTestFollowthrough,
         sendTestSignal: input.sendTestSignal,
       });
       if (didHandle) handled += 1;
@@ -1531,7 +1796,7 @@ function addSignalBotPriceGuardBlockers(
 async function loadSignalBotPriceGuardBlockers(input: {
   buySide: "NO" | "YES";
   db: DbQuery;
-  note: SignalBotNote;
+  note: Pick<SignalBotNote, "marketId">;
   redis: SignalBotRedisLike;
 }): Promise<SignalBotPriceGuardResult> {
   if (!input.note.marketId) {
@@ -2272,6 +2537,97 @@ export async function sendLatestSignalBotTestSignal(input: {
   return result.ok;
 }
 
+function signalBotFollowthroughPolicyType(
+  kind: SignalBotFollowthroughPreviewKind,
+): SignalBotFollowthroughPolicy["types"][number] {
+  return kind;
+}
+
+function signalBotFollowthroughMessageKindForPreview(
+  kind: SignalBotFollowthroughPreviewKind,
+): Extract<
+  SignalBotMessageKind,
+  "followthrough_stats" | "resolved_loss" | "resolved_win"
+> {
+  return kind === "stats" ? "followthrough_stats" : kind;
+}
+
+export async function sendSignalBotFollowthroughPreview(input: {
+  chatId: string;
+  config: SignalBotConfig;
+  db: DbQuery;
+  kind: SignalBotFollowthroughPreviewKind;
+  now?: Date;
+  redis?: SignalBotRedisLike;
+  telegram: SignalBotTelegramClient;
+}): Promise<boolean> {
+  const effectivePolicy = await resolveSignalBotFollowthroughPolicy(
+    input.db,
+    input.config.followthrough,
+  );
+  const policy: SignalBotFollowthroughPolicy = {
+    ...effectivePolicy,
+    enabled: true,
+    maxPerTick: Math.max(1, effectivePolicy.maxPerTick),
+    types: [signalBotFollowthroughPolicyType(input.kind)],
+  };
+  const now = input.now ?? new Date();
+  const expectedKind = signalBotFollowthroughMessageKindForPreview(input.kind);
+  const candidates = await loadSignalBotFollowthroughCandidates({
+    chatIds: [input.chatId],
+    db: input.db,
+    now,
+    policy,
+  });
+  for (const candidate of candidates) {
+    const stats = await buildSignalBotFollowthroughStats({
+      asOf: now,
+      candidate,
+      db: input.db,
+    });
+    const kind = resolveSignalBotFollowthroughKind({ policy, stats });
+    if (kind !== expectedKind) continue;
+    const text = `${escapeTelegramMarkdownV2(
+      "Preview only - not recorded.",
+    )}\n\n${buildSignalBotFollowthroughMessage({
+      candidate,
+      kind,
+      stats,
+    })}`;
+    const allowBuyCta =
+      input.redis != null
+        ? await shouldAllowSignalBotFollowthroughBuyCta({
+            candidate,
+            db: input.db,
+            redis: input.redis,
+            stats,
+          })
+        : false;
+    const keyboard = buildSignalBotFollowthroughKeyboard({
+      allowBuyCta,
+      appBaseUrl: input.config.appBaseUrl,
+      buyAmountUsd: input.config.buyAmountUsd,
+      candidate,
+      kind,
+      stats,
+      telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+    });
+    const result = await sendSignalBotMessageWithReplyFallback({
+      message: {
+        chat_id: input.chatId,
+        disable_web_page_preview: true,
+        parse_mode: "MarkdownV2",
+        reply_markup: keyboard,
+        text,
+      },
+      replyToMessageId: toInteger(candidate.reply_to_message_id),
+      telegram: input.telegram,
+    });
+    return result.ok;
+  }
+  return false;
+}
+
 function sideFromSignalBotDirection(
   direction: "down" | "mixed" | "up" | null,
 ): "NO" | "YES" | null {
@@ -2930,11 +3286,27 @@ export async function publishSignalBotFollowthroughTick(input: {
       kind,
       stats,
     });
+    const allowBuyCta = await shouldAllowSignalBotFollowthroughBuyCta({
+      candidate,
+      db: input.db,
+      redis: input.redis,
+      stats,
+    });
+    const keyboard = buildSignalBotFollowthroughKeyboard({
+      allowBuyCta,
+      appBaseUrl: input.config.appBaseUrl,
+      buyAmountUsd: input.config.buyAmountUsd,
+      candidate,
+      kind,
+      stats,
+      telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+    });
     const result = await sendSignalBotMessageWithReplyFallback({
       message: {
         chat_id: candidate.chat_id,
         disable_web_page_preview: true,
         parse_mode: "MarkdownV2",
+        reply_markup: keyboard,
         text,
       },
       replyToMessageId,
@@ -4095,6 +4467,7 @@ function helpText(input: { isAdmin: boolean; miniAppEnabled: boolean }): string 
     "/disable_signals <channel_id> - disable a channel",
     "/status [channel_id] - show signal status",
     "/stats [24h|7d|30d] [detail] - show signal performance",
+    "/test_followthrough [stats|win|loss] [channel_id] - preview a follow-up",
     "/test_signal [channel_id] - send latest eligible signal",
   ].join("\n");
 }

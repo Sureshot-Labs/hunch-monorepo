@@ -16,6 +16,7 @@ import {
   loadSignalBotNotes,
   parseSignalBotAggMarketConfig,
   parseSignalBotCommand,
+  parseSignalBotFollowthroughPreviewRequest,
   parseSignalBotConfig,
   parseSignalBotStatsRequest,
   parseSignalBotStatsPeriod,
@@ -23,6 +24,7 @@ import {
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
+  sendSignalBotFollowthroughPreview,
   resolveSignalBotCheaperAlternativeFromAggResponse,
   resolveSignalBotBuySide,
   sendLatestSignalBotTestSignal,
@@ -860,6 +862,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "followthrough preview parser supports kind aliases and target chat",
+    run: () => {
+      assert.equal(
+        parseSignalBotCommand("/test_followthrough", null),
+        "test_followthrough",
+      );
+      assert.deepEqual(
+        parseSignalBotFollowthroughPreviewRequest("/test_followthrough"),
+        { kind: "stats", targetChatId: null },
+      );
+      assert.deepEqual(
+        parseSignalBotFollowthroughPreviewRequest(
+          "/test_followthrough win -1001234567890",
+        ),
+        { kind: "resolved_win", targetChatId: "-1001234567890" },
+      );
+      assert.deepEqual(
+        parseSignalBotFollowthroughPreviewRequest(
+          "/test_followthrough 1234567890 loss",
+        ),
+        { kind: "resolved_loss", targetChatId: "-1001234567890" },
+      );
+      assert.equal(
+        parseSignalBotFollowthroughPreviewRequest(
+          "/test_followthrough maybe",
+        ),
+        null,
+      );
+    },
+  },
+  {
     name: "public start help is Mini App aware and hides admin controls",
     run: async () => {
       const redis = new FakeRedis();
@@ -912,6 +945,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(text, /Public help/);
       assert.match(text, /Admin controls/);
       assert.match(text, /enable\\_signals/);
+      assert.match(text, /test\\_followthrough/);
       assert.match(text, /test\\_signal/);
       assert.match(text, /Buttons open Hunch web links/);
     },
@@ -967,6 +1001,66 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.equal(statsCalled, false);
       assert.match(telegram.messages[0]?.text ?? "", /Not authorized/);
+    },
+  },
+  {
+    name: "unauthorized user cannot request followthrough preview",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      let previewCalled = false;
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 999 },
+          text: "/test_followthrough stats",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestFollowthrough: async () => {
+          previewCalled = true;
+          return true;
+        },
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.equal(previewCalled, false);
+      assert.match(telegram.messages[0]?.text ?? "", /Not authorized/);
+    },
+  },
+  {
+    name: "authorized followthrough preview command passes kind and target",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const requests: Array<{ chatId: string; kind: string }> = [];
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 123 },
+          text: "/test_followthrough win -1001234567890",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestFollowthrough: async (chatId, kind) => {
+          requests.push({ chatId, kind });
+          return true;
+        },
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.deepEqual(requests, [
+        { chatId: "-1001234567890", kind: "resolved_win" },
+      ]);
+      assert.match(telegram.messages[0]?.text ?? "", /Sent follow\\-through/);
     },
   },
   {
@@ -2745,6 +2839,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotFollowthroughTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -2758,6 +2854,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sentStats, 1);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(telegram.messages[0]?.text ?? "", /Wallets followed/);
+      const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.length, 1);
+      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+      assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
+      assert.match(readStartAppParam(keyboard?.[0]?.[0]?.url), /^m_/);
       const delivery = db.queries
         .filter((query) => query.sql.includes("insert into signal_bot_messages"))
         .at(-1);
@@ -2774,6 +2875,47 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("from wallet_activity_events"),
       );
       assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "followthrough preview sends marked reply without recording delivery",
+    run: async () => {
+      const db = new FakeFollowthroughDb();
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
+        followthroughFlowRow({
+          wallet_id: "wallet-2",
+          baseline_shares: "50",
+          latest_shares: "90",
+          latest_size_usd: "4950",
+          positive_usd: "4500",
+          net_usd: "4500",
+          net_shares: "40",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const sent = await sendSignalBotFollowthroughPreview({
+        chatId: "-100",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        kind: "stats",
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        telegram,
+      });
+
+      assert.equal(sent, true);
+      assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      assert.match(telegram.messages[0]?.text ?? "", /Preview only/);
+      assert.equal(
+        db.queries.filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        ).length,
+        0,
+      );
     },
   },
   {
@@ -2857,6 +2999,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.text ?? "",
         /tracked wallet flow is not confirmed/,
       );
+      const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.length, 1);
+      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
     },
   },
   {
@@ -2978,6 +3123,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedWin, 1);
       assert.match(telegram.messages[0]?.text ?? "", /Closed green/);
+      assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) => query.sql.includes("insert into signal_bot_messages"))
         .at(-1);
@@ -3016,6 +3162,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedLoss, 1);
       assert.match(telegram.messages[0]?.text ?? "", /Closed red/);
+      assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) => query.sql.includes("insert into signal_bot_messages"))
         .at(-1);
