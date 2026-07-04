@@ -14,6 +14,7 @@ import {
   parseSignalBotAggMarketConfig,
   parseSignalBotConfig,
   pollSignalBotCommands,
+  publishSignalBotFollowthroughTick,
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
@@ -156,20 +157,27 @@ export async function runSignalBotRunner(): Promise<void> {
   });
 
   let nextPublishAt = 0;
-  let nextLockRefreshAt = Date.now() + 20_000;
+  let heartbeatLost = false;
+  const lockHeartbeat = setInterval(() => {
+    void refreshSignalBotLock({ owner, redis })
+      .then((stillLocked) => {
+        if (stillLocked) return;
+        heartbeatLost = true;
+        log("signal_bot_lock_lost");
+      })
+      .catch((error: unknown) => {
+        log("signal_bot_lock_refresh_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, 20_000);
+  lockHeartbeat.unref?.();
   try {
     dbPool = createSignalBotDbPool();
     const db = dbPool;
     while (!shuttingDown) {
       try {
-        if (Date.now() >= nextLockRefreshAt) {
-          const stillLocked = await refreshSignalBotLock({ owner, redis });
-          if (!stillLocked) {
-            log("signal_bot_lock_lost");
-            break;
-          }
-          nextLockRefreshAt = Date.now() + 20_000;
-        }
+        if (heartbeatLost) break;
 
         const handledCommands = await pollSignalBotCommands({
           botUsername,
@@ -199,7 +207,7 @@ export async function runSignalBotRunner(): Promise<void> {
         }
 
         const now = Date.now();
-        if (now >= nextPublishAt) {
+        if (!heartbeatLost && now >= nextPublishAt) {
           const result = await publishSignalBotTick({
             config,
             db,
@@ -207,6 +215,13 @@ export async function runSignalBotRunner(): Promise<void> {
             telegram,
           });
           log("signal_bot_publish_tick", result);
+          const followthrough = await publishSignalBotFollowthroughTick({
+            config,
+            db,
+            redis,
+            telegram,
+          });
+          log("signal_bot_followthrough_tick", followthrough);
           nextPublishAt = now + config.publishIntervalSec * 1_000;
         }
       } catch (error) {
@@ -217,6 +232,7 @@ export async function runSignalBotRunner(): Promise<void> {
       }
     }
   } finally {
+    clearInterval(lockHeartbeat);
     await releaseSignalBotLock({ owner, redis }).catch(() => undefined);
     await dbPool?.end().catch(() => undefined);
     await redis.quit().catch(() => undefined);

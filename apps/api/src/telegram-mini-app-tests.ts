@@ -86,6 +86,22 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Telegram user id is read from parsed top-level user object",
+    run: () => {
+      const result = validate(
+        makeValidInitData({
+          user: JSON.stringify({
+            first_name: '"id":123',
+            id: 456,
+            username: "real_user",
+          }),
+        }),
+      );
+      assert.equal(result.user.id, "456");
+      assert.equal(result.user.firstName, '"id":123');
+    },
+  },
+  {
     name: "invalid Telegram init data hash is rejected",
     run: async () => {
       const initData = makeValidInitData().replace(/hash=[a-f0-9]+/, "hash=0");
@@ -145,8 +161,31 @@ const tests: TestCase[] = [
     run: () => {
       assert.equal(normalizeTelegramStartParam("ref_ABC123"), "ref_ABC123");
       assert.equal(normalizeTelegramStartParam("event_event-123"), "event_event-123");
+      assert.equal(
+        normalizeTelegramStartParam("e_cG9seW1hcmtldDpldmVudC0x"),
+        "e_cG9seW1hcmtldDpldmVudC0x",
+      );
+      assert.equal(
+        normalizeTelegramStartParam(
+          "b_cG9seW1hcmtldDpldmVudC0xfHBvbHltYXJrZXQ6bWFya2V0LTF8WXwxMA",
+        ),
+        "b_cG9seW1hcmtldDpldmVudC0xfHBvbHltYXJrZXQ6bWFya2V0LTF8WXwxMA",
+      );
+      assert.equal(
+        normalizeTelegramStartParam(
+          "m_cDpldmVudC0xfG1hcmtldC0xfFk",
+        ),
+        "m_cDpldmVudC0xfG1hcmtldC0xfFk",
+      );
+      assert.equal(
+        normalizeTelegramStartParam(
+          "wt_cG9seWdvbnwweGEwMjJiYTBhNjhlMTFhNzgzNDgzODJmZjE2ODYwMTAxMmQ0ZDc3Zjg",
+        ),
+        "wt_cG9seWdvbnwweGEwMjJiYTBhNjhlMTFhNzgzNDgzODJmZjE2ODYwMTAxMmQ0ZDc3Zjg",
+      );
       assert.equal(normalizeTelegramStartParam("https://example.com"), null);
       assert.equal(normalizeTelegramStartParam("event_../admin"), null);
+      assert.equal(normalizeTelegramStartParam(`e_${"x".repeat(511)}`), null);
       assert.equal(normalizeTelegramStartParam("unknown_value"), null);
     },
   },

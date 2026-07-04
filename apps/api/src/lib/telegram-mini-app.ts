@@ -39,7 +39,6 @@ type UnknownRecord = Record<string, unknown>;
 const DEFAULT_MAX_PAYLOAD_BYTES = 8 * 1024;
 const HASH_RE = /^[a-f0-9]{64}$/i;
 const START_PARAM_RE = /^[A-Za-z0-9_-]{1,512}$/;
-const TELEGRAM_USER_ID_RE = /"id"\s*:\s*(?:"(\d+)"|(\d+))/;
 
 export class TelegramInitDataValidationError extends Error {
   readonly code: TelegramInitDataValidationErrorCode;
@@ -66,11 +65,6 @@ function readOptionalString(
   return trimmed.slice(0, maxLength);
 }
 
-function extractTelegramUserIdFromRawJson(userRaw: string): string | null {
-  const match = TELEGRAM_USER_ID_RE.exec(userRaw);
-  return match?.[1] ?? match?.[2] ?? null;
-}
-
 export function normalizeTelegramStartParam(
   value: string | null | undefined,
 ): string | null {
@@ -78,6 +72,13 @@ export function normalizeTelegramStartParam(
   if (!trimmed || !START_PARAM_RE.test(trimmed)) return null;
   if (/^ref_[A-Za-z0-9]{3,32}$/.test(trimmed)) return trimmed;
   if (/^event_[A-Za-z0-9_-]{1,120}$/.test(trimmed)) return trimmed;
+  if (/^e_[A-Za-z0-9_-]{1,510}$/.test(trimmed)) return trimmed;
+  if (/^m_[A-Za-z0-9_-]{1,510}$/.test(trimmed)) return trimmed;
+  if (/^b_[A-Za-z0-9_-]{1,510}$/.test(trimmed)) return trimmed;
+  if (/^wt_[A-Za-z0-9_-]{1,509}$/.test(trimmed)) return trimmed;
+  if (/^w_[a-z0-9-]{1,16}_[A-Za-z0-9]{3,64}$/.test(trimmed)) {
+    return trimmed;
+  }
   return null;
 }
 
@@ -170,7 +171,13 @@ function parseTelegramUser(params: URLSearchParams): TelegramMiniAppUser {
     throw new TelegramInitDataValidationError("malformed_user");
   }
 
-  const id = extractTelegramUserIdFromRawJson(userRaw);
+  const rawId = user.id;
+  const id =
+    typeof rawId === "number" && Number.isSafeInteger(rawId) && rawId > 0
+      ? String(rawId)
+      : typeof rawId === "string" && /^\d+$/.test(rawId)
+        ? rawId
+        : null;
   if (!id) throw new TelegramInitDataValidationError("missing_user_id");
 
   return {

@@ -16,6 +16,8 @@ import {
   auditHolderResearchSignalPerformance,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
+  resolveHolderResearchFinalYesProbability,
+  resolveHolderResearchSignalQuote,
   type HolderResearchPerformanceAuditResult,
 } from "./holder-research-performance.js";
 import {
@@ -23,6 +25,18 @@ import {
   formatMarketSegmentLabel,
   formatMarketTypeLabel,
 } from "./market-type-classifier.js";
+import {
+  defaultSignalBotFollowthroughPolicy,
+  resolveSignalBotFollowthroughPolicy,
+  type SignalBotFollowthroughDataQuality,
+  type SignalBotFollowthroughPolicy,
+} from "./signal-bot-followthrough-policy.js";
+import {
+  buildSignalBotMiniAppEventUrl,
+  buildSignalBotMiniAppHolderUrl,
+  buildSignalBotMiniAppTradeUrl,
+  normalizeTelegramMiniAppLinkBase,
+} from "./signal-bot-mini-app-links.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import {
   outcomeLabelOrSide,
@@ -41,6 +55,8 @@ export type SignalBotConfig = {
   buyAmountUsd: number;
   priceGuardDeferTtlSec: number;
   priceGuardMaxDefers: number;
+  followthrough: SignalBotFollowthroughPolicy;
+  telegramMiniAppLinkBase: string | null;
 };
 
 export type SignalBotCommand =
@@ -143,13 +159,22 @@ export type TelegramSendMessageInput = {
   chat_id: string;
   disable_web_page_preview: boolean;
   parse_mode: "MarkdownV2";
+  reply_parameters?: {
+    allow_sending_without_reply?: boolean;
+    message_id: number;
+  };
   reply_markup?: TelegramInlineKeyboard;
   text: string;
 };
 
 export type TelegramSendResult =
-  | { ok: true }
-  | { error: "blocked_or_missing" | "other"; message: string; ok: false };
+  | { messageId: number | null; ok: true }
+  | {
+      error: "blocked_or_missing" | "other";
+      message: string;
+      ok: false;
+      retryAfterSec?: number;
+    };
 
 export type SignalBotTelegramClient = {
   getUpdates(input: {
@@ -197,6 +222,67 @@ export type SignalBotNote = {
   holderClusterSharpUsd: number | null;
 };
 
+type SignalBotMessageKind =
+  | "followthrough_stats"
+  | "initial"
+  | "research_update"
+  | "resolved_loss"
+  | "resolved_win";
+
+type SignalBotThreadContext = {
+  baselineAt: string;
+  messageKind: Extract<SignalBotMessageKind, "initial" | "research_update">;
+  replyToMessageId: number | null;
+  threadRootNoteId: string;
+};
+
+type SignalBotDeliverySendResult =
+  | {
+      fallbackStandalone: boolean;
+      messageId: number | null;
+      ok: true;
+      replyToMessageId: number | null;
+    }
+  | {
+      error: "blocked_or_missing" | "other";
+      message: string;
+      ok: false;
+      retryAfterSec?: number;
+    };
+
+type SignalBotFollowthroughStats = {
+  version: 1;
+  evaluatedAt: string;
+  threadRootNoteId: string;
+  finalProbabilitySource:
+    | "missing"
+    | "resolved_outcome"
+    | "resolved_outcome_pct"
+    | "terminal_price";
+  marketId: string;
+  signalSide: "NO" | "YES" | null;
+  state: "open" | "resolved" | "unknown";
+  outcome: "loss" | "open" | "unknown" | "win";
+  baselineAt: string;
+  asOf: string;
+  entryPrice: number | null;
+  markPrice: number | null;
+  priceMoveCents: number | null;
+  joinedWallets: number;
+  addedWallets: number;
+  joinedOrAddedWallets: number;
+  trimmedWallets: number;
+  exitedWallets: number;
+  stillHoldingWallets: number;
+  missingBaselineSnapshots: number;
+  netSignalSideFlowUsd: number;
+  netOppositeSideFlowUsd: number;
+  estimatedOpenPnlUsd: number | null;
+  estimatedRealizedPnlUsd: number | null;
+  dataQuality: SignalBotFollowthroughDataQuality;
+  dataQualityTags: string[];
+};
+
 type SignalBotNoteRow = {
   id: string;
   note_key: string;
@@ -237,6 +323,41 @@ type SignalBotEligibilityCountRow = {
   total: string | number | null;
 };
 
+type SignalBotFollowthroughCandidateRow = {
+  chat_id: string;
+  thread_root_note_id: string;
+  reply_to_message_id: string | number | null;
+  baseline_at: Date | string;
+  title: string;
+  direction: "down" | "mixed" | "up" | null;
+  metrics: unknown;
+  target_meta: unknown;
+  market_id: string;
+  event_id: string | null;
+  market_title: string | null;
+  event_title: string | null;
+  venue: string | null;
+  best_bid: string | number | null;
+  best_ask: string | number | null;
+  last_price: string | number | null;
+  resolved_outcome: string | null;
+  resolved_outcome_pct: string | number | null;
+  accepting_orders: boolean | null;
+};
+
+type SignalBotFollowthroughFlowRow = {
+  wallet_id: string;
+  outcome_side: "NO" | "YES";
+  baseline_shares: string | number | null;
+  latest_shares: string | number | null;
+  latest_size_usd: string | number | null;
+  positive_usd: string | number | null;
+  negative_usd: string | number | null;
+  net_usd: string | number | null;
+  net_shares: string | number | null;
+  event_count: string | number | null;
+};
+
 const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
 const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
@@ -249,6 +370,8 @@ const OUTCOME_LABEL_FULL_MAX_CHARS = 14;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+const SEND_FAILURE_COOLDOWN_SEC = 300;
+const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
 const OUTCOME_LABEL_VOWELS = /[AEIOUY]/g;
 const HOLDER_LINK_STOP_LABELS = new Set([
@@ -306,6 +429,10 @@ function signalBotPriceGuardDeferKey(chatId: string, noteId: string): string {
   return `${PRICE_GUARD_DEFER_KEY_PREFIX}:${chatId}:${noteId}`;
 }
 
+function signalBotSendCooldownKey(chatId: string, noteId: string): string {
+  return `tg:signal_bot:v1:send_cooldown:${chatId}:${noteId}`;
+}
+
 export function parseSignalBotConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotConfig {
@@ -336,6 +463,10 @@ export function parseSignalBotConfig(
     priceGuardMaxDefers: parsePositiveInt(
       env.SIGNAL_BOT_PRICE_GUARD_MAX_DEFERS,
       5,
+    ),
+    followthrough: defaultSignalBotFollowthroughPolicy(env),
+    telegramMiniAppLinkBase: normalizeTelegramMiniAppLinkBase(
+      env.HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE,
     ),
   };
 }
@@ -509,9 +640,12 @@ export function buildSignalBotHolderUrl(input: {
   );
   url.searchParams.set("chain", chain);
   url.searchParams.set("utm_source", "telegram_signal_bot");
-  if (input.eventId) url.searchParams.set("eventId", input.eventId);
-  if (input.marketId) url.searchParams.set("marketId", input.marketId);
-  if (input.side) url.searchParams.set("side", input.side);
+  if (input.eventId) url.searchParams.set("signalEventId", input.eventId);
+  if (input.marketId) url.searchParams.set("signalMarketId", input.marketId);
+  if (input.side) url.searchParams.set("signalSide", input.side);
+  if (input.marketId) {
+    url.searchParams.set("signalSource", "telegram_signal_bot");
+  }
   if (input.noteId) url.searchParams.set("noteId", input.noteId);
   return url.toString();
 }
@@ -716,6 +850,7 @@ export function buildSignalBotMessage(input: {
   buyAmountUsd: number;
   cheaperAlternative?: SignalBotCheaperAlternative | null;
   note: SignalBotNote;
+  telegramMiniAppLinkBase?: string | null;
 }): {
   keyboard: TelegramInlineKeyboard | undefined;
   text: string;
@@ -751,6 +886,24 @@ export function buildSignalBotMessage(input: {
     (!buySide || !note.holderSide || note.holderSide === buySide)
       ? rawHolderUrl
       : null;
+  const holderButtonUrl = holderUrl
+    ? buildSignalBotMiniAppHolderUrl({
+        address: note.holderAddress,
+        chain: note.holderChain,
+        eventId: note.eventId,
+        marketId: note.marketId,
+        miniAppLinkBase: input.telegramMiniAppLinkBase,
+        noteId: note.id,
+        side: note.holderSide,
+      }) ?? holderUrl
+    : null;
+  const marketButtonUrl =
+    buildSignalBotMiniAppEventUrl({
+      eventId: note.eventId,
+      marketId: note.marketId,
+      miniAppLinkBase: input.telegramMiniAppLinkBase,
+      side: buySide,
+    }) ?? marketUrl;
   const titleMarkdown = marketUrl
     ? `*[${title}](${escapeTelegramMarkdownV2Url(marketUrl)})*`
     : `*${title}*`;
@@ -786,6 +939,14 @@ export function buildSignalBotMessage(input: {
       marketId: note.marketId,
       side: buySide,
     });
+    const primaryTradeUrl =
+      buildSignalBotMiniAppTradeUrl({
+        amountUsd: input.buyAmountUsd,
+        eventId: note.eventId,
+        marketId: note.marketId,
+        miniAppLinkBase: input.telegramMiniAppLinkBase,
+        side: buySide,
+      }) ?? baseTradeUrl;
     keyboardRows.push([
       {
         text: formatSignalBotBuyButtonText({
@@ -798,10 +959,17 @@ export function buildSignalBotMessage(input: {
           ),
           venue: note.marketVenue,
         }),
-        url: baseTradeUrl,
+        url: primaryTradeUrl,
       },
     ]);
     if (input.cheaperAlternative && input.cheaperAlternative.side === buySide) {
+      const cheaperTradeWebUrl = buildSignalBotTradeUrl({
+        amountUsd: input.buyAmountUsd,
+        appBaseUrl: input.appBaseUrl,
+        eventId: input.cheaperAlternative.eventId,
+        marketId: input.cheaperAlternative.marketId,
+        side: input.cheaperAlternative.side,
+      });
       keyboardRows.push([
         {
           text: formatSignalBotCheaperButtonText({
@@ -812,13 +980,14 @@ export function buildSignalBotMessage(input: {
               "button",
             ),
           }),
-          url: buildSignalBotTradeUrl({
-            amountUsd: input.buyAmountUsd,
-            appBaseUrl: input.appBaseUrl,
-            eventId: input.cheaperAlternative.eventId,
-            marketId: input.cheaperAlternative.marketId,
-            side: input.cheaperAlternative.side,
-          }),
+          url:
+            buildSignalBotMiniAppTradeUrl({
+              amountUsd: input.buyAmountUsd,
+              eventId: input.cheaperAlternative.eventId,
+              marketId: input.cheaperAlternative.marketId,
+              miniAppLinkBase: input.telegramMiniAppLinkBase,
+              side: input.cheaperAlternative.side,
+            }) ?? cheaperTradeWebUrl,
         },
       ]);
     }
@@ -828,11 +997,11 @@ export function buildSignalBotMessage(input: {
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
-        holderUrl,
+        holderUrl: holderButtonUrl,
         holderSideLabel: note.holderSide
           ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
-        marketUrl: marketUrl ?? baseTradeUrl,
+        marketUrl: marketButtonUrl ?? baseTradeUrl,
       }),
     );
   } else if (note.eventId) {
@@ -842,19 +1011,21 @@ export function buildSignalBotMessage(input: {
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
-        holderUrl,
+        holderUrl: holderButtonUrl,
         holderSideLabel: note.holderSide
           ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
-        marketUrl: buildSignalBotOpenMarketUrl({
-          appBaseUrl: input.appBaseUrl,
-          eventId: note.eventId,
-          marketId: note.marketId,
-          side: buySide,
-        }),
+        marketUrl:
+          marketButtonUrl ??
+          buildSignalBotOpenMarketUrl({
+            appBaseUrl: input.appBaseUrl,
+            eventId: note.eventId,
+            marketId: note.marketId,
+            side: buySide,
+          }),
       }),
     );
-  } else if (holderUrl) {
+  } else if (holderButtonUrl) {
     keyboardRows.push(
       buildSignalBotLinkRow({
         holderActorMode: note.holderActorMode,
@@ -864,7 +1035,7 @@ export function buildSignalBotMessage(input: {
         holderSideLabel: note.holderSide
           ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
-        holderUrl,
+        holderUrl: holderButtonUrl,
         marketUrl: null,
       }),
     );
@@ -1054,8 +1225,27 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
 
-  if (command === "start" || command === "help") {
-    await input.sendMessage(buildPlainReply(chatId, helpText()));
+  if (command === "start") {
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        publicHelpText({
+          miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
+        }),
+      ),
+    );
+    return true;
+  }
+  if (command === "help") {
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        helpText({
+          isAdmin,
+          miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
+        }),
+      ),
+    );
     return true;
   }
   if (command === "enable_signals") {
@@ -1547,6 +1737,298 @@ async function resolveDefaultSignalBotCheaperAlternative(input: {
   }
 }
 
+function isMissingSignalBotMessagesTable(error: unknown): boolean {
+  return (
+    error != null &&
+    typeof error === "object" &&
+    (error as { code?: unknown }).code === "42P01"
+  );
+}
+
+async function loadSignalBotThreadContext(input: {
+  chatId: string;
+  db: DbQuery;
+  note: SignalBotNote;
+}): Promise<SignalBotThreadContext> {
+  const initial: SignalBotThreadContext = {
+    baselineAt: new Date().toISOString(),
+    messageKind: "initial",
+    replyToMessageId: null,
+    threadRootNoteId: input.note.id,
+  };
+  if (!input.note.marketId) return initial;
+  try {
+    const { rows } = await input.db.query<{
+      baseline_at: Date | string | null;
+      reply_to_message_id: string | number | null;
+      thread_root_note_id: string | null;
+    }>(
+      `
+        select
+          coalesce(root.baseline_at, prior.baseline_at)::text as baseline_at,
+          coalesce(root.telegram_message_id, prior.telegram_message_id)::text
+            as reply_to_message_id,
+          prior.thread_root_note_id::text as thread_root_note_id
+        from signal_bot_messages prior
+        join ai_note_targets prior_market
+          on prior_market.note_id = prior.note_id
+         and prior_market.target_kind = 'market'
+         and prior_market.is_primary = true
+        left join signal_bot_messages root
+          on root.chat_id = prior.chat_id
+         and root.note_id = prior.thread_root_note_id
+         and root.message_kind = 'initial'
+        where prior.chat_id = $1
+          and prior.note_id <> $2::uuid
+          and prior.message_kind in ('initial', 'research_update')
+          and prior_market.target_id = $3
+        order by prior.baseline_at asc, prior.sent_at asc
+        limit 1
+      `,
+      [input.chatId, input.note.id, input.note.marketId],
+    );
+    const row = rows[0];
+    if (!row?.thread_root_note_id) return initial;
+    return {
+      baselineAt:
+        row.baseline_at instanceof Date
+          ? row.baseline_at.toISOString()
+          : row.baseline_at || initial.baselineAt,
+      messageKind: "research_update",
+      replyToMessageId: toInteger(row.reply_to_message_id),
+      threadRootNoteId: row.thread_root_note_id,
+    };
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return initial;
+    throw error;
+  }
+}
+
+async function recordSignalBotMessage(input: {
+  baselineAt: string;
+  chatId: string;
+  db: DbQuery;
+  messageId: number | null;
+  messageKind: SignalBotMessageKind;
+  metrics?: unknown;
+  noteId: string;
+  replyToMessageId: number | null;
+  sentAt?: Date;
+  threadRootNoteId: string;
+}): Promise<boolean> {
+  try {
+    await input.db.query(
+      `
+        insert into signal_bot_messages (
+          chat_id,
+          note_id,
+          thread_root_note_id,
+          message_kind,
+          telegram_message_id,
+          reply_to_message_id,
+          baseline_at,
+          sent_at,
+          metrics
+        )
+        values ($1, $2::uuid, $3::uuid, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::jsonb)
+        on conflict (chat_id, note_id, message_kind)
+        do update set
+          telegram_message_id = excluded.telegram_message_id,
+          reply_to_message_id = excluded.reply_to_message_id,
+          baseline_at = excluded.baseline_at,
+          sent_at = excluded.sent_at,
+          metrics = excluded.metrics
+      `,
+      [
+        input.chatId,
+        input.noteId,
+        input.threadRootNoteId,
+        input.messageKind,
+        input.messageId,
+        input.replyToMessageId,
+        input.baselineAt,
+        (input.sentAt ?? new Date()).toISOString(),
+        JSON.stringify(input.metrics ?? {}),
+      ],
+    );
+    return true;
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return false;
+    console.warn("[signal-bot] failed to record message delivery", {
+      chatId: input.chatId,
+      error: error instanceof Error ? error.message : String(error),
+      messageKind: input.messageKind,
+      noteId: input.noteId,
+    });
+    return false;
+  }
+}
+
+async function reserveSignalBotFollowthroughMessage(input: {
+  baselineAt: string;
+  chatId: string;
+  db: DbQuery;
+  messageKind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  noteId: string;
+  replyToMessageId: number | null;
+  sentAt: Date;
+  threadRootNoteId: string;
+}): Promise<boolean> {
+  try {
+    const result = await input.db.query(
+      `
+        insert into signal_bot_messages (
+          chat_id,
+          note_id,
+          thread_root_note_id,
+          message_kind,
+          telegram_message_id,
+          reply_to_message_id,
+          baseline_at,
+          sent_at,
+          metrics
+        )
+        values ($1, $2::uuid, $3::uuid, $4, null, $5, $6::timestamptz, $7::timestamptz, $8::jsonb)
+        on conflict (chat_id, note_id, message_kind)
+        do update set
+          telegram_message_id = null,
+          reply_to_message_id = excluded.reply_to_message_id,
+          baseline_at = excluded.baseline_at,
+          sent_at = excluded.sent_at,
+          metrics = excluded.metrics
+        where coalesce(signal_bot_messages.metrics->>'status', 'sent') <> 'sent'
+          and signal_bot_messages.sent_at <= $9::timestamptz
+      `,
+      [
+        input.chatId,
+        input.noteId,
+        input.threadRootNoteId,
+        input.messageKind,
+        input.replyToMessageId,
+        input.baselineAt,
+        input.sentAt.toISOString(),
+        JSON.stringify({ status: "pending" }),
+        new Date(
+          input.sentAt.getTime() - FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
+        ).toISOString(),
+      ],
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return false;
+    console.warn("[signal-bot] failed to reserve followthrough delivery", {
+      chatId: input.chatId,
+      error: error instanceof Error ? error.message : String(error),
+      messageKind: input.messageKind,
+      noteId: input.noteId,
+    });
+    return false;
+  }
+}
+
+async function recordSignalBotFollowthroughSkipped(input: {
+  baselineAt: string;
+  chatId: string;
+  db: DbQuery;
+  metrics: unknown;
+  noteId: string;
+  replyToMessageId: number | null;
+  sentAt: Date;
+  threadRootNoteId: string;
+}): Promise<void> {
+  try {
+    await input.db.query(
+      `
+        insert into signal_bot_messages (
+          chat_id,
+          note_id,
+          thread_root_note_id,
+          message_kind,
+          telegram_message_id,
+          reply_to_message_id,
+          baseline_at,
+          sent_at,
+          metrics
+        )
+        values ($1, $2::uuid, $3::uuid, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::jsonb)
+        on conflict (chat_id, note_id, message_kind)
+        do update set
+          telegram_message_id = null,
+          reply_to_message_id = excluded.reply_to_message_id,
+          thread_root_note_id = excluded.thread_root_note_id,
+          baseline_at = excluded.baseline_at,
+          sent_at = excluded.sent_at,
+          metrics = excluded.metrics
+        where coalesce(signal_bot_messages.metrics->>'status', 'sent') <> 'sent'
+      `,
+      [
+        input.chatId,
+        input.noteId,
+        input.threadRootNoteId,
+        "followthrough_stats",
+        null,
+        input.replyToMessageId,
+        input.baselineAt,
+        input.sentAt.toISOString(),
+        JSON.stringify(input.metrics),
+      ],
+    );
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return;
+    console.warn("[signal-bot] failed to record skipped followthrough", {
+      chatId: input.chatId,
+      error: error instanceof Error ? error.message : String(error),
+      noteId: input.noteId,
+    });
+  }
+}
+
+async function sendSignalBotMessageWithReplyFallback(input: {
+  message: TelegramSendMessageInput;
+  replyToMessageId: number | null;
+  telegram: SignalBotTelegramClient;
+}): Promise<SignalBotDeliverySendResult> {
+  if (input.replyToMessageId == null) {
+    const result = await input.telegram.sendMessage(input.message);
+    return result.ok
+      ? {
+          fallbackStandalone: false,
+          messageId: result.messageId,
+          ok: true,
+          replyToMessageId: null,
+        }
+      : result;
+  }
+  const replyMessage: TelegramSendMessageInput = {
+    ...input.message,
+    reply_parameters: {
+      message_id: input.replyToMessageId,
+    },
+  };
+  const result = await input.telegram.sendMessage(replyMessage);
+  if (result.ok) {
+    return {
+      fallbackStandalone: false,
+      messageId: result.messageId,
+      ok: true,
+      replyToMessageId: input.replyToMessageId,
+    };
+  }
+  if (result.error === "blocked_or_missing") return result;
+  const fallback = await input.telegram.sendMessage(input.message);
+  return fallback.ok
+    ? {
+        fallbackStandalone: true,
+        messageId: fallback.messageId,
+        ok: true,
+        replyToMessageId: null,
+      }
+    : fallback;
+}
+
 export async function publishSignalBotTick(input: {
   config: SignalBotConfig;
   db: DbQuery;
@@ -1595,6 +2077,10 @@ export async function publishSignalBotTick(input: {
       minConfidence: input.config.minConfidence,
     });
     for (const note of notes) {
+      const sendCooldown = await input.redis.get(
+        signalBotSendCooldownKey(chatId, note.id),
+      );
+      if (sendCooldown) break;
       const buySide = resolveSignalBotBuySide(note);
       if (buySide) {
         const priceGuard = await loadSignalBotPriceGuardBlockers({
@@ -1667,16 +2153,40 @@ export async function publishSignalBotTick(input: {
         buyAmountUsd: input.config.buyAmountUsd,
         cheaperAlternative,
         note,
+        telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
       });
-      const result = await input.telegram.sendMessage({
-        chat_id: chatId,
-        disable_web_page_preview: false,
-        parse_mode: "MarkdownV2",
-        reply_markup: keyboard,
-        text,
+      const thread = await loadSignalBotThreadContext({
+        chatId,
+        db: input.db,
+        note,
+      });
+      const result = await sendSignalBotMessageWithReplyFallback({
+        message: {
+          chat_id: chatId,
+          disable_web_page_preview: false,
+          parse_mode: "MarkdownV2",
+          reply_markup: keyboard,
+          text,
+        },
+        replyToMessageId: thread.replyToMessageId,
+        telegram: input.telegram,
       });
       if (result.ok) {
         sent += 1;
+        await recordSignalBotMessage({
+          baselineAt: thread.baselineAt,
+          chatId,
+          db: input.db,
+          messageId: result.messageId,
+          messageKind: thread.messageKind,
+          metrics: {
+            fallbackStandalone: result.fallbackStandalone,
+            noteKind: thread.messageKind,
+          },
+          noteId: note.id,
+          replyToMessageId: result.replyToMessageId,
+          threadRootNoteId: thread.threadRootNoteId,
+        });
         await updateSignalBotChatCursor({
           chatId,
           createdAt: note.createdAt,
@@ -1690,6 +2200,11 @@ export async function publishSignalBotTick(input: {
         await disableSignalBotChat(input.redis, chatId);
         break;
       }
+      await input.redis.set(
+        signalBotSendCooldownKey(chatId, note.id),
+        result.message,
+        { EX: result.retryAfterSec ?? SEND_FAILURE_COOLDOWN_SEC },
+      );
       break;
     }
   }
@@ -1745,6 +2260,7 @@ export async function sendLatestSignalBotTestSignal(input: {
     buyAmountUsd: input.config.buyAmountUsd,
     cheaperAlternative,
     note,
+    telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
   });
   const result = await input.telegram.sendMessage({
     chat_id: input.chatId,
@@ -1754,6 +2270,729 @@ export async function sendLatestSignalBotTestSignal(input: {
     text,
   });
   return result.ok;
+}
+
+function sideFromSignalBotDirection(
+  direction: "down" | "mixed" | "up" | null,
+): "NO" | "YES" | null {
+  if (direction === "up") return "YES";
+  if (direction === "down") return "NO";
+  return null;
+}
+
+function signalBotFollowthroughQualityRank(
+  quality: SignalBotFollowthroughDataQuality,
+): number {
+  if (quality === "clean") return 2;
+  if (quality === "usable") return 1;
+  return 0;
+}
+
+function signalBotStatsSidePrice(
+  yesPrice: number | null,
+  side: "NO" | "YES" | null,
+): number | null {
+  if (yesPrice == null || !side) return null;
+  return side === "YES" ? yesPrice : 1 - yesPrice;
+}
+
+function roundSignalBotUsd(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function explicitFinalYesProbability(input: {
+  best_ask: unknown;
+  best_bid: unknown;
+  last_price: unknown;
+  resolved_outcome?: unknown;
+  resolved_outcome_pct?: unknown;
+}): ReturnType<typeof resolveHolderResearchFinalYesProbability> {
+  const final = resolveHolderResearchFinalYesProbability(input);
+  return final.source === "terminal_price"
+    ? { finalYesProbability: null, source: "missing" }
+    : final;
+}
+
+function readSignalBotEntryPrice(input: {
+  direction: "down" | "mixed" | "up" | null;
+  metrics: unknown;
+  side: "NO" | "YES" | null;
+  targetMeta: unknown;
+}): number | null {
+  const side = input.side ?? sideFromSignalBotDirection(input.direction);
+  if (!side) return null;
+  const metrics = asObject(input.metrics);
+  const snapshot = asObject(metrics.signalSnapshot);
+  const quote = asObject(snapshot.quote);
+  const snapshotSide = String(snapshot.side ?? "").toUpperCase();
+  const snapshotPrice = toNumber(quote.buyPrice);
+  if (snapshotPrice != null && snapshotSide === side) return snapshotPrice;
+  const market = asObject(metrics.market);
+  const yesProbability = toNumber(market.yesProbability);
+  return signalBotStatsSidePrice(yesProbability, side);
+}
+
+async function loadSignalBotFollowthroughCandidates(input: {
+  chatIds: string[];
+  db: DbQuery;
+  policy: SignalBotFollowthroughPolicy;
+  now: Date;
+}): Promise<SignalBotFollowthroughCandidateRow[]> {
+  if (!input.policy.enabled) return [];
+  if (input.chatIds.length === 0) return [];
+  const statsEnabled = input.policy.types.includes("stats");
+  const resolvedEnabled =
+    input.policy.types.includes("resolved_win") ||
+    input.policy.types.includes("resolved_loss");
+  if (!statsEnabled && !resolvedEnabled) return [];
+  const acceptingSql = buildWalletIntelAcceptingOrdersSql({
+    eventAlias: "e",
+    marketAlias: "m",
+  });
+  const statsCutoff = new Date(
+    input.now.getTime() - input.policy.minAgeHours * 3_600_000,
+  ).toISOString();
+  try {
+    const { rows } = await input.db.query<SignalBotFollowthroughCandidateRow>(
+      `
+        select
+          root.chat_id,
+          root.thread_root_note_id::text,
+          root.telegram_message_id::text as reply_to_message_id,
+          root.baseline_at::text as baseline_at,
+          n.title,
+          n.direction,
+          n.metrics,
+          pt.target_meta,
+          m.id as market_id,
+          m.event_id,
+          m.title as market_title,
+          e.title as event_title,
+          m.venue,
+          m.best_bid,
+          m.best_ask,
+          m.last_price,
+          m.resolved_outcome,
+          m.resolved_outcome_pct::text as resolved_outcome_pct,
+          ${acceptingSql} as accepting_orders
+        from signal_bot_messages root
+        join ai_notes n on n.id = root.thread_root_note_id
+        join ai_note_targets pt
+          on pt.note_id = n.id
+         and pt.target_kind = 'market'
+         and pt.is_primary = true
+        join unified_markets m on m.id = pt.target_id
+        left join unified_events e on e.id = m.event_id
+        where root.message_kind = 'initial'
+          and root.telegram_message_id is not null
+          and root.chat_id = any($5::text[])
+          and (
+            (
+              $1::boolean
+              and root.sent_at <= $3::timestamptz
+              and ${acceptingSql}
+              and not exists (
+                select 1
+                from signal_bot_messages sent
+                where sent.chat_id = root.chat_id
+                  and sent.note_id = root.thread_root_note_id
+                  and sent.message_kind = 'followthrough_stats'
+                  and (
+                    coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                    or sent.sent_at > $6::timestamptz
+                  )
+              )
+            )
+            or (
+              $2::boolean
+              and not exists (
+                select 1
+                from signal_bot_messages sent
+                where sent.chat_id = root.chat_id
+                  and sent.note_id = root.thread_root_note_id
+                  and sent.message_kind in ('resolved_win', 'resolved_loss')
+                  and (
+                    coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                    or sent.sent_at > $6::timestamptz
+                  )
+              )
+              and (
+                m.resolved_outcome is not null
+                or m.resolved_outcome_pct is not null
+              )
+            )
+          )
+        order by root.sent_at asc
+        limit $4
+      `,
+      [
+        statsEnabled,
+        resolvedEnabled,
+        statsCutoff,
+        Math.max(1, input.policy.maxPerTick * 4),
+        input.chatIds,
+        new Date(
+          input.now.getTime() - FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
+        ).toISOString(),
+      ],
+    );
+    return rows;
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) return [];
+    throw error;
+  }
+}
+
+async function loadSignalBotFollowthroughFlows(input: {
+  asOf: string;
+  baselineAt: string;
+  db: DbQuery;
+  marketId: string;
+  venue: string | null;
+}): Promise<SignalBotFollowthroughFlowRow[]> {
+  const venueFilter = input.venue?.trim() || null;
+  const { rows } = await input.db.query<SignalBotFollowthroughFlowRow>(
+    `
+      with post_events as materialized (
+        select
+          wa.wallet_id,
+          wa.market_id,
+          wa.outcome_side,
+          case when upper(coalesce(wa.action, 'BUY')) = 'SELL' then -1 else 1 end
+            as action_sign,
+          abs(
+            coalesce(
+              wa.size_usd,
+              abs(coalesce(wa.delta_shares, 0)) * nullif(wa.price, 0),
+              0
+            )
+          ) as abs_usd,
+          abs(
+            coalesce(
+              wa.delta_shares,
+              case
+                when wa.price is not null and wa.price > 0 and wa.size_usd is not null
+                  then wa.size_usd / wa.price
+                else 0
+              end
+            )
+          ) as abs_shares
+        from wallet_activity_events wa
+        where wa.market_id = $1
+          and ($4::text is null or wa.venue = $4)
+          and wa.outcome_side in ('YES', 'NO')
+          and wa.activity_type in ('delta', 'trade')
+          and wa.occurred_at > $2::timestamptz
+          and wa.occurred_at <= $3::timestamptz
+      ),
+      wallet_sides as (
+        select distinct wallet_id, market_id, outcome_side
+        from post_events
+      )
+      select
+        ws.wallet_id::text as wallet_id,
+        ws.outcome_side as outcome_side,
+        baseline.shares::text as baseline_shares,
+        latest.shares::text as latest_shares,
+        latest.size_usd::text as latest_size_usd,
+        coalesce(sum(pe.abs_usd) filter (where pe.action_sign > 0), 0)::text
+          as positive_usd,
+        coalesce(sum(pe.abs_usd) filter (where pe.action_sign < 0), 0)::text
+          as negative_usd,
+        coalesce(sum(pe.action_sign * pe.abs_usd), 0)::text as net_usd,
+        coalesce(sum(pe.action_sign * pe.abs_shares), 0)::text as net_shares,
+        count(pe.*)::text as event_count
+      from wallet_sides ws
+      join post_events pe
+        on pe.wallet_id = ws.wallet_id
+       and pe.market_id = ws.market_id
+       and pe.outcome_side = ws.outcome_side
+      left join lateral (
+        select s.shares
+        from wallet_position_snapshots s
+        where s.wallet_id = ws.wallet_id
+          and s.market_id = ws.market_id
+          and ($4::text is null or s.venue = $4)
+          and s.outcome_side = ws.outcome_side
+          and s.snapshot_at <= $2::timestamptz
+        order by s.snapshot_at desc
+        limit 1
+      ) baseline on true
+      left join lateral (
+        select s.shares, s.size_usd
+        from wallet_position_snapshots s
+        where s.wallet_id = ws.wallet_id
+          and s.market_id = ws.market_id
+          and ($4::text is null or s.venue = $4)
+          and s.outcome_side = ws.outcome_side
+          and s.snapshot_at <= $3::timestamptz
+        order by s.snapshot_at desc
+        limit 1
+      ) latest on true
+      group by
+        ws.wallet_id,
+        ws.outcome_side,
+        baseline.shares,
+        latest.shares,
+        latest.size_usd
+    `,
+    [input.marketId, input.baselineAt, input.asOf, venueFilter],
+  );
+  return rows;
+}
+
+async function buildSignalBotFollowthroughStats(input: {
+  asOf: Date;
+  candidate: SignalBotFollowthroughCandidateRow;
+  db: DbQuery;
+}): Promise<SignalBotFollowthroughStats> {
+  const sideRaw = String(
+    asObject(input.candidate.target_meta).side ?? "",
+  ).toUpperCase();
+  const side = sideRaw === "YES" || sideRaw === "NO" ? sideRaw : null;
+  const signalSide =
+    side === "YES" || side === "NO"
+      ? side
+      : sideFromSignalBotDirection(input.candidate.direction);
+  const final = explicitFinalYesProbability(input.candidate);
+  const state =
+    final.finalYesProbability != null
+      ? "resolved"
+      : input.candidate.accepting_orders === true
+        ? "open"
+        : "unknown";
+  const quote = signalSide
+    ? resolveHolderResearchSignalQuote(input.candidate, signalSide)
+    : null;
+  const entryPrice = readSignalBotEntryPrice({
+    direction: input.candidate.direction,
+    metrics: input.candidate.metrics,
+    side: signalSide,
+    targetMeta: input.candidate.target_meta,
+  });
+  const finalSidePrice =
+    final.finalYesProbability != null
+      ? signalBotStatsSidePrice(final.finalYesProbability, signalSide)
+      : null;
+  const markPrice = finalSidePrice ?? quote?.markPrice ?? null;
+  const priceMoveCents =
+    entryPrice != null && markPrice != null
+      ? (markPrice - entryPrice) * 100
+      : null;
+  const baselineAt =
+    input.candidate.baseline_at instanceof Date
+      ? input.candidate.baseline_at.toISOString()
+      : input.candidate.baseline_at;
+  const asOf = input.asOf.toISOString();
+  const flows = await loadSignalBotFollowthroughFlows({
+    asOf,
+    baselineAt,
+    db: input.db,
+    marketId: input.candidate.market_id,
+    venue: input.candidate.venue,
+  });
+  let joinedWallets = 0;
+  let addedWallets = 0;
+  let trimmedWallets = 0;
+  let exitedWallets = 0;
+  let stillHoldingWallets = 0;
+  let netSignalSideFlowUsd = 0;
+  let netOppositeSideFlowUsd = 0;
+  let openPnlShares = 0;
+  let missingBaseline = 0;
+  let missingLatest = 0;
+  for (const row of flows) {
+    const isSignalSide = row.outcome_side === signalSide;
+    const baselineSharesRaw = toNumber(row.baseline_shares);
+    const hasBaselineSnapshot = baselineSharesRaw != null;
+    const baselineShares = baselineSharesRaw ?? 0;
+    const latestShares = toNumber(row.latest_shares);
+    const latestSizeUsd = toNumber(row.latest_size_usd);
+    const positiveUsd = toNumber(row.positive_usd) ?? 0;
+    const negativeUsd = toNumber(row.negative_usd) ?? 0;
+    const netUsd = toNumber(row.net_usd) ?? 0;
+    const netShares = toNumber(row.net_shares) ?? 0;
+    const hadBaseline = baselineShares > 1e-9;
+    const hasLatestSnapshot = latestShares != null || latestSizeUsd != null;
+    const hasLatestPosition =
+      (latestShares ?? 0) > 1e-9 || (latestSizeUsd ?? 0) > 0;
+    if (!hasBaselineSnapshot) missingBaseline += 1;
+    if (latestShares == null) missingLatest += 1;
+    if (isSignalSide) {
+      netSignalSideFlowUsd += netUsd;
+      if (
+        hasBaselineSnapshot &&
+        !hadBaseline &&
+        positiveUsd > 0 &&
+        (netUsd > 0 || hasLatestPosition)
+      ) {
+        joinedWallets += 1;
+      } else if (hadBaseline && positiveUsd > 0 && netUsd > 0) {
+        addedWallets += 1;
+      }
+      if (negativeUsd > 0) trimmedWallets += 1;
+      if (
+        (hadBaseline || positiveUsd > 0) &&
+        negativeUsd > 0 &&
+        hasLatestSnapshot &&
+        !hasLatestPosition
+      ) {
+        exitedWallets += 1;
+      }
+      if (hasLatestPosition) {
+        stillHoldingWallets += 1;
+        openPnlShares += Math.max(0, netShares);
+      }
+    } else {
+      netOppositeSideFlowUsd += netUsd;
+    }
+  }
+  const dataQualityTags: string[] = [];
+  if (flows.length === 0) dataQualityTags.push("no_wallet_flow");
+  if (entryPrice == null) dataQualityTags.push("missing_entry_price");
+  if (markPrice == null) dataQualityTags.push("missing_mark_price");
+  if (missingBaseline > 0) dataQualityTags.push("missing_baseline_snapshots");
+  if (missingLatest > 0) dataQualityTags.push("missing_latest_snapshots");
+  let dataQuality: SignalBotFollowthroughDataQuality = "any";
+  if (flows.length > 0) dataQuality = "usable";
+  if (
+    flows.length > 0 &&
+    missingBaseline === 0 &&
+    missingLatest === 0 &&
+    entryPrice != null &&
+    markPrice != null
+  ) {
+    dataQuality = "clean";
+  }
+  const estimatedOpenPnlUsd =
+    priceMoveCents != null && openPnlShares > 0
+      ? roundSignalBotUsd((priceMoveCents / 100) * openPnlShares)
+      : null;
+  if (estimatedOpenPnlUsd != null) dataQualityTags.push("pnl_estimated");
+  let outcome: SignalBotFollowthroughStats["outcome"] =
+    state === "open" ? "open" : "unknown";
+  if (state === "resolved" && signalSide && finalSidePrice != null) {
+    if (entryPrice != null) {
+      const move = finalSidePrice - entryPrice;
+      outcome = move > 1e-9 ? "win" : move < -1e-9 ? "loss" : "unknown";
+    } else if (finalSidePrice >= 0.999) {
+      outcome = "win";
+    } else if (finalSidePrice <= 0.001) {
+      outcome = "loss";
+    }
+  }
+  return {
+    version: 1,
+    evaluatedAt: new Date().toISOString(),
+    threadRootNoteId: input.candidate.thread_root_note_id,
+    finalProbabilitySource: final.source,
+    marketId: input.candidate.market_id,
+    signalSide,
+    state,
+    outcome,
+    baselineAt,
+    asOf,
+    entryPrice,
+    markPrice,
+    priceMoveCents,
+    joinedWallets,
+    addedWallets,
+    joinedOrAddedWallets: joinedWallets + addedWallets,
+    trimmedWallets,
+    exitedWallets,
+    stillHoldingWallets,
+    missingBaselineSnapshots: missingBaseline,
+    netSignalSideFlowUsd,
+    netOppositeSideFlowUsd,
+    estimatedOpenPnlUsd,
+    estimatedRealizedPnlUsd: null,
+    dataQuality,
+    dataQualityTags,
+  };
+}
+
+function resolveSignalBotFollowthroughKind(input: {
+  policy: SignalBotFollowthroughPolicy;
+  stats: SignalBotFollowthroughStats;
+}): Extract<
+  SignalBotMessageKind,
+  "followthrough_stats" | "resolved_loss" | "resolved_win"
+> | null {
+  const { policy, stats } = input;
+  if (
+    stats.outcome === "win" &&
+    policy.types.includes("resolved_win") &&
+    signalBotFollowthroughQualityRank(stats.dataQuality) >=
+      signalBotFollowthroughQualityRank(policy.minDataQuality)
+  ) {
+    return "resolved_win";
+  }
+  if (
+    stats.outcome === "loss" &&
+    policy.types.includes("resolved_loss") &&
+    signalBotFollowthroughQualityRank(stats.dataQuality) >=
+      signalBotFollowthroughQualityRank(policy.minDataQuality)
+  ) {
+    return "resolved_loss";
+  }
+  if (stats.state !== "open" || !policy.types.includes("stats")) return null;
+  if (
+    signalBotFollowthroughQualityRank(stats.dataQuality) <
+    signalBotFollowthroughQualityRank(policy.minDataQuality)
+  ) {
+    return null;
+  }
+  if (
+    policy.requirePositiveFlowForStats &&
+    stats.netSignalSideFlowUsd <= 0
+  ) {
+    return null;
+  }
+  const priceMovePass =
+    stats.priceMoveCents != null &&
+    stats.priceMoveCents >= policy.minPriceMoveCents;
+  if (
+    stats.joinedOrAddedWallets >= policy.minJoinedOrAdded ||
+    stats.netSignalSideFlowUsd >= policy.minNetFlowUsd ||
+    priceMovePass
+  ) {
+    return "followthrough_stats";
+  }
+  return null;
+}
+
+function formatSignedCentsMove(value: number | null): string {
+  if (value == null) return "n/a";
+  const rounded = Math.round(value);
+  return `${rounded >= 0 ? "+" : ""}${rounded}¢`;
+}
+
+function buildSignalBotFollowthroughMessage(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  stats: SignalBotFollowthroughStats;
+}): string {
+  const stats = input.stats;
+  const side = stats.signalSide ?? "side";
+  const title =
+    input.candidate.event_title && input.candidate.market_title
+      ? `${input.candidate.event_title} · ${input.candidate.market_title}`
+      : input.candidate.market_title || input.candidate.title;
+  const priceLine =
+    stats.entryPrice != null && stats.markPrice != null
+      ? `${side}: ${formatCents(stats.entryPrice)} → ${formatCents(
+          stats.markPrice,
+        )} (${formatSignedCentsMove(stats.priceMoveCents)})`
+      : `${side}: price move unavailable`;
+  const flowLine = `${formatSignedCompactUsd(
+    stats.netSignalSideFlowUsd,
+  )} net tracked ${side} flow`;
+  const activityLine = `${stats.joinedOrAddedWallets} joined/added · ${
+    stats.trimmedWallets
+  } trimmed · ${stats.stillHoldingWallets} still hold`;
+  const pnlLine =
+    stats.estimatedOpenPnlUsd != null
+      ? `Est. open PnL: ${formatSignedCompactUsd(stats.estimatedOpenPnlUsd)}`
+      : null;
+  const hasWalletEvidence =
+    stats.joinedOrAddedWallets > 0 || stats.netSignalSideFlowUsd > 0;
+  const header =
+    input.kind === "resolved_win"
+      ? "🏁 Closed green"
+      : input.kind === "resolved_loss"
+        ? "🏁 Closed red"
+        : hasWalletEvidence
+          ? "🔥 Wallets followed the read"
+          : "📈 Market moved after the read";
+  const resultLine =
+    input.kind === "resolved_win"
+      ? "Signal side won."
+      : input.kind === "resolved_loss"
+        ? "Signal side lost."
+        : "Since this signal:";
+  const footerLine =
+    input.kind === "followthrough_stats" && !hasWalletEvidence
+      ? "Price moved after the signal; tracked wallet flow is not confirmed."
+      : "Tracked wallets after the signal.";
+  return [
+    header,
+    "",
+    title,
+    resultLine,
+    flowLine,
+    activityLine,
+    priceLine,
+    ...(pnlLine ? [pnlLine] : []),
+    "",
+    footerLine,
+  ]
+    .map(escapeTelegramMarkdownV2)
+    .join("\n");
+}
+
+export async function publishSignalBotFollowthroughTick(input: {
+  config: SignalBotConfig;
+  db: DbQuery;
+  now?: Date;
+  redis: SignalBotRedisLike;
+  telegram: SignalBotTelegramClient;
+}): Promise<{
+  candidates: number;
+  policyEnabled: boolean;
+  sent: number;
+  sentResolvedLoss: number;
+  sentResolvedWin: number;
+  sentStats: number;
+  skipped: number;
+}> {
+  const policy = await resolveSignalBotFollowthroughPolicy(
+    input.db,
+    input.config.followthrough,
+  );
+  if (!policy.enabled) {
+    return {
+      candidates: 0,
+      policyEnabled: false,
+      sent: 0,
+      sentResolvedLoss: 0,
+      sentResolvedWin: 0,
+      sentStats: 0,
+      skipped: 0,
+    };
+  }
+  const now = input.now ?? new Date();
+  const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
+  const candidates = await loadSignalBotFollowthroughCandidates({
+    chatIds,
+    db: input.db,
+    now,
+    policy,
+  });
+  let sent = 0;
+  let sentResolvedLoss = 0;
+  let sentResolvedWin = 0;
+  let sentStats = 0;
+  let skipped = 0;
+  for (const candidate of candidates) {
+    if (sent >= policy.maxPerTick) break;
+    const stats = await buildSignalBotFollowthroughStats({
+      asOf: now,
+      candidate,
+      db: input.db,
+    });
+    const kind = resolveSignalBotFollowthroughKind({ policy, stats });
+    const replyToMessageId = toInteger(candidate.reply_to_message_id);
+    const baselineAt =
+      candidate.baseline_at instanceof Date
+        ? candidate.baseline_at.toISOString()
+        : candidate.baseline_at;
+    if (!kind) {
+      if (stats.state === "open" && policy.types.includes("stats")) {
+        await recordSignalBotFollowthroughSkipped({
+          baselineAt,
+          chatId: candidate.chat_id,
+          db: input.db,
+          metrics: {
+            ...stats,
+            nextEvaluateAt: new Date(
+              now.getTime() + FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
+            ).toISOString(),
+            status: "skipped",
+          },
+          noteId: candidate.thread_root_note_id,
+          replyToMessageId,
+          sentAt: now,
+          threadRootNoteId: candidate.thread_root_note_id,
+        });
+      }
+      skipped += 1;
+      continue;
+    }
+    const reserved = await reserveSignalBotFollowthroughMessage({
+      baselineAt,
+      chatId: candidate.chat_id,
+      db: input.db,
+      messageKind: kind,
+      noteId: candidate.thread_root_note_id,
+      replyToMessageId,
+      sentAt: now,
+      threadRootNoteId: candidate.thread_root_note_id,
+    });
+    if (!reserved) {
+      skipped += 1;
+      continue;
+    }
+    const text = buildSignalBotFollowthroughMessage({
+      candidate,
+      kind,
+      stats,
+    });
+    const result = await sendSignalBotMessageWithReplyFallback({
+      message: {
+        chat_id: candidate.chat_id,
+        disable_web_page_preview: true,
+        parse_mode: "MarkdownV2",
+        text,
+      },
+      replyToMessageId,
+      telegram: input.telegram,
+    });
+    if (!result.ok) {
+      if (result.error === "blocked_or_missing") {
+        await disableSignalBotChat(input.redis, candidate.chat_id);
+      }
+      await recordSignalBotMessage({
+        baselineAt,
+        chatId: candidate.chat_id,
+        db: input.db,
+        messageId: null,
+        messageKind: kind,
+        metrics: {
+          ...stats,
+          error: result.error,
+          status: "send_failed",
+        },
+        noteId: candidate.thread_root_note_id,
+        replyToMessageId,
+        threadRootNoteId: candidate.thread_root_note_id,
+        sentAt: now,
+      });
+      skipped += 1;
+      continue;
+    }
+    await recordSignalBotMessage({
+      baselineAt,
+      chatId: candidate.chat_id,
+      db: input.db,
+      messageId: result.messageId,
+      messageKind: kind,
+      metrics: {
+        ...stats,
+        fallbackStandalone: result.fallbackStandalone,
+        status: "sent",
+      },
+      noteId: candidate.thread_root_note_id,
+      replyToMessageId: result.replyToMessageId,
+      threadRootNoteId: candidate.thread_root_note_id,
+      sentAt: now,
+    });
+    sent += 1;
+    if (kind === "followthrough_stats") sentStats += 1;
+    else if (kind === "resolved_win") sentResolvedWin += 1;
+    else if (kind === "resolved_loss") sentResolvedLoss += 1;
+  }
+  return {
+    candidates: candidates.length,
+    policyEnabled: true,
+    sent,
+    sentResolvedLoss,
+    sentResolvedWin,
+    sentStats,
+    skipped,
+  };
 }
 
 export function buildSignalBotStatsReport(input: {
@@ -2178,10 +3417,19 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     });
-    if (response.ok) return { ok: true };
     const payload = (await response.json().catch(() => null)) as {
       description?: string;
+      ok?: boolean;
+      parameters?: { retry_after?: number };
+      result?: { message_id?: number };
     } | null;
+    if (response.ok && payload?.ok) {
+      const messageId = payload.result?.message_id;
+      return {
+        messageId: typeof messageId === "number" ? messageId : null,
+        ok: true,
+      };
+    }
     const message = payload?.description ?? `HTTP ${response.status}`;
     if (
       response.status === 403 ||
@@ -2189,7 +3437,16 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     ) {
       return { error: "blocked_or_missing", message, ok: false };
     }
-    return { error: "other", message, ok: false };
+    const retryAfterSec = payload?.parameters?.retry_after;
+    return {
+      error: "other",
+      message,
+      ok: false,
+      retryAfterSec:
+        typeof retryAfterSec === "number" && retryAfterSec > 0
+          ? Math.trunc(retryAfterSec)
+          : undefined,
+    };
   }
 }
 
@@ -2255,6 +3512,12 @@ function toNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function toInteger(value: unknown): number | null {
+  const parsed = toNumber(value);
+  if (parsed == null) return null;
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -2803,16 +4066,35 @@ function buildPlainReply(
   };
 }
 
-function helpText(): string {
+function publicHelpText(input: { miniAppEnabled: boolean }): string {
   return [
     "Hunch Signal Bot",
     "",
+    "Public help",
+    "Signal messages include buttons to open markets, wallet profiles, and trade tickets in Hunch.",
+    input.miniAppEnabled
+      ? "In Telegram, supported buttons open the Hunch Mini App."
+      : "Buttons open Hunch web links.",
+    "",
+    "Commands",
+    "/start - show this intro",
+    "/help - show help",
+    "/status - show signal status for this chat",
+  ].join("\n");
+}
+
+function helpText(input: { isAdmin: boolean; miniAppEnabled: boolean }): string {
+  if (!input.isAdmin) return publicHelpText(input);
+  return [
+    publicHelpText(input),
+    "",
+    "Admin controls",
     "/enable_signals - enable this chat",
     "/enable_signals <channel_id> - enable a channel",
     "/disable_signals - disable this chat",
     "/disable_signals <channel_id> - disable a channel",
-    "/status - show chat status",
+    "/status [channel_id] - show signal status",
     "/stats [24h|7d|30d] [detail] - show signal performance",
-    "/test_signal - send latest eligible signal",
+    "/test_signal [channel_id] - send latest eligible signal",
   ].join("\n");
 }

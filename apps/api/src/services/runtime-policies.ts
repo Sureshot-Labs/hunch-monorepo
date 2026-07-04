@@ -12,6 +12,7 @@ import {
   type RuntimePolicyRow,
 } from "../repos/runtime-policies.js";
 import { normalizeMarketMapVenues } from "./market-map.js";
+import { DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES } from "./signal-bot-followthrough-policy.js";
 
 export const INTEL_POLICY_KEYS = [
   "auth_access",
@@ -138,6 +139,17 @@ export type HolderResearchPolicy = {
   enabled: boolean;
   dryRun: boolean;
   persistNotes: boolean;
+  signalBotFollowthroughEnabled: boolean;
+  signalBotFollowthroughTypes: Array<
+    "resolved_loss" | "resolved_win" | "stats"
+  >;
+  signalBotFollowthroughMinAgeHours: number;
+  signalBotFollowthroughMaxPerTick: number;
+  signalBotFollowthroughMinJoinedOrAdded: number;
+  signalBotFollowthroughMinNetFlowUsd: number;
+  signalBotFollowthroughMinPriceMoveCents: number;
+  signalBotFollowthroughRequirePositiveFlowForStats: boolean;
+  signalBotFollowthroughMinDataQuality: "any" | "clean" | "usable";
   externalSearchEnabled: boolean;
   externalSearchModel: string;
   maxExternalSearchCallsPerRun: number;
@@ -896,6 +908,17 @@ const holderResearchSchema = z
     enabled: strictBoolean,
     dryRun: strictBoolean,
     persistNotes: strictBoolean,
+    signalBotFollowthroughEnabled: strictBoolean,
+    signalBotFollowthroughTypes: z
+      .array(z.enum(["stats", "resolved_win", "resolved_loss"]))
+      .max(3),
+    signalBotFollowthroughMinAgeHours: positiveInt.max(24 * 365),
+    signalBotFollowthroughMaxPerTick: positiveInt.max(100),
+    signalBotFollowthroughMinJoinedOrAdded: positiveInt.max(1_000),
+    signalBotFollowthroughMinNetFlowUsd: nonNegativeNumber.max(100_000_000),
+    signalBotFollowthroughMinPriceMoveCents: nonNegativeNumber.max(100),
+    signalBotFollowthroughRequirePositiveFlowForStats: strictBoolean,
+    signalBotFollowthroughMinDataQuality: z.enum(["any", "usable", "clean"]),
     externalSearchEnabled: strictBoolean,
     externalSearchModel: z.string().trim().min(1).max(200),
     maxExternalSearchCallsPerRun: nonNegativeInt.max(100),
@@ -1634,6 +1657,15 @@ function getDefaults(): IntelPolicyMap {
       enabled: false,
       dryRun: true,
       persistNotes: false,
+      signalBotFollowthroughEnabled: false,
+      signalBotFollowthroughTypes: DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
+      signalBotFollowthroughMinAgeHours: 24,
+      signalBotFollowthroughMaxPerTick: 3,
+      signalBotFollowthroughMinJoinedOrAdded: 2,
+      signalBotFollowthroughMinNetFlowUsd: 10_000,
+      signalBotFollowthroughMinPriceMoveCents: 10,
+      signalBotFollowthroughRequirePositiveFlowForStats: false,
+      signalBotFollowthroughMinDataQuality: "any",
       externalSearchEnabled: false,
       externalSearchModel:
         process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
@@ -2544,6 +2576,46 @@ function normalizeHolderResearchPolicy(
     enabled: Boolean(policy.enabled),
     dryRun: Boolean(policy.dryRun),
     persistNotes: Boolean(policy.persistNotes),
+    signalBotFollowthroughEnabled: Boolean(
+      policy.signalBotFollowthroughEnabled,
+    ),
+    signalBotFollowthroughTypes:
+      policy.signalBotFollowthroughTypes.length > 0
+        ? Array.from(new Set(policy.signalBotFollowthroughTypes))
+        : DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
+    signalBotFollowthroughMinAgeHours: clamp(
+      Math.trunc(policy.signalBotFollowthroughMinAgeHours),
+      1,
+      24 * 365,
+    ),
+    signalBotFollowthroughMaxPerTick: clamp(
+      Math.trunc(policy.signalBotFollowthroughMaxPerTick),
+      1,
+      100,
+    ),
+    signalBotFollowthroughMinJoinedOrAdded: clamp(
+      Math.trunc(policy.signalBotFollowthroughMinJoinedOrAdded),
+      1,
+      1_000,
+    ),
+    signalBotFollowthroughMinNetFlowUsd: clamp(
+      policy.signalBotFollowthroughMinNetFlowUsd,
+      0,
+      100_000_000,
+    ),
+    signalBotFollowthroughMinPriceMoveCents: clamp(
+      policy.signalBotFollowthroughMinPriceMoveCents,
+      0,
+      100,
+    ),
+    signalBotFollowthroughRequirePositiveFlowForStats: Boolean(
+      policy.signalBotFollowthroughRequirePositiveFlowForStats,
+    ),
+    signalBotFollowthroughMinDataQuality:
+      policy.signalBotFollowthroughMinDataQuality === "usable" ||
+      policy.signalBotFollowthroughMinDataQuality === "clean"
+        ? policy.signalBotFollowthroughMinDataQuality
+        : "any",
     externalSearchEnabled: Boolean(policy.externalSearchEnabled),
     externalSearchModel:
       policy.externalSearchModel.trim() || "grok-4-1-fast-reasoning",

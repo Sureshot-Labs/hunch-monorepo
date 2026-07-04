@@ -19,6 +19,7 @@ import {
   parseSignalBotConfig,
   parseSignalBotStatsRequest,
   parseSignalBotStatsPeriod,
+  publishSignalBotFollowthroughTick,
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
@@ -27,6 +28,7 @@ import {
   sendLatestSignalBotTestSignal,
   sendSignalBotStatsReport,
   signalBotLockKey,
+  TelegramBotApiClient,
   type SignalBotNote,
   type SignalBotRedisLike,
   type TelegramSendMessageInput,
@@ -153,7 +155,9 @@ class FakeRedis implements SignalBotRedisLike {
 
 class FakeTelegram {
   readonly messages: TelegramSendMessageInput[] = [];
-  nextResult: TelegramSendResult = { ok: true };
+  nextResult: TelegramSendResult | null = null;
+  nextResults: TelegramSendResult[] = [];
+  private nextMessageId = 100;
 
   async getUpdates() {
     return [];
@@ -163,7 +167,11 @@ class FakeTelegram {
     input: TelegramSendMessageInput,
   ): Promise<TelegramSendResult> {
     this.messages.push(input);
-    return this.nextResult;
+    const nextResult = this.nextResults.shift();
+    if (nextResult) return nextResult;
+    if (this.nextResult) return this.nextResult;
+    this.nextMessageId += 1;
+    return { messageId: this.nextMessageId, ok: true };
   }
 }
 
@@ -182,6 +190,7 @@ class FakeDb {
   ];
   marketTokenRows: unknown[] = [];
   rows: unknown[] = [];
+  threadContextRows: unknown[] = [];
   tokenTopRows: unknown[] = [
     {
       best_ask: "0.41",
@@ -205,6 +214,24 @@ class FakeDb {
     const sql = String(args[0] ?? "");
     const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
     this.queries.push({ params, sql });
+    if (sql.includes("from signal_bot_messages prior")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.threadContextRows.length,
+        rows: this.threadContextRows as T[],
+      };
+    }
+    if (sql.includes("insert into signal_bot_messages")) {
+      return {
+        command: "INSERT",
+        fields: [],
+        oid: 0,
+        rowCount: 1,
+        rows: [],
+      };
+    }
     if (sql.includes("from unified_market_tokens")) {
       return {
         command: "SELECT",
@@ -432,6 +459,138 @@ function performanceNoteRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+class FakeFollowthroughDb {
+  candidateRows: unknown[] = [];
+  flowRows: unknown[] = [];
+  runtimePayload: unknown = null;
+  readonly queries: Array<{ params: unknown[]; sql: string }> = [];
+
+  query<T extends QueryResultRow = QueryResultRow>(): Promise<QueryResult<T>>;
+  async query<T extends QueryResultRow = QueryResultRow>(
+    ...args: unknown[]
+  ): Promise<QueryResult<T>> {
+    const sql = String(args[0] ?? "");
+    const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
+    this.queries.push({ params, sql });
+    if (sql.includes("from runtime_policies")) {
+      const rows =
+        this.runtimePayload == null ? [] : [{ payload: this.runtimePayload }];
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: rows.length,
+        rows: rows as unknown as T[],
+      };
+    }
+    if (sql.includes("from signal_bot_messages root")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.candidateRows.length,
+        rows: this.candidateRows as T[],
+      };
+    }
+    if (sql.includes("from wallet_activity_events")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.flowRows.length,
+        rows: this.flowRows as T[],
+      };
+    }
+    if (sql.includes("insert into signal_bot_messages")) {
+      return {
+        command: "INSERT",
+        fields: [],
+        oid: 0,
+        rowCount: 1,
+        rows: [],
+      };
+    }
+    return {
+      command: "SELECT",
+      fields: [],
+      oid: 0,
+      rowCount: 0,
+      rows: [],
+    };
+  }
+}
+
+function followthroughCandidateRow(overrides: Record<string, unknown> = {}) {
+  return {
+    chat_id: "-100",
+    thread_root_note_id: "00000000-0000-4000-8000-000000000101",
+    reply_to_message_id: "77",
+    baseline_at: "2026-01-01T00:00:00.000Z",
+    title: "Wallets liked YES",
+    direction: "up",
+    metrics: {
+      market: { yesProbability: 0.4 },
+      signalSnapshot: {
+        quote: { buyPrice: 0.4 },
+        side: "YES",
+      },
+    },
+    target_meta: { side: "YES" },
+    market_id: "polymarket:market-1",
+    event_id: "polymarket:event-1",
+    market_title: "Will test resolve Yes?",
+    event_title: "Test event",
+    venue: "polymarket",
+    best_bid: "0.55",
+    best_ask: "0.57",
+    last_price: null,
+    resolved_outcome: null,
+    resolved_outcome_pct: null,
+    accepting_orders: true,
+    ...overrides,
+  };
+}
+
+function followthroughFlowRow(overrides: Record<string, unknown> = {}) {
+  return {
+    wallet_id: "wallet-1",
+    outcome_side: "YES",
+    baseline_shares: null,
+    latest_shares: "100",
+    latest_size_usd: "5500",
+    positive_usd: "5000",
+    negative_usd: "0",
+    net_usd: "5000",
+    net_shares: "100",
+    event_count: "1",
+    ...overrides,
+  };
+}
+
+async function enableFollowthroughTestChat(redis: FakeRedis): Promise<void> {
+  await enableSignalBotChat({
+    chat: { id: "-100", title: "Signals", type: "channel" },
+    enabledBy: 123,
+    now: new Date("2026-01-01T00:00:00.000Z"),
+    redis,
+  });
+}
+
+function readStartAppParam(url: string | undefined): string {
+  assert.ok(url);
+  const startapp = new URL(url).searchParams.get("startapp");
+  assert.ok(startapp);
+  assert.match(startapp, /^[A-Za-z0-9_-]{1,512}$/);
+  return startapp;
+}
+
+function decodeStartAppPayload(startParam: string): string {
+  const separator = startParam.indexOf("_");
+  assert.notEqual(separator, -1);
+  const payload = startParam.slice(separator + 1);
+  return Buffer.from(payload, "base64url").toString("utf8");
+}
+
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
     name: "env parser handles admins and default buy amount",
@@ -449,6 +608,91 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(config.minConfidence, 0.8);
       assert.equal(config.priceGuardMaxDefers, 5);
       assert.equal(config.priceGuardDeferTtlSec, 1_800);
+      assert.deepEqual(config.followthrough, {
+        enabled: false,
+        types: ["stats", "resolved_win", "resolved_loss"],
+        minAgeHours: 24,
+        maxPerTick: 3,
+        minJoinedOrAdded: 2,
+        minNetFlowUsd: 10_000,
+        minPriceMoveCents: 10,
+        requirePositiveFlowForStats: false,
+        minDataQuality: "any",
+      });
+      assert.equal(config.telegramMiniAppLinkBase, null);
+    },
+  },
+  {
+    name: "env parser accepts Telegram Mini App link base",
+    run: () => {
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+          "https://t.me/hunch_signal_bot/hunch?ignored=1#hash",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      assert.equal(
+        config.telegramMiniAppLinkBase,
+        "https://t.me/hunch_signal_bot/hunch",
+      );
+
+      const invalid = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+          "https://app.hunch.trade/tg",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      assert.equal(invalid.telegramMiniAppLinkBase, null);
+    },
+  },
+  {
+    name: "Telegram client returns message id and retry_after",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        const responses = [
+          new Response(
+            JSON.stringify({ ok: true, result: { message_id: 456 } }),
+            { status: 200 },
+          ),
+          new Response(
+            JSON.stringify({
+              description: "Too Many Requests",
+              ok: false,
+              parameters: { retry_after: 9 },
+            }),
+            { status: 429 },
+          ),
+        ];
+        globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+          const init = args[1];
+          assert.equal(init?.method, "POST");
+          const body = JSON.parse(String(init?.body ?? "{}"));
+          assert.equal(body.chat_id, "-100");
+          return responses.shift() ?? new Response("{}", { status: 500 });
+        }) as typeof fetch;
+
+        const client = new TelegramBotApiClient("token");
+        const sent = await client.sendMessage({
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          parse_mode: "MarkdownV2",
+          text: "hello",
+        });
+        assert.deepEqual(sent, { messageId: 456, ok: true });
+        const rateLimited = await client.sendMessage({
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          parse_mode: "MarkdownV2",
+          text: "hello",
+        });
+        assert.deepEqual(rateLimited, {
+          error: "other",
+          message: "Too Many Requests",
+          ok: false,
+          retryAfterSec: 9,
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   },
   {
@@ -613,6 +857,63 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         period: "24h",
       });
       assert.equal(parseSignalBotStatsPeriod("/stats 3d"), null);
+    },
+  },
+  {
+    name: "public start help is Mini App aware and hides admin controls",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 999 },
+          text: "/start",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      const text = telegram.messages[0]?.text ?? "";
+      assert.match(text, /Public help/);
+      assert.match(text, /Hunch Mini App/);
+      assert.doesNotMatch(text, /enable\\_signals/);
+      assert.doesNotMatch(text, /test\\_signal/);
+    },
+  },
+  {
+    name: "admin help includes public help and admin controls",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 123 },
+          text: "/help",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      const text = telegram.messages[0]?.text ?? "";
+      assert.match(text, /Public help/);
+      assert.match(text, /Admin controls/);
+      assert.match(text, /enable\\_signals/);
+      assert.match(text, /test\\_signal/);
+      assert.match(text, /Buttons open Hunch web links/);
     },
   },
   {
@@ -906,9 +1207,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "/tracking/wallet/0xa022ba0a68e11a78348382ff168601012d4d77f8",
       );
       assert.equal(parsed.searchParams.get("chain"), "polygon");
-      assert.equal(parsed.searchParams.get("eventId"), "polymarket:event-1");
-      assert.equal(parsed.searchParams.get("marketId"), "polymarket:market-1");
-      assert.equal(parsed.searchParams.get("side"), "YES");
+      assert.equal(
+        parsed.searchParams.get("signalEventId"),
+        "polymarket:event-1",
+      );
+      assert.equal(
+        parsed.searchParams.get("signalMarketId"),
+        "polymarket:market-1",
+      );
+      assert.equal(parsed.searchParams.get("signalSide"), "YES");
+      assert.equal(
+        parsed.searchParams.get("signalSource"),
+        "telegram_signal_bot",
+      );
       assert.equal(
         parsed.searchParams.get("noteId"),
         "00000000-0000-4000-8000-000000000001",
@@ -946,10 +1257,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(holderButtonUrl.searchParams.get("chain"), "polygon");
       assert.equal(
-        holderButtonUrl.searchParams.get("marketId"),
+        holderButtonUrl.searchParams.get("signalMarketId"),
         "polymarket:market-1",
       );
-      assert.equal(holderButtonUrl.searchParams.get("side"), "YES");
+      assert.equal(holderButtonUrl.searchParams.get("signalSide"), "YES");
+      assert.equal(
+        holderButtonUrl.searchParams.get("signalSource"),
+        "telegram_signal_bot",
+      );
       assert.equal(rows[1]?.[1]?.text, "↗️ Open market");
       assert.match(
         message.text,
@@ -967,6 +1282,83 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /📰 Public info followed the holder activity\\\./,
       );
       assert.doesNotMatch(message.text, /confidence/i);
+    },
+  },
+  {
+    name: "message keeps web links when Mini App base is unset",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note(),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.match(rows[0]?.[0]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
+      assert.match(rows[1]?.[0]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
+      assert.match(rows[1]?.[1]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
+    },
+  },
+  {
+    name: "message prefers Mini App button links and keeps web title fallback",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          eventId: "polymarket:event-1",
+          marketId: "polymarket:market-1",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.match(
+        rows[0]?.[0]?.url ?? "",
+        /^https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=b_/,
+      );
+      assert.match(
+        rows[1]?.[0]?.url ?? "",
+        /^https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/,
+      );
+      assert.match(
+        rows[1]?.[1]?.url ?? "",
+        /^https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=m_/,
+      );
+      assert.match(
+        message.text,
+        /\(https:\/\/app\.hunch\.trade\/events\/polymarket%3Aevent-1\?/,
+      );
+      assert.equal(
+        decodeStartAppPayload(readStartAppParam(rows[0]?.[0]?.url)),
+        "p:event-1|market-1|Y|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readStartAppParam(rows[1]?.[0]?.url)),
+        "polygon|0xa022ba0a68e11a78348382ff168601012d4d77f8|" +
+          "polymarket:event-1|polymarket:market-1|Y|" +
+          "00000000-0000-4000-8000-000000000001",
+      );
+      assert.equal(
+        decodeStartAppPayload(readStartAppParam(rows[1]?.[1]?.url)),
+        "p:event-1|market-1|Y",
+      );
+    },
+  },
+  {
+    name: "message falls back to web button when Mini App payload is oversized",
+    run: () => {
+      const longId = `polymarket:${"x".repeat(500)}`;
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          eventId: longId,
+          marketId: longId,
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot",
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.match(rows[0]?.[0]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
+      assert.match(rows[1]?.[1]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
     },
   },
   {
@@ -2087,9 +2479,162 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(telegram.messages.length, 1);
       assert.equal(telegram.messages[0]?.disable_web_page_preview, false);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[0], "-100");
+      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000001");
+      assert.equal(delivery.params[2], "00000000-0000-4000-8000-000000000001");
+      assert.equal(delivery.params[3], "initial");
+      assert.equal(delivery.params[4], 101);
+      assert.equal(delivery.params[5], null);
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorCreatedAt, "2026-01-01T00:00:00.000Z");
       assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000001");
+    },
+  },
+  {
+    name: "publish research update replies to prior market thread",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000002",
+          title: "Fresh update",
+        }),
+      ];
+      db.threadContextRows = [
+        {
+          baseline_at: "2026-01-01T00:00:00.000Z",
+          reply_to_message_id: "77",
+          thread_root_note_id: "00000000-0000-4000-8000-000000000001",
+        },
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.sent, 1);
+      assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000002");
+      assert.equal(delivery.params[2], "00000000-0000-4000-8000-000000000001");
+      assert.equal(delivery.params[3], "research_update");
+      assert.equal(delivery.params[4], 101);
+      assert.equal(delivery.params[5], 77);
+    },
+  },
+  {
+    name: "publish reply failure falls back to standalone delivery",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000002",
+          title: "Fresh update",
+        }),
+      ];
+      db.threadContextRows = [
+        {
+          baseline_at: "2026-01-01T00:00:00.000Z",
+          reply_to_message_id: "77",
+          thread_root_note_id: "00000000-0000-4000-8000-000000000001",
+        },
+      ];
+      const telegram = new FakeTelegram();
+      telegram.nextResults = [
+        { error: "other", message: "reply target missing", ok: false },
+        { messageId: 333, ok: true },
+      ];
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.sent, 1);
+      assert.equal(telegram.messages.length, 2);
+      assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      assert.equal(telegram.messages[1]?.reply_parameters, undefined);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[4], 333);
+      assert.equal(delivery.params[5], null);
+      assert.deepEqual(JSON.parse(String(delivery.params[8])), {
+        fallbackStandalone: true,
+        noteKind: "research_update",
+      });
+    },
+  },
+  {
+    name: "multiple chats store independent telegram message ids",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals A", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      await enableSignalBotChat({
+        chat: { id: "-200", title: "Signals B", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.sent, 2);
+      const deliveries = db.queries.filter((query) =>
+        query.sql.includes("insert into signal_bot_messages"),
+      );
+      assert.equal(deliveries.length, 2);
+      assert.deepEqual(
+        deliveries.map((delivery) => [delivery.params[0], delivery.params[4]]),
+        [
+          ["-100", 101],
+          ["-200", 102],
+        ],
+      );
     },
   },
   {
@@ -2117,6 +2662,408 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorCreatedAt, "2026-01-01 00:00:00.123456+00");
+    },
+  },
+  {
+    name: "publish backs off after transient Telegram send failure",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      const telegram = new FakeTelegram();
+      telegram.nextResult = {
+        error: "other",
+        message: "Too Many Requests",
+        ok: false,
+        retryAfterSec: 7,
+      };
+      const first = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(first.sent, 0);
+      assert.equal(telegram.messages.length, 1);
+      assert.equal(
+        [...redis.strings.entries()].find(([key]) =>
+          key.includes("send_cooldown"),
+        )?.[1],
+        "Too Many Requests",
+      );
+
+      telegram.nextResult = null;
+      const second = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(second.sent, 0);
+      assert.equal(telegram.messages.length, 1);
+    },
+  },
+  {
+    name: "followthrough tick sends stats reply when policy threshold passes",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 2,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
+        followthroughFlowRow({
+          wallet_id: "wallet-2",
+          baseline_shares: "50",
+          latest_shares: "90",
+          latest_size_usd: "4950",
+          positive_usd: "4500",
+          net_usd: "4500",
+          net_shares: "40",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.policyEnabled, true);
+      assert.equal(result.sent, 1);
+      assert.equal(result.sentStats, 1);
+      assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      assert.match(telegram.messages[0]?.text ?? "", /Wallets followed/);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[0], "-100");
+      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000101");
+      assert.equal(delivery.params[3], "followthrough_stats");
+      assert.equal(delivery.params[5], 77);
+      const metrics = JSON.parse(String(delivery.params[8]));
+      assert.equal(metrics.joinedOrAddedWallets, 2);
+      assert.equal(metrics.netSignalSideFlowUsd, 9500);
+      assert.equal(metrics.fallbackStandalone, false);
+      const flowQuery = db.queries.find((query) =>
+        query.sql.includes("from wallet_activity_events"),
+      );
+      assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "followthrough stats thresholds suppress weak open updates",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 3,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 30,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          best_bid: "0.45",
+          best_ask: "0.47",
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow()];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.skipped, 1);
+      assert.equal(telegram.messages.length, 0);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[3], "followthrough_stats");
+      const metrics = JSON.parse(String(delivery.params[8]));
+      assert.equal(metrics.status, "skipped");
+      assert.equal(typeof metrics.nextEvaluateAt, "string");
+    },
+  },
+  {
+    name: "followthrough price-only stats do not claim wallet evidence",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 10,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Market moved after the read/,
+      );
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /tracked wallet flow is not confirmed/,
+      );
+    },
+  },
+  {
+    name: "followthrough missing baseline snapshot is not counted as joined",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [followthroughFlowRow()];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.skipped, 1);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      const metrics = JSON.parse(String(delivery.params[8]));
+      assert.equal(metrics.joinedWallets, 0);
+      assert.equal(metrics.joinedOrAddedWallets, 0);
+      assert.equal(metrics.missingBaselineSnapshots, 1);
+      assert.deepEqual(metrics.dataQualityTags, [
+        "missing_baseline_snapshots",
+        "pnl_estimated",
+      ]);
+    },
+  },
+  {
+    name: "followthrough estimated PnL uses post-signal net shares",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 1,
+        signalBotFollowthroughMinPriceMoveCents: 1,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "1000",
+          latest_shares: "1010",
+          latest_size_usd: "5555",
+          net_shares: "10",
+          net_usd: "500",
+          positive_usd: "500",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      const metrics = JSON.parse(String(delivery.params[8]));
+      assert.equal(metrics.estimatedOpenPnlUsd, 1.5);
+    },
+  },
+  {
+    name: "followthrough policy can enable only resolved wins",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["resolved_win"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          accepting_orders: false,
+          resolved_outcome: "YES",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      assert.equal(result.sentResolvedWin, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Closed green/);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[3], "resolved_win");
+    },
+  },
+  {
+    name: "followthrough policy can enable only resolved losses",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["resolved_loss"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          accepting_orders: false,
+          resolved_outcome: "NO",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      assert.equal(result.sentResolvedLoss, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Closed red/);
+      const delivery = db.queries
+        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[3], "resolved_loss");
+    },
+  },
+  {
+    name: "followthrough ignores terminal prices for resolved closeouts",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["resolved_win", "resolved_loss"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          accepting_orders: false,
+          best_ask: "1",
+          best_bid: "0.99",
+          last_price: "1",
+          resolved_outcome: null,
+          resolved_outcome_pct: null,
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.skipped, 1);
+      assert.equal(telegram.messages.length, 0);
+      assert.equal(
+        db.queries.filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        ).length,
+        0,
+      );
     },
   },
   {
