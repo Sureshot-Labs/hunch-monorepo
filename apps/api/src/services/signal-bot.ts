@@ -347,6 +347,7 @@ type SignalBotFollowthroughCandidateRow = {
   event_id: string | null;
   market_title: string | null;
   event_title: string | null;
+  outcomes: string | null;
   venue: string | null;
   best_bid: string | number | null;
   best_ask: string | number | null;
@@ -2724,6 +2725,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
           m.event_id,
           m.title as market_title,
           e.title as event_title,
+          m.outcomes,
           m.venue,
           m.best_bid,
           m.best_ask,
@@ -3123,6 +3125,21 @@ function formatSignedCentsMove(value: number | null): string {
   return `${rounded >= 0 ? "+" : ""}${rounded}¢`;
 }
 
+function formatSignalBotFollowthroughSideLabel(
+  candidate: SignalBotFollowthroughCandidateRow,
+  side: "NO" | "YES",
+): string {
+  return formatSignalBotOutcomeDisplayLabel(
+    {
+      eventTitle: candidate.event_title,
+      marketTitle: candidate.market_title,
+      outcomes: parseMarketOutcomes(candidate.outcomes),
+    },
+    side,
+    "button",
+  );
+}
+
 function buildSignalBotFollowthroughMessage(input: {
   candidate: SignalBotFollowthroughCandidateRow;
   kind: Extract<
@@ -3133,20 +3150,23 @@ function buildSignalBotFollowthroughMessage(input: {
 }): string {
   const stats = input.stats;
   const side = stats.signalSide ?? "side";
+  const sideLabel = stats.signalSide
+    ? formatSignalBotFollowthroughSideLabel(input.candidate, stats.signalSide)
+    : side;
   const title =
     input.candidate.event_title && input.candidate.market_title
       ? `${input.candidate.event_title} · ${input.candidate.market_title}`
       : input.candidate.market_title || input.candidate.title;
   const priceLine =
     stats.entryPrice != null && stats.markPrice != null
-      ? `${side}: ${formatCents(stats.entryPrice)} → ${formatCents(
+      ? `${sideLabel}: ${formatCents(stats.entryPrice)} → ${formatCents(
           stats.markPrice,
         )} (${formatSignedCentsMove(stats.priceMoveCents)})`
-      : `${side}: price move unavailable`;
+      : `${sideLabel}: price move unavailable`;
   const flowLine = `${formatSignedCompactUsd(
     stats.netSignalSideFlowUsd,
-  )} net tracked ${side} flow`;
-  const activityLine = `${stats.joinedOrAddedWallets} joined/added · ${
+  )} net tracked ${sideLabel} flow`;
+  const activityLine = `${stats.joinedOrAddedWallets} wallets followed · ${
     stats.trimmedWallets
   } trimmed · ${stats.stillHoldingWallets} still hold`;
   const pnlLine =
@@ -3171,8 +3191,8 @@ function buildSignalBotFollowthroughMessage(input: {
         : "Since this signal:";
   const footerLine =
     input.kind === "followthrough_stats" && !hasWalletEvidence
-      ? "Price moved after the signal; tracked wallet flow is not confirmed."
-      : "Tracked wallets after the signal.";
+      ? "Market moved with the read, but tracked wallet follow-through is thin."
+      : "Tracked wallets are still leaning with the signal.";
   return [
     header,
     "",

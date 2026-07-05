@@ -542,6 +542,7 @@ function followthroughCandidateRow(overrides: Record<string, unknown> = {}) {
     event_id: "polymarket:event-1",
     market_title: "Will test resolve Yes?",
     event_title: "Test event",
+    outcomes: null,
     venue: "polymarket",
     best_bid: "0.55",
     best_ask: "0.57",
@@ -2854,6 +2855,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sentStats, 1);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(telegram.messages[0]?.text ?? "", /Wallets followed/);
+      assert.match(telegram.messages[0]?.text ?? "", /wallets followed/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Tracked wallets are still leaning with the signal/,
+      );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
@@ -2875,6 +2881,91 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("from wallet_activity_events"),
       );
       assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "followthrough stats use short market title as side label",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          event_title: "World Cup Winner",
+          market_title: "Argentina",
+        }),
+      ];
+      db.flowRows = [
+        followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(text, /net tracked Argentina flow/);
+      assert.match(text, /Argentina: 40¢ → 56¢/);
+      assert.doesNotMatch(text, /net tracked YES flow/);
+    },
+  },
+  {
+    name: "followthrough stats abbreviate long outcome labels",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          event_title: "NFL Division Winner",
+          market_title: "Will the Giants win the division?",
+          outcomes: JSON.stringify(["New York Giants", "Field"]),
+        }),
+      ];
+      db.flowRows = [
+        followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(text, /net tracked NYG flow/);
+      assert.match(text, /NYG: 40¢ → 56¢/);
+      const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.length, 1);
+      assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
     },
   },
   {
@@ -2997,7 +3088,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /tracked wallet flow is not confirmed/,
+        /Market moved with the read, but tracked wallet follow-through is thin/,
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
