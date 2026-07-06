@@ -19,6 +19,8 @@ const PRIVY_TERMINAL_AUTH_MESSAGES: Record<PrivyTerminalAuthErrorCode, string> =
       "Telegram login did not match the authenticated Privy account. Reopen the Mini App and try again.",
     telegram_signup_blocked:
       "Telegram-only signup is not enabled yet. Sign in with an existing wallet or email account, then link Telegram.",
+    telegram_unlink_pending:
+      "Telegram unlink is still pending. Try again in a moment.",
   };
 
 export function getPrivyTerminalAuthMessage(

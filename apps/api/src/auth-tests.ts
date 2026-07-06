@@ -17,6 +17,7 @@ import { parseJwtExpiresInToMs } from "./env.js";
 import {
   PrivyService,
   PrivyTelegramIdentityMismatchError,
+  PrivyTelegramUnlinkPendingError,
   type PrivyUser,
   type PrivyWalletProfile,
 } from "./privy-service.js";
@@ -990,6 +991,100 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "verifyTokenAndGetUser waits for expected removed Telegram user id to disappear",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        verifyAccessToken: (accessToken: string) => Promise<unknown>;
+        getUserData: (claims: unknown) => Promise<PrivyUser>;
+      };
+      const originalVerifyAccessToken = privyAny.verifyAccessToken;
+      const originalGetUserData = privyAny.getUserData;
+      let getUserDataCalls = 0;
+      try {
+        privyAny.verifyAccessToken = async () => ({ userId: "privy-user-1" });
+        privyAny.getUserData = async () => {
+          getUserDataCalls += 1;
+          const linkedAccounts: unknown[] = [
+            {
+              type: "wallet",
+              address: "0x1111111111111111111111111111111111111111",
+              chainType: "ethereum",
+            },
+          ];
+          if (getUserDataCalls === 1) {
+            linkedAccounts.unshift({
+              type: "telegram",
+              telegram_user_id: "123456789",
+            });
+          }
+          return { linkedAccounts } as unknown as PrivyUser;
+        };
+
+        const result = await PrivyService.verifyTokenAndGetUser("token", {
+          expectedRemovedTelegramUserId: "123456789",
+          maxSyncAttempts: 3,
+          syncRetryDelayMs: 0,
+        });
+
+        assert.equal(getUserDataCalls, 2);
+        assert.equal(PrivyService.extractTelegramAccount(result.user), null);
+      } finally {
+        privyAny.verifyAccessToken = originalVerifyAccessToken;
+        privyAny.getUserData = originalGetUserData;
+      }
+    },
+  },
+  {
+    name: "verifyTokenAndGetUser rejects pending removed Telegram user id after retries",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        verifyAccessToken: (accessToken: string) => Promise<unknown>;
+        getUserData: (claims: unknown) => Promise<PrivyUser>;
+      };
+      const originalVerifyAccessToken = privyAny.verifyAccessToken;
+      const originalGetUserData = privyAny.getUserData;
+      let getUserDataCalls = 0;
+      try {
+        privyAny.verifyAccessToken = async () => ({ userId: "privy-user-1" });
+        privyAny.getUserData = async () => {
+          getUserDataCalls += 1;
+          return {
+            linkedAccounts: [
+              {
+                type: "telegram",
+                telegram_user_id: "123456789",
+              },
+              {
+                type: "wallet",
+                address: "0x1111111111111111111111111111111111111111",
+                chainType: "ethereum",
+              },
+            ],
+          } as unknown as PrivyUser;
+        };
+
+        await assert.rejects(
+          () =>
+            PrivyService.verifyTokenAndGetUser("token", {
+              expectedRemovedTelegramUserId: "123456789",
+              maxSyncAttempts: 2,
+              syncRetryDelayMs: 0,
+            }),
+          (error: unknown) => {
+            assert.ok(error instanceof PrivyTelegramUnlinkPendingError);
+            assert.equal(error.expectedRemovedTelegramUserId, "123456789");
+            assert.equal(error.actualTelegramUserId, "123456789");
+            return true;
+          },
+        );
+        assert.equal(getUserDataCalls, 2);
+      } finally {
+        privyAny.verifyAccessToken = originalVerifyAccessToken;
+        privyAny.getUserData = originalGetUserData;
+      }
+    },
+  },
+  {
     name: "resolveExistingUserIdForPrivyLoginWithClient recovers by linked wallet",
     run: async () => {
       const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -1015,6 +1110,7 @@ const tests: TestCase[] = [
               walletType: "ethereum",
             },
           ],
+          telegramAccount: null,
           email: "user@example.com",
         });
 
@@ -1030,6 +1126,9 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string) => {
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
             return { rows: [] };
           }
           if (/FROM user_wallets/i.test(sql)) {
@@ -1060,6 +1159,7 @@ const tests: TestCase[] = [
               walletType: "ethereum",
             },
           ],
+          telegramAccount: null,
           email: "user@example.com",
         });
 
@@ -1073,6 +1173,9 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string) => {
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
             return { rows: [] };
           }
           if (/FROM user_wallets/i.test(sql)) {
@@ -1102,6 +1205,7 @@ const tests: TestCase[] = [
                 walletType: "ethereum",
               },
             ],
+            telegramAccount: null,
             email: "user@example.com",
           }),
         (error: unknown) =>
@@ -1138,12 +1242,99 @@ const tests: TestCase[] = [
                 walletType: "ethereum",
               },
             ],
+            telegramAccount: null,
             email: null,
           }),
         (error: unknown) => {
           assert.ok(error instanceof PrivyTerminalAuthError);
           assert.equal(error.code, "account_merge_required");
           assert.match(error.message, /merge users before login/i);
+          assert.deepEqual(error.details?.conflictWalletAddresses, [
+            "0xabc0000000000000000000000000000000000000",
+          ]);
+          return true;
+        },
+      );
+    },
+  },
+  {
+    name: "resolveExistingUserIdForPrivyLoginWithClient recovers by linked Telegram",
+    run: async () => {
+      const calls: Array<{ sql: string; params?: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          calls.push({ sql, params });
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
+            return { rows: [{ user_id: "user-telegram-match" }] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      const result =
+        await AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
+          privyUserId: "did:privy:new-user",
+          privyWallets: [
+            {
+              address: "0xabc0000000000000000000000000000000000000",
+              walletType: "ethereum",
+            },
+          ],
+          telegramAccount: {
+            telegramUserId: "123456789",
+          },
+          email: null,
+        });
+
+      assert.equal(result.userId, "user-telegram-match");
+      assert.equal(result.consumeBindGrant, false);
+      assert.match(calls[1].sql, /FROM user_telegram_accounts/i);
+      assert.deepEqual(calls[1].params, ["123456789"]);
+    },
+  },
+  {
+    name: "resolveExistingUserIdForPrivyLoginWithClient rejects Telegram and wallet user conflicts",
+    run: async () => {
+      const client = {
+        query: async (sql: string) => {
+          if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
+            return { rows: [{ user_id: "user-telegram-match" }] };
+          }
+          if (/FROM user_wallets/i.test(sql)) {
+            return { rows: [{ user_id: "user-wallet-match" }] };
+          }
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      } as unknown as Pick<PoolClient, "query">;
+
+      await assert.rejects(
+        () =>
+          AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
+            privyUserId: "did:privy:new-user",
+            privyWallets: [
+              {
+                address: "0xabc0000000000000000000000000000000000000",
+                walletType: "ethereum",
+              },
+            ],
+            telegramAccount: {
+              telegramUserId: "123456789",
+            },
+            email: null,
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof PrivyTerminalAuthError);
+          assert.equal(error.code, "account_merge_required");
+          assert.equal(error.details?.conflictTelegramUserId, "123456789");
           assert.deepEqual(error.details?.conflictWalletAddresses, [
             "0xabc0000000000000000000000000000000000000",
           ]);
@@ -1376,6 +1567,9 @@ const tests: TestCase[] = [
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
             return { rows: [] };
           }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/FROM user_wallets/i.test(sql)) {
             return { rows: [] };
           }
@@ -1496,6 +1690,9 @@ const tests: TestCase[] = [
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
             return { rows: [] };
           }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/FROM user_wallets/i.test(sql)) {
             return { rows: [] };
           }
@@ -1539,6 +1736,9 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string) => {
           if (/FROM users WHERE privy_user_id = \$1/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/FROM user_telegram_accounts/i.test(sql)) {
             return { rows: [] };
           }
           if (/FROM user_wallets/i.test(sql)) {

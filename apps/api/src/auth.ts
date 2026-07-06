@@ -221,13 +221,15 @@ export type PrivyTerminalAuthErrorCode =
   | "wallet_conflict"
   | "telegram_conflict"
   | "telegram_identity_mismatch"
-  | "telegram_signup_blocked";
+  | "telegram_signup_blocked"
+  | "telegram_unlink_pending";
 
 export type PrivyTerminalAuthErrorDetails = {
   actualTelegramUserId?: string;
   conflictTelegramUserId?: string;
   conflictWalletAddress?: string;
   conflictWalletAddresses?: string[];
+  expectedRemovedTelegramUserId?: string;
   expectedTelegramUserId?: string;
 };
 
@@ -713,10 +715,11 @@ export class AuthService {
     params: {
       privyUserId: string;
       privyWallets: PrivyWallet[];
+      telegramAccount: PrivyTelegramAccount | null;
       email: string | null;
     },
   ): Promise<ResolvedPrivyLoginMatch> {
-    const { privyUserId, privyWallets, email } = params;
+    const { privyUserId, privyWallets, telegramAccount, email } = params;
 
     const userByPrivyId = await client.query<{ id: string }>(
       "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
@@ -725,6 +728,19 @@ export class AuthService {
     const userByPrivyIdMatch = userByPrivyId.rows[0]?.id ?? null;
     if (userByPrivyIdMatch) {
       return { userId: userByPrivyIdMatch, consumeBindGrant: false };
+    }
+
+    const telegramUserId = telegramAccount?.telegramUserId.trim() ?? "";
+    let userByTelegramIdMatch: string | null = null;
+    if (telegramUserId) {
+      const userByTelegramId = await client.query<{ user_id: string }>(
+        `SELECT user_id
+           FROM user_telegram_accounts
+          WHERE telegram_user_id = $1
+          LIMIT 1`,
+        [telegramUserId],
+      );
+      userByTelegramIdMatch = userByTelegramId.rows[0]?.user_id ?? null;
     }
 
     const matchedUserIds = new Set<string>();
@@ -760,9 +776,32 @@ export class AuthService {
       );
     }
 
+    const userByWalletMatch =
+      matchedUserIds.size === 1
+        ? (matchedUserIds.values().next().value ?? null)
+        : null;
+    if (
+      userByTelegramIdMatch &&
+      userByWalletMatch &&
+      userByTelegramIdMatch !== userByWalletMatch
+    ) {
+      throw new PrivyTerminalAuthError(
+        "account_merge_required",
+        "Privy Telegram and wallets resolve to different users; merge users before login",
+        {
+          conflictTelegramUserId: telegramUserId,
+          conflictWalletAddresses: Array.from(matchedWalletAddresses),
+        },
+      );
+    }
+
+    if (userByTelegramIdMatch) {
+      return { userId: userByTelegramIdMatch, consumeBindGrant: false };
+    }
+
     if (matchedUserIds.size === 1) {
       return {
-        userId: matchedUserIds.values().next().value ?? null,
+        userId: userByWalletMatch,
         consumeBindGrant: false,
       };
     }
@@ -969,6 +1008,7 @@ export class AuthService {
       await AuthService.resolveExistingUserIdForPrivyLoginWithClient(client, {
         privyUserId,
         privyWallets,
+        telegramAccount,
         email,
       });
     let userId = resolvedExistingUser.userId;

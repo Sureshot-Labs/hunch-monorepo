@@ -158,6 +158,7 @@ function sleep(ms: number): Promise<void> {
 type VerifyTokenAndGetUserOptions = {
   expectedAddedWalletAddresses?: string[];
   expectedRemovedWalletAddresses?: string[];
+  expectedRemovedTelegramUserId?: string | null;
   expectedTelegramUserId?: string | null;
   maxSyncAttempts?: number;
   syncRetryDelayMs?: number;
@@ -387,6 +388,20 @@ export class PrivyTelegramIdentityMismatchError extends Error {
     super("Privy Telegram account did not match expected Telegram user");
     this.actualTelegramUserId = input.actualTelegramUserId;
     this.expectedTelegramUserId = input.expectedTelegramUserId;
+  }
+}
+
+export class PrivyTelegramUnlinkPendingError extends Error {
+  readonly actualTelegramUserId: string;
+  readonly expectedRemovedTelegramUserId: string;
+
+  constructor(input: {
+    actualTelegramUserId: string;
+    expectedRemovedTelegramUserId: string;
+  }) {
+    super("Privy Telegram account unlink is still pending");
+    this.actualTelegramUserId = input.actualTelegramUserId;
+    this.expectedRemovedTelegramUserId = input.expectedRemovedTelegramUserId;
   }
 }
 
@@ -746,6 +761,7 @@ export class PrivyService {
     options: {
       expectedAddedWalletAddresses: string[];
       expectedRemovedWalletAddresses: string[];
+      expectedRemovedTelegramUserId: string | null;
       expectedTelegramUserId: string | null;
     },
   ): boolean {
@@ -758,9 +774,16 @@ export class PrivyService {
       return true;
     }
 
-    return (
+    const actualTelegramUserId = this.getTelegramUserId(privyUser);
+    if (
       options.expectedTelegramUserId !== null &&
-      this.getTelegramUserId(privyUser) !== options.expectedTelegramUserId
+      actualTelegramUserId !== options.expectedTelegramUserId
+    ) {
+      return true;
+    }
+    return (
+      options.expectedRemovedTelegramUserId !== null &&
+      actualTelegramUserId === options.expectedRemovedTelegramUserId
     );
   }
 
@@ -787,6 +810,9 @@ export class PrivyService {
     const expectedTelegramUserId = this.normalizeExpectedTelegramUserId(
       options?.expectedTelegramUserId,
     );
+    const expectedRemovedTelegramUserId = this.normalizeExpectedTelegramUserId(
+      options?.expectedRemovedTelegramUserId,
+    );
     const maxSyncAttempts = Math.max(
       1,
       options?.maxSyncAttempts ?? PRIVY_USER_SYNC_MAX_ATTEMPTS,
@@ -805,6 +831,7 @@ export class PrivyService {
       this.shouldRetryPrivyUserSync(user, walletAddresses, {
         expectedAddedWalletAddresses,
         expectedRemovedWalletAddresses,
+        expectedRemovedTelegramUserId,
         expectedTelegramUserId,
       });
       attempt += 1
@@ -825,6 +852,15 @@ export class PrivyService {
       throw new PrivyTelegramIdentityMismatchError({
         actualTelegramUserId,
         expectedTelegramUserId,
+      });
+    }
+    if (
+      expectedRemovedTelegramUserId !== null &&
+      actualTelegramUserId === expectedRemovedTelegramUserId
+    ) {
+      throw new PrivyTelegramUnlinkPendingError({
+        actualTelegramUserId,
+        expectedRemovedTelegramUserId,
       });
     }
 

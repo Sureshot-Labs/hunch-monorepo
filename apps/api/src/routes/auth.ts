@@ -23,6 +23,7 @@ import {
   PrivyAccessTokenError,
   PrivyService,
   PrivyTelegramIdentityMismatchError,
+  PrivyTelegramUnlinkPendingError,
   type PrivyWalletProfile,
   PrivyUpstreamError,
 } from "../privy-service.js";
@@ -442,6 +443,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         } = await PrivyService.verifyTokenAndGetUser(body.accessToken, {
           expectedAddedWalletAddresses: body.expectedAddedWalletAddresses,
           expectedRemovedWalletAddresses: body.expectedRemovedWalletAddresses,
+          expectedRemovedTelegramUserId: body.expectedRemovedTelegramUserId,
           expectedTelegramUserId: body.expectedTelegramUserId,
         });
         primaryWalletAddress = resolvedPrimaryWalletAddress ?? "unknown";
@@ -664,6 +666,27 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        if (error instanceof PrivyTelegramUnlinkPendingError) {
+          app.log.warn({ error }, "Privy Telegram unlink is still pending");
+
+          await AuthService.recordAuthAttempt(
+            primaryWalletAddress,
+            "privy-auth",
+            false,
+            clientIp,
+            userAgent,
+            authFailureMessage,
+          );
+
+          reply.code(409);
+          return reply.send({
+            error: "telegram_unlink_pending",
+            message: getPrivyTerminalAuthMessage("telegram_unlink_pending"),
+            actualTelegramUserId: error.actualTelegramUserId,
+            expectedRemovedTelegramUserId: error.expectedRemovedTelegramUserId,
+          });
+        }
+
         if (error instanceof PrivyTerminalAuthError) {
           app.log.warn({ error }, "Privy authentication requires user action");
 
@@ -687,6 +710,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             conflictTelegramUserId: error.details?.conflictTelegramUserId,
             conflictWalletAddress: error.details?.conflictWalletAddress,
             conflictWalletAddresses: error.details?.conflictWalletAddresses,
+            expectedRemovedTelegramUserId:
+              error.details?.expectedRemovedTelegramUserId,
             expectedTelegramUserId: error.details?.expectedTelegramUserId,
           });
         }
