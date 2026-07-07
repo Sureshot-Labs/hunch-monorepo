@@ -162,8 +162,20 @@ export type TelegramBotUser = {
   username?: string;
 };
 
+export type TelegramInlineKeyboardButton =
+  | {
+      text: string;
+      url: string;
+      web_app?: never;
+    }
+  | {
+      text: string;
+      url?: never;
+      web_app: { url: string };
+    };
+
 export type TelegramInlineKeyboard = {
-  inline_keyboard: Array<Array<{ text: string; url: string }>>;
+  inline_keyboard: Array<Array<TelegramInlineKeyboardButton>>;
 };
 
 export type TelegramSendMessageInput = {
