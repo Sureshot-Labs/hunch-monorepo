@@ -6,7 +6,10 @@ import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
-import { storeOrder } from "../repos/orders-repo.js";
+import {
+  fetchStoredOrderWalletContext,
+  storeOrder,
+} from "../repos/orders-repo.js";
 import {
   buildOrderNotification,
   createNotificationSafe,
@@ -171,6 +174,26 @@ type PolymarketRouteLogger = {
   warn?: (input: unknown, message?: string) => void;
 };
 
+type PolymarketWarnLogger = {
+  warn: (input: unknown, message?: string) => void;
+};
+
+function optionalWarnLogger(
+  log?: PolymarketRouteLogger | null,
+): PolymarketWarnLogger | undefined {
+  return log?.warn
+    ? {
+        warn: (input, message) => log.warn?.(input, message),
+      }
+    : undefined;
+}
+
+function requiredWarnLogger(
+  log?: PolymarketRouteLogger | null,
+): PolymarketWarnLogger {
+  return optionalWarnLogger(log) ?? { warn: () => undefined };
+}
+
 type PolymarketClientOrderBody = {
   deferExec?: boolean;
   exchangeAddress?: string | null;
@@ -191,6 +214,10 @@ type PolymarketBalanceAllowanceSyncBody = {
   assetType: string;
   signatureType?: number | null;
   tokenId?: string | null;
+};
+
+type PolymarketCancelOrderBody = {
+  orderID: string;
 };
 
 type PolymarketOrderHashBody = {
@@ -292,6 +319,116 @@ function sleep(ms: number): Promise<void> {
 
 function normalizeAddress(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
+}
+
+function isEvmAddress(value: string | null | undefined): value is string {
+  return typeof value === "string" && EVM_ADDRESS_RE.test(value.trim());
+}
+
+function buildPolymarketCancelSignerCandidates(inputs: {
+  requestedWalletAddress: string | null | undefined;
+  storedSignerAddress: string | null | undefined;
+  storedWalletAddress: string | null | undefined;
+}): string[] {
+  return Array.from(
+    new Map(
+      [
+        inputs.storedSignerAddress,
+        inputs.requestedWalletAddress,
+        inputs.storedWalletAddress,
+      ]
+        .filter(isEvmAddress)
+        .map((address) => [address.toLowerCase(), address]),
+    ).values(),
+  );
+}
+
+function summarizePolymarketCancelPayload(inputs: {
+  payload: unknown;
+  orderId: string;
+}): {
+  canceled: string[];
+  isCanceled: boolean;
+  notCanceledReason: string | null;
+} {
+  const canceledRaw = isRecord(inputs.payload) ? inputs.payload.canceled : null;
+  const canceled = Array.isArray(canceledRaw)
+    ? canceledRaw.filter((value): value is string => typeof value === "string")
+    : [];
+
+  if (canceled.includes(inputs.orderId)) {
+    return { canceled, isCanceled: true, notCanceledReason: null };
+  }
+
+  const notCanceled = isRecord(inputs.payload)
+    ? inputs.payload.not_canceled
+    : null;
+  const notCanceledReason =
+    isRecord(notCanceled) && typeof notCanceled[inputs.orderId] === "string"
+      ? (notCanceled[inputs.orderId] as string)
+      : canceled.length === 0
+        ? `Order[${inputs.orderId}] was not canceled by Polymarket`
+        : null;
+
+  return { canceled, isCanceled: false, notCanceledReason };
+}
+
+function isPolymarketAlreadyClosedReason(
+  reason: string | null | undefined,
+): boolean {
+  if (!reason) return false;
+  const normalized = reason.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("already canceled") ||
+    normalized.includes("already cancelled") ||
+    normalized.includes("already matched") ||
+    normalized.includes("matched orders can't be canceled") ||
+    normalized.includes("matched orders can't be cancelled") ||
+    normalized.includes("matched orders cannot be canceled") ||
+    normalized.includes("matched orders cannot be cancelled") ||
+    normalized.includes("can't be found") ||
+    normalized.includes("cannot be found") ||
+    normalized.includes("not found")
+  );
+}
+
+function resolvePolymarketClosedReasonHint(
+  reason: string | null | undefined,
+): PolymarketClosedReasonHint {
+  if (!reason) return null;
+  const normalized = reason.trim().toLowerCase();
+  if (!normalized) return null;
+  const mentionsMatched =
+    normalized.includes("matched orders can't be canceled") ||
+    normalized.includes("matched orders can't be cancelled") ||
+    normalized.includes("matched orders cannot be canceled") ||
+    normalized.includes("matched orders cannot be cancelled") ||
+    normalized.includes("already matched") ||
+    normalized.includes(" or matched");
+  const mentionsCancelled =
+    normalized.includes("already canceled") ||
+    normalized.includes("already cancelled");
+  const mentionsNotFound =
+    normalized.includes("can't be found") ||
+    normalized.includes("cannot be found") ||
+    normalized.includes("not found");
+  if ((mentionsMatched && mentionsCancelled) || mentionsNotFound) {
+    return null;
+  }
+  if (
+    normalized.includes("matched orders can't be canceled") ||
+    normalized.includes("matched orders can't be cancelled") ||
+    normalized.includes("matched orders cannot be canceled") ||
+    normalized.includes("matched orders cannot be cancelled") ||
+    normalized.includes("already matched")
+  ) {
+    return "matched";
+  }
+  if (mentionsCancelled) {
+    return "cancelled";
+  }
+  return null;
 }
 
 function buildPolymarketAccountCacheKey(inputs: {
@@ -3221,6 +3358,412 @@ export async function syncPolymarketBalanceAllowanceRoute(input: {
       signatureType: input.body.signatureType ?? null,
       tokenId: input.body.tokenId ?? null,
       payload: upstream.payload,
+    },
+  };
+}
+
+export async function cancelPolymarketOrderRoute(input: {
+  body: PolymarketCancelOrderBody;
+  log?: PolymarketRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  requestedWalletAddress?: string | null;
+  userId: string;
+}): Promise<PolymarketRouteOperationResult> {
+  const warnLog = requiredWarnLogger(input.log);
+  const notificationLog = optionalWarnLogger(input.log);
+  const storedOrderWalletContext = await fetchStoredOrderWalletContext(
+    input.pool,
+    {
+      userId: input.userId,
+      venue: "polymarket",
+      venueOrderId: input.body.orderID,
+    },
+  );
+
+  const signerCandidates = buildPolymarketCancelSignerCandidates({
+    requestedWalletAddress: input.requestedWalletAddress,
+    storedSignerAddress: storedOrderWalletContext?.signerAddress,
+    storedWalletAddress: storedOrderWalletContext?.walletAddress,
+  });
+
+  if (signerCandidates.length === 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "Polymarket cancel requires an EVM signer wallet address",
+      },
+    };
+  }
+
+  let resolvedSigner: string | null = null;
+  let resolvedPayload: unknown = null;
+  let lastUpstreamFailure: { status: number; payload: unknown } | null = null;
+  let lastInvalidCredentialsFailure: {
+    status: number;
+    payload: unknown;
+  } | null = null;
+  let lastCancelRejection: {
+    creds: PolymarketL2Credentials;
+    signer: string;
+    reason: string;
+    payload: unknown;
+  } | null = null;
+  let hasPolymarketCredentials = false;
+
+  for (const signer of signerCandidates) {
+    const creds = await AuthService.getVenueCredentials(
+      input.userId,
+      "polymarket",
+      signer,
+    );
+    if (!creds?.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
+      continue;
+    }
+    hasPolymarketCredentials = true;
+
+    const upstream = await polymarketL2Request({
+      baseUrl: env.polymarketClobBase,
+      timeoutMs: 10_000,
+      address: signer,
+      creds: {
+        apiKey: creds.apiKey,
+        apiSecret: creds.apiSecret,
+        apiPassphrase: creds.apiPassphrase,
+      },
+      method: "DELETE",
+      requestPath: "/order",
+      body: { orderID: input.body.orderID },
+    });
+
+    if (!upstream.ok) {
+      if (
+        await invalidatePolymarketCredentialsForInvalidApiKey({
+          userId: input.userId,
+          signer,
+          endpoint: "order/cancel",
+          upstream,
+          log: input.log,
+        })
+      ) {
+        lastInvalidCredentialsFailure = {
+          status: upstream.status,
+          payload: upstream.payload,
+        };
+        continue;
+      }
+
+      lastUpstreamFailure = {
+        status: upstream.status,
+        payload: upstream.payload,
+      };
+      continue;
+    }
+
+    const cancelSummary = summarizePolymarketCancelPayload({
+      payload: upstream.payload,
+      orderId: input.body.orderID,
+    });
+
+    if (cancelSummary.isCanceled) {
+      resolvedSigner = signer;
+      resolvedPayload = upstream.payload;
+      break;
+    }
+
+    if (cancelSummary.notCanceledReason) {
+      lastCancelRejection = {
+        creds: {
+          apiKey: creds.apiKey,
+          apiSecret: creds.apiSecret,
+          apiPassphrase: creds.apiPassphrase,
+        },
+        signer,
+        reason: cancelSummary.notCanceledReason,
+        payload: upstream.payload,
+      };
+    }
+  }
+
+  if (!resolvedSigner) {
+    if (!hasPolymarketCredentials) {
+      return {
+        ok: false,
+        statusCode: 400,
+        payload: {
+          error: "Polymarket credentials not found (connect first)",
+        },
+      };
+    }
+
+    if (lastCancelRejection) {
+      if (isPolymarketAlreadyClosedReason(lastCancelRejection.reason)) {
+        const fallbackStatusHint = resolvePolymarketClosedReasonHint(
+          lastCancelRejection.reason,
+        );
+        const clobOrderEvidence =
+          await fetchPolymarketClobOrderExecutionEvidence({
+            creds: lastCancelRejection.creds,
+            log: warnLog,
+            orderId: input.body.orderID,
+            signer: lastCancelRejection.signer,
+          });
+        let tradeSync: Awaited<
+          ReturnType<typeof syncPolymarketTradesForSigner>
+        > | null = null;
+        if (clobOrderEvidence.hasExecution) {
+          try {
+            tradeSync = await syncPolymarketTradesForSigner(input.pool, {
+              userId: input.userId,
+              signerAddress: lastCancelRejection.signer,
+            });
+          } catch (error) {
+            input.log?.error?.(
+              {
+                error,
+                userId: input.userId,
+                signer: lastCancelRejection.signer,
+                orderId: input.body.orderID,
+              },
+              "Polymarket trade sync before cancel reconcile failed",
+            );
+          }
+          if (
+            !(await hasPolymarketVenueOrderExecutionEvidence({
+              userId: input.userId,
+              venueOrderId: input.body.orderID,
+            }))
+          ) {
+            const markedUnconfirmed =
+              await markPolymarketDelayedOrderUnconfirmed({
+                userId: input.userId,
+                venueOrderId: input.body.orderID,
+              });
+            return {
+              ok: true,
+              payload: {
+                ok: true,
+                venue: "polymarket",
+                orderId: input.body.orderID,
+                signer: lastCancelRejection.signer,
+                status: POLYMARKET_UNCONFIRMED_STATUS,
+                reconciled: false,
+                pendingReconcile: true,
+                changed: markedUnconfirmed,
+                reason: lastCancelRejection.reason,
+                payload: lastCancelRejection.payload,
+                orderStatusPayload: clobOrderEvidence.payload ?? undefined,
+                tradeSync: tradeSync ?? undefined,
+              },
+            };
+          }
+        }
+
+        const statusHint = clobOrderEvidence.statusHint ?? fallbackStatusHint;
+        const allowMissingOrderNoFill =
+          isPolymarketClobNoFillTerminalStatus(
+            clobOrderEvidence.orderStatus,
+          ) &&
+          (await isPolymarketOrderNoFillGraceElapsed({
+            userId: input.userId,
+            venueOrderId: input.body.orderID,
+          }));
+        const terminalNoFillStatus = resolvePolymarketClobNoFillTerminalStatus(
+          clobOrderEvidence.orderStatus,
+        );
+        let reconciled = await reconcilePolymarketTerminalOrder({
+          userId: input.userId,
+          venueOrderId: input.body.orderID,
+          statusHint,
+          externalFilledSize: clobOrderEvidence.externalFilledSize,
+          externalFillPrice: clobOrderEvidence.externalFillPrice,
+          externalHasExecution: clobOrderEvidence.hasExecution,
+          skipOnchainExecutionCheck: true,
+          allowAmbiguousNoFillReconcile: allowMissingOrderNoFill,
+          allowExternalExecutionEvidence: false,
+          terminalNoFillStatus,
+        });
+        if (!reconciled || reconciled.status === "matched") {
+          try {
+            tradeSync ??= await syncPolymarketTradesForSigner(input.pool, {
+              userId: input.userId,
+              signerAddress: lastCancelRejection.signer,
+            });
+            if (!reconciled && tradeSync.insertedFillCount > 0) {
+              reconciled = await reconcilePolymarketTerminalOrder({
+                userId: input.userId,
+                venueOrderId: input.body.orderID,
+                statusHint,
+                externalFilledSize: clobOrderEvidence.externalFilledSize,
+                externalFillPrice: clobOrderEvidence.externalFillPrice,
+                externalHasExecution: clobOrderEvidence.hasExecution,
+                skipOnchainExecutionCheck: true,
+                allowAmbiguousNoFillReconcile: allowMissingOrderNoFill,
+                allowExternalExecutionEvidence: false,
+                terminalNoFillStatus,
+              });
+            }
+          } catch (error) {
+            input.log?.error?.(
+              {
+                error,
+                userId: input.userId,
+                signer: lastCancelRejection.signer,
+                orderId: input.body.orderID,
+              },
+              "Polymarket trade sync after cancel reconcile failed",
+            );
+          }
+        }
+
+        if (!reconciled) {
+          const markedUnconfirmed =
+            await markPolymarketDelayedOrderUnconfirmed({
+              userId: input.userId,
+              venueOrderId: input.body.orderID,
+            });
+          return {
+            ok: true,
+            payload: {
+              ok: true,
+              venue: "polymarket",
+              orderId: input.body.orderID,
+              signer: lastCancelRejection.signer,
+              status: POLYMARKET_UNCONFIRMED_STATUS,
+              reconciled: false,
+              pendingReconcile: true,
+              changed: markedUnconfirmed,
+              reason: lastCancelRejection.reason,
+              payload: lastCancelRejection.payload,
+              orderStatusPayload: clobOrderEvidence.payload ?? undefined,
+              tradeSync: tradeSync ?? undefined,
+            },
+          };
+        }
+
+        const reconciledStatus = reconciled.status;
+        if (reconciledStatus !== "matched") {
+          void createNotificationSafe(
+            input.pool,
+            buildOrderNotification({
+              userId: input.userId,
+              venue: "polymarket",
+              status: reconciledStatus,
+              side: reconciled.side ?? null,
+              size: reconciled.size ?? null,
+              price: reconciled.price ?? null,
+              orderId: input.body.orderID,
+              tokenId: reconciled.tokenId ?? null,
+              walletAddress:
+                reconciled.walletAddress ?? lastCancelRejection.signer,
+            }),
+            notificationLog,
+          );
+        }
+        return {
+          ok: true,
+          payload: {
+            ok: true,
+            venue: "polymarket",
+            orderId: input.body.orderID,
+            signer: lastCancelRejection.signer,
+            status: reconciledStatus ?? "cancelled",
+            reconciled: true,
+            changed: true,
+            payload: lastCancelRejection.payload,
+            orderStatusPayload: clobOrderEvidence.payload ?? undefined,
+            tradeSync: tradeSync ?? undefined,
+          },
+        };
+      }
+
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error: "Polymarket cancel rejected",
+          signer: lastCancelRejection.signer,
+          reason: lastCancelRejection.reason,
+          payload: lastCancelRejection.payload,
+        },
+      };
+    }
+
+    if (lastInvalidCredentialsFailure) {
+      return {
+        ok: false,
+        statusCode: 401,
+        payload: polymarketCredentialsInvalidPayload(
+          lastInvalidCredentialsFailure,
+        ),
+      };
+    }
+
+    if (lastUpstreamFailure) {
+      return {
+        ok: false,
+        statusCode: 502,
+        payload: {
+          error: "Polymarket cancel failed",
+          status: lastUpstreamFailure.status,
+          payload: lastUpstreamFailure.payload,
+        },
+      };
+    }
+
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: { error: "Polymarket cancel failed" },
+    };
+  }
+
+  const cancelUpdate = await input.pool.query(
+    `
+      update orders o
+      set status = 'cancelled',
+          cancelled_at = coalesce(cancelled_at, now()),
+          last_update = now()
+      where o.user_id = $1
+        and o.venue = 'polymarket'
+        and o.venue_order_id = $2
+        and lower(coalesce(o.status, '')) in (
+          'pending',
+          'submitted',
+          'live',
+          'open',
+          'delayed',
+          'unconfirmed',
+          'partially_filled'
+        )
+    `,
+    [input.userId, input.body.orderID],
+  );
+
+  if ((cancelUpdate.rowCount ?? 0) > 0) {
+    void createNotificationSafe(
+      input.pool,
+      buildOrderNotification({
+        userId: input.userId,
+        venue: "polymarket",
+        status: "cancelled",
+        orderId: input.body.orderID,
+        walletAddress: resolvedSigner,
+      }),
+      notificationLog,
+    );
+  }
+
+  return {
+    ok: true,
+    payload: {
+      ok: true,
+      venue: "polymarket",
+      orderId: input.body.orderID,
+      signer: resolvedSigner,
+      status: "cancelled",
+      changed: (cancelUpdate.rowCount ?? 0) > 0,
+      payload: resolvedPayload,
     },
   };
 }

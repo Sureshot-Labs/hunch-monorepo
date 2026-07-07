@@ -149,6 +149,17 @@ const tests: TestCase[] = [
       assert.doesNotMatch(polymarketOrderBlock, /polymarketL2Request/);
       assert.doesNotMatch(polymarketOrderBlock, /storeOrder/);
 
+      const polymarketCancelBlock = sourceSlice(
+        polymarketRoute,
+        "   * DELETE /order",
+        "\n};\n",
+      );
+      assert.match(polymarketCancelBlock, /cancelPolymarketOrderRoute/);
+      assert.doesNotMatch(polymarketCancelBlock, /polymarketL2Request/);
+      assert.doesNotMatch(polymarketCancelBlock, /fetchStoredOrderWalletContext/);
+      assert.doesNotMatch(polymarketCancelBlock, /syncPolymarketTradesForSigner/);
+      assert.doesNotMatch(polymarketCancelBlock, /createNotificationSafe/);
+
       const polymarketOrderHashBlock = sourceSlice(
         polymarketRoute,
         "   * POST /order-hash",
