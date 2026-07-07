@@ -1117,7 +1117,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       globalThis.fetch = (async (_input, init) =>
         new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener("abort", () => {
-            reject(new Error("aborted"));
+            reject(new DOMException("Aborted", "AbortError"));
           });
         })) as typeof fetch;
       try {
@@ -1126,7 +1126,53 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           timeoutMs: 1,
           token: "token",
         });
-        await assert.rejects(() => client.buildStatusMessage(999), /aborted/);
+        await assert.rejects(
+          () => client.buildStatusMessage(999),
+          /timed out/,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading API client reports unknown status on confirm timeout",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        })) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          executeTimeoutMs: 1,
+          timeoutMs: 60_000,
+          token: "token",
+        });
+        const answers: Array<{ text?: string; showAlert?: boolean }> = [];
+        const messages: Array<{ text: string }> = [];
+        const handled = await client.handleCallback({
+          answerCallbackQuery: async (input) => {
+            answers.push(input);
+          },
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-1",
+            message: { chat: { id: 999 } },
+          },
+          sendMessage: async (input) => {
+            messages.push(input);
+          },
+        });
+        assert.equal(handled, true);
+        assert.equal(answers[0]?.showAlert, true);
+        assert.match(answers[0]?.text ?? "", /status is unknown/i);
+        assert.match(messages[0]?.text ?? "", /before retrying/i);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -1706,7 +1752,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           if (sql.includes("stale_pre_submit_execution")) {
             return { rowCount: 1, rows: [] };
           }
-          if (sql.includes("reconcile_required")) {
+          if (sql.includes("submit_state_unknown")) {
+            return { rowCount: 2, rows: [] };
+          }
+          if (sql.includes("error_code = 'reconcile_required'")) {
             return { rowCount: 3, rows: [] };
           }
           return { rowCount: 0, rows: [] };
@@ -1720,14 +1769,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         expiredPending: 2,
         failedPreSubmitExecuting: 1,
         submittedReconcileRequired: 3,
+        unknownSubmitReconcileRequired: 2,
       });
       assert.match(statements[0] ?? "", /expires_at <=/);
       assert.match(statements[1] ?? "", /venue_order_id IS NULL/);
-      assert.match(statements[1] ?? "", /prepared_snapshot = '\{\}'::jsonb/);
-      assert.match(statements[2] ?? "", /venue_order_id IS NOT NULL/);
-      assert.match(statements[2] ?? "", /prepared_snapshot <> '\{\}'::jsonb/);
-      assert.match(statements[2] ?? "", /status = 'submitted'/);
-      assert.match(statements[2] ?? "", /error_code = 'reconcile_required'/);
+      assert.match(statements[1] ?? "", /submit_started_at IS NULL/);
+      assert.match(statements[2] ?? "", /status = 'reconcile_required'/);
+      assert.match(statements[2] ?? "", /submit_started_at IS NOT NULL/);
+      assert.match(statements[3] ?? "", /venue_order_id IS NOT NULL/);
+      assert.match(statements[3] ?? "", /status = 'submitted'/);
+      assert.match(statements[3] ?? "", /error_code = 'reconcile_required'/);
     },
   },
   {

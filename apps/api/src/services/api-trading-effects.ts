@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { tryRecordReferralFirstTradeConversion } from "./analytics-referrals.js";
 import type {
   ApiTradingApplicationServiceInput,
@@ -8,7 +10,11 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { applyOptimisticPositionTrade } from "./positions-optimistic.js";
-import { markOrderPositionDeltaApplied } from "../repos/orders-repo.js";
+import {
+  claimOrderPositionDeltaApplication,
+  clearOrderPositionDeltaApplicationClaim,
+  markOrderPositionDeltaApplied,
+} from "../repos/orders-repo.js";
 import type {
   ApplyTradeEffectsInput,
   TradeEffectsResult,
@@ -76,32 +82,52 @@ export async function applyOrderTradeEffects(
   }
 
   let positionDeltaApplied = false;
+  let positionDeltaAlreadyClaimed = false;
   if (
     input.submitResult.status === "filled" &&
     !storedOrder.positionDeltaApplied &&
+    storedOrder.id &&
     tokenId &&
     input.submitResult.size &&
     input.submitResult.price
   ) {
-    try {
-      const result = await applyOptimisticPositionTrade(ctx.pool, {
-        userId: input.intent.actor.userId,
-        walletAddress,
-        venue,
-        tokenId,
-        side: "BUY",
-        shares: input.submitResult.size,
-        notionalUsd: input.submitResult.size * input.submitResult.price,
-      });
-      positionDeltaApplied = result.applied;
-      if (result.applied && storedOrder.id) {
-        await markOrderPositionDeltaApplied(ctx.pool, { id: storedOrder.id });
+    const claimId = crypto.randomUUID();
+    const claimed = await claimOrderPositionDeltaApplication(ctx.pool, {
+      id: storedOrder.id,
+      claimId,
+    });
+    if (!claimed) {
+      positionDeltaAlreadyClaimed = true;
+    } else {
+      try {
+        const result = await applyOptimisticPositionTrade(ctx.pool, {
+          userId: input.intent.actor.userId,
+          walletAddress,
+          venue,
+          tokenId,
+          side: "BUY",
+          shares: input.submitResult.size,
+          notionalUsd: input.submitResult.size * input.submitResult.price,
+        });
+        positionDeltaApplied = result.applied;
+        if (result.applied) {
+          await markOrderPositionDeltaApplied(ctx.pool, { id: storedOrder.id });
+        } else {
+          await clearOrderPositionDeltaApplicationClaim(ctx.pool, {
+            id: storedOrder.id,
+            claimId,
+          });
+        }
+      } catch (error) {
+        await clearOrderPositionDeltaApplicationClaim(ctx.pool, {
+          id: storedOrder.id,
+          claimId,
+        });
+        ctx.logger?.warn?.(
+          { error, intentId: input.intent.id },
+          "Bot trading optimistic position update failed",
+        );
       }
-    } catch (error) {
-      ctx.logger?.warn?.(
-        { error, intentId: input.intent.id },
-        "Bot trading optimistic position update failed",
-      );
     }
   }
 
@@ -130,6 +156,8 @@ export async function applyOrderTradeEffects(
     positionDeltaApplied,
     raw: storedOrder.positionDeltaApplied
       ? { positionDeltaAlreadyApplied: true }
-      : undefined,
+      : positionDeltaAlreadyClaimed
+        ? { positionDeltaAlreadyClaimed: true }
+        : undefined,
   };
 }

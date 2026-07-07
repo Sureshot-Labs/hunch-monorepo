@@ -101,6 +101,10 @@ await test("retention selector reports and cleans ephemeral Telegram trade inten
     "utf8",
   );
   assert.match(source, /telegram_trade_intents_ephemeral_cleanup/);
+  assert.match(
+    source,
+    /'executing', 'submitted', 'filled', 'reconcile_required'/,
+  );
   for (const status of [
     "draft",
     "previewed",

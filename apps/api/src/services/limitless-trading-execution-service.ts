@@ -2693,9 +2693,12 @@ function extractLimitlessMarketExchangeAddress(
 
   const directCandidates = [
     marketRecord.negRiskExchange,
+    marketRecord.neg_risk_exchange,
     marketRecord.exchangeAddress,
+    marketRecord.exchange_address,
     marketRecord.exchange,
     marketRecord.venueExchange,
+    marketRecord.venue_exchange,
   ];
   for (const candidate of directCandidates) {
     if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
@@ -2705,7 +2708,15 @@ function extractLimitlessMarketExchangeAddress(
 
   const venue = marketRecord.venue;
   if (isRecord(venue)) {
-    const nestedCandidates = [venue.exchangeAddress, venue.exchange];
+    const nestedCandidates = [
+      venue.negRiskExchange,
+      venue.neg_risk_exchange,
+      venue.exchangeAddress,
+      venue.exchange_address,
+      venue.exchange,
+      venue.venueExchange,
+      venue.venue_exchange,
+    ];
     for (const candidate of nestedCandidates) {
       if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
         return ethers.getAddress(candidate.trim());
@@ -4164,19 +4175,7 @@ async function fetchLimitlessExchangeAddress(input: {
     ...(input.requestAuth as object),
   });
   if (!upstream.ok || !isRecord(upstream.payload)) return null;
-  const direct =
-    readString(upstream.payload.exchangeAddress) ??
-    readString(upstream.payload.exchange_address) ??
-    readString(upstream.payload.exchange);
-  if (direct) return direct;
-  const venue = isRecord(upstream.payload.venue)
-    ? upstream.payload.venue
-    : null;
-  return venue
-    ? (readString(venue.exchangeAddress) ??
-        readString(venue.exchange_address) ??
-        readString(venue.exchange))
-    : null;
+  return extractLimitlessMarketExchangeAddress(upstream.payload);
 }
 
 async function prepareLimitlessAmmTrade(input: {
@@ -4377,10 +4376,7 @@ async function prepareTrade(
   }
 
   const exchangeAddress =
-    (isRecord(market.metadata) &&
-      readString(market.metadata.exchangeAddress)) ||
-    (isRecord(market.metadata) &&
-      readString(market.metadata.exchange_address)) ||
+    extractLimitlessMarketExchangeAddress(market.metadata) ||
     (await fetchLimitlessExchangeAddress({
       marketSlug: market.slug,
       requestAuth,
@@ -4666,6 +4662,11 @@ async function persistTrade(
       },
     };
   }
+  const upstreamPayload =
+    isRecord(input.submitResult.raw) && "payload" in input.submitResult.raw
+      ? input.submitResult.raw.payload
+      : input.submitResult.raw;
+  const filledAt = input.submitResult.status === "filled" ? new Date() : null;
   const stored = await storeOrder(ctx.pool, {
     userId: input.intent.actor.userId,
     walletAddress: input.intent.walletAddress,
@@ -4690,13 +4691,9 @@ async function persistTrade(
     rawError: null,
     orderPayload: {
       ...payload.orderPayload,
-      _hunchUpstream:
-        isRecord(input.submitResult.raw) &&
-        "payload" in input.submitResult.raw
-          ? input.submitResult.raw.payload
-          : input.submitResult.raw,
+      _hunchUpstream: upstreamPayload,
     },
-    filledAt: input.submitResult.status === "filled" ? new Date() : null,
+    filledAt,
   });
   return {
     venue: "limitless",
@@ -4706,6 +4703,8 @@ async function persistTrade(
     status: stored.order.status,
     raw: {
       stored,
+      upstreamPayload,
+      filledAt,
       tokenId: payload.tokenId,
       walletAddress: input.intent.walletAddress,
     },
@@ -4726,6 +4725,50 @@ async function applyLimitlessTradeEffects(
       positionDeltaApplied: true,
       raw: { effectsApplied: true },
     };
+  }
+  if (input.submitResult.status === "filled") {
+    const raw = isRecord(input.persisted.raw) ? input.persisted.raw : null;
+    const stored = raw && isRecord(raw.stored) ? raw.stored : null;
+    const order = stored && isRecord(stored.order) ? stored.order : null;
+    const orderId = readString(order?.id);
+    const venueOrderId =
+      input.submitResult.venueOrderId ?? readString(order?.venue_order_id);
+    const tokenId = readString(raw?.tokenId) ?? input.intent.target.tokenId;
+    const walletAddress =
+      readString(raw?.walletAddress) ?? input.intent.walletAddress;
+    const filledAt =
+      raw?.filledAt instanceof Date ? raw.filledAt : new Date();
+    const postedAt =
+      order?.posted_at instanceof Date ? order.posted_at : filledAt;
+    const upstreamPayload = raw?.upstreamPayload;
+    if (orderId && venueOrderId && upstreamPayload != null) {
+      try {
+        await upsertLimitlessVenueShareAccrualFromOrderPayload(ctx.pool, {
+          orderId,
+          userId: input.intent.actor.userId,
+          walletAddress,
+          signerAddress: walletAddress,
+          venueOrderId,
+          orderHash: input.submitResult.orderHash ?? null,
+          tokenId,
+          side: "BUY",
+          filledAt,
+          lastUpdate: filledAt,
+          postedAt,
+          payload: upstreamPayload,
+        });
+      } catch (error) {
+        ctx.logger?.warn?.(
+          {
+            error,
+            intentId: input.intent.id,
+            userId: input.intent.actor.userId,
+            venueOrderId,
+          },
+          "Limitless bot venue fee share accrual upsert failed",
+        );
+      }
+    }
   }
   return applyOrderTradeEffects(ctx, input);
 }

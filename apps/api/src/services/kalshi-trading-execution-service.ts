@@ -32,6 +32,7 @@ import type {
 } from "./api-trading-types.js";
 import {
   extractDflowErrorMessage,
+  extractDflowErrorCode,
   formatDflowUserMessage,
 } from "./dflow-client.js";
 import {
@@ -45,6 +46,7 @@ import {
   type KalshiExecutionPurpose,
   mergeKalshiExecutionRaw,
   normalizeKalshiExecutionStatus,
+  resolveKalshiExecutionSettlementStatus,
 } from "./kalshi-executions.js";
 import type {
   PersistedTrade,
@@ -126,14 +128,14 @@ export async function buildKalshiDflowOrderRoute(input: {
   });
   if (!upstream.ok) {
     const userMessage = formatDflowUserMessage(upstream.payload);
+    const code = extractDflowErrorCode(upstream.payload);
     const message = extractDflowErrorMessage(upstream.payload);
     const normalizedMessage = message?.toLowerCase() ?? "";
     return {
       ok: false,
       routeNotFound:
         normalizedMessage.includes("route not found") ||
-        (isRecord(upstream.payload) &&
-          upstream.payload.code === "route_not_found"),
+        code === "route_not_found",
       statusCode: 502,
       payload: {
         error: userMessage ?? "DFlow order failed",
@@ -338,12 +340,56 @@ export async function recordKalshiDflowExecutionRoute(input: {
   ok: true;
   referralFirstTrade?: unknown;
 }> {
-  const executionStatus = normalizeKalshiExecutionStatus(input.body.status);
+  const clientExecutionStatus = normalizeKalshiExecutionStatus(
+    input.body.status,
+  );
   const executionPurpose: KalshiExecutionPurpose =
     input.body.purpose === "redeem" ? "redeem" : "trade";
-  const executionRaw = mergeKalshiExecutionRaw(input.body.raw, {
+  let executionStatus = clientExecutionStatus;
+  let executionRaw = mergeKalshiExecutionRaw(input.body.raw, {
+    clientStatus: clientExecutionStatus,
     purpose: executionPurpose,
   });
+  const txSignature = input.body.txSignature?.trim() || null;
+  const isClientTerminal =
+    clientExecutionStatus === "fulfilled" ||
+    clientExecutionStatus === "no_fill" ||
+    clientExecutionStatus === "failed";
+  const rawRecord = isRecord(input.body.raw) ? input.body.raw : null;
+  const executionMode =
+    rawRecord?.executionMode === "sync" || rawRecord?.executionMode === "async"
+      ? rawRecord.executionMode
+      : null;
+
+  if (txSignature) {
+    try {
+      const settlement = await resolveKalshiExecutionSettlementStatus({
+        txSignature,
+        executionMode,
+        skipTxFallbackOnOrderNotReady: executionMode == null,
+      });
+      if (settlement) {
+        executionStatus = settlement.status;
+        executionRaw = mergeKalshiExecutionRaw(executionRaw, {
+          settlement: settlement.settlementRaw,
+        });
+      }
+    } catch (error) {
+      if (isClientTerminal) {
+        executionStatus = "submitted";
+      }
+      executionRaw = mergeKalshiExecutionRaw(executionRaw, {
+        settlementVerificationError:
+          error instanceof Error ? error.message : String(error),
+      });
+      input.logger?.warn?.(
+        { error, txSignature, userId: input.userId },
+        "Kalshi execution status verification failed",
+      );
+    }
+  } else if (isClientTerminal) {
+    executionStatus = "submitted";
+  }
   const execution = await storeExecution(input.pool, {
     userId: input.userId,
     walletAddress: input.walletAddress,
@@ -358,7 +404,7 @@ export async function recordKalshiDflowExecutionRoute(input: {
     outputDecimals: input.body.outputDecimals ?? null,
     quoteId: input.body.quoteId ?? null,
     venueOrderId: input.body.venueOrderId ?? null,
-    txSignature: input.body.txSignature ?? null,
+    txSignature,
     status: executionStatus ?? null,
     raw: executionRaw,
   });

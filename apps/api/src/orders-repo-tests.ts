@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 
 import type { Pool } from "@hunch/infra";
 import {
+  claimOrderPositionDeltaApplication,
+  clearOrderPositionDeltaApplicationClaim,
   markOrderPositionDeltaApplied,
   storeOrder,
 } from "./repos/orders-repo.js";
@@ -35,6 +37,34 @@ await test("markOrderPositionDeltaApplied does not mutate order freshness", asyn
 
   assert.match(capturedSql, /_hunchPositionDeltaAppliedAt/);
   assert.doesNotMatch(capturedSql, /\blast_update\s*=/i);
+});
+
+await test("position delta application uses an atomic claim marker", async () => {
+  const capturedSql: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      capturedSql.push(sql);
+      return { rowCount: 1, rows: [{ id: "order-1" }] };
+    },
+  } as unknown as Pool;
+
+  const claimed = await claimOrderPositionDeltaApplication(pool, {
+    id: "order-1",
+    claimId: "claim-1",
+    claimedAt: new Date("2026-05-17T00:00:00.000Z"),
+  });
+  const cleared = await clearOrderPositionDeltaApplicationClaim(pool, {
+    id: "order-1",
+    claimId: "claim-1",
+  });
+
+  assert.equal(claimed, true);
+  assert.equal(cleared, true);
+  assert.match(capturedSql[0] ?? "", /_hunchPositionDeltaApplyClaimId/);
+  assert.match(capturedSql[0] ?? "", /_hunchPositionDeltaAppliedAt/);
+  assert.match(capturedSql[1] ?? "", /order_payload = order_payload/);
+  assert.match(capturedSql[1] ?? "", /_hunchPositionDeltaApplyClaimId/);
+  assert.doesNotMatch(capturedSql.join("\n"), /\blast_update\s*=/i);
 });
 
 await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders visible", async () => {

@@ -757,6 +757,8 @@ const tests: TestCase[] = [
       assert.match(effects, /readPersistedRawField\(input, "walletAddress"\)/);
       assert.match(effects, /readPersistedStoredOrder/);
       assert.match(effects, /positionDeltaApplied/);
+      assert.match(effects, /claimOrderPositionDeltaApplication/);
+      assert.match(effects, /clearOrderPositionDeltaApplicationClaim/);
       assert.match(effects, /markOrderPositionDeltaApplied/);
 
       const polymarket = readFileSync(
@@ -771,6 +773,71 @@ const tests: TestCase[] = [
       assert.match(polymarket, /walletAddress: payload\.positionWalletAddress/);
       assert.match(limitless, /tokenId: payload\.tokenId/);
       assert.match(limitless, /walletAddress: input\.intent\.walletAddress/);
+    },
+  },
+  {
+    name: "bot trading readiness and persistence preserve venue-specific safety checks",
+    run: () => {
+      const polymarket = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const limitless = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      const kalshi = readFileSync(
+        resolve(apiSrcDir, "services/kalshi-trading-execution-service.ts"),
+        "utf8",
+      );
+
+      const polymarketReadinessBlock = sourceSlice(
+        polymarket,
+        "async function getReadiness(",
+        "async function quote(",
+      );
+      assert.match(
+        polymarketReadinessBlock,
+        /resolvePolymarketMaxSpendFunds/,
+      );
+      assert.match(polymarketReadinessBlock, /executableFundsRaw <= 0n/);
+
+      const limitlessExchangeBlock = sourceSlice(
+        limitless,
+        "function extractLimitlessMarketExchangeAddress(",
+        "function extractLimitlessMarketAdapterAddress(",
+      );
+      assert.match(limitlessExchangeBlock, /venueExchange/);
+      assert.match(limitlessExchangeBlock, /venue_exchange/);
+      assert.match(limitlessExchangeBlock, /negRiskExchange/);
+      assert.match(limitless, /extractLimitlessMarketExchangeAddress\(market\.metadata\)/);
+      assert.match(limitless, /upsertLimitlessVenueShareAccrualFromOrderPayload/);
+      assert.match(limitless, /upstreamPayload/);
+
+      assert.match(kalshi, /extractDflowErrorCode/);
+      assert.match(kalshi, /code === "route_not_found"/);
+      assert.match(kalshi, /resolveKalshiExecutionSettlementStatus/);
+      assert.match(kalshi, /clientStatus/);
+      assert.match(kalshi, /executionStatus = "submitted"/);
+    },
+  },
+  {
+    name: "Telegram bot trade intent migration distinguishes unknown submit state",
+    run: () => {
+      const migration = readFileSync(
+        resolve(
+          apiSrcDir,
+          "../../../packages/db/migrations/0168_telegram_trade_intent_submit_state.sql",
+        ),
+        "utf8",
+      );
+      assert.match(migration, /ADD COLUMN IF NOT EXISTS submit_started_at/);
+      assert.match(migration, /'reconcile_required'/);
+      assert.match(migration, /status NOT IN \('submitted', 'filled'\)/);
+      assert.doesNotMatch(
+        migration,
+        /prepared_snapshot <> '\{\}'::jsonb/,
+      );
     },
   },
   {
@@ -843,8 +910,9 @@ const tests: TestCase[] = [
       assert.match(persistBlock, /orderId: recorded\.payload\.dbOrderId/);
       assert.match(
         persistBlock,
-        /_hunchUpstream:\s*[\s\S]*input\.submitResult\.raw\.payload/,
+        /_hunchUpstream:\s*upstreamPayload/,
       );
+      assert.match(persistBlock, /upstreamPayload,\s*filledAt,/);
 
       const embeddedEthereum = readFileSync(
         resolve(apiSrcDir, "services/embedded-ethereum.ts"),

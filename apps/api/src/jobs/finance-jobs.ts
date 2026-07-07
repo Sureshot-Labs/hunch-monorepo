@@ -117,6 +117,7 @@ export async function runTelegramTradeIntentReconcileJob(
       "Reconcile Telegram trade intents",
       `expiredPending=${summary.expiredPending}`,
       `failedPreSubmitExecuting=${summary.failedPreSubmitExecuting}`,
+      `unknownSubmitReconcileRequired=${summary.unknownSubmitReconcileRequired}`,
       `submittedReconcileRequired=${summary.submittedReconcileRequired}`,
     ].join(" "),
   );

@@ -464,7 +464,11 @@ export async function markOrderPositionDeltaApplied(
           when order_payload is null then
             jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
           when jsonb_typeof(order_payload) = 'object' then
-            order_payload || jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+            (
+              order_payload
+              - '_hunchPositionDeltaApplyClaimId'
+              - '_hunchPositionDeltaApplyClaimedAt'
+            ) || jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
           else
             jsonb_build_object(
               'payload',
@@ -482,6 +486,92 @@ export async function markOrderPositionDeltaApplied(
       returning id
     `,
     [inputs.id, appliedAt],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function claimOrderPositionDeltaApplication(
+  pool: Pool,
+  inputs: {
+    id: string;
+    claimId: string;
+    claimedAt?: Date;
+    staleAfterMs?: number;
+  },
+): Promise<boolean> {
+  const claimedDate = inputs.claimedAt ?? new Date();
+  const claimedAt = claimedDate.toISOString();
+  const staleAfterMs = Math.max(1, inputs.staleAfterMs ?? 10 * 60 * 1000);
+  const staleClaimCutoff = new Date(
+    claimedDate.getTime() - staleAfterMs,
+  ).toISOString();
+  const result = await pool.query(
+    `
+      update orders
+      set
+        order_payload = case
+          when order_payload is null then
+            jsonb_build_object(
+              '_hunchPositionDeltaApplyClaimId', $2::text,
+              '_hunchPositionDeltaApplyClaimedAt', $3::text
+            )
+          when jsonb_typeof(order_payload) = 'object' then
+            order_payload || jsonb_build_object(
+              '_hunchPositionDeltaApplyClaimId', $2::text,
+              '_hunchPositionDeltaApplyClaimedAt', $3::text
+            )
+          else
+            jsonb_build_object(
+              'payload',
+              order_payload,
+              '_hunchPositionDeltaApplyClaimId',
+              $2::text,
+              '_hunchPositionDeltaApplyClaimedAt',
+              $3::text
+            )
+        end
+      where id = $1
+        and not (
+          order_payload is not null
+          and jsonb_typeof(order_payload) = 'object'
+          and order_payload ? '_hunchPositionDeltaAppliedAt'
+        )
+        and (
+          not (
+            order_payload is not null
+            and jsonb_typeof(order_payload) = 'object'
+            and order_payload ? '_hunchPositionDeltaApplyClaimId'
+          )
+          or (
+            order_payload->>'_hunchPositionDeltaApplyClaimedAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+            and (order_payload->>'_hunchPositionDeltaApplyClaimedAt')::timestamptz <= $4::timestamptz
+          )
+        )
+      returning id
+    `,
+    [inputs.id, inputs.claimId, claimedAt, staleClaimCutoff],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function clearOrderPositionDeltaApplicationClaim(
+  pool: Pool,
+  inputs: { id: string; claimId: string },
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      update orders
+      set order_payload = order_payload
+        - '_hunchPositionDeltaApplyClaimId'
+        - '_hunchPositionDeltaApplyClaimedAt'
+      where id = $1
+        and order_payload is not null
+        and jsonb_typeof(order_payload) = 'object'
+        and order_payload->>'_hunchPositionDeltaApplyClaimId' = $2
+        and not (order_payload ? '_hunchPositionDeltaAppliedAt')
+      returning id
+    `,
+    [inputs.id, inputs.claimId],
   );
   return (result.rowCount ?? 0) > 0;
 }

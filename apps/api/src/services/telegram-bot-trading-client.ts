@@ -72,6 +72,8 @@ type CapturedTelegramBotTradingCallbackResult = {
 };
 
 export const TELEGRAM_BOT_TRADING_CALLBACK_PREFIX = "hbt";
+const DEFAULT_INTERNAL_API_TIMEOUT_MS = 10_000;
+const DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS = 120_000;
 
 const EXACT_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -109,18 +111,46 @@ function normalizeBaseUrl(value: string): string {
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 }
 
+export class TelegramBotTradingInternalApiTimeoutError extends Error {
+  readonly path: string;
+  readonly timeoutMs: number;
+
+  constructor(path: string, timeoutMs: number) {
+    super(`Internal trading API timed out after ${timeoutMs}ms.`);
+    this.name = "TelegramBotTradingInternalApiTimeoutError";
+    this.path = path;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 function createInternalApiPost(input: {
   baseUrl: string;
   token: string;
   timeoutMs?: number;
-}): <T>(path: string, body: unknown) => Promise<T> {
+}): <T>(
+  path: string,
+  body: unknown,
+  options?: { timeoutMs?: number },
+) => Promise<T> {
   const baseUrl = normalizeBaseUrl(input.baseUrl);
   const token = input.token.trim();
-  const timeoutMs =
+  const defaultTimeoutMs =
     Number.isFinite(input.timeoutMs) && (input.timeoutMs ?? 0) > 0
       ? Math.trunc(input.timeoutMs ?? 0)
-      : 10_000;
-  return async <T>(path: string, body: unknown): Promise<T> => {
+      : DEFAULT_INTERNAL_API_TIMEOUT_MS;
+  return async <T>(
+    path: string,
+    body: unknown,
+    options?: { timeoutMs?: number },
+  ): Promise<T> => {
+    const timeoutMs =
+      Number.isFinite(options?.timeoutMs) && (options?.timeoutMs ?? 0) > 0
+        ? Math.trunc(options?.timeoutMs ?? 0)
+        : defaultTimeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -134,6 +164,11 @@ function createInternalApiPost(input: {
         signal: controller.signal,
       });
       return readInternalApiJson<T>(response);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new TelegramBotTradingInternalApiTimeoutError(path, timeoutMs);
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }
@@ -142,10 +177,15 @@ function createInternalApiPost(input: {
 
 export function createTelegramBotTradingInternalApiClient(input: {
   baseUrl: string;
+  executeTimeoutMs?: number;
   token: string;
   timeoutMs?: number;
 }): TelegramBotTradingInternalApiClient {
   const post = createInternalApiPost(input);
+  const executeTimeoutMs =
+    Number.isFinite(input.executeTimeoutMs) && (input.executeTimeoutMs ?? 0) > 0
+      ? Math.trunc(input.executeTimeoutMs ?? 0)
+      : DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS;
   return {
     buildMarketMessage: (body) =>
       post<TelegramBotTradingClientMessage>(
@@ -177,13 +217,39 @@ export function createTelegramBotTradingInternalApiClient(input: {
           : parsed.type === "cancel"
             ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/cancel`
             : `/internal/telegram-bot/trading/intents/${parsed.intentId}/execute`;
-      const result = await post<CapturedTelegramBotTradingCallbackResult>(
-        path,
-        {
-          appBaseUrl: callbackInput.appBaseUrl,
-          callbackQuery: callbackInput.callbackQuery,
-        },
-      );
+      let result: CapturedTelegramBotTradingCallbackResult;
+      try {
+        result = await post<CapturedTelegramBotTradingCallbackResult>(
+          path,
+          {
+            appBaseUrl: callbackInput.appBaseUrl,
+            callbackQuery: callbackInput.callbackQuery,
+          },
+          parsed.type === "confirm" ? { timeoutMs: executeTimeoutMs } : {},
+        );
+      } catch (error) {
+        if (
+          parsed.type === "confirm" &&
+          error instanceof TelegramBotTradingInternalApiTimeoutError
+        ) {
+          const text =
+            "Trade status is unknown. Use /trade_status or open Hunch before retrying.";
+          await callbackInput.answerCallbackQuery({
+            callbackQueryId: callbackInput.callbackQuery.id,
+            showAlert: true,
+            text,
+          });
+          const chatId = callbackInput.callbackQuery.message?.chat?.id;
+          if (chatId != null) {
+            await callbackInput.sendMessage({
+              chat_id: String(chatId),
+              text,
+            });
+          }
+          return true;
+        }
+        throw error;
+      }
       for (const answer of result.answers) {
         await callbackInput.answerCallbackQuery(answer);
       }

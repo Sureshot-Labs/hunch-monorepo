@@ -202,6 +202,7 @@ const TERMINAL_INTENT_STATUSES = new Set([
   "expired",
   "failed",
   "filled",
+  "reconcile_required",
   "submitted",
 ]);
 const PENDING_INTENT_STATUSES = ["draft", "previewed", "confirming"];
@@ -1213,6 +1214,7 @@ async function updateIntentStatus(input: {
   orderId?: string | null;
   preparedSnapshot?: Record<string, unknown> | null;
   result?: Record<string, unknown>;
+  markSubmitStarted?: boolean;
   status: string;
   txSignature?: string | null;
   venueOrderId?: string | null;
@@ -1233,6 +1235,10 @@ async function updateIntentStatus(input: {
               WHEN $12::boolean THEN coalesce(submitted_at, now())
               ELSE submitted_at
             END,
+            submit_started_at = CASE
+              WHEN $13::boolean THEN coalesce(submit_started_at, now())
+              ELSE submit_started_at
+            END,
             updated_at = now()
       WHERE id = $1
         AND ($6::text[] IS NULL OR status = ANY($6::text[]))
@@ -1250,6 +1256,7 @@ async function updateIntentStatus(input: {
       input.txSignature ?? null,
       input.preparedSnapshot ? JSON.stringify(input.preparedSnapshot) : null,
       ["filled", "submitted"].includes(input.status),
+      Boolean(input.markSubmitStarted),
     ],
   );
   return (result.rowCount ?? 0) > 0;
@@ -1265,6 +1272,7 @@ export async function reconcileStaleTelegramTradeIntents(
   expiredPending: number;
   failedPreSubmitExecuting: number;
   submittedReconcileRequired: number;
+  unknownSubmitReconcileRequired: number;
 }> {
   const now = input.now ?? new Date();
   const executingCutoff = new Date(
@@ -1293,7 +1301,24 @@ export async function reconcileStaleTelegramTradeIntents(
         AND execution_id IS NULL
         AND venue_order_id IS NULL
         AND tx_signature IS NULL
-        AND prepared_snapshot = '{}'::jsonb
+        AND submit_started_at IS NULL
+      RETURNING id`,
+    [executingCutoff],
+  );
+  const unknownSubmitReconcileRequired = await db.query(
+    `UPDATE telegram_trade_intents
+        SET status = 'reconcile_required',
+            error_code = 'submit_state_unknown',
+            error_message = coalesce(error_message, 'Trade submit state is unknown; reconcile before retrying.'),
+            updated_at = now(),
+            submitted_at = coalesce(submitted_at, submit_started_at, now())
+      WHERE status = 'executing'
+        AND updated_at <= $1
+        AND order_id IS NULL
+        AND execution_id IS NULL
+        AND venue_order_id IS NULL
+        AND tx_signature IS NULL
+        AND submit_started_at IS NOT NULL
       RETURNING id`,
     [executingCutoff],
   );
@@ -1311,7 +1336,6 @@ export async function reconcileStaleTelegramTradeIntents(
           OR execution_id IS NOT NULL
           OR venue_order_id IS NOT NULL
           OR tx_signature IS NOT NULL
-          OR prepared_snapshot <> '{}'::jsonb
         )
       RETURNING id`,
     [executingCutoff],
@@ -1320,6 +1344,8 @@ export async function reconcileStaleTelegramTradeIntents(
     expiredPending: expiredPending.rowCount ?? 0,
     failedPreSubmitExecuting: failedPreSubmitExecuting.rowCount ?? 0,
     submittedReconcileRequired: submittedReconcileRequired.rowCount ?? 0,
+    unknownSubmitReconcileRequired:
+      unknownSubmitReconcileRequired.rowCount ?? 0,
   };
 }
 
@@ -1411,6 +1437,8 @@ async function answerIntentAlreadyProcessed(
     text:
       status === "executing"
         ? "Trade intent is already being processed."
+        : status === "reconcile_required"
+          ? "Trade status is unknown. Check Hunch before retrying."
         : "Trade intent was already processed. Send /market again.",
   });
 }
@@ -1705,6 +1733,7 @@ export async function handleTelegramBotTradingCallback(
       allowedStatuses: ["executing"],
       db: input.db,
       intentId: intent.id,
+      markSubmitStarted: true,
       preparedSnapshot,
       result: { quote },
       status: "executing",

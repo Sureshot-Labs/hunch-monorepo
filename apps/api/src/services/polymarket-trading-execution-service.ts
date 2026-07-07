@@ -6289,6 +6289,11 @@ async function getReadiness(
       setupRequired: true,
     });
   }
+  const l2Creds: PolymarketL2Credentials = {
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+    apiPassphrase: creds.apiPassphrase,
+  };
   const funders = await derivePolymarketFunders({
     signer,
     storedFunder: creds.funderAddress ?? null,
@@ -6300,6 +6305,46 @@ async function getReadiness(
       code: "insufficient_readiness",
       message:
         "Deploy or select a Polymarket deposit wallet before bot trading.",
+      setupRequired: true,
+    });
+  }
+  const funderExecutionKind = resolvePolymarketFunderExecutionKindForMaxSpend(
+    funders.recommended,
+  );
+  if (!funderExecutionKind) {
+    return readiness("polymarket", capabilities, {
+      ok: false,
+      code: "insufficient_readiness",
+      message: "Polymarket funder is not executable for bot trading.",
+      setupRequired: true,
+    });
+  }
+  try {
+    const funds = await resolvePolymarketMaxSpendFunds({
+      creds: l2Creds,
+      funder: funders.recommended.funder,
+      funderExecutionKind,
+      pool: ctx.pool,
+      signer,
+      userId: input.actor.userId,
+    });
+    if (funds.executableFundsRaw <= 0n) {
+      return readiness("polymarket", capabilities, {
+        ok: false,
+        code: "insufficient_readiness",
+        message: "No executable Polymarket funds are available.",
+        setupRequired: true,
+      });
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(
+      { error, userId: input.actor.userId, walletAddress: signer },
+      "Polymarket bot executable funds check failed",
+    );
+    return readiness("polymarket", capabilities, {
+      ok: false,
+      code: "insufficient_readiness",
+      message: "Polymarket balances are unavailable.",
       setupRequired: true,
     });
   }
@@ -6391,6 +6436,11 @@ async function prepareTrade(
       venue: "polymarket",
     });
   }
+  const l2Creds: PolymarketL2Credentials = {
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+    apiPassphrase: creds.apiPassphrase,
+  };
 
   const funders = await derivePolymarketFunders({
     signer,
@@ -6419,6 +6469,38 @@ async function prepareTrade(
     throw tradingError({
       code: "quote_unavailable",
       message: "Polymarket quote is unavailable.",
+      venue: "polymarket",
+    });
+  }
+  const rawMakerAmount = rawQuote.makerAmount;
+  const makerAmountRaw =
+    rawMakerAmount == null ||
+    typeof rawMakerAmount === "string" ||
+    typeof rawMakerAmount === "number" ||
+    typeof rawMakerAmount === "bigint"
+      ? parseBigIntValue(rawMakerAmount)
+      : null;
+  const funderExecutionKind =
+    resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
+  if (!makerAmountRaw || makerAmountRaw <= 0n || !funderExecutionKind) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Polymarket order spend is invalid.",
+      venue: "polymarket",
+    });
+  }
+  const executableFunds = await resolvePolymarketMaxSpendFunds({
+    creds: l2Creds,
+    funder: candidate.funder,
+    funderExecutionKind,
+    pool: ctx.pool,
+    signer,
+    userId: intent.actor.userId,
+  });
+  if (executableFunds.executableFundsRaw < makerAmountRaw) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Insufficient executable Polymarket funds for this bot buy.",
       venue: "polymarket",
     });
   }
