@@ -98,12 +98,14 @@ export function sanitizeSignalBotPolicyOverride(payload: unknown): unknown {
   return record;
 }
 
-export function normalizeSignalBotPolicy(policy: SignalBotPolicy): SignalBotPolicy {
+export function normalizeSignalBotPolicy(
+  policy: SignalBotPolicy,
+): SignalBotPolicy {
   const tradingActions: SignalBotTradingAction[] = ["buy"];
   const venues = Array.from(
     new Set(
-      policy.tradingVenues.filter((venue) =>
-        signalBotTradingVenueSchema.safeParse(venue).success,
+      policy.tradingVenues.filter(
+        (venue) => signalBotTradingVenueSchema.safeParse(venue).success,
       ),
     ),
   );
@@ -123,8 +125,7 @@ export function normalizeSignalBotPolicy(policy: SignalBotPolicy): SignalBotPoli
   return {
     tradingEnabled: Boolean(policy.tradingEnabled),
     tradingActions,
-    tradingVenues:
-      venues.length > 0 ? venues : ["polymarket", "limitless", "kalshi"],
+    tradingVenues: venues,
     buyAmountPresetsUsd: presets.length > 0 ? presets : [maxTradeAmountUsd],
     maxTradeAmountUsd,
     maxSlippageBps: clamp(Math.trunc(policy.maxSlippageBps), 0, 10_000),

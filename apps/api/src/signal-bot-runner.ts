@@ -23,9 +23,7 @@ import {
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
-import {
-  createTelegramBotTradingInternalApiClient,
-} from "./services/telegram-bot-trading.js";
+import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
   console.log(
@@ -288,31 +286,35 @@ export async function runSignalBotRunner(): Promise<void> {
             return result.ok;
           },
           handleCallback: (callbackQuery) =>
-            (tradingInternalApi
-              ? tradingInternalApi.handleCallback({
-                  answerCallbackQuery: (answer) =>
-                    telegram.answerCallbackQuery(answer),
-                  appBaseUrl: config.appBaseUrl,
-                  callbackQuery,
-                  sendMessage: (message) =>
-                    telegram.sendMessage({
-                      ...message,
-                      disable_web_page_preview: true,
-                      parse_mode: message.parse_mode ?? "MarkdownV2",
-                    }),
-                }).catch(async () => {
-                  await telegram.answerCallbackQuery({
+            tradingInternalApi
+              ? tradingInternalApi
+                  .handleCallback({
+                    answerCallbackQuery: (answer) =>
+                      telegram.answerCallbackQuery(answer),
+                    appBaseUrl: config.appBaseUrl,
+                    callbackQuery,
+                    sendMessage: (message) =>
+                      telegram.sendMessage({
+                        ...message,
+                        disable_web_page_preview: true,
+                        parse_mode: message.parse_mode ?? "MarkdownV2",
+                      }),
+                  })
+                  .catch(async () => {
+                    await telegram.answerCallbackQuery({
+                      callbackQueryId: callbackQuery.id,
+                      showAlert: true,
+                      text: "Trading is unavailable. Open Hunch to trade.",
+                    });
+                    return true;
+                  })
+              : telegram
+                  .answerCallbackQuery({
                     callbackQueryId: callbackQuery.id,
                     showAlert: true,
                     text: "Trading is unavailable. Open Hunch to trade.",
-                  });
-                  return true;
-                })
-              : telegram.answerCallbackQuery({
-                  callbackQueryId: callbackQuery.id,
-                  showAlert: true,
-                  text: "Trading is unavailable. Open Hunch to trade.",
-                }).then(() => true)),
+                  })
+                  .then(() => true),
           telegram,
         });
         if (handledCommands > 0) {

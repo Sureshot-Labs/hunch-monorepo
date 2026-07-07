@@ -10,6 +10,10 @@ import {
   resolveSignalBotTradingPolicyFromDb,
   type SignalBotPolicy,
 } from "./signal-bot-trading-policy.js";
+import {
+  parseTelegramBotTradingCallbackData,
+  TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
+} from "./telegram-bot-trading-client.js";
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
 import type {
   PersistedTrade,
@@ -178,26 +182,6 @@ export type TelegramBotTradingCallbackInput = {
   trading?: ApiBotTradingExecutor;
 };
 
-export type TelegramBotTradingInternalApiClient = {
-  buildMarketMessage: (input: {
-    appBaseUrl: string;
-    chatId: string | number;
-    isAdminTest?: boolean;
-    marketRef: string;
-    telegramMessageId?: number | null;
-    telegramUserId: string | number;
-  }) => Promise<TelegramBotTradingMessage>;
-  buildStatusMessage: (
-    telegramUserId: string | number,
-  ) => Promise<TelegramBotTradingMessage>;
-  disableTrading: (
-    telegramUserId: string | number,
-  ) => Promise<"already_disabled" | "disabled" | "unavailable">;
-  handleCallback: (
-    input: Omit<TelegramBotTradingCallbackInput, "db" | "trading">,
-  ) => Promise<boolean>;
-};
-
 type CapturedTelegramBotTradingCallbackResult = {
   answers: Array<{
     callbackQueryId: string;
@@ -213,9 +197,6 @@ type CapturedTelegramBotTradingCallbackResult = {
   }>;
 };
 
-const CALLBACK_PREFIX = "hbt";
-const EXACT_UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TERMINAL_INTENT_STATUSES = new Set([
   "cancelled",
   "expired",
@@ -335,8 +316,7 @@ function parseKalshiEligibility(
       typeof value.expiresAt === "string" && value.expiresAt.trim()
         ? value.expiresAt
         : null,
-    geoAllowed:
-      typeof value.geoAllowed === "boolean" ? value.geoAllowed : null,
+    geoAllowed: typeof value.geoAllowed === "boolean" ? value.geoAllowed : null,
     proofVerified:
       typeof value.proofVerified === "boolean" ? value.proofVerified : null,
   };
@@ -504,7 +484,8 @@ async function resolveTelegramTradingReadiness(input: {
       authorization?.privy_wallet_id ?? status?.privyWalletId ?? null,
     target: input.market ? marketToTradeTarget(input.market) : null,
     venue: input.venue,
-    walletAddress: authorization?.wallet_address ?? status?.walletAddress ?? null,
+    walletAddress:
+      authorization?.wallet_address ?? status?.walletAddress ?? null,
     walletChain: authorization?.wallet_chain ?? status?.walletChain ?? null,
   });
 }
@@ -544,7 +525,10 @@ function buildTelegramTradeIntent(input: {
   };
 }
 
-function openMarketUrl(appBaseUrl: string, market: TelegramBotMarketRow): string {
+function openMarketUrl(
+  appBaseUrl: string,
+  market: TelegramBotMarketRow,
+): string {
   const url = new URL(
     `/events/${encodeURIComponent(market.event_id)}`,
     `${normalizeBaseUrl(appBaseUrl)}/`,
@@ -855,7 +839,9 @@ export async function enableTelegramBotTrading(
         maxSlippageBps: policy.maxSlippageBps,
         requireConfirmation: true,
         kalshiEligibility:
-          wallet.wallet_type === "solana" ? input.kalshiEligibility ?? null : null,
+          wallet.wallet_type === "solana"
+            ? (input.kalshiEligibility ?? null)
+            : null,
       }),
     ],
   );
@@ -1076,7 +1062,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (!market) {
     return {
       parse_mode: "MarkdownV2",
-      text: escapeMarkdown("Market not found. Send /market <market_id or URL>."),
+      text: escapeMarkdown(
+        "Market not found. Send /market <market_id or URL>.",
+      ),
     };
   }
 
@@ -1135,7 +1123,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   } else if (!policyVenueAllowed) {
     lines.push("", "This venue is disabled by runtime policy.");
   } else if (!authorizationVenueAllowed) {
-    lines.push("", "Enable a compatible wallet for this venue in Settings first.");
+    lines.push(
+      "",
+      "Enable a compatible wallet for this venue in Settings first.",
+    );
   } else if (!marketOrderable) {
     lines.push("", "This market is not open for new bot trades.");
   } else if (!tradeReadiness.executable) {
@@ -1163,7 +1154,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
           telegramUserId: normalizeTelegramUserId(input.telegramUserId),
         });
         row.push({
-          callback_data: `${CALLBACK_PREFIX}:buy:${intentId}`,
+          callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:buy:${intentId}`,
           text: `Buy ${sideLabel(market, side)} ${formatUsd(amountUsd)}`,
         });
       }
@@ -1404,19 +1395,6 @@ function callbackChatId(input: TelegramBotTradingCallbackInput): string | null {
   return chatId != null ? String(chatId) : null;
 }
 
-function parseCallbackData(data: string | undefined):
-  | { intentId: string; type: "buy" | "cancel" | "confirm" }
-  | null {
-  if (!data) return null;
-  const parts = data.split(":");
-  if (parts.length !== 3) return null;
-  const [prefix, type, intentId] = parts;
-  if (prefix !== CALLBACK_PREFIX) return null;
-  if (type !== "buy" && type !== "confirm" && type !== "cancel") return null;
-  if (!EXACT_UUID_RE.test(intentId ?? "")) return null;
-  return { type, intentId };
-}
-
 function isTerminalIntentStatus(status: string): boolean {
   return TERMINAL_INTENT_STATUSES.has(status);
 }
@@ -1438,7 +1416,7 @@ async function answerIntentAlreadyProcessed(
 export async function handleTelegramBotTradingCallback(
   input: TelegramBotTradingCallbackInput,
 ): Promise<boolean> {
-  const parsed = parseCallbackData(input.callbackQuery.data);
+  const parsed = parseTelegramBotTradingCallbackData(input.callbackQuery.data);
   if (!parsed) return false;
   if (
     (input.expectedIntentId && parsed.intentId !== input.expectedIntentId) ||
@@ -1539,7 +1517,8 @@ export async function handleTelegramBotTradingCallback(
       allowedStatuses: PENDING_INTENT_STATUSES,
       db: input.db,
       errorCode: "market_venue_mismatch",
-      errorMessage: "Trade intent market venue no longer matches the intent venue.",
+      errorMessage:
+        "Trade intent market venue no longer matches the intent venue.",
       intentId: intent.id,
       status: "failed",
     });
@@ -1606,7 +1585,12 @@ export async function handleTelegramBotTradingCallback(
         parse_mode: "MarkdownV2",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "Open in Hunch", url: openMarketUrl(input.appBaseUrl, market) }],
+            [
+              {
+                text: "Open in Hunch",
+                url: openMarketUrl(input.appBaseUrl, market),
+              },
+            ],
           ],
         },
         text: escapeMarkdown(
@@ -1644,11 +1628,11 @@ export async function handleTelegramBotTradingCallback(
         inline_keyboard: [
           [
             {
-              callback_data: `${CALLBACK_PREFIX}:confirm:${intent.id}`,
+              callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:confirm:${intent.id}`,
               text: "Confirm buy",
             },
             {
-              callback_data: `${CALLBACK_PREFIX}:cancel:${intent.id}`,
+              callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
               text: "Cancel",
             },
           ],
@@ -1704,12 +1688,10 @@ export async function handleTelegramBotTradingCallback(
     market,
     side,
   });
-  let submittedRefs:
-    | {
-        submitResult: SubmitResult;
-        venueOrderId: string | null;
-      }
-    | null = null;
+  let submittedRefs: {
+    submitResult: SubmitResult;
+    venueOrderId: string | null;
+  } | null = null;
   try {
     const quote = await trading.quote({ intent: sharedIntent });
     const prepared = await trading.prepareTrade({
@@ -1744,9 +1726,11 @@ export async function handleTelegramBotTradingCallback(
     const resolution = resolveSubmitIntentStatus(submitResult);
     let persisted: PersistedTrade | null = null;
     let effects: TradeEffectsResult | null = null;
-    let postSubmitError:
-      | { code: string; message: string; statusCode: number }
-      | null = null;
+    let postSubmitError: {
+      code: string;
+      message: string;
+      statusCode: number;
+    } | null = null;
     if (resolution.shouldPersist) {
       try {
         persisted = await trading.persistTrade({
@@ -1844,7 +1828,9 @@ export async function handleTelegramBotTradingCallback(
             "Trade submitted.",
             `${intent.venue} · ${intent.market_title}`,
             `${side} · ${formatUsd(amountUsd)}`,
-            submittedRefs.venueOrderId ? `Order: ${submittedRefs.venueOrderId}` : null,
+            submittedRefs.venueOrderId
+              ? `Order: ${submittedRefs.venueOrderId}`
+              : null,
             "Hunch could not finish local recording. Check the app before retrying.",
           ]
             .filter((line): line is string => Boolean(line))
@@ -1892,105 +1878,6 @@ export async function handleTelegramBotTradingCallback(
     });
   }
   return true;
-}
-
-async function readInternalApiJson<T>(response: Response): Promise<T> {
-  const payload = (await response.json().catch(() => null)) as T | null;
-  if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && "error" in payload
-        ? String((payload as { error?: unknown }).error)
-        : `Internal trading API failed (${response.status})`;
-    throw new Error(message);
-  }
-  if (payload == null) {
-    throw new Error("Internal trading API returned an empty response.");
-  }
-  return payload;
-}
-
-function createInternalApiPost(input: {
-  baseUrl: string;
-  token: string;
-  timeoutMs?: number;
-}): <T>(path: string, body: unknown) => Promise<T> {
-  const baseUrl = normalizeBaseUrl(input.baseUrl);
-  const token = input.token.trim();
-  const timeoutMs =
-    Number.isFinite(input.timeoutMs) && (input.timeoutMs ?? 0) > 0
-      ? Math.trunc(input.timeoutMs ?? 0)
-      : 10_000;
-  return async <T>(path: string, body: unknown): Promise<T> => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(`${baseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      return readInternalApiJson<T>(response);
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-}
-
-export function createTelegramBotTradingInternalApiClient(input: {
-  baseUrl: string;
-  token: string;
-  timeoutMs?: number;
-}): TelegramBotTradingInternalApiClient {
-  const post = createInternalApiPost(input);
-  return {
-    buildMarketMessage: (body) =>
-      post<TelegramBotTradingMessage>(
-        "/internal/telegram-bot/trading/market-card",
-        body,
-      ),
-    buildStatusMessage: (telegramUserId) =>
-      post<TelegramBotTradingMessage>(
-        "/internal/telegram-bot/trading/status",
-        { telegramUserId },
-      ),
-    disableTrading: async (telegramUserId) => {
-      const result = await post<{
-        disabled?: boolean;
-        status?: "already_disabled" | "disabled" | "unavailable";
-      }>(
-        "/internal/telegram-bot/trading/disable",
-        { telegramUserId },
-      );
-      return (
-        result.status ?? (result.disabled ? "disabled" : "already_disabled")
-      );
-    },
-    handleCallback: async (callbackInput) => {
-      const parsed = parseCallbackData(callbackInput.callbackQuery.data);
-      if (!parsed) return false;
-      const path =
-        parsed.type === "buy"
-          ? "/internal/telegram-bot/trading/preview-intent"
-          : parsed.type === "cancel"
-            ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/cancel`
-            : `/internal/telegram-bot/trading/intents/${parsed.intentId}/execute`;
-      const result = await post<CapturedTelegramBotTradingCallbackResult>(path, {
-        appBaseUrl: callbackInput.appBaseUrl,
-        callbackQuery: callbackInput.callbackQuery,
-      });
-      for (const answer of result.answers) {
-        await callbackInput.answerCallbackQuery(answer);
-      }
-      for (const message of result.messages) {
-        await callbackInput.sendMessage(message);
-      }
-      return result.handled;
-    },
-  };
 }
 
 export async function captureTelegramBotTradingCallback(input: {

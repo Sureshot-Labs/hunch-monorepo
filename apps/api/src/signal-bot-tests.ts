@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { QueryResult, QueryResultRow } from "pg";
 
@@ -42,11 +45,12 @@ import {
 } from "./services/signal-bot.js";
 import {
   buildTelegramBotTradingMarketMessage,
-  createTelegramBotTradingInternalApiClient,
   enableTelegramBotTrading,
   handleTelegramBotTradingCallback,
   reconcileStaleTelegramTradeIntents,
 } from "./services/telegram-bot-trading.js";
+import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
+import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
 
 class FakeRedis implements SignalBotRedisLike {
   readonly strings = new Map<string, string>();
@@ -166,6 +170,74 @@ class FakeRedis implements SignalBotRedisLike {
   }
 }
 
+const apiSrcDir = dirname(fileURLToPath(import.meta.url));
+const runtimeImportPattern =
+  /\b(import|export)\s+([^;]*?)\s+from\s+["']([^"']+)["']|\bimport\s+["']([^"']+)["']/gs;
+
+function resolveLocalImport(
+  fromFile: string,
+  specifier: string,
+): string | null {
+  if (!specifier.startsWith(".")) return null;
+  const base = resolve(dirname(fromFile), specifier);
+  const candidates = [];
+  if (specifier.endsWith(".js")) {
+    candidates.push(base.replace(/\.js$/, ".ts"), base);
+  } else {
+    candidates.push(
+      `${base}.ts`,
+      `${base}.tsx`,
+      `${base}.js`,
+      join(base, "index.ts"),
+      join(base, "index.tsx"),
+      join(base, "index.js"),
+    );
+  }
+  for (const candidate of candidates) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function readRuntimeLocalImports(file: string): string[] {
+  const source = readFileSync(file, "utf8");
+  const imports: string[] = [];
+  runtimeImportPattern.lastIndex = 0;
+  let match: RegExpExecArray | null = null;
+  while ((match = runtimeImportPattern.exec(source))) {
+    if (match[4]) {
+      const resolvedImport = resolveLocalImport(file, match[4]);
+      if (resolvedImport) imports.push(resolvedImport);
+      continue;
+    }
+    const importKind = match[1];
+    const clause = (match[2] ?? "").trim();
+    const specifier = match[3];
+    if (!specifier) continue;
+    if (clause.startsWith("type ")) continue;
+    if (importKind === "export" && clause.startsWith("type ")) continue;
+    const resolvedImport = resolveLocalImport(file, specifier);
+    if (resolvedImport) imports.push(resolvedImport);
+  }
+  return imports;
+}
+
+function collectRuntimeImportGraph(entry: string): Set<string> {
+  const seen = new Set<string>();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.shift();
+    if (!file || seen.has(file)) continue;
+    seen.add(file);
+    for (const imported of readRuntimeLocalImports(file)) {
+      if (!seen.has(imported)) queue.push(imported);
+    }
+  }
+  return seen;
+}
+
 class FakeTelegram {
   readonly callbackAnswers: Array<{
     callbackQueryId: string;
@@ -173,8 +245,10 @@ class FakeTelegram {
     text?: string;
   }> = [];
   readonly messages: TelegramSendMessageInput[] = [];
-  readonly updateRequests: Array<{ offset: number | null; timeoutSec: number }> =
-    [];
+  readonly updateRequests: Array<{
+    offset: number | null;
+    timeoutSec: number;
+  }> = [];
   nextResult: TelegramSendResult | null = null;
   nextResults: TelegramSendResult[] = [];
   updates: TelegramBotUpdate[] = [];
@@ -768,10 +842,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         await client.getUpdates({ offset: 42, timeoutSec: 25 });
         const url = new URL(seenUrls[0] ?? "");
         assert.equal(url.searchParams.get("offset"), "42");
-        assert.deepEqual(JSON.parse(url.searchParams.get("allowed_updates") ?? "[]"), [
-          "message",
-          "callback_query",
-        ]);
+        assert.deepEqual(
+          JSON.parse(url.searchParams.get("allowed_updates") ?? "[]"),
+          ["message", "callback_query"],
+        );
 
         await client.answerCallbackQuery({
           callbackQueryId: "callback-1",
@@ -976,9 +1050,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         { kind: "resolved_loss", targetChatId: "-1001234567890" },
       );
       assert.equal(
-        parseSignalBotFollowthroughPreviewRequest(
-          "/test_followthrough maybe",
-        ),
+        parseSignalBotFollowthroughPreviewRequest("/test_followthrough maybe"),
         null,
       );
     },
@@ -986,7 +1058,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
     name: "trading command parser accepts private trading commands",
     run: () => {
-      assert.equal(parseSignalBotCommand("/trade_status", null), "trade_status");
+      assert.equal(
+        parseSignalBotCommand("/trade_status", null),
+        "trade_status",
+      );
       assert.equal(
         parseSignalBotCommand("/disable_trading", null),
         "disable_trading",
@@ -1149,7 +1224,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sendTestSignal: async () => false,
         sendTradeMarket: async (input) => {
           isAdminTest = Boolean(input.isAdminTest);
-          assert.equal(input.marketRef, "https://app.hunch.trade/events/e?market=m1");
+          assert.equal(
+            input.marketRef,
+            "https://app.hunch.trade/events/e?market=m1",
+          );
           assert.equal(input.telegramMessageId, 44);
           return true;
         },
@@ -1305,8 +1383,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(insertCount, 0);
       assert.match(message.text, /Preview only/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
-      assert.equal(buttons.some((button) => "callback_data" in button), false);
-      assert.equal(buttons.some((button) => "url" in button), true);
+      assert.equal(
+        buttons.some((button) => "callback_data" in button),
+        false,
+      );
+      assert.equal(
+        buttons.some((button) => "url" in button),
+        true,
+      );
     },
   },
   {
@@ -1435,8 +1519,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(insertCount, 0);
       assert.match(message.text, /Direct bot trading is disabled/);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
-      assert.equal(buttons.some((button) => "callback_data" in button), false);
-      assert.equal(buttons.some((button) => "url" in button), true);
+      assert.equal(
+        buttons.some((button) => "callback_data" in button),
+        false,
+      );
+      assert.equal(
+        buttons.some((button) => "url" in button),
+        true,
+      );
     },
   },
   {
@@ -1600,10 +1690,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(handled, true);
       assert.equal(telegram.messages.length, 0);
-      assert.match(
-        telegram.callbackAnswers[0]?.text ?? "",
-        /does not match/,
-      );
+      assert.match(telegram.callbackAnswers[0]?.text ?? "", /does not match/);
     },
   },
   {
@@ -1694,7 +1781,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 ],
               };
             }
-            if (sql.includes("INSERT INTO telegram_bot_trading_authorizations")) {
+            if (
+              sql.includes("INSERT INTO telegram_bot_trading_authorizations")
+            ) {
               storedVenues = params?.[6];
               return { rowCount: 1, rows: [] };
             }
@@ -2163,7 +2252,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               ],
             };
           }
-          if (sql.includes("UPDATE telegram_trade_intents") && sql.includes("SET status = $2")) {
+          if (
+            sql.includes("UPDATE telegram_trade_intents") &&
+            sql.includes("SET status = $2")
+          ) {
             updateStatuses.push({
               status: params?.[1],
               errorCode: params?.[2],
@@ -2212,7 +2304,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           }),
           normalizeError: (_venue: string, error: unknown) => ({
             code: "persistence_failed",
-            message: error instanceof Error ? error.message : "persistence failed",
+            message:
+              error instanceof Error ? error.message : "persistence failed",
             statusCode: 500,
             venue: "polymarket",
             raw: error,
@@ -2262,8 +2355,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(updateStatuses[2]?.venueOrderId, "venue-order-1");
       assert.equal(updateStatuses[3]?.errorCode, "persistence_failed");
       assert.equal(updateStatuses[3]?.venueOrderId, "venue-order-1");
-      assert.match(telegram.callbackAnswers[0]?.text ?? "", /Recording needs review/);
-      assert.match(telegram.messages[0]?.text ?? "", /Venue accepted the submit/);
+      assert.match(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /Recording needs review/,
+      );
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Venue accepted the submit/,
+      );
     },
   },
   {
@@ -2361,8 +2460,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               ],
             };
           }
-          if (sql.includes("UPDATE telegram_trade_intents") && sql.includes("SET status = $2")) {
-            updateStatuses.push({ status: params?.[1], errorCode: params?.[2] });
+          if (
+            sql.includes("UPDATE telegram_trade_intents") &&
+            sql.includes("SET status = $2")
+          ) {
+            updateStatuses.push({
+              status: params?.[1],
+              errorCode: params?.[2],
+            });
             return { rowCount: 1, rows: [{ id: params?.[0] }] };
           }
           if (sql.includes("UPDATE telegram_trade_intents")) {
@@ -2452,20 +2557,44 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "signal bot trading policy preserves explicitly empty venues",
+    run: () => {
+      const policy = normalizeSignalBotPolicy({
+        tradingEnabled: true,
+        tradingActions: ["buy"],
+        tradingVenues: [],
+        buyAmountPresetsUsd: [10],
+        maxTradeAmountUsd: 50,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+        requireConfirmation: true,
+      });
+      assert.deepEqual(policy.tradingVenues, []);
+      assert.equal(policy.tradingEnabled, true);
+    },
+  },
+  {
     name: "telegram bot trading modules stay sidecar-safe",
     run: () => {
-      const tradingService = readFileSync(
-        new URL("./services/telegram-bot-trading.ts", import.meta.url),
-        "utf8",
+      const graph = collectRuntimeImportGraph(
+        resolve(apiSrcDir, "signal-bot-runner.ts"),
       );
-      const tradingPolicy = readFileSync(
-        new URL("./services/signal-bot-trading-policy.ts", import.meta.url),
-        "utf8",
+      const relativeFiles = Array.from(graph, (file) =>
+        relative(apiSrcDir, file).replaceAll("\\", "/"),
       );
-      assert.doesNotMatch(tradingService, /runtime-policies\.js/);
-      assert.doesNotMatch(tradingService, /env\.js/);
-      assert.doesNotMatch(tradingPolicy, /env\.js/);
-      assert.doesNotMatch(tradingPolicy, /"\.\/runtime-policies\.js"/);
+      assert.equal(relativeFiles.includes("env.ts"), false);
+      assert.equal(relativeFiles.includes("privy-service.ts"), false);
+      assert.equal(
+        relativeFiles.includes("services/telegram-bot-trading.ts"),
+        false,
+      );
+      assert.equal(relativeFiles.includes("repos/runtime-policies.ts"), false);
+      assert.equal(
+        relativeFiles.some((file) =>
+          file.endsWith("-trading-execution-service.ts"),
+        ),
+        false,
+      );
       const retentionSelector = readFileSync(
         new URL("./market-retention-selector.ts", import.meta.url),
         "utf8",
@@ -4235,7 +4364,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages.length, 1);
       assert.equal(telegram.messages[0]?.disable_web_page_preview, false);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[0], "-100");
@@ -4286,7 +4417,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000002");
@@ -4339,7 +4472,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.equal(telegram.messages[1]?.reply_parameters, undefined);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[4], 333);
@@ -4530,7 +4665,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(candidateQuery?.params[6], false);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[0], "-100");
@@ -4758,7 +4895,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.skipped, 1);
       assert.equal(telegram.messages.length, 0);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[3], "followthrough_stats");
@@ -4838,7 +4977,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 0);
       assert.equal(result.skipped, 1);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       const metrics = JSON.parse(String(delivery.params[8]));
@@ -4889,7 +5030,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       const metrics = JSON.parse(String(delivery.params[8]));
@@ -4929,7 +5072,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(telegram.messages[0]?.text ?? "", /Closed green/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[3], "resolved_win");
@@ -4968,7 +5113,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(telegram.messages[0]?.text ?? "", /Closed red/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
-        .filter((query) => query.sql.includes("insert into signal_bot_messages"))
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
         .at(-1);
       assert.ok(delivery);
       assert.equal(delivery.params[3], "resolved_loss");

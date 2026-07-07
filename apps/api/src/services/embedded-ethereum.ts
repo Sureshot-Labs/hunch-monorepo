@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import type { User } from "../auth.js";
 import { env } from "../env.js";
 import {
+  type PrivyWalletApiClient,
   type PrivyWalletApiRequestSignatureInput,
   type PrivyWalletProfile,
   PrivyService,
@@ -504,15 +505,30 @@ async function waitForEvmTransaction(
   chainId: number,
   txHash: string,
   context: string,
+  timeoutMs = 90_000,
 ): Promise<void> {
   const provider = evmProviderForChain(chainId);
-  const receipt = await provider.waitForTransaction(txHash, 1, 90_000);
+  const receipt = await provider.waitForTransaction(txHash, 1, timeoutMs);
   if (!receipt) {
     throw new Error(`${context} is still pending.`);
   }
   if (receipt.status !== 1) {
     throw new Error(`${context} failed onchain.`);
   }
+}
+
+export async function waitForEmbeddedEthereumTransactionReceipt(inputs: {
+  chainId: number;
+  context: string;
+  timeoutMs?: number;
+  txHash: string;
+}): Promise<void> {
+  await waitForEvmTransaction(
+    inputs.chainId,
+    inputs.txHash,
+    inputs.context,
+    inputs.timeoutMs,
+  );
 }
 
 export async function resolveEmbeddedEthereumWalletContext(inputs: {
@@ -610,6 +626,64 @@ export function prepareEmbeddedEthereumTransactionRequests(inputs: {
       transaction,
     }),
   );
+}
+
+export async function executeServerEmbeddedEthereumTransaction(inputs: {
+  chainId: number;
+  signer: string;
+  timeoutMs?: number;
+  transaction: EmbeddedEthereumTransactionSpec;
+  walletClient: PrivyWalletApiClient;
+  walletId: string;
+}): Promise<string> {
+  const chainId = Math.trunc(inputs.chainId);
+  if (!Number.isFinite(chainId) || chainId <= 0) {
+    throw new Error("Embedded EVM execution requires a valid chain id.");
+  }
+  const signer = requireAddress(
+    inputs.signer,
+    "Invalid embedded signer address.",
+  );
+  const to = requireAddress(
+    inputs.transaction.to,
+    `${inputs.transaction.label} is missing a valid target address.`,
+  );
+  const data =
+    normalizeHex(inputs.transaction.data ?? "0x") ??
+    (() => {
+      throw new Error(
+        `${inputs.transaction.label} is missing valid transaction calldata.`,
+      );
+    })();
+  const value = normalizeValueHex(inputs.transaction.value);
+  const gasLimit = normalizeValueHex(inputs.transaction.gas);
+
+  const result = await inputs.walletClient.walletApi.ethereum.sendTransaction({
+    address: signer,
+    caip2: `eip155:${chainId}`,
+    sponsor: inputs.transaction.sponsor !== false,
+    transaction: {
+      from: signer,
+      to,
+      data,
+      ...(value ? { value } : {}),
+      ...(gasLimit ? { gas_limit: gasLimit } : {}),
+    },
+    walletId: inputs.walletId,
+  });
+  const txHash = result.hash?.trim() ?? "";
+  if (!txHash) {
+    throw new Error(
+      `${inputs.transaction.label} did not return a transaction hash.`,
+    );
+  }
+  await waitForEvmTransaction(
+    chainId,
+    txHash,
+    inputs.transaction.label,
+    inputs.timeoutMs,
+  );
+  return txHash;
 }
 
 export async function executeEmbeddedEthereumTransactionRequests(inputs: {

@@ -13,15 +13,40 @@ import type {
   TradeEffectsResult,
 } from "./trading-types.js";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readPersistedRawField(
+  input: ApplyTradeEffectsInput,
+  field: string,
+): string | null {
+  const raw = isRecord(input.persisted.raw) ? input.persisted.raw : null;
+  if (!raw) return null;
+  return readString(raw[field]);
+}
+
 export async function applyOrderTradeEffects(
   ctx: ApiTradingApplicationServiceInput,
   input: ApplyTradeEffectsInput,
 ): Promise<TradeEffectsResult> {
-  const tokenId = input.intent.target.tokenId ?? null;
+  const tokenId =
+    readPersistedRawField(input, "tokenId") ??
+    input.intent.target.tokenId ??
+    null;
+  const walletAddress =
+    readPersistedRawField(input, "walletAddress") ?? input.intent.walletAddress;
   const status = input.persisted.status;
   const venue = input.intent.venue as SupportedBotTradingVenue;
   let referralFirstTrade = null;
-  if (input.submitResult.status === "filled" && input.submitResult.venueOrderId) {
+  if (
+    input.submitResult.status === "filled" &&
+    input.submitResult.venueOrderId
+  ) {
     referralFirstTrade = await tryRecordReferralFirstTradeConversion(ctx.pool, {
       userId: input.intent.actor.userId,
       venue,
@@ -43,7 +68,7 @@ export async function applyOrderTradeEffects(
     try {
       const result = await applyOptimisticPositionTrade(ctx.pool, {
         userId: input.intent.actor.userId,
-        walletAddress: input.intent.walletAddress,
+        walletAddress,
         venue,
         tokenId,
         side: "BUY",
@@ -71,7 +96,7 @@ export async function applyOrderTradeEffects(
         price: input.submitResult.price,
         orderId: input.submitResult.venueOrderId,
         tokenId,
-        walletAddress: input.intent.walletAddress,
+        walletAddress,
       }),
       ctx.logger as never,
     );

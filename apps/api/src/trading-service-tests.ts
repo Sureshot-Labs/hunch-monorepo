@@ -16,7 +16,10 @@ type TestCase = {
 
 const apiSrcDir = dirname(fileURLToPath(import.meta.url));
 
-function resolveRelativeImport(fromFile: string, specifier: string): string | null {
+function resolveRelativeImport(
+  fromFile: string,
+  specifier: string,
+): string | null {
   if (!specifier.startsWith(".")) return null;
   const base = resolve(dirname(fromFile), specifier);
   const candidates =
@@ -110,10 +113,7 @@ const tests: TestCase[] = [
         "utf8",
       );
       const serviceSource = readFileSync(
-        resolve(
-          apiSrcDir,
-          "services/polymarket-trading-execution-service.ts",
-        ),
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
         "utf8",
       );
       assert.match(routeSource, /quotePolymarketOrderRoute/);
@@ -138,7 +138,10 @@ const tests: TestCase[] = [
         polymarketMarketInfoBlock,
         /fetchPolymarketMarketInfo\(/,
       );
-      assert.doesNotMatch(polymarketMarketInfoBlock, /exchangeAddressForNegRisk/);
+      assert.doesNotMatch(
+        polymarketMarketInfoBlock,
+        /exchangeAddressForNegRisk/,
+      );
 
       const polymarketOrderParamsBlock = sourceSlice(
         polymarketRoute,
@@ -160,7 +163,7 @@ const tests: TestCase[] = [
 
       const polymarketOrderBlock = sourceSlice(
         polymarketRoute,
-        '   * POST /order\n   * Place a signed Polymarket order',
+        "   * POST /order\n   * Place a signed Polymarket order",
         "   * DELETE /order",
       );
       const polymarketOpenOrdersBlock = sourceSlice(
@@ -194,8 +197,14 @@ const tests: TestCase[] = [
       );
       assert.match(polymarketCancelBlock, /cancelPolymarketOrderRoute/);
       assert.doesNotMatch(polymarketCancelBlock, /polymarketL2Request/);
-      assert.doesNotMatch(polymarketCancelBlock, /fetchStoredOrderWalletContext/);
-      assert.doesNotMatch(polymarketCancelBlock, /syncPolymarketTradesForSigner/);
+      assert.doesNotMatch(
+        polymarketCancelBlock,
+        /fetchStoredOrderWalletContext/,
+      );
+      assert.doesNotMatch(
+        polymarketCancelBlock,
+        /syncPolymarketTradesForSigner/,
+      );
       assert.doesNotMatch(polymarketCancelBlock, /createNotificationSafe/);
 
       const polymarketOrderHashBlock = sourceSlice(
@@ -203,11 +212,11 @@ const tests: TestCase[] = [
         "   * POST /order-hash",
         "   * GET /funder-derive",
       );
-      assert.match(
+      assert.match(polymarketOrderHashBlock, /computePolymarketOrderHashRoute/);
+      assert.doesNotMatch(
         polymarketOrderHashBlock,
-        /computePolymarketOrderHashRoute/,
+        /fetchPolymarketOrderHashV2/,
       );
-      assert.doesNotMatch(polymarketOrderHashBlock, /fetchPolymarketOrderHashV2/);
       assert.doesNotMatch(polymarketOrderHashBlock, /normalizeOrderForHash/);
       assert.doesNotMatch(polymarketOrderHashBlock, /markHotTokens/);
 
@@ -216,10 +225,7 @@ const tests: TestCase[] = [
         "   * GET /funder-derive",
         "   * POST /funder-derive/batch",
       );
-      assert.match(
-        polymarketFunderDeriveBlock,
-        /derivePolymarketFundersRoute/,
-      );
+      assert.match(polymarketFunderDeriveBlock, /derivePolymarketFundersRoute/);
       assert.doesNotMatch(
         polymarketFunderDeriveBlock,
         /derivePolymarketFunders\(/,
@@ -268,17 +274,23 @@ const tests: TestCase[] = [
         polymarketMaxSpendBlock,
         /findMaxPolymarketMarketBuyUsdForFunds/,
       );
-      assert.doesNotMatch(polymarketMaxSpendBlock, /fetchOpenOrderCollateralLocks/);
+      assert.doesNotMatch(
+        polymarketMaxSpendBlock,
+        /fetchOpenOrderCollateralLocks/,
+      );
       assert.doesNotMatch(polymarketMaxSpendBlock, /markHotTokens/);
 
       const polymarketAccountBlock = sourceSlice(
         polymarketRoute,
         "   * GET /account",
-        "  z.get(\n    \"/redemption-plan\"",
+        '  z.get(\n    "/redemption-plan"',
       );
       assert.match(polymarketAccountBlock, /fetchPolymarketAccountRoute/);
       assert.doesNotMatch(polymarketAccountBlock, /fetchEvmCode/);
-      assert.doesNotMatch(polymarketAccountBlock, /fetchPolymarketOnchainSnapshot/);
+      assert.doesNotMatch(
+        polymarketAccountBlock,
+        /fetchPolymarketOnchainSnapshot/,
+      );
 
       const polymarketRedemptionPlanBlock = sourceSlice(
         polymarketRoute,
@@ -400,10 +412,7 @@ const tests: TestCase[] = [
         limitlessAccountBlock,
         /fetchLimitlessOnchainSnapshot/,
       );
-      assert.doesNotMatch(
-        limitlessAccountBlock,
-        /fetchErc1155BalancesByOwner/,
-      );
+      assert.doesNotMatch(limitlessAccountBlock, /fetchErc1155BalancesByOwner/);
 
       const limitlessAmmQuoteBlock = sourceSlice(
         limitlessRoute,
@@ -416,7 +425,7 @@ const tests: TestCase[] = [
       const limitlessRedemptionStatusBlock = sourceSlice(
         limitlessRoute,
         "   * GET /redemption/status",
-        "    \"/redemption-plan\"",
+        '    "/redemption-plan"',
       );
       assert.match(
         limitlessRedemptionStatusBlock,
@@ -429,7 +438,7 @@ const tests: TestCase[] = [
 
       const limitlessRedemptionPlanBlock = sourceSlice(
         limitlessRoute,
-        "    \"/redemption-plan\"",
+        '    "/redemption-plan"',
         "   * POST /order",
       );
       assert.match(
@@ -457,7 +466,10 @@ const tests: TestCase[] = [
       );
       assert.match(limitlessAmmOrderBlock, /recordLimitlessAmmOrder/);
       assert.doesNotMatch(limitlessAmmOrderBlock, /storeOrder/);
-      assert.doesNotMatch(limitlessAmmOrderBlock, /applyOptimisticPositionTrade/);
+      assert.doesNotMatch(
+        limitlessAmmOrderBlock,
+        /applyOptimisticPositionTrade/,
+      );
 
       const limitlessSyncBlock = sourceSlice(
         limitlessRoute,
@@ -474,8 +486,14 @@ const tests: TestCase[] = [
         "   * GET /market/exchange",
       );
       assert.match(limitlessHistorySyncBlock, /syncLimitlessOrderHistoryRoute/);
-      assert.doesNotMatch(limitlessHistorySyncBlock, /syncLimitlessHistoryForWallet/);
-      assert.doesNotMatch(limitlessHistorySyncBlock, /resolveLimitlessAuthContext/);
+      assert.doesNotMatch(
+        limitlessHistorySyncBlock,
+        /syncLimitlessHistoryForWallet/,
+      );
+      assert.doesNotMatch(
+        limitlessHistorySyncBlock,
+        /resolveLimitlessAuthContext/,
+      );
 
       const limitlessMarketExchangeBlock = sourceSlice(
         limitlessRoute,
@@ -494,14 +512,17 @@ const tests: TestCase[] = [
 
       const limitlessEmbeddedSignPrepareBlock = sourceSlice(
         limitlessRoute,
-        "    \"/embedded/sign-order/prepare\"",
-        "    \"/embedded/sign-order\"",
+        '    "/embedded/sign-order/prepare"',
+        '    "/embedded/sign-order"',
       );
       assert.match(
         limitlessEmbeddedSignPrepareBlock,
         /prepareEmbeddedLimitlessOrderSigningRequest/,
       );
-      assert.doesNotMatch(limitlessEmbeddedSignPrepareBlock, /limitlessRequest/);
+      assert.doesNotMatch(
+        limitlessEmbeddedSignPrepareBlock,
+        /limitlessRequest/,
+      );
       const limitlessEmbeddedPrepareHelperBlock = sourceSlice(
         limitlessRoute,
         "async function prepareEmbeddedLimitlessOrderSigningRequest",
@@ -523,7 +544,10 @@ const tests: TestCase[] = [
       );
       assert.match(limitlessOrderFetchBlock, /fetchLimitlessOrderRoute/);
       assert.doesNotMatch(limitlessOrderFetchBlock, /limitlessRequest/);
-      assert.doesNotMatch(limitlessOrderFetchBlock, /requireLimitlessPartnerAuth/);
+      assert.doesNotMatch(
+        limitlessOrderFetchBlock,
+        /requireLimitlessPartnerAuth/,
+      );
 
       const limitlessSingleCancelBlock = sourceSlice(
         limitlessRoute,
@@ -539,7 +563,10 @@ const tests: TestCase[] = [
         "   * POST /orders/cancel-batch",
         "   * DELETE /orders/all/:slug",
       );
-      assert.match(limitlessBatchCancelBlock, /cancelLimitlessOrdersBatchRoute/);
+      assert.match(
+        limitlessBatchCancelBlock,
+        /cancelLimitlessOrdersBatchRoute/,
+      );
       assert.doesNotMatch(limitlessBatchCancelBlock, /limitlessRequest/);
       assert.doesNotMatch(limitlessBatchCancelBlock, /createNotificationSafe/);
 
@@ -559,7 +586,10 @@ const tests: TestCase[] = [
       );
       assert.match(limitlessOpenOrdersBlock, /fetchLimitlessOpenOrdersRoute/);
       assert.doesNotMatch(limitlessOpenOrdersBlock, /limitlessRequest/);
-      assert.doesNotMatch(limitlessOpenOrdersBlock, /requireLimitlessPartnerAuth/);
+      assert.doesNotMatch(
+        limitlessOpenOrdersBlock,
+        /requireLimitlessPartnerAuth/,
+      );
 
       const dflowRoute = readFileSync(
         resolve(apiSrcDir, "routes/dflow-private.ts"),
@@ -573,7 +603,7 @@ const tests: TestCase[] = [
       const dflowOrderBlock = sourceSlice(
         dflowRoute,
         "   * GET /order",
-        "  z.get(\n    \"/order-status\"",
+        '  z.get(\n    "/order-status"',
       );
       assert.match(dflowOrderBlock, /buildKalshiDflowOrderRoute/);
       assert.doesNotMatch(dflowOrderBlock, /dflowRequest/);
@@ -631,6 +661,132 @@ const tests: TestCase[] = [
       assert.match(polymarket, /privy-service\.js|createServerWalletClient/);
       assert.match(limitless, /limitlessRequest/);
       assert.match(kalshi, /dflow-trading-service\.js/);
+    },
+  },
+  {
+    name: "Polymarket bot submit preserves REST retry and FOK confirmation safeguards",
+    run: () => {
+      const polymarket = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const submitBlock = sourceSlice(
+        polymarket,
+        "async function submitPreparedTrade(",
+        "export function createPolymarketTradingExecutionService",
+      );
+      assert.match(submitBlock, /isPolymarketServiceNotReadyResponse/);
+      assert.match(submitBlock, /POLYMARKET_ORDER_RETRY_DELAYS_MS/);
+      assert.match(
+        submitBlock,
+        /invalidatePolymarketCredentialsForInvalidApiKey/,
+      );
+      assert.match(submitBlock, /waitForPolymarketExecutionConfirmation/);
+      assert.match(submitBlock, /POLYMARKET_UNCONFIRMED_STATUS/);
+      assert.doesNotMatch(submitBlock, /venueOrderId:\s*payload\.orderHash/);
+    },
+  },
+  {
+    name: "bot order effects use persisted token and wallet context",
+    run: () => {
+      const effects = readFileSync(
+        resolve(apiSrcDir, "services/api-trading-effects.ts"),
+        "utf8",
+      );
+      assert.match(effects, /readPersistedRawField\(input, "tokenId"\)/);
+      assert.match(effects, /readPersistedRawField\(input, "walletAddress"\)/);
+
+      const polymarket = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const limitless = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      assert.match(polymarket, /tokenId: payload\.tokenId/);
+      assert.match(polymarket, /walletAddress: payload\.positionWalletAddress/);
+      assert.match(limitless, /tokenId: payload\.tokenId/);
+      assert.match(limitless, /walletAddress: input\.intent\.walletAddress/);
+    },
+  },
+  {
+    name: "Limitless bot AMM path is backend-executed and receipt-gated",
+    run: () => {
+      const limitless = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      const readinessBlock = sourceSlice(
+        limitless,
+        "async function getReadiness(",
+        "async function quote(",
+      );
+      assert.match(limitless, /readString\(metadata\.tradeType\)/);
+      assert.match(readinessBlock, /readLimitlessAmmMarketAddress/);
+      assert.doesNotMatch(
+        readinessBlock,
+        /AMM bot execution is not route-equivalent/,
+      );
+
+      const quoteBlock = sourceSlice(
+        limitless,
+        "async function quote(",
+        "function canonicalLimitlessOrderPayload",
+      );
+      assert.match(quoteBlock, /quoteLimitlessAmmTrade/);
+      assert.match(quoteBlock, /kind: "limitless_amm"/);
+
+      const prepareAmmBlock = sourceSlice(
+        limitless,
+        "async function prepareLimitlessAmmTrade(",
+        "async function prepareTrade(",
+      );
+      assert.match(prepareAmmBlock, /fetchLimitlessOnchainSnapshot/);
+      assert.match(prepareAmmBlock, /allowanceRaw < amountRaw/);
+      assert.match(prepareAmmBlock, /minOutcomeTokensRaw/);
+
+      const submitAmmBlock = sourceSlice(
+        limitless,
+        "async function submitLimitlessAmmPreparedTrade(",
+        "function parseLimitlessPreparedPayload",
+      );
+      assert.match(submitAmmBlock, /sendLimitlessServerEvmTransaction/);
+      assert.match(submitAmmBlock, /encodeLimitlessAmmUsdcApproval/);
+      assert.match(submitAmmBlock, /encodeLimitlessAmmBuy/);
+      assert.match(submitAmmBlock, /status: "filled"/);
+
+      const sendBlock = sourceSlice(
+        limitless,
+        "async function sendLimitlessServerEvmTransaction(",
+        "async function getReadiness(",
+      );
+      assert.match(sendBlock, /executeServerEmbeddedEthereumTransaction/);
+
+      const recordBlock = sourceSlice(
+        limitless,
+        "export async function recordLimitlessAmmOrder(",
+        "function isLimitlessAmmMarket",
+      );
+      assert.match(recordBlock, /waitForEmbeddedEthereumTransactionReceipt/);
+      assert.match(recordBlock, /statusCode: 409/);
+
+      const embeddedEthereum = readFileSync(
+        resolve(apiSrcDir, "services/embedded-ethereum.ts"),
+        "utf8",
+      );
+      const serverEvmBlock = sourceSlice(
+        embeddedEthereum,
+        "export async function executeServerEmbeddedEthereumTransaction(",
+        "export async function executeEmbeddedEthereumTransactionRequests(",
+      );
+      assert.match(serverEvmBlock, /walletApi\.ethereum\.sendTransaction/);
+      assert.match(serverEvmBlock, /waitForEvmTransaction/);
+
+      assert.match(
+        limitless,
+        /applyTradeEffects: \(input\) => applyLimitlessTradeEffects/,
+      );
     },
   },
   {

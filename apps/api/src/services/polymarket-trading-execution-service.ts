@@ -818,12 +818,11 @@ export async function executeEmbeddedPolymarketEnsureReadyRoute(input: {
             timestamp: connectTimestamp,
             nonce: connectNonce,
           });
-          const connectSignature = await executeEmbeddedPolymarketConnectRequest(
-            {
+          const connectSignature =
+            await executeEmbeddedPolymarketConnectRequest({
               request: preparedConnectRequest,
               authorizationSignature: connectRequest.signature,
-            },
-          );
+            });
           const { apiKey, apiSecret, passphrase } =
             await requestPolymarketCredentials({
               walletAddress: input.signer,
@@ -3038,9 +3037,7 @@ export async function fetchPolymarketMarketInfoRoute(input: {
         orderMinSize:
           info.order_min_size != null ? Number(info.order_min_size) : null,
         acceptingOrders:
-          info.accepting_orders != null
-            ? Boolean(info.accepting_orders)
-            : null,
+          info.accepting_orders != null ? Boolean(info.accepting_orders) : null,
         takerFeeBps,
         makerFeeBps,
       },
@@ -3072,7 +3069,9 @@ export async function buildPolymarketOrderParamsRoute(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "Polymarket order params require an EVM wallet address" },
+      payload: {
+        error: "Polymarket order params require an EVM wallet address",
+      },
     };
   }
 
@@ -3149,8 +3148,7 @@ export async function quotePolymarketOrderRoute(input: {
   });
 
   const orderType = normalizeOrderTypeForClob(body.orderType ?? "FOK");
-  const amountType =
-    (body.amountType ?? "usd") === "shares" ? "shares" : "usd";
+  const amountType = (body.amountType ?? "usd") === "shares" ? "shares" : "usd";
   const amountUsdInput =
     amountType === "usd" ? (body.amountUsd ?? body.amount) : null;
   const amountSharesInput = amountType === "shares" ? body.amount : null;
@@ -3328,7 +3326,9 @@ export async function buildPolymarketRedemptionPlanRoute(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "Polymarket redemption requires an EVM wallet address" },
+      payload: {
+        error: "Polymarket redemption requires an EVM wallet address",
+      },
     };
   }
 
@@ -3517,9 +3517,7 @@ export async function executeEmbeddedPolymarketTypedDataSignatureRoute(input: {
       statusCode: 400,
       payload: {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to sign typed data",
+          error instanceof Error ? error.message : "Failed to sign typed data",
       },
     };
   }
@@ -3536,7 +3534,9 @@ export async function computePolymarketOrderHashRoute(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "Polymarket order hash requires an EVM wallet address" },
+      payload: {
+        error: "Polymarket order hash requires an EVM wallet address",
+      },
     };
   }
 
@@ -4078,7 +4078,9 @@ export async function fetchPolymarketAccountRoute(input: {
           isApprovedForAll: {
             exchange: okExchange,
             negRiskExchange: okNegRisk,
-            ...(negRiskAdapterAddress ? { negRiskAdapter: okNegRiskAdapter } : {}),
+            ...(negRiskAdapterAddress
+              ? { negRiskAdapter: okNegRiskAdapter }
+              : {}),
             ...(ctfCollateralAdapterAddress
               ? { ctfCollateralAdapter: okCtfCollateralAdapter }
               : {}),
@@ -4307,7 +4309,9 @@ export async function fetchPolymarketOpenOrdersRoute(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "Polymarket open orders require an EVM wallet address" },
+      payload: {
+        error: "Polymarket open orders require an EVM wallet address",
+      },
     };
   }
 
@@ -4398,7 +4402,9 @@ export async function syncPolymarketBalanceAllowanceRoute(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "Polymarket balance sync requires an EVM wallet address" },
+      payload: {
+        error: "Polymarket balance sync requires an EVM wallet address",
+      },
     };
   }
 
@@ -4683,9 +4689,7 @@ export async function cancelPolymarketOrderRoute(input: {
 
         const statusHint = clobOrderEvidence.statusHint ?? fallbackStatusHint;
         const allowMissingOrderNoFill =
-          isPolymarketClobNoFillTerminalStatus(
-            clobOrderEvidence.orderStatus,
-          ) &&
+          isPolymarketClobNoFillTerminalStatus(clobOrderEvidence.orderStatus) &&
           (await isPolymarketOrderNoFillGraceElapsed({
             userId: input.userId,
             venueOrderId: input.body.orderID,
@@ -4739,11 +4743,12 @@ export async function cancelPolymarketOrderRoute(input: {
         }
 
         if (!reconciled) {
-          const markedUnconfirmed =
-            await markPolymarketDelayedOrderUnconfirmed({
+          const markedUnconfirmed = await markPolymarketDelayedOrderUnconfirmed(
+            {
               userId: input.userId,
               venueOrderId: input.body.orderID,
-            });
+            },
+          );
           return {
             ok: true,
             payload: {
@@ -4952,13 +4957,16 @@ function validatePolymarketOrderWallets(inputs: {
   configuredFunder: string;
   order: Record<string, unknown>;
   selectedSigner: string;
-}): { depositWallet: boolean; maker: string; ok: true; orderSigner: string } | {
-  error: string;
-  ok: false;
-} {
+}):
+  | { depositWallet: boolean; maker: string; ok: true; orderSigner: string }
+  | {
+      error: string;
+      ok: false;
+    } {
   const orderSigner =
     typeof inputs.order.signer === "string" ? inputs.order.signer : "";
-  const maker = typeof inputs.order.maker === "string" ? inputs.order.maker : "";
+  const maker =
+    typeof inputs.order.maker === "string" ? inputs.order.maker : "";
   const signatureType = normalizeSignatureType(inputs.order.signatureType);
   const depositWallet = signatureType === 3;
   const legacySafe = signatureType === 2;
@@ -5013,7 +5021,8 @@ function validatePolymarketOrderWallets(inputs: {
   if (normalizedMaker !== configuredFunder) {
     return {
       ok: false,
-      error: "Order maker does not match the configured Polymarket funder/vault",
+      error:
+        "Order maker does not match the configured Polymarket funder/vault",
     };
   }
 
@@ -5549,7 +5558,8 @@ function normalizeOrderForHash(
   const makerAmount = normalizeNumberishString(order.makerAmount);
   const takerAmount = normalizeNumberishString(order.takerAmount);
   const timestamp = normalizeNumberishString(order.timestamp);
-  const metadata = typeof order.metadata === "string" ? order.metadata.trim() : "";
+  const metadata =
+    typeof order.metadata === "string" ? order.metadata.trim() : "";
   const builder = typeof order.builder === "string" ? order.builder.trim() : "";
   if (
     !salt ||
@@ -5819,7 +5829,9 @@ export async function submitPolymarketClientSignedOrder(input: {
   const exchangeAddress =
     (typeof input.body.exchangeAddress === "string" &&
       input.body.exchangeAddress.trim()) ||
-    exchangeAddressForNegRisk(input.body.negRisk ?? marketInfo?.neg_risk ?? null) ||
+    exchangeAddressForNegRisk(
+      input.body.negRisk ?? marketInfo?.neg_risk ?? null,
+    ) ||
     env.polymarketExchangeAddress;
 
   if (!normalizedForHash) {
@@ -6007,7 +6019,8 @@ export async function submitPolymarketClientSignedOrder(input: {
 
   const tokenId = extractTokenId(order);
   const { price, size } = derivePriceAndSize(order, side);
-  const statusRaw = extractPolymarketOrderStatus(upstream.payload) ?? "submitted";
+  const statusRaw =
+    extractPolymarketOrderStatus(upstream.payload) ?? "submitted";
   const immediateFill = extractPolymarketImmediateFill({
     payload: upstream.payload,
     side,
@@ -6029,7 +6042,8 @@ export async function submitPolymarketClientSignedOrder(input: {
           exchangeAddress,
           orderHash,
           makerAmount,
-          orderPayloadVersion: resolvePolymarketOrderPayloadVersion(orderPayload),
+          orderPayloadVersion:
+            resolvePolymarketOrderPayloadVersion(orderPayload),
         });
         status = execution?.hasExecution
           ? "matched"
@@ -6091,7 +6105,12 @@ export async function submitPolymarketClientSignedOrder(input: {
         })
       : null;
 
-  if (stored.kind === "stored" && status === "matched" && tokenId && immediateFill) {
+  if (
+    stored.kind === "stored" &&
+    status === "matched" &&
+    tokenId &&
+    immediateFill
+  ) {
     const optimisticPositionWalletAddress =
       side === "SELL" && positionWalletAddress ? positionWalletAddress : funder;
     try {
@@ -6245,7 +6264,8 @@ async function getReadiness(
     return readiness("polymarket", capabilities, {
       ok: false,
       code: "insufficient_readiness",
-      message: "Deploy or select a Polymarket deposit wallet before bot trading.",
+      message:
+        "Deploy or select a Polymarket deposit wallet before bot trading.",
       setupRequired: true,
     });
   }
@@ -6459,6 +6479,7 @@ function extractStatus(payload: unknown): string | null {
 }
 
 async function submitPreparedTrade(
+  ctx: ApiTradingApplicationServiceInput,
   prepared: PreparedTrade,
 ): Promise<SubmitResult> {
   const payload = parsePreparedPayload<PolymarketPreparedPayload>(
@@ -6479,24 +6500,69 @@ async function submitPreparedTrade(
     });
   }
 
-  const upstream = await polymarketL2Request({
-    baseUrl: env.polymarketClobBase,
-    timeoutMs: 10_000,
-    address: signer,
-    creds: {
-      apiKey: creds.apiKey,
-      apiSecret: creds.apiSecret,
-      apiPassphrase: creds.apiPassphrase,
-    },
-    method: "POST",
-    requestPath: "/order",
-    body: {
-      order: payload.orderPayload,
-      owner: creds.apiKey,
-      orderType: payload.orderType,
-    },
-  });
+  const requestBody = {
+    order: payload.orderPayload,
+    owner: creds.apiKey,
+    orderType: payload.orderType,
+  };
+  const clobCreds = {
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+    apiPassphrase: creds.apiPassphrase,
+  };
+  const submitOrder = () =>
+    polymarketL2Request({
+      baseUrl: env.polymarketClobBase,
+      timeoutMs: 10_000,
+      address: signer,
+      creds: clobCreds,
+      method: "POST",
+      requestPath: "/order",
+      body: requestBody,
+    });
+
+  let upstream = await submitOrder();
+  for (
+    let attempt = 0;
+    !upstream.ok &&
+    isPolymarketServiceNotReadyResponse(upstream) &&
+    attempt < POLYMARKET_ORDER_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    const delayMs = POLYMARKET_ORDER_RETRY_DELAYS_MS[attempt] ?? 0;
+    ctx.logger?.warn?.(
+      {
+        upstreamStatus: upstream.status,
+        upstreamPayload: upstream.payload,
+        signer,
+        tokenId: payload.tokenId,
+        orderType: payload.orderType,
+        orderHash: payload.orderHash,
+        retryAttempt: attempt + 1,
+        retryDelayMs: delayMs,
+      },
+      "Polymarket order service not ready; retrying same signed order",
+    );
+    await sleep(delayMs);
+    upstream = await submitOrder();
+  }
   if (!upstream.ok) {
+    if (
+      await invalidatePolymarketCredentialsForInvalidApiKey({
+        userId: prepared.intent.actor.userId,
+        signer,
+        endpoint: "order",
+        upstream,
+        log: ctx.logger,
+      })
+    ) {
+      throw tradingError({
+        code: POLYMARKET_CREDENTIALS_INVALID_CODE,
+        message: "Reconnect Polymarket to refresh trading credentials.",
+        statusCode: 401,
+        venue: "polymarket",
+      });
+    }
     throw tradingError({
       code: "trade_submission_failed",
       message:
@@ -6523,7 +6589,51 @@ async function submitPreparedTrade(
     });
   }
 
-  const status = extractStatus(upstream.payload) ?? "submitted";
+  const statusRaw = extractStatus(upstream.payload) ?? "submitted";
+  const immediateFill = extractPolymarketImmediateFill({
+    payload: upstream.payload,
+    side: "BUY",
+    status: statusRaw,
+    fallbackPrice: payload.price,
+    fallbackSize: payload.size,
+  });
+  const shouldConfirmImmediateExecution =
+    payload.orderType === "FOK" &&
+    (isImmediateExecutionStatus(statusRaw) ||
+      immediateFill?.fromPayload === true);
+  let status = statusRaw;
+  if (shouldConfirmImmediateExecution) {
+    const makerAmount = readMakerAmountFromOrderPayload(payload.orderPayload);
+    if (makerAmount != null && makerAmount > 0n) {
+      try {
+        const execution = await waitForPolymarketExecutionConfirmation({
+          exchangeAddress: payload.exchangeAddress,
+          makerAmount,
+          orderHash: payload.orderHash,
+          orderPayloadVersion: resolvePolymarketOrderPayloadVersion(
+            payload.orderPayload,
+          ),
+        });
+        status = execution?.hasExecution
+          ? "matched"
+          : POLYMARKET_UNCONFIRMED_STATUS;
+      } catch (error) {
+        ctx.logger?.warn?.(
+          {
+            error,
+            userId: prepared.intent.actor.userId,
+            signer,
+            tokenId: payload.tokenId,
+            orderHash: payload.orderHash,
+          },
+          "Polymarket submit-time on-chain confirmation failed",
+        );
+        status = POLYMARKET_UNCONFIRMED_STATUS;
+      }
+    } else {
+      status = POLYMARKET_UNCONFIRMED_STATUS;
+    }
+  }
   return {
     venue: "polymarket",
     status: ["matched", "filled"].includes(status) ? "filled" : "submitted",
@@ -6532,7 +6642,7 @@ async function submitPreparedTrade(
     txSignature: null,
     price: payload.price,
     size: payload.size,
-    raw: { payload: upstream.payload, prepared: payload },
+    raw: { payload: upstream.payload, prepared: payload, status },
   };
 }
 
@@ -6546,7 +6656,7 @@ export function createPolymarketTradingExecutionService(
     quote: (input) => quote(ctx, input),
     prepareTrade: (input) =>
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
-    submitPreparedTrade: (input) => submitPreparedTrade(input.prepared),
+    submitPreparedTrade: (input) => submitPreparedTrade(ctx, input.prepared),
     persistTrade: async (input) => {
       const payload = input.prepared
         ? parsePreparedPayload<PolymarketPreparedPayload>(
@@ -6561,6 +6671,15 @@ export function createPolymarketTradingExecutionService(
           venue: "polymarket",
         });
       }
+      const submitRawStatus = readString(
+        isRecord(input.submitResult.raw) ? input.submitResult.raw.status : null,
+      );
+      const storedStatus =
+        input.submitResult.status === "filled"
+          ? "matched"
+          : submitRawStatus === POLYMARKET_UNCONFIRMED_STATUS
+            ? POLYMARKET_UNCONFIRMED_STATUS
+            : "submitted";
       const stored = await storeOrder(ctx.pool, {
         userId: input.intent.actor.userId,
         walletAddress: payload.positionWalletAddress,
@@ -6572,8 +6691,7 @@ export function createPolymarketTradingExecutionService(
         orderType: "FOK",
         price: payload.price,
         size: payload.size,
-        status:
-          input.submitResult.status === "filled" ? "matched" : "submitted",
+        status: storedStatus,
         errorMessage: null,
         rawError: null,
         orderPayload: payload.orderPayload,
@@ -6588,7 +6706,11 @@ export function createPolymarketTradingExecutionService(
         executionId: null,
         venueOrderId: stored.order.venue_order_id,
         status: stored.order.status,
-        raw: stored,
+        raw: {
+          stored,
+          tokenId: payload.tokenId,
+          walletAddress: payload.positionWalletAddress,
+        },
       };
     },
     applyTradeEffects: (input) => applyOrderTradeEffects(ctx, input),

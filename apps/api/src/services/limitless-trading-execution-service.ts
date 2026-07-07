@@ -15,8 +15,15 @@ import {
   normalizeLimitlessFokOrderSizesForMarket,
   storeOrder,
 } from "../repos/orders-repo.js";
-import { buildOrderNotification, createNotificationSafe } from "./notifications.js";
+import {
+  buildOrderNotification,
+  createNotificationSafe,
+} from "./notifications.js";
 import { tryRecordReferralFirstTradeConversion } from "./analytics-referrals.js";
+import {
+  executeServerEmbeddedEthereumTransaction,
+  waitForEmbeddedEthereumTransactionReceipt,
+} from "./embedded-ethereum.js";
 import {
   applyOptimisticPositionTrade,
   reconcileExactPositionBalance,
@@ -83,9 +90,11 @@ import {
   normalizeLimitlessRawAmount,
 } from "./limitless-order-normalization.js";
 import type {
+  ApplyTradeEffectsInput,
   PersistedTrade,
   PreparedTrade,
   SubmitResult,
+  TradeEffectsResult,
   TradeIntent,
   TradeQuote,
   TradeQuoteInput,
@@ -99,6 +108,10 @@ const LIMITLESS_CHAIN_ID = 8453;
 const LIMITLESS_FOK_UNMATCHED_REASON = "market_order_unmatched";
 const LIMITLESS_FOK_UNMATCHED_MESSAGE =
   "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
+const LIMITLESS_AMM_DEFAULT_SLIPPAGE_BPS = 30;
+const LIMITLESS_AMM_APPROVAL_BUFFER_MULTIPLIER = 2n;
+const LIMITLESS_AMM_APPROVAL_MIN_BUFFER_RAW = 5_000_000n;
+const LIMITLESS_AMM_RECEIPT_WAIT_MS = 90_000;
 const LIMITLESS_CONNECT_LOCK_PREFIX = "lock:limitless:connect:";
 const LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS = [
   100, 250, 500, 1_000,
@@ -126,7 +139,15 @@ const LIMITLESS_ORDER_TYPES = {
   ],
 } as const;
 
-type LimitlessPreparedPayload = PreparedPayloadBase & {
+const LIMITLESS_AMM_IFACE = new ethers.Interface([
+  "function buy(uint256 investmentAmount,uint256 outcomeIndex,uint256 minOutcomeTokens) returns (uint256)",
+]);
+
+const ERC20_IFACE = new ethers.Interface([
+  "function approve(address spender,uint256 value) returns (bool)",
+]);
+
+type LimitlessClobPreparedPayload = PreparedPayloadBase & {
   kind: "limitless";
   marketSlug: string;
   orderPayload: Record<string, unknown>;
@@ -137,6 +158,27 @@ type LimitlessPreparedPayload = PreparedPayloadBase & {
   size: number | null;
   tokenId: string | null;
 };
+
+type LimitlessAmmPreparedPayload = PreparedPayloadBase & {
+  kind: "limitless";
+  allowanceRaw: string;
+  amountUsd: number;
+  amountUsdRaw: string;
+  approvalRequired: boolean;
+  approvalTargetRaw: string;
+  marketAddress: string;
+  minOutcomeTokensRaw: string;
+  outcomeIndex: number;
+  price: number | null;
+  sharesRaw: string;
+  size: number;
+  tokenId: string;
+  tradeType: "amm";
+};
+
+type LimitlessPreparedPayload =
+  | LimitlessAmmPreparedPayload
+  | LimitlessClobPreparedPayload;
 
 type LimitlessRouteLogger = {
   debug?: (input: unknown, message?: string) => void;
@@ -183,6 +225,7 @@ const limitlessAccountInflight = new Map<
 
 type LimitlessAmmOrderBody = {
   amountUsd?: number | null;
+  marketSlug?: string | null;
   price?: number | null;
   side: "BUY" | "SELL";
   size: number;
@@ -402,7 +445,9 @@ async function resolveLimitlessRouteAuth(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: "Limitless profile mapping is missing for this wallet." },
+      payload: {
+        error: "Limitless profile mapping is missing for this wallet.",
+      },
     };
   }
 
@@ -554,7 +599,10 @@ async function lookupLimitlessPartnerAccountProfile(input: {
   }
 
   const matchingProfile = normalizeLimitlessProfileForAccount({
-    profile: extractLimitlessPartnerAccountProfile(lookup.payload, input.account),
+    profile: extractLimitlessPartnerAccountProfile(
+      lookup.payload,
+      input.account,
+    ),
     account: input.account,
     clientType: input.clientType,
   });
@@ -705,12 +753,11 @@ export async function connectLimitlessPartnerAccountRoute(input: {
 
       if (!upstream.ok) {
         if (upstream.status === 409) {
-          const partnerAccountLookup = await lookupLimitlessPartnerAccountProfile(
-            {
+          const partnerAccountLookup =
+            await lookupLimitlessPartnerAccountProfile({
               account: checksumAccount,
               clientType: input.clientType,
-            },
-          );
+            });
           if (partnerAccountLookup.profile) {
             return persistAndReturnProfile(
               partnerAccountLookup.profile,
@@ -1566,7 +1613,9 @@ export async function fetchLimitlessAccountRoute(input: {
       : (creds?.updatedAt ?? null);
   const refresh = input.query.refresh === true;
   let hasCredentials =
-    Boolean(creds) && Boolean(authContext) && isLimitlessPartnerHmacConfigured();
+    Boolean(creds) &&
+    Boolean(authContext) &&
+    isLimitlessPartnerHmacConfigured();
   let verifiedProfileBase: Awaited<
     ReturnType<typeof loadLimitlessProfileForWallet>
   > | null = null;
@@ -1701,7 +1750,9 @@ export async function fetchLimitlessAccountRoute(input: {
       const allowanceNegRisk = snapshot.allowanceNegRisk;
       const allowanceAmm = snapshot.allowanceAmm;
       const tokenBalanceRaw =
-        tokenId && tokenBalanceMap ? (tokenBalanceMap.get(tokenId) ?? 0n) : null;
+        tokenId && tokenBalanceMap
+          ? (tokenBalanceMap.get(tokenId) ?? 0n)
+          : null;
       const isContract = typeof code === "string" && code.length > 2;
 
       return {
@@ -2256,7 +2307,7 @@ async function notifyLimitlessCancel(input: {
           venue: "limitless",
           orderIds: input.orderIds,
           walletAddress: input.walletAddress,
-            },
+        },
         dedupeKey: `${input.dedupePrefix ?? "order_cancelled_batch"}:${
           input.orderIds[0] ??
           (input.dedupePrefix === "order_cancelled_all" ? "all" : "batch")
@@ -2411,7 +2462,10 @@ export async function cancelLimitlessOrdersBatchRoute(input: {
     };
   }
 
-  const cancelledIds = extractLimitlessCanceledIds(upstream.payload, input.orderIds);
+  const cancelledIds = extractLimitlessCanceledIds(
+    upstream.payload,
+    input.orderIds,
+  );
   if (cancelledIds.length) {
     await input.pool.query(
       `
@@ -2495,7 +2549,10 @@ export async function cancelAllLimitlessOrdersRoute(input: {
     };
   }
 
-  const cancelledIds = extractLimitlessCanceledIds(upstream.payload, openOrderIds);
+  const cancelledIds = extractLimitlessCanceledIds(
+    upstream.payload,
+    openOrderIds,
+  );
   if (cancelledIds.length) {
     await input.pool.query(
       `
@@ -2564,7 +2621,9 @@ function deriveSize(
   });
 }
 
-function normalizeRawLimitlessTokenIdFromUnknown(value: unknown): string | null {
+function normalizeRawLimitlessTokenIdFromUnknown(
+  value: unknown,
+): string | null {
   return typeof value === "string" ||
     typeof value === "number" ||
     typeof value === "bigint"
@@ -2581,7 +2640,9 @@ function extractLimitlessPositionTokenIds(value: unknown): string[] {
     .filter((entry): entry is string => Boolean(entry));
 }
 
-function extractLimitlessTokenPair(payload: unknown): LimitlessTokenPair | null {
+function extractLimitlessTokenPair(
+  payload: unknown,
+): LimitlessTokenPair | null {
   const marketRecord = isRecord(payload)
     ? isRecord(payload.market)
       ? payload.market
@@ -2608,7 +2669,9 @@ function extractLimitlessTokenPair(payload: unknown): LimitlessTokenPair | null 
     null;
   const tokenNo =
     normalizeRawLimitlessTokenIdFromUnknown(
-      tokensRecord ? (tokensRecord.no ?? tokensRecord.NO ?? tokensRecord[1]) : null,
+      tokensRecord
+        ? (tokensRecord.no ?? tokensRecord.NO ?? tokensRecord[1])
+        : null,
     ) ??
     positionIds[1] ??
     null;
@@ -2828,7 +2891,9 @@ export async function submitLimitlessClientSignedOrder(input: {
     return {
       ok: false,
       statusCode: 400,
-      payload: { error: verification.message ?? "Limitless account is not ready." },
+      payload: {
+        error: verification.message ?? "Limitless account is not ready.",
+      },
     };
   }
   const profile = verification.profile;
@@ -2927,7 +2992,10 @@ export async function submitLimitlessClientSignedOrder(input: {
       };
     }
     const sideValue = coerceOrderNumber(order.side, "side");
-    const signatureType = coerceOrderNumber(order.signatureType, "signatureType");
+    const signatureType = coerceOrderNumber(
+      order.signatureType,
+      "signatureType",
+    );
     const price =
       order.price == null
         ? null
@@ -3015,7 +3083,9 @@ export async function submitLimitlessClientSignedOrder(input: {
       return {
         ok: false,
         statusCode: 400,
-        payload: { error: "GTC orders require makerAmount, takerAmount, and side." },
+        payload: {
+          error: "GTC orders require makerAmount, takerAmount, and side.",
+        },
       };
     }
     const priceRaw = Math.round(coercedPrice * 1_000_000);
@@ -3249,7 +3319,8 @@ export async function submitLimitlessClientSignedOrder(input: {
       : null;
   const storedPrice =
     confirmedImmediateFill && confirmedImmediateFill.shares > 0
-      ? (price ?? confirmedImmediateFill.notionalUsd / confirmedImmediateFill.shares)
+      ? (price ??
+        confirmedImmediateFill.notionalUsd / confirmedImmediateFill.shares)
       : price;
   const storedSize =
     confirmedImmediateFill && confirmedImmediateFill.shares > 0
@@ -3312,28 +3383,34 @@ export async function submitLimitlessClientSignedOrder(input: {
   let referralFirstTrade = null;
   if (stored.kind === "stored" && input.body.orderType === "FOK" && tokenId) {
     if (confirmedImmediateFill) {
-      referralFirstTrade = await tryRecordReferralFirstTradeConversion(input.pool, {
-        userId: input.userId,
-        venue: "limitless",
-        status,
-        sourceType: "order",
-        sourceId: venueOrderId,
-        txHash: null,
-        logger: input.log,
-      });
+      referralFirstTrade = await tryRecordReferralFirstTradeConversion(
+        input.pool,
+        {
+          userId: input.userId,
+          venue: "limitless",
+          status,
+          sourceType: "order",
+          sourceId: venueOrderId,
+          txHash: null,
+          logger: input.log,
+        },
+      );
     }
     let optimisticApplied = false;
     if (confirmedImmediateFill) {
       try {
-        const optimisticResult = await applyOptimisticPositionTrade(input.pool, {
-          userId: input.userId,
-          walletAddress: signer,
-          venue: "limitless",
-          tokenId,
-          side,
-          shares: confirmedImmediateFill.shares,
-          notionalUsd: confirmedImmediateFill.notionalUsd,
-        });
+        const optimisticResult = await applyOptimisticPositionTrade(
+          input.pool,
+          {
+            userId: input.userId,
+            walletAddress: signer,
+            venue: "limitless",
+            tokenId,
+            side,
+            shares: confirmedImmediateFill.shares,
+            notionalUsd: confirmedImmediateFill.notionalUsd,
+          },
+        );
         optimisticApplied = optimisticResult.applied;
         if (optimisticResult.applied) {
           await markOrderPositionDeltaApplied(input.pool, {
@@ -3406,7 +3483,10 @@ export async function quoteLimitlessAmmRoute(input: {
       ? BigInt(input.query.amountSharesRaw)
       : null;
 
-  if (input.query.side === "BUY" && (amountUsdRaw == null || amountUsdRaw <= 0n)) {
+  if (
+    input.query.side === "BUY" &&
+    (amountUsdRaw == null || amountUsdRaw <= 0n)
+  ) {
     return {
       ok: false,
       statusCode: 400,
@@ -3469,6 +3549,7 @@ export async function quoteLimitlessAmmRoute(input: {
 export async function recordLimitlessAmmOrder(input: {
   body: LimitlessAmmOrderBody;
   log?: LimitlessRouteLogger | null;
+  onchainConfirmed?: boolean;
   pool: ApiTradingApplicationServiceInput["pool"];
   signer: string;
   userId: string;
@@ -3503,6 +3584,27 @@ export async function recordLimitlessAmmOrder(input: {
   }
 
   const txHash = input.body.txHash;
+  if (input.onchainConfirmed !== true) {
+    try {
+      await waitForEmbeddedEthereumTransactionReceipt({
+        chainId: LIMITLESS_CHAIN_ID,
+        context: "Limitless AMM order",
+        timeoutMs: 15_000,
+        txHash,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : "Limitless AMM transaction is not confirmed yet.",
+        },
+      };
+    }
+  }
   const venueOrderId = `amm:${txHash}:${tokenId}`;
   const now = new Date();
 
@@ -3581,7 +3683,9 @@ export async function recordLimitlessAmmOrder(input: {
         notionalUsd: fallbackNotional,
       });
       if (optimisticResult.applied) {
-        await markOrderPositionDeltaApplied(input.pool, { id: stored.order.id });
+        await markOrderPositionDeltaApplied(input.pool, {
+          id: stored.order.id,
+        });
       }
     } catch (error) {
       input.log?.warn?.(
@@ -3677,9 +3781,119 @@ function isLimitlessAmmMarket(metadata: unknown): boolean {
     readString(metadata.execution_mode) ??
     readString(metadata.tradingMode) ??
     readString(metadata.trading_mode) ??
+    readString(metadata.tradeType) ??
+    readString(metadata.trade_type) ??
     readString(metadata.marketType) ??
     readString(metadata.market_type);
   return mode?.toLowerCase() === "amm";
+}
+
+type LimitlessTradingMarket = Awaited<ReturnType<typeof loadMarketForVenue>>;
+
+function readLimitlessAmmMarketAddress(metadata: unknown): string | null {
+  if (!isRecord(metadata)) return null;
+  return toChecksumAddress(
+    readString(metadata.address) ??
+      readString(metadata.marketAddress) ??
+      readString(metadata.market_address) ??
+      readString(metadata.ammAddress) ??
+      readString(metadata.amm_address),
+  );
+}
+
+function resolveLimitlessAmmOutcomeIndex(
+  market: LimitlessTradingMarket,
+  side: "NO" | "YES",
+): number | null {
+  const selected = normalizeLimitlessRawTokenId(tokenForSide(market, side));
+  const yes = normalizeLimitlessRawTokenId(market.token_yes);
+  const no = normalizeLimitlessRawTokenId(market.token_no);
+  if (selected && yes && selected === yes) return 0;
+  if (selected && no && selected === no) return 1;
+  return side === "YES" ? 0 : 1;
+}
+
+function amountUsdRawValue(intent: TradeIntent): bigint {
+  const amount = amountUsd(intent);
+  const raw = Math.floor(amount * USDC_SCALE + 1e-9);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Trade amount must be positive.",
+      venue: "limitless",
+    });
+  }
+  return BigInt(raw);
+}
+
+function amountFromRaw(raw: bigint): number {
+  return Number(raw) / USDC_SCALE;
+}
+
+function applySlippageDown(value: bigint, bps: number): bigint {
+  if (bps <= 0) return value;
+  return (value * BigInt(10_000 - bps)) / 10_000n;
+}
+
+function limitlessAmmApprovalTargetRaw(amountRaw: bigint): bigint {
+  if (amountRaw > LIMITLESS_AMM_APPROVAL_MIN_BUFFER_RAW) {
+    return amountRaw * LIMITLESS_AMM_APPROVAL_BUFFER_MULTIPLIER;
+  }
+  return LIMITLESS_AMM_APPROVAL_MIN_BUFFER_RAW;
+}
+
+function encodeLimitlessAmmUsdcApproval(spender: string, amount: bigint) {
+  return ERC20_IFACE.encodeFunctionData("approve", [spender, amount]);
+}
+
+function encodeLimitlessAmmBuy(input: {
+  amountUsdRaw: bigint;
+  minOutcomeTokensRaw: bigint;
+  outcomeIndex: number;
+}) {
+  return LIMITLESS_AMM_IFACE.encodeFunctionData("buy", [
+    input.amountUsdRaw,
+    BigInt(input.outcomeIndex),
+    input.minOutcomeTokensRaw,
+  ]);
+}
+
+async function sendLimitlessServerEvmTransaction(input: {
+  data: string;
+  label: string;
+  signer: string;
+  to: string;
+  walletId: string;
+}): Promise<string> {
+  try {
+    return await executeServerEmbeddedEthereumTransaction({
+      chainId: LIMITLESS_CHAIN_ID,
+      signer: input.signer,
+      timeoutMs: LIMITLESS_AMM_RECEIPT_WAIT_MS,
+      transaction: {
+        data: input.data,
+        id: input.label.toLowerCase().replace(/\s+/g, "-"),
+        label: input.label,
+        sponsor: true,
+        to: input.to,
+      },
+      walletClient: createServerWalletClient(),
+      walletId: input.walletId,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message.trim()
+        ? error.message
+        : `${input.label} was not confirmed onchain.`;
+    throw tradingError({
+      code: "trade_submission_failed",
+      message,
+      statusCode: message.includes("did not return a transaction hash")
+        ? 502
+        : 504,
+      venue: "limitless",
+    });
+  }
 }
 
 async function getReadiness(
@@ -3739,14 +3953,15 @@ async function getReadiness(
       "limitless",
     );
     if (isLimitlessAmmMarket(market.metadata)) {
-      return readiness("limitless", capabilities, {
-        ok: false,
-        code: "unsupported_capability",
-        message:
-          "Limitless AMM bot execution is not route-equivalent yet. Open Hunch to trade.",
-      });
-    }
-    if (!market.slug || !market.token_yes || !market.token_no) {
+      const marketAddress = readLimitlessAmmMarketAddress(market.metadata);
+      if (!marketAddress || !market.token_yes || !market.token_no) {
+        return readiness("limitless", capabilities, {
+          ok: false,
+          code: "insufficient_readiness",
+          message: "Limitless AMM market is missing onchain routing data.",
+        });
+      }
+    } else if (!market.slug || !market.token_yes || !market.token_no) {
       return readiness("limitless", capabilities, {
         ok: false,
         code: "insufficient_readiness",
@@ -3806,15 +4021,73 @@ async function quote(
     intent.target.marketId,
     "limitless",
   );
-  if (isLimitlessAmmMarket(market.metadata)) {
-    throw tradingError({
-      code: "unsupported_capability",
-      message:
-        "Limitless AMM bot execution is not route-equivalent yet. Open Hunch to trade.",
-      venue: "limitless",
-    });
-  }
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
+  if (isLimitlessAmmMarket(market.metadata)) {
+    if (!isOrderable(market)) {
+      throw tradingError({
+        code: "invalid_trade_request",
+        message: "Market is not open for orders.",
+        venue: "limitless",
+      });
+    }
+    const marketAddress = readLimitlessAmmMarketAddress(market.metadata);
+    const tokenId = normalizeLimitlessScopedTokenId(tokenForSide(market, side));
+    const outcomeIndex = resolveLimitlessAmmOutcomeIndex(market, side);
+    if (!marketAddress || !tokenId || outcomeIndex == null) {
+      throw tradingError({
+        code: "insufficient_readiness",
+        message: "Limitless AMM routing data is unavailable.",
+        venue: "limitless",
+      });
+    }
+    const amountRaw = amountUsdRawValue(intent);
+    const ammQuote = await quoteLimitlessAmmTrade({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      marketAddress,
+      outcomeIndex,
+      side: "BUY",
+      amountUsdRaw: amountRaw,
+      amountSharesRaw: null,
+    });
+    const sharesRaw =
+      ammQuote.sharesRaw != null ? BigInt(ammQuote.sharesRaw) : null;
+    if (sharesRaw == null || sharesRaw <= 0n) {
+      throw tradingError({
+        code: "quote_unavailable",
+        message: "Limitless AMM quote is unavailable.",
+        venue: "limitless",
+      });
+    }
+    const amount = amountUsd(intent);
+    const estimatedShares = amountFromRaw(sharesRaw);
+    const price = estimatedShares > 0 ? amount / estimatedShares : null;
+    return {
+      venue: "limitless",
+      target: {
+        ...intent.target,
+        tokenId,
+        raw: { market, marketAddress, outcomeIndex },
+      },
+      action: "BUY",
+      amount: intent.amount,
+      price,
+      estimatedShares,
+      estimatedNotionalUsd: amount,
+      maxSpendUsd: amount,
+      minReceiveShares: estimatedShares,
+      fees: {},
+      expiresAt: new Date(Date.now() + 30_000),
+      raw: {
+        amountUsdRaw: amountRaw.toString(),
+        kind: "limitless_amm",
+        marketAddress,
+        outcomeIndex,
+        sharesRaw: sharesRaw.toString(),
+        tokenId,
+      },
+    };
+  }
   const tokenId = tokenForSide(market, side);
   if (!isOrderable(market)) {
     throw tradingError({
@@ -3879,12 +4152,143 @@ async function fetchLimitlessExchangeAddress(input: {
     readString(upstream.payload.exchange_address) ??
     readString(upstream.payload.exchange);
   if (direct) return direct;
-  const venue = isRecord(upstream.payload.venue) ? upstream.payload.venue : null;
+  const venue = isRecord(upstream.payload.venue)
+    ? upstream.payload.venue
+    : null;
   return venue
     ? (readString(venue.exchangeAddress) ??
         readString(venue.exchange_address) ??
         readString(venue.exchange))
     : null;
+}
+
+async function prepareLimitlessAmmTrade(input: {
+  intent: TradeIntent;
+  market: LimitlessTradingMarket;
+  quote?: TradeQuote | null;
+}): Promise<PreparedTrade> {
+  const intent = input.intent;
+  const side = normalizeSide(intent.outcome ?? intent.target.outcome);
+  const signer = toChecksumAddress(intent.walletAddress);
+  const marketAddress = readLimitlessAmmMarketAddress(input.market.metadata);
+  const tokenId = normalizeLimitlessScopedTokenId(
+    tokenForSide(input.market, side),
+  );
+  const outcomeIndex = resolveLimitlessAmmOutcomeIndex(input.market, side);
+  if (!signer || !marketAddress || !tokenId || outcomeIndex == null) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Limitless AMM market or wallet is invalid.",
+      venue: "limitless",
+    });
+  }
+  if (!isOrderable(input.market)) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Market is not open for orders.",
+      venue: "limitless",
+    });
+  }
+
+  const authContext = await resolveLimitlessAuthContext(
+    intent.actor.userId,
+    signer,
+  );
+  if (!authContext) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Limitless account is not connected.",
+      venue: "limitless",
+    });
+  }
+  const verification = await verifyLimitlessAuthContext({
+    authContext,
+    walletAddress: signer,
+  });
+  if (!verification.ok || !verification.profile?.id) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: !verification.ok
+        ? (verification.message ?? "Limitless account is not ready.")
+        : "Limitless account is not ready.",
+      venue: "limitless",
+    });
+  }
+
+  const amountRaw = amountUsdRawValue(intent);
+  const amount = amountUsd(intent);
+  let sharesRaw =
+    isRecord(input.quote?.raw) && input.quote.raw.kind === "limitless_amm"
+      ? BigInt(String(input.quote.raw.sharesRaw ?? "0"))
+      : null;
+  if (sharesRaw == null || sharesRaw <= 0n) {
+    const freshQuote = await quoteLimitlessAmmTrade({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      marketAddress,
+      outcomeIndex,
+      side: "BUY",
+      amountUsdRaw: amountRaw,
+      amountSharesRaw: null,
+    });
+    sharesRaw =
+      freshQuote.sharesRaw != null ? BigInt(freshQuote.sharesRaw) : null;
+  }
+  if (sharesRaw == null || sharesRaw <= 0n) {
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Limitless AMM quote is unavailable.",
+      venue: "limitless",
+    });
+  }
+
+  const snapshot = await fetchLimitlessOnchainSnapshot({
+    rpcUrl: env.baseRpcUrl,
+    timeoutMs: env.baseRpcTimeoutMs,
+    owner: signer,
+    ammAddress: marketAddress,
+  });
+  if (snapshot.usdcBalance < amountRaw) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Insufficient USDC balance for this Limitless AMM buy.",
+      venue: "limitless",
+    });
+  }
+  const allowanceRaw = snapshot.allowanceAmm ?? 0n;
+  const approvalTargetRaw = limitlessAmmApprovalTargetRaw(amountRaw);
+  const minOutcomeTokensRaw = applySlippageDown(
+    sharesRaw,
+    intent.slippageBps ?? LIMITLESS_AMM_DEFAULT_SLIPPAGE_BPS,
+  );
+  const size = amountFromRaw(sharesRaw);
+  const price = size > 0 ? amount / size : null;
+
+  return {
+    preparedId: crypto.randomUUID(),
+    venue: "limitless",
+    intent,
+    quote: input.quote ?? null,
+    authorizationMode: "embedded_privy_evm",
+    authorizationRequests: [],
+    venuePayload: {
+      kind: "limitless",
+      allowanceRaw: allowanceRaw.toString(),
+      amountUsd: amount,
+      amountUsdRaw: amountRaw.toString(),
+      approvalRequired: allowanceRaw < amountRaw,
+      approvalTargetRaw: approvalTargetRaw.toString(),
+      marketAddress,
+      minOutcomeTokensRaw: minOutcomeTokensRaw.toString(),
+      outcomeIndex,
+      price,
+      sharesRaw: sharesRaw.toString(),
+      size,
+      tokenId,
+      tradeType: "amm",
+    } satisfies LimitlessAmmPreparedPayload,
+    expiresAt: new Date(Date.now() + 30_000),
+  };
 }
 
 async function prepareTrade(
@@ -3898,11 +4302,10 @@ async function prepareTrade(
     "limitless",
   );
   if (isLimitlessAmmMarket(market.metadata)) {
-    throw tradingError({
-      code: "unsupported_capability",
-      message:
-        "Limitless AMM bot execution is not route-equivalent yet. Open Hunch to trade.",
-      venue: "limitless",
+    return prepareLimitlessAmmTrade({
+      intent,
+      market,
+      quote: input.quote ?? null,
     });
   }
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
@@ -3957,8 +4360,10 @@ async function prepareTrade(
   }
 
   const exchangeAddress =
-    (isRecord(market.metadata) && readString(market.metadata.exchangeAddress)) ||
-    (isRecord(market.metadata) && readString(market.metadata.exchange_address)) ||
+    (isRecord(market.metadata) &&
+      readString(market.metadata.exchangeAddress)) ||
+    (isRecord(market.metadata) &&
+      readString(market.metadata.exchange_address)) ||
     (await fetchLimitlessExchangeAddress({
       marketSlug: market.slug,
       requestAuth,
@@ -4021,18 +4426,99 @@ async function prepareTrade(
       requestAuth: requestAuth as unknown as Record<string, unknown>,
       size,
       tokenId: normalizeLimitlessScopedTokenId(tokenId) ?? tokenId,
-    } satisfies LimitlessPreparedPayload,
+    } satisfies LimitlessClobPreparedPayload,
     expiresAt: new Date(Date.now() + 30_000),
   };
+}
+
+async function submitLimitlessAmmPreparedTrade(input: {
+  payload: LimitlessAmmPreparedPayload;
+  prepared: PreparedTrade;
+}): Promise<SubmitResult> {
+  const payload = input.payload;
+  const signer = toChecksumAddress(input.prepared.intent.walletAddress);
+  const marketAddress = toChecksumAddress(payload.marketAddress);
+  if (!signer || !marketAddress) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Limitless AMM prepared trade has an invalid wallet or market.",
+      venue: "limitless",
+    });
+  }
+  const amountUsdRaw = BigInt(payload.amountUsdRaw);
+  const approvalTargetRaw = BigInt(payload.approvalTargetRaw);
+  const minOutcomeTokensRaw = BigInt(payload.minOutcomeTokensRaw);
+  const walletId = getPrivyWalletId(input.prepared.intent);
+  const snapshot = await fetchLimitlessOnchainSnapshot({
+    rpcUrl: env.baseRpcUrl,
+    timeoutMs: env.baseRpcTimeoutMs,
+    owner: signer,
+    ammAddress: marketAddress,
+  });
+  if (snapshot.usdcBalance < amountUsdRaw) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Insufficient USDC balance for this Limitless AMM buy.",
+      venue: "limitless",
+    });
+  }
+
+  const allowanceRaw = snapshot.allowanceAmm ?? 0n;
+  if (allowanceRaw < amountUsdRaw) {
+    const approvalAmount =
+      approvalTargetRaw >= amountUsdRaw ? approvalTargetRaw : amountUsdRaw;
+    await sendLimitlessServerEvmTransaction({
+      data: encodeLimitlessAmmUsdcApproval(marketAddress, approvalAmount),
+      label: "Limitless AMM USDC approval",
+      signer,
+      to: env.limitlessUsdcAddress,
+      walletId,
+    });
+  }
+
+  const txHash = await sendLimitlessServerEvmTransaction({
+    data: encodeLimitlessAmmBuy({
+      amountUsdRaw,
+      minOutcomeTokensRaw,
+      outcomeIndex: payload.outcomeIndex,
+    }),
+    label: "Limitless AMM buy",
+    signer,
+    to: marketAddress,
+    walletId,
+  });
+
+  return {
+    venue: "limitless",
+    status: "filled",
+    venueOrderId: `amm:${txHash}:${payload.tokenId}`,
+    orderHash: txHash,
+    txSignature: txHash,
+    price: payload.price,
+    size: payload.size,
+    raw: { payload, txHash },
+  };
+}
+
+function parseLimitlessPreparedPayload(
+  prepared: PreparedTrade,
+): LimitlessPreparedPayload {
+  return parsePreparedPayload<LimitlessPreparedPayload>(prepared, "limitless");
+}
+
+function isLimitlessAmmPreparedPayload(
+  payload: LimitlessPreparedPayload,
+): payload is LimitlessAmmPreparedPayload {
+  return "tradeType" in payload && payload.tradeType === "amm";
 }
 
 async function submitPreparedTrade(
   prepared: PreparedTrade,
 ): Promise<SubmitResult> {
-  const payload = parsePreparedPayload<LimitlessPreparedPayload>(
-    prepared,
-    "limitless",
-  );
+  const payload = parseLimitlessPreparedPayload(prepared);
+  if (isLimitlessAmmPreparedPayload(payload)) {
+    return submitLimitlessAmmPreparedTrade({ payload, prepared });
+  }
   const upstream = await limitlessRequest({
     method: "POST",
     requestPath: "/orders",
@@ -4089,7 +4575,8 @@ async function submitPreparedTrade(
   const status = isRecord(order) ? readString(order.status) : null;
   return {
     venue: "limitless",
-    status: status && ["filled", "matched"].includes(status) ? "filled" : "submitted",
+    status:
+      status && ["filled", "matched"].includes(status) ? "filled" : "submitted",
     venueOrderId,
     orderHash: null,
     txSignature: null,
@@ -4108,7 +4595,7 @@ async function persistTrade(
   },
 ): Promise<PersistedTrade> {
   const payload = input.prepared
-    ? parsePreparedPayload<LimitlessPreparedPayload>(input.prepared, "limitless")
+    ? parseLimitlessPreparedPayload(input.prepared)
     : null;
   if (!payload || !input.submitResult.venueOrderId) {
     throw tradingError({
@@ -4116,6 +4603,56 @@ async function persistTrade(
       message: "Limitless persistence requires a venue order id.",
       venue: "limitless",
     });
+  }
+  if (isLimitlessAmmPreparedPayload(payload)) {
+    const txHash =
+      input.submitResult.orderHash ?? input.submitResult.txSignature;
+    if (!txHash) {
+      throw tradingError({
+        code: "trade_submission_failed",
+        message: "Limitless AMM persistence requires a transaction hash.",
+        venue: "limitless",
+      });
+    }
+    const recorded = await recordLimitlessAmmOrder({
+      body: {
+        amountUsd: payload.amountUsd,
+        marketSlug:
+          typeof input.intent.target.venueMarketId === "string"
+            ? input.intent.target.venueMarketId
+            : undefined,
+        price: payload.price ?? undefined,
+        side: "BUY",
+        size: payload.size,
+        tokenId: payload.tokenId,
+        txHash,
+      },
+      log: ctx.logger as LimitlessRouteLogger,
+      onchainConfirmed: true,
+      pool: ctx.pool,
+      signer: input.intent.walletAddress,
+      userId: input.intent.actor.userId,
+    });
+    if (!recorded.ok) {
+      throw tradingError({
+        code: "trade_submission_failed",
+        message: recorded.payload.error,
+        statusCode: recorded.statusCode,
+        venue: "limitless",
+      });
+    }
+    return {
+      venue: "limitless",
+      orderId: null,
+      executionId: null,
+      venueOrderId: recorded.payload.orderId,
+      status: "filled",
+      raw: {
+        effectsApplied: true,
+        tokenId: payload.tokenId,
+        walletAddress: input.intent.walletAddress,
+      },
+    };
   }
   const stored = await storeOrder(ctx.pool, {
     userId: input.intent.actor.userId,
@@ -4151,8 +4688,30 @@ async function persistTrade(
     executionId: null,
     venueOrderId: stored.order.venue_order_id,
     status: stored.order.status,
-    raw: stored,
+    raw: {
+      stored,
+      tokenId: payload.tokenId,
+      walletAddress: input.intent.walletAddress,
+    },
   };
+}
+
+async function applyLimitlessTradeEffects(
+  ctx: ApiTradingApplicationServiceInput,
+  input: ApplyTradeEffectsInput,
+): Promise<TradeEffectsResult> {
+  if (
+    isRecord(input.persisted.raw) &&
+    input.persisted.raw.effectsApplied === true
+  ) {
+    return {
+      ok: true,
+      notificationsCreated: 1,
+      positionDeltaApplied: true,
+      raw: { effectsApplied: true },
+    };
+  }
+  return applyOrderTradeEffects(ctx, input);
 }
 
 export function createLimitlessTradingExecutionService(
@@ -4167,6 +4726,6 @@ export function createLimitlessTradingExecutionService(
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
     submitPreparedTrade: (input) => submitPreparedTrade(input.prepared),
     persistTrade: (input) => persistTrade(ctx, input),
-    applyTradeEffects: (input) => applyOrderTradeEffects(ctx, input),
+    applyTradeEffects: (input) => applyLimitlessTradeEffects(ctx, input),
   };
 }
