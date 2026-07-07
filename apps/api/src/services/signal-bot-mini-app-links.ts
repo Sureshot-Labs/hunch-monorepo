@@ -33,7 +33,9 @@ function fitSignalBotStartParam(value: string): string | null {
   return value.length <= TELEGRAM_STARTAPP_MAX_LENGTH ? value : null;
 }
 
-function buildSignalBotEventStartParam(eventId: string): string | null {
+export function buildSignalBotEventStartParam(
+  eventId: string,
+): string | null {
   const normalized = eventId.trim();
   if (!isSignalBotRouteId(normalized)) return null;
   if (SIGNAL_BOT_SAFE_ROUTE_ID_RE.test(normalized)) {
@@ -44,7 +46,7 @@ function buildSignalBotEventStartParam(eventId: string): string | null {
   );
 }
 
-function buildSignalBotBuyStartParam(input: {
+export function buildSignalBotBuyStartParam(input: {
   amountUsd?: number | null;
   eventId: string;
   marketId: string;
@@ -82,7 +84,7 @@ function buildSignalBotBuyStartParam(input: {
   );
 }
 
-function buildSignalBotMarketStartParam(input: {
+export function buildSignalBotMarketStartParam(input: {
   eventId: string;
   marketId?: string | null;
   side?: "NO" | "YES" | null;
@@ -110,7 +112,7 @@ function buildSignalBotMarketStartParam(input: {
   );
 }
 
-function buildSignalBotHolderStartParam(input: {
+export function buildSignalBotHolderStartParam(input: {
   address: string | null | undefined;
   chain: string | null | undefined;
   eventId?: string | null | undefined;
@@ -140,7 +142,7 @@ function buildSignalBotHolderStartParam(input: {
   );
 }
 
-function buildSignalBotMiniAppUrl(input: {
+export function buildSignalBotMiniAppUrl(input: {
   base: string | null | undefined;
   startParam: string | null;
 }): string | null {

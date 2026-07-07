@@ -587,6 +587,19 @@ function readStartAppParam(url: string | undefined): string {
   return startapp;
 }
 
+function readWebAppStartParam(
+  button: { web_app?: { url: string } } | undefined,
+): string {
+  assert.ok(button?.web_app?.url);
+  const url = new URL(button.web_app.url);
+  assert.equal(url.origin, "https://app.hunch.trade");
+  assert.equal(url.pathname, "/tg");
+  const startParam = url.searchParams.get("tgWebAppStartParam");
+  assert.ok(startParam);
+  assert.match(startParam, /^[A-Za-z0-9_-]{1,512}$/);
+  return startParam;
+}
+
 function decodeStartAppPayload(startParam: string): string {
   const separator = startParam.indexOf("_");
   assert.notEqual(separator, -1);
@@ -1062,6 +1075,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         { chatId: "-1001234567890", kind: "resolved_win" },
       ]);
       assert.match(telegram.messages[0]?.text ?? "", /Sent follow\\-through/);
+    },
+  },
+  {
+    name: "authorized followthrough preview command explains empty preview",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const handled = await handleSignalBotCommand({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        message: {
+          chat: { id: -1, title: "Group", type: "group" },
+          from: { id: 123 },
+          text: "/test_followthrough stats -1001234567890",
+        },
+        redis,
+        sendMessage: (message) => telegram.sendMessage(message),
+        sendTestFollowthrough: async () => false,
+        sendTestSignal: async () => false,
+      });
+      assert.equal(handled, true);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /No follow\\-through preview found for stats in \\-1001234567890/,
+      );
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Check age\/policy\/type\/thresholds/,
+      );
     },
   },
   {
@@ -1916,6 +1960,51 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           }),
         ),
         "YES",
+      );
+    },
+  },
+  {
+    name: "message uses private chat web app buttons when Mini App base is set",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "private",
+        cheaperAlternative: {
+          eventId: "kalshi:event-1",
+          marketId: "kalshi:market-1",
+          price: 0.29,
+          side: "YES",
+          venue: "kalshi",
+        },
+        note: note({
+          eventId: "polymarket:event-1",
+          marketId: "polymarket:market-1",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[0]?.[0]?.url, undefined);
+      assert.equal(rows[1]?.[0]?.url, undefined);
+      assert.equal(rows[2]?.[0]?.url, undefined);
+      assert.equal(rows[2]?.[1]?.url, undefined);
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(rows[0]?.[0])),
+        "p:event-1|market-1|Y|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(rows[1]?.[0])),
+        "k:event-1|market-1|Y|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(rows[2]?.[0])),
+        "polygon|0xa022ba0a68e11a78348382ff168601012d4d77f8|" +
+          "polymarket:event-1|polymarket:market-1|Y|" +
+          "00000000-0000-4000-8000-000000000001",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(rows[2]?.[1])),
+        "p:event-1|market-1|Y",
       );
     },
   },
@@ -2865,6 +2954,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
       assert.match(readStartAppParam(keyboard?.[0]?.[0]?.url), /^m_/);
+      const candidateQuery = db.queries.find((query) =>
+        query.sql.includes("from signal_bot_messages root"),
+      );
+      assert.equal(candidateQuery?.params[6], false);
       const delivery = db.queries
         .filter((query) => query.sql.includes("insert into signal_bot_messages"))
         .at(-1);
@@ -2881,6 +2974,51 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         query.sql.includes("from wallet_activity_events"),
       );
       assert.equal(flowQuery?.params[3], "polymarket");
+    },
+  },
+  {
+    name: "followthrough private chat buttons use web app payloads",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", first_name: "Kreedle", type: "private" },
+        enabledBy: 123,
+        now: new Date("2026-01-01T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.[0]?.[0]?.url, undefined);
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
+        "p:event-1|market-1|Y",
+      );
     },
   },
   {
@@ -3001,6 +3139,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(sent, true);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(telegram.messages[0]?.text ?? "", /Preview only/);
+      const candidateQuery = db.queries.find((query) =>
+        query.sql.includes("from signal_bot_messages root"),
+      );
+      assert.equal(candidateQuery?.params[6], true);
       assert.equal(
         db.queries.filter((query) =>
           query.sql.includes("insert into signal_bot_messages"),
@@ -3394,6 +3536,40 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(sent, true);
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
+    },
+  },
+  {
+    name: "test signal uses private chat web app buttons from redis state",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", first_name: "Kreedle", type: "private" },
+        enabledBy: 123,
+        now: new Date("2026-01-01T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow({ id: "00000000-0000-4000-8000-000000000099" })];
+      const telegram = new FakeTelegram();
+      const sent = await sendLatestSignalBotTestSignal({
+        chatId: "-100",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(sent, true);
+      const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
+      assert.equal(keyboard?.[0]?.[0]?.url, undefined);
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
+        "p:event-1|market-1|Y|10",
+      );
     },
   },
 ];

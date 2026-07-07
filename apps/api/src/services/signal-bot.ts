@@ -32,9 +32,10 @@ import {
   type SignalBotFollowthroughPolicy,
 } from "./signal-bot-followthrough-policy.js";
 import {
-  buildSignalBotMiniAppEventUrl,
-  buildSignalBotMiniAppHolderUrl,
-  buildSignalBotMiniAppTradeUrl,
+  buildSignalBotBuyStartParam,
+  buildSignalBotHolderStartParam,
+  buildSignalBotMiniAppUrl,
+  buildSignalBotMarketStartParam,
   normalizeTelegramMiniAppLinkBase,
 } from "./signal-bot-mini-app-links.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
@@ -396,6 +397,8 @@ const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
+const TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
+const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
 const OUTCOME_LABEL_VOWELS = /[AEIOUY]/g;
 const HOLDER_LINK_STOP_LABELS = new Set([
@@ -919,9 +922,61 @@ function renderSignalBotHolderLinkedText(
   ].join("");
 }
 
+function isSignalBotPrivateChat(chatType: string | null | undefined): boolean {
+  return chatType === "private";
+}
+
+function buildSignalBotTelegramWebAppUrl(input: {
+  appBaseUrl: string;
+  startParam: string | null | undefined;
+}): string | null {
+  if (!input.startParam) return null;
+  try {
+    const url = new URL(TELEGRAM_WEB_APP_ENTRY_PATH, input.appBaseUrl);
+    url.searchParams.set(TELEGRAM_WEB_APP_START_PARAM_QUERY, input.startParam);
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function buildSignalBotTelegramButton(input: {
+  appBaseUrl: string;
+  chatType?: string | null;
+  miniAppLinkBase?: string | null;
+  startParam: string | null | undefined;
+  text: string;
+  webUrl: string;
+}): TelegramInlineKeyboardButton {
+  const miniAppUrl =
+    buildSignalBotMiniAppUrl({
+      base: input.miniAppLinkBase,
+      startParam: input.startParam ?? null,
+    }) ?? input.webUrl;
+  const webAppUrl = buildSignalBotTelegramWebAppUrl({
+    appBaseUrl: input.appBaseUrl,
+    startParam: input.startParam,
+  });
+  if (
+    input.miniAppLinkBase &&
+    isSignalBotPrivateChat(input.chatType) &&
+    webAppUrl
+  ) {
+    return {
+      text: input.text,
+      web_app: { url: webAppUrl },
+    };
+  }
+  return {
+    text: input.text,
+    url: miniAppUrl,
+  };
+}
+
 export function buildSignalBotMessage(input: {
   appBaseUrl: string;
   buyAmountUsd: number;
+  chatType?: string | null;
   cheaperAlternative?: SignalBotCheaperAlternative | null;
   note: SignalBotNote;
   telegramMiniAppLinkBase?: string | null;
@@ -960,24 +1015,23 @@ export function buildSignalBotMessage(input: {
     (!buySide || !note.holderSide || note.holderSide === buySide)
       ? rawHolderUrl
       : null;
-  const holderButtonUrl = holderUrl
-    ? buildSignalBotMiniAppHolderUrl({
+  const holderStartParam = holderUrl
+    ? buildSignalBotHolderStartParam({
         address: note.holderAddress,
         chain: note.holderChain,
         eventId: note.eventId,
         marketId: note.marketId,
-        miniAppLinkBase: input.telegramMiniAppLinkBase,
         noteId: note.id,
         side: note.holderSide,
-      }) ?? holderUrl
+      })
     : null;
-  const marketButtonUrl =
-    buildSignalBotMiniAppEventUrl({
-      eventId: note.eventId,
-      marketId: note.marketId,
-      miniAppLinkBase: input.telegramMiniAppLinkBase,
-      side: buySide,
-    }) ?? marketUrl;
+  const marketStartParam = note.eventId
+    ? buildSignalBotMarketStartParam({
+        eventId: note.eventId,
+        marketId: note.marketId,
+        side: buySide,
+      })
+    : null;
   const titleMarkdown = marketUrl
     ? `*[${title}](${escapeTelegramMarkdownV2Url(marketUrl)})*`
     : `*${title}*`;
@@ -1013,16 +1067,17 @@ export function buildSignalBotMessage(input: {
       marketId: note.marketId,
       side: buySide,
     });
-    const primaryTradeUrl =
-      buildSignalBotMiniAppTradeUrl({
-        amountUsd: input.buyAmountUsd,
-        eventId: note.eventId,
-        marketId: note.marketId,
-        miniAppLinkBase: input.telegramMiniAppLinkBase,
-        side: buySide,
-      }) ?? baseTradeUrl;
     keyboardRows.push([
-      {
+      buildSignalBotTelegramButton({
+        appBaseUrl: input.appBaseUrl,
+        chatType: input.chatType,
+        miniAppLinkBase: input.telegramMiniAppLinkBase,
+        startParam: buildSignalBotBuyStartParam({
+          amountUsd: input.buyAmountUsd,
+          eventId: note.eventId,
+          marketId: note.marketId,
+          side: buySide,
+        }),
         text: formatSignalBotBuyButtonText({
           price,
           side: buySide,
@@ -1033,8 +1088,8 @@ export function buildSignalBotMessage(input: {
           ),
           venue: note.marketVenue,
         }),
-        url: primaryTradeUrl,
-      },
+        webUrl: baseTradeUrl,
+      }),
     ]);
     if (input.cheaperAlternative && input.cheaperAlternative.side === buySide) {
       const cheaperTradeWebUrl = buildSignalBotTradeUrl({
@@ -1045,7 +1100,16 @@ export function buildSignalBotMessage(input: {
         side: input.cheaperAlternative.side,
       });
       keyboardRows.push([
-        {
+        buildSignalBotTelegramButton({
+          appBaseUrl: input.appBaseUrl,
+          chatType: input.chatType,
+          miniAppLinkBase: input.telegramMiniAppLinkBase,
+          startParam: buildSignalBotBuyStartParam({
+            amountUsd: input.buyAmountUsd,
+            eventId: input.cheaperAlternative.eventId,
+            marketId: input.cheaperAlternative.marketId,
+            side: input.cheaperAlternative.side,
+          }),
           text: formatSignalBotCheaperButtonText({
             alternative: input.cheaperAlternative,
             sideLabel: formatSignalBotOutcomeDisplayLabel(
@@ -1054,54 +1118,71 @@ export function buildSignalBotMessage(input: {
               "button",
             ),
           }),
-          url:
-            buildSignalBotMiniAppTradeUrl({
-              amountUsd: input.buyAmountUsd,
-              eventId: input.cheaperAlternative.eventId,
-              marketId: input.cheaperAlternative.marketId,
-              miniAppLinkBase: input.telegramMiniAppLinkBase,
-              side: input.cheaperAlternative.side,
-            }) ?? cheaperTradeWebUrl,
-        },
+          webUrl: cheaperTradeWebUrl,
+        }),
       ]);
     }
     keyboardRows.push(
       buildSignalBotLinkRow({
+        appBaseUrl: input.appBaseUrl,
+        chatType: input.chatType,
         holderActorMode: note.holderActorMode,
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
-        holderUrl: holderButtonUrl,
+        holderLink: holderUrl
+          ? {
+              startParam: holderStartParam,
+              webUrl: holderUrl,
+            }
+          : null,
         holderSideLabel: note.holderSide
           ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
-        marketUrl: marketButtonUrl ?? baseTradeUrl,
+        marketLink: {
+          startParam: marketStartParam,
+          webUrl: marketUrl ?? baseTradeUrl,
+        },
+        telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
       }),
     );
   } else if (note.eventId) {
     keyboardRows.push(
       buildSignalBotLinkRow({
+        appBaseUrl: input.appBaseUrl,
+        chatType: input.chatType,
         holderActorMode: note.holderActorMode,
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
         holderPositionUsd: note.holderPositionUsd,
-        holderUrl: holderButtonUrl,
+        holderLink: holderUrl
+          ? {
+              startParam: holderStartParam,
+              webUrl: holderUrl,
+            }
+          : null,
         holderSideLabel: note.holderSide
           ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
-        marketUrl:
-          marketButtonUrl ??
-          buildSignalBotOpenMarketUrl({
-            appBaseUrl: input.appBaseUrl,
-            eventId: note.eventId,
-            marketId: note.marketId,
-            side: buySide,
-          }),
+        marketLink: {
+          startParam: marketStartParam,
+          webUrl:
+            marketUrl ??
+            buildSignalBotOpenMarketUrl({
+              appBaseUrl: input.appBaseUrl,
+              eventId: note.eventId,
+              marketId: note.marketId,
+              side: buySide,
+            }),
+        },
+        telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
       }),
     );
-  } else if (holderButtonUrl) {
+  } else if (holderUrl) {
     keyboardRows.push(
       buildSignalBotLinkRow({
+        appBaseUrl: input.appBaseUrl,
+        chatType: input.chatType,
         holderActorMode: note.holderActorMode,
         holderSide: note.holderSide,
         holderOpenPnlUsd: note.holderOpenPnlUsd,
@@ -1109,8 +1190,12 @@ export function buildSignalBotMessage(input: {
         holderSideLabel: note.holderSide
           ? formatSignalBotOutcomeDisplayLabel(note, note.holderSide, "button")
           : null,
-        holderUrl: holderButtonUrl,
-        marketUrl: null,
+        holderLink: {
+          startParam: holderStartParam,
+          webUrl: holderUrl,
+        },
+        marketLink: null,
+        telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
       }),
     );
   }
@@ -1123,26 +1208,41 @@ export function buildSignalBotMessage(input: {
 }
 
 function buildSignalBotLinkRow(input: {
+  appBaseUrl: string;
+  chatType?: string | null;
   holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
+  holderLink: { startParam: string | null; webUrl: string } | null;
   holderOpenPnlUsd: number | null;
   holderPositionUsd: number | null;
   holderSide: "NO" | "YES" | null;
   holderSideLabel: string | null;
-  holderUrl: string | null;
-  marketUrl: string | null;
+  marketLink: { startParam: string | null; webUrl: string } | null;
+  telegramMiniAppLinkBase?: string | null;
 }): TelegramInlineKeyboard["inline_keyboard"][number] {
   const row: TelegramInlineKeyboard["inline_keyboard"][number] = [];
-  if (input.holderUrl) {
-    row.push({
-      text: formatHolderButtonText(input),
-      url: input.holderUrl,
-    });
+  if (input.holderLink) {
+    row.push(
+      buildSignalBotTelegramButton({
+        appBaseUrl: input.appBaseUrl,
+        chatType: input.chatType,
+        miniAppLinkBase: input.telegramMiniAppLinkBase,
+        startParam: input.holderLink.startParam,
+        text: formatHolderButtonText(input),
+        webUrl: input.holderLink.webUrl,
+      }),
+    );
   }
-  if (input.marketUrl) {
-    row.push({
-      text: "↗️ Open market",
-      url: input.marketUrl,
-    });
+  if (input.marketLink) {
+    row.push(
+      buildSignalBotTelegramButton({
+        appBaseUrl: input.appBaseUrl,
+        chatType: input.chatType,
+        miniAppLinkBase: input.telegramMiniAppLinkBase,
+        startParam: input.marketLink.startParam,
+        text: "↗️ Open market",
+        webUrl: input.marketLink.webUrl,
+      }),
+    );
   }
   return row;
 }
@@ -1182,6 +1282,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
   appBaseUrl: string;
   buyAmountUsd: number;
   candidate: SignalBotFollowthroughCandidateRow;
+  chatType?: string | null;
   kind: Extract<
     SignalBotMessageKind,
     "followthrough_stats" | "resolved_loss" | "resolved_win"
@@ -1223,7 +1324,16 @@ function buildSignalBotFollowthroughKeyboard(input: {
         side,
       });
       rows.push([
-        {
+        buildSignalBotTelegramButton({
+          appBaseUrl: input.appBaseUrl,
+          chatType: input.chatType,
+          miniAppLinkBase: input.telegramMiniAppLinkBase,
+          startParam: buildSignalBotBuyStartParam({
+            amountUsd: input.buyAmountUsd,
+            eventId,
+            marketId,
+            side,
+          }),
           text: formatSignalBotBuyButtonText({
             price: buyPrice,
             side,
@@ -1238,15 +1348,8 @@ function buildSignalBotFollowthroughKeyboard(input: {
             ),
             venue: input.candidate.venue,
           }),
-          url:
-            buildSignalBotMiniAppTradeUrl({
-              amountUsd: input.buyAmountUsd,
-              eventId,
-              marketId,
-              miniAppLinkBase: input.telegramMiniAppLinkBase,
-              side,
-            }) ?? webTradeUrl,
-        },
+          webUrl: webTradeUrl,
+        }),
       ]);
     }
   }
@@ -1258,16 +1361,18 @@ function buildSignalBotFollowthroughKeyboard(input: {
     side,
   });
   rows.push([
-    {
+    buildSignalBotTelegramButton({
+      appBaseUrl: input.appBaseUrl,
+      chatType: input.chatType,
+      miniAppLinkBase: input.telegramMiniAppLinkBase,
+      startParam: buildSignalBotMarketStartParam({
+        eventId,
+        marketId,
+        side,
+      }),
       text: "↗️ Open market",
-      url:
-        buildSignalBotMiniAppEventUrl({
-          eventId,
-          marketId,
-          miniAppLinkBase: input.telegramMiniAppLinkBase,
-          side,
-        }) ?? webMarketUrl,
-    },
+      webUrl: webMarketUrl,
+    }),
   ]);
 
   return rows.length > 0 ? { inline_keyboard: rows } : undefined;
@@ -1598,7 +1703,9 @@ export async function handleSignalBotCommand(input: {
         chatId,
         sent
           ? "Sent follow-through preview."
-          : "No eligible follow-through preview found.",
+          : `No follow-through preview found for ${request.kind} in ${
+              request.targetChatId ?? chatId
+            }. Check age/policy/type/thresholds, or pass the channel id.`,
       ),
     );
     return true;
@@ -2429,6 +2536,7 @@ export async function publishSignalBotTick(input: {
       const { keyboard, text } = buildSignalBotMessage({
         appBaseUrl: input.config.appBaseUrl,
         buyAmountUsd: input.config.buyAmountUsd,
+        chatType: state.chatType,
         cheaperAlternative,
         note,
         telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
@@ -2507,6 +2615,9 @@ export async function sendLatestSignalBotTestSignal(input: {
   resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
   telegram: SignalBotTelegramClient;
 }): Promise<boolean> {
+  const chatState = input.redis
+    ? await getSignalBotChatState(input.redis, input.chatId)
+    : null;
   const notes = await loadSignalBotNotes(input.db, {
     afterCreatedAt: LATEST_CURSOR_CREATED_AT,
     afterId: LATEST_CURSOR_ID,
@@ -2536,6 +2647,7 @@ export async function sendLatestSignalBotTestSignal(input: {
   const { keyboard, text } = buildSignalBotMessage({
     appBaseUrl: input.config.appBaseUrl,
     buyAmountUsd: input.config.buyAmountUsd,
+    chatType: chatState?.chatType,
     cheaperAlternative,
     note,
     telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
@@ -2589,9 +2701,13 @@ export async function sendSignalBotFollowthroughPreview(input: {
   const candidates = await loadSignalBotFollowthroughCandidates({
     chatIds: [input.chatId],
     db: input.db,
+    mode: "preview",
     now,
     policy,
   });
+  const chatState = input.redis
+    ? await getSignalBotChatState(input.redis, input.chatId)
+    : null;
   for (const candidate of candidates) {
     const stats = await buildSignalBotFollowthroughStats({
       asOf: now,
@@ -2621,6 +2737,7 @@ export async function sendSignalBotFollowthroughPreview(input: {
       appBaseUrl: input.config.appBaseUrl,
       buyAmountUsd: input.config.buyAmountUsd,
       candidate,
+      chatType: chatState?.chatType,
       kind,
       stats,
       telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
@@ -2704,6 +2821,7 @@ function readSignalBotEntryPrice(input: {
 async function loadSignalBotFollowthroughCandidates(input: {
   chatIds: string[];
   db: DbQuery;
+  mode: "preview" | "publish";
   policy: SignalBotFollowthroughPolicy;
   now: Date;
 }): Promise<SignalBotFollowthroughCandidateRow[]> {
@@ -2761,30 +2879,36 @@ async function loadSignalBotFollowthroughCandidates(input: {
               $1::boolean
               and root.sent_at <= $3::timestamptz
               and ${acceptingSql}
-              and not exists (
-                select 1
-                from signal_bot_messages sent
-                where sent.chat_id = root.chat_id
-                  and sent.note_id = root.thread_root_note_id
-                  and sent.message_kind = 'followthrough_stats'
-                  and (
-                    coalesce(sent.metrics->>'status', 'sent') = 'sent'
-                    or sent.sent_at > $6::timestamptz
-                  )
+              and (
+                $7::boolean
+                or not exists (
+                  select 1
+                  from signal_bot_messages sent
+                  where sent.chat_id = root.chat_id
+                    and sent.note_id = root.thread_root_note_id
+                    and sent.message_kind = 'followthrough_stats'
+                    and (
+                      coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                      or sent.sent_at > $6::timestamptz
+                    )
+                )
               )
             )
             or (
               $2::boolean
-              and not exists (
-                select 1
-                from signal_bot_messages sent
-                where sent.chat_id = root.chat_id
-                  and sent.note_id = root.thread_root_note_id
-                  and sent.message_kind in ('resolved_win', 'resolved_loss')
-                  and (
-                    coalesce(sent.metrics->>'status', 'sent') = 'sent'
-                    or sent.sent_at > $6::timestamptz
-                  )
+              and (
+                $7::boolean
+                or not exists (
+                  select 1
+                  from signal_bot_messages sent
+                  where sent.chat_id = root.chat_id
+                    and sent.note_id = root.thread_root_note_id
+                    and sent.message_kind in ('resolved_win', 'resolved_loss')
+                    and (
+                      coalesce(sent.metrics->>'status', 'sent') = 'sent'
+                      or sent.sent_at > $6::timestamptz
+                    )
+                )
               )
               and (
                 m.resolved_outcome is not null
@@ -2804,6 +2928,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
         new Date(
           input.now.getTime() - FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
         ).toISOString(),
+        input.mode === "preview",
       ],
     );
     return rows;
@@ -3256,6 +3381,7 @@ export async function publishSignalBotFollowthroughTick(input: {
   const candidates = await loadSignalBotFollowthroughCandidates({
     chatIds,
     db: input.db,
+    mode: "publish",
     now,
     policy,
   });
@@ -3324,11 +3450,16 @@ export async function publishSignalBotFollowthroughTick(input: {
       redis: input.redis,
       stats,
     });
+    const chatState = await getSignalBotChatState(
+      input.redis,
+      candidate.chat_id,
+    );
     const keyboard = buildSignalBotFollowthroughKeyboard({
       allowBuyCta,
       appBaseUrl: input.config.appBaseUrl,
       buyAmountUsd: input.config.buyAmountUsd,
       candidate,
+      chatType: chatState?.chatType,
       kind,
       stats,
       telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
