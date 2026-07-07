@@ -67,6 +67,7 @@ import {
 } from "./polymarket-funder.js";
 import {
   buildEmbeddedExecutionSingleFlightKey,
+  type EmbeddedExecutionSingleFlightRedis,
   getEmbeddedExecutionSingleFlightPromise,
   runEmbeddedExecutionSingleFlight,
 } from "./embedded-execution-singleflight.js";
@@ -143,6 +144,8 @@ const POLYMARKET_SERVICE_NOT_READY_STATUS = 425;
 const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+type PolymarketL2RequestResult = Awaited<ReturnType<typeof polymarketL2Request>>;
 
 const ORDER_TYPE_STRING =
   "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)";
@@ -765,6 +768,7 @@ export async function prepareEmbeddedPolymarketEnsureReadyRoute(input: {
 export async function executeEmbeddedPolymarketEnsureReadyRoute(input: {
   body: PolymarketEmbeddedEnsureReadyExecuteBody;
   log?: PolymarketRouteLogger | null;
+  redis?: EmbeddedExecutionSingleFlightRedis | null;
   signer: string;
   user: User;
 }): Promise<PolymarketRouteOperationResult> {
@@ -789,6 +793,7 @@ export async function executeEmbeddedPolymarketEnsureReadyRoute(input: {
 
     const result = await runEmbeddedExecutionSingleFlight({
       key: singleFlightKey,
+      redis: input.redis,
       run: async () => {
         const state = await resolveEmbeddedPolymarketEnsureReadyState({
           user: input.user,
@@ -881,15 +886,25 @@ export async function executeEmbeddedPolymarketEnsureReadyRoute(input: {
       payload: result,
     };
   } catch (error) {
+    const responseStatus =
+      typeof (error as { responseStatus?: unknown })?.responseStatus ===
+      "number"
+        ? (error as { responseStatus: number }).responseStatus
+        : 500;
+    const responsePayload =
+      (error as { responsePayload?: unknown })?.responsePayload ?? undefined;
     input.log?.error?.(
       { error, userId: input.user.id, signer: input.signer },
       "Failed to execute embedded Polymarket readiness",
     );
     return {
       ok: false,
-      statusCode: 500,
+      statusCode: responseStatus,
       payload: {
         error: error instanceof Error ? error.message : "Embedded setup failed",
+        ...(responsePayload !== undefined && isRecord(responsePayload)
+          ? (responsePayload as Record<string, unknown>)
+          : {}),
       },
     };
   }
@@ -5204,6 +5219,49 @@ function isPolymarketServiceNotReadyResponse(inputs: {
   return message.toLowerCase().includes("service not ready");
 }
 
+async function submitPolymarketClobOrderWithRetry(input: {
+  address: string;
+  body: unknown;
+  creds: PolymarketL2Credentials;
+  log?: PolymarketRouteLogger | null;
+  logContext?: Record<string, unknown>;
+}): Promise<PolymarketL2RequestResult> {
+  const submitOrder = () =>
+    polymarketL2Request({
+      baseUrl: env.polymarketClobBase,
+      timeoutMs: 10_000,
+      address: input.address,
+      creds: input.creds,
+      method: "POST",
+      requestPath: "/order",
+      body: input.body,
+    });
+
+  let upstream = await submitOrder();
+  for (
+    let attempt = 0;
+    !upstream.ok &&
+    isPolymarketServiceNotReadyResponse(upstream) &&
+    attempt < POLYMARKET_ORDER_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    const delayMs = POLYMARKET_ORDER_RETRY_DELAYS_MS[attempt] ?? 0;
+    input.log?.warn?.(
+      {
+        upstreamStatus: upstream.status,
+        upstreamPayload: upstream.payload,
+        ...(input.logContext ?? {}),
+        retryAttempt: attempt + 1,
+        retryDelayMs: delayMs,
+      },
+      "Polymarket order service not ready; retrying same signed order",
+    );
+    await sleep(delayMs);
+    upstream = await submitOrder();
+  }
+  return upstream;
+}
+
 function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
   if (negRisk == null) return null;
   return negRisk
@@ -5896,43 +5954,19 @@ export async function submitPolymarketClientSignedOrder(input: {
     apiPassphrase: creds.apiPassphrase,
   };
 
-  const submitOrder = () =>
-    polymarketL2Request({
-      baseUrl: env.polymarketClobBase,
-      timeoutMs: 10_000,
-      address: signer,
-      creds: clobCreds,
-      method: "POST",
-      requestPath: "/order",
-      body: payload,
-    });
-
-  let upstream = await submitOrder();
-  for (
-    let attempt = 0;
-    !upstream.ok &&
-    isPolymarketServiceNotReadyResponse(upstream) &&
-    attempt < POLYMARKET_ORDER_RETRY_DELAYS_MS.length;
-    attempt += 1
-  ) {
-    const delayMs = POLYMARKET_ORDER_RETRY_DELAYS_MS[attempt] ?? 0;
-    input.log?.warn?.(
-      {
-        upstreamStatus: upstream.status,
-        upstreamPayload: upstream.payload,
-        signer,
-        funder,
-        tokenId: orderTokenId,
-        orderType,
-        orderHash,
-        retryAttempt: attempt + 1,
-        retryDelayMs: delayMs,
-      },
-      "Polymarket order service not ready; retrying same signed order",
-    );
-    await sleep(delayMs);
-    upstream = await submitOrder();
-  }
+  const upstream = await submitPolymarketClobOrderWithRetry({
+    address: signer,
+    body: payload,
+    creds: clobCreds,
+    log: input.log,
+    logContext: {
+      signer,
+      funder,
+      tokenId: orderTokenId,
+      orderType,
+      orderHash,
+    },
+  });
 
   if (!upstream.ok) {
     if (
@@ -6510,42 +6544,18 @@ async function submitPreparedTrade(
     apiSecret: creds.apiSecret,
     apiPassphrase: creds.apiPassphrase,
   };
-  const submitOrder = () =>
-    polymarketL2Request({
-      baseUrl: env.polymarketClobBase,
-      timeoutMs: 10_000,
-      address: signer,
-      creds: clobCreds,
-      method: "POST",
-      requestPath: "/order",
-      body: requestBody,
-    });
-
-  let upstream = await submitOrder();
-  for (
-    let attempt = 0;
-    !upstream.ok &&
-    isPolymarketServiceNotReadyResponse(upstream) &&
-    attempt < POLYMARKET_ORDER_RETRY_DELAYS_MS.length;
-    attempt += 1
-  ) {
-    const delayMs = POLYMARKET_ORDER_RETRY_DELAYS_MS[attempt] ?? 0;
-    ctx.logger?.warn?.(
-      {
-        upstreamStatus: upstream.status,
-        upstreamPayload: upstream.payload,
-        signer,
-        tokenId: payload.tokenId,
-        orderType: payload.orderType,
-        orderHash: payload.orderHash,
-        retryAttempt: attempt + 1,
-        retryDelayMs: delayMs,
-      },
-      "Polymarket order service not ready; retrying same signed order",
-    );
-    await sleep(delayMs);
-    upstream = await submitOrder();
-  }
+  const upstream = await submitPolymarketClobOrderWithRetry({
+    address: signer,
+    body: requestBody,
+    creds: clobCreds,
+    log: ctx.logger,
+    logContext: {
+      signer,
+      tokenId: payload.tokenId,
+      orderType: payload.orderType,
+      orderHash: payload.orderHash,
+    },
+  });
   if (!upstream.ok) {
     if (
       await invalidatePolymarketCredentialsForInvalidApiKey({

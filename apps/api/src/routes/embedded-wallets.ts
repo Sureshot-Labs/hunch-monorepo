@@ -46,6 +46,7 @@ import {
 } from "../services/embedded-ethereum.js";
 import {
   buildEmbeddedExecutionSingleFlightKey,
+  isEmbeddedExecutionInProgressError,
   runEmbeddedExecutionSingleFlight,
 } from "../services/embedded-execution-singleflight.js";
 import {
@@ -2356,6 +2357,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           200: solanaPrefundExecuteResponseSchema,
           400: solanaPrefundErrorResponseSchema,
           401: solanaPrefundErrorResponseSchema,
+          409: solanaPrefundErrorResponseSchema,
         },
       },
     },
@@ -2392,6 +2394,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             SOLANA_CHAIN_ID,
             request.body.executionKey,
           ),
+          redis: await getRedis(),
           run: async () => {
             const entry = await readCachedSolanaPrefundPreparedRequest({
               signer,
@@ -2453,7 +2456,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to execute Solana prefund",
         );
-        reply.code(400);
+        reply.code(isEmbeddedExecutionInProgressError(error) ? 409 : 400);
         return reply.send({
           error:
             error instanceof Error
@@ -2542,6 +2545,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             request.body.chainId,
             request.body.executionKey,
           ),
+          redis: await getRedis(),
           run: async () => {
             const requests = prepareEmbeddedEthereumTransactionRequests({
               context,
@@ -2573,7 +2577,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to execute embedded EVM transactions",
         );
-        reply.code(400);
+        reply.code(isEmbeddedExecutionInProgressError(error) ? 409 : 400);
         return reply.send({
           error:
             error instanceof Error
@@ -2681,6 +2685,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             context.signer,
             request.body.executionKey,
           ),
+          redis: await getRedis(),
           run: async () => {
             const requests = await readCachedEmbeddedSolanaPreparedRequests({
               signer: context.signer,
@@ -2725,7 +2730,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to execute embedded Solana transactions",
         );
-        reply.code(400);
+        reply.code(isEmbeddedExecutionInProgressError(error) ? 409 : 400);
         return reply.send({
           error:
             error instanceof Error

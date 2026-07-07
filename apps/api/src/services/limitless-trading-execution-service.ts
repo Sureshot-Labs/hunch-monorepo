@@ -2851,6 +2851,32 @@ async function resolveLimitlessTokenPairForSlug(input: {
   };
 }
 
+function submitLimitlessClobOrderToVenue(input: {
+  body: unknown;
+  requestAuth: unknown;
+}): ReturnType<typeof limitlessRequest> {
+  return limitlessRequest({
+    method: "POST",
+    requestPath: "/orders",
+    ...(input.requestAuth as object),
+    body: input.body,
+  });
+}
+
+function extractLimitlessSubmittedOrder(payload: unknown): {
+  order: unknown;
+  status: string | null;
+  venueOrderId: string | null;
+} {
+  const order =
+    isRecord(payload) && isRecord(payload.order) ? payload.order : payload;
+  return {
+    order,
+    status: isRecord(order) ? readString(order.status) : null,
+    venueOrderId: isRecord(order) ? readString(order.id) : null,
+  };
+}
+
 export async function submitLimitlessClientSignedOrder(input: {
   body: LimitlessClientOrderBody;
   log?: LimitlessRouteLogger | null;
@@ -3202,11 +3228,9 @@ export async function submitLimitlessClientSignedOrder(input: {
     clientOrderId,
   };
 
-  const upstream = await limitlessRequest({
-    method: "POST",
-    requestPath: "/orders",
-    ...(requestAuth as object),
+  const upstream = await submitLimitlessClobOrderToVenue({
     body: orderPayload,
+    requestAuth,
   });
 
   if (!upstream.ok) {
@@ -3284,12 +3308,8 @@ export async function submitLimitlessClientSignedOrder(input: {
     };
   }
 
-  const venueOrderId =
-    (isRecord(upstream.payload) &&
-      isRecord(upstream.payload.order) &&
-      typeof upstream.payload.order.id === "string" &&
-      upstream.payload.order.id) ||
-    null;
+  const submittedOrder = extractLimitlessSubmittedOrder(upstream.payload);
+  const venueOrderId = submittedOrder.venueOrderId;
 
   if (!venueOrderId) {
     return {
@@ -3302,12 +3322,7 @@ export async function submitLimitlessClientSignedOrder(input: {
     };
   }
 
-  const status =
-    (isRecord(upstream.payload) &&
-      isRecord(upstream.payload.order) &&
-      typeof upstream.payload.order.status === "string" &&
-      upstream.payload.order.status) ||
-    "submitted";
+  const status = submittedOrder.status ?? "submitted";
 
   const immediateFill =
     input.body.orderType === "FOK"
@@ -4519,10 +4534,8 @@ async function submitPreparedTrade(
   if (isLimitlessAmmPreparedPayload(payload)) {
     return submitLimitlessAmmPreparedTrade({ payload, prepared });
   }
-  const upstream = await limitlessRequest({
-    method: "POST",
-    requestPath: "/orders",
-    ...(payload.requestAuth as object),
+  const upstream = await submitLimitlessClobOrderToVenue({
+    requestAuth: payload.requestAuth,
     body: {
       order: payload.orderPayload,
       orderType: payload.orderType,
@@ -4559,11 +4572,8 @@ async function submitPreparedTrade(
     });
   }
 
-  const order =
-    isRecord(upstream.payload) && isRecord(upstream.payload.order)
-      ? upstream.payload.order
-      : upstream.payload;
-  const venueOrderId = isRecord(order) ? readString(order.id) : null;
+  const submittedOrder = extractLimitlessSubmittedOrder(upstream.payload);
+  const venueOrderId = submittedOrder.venueOrderId;
   if (!venueOrderId) {
     throw tradingError({
       code: "trade_submission_failed",
@@ -4572,7 +4582,7 @@ async function submitPreparedTrade(
       venue: "limitless",
     });
   }
-  const status = isRecord(order) ? readString(order.status) : null;
+  const status = submittedOrder.status;
   return {
     venue: "limitless",
     status:

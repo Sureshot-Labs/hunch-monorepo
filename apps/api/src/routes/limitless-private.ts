@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { getRedis } from "../redis.js";
 import {
   isLimitlessPartnerHmacConfigured,
   type LimitlessRequestAuthInputs,
@@ -585,6 +586,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
 
         const result = await runEmbeddedExecutionSingleFlight({
           key: singleFlightKey,
+          redis: await getRedis(),
           run: async () => {
             const context = await resolveEmbeddedPrivyWalletContext({
               user,

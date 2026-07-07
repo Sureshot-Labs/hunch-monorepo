@@ -670,13 +670,25 @@ const tests: TestCase[] = [
         resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
         "utf8",
       );
+      const sharedSubmitBlock = sourceSlice(
+        polymarket,
+        "async function submitPolymarketClobOrderWithRetry(",
+        "function exchangeAddressForNegRisk",
+      );
+      assert.match(sharedSubmitBlock, /isPolymarketServiceNotReadyResponse/);
+      assert.match(sharedSubmitBlock, /POLYMARKET_ORDER_RETRY_DELAYS_MS/);
+      const restSubmitBlock = sourceSlice(
+        polymarket,
+        "export async function submitPolymarketClientSignedOrder(",
+        "async function getReadiness(",
+      );
       const submitBlock = sourceSlice(
         polymarket,
         "async function submitPreparedTrade(",
         "export function createPolymarketTradingExecutionService",
       );
-      assert.match(submitBlock, /isPolymarketServiceNotReadyResponse/);
-      assert.match(submitBlock, /POLYMARKET_ORDER_RETRY_DELAYS_MS/);
+      assert.match(restSubmitBlock, /submitPolymarketClobOrderWithRetry/);
+      assert.match(submitBlock, /submitPolymarketClobOrderWithRetry/);
       assert.match(
         submitBlock,
         /invalidatePolymarketCredentialsForInvalidApiKey/,
@@ -684,6 +696,46 @@ const tests: TestCase[] = [
       assert.match(submitBlock, /waitForPolymarketExecutionConfirmation/);
       assert.match(submitBlock, /POLYMARKET_UNCONFIRMED_STATUS/);
       assert.doesNotMatch(submitBlock, /venueOrderId:\s*payload\.orderHash/);
+    },
+  },
+  {
+    name: "REST and bot CLOB submits share upstream venue submit helpers",
+    run: () => {
+      const polymarket = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const limitless = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+
+      const polymarketHelperCalls =
+        polymarket.match(/submitPolymarketClobOrderWithRetry\(/g) ?? [];
+      assert.equal(polymarketHelperCalls.length, 3);
+
+      const limitlessSharedSubmitBlock = sourceSlice(
+        limitless,
+        "function submitLimitlessClobOrderToVenue(",
+        "function extractLimitlessSubmittedOrder(",
+      );
+      assert.match(limitlessSharedSubmitBlock, /limitlessRequest/);
+      assert.match(limitlessSharedSubmitBlock, /requestPath: "\/orders"/);
+
+      const limitlessRestSubmitBlock = sourceSlice(
+        limitless,
+        "export async function submitLimitlessClientSignedOrder(",
+        "export async function quoteLimitlessAmmRoute(",
+      );
+      const limitlessBotSubmitBlock = sourceSlice(
+        limitless,
+        "async function submitPreparedTrade(",
+        "async function persistTrade(",
+      );
+      assert.match(limitlessRestSubmitBlock, /submitLimitlessClobOrderToVenue/);
+      assert.match(limitlessBotSubmitBlock, /submitLimitlessClobOrderToVenue/);
+      assert.match(limitlessRestSubmitBlock, /extractLimitlessSubmittedOrder/);
+      assert.match(limitlessBotSubmitBlock, /extractLimitlessSubmittedOrder/);
     },
   },
   {

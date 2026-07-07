@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { getRedis } from "../redis.js";
 import {
   polymarketBalanceAllowanceSyncBodySchema,
   polymarketCancelOrderBodySchema,
@@ -464,6 +465,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       const result = await executeEmbeddedPolymarketEnsureReadyRoute({
         body: request.body,
         log: request.log,
+        redis: await getRedis(),
         signer,
         user,
       });
