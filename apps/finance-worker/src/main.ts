@@ -1,9 +1,12 @@
+import { pathToFileURL } from "node:url";
+
 import {
   runApiCacheWarmJob,
   runFeesCollectJob,
   runFeesReconcileJob,
   runKalshiExecutionReconcileJob,
   runRewardsPayoutJob,
+  runTelegramTradeIntentReconcileJob,
   runTreasurySweepJob,
 } from "./finance-jobs.js";
 import { env } from "./env.js";
@@ -30,17 +33,19 @@ function resolveFundsLockKey(chainId?: string): string {
   return chainId ? `funds:${chainId}` : "funds:all";
 }
 
-function buildJobs(): ScheduledJob[] {
-  const allowExecute = env.executeEnabled;
+type FinanceWorkerEnv = typeof env;
+
+export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
+  const allowExecute = workerEnv.executeEnabled;
   return [
     {
       name: "api_cache_warm",
-      enabled: env.apiCacheWarmEnabled,
-      intervalSec: env.apiCacheWarmIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
+      enabled: workerEnv.apiCacheWarmEnabled,
+      intervalSec: workerEnv.apiCacheWarmIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
       run: () =>
         runApiCacheWarmJob({
           force: false,
@@ -48,103 +53,119 @@ function buildJobs(): ScheduledJob[] {
     },
     {
       name: "fees_collect",
-      enabled: env.feesCollectEnabled,
-      intervalSec: env.feesCollectIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
+      enabled: workerEnv.feesCollectEnabled,
+      intervalSec: workerEnv.feesCollectIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
       run: () =>
         runFeesCollectJob({
           archiveLegacy: true,
           dryRun:
-            env.feesCollectDryRun || env.feesCollectReadOnly || !allowExecute,
-          readOnly: env.feesCollectReadOnly || !allowExecute,
+            workerEnv.feesCollectDryRun ||
+            workerEnv.feesCollectReadOnly ||
+            !allowExecute,
+          readOnly: workerEnv.feesCollectReadOnly || !allowExecute,
         }),
     },
     {
       name: "fees_reconcile",
-      enabled: env.feesReconcileEnabled,
-      intervalSec: env.feesReconcileIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
+      enabled: workerEnv.feesReconcileEnabled,
+      intervalSec: workerEnv.feesReconcileIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
       run: () =>
         runFeesReconcileJob({
-          dryRun: env.feesReconcileDryRun || !allowExecute,
+          dryRun: workerEnv.feesReconcileDryRun || !allowExecute,
           limit: 25,
           minAgeSec: 60,
         }),
     },
     {
       name: "kalshi_execution_reconcile",
-      enabled: env.kalshiExecutionReconcileEnabled,
-      intervalSec: env.kalshiExecutionReconcileIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
+      enabled: workerEnv.kalshiExecutionReconcileEnabled,
+      intervalSec: workerEnv.kalshiExecutionReconcileIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
       run: () =>
         runKalshiExecutionReconcileJob({
-          dryRun: env.kalshiExecutionReconcileDryRun || !allowExecute,
-          limit: env.kalshiExecutionReconcileLimit,
-          minAgeSec: env.kalshiExecutionReconcileMinAgeSec,
+          dryRun: workerEnv.kalshiExecutionReconcileDryRun || !allowExecute,
+          limit: workerEnv.kalshiExecutionReconcileLimit,
+          minAgeSec: workerEnv.kalshiExecutionReconcileMinAgeSec,
+        }),
+    },
+    {
+      name: "telegram_trade_intents_reconcile",
+      enabled: workerEnv.telegramTradeIntentsEnabled,
+      intervalSec: workerEnv.telegramTradeIntentsIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      run: () =>
+        runTelegramTradeIntentReconcileJob({
+          executingGraceMs:
+            workerEnv.telegramTradeIntentsExecutingGraceSec * 1000,
         }),
     },
     {
       name: "treasury_sweep",
-      enabled: env.treasurySweepEnabled,
-      intervalSec: env.treasurySweepIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
-      lockKey: resolveFundsLockKey(env.treasurySweepChainId),
+      enabled: workerEnv.treasurySweepEnabled,
+      intervalSec: workerEnv.treasurySweepIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      lockKey: resolveFundsLockKey(workerEnv.treasurySweepChainId),
       run: () =>
         runTreasurySweepJob({
-          execute: allowExecute && env.treasurySweepExecute,
-          dryRun: !allowExecute || !env.treasurySweepExecute,
-          chainId: env.treasurySweepChainId,
-          maxUsd: env.treasurySweepMaxUsd,
+          execute: allowExecute && workerEnv.treasurySweepExecute,
+          dryRun: !allowExecute || !workerEnv.treasurySweepExecute,
+          chainId: workerEnv.treasurySweepChainId,
+          maxUsd: workerEnv.treasurySweepMaxUsd,
         }),
     },
     {
       name: "payout_prepare",
-      enabled: env.payoutPrepareEnabled,
-      intervalSec: env.payoutPrepareIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
-      lockKey: resolveFundsLockKey(env.payoutPrepareChainId),
+      enabled: workerEnv.payoutPrepareEnabled,
+      intervalSec: workerEnv.payoutPrepareIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      lockKey: resolveFundsLockKey(workerEnv.payoutPrepareChainId),
       run: () =>
         runRewardsPayoutJob({
-          dryRun: env.payoutPrepareDryRun || !allowExecute,
+          dryRun: workerEnv.payoutPrepareDryRun || !allowExecute,
           confirmOnly: true,
           sendOnly: false,
           failPending: false,
-          limit: env.payoutPrepareLimit,
-          chainId: env.payoutPrepareChainId,
+          limit: workerEnv.payoutPrepareLimit,
+          chainId: workerEnv.payoutPrepareChainId,
         }),
     },
     {
       name: "payout_send",
-      enabled: env.payoutSendEnabled,
-      intervalSec: env.payoutSendIntervalSec,
-      timeoutSec: env.jobTimeoutSec,
-      maxRetries: env.maxRetries,
-      retryBackoffSec: env.retryBackoffSec,
-      jitterSec: env.jitterSec,
-      lockKey: resolveFundsLockKey(env.payoutSendChainId),
+      enabled: workerEnv.payoutSendEnabled,
+      intervalSec: workerEnv.payoutSendIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      lockKey: resolveFundsLockKey(workerEnv.payoutSendChainId),
       run: () =>
         runRewardsPayoutJob({
-          dryRun: !allowExecute || !env.payoutSendExecute,
+          dryRun: !allowExecute || !workerEnv.payoutSendExecute,
           confirmOnly: false,
           sendOnly: false,
           failPending: false,
-          limit: env.payoutSendLimit,
-          chainId: env.payoutSendChainId,
+          limit: workerEnv.payoutSendLimit,
+          chainId: workerEnv.payoutSendChainId,
         }),
     },
   ];
@@ -166,7 +187,7 @@ function main() {
 
   const lockManager = new InMemoryLockManager();
   const scheduler = new IntervalScheduler(log, lockManager);
-  const jobs = buildJobs();
+  const jobs = buildJobs(env);
   for (const job of jobs) {
     scheduler.schedule(job);
   }
@@ -190,4 +211,12 @@ function main() {
   });
 }
 
-main();
+function isDirectExecution(metaUrl: string): boolean {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+  return pathToFileURL(entrypoint).href === metaUrl;
+}
+
+if (isDirectExecution(import.meta.url)) {
+  main();
+}

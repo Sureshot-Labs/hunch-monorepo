@@ -186,12 +186,16 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       preHandler: requireInternal,
       schema: { body: internalDisableBodySchema },
     },
-    async (request) => ({
-      disabled: await disableTelegramBotTradingForTelegramUser(
+    async (request) => {
+      const disabled = await disableTelegramBotTradingForTelegramUser(
         pool,
         request.body.telegramUserId,
-      ),
-    }),
+      );
+      return {
+        disabled,
+        status: disabled ? "disabled" : "already_disabled",
+      };
+    },
   );
 
   api.post(

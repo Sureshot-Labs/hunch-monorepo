@@ -100,6 +100,19 @@ export const env = {
     15,
   ),
 
+  telegramTradeIntentsEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED"),
+    true,
+  ),
+  telegramTradeIntentsIntervalSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_INTERVAL_SEC"),
+    60,
+  ),
+  telegramTradeIntentsExecutingGraceSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_EXECUTING_GRACE_SEC"),
+    600,
+  ),
+
   treasurySweepEnabled: parseBool(
     readEnv("HUNCH_FINANCE_SWEEP_ENABLED"),
     false,

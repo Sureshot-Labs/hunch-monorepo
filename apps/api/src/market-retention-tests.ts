@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -93,6 +94,28 @@ function countFor(rows: JsonRecord[], input: Partial<JsonRecord>): number {
   );
   return Number(row?.markets ?? row?.rows ?? 0);
 }
+
+await test("retention selector reports and cleans ephemeral Telegram trade intents before markets", async () => {
+  const source = readFileSync(
+    new URL("./market-retention-selector.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /telegram_trade_intents_ephemeral_cleanup/);
+  for (const status of [
+    "draft",
+    "previewed",
+    "confirming",
+    "expired",
+    "cancelled",
+    "failed",
+  ]) {
+    assert.match(source, new RegExp(`"${status}"`));
+  }
+  assert.ok(
+    source.indexOf('"telegram_trade_intents_ephemeral_cleanup"') <
+      source.indexOf('"unified_markets"'),
+  );
+});
 
 async function insertUnifiedLimitlessMarket(params: {
   marketId: string;

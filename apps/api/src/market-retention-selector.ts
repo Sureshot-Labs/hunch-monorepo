@@ -53,6 +53,14 @@ const DEFAULT_LIMIT = 50_000;
 const DEFAULT_SAMPLE_LIMIT = 20;
 const DEFAULT_STATUSES = ["CLOSED", "SETTLED", "ARCHIVED"];
 const ALLOWED_STATUSES = new Set(["ACTIVE", "CLOSED", "SETTLED", "ARCHIVED"]);
+const TELEGRAM_TRADE_INTENT_EPHEMERAL_STATUSES = [
+  "draft",
+  "previewed",
+  "confirming",
+  "expired",
+  "cancelled",
+  "failed",
+];
 
 function readValues(argv: string[], name: string): string[] {
   const key = `--${name}`;
@@ -256,6 +264,32 @@ function protectedRefsSql(
     select distinct ct.market_id, 'venue_fee_accruals' as reason
     from ${candidateRefTokensTable} ct
     join venue_fee_accruals vf on vf.token_id = ct.token_id
+  `;
+}
+
+function telegramTradeIntentEphemeralPredicate(alias: string): string {
+  return `
+    ${alias}.status in (${TELEGRAM_TRADE_INTENT_EPHEMERAL_STATUSES.map(
+      (status) => `'${status}'`,
+    ).join(", ")})
+    and ${alias}.order_id is null
+    and ${alias}.execution_id is null
+    and ${alias}.venue_order_id is null
+    and ${alias}.tx_signature is null
+  `;
+}
+
+function telegramTradeIntentEphemeralDerivedSql(
+  candidatePoolTable: string,
+): string {
+  return `
+        union all
+        select 'telegram_trade_intents_ephemeral_cleanup' as label,
+          count(distinct x.market_id)::text as markets,
+          count(*)::text as rows
+        from telegram_trade_intents x
+        join ${candidatePoolTable} c on c.market_id = x.market_id
+        where ${telegramTradeIntentEphemeralPredicate("x")}
   `;
 }
 
@@ -512,6 +546,9 @@ async function queryBatchSummary(
     client,
     "public.telegram_trade_intents",
   );
+  const telegramTradeIntentsEphemeralDerived = includeTelegramTradeIntents
+    ? telegramTradeIntentEphemeralDerivedSql("candidate_pool")
+    : "";
   const { rows } = await client.query<BatchSummaryRow>(
     `
       ${candidateCte({ includeTelegramTradeIntents })},
@@ -563,6 +600,7 @@ async function queryBatchSummary(
         select 'unified_event_activity_metrics_24h' as label, count(distinct c.event_id)::text as markets, count(*)::text as rows
         from unified_event_activity_metrics_24h x
         join candidate_events c on c.event_id = x.event_id
+        ${telegramTradeIntentsEphemeralDerived}
       )
       select
         'pool_total' as section,
@@ -908,6 +946,10 @@ async function materializeDeletionSet(
 
 async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
   const counts: DeleteCountRow[] = [];
+  const includeTelegramTradeIntents = await relationExists(
+    client,
+    "public.telegram_trade_intents",
+  );
 
   counts.push(
     await deleteAndCount(
@@ -997,6 +1039,20 @@ async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
       `,
     ),
   );
+  if (includeTelegramTradeIntents) {
+    counts.push(
+      await deleteAndCount(
+        client,
+        "telegram_trade_intents_ephemeral_cleanup",
+        `
+          delete from telegram_trade_intents x
+          using tmp_market_retention_removable_markets r
+          where x.market_id = r.market_id
+            and ${telegramTradeIntentEphemeralPredicate("x")}
+        `,
+      ),
+    );
+  }
   counts.push(
     await deleteAndCount(
       client,

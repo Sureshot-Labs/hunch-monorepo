@@ -262,6 +262,7 @@ services:
     environment:
       HUNCH_JS_RUNTIME: ${HUNCH_WORKER_JS_RUNTIME:-bun}
       HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_SIGNAL_BOT:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/signal-bot}
+      HUNCH_SIGNAL_BOT_INTERNAL_API_BASE_URL: ${HUNCH_SIGNAL_BOT_INTERNAL_API_BASE_URL:-http://api:3001}
     volumes:
       - /opt/hunch/.env:/app/.env:ro
     depends_on:

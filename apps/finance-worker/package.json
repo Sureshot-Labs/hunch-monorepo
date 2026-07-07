@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "start:bun": "bun dist/main.js",
+    "test": "tsx src/finance-worker-tests.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier -w . --ignore-path ../../.gitignore --ignore-unknown",

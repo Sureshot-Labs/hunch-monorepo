@@ -43,6 +43,7 @@ import {
 } from "./services/signal-bot.js";
 import {
   buildTelegramBotTradingMarketMessage,
+  createTelegramBotTradingInternalApiClient,
   enableTelegramBotTrading,
   handleTelegramBotTradingCallback,
   reconcileStaleTelegramTradeIntents,
@@ -993,6 +994,68 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(parseSignalBotCommand("/market", null), "market");
       assert.equal(parseSignalBotCommand("/test_trade", null), "test_trade");
+    },
+  },
+  {
+    name: "disable trading command reports disabled, already disabled, and unavailable distinctly",
+    run: async () => {
+      const cases = [
+        {
+          expected: /Telegram bot trading disabled/,
+          result: "disabled" as const,
+        },
+        {
+          expected: /already disabled/,
+          result: "already_disabled" as const,
+        },
+        {
+          expected: /Trading is unavailable/,
+          result: "unavailable" as const,
+        },
+      ];
+      for (const testCase of cases) {
+        const redis = new FakeRedis();
+        const telegram = new FakeTelegram();
+        const handled = await handleSignalBotCommand({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+          }),
+          disableTrading: async () => testCase.result,
+          message: {
+            chat: { id: 999, first_name: "Kreedle", type: "private" },
+            from: { id: 999 },
+            text: "/disable_trading",
+          },
+          redis,
+          sendMessage: (message) => telegram.sendMessage(message),
+          sendTestSignal: async () => false,
+        });
+        assert.equal(handled, true);
+        assert.match(telegram.messages[0]?.text ?? "", testCase.expected);
+      }
+    },
+  },
+  {
+    name: "internal trading API client times out stalled calls",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new Error("aborted"));
+          });
+        })) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          timeoutMs: 1,
+          token: "token",
+        });
+        await assert.rejects(() => client.buildStatusMessage(999), /aborted/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   },
   {
@@ -2390,6 +2453,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "utf8",
       );
       assert.match(retentionSelector, /telegram_trade_intents/);
+      assert.match(
+        retentionSelector,
+        /telegram_trade_intents_ephemeral_cleanup/,
+      );
     },
   },
   {

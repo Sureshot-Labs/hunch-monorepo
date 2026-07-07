@@ -80,6 +80,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "LIMITLESS_HMAC_SECRET",
     "ACROSS_API_KEY",
     "HUNCH_TELEGRAM_BOT_TOKEN",
+    "HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN",
     "XAI_API_KEY",
     "XAI_MANAGEMENT_API_KEY",
     "OPENROUTER_API_KEY",
@@ -115,7 +116,11 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "LIMITLESS_SESSION",
     "POLYGON_DEPLOYER_KEY",
   ],
-  "signal-bot": ["HUNCH_SIGNAL_BOT_ADMIN_USER_IDS", "HUNCH_SIGNAL_BOT_TOKEN"],
+  "signal-bot": [
+    "HUNCH_SIGNAL_BOT_ADMIN_USER_IDS",
+    "HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN",
+    "HUNCH_SIGNAL_BOT_TOKEN",
+  ],
 };
 
 const DEFAULT_SECRET_PREFIX = "/hunch/prod";

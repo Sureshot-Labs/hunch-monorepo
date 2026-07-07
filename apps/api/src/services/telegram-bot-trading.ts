@@ -184,7 +184,9 @@ export type TelegramBotTradingInternalApiClient = {
   buildStatusMessage: (
     telegramUserId: string | number,
   ) => Promise<TelegramBotTradingMessage>;
-  disableTrading: (telegramUserId: string | number) => Promise<boolean>;
+  disableTrading: (
+    telegramUserId: string | number,
+  ) => Promise<"already_disabled" | "disabled" | "unavailable">;
   handleCallback: (
     input: Omit<TelegramBotTradingCallbackInput, "db" | "trading">,
   ) => Promise<boolean>;
@@ -1787,25 +1789,38 @@ async function readInternalApiJson<T>(response: Response): Promise<T> {
 function createInternalApiPost(input: {
   baseUrl: string;
   token: string;
+  timeoutMs?: number;
 }): <T>(path: string, body: unknown) => Promise<T> {
   const baseUrl = normalizeBaseUrl(input.baseUrl);
   const token = input.token.trim();
+  const timeoutMs =
+    Number.isFinite(input.timeoutMs) && (input.timeoutMs ?? 0) > 0
+      ? Math.trunc(input.timeoutMs ?? 0)
+      : 10_000;
   return async <T>(path: string, body: unknown): Promise<T> => {
-    const response = await fetch(`${baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    return readInternalApiJson<T>(response);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      return readInternalApiJson<T>(response);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 }
 
 export function createTelegramBotTradingInternalApiClient(input: {
   baseUrl: string;
   token: string;
+  timeoutMs?: number;
 }): TelegramBotTradingInternalApiClient {
   const post = createInternalApiPost(input);
   return {
@@ -1820,11 +1835,16 @@ export function createTelegramBotTradingInternalApiClient(input: {
         { telegramUserId },
       ),
     disableTrading: async (telegramUserId) => {
-      const result = await post<{ disabled: boolean }>(
+      const result = await post<{
+        disabled?: boolean;
+        status?: "already_disabled" | "disabled" | "unavailable";
+      }>(
         "/internal/telegram-bot/trading/disable",
         { telegramUserId },
       );
-      return result.disabled;
+      return (
+        result.status ?? (result.disabled ? "disabled" : "already_disabled")
+      );
     },
     handleCallback: async (callbackInput) => {
       const parsed = parseCallbackData(callbackInput.callbackQuery.data);

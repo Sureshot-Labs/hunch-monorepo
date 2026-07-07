@@ -28,6 +28,12 @@ import {
   runApiCacheWarm,
   type ApiCacheWarmJobOptions,
 } from "../api-cache-warm-runner.js";
+import { pool } from "../db.js";
+import { reconcileStaleTelegramTradeIntents } from "../services/telegram-bot-trading.js";
+
+export type ReconcileTelegramTradeIntentsOptions = {
+  executingGraceMs?: number;
+};
 
 function mergeOptions<T extends object>(base: T, overrides?: Partial<T>): T {
   if (!overrides) return base;
@@ -98,6 +104,23 @@ export async function runApiCacheWarmJob(
   overrides?: Partial<ApiCacheWarmJobOptions>,
 ) {
   return runApiCacheWarm(overrides);
+}
+
+export async function runTelegramTradeIntentReconcileJob(
+  overrides?: Partial<ReconcileTelegramTradeIntentsOptions>,
+) {
+  const summary = await reconcileStaleTelegramTradeIntents(pool, {
+    executingGraceMs: overrides?.executingGraceMs,
+  });
+  console.log(
+    [
+      "Reconcile Telegram trade intents",
+      `expiredPending=${summary.expiredPending}`,
+      `failedPreSubmitExecuting=${summary.failedPreSubmitExecuting}`,
+      `submittedReconcileRequired=${summary.submittedReconcileRequired}`,
+    ].join(" "),
+  );
+  return summary;
 }
 
 export type {

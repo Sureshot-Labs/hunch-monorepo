@@ -76,6 +76,11 @@ export type SignalBotCommand =
   | "test_signal"
   | "test_trade";
 
+export type SignalBotDisableTradingResult =
+  | "already_disabled"
+  | "disabled"
+  | "unavailable";
+
 export type SignalBotFollowthroughPreviewKind =
   | "resolved_loss"
   | "resolved_win"
@@ -1614,7 +1619,10 @@ export async function handleSignalBotCommand(input: {
     chatId: string,
     telegramUserId: number,
   ) => Promise<boolean>;
-  disableTrading?: (chatId: string, telegramUserId: number) => Promise<boolean>;
+  disableTrading?: (
+    chatId: string,
+    telegramUserId: number,
+  ) => Promise<SignalBotDisableTradingResult>;
 }): Promise<boolean> {
   const command = parseSignalBotCommand(input.message.text, input.botUsername);
   if (!command) return false;
@@ -1765,16 +1773,18 @@ export async function handleSignalBotCommand(input: {
       );
       return true;
     }
-    const disabled = await (input.disableTrading?.(
+    const disableResult = await (input.disableTrading?.(
       chatId,
       input.message.from.id,
-    ) ?? Promise.resolve(false));
+    ) ?? Promise.resolve("unavailable" as const));
     await input.sendMessage(
       buildPlainReply(
         chatId,
-        disabled
+        disableResult === "disabled"
           ? "Telegram bot trading disabled."
-          : "Telegram bot trading was not enabled.",
+          : disableResult === "already_disabled"
+            ? "Telegram bot trading was already disabled."
+            : "Trading is unavailable right now. Open Hunch to trade.",
       ),
     );
     return true;
@@ -1899,7 +1909,10 @@ export async function pollSignalBotCommands(input: {
     chatId: string,
     telegramUserId: number,
   ) => Promise<boolean>;
-  disableTrading?: (chatId: string, telegramUserId: number) => Promise<boolean>;
+  disableTrading?: (
+    chatId: string,
+    telegramUserId: number,
+  ) => Promise<SignalBotDisableTradingResult>;
   handleCallback?: (callbackQuery: TelegramBotCallbackQuery) => Promise<boolean>;
   telegram: SignalBotTelegramClient;
 }): Promise<number> {

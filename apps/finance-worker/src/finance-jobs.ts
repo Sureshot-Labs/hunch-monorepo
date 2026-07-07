@@ -25,6 +25,10 @@ type ReconcileKalshiExecutionsOptions = {
   minAgeSec?: number;
 };
 
+type ReconcileTelegramTradeIntentsOptions = {
+  executingGraceMs?: number;
+};
+
 type RewardsPayoutOptions = {
   dryRun?: boolean;
   confirmOnly?: boolean;
@@ -54,6 +58,9 @@ type FinanceJobsModule = {
   ) => Promise<unknown>;
   runKalshiExecutionReconcileJob: (
     overrides?: Partial<ReconcileKalshiExecutionsOptions>,
+  ) => Promise<unknown>;
+  runTelegramTradeIntentReconcileJob: (
+    overrides?: Partial<ReconcileTelegramTradeIntentsOptions>,
   ) => Promise<unknown>;
   runRewardsPayoutJob: (
     overrides?: Partial<RewardsPayoutOptions>,
@@ -108,6 +115,13 @@ export async function runKalshiExecutionReconcileJob(
 ): Promise<unknown> {
   const jobs = await getFinanceJobsModule();
   return jobs.runKalshiExecutionReconcileJob(overrides);
+}
+
+export async function runTelegramTradeIntentReconcileJob(
+  overrides?: Partial<ReconcileTelegramTradeIntentsOptions>,
+): Promise<unknown> {
+  const jobs = await getFinanceJobsModule();
+  return jobs.runTelegramTradeIntentReconcileJob(overrides);
 }
 
 export async function runRewardsPayoutJob(
