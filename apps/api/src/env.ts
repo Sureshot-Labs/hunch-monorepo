@@ -1171,7 +1171,11 @@ export const env = {
   ),
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
+  privyWalletAuthorizationKey:
+    process.env.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() || "",
   privyWebhookSecret: process.env.PRIVY_WEBHOOK_SECRET?.trim() || "",
+  telegramBotInternalApiToken:
+    process.env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || "",
   metricsAuthToken: process.env.METRICS_AUTH_TOKEN?.trim() || "",
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
   pricesSseMaxConnectionsPerIp: optionalPositiveInt(

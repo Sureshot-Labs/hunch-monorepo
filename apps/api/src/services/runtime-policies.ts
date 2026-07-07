@@ -13,6 +13,19 @@ import {
 } from "../repos/runtime-policies.js";
 import { normalizeMarketMapVenues } from "./market-map.js";
 import { DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES } from "./signal-bot-followthrough-policy.js";
+import {
+  getDefaultSignalBotPolicy,
+  normalizeSignalBotPolicy,
+  sanitizeSignalBotPolicyOverride,
+  signalBotSchema,
+  type SignalBotPolicy,
+} from "./signal-bot-trading-policy.js";
+
+export type {
+  SignalBotPolicy,
+  SignalBotTradingAction,
+  SignalBotTradingVenue,
+} from "./signal-bot-trading-policy.js";
 
 export const INTEL_POLICY_KEYS = [
   "auth_access",
@@ -27,6 +40,7 @@ export const INTEL_POLICY_KEYS = [
   "map_signals",
   "holder_research",
   "arbitrage_defaults",
+  "signal_bot",
 ] as const;
 
 export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
@@ -564,6 +578,7 @@ type IntelPolicyMap = {
   map_signals: MapSignalsPolicy;
   holder_research: HolderResearchPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
+  signal_bot: SignalBotPolicy;
 };
 
 type IntelPolicyResult<K extends IntelPolicyKey> = {
@@ -1220,6 +1235,7 @@ const policySchemas = {
   map_signals: mapSignalsSchema,
   holder_research: holderResearchSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
+  signal_bot: signalBotSchema,
 } as const;
 
 const warnedInvalidOverrides = new Set<string>();
@@ -1792,6 +1808,7 @@ function getDefaults(): IntelPolicyMap {
       minSpread: 0.03,
       minQualityScore: 0.6,
     },
+    signal_bot: getDefaultSignalBotPolicy(),
   };
 }
 
@@ -2985,6 +3002,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeArbitrageDefaultsPolicy(
         merged as ArbitrageDefaultsPolicy,
       ) as IntelPolicyMap[K];
+    case "signal_bot":
+      return normalizeSignalBotPolicy(merged as SignalBotPolicy) as IntelPolicyMap[K];
     default:
       return merged;
   }
@@ -3050,6 +3069,9 @@ function sanitizeOverridePayload(
       delete record.minAnalysisConfidence;
       delete record.maxOutlierRatio;
       return record;
+    }
+    case "signal_bot": {
+      return sanitizeSignalBotPolicyOverride(record);
     }
     default:
       return record;
@@ -3187,6 +3209,7 @@ export async function resolveAllIntelPolicies(
       "arbitrage_defaults",
       byKey.get("arbitrage_defaults") ?? null,
     ),
+    signal_bot: resolveFromRow("signal_bot", byKey.get("signal_bot") ?? null),
   };
 }
 
@@ -3236,4 +3259,8 @@ export async function resolveArbitrageDefaultsPolicy(pool: DbQuery) {
 
 export async function resolveAuthAccessPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "auth_access");
+}
+
+export async function resolveSignalBotPolicy(pool: DbQuery) {
+  return resolveIntelPolicy(pool, "signal_bot");
 }

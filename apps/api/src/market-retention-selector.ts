@@ -188,7 +188,21 @@ function assertExecutionFlags(args: Args): void {
 function protectedRefsSql(
   candidatePoolTable: string,
   candidateRefTokensTable: string,
+  options: { includeTelegramTradeIntents?: boolean } = {},
 ): string {
+  const telegramTradeIntentsRef = options.includeTelegramTradeIntents
+    ? `
+    union
+    select distinct c.market_id, 'telegram_trade_intents_durable' as reason
+    from ${candidatePoolTable} c
+    join telegram_trade_intents ti on ti.market_id = c.market_id
+    where ti.status in ('executing', 'submitted', 'filled')
+       or ti.order_id is not null
+       or ti.execution_id is not null
+       or ti.venue_order_id is not null
+       or ti.tx_signature is not null
+  `
+    : "";
   return `
     select distinct ct.market_id, 'orders' as reason
     from ${candidateRefTokensTable} ct
@@ -205,6 +219,7 @@ function protectedRefsSql(
     select distinct c.market_id, 'executions' as reason
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
+    ${telegramTradeIntentsRef}
     union
     select distinct c.market_id, 'wallet_position_snapshots' as reason
     from ${candidatePoolTable} c
@@ -267,7 +282,8 @@ function refTokensSql(
   `;
 }
 
-const candidateCte = `
+function candidateCte(options: { includeTelegramTradeIntents?: boolean } = {}): string {
+  return `
   with raw_candidate_pool as materialized (
     select
       m.id as market_id,
@@ -347,12 +363,13 @@ const candidateCte = `
   ),
   -- Retention safety boundary: update this list, dry-run reports, and delete cleanup when adding persisted market/token/event user-visible references.
   protected_refs as materialized (
-    ${protectedRefsSql("candidate_pool", "candidate_ref_tokens")}
+    ${protectedRefsSql("candidate_pool", "candidate_ref_tokens", options)}
   ),
   protected_market_ids as materialized (
     select distinct market_id from protected_refs
   )
 `;
+}
 
 async function queryGlobalTerminalSummary(
   client: PoolClient,
@@ -476,13 +493,28 @@ async function queryActivePastTerminalSummary(
   return rows;
 }
 
+async function relationExists(
+  client: PoolClient,
+  relationName: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ exists: boolean }>(
+    `select to_regclass($1) is not null as exists`,
+    [relationName],
+  );
+  return rows[0]?.exists === true;
+}
+
 async function queryBatchSummary(
   client: PoolClient,
   args: Args,
 ): Promise<BatchSummaryRow[]> {
+  const includeTelegramTradeIntents = await relationExists(
+    client,
+    "public.telegram_trade_intents",
+  );
   const { rows } = await client.query<BatchSummaryRow>(
     `
-      ${candidateCte},
+      ${candidateCte({ includeTelegramTradeIntents })},
       derived_refs as materialized (
         select 'unified_market_tokens' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
         from unified_market_tokens x
@@ -616,9 +648,13 @@ async function queryRemovableSamples(
   client: PoolClient,
   args: Args,
 ): Promise<SampleRow[]> {
+  const includeTelegramTradeIntents = await relationExists(
+    client,
+    "public.telegram_trade_intents",
+  );
   const { rows } = await client.query<SampleRow>(
     `
-      ${candidateCte}
+      ${candidateCte({ includeTelegramTradeIntents })}
       select
         c.market_id,
         c.venue,
@@ -767,10 +803,14 @@ async function materializeDeletionSet(
   client: PoolClient,
   args: Args,
 ): Promise<DeleteCountRow[]> {
+  const includeTelegramTradeIntents = await relationExists(
+    client,
+    "public.telegram_trade_intents",
+  );
   await client.query(
     `
       create temp table tmp_market_retention_removable_markets on commit drop as
-      ${candidateCte}
+      ${candidateCte({ includeTelegramTradeIntents })}
       select
         c.market_id,
         c.venue,
@@ -833,6 +873,7 @@ async function materializeDeletionSet(
       ${protectedRefsSql(
         "tmp_market_retention_removable_markets",
         "tmp_market_retention_protected_ref_tokens",
+        { includeTelegramTradeIntents },
       )}
     `,
   );
@@ -1060,12 +1101,17 @@ async function runEventDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
 async function queryPostDeleteValidation(
   client: PoolClient,
 ): Promise<DeleteCountRow[]> {
+  const includeTelegramTradeIntents = await relationExists(
+    client,
+    "public.telegram_trade_intents",
+  );
   await client.query(
     `
       create temp table tmp_market_retention_post_delete_protected_refs on commit drop as
       ${protectedRefsSql(
         "tmp_market_retention_removable_markets",
         "tmp_market_retention_protected_ref_tokens",
+        { includeTelegramTradeIntents },
       )}
     `,
   );

@@ -22,6 +22,10 @@ async function readJsonOrText(res: Response): Promise<unknown> {
   }
 }
 
+export type DflowRequestResult =
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; payload: unknown };
+
 export async function dflowRequest(inputs: {
   baseUrl: string;
   timeoutMs: number;
@@ -30,10 +34,7 @@ export async function dflowRequest(inputs: {
   apiKey?: string;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
-}): Promise<
-  | { ok: true; payload: unknown }
-  | { ok: false; status: number; payload: unknown }
-> {
+}): Promise<DflowRequestResult> {
   const baseUrl = normalizeBaseUrl(inputs.baseUrl);
   const requestPath = inputs.requestPath.startsWith("/")
     ? inputs.requestPath

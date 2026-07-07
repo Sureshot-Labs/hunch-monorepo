@@ -169,6 +169,9 @@ async function storeOrderInTx(
   const resolvedSignerAddress = normalizeOptionalWalletForStorage(
     inputs.signerAddress ?? payloadSigner,
   );
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `orders:${inputs.userId}:${inputs.venue}:${inputs.venueOrderId}`,
+  ]);
 
   const existingOrder = await client.query<{
     id: string;

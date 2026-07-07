@@ -20,6 +20,11 @@ import {
   formatDflowUserMessage,
 } from "../services/dflow-client.js";
 import {
+  buildDflowSwap,
+  quoteDflowTrade,
+  submitDflowSignedTransaction,
+} from "../services/dflow-trading-service.js";
+import {
   fetchKalshiNormalizedOrderStatus,
   finalizeKalshiExecutionEffects,
   mergeKalshiExecutionRaw,
@@ -31,7 +36,6 @@ import {
   fetchSolanaSignatureStatus,
   fetchSolanaTokenBalanceByOwnerAndMint,
   formatUiAmount,
-  sendSolanaRawTransaction,
 } from "../services/solana-rpc.js";
 import {
   dflowExecutionBodySchema,
@@ -691,11 +695,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const upstream = await dflowRequest({
+      const upstream = await quoteDflowTrade({
         baseUrl: env.dflowQuoteBase,
         timeoutMs: 10_000,
-        method: "GET",
-        requestPath: "/quote",
         apiKey: env.dflowApiKey,
         query: {
           inputMint: query.inputMint,
@@ -788,11 +790,9 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
       if (!proofAllowed) return;
 
-      const upstream = await dflowRequest({
+      const upstream = await buildDflowSwap({
         baseUrl: env.dflowQuoteBase,
         timeoutMs: 15_000,
-        method: "POST",
-        requestPath: "/swap",
         apiKey: env.dflowApiKey,
         body: {
           userPublicKey: body.userPublicKey,
@@ -847,7 +847,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const signature = await sendSolanaRawTransaction({
+        const signature = await submitDflowSignedTransaction({
           rpcUrls: env.solanaRpcUrls,
           timeoutMs: env.solanaRpcTimeoutMs,
           signedTransaction: request.body.signedTransaction,

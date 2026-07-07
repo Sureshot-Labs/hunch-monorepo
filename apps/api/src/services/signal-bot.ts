@@ -58,17 +58,23 @@ export type SignalBotConfig = {
   priceGuardMaxDefers: number;
   followthrough: SignalBotFollowthroughPolicy;
   telegramMiniAppLinkBase: string | null;
+  tradingInternalApiBaseUrl: string | null;
+  tradingInternalApiToken: string | null;
 };
 
 export type SignalBotCommand =
   | "disable_signals"
   | "enable_signals"
   | "help"
+  | "market"
   | "start"
   | "stats"
   | "status"
+  | "trade_status"
+  | "disable_trading"
   | "test_followthrough"
-  | "test_signal";
+  | "test_signal"
+  | "test_trade";
 
 export type SignalBotFollowthroughPreviewKind =
   | "resolved_loss"
@@ -152,8 +158,21 @@ export type TelegramBotMessage = {
   text?: string;
 };
 
+export type TelegramBotCallbackQuery = {
+  id: string;
+  from?: {
+    id?: number;
+    is_bot?: boolean;
+    first_name?: string;
+    username?: string;
+  };
+  message?: TelegramBotMessage;
+  data?: string;
+};
+
 export type TelegramBotUpdate = {
   update_id: number;
+  callback_query?: TelegramBotCallbackQuery;
   message?: TelegramBotMessage;
 };
 
@@ -173,6 +192,12 @@ export type TelegramInlineKeyboardButton =
       text: string;
       url?: never;
       web_app: { url: string };
+    }
+  | {
+      callback_data: string;
+      text: string;
+      url?: never;
+      web_app?: never;
     };
 
 export type TelegramInlineKeyboard = {
@@ -201,6 +226,11 @@ export type TelegramSendResult =
     };
 
 export type SignalBotTelegramClient = {
+  answerCallbackQuery(input: {
+    callbackQueryId: string;
+    showAlert?: boolean;
+    text?: string;
+  }): Promise<unknown>;
   getUpdates(input: {
     offset: number | null;
     timeoutSec: number;
@@ -495,6 +525,10 @@ export function parseSignalBotConfig(
     telegramMiniAppLinkBase: normalizeTelegramMiniAppLinkBase(
       env.HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE,
     ),
+    tradingInternalApiBaseUrl:
+      env.HUNCH_SIGNAL_BOT_INTERNAL_API_BASE_URL?.trim() || null,
+    tradingInternalApiToken:
+      env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || null,
   };
 }
 
@@ -522,16 +556,24 @@ export function parseSignalBotCommand(
       return "enable_signals";
     case "help":
       return "help";
+    case "market":
+      return "market";
     case "start":
       return "start";
     case "stats":
       return "stats";
     case "status":
       return "status";
+    case "trade_status":
+      return "trade_status";
+    case "disable_trading":
+      return "disable_trading";
     case "test_followthrough":
       return "test_followthrough";
     case "test_signal":
       return "test_signal";
+    case "test_trade":
+      return "test_trade";
     default:
       return null;
   }
@@ -599,6 +641,15 @@ function parseSignalBotCommandTargetChatId(
   if (!text) return null;
   const [, rawTarget] = text.trim().split(/\s+/, 2);
   return normalizeSignalBotCommandTargetChatId(rawTarget);
+}
+
+function parseSignalBotCommandFirstArg(
+  text: string | null | undefined,
+): string | null {
+  if (!text) return null;
+  const [, rawArg] = text.trim().split(/\s+/, 2);
+  const arg = rawArg?.trim();
+  return arg ? arg : null;
 }
 
 function normalizeSignalBotCommandTargetChatId(
@@ -1552,6 +1603,18 @@ export async function handleSignalBotCommand(input: {
     kind: SignalBotFollowthroughPreviewKind,
   ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
+  sendTradeMarket?: (input: {
+    chatId: string;
+    isAdminTest?: boolean;
+    marketRef: string;
+    telegramMessageId?: number | null;
+    telegramUserId: number;
+  }) => Promise<boolean>;
+  sendTradeStatus?: (
+    chatId: string,
+    telegramUserId: number,
+  ) => Promise<boolean>;
+  disableTrading?: (chatId: string, telegramUserId: number) => Promise<boolean>;
 }): Promise<boolean> {
   const command = parseSignalBotCommand(input.message.text, input.botUsername);
   if (!command) return false;
@@ -1565,7 +1628,8 @@ export async function handleSignalBotCommand(input: {
       command === "enable_signals" ||
       command === "stats" ||
       command === "test_followthrough" ||
-      command === "test_signal")
+      command === "test_signal" ||
+      command === "test_trade")
   ) {
     await input.sendMessage(buildPlainReply(chatId, "Not authorized."));
     return true;
@@ -1676,6 +1740,68 @@ export async function handleSignalBotCommand(input: {
     }
     return true;
   }
+  if (command === "trade_status") {
+    if (input.message.chat.type !== "private" || !input.message.from?.id) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Open a private chat with the bot to trade."),
+      );
+      return true;
+    }
+    const sent = await (input.sendTradeStatus?.(
+      chatId,
+      input.message.from.id,
+    ) ?? Promise.resolve(false));
+    if (!sent) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Trading status is unavailable right now."),
+      );
+    }
+    return true;
+  }
+  if (command === "disable_trading") {
+    if (input.message.chat.type !== "private" || !input.message.from?.id) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Open a private chat with the bot to trade."),
+      );
+      return true;
+    }
+    const disabled = await (input.disableTrading?.(
+      chatId,
+      input.message.from.id,
+    ) ?? Promise.resolve(false));
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        disabled
+          ? "Telegram bot trading disabled."
+          : "Telegram bot trading was not enabled.",
+      ),
+    );
+    return true;
+  }
+  if (command === "market") {
+    const marketRef = parseSignalBotCommandFirstArg(input.message.text);
+    if (!marketRef) {
+      await input.sendMessage(buildPlainReply(chatId, "Usage: /market <market_id or URL>"));
+      return true;
+    }
+    if (input.message.chat.type !== "private" || !input.message.from?.id) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Open a private chat with the bot to trade."),
+      );
+      return true;
+    }
+    const sent = await (input.sendTradeMarket?.({
+      chatId,
+      marketRef,
+      telegramMessageId: input.message.message_id ?? null,
+      telegramUserId: input.message.from.id,
+    }) ?? Promise.resolve(false));
+    if (!sent) {
+      await input.sendMessage(buildPlainReply(chatId, "Unable to render market card."));
+    }
+    return true;
+  }
   if (command === "test_followthrough") {
     const request = parseSignalBotFollowthroughPreviewRequest(
       input.message.text,
@@ -1720,6 +1846,31 @@ export async function handleSignalBotCommand(input: {
     );
     return true;
   }
+  if (command === "test_trade") {
+    const marketRef = parseSignalBotCommandFirstArg(input.message.text);
+    if (!marketRef) {
+      await input.sendMessage(buildPlainReply(chatId, "Usage: /test_trade <market_id or URL>"));
+      return true;
+    }
+    if (!input.message.from?.id) {
+      await input.sendMessage(buildPlainReply(chatId, "Missing Telegram user id."));
+      return true;
+    }
+    const sent = await (input.sendTradeMarket?.({
+      chatId,
+      isAdminTest: true,
+      marketRef,
+      telegramMessageId: input.message.message_id ?? null,
+      telegramUserId: input.message.from.id,
+    }) ?? Promise.resolve(false));
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        sent ? "Sent trade card preview." : "Unable to render trade card preview.",
+      ),
+    );
+    return true;
+  }
   return true;
 }
 
@@ -1737,6 +1888,19 @@ export async function pollSignalBotCommands(input: {
     kind: SignalBotFollowthroughPreviewKind,
   ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
+  sendTradeMarket?: (input: {
+    chatId: string;
+    isAdminTest?: boolean;
+    marketRef: string;
+    telegramMessageId?: number | null;
+    telegramUserId: number;
+  }) => Promise<boolean>;
+  sendTradeStatus?: (
+    chatId: string,
+    telegramUserId: number,
+  ) => Promise<boolean>;
+  disableTrading?: (chatId: string, telegramUserId: number) => Promise<boolean>;
+  handleCallback?: (callbackQuery: TelegramBotCallbackQuery) => Promise<boolean>;
   telegram: SignalBotTelegramClient;
 }): Promise<number> {
   const offset = await readSignalBotUpdateOffset(input.redis);
@@ -1746,20 +1910,55 @@ export async function pollSignalBotCommands(input: {
   });
   let handled = 0;
   for (const update of updates) {
-    if (update.message) {
-      const didHandle = await handleSignalBotCommand({
-        botUsername: input.botUsername,
-        config: input.config,
-        message: update.message,
-        redis: input.redis,
-        sendMessage: (message) => input.telegram.sendMessage(message),
-        sendStatsReport: input.sendStatsReport,
-        sendTestFollowthrough: input.sendTestFollowthrough,
-        sendTestSignal: input.sendTestSignal,
-      });
-      if (didHandle) handled += 1;
+    try {
+      if (update.message) {
+        let didHandle = false;
+        try {
+          didHandle = await handleSignalBotCommand({
+            botUsername: input.botUsername,
+            config: input.config,
+            message: update.message,
+            redis: input.redis,
+            sendMessage: (message) => input.telegram.sendMessage(message),
+            sendStatsReport: input.sendStatsReport,
+            sendTestFollowthrough: input.sendTestFollowthrough,
+            sendTestSignal: input.sendTestSignal,
+            sendTradeMarket: input.sendTradeMarket,
+            sendTradeStatus: input.sendTradeStatus,
+            disableTrading: input.disableTrading,
+          });
+        } catch {
+          didHandle = true;
+          await input.telegram
+            .sendMessage(
+              buildPlainReply(
+                String(update.message.chat.id),
+                "Command failed. Try again.",
+              ),
+            )
+            .catch(() => undefined);
+        }
+        if (didHandle) handled += 1;
+      }
+      if (update.callback_query) {
+        let didHandle = false;
+        try {
+          didHandle = (await input.handleCallback?.(update.callback_query)) ?? false;
+        } catch {
+          didHandle = true;
+          await input.telegram
+            .answerCallbackQuery({
+              callbackQueryId: update.callback_query.id,
+              showAlert: true,
+              text: "Action failed. Try again.",
+            })
+            .catch(() => undefined);
+        }
+        if (didHandle) handled += 1;
+      }
+    } finally {
+      await writeSignalBotUpdateOffset(input.redis, update.update_id + 1);
     }
-    await writeSignalBotUpdateOffset(input.redis, update.update_id + 1);
   }
   return handled;
 }
@@ -3927,7 +4126,10 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
   }): Promise<TelegramBotUpdate[]> {
     const url = new URL(`${this.baseUrl}/getUpdates`);
     url.searchParams.set("timeout", String(input.timeoutSec));
-    url.searchParams.set("allowed_updates", JSON.stringify(["message"]));
+    url.searchParams.set(
+      "allowed_updates",
+      JSON.stringify(["message", "callback_query"]),
+    );
     if (input.offset != null)
       url.searchParams.set("offset", String(input.offset));
     const response = await fetch(url);
@@ -3942,6 +4144,23 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       );
     }
     return payload.result;
+  }
+
+  async answerCallbackQuery(input: {
+    callbackQueryId: string;
+    showAlert?: boolean;
+    text?: string;
+  }): Promise<unknown> {
+    const response = await fetch(`${this.baseUrl}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        callback_query_id: input.callbackQueryId,
+        show_alert: input.showAlert ?? false,
+        text: input.text,
+      }),
+    });
+    return response.json().catch(() => null);
   }
 
   async sendMessage(
@@ -4615,6 +4834,9 @@ function publicHelpText(input: { miniAppEnabled: boolean }): string {
     "/start - show this intro",
     "/help - show help",
     "/status - show signal status for this chat",
+    "/trade_status - show private trading readiness",
+    "/market <market_id or URL> - open a private trading card",
+    "/disable_trading - disable Telegram bot trading",
   ].join("\n");
 }
 
@@ -4632,5 +4854,6 @@ function helpText(input: { isAdmin: boolean; miniAppEnabled: boolean }): string 
     "/stats [24h|7d|30d] [detail] - show signal performance",
     "/test_followthrough [stats|win|loss] [channel_id] - preview a follow-up",
     "/test_signal [channel_id] - send latest eligible signal",
+    "/test_trade <market_id or URL> - preview a private trade card",
   ].join("\n");
 }

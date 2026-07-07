@@ -106,12 +106,13 @@ import {
 } from "../services/polymarket-builder-fees.js";
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
 import {
-  calculatePolymarketQuote,
-  findMaxPolymarketMarketBuyUsdDetailed,
-  loadPolymarketQuoteContext,
   normalizeOrderTypeForClob as normalizeQuoteOrderTypeForClob,
   PolymarketQuoteError,
 } from "../services/polymarket-quote.js";
+import {
+  findMaxPolymarketMarketBuyUsdForFunds,
+  quotePolymarketOrder,
+} from "../services/polymarket-trading-service.js";
 import {
   computePolymarketClobOpenOrderLocks,
   computePolymarketExecutableFunds,
@@ -3660,15 +3661,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
 
       try {
-        const context = await loadPolymarketQuoteContext(pool, {
-          tokenId,
-          logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
-            request.log.warn(
-              { error, tokenId: warningTokenId, conditionId },
-              "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
-            ),
-        });
-        const quote = calculatePolymarketQuote({
+        const quote = await quotePolymarketOrder(pool, {
           tokenId,
           side: body.side,
           orderType,
@@ -3677,7 +3670,11 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
           amountSharesInput,
           limitPrice: body.limitPrice,
           slippageBps: body.slippageBps,
-          context,
+          logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
+            request.log.warn(
+              { error, tokenId: warningTokenId, conditionId },
+              "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
+            ),
         });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(quote);
@@ -3866,20 +3863,15 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const context = await loadPolymarketQuoteContext(pool, {
+        const maxSpend = await findMaxPolymarketMarketBuyUsdForFunds(pool, {
           tokenId,
+          executableFundsRaw: funds.executableFundsRaw,
+          slippageBps: body.slippageBps,
           logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
             request.log.warn(
               { error, tokenId: warningTokenId, conditionId },
               "Failed to fetch Polymarket CLOB fee curve; using local fee fallback",
             ),
-        });
-        const maxSpend = findMaxPolymarketMarketBuyUsdDetailed({
-          context,
-          tokenId,
-          executableFundsRaw: funds.executableFundsRaw,
-          slippageBps: body.slippageBps,
-          requireOrderbookDepth: true,
         });
 
         if (!maxSpend.ok) {

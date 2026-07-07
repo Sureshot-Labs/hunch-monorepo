@@ -78,6 +78,9 @@ export async function storeExecution(
 ): Promise<ExecutionRow> {
   const amountIn = inputs.amountIn == null ? null : String(inputs.amountIn);
   const amountOut = inputs.amountOut == null ? null : String(inputs.amountOut);
+  if (!inputs.txSignature?.trim()) {
+    throw new Error("storeExecution requires txSignature for idempotency");
+  }
 
   const { rows } = await pool.query<ExecutionRow>(
     `

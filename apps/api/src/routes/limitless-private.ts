@@ -23,9 +23,9 @@ import {
   fetchErc1155IsApprovedForAll,
 } from "../services/polygon-rpc.js";
 import {
-  fetchLimitlessAmmQuote,
   fetchLimitlessOnchainSnapshot,
 } from "../services/limitless-onchain.js";
+import { quoteLimitlessAmmTrade } from "../services/limitless-trading-service.js";
 import { buildLimitlessRedemptionPlan } from "../services/limitless-redemption-plan.js";
 import { fetchConditionalTokensPayouts } from "../services/limitless-redemption.js";
 import {
@@ -2436,7 +2436,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
-        const quote = await fetchLimitlessAmmQuote({
+        const quote = await quoteLimitlessAmmTrade({
           rpcUrl: env.baseRpcUrl,
           timeoutMs: env.baseRpcTimeoutMs,
           marketAddress: request.query.marketAddress,
@@ -2449,11 +2449,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
-          marketAddress: ethers.getAddress(request.query.marketAddress),
-          outcomeIndex: request.query.outcomeIndex,
-          side: request.query.side,
-          sharesRaw: quote.sharesRaw?.toString() ?? null,
-          returnAmountRaw: quote.returnAmountRaw?.toString() ?? null,
+          ...quote,
         });
       } catch (error) {
         request.log.warn(

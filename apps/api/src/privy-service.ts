@@ -110,6 +110,11 @@ type PrivyEthereumSignTypedDataInput = {
   chainType?: "ethereum";
   typedData: PrivyEthereumTypedData;
 };
+type PrivySolanaSignAndSendTransactionInput = {
+  walletId?: string;
+  transaction: string | Uint8Array;
+  caip2: string;
+};
 export type PrivyWalletApiClient = {
   walletApi: {
     ethereum: {
@@ -119,6 +124,11 @@ export type PrivyWalletApiClient = {
       signTypedData(
         input: PrivyEthereumSignTypedDataInput,
       ): Promise<{ signature: string }>;
+    };
+    solana: {
+      signAndSendTransaction(
+        input: PrivySolanaSignAndSendTransactionInput,
+      ): Promise<{ hash: string }>;
     };
   };
 };
@@ -439,6 +449,18 @@ export class PrivyService {
                     primary_type: input.typedData.primaryType,
                   },
                 },
+                ...(authorization_context ? { authorization_context } : {}),
+              });
+          },
+        },
+        solana: {
+          async signAndSendTransaction(input) {
+            return await privyClient
+              .wallets()
+              .solana()
+              .signAndSendTransaction(requireWalletId(input.walletId), {
+                transaction: input.transaction,
+                caip2: input.caip2,
                 ...(authorization_context ? { authorization_context } : {}),
               });
           },

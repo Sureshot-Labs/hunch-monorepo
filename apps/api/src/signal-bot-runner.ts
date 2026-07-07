@@ -23,6 +23,10 @@ import {
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
+import {
+  createTelegramBotTradingInternalApiClient,
+  reconcileStaleTelegramTradeIntents,
+} from "./services/telegram-bot-trading.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
   console.log(
@@ -158,6 +162,7 @@ export async function runSignalBotRunner(): Promise<void> {
   });
 
   let nextPublishAt = 0;
+  let nextTradingReconcileAt = 0;
   let heartbeatLost = false;
   const lockHeartbeat = setInterval(() => {
     void refreshSignalBotLock({ owner, redis })
@@ -176,6 +181,13 @@ export async function runSignalBotRunner(): Promise<void> {
   try {
     dbPool = createSignalBotDbPool();
     const db = dbPool;
+    const tradingInternalApi =
+      config.tradingInternalApiBaseUrl && config.tradingInternalApiToken
+        ? createTelegramBotTradingInternalApiClient({
+            baseUrl: config.tradingInternalApiBaseUrl,
+            token: config.tradingInternalApiToken,
+          })
+        : null;
     while (!shuttingDown) {
       try {
         if (heartbeatLost) break;
@@ -210,6 +222,73 @@ export async function runSignalBotRunner(): Promise<void> {
               redis,
               telegram,
             }),
+          sendTradeStatus: async (chatId, telegramUserId) => {
+            const message = tradingInternalApi
+              ? await tradingInternalApi.buildStatusMessage(telegramUserId)
+              : {
+                  parse_mode: "MarkdownV2" as const,
+                  text: "Telegram bot trading is unavailable\\. Open Hunch to trade\\.",
+                };
+            const result = await telegram.sendMessage({
+              chat_id: chatId,
+              disable_web_page_preview: true,
+              parse_mode: message.parse_mode ?? "MarkdownV2",
+              reply_markup: message.reply_markup,
+              text: message.text,
+            });
+            return result.ok;
+          },
+          disableTrading: async (_chatId, telegramUserId) =>
+            tradingInternalApi
+              ? tradingInternalApi.disableTrading(telegramUserId)
+              : false,
+          sendTradeMarket: async (input) => {
+            const message = tradingInternalApi
+              ? await tradingInternalApi.buildMarketMessage({
+                  appBaseUrl: config.appBaseUrl,
+                  chatId: input.chatId,
+                  isAdminTest: input.isAdminTest,
+                  marketRef: input.marketRef,
+                  telegramMessageId: input.telegramMessageId,
+                  telegramUserId: input.telegramUserId,
+                })
+              : {
+                  parse_mode: "MarkdownV2" as const,
+                  reply_markup: {
+                    inline_keyboard: [
+                      [{ text: "Open in Hunch", url: config.appBaseUrl }],
+                    ],
+                  },
+                  text: "Direct bot trading is unavailable\\. Open Hunch to trade\\.",
+                };
+            const result = await telegram.sendMessage({
+              chat_id: input.chatId,
+              disable_web_page_preview: true,
+              parse_mode: message.parse_mode ?? "MarkdownV2",
+              reply_markup: message.reply_markup,
+              text: message.text,
+            });
+            return result.ok;
+          },
+          handleCallback: (callbackQuery) =>
+            (tradingInternalApi
+              ? tradingInternalApi.handleCallback({
+                  answerCallbackQuery: (answer) =>
+                    telegram.answerCallbackQuery(answer),
+                  appBaseUrl: config.appBaseUrl,
+                  callbackQuery,
+                  sendMessage: (message) =>
+                    telegram.sendMessage({
+                      ...message,
+                      disable_web_page_preview: true,
+                      parse_mode: message.parse_mode ?? "MarkdownV2",
+                    }),
+                })
+              : telegram.answerCallbackQuery({
+                  callbackQueryId: callbackQuery.id,
+                  showAlert: true,
+                  text: "Trading is unavailable. Open Hunch to trade.",
+                }).then(() => true)),
           telegram,
         });
         if (handledCommands > 0) {
@@ -217,6 +296,17 @@ export async function runSignalBotRunner(): Promise<void> {
         }
 
         const now = Date.now();
+        if (!heartbeatLost && now >= nextTradingReconcileAt) {
+          try {
+            const result = await reconcileStaleTelegramTradeIntents(db);
+            log("signal_bot_trading_reconcile", result);
+          } catch (error) {
+            log("signal_bot_trading_reconcile_error", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          nextTradingReconcileAt = now + 60_000;
+        }
         if (!heartbeatLost && now >= nextPublishAt) {
           const result = await publishSignalBotTick({
             config,
