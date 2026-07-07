@@ -760,6 +760,15 @@ const tests: TestCase[] = [
       assert.match(effects, /claimOrderPositionDeltaApplication/);
       assert.match(effects, /clearOrderPositionDeltaApplicationClaim/);
       assert.match(effects, /markOrderPositionDeltaApplied/);
+      const optimisticApplyBlock = sourceSlice(
+        effects,
+        "const claimed = await claimOrderPositionDeltaApplication",
+        'if (input.submitResult.venueOrderId)',
+      );
+      assert.ok(
+        optimisticApplyBlock.indexOf("markOrderPositionDeltaApplied") <
+          optimisticApplyBlock.indexOf("applyOptimisticPositionTrade"),
+      );
 
       const polymarket = readFileSync(
         resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
@@ -899,6 +908,16 @@ const tests: TestCase[] = [
         "function isLimitlessAmmMarket",
       );
       assert.match(recordBlock, /waitForEmbeddedEthereumTransactionReceipt/);
+      assert.match(
+        recordBlock,
+        /Limitless AMM transaction not confirmed yet; recording pending order/,
+      );
+      assert.match(
+        recordBlock,
+        /const status = onchainConfirmed \? "filled" : "submitted"/,
+      );
+      assert.match(recordBlock, /onchainConfirmed/);
+      assert.match(recordBlock, /includes\("failed onchain"\)/);
       assert.match(recordBlock, /statusCode: 409/);
       assert.match(recordBlock, /dbOrderId: stored\.order\.id/);
 

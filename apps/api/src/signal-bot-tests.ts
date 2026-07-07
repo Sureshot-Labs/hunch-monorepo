@@ -2216,6 +2216,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         status: unknown;
         venueOrderId: unknown;
       }> = [];
+      let quotedSlippageBps: unknown = null;
       const db = {
         query: async (sql: string, params?: unknown[]) => {
           if (/from runtime_policies/i.test(sql)) {
@@ -2377,19 +2378,24 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             venuePayload: {},
             expiresAt: null,
           }),
-          quote: async (input: never) => ({
-            venue: "polymarket",
-            target: (input as { intent: { target: unknown } }).intent.target,
-            action: "BUY",
-            amount: { type: "usd", value: "10" },
-            price: 0.5,
-            estimatedShares: 20,
-            estimatedNotionalUsd: 10,
-            maxSpendUsd: 10,
-            minReceiveShares: 20,
-            fees: {},
-            expiresAt: null,
-          }),
+          quote: async (input: never) => {
+            quotedSlippageBps = (
+              input as { intent: { slippageBps?: unknown } }
+            ).intent.slippageBps;
+            return {
+              venue: "polymarket",
+              target: (input as { intent: { target: unknown } }).intent.target,
+              action: "BUY",
+              amount: { type: "usd", value: "10" },
+              price: 0.5,
+              estimatedShares: 20,
+              estimatedNotionalUsd: 10,
+              maxSpendUsd: 10,
+              minReceiveShares: 20,
+              fees: {},
+              expiresAt: null,
+            };
+          },
           submitPreparedTrade: async () => ({
             venue: "polymarket",
             status: "submitted",
@@ -2409,6 +2415,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(updateStatuses[2]?.venueOrderId, "venue-order-1");
       assert.equal(updateStatuses[3]?.errorCode, "persistence_failed");
       assert.equal(updateStatuses[3]?.venueOrderId, "venue-order-1");
+      assert.equal(quotedSlippageBps, 500);
       assert.match(
         telegram.callbackAnswers[0]?.text ?? "",
         /Recording needs review/,

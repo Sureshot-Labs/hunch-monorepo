@@ -496,6 +496,7 @@ function buildTelegramTradeIntent(input: {
   authorization: TelegramBotTradingAuthorizationRow;
   intentId: string;
   market: TelegramBotMarketRow;
+  maxSlippageBps: number;
   side: TelegramBotTradingSide;
 }): TradeIntent {
   return {
@@ -521,6 +522,7 @@ function buildTelegramTradeIntent(input: {
     outcome: input.side,
     amount: { type: "usd", value: String(input.amountUsd) },
     orderType: "FOK",
+    slippageBps: input.maxSlippageBps,
     idempotencyKey: `telegram-bot:${input.intentId}`,
     raw: {},
   };
@@ -1716,6 +1718,7 @@ export async function handleTelegramBotTradingCallback(
     authorization,
     intentId: intent.id,
     market,
+    maxSlippageBps: policy.maxSlippageBps,
     side,
   });
   let submittedRefs: {

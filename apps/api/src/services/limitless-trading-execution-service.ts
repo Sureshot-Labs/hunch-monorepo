@@ -9,6 +9,8 @@ import {
   normalizeLimitlessScopedTokenId,
 } from "../lib/limitless-token.js";
 import {
+  claimOrderPositionDeltaApplication,
+  clearOrderPositionDeltaApplicationClaim,
   expireStaleLimitlessFokOrders,
   fetchStoredOrderWalletContext,
   markOrderPositionDeltaApplied,
@@ -310,9 +312,11 @@ export type LimitlessAmmRecordRouteResult =
       ok: true;
       payload: {
         dbOrderId: string;
+        onchainConfirmed?: boolean;
         ok: true;
         orderId: string;
         referralFirstTrade?: unknown;
+        status?: string;
       };
     }
   | {
@@ -3611,6 +3615,7 @@ export async function recordLimitlessAmmOrder(input: {
   }
 
   const txHash = input.body.txHash;
+  let onchainConfirmed = input.onchainConfirmed === true;
   if (input.onchainConfirmed !== true) {
     try {
       await waitForEmbeddedEthereumTransactionReceipt({
@@ -3619,21 +3624,29 @@ export async function recordLimitlessAmmOrder(input: {
         timeoutMs: 15_000,
         txHash,
       });
+      onchainConfirmed = true;
     } catch (error) {
-      return {
-        ok: false,
-        statusCode: 409,
-        payload: {
-          error:
-            error instanceof Error && error.message.trim()
-              ? error.message
-              : "Limitless AMM transaction is not confirmed yet.",
-        },
-      };
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Limitless AMM transaction is not confirmed yet.";
+      if (message.toLowerCase().includes("failed onchain")) {
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: { error: message },
+        };
+      }
+      input.log?.warn?.(
+        { error, txHash, userId: input.userId, walletAddress: signer },
+        "Limitless AMM transaction not confirmed yet; recording pending order",
+      );
     }
   }
   const venueOrderId = `amm:${txHash}:${tokenId}`;
   const now = new Date();
+  const status = onchainConfirmed ? "filled" : "submitted";
+  const filledAt = onchainConfirmed ? now : null;
 
   const stored = await storeOrder(input.pool, {
     userId: input.userId,
@@ -3646,22 +3659,36 @@ export async function recordLimitlessAmmOrder(input: {
     orderType: "FOK",
     price,
     size,
-    status: "filled",
+    status,
     errorMessage: null,
     rawError: null,
     orderPayload: {
       ...input.body,
+      onchainConfirmed,
       tokenId,
       price,
     },
     orderHash: txHash,
     postedAt: now,
     lastUpdate: now,
-    filledAt: now,
+    filledAt,
   });
+  if (onchainConfirmed) {
+    await input.pool.query(
+      `
+        update orders
+        set status = 'filled',
+            filled_at = coalesce(filled_at, $2),
+            last_update = greatest(coalesce(last_update, $2), $2)
+        where id = $1
+          and status is distinct from 'filled'
+      `,
+      [stored.order.id, now],
+    );
+  }
 
   const referralFirstTrade =
-    stored.kind === "stored"
+    onchainConfirmed && stored.kind === "stored"
       ? await tryRecordReferralFirstTradeConversion(input.pool, {
           userId: input.userId,
           venue: "limitless",
@@ -3679,7 +3706,7 @@ export async function recordLimitlessAmmOrder(input: {
       : price != null && Number.isFinite(price) && price > 0
         ? price * size
         : null;
-  if (stored.kind === "stored" && fallbackNotional != null) {
+  if (onchainConfirmed && fallbackNotional != null) {
     try {
       await recordLimitlessVolumeEvent(input.pool, {
         userId: input.userId,
@@ -3700,19 +3727,31 @@ export async function recordLimitlessAmmOrder(input: {
       );
     }
     try {
-      const optimisticResult = await applyOptimisticPositionTrade(input.pool, {
-        userId: input.userId,
-        walletAddress: signer,
-        venue: "limitless",
-        tokenId,
-        side,
-        shares: size,
-        notionalUsd: fallbackNotional,
+      const claimId = crypto.randomUUID();
+      const claimed = await claimOrderPositionDeltaApplication(input.pool, {
+        id: stored.order.id,
+        claimId,
       });
-      if (optimisticResult.applied) {
-        await markOrderPositionDeltaApplied(input.pool, {
+      if (claimed) {
+        const marked = await markOrderPositionDeltaApplied(input.pool, {
           id: stored.order.id,
         });
+        if (marked) {
+          await applyOptimisticPositionTrade(input.pool, {
+            userId: input.userId,
+            walletAddress: signer,
+            venue: "limitless",
+            tokenId,
+            side,
+            shares: size,
+            notionalUsd: fallbackNotional,
+          });
+        } else {
+          await clearOrderPositionDeltaApplicationClaim(input.pool, {
+            id: stored.order.id,
+            claimId,
+          });
+        }
       }
     } catch (error) {
       input.log?.warn?.(
@@ -3728,68 +3767,74 @@ export async function recordLimitlessAmmOrder(input: {
     }
   }
 
-  try {
-    const rawTokenId = normalizeLimitlessRawTokenId(tokenId);
-    if (rawTokenId) {
-      const balanceMap = await fetchErc1155BalancesByOwner({
-        rpcUrl: env.baseRpcUrl,
-        timeoutMs: env.baseRpcTimeoutMs,
-        contractAddress: env.limitlessConditionalTokensAddress,
-        owner: signer,
-        tokenIds: [rawTokenId],
-      });
-      const exactRawBalance = balanceMap.get(rawTokenId) ?? 0n;
-      const exactSize = Number(ethers.formatUnits(exactRawBalance, 6));
-      const buyStaleTolerance = Math.max(0.01, size * 0.02);
-      const likelyStaleBuyBalance =
-        side === "BUY" && exactSize + buyStaleTolerance < size;
-      if (!likelyStaleBuyBalance) {
-        await reconcileExactPositionBalance(input.pool, {
+  if (onchainConfirmed) {
+    try {
+      const rawTokenId = normalizeLimitlessRawTokenId(tokenId);
+      if (rawTokenId) {
+        const balanceMap = await fetchErc1155BalancesByOwner({
+          rpcUrl: env.baseRpcUrl,
+          timeoutMs: env.baseRpcTimeoutMs,
+          contractAddress: env.limitlessConditionalTokensAddress,
+          owner: signer,
+          tokenIds: [rawTokenId],
+        });
+        const exactRawBalance = balanceMap.get(rawTokenId) ?? 0n;
+        const exactSize = Number(ethers.formatUnits(exactRawBalance, 6));
+        const buyStaleTolerance = Math.max(0.01, size * 0.02);
+        const likelyStaleBuyBalance =
+          side === "BUY" && exactSize + buyStaleTolerance < size;
+        if (!likelyStaleBuyBalance) {
+          await reconcileExactPositionBalance(input.pool, {
+            userId: input.userId,
+            walletAddress: signer,
+            venue: "limitless",
+            tokenId,
+            size: exactSize,
+            averagePrice: price,
+          });
+        }
+      }
+    } catch (error) {
+      input.log?.warn?.(
+        {
+          error,
           userId: input.userId,
           walletAddress: signer,
-          venue: "limitless",
           tokenId,
-          size: exactSize,
-          averagePrice: price,
-        });
-      }
+          side,
+        },
+        "Limitless AMM exact position reconciliation failed",
+      );
     }
-  } catch (error) {
-    input.log?.warn?.(
-      {
-        error,
-        userId: input.userId,
-        walletAddress: signer,
-        tokenId,
-        side,
-      },
-      "Limitless AMM exact position reconciliation failed",
-    );
   }
 
-  void createNotificationSafe(
-    input.pool,
-    buildOrderNotification({
-      userId: input.userId,
-      venue: "limitless",
-      status: "filled",
-      side,
-      size,
-      price: price ?? null,
-      orderId: venueOrderId,
-      tokenId,
-      walletAddress: signer,
-    }),
-    input.log as never,
-  );
+  if (onchainConfirmed) {
+    void createNotificationSafe(
+      input.pool,
+      buildOrderNotification({
+        userId: input.userId,
+        venue: "limitless",
+        status: "filled",
+        side,
+        size,
+        price: price ?? null,
+        orderId: venueOrderId,
+        tokenId,
+        walletAddress: signer,
+      }),
+      input.log as never,
+    );
+  }
 
   return {
     ok: true,
     payload: {
       dbOrderId: stored.order.id,
+      onchainConfirmed,
       ok: true,
       orderId: venueOrderId,
       referralFirstTrade: referralFirstTrade ?? undefined,
+      status,
     },
   };
 }

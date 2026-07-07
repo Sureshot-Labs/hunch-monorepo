@@ -100,29 +100,28 @@ export async function applyOrderTradeEffects(
       positionDeltaAlreadyClaimed = true;
     } else {
       try {
-        const result = await applyOptimisticPositionTrade(ctx.pool, {
-          userId: input.intent.actor.userId,
-          walletAddress,
-          venue,
-          tokenId,
-          side: "BUY",
-          shares: input.submitResult.size,
-          notionalUsd: input.submitResult.size * input.submitResult.price,
+        const marked = await markOrderPositionDeltaApplied(ctx.pool, {
+          id: storedOrder.id,
         });
-        positionDeltaApplied = result.applied;
-        if (result.applied) {
-          await markOrderPositionDeltaApplied(ctx.pool, { id: storedOrder.id });
-        } else {
+        if (!marked) {
+          positionDeltaAlreadyClaimed = true;
           await clearOrderPositionDeltaApplicationClaim(ctx.pool, {
             id: storedOrder.id,
             claimId,
           });
+        } else {
+          const result = await applyOptimisticPositionTrade(ctx.pool, {
+            userId: input.intent.actor.userId,
+            walletAddress,
+            venue,
+            tokenId,
+            side: "BUY",
+            shares: input.submitResult.size,
+            notionalUsd: input.submitResult.size * input.submitResult.price,
+          });
+          positionDeltaApplied = result.applied;
         }
       } catch (error) {
-        await clearOrderPositionDeltaApplicationClaim(ctx.pool, {
-          id: storedOrder.id,
-          claimId,
-        });
         ctx.logger?.warn?.(
           { error, intentId: input.intent.id },
           "Bot trading optimistic position update failed",
