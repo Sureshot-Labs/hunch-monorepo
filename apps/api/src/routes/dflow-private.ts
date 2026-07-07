@@ -13,15 +13,10 @@ import {
   type GeoFenceConfig,
 } from "../lib/geo-fence.js";
 import {
-  dflowRequest,
-  extractDflowErrorCode,
-  extractDflowErrorMessage,
-  formatDflowUserMessage,
-} from "../services/dflow-client.js";
-import {
   fetchKalshiNormalizedOrderStatus,
 } from "../services/kalshi-executions.js";
 import {
+  buildKalshiDflowOrderRoute,
   buildKalshiDflowSwapRoute,
   quoteKalshiDflowRoute,
   recordKalshiDflowExecutionRoute,
@@ -78,13 +73,6 @@ function ensureDflowReady(reply: {
 
 function isBuyIntent(inputMint: string | null | undefined): boolean {
   return Boolean(inputMint && inputMint === env.solanaUsdcMint);
-}
-
-function isDflowRouteNotFound(payload: unknown): boolean {
-  const code = extractDflowErrorCode(payload);
-  if (code === "route_not_found") return true;
-  const message = extractDflowErrorMessage(payload)?.toLowerCase() ?? "";
-  return message.includes("route not found");
 }
 
 function buildClearedTopTick(tokenId: string, tsMs: number): string {
@@ -518,35 +506,12 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const upstream = await dflowRequest({
-        baseUrl: env.dflowQuoteBase,
-        timeoutMs: 15_000,
-        method: "GET",
-        requestPath: "/order",
-        apiKey: env.dflowApiKey,
-        query: {
-          inputMint: query.inputMint,
-          outputMint: query.outputMint,
-          amount: query.amount,
-          userPublicKey,
-          ...(query.slippageBps != null
-            ? { slippageBps: query.slippageBps }
-            : {}),
-          ...(query.platformFeeBps != null
-            ? { platformFeeBps: query.platformFeeBps }
-            : {}),
-          ...(query.platformFeeScale != null
-            ? { platformFeeScale: query.platformFeeScale }
-            : {}),
-          ...(query.platformFeeMode
-            ? { platformFeeMode: query.platformFeeMode }
-            : {}),
-          ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
-        },
+      const result = await buildKalshiDflowOrderRoute({
+        query,
+        userPublicKey,
       });
-
-      if (!upstream.ok) {
-        if (isDflowRouteNotFound(upstream.payload)) {
+      if (!result.ok) {
+        if (result.routeNotFound) {
           void markDflowRouteUnavailable([
             query.inputMint,
             query.outputMint,
@@ -554,18 +519,12 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
           );
         }
-        const userMessage = formatDflowUserMessage(upstream.payload);
-        reply.code(502);
-        return reply.send({
-          error: userMessage ?? "DFlow order failed",
-          status: upstream.status,
-          message: extractDflowErrorMessage(upstream.payload),
-          payload: upstream.payload,
-        });
+        reply.code(result.statusCode);
+        return reply.send(result.payload);
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(upstream.payload);
+      return reply.send(result.payload);
     },
   );
 

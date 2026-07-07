@@ -22,6 +22,22 @@ export function quoteDflowTrade(input: {
   });
 }
 
+export function buildDflowOrder(input: {
+  baseUrl: string;
+  timeoutMs: number;
+  apiKey?: string;
+  query: Record<string, DflowQueryValue>;
+}): Promise<DflowRequestResult> {
+  return dflowRequest({
+    baseUrl: input.baseUrl,
+    timeoutMs: input.timeoutMs,
+    method: "GET",
+    requestPath: "/order",
+    apiKey: input.apiKey,
+    query: input.query,
+  });
+}
+
 export function buildDflowSwap(input: {
   baseUrl: string;
   timeoutMs: number;

@@ -35,6 +35,7 @@ import {
   formatDflowUserMessage,
 } from "./dflow-client.js";
 import {
+  buildDflowOrder,
   buildDflowSwap,
   quoteDflowTrade,
   submitDflowSignedTransaction,
@@ -74,6 +75,76 @@ const capabilities = createCapability({
   supportsExecutionSync: true,
   venue: "kalshi",
 });
+
+export async function buildKalshiDflowOrderRoute(input: {
+  query: {
+    amount: string;
+    feeAccount?: string | null;
+    inputMint: string;
+    outputMint: string;
+    platformFeeBps?: number | null;
+    platformFeeMode?: string | null;
+    platformFeeScale?: number | null;
+    slippageBps?: number | null;
+    userPublicKey?: string | null;
+  };
+  userPublicKey: string;
+}): Promise<
+  | { ok: true; payload: unknown }
+  | {
+      ok: false;
+      payload: {
+        error: string;
+        message?: string | null;
+        payload: unknown;
+        status: number;
+      };
+      routeNotFound: boolean;
+      statusCode: number;
+    }
+> {
+  const query = input.query;
+  const upstream = await buildDflowOrder({
+    baseUrl: env.dflowQuoteBase,
+    timeoutMs: 15_000,
+    apiKey: env.dflowApiKey,
+    query: {
+      inputMint: query.inputMint,
+      outputMint: query.outputMint,
+      amount: query.amount,
+      userPublicKey: input.userPublicKey,
+      ...(query.slippageBps != null ? { slippageBps: query.slippageBps } : {}),
+      ...(query.platformFeeBps != null
+        ? { platformFeeBps: query.platformFeeBps }
+        : {}),
+      ...(query.platformFeeScale != null
+        ? { platformFeeScale: query.platformFeeScale }
+        : {}),
+      ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
+      ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
+    },
+  });
+  if (!upstream.ok) {
+    const userMessage = formatDflowUserMessage(upstream.payload);
+    const message = extractDflowErrorMessage(upstream.payload);
+    const normalizedMessage = message?.toLowerCase() ?? "";
+    return {
+      ok: false,
+      routeNotFound:
+        normalizedMessage.includes("route not found") ||
+        (isRecord(upstream.payload) &&
+          upstream.payload.code === "route_not_found"),
+      statusCode: 502,
+      payload: {
+        error: userMessage ?? "DFlow order failed",
+        status: upstream.status,
+        message,
+        payload: upstream.payload,
+      },
+    };
+  }
+  return { ok: true, payload: upstream.payload };
+}
 
 export async function quoteKalshiDflowRoute(input: {
   query: {

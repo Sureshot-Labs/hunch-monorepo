@@ -25,7 +25,14 @@ import { upsertLimitlessVenueShareAccrualFromOrderPayload } from "./limitless-fe
 import { recordLimitlessVolumeEvent } from "./limitless-volume-events.js";
 import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
 import { quoteLimitlessAmmTrade } from "./limitless-trading-service.js";
-import { fetchErc1155BalancesByOwner } from "./polygon-rpc.js";
+import {
+  fetchErc1155BalancesByOwner,
+  fetchErc1155IsApprovedForAll,
+  fetchEvmCode,
+} from "./polygon-rpc.js";
+import { fetchLimitlessOnchainSnapshot } from "./limitless-onchain.js";
+import { buildLimitlessRedemptionPlan } from "./limitless-redemption-plan.js";
+import { fetchConditionalTokensPayouts } from "./limitless-redemption.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 import {
   amountUsd,
@@ -57,8 +64,12 @@ import type {
 } from "./api-trading-types.js";
 import {
   buildLimitlessRequestAuthInputs,
+  extractLimitlessPartnerAccountProfile,
+  extractLimitlessPartnerAccountProfiles,
+  extractLimitlessProfile,
   loadLimitlessProfileForWallet,
   resolveLimitlessAuthContext,
+  type LimitlessProfile,
   verifyLimitlessAuthContext,
 } from "./limitless-auth.js";
 import {
@@ -88,6 +99,15 @@ const LIMITLESS_CHAIN_ID = 8453;
 const LIMITLESS_FOK_UNMATCHED_REASON = "market_order_unmatched";
 const LIMITLESS_FOK_UNMATCHED_MESSAGE =
   "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
+const LIMITLESS_CONNECT_LOCK_PREFIX = "lock:limitless:connect:";
+const LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS = [
+  100, 250, 500, 1_000,
+] as const;
+const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> =
+  {
+    [normalizeAddress("0x5a38afc17F7E97ad8d6C547ddb837E40B4aEDfC6")]:
+      "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
+  };
 
 const LIMITLESS_ORDER_TYPES = {
   Order: [
@@ -139,6 +159,28 @@ type LimitlessAmmQuoteQuery = {
   side: "BUY" | "SELL";
 };
 
+type LimitlessAccountQuery = {
+  adapterSpender?: string | null;
+  ammSpender?: string | null;
+  clobSpender?: string | null;
+  negRiskSpender?: string | null;
+  refresh?: boolean | null;
+  tokenId?: string | null;
+};
+
+type LimitlessAccountPayload = Record<string, unknown>;
+
+type LimitlessAccountCacheEntry = {
+  expiresAt: number;
+  value: LimitlessAccountPayload;
+};
+
+const limitlessAccountCache = new Map<string, LimitlessAccountCacheEntry>();
+const limitlessAccountInflight = new Map<
+  string,
+  Promise<LimitlessAccountPayload>
+>();
+
 type LimitlessAmmOrderBody = {
   amountUsd?: number | null;
   price?: number | null;
@@ -152,11 +194,42 @@ type LimitlessOpenOrdersQuery = {
   slug: string;
 };
 
+type LimitlessMarketExchangeQuery = {
+  forceCanonical?: boolean | null;
+  side?: "BUY" | "SELL" | null;
+  slug: string;
+};
+
+type LimitlessRedemptionStatusQuery = {
+  adapter?: string | null;
+  conditionIds: string[];
+};
+
+type LimitlessRedemptionPlanQuery = {
+  adapter?: string | null;
+  conditionId: string;
+  negRisk?: boolean | null;
+  outcome: "YES" | "NO";
+  tokenId: string;
+};
+
+type LimitlessConnectClientType = "eoa" | "base" | "etherspot";
+
 type LimitlessHistoryQuery = {
   cursor?: string | null;
   limit: number;
   wallets?: string[] | undefined;
 };
+
+export type LimitlessConnectResult =
+  | { ok: true; authMode: "partner_hmac"; profile: LimitlessProfile }
+  | {
+      ok: false;
+      httpStatus: number;
+      error: string;
+      status?: number;
+      payload?: unknown;
+    };
 
 export type LimitlessClientSignedOrderResult =
   | {
@@ -341,6 +414,409 @@ async function resolveLimitlessRouteAuth(input: {
   };
 }
 
+export async function fetchLimitlessSigningMessageRoute(): Promise<LimitlessRouteOperationResult> {
+  if (!isLimitlessPartnerHmacConfigured()) {
+    return {
+      ok: false,
+      statusCode: 503,
+      payload: { error: "Limitless is temporarily unavailable." },
+    };
+  }
+
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: "/auth/signing-message",
+  });
+
+  if (!upstream.ok) {
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: {
+        error: "Limitless signing message failed",
+        status: upstream.status,
+        payload: upstream.payload,
+      },
+    };
+  }
+
+  const message = extractLimitlessMessage(upstream.payload);
+  if (!message) {
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: {
+        error: "Limitless signing message invalid",
+        payload: upstream.payload,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    payload: { ok: true, message },
+  };
+}
+
+async function persistLimitlessProfileForWallet(input: {
+  account: string;
+  profile: LimitlessProfile;
+  signer: string;
+  userId: string;
+}) {
+  await AuthService.createOrUpdateVenueCredentials(
+    input.userId,
+    input.signer,
+    "limitless",
+    input.account,
+    "",
+    { authMode: "partner_hmac", profile: input.profile },
+  );
+}
+
+async function withLimitlessConnectAdvisoryLock<T>(input: {
+  log?: LimitlessRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  run: () => Promise<T>;
+  userId: string;
+  walletAddress: string;
+}): Promise<T> {
+  const lockKey = `${LIMITLESS_CONNECT_LOCK_PREFIX}${input.userId.trim().toLowerCase()}:${normalizeAddress(input.walletAddress)}`;
+  const client = await input.pool.connect();
+  let locked = false;
+  try {
+    await client.query("select pg_advisory_lock(hashtext($1)::bigint)", [
+      lockKey,
+    ]);
+    locked = true;
+    return await input.run();
+  } finally {
+    if (locked) {
+      try {
+        await client.query("select pg_advisory_unlock(hashtext($1)::bigint)", [
+          lockKey,
+        ]);
+      } catch (error) {
+        input.log?.error?.(
+          { error, lockKey },
+          "Failed to release Limitless connect advisory lock",
+        );
+      }
+    }
+    client.release();
+  }
+}
+
+function normalizeLimitlessProfileForAccount(input: {
+  account: string;
+  clientType: LimitlessConnectClientType;
+  profile: LimitlessProfile | null;
+}): LimitlessProfile | null {
+  if (!input.profile?.id) return null;
+  if (
+    input.profile.account &&
+    normalizeAddress(input.profile.account) !== normalizeAddress(input.account)
+  ) {
+    return null;
+  }
+
+  return {
+    ...input.profile,
+    account: input.profile.account ?? input.account,
+    client: input.profile.client ?? input.clientType,
+  };
+}
+
+async function lookupLimitlessPartnerAccountProfile(input: {
+  account: string;
+  clientType: LimitlessConnectClientType;
+}): Promise<{
+  message: string | null;
+  profile: LimitlessProfile | null;
+  returnedNonMatchingAccount: boolean;
+  status: number;
+}> {
+  const lookup = await limitlessRequest({
+    method: "GET",
+    requestPath: `/profiles/partner-accounts?account=${encodeURIComponent(
+      input.account,
+    )}`,
+    auth: "partner_hmac",
+  });
+
+  if (!lookup.ok) {
+    return {
+      status: lookup.status,
+      message: extractLimitlessMessage(lookup.payload),
+      profile: null,
+      returnedNonMatchingAccount: false,
+    };
+  }
+
+  const matchingProfile = normalizeLimitlessProfileForAccount({
+    profile: extractLimitlessPartnerAccountProfile(lookup.payload, input.account),
+    account: input.account,
+    clientType: input.clientType,
+  });
+  const requestedAccount = normalizeAddress(input.account);
+  const returnedNonMatchingAccount = extractLimitlessPartnerAccountProfiles(
+    lookup.payload,
+  ).some(
+    (profile) =>
+      profile.account != null &&
+      normalizeAddress(profile.account) !== requestedAccount,
+  );
+
+  return {
+    status: 200,
+    message: null,
+    profile: matchingProfile,
+    returnedNonMatchingAccount:
+      matchingProfile == null && returnedNonMatchingAccount,
+  };
+}
+
+async function loadStoredLimitlessProfileForAccount(input: {
+  account: string;
+  clientType: LimitlessConnectClientType;
+  userId: string;
+}): Promise<LimitlessProfile | null> {
+  const authContext = await resolveLimitlessAuthContext(
+    input.userId,
+    input.account,
+  );
+  if (!authContext) return null;
+
+  const verification = await verifyLimitlessAuthContext({
+    authContext,
+    walletAddress: input.account,
+  });
+  if (!verification.ok) return null;
+
+  return normalizeLimitlessProfileForAccount({
+    profile: verification.profile ?? authContext.storedProfile,
+    account: input.account,
+    clientType: input.clientType,
+  });
+}
+
+async function waitForStoredLimitlessProfileForAccount(input: {
+  account: string;
+  clientType: LimitlessConnectClientType;
+  userId: string;
+}): Promise<LimitlessProfile | null> {
+  const immediate = await loadStoredLimitlessProfileForAccount(input);
+  if (immediate) return immediate;
+
+  for (const delayMs of LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS) {
+    await sleep(delayMs);
+    const profile = await loadStoredLimitlessProfileForAccount(input);
+    if (profile) return profile;
+  }
+
+  return null;
+}
+
+export async function connectLimitlessPartnerAccountRoute(input: {
+  account: string;
+  clientType: LimitlessConnectClientType;
+  log?: LimitlessRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  signature: string;
+  signer: string;
+  signingMessage: string;
+  userId: string;
+}): Promise<LimitlessConnectResult> {
+  const checksumAccount = toChecksumAddress(input.account);
+  if (!checksumAccount) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      error: "x-account is not a valid EVM address",
+    };
+  }
+
+  return withLimitlessConnectAdvisoryLock({
+    pool: input.pool,
+    log: input.log,
+    userId: input.userId,
+    walletAddress: checksumAccount,
+    run: async () => {
+      const storedProfile = await loadStoredLimitlessProfileForAccount({
+        userId: input.userId,
+        account: checksumAccount,
+        clientType: input.clientType,
+      });
+      if (storedProfile) {
+        return {
+          ok: true,
+          authMode: "partner_hmac",
+          profile: storedProfile,
+        };
+      }
+
+      const persistAndReturnProfile = async (
+        profile: LimitlessProfile,
+        logMessage: string,
+        clientError = "Failed to store recovered Limitless credentials",
+      ): Promise<LimitlessConnectResult> => {
+        try {
+          await persistLimitlessProfileForWallet({
+            userId: input.userId,
+            signer: input.signer,
+            account: profile.account ?? checksumAccount,
+            profile,
+          });
+        } catch (error) {
+          input.log?.error?.(
+            { error, userId: input.userId, signer: input.signer },
+            logMessage,
+          );
+          return {
+            ok: false,
+            httpStatus: 500,
+            error: clientError,
+          };
+        }
+
+        return {
+          ok: true,
+          authMode: "partner_hmac",
+          profile,
+        };
+      };
+
+      const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
+        input.signingMessage,
+      );
+      const upstream = await limitlessRequest({
+        method: "POST",
+        requestPath: "/profiles/partner-accounts",
+        auth: "partner_hmac",
+        body: {
+          displayName: checksumAccount,
+        },
+        headers: {
+          "x-account": checksumAccount,
+          "x-signing-message": encodedSigningMessage,
+          "x-signature": input.signature,
+        },
+      });
+
+      if (!upstream.ok) {
+        if (upstream.status === 409) {
+          const partnerAccountLookup = await lookupLimitlessPartnerAccountProfile(
+            {
+              account: checksumAccount,
+              clientType: input.clientType,
+            },
+          );
+          if (partnerAccountLookup.profile) {
+            return persistAndReturnProfile(
+              partnerAccountLookup.profile,
+              "Failed to store recovered Limitless credentials from partner account lookup",
+            );
+          }
+
+          const upstreamExistingProfile = normalizeLimitlessProfileForAccount({
+            profile: extractLimitlessProfile(upstream.payload),
+            account: checksumAccount,
+            clientType: input.clientType,
+          });
+          if (upstreamExistingProfile) {
+            return persistAndReturnProfile(
+              upstreamExistingProfile,
+              "Failed to store recovered Limitless credentials from 409 response",
+            );
+          }
+
+          const storedAfterConflict =
+            await waitForStoredLimitlessProfileForAccount({
+              userId: input.userId,
+              account: checksumAccount,
+              clientType: input.clientType,
+            });
+          if (storedAfterConflict) {
+            return {
+              ok: true,
+              authMode: "partner_hmac",
+              profile: storedAfterConflict,
+            };
+          }
+
+          const upstreamMessage = extractLimitlessMessage(upstream.payload);
+          input.log?.warn?.(
+            {
+              userId: input.userId,
+              signer: input.signer,
+              account: checksumAccount,
+              upstreamStatus: upstream.status,
+              upstreamMessage,
+              profileLookupStatus: partnerAccountLookup.status,
+              profileLookupMessage: partnerAccountLookup.message,
+              profileLookupReturnedNonMatchingAccount:
+                partnerAccountLookup.returnedNonMatchingAccount,
+            },
+            "Limitless profile exists but profile id could not be recovered",
+          );
+
+          return {
+            ok: false,
+            httpStatus: 409,
+            error:
+              "Limitless profile already exists but profile id could not be recovered",
+            status: upstream.status,
+            payload: {
+              code: "limitless_profile_exists_unrecoverable",
+              upstream: {
+                status: upstream.status,
+                message: upstreamMessage,
+              },
+              profileLookup: {
+                status: partnerAccountLookup.status,
+                message: partnerAccountLookup.message,
+              },
+            },
+          };
+        }
+
+        return {
+          ok: false,
+          httpStatus:
+            upstream.status >= 400 && upstream.status < 500
+              ? upstream.status
+              : 502,
+          error: "Limitless connect failed",
+          status: upstream.status,
+          payload: upstream.payload,
+        };
+      }
+
+      const profileSafe = normalizeLimitlessProfileForAccount({
+        profile: extractLimitlessProfile(upstream.payload),
+        account: checksumAccount,
+        clientType: input.clientType,
+      });
+
+      if (!profileSafe?.id) {
+        return {
+          ok: false,
+          httpStatus: 502,
+          error:
+            "Limitless partner account creation did not return a profile id",
+          payload: upstream.payload,
+        };
+      }
+
+      return persistAndReturnProfile(
+        profileSafe,
+        "Failed to store Limitless credentials",
+        "Failed to store Limitless credentials",
+      );
+    },
+  });
+}
+
 async function resolveLimitlessWalletAddresses(input: {
   requestedWallets: string[] | undefined;
   userId: string;
@@ -379,6 +855,64 @@ function extractLimitlessOrderIdFromMessage(
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function encodeLimitlessSigningMessageHeader(value: string): string {
+  const trimmed = value.trim();
+  if (/^0x[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+    return trimmed;
+  }
+  return `0x${Buffer.from(value, "utf8").toString("hex")}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildLimitlessAccountCacheKey(inputs: {
+  adapterSpender: string;
+  ammSpender: string;
+  clobSpender: string;
+  credsUpdatedAt: string | null;
+  negRiskSpender: string;
+  signer: string;
+  tokenId: string;
+  userId: string;
+}): string {
+  return [
+    inputs.userId,
+    normalizeAddress(inputs.signer),
+    normalizeAddress(inputs.clobSpender),
+    normalizeAddress(inputs.negRiskSpender),
+    normalizeAddress(inputs.adapterSpender),
+    normalizeAddress(inputs.ammSpender),
+    inputs.tokenId,
+    inputs.credsUpdatedAt ?? "none",
+  ].join("|");
+}
+
+function readLimitlessAccountCache(
+  key: string,
+): LimitlessAccountPayload | null {
+  if (env.limitlessAccountCacheTtlMs <= 0) return null;
+  const entry = limitlessAccountCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    limitlessAccountCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function writeLimitlessAccountCache(
+  key: string,
+  value: LimitlessAccountPayload,
+) {
+  if (env.limitlessAccountCacheTtlMs <= 0) return;
+  limitlessAccountCache.set(key, {
+    value,
+    expiresAt: Date.now() + env.limitlessAccountCacheTtlMs,
+  });
 }
 
 function stringifyLimitlessRawError(payload: unknown): string | null {
@@ -991,6 +1525,687 @@ export async function syncLimitlessOrderHistoryRoute(input: {
   };
 }
 
+export async function fetchLimitlessAccountRoute(input: {
+  log?: LimitlessRouteLogger | null;
+  query: LimitlessAccountQuery;
+  signerRaw: string;
+  userId: string;
+}): Promise<LimitlessRouteOperationResult> {
+  if (!isEvmWallet(input.signerRaw)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "Limitless account snapshot requires an EVM wallet address",
+      },
+    };
+  }
+  const signer = toChecksumAddress(input.signerRaw);
+  if (!signer) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "Limitless account snapshot requires a valid EVM wallet address",
+      },
+    };
+  }
+
+  const creds = await AuthService.getVenueCredentials(
+    input.userId,
+    "limitless",
+    input.signerRaw,
+  );
+  const authContext = await resolveLimitlessAuthContext(
+    input.userId,
+    input.signerRaw,
+  );
+  const credsUpdatedAtValue =
+    creds?.updatedAt instanceof Date
+      ? creds.updatedAt.toISOString()
+      : (creds?.updatedAt ?? null);
+  const refresh = input.query.refresh === true;
+  let hasCredentials =
+    Boolean(creds) && Boolean(authContext) && isLimitlessPartnerHmacConfigured();
+  let verifiedProfileBase: Awaited<
+    ReturnType<typeof loadLimitlessProfileForWallet>
+  > | null = null;
+
+  const clobSpender = input.query.clobSpender ?? env.limitlessClobAddress;
+  const negRiskSpender =
+    input.query.negRiskSpender ?? env.limitlessNegRiskAddress;
+  const adapterSpender = input.query.adapterSpender ?? null;
+  const ammSpender = input.query.ammSpender ?? null;
+  const tokenId = normalizeLimitlessRawTokenId(input.query.tokenId);
+
+  const cacheEnabled = !refresh && env.limitlessAccountCacheTtlMs > 0;
+  const cacheKey = buildLimitlessAccountCacheKey({
+    userId: input.userId,
+    signer,
+    clobSpender: clobSpender ?? "none",
+    negRiskSpender: negRiskSpender ?? "none",
+    adapterSpender: adapterSpender ?? "none",
+    ammSpender: ammSpender ?? "none",
+    tokenId: tokenId ?? "none",
+    credsUpdatedAt: credsUpdatedAtValue,
+  });
+
+  if (cacheEnabled) {
+    const cached = readLimitlessAccountCache(cacheKey);
+    if (cached) return { ok: true, payload: cached };
+    const inflight = limitlessAccountInflight.get(cacheKey);
+    if (inflight) {
+      const payload = await inflight;
+      return { ok: true, payload };
+    }
+  }
+
+  if (hasCredentials && authContext) {
+    const verification = await verifyLimitlessAuthContext({
+      authContext,
+      walletAddress: signer,
+    });
+    hasCredentials = verification.ok;
+    if (verification.ok) {
+      verifiedProfileBase = verification.profile;
+    }
+  }
+
+  try {
+    const conditionalTokensAddress = env.limitlessConditionalTokensAddress;
+    const computePromise = (async (): Promise<LimitlessAccountPayload> => {
+      const [
+        code,
+        snapshot,
+        approvedClob,
+        approvedNegRisk,
+        approvedAdapter,
+        approvedAmm,
+        tokenBalanceMap,
+        liveProfile,
+      ] = await Promise.all([
+        fetchEvmCode({
+          rpcUrl: env.baseRpcUrl,
+          timeoutMs: env.baseRpcTimeoutMs,
+          address: signer,
+        }),
+        fetchLimitlessOnchainSnapshot({
+          rpcUrl: env.baseRpcUrl,
+          timeoutMs: env.baseRpcTimeoutMs,
+          owner: signer,
+          clobAddress: clobSpender,
+          negRiskAddress: negRiskSpender,
+          ammAddress: ammSpender,
+        }),
+        clobSpender
+          ? fetchErc1155IsApprovedForAll({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: conditionalTokensAddress,
+              owner: signer,
+              operator: clobSpender,
+              bypassCache: refresh,
+            })
+          : Promise.resolve(null),
+        negRiskSpender
+          ? fetchErc1155IsApprovedForAll({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: conditionalTokensAddress,
+              owner: signer,
+              operator: negRiskSpender,
+              bypassCache: refresh,
+            })
+          : Promise.resolve(null),
+        adapterSpender
+          ? fetchErc1155IsApprovedForAll({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: conditionalTokensAddress,
+              owner: signer,
+              operator: adapterSpender,
+              bypassCache: refresh,
+            })
+          : Promise.resolve(null),
+        ammSpender
+          ? fetchErc1155IsApprovedForAll({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: conditionalTokensAddress,
+              owner: signer,
+              operator: ammSpender,
+              bypassCache: refresh,
+            })
+          : Promise.resolve(null),
+        tokenId
+          ? fetchErc1155BalancesByOwner({
+              rpcUrl: env.baseRpcUrl,
+              timeoutMs: env.baseRpcTimeoutMs,
+              contractAddress: conditionalTokensAddress,
+              owner: signer,
+              tokenIds: [tokenId],
+            })
+          : Promise.resolve(null),
+        hasCredentials && authContext
+          ? loadLimitlessProfileForWallet({
+              walletAddress: signer,
+              authContext,
+              additionalData: creds?.additionalData ?? null,
+              baseProfile: verifiedProfileBase,
+            })
+          : Promise.resolve(null),
+      ]);
+
+      const usdcBalance = snapshot.usdcBalance;
+      const allowanceClob = snapshot.allowanceClob;
+      const allowanceNegRisk = snapshot.allowanceNegRisk;
+      const allowanceAmm = snapshot.allowanceAmm;
+      const tokenBalanceRaw =
+        tokenId && tokenBalanceMap ? (tokenBalanceMap.get(tokenId) ?? 0n) : null;
+      const isContract = typeof code === "string" && code.length > 2;
+
+      return {
+        ok: true,
+        venue: "limitless",
+        chainId: 8453,
+        signer,
+        signerIsContract: isContract,
+        rpcUrl: env.baseRpcUrl,
+        usdc: {
+          tokenAddress: env.limitlessUsdcAddress,
+          decimals: 6,
+          balance: ethers.formatUnits(usdcBalance, 6),
+          balanceRaw: usdcBalance.toString(),
+          allowance: {
+            ...(clobSpender
+              ? {
+                  clob: {
+                    spender: clobSpender,
+                    allowance: ethers.formatUnits(allowanceClob ?? 0n, 6),
+                    allowanceRaw: (allowanceClob ?? 0n).toString(),
+                  },
+                }
+              : {}),
+            ...(negRiskSpender
+              ? {
+                  negRisk: {
+                    spender: negRiskSpender,
+                    allowance: ethers.formatUnits(allowanceNegRisk ?? 0n, 6),
+                    allowanceRaw: (allowanceNegRisk ?? 0n).toString(),
+                  },
+                }
+              : {}),
+            ...(ammSpender
+              ? {
+                  amm: {
+                    spender: ammSpender,
+                    allowance: ethers.formatUnits(allowanceAmm ?? 0n, 6),
+                    allowanceRaw: (allowanceAmm ?? 0n).toString(),
+                  },
+                }
+              : {}),
+          },
+        },
+        conditionalTokens: {
+          contractAddress: conditionalTokensAddress,
+          ...(tokenId
+            ? {
+                tokenBalance: {
+                  tokenId,
+                  balance: ethers.formatUnits(tokenBalanceRaw ?? 0n, 6),
+                  balanceRaw: (tokenBalanceRaw ?? 0n).toString(),
+                },
+              }
+            : {}),
+          isApprovedForAll: {
+            ...(clobSpender ? { clob: approvedClob ?? false } : {}),
+            ...(negRiskSpender ? { negRisk: approvedNegRisk ?? false } : {}),
+            ...(adapterSpender ? { adapter: approvedAdapter ?? false } : {}),
+            ...(ammSpender ? { amm: approvedAmm ?? false } : {}),
+          },
+        },
+        profile: liveProfile ?? null,
+        hasCredentials,
+        ...(authContext?.authMode ? { authMode: authContext.authMode } : {}),
+      };
+    })();
+
+    if (cacheEnabled) {
+      limitlessAccountInflight.set(cacheKey, computePromise);
+    }
+    try {
+      const payload = await computePromise;
+      if (cacheEnabled) {
+        writeLimitlessAccountCache(cacheKey, payload);
+      }
+      return { ok: true, payload };
+    } finally {
+      limitlessAccountInflight.delete(cacheKey);
+    }
+  } catch (error) {
+    input.log?.error?.(
+      { error, userId: input.userId, signer },
+      "Failed to fetch Limitless account snapshot",
+    );
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: { error: "Failed to fetch Limitless account snapshot" },
+    };
+  }
+}
+
+function isBytes32(value: string): boolean {
+  return /^0x[a-fA-F0-9]{64}$/.test(value);
+}
+
+export async function fetchLimitlessRedemptionStatusRoute(input: {
+  log?: LimitlessRouteLogger | null;
+  query: LimitlessRedemptionStatusQuery;
+  signer: string;
+  userId: string;
+}): Promise<LimitlessRouteOperationResult> {
+  if (!isEvmWallet(input.signer)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "Limitless redemption requires an EVM wallet address" },
+    };
+  }
+
+  const conditionIds = input.query.conditionIds
+    .map((value) => value.trim())
+    .filter((value) => isBytes32(value));
+
+  if (conditionIds.length === 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "No valid conditionIds provided." },
+    };
+  }
+
+  const adapter =
+    typeof input.query.adapter === "string" ? input.query.adapter.trim() : null;
+
+  try {
+    const [payouts, adapterApproved] = await Promise.all([
+      fetchConditionalTokensPayouts({ conditionIds }),
+      adapter && isEvmWallet(adapter)
+        ? fetchErc1155IsApprovedForAll({
+            rpcUrl: env.baseRpcUrl,
+            timeoutMs: env.baseRpcTimeoutMs,
+            contractAddress: env.limitlessConditionalTokensAddress,
+            owner: input.signer,
+            operator: adapter,
+          })
+        : Promise.resolve(null),
+    ]);
+
+    return {
+      ok: true,
+      payload: {
+        ok: true,
+        venue: "limitless",
+        signer: input.signer,
+        conditionalTokens: {
+          contractAddress: env.limitlessConditionalTokensAddress,
+        },
+        adapter: adapter ?? null,
+        adapterApproved,
+        conditions: payouts,
+      },
+    };
+  } catch (error) {
+    input.log?.error?.(
+      { error, userId: input.userId, signer: input.signer },
+      "Failed to fetch Limitless redemption status",
+    );
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: { error: "Failed to fetch Limitless redemption status" },
+    };
+  }
+}
+
+export async function buildLimitlessRedemptionPlanRoute(input: {
+  log?: LimitlessRouteLogger | null;
+  query: LimitlessRedemptionPlanQuery;
+  signer: string;
+  userId: string;
+}): Promise<LimitlessRouteOperationResult> {
+  if (!isEvmWallet(input.signer)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "Limitless redemption requires an EVM wallet address" },
+    };
+  }
+
+  try {
+    const plan = await buildLimitlessRedemptionPlan({
+      rpcUrl: env.baseRpcUrl,
+      timeoutMs: env.baseRpcTimeoutMs,
+      owner: input.signer,
+      conditionId: input.query.conditionId,
+      tokenId: input.query.tokenId,
+      outcome: input.query.outcome,
+      isNegRisk: input.query.negRisk === true,
+      adapterAddress: input.query.adapter ?? null,
+    });
+    return { ok: true, payload: plan };
+  } catch (error) {
+    input.log?.error?.(
+      {
+        error,
+        userId: input.userId,
+        signer: input.signer,
+        tokenId: input.query.tokenId,
+        conditionId: input.query.conditionId,
+        outcome: input.query.outcome,
+      },
+      "Failed to build Limitless redemption plan",
+    );
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: { error: "Failed to prepare Limitless redemption" },
+    };
+  }
+}
+
+export async function fetchLimitlessMarketExchangeRoute(input: {
+  log?: LimitlessRouteLogger | null;
+  query: LimitlessMarketExchangeQuery;
+  signer: string;
+  userId: string;
+}): Promise<LimitlessRouteOperationResult> {
+  const authContext = await resolveLimitlessAuthContext(
+    input.userId,
+    input.signer,
+  );
+  const requestAuth =
+    authContext && isLimitlessPartnerHmacConfigured()
+      ? buildLimitlessRequestAuthInputs(authContext)
+      : {};
+
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(input.query.slug)}`,
+    ...requestAuth,
+  });
+
+  if (!upstream.ok) {
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: {
+        error: "Limitless market exchange fetch failed",
+        status: upstream.status,
+        payload: upstream.payload,
+      },
+    };
+  }
+
+  const exchangeAddress = extractLimitlessMarketExchangeAddress(
+    upstream.payload,
+  );
+  const adapterAddress = extractLimitlessMarketAdapterAddress(upstream.payload);
+  let canonicalExchangeAddress = exchangeAddress;
+  let canonicalAdapterAddress = adapterAddress;
+
+  if (
+    (input.query.forceCanonical || !exchangeAddress) &&
+    authContext &&
+    isEvmWallet(input.signer)
+  ) {
+    const signerChecksum = toChecksumAddress(input.signer);
+    const tokenPair = extractLimitlessTokenPair(upstream.payload);
+    const probeTokenId = tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? null;
+    const profile = await loadLimitlessProfileForWallet({
+      walletAddress: input.signer,
+      authContext,
+      additionalData: authContext.creds.additionalData ?? null,
+    });
+    const ownerId = profile?.id;
+
+    if (signerChecksum && ownerId && probeTokenId) {
+      const probeSide = input.query.side === "SELL" ? 1 : 0;
+      try {
+        const probe = await limitlessRequest({
+          method: "POST",
+          requestPath: "/orders",
+          ...requestAuth,
+          body: {
+            order: {
+              salt: Date.now() * 1000,
+              maker: signerChecksum,
+              signer: signerChecksum,
+              taker: ZERO_ADDRESS,
+              tokenId: probeTokenId,
+              makerAmount: 1_000_000,
+              takerAmount: 1,
+              expiration: "0",
+              nonce: 0,
+              feeRateBps: 300,
+              side: probeSide,
+              signatureType: 0,
+              signature: `0x${"0".repeat(130)}`,
+            },
+            orderType: "FOK",
+            marketSlug: input.query.slug,
+            ownerId,
+            onBehalfOf: ownerId,
+          },
+        });
+        if (!probe.ok) {
+          const probedExchange = extractLimitlessExpectedExchangeAddress(
+            probe.payload,
+          );
+          if (probedExchange) {
+            canonicalExchangeAddress = probedExchange;
+          }
+        }
+      } catch (error) {
+        input.log?.warn?.(
+          { error, slug: input.query.slug },
+          "Limitless canonical exchange probe failed",
+        );
+      }
+    }
+  }
+
+  if (!canonicalAdapterAddress) {
+    canonicalAdapterAddress = resolveLimitlessLegacyOperatorForExchange(
+      canonicalExchangeAddress ?? exchangeAddress ?? null,
+    );
+  }
+
+  return {
+    ok: true,
+    payload: {
+      ok: true,
+      marketSlug: input.query.slug,
+      exchangeAddress: canonicalExchangeAddress,
+      adapterAddress: canonicalAdapterAddress,
+    },
+  };
+}
+
+export async function resolveLimitlessEmbeddedOrderSigningContext(input: {
+  marketSlug: string;
+  ownerId: number;
+  payload: { side: string | number; tokenId: string | number | bigint };
+  pool: ApiTradingApplicationServiceInput["pool"];
+  requestAuth: Record<string, unknown>;
+  signer: string;
+}): Promise<{ exchangeAddress: string }> {
+  const marketSlug = input.marketSlug.trim();
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(marketSlug)}`,
+    ...(input.requestAuth as object),
+  });
+
+  if (!upstream.ok) {
+    throw Object.assign(new Error("Limitless market exchange fetch failed"), {
+      responseStatus: 502,
+      responsePayload: {
+        status: upstream.status,
+        payload: upstream.payload,
+      },
+    });
+  }
+
+  const tokenId = normalizeLimitlessRawTokenId(input.payload.tokenId);
+  if (!tokenId) {
+    throw new Error("Embedded Limitless order token is invalid.");
+  }
+
+  const tokenPair =
+    extractLimitlessTokenPair(upstream.payload) ??
+    (await resolveLimitlessTokenPairForSlug({
+      pool: input.pool,
+      slug: marketSlug,
+      requestAuth: input.requestAuth,
+    }));
+  if (!tokenPair?.tokenYes && !tokenPair?.tokenNo) {
+    throw new Error("Unable to resolve Limitless market tokens.");
+  }
+  if (tokenId !== tokenPair.tokenYes && tokenId !== tokenPair.tokenNo) {
+    throw new Error(
+      "Embedded Limitless order token does not belong to this market.",
+    );
+  }
+
+  const exchangeAddress = extractLimitlessMarketExchangeAddress(
+    upstream.payload,
+  );
+  if (!exchangeAddress) {
+    throw new Error("Unable to resolve Limitless exchange for this market.");
+  }
+
+  let canonicalExchangeAddress = exchangeAddress;
+  const probeTokenId = tokenPair.tokenYes ?? tokenPair.tokenNo ?? tokenId;
+  const signerChecksum = toChecksumAddress(input.signer);
+  if (signerChecksum && input.ownerId && probeTokenId) {
+    const probeSide = Number(input.payload.side) === 1 ? 1 : 0;
+    try {
+      const probe = await limitlessRequest({
+        method: "POST",
+        requestPath: "/orders",
+        ...(input.requestAuth as object),
+        body: {
+          order: {
+            salt: Date.now() * 1000,
+            maker: signerChecksum,
+            signer: signerChecksum,
+            taker: ZERO_ADDRESS,
+            tokenId: probeTokenId,
+            makerAmount: 1_000_000,
+            takerAmount: 1,
+            expiration: "0",
+            nonce: 0,
+            feeRateBps: 300,
+            side: probeSide,
+            signatureType: 0,
+            signature: `0x${"0".repeat(130)}`,
+          },
+          orderType: "FOK",
+          marketSlug,
+          ownerId: input.ownerId,
+          onBehalfOf: input.ownerId,
+        },
+      });
+      if (!probe.ok) {
+        const probedExchange = extractLimitlessExpectedExchangeAddress(
+          probe.payload,
+        );
+        if (probedExchange) {
+          canonicalExchangeAddress = probedExchange;
+        }
+      }
+    } catch (error) {
+      void error;
+    }
+  }
+
+  return { exchangeAddress: canonicalExchangeAddress };
+}
+
+export async function fetchLimitlessOrderRoute(input: {
+  orderId: string;
+  signer: string;
+  userId: string;
+}): Promise<LimitlessRouteOperationResult> {
+  const partnerAuth = await resolveLimitlessRouteAuth({
+    userId: input.userId,
+    walletAddress: input.signer,
+  });
+  if (!partnerAuth.ok) return partnerAuth;
+
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/orders/${input.orderId}`,
+    ...partnerAuth.requestAuth,
+    headers: buildLimitlessOnBehalfHeaders(partnerAuth.profile),
+  });
+
+  if (!upstream.ok) {
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: {
+        error: "Limitless order fetch failed",
+        status: upstream.status,
+        payload: upstream.payload,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    payload: { ok: true, payload: upstream.payload },
+  };
+}
+
+export async function fetchLimitlessOpenOrdersRoute(input: {
+  query: LimitlessOpenOrdersQuery;
+  signer: string;
+  userId: string;
+}): Promise<LimitlessRouteOperationResult> {
+  const partnerAuth = await resolveLimitlessRouteAuth({
+    userId: input.userId,
+    walletAddress: input.signer,
+  });
+  if (!partnerAuth.ok) return partnerAuth;
+
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/markets/${encodeURIComponent(input.query.slug)}/user-orders`,
+    ...partnerAuth.requestAuth,
+    headers: buildLimitlessOnBehalfHeaders(partnerAuth.profile),
+  });
+
+  if (!upstream.ok) {
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: {
+        error: "Limitless open orders failed",
+        status: upstream.status,
+        payload: upstream.payload,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    payload: { ok: true, payload: upstream.payload },
+  };
+}
+
 async function markLimitlessLocalOrderCancelled(input: {
   orderId: string;
   pool: ApiTradingApplicationServiceInput["pool"];
@@ -1400,6 +2615,122 @@ function extractLimitlessTokenPair(payload: unknown): LimitlessTokenPair | null 
 
   if (!tokenYes && !tokenNo) return null;
   return { tokenYes, tokenNo };
+}
+
+function extractLimitlessMarketExchangeAddress(
+  payload: unknown,
+): string | null {
+  const marketRecord = isRecord(payload)
+    ? isRecord(payload.market)
+      ? payload.market
+      : payload
+    : null;
+  if (!marketRecord) return null;
+
+  const directCandidates = [
+    marketRecord.negRiskExchange,
+    marketRecord.exchangeAddress,
+    marketRecord.exchange,
+    marketRecord.venueExchange,
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+      return ethers.getAddress(candidate.trim());
+    }
+  }
+
+  const venue = marketRecord.venue;
+  if (isRecord(venue)) {
+    const nestedCandidates = [venue.exchangeAddress, venue.exchange];
+    for (const candidate of nestedCandidates) {
+      if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+        return ethers.getAddress(candidate.trim());
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
+  const marketRecord = isRecord(payload)
+    ? isRecord(payload.market)
+      ? payload.market
+      : payload
+    : null;
+  if (!marketRecord) return null;
+
+  const directCandidates = [
+    marketRecord.operator,
+    marketRecord.operatorAddress,
+    marketRecord.negRiskOperator,
+    marketRecord.negRiskOperatorAddress,
+    marketRecord.negRiskAdapter,
+    marketRecord.adapter,
+    marketRecord.adapterAddress,
+    marketRecord.venueAdapter,
+    marketRecord.exchangeAdapter,
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+      return ethers.getAddress(candidate.trim());
+    }
+  }
+
+  const venue = marketRecord.venue;
+  if (isRecord(venue)) {
+    const nestedCandidates = [
+      venue.operator,
+      venue.operatorAddress,
+      venue.negRiskOperator,
+      venue.negRiskOperatorAddress,
+      venue.adapter,
+      venue.adapterAddress,
+      venue.exchangeAdapter,
+    ];
+    for (const candidate of nestedCandidates) {
+      if (typeof candidate === "string" && ethers.isAddress(candidate.trim())) {
+        return ethers.getAddress(candidate.trim());
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractLimitlessExpectedExchangeAddress(
+  payload: unknown,
+): string | null {
+  if (!isRecord(payload)) return null;
+
+  const nestedPayload = isRecord(payload.payload) ? payload.payload : null;
+  const candidates: unknown[] = [
+    payload.message,
+    payload.error,
+    nestedPayload?.message,
+    nestedPayload?.error,
+  ];
+
+  const pattern = /exchange address for this market:\s*(0x[a-fA-F0-9]{40})/i;
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const match = candidate.match(pattern);
+    if (!match?.[1]) continue;
+    const value = match[1].trim();
+    if (!ethers.isAddress(value)) continue;
+    return ethers.getAddress(value);
+  }
+
+  return null;
+}
+
+function resolveLimitlessLegacyOperatorForExchange(
+  exchangeAddress: string | null,
+): string | null {
+  if (!exchangeAddress) return null;
+  const mapped =
+    LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE[normalizeAddress(exchangeAddress)];
+  return mapped ?? null;
 }
 
 async function resolveLimitlessTokenPairForSlug(input: {
