@@ -531,7 +531,10 @@ export function parseSignalBotConfig(
       env.HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE,
     ),
     tradingInternalApiBaseUrl:
-      env.HUNCH_SIGNAL_BOT_INTERNAL_API_BASE_URL?.trim() || null,
+      env.HUNCH_SIGNAL_BOT_INTERNAL_API_BASE_URL?.trim() ||
+      (env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim()
+        ? "http://api:3001"
+        : null),
     tradingInternalApiToken:
       env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || null,
   };

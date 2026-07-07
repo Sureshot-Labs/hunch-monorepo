@@ -73,6 +73,7 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   api: [
     "PRIVY_APP_ID",
     "PRIVY_APP_SECRET",
+    "PRIVY_WALLET_AUTHORIZATION_KEY",
     "PRIVY_WEBHOOK_SECRET",
     "METRICS_AUTH_TOKEN",
     "DFLOW_API_KEY",

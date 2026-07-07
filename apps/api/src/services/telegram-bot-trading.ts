@@ -5,6 +5,7 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
+import { isRecord } from "../lib/type-guards.js";
 import {
   resolveSignalBotTradingPolicyFromDb,
   type SignalBotPolicy,
@@ -12,7 +13,9 @@ import {
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
 import type {
   PersistedTrade,
+  KalshiTradeEligibility,
   SubmitResult,
+  TradeExecutionAuthorization,
   TradeEffectsResult,
   TradeIntent,
   TradeTarget,
@@ -49,6 +52,7 @@ type TelegramBotTradingStatusRow = {
   privy_wallet_id: string | null;
   enabled: boolean | null;
   enabled_venues: string[] | null;
+  limits: Record<string, unknown> | null;
   max_amount_usd: string | null;
   disabled_at: Date | null;
   last_verified_at: Date | null;
@@ -64,6 +68,7 @@ type TelegramBotTradingAuthorizationRow = {
   privy_wallet_id: string | null;
   enabled: boolean;
   enabled_venues: string[];
+  limits: Record<string, unknown> | null;
   max_amount_usd: string | null;
 };
 
@@ -139,6 +144,7 @@ export type TelegramBotTradingAuthorizationStatus = {
 
 export type EnableTelegramBotTradingInput = {
   enabledVenues?: TelegramBotTradingVenue[];
+  kalshiEligibility?: KalshiTradeEligibility | null;
   privyWalletId?: string | null;
   userId: string;
   walletAddress: string;
@@ -315,6 +321,39 @@ function parseNumber(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseKalshiEligibility(
+  limits: Record<string, unknown> | null | undefined,
+): KalshiTradeEligibility | null {
+  const value = limits?.kalshiEligibility;
+  if (!isRecord(value)) return null;
+  return {
+    checkedAt:
+      typeof value.checkedAt === "string" && value.checkedAt.trim()
+        ? value.checkedAt
+        : null,
+    expiresAt:
+      typeof value.expiresAt === "string" && value.expiresAt.trim()
+        ? value.expiresAt
+        : null,
+    geoAllowed:
+      typeof value.geoAllowed === "boolean" ? value.geoAllowed : null,
+    proofVerified:
+      typeof value.proofVerified === "boolean" ? value.proofVerified : null,
+  };
+}
+
+function executionAuthorizationForAuthorization(
+  authorization: TelegramBotTradingAuthorizationRow,
+): TradeExecutionAuthorization {
+  return {
+    privyWalletId: authorization.privy_wallet_id,
+    kalshiEligibility:
+      authorization.wallet_chain === "solana"
+        ? parseKalshiEligibility(authorization.limits)
+        : null,
+  };
+}
+
 function effectiveMaxTradeAmountUsd(
   policy: SignalBotPolicy,
   authorizationMaxAmountUsd?: string | number | null,
@@ -339,7 +378,7 @@ function isVenueAllowed(
   return policy.tradingVenues.includes(venue) && enabledVenues.includes(venue);
 }
 
-function resolveSubmitIntentStatus(status: SubmitResult["status"]): {
+function resolveSubmitIntentStatus(submitResult: SubmitResult): {
   callbackText: string;
   errorCode?: string;
   errorMessage?: string;
@@ -347,7 +386,7 @@ function resolveSubmitIntentStatus(status: SubmitResult["status"]): {
   messageTitle: string;
   shouldPersist: boolean;
 } {
-  switch (status) {
+  switch (submitResult.status) {
     case "filled":
       return {
         callbackText: "Trade filled.",
@@ -371,7 +410,7 @@ function resolveSubmitIntentStatus(status: SubmitResult["status"]): {
         errorMessage: "Venue returned no fill.",
         intentStatus: "failed",
         messageTitle: "No fill.",
-        shouldPersist: false,
+        shouldPersist: Boolean(submitResult.venueOrderId),
       };
     case "cancelled":
       return {
@@ -455,6 +494,14 @@ async function resolveTelegramTradingReadiness(input: {
       authorizationId: authorization?.id ?? status?.authorizationId ?? null,
     },
     action: "BUY",
+    executionAuthorization: authorization
+      ? executionAuthorizationForAuthorization(authorization)
+      : {
+          privyWalletId: status?.privyWalletId ?? null,
+          kalshiEligibility: null,
+        },
+    privyWalletId:
+      authorization?.privy_wallet_id ?? status?.privyWalletId ?? null,
     target: input.market ? marketToTradeTarget(input.market) : null,
     venue: input.venue,
     walletAddress: authorization?.wallet_address ?? status?.walletAddress ?? null,
@@ -483,6 +530,9 @@ function buildTelegramTradeIntent(input: {
       ...marketToTradeTarget(input.market),
       outcome: input.side,
     },
+    executionAuthorization: executionAuthorizationForAuthorization(
+      input.authorization,
+    ),
     walletAddress: input.authorization.wallet_address,
     walletChain: input.authorization.wallet_chain,
     action: "BUY",
@@ -490,6 +540,7 @@ function buildTelegramTradeIntent(input: {
     amount: { type: "usd", value: String(input.amountUsd) },
     orderType: "FOK",
     idempotencyKey: `telegram-bot:${input.intentId}`,
+    raw: {},
   };
 }
 
@@ -565,6 +616,7 @@ export async function getTelegramBotTradingStatus(
        a.privy_wallet_id,
        a.enabled,
        a.enabled_venues,
+       a.limits,
        a.max_amount_usd,
        a.disabled_at,
        a.last_verified_at
@@ -621,6 +673,7 @@ export async function getTelegramBotTradingStatus(
       privy_wallet_id: authRow.privy_wallet_id,
       enabled: Boolean(authRow.enabled),
       enabled_venues: authRow.enabled_venues ?? [],
+      limits: authRow.limits,
       max_amount_usd: authRow.max_amount_usd,
     };
     const enabledVenues = filterVenuesForWalletChain(
@@ -740,18 +793,21 @@ export async function enableTelegramBotTrading(
   if (!wallet?.telegram_user_id) {
     throw new Error("telegram_account_required");
   }
+  if (!input.privyWalletId?.trim()) {
+    throw new Error("privy_wallet_id_required");
+  }
 
   const policy = await resolveTelegramBotTradingPolicy(db);
-  const requestedEnabledVenues =
-    input.enabledVenues
-      ?.filter((venue) => policy.tradingVenues.includes(venue)) ?? [];
-  const enabledVenues =
-    filterVenuesForWalletChain(
-      requestedEnabledVenues.length > 0
-        ? requestedEnabledVenues
-        : policy.tradingVenues,
-      wallet.wallet_type,
-    );
+  const enabledVenueSource =
+    input.enabledVenues === undefined
+      ? policy.tradingVenues
+      : input.enabledVenues.filter((venue) =>
+          policy.tradingVenues.includes(venue),
+        );
+  const enabledVenues = filterVenuesForWalletChain(
+    enabledVenueSource,
+    wallet.wallet_type,
+  );
   if (enabledVenues.length === 0) {
     throw new Error("no_compatible_venues_for_wallet");
   }
@@ -798,6 +854,8 @@ export async function enableTelegramBotTrading(
       JSON.stringify({
         maxSlippageBps: policy.maxSlippageBps,
         requireConfirmation: true,
+        kalshiEligibility:
+          wallet.wallet_type === "solana" ? input.kalshiEligibility ?? null : null,
       }),
     ],
   );
@@ -1054,6 +1112,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     authorizationVenueAllowed &&
     marketOrderable &&
     authorization?.enabled === true &&
+    Boolean(authorization.privy_wallet_id) &&
     tradeReadiness.executable;
   const lines = [
     input.isAdminTest ? "Trade Card Preview" : "Trade This Market",
@@ -1314,6 +1373,7 @@ async function loadEnabledAuthorization(
        a.privy_wallet_id,
        a.enabled,
        a.enabled_venues,
+       a.limits,
        a.max_amount_usd
      FROM telegram_bot_trading_authorizations a
      JOIN user_telegram_accounts uta
@@ -1474,6 +1534,22 @@ export async function handleTelegramBotTradingCallback(
   ]);
   const amountUsd = parseNumber(intent.amount_usd);
   const side = intent.side;
+  if (market && market.venue !== intent.venue) {
+    await updateIntentStatus({
+      allowedStatuses: PENDING_INTENT_STATUSES,
+      db: input.db,
+      errorCode: "market_venue_mismatch",
+      errorMessage: "Trade intent market venue no longer matches the intent venue.",
+      intentId: intent.id,
+      status: "failed",
+    });
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      showAlert: true,
+      text: "Market venue changed. Send /market again.",
+    });
+    return true;
+  }
   const authorizationVenues = filterVenuesForWalletChain(
     normalizeVenues(authorization?.enabled_venues ?? []),
     authorization?.wallet_chain,
@@ -1498,6 +1574,7 @@ export async function handleTelegramBotTradingCallback(
     !market ||
     !isMarketOrderable(market) ||
     !authorization ||
+    !authorization.privy_wallet_id ||
     !isVenueAllowed(intent.venue, policy, authorizationVenues) ||
     !tradeReadiness?.executable ||
     !amountUsd ||
@@ -1627,6 +1704,12 @@ export async function handleTelegramBotTradingCallback(
     market,
     side,
   });
+  let submittedRefs:
+    | {
+        submitResult: SubmitResult;
+        venueOrderId: string | null;
+      }
+    | null = null;
   try {
     const quote = await trading.quote({ intent: sharedIntent });
     const prepared = await trading.prepareTrade({
@@ -1644,9 +1727,11 @@ export async function handleTelegramBotTradingCallback(
     });
     const submitResult = await trading.submitPreparedTrade({ prepared });
     const submitVenueOrderId =
-      submitResult.venueOrderId ??
-      submitResult.orderHash ??
-      submitResult.txSignature;
+      submitResult.venueOrderId ?? submitResult.txSignature;
+    submittedRefs = {
+      submitResult,
+      venueOrderId: submitVenueOrderId,
+    };
     await updateIntentStatus({
       allowedStatuses: ["executing"],
       db: input.db,
@@ -1656,7 +1741,7 @@ export async function handleTelegramBotTradingCallback(
       txSignature: submitResult.txSignature,
       venueOrderId: submitVenueOrderId,
     });
-    const resolution = resolveSubmitIntentStatus(submitResult.status);
+    const resolution = resolveSubmitIntentStatus(submitResult);
     let persisted: PersistedTrade | null = null;
     let effects: TradeEffectsResult | null = null;
     let postSubmitError:
@@ -1700,7 +1785,7 @@ export async function handleTelegramBotTradingCallback(
         postSubmitError,
         submitResult,
       },
-      status: resolution.intentStatus,
+      status: postSubmitError ? "submitted" : resolution.intentStatus,
       txSignature: submitResult.txSignature,
       venueOrderId,
     });
@@ -1730,6 +1815,44 @@ export async function handleTelegramBotTradingCallback(
     });
   } catch (error) {
     const normalized = trading.normalizeError(intent.venue, error);
+    if (submittedRefs) {
+      await updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: input.db,
+        errorCode: "reconcile_required",
+        errorMessage: normalized.message,
+        intentId: intent.id,
+        result: {
+          error: normalized,
+          submitResult: submittedRefs.submitResult,
+          venue: intent.venue,
+        },
+        status: "submitted",
+        txSignature: submittedRefs.submitResult.txSignature,
+        venueOrderId: submittedRefs.venueOrderId,
+      });
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "Trade submitted. Recording needs review.",
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: escapeMarkdown(
+          [
+            "Trade submitted.",
+            `${intent.venue} · ${intent.market_title}`,
+            `${side} · ${formatUsd(amountUsd)}`,
+            submittedRefs.venueOrderId ? `Order: ${submittedRefs.venueOrderId}` : null,
+            "Hunch could not finish local recording. Check the app before retrying.",
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n"),
+        ),
+      });
+      return true;
+    }
     await updateIntentStatus({
       allowedStatuses: ["executing"],
       db: input.db,

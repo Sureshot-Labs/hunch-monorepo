@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 
 import type { QueryResult, QueryResultRow } from "pg";
 
-import { createApiTradingApplicationService } from "./services/api-trading-service.js";
 import {
   acquireSignalBotLock,
   buildSignalBotHolderUrl,
@@ -1412,7 +1411,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         telegramUserId: 999,
-        trading: createApiTradingApplicationService({ pool: {} as never }),
+        trading: {
+          getReadiness: async () => ({
+            ready: false,
+            executable: false,
+            reasonCode: "unsupported_capability",
+            message: "Direct bot trading is disabled for this venue.",
+            setupRequired: false,
+            capabilities: {
+              venue: "polymarket",
+              supportsBuy: false,
+              supportsSell: false,
+              supportsCancel: false,
+              supportsOrderSync: false,
+              supportsPositionSync: false,
+              supportsExecutionSync: false,
+              supportsSetup: false,
+              authorizationModes: ["unsupported"],
+            },
+          }),
+        } as never,
       });
       assert.equal(insertCount, 0);
       assert.match(message.text, /Direct bot trading is disabled/);

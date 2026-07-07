@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import type { Pool } from "@hunch/infra";
 
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
-import { TradingServiceError } from "./services/trading-errors.js";
 
 type TestCase = {
   name: string;
@@ -54,9 +53,21 @@ function collectRuntimeImportGraph(entryRelativePath: string): Set<string> {
   return visited;
 }
 
+function sourceSlice(
+  source: string,
+  startMarker: string,
+  endMarker: string,
+): string {
+  const start = source.indexOf(startMarker);
+  assert.notEqual(start, -1, `missing start marker ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(end, -1, `missing end marker ${endMarker}`);
+  return source.slice(start, end);
+}
+
 const tests: TestCase[] = [
   {
-    name: "API-owned bot execution stays fail-closed for all venues",
+    name: "API-owned trading execution advertises venue buy capabilities",
     run: async () => {
       const trading = createApiTradingApplicationService({
         pool: {} as Pool,
@@ -69,10 +80,13 @@ const tests: TestCase[] = [
         ["kalshi", "limitless", "polymarket"],
       );
       for (const capability of capabilities) {
-        assert.equal(capability.supportsBuy, false);
+        assert.equal(capability.supportsBuy, true);
         assert.equal(capability.supportsSell, false);
         assert.equal(capability.supportsSetup, false);
-        assert.equal(capability.authorizationModes.includes("unsupported"), true);
+        assert.equal(
+          capability.authorizationModes.includes("unsupported"),
+          false,
+        );
       }
       const readiness = await trading.getReadiness({
         actor: {
@@ -80,28 +94,212 @@ const tests: TestCase[] = [
           userId: "user-1",
         },
         venue: "polymarket",
-        walletAddress: "0x0000000000000000000000000000000000000001",
+        walletAddress: null,
         walletChain: "ethereum",
       });
       assert.equal(readiness.ready, false);
       assert.equal(readiness.executable, false);
-      assert.equal(readiness.reasonCode, "unsupported_capability");
+      assert.equal(readiness.reasonCode, "insufficient_readiness");
     },
   },
   {
-    name: "Polymarket quote route remains token-only REST compatible",
+    name: "Polymarket quote route remains token-only REST compatible through shared quote service",
     run: () => {
       const routeSource = readFileSync(
         resolve(apiSrcDir, "routes/polymarket-private.ts"),
         "utf8",
       );
-      assert.doesNotMatch(routeSource, /createApiTradingApplicationService/);
       assert.match(routeSource, /quotePolymarketOrder\(pool,/);
       assert.match(routeSource, /return reply\.send\(quote\)/);
     },
   },
   {
-    name: "API bot executor is a small fail-closed boundary",
+    name: "migrated REST execution endpoints delegate to shared venue services",
+    run: () => {
+      const polymarketRoute = readFileSync(
+        resolve(apiSrcDir, "routes/polymarket-private.ts"),
+        "utf8",
+      );
+      const polymarketOrderBlock = sourceSlice(
+        polymarketRoute,
+        '   * POST /order\n   * Place a signed Polymarket order',
+        "   * DELETE /order",
+      );
+      const polymarketOpenOrdersBlock = sourceSlice(
+        polymarketRoute,
+        "   * GET /orders/open",
+        "   * POST /balance-allowance/sync",
+      );
+      assert.match(polymarketOpenOrdersBlock, /fetchPolymarketOpenOrdersRoute/);
+      assert.doesNotMatch(polymarketOpenOrdersBlock, /polymarketL2Request/);
+
+      const polymarketBalanceSyncBlock = sourceSlice(
+        polymarketRoute,
+        "   * POST /balance-allowance/sync",
+        "   * POST /order",
+      );
+      assert.match(
+        polymarketBalanceSyncBlock,
+        /syncPolymarketBalanceAllowanceRoute/,
+      );
+      assert.doesNotMatch(polymarketBalanceSyncBlock, /polymarketL2Request/);
+
+      assert.match(polymarketRoute, /submitPolymarketClientSignedOrder/);
+      assert.match(polymarketOrderBlock, /submitPolymarketClientSignedOrder/);
+      assert.doesNotMatch(polymarketOrderBlock, /polymarketL2Request/);
+      assert.doesNotMatch(polymarketOrderBlock, /storeOrder/);
+
+      const polymarketOrderHashBlock = sourceSlice(
+        polymarketRoute,
+        "   * POST /order-hash",
+        "   * GET /funder-derive",
+      );
+      assert.match(
+        polymarketOrderHashBlock,
+        /computePolymarketOrderHashRoute/,
+      );
+      assert.doesNotMatch(polymarketOrderHashBlock, /fetchPolymarketOrderHashV2/);
+      assert.doesNotMatch(polymarketOrderHashBlock, /normalizeOrderForHash/);
+
+      const polymarketMaxSpendBlock = sourceSlice(
+        polymarketRoute,
+        "   * POST /max-spend",
+        "   * GET /account",
+      );
+      assert.match(polymarketMaxSpendBlock, /computePolymarketMaxSpendRoute/);
+      assert.doesNotMatch(polymarketMaxSpendBlock, /derivePolymarketFunders/);
+      assert.doesNotMatch(
+        polymarketMaxSpendBlock,
+        /findMaxPolymarketMarketBuyUsdForFunds/,
+      );
+      assert.doesNotMatch(polymarketMaxSpendBlock, /fetchOpenOrderCollateralLocks/);
+
+      const polymarketAccountBlock = sourceSlice(
+        polymarketRoute,
+        "   * GET /account",
+        "  z.get(\n    \"/redemption-plan\"",
+      );
+      assert.match(polymarketAccountBlock, /fetchPolymarketAccountRoute/);
+      assert.doesNotMatch(polymarketAccountBlock, /fetchEvmCode/);
+      assert.doesNotMatch(polymarketAccountBlock, /fetchPolymarketOnchainSnapshot/);
+
+      const polymarketOrdersSyncBlock = sourceSlice(
+        polymarketRoute,
+        "   * POST /orders/sync",
+        "   * GET /orders/open",
+      );
+      assert.match(polymarketOrdersSyncBlock, /syncPolymarketOrdersRoute/);
+      assert.doesNotMatch(polymarketOrdersSyncBlock, /polymarketL2Request/);
+      assert.doesNotMatch(polymarketOrdersSyncBlock, /storeOrder/);
+      assert.doesNotMatch(
+        polymarketOrdersSyncBlock,
+        /syncPolymarketTradesForSigner/,
+      );
+
+      const limitlessRoute = readFileSync(
+        resolve(apiSrcDir, "routes/limitless-private.ts"),
+        "utf8",
+      );
+      const limitlessAmmQuoteBlock = sourceSlice(
+        limitlessRoute,
+        "   * GET /amm/quote",
+        "   * GET /redemption/status",
+      );
+      assert.match(limitlessAmmQuoteBlock, /quoteLimitlessAmmRoute/);
+      assert.doesNotMatch(limitlessAmmQuoteBlock, /quoteLimitlessAmmTrade/);
+
+      const limitlessOrderBlock = sourceSlice(
+        limitlessRoute,
+        "   * POST /order\n   */",
+        "   * POST /orders/amm",
+      );
+      assert.match(limitlessOrderBlock, /submitLimitlessClientSignedOrder/);
+      assert.doesNotMatch(limitlessOrderBlock, /limitlessRequest/);
+      assert.doesNotMatch(limitlessOrderBlock, /storeOrder/);
+
+      const limitlessAmmOrderBlock = sourceSlice(
+        limitlessRoute,
+        "   * POST /orders/amm",
+        "   * POST /orders/sync",
+      );
+      assert.match(limitlessAmmOrderBlock, /recordLimitlessAmmOrder/);
+      assert.doesNotMatch(limitlessAmmOrderBlock, /storeOrder/);
+      assert.doesNotMatch(limitlessAmmOrderBlock, /applyOptimisticPositionTrade/);
+
+      const limitlessSyncBlock = sourceSlice(
+        limitlessRoute,
+        "   * POST /orders/sync",
+        "   * POST /orders/history/sync",
+      );
+      assert.match(limitlessSyncBlock, /syncLimitlessOpenOrdersRoute/);
+      assert.doesNotMatch(limitlessSyncBlock, /limitlessRequest/);
+      assert.doesNotMatch(limitlessSyncBlock, /storeOrder/);
+
+      const limitlessHistorySyncBlock = sourceSlice(
+        limitlessRoute,
+        "   * POST /orders/history/sync",
+        "   * GET /market/exchange",
+      );
+      assert.match(limitlessHistorySyncBlock, /syncLimitlessOrderHistoryRoute/);
+      assert.doesNotMatch(limitlessHistorySyncBlock, /syncLimitlessHistoryForWallet/);
+      assert.doesNotMatch(limitlessHistorySyncBlock, /resolveLimitlessAuthContext/);
+
+      const limitlessSingleCancelBlock = sourceSlice(
+        limitlessRoute,
+        "   * DELETE /order/:orderId",
+        "   * POST /orders/cancel-batch",
+      );
+      assert.match(limitlessSingleCancelBlock, /cancelLimitlessOrderRoute/);
+      assert.doesNotMatch(limitlessSingleCancelBlock, /limitlessRequest/);
+      assert.doesNotMatch(limitlessSingleCancelBlock, /createNotificationSafe/);
+
+      const limitlessBatchCancelBlock = sourceSlice(
+        limitlessRoute,
+        "   * POST /orders/cancel-batch",
+        "   * DELETE /orders/all/:slug",
+      );
+      assert.match(limitlessBatchCancelBlock, /cancelLimitlessOrdersBatchRoute/);
+      assert.doesNotMatch(limitlessBatchCancelBlock, /limitlessRequest/);
+      assert.doesNotMatch(limitlessBatchCancelBlock, /createNotificationSafe/);
+
+      const limitlessCancelAllBlock = sourceSlice(
+        limitlessRoute,
+        "   * DELETE /orders/all/:slug",
+        "   * GET /orders/open",
+      );
+      assert.match(limitlessCancelAllBlock, /cancelAllLimitlessOrdersRoute/);
+      assert.doesNotMatch(limitlessCancelAllBlock, /limitlessRequest/);
+      assert.doesNotMatch(limitlessCancelAllBlock, /createNotificationSafe/);
+
+      const dflowRoute = readFileSync(
+        resolve(apiSrcDir, "routes/dflow-private.ts"),
+        "utf8",
+      );
+      assert.match(dflowRoute, /quoteKalshiDflowRoute/);
+      assert.match(dflowRoute, /buildKalshiDflowSwapRoute/);
+      assert.match(dflowRoute, /submitKalshiDflowSignedTransactionRoute/);
+      assert.match(dflowRoute, /recordKalshiDflowExecutionRoute/);
+    },
+  },
+  {
+    name: "api trading common is a compatibility barrel over focused modules",
+    run: () => {
+      const common = readFileSync(
+        resolve(apiSrcDir, "services/api-trading-common.ts"),
+        "utf8",
+      );
+      assert.match(common, /api-trading-effects\.js/);
+      assert.match(common, /api-trading-market-repo\.js/);
+      assert.match(common, /api-trading-utils\.js/);
+      assert.match(common, /api-trading-wallet-signing\.js/);
+      assert.doesNotMatch(common, /from "\.\.\/env\.js"/);
+      assert.doesNotMatch(common, /from "\.\.\/privy-service\.js"/);
+      assert.doesNotMatch(common, /SELECT\s/i);
+      assert.doesNotMatch(common, /storeOrder/);
+    },
+  },
+  {
+    name: "API trading execution services are API-owned and not imported by the sidecar",
     run: () => {
       const source = readFileSync(
         resolve(apiSrcDir, "services/api-trading-service.ts"),
@@ -111,18 +309,39 @@ const tests: TestCase[] = [
       assert.doesNotMatch(source, /VenueTradingRegistry/);
       assert.doesNotMatch(source, /new PolymarketTradingAdapter/);
       assert.doesNotMatch(source, /privy-service\.js/);
-      assert.doesNotMatch(source, /from "\.\.\/env\.js"/);
       assert.doesNotMatch(source, /polymarketL2Request/);
       assert.doesNotMatch(source, /dflow-trading-service\.js/);
       assert.doesNotMatch(source, /limitlessRequest/);
-      assert.match(source, /BOT_EXECUTION_DISABLED_MESSAGE/);
+      assert.doesNotMatch(source, /if\s*\(\s*venue\s*===/);
+      assert.match(source, /polymarket-trading-execution-service\.js/);
+      assert.match(source, /limitless-trading-execution-service\.js/);
+      assert.match(source, /kalshi-trading-execution-service\.js/);
+
+      const polymarket = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const limitless = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      const kalshi = readFileSync(
+        resolve(apiSrcDir, "services/kalshi-trading-execution-service.ts"),
+        "utf8",
+      );
+      assert.match(polymarket, /polymarketL2Request/);
+      assert.match(polymarket, /privy-service\.js|createServerWalletClient/);
+      assert.match(limitless, /limitlessRequest/);
+      assert.match(kalshi, /dflow-trading-service\.js/);
     },
   },
   {
-    name: "API bot executor rejects quote and submit before venue side effects",
+    name: "API trading execution validates setup before venue side effects",
     run: async () => {
       const trading = createApiTradingApplicationService({
-        pool: {} as Pool,
+        pool: {
+          query: async () => ({ rows: [], rowCount: 0 }),
+        } as unknown as Pool,
       });
       const intent = {
         action: "BUY" as const,
@@ -142,20 +361,16 @@ const tests: TestCase[] = [
           venueMarketId: "venue-market-1",
         },
         venue: "polymarket",
-        walletAddress: "0x0000000000000000000000000000000000000001",
+        walletAddress: "",
         walletChain: "ethereum" as const,
       };
       await assert.rejects(
         trading.quote({ intent }),
-        (error: unknown) =>
-          error instanceof TradingServiceError &&
-          error.code === "unsupported_capability",
+        /Trade target market id is required|Market not found/,
       );
       await assert.rejects(
         trading.prepareTrade({ intent, quote: null }),
-        (error: unknown) =>
-          error instanceof TradingServiceError &&
-          error.code === "unsupported_capability",
+        /Market not found/,
       );
     },
   },

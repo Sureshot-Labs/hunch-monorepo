@@ -12,7 +12,6 @@ import {
   evaluateGeoFence,
   type GeoFenceConfig,
 } from "../lib/geo-fence.js";
-import { storeExecution } from "../repos/executions-repo.js";
 import {
   dflowRequest,
   extractDflowErrorCode,
@@ -20,16 +19,14 @@ import {
   formatDflowUserMessage,
 } from "../services/dflow-client.js";
 import {
-  buildDflowSwap,
-  quoteDflowTrade,
-  submitDflowSignedTransaction,
-} from "../services/dflow-trading-service.js";
-import {
   fetchKalshiNormalizedOrderStatus,
-  finalizeKalshiExecutionEffects,
-  mergeKalshiExecutionRaw,
-  normalizeKalshiExecutionStatus,
 } from "../services/kalshi-executions.js";
+import {
+  buildKalshiDflowSwapRoute,
+  quoteKalshiDflowRoute,
+  recordKalshiDflowExecutionRoute,
+  submitKalshiDflowSignedTransactionRoute,
+} from "../services/kalshi-trading-execution-service.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
   fetchSolanaBalanceLamports,
@@ -695,51 +692,22 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const upstream = await quoteDflowTrade({
-        baseUrl: env.dflowQuoteBase,
-        timeoutMs: 10_000,
-        apiKey: env.dflowApiKey,
-        query: {
-          inputMint: query.inputMint,
-          outputMint: query.outputMint,
-          amount: query.amount,
-          ...(query.slippageBps != null
-            ? { slippageBps: query.slippageBps }
-            : {}),
-          ...(query.platformFeeBps != null
-            ? { platformFeeBps: query.platformFeeBps }
-            : {}),
-          ...(query.platformFeeScale != null
-            ? { platformFeeScale: query.platformFeeScale }
-            : {}),
-          ...(query.platformFeeMode
-            ? { platformFeeMode: query.platformFeeMode }
-            : {}),
-          ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
-        },
-      });
-
-      if (!upstream.ok) {
-        if (isDflowRouteNotFound(upstream.payload)) {
+      const result = await quoteKalshiDflowRoute({ query });
+      if (!result.ok) {
+        if (result.routeNotFound) {
           void markDflowRouteUnavailable([
             query.inputMint,
             query.outputMint,
           ]).catch((error) =>
-            app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
+              app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
           );
         }
-        const userMessage = formatDflowUserMessage(upstream.payload);
-        reply.code(502);
-        return reply.send({
-          error: userMessage ?? "DFlow quote failed",
-          status: upstream.status,
-          message: extractDflowErrorMessage(upstream.payload),
-          payload: upstream.payload,
-        });
+        reply.code(result.statusCode);
+        return reply.send(result.payload);
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(upstream.payload);
+      return reply.send(result.payload);
     },
   );
 
@@ -790,34 +758,14 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
       });
       if (!proofAllowed) return;
 
-      const upstream = await buildDflowSwap({
-        baseUrl: env.dflowQuoteBase,
-        timeoutMs: 15_000,
-        apiKey: env.dflowApiKey,
-        body: {
-          userPublicKey: body.userPublicKey,
-          quoteResponse: body.quoteResponse,
-          ...(body.dynamicComputeUnitLimit !== undefined
-            ? { dynamicComputeUnitLimit: body.dynamicComputeUnitLimit }
-            : {}),
-          ...(body.prioritizationFeeLamports !== undefined
-            ? { prioritizationFeeLamports: body.prioritizationFeeLamports }
-            : {}),
-        },
-      });
-
-      if (!upstream.ok) {
-        reply.code(502);
-        return reply.send({
-          error: "DFlow swap failed",
-          status: upstream.status,
-          message: extractDflowErrorMessage(upstream.payload),
-          payload: upstream.payload,
-        });
+      const result = await buildKalshiDflowSwapRoute({ body });
+      if (!result.ok) {
+        reply.code(result.statusCode);
+        return reply.send(result.payload);
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(upstream.payload);
+      return reply.send(result.payload);
     },
   );
 
@@ -846,30 +794,20 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
-      try {
-        const signature = await submitDflowSignedTransaction({
-          rpcUrls: env.solanaRpcUrls,
-          timeoutMs: env.solanaRpcTimeoutMs,
-          signedTransaction: request.body.signedTransaction,
-          skipPreflight: request.body.skipPreflight,
-          maxRetries: request.body.maxRetries,
-        });
-
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          signature,
-        });
-      } catch (error) {
+      const result = await submitKalshiDflowSignedTransactionRoute({
+        body: request.body,
+      });
+      if (!result.ok) {
         app.log.error(
-          { error, userId: user.id, walletAddress },
+          { userId: user.id, walletAddress },
           "DFlow submit failed",
         );
-        reply.code(502);
-        return reply.send({
-          error: "DFlow submit failed",
-        });
+        reply.code(result.statusCode);
+        return reply.send(result.payload);
       }
+
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      return reply.send(result.payload);
     },
   );
 
@@ -907,66 +845,17 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             "DFlow execution tracking requires a linked Solana wallet address",
         });
       }
-      const executionStatus = normalizeKalshiExecutionStatus(body.status);
-      const executionPurpose = body.purpose ?? "trade";
-      const executionRaw = mergeKalshiExecutionRaw(body.raw, {
-        purpose: executionPurpose,
-      });
-
       try {
-        const execution = await storeExecution(pool, {
+        const result = await recordKalshiDflowExecutionRoute({
+          body,
+          logger: app.log,
+          pool,
           userId: user.id,
           walletAddress: executionWalletAddress,
-          venue: "kalshi",
-          unifiedMarketId: body.marketId ?? null,
-          side: body.side ?? null,
-          inputMint: body.inputMint ?? null,
-          outputMint: body.outputMint ?? null,
-          amountIn: body.amountIn ?? null,
-          amountOut: body.amountOut ?? null,
-          inputDecimals: body.inputDecimals ?? null,
-          outputDecimals: body.outputDecimals ?? null,
-          quoteId: body.quoteId ?? null,
-          venueOrderId: body.venueOrderId ?? null,
-          txSignature: body.txSignature ?? null,
-          status: executionStatus ?? null,
-          raw: executionRaw,
-        });
-        const effects = await finalizeKalshiExecutionEffects(pool, {
-          execution,
-          purpose: executionPurpose,
-          logger: app.log,
         });
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        return reply.send({
-          ok: true,
-          referralFirstTrade: effects.referralFirstTrade ?? undefined,
-          execution: {
-            id: execution.id,
-            venue: execution.venue,
-            unifiedMarketId: execution.unified_market_id,
-            side: execution.side,
-            outcome: execution.outcome,
-            inputMint: execution.input_mint,
-            outputMint: execution.output_mint,
-            amountIn:
-              execution.amount_in != null ? Number(execution.amount_in) : null,
-            amountOut:
-              execution.amount_out != null
-                ? Number(execution.amount_out)
-                : null,
-            inputDecimals: execution.input_decimals ?? null,
-            outputDecimals: execution.output_decimals ?? null,
-            quoteId: execution.quote_id,
-            txSignature: execution.tx_signature,
-            venueOrderId: execution.venue_order_id,
-            status: execution.status,
-            raw: execution.raw ?? null,
-            createdAt: execution.created_at,
-            updatedAt: execution.updated_at,
-          },
-        });
+        return reply.send(result);
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress, body },

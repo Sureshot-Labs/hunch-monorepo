@@ -1,125 +1,80 @@
-import type { Pool } from "@hunch/infra";
-
+import type {
+  ApiBotTradingExecutor,
+  ApiTradingApplicationServiceInput,
+  ApiVenueTradingExecutor,
+  SupportedBotTradingVenue,
+} from "./api-trading-types.js";
+import { createKalshiTradingExecutionService } from "./kalshi-trading-execution-service.js";
+import { createLimitlessTradingExecutionService } from "./limitless-trading-execution-service.js";
+import { createPolymarketTradingExecutionService } from "./polymarket-trading-execution-service.js";
 import {
   normalizeTradingError,
   TradingServiceError,
 } from "./trading-errors.js";
-import type {
-  ApplyTradeEffectsInput,
-  PersistedTrade,
-  PersistTradeInput,
-  PreparedTrade,
-  PrepareTradeInput,
-  SubmitPreparedTradeInput,
-  SubmitResult,
-  TradeEffectsResult,
-  TradeQuote,
-  TradeQuoteInput,
-  TradingError,
-  TradingReadiness,
-  TradingReadinessInput,
-  TradingVenue,
-  VenueTradingCapabilities,
-} from "./trading-types.js";
+import type { TradingVenue } from "./trading-types.js";
 
-const BOT_EXECUTION_DISABLED_MESSAGE =
-  "Direct bot trading is disabled for this venue. Open Hunch to trade.";
+export type {
+  ApiBotTradingExecutor,
+  ApiTradingApplicationServiceInput,
+} from "./api-trading-types.js";
 
-const BOT_EXECUTION_VENUES = [
-  "polymarket",
-  "limitless",
-  "kalshi",
-] as const satisfies readonly TradingVenue[];
-
-export type ApiBotTradingExecutor = {
-  applyTradeEffects: (
-    input: ApplyTradeEffectsInput,
-  ) => Promise<TradeEffectsResult>;
-  getReadiness: (input: TradingReadinessInput) => Promise<TradingReadiness>;
-  listCapabilities: () => VenueTradingCapabilities[];
-  normalizeError: (venue: TradingVenue, error: unknown) => TradingError;
-  persistTrade: (input: PersistTradeInput) => Promise<PersistedTrade>;
-  prepareTrade: (input: PrepareTradeInput) => Promise<PreparedTrade>;
-  quote: (input: TradeQuoteInput) => Promise<TradeQuote>;
-  submitPreparedTrade: (
-    input: SubmitPreparedTradeInput,
-  ) => Promise<SubmitResult>;
-};
-
-export type ApiTradingApplicationServiceInput = {
-  geoFence?: {
-    kalshiAllowed?: boolean;
-    kalshiMessage?: string | null;
-  };
-  logger?: {
-    warn?: (input: unknown, message?: string) => void;
-  };
-  pool: Pool;
-};
-
-function buildDisabledCapability(
+function normalizeSupportedVenue(
   venue: TradingVenue,
-): VenueTradingCapabilities {
-  return {
-    venue,
-    supportsBuy: false,
-    supportsSell: false,
-    supportsCancel: false,
-    supportsOrderSync: false,
-    supportsPositionSync: false,
-    supportsExecutionSync: false,
-    supportsSetup: false,
-    authorizationModes: ["unsupported"],
-    notes: [BOT_EXECUTION_DISABLED_MESSAGE],
-  };
+): SupportedBotTradingVenue | null {
+  return venue === "polymarket" || venue === "limitless" || venue === "kalshi"
+    ? venue
+    : null;
 }
 
-function buildDisabledReadiness(venue: TradingVenue): TradingReadiness {
-  return {
-    ready: false,
-    executable: false,
-    reasonCode: "unsupported_capability",
-    message: BOT_EXECUTION_DISABLED_MESSAGE,
-    setupRequired: false,
-    capabilities: buildDisabledCapability(venue),
-  };
-}
-
-function unsupportedBotExecution(venue: TradingVenue): TradingServiceError {
+function unsupportedVenue(venue: TradingVenue): TradingServiceError {
   return new TradingServiceError({
     code: "unsupported_capability",
-    message: BOT_EXECUTION_DISABLED_MESSAGE,
-    statusCode: 501,
+    message: "Venue is not supported for Telegram bot trading.",
+    statusCode: 400,
     venue,
   });
 }
 
+function createExecutorRegistry(
+  input: ApiTradingApplicationServiceInput,
+): Map<SupportedBotTradingVenue, ApiVenueTradingExecutor> {
+  return new Map([
+    ["polymarket", createPolymarketTradingExecutionService(input)],
+    ["limitless", createLimitlessTradingExecutionService(input)],
+    ["kalshi", createKalshiTradingExecutionService(input)],
+  ]);
+}
+
 export function createApiTradingApplicationService(
-  _input: ApiTradingApplicationServiceInput,
+  input: ApiTradingApplicationServiceInput,
 ): ApiBotTradingExecutor {
+  const executors = createExecutorRegistry(input);
+  const executorFor = (venue: TradingVenue): ApiVenueTradingExecutor => {
+    const supported = normalizeSupportedVenue(venue);
+    if (!supported) throw unsupportedVenue(venue);
+    const executor = executors.get(supported);
+    if (!executor) throw unsupportedVenue(venue);
+    return executor;
+  };
+
   return {
-    applyTradeEffects: async (input) => {
-      throw unsupportedBotExecution(input.intent.venue);
-    },
-    getReadiness: async (input) => buildDisabledReadiness(input.venue),
+    applyTradeEffects: (effectsInput) =>
+      executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
+    getReadiness: (readinessInput) =>
+      executorFor(readinessInput.venue).getReadiness(readinessInput),
     listCapabilities: () =>
-      BOT_EXECUTION_VENUES.map((venue) => buildDisabledCapability(venue)),
+      Array.from(executors.values(), (executor) => executor.capabilities()),
     normalizeError: (venue, error) =>
       normalizeTradingError(error, {
-        message: BOT_EXECUTION_DISABLED_MESSAGE,
+        message: "Telegram bot trading failed.",
         venue,
       }),
-    persistTrade: async (input) => {
-      throw unsupportedBotExecution(input.intent.venue);
-    },
-    prepareTrade: async (input) => {
-      throw unsupportedBotExecution(input.intent.venue);
-    },
-    quote: async (input) => {
-      throw unsupportedBotExecution(input.intent.venue);
-    },
-    submitPreparedTrade: async (input) => {
-      throw unsupportedBotExecution(input.prepared.venue);
-    },
+    persistTrade: (persistInput) =>
+      executorFor(persistInput.intent.venue).persistTrade(persistInput),
+    prepareTrade: (prepareInput) =>
+      executorFor(prepareInput.intent.venue).prepareTrade(prepareInput),
+    quote: (quoteInput) => executorFor(quoteInput.intent.venue).quote(quoteInput),
+    submitPreparedTrade: (submitInput) =>
+      executorFor(submitInput.prepared.venue).submitPreparedTrade(submitInput),
   };
 }

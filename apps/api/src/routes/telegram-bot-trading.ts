@@ -11,6 +11,7 @@ import {
 } from "../lib/geo-fence.js";
 import { PrivyService } from "../privy-service.js";
 import { createApiTradingApplicationService } from "../services/api-trading-service.js";
+import { verifyProofAddress } from "../services/proof-client.js";
 import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
@@ -22,6 +23,7 @@ import {
   resolveTelegramBotTradingPolicy,
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
+import type { KalshiTradeEligibility } from "../services/trading-types.js";
 
 const enableBodySchema = z
   .object({
@@ -134,6 +136,31 @@ async function resolvePrivyWalletIdForAddress(input: {
   }
 }
 
+async function buildKalshiEligibilityForRequest(input: {
+  request: FastifyRequest;
+  walletAddress: string;
+  user: NonNullable<FastifyRequest["user"]>;
+  geoFenceConfig: GeoFenceConfig;
+}): Promise<KalshiTradeEligibility> {
+  const checkedAt = new Date();
+  const decision = evaluateGeoFence(input.request, input.geoFenceConfig);
+  let proofVerified = true;
+  if (env.kalshiProofEnabled && !input.user.kalshiProofBypass) {
+    try {
+      const proof = await verifyProofAddress({ address: input.walletAddress });
+      proofVerified = proof.ok === true && proof.verified === true;
+    } catch {
+      proofVerified = false;
+    }
+  }
+  return {
+    checkedAt: checkedAt.toISOString(),
+    expiresAt: new Date(checkedAt.getTime() + 60 * 60 * 1000).toISOString(),
+    geoAllowed: decision.allowed,
+    proofVerified,
+  };
+}
+
 export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
   const api = app.withTypeProvider<ZodTypeProvider>();
   const kalshiGeoFenceConfig: GeoFenceConfig = {
@@ -143,15 +170,8 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
     trustProxy: env.trustProxy,
     proxySecret: env.proxySecret,
   };
-  const createTradingForRequest = (request: FastifyRequest) => {
-    const kalshiDecision = evaluateGeoFence(request, kalshiGeoFenceConfig);
+  const createTradingForRequest = (_request: FastifyRequest) => {
     return createApiTradingApplicationService({
-      geoFence: {
-        kalshiAllowed: kalshiDecision.allowed,
-        kalshiMessage: kalshiDecision.allowed
-          ? null
-          : "Kalshi trading is not available in your region.",
-      },
       logger: app.log,
       pool,
     });
@@ -355,10 +375,25 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           privyUserId: user.privyUserId,
           walletAddress: body.walletAddress,
         });
+        if (!privyWalletId) {
+          reply.code(409);
+          return reply.send({
+            error: "privy_wallet_id_required",
+            message:
+              "Selected wallet must be an internal Privy trading wallet before bot trading can be enabled.",
+          });
+        }
+        const kalshiEligibility = await buildKalshiEligibilityForRequest({
+          geoFenceConfig: kalshiGeoFenceConfig,
+          request,
+          user,
+          walletAddress: body.walletAddress,
+        });
         const status = await enableTelegramBotTrading(pool, {
           enabledVenues: body.enabledVenues as
             | TelegramBotTradingVenue[]
             | undefined,
+          kalshiEligibility,
           privyWalletId,
           userId: user.id,
           walletAddress: body.walletAddress,
@@ -368,6 +403,9 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
         const message =
           error instanceof Error && error.message === "telegram_account_required"
             ? "Telegram account is required before enabling bot trading."
+            : error instanceof Error &&
+                error.message === "privy_wallet_id_required"
+              ? "Selected wallet must be an internal Privy trading wallet before bot trading can be enabled."
             : error instanceof Error &&
                 error.message === "no_compatible_venues_for_wallet"
               ? "Selected wallet is not compatible with any enabled bot trading venue."

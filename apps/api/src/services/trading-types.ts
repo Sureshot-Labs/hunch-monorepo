@@ -46,11 +46,25 @@ export type TradeTarget = {
 export type TradingReadinessInput = {
   actor: TradeActor;
   venue: TradingVenue;
+  executionAuthorization?: TradeExecutionAuthorization | null;
+  privyWalletId?: string | null;
   walletAddress: string | null;
   walletChain?: "ethereum" | "solana" | string | null;
   target?: TradeTarget | null;
   action?: TradeSide | null;
   raw?: unknown;
+};
+
+export type KalshiTradeEligibility = {
+  checkedAt: string | null;
+  expiresAt: string | null;
+  geoAllowed: boolean | null;
+  proofVerified: boolean | null;
+};
+
+export type TradeExecutionAuthorization = {
+  kalshiEligibility?: KalshiTradeEligibility | null;
+  privyWalletId?: string | null;
 };
 
 export type TradingReadiness = {
@@ -68,6 +82,7 @@ export type TradeIntent = {
   actor: TradeActor;
   venue: TradingVenue;
   target: TradeTarget;
+  executionAuthorization?: TradeExecutionAuthorization | null;
   walletAddress: string;
   walletChain?: "ethereum" | "solana" | string | null;
   action: TradeSide;
@@ -104,6 +119,8 @@ export type PreparedTradeAuthorizationMode =
   | "client_signed_order"
   | "client_signed_transaction"
   | "embedded_privy"
+  | "embedded_privy_evm"
+  | "embedded_privy_solana"
   | "server_delegated"
   | "unsupported";
 
