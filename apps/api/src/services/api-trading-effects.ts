@@ -8,6 +8,7 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { applyOptimisticPositionTrade } from "./positions-optimistic.js";
+import { markOrderPositionDeltaApplied } from "../repos/orders-repo.js";
 import type {
   ApplyTradeEffectsInput,
   TradeEffectsResult,
@@ -30,6 +31,21 @@ function readPersistedRawField(
   return readString(raw[field]);
 }
 
+function readPersistedStoredOrder(input: ApplyTradeEffectsInput): {
+  id: string | null;
+  positionDeltaApplied: boolean;
+} {
+  const raw = isRecord(input.persisted.raw) ? input.persisted.raw : null;
+  const stored = raw && isRecord(raw.stored) ? raw.stored : null;
+  const order = stored && isRecord(stored.order) ? stored.order : null;
+  return {
+    id: readString(order?.id),
+    positionDeltaApplied:
+      order?.position_delta_applied === true ||
+      order?.positionDeltaApplied === true,
+  };
+}
+
 export async function applyOrderTradeEffects(
   ctx: ApiTradingApplicationServiceInput,
   input: ApplyTradeEffectsInput,
@@ -42,6 +58,7 @@ export async function applyOrderTradeEffects(
     readPersistedRawField(input, "walletAddress") ?? input.intent.walletAddress;
   const status = input.persisted.status;
   const venue = input.intent.venue as SupportedBotTradingVenue;
+  const storedOrder = readPersistedStoredOrder(input);
   let referralFirstTrade = null;
   if (
     input.submitResult.status === "filled" &&
@@ -61,6 +78,7 @@ export async function applyOrderTradeEffects(
   let positionDeltaApplied = false;
   if (
     input.submitResult.status === "filled" &&
+    !storedOrder.positionDeltaApplied &&
     tokenId &&
     input.submitResult.size &&
     input.submitResult.price
@@ -76,6 +94,9 @@ export async function applyOrderTradeEffects(
         notionalUsd: input.submitResult.size * input.submitResult.price,
       });
       positionDeltaApplied = result.applied;
+      if (result.applied && storedOrder.id) {
+        await markOrderPositionDeltaApplied(ctx.pool, { id: storedOrder.id });
+      }
     } catch (error) {
       ctx.logger?.warn?.(
         { error, intentId: input.intent.id },
@@ -107,5 +128,8 @@ export async function applyOrderTradeEffects(
     notificationsCreated: input.submitResult.venueOrderId ? 1 : 0,
     referralFirstTrade,
     positionDeltaApplied,
+    raw: storedOrder.positionDeltaApplied
+      ? { positionDeltaAlreadyApplied: true }
+      : undefined,
   };
 }

@@ -25,6 +25,16 @@ function extractPayloadAddress(
   return null;
 }
 
+function hasPositionDeltaApplied(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  return Object.prototype.hasOwnProperty.call(
+    payload,
+    "_hunchPositionDeltaAppliedAt",
+  );
+}
+
 export async function findOrderVenueForUser(
   pool: Pool,
   inputs: { orderId: string; userId: string; walletAddress: string },
@@ -115,6 +125,7 @@ export type StoreOrderResult =
         venue_order_id: string;
         status: string;
         posted_at: Date;
+        position_delta_applied: boolean;
       };
     }
   | {
@@ -124,6 +135,7 @@ export type StoreOrderResult =
         venue_order_id: string;
         status: string;
         posted_at: Date;
+        position_delta_applied: boolean;
       };
     };
 
@@ -258,6 +270,9 @@ async function storeOrderInTx(
         venue_order_id: inputs.venueOrderId,
         status: existing.status ?? inputs.status,
         posted_at: existing.posted_at ?? inputs.postedAt ?? new Date(),
+        position_delta_applied: hasPositionDeltaApplied(
+          existing.order_payload,
+        ),
       },
     };
   }
@@ -310,7 +325,13 @@ async function storeOrderInTx(
     ],
   );
 
-  return { kind: "stored", order: result.rows[0] };
+  return {
+    kind: "stored",
+    order: {
+      ...result.rows[0],
+      position_delta_applied: false,
+    },
+  };
 }
 
 export async function storeOrder(
@@ -433,9 +454,9 @@ export async function findLimitlessHistoryMatch(
 export async function markOrderPositionDeltaApplied(
   pool: Pool,
   inputs: { id: string; appliedAt?: Date },
-): Promise<void> {
+): Promise<boolean> {
   const appliedAt = (inputs.appliedAt ?? new Date()).toISOString();
-  await pool.query(
+  const result = await pool.query(
     `
       update orders
       set
@@ -453,9 +474,16 @@ export async function markOrderPositionDeltaApplied(
             )
         end
       where id = $1
+        and not (
+          order_payload is not null
+          and jsonb_typeof(order_payload) = 'object'
+          and order_payload ? '_hunchPositionDeltaAppliedAt'
+        )
+      returning id
     `,
     [inputs.id, appliedAt],
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function deleteHistoryOrder(

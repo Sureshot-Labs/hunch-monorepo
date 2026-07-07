@@ -309,6 +309,7 @@ export type LimitlessAmmRecordRouteResult =
   | {
       ok: true;
       payload: {
+        dbOrderId: string;
         ok: true;
         orderId: string;
         referralFirstTrade?: unknown;
@@ -3774,6 +3775,7 @@ export async function recordLimitlessAmmOrder(input: {
   return {
     ok: true,
     payload: {
+      dbOrderId: stored.order.id,
       ok: true,
       orderId: venueOrderId,
       referralFirstTrade: referralFirstTrade ?? undefined,
@@ -4653,7 +4655,7 @@ async function persistTrade(
     }
     return {
       venue: "limitless",
-      orderId: null,
+      orderId: recorded.payload.dbOrderId,
       executionId: null,
       venueOrderId: recorded.payload.orderId,
       status: "filled",
@@ -4688,7 +4690,11 @@ async function persistTrade(
     rawError: null,
     orderPayload: {
       ...payload.orderPayload,
-      _hunchUpstream: input.submitResult.raw,
+      _hunchUpstream:
+        isRecord(input.submitResult.raw) &&
+        "payload" in input.submitResult.raw
+          ? input.submitResult.raw.payload
+          : input.submitResult.raw,
     },
     filledAt: input.submitResult.status === "filled" ? new Date() : null,
   });

@@ -583,6 +583,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "map_signals",
   "holder_research",
   "arbitrage_defaults",
+  "signal_bot",
 ]);
 
 export const adminIntelPolicyParamsSchema = z.object({

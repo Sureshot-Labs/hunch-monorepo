@@ -696,6 +696,14 @@ const tests: TestCase[] = [
       assert.match(submitBlock, /waitForPolymarketExecutionConfirmation/);
       assert.match(submitBlock, /POLYMARKET_UNCONFIRMED_STATUS/);
       assert.doesNotMatch(submitBlock, /venueOrderId:\s*payload\.orderHash/);
+
+      const persistBlock = sourceSlice(
+        polymarket,
+        "persistTrade: async (input) => {",
+        "applyTradeEffects: (input) => applyOrderTradeEffects",
+      );
+      assert.match(persistBlock, /orderPayloadVersion: "polymarket_clob_v2"/);
+      assert.doesNotMatch(persistBlock, /orderPayloadVersion: "v2"/);
     },
   },
   {
@@ -739,7 +747,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "bot order effects use persisted token and wallet context",
+    name: "bot order effects use persisted context and idempotency markers",
     run: () => {
       const effects = readFileSync(
         resolve(apiSrcDir, "services/api-trading-effects.ts"),
@@ -747,6 +755,9 @@ const tests: TestCase[] = [
       );
       assert.match(effects, /readPersistedRawField\(input, "tokenId"\)/);
       assert.match(effects, /readPersistedRawField\(input, "walletAddress"\)/);
+      assert.match(effects, /readPersistedStoredOrder/);
+      assert.match(effects, /positionDeltaApplied/);
+      assert.match(effects, /markOrderPositionDeltaApplied/);
 
       const polymarket = readFileSync(
         resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
@@ -822,6 +833,18 @@ const tests: TestCase[] = [
       );
       assert.match(recordBlock, /waitForEmbeddedEthereumTransactionReceipt/);
       assert.match(recordBlock, /statusCode: 409/);
+      assert.match(recordBlock, /dbOrderId: stored\.order\.id/);
+
+      const persistBlock = sourceSlice(
+        limitless,
+        "async function persistTrade(",
+        "async function applyLimitlessTradeEffects",
+      );
+      assert.match(persistBlock, /orderId: recorded\.payload\.dbOrderId/);
+      assert.match(
+        persistBlock,
+        /_hunchUpstream:\s*[\s\S]*input\.submitResult\.raw\.payload/,
+      );
 
       const embeddedEthereum = readFileSync(
         resolve(apiSrcDir, "services/embedded-ethereum.ts"),

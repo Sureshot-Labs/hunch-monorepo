@@ -1723,8 +1723,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(statements[0] ?? "", /expires_at <=/);
       assert.match(statements[1] ?? "", /venue_order_id IS NULL/);
+      assert.match(statements[1] ?? "", /prepared_snapshot = '\{\}'::jsonb/);
       assert.match(statements[2] ?? "", /venue_order_id IS NOT NULL/);
+      assert.match(statements[2] ?? "", /prepared_snapshot <> '\{\}'::jsonb/);
       assert.match(statements[2] ?? "", /status = 'submitted'/);
+      assert.match(statements[2] ?? "", /error_code = 'reconcile_required'/);
     },
   },
   {
@@ -2571,6 +2574,46 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.deepEqual(policy.tradingVenues, []);
       assert.equal(policy.tradingEnabled, true);
+    },
+  },
+  {
+    name: "signal bot trading policy preserves explicitly disabled buy actions",
+    run: () => {
+      const emptyActions = normalizeSignalBotPolicy({
+        tradingEnabled: true,
+        tradingActions: [],
+        tradingVenues: ["polymarket"],
+        buyAmountPresetsUsd: [10],
+        maxTradeAmountUsd: 50,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+        requireConfirmation: true,
+      });
+      assert.deepEqual(emptyActions.tradingActions, []);
+
+      const sellOnlyActions = normalizeSignalBotPolicy({
+        tradingEnabled: true,
+        tradingActions: ["sell"],
+        tradingVenues: ["polymarket"],
+        buyAmountPresetsUsd: [10],
+        maxTradeAmountUsd: 50,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+        requireConfirmation: true,
+      });
+      assert.deepEqual(sellOnlyActions.tradingActions, ["sell"]);
+
+      const buyActions = normalizeSignalBotPolicy({
+        tradingEnabled: true,
+        tradingActions: ["buy"],
+        tradingVenues: ["polymarket"],
+        buyAmountPresetsUsd: [10],
+        maxTradeAmountUsd: 50,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+        requireConfirmation: true,
+      });
+      assert.deepEqual(buyActions.tradingActions, ["buy"]);
     },
   },
   {

@@ -101,7 +101,13 @@ export function sanitizeSignalBotPolicyOverride(payload: unknown): unknown {
 export function normalizeSignalBotPolicy(
   policy: SignalBotPolicy,
 ): SignalBotPolicy {
-  const tradingActions: SignalBotTradingAction[] = ["buy"];
+  const tradingActions = Array.from(
+    new Set(
+      policy.tradingActions.filter(
+        (action) => signalBotTradingActionSchema.safeParse(action).success,
+      ),
+    ),
+  );
   const venues = Array.from(
     new Set(
       policy.tradingVenues.filter(

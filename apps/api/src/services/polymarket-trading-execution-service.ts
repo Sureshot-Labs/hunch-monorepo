@@ -6705,7 +6705,7 @@ export function createPolymarketTradingExecutionService(
         errorMessage: null,
         rawError: null,
         orderPayload: payload.orderPayload,
-        orderPayloadVersion: "v2",
+        orderPayloadVersion: "polymarket_clob_v2",
         orderHash: payload.orderHash,
         feePolicySnapshot: payload.feePolicySnapshot,
         filledAt: input.submitResult.status === "filled" ? new Date() : null,
