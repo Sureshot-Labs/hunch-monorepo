@@ -1084,6 +1084,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         body: request.body,
         log: request.log,
         pool,
+        settlementMode: "legacy_assume_filled",
         signer,
         userId: user.id,
       });
@@ -1092,7 +1093,11 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(result.payload);
       }
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send(result.payload);
+      return reply.send({
+        ok: result.payload.ok,
+        orderId: result.payload.orderId,
+        referralFirstTrade: result.payload.referralFirstTrade,
+      });
     },
   );
 

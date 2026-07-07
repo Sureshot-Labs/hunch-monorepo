@@ -9,11 +9,8 @@ import {
   normalizeLimitlessScopedTokenId,
 } from "../lib/limitless-token.js";
 import {
-  claimOrderPositionDeltaApplication,
-  clearOrderPositionDeltaApplicationClaim,
   expireStaleLimitlessFokOrders,
   fetchStoredOrderWalletContext,
-  markOrderPositionDeltaApplied,
   normalizeLimitlessFokOrderSizesForMarket,
   storeOrder,
 } from "../repos/orders-repo.js";
@@ -27,7 +24,7 @@ import {
   waitForEmbeddedEthereumTransactionReceipt,
 } from "./embedded-ethereum.js";
 import {
-  applyOptimisticPositionTrade,
+  applyOptimisticPositionTradeOnce,
   reconcileExactPositionBalance,
 } from "./positions-optimistic.js";
 import { upsertLimitlessVenueShareAccrualFromOrderPayload } from "./limitless-fee-accruals.js";
@@ -49,6 +46,7 @@ import {
   bestAskForToken,
   createCapability,
   createServerWalletClient,
+  executePreparedTradeLifecycle,
   getPrivyWalletId,
   hasServerWalletClientConfig,
   isOrderable,
@@ -3430,9 +3428,10 @@ export async function submitLimitlessClientSignedOrder(input: {
     let optimisticApplied = false;
     if (confirmedImmediateFill) {
       try {
-        const optimisticResult = await applyOptimisticPositionTrade(
+        const optimisticResult = await applyOptimisticPositionTradeOnce(
           input.pool,
           {
+            orderId: stored.order.id,
             userId: input.userId,
             walletAddress: signer,
             venue: "limitless",
@@ -3443,11 +3442,6 @@ export async function submitLimitlessClientSignedOrder(input: {
           },
         );
         optimisticApplied = optimisticResult.applied;
-        if (optimisticResult.applied) {
-          await markOrderPositionDeltaApplied(input.pool, {
-            id: stored.order.id,
-          });
-        }
       } catch (error) {
         input.log?.warn?.(
           {
@@ -3582,6 +3576,7 @@ export async function recordLimitlessAmmOrder(input: {
   log?: LimitlessRouteLogger | null;
   onchainConfirmed?: boolean;
   pool: ApiTradingApplicationServiceInput["pool"];
+  settlementMode?: "confirmed" | "legacy_assume_filled";
   signer: string;
   userId: string;
 }): Promise<LimitlessAmmRecordRouteResult> {
@@ -3615,8 +3610,10 @@ export async function recordLimitlessAmmOrder(input: {
   }
 
   const txHash = input.body.txHash;
-  let onchainConfirmed = input.onchainConfirmed === true;
-  if (input.onchainConfirmed !== true) {
+  const settlementMode = input.settlementMode ?? "confirmed";
+  let onchainConfirmed =
+    settlementMode === "legacy_assume_filled" || input.onchainConfirmed === true;
+  if (settlementMode === "confirmed" && input.onchainConfirmed !== true) {
     try {
       await waitForEmbeddedEthereumTransactionReceipt({
         chainId: LIMITLESS_CHAIN_ID,
@@ -3665,6 +3662,7 @@ export async function recordLimitlessAmmOrder(input: {
     orderPayload: {
       ...input.body,
       onchainConfirmed,
+      settlementMode,
       tokenId,
       price,
     },
@@ -3727,32 +3725,16 @@ export async function recordLimitlessAmmOrder(input: {
       );
     }
     try {
-      const claimId = crypto.randomUUID();
-      const claimed = await claimOrderPositionDeltaApplication(input.pool, {
-        id: stored.order.id,
-        claimId,
+      await applyOptimisticPositionTradeOnce(input.pool, {
+        orderId: stored.order.id,
+        userId: input.userId,
+        walletAddress: signer,
+        venue: "limitless",
+        tokenId,
+        side,
+        shares: size,
+        notionalUsd: fallbackNotional,
       });
-      if (claimed) {
-        const marked = await markOrderPositionDeltaApplied(input.pool, {
-          id: stored.order.id,
-        });
-        if (marked) {
-          await applyOptimisticPositionTrade(input.pool, {
-            userId: input.userId,
-            walletAddress: signer,
-            venue: "limitless",
-            tokenId,
-            side,
-            shares: size,
-            notionalUsd: fallbackNotional,
-          });
-        } else {
-          await clearOrderPositionDeltaApplicationClaim(input.pool, {
-            id: stored.order.id,
-            claimId,
-          });
-        }
-      }
     } catch (error) {
       input.log?.warn?.(
         {
@@ -4831,5 +4813,14 @@ export function createLimitlessTradingExecutionService(
     submitPreparedTrade: (input) => submitPreparedTrade(input.prepared),
     persistTrade: (input) => persistTrade(ctx, input),
     applyTradeEffects: (input) => applyLimitlessTradeEffects(ctx, input),
+    executePreparedTrade: (input) =>
+      executePreparedTradeLifecycle({
+        executeInput: input,
+        submitPreparedTrade: (submitInput) =>
+          submitPreparedTrade(submitInput.prepared),
+        persistTrade: (persistInput) => persistTrade(ctx, persistInput),
+        applyTradeEffects: (effectsInput) =>
+          applyLimitlessTradeEffects(ctx, effectsInput),
+      }),
   };
 }

@@ -23,6 +23,7 @@ import {
   applyOrderTradeEffects,
   createCapability,
   createServerWalletClient,
+  executePreparedTradeLifecycle,
   extractQuoteRaw,
   getPrivyWalletId,
   hasServerWalletClientConfig,
@@ -124,6 +125,8 @@ import {
   type PolymarketFunderExecutionKind,
 } from "./polymarket-max-spend.js";
 import type {
+  PersistedTrade,
+  PersistTradeInput,
   PreparedTrade,
   SubmitResult,
   TradeIntent,
@@ -6738,6 +6741,66 @@ async function submitPreparedTrade(
   };
 }
 
+async function persistTrade(
+  ctx: ApiTradingApplicationServiceInput,
+  input: PersistTradeInput,
+): Promise<PersistedTrade> {
+  const payload = input.prepared
+    ? parsePreparedPayload<PolymarketPreparedPayload>(
+        input.prepared,
+        "polymarket",
+      )
+    : null;
+  if (!payload || !input.submitResult.venueOrderId) {
+    throw tradingError({
+      code: "trade_submission_failed",
+      message: "Polymarket persistence requires a venue order id.",
+      venue: "polymarket",
+    });
+  }
+  const submitRawStatus = readString(
+    isRecord(input.submitResult.raw) ? input.submitResult.raw.status : null,
+  );
+  const storedStatus =
+    input.submitResult.status === "filled"
+      ? "matched"
+      : submitRawStatus === POLYMARKET_UNCONFIRMED_STATUS
+        ? POLYMARKET_UNCONFIRMED_STATUS
+        : "submitted";
+  const stored = await storeOrder(ctx.pool, {
+    userId: input.intent.actor.userId,
+    walletAddress: payload.positionWalletAddress,
+    signerAddress: input.intent.walletAddress,
+    venue: "polymarket",
+    venueOrderId: input.submitResult.venueOrderId,
+    tokenId: payload.tokenId,
+    side: "BUY",
+    orderType: "FOK",
+    price: payload.price,
+    size: payload.size,
+    status: storedStatus,
+    errorMessage: null,
+    rawError: null,
+    orderPayload: payload.orderPayload,
+    orderPayloadVersion: "polymarket_clob_v2",
+    orderHash: payload.orderHash,
+    feePolicySnapshot: payload.feePolicySnapshot,
+    filledAt: input.submitResult.status === "filled" ? new Date() : null,
+  });
+  return {
+    venue: "polymarket",
+    orderId: stored.order.id,
+    executionId: null,
+    venueOrderId: stored.order.venue_order_id,
+    status: stored.order.status,
+    raw: {
+      stored,
+      tokenId: payload.tokenId,
+      walletAddress: payload.positionWalletAddress,
+    },
+  };
+}
+
 export function createPolymarketTradingExecutionService(
   ctx: ApiTradingApplicationServiceInput,
 ): ApiVenueTradingExecutor {
@@ -6749,62 +6812,16 @@ export function createPolymarketTradingExecutionService(
     prepareTrade: (input) =>
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
     submitPreparedTrade: (input) => submitPreparedTrade(ctx, input.prepared),
-    persistTrade: async (input) => {
-      const payload = input.prepared
-        ? parsePreparedPayload<PolymarketPreparedPayload>(
-            input.prepared,
-            "polymarket",
-          )
-        : null;
-      if (!payload || !input.submitResult.venueOrderId) {
-        throw tradingError({
-          code: "trade_submission_failed",
-          message: "Polymarket persistence requires a venue order id.",
-          venue: "polymarket",
-        });
-      }
-      const submitRawStatus = readString(
-        isRecord(input.submitResult.raw) ? input.submitResult.raw.status : null,
-      );
-      const storedStatus =
-        input.submitResult.status === "filled"
-          ? "matched"
-          : submitRawStatus === POLYMARKET_UNCONFIRMED_STATUS
-            ? POLYMARKET_UNCONFIRMED_STATUS
-            : "submitted";
-      const stored = await storeOrder(ctx.pool, {
-        userId: input.intent.actor.userId,
-        walletAddress: payload.positionWalletAddress,
-        signerAddress: input.intent.walletAddress,
-        venue: "polymarket",
-        venueOrderId: input.submitResult.venueOrderId,
-        tokenId: payload.tokenId,
-        side: "BUY",
-        orderType: "FOK",
-        price: payload.price,
-        size: payload.size,
-        status: storedStatus,
-        errorMessage: null,
-        rawError: null,
-        orderPayload: payload.orderPayload,
-        orderPayloadVersion: "polymarket_clob_v2",
-        orderHash: payload.orderHash,
-        feePolicySnapshot: payload.feePolicySnapshot,
-        filledAt: input.submitResult.status === "filled" ? new Date() : null,
-      });
-      return {
-        venue: "polymarket",
-        orderId: stored.order.id,
-        executionId: null,
-        venueOrderId: stored.order.venue_order_id,
-        status: stored.order.status,
-        raw: {
-          stored,
-          tokenId: payload.tokenId,
-          walletAddress: payload.positionWalletAddress,
-        },
-      };
-    },
+    persistTrade: (input) => persistTrade(ctx, input),
     applyTradeEffects: (input) => applyOrderTradeEffects(ctx, input),
+    executePreparedTrade: (input) =>
+      executePreparedTradeLifecycle({
+        executeInput: input,
+        submitPreparedTrade: (submitInput) =>
+          submitPreparedTrade(ctx, submitInput.prepared),
+        persistTrade: (persistInput) => persistTrade(ctx, persistInput),
+        applyTradeEffects: (effectsInput) =>
+          applyOrderTradeEffects(ctx, effectsInput),
+      }),
   };
 }

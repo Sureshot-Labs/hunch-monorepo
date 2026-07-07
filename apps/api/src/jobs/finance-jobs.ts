@@ -28,11 +28,21 @@ import {
   runApiCacheWarm,
   type ApiCacheWarmJobOptions,
 } from "../api-cache-warm-runner.js";
-import { pool } from "../db.js";
+import { pool, type DbQuery } from "../db.js";
 import { reconcileStaleTelegramTradeIntents } from "../services/telegram-bot-trading.js";
 
 export type ReconcileTelegramTradeIntentsOptions = {
+  db?: DbQuery;
   executingGraceMs?: number;
+};
+
+export type ReconcileTelegramTradeIntentsJobSummary = {
+  expiredPending: number;
+  failedPreSubmitExecuting: number;
+  skipped?: boolean;
+  skipReason?: string;
+  submittedReconcileRequired: number;
+  unknownSubmitReconcileRequired: number;
 };
 
 function mergeOptions<T extends object>(base: T, overrides?: Partial<T>): T {
@@ -106,12 +116,62 @@ export async function runApiCacheWarmJob(
   return runApiCacheWarm(overrides);
 }
 
+export async function isTelegramTradeIntentReconcileSchemaReady(
+  db: DbQuery,
+): Promise<boolean> {
+  const result = await db.query<{
+    has_submit_started_at: boolean;
+    has_telegram_trade_intents: boolean;
+  }>(
+    `
+      select
+        exists (
+          select 1
+          from information_schema.tables
+          where table_schema = 'public'
+            and table_name = 'telegram_trade_intents'
+        ) as has_telegram_trade_intents,
+        exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'telegram_trade_intents'
+            and column_name = 'submit_started_at'
+        ) as has_submit_started_at
+    `,
+  );
+  const row = result.rows[0];
+  return Boolean(
+    row?.has_telegram_trade_intents && row.has_submit_started_at,
+  );
+}
+
 export async function runTelegramTradeIntentReconcileJob(
   overrides?: Partial<ReconcileTelegramTradeIntentsOptions>,
-) {
-  const summary = await reconcileStaleTelegramTradeIntents(pool, {
+): Promise<ReconcileTelegramTradeIntentsJobSummary> {
+  const db = overrides?.db ?? pool;
+  if (!(await isTelegramTradeIntentReconcileSchemaReady(db))) {
+    const summary = {
+      expiredPending: 0,
+      failedPreSubmitExecuting: 0,
+      skipped: true,
+      skipReason: "telegram_trade_intents_schema_not_ready",
+      submittedReconcileRequired: 0,
+      unknownSubmitReconcileRequired: 0,
+    } satisfies ReconcileTelegramTradeIntentsJobSummary;
+    console.warn(
+      "Skipping Telegram trade intents reconcile: schema is not ready.",
+    );
+    return summary;
+  }
+
+  const reconcileSummary = await reconcileStaleTelegramTradeIntents(db, {
     executingGraceMs: overrides?.executingGraceMs,
   });
+  const summary: ReconcileTelegramTradeIntentsJobSummary = {
+    ...reconcileSummary,
+    skipped: false,
+  };
   console.log(
     [
       "Reconcile Telegram trade intents",
@@ -119,6 +179,7 @@ export async function runTelegramTradeIntentReconcileJob(
       `failedPreSubmitExecuting=${summary.failedPreSubmitExecuting}`,
       `unknownSubmitReconcileRequired=${summary.unknownSubmitReconcileRequired}`,
       `submittedReconcileRequired=${summary.submittedReconcileRequired}`,
+      `skipped=${summary.skipped === true}`,
     ].join(" "),
   );
   return summary;

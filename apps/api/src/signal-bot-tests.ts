@@ -2336,8 +2336,31 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {
-          applyTradeEffects: async () => {
-            throw new Error("effects should not run");
+          executePreparedTrade: async (input: never) => {
+            const submitResult = {
+              venue: "polymarket",
+              status: "submitted" as const,
+              venueOrderId: "venue-order-1",
+              orderHash: "hash",
+              txSignature: null,
+              price: 0.5,
+              size: 20,
+            };
+            await (
+              input as {
+                onSubmitted?: (submitResult: unknown) => unknown;
+              }
+            ).onSubmitted?.(submitResult);
+            return {
+              submitResult,
+              persisted: null,
+              effects: null,
+              postSubmitError: {
+                code: "persistence_failed",
+                message: "store down",
+                statusCode: 500,
+              },
+            };
           },
           getReadiness: async () => ({
             ready: true,
@@ -2365,9 +2388,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             venue: "polymarket",
             raw: error,
           }),
-          persistTrade: async () => {
-            throw new Error("store down");
-          },
           prepareTrade: async (input: never) => ({
             preparedId: "prepared",
             venue: "polymarket",
@@ -2396,15 +2416,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               expiresAt: null,
             };
           },
-          submitPreparedTrade: async () => ({
-            venue: "polymarket",
-            status: "submitted",
-            venueOrderId: "venue-order-1",
-            orderHash: "hash",
-            txSignature: null,
-            price: 0.5,
-            size: 20,
-          }),
         } as never,
       });
       assert.equal(handled, true);
@@ -2548,6 +2559,28 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {
+          executePreparedTrade: async (input: never) => {
+            const submitResult = {
+              venue: "polymarket",
+              status: "no_fill" as const,
+              venueOrderId: null,
+              orderHash: null,
+              txSignature: null,
+              price: 0.5,
+              size: 0,
+            };
+            await (
+              input as {
+                onSubmitted?: (submitResult: unknown) => unknown;
+              }
+            ).onSubmitted?.(submitResult);
+            return {
+              submitResult,
+              persisted: null,
+              effects: null,
+              postSubmitError: null,
+            };
+          },
           getReadiness: async () => ({
             ready: true,
             executable: true,
@@ -2595,15 +2628,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             minReceiveShares: 20,
             fees: {},
             expiresAt: null,
-          }),
-          submitPreparedTrade: async () => ({
-            venue: "polymarket",
-            status: "no_fill",
-            venueOrderId: null,
-            orderHash: null,
-            txSignature: null,
-            price: 0.5,
-            size: 0,
           }),
         } as never,
       });

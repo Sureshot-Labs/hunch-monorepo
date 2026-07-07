@@ -2,11 +2,19 @@ import crypto from "node:crypto";
 import { ethers } from "ethers";
 
 import { isRecord } from "../lib/type-guards.js";
-import { TradingServiceError } from "./trading-errors.js";
+import { normalizeTradingError, TradingServiceError } from "./trading-errors.js";
 import type {
+  ApplyTradeEffectsInput,
+  ExecutedPreparedTrade,
+  ExecutePreparedTradeInput,
+  PersistedTrade,
+  PersistTradeInput,
   PreparedTrade,
+  SubmitPreparedTradeInput,
+  SubmitResult,
   TradeIntent,
   TradeQuote,
+  TradeEffectsResult,
   TradingVenue,
   VenueTradingCapabilities,
 } from "./trading-types.js";
@@ -52,6 +60,83 @@ export function tradingError(input: {
     statusCode: input.statusCode ?? 400,
     venue: input.venue ?? null,
   });
+}
+
+export function shouldPersistSubmitResult(submitResult: SubmitResult): boolean {
+  switch (submitResult.status) {
+    case "filled":
+    case "open":
+    case "submitted":
+      return true;
+    case "no_fill":
+      return Boolean(submitResult.venueOrderId);
+    case "cancelled":
+    case "failed":
+      return false;
+  }
+}
+
+export async function executePreparedTradeLifecycle(input: {
+  applyTradeEffects: (
+    effectsInput: ApplyTradeEffectsInput,
+  ) => Promise<TradeEffectsResult>;
+  executeInput: ExecutePreparedTradeInput;
+  persistTrade: (persistInput: PersistTradeInput) => Promise<PersistedTrade>;
+  submitPreparedTrade: (
+    submitInput: SubmitPreparedTradeInput,
+  ) => Promise<SubmitResult>;
+}): Promise<ExecutedPreparedTrade> {
+  const submitResult = await input.submitPreparedTrade({
+    now: input.executeInput.now,
+    prepared: input.executeInput.prepared,
+    signatures: input.executeInput.signatures,
+  });
+  await input.executeInput.onSubmitted?.(submitResult);
+  if (!shouldPersistSubmitResult(submitResult)) {
+    return {
+      submitResult,
+      persisted: null,
+      effects: null,
+      postSubmitError: null,
+    };
+  }
+
+  let persisted: PersistedTrade | null = null;
+  let effects: TradeEffectsResult | null = null;
+  try {
+    persisted = await input.persistTrade({
+      intent: input.executeInput.prepared.intent,
+      prepared: input.executeInput.prepared,
+      submitResult,
+    });
+    effects = await input.applyTradeEffects({
+      intent: input.executeInput.prepared.intent,
+      persisted,
+      submitResult,
+    });
+  } catch (error) {
+    const normalized = normalizeTradingError(error, {
+      message: "Trade submitted but local recording needs review.",
+      venue: input.executeInput.prepared.venue,
+    });
+    return {
+      submitResult,
+      persisted,
+      effects,
+      postSubmitError: {
+        code: normalized.code,
+        message: normalized.message,
+        statusCode: normalized.statusCode,
+      },
+    };
+  }
+
+  return {
+    submitResult,
+    persisted,
+    effects,
+    postSubmitError: null,
+  };
 }
 
 export function readString(value: unknown): string | null {

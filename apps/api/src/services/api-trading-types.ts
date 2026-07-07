@@ -2,6 +2,8 @@ import type { Pool } from "@hunch/infra";
 
 import type {
   ApplyTradeEffectsInput,
+  ExecutedPreparedTrade,
+  ExecutePreparedTradeInput,
   PersistedTrade,
   PersistTradeInput,
   PreparedTrade,
@@ -37,6 +39,9 @@ export type ApiBotTradingExecutor = {
   applyTradeEffects: (
     input: ApplyTradeEffectsInput,
   ) => Promise<TradeEffectsResult>;
+  executePreparedTrade: (
+    input: ExecutePreparedTradeInput,
+  ) => Promise<ExecutedPreparedTrade>;
   getReadiness: (input: TradingReadinessInput) => Promise<TradingReadiness>;
   listCapabilities: () => VenueTradingCapabilities[];
   normalizeError: (venue: TradingVenue, error: unknown) => TradingError;
@@ -53,6 +58,9 @@ export type ApiVenueTradingExecutor = {
     input: ApplyTradeEffectsInput,
   ) => Promise<TradeEffectsResult>;
   capabilities: () => VenueTradingCapabilities;
+  executePreparedTrade: (
+    input: ExecutePreparedTradeInput,
+  ) => Promise<ExecutedPreparedTrade>;
   getReadiness: (input: TradingReadinessInput) => Promise<TradingReadiness>;
   persistTrade: (input: PersistTradeInput) => Promise<PersistedTrade>;
   prepareTrade: (input: PrepareTradeInput) => Promise<PreparedTrade>;

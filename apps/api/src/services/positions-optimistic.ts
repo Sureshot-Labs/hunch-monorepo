@@ -31,6 +31,11 @@ export type OptimisticPositionTradeInput = {
   notionalUsd: number;
 };
 
+export type OptimisticPositionTradeOnceInput = OptimisticPositionTradeInput & {
+  appliedAt?: Date;
+  orderId: string;
+};
+
 export type OptimisticPositionTradeResult = {
   applied: boolean;
   reason?: string;
@@ -257,11 +262,152 @@ async function applySell(
   return { applied: true };
 }
 
+function normalizeOptimisticPositionTradeInput(
+  input: OptimisticPositionTradeInput,
+):
+  | { ok: true; tradeInput: OptimisticPositionTradeInput }
+  | { ok: false; result: OptimisticPositionTradeResult } {
+  const walletAddress = normalizeWalletForStorage(input.walletAddress);
+  const tokenId = input.tokenId.trim();
+  const shares = clampPositive(input.shares);
+  const notionalUsd = clampPositive(input.notionalUsd);
+
+  if (!walletAddress) {
+    return { ok: false, result: { applied: false, reason: "wallet_missing" } };
+  }
+  if (!tokenId) {
+    return { ok: false, result: { applied: false, reason: "token_missing" } };
+  }
+  if (shares == null) {
+    return { ok: false, result: { applied: false, reason: "shares_invalid" } };
+  }
+  if (notionalUsd == null) {
+    return {
+      ok: false,
+      result: { applied: false, reason: "notional_invalid" },
+    };
+  }
+
+  return {
+    ok: true,
+    tradeInput: {
+      ...input,
+      walletAddress,
+      tokenId,
+      shares,
+      notionalUsd,
+    },
+  };
+}
+
+async function applyPositionTradeDeltaInTx(
+  client: PoolClient,
+  tradeInput: OptimisticPositionTradeInput,
+): Promise<OptimisticPositionTradeResult> {
+  if (tradeInput.side === "BUY") {
+    return applyBuy(client, tradeInput);
+  }
+  return applySell(client, tradeInput);
+}
+
+async function recomputeOptimisticPositionMetrics(
+  pool: Pool,
+  tradeInput: OptimisticPositionTradeInput,
+): Promise<void> {
+  try {
+    await recomputePositionMetricsForWallet(pool, {
+      userId: tradeInput.userId,
+      walletAddress: tradeInput.walletAddress,
+      venue: tradeInput.venue,
+    });
+  } catch (error) {
+    console.error("Optimistic position metrics recompute failed", {
+      error,
+      userId: tradeInput.userId,
+      walletAddress: tradeInput.walletAddress,
+      venue: tradeInput.venue,
+      tokenId: tradeInput.tokenId,
+    });
+  }
+}
+
 export async function applyOptimisticPositionTrade(
   pool: Pool,
   input: OptimisticPositionTradeInput,
 ): Promise<OptimisticPositionTradeResult> {
   return applyPositionTradeDelta(pool, input);
+}
+
+export async function applyOptimisticPositionTradeOnce(
+  pool: Pool,
+  input: OptimisticPositionTradeOnceInput,
+): Promise<OptimisticPositionTradeResult> {
+  const normalized = normalizeOptimisticPositionTradeInput(input);
+  if (!normalized.ok) return normalized.result;
+  const { tradeInput } = normalized;
+  const appliedAt = (input.appliedAt ?? new Date()).toISOString();
+
+  const result = await withPositionMutationLock(
+    pool,
+    { userId: tradeInput.userId, venue: tradeInput.venue },
+    async (client: PoolClient) => {
+      const order = await client.query<{ position_delta_applied: boolean }>(
+        `
+          select coalesce(order_payload ? '_hunchPositionDeltaAppliedAt', false)
+            as position_delta_applied
+          from orders
+          where id = $1
+          for update
+        `,
+        [input.orderId],
+      );
+      if (order.rows.length === 0) {
+        return { applied: false, reason: "order_not_found" };
+      }
+      if (order.rows[0].position_delta_applied) {
+        return {
+          applied: false,
+          reason: "position_delta_already_applied",
+        };
+      }
+
+      const applyResult = await applyPositionTradeDeltaInTx(client, tradeInput);
+      if (!applyResult.applied) return applyResult;
+
+      await client.query(
+        `
+          update orders
+          set
+            order_payload = case
+              when order_payload is null then
+                jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+              when jsonb_typeof(order_payload) = 'object' then
+                (
+                  order_payload
+                  - '_hunchPositionDeltaApplyClaimId'
+                  - '_hunchPositionDeltaApplyClaimedAt'
+                ) || jsonb_build_object('_hunchPositionDeltaAppliedAt', $2::text)
+              else
+                jsonb_build_object(
+                  'payload',
+                  order_payload,
+                  '_hunchPositionDeltaAppliedAt',
+                  $2::text
+                )
+            end
+          where id = $1
+        `,
+        [input.orderId, appliedAt],
+      );
+
+      return applyResult;
+    },
+  );
+
+  if (result.applied) {
+    await recomputeOptimisticPositionMetrics(pool, tradeInput);
+  }
+  return result;
 }
 
 export async function applyVenueConfirmedPositionTrade(
@@ -435,54 +581,17 @@ async function applyPositionTradeDelta(
   pool: Pool,
   input: OptimisticPositionTradeInput,
 ): Promise<OptimisticPositionTradeResult> {
-  const walletAddress = normalizeWalletForStorage(input.walletAddress);
-  const tokenId = input.tokenId.trim();
-  const shares = clampPositive(input.shares);
-  const notionalUsd = clampPositive(input.notionalUsd);
-
-  if (!walletAddress) return { applied: false, reason: "wallet_missing" };
-  if (!tokenId) return { applied: false, reason: "token_missing" };
-  if (shares == null) return { applied: false, reason: "shares_invalid" };
-  if (notionalUsd == null) {
-    return { applied: false, reason: "notional_invalid" };
-  }
-
-  const tradeInput: OptimisticPositionTradeInput = {
-    ...input,
-    walletAddress,
-    tokenId,
-    shares,
-    notionalUsd,
-  };
+  const normalized = normalizeOptimisticPositionTradeInput(input);
+  if (!normalized.ok) return normalized.result;
+  const { tradeInput } = normalized;
 
   const result = await withPositionMutationLock(
     pool,
     { userId: tradeInput.userId, venue: tradeInput.venue },
-    async (client: PoolClient) => {
-      if (tradeInput.side === "BUY") {
-        return applyBuy(client, tradeInput);
-      }
-      return applySell(client, tradeInput);
-    },
+    (client: PoolClient) => applyPositionTradeDeltaInTx(client, tradeInput),
   );
 
   if (!result.applied) return result;
-
-  try {
-    await recomputePositionMetricsForWallet(pool, {
-      userId: tradeInput.userId,
-      walletAddress: tradeInput.walletAddress,
-      venue: tradeInput.venue,
-    });
-  } catch (error) {
-    console.error("Optimistic position metrics recompute failed", {
-      error,
-      userId: tradeInput.userId,
-      walletAddress: tradeInput.walletAddress,
-      venue: tradeInput.venue,
-      tokenId: tradeInput.tokenId,
-    });
-  }
-
+  await recomputeOptimisticPositionMetrics(pool, tradeInput);
   return result;
 }

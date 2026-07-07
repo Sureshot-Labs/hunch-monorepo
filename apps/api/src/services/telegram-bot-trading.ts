@@ -16,11 +16,9 @@ import {
 } from "./telegram-bot-trading-client.js";
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
 import type {
-  PersistedTrade,
   KalshiTradeEligibility,
   SubmitResult,
   TradeExecutionAuthorization,
-  TradeEffectsResult,
   TradeIntent,
   TradeTarget,
   TradingReadiness,
@@ -92,6 +90,11 @@ type TelegramBotMarketRow = {
   best_bid: string | null;
   best_ask: string | null;
   last_price: string | null;
+};
+
+type SubmittedTradeRefs = {
+  submitResult: SubmitResult;
+  venueOrderId: string | null;
 };
 
 type TelegramTradeIntentRow = {
@@ -1721,10 +1724,7 @@ export async function handleTelegramBotTradingCallback(
     maxSlippageBps: policy.maxSlippageBps,
     side,
   });
-  let submittedRefs: {
-    submitResult: SubmitResult;
-    venueOrderId: string | null;
-  } | null = null;
+  let submittedRefs: SubmittedTradeRefs | null = null;
   try {
     const quote = await trading.quote({ intent: sharedIntent });
     const prepared = await trading.prepareTrade({
@@ -1741,52 +1741,32 @@ export async function handleTelegramBotTradingCallback(
       result: { quote },
       status: "executing",
     });
-    const submitResult = await trading.submitPreparedTrade({ prepared });
-    const submitVenueOrderId =
-      submitResult.venueOrderId ?? submitResult.txSignature;
-    submittedRefs = {
-      submitResult,
-      venueOrderId: submitVenueOrderId,
-    };
-    await updateIntentStatus({
-      allowedStatuses: ["executing"],
-      db: input.db,
-      intentId: intent.id,
-      result: { quote, submitResult },
-      status: "executing",
-      txSignature: submitResult.txSignature,
-      venueOrderId: submitVenueOrderId,
-    });
-    const resolution = resolveSubmitIntentStatus(submitResult);
-    let persisted: PersistedTrade | null = null;
-    let effects: TradeEffectsResult | null = null;
-    let postSubmitError: {
-      code: string;
-      message: string;
-      statusCode: number;
-    } | null = null;
-    if (resolution.shouldPersist) {
-      try {
-        persisted = await trading.persistTrade({
-          intent: sharedIntent,
-          prepared,
+    const executed = await trading.executePreparedTrade({
+      prepared,
+      onSubmitted: async (submitResult) => {
+        const submitVenueOrderId =
+          submitResult.venueOrderId ?? submitResult.txSignature;
+        submittedRefs = {
           submitResult,
-        });
-        effects = await trading.applyTradeEffects({
-          intent: sharedIntent,
-          persisted,
-          submitResult,
-        });
-      } catch (error) {
-        const normalized = trading.normalizeError(intent.venue, error);
-        postSubmitError = {
-          code: normalized.code,
-          message: normalized.message,
-          statusCode: normalized.statusCode,
+          venueOrderId: submitVenueOrderId,
         };
-      }
-    }
-    const venueOrderId = persisted?.venueOrderId ?? submitVenueOrderId;
+        await updateIntentStatus({
+          allowedStatuses: ["executing"],
+          db: input.db,
+          intentId: intent.id,
+          result: { quote, submitResult },
+          status: "executing",
+          txSignature: submitResult.txSignature,
+          venueOrderId: submitVenueOrderId,
+        });
+      },
+    });
+    const { effects, persisted, postSubmitError, submitResult } = executed;
+    const resolution = resolveSubmitIntentStatus(submitResult);
+    const venueOrderId =
+      persisted?.venueOrderId ??
+      submitResult.venueOrderId ??
+      submitResult.txSignature;
     await updateIntentStatus({
       allowedStatuses: ["executing"],
       db: input.db,
@@ -1833,7 +1813,8 @@ export async function handleTelegramBotTradingCallback(
     });
   } catch (error) {
     const normalized = trading.normalizeError(intent.venue, error);
-    if (submittedRefs) {
+    const submitted = submittedRefs as SubmittedTradeRefs | null;
+    if (submitted) {
       await updateIntentStatus({
         allowedStatuses: ["executing"],
         db: input.db,
@@ -1842,12 +1823,12 @@ export async function handleTelegramBotTradingCallback(
         intentId: intent.id,
         result: {
           error: normalized,
-          submitResult: submittedRefs.submitResult,
+          submitResult: submitted.submitResult,
           venue: intent.venue,
         },
         status: "submitted",
-        txSignature: submittedRefs.submitResult.txSignature,
-        venueOrderId: submittedRefs.venueOrderId,
+        txSignature: submitted.submitResult.txSignature,
+        venueOrderId: submitted.venueOrderId,
       });
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
@@ -1862,9 +1843,7 @@ export async function handleTelegramBotTradingCallback(
             "Trade submitted.",
             `${intent.venue} · ${intent.market_title}`,
             `${side} · ${formatUsd(amountUsd)}`,
-            submittedRefs.venueOrderId
-              ? `Order: ${submittedRefs.venueOrderId}`
-              : null,
+            submitted.venueOrderId ? `Order: ${submitted.venueOrderId}` : null,
             "Hunch could not finish local recording. Check the app before retrying.",
           ]
             .filter((line): line is string => Boolean(line))

@@ -201,6 +201,26 @@ export type TradeEffectsResult = {
   raw?: unknown;
 };
 
+export type ExecutedPreparedTradeError = {
+  code: string;
+  message: string;
+  statusCode: number;
+};
+
+export type ExecutePreparedTradeInput = {
+  onSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
+  prepared: PreparedTrade;
+  signatures?: Array<{ id: string; signature: string }>;
+  now?: Date;
+};
+
+export type ExecutedPreparedTrade = {
+  submitResult: SubmitResult;
+  persisted: PersistedTrade | null;
+  effects: TradeEffectsResult | null;
+  postSubmitError: ExecutedPreparedTradeError | null;
+};
+
 export type TradingErrorCode =
   | "insufficient_readiness"
   | "invalid_trade_request"

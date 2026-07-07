@@ -465,6 +465,11 @@ const tests: TestCase[] = [
         "   * POST /orders/sync",
       );
       assert.match(limitlessAmmOrderBlock, /recordLimitlessAmmOrder/);
+      assert.match(
+        limitlessAmmOrderBlock,
+        /settlementMode: "legacy_assume_filled"/,
+      );
+      assert.match(limitlessAmmOrderBlock, /orderId: result\.payload\.orderId/);
       assert.doesNotMatch(limitlessAmmOrderBlock, /storeOrder/);
       assert.doesNotMatch(
         limitlessAmmOrderBlock,
@@ -699,11 +704,20 @@ const tests: TestCase[] = [
 
       const persistBlock = sourceSlice(
         polymarket,
-        "persistTrade: async (input) => {",
-        "applyTradeEffects: (input) => applyOrderTradeEffects",
+        "async function persistTrade(",
+        "export function createPolymarketTradingExecutionService",
       );
       assert.match(persistBlock, /orderPayloadVersion: "polymarket_clob_v2"/);
       assert.doesNotMatch(persistBlock, /orderPayloadVersion: "v2"/);
+
+      const executorBlock = sourceSlice(
+        polymarket,
+        "export function createPolymarketTradingExecutionService",
+        "};\n}",
+      );
+      assert.match(executorBlock, /executePreparedTradeLifecycle/);
+      assert.match(executorBlock, /persistTrade\(ctx, persistInput\)/);
+      assert.match(executorBlock, /applyOrderTradeEffects\(ctx, effectsInput\)/);
     },
   },
   {
@@ -757,18 +771,15 @@ const tests: TestCase[] = [
       assert.match(effects, /readPersistedRawField\(input, "walletAddress"\)/);
       assert.match(effects, /readPersistedStoredOrder/);
       assert.match(effects, /positionDeltaApplied/);
-      assert.match(effects, /claimOrderPositionDeltaApplication/);
-      assert.match(effects, /clearOrderPositionDeltaApplicationClaim/);
-      assert.match(effects, /markOrderPositionDeltaApplied/);
+      assert.match(effects, /applyOptimisticPositionTradeOnce/);
+      assert.doesNotMatch(effects, /claimOrderPositionDeltaApplication/);
+      assert.doesNotMatch(effects, /clearOrderPositionDeltaApplicationClaim/);
       const optimisticApplyBlock = sourceSlice(
         effects,
-        "const claimed = await claimOrderPositionDeltaApplication",
+        "const result = await applyOptimisticPositionTradeOnce",
         'if (input.submitResult.venueOrderId)',
       );
-      assert.ok(
-        optimisticApplyBlock.indexOf("markOrderPositionDeltaApplied") <
-          optimisticApplyBlock.indexOf("applyOptimisticPositionTrade"),
-      );
+      assert.match(optimisticApplyBlock, /orderId: storedOrder\.id/);
 
       const polymarket = readFileSync(
         resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
@@ -782,6 +793,49 @@ const tests: TestCase[] = [
       assert.match(polymarket, /walletAddress: payload\.positionWalletAddress/);
       assert.match(limitless, /tokenId: payload\.tokenId/);
       assert.match(limitless, /walletAddress: input\.intent\.walletAddress/);
+    },
+  },
+  {
+    name: "Telegram confirm delegates executable lifecycle to shared executor",
+    run: () => {
+      const telegramTrading = readFileSync(
+        resolve(apiSrcDir, "services/telegram-bot-trading.ts"),
+        "utf8",
+      );
+      const confirmLifecycleBlock = sourceSlice(
+        telegramTrading,
+        "const quote = await trading.quote({ intent: sharedIntent });",
+        "const resolution = resolveSubmitIntentStatus(submitResult);",
+      );
+      assert.match(confirmLifecycleBlock, /trading\.prepareTrade/);
+      assert.match(confirmLifecycleBlock, /trading\.executePreparedTrade/);
+      assert.match(confirmLifecycleBlock, /onSubmitted/);
+      assert.doesNotMatch(confirmLifecycleBlock, /trading\.submitPreparedTrade/);
+      assert.doesNotMatch(confirmLifecycleBlock, /trading\.persistTrade/);
+      assert.doesNotMatch(confirmLifecycleBlock, /trading\.applyTradeEffects/);
+    },
+  },
+  {
+    name: "optimistic position effects mark orders atomically with mutation",
+    run: () => {
+      const optimistic = readFileSync(
+        resolve(apiSrcDir, "services/positions-optimistic.ts"),
+        "utf8",
+      );
+      const onceBlock = sourceSlice(
+        optimistic,
+        "export async function applyOptimisticPositionTradeOnce(",
+        "export async function applyVenueConfirmedPositionTrade(",
+      );
+      assert.match(onceBlock, /withPositionMutationLock/);
+      assert.match(onceBlock, /from orders/);
+      assert.match(onceBlock, /for update/);
+      assert.match(onceBlock, /applyPositionTradeDeltaInTx/);
+      assert.match(onceBlock, /_hunchPositionDeltaAppliedAt/);
+      assert.ok(
+        onceBlock.indexOf("applyPositionTradeDeltaInTx") <
+          onceBlock.indexOf("update orders"),
+      );
     },
   },
   {
@@ -908,6 +962,8 @@ const tests: TestCase[] = [
         "function isLimitlessAmmMarket",
       );
       assert.match(recordBlock, /waitForEmbeddedEthereumTransactionReceipt/);
+      assert.match(recordBlock, /settlementMode === "legacy_assume_filled"/);
+      assert.match(recordBlock, /settlementMode === "confirmed"/);
       assert.match(
         recordBlock,
         /Limitless AMM transaction not confirmed yet; recording pending order/,

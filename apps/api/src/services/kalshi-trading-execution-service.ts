@@ -11,6 +11,7 @@ import {
   amountUsd,
   createCapability,
   createServerWalletClient,
+  executePreparedTradeLifecycle,
   extractQuoteRaw,
   getPrivyWalletId,
   hasServerWalletClientConfig,
@@ -49,9 +50,11 @@ import {
   resolveKalshiExecutionSettlementStatus,
 } from "./kalshi-executions.js";
 import type {
+  ApplyTradeEffectsInput,
   PersistedTrade,
   PreparedTrade,
   SubmitResult,
+  TradeEffectsResult,
   TradeIntent,
   KalshiTradeEligibility,
   TradeQuote,
@@ -807,6 +810,27 @@ async function persistTrade(
   };
 }
 
+async function applyKalshiTradeEffects(
+  ctx: ApiTradingApplicationServiceInput,
+  input: ApplyTradeEffectsInput,
+): Promise<TradeEffectsResult> {
+  if (!input.persisted.executionId || !isRecord(input.persisted.raw)) {
+    return { ok: true, notificationsCreated: 0 };
+  }
+  const effects = await finalizeKalshiExecutionEffects(ctx.pool, {
+    execution: input.persisted.raw as Parameters<
+      typeof finalizeKalshiExecutionEffects
+    >[1]["execution"],
+    purpose: "trade",
+    logger: ctx.logger,
+  });
+  return {
+    ok: true,
+    referralFirstTrade: effects.referralFirstTrade,
+    raw: effects,
+  };
+}
+
 export function createKalshiTradingExecutionService(
   ctx: ApiTradingApplicationServiceInput,
 ): ApiVenueTradingExecutor {
@@ -819,22 +843,15 @@ export function createKalshiTradingExecutionService(
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
     submitPreparedTrade: (input) => submitPreparedTrade(input.prepared),
     persistTrade: (input) => persistTrade(ctx, input),
-    applyTradeEffects: async (input) => {
-      if (!input.persisted.executionId || !isRecord(input.persisted.raw)) {
-        return { ok: true, notificationsCreated: 0 };
-      }
-      const effects = await finalizeKalshiExecutionEffects(ctx.pool, {
-        execution: input.persisted.raw as Parameters<
-          typeof finalizeKalshiExecutionEffects
-        >[1]["execution"],
-        purpose: "trade",
-        logger: ctx.logger,
-      });
-      return {
-        ok: true,
-        referralFirstTrade: effects.referralFirstTrade,
-        raw: effects,
-      };
-    },
+    applyTradeEffects: (input) => applyKalshiTradeEffects(ctx, input),
+    executePreparedTrade: (input) =>
+      executePreparedTradeLifecycle({
+        executeInput: input,
+        submitPreparedTrade: (submitInput) =>
+          submitPreparedTrade(submitInput.prepared),
+        persistTrade: (persistInput) => persistTrade(ctx, persistInput),
+        applyTradeEffects: (effectsInput) =>
+          applyKalshiTradeEffects(ctx, effectsInput),
+      }),
   };
 }

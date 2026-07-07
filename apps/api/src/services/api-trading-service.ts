@@ -60,6 +60,10 @@ export function createApiTradingApplicationService(
   return {
     applyTradeEffects: (effectsInput) =>
       executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
+    executePreparedTrade: (executeInput) =>
+      executorFor(executeInput.prepared.venue).executePreparedTrade(
+        executeInput,
+      ),
     getReadiness: (readinessInput) =>
       executorFor(readinessInput.venue).getReadiness(readinessInput),
     listCapabilities: () =>

@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { tryRecordReferralFirstTradeConversion } from "./analytics-referrals.js";
 import type {
   ApiTradingApplicationServiceInput,
@@ -9,12 +7,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
-import { applyOptimisticPositionTrade } from "./positions-optimistic.js";
-import {
-  claimOrderPositionDeltaApplication,
-  clearOrderPositionDeltaApplicationClaim,
-  markOrderPositionDeltaApplied,
-} from "../repos/orders-repo.js";
+import { applyOptimisticPositionTradeOnce } from "./positions-optimistic.js";
 import type {
   ApplyTradeEffectsInput,
   TradeEffectsResult,
@@ -91,42 +84,26 @@ export async function applyOrderTradeEffects(
     input.submitResult.size &&
     input.submitResult.price
   ) {
-    const claimId = crypto.randomUUID();
-    const claimed = await claimOrderPositionDeltaApplication(ctx.pool, {
-      id: storedOrder.id,
-      claimId,
-    });
-    if (!claimed) {
-      positionDeltaAlreadyClaimed = true;
-    } else {
-      try {
-        const marked = await markOrderPositionDeltaApplied(ctx.pool, {
-          id: storedOrder.id,
-        });
-        if (!marked) {
-          positionDeltaAlreadyClaimed = true;
-          await clearOrderPositionDeltaApplicationClaim(ctx.pool, {
-            id: storedOrder.id,
-            claimId,
-          });
-        } else {
-          const result = await applyOptimisticPositionTrade(ctx.pool, {
-            userId: input.intent.actor.userId,
-            walletAddress,
-            venue,
-            tokenId,
-            side: "BUY",
-            shares: input.submitResult.size,
-            notionalUsd: input.submitResult.size * input.submitResult.price,
-          });
-          positionDeltaApplied = result.applied;
-        }
-      } catch (error) {
-        ctx.logger?.warn?.(
-          { error, intentId: input.intent.id },
-          "Bot trading optimistic position update failed",
-        );
+    try {
+      const result = await applyOptimisticPositionTradeOnce(ctx.pool, {
+        orderId: storedOrder.id,
+        userId: input.intent.actor.userId,
+        walletAddress,
+        venue,
+        tokenId,
+        side: "BUY",
+        shares: input.submitResult.size,
+        notionalUsd: input.submitResult.size * input.submitResult.price,
+      });
+      positionDeltaApplied = result.applied;
+      if (result.reason === "position_delta_already_applied") {
+        positionDeltaAlreadyClaimed = true;
       }
+    } catch (error) {
+      ctx.logger?.warn?.(
+        { error, intentId: input.intent.id },
+        "Bot trading optimistic position update failed",
+      );
     }
   }
 
