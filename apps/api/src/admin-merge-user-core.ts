@@ -1,6 +1,8 @@
+import type { Pool, PoolClient } from "pg";
+
 import { pool } from "./db.js";
 
-type UserRow = {
+export type UserRow = {
   id: string;
   email: string | null;
   username: string | null;
@@ -43,6 +45,11 @@ export type MergeSummary = {
   ordersMoved: number;
   orderLogsMoved: number;
   bridgeOrdersMoved: number;
+  telegramAccountsMoved: number;
+  telegramAccountsConflictBlocked: number;
+  telegramBotTradingAuthorizationsDropped: number;
+  telegramBotTradingAuthorizationsMoved: number;
+  telegramTradeIntentsMoved: number;
   referralsReferredDeduped: number;
   referralsReferredMoved: number;
   referralsReferrerDeduped: number;
@@ -62,8 +69,33 @@ export type MergeResult = {
   dryRun: boolean;
 };
 
-export async function fetchUser(userId: string): Promise<UserRow | null> {
-  const { rows } = await pool.query<UserRow>(
+type MergeDb = Pick<Pool, "connect" | "query">;
+
+type TelegramAccountRow = {
+  telegram_user_id: string;
+};
+
+async function fetchTelegramAccountForMerge(
+  client: Pick<PoolClient, "query">,
+  userId: string,
+): Promise<TelegramAccountRow | null> {
+  const { rows } = await client.query<TelegramAccountRow>(
+    `
+      select telegram_user_id
+      from user_telegram_accounts
+      where user_id = $1
+      limit 1
+    `,
+    [userId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function fetchUser(
+  userId: string,
+  db: Pick<Pool, "query"> = pool,
+): Promise<UserRow | null> {
+  const { rows } = await db.query<UserRow>(
     `
       select id,
              email,
@@ -88,13 +120,14 @@ export async function mergeUsersById(
   sourceId: string,
   targetId: string,
   options: MergeOptions,
+  db: MergeDb = pool,
 ): Promise<MergeResult> {
   if (sourceId === targetId) {
     throw new Error("Source and target must be different users");
   }
 
-  const source = await fetchUser(sourceId);
-  const target = await fetchUser(targetId);
+  const source = await fetchUser(sourceId, db);
+  const target = await fetchUser(targetId, db);
 
   if (!source) {
     throw new Error(`Source user not found (${sourceId})`);
@@ -103,15 +136,16 @@ export async function mergeUsersById(
     throw new Error(`Target user not found (${targetId})`);
   }
 
-  return mergeUsers(source, target, options);
+  return mergeUsers(source, target, options, db);
 }
 
 export async function mergeUsers(
   source: UserRow,
   target: UserRow,
   options: MergeOptions,
+  db: MergeDb = pool,
 ): Promise<MergeResult> {
-  const client = await pool.connect();
+  const client = await db.connect();
   const summary: MergeSummary = {
     walletsInserted: 0,
     venueCredsDeduped: 0,
@@ -137,6 +171,11 @@ export async function mergeUsers(
     ordersMoved: 0,
     orderLogsMoved: 0,
     bridgeOrdersMoved: 0,
+    telegramAccountsMoved: 0,
+    telegramAccountsConflictBlocked: 0,
+    telegramBotTradingAuthorizationsDropped: 0,
+    telegramBotTradingAuthorizationsMoved: 0,
+    telegramTradeIntentsMoved: 0,
     referralsReferredDeduped: 0,
     referralsReferredMoved: 0,
     referralsReferrerDeduped: 0,
@@ -433,6 +472,66 @@ export async function mergeUsers(
       (
         await client.query(
           `update bridge_orders set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    const sourceTelegramAccount = await fetchTelegramAccountForMerge(
+      client,
+      source.id,
+    );
+    const targetTelegramAccount = await fetchTelegramAccountForMerge(
+      client,
+      target.id,
+    );
+    if (
+      sourceTelegramAccount &&
+      targetTelegramAccount &&
+      sourceTelegramAccount.telegram_user_id !==
+        targetTelegramAccount.telegram_user_id
+    ) {
+      summary.telegramAccountsConflictBlocked = 1;
+      throw new Error(
+        "Cannot merge users with different linked Telegram accounts; unlink or resolve the Telegram account before merging",
+      );
+    }
+
+    if (sourceTelegramAccount && !targetTelegramAccount) {
+      if (options.keepSource) {
+        summary.telegramAccountsConflictBlocked = 1;
+      } else {
+        summary.telegramAccountsMoved =
+          (
+            await client.query(
+              `
+              update user_telegram_accounts
+              set user_id = $1,
+                  updated_at = now()
+              where user_id = $2
+            `,
+              [target.id, source.id],
+            )
+          ).rowCount ?? 0;
+
+        summary.telegramBotTradingAuthorizationsMoved =
+          (
+            await client.query(
+              `
+              update telegram_bot_trading_authorizations
+              set user_id = $1,
+                  updated_at = now()
+              where user_id = $2
+            `,
+              [target.id, source.id],
+            )
+          ).rowCount ?? 0;
+      }
+    }
+
+    summary.telegramTradeIntentsMoved =
+      (
+        await client.query(
+          `update telegram_trade_intents set user_id = $1 where user_id = $2`,
           [target.id, source.id],
         )
       ).rowCount ?? 0;
