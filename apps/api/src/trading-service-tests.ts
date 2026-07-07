@@ -836,6 +836,16 @@ const tests: TestCase[] = [
         onceBlock.indexOf("applyPositionTradeDeltaInTx") <
           onceBlock.indexOf("update orders"),
       );
+
+      const limitlessHistory = readFileSync(
+        resolve(apiSrcDir, "services/limitless-history.ts"),
+        "utf8",
+      );
+      assert.match(limitlessHistory, /applyOptimisticPositionTradeOnce/);
+      assert.doesNotMatch(
+        limitlessHistory,
+        /markOrderPositionDeltaApplied/,
+      );
     },
   },
   {
@@ -851,6 +861,10 @@ const tests: TestCase[] = [
       );
       const kalshi = readFileSync(
         resolve(apiSrcDir, "services/kalshi-trading-execution-service.ts"),
+        "utf8",
+      );
+      const dflowRoute = readFileSync(
+        resolve(apiSrcDir, "routes/dflow-private.ts"),
         "utf8",
       );
 
@@ -882,6 +896,25 @@ const tests: TestCase[] = [
       assert.match(kalshi, /resolveKalshiExecutionSettlementStatus/);
       assert.match(kalshi, /clientStatus/);
       assert.match(kalshi, /executionStatus = "submitted"/);
+      assert.match(dflowRoute, /statusMode: "legacy_client_status"/);
+      const kalshiRecordBlock = sourceSlice(
+        kalshi,
+        "export async function recordKalshiDflowExecutionRoute(",
+        "function requireFreshKalshiEligibility(",
+      );
+      assert.match(
+        kalshiRecordBlock,
+        /statusMode\?: "legacy_client_status" \| "verified"/,
+      );
+      assert.match(
+        kalshiRecordBlock,
+        /const statusMode = input\.statusMode \?\? "verified"/,
+      );
+      assert.match(kalshiRecordBlock, /statusMode === "verified" && txSignature/);
+      assert.match(
+        kalshiRecordBlock,
+        /statusMode === "verified" && isClientTerminal/,
+      );
     },
   },
   {

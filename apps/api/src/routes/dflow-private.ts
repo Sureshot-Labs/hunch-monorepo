@@ -809,6 +809,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
           body,
           logger: app.log,
           pool,
+          statusMode: "legacy_client_status",
           userId: user.id,
           walletAddress: executionWalletAddress,
         });

@@ -6,8 +6,10 @@ import type { Pool } from "@hunch/infra";
 import {
   claimOrderPositionDeltaApplication,
   clearOrderPositionDeltaApplicationClaim,
+  findLimitlessHistoryMatch,
   markOrderPositionDeltaApplied,
   storeOrder,
+  updateOrderFromHistory,
 } from "./repos/orders-repo.js";
 import { fetchUnifiedOrders } from "./repos/unified-orders.js";
 
@@ -65,6 +67,125 @@ await test("position delta application uses an atomic claim marker", async () =>
   assert.match(capturedSql[1] ?? "", /order_payload = order_payload/);
   assert.match(capturedSql[1] ?? "", /_hunchPositionDeltaApplyClaimId/);
   assert.doesNotMatch(capturedSql.join("\n"), /\blast_update\s*=/i);
+});
+
+await test("Limitless history matching detects nested position delta markers", async () => {
+  let capturedSql = "";
+  const pool = {
+    query: async (sql: string) => {
+      capturedSql = sql;
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: "order-1",
+            venue_order_id: "venue-order-1",
+            status: "filled",
+            posted_at: new Date("2026-05-17T00:00:00.000Z"),
+            position_delta_applied: true,
+          },
+        ],
+      };
+    },
+  } as unknown as Pool;
+
+  const match = await findLimitlessHistoryMatch(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    tokenId: "token-1",
+    side: "BUY",
+    orderType: "FOK",
+    postedAt: new Date("2026-05-17T00:00:00.000Z"),
+  });
+
+  assert.equal(match?.positionDeltaApplied, true);
+  assert.match(capturedSql, /order_payload->'submitted'/);
+  assert.match(capturedSql, /order_payload->'payload'/);
+  assert.match(capturedSql, /order_payload->'submitted'->'payload'/);
+});
+
+await test("updateOrderFromHistory preserves position marker when wrapping payload", async () => {
+  let capturedSql = "";
+  const pool = {
+    query: async (sql: string) => {
+      capturedSql = sql;
+      return { rowCount: 1, rows: [] };
+    },
+  } as unknown as Pool;
+
+  await updateOrderFromHistory(pool, {
+    id: "order-1",
+    status: "filled",
+    price: 0.5,
+    size: 10,
+    filledAt: new Date("2026-05-17T00:00:00.000Z"),
+    lastUpdate: new Date("2026-05-17T00:00:00.000Z"),
+    orderHash: "hash",
+    orderPayload: { id: "history-order-1" },
+  });
+
+  assert.match(capturedSql, /jsonb_build_object\('submitted'/);
+  assert.match(capturedSql, /'_hunchPositionDeltaAppliedAt'/);
+  assert.match(capturedSql, /order_payload->'submitted'->'payload'/);
+});
+
+await test("storeOrder reads nested position delta markers on existing orders", async () => {
+  const client = {
+    query: async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/from orders/i.test(sql)) {
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: "order-1",
+              wallet_address: "0x0000000000000000000000000000000000000001",
+              signer_address: "0x0000000000000000000000000000000000000001",
+              price: 0.5,
+              size: 10,
+              status: "filled",
+              posted_at: new Date("2026-05-17T00:00:00.000Z"),
+              order_payload: {
+                submitted: {
+                  _hunchPositionDeltaAppliedAt:
+                    "2026-05-17T00:00:00.000Z",
+                },
+                history: {},
+              },
+              order_payload_version: null,
+              fee_policy_snapshot: null,
+            },
+          ],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+  const pool = {
+    connect: async () => client,
+  } as unknown as Pool;
+
+  const result = await storeOrder(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    signerAddress: "0x0000000000000000000000000000000000000001",
+    venue: "limitless",
+    venueOrderId: "venue-order-1",
+    tokenId: "token-1",
+    side: "BUY",
+    orderType: "FOK",
+    price: 0.5,
+    size: 10,
+    status: "filled",
+    errorMessage: null,
+    rawError: null,
+  });
+
+  assert.equal(result.kind, "exists");
+  assert.equal(result.order.position_delta_applied, true);
 });
 
 await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders visible", async () => {

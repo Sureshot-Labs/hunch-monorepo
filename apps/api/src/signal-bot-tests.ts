@@ -2642,6 +2642,203 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "trading confirm stops if intent changes before submit",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const updateAttempts: Array<{
+        preparedSnapshot: boolean;
+        status: unknown;
+      }> = [];
+      let executeCalls = 0;
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/from runtime_policies/i.test(sql)) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  payload: {
+                    tradingEnabled: true,
+                    tradingActions: ["buy"],
+                    tradingVenues: ["polymarket"],
+                    buyAmountPresetsUsd: [10],
+                    maxTradeAmountUsd: 50,
+                    maxSlippageBps: 500,
+                    intentTtlSec: 120,
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_trade_intents i")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  telegram_user_id: "999",
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
+                  chat_id: "999",
+                  telegram_message_id: null,
+                  action: "buy",
+                  venue: "polymarket",
+                  market_id: "market-1",
+                  event_id: "event-1",
+                  side: "YES",
+                  amount_usd: "10",
+                  status: "confirming",
+                  quote_snapshot: {},
+                  policy_snapshot: {},
+                  expires_at: new Date(Date.now() + 60_000),
+                  market_title: "Market",
+                  market_status: "ACTIVE",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_bot_trading_authorizations a")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "authorization-1",
+                  user_id: "user-1",
+                  telegram_user_id: "999",
+                  privy_user_id: "privy-1",
+                  wallet_address: "0x0000000000000000000000000000000000000001",
+                  wallet_chain: "ethereum",
+                  privy_wallet_id: "wallet-1",
+                  enabled: true,
+                  enabled_venues: ["polymarket"],
+                  max_amount_usd: "50",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM unified_markets m")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "market-1",
+                  venue: "polymarket",
+                  venue_market_id: "venue-market-1",
+                  event_id: "event-1",
+                  event_title: "Event",
+                  title: "Market",
+                  status: "ACTIVE",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  metadata: {},
+                  close_time: new Date(Date.now() + 60_000),
+                  expiration_time: null,
+                  event_end_time: null,
+                  best_bid: "0.4",
+                  best_ask: "0.6",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (
+            sql.includes("UPDATE telegram_trade_intents") &&
+            sql.includes("SET status = $2")
+          ) {
+            const hasPreparedSnapshot = params?.[10] != null;
+            updateAttempts.push({
+              status: params?.[1],
+              preparedSnapshot: hasPreparedSnapshot,
+            });
+            return hasPreparedSnapshot
+              ? { rowCount: 0, rows: [] }
+              : { rowCount: 1, rows: [{ id: params?.[0] }] };
+          }
+          if (sql.includes("UPDATE telegram_trade_intents")) {
+            return { rowCount: 1, rows: [{ id: params?.[0] }] };
+          }
+          return { rowCount: 0, rows: [] };
+        },
+      };
+      const handled = await handleTelegramBotTradingCallback({
+        answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+        appBaseUrl: "https://app.hunch.trade",
+        callbackQuery: {
+          data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+          from: { id: 999 },
+          id: "callback-1",
+        },
+        db: db as never,
+        sendMessage: (message) => telegram.sendMessage(message as never),
+        trading: {
+          executePreparedTrade: async () => {
+            executeCalls += 1;
+            throw new Error("execute must not be called");
+          },
+          getReadiness: async () => ({
+            ready: true,
+            executable: true,
+            reasonCode: null,
+            message: null,
+            setupRequired: false,
+            capabilities: {
+              venue: "polymarket",
+              supportsBuy: true,
+              supportsSell: false,
+              supportsCancel: false,
+              supportsOrderSync: false,
+              supportsPositionSync: false,
+              supportsExecutionSync: false,
+              supportsSetup: false,
+              authorizationModes: ["server_delegated"],
+            },
+          }),
+          normalizeError: (_venue: string, error: unknown) => ({
+            code: "fake_error",
+            message: error instanceof Error ? error.message : "fake error",
+            statusCode: 500,
+            venue: "polymarket",
+            raw: error,
+          }),
+          prepareTrade: async (input: never) => ({
+            preparedId: "prepared",
+            venue: "polymarket",
+            intent: (input as { intent: unknown }).intent,
+            quote: null,
+            authorizationMode: "server_delegated",
+            authorizationRequests: [],
+            venuePayload: {},
+            expiresAt: null,
+          }),
+          quote: async (input: never) => ({
+            venue: "polymarket",
+            target: (input as { intent: { target: unknown } }).intent.target,
+            action: "BUY",
+            amount: { type: "usd", value: "10" },
+            price: 0.5,
+            estimatedShares: 20,
+            estimatedNotionalUsd: 10,
+            maxSpendUsd: 10,
+            minReceiveShares: 20,
+            fees: {},
+            expiresAt: null,
+          }),
+        } as never,
+      });
+
+      assert.equal(handled, true);
+      assert.equal(executeCalls, 0);
+      assert.deepEqual(updateAttempts, [
+        { status: "executing", preparedSnapshot: false },
+        { status: "executing", preparedSnapshot: true },
+      ]);
+      assert.match(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /no longer active/,
+      );
+      assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
     name: "signal bot trading policy preserves explicitly empty venues",
     run: () => {
       const policy = normalizeSignalBotPolicy({
@@ -2683,7 +2880,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         intentTtlSec: 120,
         requireConfirmation: true,
       });
-      assert.deepEqual(sellOnlyActions.tradingActions, ["sell"]);
+      assert.deepEqual(sellOnlyActions.tradingActions, []);
+      assert.equal(sellOnlyActions.requireConfirmation, true);
 
       const buyActions = normalizeSignalBotPolicy({
         tradingEnabled: true,
@@ -2696,6 +2894,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         requireConfirmation: true,
       });
       assert.deepEqual(buyActions.tradingActions, ["buy"]);
+
+      const buyAndSellActions = normalizeSignalBotPolicy({
+        tradingEnabled: true,
+        tradingActions: ["buy", "sell"],
+        tradingVenues: ["polymarket"],
+        buyAmountPresetsUsd: [10],
+        maxTradeAmountUsd: 50,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+        requireConfirmation: false,
+      });
+      assert.deepEqual(buyAndSellActions.tradingActions, ["buy"]);
+      assert.equal(buyAndSellActions.requireConfirmation, true);
     },
   },
   {

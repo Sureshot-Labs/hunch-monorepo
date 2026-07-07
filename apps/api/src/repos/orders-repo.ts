@@ -25,13 +25,22 @@ function extractPayloadAddress(
   return null;
 }
 
-function hasPositionDeltaApplied(payload: unknown): boolean {
+function hasPositionDeltaApplied(payload: unknown, depth = 0): boolean {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return false;
   }
-  return Object.prototype.hasOwnProperty.call(
-    payload,
-    "_hunchPositionDeltaAppliedAt",
+  if (depth > 2) return false;
+  const record = payload as Record<string, unknown>;
+  if (
+    Object.prototype.hasOwnProperty.call(
+      record,
+      "_hunchPositionDeltaAppliedAt",
+    )
+  ) {
+    return true;
+  }
+  return ["submitted", "payload"].some((key) =>
+    hasPositionDeltaApplied(record[key], depth + 1),
   );
 }
 
@@ -415,7 +424,13 @@ export async function findLimitlessHistoryMatch(
         venue_order_id,
         status,
         posted_at,
-        coalesce(order_payload ? '_hunchPositionDeltaAppliedAt', false)
+        coalesce(
+          order_payload ? '_hunchPositionDeltaAppliedAt',
+          (order_payload->'submitted') ? '_hunchPositionDeltaAppliedAt',
+          (order_payload->'payload') ? '_hunchPositionDeltaAppliedAt',
+          (order_payload->'submitted'->'payload') ? '_hunchPositionDeltaAppliedAt',
+          false
+        )
           as position_delta_applied
       from orders
       where user_id = $1
@@ -626,7 +641,27 @@ export async function updateOrderFromHistory(
           when $9::jsonb is null then order_payload
           when order_payload is null then $9::jsonb
           when order_payload ? 'history' then order_payload
-          else jsonb_build_object('submitted', order_payload, 'history', $9::jsonb)
+          else
+            jsonb_build_object('submitted', order_payload, 'history', $9::jsonb)
+            ||
+            case
+              when coalesce(
+                order_payload ? '_hunchPositionDeltaAppliedAt',
+                (order_payload->'submitted') ? '_hunchPositionDeltaAppliedAt',
+                (order_payload->'payload') ? '_hunchPositionDeltaAppliedAt',
+                (order_payload->'submitted'->'payload') ? '_hunchPositionDeltaAppliedAt',
+                false
+              ) then jsonb_build_object(
+                '_hunchPositionDeltaAppliedAt',
+                coalesce(
+                  order_payload->'_hunchPositionDeltaAppliedAt',
+                  order_payload->'submitted'->'_hunchPositionDeltaAppliedAt',
+                  order_payload->'payload'->'_hunchPositionDeltaAppliedAt',
+                  order_payload->'submitted'->'payload'->'_hunchPositionDeltaAppliedAt'
+                )
+              )
+              else '{}'::jsonb
+            end
         end
       where id = $1
     `,

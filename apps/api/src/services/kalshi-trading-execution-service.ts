@@ -317,6 +317,7 @@ export async function recordKalshiDflowExecutionRoute(input: {
   };
   logger?: ApiTradingApplicationServiceInput["logger"] | null;
   pool: ApiTradingApplicationServiceInput["pool"];
+  statusMode?: "legacy_client_status" | "verified";
   userId: string;
   walletAddress: string;
 }): Promise<{
@@ -353,6 +354,7 @@ export async function recordKalshiDflowExecutionRoute(input: {
     clientStatus: clientExecutionStatus,
     purpose: executionPurpose,
   });
+  const statusMode = input.statusMode ?? "verified";
   const txSignature = input.body.txSignature?.trim() || null;
   const isClientTerminal =
     clientExecutionStatus === "fulfilled" ||
@@ -364,7 +366,7 @@ export async function recordKalshiDflowExecutionRoute(input: {
       ? rawRecord.executionMode
       : null;
 
-  if (txSignature) {
+  if (statusMode === "verified" && txSignature) {
     try {
       const settlement = await resolveKalshiExecutionSettlementStatus({
         txSignature,
@@ -390,7 +392,7 @@ export async function recordKalshiDflowExecutionRoute(input: {
         "Kalshi execution status verification failed",
       );
     }
-  } else if (isClientTerminal) {
+  } else if (statusMode === "verified" && isClientTerminal) {
     executionStatus = "submitted";
   }
   const execution = await storeExecution(input.pool, {

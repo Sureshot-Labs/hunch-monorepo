@@ -2,7 +2,6 @@ import type { Pool } from "@hunch/infra";
 import {
   deleteHistoryOrder,
   findLimitlessHistoryMatch,
-  markOrderPositionDeltaApplied,
   storeOrder,
   updateOrderFromHistory,
 } from "../repos/orders-repo.js";
@@ -24,7 +23,7 @@ import {
   buildOrderNotification,
   createNotificationSafe,
 } from "./notifications.js";
-import { applyVenueConfirmedPositionTrade } from "./positions-optimistic.js";
+import { applyOptimisticPositionTradeOnce } from "./positions-optimistic.js";
 import { recordLimitlessVolumeEvent } from "./limitless-volume-events.js";
 
 export type LimitlessHistorySyncStats = {
@@ -183,6 +182,7 @@ function normalizeHistoryTimestamp(value: unknown): Date | null {
 async function applyConfirmedHistoryFillToPosition(
   pool: Pool,
   inputs: {
+    orderId: string;
     userId: string;
     walletAddress: string;
     tokenId: string;
@@ -200,7 +200,8 @@ async function applyConfirmedHistoryFillToPosition(
   });
   if (notionalUsd == null || notionalUsd <= 0) return false;
 
-  const result = await applyVenueConfirmedPositionTrade(pool, {
+  const result = await applyOptimisticPositionTradeOnce(pool, {
+    orderId: inputs.orderId,
     userId: inputs.userId,
     walletAddress: inputs.walletAddress,
     venue: "limitless",
@@ -637,6 +638,7 @@ export async function syncLimitlessHistoryForWallet(
         if (shouldApplyPositionFill) {
           try {
             const applied = await applyConfirmedHistoryFillToPosition(pool, {
+              orderId: match.id,
               userId: inputs.userId,
               walletAddress: inputs.walletAddress,
               tokenId,
@@ -647,7 +649,6 @@ export async function syncLimitlessHistoryForWallet(
                 entry.collateralAmount ?? entry.collateral_amount,
             });
             if (applied) {
-              await markOrderPositionDeltaApplied(pool, { id: match.id });
               positionUpdates += 1;
             }
           } catch {
@@ -686,6 +687,7 @@ export async function syncLimitlessHistoryForWallet(
     if (result.kind === "stored") {
       try {
         const applied = await applyConfirmedHistoryFillToPosition(pool, {
+          orderId: result.order.id,
           userId: inputs.userId,
           walletAddress: inputs.walletAddress,
           tokenId,
@@ -695,7 +697,6 @@ export async function syncLimitlessHistoryForWallet(
           collateralAmount: entry.collateralAmount ?? entry.collateral_amount,
         });
         if (applied) {
-          await markOrderPositionDeltaApplied(pool, { id: result.order.id });
           positionUpdates += 1;
         }
       } catch {

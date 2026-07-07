@@ -1732,7 +1732,7 @@ export async function handleTelegramBotTradingCallback(
       quote,
     });
     const preparedSnapshot = buildPreparedTradeSnapshot(prepared);
-    await updateIntentStatus({
+    const preparedRecorded = await updateIntentStatus({
       allowedStatuses: ["executing"],
       db: input.db,
       intentId: intent.id,
@@ -1741,6 +1741,14 @@ export async function handleTelegramBotTradingCallback(
       result: { quote },
       status: "executing",
     });
+    if (!preparedRecorded) {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "Trade intent is no longer active. Send /market again.",
+      });
+      return true;
+    }
     const executed = await trading.executePreparedTrade({
       prepared,
       onSubmitted: async (submitResult) => {
