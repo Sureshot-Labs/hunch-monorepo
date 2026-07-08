@@ -5060,6 +5060,38 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "message strips leading at-sign from holder identity mentions",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description:
+            "@Valen9 is fading the deadline while the public news is noisy.",
+          direction: "down",
+          holderDisplayName: "Valen9",
+          holderIdentityDisplayName: "@Valen9",
+          holderSide: "NO",
+          modelMeta: {
+            external_research: {
+              summary:
+                "Public news does not explain @Valen9 positioning.",
+            },
+          },
+          title: "Valen9 fades Iran withdrawal deadline risk",
+        }),
+      });
+
+      assert.doesNotMatch(message.text, /@Valen9/);
+      assert.match(message.text, /Valen9/);
+      assert.match(
+        message.text,
+        /Valen9 is still holding NO, with \$12\\.3K still on and \\-\$123 open PnL\\./,
+      );
+      assert.match(message.text, /Public news does not explain Valen9/);
+    },
+  },
+  {
     name: "message keeps web links when Mini App base is unset",
     run: () => {
       const message = buildSignalBotMessage({

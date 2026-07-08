@@ -820,13 +820,14 @@ function createSignalBotBodyTextRenderer(
   const candidates = holderUrl ? buildSignalBotHolderLinkCandidates(note) : [];
   let didLinkHolder = false;
   return (value: string) => {
+    const sanitizedValue = sanitizeSignalBotPublicHolderMentions(value, note);
     if (!holderUrl || didLinkHolder || candidates.length === 0) {
-      return escapeTelegramMarkdownV2(value);
+      return escapeTelegramMarkdownV2(sanitizedValue);
     }
-    const match = findSignalBotHolderLinkMatch(value, candidates);
-    if (!match) return escapeTelegramMarkdownV2(value);
+    const match = findSignalBotHolderLinkMatch(sanitizedValue, candidates);
+    if (!match) return escapeTelegramMarkdownV2(sanitizedValue);
     didLinkHolder = true;
-    return renderSignalBotHolderLinkedText(value, match, holderUrl);
+    return renderSignalBotHolderLinkedText(sanitizedValue, match, holderUrl);
   };
 }
 
@@ -834,13 +835,9 @@ function buildSignalBotHolderLinkCandidates(note: SignalBotNote): string[] {
   const collisionLabels = buildSignalBotHolderLinkCollisionLabels(note);
   const candidates: string[] = [];
   for (const raw of [note.holderIdentityDisplayName, note.holderDisplayName]) {
-    const label = normalizeSignalBotHolderLinkLabel(raw);
+    const label = normalizeSignalBotPublicHolderLabel(raw);
     if (!label) continue;
     candidates.push(label);
-    const stripped = normalizeSignalBotHolderLinkLabel(
-      label.replace(/^@+/, ""),
-    );
-    if (stripped && stripped !== label) candidates.push(stripped);
   }
   const unique = new Set<string>();
   const safeCandidates: string[] = [];
@@ -893,6 +890,14 @@ function normalizeSignalBotHolderLinkLabel(
 ): string | null {
   const label = value?.trim().replace(/\s+/g, " ");
   return label ? label : null;
+}
+
+function normalizeSignalBotPublicHolderLabel(
+  value: string | null | undefined,
+): string | null {
+  const label = normalizeSignalBotHolderLinkLabel(value);
+  if (!label) return null;
+  return label.replace(/^@+/, "").trim() || label;
 }
 
 function normalizeSignalBotHolderLinkKey(
@@ -962,6 +967,28 @@ function isSignalBotHolderLinkMatchAllowed(
 
 function isSignalBotHolderLinkBoundary(char: string): boolean {
   return !char || !/[0-9A-Za-z_@]/.test(char);
+}
+
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sanitizeSignalBotPublicHolderMentions(
+  value: string,
+  note: SignalBotNote,
+): string {
+  let output = value;
+  for (const raw of [note.holderIdentityDisplayName, note.holderDisplayName]) {
+    const rawLabel = normalizeSignalBotHolderLinkLabel(raw);
+    const publicLabel = normalizeSignalBotPublicHolderLabel(raw);
+    if (!rawLabel || !publicLabel || rawLabel === publicLabel) continue;
+    const pattern = new RegExp(
+      `(^|[^0-9A-Za-z_])${escapeRegExpLiteral(rawLabel)}(?=$|[^0-9A-Za-z_])`,
+      "g",
+    );
+    output = output.replace(pattern, `$1${publicLabel}`);
+  }
+  return output;
 }
 
 function isSignalBotNumericLinkBlockedBefore(
@@ -4884,8 +4911,8 @@ function shouldMentionSignalBotPriceInBody(price: number | null): boolean {
 function formatSignalBotActorLabel(note: SignalBotNote): string {
   if (note.holderActorMode === "sharp_cluster") return "these wallets";
   return (
-    note.holderIdentityDisplayName?.trim() ||
-    note.holderDisplayName?.trim() ||
+    normalizeSignalBotPublicHolderLabel(note.holderIdentityDisplayName) ||
+    normalizeSignalBotPublicHolderLabel(note.holderDisplayName) ||
     "this wallet"
   );
 }
