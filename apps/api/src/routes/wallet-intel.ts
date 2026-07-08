@@ -1266,7 +1266,7 @@ async function loadWalletOnchainStateByIds(
         wos.wallet_id,
         wos.wallet_kind,
         wos.owner_address,
-        coalesce(wos.owner_wallet_id, owner_wallet.id) as owner_wallet_id,
+        coalesce(wos.owner_wallet_id, solana_owner.id, evm_owner.id) as owner_wallet_id,
         wos.wallet_balances,
         wos.owner_balances,
         wos.wallet_usd_like_balance::text as wallet_usd_like_balance,
@@ -1275,13 +1275,27 @@ async function loadWalletOnchainStateByIds(
         wos.identity_resolved_at
       from wallet_set ws
       join wallet_onchain_state wos on wos.wallet_id = ws.wallet_id
-      left join wallets owner_wallet
-        on owner_wallet.chain = wos.chain
+      left join lateral (
+        select owner_wallet.id
+        from wallets owner_wallet
+        where wos.chain = 'solana'
+          and owner_wallet.chain = 'solana'
+          and owner_wallet.address = wos.owner_address
+        limit 1
+      ) solana_owner
+        on wos.owner_wallet_id is null
        and wos.owner_address is not null
-       and (
-         (wos.chain = 'solana' and owner_wallet.address = wos.owner_address)
-         or (wos.chain <> 'solana' and lower(owner_wallet.address) = lower(wos.owner_address))
-       )
+      left join lateral (
+        select owner_wallet.id
+        from wallets owner_wallet
+        where wos.chain <> 'solana'
+          and owner_wallet.chain <> 'solana'
+          and owner_wallet.chain = wos.chain
+          and lower(owner_wallet.address) = lower(wos.owner_address)
+        limit 1
+      ) evm_owner
+        on wos.owner_wallet_id is null
+       and wos.owner_address is not null
     `,
     [walletIds],
   );
@@ -6870,24 +6884,22 @@ async function loadWhaleTopMarkets(
           ) as rn
         from recent_markets
         left join lateral (
-          with latest_snapshot as (
-            select max(ws.snapshot_at) as snapshot_at
-            from wallet_position_snapshots ws
-            where ws.wallet_id = recent_markets.wallet_id
-              and ws.venue = recent_markets.venue
-          ),
-          latest_positions as (
+          with latest_positions as (
             select distinct on (ws.outcome_side)
               ws.outcome_side,
               ws.shares,
               ws.size_usd,
               ws.price
             from wallet_position_snapshots ws
-            join latest_snapshot ls
-              on ls.snapshot_at = ws.snapshot_at
             where ws.wallet_id = recent_markets.wallet_id
               and ws.venue = recent_markets.venue
               and ws.market_id = recent_markets.market_id
+              and ws.snapshot_at = (
+                select max(ws_latest.snapshot_at)
+                from wallet_position_snapshots ws_latest
+                where ws_latest.wallet_id = recent_markets.wallet_id
+                  and ws_latest.venue = recent_markets.venue
+              )
               and ws.shares > 0
             order by
               ws.outcome_side,

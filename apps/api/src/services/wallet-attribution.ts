@@ -627,23 +627,29 @@ async function loadVenueStats(
     ? (
         await client.query<CategoryVolumeRow>(
           `
-              with wallet_market as (
+              with wallet_set as materialized (
+                select unnest($1::uuid[]) as wallet_id
+              ),
+              wallet_market as materialized (
                 select
                   wah.wallet_id,
                   wah.venue,
                   wah.market_id,
                   sum(coalesce(wah.volume_usd, abs(wah.signed_delta_usd), 0)) as volume_usd
                 from wallet_activity_hourly wah
-                where wah.wallet_id = any($1::uuid[])
-                  and wah.activity_type in ('delta', 'trade')
+                join wallet_set ws on ws.wallet_id = wah.wallet_id
+                where wah.activity_type in ('delta', 'trade')
                   and wah.hour_bucket >= now() - interval '30 days'
                 group by wah.wallet_id, wah.venue, wah.market_id
               ),
-              market_meta as (
+              market_meta as materialized (
                 select
                   um.id as market_id,
                   lower(um.category) as market_category,
-                  um.event_id,
+                  lower(ue.category) as event_category,
+                  ue.series_key,
+                  ue.series_title,
+                  ue.title as event_title,
                   um.title as market_title,
                   um.close_time,
                   um.expiration_time
@@ -652,37 +658,23 @@ async function loadVenueStats(
                   select distinct market_id
                   from wallet_market
                 ) mk on mk.market_id = um.id
-              ),
-              event_lookup as (
-                select
-                  ue.id as event_id,
-                  lower(ue.category) as event_category,
-                  ue.title as event_title,
-                  ue.series_key,
-                  ue.series_title
-                from unified_events ue
-                join (
-                  select distinct mm.event_id
-                  from market_meta mm
-                  where mm.event_id is not null
-                ) ev on ev.event_id = ue.id
+                left join unified_events ue on ue.id = um.event_id
               )
               select
                 wm.wallet_id,
                 wm.venue,
-                coalesce(mm.market_category, el.event_category) as raw_category,
+                coalesce(mm.market_category, mm.event_category) as raw_category,
                 mm.market_category,
-                el.event_category,
-                el.series_key,
-                el.series_title,
-                el.event_title,
+                mm.event_category,
+                mm.series_key,
+                mm.series_title,
+                mm.event_title,
                 mm.market_title,
                 mm.close_time,
                 mm.expiration_time,
                 wm.volume_usd
               from wallet_market wm
               left join market_meta mm on mm.market_id = wm.market_id
-              left join event_lookup el on el.event_id = mm.event_id
             `,
           [walletIds],
         )
