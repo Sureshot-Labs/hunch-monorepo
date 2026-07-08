@@ -3,13 +3,16 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
 import { createAuthMiddleware } from "../auth.js";
-import { pool } from "../db.js";
+import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
 import {
   evaluateGeoFence,
   type GeoFenceConfig,
 } from "../lib/geo-fence.js";
-import { PrivyService } from "../privy-service.js";
+import {
+  PrivyService,
+  type PrivyWalletProfile,
+} from "../privy-service.js";
 import { createApiTradingApplicationService } from "../services/api-trading-service.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
@@ -20,7 +23,10 @@ import {
   disableTelegramBotTradingForTelegramUser,
   enableTelegramBotTrading,
   getTelegramBotTradingStatus,
+  resolveTelegramBotTradingWalletSetupIssues,
   resolveTelegramBotTradingPolicy,
+  type TelegramBotTradingInternalWalletCandidate,
+  type TelegramBotTradingWalletSetupIssue,
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
 import type { KalshiTradeEligibility } from "../services/trading-types.js";
@@ -31,7 +37,7 @@ const enableBodySchema = z
       .array(z.enum(["polymarket", "limitless", "kalshi"]))
       .optional(),
     privyWalletId: z.string().trim().min(1).max(256).optional().nullable(),
-    walletAddress: z.string().trim().min(1),
+    walletAddress: z.string().trim().min(1).optional().nullable(),
   })
   .strict();
 
@@ -98,45 +104,58 @@ function isInternalTradingAuthorized(request: {
   return token === configured;
 }
 
-function walletAddressMatches(input: {
-  walletAddress: string;
-  walletType: "ethereum" | "solana";
-  selectedAddress: string;
-}): boolean {
-  if (input.walletType === "ethereum") {
-    return (
-      input.walletAddress.trim().toLowerCase() ===
-      input.selectedAddress.trim().toLowerCase()
-    );
-  }
-  return input.walletAddress.trim() === input.selectedAddress.trim();
+export function resolveInternalPrivyWalletCandidatesForProfile(
+  walletProfiles: readonly PrivyWalletProfile[],
+): TelegramBotTradingInternalWalletCandidate[] {
+  return walletProfiles
+    .filter((profile) => profile.isInternalWallet && profile.walletId?.trim())
+    .map((profile) => ({
+      privyWalletId: profile.walletId?.trim() ?? "",
+      walletAddress: profile.address,
+      walletChain: profile.walletType,
+    }));
 }
 
-async function resolvePrivyWalletIdForAddress(input: {
+export async function resolveInternalPrivyWalletCandidates(input: {
   app: Parameters<FastifyPluginAsync>[0];
   privyUserId: string | null | undefined;
-  walletAddress: string;
-}): Promise<string | null> {
-  if (!input.privyUserId) return null;
+}): Promise<TelegramBotTradingInternalWalletCandidate[]> {
+  if (!input.privyUserId) return [];
   try {
     const privyUser = await PrivyService.getUserById(input.privyUserId);
-    const walletProfiles = PrivyService.classifyWallets(privyUser);
-    const wallet = walletProfiles.find((profile) =>
-      walletAddressMatches({
-        selectedAddress: input.walletAddress,
-        walletAddress: profile.address,
-        walletType: profile.walletType,
-      }),
+    return resolveInternalPrivyWalletCandidatesForProfile(
+      PrivyService.classifyWallets(privyUser),
     );
-    if (wallet && !wallet.isInternalWallet) return null;
-    return wallet?.walletId?.trim() || null;
   } catch (error) {
     input.app.log.warn(
       { err: error },
-      "Failed to resolve Privy wallet id for Telegram bot trading",
+      "Failed to resolve internal Privy wallets for Telegram bot trading",
     );
-    return null;
+    throw new Error("internal_privy_wallet_lookup_failed");
   }
+}
+
+export async function resolveTelegramBotTradingStatusWalletSetupIssues(input: {
+  app: Parameters<FastifyPluginAsync>[0];
+  db: DbQuery;
+  privyUserId: string | null | undefined;
+  requestedVenues: readonly TelegramBotTradingVenue[];
+  userId: string;
+}): Promise<TelegramBotTradingWalletSetupIssue[]> {
+  let internalWallets: TelegramBotTradingInternalWalletCandidate[];
+  try {
+    internalWallets = await resolveInternalPrivyWalletCandidates({
+      app: input.app,
+      privyUserId: input.privyUserId,
+    });
+  } catch {
+    return [];
+  }
+  return resolveTelegramBotTradingWalletSetupIssues(input.db, {
+    internalWallets,
+    requestedVenues: input.requestedVenues,
+    userId: input.userId,
+  });
 }
 
 async function buildKalshiEligibilityForRequest(input: {
@@ -326,6 +345,44 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
             )
           : Promise.resolve(null),
       ]);
+      let walletSetupIssues =
+        status?.linked && status.userId
+          ? status.walletSetupIssues
+          : [];
+      if (status?.linked && status.userId) {
+        walletSetupIssues =
+          await resolveTelegramBotTradingStatusWalletSetupIssues({
+            app,
+            db: pool,
+            privyUserId: user.privyUserId,
+            requestedVenues: policy.tradingVenues,
+            userId: status.userId,
+          });
+      }
+      const statusPayload = status
+        ? {
+            ...status,
+            walletSetupIssues,
+          }
+        : {
+            authorizationId: null,
+            activeAuthorization: null,
+            authorizations: [],
+            directExecutionReady: false,
+            enabled: false,
+            enabledVenues: [],
+            linked: false,
+            maxAmountUsd: null,
+            privyUserId: user.privyUserId ?? null,
+            privyWalletId: null,
+            setupIssue: "Telegram is not linked to this Hunch account.",
+            telegramUserId,
+            username: null,
+            userId: user.id,
+            walletAddress: null,
+            walletChain: null,
+            walletSetupIssues: [],
+          };
       return reply.send({
         policy: {
           tradingEnabled: policy.tradingEnabled,
@@ -337,24 +394,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           intentTtlSec: policy.intentTtlSec,
           requireConfirmation: true,
         },
-        status: status ?? {
-          authorizationId: null,
-          activeAuthorization: null,
-          authorizations: [],
-          directExecutionReady: false,
-          enabled: false,
-          enabledVenues: [],
-          linked: false,
-          maxAmountUsd: null,
-          privyUserId: user.privyUserId ?? null,
-          privyWalletId: null,
-          setupIssue: "Telegram is not linked to this Hunch account.",
-          telegramUserId,
-          username: null,
-          userId: user.id,
-          walletAddress: null,
-          walletChain: null,
-        },
+        status: statusPayload,
       });
     },
   );
@@ -373,33 +413,24 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       }
       try {
         const body = request.body;
-        const privyWalletId = await resolvePrivyWalletIdForAddress({
+        const internalWallets = await resolveInternalPrivyWalletCandidates({
           app,
           privyUserId: user.privyUserId,
-          walletAddress: body.walletAddress,
-        });
-        if (!privyWalletId) {
-          reply.code(409);
-          return reply.send({
-            error: "privy_wallet_id_required",
-            message:
-              "Selected wallet must be an internal Privy trading wallet before bot trading can be enabled.",
-          });
-        }
-        const kalshiEligibility = await buildKalshiEligibilityForRequest({
-          geoFenceConfig: kalshiGeoFenceConfig,
-          request,
-          user,
-          walletAddress: body.walletAddress,
         });
         const status = await enableTelegramBotTrading(pool, {
+          buildKalshiEligibilityForWallet: (walletAddress) =>
+            buildKalshiEligibilityForRequest({
+              geoFenceConfig: kalshiGeoFenceConfig,
+              request,
+              user,
+              walletAddress,
+            }),
           enabledVenues: body.enabledVenues as
             | TelegramBotTradingVenue[]
             | undefined,
-          kalshiEligibility,
-          privyWalletId,
+          internalWallets,
+          preferredWalletAddress: body.walletAddress ?? null,
           userId: user.id,
-          walletAddress: body.walletAddress,
         }, createTradingForRequest(request));
         return reply.send({ ok: true, status });
       } catch (error) {
@@ -407,11 +438,11 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           error instanceof Error && error.message === "telegram_account_required"
             ? "Telegram account is required before enabling bot trading."
             : error instanceof Error &&
-                error.message === "privy_wallet_id_required"
-              ? "Selected wallet must be an internal Privy trading wallet before bot trading can be enabled."
+                error.message === "internal_trading_wallet_required"
+              ? "Create an internal Hunch Trading Wallet before enabling Telegram bot trading."
             : error instanceof Error &&
                 error.message === "no_compatible_venues_for_wallet"
-              ? "Selected wallet is not compatible with any enabled bot trading venue."
+              ? "No compatible bot trading venues are enabled."
             : "Unable to enable Telegram bot trading.";
         reply.code(400);
         return reply.send({ error: "telegram_bot_trading_enable_failed", message });

@@ -28,6 +28,7 @@ import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
 export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell";
 export type TelegramBotTradingSide = "NO" | "YES";
+export type TelegramBotTradingWalletChain = "ethereum" | "solana";
 
 export type TelegramBotTradingButton =
   | { text: string; callback_data: string }
@@ -147,6 +148,7 @@ export type TelegramBotTradingStatus = {
   userId: string | null;
   walletAddress: string | null;
   walletChain: "ethereum" | "solana" | null;
+  walletSetupIssues: TelegramBotTradingWalletSetupIssue[];
 };
 
 export type TelegramBotTradingAuthorizationStatus = {
@@ -161,12 +163,32 @@ export type TelegramBotTradingAuthorizationStatus = {
   walletChain: "ethereum" | "solana";
 };
 
+export type TelegramBotTradingWalletSetupIssue = {
+  code: "internal_wallet_missing";
+  message: string;
+  venue: TelegramBotTradingVenue;
+  walletChain: "ethereum" | "solana";
+};
+
+export type TelegramBotTradingInternalWalletCandidate = {
+  privyWalletId: string;
+  walletAddress: string;
+  walletChain: TelegramBotTradingWalletChain;
+};
+
+export type TelegramBotTradingKalshiEligibilityBuilder = (
+  walletAddress: string,
+) => Promise<KalshiTradeEligibility | null>;
+
 export type EnableTelegramBotTradingInput = {
+  buildKalshiEligibilityForWallet?: TelegramBotTradingKalshiEligibilityBuilder;
   enabledVenues?: TelegramBotTradingVenue[];
+  internalWallets?: TelegramBotTradingInternalWalletCandidate[];
   kalshiEligibility?: KalshiTradeEligibility | null;
+  preferredWalletAddress?: string | null;
   privyWalletId?: string | null;
   userId: string;
-  walletAddress: string;
+  walletAddress?: string | null;
 };
 
 export type TelegramBotTradingCallbackInput = {
@@ -232,6 +254,19 @@ const EVM_TRADING_VENUES: TelegramBotTradingVenue[] = [
 ];
 const SOLANA_TRADING_VENUES: TelegramBotTradingVenue[] = ["kalshi"];
 
+type VerifiedTelegramBotTradingWalletRow = {
+  wallet_address: string;
+  wallet_type: TelegramBotTradingWalletChain;
+  is_primary: boolean | null;
+  created_at: Date | null;
+};
+
+type SelectedTelegramBotTradingInternalWallet = {
+  privyWalletId: string;
+  walletAddress: string;
+  walletChain: TelegramBotTradingWalletChain;
+};
+
 function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim();
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
@@ -291,6 +326,236 @@ function filterVenuesForWalletChain(
 ): TelegramBotTradingVenue[] {
   const allowed = venuesForWalletChain(walletChain);
   return venues.filter((venue) => allowed.includes(venue));
+}
+
+function walletChainForVenue(
+  venue: TelegramBotTradingVenue,
+): TelegramBotTradingWalletChain {
+  return venue === "kalshi" ? "solana" : "ethereum";
+}
+
+function requestedChainsForVenues(
+  venues: readonly TelegramBotTradingVenue[],
+): TelegramBotTradingWalletChain[] {
+  const chains: TelegramBotTradingWalletChain[] = [];
+  if (filterVenuesForWalletChain(venues, "ethereum").length > 0) {
+    chains.push("ethereum");
+  }
+  if (filterVenuesForWalletChain(venues, "solana").length > 0) {
+    chains.push("solana");
+  }
+  return chains;
+}
+
+function normalizeWalletAddressForChain(
+  address: string | null | undefined,
+  walletChain: TelegramBotTradingWalletChain,
+): string {
+  const trimmed = address?.trim() ?? "";
+  return walletChain === "ethereum" ? trimmed.toLowerCase() : trimmed;
+}
+
+function internalWalletMissingMessage(
+  walletChain: TelegramBotTradingWalletChain,
+): string {
+  return walletChain === "ethereum"
+    ? "Telegram bot trading needs an internal Hunch EVM Trading Wallet."
+    : "Telegram bot trading needs an internal Hunch Solana Trading Wallet.";
+}
+
+function buildTelegramBotTradingWalletSetupIssues(input: {
+  selectedWalletChains: readonly TelegramBotTradingWalletChain[];
+  requestedVenues: readonly TelegramBotTradingVenue[];
+}): TelegramBotTradingWalletSetupIssue[] {
+  const selectedChains = new Set(input.selectedWalletChains);
+  const issues: TelegramBotTradingWalletSetupIssue[] = [];
+  for (const venue of input.requestedVenues) {
+    const walletChain = walletChainForVenue(venue);
+    if (selectedChains.has(walletChain)) continue;
+    issues.push({
+      code: "internal_wallet_missing",
+      message: internalWalletMissingMessage(walletChain),
+      venue,
+      walletChain,
+    });
+  }
+  return issues;
+}
+
+function buildInternalWalletCandidateLookup(
+  candidates: readonly TelegramBotTradingInternalWalletCandidate[],
+): Map<string, TelegramBotTradingInternalWalletCandidate> {
+  const out = new Map<string, TelegramBotTradingInternalWalletCandidate>();
+  for (const candidate of candidates) {
+    const walletId = candidate.privyWalletId.trim();
+    const address = normalizeWalletAddressForChain(
+      candidate.walletAddress,
+      candidate.walletChain,
+    );
+    if (!walletId || !address) continue;
+    out.set(`${candidate.walletChain}:${address}`, {
+      ...candidate,
+      privyWalletId: walletId,
+    });
+  }
+  return out;
+}
+
+function selectInternalWalletForChain(input: {
+  internalWallets: Map<string, TelegramBotTradingInternalWalletCandidate>;
+  preferredWalletAddress?: string | null;
+  verifiedWallets: readonly VerifiedTelegramBotTradingWalletRow[];
+  walletChain: TelegramBotTradingWalletChain;
+}): SelectedTelegramBotTradingInternalWallet | null {
+  const eligible = input.verifiedWallets
+    .filter((wallet) => wallet.wallet_type === input.walletChain)
+    .map((wallet) => {
+      const normalizedAddress = normalizeWalletAddressForChain(
+        wallet.wallet_address,
+        input.walletChain,
+      );
+      const internal = input.internalWallets.get(
+        `${input.walletChain}:${normalizedAddress}`,
+      );
+      return internal
+        ? {
+            internal,
+            isPrimary: Boolean(wallet.is_primary),
+            createdAtMs:
+              wallet.created_at?.getTime() ?? Number.MAX_SAFE_INTEGER,
+            normalizedAddress,
+            walletAddress: wallet.wallet_address,
+          }
+        : null;
+    })
+    .filter((wallet): wallet is NonNullable<typeof wallet> => wallet != null)
+    .sort((left, right) => {
+      const primaryDiff = Number(right.isPrimary) - Number(left.isPrimary);
+      if (primaryDiff !== 0) return primaryDiff;
+      if (left.createdAtMs !== right.createdAtMs) {
+        return left.createdAtMs - right.createdAtMs;
+      }
+      return left.normalizedAddress.localeCompare(right.normalizedAddress);
+    });
+  if (eligible.length === 0) return null;
+
+  const preferredAddress = normalizeWalletAddressForChain(
+    input.preferredWalletAddress,
+    input.walletChain,
+  );
+  const selected =
+    (preferredAddress
+      ? eligible.find((wallet) => wallet.normalizedAddress === preferredAddress)
+      : null) ?? eligible[0];
+  if (!selected) return null;
+  return {
+    privyWalletId: selected.internal.privyWalletId,
+    walletAddress: selected.walletAddress,
+    walletChain: input.walletChain,
+  };
+}
+
+function buildTelegramBotTradingWalletSelection(input: {
+  internalWallets: readonly TelegramBotTradingInternalWalletCandidate[];
+  preferredWalletAddress?: string | null;
+  requestedVenues: readonly TelegramBotTradingVenue[];
+  verifiedWallets: readonly VerifiedTelegramBotTradingWalletRow[];
+}): {
+  requestedChains: TelegramBotTradingWalletChain[];
+  selectedByChain: Map<
+    TelegramBotTradingWalletChain,
+    SelectedTelegramBotTradingInternalWallet
+  >;
+  walletSetupIssues: TelegramBotTradingWalletSetupIssue[];
+} {
+  const internalWallets = buildInternalWalletCandidateLookup(
+    input.internalWallets,
+  );
+  const requestedChains = requestedChainsForVenues(input.requestedVenues);
+  const selectedByChain = new Map<
+    TelegramBotTradingWalletChain,
+    SelectedTelegramBotTradingInternalWallet
+  >();
+  for (const walletChain of requestedChains) {
+    const selected = selectInternalWalletForChain({
+      internalWallets,
+      preferredWalletAddress: input.preferredWalletAddress,
+      verifiedWallets: input.verifiedWallets,
+      walletChain,
+    });
+    if (selected) selectedByChain.set(walletChain, selected);
+  }
+  return {
+    requestedChains,
+    selectedByChain,
+    walletSetupIssues: buildTelegramBotTradingWalletSetupIssues({
+      requestedVenues: input.requestedVenues,
+      selectedWalletChains: Array.from(selectedByChain.keys()),
+    }),
+  };
+}
+
+async function loadVerifiedTelegramBotTradingWallets(
+  db: DbQuery,
+  userId: string,
+): Promise<VerifiedTelegramBotTradingWalletRow[]> {
+  const walletsResult = await db.query<VerifiedTelegramBotTradingWalletRow>(
+    `SELECT
+       uw.wallet_address,
+       uw.wallet_type,
+       uw.is_primary,
+       uw.created_at
+     FROM user_wallets uw
+     WHERE uw.user_id = $1
+       AND uw.is_verified = true
+       AND uw.wallet_type = ANY($2::text[])
+     ORDER BY
+       uw.is_primary DESC NULLS LAST,
+       uw.created_at ASC NULLS LAST,
+       lower(uw.wallet_address) ASC`,
+    [userId, ["ethereum", "solana"]],
+  );
+  return walletsResult.rows;
+}
+
+export async function resolveTelegramBotTradingWalletSetupIssues(
+  db: DbQuery,
+  input: {
+    internalWallets: readonly TelegramBotTradingInternalWalletCandidate[];
+    preferredWalletAddress?: string | null;
+    requestedVenues: readonly TelegramBotTradingVenue[];
+    userId: string;
+  },
+): Promise<TelegramBotTradingWalletSetupIssue[]> {
+  const verifiedWallets = await loadVerifiedTelegramBotTradingWallets(
+    db,
+    input.userId,
+  );
+  return buildTelegramBotTradingWalletSelection({
+    internalWallets: input.internalWallets,
+    preferredWalletAddress: input.preferredWalletAddress,
+    requestedVenues: input.requestedVenues,
+    verifiedWallets,
+  }).walletSetupIssues;
+}
+
+async function disableTelegramBotTradingAuthorizationsForChains(
+  db: DbQuery,
+  input: {
+    telegramUserId: string;
+    walletChains: readonly TelegramBotTradingWalletChain[];
+  },
+): Promise<void> {
+  if (input.walletChains.length === 0) return;
+  await db.query(
+    `UPDATE telegram_bot_trading_authorizations
+        SET enabled = false,
+            disabled_at = now(),
+            updated_at = now()
+      WHERE telegram_user_id = $1
+        AND wallet_chain = ANY($2::text[])`,
+    [input.telegramUserId, input.walletChains],
+  );
 }
 
 function formatUsd(amount: number): string {
@@ -632,6 +897,7 @@ export async function getTelegramBotTradingStatus(
       userId: null,
       walletAddress: null,
       walletChain: null,
+      walletSetupIssues: [],
     };
   }
   const authorizations: TelegramBotTradingAuthorizationStatus[] = [];
@@ -740,6 +1006,7 @@ export async function getTelegramBotTradingStatus(
     userId: row.user_id,
     walletAddress: activeAuthorization?.walletAddress ?? null,
     walletChain: activeAuthorization?.walletChain ?? null,
+    walletSetupIssues: [],
   };
 }
 
@@ -748,103 +1015,151 @@ export async function enableTelegramBotTrading(
   input: EnableTelegramBotTradingInput,
   trading?: ApiBotTradingExecutor,
 ): Promise<TelegramBotTradingStatus> {
-  const walletResult = await db.query<{
+  const accountResult = await db.query<{
     privy_user_id: string | null;
     telegram_user_id: string | null;
-    wallet_address: string;
-    wallet_type: "ethereum" | "solana";
   }>(
     `SELECT
        u.privy_user_id,
-       uta.telegram_user_id,
-       uw.wallet_address,
-       uw.wallet_type
-     FROM user_wallets uw
-     JOIN users u ON u.id = uw.user_id
+       uta.telegram_user_id
+     FROM users u
      LEFT JOIN user_telegram_accounts uta ON uta.user_id = u.id
-     WHERE uw.user_id = $1
-       AND uw.is_verified = true
-       AND (
-         (uw.wallet_type = 'ethereum' AND lower(uw.wallet_address) = lower($2))
-         OR (uw.wallet_type <> 'ethereum' AND uw.wallet_address = $2)
-       )
+     WHERE u.id = $1
      LIMIT 1`,
-    [input.userId, input.walletAddress.trim()],
+    [input.userId],
   );
-  const wallet = walletResult.rows[0];
-  if (!wallet?.telegram_user_id) {
+  const account = accountResult.rows[0];
+  if (!account?.telegram_user_id) {
     throw new Error("telegram_account_required");
-  }
-  if (!input.privyWalletId?.trim()) {
-    throw new Error("privy_wallet_id_required");
   }
 
   const policy = await resolveTelegramBotTradingPolicy(db);
-  const enabledVenueSource =
+  const requestedVenueSource =
     input.enabledVenues === undefined
       ? policy.tradingVenues
-      : input.enabledVenues.filter((venue) =>
-          policy.tradingVenues.includes(venue),
-        );
-  const enabledVenues = filterVenuesForWalletChain(
-    enabledVenueSource,
-    wallet.wallet_type,
+      : normalizeVenues(input.enabledVenues);
+  const enabledVenueSource = requestedVenueSource.filter((venue) =>
+    policy.tradingVenues.includes(venue),
   );
-  if (enabledVenues.length === 0) {
+  if (enabledVenueSource.length === 0) {
     throw new Error("no_compatible_venues_for_wallet");
   }
 
-  await db.query(
-    `INSERT INTO telegram_bot_trading_authorizations (
-       user_id,
-       telegram_user_id,
-       privy_user_id,
-       wallet_address,
-       wallet_chain,
-       privy_wallet_id,
-       enabled,
-       enabled_venues,
-       max_amount_usd,
-       limits,
-       disabled_at,
-       last_verified_at,
-       updated_at
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, true, $7::text[], $8, $9::jsonb, null, now(), now())
-     ON CONFLICT (telegram_user_id, wallet_chain) DO UPDATE SET
-       user_id = EXCLUDED.user_id,
-       privy_user_id = EXCLUDED.privy_user_id,
-       wallet_address = EXCLUDED.wallet_address,
-       wallet_chain = EXCLUDED.wallet_chain,
-       privy_wallet_id = EXCLUDED.privy_wallet_id,
-       enabled = true,
-       enabled_venues = EXCLUDED.enabled_venues,
-       max_amount_usd = EXCLUDED.max_amount_usd,
-       limits = EXCLUDED.limits,
-       disabled_at = null,
-       last_verified_at = now(),
-       updated_at = now()`,
-    [
+  const requestedEvmVenues = filterVenuesForWalletChain(
+    enabledVenueSource,
+    "ethereum",
+  );
+  const requestedSolanaVenues = filterVenuesForWalletChain(
+    enabledVenueSource,
+    "solana",
+  );
+  const preferredWalletAddress =
+    input.preferredWalletAddress ?? input.walletAddress ?? null;
+  const walletSelection = buildTelegramBotTradingWalletSelection({
+    internalWallets: input.internalWallets ?? [],
+    preferredWalletAddress,
+    requestedVenues: enabledVenueSource,
+    verifiedWallets: await loadVerifiedTelegramBotTradingWallets(
+      db,
       input.userId,
-      wallet.telegram_user_id,
-      wallet.privy_user_id,
-      wallet.wallet_address,
-      wallet.wallet_type,
-      input.privyWalletId?.trim() || null,
+    ),
+  });
+  const selectedByChain = walletSelection.selectedByChain;
+  const missingRequestedChains = walletSelection.requestedChains.filter(
+    (walletChain) => !selectedByChain.has(walletChain),
+  );
+  const authorizationUpdates: Array<{
+    enabledVenues: TelegramBotTradingVenue[];
+    limits: string;
+    selected: SelectedTelegramBotTradingInternalWallet;
+  }> = [];
+  for (const [walletChain, selected] of selectedByChain) {
+    const enabledVenues =
+      walletChain === "solana" ? requestedSolanaVenues : requestedEvmVenues;
+    if (enabledVenues.length === 0) continue;
+    const kalshiEligibility =
+      selected.walletChain === "solana"
+        ? normalizeKalshiTradeEligibility(
+            input.buildKalshiEligibilityForWallet
+              ? await input.buildKalshiEligibilityForWallet(
+                  selected.walletAddress,
+                )
+              : input.kalshiEligibility,
+          )
+        : null;
+    authorizationUpdates.push({
       enabledVenues,
-      policy.maxTradeAmountUsd,
-      JSON.stringify({
+      limits: JSON.stringify({
         maxSlippageBps: policy.maxSlippageBps,
         requireConfirmation: true,
-        kalshiEligibility:
-          wallet.wallet_type === "solana"
-            ? normalizeKalshiTradeEligibility(input.kalshiEligibility)
-            : null,
+        kalshiEligibility,
       }),
-    ],
-  );
+      selected,
+    });
+  }
 
-  return getTelegramBotTradingStatus(db, wallet.telegram_user_id, trading);
+  await disableTelegramBotTradingAuthorizationsForChains(db, {
+    telegramUserId: account.telegram_user_id,
+    walletChains: missingRequestedChains,
+  });
+  if (selectedByChain.size === 0) {
+    throw new Error("internal_trading_wallet_required");
+  }
+
+  for (const update of authorizationUpdates) {
+    await db.query(
+      `INSERT INTO telegram_bot_trading_authorizations (
+         user_id,
+         telegram_user_id,
+         privy_user_id,
+         wallet_address,
+         wallet_chain,
+         privy_wallet_id,
+         enabled,
+         enabled_venues,
+         max_amount_usd,
+         limits,
+         disabled_at,
+         last_verified_at,
+         updated_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, true, $7::text[], $8, $9::jsonb, null, now(), now())
+       ON CONFLICT (telegram_user_id, wallet_chain) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
+         privy_user_id = EXCLUDED.privy_user_id,
+         wallet_address = EXCLUDED.wallet_address,
+         wallet_chain = EXCLUDED.wallet_chain,
+         privy_wallet_id = EXCLUDED.privy_wallet_id,
+         enabled = true,
+         enabled_venues = EXCLUDED.enabled_venues,
+         max_amount_usd = EXCLUDED.max_amount_usd,
+         limits = EXCLUDED.limits,
+         disabled_at = null,
+         last_verified_at = now(),
+         updated_at = now()`,
+      [
+        input.userId,
+        account.telegram_user_id,
+        account.privy_user_id,
+        update.selected.walletAddress,
+        update.selected.walletChain,
+        update.selected.privyWalletId,
+        update.enabledVenues,
+        policy.maxTradeAmountUsd,
+        update.limits,
+      ],
+    );
+  }
+
+  const status = await getTelegramBotTradingStatus(
+    db,
+    account.telegram_user_id,
+    trading,
+  );
+  return {
+    ...status,
+    walletSetupIssues: walletSelection.walletSetupIssues,
+  };
 }
 
 export async function disableTelegramBotTradingForUser(

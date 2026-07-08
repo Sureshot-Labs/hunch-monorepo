@@ -50,7 +50,18 @@ import {
   enableTelegramBotTrading,
   handleTelegramBotTradingCallback,
   reconcileStaleTelegramTradeIntents,
+  resolveTelegramBotTradingWalletSetupIssues,
 } from "./services/telegram-bot-trading.js";
+import {
+  resolveInternalPrivyWalletCandidates,
+  resolveInternalPrivyWalletCandidatesForProfile,
+  resolveTelegramBotTradingStatusWalletSetupIssues,
+} from "./routes/telegram-bot-trading.js";
+import {
+  PrivyService,
+  type PrivyUser,
+  type PrivyWalletProfile,
+} from "./privy-service.js";
 import type { PreparedTrade, TradingVenue } from "./services/trading-types.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
@@ -2367,39 +2378,240 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "enabling bot trading stores only venues compatible with selected wallet chain",
-    run: async () => {
-      const cases: Array<{
-        expectedVenues: string[];
-        walletAddress: string;
-        walletType: "ethereum" | "solana";
-      }> = [
+    name: "telegram bot trading internal Privy wallet resolver filters candidates",
+    run: () => {
+      const profiles: PrivyWalletProfile[] = [
         {
-          expectedVenues: ["polymarket", "limitless"],
-          walletAddress: "0x0000000000000000000000000000000000000001",
+          address: "0x0000000000000000000000000000000000000001",
+          isInternalWallet: true,
+          source: "embedded",
+          walletId: "  evm-wallet  ",
           walletType: "ethereum",
         },
         {
-          expectedVenues: ["kalshi"],
-          walletAddress: "So11111111111111111111111111111111111111112",
+          address: "0x0000000000000000000000000000000000000002",
+          isInternalWallet: false,
+          source: "external",
+          walletId: "external-wallet",
+          walletType: "ethereum",
+        },
+        {
+          address: "So11111111111111111111111111111111111111112",
+          isInternalWallet: true,
+          source: "embedded",
+          walletId: "",
           walletType: "solana",
         },
       ];
-      for (const testCase of cases) {
-        let storedVenues: unknown = null;
+      assert.deepEqual(resolveInternalPrivyWalletCandidatesForProfile(profiles), [
+        {
+          privyWalletId: "evm-wallet",
+          walletAddress: "0x0000000000000000000000000000000000000001",
+          walletChain: "ethereum",
+        },
+      ]);
+    },
+  },
+  {
+    name: "telegram bot trading Privy lookup failure stops enable wallet resolution",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        getUserById: typeof PrivyService.getUserById;
+      };
+      const originalGetUserById = privyAny.getUserById;
+      let warnCount = 0;
+      let downstreamCalled = false;
+      try {
+        privyAny.getUserById = async () => {
+          throw new Error("privy unavailable");
+        };
+        await assert.rejects(
+          async () => {
+            await resolveInternalPrivyWalletCandidates({
+              app: {
+                log: {
+                  warn: () => {
+                    warnCount += 1;
+                  },
+                },
+              } as never,
+              privyUserId: "privy-1",
+            });
+            downstreamCalled = true;
+          },
+          /internal_privy_wallet_lookup_failed/,
+        );
+        assert.equal(downstreamCalled, false);
+        assert.equal(warnCount, 1);
+      } finally {
+        privyAny.getUserById = originalGetUserById;
+      }
+    },
+  },
+  {
+    name: "telegram bot trading status wallet setup ignores unknown Privy availability",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        getUserById: typeof PrivyService.getUserById;
+      };
+      const originalGetUserById = privyAny.getUserById;
+      let warnCount = 0;
+      let dbQueries = 0;
+      try {
+        privyAny.getUserById = async () => {
+          throw new Error("privy unavailable");
+        };
+        const issues = await resolveTelegramBotTradingStatusWalletSetupIssues({
+          app: {
+            log: {
+              warn: () => {
+                warnCount += 1;
+              },
+            },
+          } as never,
+          db: {
+            query: async () => {
+              dbQueries += 1;
+              throw new Error("wallet setup DB should not be queried");
+            },
+          } as never,
+          privyUserId: "privy-1",
+          requestedVenues: ["kalshi"],
+          userId: "user-1",
+        });
+        assert.deepEqual(issues, []);
+        assert.equal(warnCount, 1);
+        assert.equal(dbQueries, 0);
+      } finally {
+        privyAny.getUserById = originalGetUserById;
+      }
+    },
+  },
+  {
+    name: "telegram bot trading status wallet setup treats empty internal list as missing wallet",
+    run: async () => {
+      const privyAny = PrivyService as unknown as {
+        classifyWallets: typeof PrivyService.classifyWallets;
+        getUserById: typeof PrivyService.getUserById;
+      };
+      const originalClassifyWallets = privyAny.classifyWallets;
+      const originalGetUserById = privyAny.getUserById;
+      let dbQueries = 0;
+      try {
+        privyAny.getUserById = async () => ({ id: "privy-1" }) as PrivyUser;
+        privyAny.classifyWallets = () => [
+          {
+            address: "0x0000000000000000000000000000000000000001",
+            isInternalWallet: false,
+            source: "external",
+            walletId: "external-wallet",
+            walletType: "ethereum",
+          },
+        ];
+        const issues = await resolveTelegramBotTradingStatusWalletSetupIssues({
+          app: {
+            log: {
+              warn: () => undefined,
+            },
+          } as never,
+          db: {
+            query: async (sql: string) => {
+              dbQueries += 1;
+              assert.match(sql, /FROM user_wallets uw/);
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    created_at: new Date("2026-01-01T00:00:00.000Z"),
+                    is_primary: true,
+                    wallet_address:
+                      "0x0000000000000000000000000000000000000001",
+                    wallet_type: "ethereum",
+                  },
+                ],
+              };
+            },
+          } as never,
+          privyUserId: "privy-1",
+          requestedVenues: ["polymarket"],
+          userId: "user-1",
+        });
+        assert.equal(dbQueries, 1);
+        assert.deepEqual(issues, [
+          {
+            code: "internal_wallet_missing",
+            message:
+              "Telegram bot trading needs an internal Hunch EVM Trading Wallet.",
+            venue: "polymarket",
+            walletChain: "ethereum",
+          },
+        ]);
+      } finally {
+        privyAny.classifyWallets = originalClassifyWallets;
+        privyAny.getUserById = originalGetUserById;
+      }
+    },
+  },
+  {
+    name: "enabling bot trading auto-selects internal wallets by requested chain",
+    run: async () => {
+      const makeDb = (input: {
+        existingAuthorizations?: Array<{
+          enabled?: boolean;
+          enabledVenues: string[];
+          limits?: Record<string, unknown>;
+          privyWalletId: string;
+          walletAddress: string;
+          walletChain: "ethereum" | "solana";
+        }>;
+        verifiedWallets: Array<{
+          address: string;
+          type: "ethereum" | "solana";
+          isPrimary?: boolean;
+          createdAt?: Date;
+        }>;
+      }) => {
+        const storedAuthorizations: Array<{
+          enabled: boolean;
+          limits: Record<string, unknown>;
+          walletAddress: string;
+          walletChain: "ethereum" | "solana";
+          privyWalletId: string;
+          enabledVenues: string[];
+        }> =
+          input.existingAuthorizations?.map((authorization) => ({
+            enabled: authorization.enabled ?? true,
+            enabledVenues: authorization.enabledVenues,
+            limits: authorization.limits ?? {},
+            privyWalletId: authorization.privyWalletId,
+            walletAddress: authorization.walletAddress,
+            walletChain: authorization.walletChain,
+          })) ?? [];
+        const stats = { disabledRows: 0, upserts: 0 };
         const db = {
           query: async (sql: string, params?: unknown[]) => {
-            if (sql.includes("FROM user_wallets uw")) {
+            if (/FROM users u/i.test(sql)) {
               return {
                 rowCount: 1,
                 rows: [
                   {
                     privy_user_id: "privy-1",
                     telegram_user_id: "999",
-                    wallet_address: testCase.walletAddress,
-                    wallet_type: testCase.walletType,
                   },
                 ],
+              };
+            }
+            if (sql.includes("FROM user_wallets uw")) {
+              return {
+                rowCount: input.verifiedWallets.length,
+                rows: input.verifiedWallets.map((wallet, index) => ({
+                  wallet_address: wallet.address,
+                  wallet_type: wallet.type,
+                  is_primary: Boolean(wallet.isPrimary),
+                  created_at:
+                    wallet.createdAt ??
+                    new Date(Date.UTC(2026, 0, index + 1)),
+                })),
               };
             }
             if (/from runtime_policies/i.test(sql)) {
@@ -2423,42 +2635,383 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             if (
               sql.includes("INSERT INTO telegram_bot_trading_authorizations")
             ) {
-              storedVenues = params?.[6];
+              stats.upserts += 1;
+              const walletChain = params?.[4] as "ethereum" | "solana";
+              const next = {
+                enabled: true,
+                walletAddress: String(params?.[3] ?? ""),
+                walletChain,
+                privyWalletId: String(params?.[5] ?? ""),
+                enabledVenues: (params?.[6] as string[] | undefined) ?? [],
+                limits: JSON.parse(String(params?.[8] ?? "{}")) as Record<
+                  string,
+                  unknown
+                >,
+              };
+              const existing = storedAuthorizations.find(
+                (authorization) => authorization.walletChain === walletChain,
+              );
+              if (existing) {
+                Object.assign(existing, next);
+              } else {
+                storedAuthorizations.push(next);
+              }
+              return { rowCount: 1, rows: [] };
+            }
+            if (
+              sql.includes("UPDATE telegram_bot_trading_authorizations") &&
+              sql.includes("wallet_chain = ANY")
+            ) {
+              const walletChains = new Set(
+                (params?.[1] as string[] | undefined) ?? [],
+              );
+              for (const authorization of storedAuthorizations) {
+                if (!walletChains.has(authorization.walletChain)) continue;
+                if (authorization.enabled) stats.disabledRows += 1;
+                authorization.enabled = false;
+              }
               return { rowCount: 1, rows: [] };
             }
             if (sql.includes("FROM user_telegram_accounts uta")) {
               return {
-                rowCount: 1,
-                rows: [
-                  {
-                    id: "authorization-1",
-                    user_id: "user-1",
-                    privy_user_id: "privy-1",
-                    telegram_user_id: "999",
-                    username: "user",
-                    wallet_address: testCase.walletAddress,
-                    wallet_chain: testCase.walletType,
-                    privy_wallet_id: "wallet-1",
-                    enabled: true,
-                    enabled_venues: storedVenues,
-                    max_amount_usd: "50",
-                    disabled_at: null,
-                    last_verified_at: new Date(),
-                  },
-                ],
+                rowCount: storedAuthorizations.length,
+                rows: storedAuthorizations.map((authorization, index) => ({
+                  id: `authorization-${index + 1}`,
+                  user_id: "user-1",
+                  privy_user_id: "privy-1",
+                  telegram_user_id: "999",
+                  username: "user",
+                  wallet_address: authorization.walletAddress,
+                  wallet_chain: authorization.walletChain,
+                  privy_wallet_id: authorization.privyWalletId,
+                  enabled: authorization.enabled,
+                  enabled_venues: authorization.enabledVenues,
+                  max_amount_usd: "50",
+                  limits: authorization.limits,
+                  disabled_at: null,
+                  last_verified_at: new Date(),
+                })),
               };
             }
             return { rowCount: 0, rows: [] };
           },
         };
+        return { db, stats, storedAuthorizations };
+      };
+
+      {
+        const solanaUnselected = "SoUnselected1111111111111111111111111111111";
+        const solanaSelected = "SoSelected222222222222222222222222222222222";
+        const { db, storedAuthorizations } = makeDb({
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+              isPrimary: true,
+            },
+            {
+              address: "0x0000000000000000000000000000000000000002",
+              type: "ethereum",
+            },
+            {
+              address: solanaUnselected,
+              type: "solana",
+            },
+            {
+              address: solanaSelected,
+              type: "solana",
+              isPrimary: true,
+            },
+          ],
+        });
+        let kalshiEligibilityWalletAddress: string | null = null;
+        const status = await enableTelegramBotTrading(db as never, {
+          buildKalshiEligibilityForWallet: async (walletAddress) => {
+            kalshiEligibilityWalletAddress = walletAddress;
+            return {
+              checkedAt: "2026-07-08T00:00:00.000Z",
+              expiresAt: "2026-07-08T01:00:00.000Z",
+              geoAllowed: true,
+              proofVerified: true,
+            };
+          },
+          enabledVenues: ["polymarket", "limitless", "kalshi"],
+          internalWallets: [
+            {
+              privyWalletId: "evm-primary-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+            {
+              privyWalletId: "evm-preferred-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000002",
+              walletChain: "ethereum",
+            },
+            {
+              privyWalletId: "solana-unselected-wallet",
+              walletAddress: solanaUnselected,
+              walletChain: "solana",
+            },
+            {
+              privyWalletId: "solana-selected-wallet",
+              walletAddress: solanaSelected,
+              walletChain: "solana",
+            },
+          ],
+          preferredWalletAddress: "0x0000000000000000000000000000000000000002",
+          userId: "user-1",
+        });
+        assert.equal(storedAuthorizations.length, 2);
+        assert.deepEqual(storedAuthorizations[0]?.enabledVenues, [
+          "polymarket",
+          "limitless",
+        ]);
+        assert.equal(
+          storedAuthorizations[0]?.privyWalletId,
+          "evm-preferred-wallet",
+        );
+        assert.deepEqual(storedAuthorizations[1]?.enabledVenues, ["kalshi"]);
+        assert.equal(
+          storedAuthorizations[1]?.privyWalletId,
+          "solana-selected-wallet",
+        );
+        assert.equal(kalshiEligibilityWalletAddress, solanaSelected);
+        assert.deepEqual(storedAuthorizations[1]?.limits.kalshiEligibility, {
+          checkedAt: "2026-07-08T00:00:00.000Z",
+          expiresAt: "2026-07-08T01:00:00.000Z",
+          geoAllowed: true,
+          proofVerified: true,
+        });
+        assert.deepEqual(status.enabledVenues, [
+          "polymarket",
+          "limitless",
+          "kalshi",
+        ]);
+        assert.deepEqual(status.walletSetupIssues, []);
+      }
+
+      {
+        const { db, storedAuthorizations } = makeDb({
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+              isPrimary: true,
+            },
+            {
+              address: "0x0000000000000000000000000000000000000002",
+              type: "ethereum",
+            },
+          ],
+        });
+        await enableTelegramBotTrading(db as never, {
+          enabledVenues: ["polymarket", "limitless"],
+          internalWallets: [
+            {
+              privyWalletId: "evm-primary-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+            {
+              privyWalletId: "evm-secondary-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000002",
+              walletChain: "ethereum",
+            },
+          ],
+          preferredWalletAddress: "0x0000000000000000000000000000000000009999",
+          userId: "user-1",
+        });
+        assert.equal(
+          storedAuthorizations[0]?.privyWalletId,
+          "evm-primary-wallet",
+        );
+      }
+
+      {
+        const { db, stats, storedAuthorizations } = makeDb({
+          existingAuthorizations: [
+            {
+              enabled: true,
+              enabledVenues: ["kalshi"],
+              privyWalletId: "old-solana-wallet",
+              walletAddress: "OldSolana111111111111111111111111111111111",
+              walletChain: "solana",
+            },
+          ],
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+            },
+          ],
+        });
         const status = await enableTelegramBotTrading(db as never, {
           enabledVenues: ["polymarket", "limitless", "kalshi"],
-          privyWalletId: "wallet-1",
+          internalWallets: [
+            {
+              privyWalletId: "evm-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+          ],
           userId: "user-1",
-          walletAddress: testCase.walletAddress,
         });
-        assert.deepEqual(storedVenues, testCase.expectedVenues);
-        assert.deepEqual(status.enabledVenues, testCase.expectedVenues);
+        const evmAuthorization = storedAuthorizations.find(
+          (authorization) => authorization.walletChain === "ethereum",
+        );
+        const solanaAuthorization = storedAuthorizations.find(
+          (authorization) => authorization.walletChain === "solana",
+        );
+        assert.equal(storedAuthorizations.length, 2);
+        assert.equal(stats.disabledRows, 1);
+        assert.equal(solanaAuthorization?.enabled, false);
+        assert.deepEqual(evmAuthorization?.enabledVenues, [
+          "polymarket",
+          "limitless",
+        ]);
+        assert.deepEqual(status.enabledVenues, ["polymarket", "limitless"]);
+        assert.deepEqual(status.walletSetupIssues, [
+          {
+            code: "internal_wallet_missing",
+            message:
+              "Telegram bot trading needs an internal Hunch Solana Trading Wallet.",
+            venue: "kalshi",
+            walletChain: "solana",
+          },
+        ]);
+      }
+
+      {
+        const { db } = makeDb({
+          existingAuthorizations: [
+            {
+              enabled: true,
+              enabledVenues: ["polymarket", "limitless"],
+              privyWalletId: "evm-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+          ],
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+            },
+            {
+              address: "So11111111111111111111111111111111111111112",
+              type: "solana",
+            },
+          ],
+        });
+        const issues = await resolveTelegramBotTradingWalletSetupIssues(
+          db as never,
+          {
+            internalWallets: [
+              {
+                privyWalletId: "evm-wallet",
+                walletAddress: "0x0000000000000000000000000000000000000001",
+                walletChain: "ethereum",
+              },
+              {
+                privyWalletId: "solana-wallet",
+                walletAddress: "So11111111111111111111111111111111111111112",
+                walletChain: "solana",
+              },
+            ],
+            requestedVenues: ["polymarket", "limitless", "kalshi"],
+            userId: "user-1",
+          },
+        );
+        assert.deepEqual(issues, []);
+      }
+
+      {
+        const { db } = makeDb({
+          existingAuthorizations: [
+            {
+              enabled: true,
+              enabledVenues: ["polymarket", "limitless"],
+              privyWalletId: "evm-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+          ],
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+            },
+          ],
+        });
+        const issues = await resolveTelegramBotTradingWalletSetupIssues(
+          db as never,
+          {
+            internalWallets: [
+              {
+                privyWalletId: "evm-wallet",
+                walletAddress: "0x0000000000000000000000000000000000000001",
+                walletChain: "ethereum",
+              },
+            ],
+            requestedVenues: ["polymarket", "limitless", "kalshi"],
+            userId: "user-1",
+          },
+        );
+        assert.deepEqual(issues, [
+          {
+            code: "internal_wallet_missing",
+            message:
+              "Telegram bot trading needs an internal Hunch Solana Trading Wallet.",
+            venue: "kalshi",
+            walletChain: "solana",
+          },
+        ]);
+      }
+
+      {
+        const { db, stats, storedAuthorizations } = makeDb({
+          existingAuthorizations: [
+            {
+              enabled: true,
+              enabledVenues: ["polymarket", "limitless"],
+              privyWalletId: "old-evm-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+            {
+              enabled: true,
+              enabledVenues: ["kalshi"],
+              privyWalletId: "old-solana-wallet",
+              walletAddress: "OldSolana111111111111111111111111111111111",
+              walletChain: "solana",
+            },
+          ],
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+            },
+            {
+              address: "OldSolana111111111111111111111111111111111",
+              type: "solana",
+            },
+          ],
+        });
+        await assert.rejects(
+          () =>
+            enableTelegramBotTrading(db as never, {
+              enabledVenues: ["polymarket", "limitless", "kalshi"],
+              internalWallets: [],
+              userId: "user-1",
+            }),
+          /internal_trading_wallet_required/,
+        );
+        assert.equal(stats.upserts, 0);
+        assert.equal(stats.disabledRows, 2);
+        assert.deepEqual(
+          storedAuthorizations.map((authorization) => authorization.enabled),
+          [false, false],
+        );
       }
     },
   },
