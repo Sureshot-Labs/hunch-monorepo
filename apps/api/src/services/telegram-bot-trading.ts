@@ -5,7 +5,6 @@ import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
 } from "../lib/market-availability.js";
-import { isRecord } from "../lib/type-guards.js";
 import {
   resolveSignalBotTradingPolicyFromDb,
   type SignalBotPolicy,
@@ -14,6 +13,7 @@ import {
   parseTelegramBotTradingCallbackData,
   TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
 } from "./telegram-bot-trading-client.js";
+import { normalizeKalshiTradeEligibility } from "./kalshi-trade-eligibility.js";
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
 import type {
   KalshiTradeEligibility,
@@ -97,6 +97,11 @@ type SubmittedTradeRefs = {
   venueOrderId: string | null;
 };
 
+type DbTransactionClient = DbQuery & { release: () => void };
+type TransactionalDbQuery = DbQuery & {
+  connect?: () => Promise<DbTransactionClient>;
+};
+
 type TelegramTradeIntentRow = {
   id: string;
   telegram_user_id: string;
@@ -116,6 +121,13 @@ type TelegramTradeIntentRow = {
   expires_at: Date;
   market_title: string;
   market_status: string;
+};
+
+type UnresolvedTelegramTradeIntentRow = {
+  id: string;
+  error_code: string | null;
+  side: TelegramBotTradingSide | null;
+  status: string;
 };
 
 export type TelegramBotTradingStatus = {
@@ -306,26 +318,6 @@ function parseNumber(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function parseKalshiEligibility(
-  limits: Record<string, unknown> | null | undefined,
-): KalshiTradeEligibility | null {
-  const value = limits?.kalshiEligibility;
-  if (!isRecord(value)) return null;
-  return {
-    checkedAt:
-      typeof value.checkedAt === "string" && value.checkedAt.trim()
-        ? value.checkedAt
-        : null,
-    expiresAt:
-      typeof value.expiresAt === "string" && value.expiresAt.trim()
-        ? value.expiresAt
-        : null,
-    geoAllowed: typeof value.geoAllowed === "boolean" ? value.geoAllowed : null,
-    proofVerified:
-      typeof value.proofVerified === "boolean" ? value.proofVerified : null,
-  };
-}
-
 function executionAuthorizationForAuthorization(
   authorization: TelegramBotTradingAuthorizationRow,
 ): TradeExecutionAuthorization {
@@ -333,7 +325,7 @@ function executionAuthorizationForAuthorization(
     privyWalletId: authorization.privy_wallet_id,
     kalshiEligibility:
       authorization.wallet_chain === "solana"
-        ? parseKalshiEligibility(authorization.limits)
+        ? normalizeKalshiTradeEligibility(authorization.limits)
         : null,
   };
 }
@@ -846,7 +838,7 @@ export async function enableTelegramBotTrading(
         requireConfirmation: true,
         kalshiEligibility:
           wallet.wallet_type === "solana"
-            ? (input.kalshiEligibility ?? null)
+            ? normalizeKalshiTradeEligibility(input.kalshiEligibility)
             : null,
       }),
     ],
@@ -1013,6 +1005,138 @@ async function insertBuyIntent(input: {
   return id;
 }
 
+function isTransactionalDb(db: DbQuery): db is TransactionalDbQuery {
+  return typeof (db as TransactionalDbQuery).connect === "function";
+}
+
+async function loadUnresolvedTelegramTradeIntent(
+  db: DbQuery,
+  input: {
+    excludeIntentId?: string | null;
+    marketId: string;
+    side?: TelegramBotTradingSide | null;
+    telegramUserId: string;
+  },
+): Promise<UnresolvedTelegramTradeIntentRow | null> {
+  const result = await db.query<UnresolvedTelegramTradeIntentRow>(
+    `SELECT id, side, status, error_code
+       FROM telegram_trade_intents tti
+      WHERE telegram_user_id = $1
+        AND market_id = $2
+        AND ($3::text IS NULL OR side = $3)
+        AND ($4::uuid IS NULL OR id <> $4::uuid)
+        AND (
+          status = ANY($5::text[])
+          OR (status = 'submitted' AND error_code = 'reconcile_required')
+        )
+      ORDER BY updated_at DESC
+      LIMIT 1`,
+    [
+      input.telegramUserId,
+      input.marketId,
+      input.side ?? null,
+      input.excludeIntentId ?? null,
+      ["confirming", "executing", "reconcile_required"],
+    ],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function countUnresolvedTelegramTradeIntents(
+  db: DbQuery,
+  telegramUserId: string,
+): Promise<number> {
+  const result = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM telegram_trade_intents tti
+      WHERE telegram_user_id = $1
+        AND (
+          status = ANY($2::text[])
+          OR (status = 'submitted' AND error_code = 'reconcile_required')
+        )`,
+    [telegramUserId, ["confirming", "executing", "reconcile_required"]],
+  );
+  const parsed = Number(result.rows[0]?.count ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function withOptionalTransaction<T>(
+  db: DbQuery,
+  callback: (client: DbQuery) => Promise<T>,
+): Promise<T> {
+  if (!isTransactionalDb(db) || !db.connect) {
+    return callback(db);
+  }
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function lockTelegramIntentMarketSide(
+  db: DbQuery,
+  input: {
+    marketId: string;
+    side: TelegramBotTradingSide;
+    telegramUserId: string;
+  },
+): Promise<void> {
+  await db.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+    [
+      [
+        "telegram-bot-trade",
+        input.telegramUserId,
+        input.marketId,
+        input.side,
+      ].join(":"),
+    ],
+  );
+}
+
+async function transitionIntentToConfirming(input: {
+  authorization: TelegramBotTradingAuthorizationRow;
+  db: DbQuery;
+  intent: TelegramTradeIntentRow;
+  side: TelegramBotTradingSide;
+}): Promise<"blocked" | "confirmed" | "overtaken"> {
+  return withOptionalTransaction(input.db, async (client) => {
+    await lockTelegramIntentMarketSide(client, {
+      marketId: input.intent.market_id,
+      side: input.side,
+      telegramUserId: input.intent.telegram_user_id,
+    });
+    const unresolved = await loadUnresolvedTelegramTradeIntent(client, {
+      excludeIntentId: input.intent.id,
+      marketId: input.intent.market_id,
+      side: input.side,
+      telegramUserId: input.intent.telegram_user_id,
+    });
+    if (unresolved) return "blocked";
+    const confirming = await updateIntentStatus({
+      allowedStatuses: ["draft", "previewed"],
+      db: client,
+      intentId: input.intent.id,
+      status: "confirming",
+    });
+    if (!confirming) return "overtaken";
+    await attachAuthorizationToIntent({
+      authorization: input.authorization,
+      db: client,
+      intentId: input.intent.id,
+    });
+    return "confirmed";
+  });
+}
+
 export async function buildTelegramBotTradingStatusMessage(
   db: DbQuery,
   telegramUserId: string | number,
@@ -1022,6 +1146,10 @@ export async function buildTelegramBotTradingStatusMessage(
     resolveTelegramBotTradingPolicy(db),
     getTelegramBotTradingStatus(db, telegramUserId, trading),
   ]);
+  const unresolvedIntentCount = await countUnresolvedTelegramTradeIntents(
+    db,
+    normalizeTelegramUserId(telegramUserId),
+  );
   const lines = [
     "Telegram Trading Status",
     "",
@@ -1041,6 +1169,11 @@ export async function buildTelegramBotTradingStatusMessage(
     `Max buy: ${formatUsd(status.maxAmountUsd ?? policy.maxTradeAmountUsd)}`,
     `Direct execution: ${status.directExecutionReady ? "ready" : "not ready"}`,
   ];
+  if (unresolvedIntentCount > 0) {
+    lines.push(
+      `Resolving trades: ${unresolvedIntentCount}. Check Hunch before retrying those markets.`,
+    );
+  }
   if (status.setupIssue) lines.push("", status.setupIssue);
   return {
     parse_mode: "MarkdownV2",
@@ -1101,8 +1234,13 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     trading: input.trading,
     venue: market.venue,
   });
+  const unresolvedIntent = await loadUnresolvedTelegramTradeIntent(input.db, {
+    marketId: market.id,
+    telegramUserId,
+  });
   const buyEnabled =
     !input.isAdminTest &&
+    !unresolvedIntent &&
     policy.tradingEnabled &&
     policy.tradingActions.includes("buy") &&
     policyVenueAllowed &&
@@ -1123,6 +1261,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   lines.push("", `${market.venue} · ${market.status}`, marketPriceLine(market));
   if (input.isAdminTest) {
     lines.push("", "Preview only - trade buttons are not created.");
+  } else if (unresolvedIntent) {
+    lines.push(
+      "",
+      "Existing trade is still resolving. Check /trade_status before retrying.",
+    );
   }
   if (!policy.tradingEnabled) {
     lines.push("", "Trading is disabled by runtime policy.");
@@ -1221,6 +1364,7 @@ async function loadIntent(
 
 async function updateIntentStatus(input: {
   allowedStatuses?: string[];
+  allowRecoverableFinalization?: boolean;
   db: DbQuery;
   errorCode?: string;
   errorMessage?: string;
@@ -1256,7 +1400,17 @@ async function updateIntentStatus(input: {
             END,
             updated_at = now()
       WHERE id = $1
-        AND ($6::text[] IS NULL OR status = ANY($6::text[]))
+        AND (
+          $6::text[] IS NULL
+          OR status = ANY($6::text[])
+          OR (
+            $14::boolean
+            AND (
+              (status = 'reconcile_required' AND error_code = 'submit_state_unknown')
+              OR (status = 'submitted' AND error_code = 'reconcile_required')
+            )
+          )
+        )
       RETURNING id`,
     [
       input.intentId,
@@ -1272,9 +1426,46 @@ async function updateIntentStatus(input: {
       input.preparedSnapshot ? JSON.stringify(input.preparedSnapshot) : null,
       ["filled", "submitted"].includes(input.status),
       Boolean(input.markSubmitStarted),
+      Boolean(input.allowRecoverableFinalization),
     ],
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+async function finalizeSubmittedIntent(input: {
+  db: DbQuery;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  executionId?: string | null;
+  intentId: string;
+  orderId?: string | null;
+  preparedSnapshot?: Record<string, unknown> | null;
+  result: Record<string, unknown>;
+  status: string;
+  txSignature?: string | null;
+  venueOrderId?: string | null;
+}): Promise<boolean> {
+  const hasDurableRefs = Boolean(
+    input.orderId ??
+      input.executionId ??
+      input.venueOrderId ??
+      input.txSignature,
+  );
+  return updateIntentStatus({
+    allowedStatuses: ["executing"],
+    allowRecoverableFinalization: hasDurableRefs,
+    db: input.db,
+    errorCode: input.errorCode ?? undefined,
+    errorMessage: input.errorMessage ?? undefined,
+    executionId: input.executionId ?? null,
+    intentId: input.intentId,
+    orderId: input.orderId ?? null,
+    preparedSnapshot: input.preparedSnapshot ?? null,
+    result: input.result,
+    status: input.status,
+    txSignature: input.txSignature ?? null,
+    venueOrderId: input.venueOrderId ?? null,
+  });
 }
 
 export async function reconcileStaleTelegramTradeIntents(
@@ -1284,6 +1475,8 @@ export async function reconcileStaleTelegramTradeIntents(
     now?: Date;
   } = {},
 ): Promise<{
+  backfilledExecutionRefs: number;
+  backfilledOrderRefs: number;
   expiredPending: number;
   failedPreSubmitExecuting: number;
   submittedReconcileRequired: number;
@@ -1303,6 +1496,53 @@ export async function reconcileStaleTelegramTradeIntents(
         AND expires_at <= $2
       RETURNING id`,
     [PENDING_INTENT_STATUSES, now],
+  );
+  const backfilledOrderRefs = await db.query(
+    `UPDATE telegram_trade_intents ti
+        SET status = CASE
+              WHEN lower(o.status) IN ('filled', 'matched') THEN 'filled'
+              ELSE 'submitted'
+            END,
+            error_code = NULL,
+            error_message = NULL,
+            order_id = coalesce(ti.order_id, o.id),
+            venue_order_id = coalesce(ti.venue_order_id, o.venue_order_id),
+            submitted_at = coalesce(ti.submitted_at, ti.submit_started_at, now()),
+            updated_at = now()
+       FROM orders o
+      WHERE ti.status = ANY($1::text[])
+        AND ti.order_id IS NULL
+        AND o.user_id = ti.user_id
+        AND o.venue = ti.venue
+        AND o.order_payload IS NOT NULL
+        AND jsonb_typeof(o.order_payload) = 'object'
+        AND o.order_payload->>'telegramIntentId' = ti.id::text
+      RETURNING ti.id`,
+    [["executing", "reconcile_required", "submitted"]],
+  );
+  const backfilledExecutionRefs = await db.query(
+    `UPDATE telegram_trade_intents ti
+        SET status = CASE
+              WHEN lower(e.status) IN ('fulfilled', 'filled') THEN 'filled'
+              ELSE 'submitted'
+            END,
+            error_code = NULL,
+            error_message = NULL,
+            execution_id = coalesce(ti.execution_id, e.id),
+            venue_order_id = coalesce(ti.venue_order_id, e.venue_order_id),
+            tx_signature = coalesce(ti.tx_signature, e.tx_signature),
+            submitted_at = coalesce(ti.submitted_at, ti.submit_started_at, now()),
+            updated_at = now()
+       FROM executions e
+      WHERE ti.status = ANY($1::text[])
+        AND ti.execution_id IS NULL
+        AND e.user_id = ti.user_id
+        AND e.venue = ti.venue
+        AND e.raw IS NOT NULL
+        AND jsonb_typeof(e.raw) = 'object'
+        AND e.raw->>'telegramIntentId' = ti.id::text
+      RETURNING ti.id`,
+    [["executing", "reconcile_required", "submitted"]],
   );
   const failedPreSubmitExecuting = await db.query(
     `UPDATE telegram_trade_intents
@@ -1356,6 +1596,8 @@ export async function reconcileStaleTelegramTradeIntents(
     [executingCutoff],
   );
   return {
+    backfilledExecutionRefs: backfilledExecutionRefs.rowCount ?? 0,
+    backfilledOrderRefs: backfilledOrderRefs.rowCount ?? 0,
     expiredPending: expiredPending.rowCount ?? 0,
     failedPreSubmitExecuting: failedPreSubmitExecuting.rowCount ?? 0,
     submittedReconcileRequired: submittedReconcileRequired.rowCount ?? 0,
@@ -1364,13 +1606,14 @@ export async function reconcileStaleTelegramTradeIntents(
   };
 }
 
-function buildPreparedTradeSnapshot(
+export function buildPreparedTradeSnapshot(
   prepared: Awaited<ReturnType<ApiBotTradingExecutor["prepareTrade"]>>,
 ): Record<string, unknown> {
   return {
     authorizationMode: prepared.authorizationMode,
     expiresAt: prepared.expiresAt?.toISOString() ?? null,
     preparedId: prepared.preparedId,
+    reconcileKeys: prepared.reconcileKeys,
     venue: prepared.venue,
   };
 }
@@ -1674,21 +1917,31 @@ export async function handleTelegramBotTradingCallback(
     return true;
   }
   if (parsed.type === "buy") {
-    const confirming = await updateIntentStatus({
-      allowedStatuses: ["draft", "previewed"],
+    const confirming = await transitionIntentToConfirming({
+      authorization,
       db: input.db,
-      intentId: intent.id,
-      status: "confirming",
+      intent,
+      side,
     });
-    if (!confirming) {
+    if (confirming === "blocked") {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "Existing trade is still resolving. Check /trade_status before retrying.",
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: escapeMarkdown(
+          "Existing trade is still resolving. Check /trade_status before retrying.",
+        ),
+      });
+      return true;
+    }
+    if (confirming !== "confirmed") {
       await answerIntentAlreadyProcessed(input, intent.status);
       return true;
     }
-    await attachAuthorizationToIntent({
-      authorization,
-      db: input.db,
-      intentId: intent.id,
-    });
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       text: "Confirm in the next message.",
@@ -1765,6 +2018,40 @@ export async function handleTelegramBotTradingCallback(
   let submitStarted = false;
   try {
     const quote = await trading.quote({ intent: sharedIntent });
+    const quoteMaxSpendUsd = quote.maxSpendUsd ?? amountUsd;
+    if (quoteMaxSpendUsd > maxAmountUsd) {
+      await updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: input.db,
+        errorCode: "max_spend_exceeded",
+        errorMessage: "Quote max spend exceeds the Telegram bot max buy.",
+        intentId: intent.id,
+        result: {
+          maxAmountUsd,
+          quote,
+          quoteMaxSpendUsd,
+        },
+        status: "failed",
+      });
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "Quote exceeds your max buy. Send /market again.",
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: escapeMarkdown(
+          [
+            "Trade not submitted.",
+            `${intent.venue} · ${intent.market_title}`,
+            `${side} · ${formatUsd(amountUsd)}`,
+            `Quote max spend ${formatUsd(quoteMaxSpendUsd)} exceeds your ${formatUsd(maxAmountUsd)} max buy.`,
+          ].join("\n"),
+        ),
+      });
+      return true;
+    }
     const prepared = await trading.prepareTrade({
       intent: sharedIntent,
       quote,
@@ -1814,8 +2101,7 @@ export async function handleTelegramBotTradingCallback(
       persisted?.venueOrderId ??
       submitResult.venueOrderId ??
       submitResult.txSignature;
-    await updateIntentStatus({
-      allowedStatuses: ["executing"],
+    const finalized = await finalizeSubmittedIntent({
       db: input.db,
       errorCode: postSubmitError?.code ?? resolution.errorCode,
       errorMessage: postSubmitError?.message ?? resolution.errorMessage,
@@ -1834,6 +2120,31 @@ export async function handleTelegramBotTradingCallback(
       txSignature: submitResult.txSignature,
       venueOrderId,
     });
+    if (!finalized) {
+      const currentIntent = await loadIntent(input.db, intent.id);
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "Trade status changed while recording. Check /trade_status before retrying.",
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: escapeMarkdown(
+          [
+            "Trade status changed while recording.",
+            `${intent.venue} · ${intent.market_title}`,
+            currentIntent?.status
+              ? `Current bot status: ${currentIntent.status}`
+              : null,
+            "Check /trade_status before retrying.",
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n"),
+        ),
+      });
+      return true;
+    }
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: Boolean(postSubmitError),

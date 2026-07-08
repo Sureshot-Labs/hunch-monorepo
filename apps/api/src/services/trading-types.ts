@@ -1,4 +1,7 @@
-export type TradingVenue = "kalshi" | "limitless" | "polymarket" | string;
+export type TradingVenue = "kalshi" | "limitless" | "polymarket";
+export type ExternalTradingVenue = string & {
+  readonly __externalTradingVenue: unique symbol;
+};
 
 export type TradeActorKind = "admin_test" | "telegram_bot" | "web_app" | "worker";
 
@@ -143,6 +146,7 @@ export type PreparedTrade = {
   quote: TradeQuote | null;
   authorizationMode: PreparedTradeAuthorizationMode;
   authorizationRequests: PreparedAuthorizationRequest[];
+  reconcileKeys: Record<string, unknown>;
   venuePayload: unknown;
   expiresAt: Date | null;
 };

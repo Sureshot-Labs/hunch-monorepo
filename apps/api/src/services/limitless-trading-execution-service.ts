@@ -30,7 +30,13 @@ import {
 import { upsertLimitlessVenueShareAccrualFromOrderPayload } from "./limitless-fee-accruals.js";
 import { recordLimitlessVolumeEvent } from "./limitless-volume-events.js";
 import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
-import { quoteLimitlessAmmTrade } from "./limitless-trading-service.js";
+import {
+  LIMITLESS_CLOB_CHAIN_ID,
+  LIMITLESS_CLOB_EIP712_NAME,
+  LIMITLESS_CLOB_EIP712_VERSION,
+  LIMITLESS_CLOB_ORDER_TYPES,
+  quoteLimitlessAmmTrade,
+} from "./limitless-trading-service.js";
 import {
   fetchErc1155BalancesByOwner,
   fetchErc1155IsApprovedForAll,
@@ -44,6 +50,7 @@ import {
   amountUsd,
   applyOrderTradeEffects,
   bestAskForToken,
+  buildTelegramTradeSourceMetadata,
   createCapability,
   createServerWalletClient,
   executePreparedTradeLifecycle,
@@ -102,9 +109,7 @@ import type {
   TradingReadinessInput,
 } from "./trading-types.js";
 
-const LIMITLESS_EIP712_NAME = "Limitless CTF Exchange";
-const LIMITLESS_EIP712_VERSION = "1";
-const LIMITLESS_CHAIN_ID = 8453;
+const LIMITLESS_CHAIN_ID = LIMITLESS_CLOB_CHAIN_ID;
 const LIMITLESS_FOK_UNMATCHED_REASON = "market_order_unmatched";
 const LIMITLESS_FOK_UNMATCHED_MESSAGE =
   "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
@@ -122,23 +127,6 @@ const LIMITLESS_LEGACY_OPERATOR_BY_EXCHANGE: Readonly<Record<string, string>> =
       "0xb8daa4c8c9f690396f671bb601727a4c3741340c",
   };
 
-const LIMITLESS_ORDER_TYPES = {
-  Order: [
-    { name: "salt", type: "uint256" },
-    { name: "maker", type: "address" },
-    { name: "signer", type: "address" },
-    { name: "taker", type: "address" },
-    { name: "tokenId", type: "uint256" },
-    { name: "makerAmount", type: "uint256" },
-    { name: "takerAmount", type: "uint256" },
-    { name: "expiration", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "feeRateBps", type: "uint256" },
-    { name: "side", type: "uint8" },
-    { name: "signatureType", type: "uint8" },
-  ],
-} as const;
-
 const LIMITLESS_AMM_IFACE = new ethers.Interface([
   "function buy(uint256 investmentAmount,uint256 outcomeIndex,uint256 minOutcomeTokens) returns (uint256)",
 ]);
@@ -148,6 +136,7 @@ const ERC20_IFACE = new ethers.Interface([
 ]);
 
 type LimitlessClobPreparedPayload = PreparedPayloadBase & {
+  clientOrderId: string;
   kind: "limitless";
   marketSlug: string;
   orderPayload: Record<string, unknown>;
@@ -3533,6 +3522,7 @@ export async function recordLimitlessAmmOrder(input: {
   onchainConfirmed?: boolean;
   pool: ApiTradingApplicationServiceInput["pool"];
   settlementMode?: "confirmed" | "legacy_assume_filled";
+  source?: Record<string, unknown> | null;
   signer: string;
   userId: string;
 }): Promise<LimitlessAmmRecordRouteResult> {
@@ -3617,6 +3607,7 @@ export async function recordLimitlessAmmOrder(input: {
     rawError: null,
     orderPayload: {
       ...input.body,
+      ...(input.source ?? {}),
       onchainConfirmed,
       settlementMode,
       tokenId,
@@ -4164,6 +4155,21 @@ function canonicalLimitlessOrderPayload(payload: Record<string, unknown>) {
   };
 }
 
+function digestPreparedPayload(value: unknown): string {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(value))
+    .digest("hex");
+}
+
+function deterministicLimitlessClientOrderId(intent: TradeIntent): string {
+  return `hunch-${crypto
+    .createHash("sha256")
+    .update(intent.idempotencyKey)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 async function fetchLimitlessExchangeAddress(input: {
   marketSlug: string;
   requestAuth: Record<string, unknown>;
@@ -4278,6 +4284,14 @@ async function prepareLimitlessAmmTrade(input: {
   );
   const size = amountFromRaw(sharesRaw);
   const price = size > 0 ? amount / size : null;
+  const preparedDigest = digestPreparedPayload({
+    amountUsdRaw: amountRaw.toString(),
+    marketAddress,
+    minOutcomeTokensRaw: minOutcomeTokensRaw.toString(),
+    outcomeIndex,
+    tokenId,
+    tradeType: "amm",
+  });
 
   return {
     preparedId: crypto.randomUUID(),
@@ -4286,6 +4300,16 @@ async function prepareLimitlessAmmTrade(input: {
     quote: input.quote ?? null,
     authorizationMode: "embedded_privy_evm",
     authorizationRequests: [],
+    reconcileKeys: {
+      amountUsdRaw: amountRaw.toString(),
+      idempotencyKey: intent.idempotencyKey,
+      intentId: intent.id ?? null,
+      marketAddress,
+      preparedDigest,
+      tokenId,
+      tradeType: "amm",
+      venue: "limitless",
+    },
     venuePayload: {
       kind: "limitless",
       allowanceRaw: allowanceRaw.toString(),
@@ -4420,17 +4444,18 @@ async function prepareTrade(
     signer,
     typedData: {
       domain: {
-        name: LIMITLESS_EIP712_NAME,
-        version: LIMITLESS_EIP712_VERSION,
+        name: LIMITLESS_CLOB_EIP712_NAME,
+        version: LIMITLESS_CLOB_EIP712_VERSION,
         chainId: LIMITLESS_CHAIN_ID,
         verifyingContract: exchangeAddress,
       },
-      types: LIMITLESS_ORDER_TYPES,
+      types: LIMITLESS_CLOB_ORDER_TYPES,
       primaryType: "Order",
       message: order,
     },
   });
   const size = input.quote?.estimatedShares ?? amountUsd(intent) / price;
+  const clientOrderId = deterministicLimitlessClientOrderId(intent);
 
   return {
     preparedId: crypto.randomUUID(),
@@ -4439,7 +4464,17 @@ async function prepareTrade(
     quote: input.quote ?? null,
     authorizationMode: "embedded_privy_evm",
     authorizationRequests: [],
+    reconcileKeys: {
+      clientOrderId,
+      idempotencyKey: intent.idempotencyKey,
+      intentId: intent.id ?? null,
+      marketSlug: market.slug,
+      tokenId: normalizeLimitlessScopedTokenId(tokenId) ?? tokenId,
+      tradeType: "clob",
+      venue: "limitless",
+    },
     venuePayload: {
+      clientOrderId,
       kind: "limitless",
       marketSlug: market.slug,
       orderPayload: { ...order, signature },
@@ -4550,7 +4585,7 @@ async function submitPreparedTrade(
       marketSlug: payload.marketSlug,
       ownerId: payload.ownerId,
       onBehalfOf: payload.ownerId,
-      clientOrderId: `hunch-${crypto.randomUUID()}`,
+      clientOrderId: payload.clientOrderId,
     },
   });
   if (!upstream.ok) {
@@ -4648,6 +4683,7 @@ async function persistTrade(
       log: ctx.logger as LimitlessRouteLogger,
       onchainConfirmed: true,
       pool: ctx.pool,
+      source: buildTelegramTradeSourceMetadata(input),
       signer: input.intent.walletAddress,
       userId: input.intent.actor.userId,
     });
@@ -4701,6 +4737,7 @@ async function persistTrade(
     rawError: null,
     orderPayload: {
       ...payload.orderPayload,
+      ...buildTelegramTradeSourceMetadata(input),
       _hunchUpstream: upstreamPayload,
     },
     filledAt,

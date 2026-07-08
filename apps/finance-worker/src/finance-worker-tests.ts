@@ -23,8 +23,9 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
     payoutPrepareEnabled: false,
     payoutSendEnabled: false,
     retryBackoffSec: 1,
-    telegramTradeIntentsEnabled: true,
+    telegramTradeIntentsEnabled: false,
     telegramTradeIntentsExecutingGraceSec: 600,
+    telegramTradeIntentsExplicitWriteOverride: false,
     telegramTradeIntentsIntervalSec: 60,
     treasurySweepEnabled: false,
     ...overrides,
@@ -33,14 +34,14 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
 
 const tests: TestCase[] = [
   {
-    name: "telegram trade intent reconcile job is enabled by default",
+    name: "telegram trade intent reconcile job is disabled by default when execute is false",
     run: () => {
       const jobs = buildJobs(buildTestEnv());
       const job = jobs.find(
         (candidate) => candidate.name === "telegram_trade_intents_reconcile",
       );
       assert.ok(job);
-      assert.equal(job.enabled, true);
+      assert.equal(job.enabled, false);
       assert.equal(job.intervalSec, 60);
       assert.equal(job.timeoutSec, env.jobTimeoutSec);
       assert.equal(job.maxRetries, 0);
@@ -49,32 +50,50 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "telegram trade intent reconcile does not depend on execute flag",
+    name: "telegram trade intent reconcile follows explicit execute-enabled env",
     run: () => {
       const disabledExecute = buildJobs(buildTestEnv({ executeEnabled: false }))
         .find(
           (candidate) =>
             candidate.name === "telegram_trade_intents_reconcile",
         );
-      const enabledExecute = buildJobs(buildTestEnv({ executeEnabled: true }))
-        .find(
+      const enabledExecute = buildJobs(
+        buildTestEnv({
+          executeEnabled: true,
+          telegramTradeIntentsEnabled: true,
+        }),
+      ).find(
           (candidate) =>
             candidate.name === "telegram_trade_intents_reconcile",
         );
-      assert.equal(disabledExecute?.enabled, true);
+      assert.equal(disabledExecute?.enabled, false);
       assert.equal(enabledExecute?.enabled, true);
     },
   },
   {
-    name: "telegram trade intent reconcile can be disabled independently",
+    name: "telegram trade intent reconcile explicit override is honored and warned",
     run: () => {
-      const jobs = buildJobs(
-        buildTestEnv({ telegramTradeIntentsEnabled: false }),
-      );
-      const job = jobs.find(
-        (candidate) => candidate.name === "telegram_trade_intents_reconcile",
-      );
-      assert.equal(job?.enabled, false);
+      const originalWarn = console.warn;
+      const warnings: unknown[] = [];
+      console.warn = (message?: unknown) => {
+        warnings.push(message);
+      };
+      try {
+        const jobs = buildJobs(
+          buildTestEnv({
+            executeEnabled: false,
+            telegramTradeIntentsEnabled: true,
+            telegramTradeIntentsExplicitWriteOverride: true,
+          }),
+        );
+        const job = jobs.find(
+          (candidate) => candidate.name === "telegram_trade_intents_reconcile",
+        );
+        assert.equal(job?.enabled, true);
+        assert.match(String(warnings[0] ?? ""), /DB writes/);
+      } finally {
+        console.warn = originalWarn;
+      }
     },
   },
 ];

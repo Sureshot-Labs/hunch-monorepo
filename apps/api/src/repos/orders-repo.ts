@@ -440,7 +440,10 @@ export async function storeOrder(
 export async function findLimitlessHistoryMatch(
   pool: Pool,
   inputs: {
+    clientOrderId?: string | null;
+    orderHash?: string | null;
     userId: string;
+    venueOrderId?: string | null;
     walletAddress: string;
     tokenId: string;
     side: string;
@@ -455,10 +458,73 @@ export async function findLimitlessHistoryMatch(
   postedAt: Date | null;
   positionDeltaApplied: boolean;
 } | null> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
+  if (inputs.venueOrderId || inputs.orderHash || inputs.clientOrderId) {
+    const exact = await pool.query<{
+      id: string;
+      venue_order_id: string | null;
+      status: string | null;
+      posted_at: Date | null;
+      position_delta_applied: boolean;
+    }>(
+      `
+        select
+          id,
+          venue_order_id,
+          status,
+          posted_at,
+          ${positionDeltaAppliedSqlExpression()} as position_delta_applied
+        from orders
+        where user_id = $1
+          and venue = 'limitless'
+          and token_id = $2
+          and side = $3
+          and (wallet_address is null or wallet_address = $4 or signer_address = $4)
+          and ($5::text is null or order_type is null or order_type = $5)
+          and status in ('submitted', 'open', 'pending', 'matched', 'filled', 'expired')
+          and (venue_order_id is null or venue_order_id not like 'history:%')
+          and (
+            ($6::text is not null and venue_order_id = $6)
+            or ($7::text is not null and order_hash = $7)
+            or (
+              $8::text is not null
+              and order_payload is not null
+              and jsonb_typeof(order_payload) = 'object'
+              and (
+                order_payload->>'clientOrderId' = $8
+                or order_payload->'reconcileKeys'->>'clientOrderId' = $8
+              )
+            )
+          )
+        order by posted_at desc nulls last
+        limit 2
+      `,
+      [
+        inputs.userId,
+        inputs.tokenId,
+        inputs.side,
+        walletAddress,
+        inputs.orderType,
+        inputs.venueOrderId ?? null,
+        inputs.orderHash ?? null,
+        inputs.clientOrderId ?? null,
+      ],
+    );
+
+    if (exact.rows.length === 1) {
+      return {
+        id: exact.rows[0].id,
+        venueOrderId: exact.rows[0].venue_order_id ?? null,
+        status: exact.rows[0].status ?? null,
+        postedAt: exact.rows[0].posted_at ?? null,
+        positionDeltaApplied: exact.rows[0].position_delta_applied,
+      };
+    }
+  }
+
   const windowMs = inputs.windowMs ?? 2 * 60 * 1000;
   const from = new Date(inputs.postedAt.getTime() - windowMs);
   const to = new Date(inputs.postedAt.getTime() + windowMs);
-  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
 
   const { rows } = await pool.query<{
     id: string;

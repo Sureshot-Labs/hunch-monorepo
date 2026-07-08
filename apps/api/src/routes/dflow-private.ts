@@ -15,6 +15,7 @@ import {
 import {
   fetchKalshiNormalizedOrderStatus,
 } from "../services/kalshi-executions.js";
+import { resolveKalshiProofRequirement } from "../services/kalshi-trade-eligibility.js";
 import {
   buildKalshiDflowOrderRoute,
   buildKalshiDflowSwapRoute,
@@ -69,10 +70,6 @@ function ensureDflowReady(reply: {
   reply.code(400);
   reply.send({ error: "Missing DFLOW_API_KEY" });
   return false;
-}
-
-function isBuyIntent(inputMint: string | null | undefined): boolean {
-  return Boolean(inputMint && inputMint === env.solanaUsdcMint);
 }
 
 function buildClearedTopTick(tokenId: string, tsMs: number): string {
@@ -206,10 +203,6 @@ async function markDflowRouteUnavailable(mints: string[]): Promise<void> {
   );
 }
 
-function isProofBypassed(user: { kalshiProofBypass: boolean }): boolean {
-  return user.kalshiProofBypass;
-}
-
 function sendProofRequired(
   reply: {
     code: (status: number) => void;
@@ -308,10 +301,17 @@ async function enforceKalshiProof(args: {
     send: (payload: unknown) => void;
   };
 }): Promise<boolean> {
-  if (!env.kalshiProofEnabled) return true;
-  if (isProofBypassed(args.user)) return true;
+  const requirement = resolveKalshiProofRequirement({
+    hasDeterministicIntent:
+      args.hasDeterministicIntent && Boolean(args.outputMint),
+    inputMint: args.inputMint,
+    proofBypassed: args.user.kalshiProofBypass,
+    proofEnabled: env.kalshiProofEnabled,
+    usdcMint: env.solanaUsdcMint,
+  });
+  if (!requirement.requiresProof) return true;
 
-  if (!args.hasDeterministicIntent || !args.inputMint || !args.outputMint) {
+  if (requirement.decision === "unknown_intent") {
     args.app.log.warn(
       {
         userId: args.user.id,
@@ -322,8 +322,6 @@ async function enforceKalshiProof(args: {
     sendProofUnavailable(args.reply);
     return false;
   }
-
-  if (!isBuyIntent(args.inputMint)) return true;
 
   const proofCheck = await verifyProofAddress({
     address: args.walletAddress,

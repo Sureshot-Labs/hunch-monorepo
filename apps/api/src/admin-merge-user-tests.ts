@@ -111,6 +111,12 @@ function createMergeDb(fixture: MergeDbFixture) {
         assert.equal(params?.[1], "source");
         return result<T>([], fixture.authRows ?? 0);
       }
+      if (normalized.startsWith("select count(*)::text as count from telegram_trade_intents")) {
+        assert.equal(params?.[0], "source");
+        return result<T>(
+          [{ count: String(fixture.intentRows ?? 0) }] as unknown as T[],
+        );
+      }
       if (normalized.startsWith("update telegram_trade_intents")) {
         assert.equal(params?.[0], "target");
         assert.equal(params?.[1], "source");
@@ -240,7 +246,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
     },
   },
   {
-    name: "keep-source merge preserves Telegram login rows but moves intents",
+    name: "keep-source merge preserves Telegram login rows and intents",
     run: async () => {
       const fake = createMergeDb({
         authRows: 2,
@@ -257,7 +263,11 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
       assert.equal(resultValue.summary.telegramAccountsMoved, 0);
       assert.equal(resultValue.summary.telegramAccountsConflictBlocked, 1);
       assert.equal(resultValue.summary.telegramBotTradingAuthorizationsMoved, 0);
-      assert.equal(resultValue.summary.telegramTradeIntentsMoved, 5);
+      assert.equal(resultValue.summary.telegramTradeIntentsMoved, 0);
+      assert.equal(
+        resultValue.summary.telegramTradeIntentsPreservedWithSource,
+        5,
+      );
       assert.equal(fake.state.committed, true);
       assert.equal(
         countCalls(fake.calls, /^update user_telegram_accounts/),
@@ -267,7 +277,11 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
         countCalls(fake.calls, /^update telegram_bot_trading_authorizations/),
         0,
       );
-      assert.equal(countCalls(fake.calls, /^update telegram_trade_intents/), 1);
+      assert.equal(countCalls(fake.calls, /^update telegram_trade_intents/), 0);
+      assert.equal(
+        countCalls(fake.calls, /^select count\(\*\)::text as count from telegram_trade_intents/),
+        1,
+      );
     },
   },
 ];

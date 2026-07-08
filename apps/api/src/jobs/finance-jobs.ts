@@ -37,6 +37,8 @@ export type ReconcileTelegramTradeIntentsOptions = {
 };
 
 export type ReconcileTelegramTradeIntentsJobSummary = {
+  backfilledExecutionRefs: number;
+  backfilledOrderRefs: number;
   expiredPending: number;
   failedPreSubmitExecuting: number;
   skipped?: boolean;
@@ -152,6 +154,8 @@ export async function runTelegramTradeIntentReconcileJob(
   const db = overrides?.db ?? pool;
   if (!(await isTelegramTradeIntentReconcileSchemaReady(db))) {
     const summary = {
+      backfilledExecutionRefs: 0,
+      backfilledOrderRefs: 0,
       expiredPending: 0,
       failedPreSubmitExecuting: 0,
       skipped: true,
@@ -175,6 +179,8 @@ export async function runTelegramTradeIntentReconcileJob(
   console.log(
     [
       "Reconcile Telegram trade intents",
+      `backfilledOrderRefs=${summary.backfilledOrderRefs}`,
+      `backfilledExecutionRefs=${summary.backfilledExecutionRefs}`,
       `expiredPending=${summary.expiredPending}`,
       `failedPreSubmitExecuting=${summary.failedPreSubmitExecuting}`,
       `unknownSubmitReconcileRequired=${summary.unknownSubmitReconcileRequired}`,

@@ -37,6 +37,11 @@ type FinanceWorkerEnv = typeof env;
 
 export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
   const allowExecute = workerEnv.executeEnabled;
+  if (workerEnv.telegramTradeIntentsExplicitWriteOverride) {
+    console.warn(
+      "HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED enables DB writes while HUNCH_FINANCE_EXECUTE=false.",
+    );
+  }
   return [
     {
       name: "api_cache_warm",

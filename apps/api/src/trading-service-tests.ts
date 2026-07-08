@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import type { Pool } from "@hunch/infra";
 
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
+import { executePreparedTradeLifecycle } from "./services/api-trading-utils.js";
+import type { PreparedTrade, SubmitResult } from "./services/trading-types.js";
 
 type TestCase = {
   name: string;
@@ -70,6 +72,92 @@ function sourceSlice(
 
 const tests: TestCase[] = [
   {
+    name: "trading lifecycle persists accepted submit when onSubmitted throws",
+    run: async () => {
+      const calls: string[] = [];
+      const prepared: PreparedTrade = {
+        authorizationMode: "embedded_privy_evm",
+        authorizationRequests: [],
+        expiresAt: null,
+        intent: {
+          action: "BUY",
+          actor: { kind: "telegram_bot", userId: "user-1" },
+          amount: { type: "usd", value: "10" },
+          id: "intent-1",
+          idempotencyKey: "telegram-bot:intent-1",
+          target: {
+            eventId: "event-1",
+            marketId: "market-1",
+            outcome: "YES",
+            title: "Market",
+            tokenId: "token-1",
+            venue: "polymarket",
+            venueMarketId: "venue-market-1",
+          },
+          venue: "polymarket",
+          walletAddress: "0x0000000000000000000000000000000000000001",
+          walletChain: "ethereum",
+        },
+        preparedId: "prepared-1",
+        quote: null,
+        reconcileKeys: {
+          idempotencyKey: "telegram-bot:intent-1",
+          orderHash: "0xorder",
+          venue: "polymarket",
+        },
+        venue: "polymarket",
+        venuePayload: {},
+      };
+      const submitResult: SubmitResult = {
+        orderHash: "0xorder",
+        price: 0.5,
+        size: 20,
+        status: "submitted",
+        txSignature: null,
+        venue: "polymarket",
+        venueOrderId: "venue-order-1",
+      };
+
+      const result = await executePreparedTradeLifecycle({
+        applyTradeEffects: async () => {
+          calls.push("effects");
+          return { ok: true };
+        },
+        executeInput: {
+          onSubmitted: async () => {
+            calls.push("onSubmitted");
+            throw new Error("telegram intent update failed");
+          },
+          prepared,
+        },
+        persistTrade: async () => {
+          calls.push("persist");
+          return {
+            executionId: null,
+            orderId: "order-1",
+            raw: null,
+            status: "submitted",
+            venue: "polymarket",
+            venueOrderId: "venue-order-1",
+          };
+        },
+        submitPreparedTrade: async () => {
+          calls.push("submit");
+          return submitResult;
+        },
+      });
+
+      assert.deepEqual(calls, ["submit", "onSubmitted", "persist", "effects"]);
+      assert.equal(result.persisted?.orderId, "order-1");
+      assert.equal(result.effects?.ok, true);
+      assert.equal(result.postSubmitError?.code, "trade_submission_failed");
+      assert.match(
+        result.postSubmitError?.message ?? "",
+        /telegram intent update failed/,
+      );
+    },
+  },
+  {
     name: "API-owned trading execution advertises venue buy capabilities",
     run: async () => {
       const trading = createApiTradingApplicationService({
@@ -96,7 +184,7 @@ const tests: TestCase[] = [
           kind: "telegram_bot",
           userId: "user-1",
         },
-        venue: "polymarket",
+        venue: "polymarket" as const,
         walletAddress: null,
         walletChain: "ethereum",
       });
@@ -1090,10 +1178,10 @@ const tests: TestCase[] = [
           outcome: "YES",
           title: "Market",
           tokenId: null,
-          venue: "polymarket",
+          venue: "polymarket" as const,
           venueMarketId: "venue-market-1",
         },
-        venue: "polymarket",
+        venue: "polymarket" as const,
         walletAddress: "",
         walletChain: "ethereum" as const,
       };

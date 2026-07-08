@@ -5,6 +5,7 @@ import { isRecord } from "../lib/type-guards.js";
 import { normalizeTradingError, TradingServiceError } from "./trading-errors.js";
 import type {
   ApplyTradeEffectsInput,
+  ExecutedPreparedTradeError,
   ExecutedPreparedTrade,
   ExecutePreparedTradeInput,
   PersistedTrade,
@@ -91,13 +92,26 @@ export async function executePreparedTradeLifecycle(input: {
     prepared: input.executeInput.prepared,
     signatures: input.executeInput.signatures,
   });
-  await input.executeInput.onSubmitted?.(submitResult);
+  let postSubmitError: ExecutedPreparedTradeError | null = null;
+  try {
+    await input.executeInput.onSubmitted?.(submitResult);
+  } catch (error) {
+    const normalized = normalizeTradingError(error, {
+      message: "Trade submitted but submitted-state recording needs review.",
+      venue: input.executeInput.prepared.venue,
+    });
+    postSubmitError = {
+      code: normalized.code,
+      message: normalized.message,
+      statusCode: normalized.statusCode,
+    };
+  }
   if (!shouldPersistSubmitResult(submitResult)) {
     return {
       submitResult,
       persisted: null,
       effects: null,
-      postSubmitError: null,
+      postSubmitError,
     };
   }
 
@@ -135,7 +149,19 @@ export async function executePreparedTradeLifecycle(input: {
     submitResult,
     persisted,
     effects,
-    postSubmitError: null,
+    postSubmitError,
+  };
+}
+
+export function buildTelegramTradeSourceMetadata(input: {
+  intent: TradeIntent;
+  prepared?: PreparedTrade | null;
+}): Record<string, unknown> {
+  if (input.intent.actor.kind !== "telegram_bot") return {};
+  return {
+    telegramIntentId: input.intent.id ?? null,
+    telegramIdempotencyKey: input.intent.idempotencyKey,
+    reconcileKeys: input.prepared?.reconcileKeys ?? null,
   };
 }
 

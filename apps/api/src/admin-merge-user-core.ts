@@ -50,6 +50,7 @@ export type MergeSummary = {
   telegramBotTradingAuthorizationsDropped: number;
   telegramBotTradingAuthorizationsMoved: number;
   telegramTradeIntentsMoved: number;
+  telegramTradeIntentsPreservedWithSource: number;
   referralsReferredDeduped: number;
   referralsReferredMoved: number;
   referralsReferrerDeduped: number;
@@ -176,6 +177,7 @@ export async function mergeUsers(
     telegramBotTradingAuthorizationsDropped: 0,
     telegramBotTradingAuthorizationsMoved: 0,
     telegramTradeIntentsMoved: 0,
+    telegramTradeIntentsPreservedWithSource: 0,
     referralsReferredDeduped: 0,
     referralsReferredMoved: 0,
     referralsReferrerDeduped: 0,
@@ -528,13 +530,25 @@ export async function mergeUsers(
       }
     }
 
-    summary.telegramTradeIntentsMoved =
-      (
-        await client.query(
-          `update telegram_trade_intents set user_id = $1 where user_id = $2`,
-          [target.id, source.id],
-        )
-      ).rowCount ?? 0;
+    const preserveTelegramTradeIntentsWithSource =
+      options.keepSource && sourceTelegramAccount && !targetTelegramAccount;
+    if (preserveTelegramTradeIntentsWithSource) {
+      const preserved = await client.query<{ count: string }>(
+        `select count(*)::text as count from telegram_trade_intents where user_id = $1`,
+        [source.id],
+      );
+      summary.telegramTradeIntentsPreservedWithSource = Number(
+        preserved.rows[0]?.count ?? 0,
+      );
+    } else {
+      summary.telegramTradeIntentsMoved =
+        (
+          await client.query(
+            `update telegram_trade_intents set user_id = $1 where user_id = $2`,
+            [target.id, source.id],
+          )
+        ).rowCount ?? 0;
+    }
 
     summary.referralsReferredDeduped =
       (

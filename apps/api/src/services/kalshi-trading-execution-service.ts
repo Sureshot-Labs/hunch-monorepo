@@ -9,6 +9,7 @@ import { isRecord } from "../lib/type-guards.js";
 import { storeExecution } from "../repos/executions-repo.js";
 import {
   amountUsd,
+  buildTelegramTradeSourceMetadata,
   createCapability,
   createServerWalletClient,
   executePreparedTradeLifecycle,
@@ -49,6 +50,10 @@ import {
   normalizeKalshiExecutionStatus,
   resolveKalshiExecutionSettlementStatus,
 } from "./kalshi-executions.js";
+import {
+  hasFreshKalshiTradeEligibility,
+  kalshiTradeEligibilityMessage,
+} from "./kalshi-trade-eligibility.js";
 import type {
   ApplyTradeEffectsInput,
   PersistedTrade,
@@ -462,38 +467,24 @@ function kalshiMarketOrderable(input: {
   });
 }
 
-function hasFreshKalshiEligibility(
-  eligibility: KalshiTradeEligibility | null | undefined,
-): boolean {
-  if (!eligibility) return false;
-  if (eligibility.geoAllowed !== true || eligibility.proofVerified !== true) {
-    return false;
-  }
-  const expiresAt = eligibility.expiresAt
-    ? Date.parse(eligibility.expiresAt)
-    : NaN;
-  return Number.isFinite(expiresAt) && expiresAt > Date.now();
-}
-
 function kalshiEligibilityReadiness(
   eligibility: KalshiTradeEligibility | null | undefined,
 ): TradingReadiness | null {
-  if (hasFreshKalshiEligibility(eligibility)) return null;
+  if (hasFreshKalshiTradeEligibility(eligibility)) return null;
   return readiness("kalshi", capabilities, {
     ok: false,
     code: "insufficient_readiness",
-    message:
-      eligibility?.geoAllowed === false
-        ? "Kalshi trading is not available in your region."
-        : eligibility?.proofVerified === false
-          ? "Kalshi bot trading requires verified Proof eligibility."
-          : "Open Hunch to refresh Kalshi eligibility before bot trading.",
+    message: kalshiTradeEligibilityMessage(eligibility),
     setupRequired: true,
   });
 }
 
 function requireFreshKalshiEligibility(intent: TradeIntent): void {
-  if (hasFreshKalshiEligibility(intent.executionAuthorization?.kalshiEligibility)) {
+  if (
+    hasFreshKalshiTradeEligibility(
+      intent.executionAuthorization?.kalshiEligibility,
+    )
+  ) {
     return;
   }
   throw tradingError({
@@ -720,6 +711,10 @@ async function prepareTrade(
       readString(isRecord(quotePayload) ? quotePayload.quoteId : null) ??
       readString(isRecord(quotePayload) ? quotePayload.id : null),
   };
+  const transactionDigest = crypto
+    .createHash("sha256")
+    .update(transaction)
+    .digest("hex");
   return {
     preparedId: crypto.randomUUID(),
     venue: "kalshi",
@@ -727,6 +722,16 @@ async function prepareTrade(
     quote: quoted,
     authorizationMode: "embedded_privy_solana",
     authorizationRequests: [],
+    reconcileKeys: {
+      amountInRaw: payload.amountInRaw,
+      idempotencyKey: intent.idempotencyKey,
+      inputMint: payload.inputMint,
+      intentId: intent.id ?? null,
+      outputMint: payload.outputMint,
+      quoteId: payload.quoteId,
+      transactionDigest,
+      venue: "kalshi",
+    },
     venuePayload: payload,
     expiresAt: new Date(Date.now() + 30_000),
   };
@@ -800,7 +805,10 @@ async function persistTrade(
     txSignature: input.submitResult.txSignature,
     venueOrderId: input.submitResult.venueOrderId,
     status: normalizeKalshiExecutionStatus(input.submitResult.status) ?? "submitted",
-    raw: mergeKalshiExecutionRaw(input.submitResult.raw, { purpose: "trade" }),
+    raw: mergeKalshiExecutionRaw(input.submitResult.raw, {
+      ...buildTelegramTradeSourceMetadata(input),
+      purpose: "trade",
+    }),
   });
   return {
     venue: "kalshi",

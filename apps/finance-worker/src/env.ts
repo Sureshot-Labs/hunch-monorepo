@@ -50,6 +50,13 @@ function parseOptionalPositiveUsdcString(key: string): string | undefined {
 
 const enabled = parseBool(process.env.HUNCH_FINANCE_WORKER_ENABLED, false);
 const executeEnabled = parseBool(process.env.HUNCH_FINANCE_EXECUTE, false);
+const telegramTradeIntentsEnabledRaw = readEnv(
+  "HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED",
+);
+const telegramTradeIntentsEnabled = parseBool(
+  telegramTradeIntentsEnabledRaw,
+  executeEnabled,
+);
 
 export const env = {
   enabled,
@@ -100,10 +107,11 @@ export const env = {
     15,
   ),
 
-  telegramTradeIntentsEnabled: parseBool(
-    readEnv("HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED"),
-    true,
-  ),
+  telegramTradeIntentsEnabled,
+  telegramTradeIntentsExplicitWriteOverride:
+    !executeEnabled && telegramTradeIntentsEnabledRaw != null
+      ? parseBool(telegramTradeIntentsEnabledRaw, false)
+      : false,
   telegramTradeIntentsIntervalSec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_INTERVAL_SEC"),
     60,

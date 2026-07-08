@@ -242,6 +242,30 @@ function extractHistoryTxHash(entry: Record<string, unknown>): string | null {
   return trimmed.length ? trimmed : null;
 }
 
+function extractHistorySubmittedOrderId(
+  entry: Record<string, unknown>,
+): string | null {
+  const order = isRecord(entry.order) ? entry.order : null;
+  return normalizeOrderId(
+    entry.orderId ??
+      entry.order_id ??
+      entry.venueOrderId ??
+      entry.venue_order_id ??
+      (order ? (order.id ?? order.orderId ?? order.order_id) : null),
+  );
+}
+
+function extractHistoryClientOrderId(
+  entry: Record<string, unknown>,
+): string | null {
+  const order = isRecord(entry.order) ? entry.order : null;
+  const raw =
+    entry.clientOrderId ??
+    entry.client_order_id ??
+    (order ? (order.clientOrderId ?? order.client_order_id) : null);
+  return normalizeOrderId(raw);
+}
+
 type LimitlessTokenPair = { tokenYes: string | null; tokenNo: string | null };
 
 function shouldNotifyHistoryFill(previousStatus: string | null): boolean {
@@ -591,14 +615,19 @@ export async function syncLimitlessHistoryForWallet(
       }
     }
 
-    if (timestamp) {
+    const submittedOrderId = extractHistorySubmittedOrderId(entry);
+    const clientOrderId = extractHistoryClientOrderId(entry);
+    if (timestamp || submittedOrderId || clientOrderId || orderHash) {
       const match = await findLimitlessHistoryMatch(pool, {
+        clientOrderId,
+        orderHash,
         userId: inputs.userId,
+        venueOrderId: submittedOrderId,
         walletAddress: inputs.walletAddress,
         tokenId,
         side,
         orderType: orderType ?? null,
-        postedAt: timestamp,
+        postedAt: timestamp ?? new Date(),
       });
       if (match) {
         const shouldNotifyFill = shouldNotifyHistoryFill(match.status);

@@ -105,6 +105,42 @@ await test("Limitless history matching detects nested position delta markers", a
   assert.match(capturedSql, /order_payload->'submitted'->'payload'/);
 });
 
+await test("Limitless history matching tries deterministic identifiers before time window", async () => {
+  const capturedSql: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      capturedSql.push(sql);
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            id: "order-1",
+            venue_order_id: "venue-order-1",
+            status: "submitted",
+            posted_at: new Date("2026-05-17T00:00:00.000Z"),
+            position_delta_applied: false,
+          },
+        ],
+      };
+    },
+  } as unknown as Pool;
+
+  const match = await findLimitlessHistoryMatch(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    tokenId: "token-1",
+    side: "BUY",
+    orderType: "FOK",
+    postedAt: new Date("2026-05-17T00:00:00.000Z"),
+    clientOrderId: "hunch-deterministic-client-order",
+  });
+
+  assert.equal(match?.id, "order-1");
+  assert.equal(capturedSql.length, 1);
+  assert.match(capturedSql[0] ?? "", /clientOrderId/);
+  assert.doesNotMatch(capturedSql[0] ?? "", /posted_at between/i);
+});
+
 await test("updateOrderFromHistory preserves position marker when wrapping payload", async () => {
   let capturedSql = "";
   const pool = {
