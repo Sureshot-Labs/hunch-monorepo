@@ -24,6 +24,11 @@ import {
   type MarketType,
 } from "./market-type-classifier.js";
 import {
+  buildMarketSideCopy,
+  buildMarketSideCopyPair,
+  type MarketSideCopy,
+} from "./market-side-copy.js";
+import {
   buildWalletIntelAcceptingOrdersSql,
   buildWalletIntelTrackableMarketSql,
 } from "./wallet-intel-market-eligibility.js";
@@ -41,10 +46,7 @@ import {
   buildHolderResearchSignalSnapshot,
   loadHolderResearchPerformanceCalibrationMemo,
 } from "./holder-research-performance.js";
-import {
-  outcomeLabelOrSide,
-  parseMarketOutcomes,
-} from "./wallet-intel-helpers.js";
+import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -4031,14 +4033,58 @@ function compactPromptMovement(movement: HolderResearchMarketMovementContext) {
   };
 }
 
+function buildHolderResearchMarketSideCopy(
+  market: HolderResearchMarketInput,
+  side: HolderResearchSideKey,
+): MarketSideCopy {
+  return buildMarketSideCopy({
+    eventDescription: market.eventDescription,
+    eventTitle: market.eventTitle,
+    marketDescription: market.marketDescription,
+    marketSegment: classifyHolderResearchMarketSegment(market),
+    marketSlug: market.marketSlug,
+    marketTitle: market.marketTitle,
+    outcomes: market.outcomes,
+    resolutionSource: market.resolutionSource,
+    side,
+  });
+}
+
+function compactHolderResearchSideCopy(copy: MarketSideCopy) {
+  return {
+    side: copy.side,
+    label: copy.sideLabel,
+    buttonLabel: copy.buttonLabel,
+    priceLabel: copy.priceLabel,
+    plainPosition: copy.plainPosition,
+    winCondition: copy.winCondition,
+    marketLine: copy.marketLine,
+    copyKind: copy.copyKind,
+    copyVersion: copy.copyVersion,
+  };
+}
+
+function buildHolderResearchSideCopies(market: HolderResearchMarketInput) {
+  return buildMarketSideCopyPair({
+    eventDescription: market.eventDescription,
+    eventTitle: market.eventTitle,
+    marketDescription: market.marketDescription,
+    marketSegment: classifyHolderResearchMarketSegment(market),
+    marketSlug: market.marketSlug,
+    marketTitle: market.marketTitle,
+    outcomes: market.outcomes,
+    resolutionSource: market.resolutionSource,
+  });
+}
+
 function compactPromptMarket(
   candidate: HolderResearchCandidate,
   mode: HolderResearchPromptMode,
   totalUsd?: number,
 ) {
   const market = candidate.market;
-  const yesLabel = outcomeLabelOrSide(market.outcomes, "YES");
-  const noLabel = outcomeLabelOrSide(market.outcomes, "NO");
+  const sideCopies = buildHolderResearchSideCopies(market);
+  const targetSideCopy = candidate.side ? sideCopies[candidate.side] : null;
   const result: Record<string, unknown> = {
     id: market.marketId,
     evtId: market.eventId,
@@ -4049,8 +4095,15 @@ function compactPromptMarket(
     evt: market.eventTitle,
     series: market.seriesTitle,
     labels: {
-      YES: yesLabel,
-      NO: noLabel,
+      YES: sideCopies.YES.sideLabel,
+      NO: sideCopies.NO.sideLabel,
+    },
+    sideCopy: targetSideCopy
+      ? compactHolderResearchSideCopy(targetSideCopy)
+      : null,
+    sideCopies: {
+      YES: compactHolderResearchSideCopy(sideCopies.YES),
+      NO: compactHolderResearchSideCopy(sideCopies.NO),
     },
     cat: market.category,
     close: market.closeTime,
@@ -4219,6 +4272,8 @@ export function buildHolderResearchExternalSearchInput(
     targetSide === "YES" ? "NO" : targetSide === "NO" ? "YES" : null;
   const target = targetSide ? candidate.market.sides[targetSide] : null;
   const other = otherSide ? candidate.market.sides[otherSide] : null;
+  const sideCopies = buildHolderResearchSideCopies(candidate.market);
+  const targetSideCopy = targetSide ? sideCopies[targetSide] : null;
   const topTargetHolder = targetSide
     ? candidate.market.holders
         .filter((holder) => holder.side === targetSide)
@@ -4234,8 +4289,15 @@ export function buildHolderResearchExternalSearchInput(
       cat: candidate.market.category,
       series: candidate.market.seriesTitle,
       labels: {
-        YES: outcomeLabelOrSide(candidate.market.outcomes, "YES"),
-        NO: outcomeLabelOrSide(candidate.market.outcomes, "NO"),
+        YES: sideCopies.YES.sideLabel,
+        NO: sideCopies.NO.sideLabel,
+      },
+      sideCopy: targetSideCopy
+        ? compactHolderResearchSideCopy(targetSideCopy)
+        : null,
+      sideCopies: {
+        YES: compactHolderResearchSideCopy(sideCopies.YES),
+        NO: compactHolderResearchSideCopy(sideCopies.NO),
       },
       close: candidate.market.closeTime,
       pYes: candidate.market.yesProbability,
@@ -4284,14 +4346,17 @@ export function buildDeterministicHolderResearchDecision(
       : candidate.score >= policy.minScore
         ? "CONTEXT"
         : "SKIP";
-  const sideLabel = candidate.side ? `${candidate.side} ` : "";
+  const sideCopy = candidate.side
+    ? buildHolderResearchMarketSideCopy(candidate.market, candidate.side)
+    : null;
+  const sideLabel = sideCopy?.sideLabel ?? candidate.side ?? "";
   const titlePrefix =
     candidate.bucket === "sharp_minority"
-      ? `Strong minority ${sideLabel.trim()}`
+      ? `Strong minority ${sideLabel}`
       : candidate.bucket === "sharp_split"
         ? "Strong holders on both sides"
         : candidate.bucket === "sharp_side"
-          ? `Strong ${sideLabel.trim()} holders`
+          ? `Strong ${sideLabel} holders`
           : candidate.bucket === "clean_disagreement"
             ? "Clean two-sided disagreement"
             : candidate.bucket === "recent_flow"
@@ -4304,7 +4369,8 @@ export function buildDeterministicHolderResearchDecision(
   const topEvidence = candidate.evidence.slice(0, 5);
   const totalUsd =
     candidate.market.sides.YES.usd + candidate.market.sides.NO.usd;
-  const summary = `${candidate.market.marketTitle}: ${formatUsd(totalUsd)} tracked, YES ${formatUsd(candidate.market.sides.YES.usd)} / NO ${formatUsd(candidate.market.sides.NO.usd)}. ${candidate.reasons.join(", ")}.`;
+  const sideCopies = buildHolderResearchSideCopies(candidate.market);
+  const summary = `${sideCopy?.plainPosition ?? candidate.market.marketTitle}: ${formatUsd(totalUsd)} tracked, ${sideCopies.YES.sideLabel} ${formatUsd(candidate.market.sides.YES.usd)} / ${sideCopies.NO.sideLabel} ${formatUsd(candidate.market.sides.NO.usd)}. ${candidate.reasons.join(", ")}.`;
 
   return {
     version: "holder_research_v1",
@@ -4313,7 +4379,10 @@ export function buildDeterministicHolderResearchDecision(
     confidence: clamp01(candidate.score),
     signal_type: candidate.signalType,
     direction: candidate.direction,
-    headline: `${titlePrefix}: ${candidate.market.marketTitle}`.slice(0, 140),
+    headline: `${titlePrefix}: ${sideCopy?.plainPosition ?? candidate.market.marketTitle}`.slice(
+      0,
+      140,
+    ),
     summary,
     rationale:
       status === "PUBLISH"
@@ -4636,6 +4705,9 @@ export async function persistHolderResearchNotes(
         side: candidate.side,
         direction: decision.output.direction,
       });
+      const sideCopy = candidate.side
+        ? buildHolderResearchMarketSideCopy(candidate.market, candidate.side)
+        : null;
       const inserted = await client.query<{ id: string }>(
         `
           insert into ai_notes (
@@ -4688,6 +4760,9 @@ export async function persistHolderResearchNotes(
             score: candidate.score,
             bucket: candidate.bucket,
             side: candidate.side,
+            sideCopy: sideCopy
+              ? compactHolderResearchSideCopy(sideCopy)
+              : null,
             quality: buildHolderResearchQualityAssessment(
               candidate,
               params.policy,

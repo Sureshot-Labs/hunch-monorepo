@@ -26,6 +26,10 @@ import {
   formatMarketTypeLabel,
 } from "./market-type-classifier.js";
 import {
+  buildMarketSideCopy,
+  type MarketSideCopy,
+} from "./market-side-copy.js";
+import {
   defaultSignalBotFollowthroughPolicy,
   resolveSignalBotFollowthroughPolicy,
   type SignalBotFollowthroughDataQuality,
@@ -39,10 +43,7 @@ import {
   normalizeTelegramMiniAppLinkBase,
 } from "./signal-bot-mini-app-links.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
-import {
-  outcomeLabelOrSide,
-  parseMarketOutcomes,
-} from "./wallet-intel-helpers.js";
+import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 
 export type SignalBotConfig = {
   enabled: boolean;
@@ -259,8 +260,12 @@ export type SignalBotNote = {
   eventId: string | null;
   marketVenue: string | null;
   marketTitle: string | null;
+  marketSlug: string | null;
+  marketDescription: string | null;
   eventTitle: string | null;
+  eventDescription: string | null;
   outcomes: string[] | null;
+  resolutionSource: string | null;
   marketSegment: string | null;
   closeTime: string | null;
   expirationTime: string | null;
@@ -358,7 +363,10 @@ type SignalBotNoteRow = {
   event_id: string | null;
   market_venue: string | null;
   market_title: string | null;
+  market_slug: string | null;
+  market_description: string | null;
   event_title: string | null;
+  event_description: string | null;
   category: string | null;
   event_category: string | null;
   series_key: string | null;
@@ -366,6 +374,7 @@ type SignalBotNoteRow = {
   close_time: Date | string | null;
   expiration_time: Date | string | null;
   outcomes: string | null;
+  resolution_source: string | null;
   market_segment: string | null;
   best_bid: string | number | null;
   best_ask: string | number | null;
@@ -394,8 +403,12 @@ type SignalBotFollowthroughCandidateRow = {
   market_id: string;
   event_id: string | null;
   market_title: string | null;
+  market_slug: string | null;
+  market_description: string | null;
   event_title: string | null;
+  event_description: string | null;
   outcomes: string | null;
+  resolution_source: string | null;
   venue: string | null;
   best_bid: string | number | null;
   best_ask: string | number | null;
@@ -425,17 +438,22 @@ const PRICE_GUARD_DEFER_KEY_PREFIX = "tg:signal_bot:v1:price_guard_defer";
 const PRICE_GUARD_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
-const OUTCOME_LABEL_MAX_CHARS = 3;
-const OUTCOME_LABEL_FULL_MAX_CHARS = 14;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
+const SIGNAL_BOT_COPY_FLOW_HEADLINES = [
+  "🔥 Copy traders are flowing into this signal",
+  "🔥 This signal is getting copied",
+  "🔥 Traders are still following this call",
+  "🔥 Copy flow is building here",
+  "🔥 More wallets are joining this side",
+  "🔥 This call is starting to get traction",
+] as const;
 const TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
 const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
-const OUTCOME_LABEL_VOWELS = /[AEIOUY]/g;
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
   "TRACKEDWALLET",
@@ -1049,7 +1067,11 @@ export function buildSignalBotMessage(input: {
   const title = escapeTelegramMarkdownV2(note.title);
   const contextLine = formatSignalContextLine(note);
   const credentialLines = formatSignalCredentialLines(note);
-  const marketTitleLine = formatMarketTitleLine(note);
+  const buySideCopy = buySide ? buildSignalBotSideCopy(note, buySide) : null;
+  const marketTitleLine = formatMarketTitleLine(note, buySide);
+  const winConditionLine = buySideCopy?.winCondition
+    ? `This wins if there are ${buySideCopy.winCondition}.`
+    : null;
   const priceLine = formatPriceLine(note);
   const timeLeftLine = formatTimeLeftLine(note);
   const marketUrl = note.eventId
@@ -1109,6 +1131,7 @@ export function buildSignalBotMessage(input: {
     ...(marketTitleLine
       ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)]
       : []),
+    ...(winConditionLine ? [escapeTelegramMarkdownV2(winConditionLine)] : []),
     "",
     summary,
     ...(credentialLines.length > 0
@@ -1396,15 +1419,8 @@ function buildSignalBotFollowthroughKeyboard(input: {
           text: formatSignalBotBuyButtonText({
             price: buyPrice,
             side,
-            sideLabel: formatSignalBotOutcomeDisplayLabel(
-              {
-                eventTitle: input.candidate.event_title,
-                marketTitle: input.candidate.market_title,
-                outcomes: null,
-              },
-              side,
-              "button",
-            ),
+            sideLabel: buildSignalBotFollowthroughSideCopy(input.candidate, side)
+              .buttonLabel,
             venue: input.candidate.venue,
           }),
           webUrl: webTradeUrl,
@@ -2781,6 +2797,7 @@ export async function publishSignalBotTick(input: {
           messageId: result.messageId,
           messageKind: thread.messageKind,
           metrics: {
+            copy: buildSignalBotCopyAudit({ buySide, note }),
             fallbackStandalone: result.fallbackStandalone,
             noteKind: thread.messageKind,
           },
@@ -3069,7 +3086,10 @@ async function loadSignalBotFollowthroughCandidates(input: {
           m.id as market_id,
           m.event_id,
           m.title as market_title,
+          m.slug as market_slug,
+          m.description as market_description,
           e.title as event_title,
+          e.description as event_description,
           m.outcomes,
           m.venue,
           m.best_bid,
@@ -3077,6 +3097,13 @@ async function loadSignalBotFollowthroughCandidates(input: {
           m.last_price,
           m.resolved_outcome,
           m.resolved_outcome_pct::text as resolved_outcome_pct,
+          nullif(
+            coalesce(
+              nullif(m.metadata->>'resolutionSource', ''),
+              nullif(e.metadata->>'resolutionSource', '')
+            ),
+            ''
+          ) as resolution_source,
           ${acceptingSql} as accepting_orders
         from signal_bot_messages root
         join ai_notes n on n.id = root.thread_root_note_id
@@ -3477,19 +3504,75 @@ function formatSignedCentsMove(value: number | null): string {
   return `${rounded >= 0 ? "+" : ""}${rounded}¢`;
 }
 
-function formatSignalBotFollowthroughSideLabel(
+function formatFollowthroughMarketLine(
   candidate: SignalBotFollowthroughCandidateRow,
-  side: "NO" | "YES",
 ): string {
-  return formatSignalBotOutcomeDisplayLabel(
-    {
-      eventTitle: candidate.event_title,
-      marketTitle: candidate.market_title,
-      outcomes: parseMarketOutcomes(candidate.outcomes),
-    },
-    side,
-    "button",
-  );
+  if (candidate.event_title && candidate.market_title) {
+    return `${candidate.event_title} · ${candidate.market_title}`;
+  }
+  return candidate.market_title || candidate.title;
+}
+
+function formatSignalBotElapsedTime(from: string, to: string): string {
+  const fromMs = new Date(from).getTime();
+  const toMs = new Date(to).getTime();
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
+    return "just now";
+  }
+  const minutes = Math.max(1, Math.round((toMs - fromMs) / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
+}
+
+function formatSignalBotFollowthroughRead(input: {
+  hasWalletEvidence: boolean;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  sideCopy: MarketSideCopy | null;
+  stats: SignalBotFollowthroughStats;
+}): string {
+  const side = input.sideCopy?.plainPosition ?? "the signal side";
+  if (input.kind === "resolved_win") {
+    return `${side} closed green. The follow-through note is the result, not a fresh entry signal.`;
+  }
+  if (input.kind === "resolved_loss") {
+    return `${side} closed red. Treat this as performance tracking, not a fresh entry signal.`;
+  }
+  if (!input.hasWalletEvidence) {
+    return "The market moved with the read, but tracked wallet follow-through is thin so far.";
+  }
+  if (input.stats.priceMoveCents != null && input.stats.priceMoveCents > 0) {
+    return "The market moved with the call and tracked wallets have not fully faded it yet.";
+  }
+  if (input.stats.priceMoveCents != null && input.stats.priceMoveCents < 0) {
+    return "Copy flow is still leaning with the call, but price has moved against the entry.";
+  }
+  return "Price has not moved much yet, but copy flow is still leaning with the call.";
+}
+
+function selectSignalBotCopyFlowHeadline(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  stats: SignalBotFollowthroughStats;
+}): string {
+  const seed = [
+    input.candidate.thread_root_note_id,
+    input.candidate.market_id,
+    input.stats.signalSide,
+    input.stats.joinedOrAddedWallets,
+    Math.round(input.stats.netSignalSideFlowUsd),
+  ].join(":");
+  let hash = 0;
+  for (const char of seed) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return SIGNAL_BOT_COPY_FLOW_HEADLINES[
+    hash % SIGNAL_BOT_COPY_FLOW_HEADLINES.length
+  ];
 }
 
 function buildSignalBotFollowthroughMessage(input: {
@@ -3502,58 +3585,63 @@ function buildSignalBotFollowthroughMessage(input: {
 }): string {
   const stats = input.stats;
   const side = stats.signalSide ?? "side";
-  const sideLabel = stats.signalSide
-    ? formatSignalBotFollowthroughSideLabel(input.candidate, stats.signalSide)
-    : side;
+  const sideCopy = stats.signalSide
+    ? buildSignalBotFollowthroughSideCopy(input.candidate, stats.signalSide)
+    : null;
+  const sideLabel = sideCopy?.priceLabel ?? side;
   const title =
-    input.candidate.event_title && input.candidate.market_title
-      ? `${input.candidate.event_title} · ${input.candidate.market_title}`
-      : input.candidate.market_title || input.candidate.title;
+    sideCopy && shouldUseSignalBotCopyMarketLine(sideCopy)
+      ? (sideCopy.marketLine ?? formatFollowthroughMarketLine(input.candidate))
+      : formatFollowthroughMarketLine(input.candidate);
   const priceLine =
     stats.entryPrice != null && stats.markPrice != null
       ? `${sideLabel}: ${formatCents(stats.entryPrice)} → ${formatCents(
           stats.markPrice,
         )} (${formatSignedCentsMove(stats.priceMoveCents)})`
       : `${sideLabel}: price move unavailable`;
-  const flowLine = `${formatSignedCompactUsd(
-    stats.netSignalSideFlowUsd,
-  )} net tracked ${sideLabel} flow`;
-  const activityLine = `${stats.joinedOrAddedWallets} wallets followed · ${
-    stats.trimmedWallets
-  } trimmed · ${stats.stillHoldingWallets} still hold`;
+  const flowLine = `${formatSignedCompactUsd(stats.netSignalSideFlowUsd)} net tracked flow`;
+  const trimmedOrExitedWallets = stats.trimmedWallets;
+  const activityLine = `${stats.joinedOrAddedWallets} wallets added · ${trimmedOrExitedWallets} trimmed/exited · ${stats.stillHoldingWallets} still hold`;
   const pnlLine =
     stats.estimatedOpenPnlUsd != null
       ? `Est. open PnL: ${formatSignedCompactUsd(stats.estimatedOpenPnlUsd)}`
       : null;
+  const timeLine = `Time since signal: ${formatSignalBotElapsedTime(
+    stats.baselineAt,
+    stats.asOf,
+  )}`;
   const hasWalletEvidence =
     stats.joinedOrAddedWallets > 0 || stats.netSignalSideFlowUsd > 0;
   const header =
     input.kind === "resolved_win"
-      ? "🏁 Closed green"
+      ? "🏁 Signal side won"
       : input.kind === "resolved_loss"
-        ? "🏁 Closed red"
+        ? "🏁 Signal side lost"
         : hasWalletEvidence
-          ? "🔥 Wallets followed the read"
-          : "📈 Market moved after the read";
-  const resultLine =
-    input.kind === "resolved_win"
-      ? "Signal side won."
-      : input.kind === "resolved_loss"
-        ? "Signal side lost."
-        : "Since this signal:";
-  const footerLine =
-    input.kind === "followthrough_stats" && !hasWalletEvidence
-      ? "Market moved with the read, but tracked wallet follow-through is thin."
-      : "Tracked wallets are still leaning with the signal.";
+          ? selectSignalBotCopyFlowHeadline({
+              candidate: input.candidate,
+              stats,
+            })
+          : stats.priceMoveCents != null && stats.priceMoveCents > 0
+            ? "📈 Market moved with the signal"
+            : "⚠️ Copy flow is thin here";
+  const resultLine = "Since the signal:";
+  const footerLine = formatSignalBotFollowthroughRead({
+    hasWalletEvidence,
+    kind: input.kind,
+    sideCopy,
+    stats,
+  });
   return [
     header,
     "",
-    title,
+    `📍 ${title}`,
     resultLine,
     flowLine,
     activityLine,
     priceLine,
     ...(pnlLine ? [pnlLine] : []),
+    timeLine,
     "",
     footerLine,
   ]
@@ -3659,6 +3747,10 @@ export async function publishSignalBotFollowthroughTick(input: {
       kind,
       stats,
     });
+    const copyAudit = buildSignalBotFollowthroughCopyAudit({
+      candidate,
+      stats,
+    });
     const allowBuyCta = await shouldAllowSignalBotFollowthroughBuyCta({
       candidate,
       db: input.db,
@@ -3702,6 +3794,7 @@ export async function publishSignalBotFollowthroughTick(input: {
         messageKind: kind,
         metrics: {
           ...stats,
+          copy: copyAudit,
           error: result.error,
           status: "send_failed",
         },
@@ -3721,6 +3814,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       messageKind: kind,
       metrics: {
         ...stats,
+        copy: copyAudit,
         fallbackStandalone: result.fallbackStandalone,
         status: "sent",
       },
@@ -3990,7 +4084,10 @@ export async function loadSignalBotNotes(
         m.event_id,
         m.venue as market_venue,
         m.title as market_title,
+        m.slug as market_slug,
+        m.description as market_description,
         e.title as event_title,
+        e.description as event_description,
         m.category,
         e.category as event_category,
         e.series_key,
@@ -3998,6 +4095,13 @@ export async function loadSignalBotNotes(
         m.close_time,
         m.expiration_time,
         m.outcomes,
+        nullif(
+          coalesce(
+            nullif(m.metadata->>'resolutionSource', ''),
+            nullif(e.metadata->>'resolutionSource', '')
+          ),
+          ''
+        ) as resolution_source,
         coalesce(
           n.metrics #>> '{quality,marketSegment}',
           n.metrics #>> '{signalPerformance,marketSegment}',
@@ -4345,8 +4449,12 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     eventId: row.event_id,
     marketVenue: row.market_venue,
     marketTitle: row.market_title,
+    marketSlug: row.market_slug,
+    marketDescription: row.market_description,
     eventTitle: row.event_title,
+    eventDescription: row.event_description,
     outcomes: parseMarketOutcomes(row.outcomes),
+    resolutionSource: row.resolution_source,
     marketSegment,
     closeTime: row.close_time ? toIso(row.close_time) : null,
     expirationTime: row.expiration_time ? toIso(row.expiration_time) : null,
@@ -4427,83 +4535,134 @@ function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
 }
 
-function normalizeAlnumUpper(value: string): string {
-  return value.replace(/[^0-9A-Za-z]+/g, "").toUpperCase();
-}
-
-function abbreviateOutcomeLabel(
-  label: string,
-  maxLength = OUTCOME_LABEL_MAX_CHARS,
-): string {
-  const trimmed = label.trim();
-  if (!trimmed) return "";
-  if (trimmed.length <= maxLength) return trimmed;
-
-  const words = trimmed
-    .split(/[\s/_-]+/g)
-    .map(normalizeAlnumUpper)
-    .filter(Boolean);
-  if (words.length > 1) {
-    const initials = words.map((word) => word[0]).join("");
-    if (initials.length >= maxLength) return initials.slice(0, maxLength);
-    const consonantTail = words
-      .map((word) => word.slice(1).replace(OUTCOME_LABEL_VOWELS, ""))
-      .join("");
-    const fallbackTail = words.map((word) => word.slice(1)).join("");
-    return `${initials}${consonantTail}${fallbackTail}`.slice(0, maxLength);
-  }
-
-  const normalized = words[0] ?? normalizeAlnumUpper(trimmed);
-  if (!normalized) return trimmed.toUpperCase().slice(0, maxLength);
-  const consonants = normalized.replace(OUTCOME_LABEL_VOWELS, "");
-  if (consonants.length >= maxLength) return consonants.slice(0, maxLength);
-  if (normalized.length >= maxLength) return normalized.slice(0, maxLength);
-  return normalized;
-}
-
 type SignalBotOutcomeLabelMode = "button" | "price";
 
-function formatReadableOutcomeLabel(label: string): string {
-  const trimmed = label.trim().replace(/\s+/g, " ");
-  if (!trimmed) return "";
-  if (trimmed.length <= OUTCOME_LABEL_FULL_MAX_CHARS) return trimmed;
-  return abbreviateOutcomeLabel(trimmed);
-}
+type SignalBotMarketCopySource = {
+  eventDescription?: string | null;
+  eventTitle?: string | null;
+  marketDescription?: string | null;
+  marketSegment?: string | null;
+  marketSlug?: string | null;
+  marketTitle?: string | null;
+  outcomes?: unknown;
+  resolutionSource?: string | null;
+};
 
-function formatShortSignalBotMarketLabel(
-  value: string | null | undefined,
-): string | null {
-  const label = value?.trim().replace(/\s+/g, " ");
-  if (!label || label.length > OUTCOME_LABEL_FULL_MAX_CHARS) return null;
-  const upper = label.toUpperCase();
-  if (upper === "YES" || upper === "NO") return null;
-  return label;
-}
-
-function formatSignalBotGenericOutcomeButtonLabel(
-  note: Pick<SignalBotNote, "marketTitle">,
+function buildSignalBotSideCopy(
+  note: SignalBotMarketCopySource,
   side: "NO" | "YES",
-): string | null {
-  const base = formatShortSignalBotMarketLabel(note.marketTitle);
-  if (!base) return null;
-  const label = side === "YES" ? base : `NO ${base}`;
-  return label.length <= OUTCOME_LABEL_FULL_MAX_CHARS ? label : null;
+): MarketSideCopy {
+  return buildMarketSideCopy({
+    eventDescription: note.eventDescription,
+    eventTitle: note.eventTitle,
+    marketDescription: note.marketDescription,
+    marketSegment: note.marketSegment,
+    marketSlug: note.marketSlug,
+    marketTitle: note.marketTitle,
+    outcomes: note.outcomes,
+    resolutionSource: note.resolutionSource,
+    side,
+  });
+}
+
+function buildSignalBotFollowthroughSideCopy(
+  candidate: SignalBotFollowthroughCandidateRow,
+  side: "NO" | "YES",
+): MarketSideCopy {
+  return buildSignalBotSideCopy(
+    {
+      eventDescription: candidate.event_description,
+      eventTitle: candidate.event_title,
+      marketDescription: candidate.market_description,
+      marketSlug: candidate.market_slug,
+      marketTitle: candidate.market_title,
+      outcomes: candidate.outcomes,
+      resolutionSource: candidate.resolution_source,
+    },
+    side,
+  );
 }
 
 function formatSignalBotOutcomeDisplayLabel(
-  note: Pick<SignalBotNote, "eventTitle" | "marketTitle" | "outcomes">,
+  note: SignalBotMarketCopySource,
   side: "NO" | "YES",
   mode: SignalBotOutcomeLabelMode,
 ): string {
-  const label = outcomeLabelOrSide(note.outcomes, side);
-  const upper = label.trim().toUpperCase();
-  if (upper === "YES" || upper === "NO") {
-    if (mode === "button") {
-      return formatSignalBotGenericOutcomeButtonLabel(note, side) ?? side;
-    }
-    return side;
-  }
-  return formatReadableOutcomeLabel(label);
+  const copy = buildSignalBotSideCopy(note, side);
+  return mode === "button" ? copy.buttonLabel : copy.priceLabel;
+}
+
+function compactSignalBotCopyAudit(copy: MarketSideCopy | null) {
+  if (!copy) return null;
+  return {
+    buttonLabel: copy.buttonLabel,
+    copyKind: copy.copyKind,
+    copyVersion: copy.copyVersion,
+    marketLine: copy.marketLine,
+    plainPosition: copy.plainPosition,
+    priceLabel: copy.priceLabel,
+    rawOutcomeLabel: copy.rawOutcomeLabel,
+    side: copy.side,
+    sideLabel: copy.sideLabel,
+    winCondition: copy.winCondition,
+  };
+}
+
+function shouldUseSignalBotCopyMarketLine(copy: MarketSideCopy): boolean {
+  return copy.copyKind !== "generic" || copy.sideLabel !== copy.side;
+}
+
+function buildSignalBotCopyAudit(input: {
+  buySide: "NO" | "YES" | null;
+  note: SignalBotNote;
+}) {
+  const yesCopy = buildSignalBotSideCopy(input.note, "YES");
+  const noCopy = buildSignalBotSideCopy(input.note, "NO");
+  const activeCopy =
+    input.buySide === "YES" ? yesCopy : input.buySide === "NO" ? noCopy : null;
+  return {
+    activeSide: input.buySide,
+    copyVersion: "signal_bot_copy_v1",
+    marketSegment: input.note.marketSegment,
+    priceSnapshot: {
+      bestAsk: input.note.bestAsk,
+      bestBid: input.note.bestBid,
+      lastPrice: input.note.lastPrice,
+    },
+    sideCopy: compactSignalBotCopyAudit(activeCopy),
+    sides: {
+      YES: compactSignalBotCopyAudit(yesCopy),
+      NO: compactSignalBotCopyAudit(noCopy),
+    },
+  };
+}
+
+function buildSignalBotFollowthroughCopyAudit(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  stats: SignalBotFollowthroughStats;
+}) {
+  const yesCopy = buildSignalBotFollowthroughSideCopy(input.candidate, "YES");
+  const noCopy = buildSignalBotFollowthroughSideCopy(input.candidate, "NO");
+  const activeCopy =
+    input.stats.signalSide === "YES"
+      ? yesCopy
+      : input.stats.signalSide === "NO"
+        ? noCopy
+        : null;
+  return {
+    activeSide: input.stats.signalSide,
+    copyVersion: "signal_bot_copy_v1",
+    priceSnapshot: {
+      bestAsk: toNumber(input.candidate.best_ask),
+      bestBid: toNumber(input.candidate.best_bid),
+      lastPrice: toNumber(input.candidate.last_price),
+    },
+    sideCopy: compactSignalBotCopyAudit(activeCopy),
+    sides: {
+      YES: compactSignalBotCopyAudit(yesCopy),
+      NO: compactSignalBotCopyAudit(noCopy),
+    },
+  };
 }
 
 function formatSignalBotMarketEmoji(
@@ -4714,7 +4873,16 @@ function formatSignalBotSignalLabel(note: SignalBotNote): string {
   return isHighConvictionSignal(note) ? label.replace(/^\S+/, "🔥") : label;
 }
 
-function formatMarketTitleLine(note: SignalBotNote): string | null {
+function formatMarketTitleLine(
+  note: SignalBotNote,
+  side: "NO" | "YES" | null,
+): string | null {
+  if (side) {
+    const copy = buildSignalBotSideCopy(note, side);
+    if (copy.marketLine && shouldUseSignalBotCopyMarketLine(copy)) {
+      return copy.marketLine;
+    }
+  }
   const unique: string[] = [];
   for (const raw of [note.eventTitle, note.marketTitle]) {
     const title = raw?.trim().replace(/\s+/g, " ");

@@ -726,6 +726,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           marketType: "sports_outright",
         },
       );
+      assert.equal(
+        classifyMarketTaxonomy({
+          category: "Sports",
+          eventTitle: "FIFA World Cup: Portugal vs Spain",
+          marketTitle: "Match Winner",
+        }).marketSegment,
+        "sports_soccer_game",
+      );
       assert.deepEqual(
         classifyMarketTaxonomy({
           category: "Esports",
@@ -736,6 +744,22 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           marketSegment: "sports_esports_game",
           marketType: "single_game_sports",
         },
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          category: "Sports",
+          eventTitle: "FIFAe World Cup: Falcons vs Liquid",
+          marketTitle: "Game 1 Winner",
+        }).marketSegment,
+        "sports_esports_game",
+      );
+      assert.equal(
+        classifyMarketTaxonomy({
+          category: "Sports",
+          eventTitle: "EA Sports FC esports World Cup",
+          marketTitle: "Valorant BO3 winner",
+        }).marketSegment,
+        "sports_esports_game",
       );
       assert.equal(
         classifyMarketTaxonomy({
@@ -3072,6 +3096,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /do not invent credentials/i);
       assert.match(prompt, /candidate\.move/i);
       assert.match(prompt, /candidate\.holderEntry/i);
+      assert.match(prompt, /candidate\.mkt\.sideCopy/i);
+      assert.match(prompt, /Under 2\.5 total goals/i);
+      assert.match(prompt, /NO France/i);
       assert.match(prompt, /flowProfile/i);
       assert.match(prompt, /riskTags/i);
       assert.match(prompt, /execution_priority/i);
@@ -3274,6 +3301,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         serialized,
         /"labels":\{"YES":"Alpha Team","NO":"Beta Team"\}/,
       );
+      assert.match(serialized, /"sideCopy"/);
+      assert.match(serialized, /"plainPosition":"Beta Team"/);
       assert.doesNotMatch(serialized, /0xowner/);
       assert.doesNotMatch(serialized, /walletUsdLikeBalance/);
       assert.doesNotMatch(serialized, /identityProfileUrl/);
@@ -3286,6 +3315,31 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(finalPrompt, /execution_priority/);
       assert.match(finalPrompt, /high_conviction/);
       assert.doesNotMatch(finalPrompt, /\n\s+"/);
+    },
+  },
+  {
+    name: "candidate prompt includes plain side copy for totals",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Portugal vs Spain",
+          marketDescription:
+            "Over if Portugal and Spain combine for 3 or more goals.",
+          marketTitle: "O/U 2.5",
+          outcomes: ["Over", "Under"],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const promptJson = buildHolderResearchCandidatePromptJson(candidate, p);
+      const serialized = JSON.stringify(promptJson);
+      assert.match(serialized, /"label":"Under 2.5 total goals"/);
+      assert.match(serialized, /"plainPosition":"Under 2.5 total goals"/);
+      assert.match(serialized, /"winCondition":"0-2 total goals"/);
+      assert.equal(serialized.includes("NO O/U"), false);
     },
   },
   {
@@ -3512,6 +3566,30 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(parsed.status, "PUBLISH");
       assert.equal(parsed.evidence_ids.length > 0, true);
       assert.equal(parsed.execution_priority, "normal");
+    },
+  },
+  {
+    name: "deterministic decision uses semantic side copy for totals",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          category: "Sports",
+          eventTitle: "Portugal vs Spain",
+          marketDescription:
+            "Over if Portugal and Spain combine for 3 or more goals.",
+          marketTitle: "O/U 2.5",
+          outcomes: ["Over", "Under"],
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+
+      const decision = buildDeterministicHolderResearchDecision(candidate, p);
+      assert.match(decision.headline, /Under 2\.5 total goals/);
+      assert.match(decision.summary, /Under 2\.5 total goals/);
+      assert.doesNotMatch(decision.headline, /NO O\/U/);
+      assert.doesNotMatch(decision.summary, /NO O\/U/);
     },
   },
   {

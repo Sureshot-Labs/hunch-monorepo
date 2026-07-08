@@ -461,8 +461,12 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     eventId: "polymarket:event-1",
     marketVenue: "polymarket",
     marketTitle: "Will test resolve Yes?",
+    marketSlug: null,
+    marketDescription: null,
     eventTitle: "Test event",
+    eventDescription: null,
     outcomes: null,
+    resolutionSource: null,
     marketSegment: null,
     closeTime: null,
     expirationTime: null,
@@ -508,7 +512,10 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     event_id: "polymarket:event-1",
     market_venue: "polymarket",
     market_title: "Will test resolve Yes?",
+    market_slug: null,
+    market_description: null,
     event_title: "Test event",
+    event_description: null,
     category: null,
     event_category: null,
     series_key: null,
@@ -516,6 +523,7 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     close_time: null,
     expiration_time: null,
     outcomes: null,
+    resolution_source: null,
     market_segment: null,
     best_bid: "0.30",
     best_ask: "0.32",
@@ -670,8 +678,12 @@ function followthroughCandidateRow(overrides: Record<string, unknown> = {}) {
     market_id: "polymarket:market-1",
     event_id: "polymarket:event-1",
     market_title: "Will test resolve Yes?",
+    market_slug: null,
+    market_description: null,
     event_title: "Test event",
+    event_description: null,
     outcomes: null,
+    resolution_source: null,
     venue: "polymarket",
     best_bid: "0.55",
     best_ask: "0.57",
@@ -4634,7 +4646,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message uses short market title for generic outcome buttons",
+    name: "message keeps generic binary buttons as YES NO while market line carries title",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -4645,9 +4657,73 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy France · Poly 32¢");
-      assert.equal(rows[1]?.[0]?.text, "👤 Wallet · France $12.3K (-$123 PnL)");
-      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
+      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(rows[1]?.[0]?.text, "👤 Wallet · YES $12.3K (-$123 PnL)");
+      assert.match(message.text, /📍 World Cup Winner · France/);
+      assert.match(
+        message.text,
+        /⚡ Strong holder · YES 31¢ \/ NO 69¢/,
+      );
+    },
+  },
+  {
+    name: "message renders totals as plain English sides",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          direction: "down",
+          eventTitle: "Portugal vs Spain",
+          holderSide: "NO",
+          marketDescription:
+            "Over if Portugal and Spain combine for 3 or more goals.",
+          marketTitle: "O/U 2.5",
+          outcomes: ["Over", "Under"],
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(
+        rows[0]?.[0]?.text,
+        "⚪ Buy Under 2.5 total goals · Poly 70¢",
+      );
+      assert.match(
+        rows[1]?.[0]?.text ?? "",
+        /^👤 Wallet · Under 2\.5 total goals /,
+      );
+      assert.match(
+        message.text,
+        /📍 Portugal vs Spain · Under 2\\.5 total goals/,
+      );
+      assert.match(
+        message.text,
+        /This wins if there are 0\\-2 total goals\\./,
+      );
+      assert.match(
+        message.text,
+        /Over 2\\.5 total goals 31¢ \/ Under 2\\.5 total goals 69¢/,
+      );
+      assert.equal(message.text.includes("NO O/U 2.5"), false);
+    },
+  },
+  {
+    name: "message renders generic team NO as plain NO labels",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          direction: "down",
+          eventTitle: "World Cup Winner",
+          holderSide: "NO",
+          marketTitle: "France",
+        }),
+      });
+      const rows = message.keyboard?.inline_keyboard ?? [];
+      assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
+      assert.match(rows[1]?.[0]?.text ?? "", /^👤 Wallet · NO /);
+      assert.doesNotMatch(rows[0]?.[0]?.text ?? "", /NO France/);
+      assert.doesNotMatch(rows[0]?.[0]?.text ?? "", /not to win/);
     },
   },
   {
@@ -5841,10 +5917,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(delivery);
       assert.equal(delivery.params[4], 333);
       assert.equal(delivery.params[5], null);
-      assert.deepEqual(JSON.parse(String(delivery.params[8])), {
-        fallbackStandalone: true,
-        noteKind: "research_update",
-      });
+      const metrics = JSON.parse(String(delivery.params[8])) as {
+        copy?: { copyVersion?: string };
+        fallbackStandalone?: boolean;
+        noteKind?: string;
+      };
+      assert.equal(metrics.fallbackStandalone, true);
+      assert.equal(metrics.noteKind, "research_update");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v1");
     },
   },
   {
@@ -6011,11 +6091,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(result.sentStats, 1);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
-      assert.match(telegram.messages[0]?.text ?? "", /Wallets followed/);
-      assert.match(telegram.messages[0]?.text ?? "", /wallets followed/);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Tracked wallets are still leaning with the signal/,
+        /Copy traders are flowing into this signal|This signal is getting copied|Traders are still following this call|Copy flow is building here|More wallets are joining this side|This call is starting to get traction/,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /wallets added/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /tracked wallets have not fully faded it yet/,
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -6092,7 +6175,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "followthrough stats use short market title as side label",
+    name: "followthrough stats keep generic binary price labels as YES NO",
     run: async () => {
       const redis = new FakeRedis();
       await enableFollowthroughTestChat(redis);
@@ -6127,8 +6210,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /net tracked Argentina flow/);
-      assert.match(text, /Argentina: 40¢ → 55¢/);
+      assert.match(text, /World Cup Winner · Argentina/);
+      assert.match(text, /net tracked flow/);
+      assert.match(text, /YES: 40¢ → 55¢/);
       assert.doesNotMatch(text, /net tracked YES flow/);
     },
   },
@@ -6169,11 +6253,77 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /net tracked NYG flow/);
+      assert.match(text, /net tracked flow/);
       assert.match(text, /NYG: 40¢ → 55¢/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+    },
+  },
+  {
+    name: "followthrough stats render totals in copy-trading format",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          direction: "down",
+          event_title: "Portugal vs Spain",
+          market_description:
+            "Over if Portugal and Spain combine for 3 or more goals.",
+          market_title: "O/U 2.5",
+          metrics: {
+            signalSnapshot: {
+              quote: { buyPrice: 0.4 },
+              side: "NO",
+            },
+          },
+          outcomes: JSON.stringify(["Over", "Under"]),
+          target_meta: { side: "NO" },
+        }),
+      ];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "0",
+          outcome_side: "NO",
+          wallet_id: "wallet-1",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(
+        text,
+        /🔥 (Copy traders are flowing into this signal|This signal is getting copied|Traders are still following this call|Copy flow is building here|More wallets are joining this side|This call is starting to get traction)/,
+      );
+      assert.match(
+        text,
+        /📍 Portugal vs Spain · Under 2\\.5 total goals/,
+      );
+      assert.match(text, /Since the signal:/);
+      assert.match(text, /net tracked flow/);
+      assert.match(text, /1 wallets added · 0 trimmed\/exited · 1 still hold/);
+      assert.match(text, /Under 2\\.5 total goals: 40¢ → 43¢/);
+      assert.match(text, /Time since signal: 25h/);
     },
   },
   {
@@ -6298,11 +6448,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Market moved after the read/,
+        /Market moved with the signal/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Market moved with the read, but tracked wallet follow\\-through is thin/,
+        /market moved with the read, but tracked wallet follow\\-through is thin so far/,
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -6431,7 +6581,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedWin, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Closed green/);
+      assert.match(telegram.messages[0]?.text ?? "", /Signal side won/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>
@@ -6472,7 +6622,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedLoss, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Closed red/);
+      assert.match(telegram.messages[0]?.text ?? "", /Signal side lost/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>

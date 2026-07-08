@@ -100,6 +100,13 @@ export function classifyMarketSegmentFromText(
 
 function sportsGameSegment(text: string): MarketSegment {
   if (
+    /\b(esports?|fifae|ea sports fc|counter-strike|counter strike|cs2|league of legends|dota|valorant|bo3|bo5|game [1-5] winner)\b/.test(
+      text,
+    )
+  ) {
+    return "sports_esports_game";
+  }
+  if (
     /\b(soccer|fifa|world cup|uefa|premier league|champions league|laliga|la liga|serie a|bundesliga|mls|football)\b/.test(
       text,
     )
@@ -118,13 +125,6 @@ function sportsGameSegment(text: string): MarketSegment {
     return "sports_basketball_game";
   }
   if (/\b(cricket|icc|t20|ipl)\b/.test(text)) return "sports_cricket_game";
-  if (
-    /\b(esports?|counter-strike|counter strike|cs2|league of legends|dota|valorant|bo3|bo5|game [1-5] winner)\b/.test(
-      text,
-    )
-  ) {
-    return "sports_esports_game";
-  }
   return "sports_other_game";
 }
 
