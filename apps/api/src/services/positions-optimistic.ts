@@ -8,6 +8,7 @@ import {
   markPositionFlatByIdInTx,
   withPositionMutationLock,
 } from "../repos/positions-repo.js";
+import { positionDeltaAppliedSqlExpression } from "../repos/orders-repo.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
 
 type SupportedVenue = "polymarket" | "kalshi" | "limitless";
@@ -353,8 +354,7 @@ export async function applyOptimisticPositionTradeOnce(
     async (client: PoolClient) => {
       const order = await client.query<{ position_delta_applied: boolean }>(
         `
-          select coalesce(order_payload ? '_hunchPositionDeltaAppliedAt', false)
-            as position_delta_applied
+          select ${positionDeltaAppliedSqlExpression()} as position_delta_applied
           from orders
           where id = $1
           for update

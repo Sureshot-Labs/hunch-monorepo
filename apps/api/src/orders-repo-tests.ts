@@ -12,6 +12,7 @@ import {
   updateOrderFromHistory,
 } from "./repos/orders-repo.js";
 import { fetchUnifiedOrders } from "./repos/unified-orders.js";
+import { applyOptimisticPositionTradeOnce } from "./services/positions-optimistic.js";
 
 async function test(name: string, fn: () => Promise<void>) {
   try {
@@ -186,6 +187,46 @@ await test("storeOrder reads nested position delta markers on existing orders", 
 
   assert.equal(result.kind, "exists");
   assert.equal(result.order.position_delta_applied, true);
+});
+
+await test("applyOptimisticPositionTradeOnce skips nested position delta markers", async () => {
+  const capturedSql: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      capturedSql.push(sql);
+      if (/select pg_advisory_xact_lock/i.test(sql)) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (/from orders/i.test(sql)) {
+        return {
+          rows: [{ position_delta_applied: true }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+  const pool = {
+    connect: async () => client,
+  } as unknown as Pool;
+
+  const result = await applyOptimisticPositionTradeOnce(pool, {
+    orderId: "order-1",
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    venue: "limitless",
+    tokenId: "token-1",
+    side: "BUY",
+    shares: 10,
+    notionalUsd: 5,
+  });
+
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, "position_delta_already_applied");
+  assert.match(capturedSql.join("\n"), /order_payload->'submitted'/);
+  assert.doesNotMatch(capturedSql.join("\n"), /insert into positions/i);
+  assert.doesNotMatch(capturedSql.join("\n"), /update positions/i);
 });
 
 await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders visible", async () => {

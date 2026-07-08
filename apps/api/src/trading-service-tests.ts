@@ -754,7 +754,14 @@ const tests: TestCase[] = [
         "async function submitPreparedTrade(",
         "async function persistTrade(",
       );
+      const limitlessRestSyncServiceBlock = sourceSlice(
+        limitless,
+        "export async function syncLimitlessOpenOrdersRoute(",
+        "export async function syncLimitlessOrderHistoryRoute(",
+      );
       assert.match(limitlessRestSubmitBlock, /submitLimitlessClobOrderToVenue/);
+      assert.match(limitlessRestSubmitBlock, /resolveLimitlessRouteAuth/);
+      assert.match(limitlessRestSyncServiceBlock, /resolveLimitlessRouteAuth/);
       assert.match(limitlessBotSubmitBlock, /submitLimitlessClobOrderToVenue/);
       assert.match(limitlessRestSubmitBlock, /extractLimitlessSubmittedOrder/);
       assert.match(limitlessBotSubmitBlock, /extractLimitlessSubmittedOrder/);
@@ -830,6 +837,7 @@ const tests: TestCase[] = [
       assert.match(onceBlock, /withPositionMutationLock/);
       assert.match(onceBlock, /from orders/);
       assert.match(onceBlock, /for update/);
+      assert.match(onceBlock, /positionDeltaAppliedSqlExpression/);
       assert.match(onceBlock, /applyPositionTradeDeltaInTx/);
       assert.match(onceBlock, /_hunchPositionDeltaAppliedAt/);
       assert.ok(
@@ -842,6 +850,10 @@ const tests: TestCase[] = [
         "utf8",
       );
       assert.match(limitlessHistory, /applyOptimisticPositionTradeOnce/);
+      assert.match(
+        limitlessHistory,
+        /result\.kind === "stored" \|\| !result\.order\.position_delta_applied/,
+      );
       assert.doesNotMatch(
         limitlessHistory,
         /markOrderPositionDeltaApplied/,
@@ -890,6 +902,12 @@ const tests: TestCase[] = [
       assert.match(limitless, /extractLimitlessMarketExchangeAddress\(market\.metadata\)/);
       assert.match(limitless, /upsertLimitlessVenueShareAccrualFromOrderPayload/);
       assert.match(limitless, /upstreamPayload/);
+      assert.match(limitless, /isLimitlessBotClobExecutable/);
+      assert.match(limitless, /limitless_clob_slippage_guard_unavailable/);
+      assert.match(
+        limitless,
+        /CLOB bot trading is disabled until slippage can be enforced/,
+      );
 
       assert.match(kalshi, /extractDflowErrorCode/);
       assert.match(kalshi, /code === "route_not_found"/);

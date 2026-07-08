@@ -39,6 +39,7 @@ import {
   TelegramBotApiClient,
   type SignalBotNote,
   type SignalBotRedisLike,
+  type TelegramBotCallbackQuery,
   type TelegramBotUpdate,
   type TelegramSendMessageInput,
   type TelegramSendResult,
@@ -281,6 +282,26 @@ class FakeTelegram {
     this.nextMessageId += 1;
     return { messageId: this.nextMessageId, ok: true };
   }
+}
+
+function buildTradeCallbackQuery(input: {
+  chatId?: number | string;
+  chatType?: string;
+  data: string;
+  fromId?: number;
+  id?: string;
+}): TelegramBotCallbackQuery {
+  return {
+    data: input.data,
+    from: { id: input.fromId ?? 999 },
+    id: input.id ?? "callback-1",
+    message: {
+      chat: {
+        id: input.chatId ?? 999,
+        type: input.chatType ?? "private",
+      },
+    },
+  };
 }
 
 class FakeDb {
@@ -1920,11 +1941,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleTelegramBotTradingCallback({
         answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
         appBaseUrl: "https://app.hunch.trade",
-        callbackQuery: {
+        callbackQuery: buildTradeCallbackQuery({
           data: "hbt:buy:00000000-0000-4000-8000-000000000001",
-          from: { id: 999 },
-          id: "callback-1",
-        },
+        }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
       });
@@ -1934,6 +1953,82 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.callbackAnswers[0]?.text ?? "",
         /already processed/,
       );
+    },
+  },
+  {
+    name: "trading callback is bound to the original private chat",
+    run: async () => {
+      const cases = [
+        {
+          chatId: 123,
+          chatType: "private",
+          name: "wrong private chat",
+        },
+        {
+          chatId: 999,
+          chatType: "group",
+          name: "non-private chat",
+        },
+      ];
+      for (const testCase of cases) {
+        const telegram = new FakeTelegram();
+        let updateCount = 0;
+        const db = {
+          query: async (sql: string) => {
+            if (sql.includes("FROM telegram_trade_intents i")) {
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    id: "00000000-0000-4000-8000-000000000001",
+                    telegram_user_id: "999",
+                    user_id: null,
+                    authorization_id: null,
+                    chat_id: "999",
+                    telegram_message_id: null,
+                    action: "buy",
+                    venue: "polymarket",
+                    market_id: "market-1",
+                    event_id: "event-1",
+                    side: "YES",
+                    amount_usd: "10",
+                    status: "draft",
+                    quote_snapshot: {},
+                    policy_snapshot: {},
+                    expires_at: new Date(Date.now() + 60_000),
+                    market_title: "Market",
+                    market_status: "ACTIVE",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("UPDATE telegram_trade_intents")) {
+              updateCount += 1;
+            }
+            return { rowCount: 0, rows: [] };
+          },
+        };
+
+        const handled = await handleTelegramBotTradingCallback({
+          answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: buildTradeCallbackQuery({
+            chatId: testCase.chatId,
+            chatType: testCase.chatType,
+            data: "hbt:buy:00000000-0000-4000-8000-000000000001",
+          }),
+          db: db as never,
+          sendMessage: (message) => telegram.sendMessage(message as never),
+        });
+
+        assert.equal(handled, true, testCase.name);
+        assert.equal(updateCount, 0, testCase.name);
+        assert.match(
+          telegram.callbackAnswers[0]?.text ?? "",
+          /original private bot chat/,
+          testCase.name,
+        );
+      }
     },
   },
   {
@@ -2046,11 +2141,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleTelegramBotTradingCallback({
         answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
         appBaseUrl: "https://app.hunch.trade",
-        callbackQuery: {
+        callbackQuery: buildTradeCallbackQuery({
           data: "hbt:buy:00000000-0000-4000-8000-000000000001",
-          from: { id: 999 },
-          id: "callback-1",
-        },
+        }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
       });
@@ -2167,11 +2260,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleTelegramBotTradingCallback({
         answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
         appBaseUrl: "https://app.hunch.trade",
-        callbackQuery: {
+        callbackQuery: buildTradeCallbackQuery({
           data: "hbt:buy:00000000-0000-4000-8000-000000000001",
-          from: { id: 999 },
-          id: "callback-1",
-        },
+        }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {
@@ -2328,11 +2419,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleTelegramBotTradingCallback({
         answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
         appBaseUrl: "https://app.hunch.trade",
-        callbackQuery: {
+        callbackQuery: buildTradeCallbackQuery({
           data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
-          from: { id: 999 },
-          id: "callback-1",
-        },
+        }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {
@@ -2551,11 +2640,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleTelegramBotTradingCallback({
         answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
         appBaseUrl: "https://app.hunch.trade",
-        callbackQuery: {
+        callbackQuery: buildTradeCallbackQuery({
           data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
-          from: { id: 999 },
-          id: "callback-1",
-        },
+        }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {
@@ -2762,11 +2849,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleTelegramBotTradingCallback({
         answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
         appBaseUrl: "https://app.hunch.trade",
-        callbackQuery: {
+        callbackQuery: buildTradeCallbackQuery({
           data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
-          from: { id: 999 },
-          id: "callback-1",
-        },
+        }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {

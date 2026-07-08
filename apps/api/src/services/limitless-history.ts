@@ -684,7 +684,7 @@ export async function syncLimitlessHistoryForWallet(
 
     if (result.kind === "stored") storedNew += 1;
     if (result.kind === "exists") alreadyKnown += 1;
-    if (result.kind === "stored") {
+    if (result.kind === "stored" || !result.order.position_delta_applied) {
       try {
         const applied = await applyConfirmedHistoryFillToPosition(pool, {
           orderId: result.order.id,

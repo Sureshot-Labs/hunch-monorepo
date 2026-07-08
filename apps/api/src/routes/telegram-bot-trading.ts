@@ -69,7 +69,10 @@ const internalCallbackBodySchema = z
         message: z
           .object({
             chat: z
-              .object({ id: z.union([z.string(), z.number()]) })
+              .object({
+                id: z.union([z.string(), z.number()]),
+                type: z.string().optional(),
+              })
               .optional(),
             message_id: z.number().optional(),
           })

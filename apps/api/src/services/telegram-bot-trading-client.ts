@@ -24,7 +24,7 @@ export type TelegramBotTradingClientCallbackInput = {
     from?: { id?: number };
     id: string;
     message?: {
-      chat?: { id: string | number };
+      chat?: { id: string | number; type?: string };
       message_id?: number;
     };
   };

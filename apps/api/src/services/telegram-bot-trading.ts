@@ -169,7 +169,7 @@ export type TelegramBotTradingCallbackInput = {
     from?: { id?: number };
     id: string;
     message?: {
-      chat?: { id: string | number };
+      chat?: { id: string | number; type?: string };
       message_id?: number;
     };
   };
@@ -1421,11 +1421,21 @@ async function loadEnabledAuthorization(
   return result.rows[0] ?? null;
 }
 
-function callbackChatId(input: TelegramBotTradingCallbackInput): string | null {
+function callbackSenderId(input: TelegramBotTradingCallbackInput): string | null {
   const fromId = input.callbackQuery.from?.id;
-  if (fromId != null) return String(fromId);
+  return fromId != null ? String(fromId) : null;
+}
+
+function callbackMessageChat(input: TelegramBotTradingCallbackInput): {
+  id: string;
+  type: string | null;
+} | null {
   const chatId = input.callbackQuery.message?.chat?.id;
-  return chatId != null ? String(chatId) : null;
+  if (chatId == null) return null;
+  return {
+    id: String(chatId),
+    type: input.callbackQuery.message?.chat?.type ?? null,
+  };
 }
 
 function isTerminalIntentStatus(status: string): boolean {
@@ -1465,8 +1475,8 @@ export async function handleTelegramBotTradingCallback(
     return true;
   }
 
-  const chatId = callbackChatId(input);
-  if (!chatId) {
+  const senderId = callbackSenderId(input);
+  if (!senderId) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
@@ -1484,7 +1494,7 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
-  if (intent.telegram_user_id !== normalizeTelegramUserId(chatId)) {
+  if (intent.telegram_user_id !== normalizeTelegramUserId(senderId)) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
@@ -1492,6 +1502,21 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
+  const messageChat = callbackMessageChat(input);
+  if (
+    !messageChat ||
+    messageChat.type !== "private" ||
+    !intent.chat_id ||
+    messageChat.id !== intent.chat_id
+  ) {
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      showAlert: true,
+      text: "Open the original private bot chat to use this trade button.",
+    });
+    return true;
+  }
+  const chatId = messageChat.id;
   if (isTerminalIntentStatus(intent.status) || intent.status === "executing") {
     await answerIntentAlreadyProcessed(input, intent.status);
     return true;

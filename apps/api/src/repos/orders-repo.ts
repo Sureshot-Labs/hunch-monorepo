@@ -6,6 +6,31 @@ import {
 } from "../lib/wallet-address.js";
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
+const POSITION_DELTA_APPLIED_MARKER = "_hunchPositionDeltaAppliedAt";
+
+export function positionDeltaAppliedSqlExpression(
+  payloadExpression = "order_payload",
+): string {
+  return `coalesce(
+    ${payloadExpression} ? '${POSITION_DELTA_APPLIED_MARKER}',
+    (${payloadExpression}->'submitted') ? '${POSITION_DELTA_APPLIED_MARKER}',
+    (${payloadExpression}->'payload') ? '${POSITION_DELTA_APPLIED_MARKER}',
+    (${payloadExpression}->'submitted'->'payload') ? '${POSITION_DELTA_APPLIED_MARKER}',
+    false
+  )`;
+}
+
+function positionDeltaAppliedAtSqlExpression(
+  payloadExpression = "order_payload",
+): string {
+  return `coalesce(
+    ${payloadExpression}->'${POSITION_DELTA_APPLIED_MARKER}',
+    ${payloadExpression}->'submitted'->'${POSITION_DELTA_APPLIED_MARKER}',
+    ${payloadExpression}->'payload'->'${POSITION_DELTA_APPLIED_MARKER}',
+    ${payloadExpression}->'submitted'->'payload'->'${POSITION_DELTA_APPLIED_MARKER}'
+  )`;
+}
+
 function extractPayloadAddress(
   payload: unknown,
   key: "maker" | "signer",
@@ -25,7 +50,7 @@ function extractPayloadAddress(
   return null;
 }
 
-function hasPositionDeltaApplied(payload: unknown, depth = 0): boolean {
+export function hasPositionDeltaApplied(payload: unknown, depth = 0): boolean {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return false;
   }
@@ -424,14 +449,7 @@ export async function findLimitlessHistoryMatch(
         venue_order_id,
         status,
         posted_at,
-        coalesce(
-          order_payload ? '_hunchPositionDeltaAppliedAt',
-          (order_payload->'submitted') ? '_hunchPositionDeltaAppliedAt',
-          (order_payload->'payload') ? '_hunchPositionDeltaAppliedAt',
-          (order_payload->'submitted'->'payload') ? '_hunchPositionDeltaAppliedAt',
-          false
-        )
-          as position_delta_applied
+        ${positionDeltaAppliedSqlExpression()} as position_delta_applied
       from orders
       where user_id = $1
         and venue = 'limitless'
@@ -493,11 +511,7 @@ export async function markOrderPositionDeltaApplied(
             )
         end
       where id = $1
-        and not (
-          order_payload is not null
-          and jsonb_typeof(order_payload) = 'object'
-          and order_payload ? '_hunchPositionDeltaAppliedAt'
-        )
+        and not (${positionDeltaAppliedSqlExpression()})
       returning id
     `,
     [inputs.id, appliedAt],
@@ -546,11 +560,7 @@ export async function claimOrderPositionDeltaApplication(
             )
         end
       where id = $1
-        and not (
-          order_payload is not null
-          and jsonb_typeof(order_payload) = 'object'
-          and order_payload ? '_hunchPositionDeltaAppliedAt'
-        )
+        and not (${positionDeltaAppliedSqlExpression()})
         and (
           not (
             order_payload is not null
@@ -583,7 +593,7 @@ export async function clearOrderPositionDeltaApplicationClaim(
         and order_payload is not null
         and jsonb_typeof(order_payload) = 'object'
         and order_payload->>'_hunchPositionDeltaApplyClaimId' = $2
-        and not (order_payload ? '_hunchPositionDeltaAppliedAt')
+        and not (${positionDeltaAppliedSqlExpression()})
       returning id
     `,
     [inputs.id, inputs.claimId],
@@ -645,20 +655,9 @@ export async function updateOrderFromHistory(
             jsonb_build_object('submitted', order_payload, 'history', $9::jsonb)
             ||
             case
-              when coalesce(
-                order_payload ? '_hunchPositionDeltaAppliedAt',
-                (order_payload->'submitted') ? '_hunchPositionDeltaAppliedAt',
-                (order_payload->'payload') ? '_hunchPositionDeltaAppliedAt',
-                (order_payload->'submitted'->'payload') ? '_hunchPositionDeltaAppliedAt',
-                false
-              ) then jsonb_build_object(
+              when ${positionDeltaAppliedSqlExpression()} then jsonb_build_object(
                 '_hunchPositionDeltaAppliedAt',
-                coalesce(
-                  order_payload->'_hunchPositionDeltaAppliedAt',
-                  order_payload->'submitted'->'_hunchPositionDeltaAppliedAt',
-                  order_payload->'payload'->'_hunchPositionDeltaAppliedAt',
-                  order_payload->'submitted'->'payload'->'_hunchPositionDeltaAppliedAt'
-                )
+                ${positionDeltaAppliedAtSqlExpression()}
               )
               else '{}'::jsonb
             end

@@ -1250,36 +1250,17 @@ export async function syncLimitlessOpenOrdersRoute(input: {
   signer: string;
   userId: string;
 }): Promise<LimitlessRouteOperationResult> {
-  const authContext = await resolveLimitlessAuthContext(
-    input.userId,
-    input.signer,
-  );
-  if (!authContext) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: { error: "Connect Limitless before trading." },
-    };
-  }
-  const verification = await verifyLimitlessAuthContext({
-    authContext,
+  const partnerAuth = await resolveLimitlessRouteAuth({
+    userId: input.userId,
     walletAddress: input.signer,
   });
-  if (!verification.ok) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: {
-        error: verification.message ?? "Limitless account is not ready.",
-      },
-    };
-  }
-  const requestAuth = buildLimitlessRequestAuthInputs(authContext);
+  if (!partnerAuth.ok) return partnerAuth;
+  const { profile, requestAuth } = partnerAuth;
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: `/markets/${encodeURIComponent(input.query.slug)}/user-orders`,
     ...requestAuth,
-    headers: buildLimitlessOnBehalfHeaders(verification.profile),
+    headers: buildLimitlessOnBehalfHeaders(profile),
   });
 
   if (!upstream.ok) {
@@ -1355,7 +1336,7 @@ export async function syncLimitlessOpenOrdersRoute(input: {
     historyStats = await syncLimitlessHistoryForWallet(input.pool, {
       userId: input.userId,
       walletAddress: input.signer,
-      authContext,
+      authContext: partnerAuth.authContext,
       limit: 100,
     });
     expiredStaleFok = await expireStaleLimitlessFokOrders(input.pool, {
@@ -2907,37 +2888,12 @@ export async function submitLimitlessClientSignedOrder(input: {
     };
   }
 
-  if (!isLimitlessPartnerHmacConfigured()) {
-    return {
-      ok: false,
-      statusCode: 503,
-      payload: { error: "Limitless partner auth is not configured" },
-    };
-  }
-
-  const authContext = await resolveLimitlessAuthContext(input.userId, signer);
-  if (!authContext) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: { error: "Connect Limitless before trading." },
-    };
-  }
-  const verification = await verifyLimitlessAuthContext({
-    authContext,
+  const partnerAuth = await resolveLimitlessRouteAuth({
+    userId: input.userId,
     walletAddress: signer,
   });
-  if (!verification.ok) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: {
-        error: verification.message ?? "Limitless account is not ready.",
-      },
-    };
-  }
-  const profile = verification.profile;
-  const requestAuth = buildLimitlessRequestAuthInputs(authContext);
+  if (!partnerAuth.ok) return partnerAuth;
+  const { profile, requestAuth } = partnerAuth;
   const ownerId = profile?.id;
   if (!ownerId) {
     return {
@@ -3843,6 +3799,10 @@ function isLimitlessAmmMarket(metadata: unknown): boolean {
   return mode?.toLowerCase() === "amm";
 }
 
+export function isLimitlessBotClobExecutable(): boolean {
+  return false;
+}
+
 type LimitlessTradingMarket = Awaited<ReturnType<typeof loadMarketForVenue>>;
 
 function readLimitlessAmmMarketAddress(metadata: unknown): string | null {
@@ -4028,6 +3988,18 @@ async function getReadiness(
         ok: false,
         code: "market_not_orderable",
         message: "Market is not currently open for orders.",
+      });
+    }
+    if (
+      !isLimitlessAmmMarket(market.metadata) &&
+      input.actor.kind === "telegram_bot" &&
+      !isLimitlessBotClobExecutable()
+    ) {
+      return readiness("limitless", capabilities, {
+        ok: false,
+        code: "limitless_clob_slippage_guard_unavailable",
+        message:
+          "Limitless CLOB bot trading is disabled until slippage can be enforced by the submitted order.",
       });
     }
   }
@@ -4349,6 +4321,17 @@ async function prepareTrade(
       intent,
       market,
       quote: input.quote ?? null,
+    });
+  }
+  if (
+    intent.actor.kind === "telegram_bot" &&
+    !isLimitlessBotClobExecutable()
+  ) {
+    throw tradingError({
+      code: "unsupported_capability",
+      message:
+        "Limitless CLOB bot trading is disabled until slippage can be enforced by the submitted order.",
+      venue: "limitless",
     });
   }
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
