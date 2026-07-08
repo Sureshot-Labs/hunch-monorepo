@@ -199,13 +199,13 @@ export async function quoteKalshiDflowRoute(input: {
   if (!upstream.ok) {
     const userMessage = formatDflowUserMessage(upstream.payload);
     const message = extractDflowErrorMessage(upstream.payload);
+    const code = extractDflowErrorCode(upstream.payload);
     const normalizedMessage = message?.toLowerCase() ?? "";
     return {
       ok: false,
       routeNotFound:
         normalizedMessage.includes("route not found") ||
-        (isRecord(upstream.payload) &&
-          upstream.payload.code === "route_not_found"),
+        code === "route_not_found",
       statusCode: 502,
       payload: {
         error: userMessage ?? "DFlow quote failed",

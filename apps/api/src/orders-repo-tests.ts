@@ -189,6 +189,70 @@ await test("storeOrder reads nested position delta markers on existing orders", 
   assert.equal(result.order.position_delta_applied, true);
 });
 
+await test("storeOrder locks and marker-preserves existing order payload updates", async () => {
+  let selectSql = "";
+  let updateSql = "";
+  const client = {
+    query: async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/from orders/i.test(sql)) {
+        selectSql = sql;
+        return {
+          rowCount: 1,
+          rows: [
+            {
+              id: "order-1",
+              wallet_address: "0x0000000000000000000000000000000000000001",
+              signer_address: "0x0000000000000000000000000000000000000001",
+              price: 0.5,
+              size: 10,
+              status: "submitted",
+              posted_at: new Date("2026-05-17T00:00:00.000Z"),
+              order_payload: null,
+              order_payload_version: null,
+              fee_policy_snapshot: null,
+            },
+          ],
+        };
+      }
+      if (/update orders set/i.test(sql)) {
+        updateSql = sql;
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+  const pool = {
+    connect: async () => client,
+  } as unknown as Pool;
+
+  const result = await storeOrder(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    signerAddress: "0x0000000000000000000000000000000000000001",
+    venue: "limitless",
+    venueOrderId: "venue-order-1",
+    tokenId: "token-1",
+    side: "BUY",
+    orderType: "FOK",
+    price: 0.5,
+    size: 10,
+    status: "filled",
+    errorMessage: null,
+    rawError: null,
+    orderPayload: { id: "submitted-order" },
+  });
+
+  assert.equal(result.kind, "exists");
+  assert.match(selectSql, /for update/i);
+  assert.match(updateSql, /_hunchPositionDeltaAppliedAt/);
+  assert.match(updateSql, /order_payload->'submitted'->'payload'/);
+  assert.match(updateSql, /jsonb_build_object\(\s*'payload'/);
+});
+
 await test("applyOptimisticPositionTradeOnce skips nested position delta markers", async () => {
   const capturedSql: string[] = [];
   const client = {
@@ -199,7 +263,7 @@ await test("applyOptimisticPositionTradeOnce skips nested position delta markers
       }
       if (/from orders/i.test(sql)) {
         return {
-          rows: [{ position_delta_applied: true }],
+          rows: [{ context_matches: true, position_delta_applied: true }],
           rowCount: 1,
         };
       }
@@ -227,6 +291,62 @@ await test("applyOptimisticPositionTradeOnce skips nested position delta markers
   assert.match(capturedSql.join("\n"), /order_payload->'submitted'/);
   assert.doesNotMatch(capturedSql.join("\n"), /insert into positions/i);
   assert.doesNotMatch(capturedSql.join("\n"), /update positions/i);
+});
+
+await test("applyOptimisticPositionTradeOnce guards order context before mutation", async () => {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      capturedSql.push(sql);
+      capturedParams.push(params ?? []);
+      if (["begin", "commit", "rollback"].includes(sql.trim().toLowerCase())) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (/select pg_advisory_xact_lock/i.test(sql)) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (/from orders/i.test(sql)) {
+        return {
+          rows: [{ context_matches: false, position_delta_applied: false }],
+          rowCount: 1,
+        };
+      }
+      throw new Error(`unexpected mutation after context mismatch: ${sql}`);
+    },
+    release: () => {},
+  };
+  const pool = {
+    connect: async () => client,
+  } as unknown as Pool;
+
+  const result = await applyOptimisticPositionTradeOnce(pool, {
+    orderId: "order-1",
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    venue: "limitless",
+    tokenId: "token-1",
+    side: "BUY",
+    shares: 10,
+    notionalUsd: 5,
+  });
+
+  const orderSql = capturedSql.find((sql) => /from orders/i.test(sql)) ?? "";
+  const orderParams = capturedParams[capturedSql.indexOf(orderSql)] ?? [];
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, "order_context_mismatch");
+  assert.match(orderSql, /user_id = \$2/);
+  assert.match(orderSql, /venue = \$3/);
+  assert.match(orderSql, /token_id = \$4/);
+  assert.match(orderSql, /wallet_address = \$5/);
+  assert.match(orderSql, /signer_address = \$5/);
+  assert.deepEqual(orderParams, [
+    "order-1",
+    "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    "limitless",
+    "token-1",
+    "0x0000000000000000000000000000000000000001",
+  ]);
 });
 
 await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders visible", async () => {

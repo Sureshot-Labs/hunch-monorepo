@@ -31,6 +31,27 @@ function positionDeltaAppliedAtSqlExpression(
   )`;
 }
 
+function positionDeltaPreservingPayloadUpdateSql(param: string): string {
+  return `order_payload = case
+          when ${positionDeltaAppliedSqlExpression()} then
+            case
+              when jsonb_typeof(${param}::jsonb) = 'object' then
+                ${param}::jsonb || jsonb_build_object(
+                  '${POSITION_DELTA_APPLIED_MARKER}',
+                  ${positionDeltaAppliedAtSqlExpression()}
+                )
+              else
+                jsonb_build_object(
+                  'payload',
+                  ${param}::jsonb,
+                  '${POSITION_DELTA_APPLIED_MARKER}',
+                  ${positionDeltaAppliedAtSqlExpression()}
+                )
+            end
+          else ${param}::jsonb
+        end`;
+}
+
 function extractPayloadAddress(
   payload: unknown,
   key: "maker" | "signer",
@@ -240,7 +261,8 @@ async function storeOrderInTx(
        (order_payload IS NOT NULL)::int DESC,
        posted_at DESC NULLS LAST,
        id DESC
-     LIMIT 1`,
+     LIMIT 1
+     FOR UPDATE`,
     [inputs.venue, inputs.venueOrderId, inputs.userId],
   );
 
@@ -276,7 +298,9 @@ async function storeOrderInTx(
     }
     if (!existing.order_payload && inputs.orderPayload != null) {
       paramCount += 1;
-      updates.push(`order_payload = $${paramCount}`);
+      updates.push(
+        positionDeltaPreservingPayloadUpdateSql(`$${paramCount}`),
+      );
       params.push(JSON.stringify(inputs.orderPayload));
     }
     if (!existing.order_payload_version && inputs.orderPayloadVersion) {

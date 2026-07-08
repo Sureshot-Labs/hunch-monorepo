@@ -134,7 +134,7 @@ export function normalizeSignalBotPolicy(
     tradingEnabled: Boolean(policy.tradingEnabled),
     tradingActions,
     tradingVenues: venues,
-    buyAmountPresetsUsd: presets.length > 0 ? presets : [maxTradeAmountUsd],
+    buyAmountPresetsUsd: presets,
     maxTradeAmountUsd,
     maxSlippageBps: clamp(Math.trunc(policy.maxSlippageBps), 0, 10_000),
     intentTtlSec: clamp(Math.trunc(policy.intentTtlSec), 30, 3_600),

@@ -91,6 +91,14 @@ export function parseTelegramBotTradingCallbackData(
   return { type, intentId };
 }
 
+function isTelegramBotTradingCallbackData(data: string | undefined): boolean {
+  if (!data) return false;
+  return (
+    data === TELEGRAM_BOT_TRADING_CALLBACK_PREFIX ||
+    data.startsWith(`${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:`)
+  );
+}
+
 async function readInternalApiJson<T>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => null)) as T | null;
   if (!response.ok) {
@@ -210,7 +218,19 @@ export function createTelegramBotTradingInternalApiClient(input: {
       const parsed = parseTelegramBotTradingCallbackData(
         callbackInput.callbackQuery.data,
       );
-      if (!parsed) return false;
+      if (!parsed) {
+        if (
+          !isTelegramBotTradingCallbackData(callbackInput.callbackQuery.data)
+        ) {
+          return false;
+        }
+        await callbackInput.answerCallbackQuery({
+          callbackQueryId: callbackInput.callbackQuery.id,
+          showAlert: true,
+          text: "Trade button expired or invalid. Send /market again.",
+        });
+        return true;
+      }
       const path =
         parsed.type === "buy"
           ? "/internal/telegram-bot/trading/preview-intent"

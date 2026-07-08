@@ -107,7 +107,10 @@ export async function applyOrderTradeEffects(
     }
   }
 
-  if (input.submitResult.venueOrderId) {
+  const shouldNotifyOrder =
+    Boolean(input.submitResult.venueOrderId) &&
+    input.submitResult.status !== "no_fill";
+  if (shouldNotifyOrder) {
     void createNotificationSafe(
       ctx.pool,
       buildOrderNotification({
@@ -127,7 +130,7 @@ export async function applyOrderTradeEffects(
 
   return {
     ok: true,
-    notificationsCreated: input.submitResult.venueOrderId ? 1 : 0,
+    notificationsCreated: shouldNotifyOrder ? 1 : 0,
     referralFirstTrade,
     positionDeltaApplied,
     raw: storedOrder.positionDeltaApplied

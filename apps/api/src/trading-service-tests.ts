@@ -779,12 +779,14 @@ const tests: TestCase[] = [
       assert.match(effects, /readPersistedStoredOrder/);
       assert.match(effects, /positionDeltaApplied/);
       assert.match(effects, /applyOptimisticPositionTradeOnce/);
+      assert.match(effects, /shouldNotifyOrder/);
+      assert.match(effects, /input\.submitResult\.status !== "no_fill"/);
       assert.doesNotMatch(effects, /claimOrderPositionDeltaApplication/);
       assert.doesNotMatch(effects, /clearOrderPositionDeltaApplicationClaim/);
       const optimisticApplyBlock = sourceSlice(
         effects,
         "const result = await applyOptimisticPositionTradeOnce",
-        'if (input.submitResult.venueOrderId)',
+        "const shouldNotifyOrder",
       );
       assert.match(optimisticApplyBlock, /orderId: storedOrder\.id/);
 
@@ -837,6 +839,13 @@ const tests: TestCase[] = [
       assert.match(onceBlock, /withPositionMutationLock/);
       assert.match(onceBlock, /from orders/);
       assert.match(onceBlock, /for update/);
+      assert.match(onceBlock, /context_matches/);
+      assert.match(onceBlock, /user_id = \$2/);
+      assert.match(onceBlock, /venue = \$3/);
+      assert.match(onceBlock, /token_id = \$4/);
+      assert.match(onceBlock, /wallet_address = \$5/);
+      assert.match(onceBlock, /signer_address = \$5/);
+      assert.match(onceBlock, /order_context_mismatch/);
       assert.match(onceBlock, /positionDeltaAppliedSqlExpression/);
       assert.match(onceBlock, /applyPositionTradeDeltaInTx/);
       assert.match(onceBlock, /_hunchPositionDeltaAppliedAt/);
@@ -911,6 +920,7 @@ const tests: TestCase[] = [
 
       assert.match(kalshi, /extractDflowErrorCode/);
       assert.match(kalshi, /code === "route_not_found"/);
+      assert.doesNotMatch(kalshi, /upstream\.payload\.code === "route_not_found"/);
       assert.match(kalshi, /resolveKalshiExecutionSettlementStatus/);
       assert.match(kalshi, /clientStatus/);
       assert.match(kalshi, /executionStatus = "submitted"/);

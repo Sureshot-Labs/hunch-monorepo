@@ -347,22 +347,48 @@ export async function applyOptimisticPositionTradeOnce(
   if (!normalized.ok) return normalized.result;
   const { tradeInput } = normalized;
   const appliedAt = (input.appliedAt ?? new Date()).toISOString();
+  const walletAddress = normalizeWalletForStorage(tradeInput.walletAddress);
 
   const result = await withPositionMutationLock(
     pool,
     { userId: tradeInput.userId, venue: tradeInput.venue },
     async (client: PoolClient) => {
-      const order = await client.query<{ position_delta_applied: boolean }>(
+      const order = await client.query<{
+        context_matches: boolean;
+        position_delta_applied: boolean;
+      }>(
         `
-          select ${positionDeltaAppliedSqlExpression()} as position_delta_applied
+          select
+            ${positionDeltaAppliedSqlExpression()} as position_delta_applied,
+            coalesce((
+              user_id = $2
+              and venue = $3
+              and token_id = $4
+              and (
+                (wallet_address is null and signer_address is null)
+                or wallet_address = $5
+                or signer_address = $5
+                or lower(coalesce(wallet_address, '')) = lower($5)
+                or lower(coalesce(signer_address, '')) = lower($5)
+              )
+            ), false) as context_matches
           from orders
           where id = $1
           for update
         `,
-        [input.orderId],
+        [
+          input.orderId,
+          tradeInput.userId,
+          tradeInput.venue,
+          tradeInput.tokenId,
+          walletAddress,
+        ],
       );
       if (order.rows.length === 0) {
         return { applied: false, reason: "order_not_found" };
+      }
+      if (!order.rows[0].context_matches) {
+        return { applied: false, reason: "order_context_mismatch" };
       }
       if (order.rows[0].position_delta_applied) {
         return {

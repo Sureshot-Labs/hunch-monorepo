@@ -1147,10 +1147,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           timeoutMs: 1,
           token: "token",
         });
-        await assert.rejects(
-          () => client.buildStatusMessage(999),
-          /timed out/,
-        );
+        await assert.rejects(() => client.buildStatusMessage(999), /timed out/);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -1597,6 +1594,143 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "market card suppresses live buy callbacks when buy presets are empty",
+    run: async () => {
+      let insertCount = 0;
+      const db = {
+        query: async (sql: string) => {
+          if (/from runtime_policies/i.test(sql)) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  payload: {
+                    tradingEnabled: true,
+                    tradingActions: ["buy"],
+                    tradingVenues: ["polymarket"],
+                    buyAmountPresetsUsd: [],
+                    maxTradeAmountUsd: 50,
+                    maxSlippageBps: 500,
+                    intentTtlSec: 120,
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM user_telegram_accounts uta")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "authorization-1",
+                  user_id: "user-1",
+                  privy_user_id: "privy-1",
+                  telegram_user_id: "999",
+                  username: "admin",
+                  wallet_address: "0x0000000000000000000000000000000000000001",
+                  wallet_chain: "ethereum",
+                  privy_wallet_id: "wallet-1",
+                  enabled: true,
+                  enabled_venues: ["polymarket"],
+                  max_amount_usd: "50",
+                  disabled_at: null,
+                  last_verified_at: new Date(),
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_bot_trading_authorizations a")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "authorization-1",
+                  user_id: "user-1",
+                  telegram_user_id: "999",
+                  privy_user_id: "privy-1",
+                  wallet_address: "0x0000000000000000000000000000000000000001",
+                  wallet_chain: "ethereum",
+                  privy_wallet_id: "wallet-1",
+                  enabled: true,
+                  enabled_venues: ["polymarket"],
+                  max_amount_usd: "50",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM unified_markets m")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "market-1",
+                  venue: "polymarket",
+                  venue_market_id: "venue-market-1",
+                  event_id: "event-1",
+                  event_title: "Event",
+                  title: "Market",
+                  status: "ACTIVE",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  metadata: {},
+                  close_time: new Date(Date.now() + 60_000),
+                  expiration_time: null,
+                  event_end_time: null,
+                  best_bid: "0.4",
+                  best_ask: "0.6",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (sql.includes("INSERT INTO telegram_trade_intents")) {
+            insertCount += 1;
+            throw new Error("empty presets should not insert intents");
+          }
+          return { rowCount: 0, rows: [] };
+        },
+      };
+      const message = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async () => ({
+            ready: true,
+            executable: true,
+            reasonCode: null,
+            message: null,
+            setupRequired: false,
+            capabilities: {
+              venue: "polymarket",
+              supportsBuy: true,
+              supportsSell: false,
+              supportsCancel: false,
+              supportsOrderSync: false,
+              supportsPositionSync: false,
+              supportsExecutionSync: false,
+              supportsSetup: false,
+              authorizationModes: ["server_delegated"],
+            },
+          }),
+        } as never,
+      });
+
+      assert.equal(insertCount, 0);
+      assert.match(message.text, /No bot buy presets are configured/);
+      const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(
+        buttons.some((button) => "callback_data" in button),
+        false,
+      );
+      assert.equal(
+        buttons.some((button) => "url" in button),
+        true,
+      );
+    },
+  },
+  {
     name: "polling handles callback queries and advances offset",
     run: async () => {
       const redis = new FakeRedis();
@@ -1730,6 +1864,33 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(handled, false);
       }
       assert.equal(telegram.callbackAnswers.length, 0);
+      assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
+    name: "trading internal client answers malformed prefixed callbacks",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const client = createTelegramBotTradingInternalApiClient({
+        baseUrl: "https://internal.hunch.test",
+        token: "service-token",
+      });
+      const handled = await client.handleCallback({
+        answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+        appBaseUrl: "https://app.hunch.trade",
+        callbackQuery: {
+          data: "hbt:buy:not-a-real-uuid",
+          from: { id: 999 },
+          id: "callback-1",
+        },
+        sendMessage: (message) => telegram.sendMessage(message as never),
+      });
+      assert.equal(handled, true);
+      assert.deepEqual(telegram.callbackAnswers[0], {
+        callbackQueryId: "callback-1",
+        showAlert: true,
+        text: "Trade button expired or invalid. Send /market again.",
+      });
       assert.equal(telegram.messages.length, 0);
     },
   },
@@ -2488,9 +2649,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             expiresAt: null,
           }),
           quote: async (input: never) => {
-            quotedSlippageBps = (
-              input as { intent: { slippageBps?: unknown } }
-            ).intent.slippageBps;
+            quotedSlippageBps = (input as { intent: { slippageBps?: unknown } })
+              .intent.slippageBps;
             return {
               venue: "polymarket",
               target: (input as { intent: { target: unknown } }).intent.target,
@@ -2916,11 +3076,201 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         { status: "executing", preparedSnapshot: false },
         { status: "executing", preparedSnapshot: true },
       ]);
+      assert.match(telegram.callbackAnswers[0]?.text ?? "", /no longer active/);
+      assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
+    name: "trading confirm marks no-ref post-submit-start failures unknown",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const updateAttempts: Array<{
+        errorCode: unknown;
+        preparedSnapshot: boolean;
+        status: unknown;
+      }> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/from runtime_policies/i.test(sql)) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  payload: {
+                    tradingEnabled: true,
+                    tradingActions: ["buy"],
+                    tradingVenues: ["polymarket"],
+                    buyAmountPresetsUsd: [10],
+                    maxTradeAmountUsd: 50,
+                    maxSlippageBps: 500,
+                    intentTtlSec: 120,
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_trade_intents i")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  telegram_user_id: "999",
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
+                  chat_id: "999",
+                  telegram_message_id: null,
+                  action: "buy",
+                  venue: "polymarket",
+                  market_id: "market-1",
+                  event_id: "event-1",
+                  side: "YES",
+                  amount_usd: "10",
+                  status: "confirming",
+                  quote_snapshot: {},
+                  policy_snapshot: {},
+                  expires_at: new Date(Date.now() + 60_000),
+                  market_title: "Market",
+                  market_status: "ACTIVE",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_bot_trading_authorizations a")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "authorization-1",
+                  user_id: "user-1",
+                  telegram_user_id: "999",
+                  privy_user_id: "privy-1",
+                  wallet_address: "0x0000000000000000000000000000000000000001",
+                  wallet_chain: "ethereum",
+                  privy_wallet_id: "wallet-1",
+                  enabled: true,
+                  enabled_venues: ["polymarket"],
+                  max_amount_usd: "50",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM unified_markets m")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "market-1",
+                  venue: "polymarket",
+                  venue_market_id: "venue-market-1",
+                  event_id: "event-1",
+                  event_title: "Event",
+                  title: "Market",
+                  status: "ACTIVE",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  metadata: {},
+                  close_time: new Date(Date.now() + 60_000),
+                  expiration_time: null,
+                  event_end_time: null,
+                  best_bid: "0.4",
+                  best_ask: "0.6",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (
+            sql.includes("UPDATE telegram_trade_intents") &&
+            sql.includes("SET status = $2")
+          ) {
+            updateAttempts.push({
+              status: params?.[1],
+              errorCode: params?.[2],
+              preparedSnapshot: params?.[10] != null,
+            });
+            return { rowCount: 1, rows: [{ id: params?.[0] }] };
+          }
+          return { rowCount: 0, rows: [] };
+        },
+      };
+      const handled = await handleTelegramBotTradingCallback({
+        answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+        appBaseUrl: "https://app.hunch.trade",
+        callbackQuery: buildTradeCallbackQuery({
+          data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+        }),
+        db: db as never,
+        sendMessage: (message) => telegram.sendMessage(message as never),
+        trading: {
+          executePreparedTrade: async () => {
+            throw new Error("connection dropped after submit started");
+          },
+          getReadiness: async () => ({
+            ready: true,
+            executable: true,
+            reasonCode: null,
+            message: null,
+            setupRequired: false,
+            capabilities: {
+              venue: "polymarket",
+              supportsBuy: true,
+              supportsSell: false,
+              supportsCancel: false,
+              supportsOrderSync: false,
+              supportsPositionSync: false,
+              supportsExecutionSync: false,
+              supportsSetup: false,
+              authorizationModes: ["server_delegated"],
+            },
+          }),
+          normalizeError: (_venue: string, error: unknown) => ({
+            code: "network_error",
+            message: error instanceof Error ? error.message : "network error",
+            statusCode: 500,
+            venue: "polymarket",
+            raw: error,
+          }),
+          prepareTrade: async (input: never) => ({
+            preparedId: "prepared",
+            venue: "polymarket",
+            intent: (input as { intent: unknown }).intent,
+            quote: null,
+            authorizationMode: "server_delegated",
+            authorizationRequests: [],
+            venuePayload: {},
+            expiresAt: null,
+          }),
+          quote: async (input: never) => ({
+            venue: "polymarket",
+            target: (input as { intent: { target: unknown } }).intent.target,
+            action: "BUY",
+            amount: { type: "usd", value: "10" },
+            price: 0.5,
+            estimatedShares: 20,
+            estimatedNotionalUsd: 10,
+            maxSpendUsd: 10,
+            minReceiveShares: 20,
+            fees: {},
+            expiresAt: null,
+          }),
+        } as never,
+      });
+
+      assert.equal(handled, true);
+      assert.deepEqual(updateAttempts, [
+        { status: "executing", errorCode: null, preparedSnapshot: false },
+        { status: "executing", errorCode: null, preparedSnapshot: true },
+        {
+          status: "reconcile_required",
+          errorCode: "submit_state_unknown",
+          preparedSnapshot: false,
+        },
+      ]);
       assert.match(
         telegram.callbackAnswers[0]?.text ?? "",
-        /no longer active/,
+        /status is unknown/i,
       );
-      assert.equal(telegram.messages.length, 0);
+      assert.match(telegram.messages[0]?.text ?? "", /status is unknown/i);
     },
   },
   {
@@ -2979,6 +3329,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         requireConfirmation: true,
       });
       assert.deepEqual(buyActions.tradingActions, ["buy"]);
+
+      const emptyPresets = normalizeSignalBotPolicy({
+        tradingEnabled: true,
+        tradingActions: ["buy"],
+        tradingVenues: ["polymarket"],
+        buyAmountPresetsUsd: [],
+        maxTradeAmountUsd: 50,
+        maxSlippageBps: 500,
+        intentTtlSec: 120,
+        requireConfirmation: true,
+      });
+      assert.deepEqual(emptyPresets.buyAmountPresetsUsd, []);
 
       const buyAndSellActions = normalizeSignalBotPolicy({
         tradingEnabled: true,

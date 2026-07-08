@@ -1092,6 +1092,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     policy,
     authorization?.max_amount_usd ?? status.maxAmountUsd,
   );
+  const allowedPresetAmounts = policy.buyAmountPresetsUsd.filter(
+    (amountUsd) => amountUsd <= maxAmountUsd,
+  );
   const tradeReadiness = await resolveTelegramTradingReadiness({
     authorization,
     market,
@@ -1107,7 +1110,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     marketOrderable &&
     authorization?.enabled === true &&
     Boolean(authorization.privy_wallet_id) &&
-    tradeReadiness.executable;
+    tradeReadiness.executable &&
+    allowedPresetAmounts.length > 0;
   const lines = [
     input.isAdminTest ? "Trade Card Preview" : "Trade This Market",
     "",
@@ -1141,14 +1145,20 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       tradeReadiness.message ??
         "Direct bot execution is not ready yet. Open Hunch to trade.",
     );
+  } else if (policy.buyAmountPresetsUsd.length === 0) {
+    lines.push("", "No bot buy presets are configured.");
+  } else if (allowedPresetAmounts.length === 0) {
+    lines.push(
+      "",
+      `No bot buy preset is within your ${formatUsd(maxAmountUsd)} max buy.`,
+    );
   }
 
   const keyboard: TelegramBotTradingButton[][] = [];
   if (buyEnabled) {
     for (const side of ["YES", "NO"] as const) {
       const row: TelegramBotTradingButton[] = [];
-      for (const amountUsd of policy.buyAmountPresetsUsd) {
-        if (amountUsd > maxAmountUsd) continue;
+      for (const amountUsd of allowedPresetAmounts) {
         const intentId = await insertBuyIntent({
           amountUsd,
           chatId: String(input.chatId),
@@ -1421,7 +1431,9 @@ async function loadEnabledAuthorization(
   return result.rows[0] ?? null;
 }
 
-function callbackSenderId(input: TelegramBotTradingCallbackInput): string | null {
+function callbackSenderId(
+  input: TelegramBotTradingCallbackInput,
+): string | null {
   const fromId = input.callbackQuery.from?.id;
   return fromId != null ? String(fromId) : null;
 }
@@ -1454,7 +1466,7 @@ async function answerIntentAlreadyProcessed(
         ? "Trade intent is already being processed."
         : status === "reconcile_required"
           ? "Trade status is unknown. Check Hunch before retrying."
-        : "Trade intent was already processed. Send /market again.",
+          : "Trade intent was already processed. Send /market again.",
   });
 }
 
@@ -1750,6 +1762,7 @@ export async function handleTelegramBotTradingCallback(
     side,
   });
   let submittedRefs: SubmittedTradeRefs | null = null;
+  let submitStarted = false;
   try {
     const quote = await trading.quote({ intent: sharedIntent });
     const prepared = await trading.prepareTrade({
@@ -1774,6 +1787,7 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
+    submitStarted = true;
     const executed = await trading.executePreparedTrade({
       prepared,
       onSubmitted: async (submitResult) => {
@@ -1881,6 +1895,40 @@ export async function handleTelegramBotTradingCallback(
           ]
             .filter((line): line is string => Boolean(line))
             .join("\n"),
+        ),
+      });
+      return true;
+    }
+    if (submitStarted) {
+      const unknownMessage =
+        "Trade status is unknown. Check Hunch before retrying.";
+      await updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: input.db,
+        errorCode: "submit_state_unknown",
+        errorMessage: unknownMessage,
+        intentId: intent.id,
+        result: {
+          error: normalized,
+          venue: intent.venue,
+        },
+        status: "reconcile_required",
+      });
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: unknownMessage,
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: escapeMarkdown(
+          [
+            "Trade status is unknown.",
+            `${intent.venue} · ${intent.market_title}`,
+            `${side} · ${formatUsd(amountUsd)}`,
+            "Check Hunch before retrying.",
+          ].join("\n"),
         ),
       });
       return true;
