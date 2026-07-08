@@ -3110,6 +3110,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /understand the setup in 2 seconds/i);
       assert.match(prompt, /which side the wallet\(s\) are on/i);
       assert.match(prompt, /compressed signal thesis/i);
+      assert.match(prompt, /Do not repeat the headline/i);
+      assert.match(prompt, /summary sentence 1 must add new information/i);
+      assert.match(prompt, /same actor\/action from the headline/i);
       assert.match(prompt, /Lead with what strong wallets are doing/i);
       assert.match(
         prompt,
@@ -3121,6 +3124,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /Avoid in headline\/summary/i);
       assert.match(prompt, /Strong wallets are fading Norway/i);
       assert.match(prompt, /Market signal detected/i);
+      assert.match(
+        prompt,
+        /Strong wallets are still backing Spain"; summary "Strong wallets are backing Spain/i,
+      );
+      assert.match(
+        prompt,
+        /Spain trades near 19c, and the wallet side has not backed off/i,
+      );
       assert.match(prompt, /Known odds and team news already lean France/i);
       assert.doesNotMatch(prompt, /pick articles/i);
       assert.doesNotMatch(prompt, /\bpreviews\b/i);
