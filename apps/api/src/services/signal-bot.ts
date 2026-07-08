@@ -423,6 +423,7 @@ type SignalBotFollowthroughFlowRow = {
   outcome_side: "NO" | "YES";
   baseline_shares: string | number | null;
   latest_shares: string | number | null;
+  latest_snapshot_at: Date | string | null;
   latest_size_usd: string | number | null;
   positive_usd: string | number | null;
   negative_usd: string | number | null;
@@ -443,6 +444,7 @@ const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
+const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
 const SIGNAL_BOT_COPY_FLOW_HEADLINES = [
   "🔥 Copy flow is building before price moves",
   "👀 People are quietly joining this side",
@@ -2359,6 +2361,55 @@ function isMissingSignalBotMessagesTable(error: unknown): boolean {
   );
 }
 
+function parseFollowthroughSnapshotHours(payload: unknown): number | null {
+  const raw = asObject(payload).snapshotHours;
+  const hours = toNumber(raw);
+  if (hours == null || hours <= 0) return null;
+  return Math.trunc(hours);
+}
+
+function resolveSignalBotDefaultSnapshotHours(): number {
+  const raw = process.env.WALLET_INTEL_SNAPSHOT_HOURS;
+  const parsed = raw != null && raw.trim() ? Number(raw) : null;
+  if (parsed == null || !Number.isFinite(parsed) || parsed <= 0) return 6;
+  return Math.trunc(parsed);
+}
+
+function resolveFollowthroughSnapshotMaxAgeMs(snapshotHours: number): number {
+  return Math.max(
+    snapshotHours * 2 * 60 * 60 * 1_000,
+    FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS,
+  );
+}
+
+export async function resolveSignalBotLatestSnapshotMaxAgeMs(
+  db: DbQuery,
+): Promise<number> {
+  try {
+    const { rows } = await db.query<{ payload: unknown }>(
+      `
+        select payload
+        from runtime_policies
+        where policy_key = 'wallet_intel_refresh'
+          and effective_at <= now()
+        order by effective_at desc, created_at desc
+        limit 1
+      `,
+    );
+    const snapshotHours =
+      parseFollowthroughSnapshotHours(rows[0]?.payload) ??
+      resolveSignalBotDefaultSnapshotHours();
+    return resolveFollowthroughSnapshotMaxAgeMs(snapshotHours);
+  } catch (error) {
+    if (isMissingSignalBotMessagesTable(error)) {
+      return resolveFollowthroughSnapshotMaxAgeMs(
+        resolveSignalBotDefaultSnapshotHours(),
+      );
+    }
+    throw error;
+  }
+}
+
 async function loadSignalBotThreadContext(input: {
   chatId: string;
   db: DbQuery;
@@ -2938,11 +2989,15 @@ export async function sendSignalBotFollowthroughPreview(input: {
   const chatState = input.redis
     ? await getSignalBotChatState(input.redis, input.chatId)
     : null;
+  const latestSnapshotMaxAgeMs = await resolveSignalBotLatestSnapshotMaxAgeMs(
+    input.db,
+  );
   for (const candidate of candidates) {
     const stats = await buildSignalBotFollowthroughStats({
       asOf: now,
       candidate,
       db: input.db,
+      latestSnapshotMaxAgeMs,
     });
     const kind = resolveSignalBotFollowthroughKind({ policy, stats });
     if (kind !== expectedKind) continue;
@@ -3229,6 +3284,7 @@ async function loadSignalBotFollowthroughFlows(input: {
         ws.outcome_side as outcome_side,
         baseline.shares::text as baseline_shares,
         latest.shares::text as latest_shares,
+        latest.snapshot_at::text as latest_snapshot_at,
         latest.size_usd::text as latest_size_usd,
         coalesce(sum(pe.abs_usd) filter (where pe.action_sign > 0), 0)::text
           as positive_usd,
@@ -3254,7 +3310,7 @@ async function loadSignalBotFollowthroughFlows(input: {
         limit 1
       ) baseline on true
       left join lateral (
-        select s.shares, s.size_usd
+        select s.shares, s.size_usd, s.snapshot_at
         from wallet_position_snapshots s
         where s.wallet_id = ws.wallet_id
           and s.market_id = ws.market_id
@@ -3269,6 +3325,7 @@ async function loadSignalBotFollowthroughFlows(input: {
         ws.outcome_side,
         baseline.shares,
         latest.shares,
+        latest.snapshot_at,
         latest.size_usd
     `,
     [input.marketId, input.baselineAt, input.asOf, venueFilter],
@@ -3280,6 +3337,7 @@ async function buildSignalBotFollowthroughStats(input: {
   asOf: Date;
   candidate: SignalBotFollowthroughCandidateRow;
   db: DbQuery;
+  latestSnapshotMaxAgeMs: number;
 }): Promise<SignalBotFollowthroughStats> {
   const sideRaw = String(
     asObject(input.candidate.target_meta).side ?? "",
@@ -3336,12 +3394,20 @@ async function buildSignalBotFollowthroughStats(input: {
   let openPnlShares = 0;
   let missingBaseline = 0;
   let missingLatest = 0;
+  let staleLatest = 0;
   for (const row of flows) {
     const isSignalSide = row.outcome_side === signalSide;
     const baselineSharesRaw = toNumber(row.baseline_shares);
     const hasBaselineSnapshot = baselineSharesRaw != null;
     const baselineShares = baselineSharesRaw ?? 0;
     const latestShares = toNumber(row.latest_shares);
+    const latestSnapshotAt =
+      row.latest_snapshot_at instanceof Date
+        ? row.latest_snapshot_at.getTime()
+        : typeof row.latest_snapshot_at === "string" &&
+            row.latest_snapshot_at.trim().length > 0
+          ? Date.parse(row.latest_snapshot_at)
+          : null;
     const latestSizeUsd = toNumber(row.latest_size_usd);
     const positiveUsd = toNumber(row.positive_usd) ?? 0;
     const negativeUsd = toNumber(row.negative_usd) ?? 0;
@@ -3349,10 +3415,17 @@ async function buildSignalBotFollowthroughStats(input: {
     const netShares = toNumber(row.net_shares) ?? 0;
     const hadBaseline = baselineShares > 1e-9;
     const hasLatestSnapshot = latestShares != null || latestSizeUsd != null;
+    const hasFreshLatestSnapshot =
+      hasLatestSnapshot &&
+      latestSnapshotAt != null &&
+      Number.isFinite(latestSnapshotAt) &&
+      input.asOf.getTime() - latestSnapshotAt <= input.latestSnapshotMaxAgeMs;
     const hasLatestPosition =
-      (latestShares ?? 0) > 1e-9 || (latestSizeUsd ?? 0) > 0;
+      hasFreshLatestSnapshot &&
+      ((latestShares ?? 0) > 1e-9 || (latestSizeUsd ?? 0) > 0);
     if (!hasBaselineSnapshot) missingBaseline += 1;
     if (latestShares == null) missingLatest += 1;
+    if (hasLatestSnapshot && !hasFreshLatestSnapshot) staleLatest += 1;
     if (isSignalSide) {
       netSignalSideFlowUsd += netUsd;
       if (
@@ -3369,7 +3442,7 @@ async function buildSignalBotFollowthroughStats(input: {
       if (
         (hadBaseline || positiveUsd > 0) &&
         negativeUsd > 0 &&
-        hasLatestSnapshot &&
+        hasFreshLatestSnapshot &&
         !hasLatestPosition
       ) {
         exitedWallets += 1;
@@ -3388,12 +3461,14 @@ async function buildSignalBotFollowthroughStats(input: {
   if (markPrice == null) dataQualityTags.push("missing_mark_price");
   if (missingBaseline > 0) dataQualityTags.push("missing_baseline_snapshots");
   if (missingLatest > 0) dataQualityTags.push("missing_latest_snapshots");
+  if (staleLatest > 0) dataQualityTags.push("stale_latest_snapshots");
   let dataQuality: SignalBotFollowthroughDataQuality = "any";
   if (flows.length > 0) dataQuality = "usable";
   if (
     flows.length > 0 &&
     missingBaseline === 0 &&
     missingLatest === 0 &&
+    staleLatest === 0 &&
     entryPrice != null &&
     markPrice != null
   ) {
@@ -3713,6 +3788,9 @@ export async function publishSignalBotFollowthroughTick(input: {
     now,
     policy,
   });
+  const latestSnapshotMaxAgeMs = await resolveSignalBotLatestSnapshotMaxAgeMs(
+    input.db,
+  );
   let sent = 0;
   let sentResolvedLoss = 0;
   let sentResolvedWin = 0;
@@ -3724,6 +3802,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       asOf: now,
       candidate,
       db: input.db,
+      latestSnapshotMaxAgeMs,
     });
     const kind = resolveSignalBotFollowthroughKind({ policy, stats });
     const replyToMessageId = toInteger(candidate.reply_to_message_id);

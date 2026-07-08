@@ -104,6 +104,11 @@ export type WalletIntelRefreshPolicy = {
   tokenLimitKalshi: number;
   holderLimit: number;
   snapshotHours: number;
+  autoTrackedWalletEnabled: boolean;
+  autoTrackedWalletLimit: number;
+  autoTrackedWalletRefreshHours: number;
+  autoTrackedWalletAttemptBackoffMinutes: number;
+  autoTrackedSubjectTtlDays: number;
   backfillSnapshots: number;
   backfillMaxSteps: number;
   retentionDaysSnapshots: number;
@@ -660,6 +665,11 @@ const walletIntelRefreshSchema = z
     tokenLimitKalshi: positiveInt,
     holderLimit: positiveInt,
     snapshotHours: positiveInt,
+    autoTrackedWalletEnabled: strictBoolean,
+    autoTrackedWalletLimit: nonNegativeInt,
+    autoTrackedWalletRefreshHours: positiveInt,
+    autoTrackedWalletAttemptBackoffMinutes: positiveInt,
+    autoTrackedSubjectTtlDays: nonNegativeInt,
     backfillSnapshots: nonNegativeInt,
     backfillMaxSteps: positiveInt,
     retentionDaysSnapshots: nonNegativeInt,
@@ -1423,6 +1433,13 @@ function getDefaults(): IntelPolicyMap {
       tokenLimitKalshi: env.walletIntelTokenLimitKalshi,
       holderLimit: env.walletIntelHolderLimit,
       snapshotHours: env.walletIntelSnapshotHours,
+      autoTrackedWalletEnabled: env.walletIntelAutoTrackedWalletEnabled,
+      autoTrackedWalletLimit: env.walletIntelAutoTrackedWalletLimit,
+      autoTrackedWalletRefreshHours:
+        env.walletIntelAutoTrackedWalletRefreshHours,
+      autoTrackedWalletAttemptBackoffMinutes:
+        env.walletIntelAutoTrackedWalletAttemptBackoffMinutes,
+      autoTrackedSubjectTtlDays: env.walletIntelAutoTrackedSubjectTtlDays,
       backfillSnapshots: env.walletIntelBackfillSnapshots,
       backfillMaxSteps: env.walletIntelBackfillMaxSteps,
       retentionDaysSnapshots: env.walletIntelRetentionDaysSnapshots,
@@ -1886,6 +1903,23 @@ function normalizeRefreshPolicy(
     tokenLimitKalshi: Math.max(1, Math.trunc(policy.tokenLimitKalshi)),
     holderLimit: Math.max(1, Math.trunc(policy.holderLimit)),
     snapshotHours: Math.max(1, Math.trunc(policy.snapshotHours)),
+    autoTrackedWalletEnabled: Boolean(policy.autoTrackedWalletEnabled),
+    autoTrackedWalletLimit: Math.max(
+      0,
+      Math.trunc(policy.autoTrackedWalletLimit),
+    ),
+    autoTrackedWalletRefreshHours: Math.max(
+      1,
+      Math.trunc(policy.autoTrackedWalletRefreshHours),
+    ),
+    autoTrackedWalletAttemptBackoffMinutes: Math.max(
+      1,
+      Math.trunc(policy.autoTrackedWalletAttemptBackoffMinutes),
+    ),
+    autoTrackedSubjectTtlDays: Math.max(
+      0,
+      Math.trunc(policy.autoTrackedSubjectTtlDays),
+    ),
     backfillSnapshots: Math.max(0, Math.trunc(policy.backfillSnapshots)),
     backfillMaxSteps: Math.max(1, Math.trunc(policy.backfillMaxSteps)),
     retentionDaysSnapshots: Math.max(

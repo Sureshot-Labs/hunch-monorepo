@@ -67,7 +67,7 @@ type MarketHolderTelemetry = {
   holdersSolanaOwnerLookup?: WalletIntelRetryTelemetry | null;
 };
 
-const POLYMARKET_HOLDER_LIMIT = 20;
+export const POLYMARKET_HOLDER_LIMIT_MAX = 250;
 const HOLDERS_TIMEOUT_MS = 10_000;
 const LIMITLESS_BALANCE_BATCH_MAX_PAIRS = 200;
 
@@ -799,7 +799,7 @@ export async function fetchMarketHolderData(inputs: {
     try {
       const holders = await fetchPolymarketHolders({
         conditionId: market.condition_id,
-        limit: Math.min(inputs.limit, POLYMARKET_HOLDER_LIMIT),
+        limit: Math.min(inputs.limit, POLYMARKET_HOLDER_LIMIT_MAX),
         telemetry: inputs.telemetry?.holdersPolymarket ?? null,
       });
       for (const holder of holders) {

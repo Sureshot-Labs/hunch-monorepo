@@ -47,6 +47,10 @@ import {
   loadHolderResearchPerformanceCalibrationMemo,
 } from "./holder-research-performance.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
+import {
+  resolveWalletTrackingSubjectsEnabled,
+  upsertWalletTrackingSubjects,
+} from "./wallet-tracking-subjects.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -4859,11 +4863,12 @@ export async function persistHolderResearchNotes(
         );
       }
 
-      for (const target of buildHolderResearchWalletTargets(
+      const walletTargets = buildHolderResearchWalletTargets(
         candidate,
         decision.output.evidence_ids,
         params.policy,
-      )) {
+      );
+      for (const target of walletTargets) {
         await client.query(
           `
             insert into ai_note_targets (
@@ -4886,6 +4891,45 @@ export async function persistHolderResearchNotes(
             target.affinityScore,
             JSON.stringify(target.meta),
           ],
+        );
+      }
+
+      const trackingVenue =
+        candidate.market.venue === "polymarket" ||
+        candidate.market.venue === "limitless" ||
+        candidate.market.venue === "kalshi"
+          ? candidate.market.venue
+          : null;
+      if (
+        trackingVenue &&
+        walletTargets.length > 0 &&
+        (await resolveWalletTrackingSubjectsEnabled(client))
+      ) {
+        await upsertWalletTrackingSubjects(
+          client,
+          walletTargets.map((target, index) => ({
+            walletId: target.walletId,
+            venue: trackingVenue,
+            source: "signal_candidate",
+            priority: 250 + Math.max(0, walletTargets.length - index),
+            reason: "holder_research_signal_candidate",
+            metadata: {
+              noteId,
+              noteKey,
+              marketId: candidate.market.marketId,
+              side:
+                candidate.side ??
+                (typeof target.meta.side === "string"
+                  ? target.meta.side
+                  : null),
+              score: candidate.score,
+              evidenceId:
+                typeof target.meta.evidenceId === "string"
+                  ? target.meta.evidenceId
+                  : null,
+            },
+            selectedAt: new Date(),
+          })),
         );
       }
 

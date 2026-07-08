@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import type { PoolClient } from "pg";
 
 import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
@@ -35,6 +36,9 @@ import {
 import {
   estimateErc1155BalanceRpcCalls,
   estimateErc1155OwnerTokenPairRpcCalls,
+  extractLimitlessTokenBalances,
+  fetchPolymarketDataApiPositionSnapshots,
+  isLimitlessPublicPortfolioUserNotFound,
   prefetchPolymarketOwnerBalancesForWallets,
   readPrefetchRpcTelemetry,
   syncPositionsForUserWallet,
@@ -42,6 +46,7 @@ import {
   type PrefetchedPolymarketOwnerBalances,
 } from "./services/positions-sync.js";
 import { markHotTokens } from "./lib/hot-tokens.js";
+import { normalizeLimitlessScopedTokenId } from "./lib/limitless-token.js";
 import { requestPriceRefreshForTokens } from "./lib/price-refresh.js";
 import {
   normalizeOutcomeSideForStorage,
@@ -73,6 +78,10 @@ import {
   type InternalHunchFillActivityInput,
   type InternalHunchFillInitialShares,
 } from "./services/wallet-intel-internal-hunch.js";
+import {
+  upsertWalletTrackingSubjects,
+  type WalletTrackingSubjectInput,
+} from "./services/wallet-tracking-subjects.js";
 
 type Chain = "polygon" | "base" | "solana";
 type Venue = "polymarket" | "limitless" | "kalshi";
@@ -184,7 +193,7 @@ const SYSTEM_TAGS = [
 const REFRESH_ADVISORY_LOCK_KEY_1 = 4207;
 const REFRESH_ADVISORY_LOCK_KEY_2 = 1;
 
-type TokenIndexEntry = {
+export type TokenIndexEntry = {
   marketId: string;
   venue: Venue;
   tokenId: string;
@@ -613,6 +622,111 @@ type RetentionConfig = {
   skipCleanup: boolean;
 };
 
+export type WalletIntelRefreshCliArgs = {
+  autoTrackedWalletAttemptBackoffMinutes: number | null;
+  autoTrackedSubjectTtlDays: number | null;
+  autoTrackedWalletEnabled: boolean | null;
+  autoTrackedWalletLimit: number | null;
+  autoTrackedWalletRefreshHours: number | null;
+  holderLimit: number | null;
+  ignoreRuntimePolicy: boolean;
+  printEffectivePolicy: boolean;
+};
+
+function parseCliPositiveInt(name: string, raw: string): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}: expected a positive integer.`);
+  }
+  return Math.trunc(parsed);
+}
+
+function parseCliNonNegativeInt(name: string, raw: string): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid ${name}: expected a non-negative integer.`);
+  }
+  return Math.trunc(parsed);
+}
+
+function parseCliBoolean(name: string, raw: string | undefined): boolean {
+  if (raw == null || raw === "") return true;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  throw new Error(`Invalid ${name}: expected true or false.`);
+}
+
+export function parseWalletIntelRefreshCliArgs(
+  argv: string[] = process.argv.slice(2),
+): WalletIntelRefreshCliArgs {
+  const parsed: WalletIntelRefreshCliArgs = {
+    autoTrackedWalletAttemptBackoffMinutes: null,
+    autoTrackedSubjectTtlDays: null,
+    autoTrackedWalletEnabled: null,
+    autoTrackedWalletLimit: null,
+    autoTrackedWalletRefreshHours: null,
+    holderLimit: null,
+    ignoreRuntimePolicy: false,
+    printEffectivePolicy: false,
+  };
+
+  for (const arg of argv) {
+    if (arg === "--ignore-runtime-policy") {
+      parsed.ignoreRuntimePolicy = true;
+      continue;
+    }
+    if (arg === "--print-effective-policy") {
+      parsed.printEffectivePolicy = true;
+      continue;
+    }
+    const [name, value] = arg.split("=", 2);
+    if (name === "--auto-tracked-wallets") {
+      parsed.autoTrackedWalletEnabled = parseCliBoolean(name, value);
+      continue;
+    }
+    if (value == null) continue;
+    if (name === "--holder-limit") {
+      parsed.holderLimit = parseCliPositiveInt(name, value);
+    } else if (name === "--auto-tracked-wallet-limit") {
+      parsed.autoTrackedWalletLimit = parseCliNonNegativeInt(name, value);
+    } else if (name === "--auto-tracked-wallet-refresh-hours") {
+      parsed.autoTrackedWalletRefreshHours = parseCliPositiveInt(name, value);
+    } else if (name === "--auto-tracked-attempt-backoff-minutes") {
+      parsed.autoTrackedWalletAttemptBackoffMinutes = parseCliPositiveInt(
+        name,
+        value,
+      );
+    } else if (name === "--auto-tracked-subject-ttl-days") {
+      parsed.autoTrackedSubjectTtlDays = parseCliNonNegativeInt(name, value);
+    }
+  }
+
+  return parsed;
+}
+
+export function applyWalletIntelRefreshCliArgs(
+  policy: WalletIntelRefreshPolicy,
+  args: WalletIntelRefreshCliArgs,
+): WalletIntelRefreshPolicy {
+  return {
+    ...policy,
+    autoTrackedWalletAttemptBackoffMinutes:
+      args.autoTrackedWalletAttemptBackoffMinutes ??
+      policy.autoTrackedWalletAttemptBackoffMinutes,
+    autoTrackedSubjectTtlDays:
+      args.autoTrackedSubjectTtlDays ?? policy.autoTrackedSubjectTtlDays,
+    autoTrackedWalletEnabled:
+      args.autoTrackedWalletEnabled ?? policy.autoTrackedWalletEnabled,
+    autoTrackedWalletLimit:
+      args.autoTrackedWalletLimit ?? policy.autoTrackedWalletLimit,
+    autoTrackedWalletRefreshHours:
+      args.autoTrackedWalletRefreshHours ??
+      policy.autoTrackedWalletRefreshHours,
+    holderLimit: args.holderLimit ?? policy.holderLimit,
+  };
+}
+
 const WALLET_INTEL_CLEANUP_DELETE_BATCH_SIZE = 25_000;
 
 type WalletIntelCleanupTarget = {
@@ -713,9 +827,31 @@ function normalizeOnchainTokenId(
   return trimmed;
 }
 
-function capTokenIds(tokenIds: string[], limit: number): string[] {
-  if (tokenIds.length <= limit) return tokenIds;
-  return tokenIds.slice(0, limit);
+function addTokenIndexEntry(
+  tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>>,
+  tokenIdsByVenue: Record<Venue, string[]>,
+  inputs: {
+    marketId: string;
+    price: number | null;
+    side: "YES" | "NO";
+    tokenId: string | null;
+    venue: Venue;
+  },
+): string | null {
+  const onchainTokenId = normalizeOnchainTokenId(inputs.venue, inputs.tokenId);
+  if (!onchainTokenId) return null;
+  const bucket = tokenIndexByVenue[inputs.venue];
+  if (!bucket.has(onchainTokenId)) {
+    bucket.set(onchainTokenId, {
+      marketId: inputs.marketId,
+      venue: inputs.venue,
+      tokenId: inputs.tokenId ?? onchainTokenId,
+      side: inputs.side,
+      price: inputs.price,
+    });
+    tokenIdsByVenue[inputs.venue].push(onchainTokenId);
+  }
+  return onchainTokenId;
 }
 
 function toWalletIntelMarketRefreshVenue(
@@ -758,6 +894,45 @@ async function enqueueWalletIntelMarketRefresh(
   if (counts.polymarket || counts.limitless || counts.kalshi) {
     console.log("[wallets:intel:refresh] market refresh queued", counts);
   }
+}
+
+export function capWalletIntelSelectedTokenUniverse(
+  tokenIdsByVenue: Record<Venue, string[]>,
+  tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>>,
+  policy: Pick<
+    WalletIntelRefreshPolicy,
+    "tokenLimitPoly" | "tokenLimitLimitless" | "tokenLimitKalshi"
+  >,
+): {
+  tokenIdsByVenue: Record<Venue, string[]>;
+  tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>>;
+} {
+  const limits: Record<Venue, number> = {
+    polymarket: Math.max(1, Math.trunc(policy.tokenLimitPoly)),
+    limitless: Math.max(1, Math.trunc(policy.tokenLimitLimitless)),
+    kalshi: Math.max(1, Math.trunc(policy.tokenLimitKalshi)),
+  };
+  const cappedIds: Record<Venue, string[]> = {
+    polymarket: [],
+    limitless: [],
+    kalshi: [],
+  };
+  const cappedIndex: Record<Venue, Map<string, TokenIndexEntry>> = {
+    polymarket: new Map(),
+    limitless: new Map(),
+    kalshi: new Map(),
+  };
+
+  for (const venue of ["polymarket", "limitless", "kalshi"] as Venue[]) {
+    const ids = tokenIdsByVenue[venue].slice(0, limits[venue]);
+    cappedIds[venue] = ids;
+    for (const tokenId of ids) {
+      const entry = tokenIndexByVenue[venue].get(tokenId);
+      if (entry) cappedIndex[venue].set(tokenId, entry);
+    }
+  }
+
+  return { tokenIdsByVenue: cappedIds, tokenIndexByVenue: cappedIndex };
 }
 
 async function requestFreshWalletIntelMarketPrices(
@@ -1278,7 +1453,7 @@ async function upsertWalletActivityEvent(
   );
 }
 
-async function snapshotFollowedWalletHoldingsEvm(
+export async function snapshotFollowedWalletHoldingsEvm(
   client: Queryable,
   inputs: {
     walletId: string;
@@ -1291,6 +1466,7 @@ async function snapshotFollowedWalletHoldingsEvm(
     tokenIndex: Map<string, TokenIndexEntry>;
     occurredAt: Date;
     prefetchedBalances?: Array<{ tokenId: string; size: string }> | null;
+    metadataSource?: string;
   },
 ): Promise<number> {
   if (inputs.tokenIds.length === 0) return 0;
@@ -1322,7 +1498,7 @@ async function snapshotFollowedWalletHoldingsEvm(
         sizeUsd,
         price: entry.price,
         metadata: {
-          source: "followed_wallet",
+          source: inputs.metadataSource ?? "followed_wallet",
           tokenId: entry.tokenId,
           onchainTokenId: balance.tokenId,
           shares,
@@ -1373,11 +1549,65 @@ type FollowedWalletRow = {
   chain: Chain;
 };
 
+type AutoTrackedWalletSource = "recent_top_holder" | "signal_candidate" | "whale";
+
+type AutoTrackedWalletRow = {
+  wallet_id: string;
+  address: string;
+  chain: Chain;
+  venue: Venue;
+  sources: AutoTrackedWalletSource[];
+  priority: number;
+};
+
+type AutoTrackedPreviousOpenPositionRow = {
+  wallet_id: string;
+  venue: Venue;
+  market_id: string;
+  outcome_side: "YES" | "NO";
+  token_id: string;
+  price: string | null;
+};
+
+type RecentTopHolderTrackingCandidate = {
+  walletId: string;
+  venue: Venue;
+  marketId: string;
+  side: "YES" | "NO";
+  sizeUsd: number;
+  shares: number;
+  snapshotAt: Date;
+};
+
 type FollowedCollectionResult = {
   processed: number;
   rowInserts: number;
   activityRows: number;
 };
+
+type AutoTrackedCollectionResult = {
+  processed: number;
+  rowInserts: number;
+  activityRows: number;
+  marketIds: string[];
+  previousOpenMarketKeys: SnapshotDeltaMarketKey[];
+  attemptedWallets: AutoTrackedWalletRow[];
+  refreshedWallets: AutoTrackedWalletRow[];
+};
+
+export function dedupeFollowedWalletRowsForSnapshotWork<
+  T extends { chain: string; wallet_id: string },
+>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  const deduped: T[] = [];
+  for (const row of rows) {
+    const key = `${row.wallet_id}:${row.chain}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
+}
 
 async function collectFollowedWalletSnapshotRows(
   client: Queryable,
@@ -1393,23 +1623,32 @@ async function collectFollowedWalletSnapshotRows(
     poolClient: typeof pool;
   },
 ): Promise<FollowedCollectionResult> {
+  const followedSnapshotWallets = dedupeFollowedWalletRowsForSnapshotWork(
+    inputs.followedWallets,
+  );
   const followedByChain = { polygon: 0, base: 0, solana: 0 };
   for (const followed of inputs.followedWallets) {
     followedByChain[followed.chain] += 1;
   }
+  const followedSnapshotByChain = { polygon: 0, base: 0, solana: 0 };
+  for (const followed of followedSnapshotWallets) {
+    followedSnapshotByChain[followed.chain] += 1;
+  }
 
   const estPolygonHoldingsRpcCalls = estimateErc1155OwnerTokenPairRpcCalls(
-    followedByChain.polygon,
+    followedSnapshotByChain.polygon,
     inputs.tokenIdsByVenue.polymarket,
   );
   const estBaseHoldingsRpcCalls = estimateErc1155BalanceRpcCalls(
-    followedByChain.base,
+    followedSnapshotByChain.base,
     inputs.tokenIdsByVenue.limitless,
   );
   const estSolanaHoldingsRpcCalls =
-    inputs.tokenIdsByVenue.kalshi.length > 0 ? followedByChain.solana : 0;
+    inputs.tokenIdsByVenue.kalshi.length > 0
+      ? followedSnapshotByChain.solana
+      : 0;
   inputs.telemetry.followedSnapshotPolygon.estimatedCalls +=
-    followedByChain.polygon;
+    followedSnapshotByChain.polygon;
   inputs.telemetry.followedSnapshotBase.estimatedCalls +=
     estBaseHoldingsRpcCalls;
   inputs.telemetry.followedSnapshotSolana.estimatedCalls +=
@@ -1428,7 +1667,9 @@ async function collectFollowedWalletSnapshotRows(
 
   console.log("[wallets:intel:refresh] followed fanout", {
     followed: inputs.followedWallets.length,
+    followedSnapshotWallets: followedSnapshotWallets.length,
     followedByChain,
+    followedSnapshotByChain,
     tokenIds: {
       polymarket: inputs.tokenIdsByVenue.polymarket.length,
       limitless: inputs.tokenIdsByVenue.limitless.length,
@@ -1457,15 +1698,15 @@ async function collectFollowedWalletSnapshotRows(
   const polymarketPrefetchTimedOutWalletIds = new Set<string>();
   let followedSnapshotsSkippedAlreadyCollected = 0;
 
-  const solanaFollowedWallets = inputs.followedWallets.filter(
+  const solanaSnapshotWallets = followedSnapshotWallets.filter(
     (row) => row.chain === "solana",
   );
   if (
-    solanaFollowedWallets.length > 0 &&
+    solanaSnapshotWallets.length > 0 &&
     inputs.tokenIdsByVenue.kalshi.length > 0
   ) {
     await mapWithConcurrency(
-      solanaFollowedWallets,
+      solanaSnapshotWallets,
       inputs.followedFetchConcurrency,
       async (followed) => {
         try {
@@ -1492,12 +1733,12 @@ async function collectFollowedWalletSnapshotRows(
     );
   }
 
-  const polygonFollowedWallets = inputs.followedWallets.filter(
+  const polygonSnapshotWallets = followedSnapshotWallets.filter(
     (row) => row.chain === "polygon",
   );
-  if (polygonFollowedWallets.length > 0) {
+  if (polygonSnapshotWallets.length > 0) {
     const byUser = new Map<string, FollowedWalletRow[]>();
-    for (const followed of polygonFollowedWallets) {
+    for (const followed of polygonSnapshotWallets) {
       const rows = byUser.get(followed.user_id) ?? [];
       rows.push(followed);
       byUser.set(followed.user_id, rows);
@@ -1971,11 +2212,913 @@ async function collectFollowedWalletSnapshotRows(
   };
 }
 
+function buildAutoTrackedPreviousOpenMarketKeys(
+  rows: AutoTrackedPreviousOpenPositionRow[],
+): SnapshotDeltaMarketKey[] {
+  const marketKeys = new Map<string, SnapshotDeltaMarketKey>();
+  for (const row of rows) {
+    const key = `${row.wallet_id}:${row.venue}:${row.market_id}`;
+    if (marketKeys.has(key)) continue;
+    marketKeys.set(key, {
+      wallet_id: row.wallet_id,
+      venue: row.venue,
+      market_id: row.market_id,
+    });
+  }
+  return Array.from(marketKeys.values());
+}
+
+export async function loadAutoTrackedWalletRows(
+  client: Queryable,
+  inputs: {
+    asOf: Date;
+    attemptBackoffMinutes: number;
+    limit: number;
+    refreshHours: number;
+    subjectTtlDays: number;
+  },
+): Promise<AutoTrackedWalletRow[]> {
+  if (inputs.limit <= 0) return [];
+  const { rows } = await client.query<{
+    wallet_id: string;
+    address: string;
+    chain: Chain;
+    venue: Venue;
+    sources: AutoTrackedWalletSource[] | null;
+    priority: string | number | null;
+  }>(
+    `
+      select
+        w.id::text as wallet_id,
+        w.address,
+        w.chain,
+        wts.venue,
+        array_agg(distinct wts.source order by wts.source) as sources,
+        max(wts.priority) as priority
+      from wallet_tracking_subjects wts
+      join wallets w on w.id = wts.wallet_id
+      where wts.status = 'active'
+        and wts.source in ('whale', 'recent_top_holder', 'signal_candidate')
+        and wts.venue in ('polymarket', 'limitless', 'kalshi')
+        and (
+          $5::int <= 0 or
+          (
+            wts.last_selected_at is not null and
+            wts.last_selected_at >= $2::timestamptz - ($5::int * interval '1 day')
+          )
+        )
+        and (
+          (wts.venue = 'polymarket' and w.chain = 'polygon') or
+          (wts.venue = 'limitless' and w.chain = 'base') or
+          (wts.venue = 'kalshi' and w.chain = 'solana')
+        )
+        and (
+          wts.last_refreshed_at is null or
+          wts.last_refreshed_at <= $2::timestamptz - ($3::int * interval '1 hour')
+        )
+        and (
+          wts.last_refresh_attempted_at is null or
+          wts.last_refreshed_at >= wts.last_refresh_attempted_at or
+          wts.last_refresh_attempted_at <= $2::timestamptz - ($4::int * interval '1 minute')
+        )
+      group by w.id, w.address, w.chain, wts.venue
+      order by
+        max(wts.priority) desc,
+        min(coalesce(wts.last_refreshed_at, 'epoch'::timestamptz)) asc,
+        min(wts.created_at) asc
+      limit $1
+    `,
+    [
+      inputs.limit,
+      inputs.asOf,
+      Math.max(1, inputs.refreshHours),
+      Math.max(1, inputs.attemptBackoffMinutes),
+      Math.max(0, inputs.subjectTtlDays),
+    ],
+  );
+
+  return rows.map((row) => ({
+    wallet_id: row.wallet_id,
+    address: row.address,
+    chain: row.chain,
+    venue: row.venue,
+    sources: Array.isArray(row.sources) ? row.sources : [],
+    priority: Number(row.priority ?? 0),
+  }));
+}
+
+async function loadAutoTrackedPreviousOpenPositions(
+  client: Queryable,
+  inputs: { snapshotAt: Date; wallets: AutoTrackedWalletRow[] },
+): Promise<AutoTrackedPreviousOpenPositionRow[]> {
+  if (inputs.wallets.length === 0) return [];
+  const { rows } = await client.query<{
+    wallet_id: string;
+    venue: Venue;
+    market_id: string;
+    outcome_side: "YES" | "NO";
+    token_id: string | null;
+    price: string | null;
+  }>(
+    `
+      with subjects as (
+        select distinct *
+        from unnest($1::uuid[], $2::text[]) as x(wallet_id, venue)
+      ),
+      latest as (
+        select distinct on (
+          ws.wallet_id,
+          ws.venue,
+          ws.market_id,
+          ws.outcome_side
+        )
+          ws.wallet_id::text as wallet_id,
+          ws.venue,
+          ws.market_id,
+          ws.outcome_side,
+          ws.shares,
+          ws.price::text as price,
+          coalesce(nullif(ws.metadata->>'tokenId', ''), ut.token_id) as token_id
+        from wallet_position_snapshots ws
+        join subjects s
+          on s.wallet_id = ws.wallet_id
+         and s.venue = ws.venue
+        left join unified_tokens ut
+          on ut.market_id = ws.market_id
+         and ut.side = ws.outcome_side
+        where ws.snapshot_at < $3
+          and ws.outcome_side in ('YES', 'NO')
+          and (
+            ws.metadata->>'source' = 'auto_tracked_wallet' or
+            ws.metadata->>'snapshotSource' = 'auto_tracked_wallet'
+          )
+        order by
+          ws.wallet_id,
+          ws.venue,
+          ws.market_id,
+          ws.outcome_side,
+          ws.snapshot_at desc
+      )
+      select
+        wallet_id,
+        venue,
+        market_id,
+        outcome_side,
+        token_id,
+        price
+      from latest
+      where shares > 0
+        and token_id is not null
+    `,
+    [
+      inputs.wallets.map((row) => row.wallet_id),
+      inputs.wallets.map((row) => row.venue),
+      inputs.snapshotAt,
+    ],
+  );
+
+  return rows
+    .filter((row): row is AutoTrackedPreviousOpenPositionRow =>
+      Boolean(row.token_id),
+    )
+    .map((row) => ({
+      wallet_id: row.wallet_id,
+      venue: row.venue,
+      market_id: row.market_id,
+      outcome_side: row.outcome_side,
+      token_id: row.token_id,
+      price: row.price,
+    }));
+}
+
+function buildAutoTrackedWalletVenueKey(walletId: string, venue: Venue): string {
+  return `${walletId}:${venue}`;
+}
+
+function previousOpenRowsForTrackedWallet(
+  rows: AutoTrackedPreviousOpenPositionRow[],
+  tracked: AutoTrackedWalletRow,
+): AutoTrackedPreviousOpenPositionRow[] {
+  return rows.filter(
+    (row) => row.wallet_id === tracked.wallet_id && row.venue === tracked.venue,
+  );
+}
+
+function previousOpenTokenIdsForTrackedWallet(
+  rows: AutoTrackedPreviousOpenPositionRow[],
+  tracked: AutoTrackedWalletRow,
+): string[] {
+  return Array.from(
+    new Set(
+      previousOpenRowsForTrackedWallet(rows, tracked)
+        .map((row) => normalizeOnchainTokenId(row.venue, row.token_id))
+        .filter((tokenId): tokenId is string => Boolean(tokenId)),
+    ),
+  );
+}
+
+function buildPreviousOpenMarketKeysForSuccessfulScans(
+  rows: AutoTrackedPreviousOpenPositionRow[],
+  successfulWalletVenueKeys: Set<string>,
+): SnapshotDeltaMarketKey[] {
+  return buildAutoTrackedPreviousOpenMarketKeys(
+    rows.filter((row) =>
+      successfulWalletVenueKeys.has(
+        buildAutoTrackedWalletVenueKey(row.wallet_id, row.venue),
+      ),
+    ),
+  );
+}
+
+function resolveMarkPrice(row: {
+  best_bid: string | null;
+  best_ask: string | null;
+  mid: string | null;
+  last_price: string | null;
+}): number | null {
+  return (
+    resolveMidPrice(row.best_bid, row.best_ask, row.mid) ??
+    parseLimitlessNumber(row.last_price)
+  );
+}
+
+async function backfillPolymarketUnifiedTokensForWalletIntel(
+  client: Queryable,
+  tokenIds: string[],
+): Promise<void> {
+  const normalizedTokenIds = Array.from(
+    new Set(
+      tokenIds
+        .map((tokenId) => normalizeOnchainTokenId("polymarket", tokenId))
+        .filter((tokenId): tokenId is string => Boolean(tokenId)),
+    ),
+  );
+  if (normalizedTokenIds.length === 0) return;
+  await client.query(
+    `
+      with wanted as (
+        select distinct unnest($1::text[]) as token_id
+      ),
+      missing as (
+        select w.token_id
+        from wanted w
+        left join unified_tokens ut
+          on ut.venue = 'polymarket'
+         and ut.token_id = w.token_id
+        where ut.token_id is null
+      ),
+      matched_yes as (
+        select m.id as market_id, w.token_id, 'YES'::text as side
+        from unified_markets m
+        join missing w on w.token_id = m.token_yes
+        where m.venue = 'polymarket'
+      ),
+      matched_no as (
+        select m.id as market_id, w.token_id, 'NO'::text as side
+        from unified_markets m
+        join missing w on w.token_id = m.token_no
+        where m.venue = 'polymarket'
+      ),
+      matched_clob as (
+        select m.id as market_id,
+               w.token_id,
+               case
+                 when m.clob_token_ids::jsonb->>0 = w.token_id then 'YES'
+                 else 'NO'
+               end as side
+        from unified_markets m
+        join missing w on m.clob_token_ids::jsonb ? w.token_id
+        where m.venue = 'polymarket'
+          and m.clob_token_ids is not null
+          and m.clob_token_ids <> ''
+          and m.clob_token_ids <> '[]'
+          and (
+            m.clob_token_ids::jsonb->>0 = w.token_id
+            or m.clob_token_ids::jsonb->>1 = w.token_id
+          )
+      ),
+      to_insert as (
+        select * from matched_yes
+        union all
+        select * from matched_no
+        union all
+        select * from matched_clob
+      )
+      insert into unified_tokens(token_id, venue, market_id, side)
+      select token_id, 'polymarket', market_id, side
+      from to_insert
+      on conflict do nothing
+    `,
+    [normalizedTokenIds],
+  );
+}
+
+async function backfillKalshiUnifiedTokensForWalletIntel(
+  client: Queryable,
+  tokenIds: string[],
+): Promise<void> {
+  const scopedTokenIds = Array.from(
+    new Set(
+      tokenIds
+        .map((tokenId) => {
+          const normalized = normalizeOnchainTokenId("kalshi", tokenId);
+          return normalized ? `sol:${normalized}` : null;
+        })
+        .filter((tokenId): tokenId is string => Boolean(tokenId)),
+    ),
+  );
+  if (scopedTokenIds.length === 0) return;
+  await client.query(
+    `
+      with wanted as (
+        select distinct unnest($1::text[]) as token_id
+      ),
+      missing as (
+        select w.token_id
+        from wanted w
+        left join unified_tokens ut
+          on ut.venue = 'kalshi'
+         and ut.token_id = w.token_id
+        where ut.token_id is null
+      ),
+      matched_yes as (
+        select m.id as market_id, w.token_id, 'YES'::text as side
+        from unified_markets m
+        join missing w on w.token_id = m.token_yes
+        where m.venue = 'kalshi'
+      ),
+      matched_no as (
+        select m.id as market_id, w.token_id, 'NO'::text as side
+        from unified_markets m
+        join missing w on w.token_id = m.token_no
+        where m.venue = 'kalshi'
+      ),
+      to_insert as (
+        select * from matched_yes
+        union all
+        select * from matched_no
+      )
+      insert into unified_tokens(token_id, venue, market_id, side)
+      select token_id, 'kalshi', market_id, side
+      from to_insert
+      on conflict (market_id, side) do update
+        set token_id = excluded.token_id,
+            venue = excluded.venue,
+            updated_at = now()
+    `,
+    [scopedTokenIds],
+  );
+}
+
+async function loadTokenIndexEntriesForVenue(
+  client: Queryable,
+  inputs: { venue: Venue; tokenIds: string[] },
+): Promise<Map<string, TokenIndexEntry>> {
+  const normalizedTokenIds = Array.from(
+    new Set(
+      inputs.tokenIds
+        .map((tokenId) => normalizeOnchainTokenId(inputs.venue, tokenId))
+        .filter((tokenId): tokenId is string => Boolean(tokenId)),
+    ),
+  );
+  if (normalizedTokenIds.length === 0) return new Map();
+
+  const { rows } = await client.query<{
+    token_id: string;
+    market_id: string;
+    side: "YES" | "NO";
+    best_bid: string | null;
+    best_ask: string | null;
+    mid: string | null;
+    last_price: string | null;
+  }>(
+    `
+      select
+        ut.token_id,
+        ut.market_id,
+        ut.side,
+        top.best_bid,
+        top.best_ask,
+        top.mid,
+        um.last_price
+      from unified_tokens ut
+      join unified_markets um
+        on um.id = ut.market_id
+      left join unified_token_top_latest top
+        on top.token_id = ut.token_id
+      where ut.venue = $1
+        and (
+          ut.token_id = any($2::text[])
+          or regexp_replace(ut.token_id, '^(limitless:|kalshi:|sol:)', '') = any($2::text[])
+        )
+        and ut.side in ('YES', 'NO')
+    `,
+    [inputs.venue, normalizedTokenIds],
+  );
+
+  const index = new Map<string, TokenIndexEntry>();
+  for (const row of rows) {
+    const key = normalizeOnchainTokenId(inputs.venue, row.token_id);
+    if (!key || index.has(key)) continue;
+    index.set(key, {
+      marketId: row.market_id,
+      venue: inputs.venue,
+      tokenId: row.token_id,
+      side: row.side,
+      price: resolveMarkPrice(row),
+    });
+  }
+  return index;
+}
+
+async function snapshotAutoTrackedWalletTokenBalances(
+  client: Queryable,
+  inputs: {
+    walletId: string;
+    venue: Venue;
+    tokenBalances: Array<{ tokenId: string; size: string }>;
+    tokenIndex: Map<string, TokenIndexEntry>;
+    occurredAt: Date;
+  },
+): Promise<{ inserted: number; marketIds: string[] }> {
+  let inserted = 0;
+  const marketIds = new Set<string>();
+  for (const balance of inputs.tokenBalances) {
+    const onchainTokenId = normalizeOnchainTokenId(inputs.venue, balance.tokenId);
+    if (!onchainTokenId) continue;
+    const entry = inputs.tokenIndex.get(onchainTokenId);
+    if (!entry) continue;
+    const shares = Number(balance.size);
+    if (!Number.isFinite(shares) || shares <= 0) continue;
+
+    const sizeUsd =
+      entry.price != null ? Number((shares * entry.price).toFixed(6)) : null;
+
+    await upsertWalletVenue(client, inputs.walletId, entry.venue);
+    const snapshotInserted = await upsertWalletPositionSnapshot(client, {
+      walletId: inputs.walletId,
+      venue: entry.venue,
+      marketId: entry.marketId,
+      outcomeSide: entry.side,
+      shares,
+      sizeUsd,
+      price: entry.price,
+      metadata: {
+        source: "auto_tracked_wallet",
+        tokenId: entry.tokenId,
+        onchainTokenId,
+        shares,
+      },
+      snapshotAt: inputs.occurredAt,
+    });
+    if (snapshotInserted) {
+      inserted += 1;
+      marketIds.add(entry.marketId);
+    }
+  }
+  return { inserted, marketIds: Array.from(marketIds) };
+}
+
+async function fetchPolymarketAutoTrackedTokenBalances(inputs: {
+  address: string;
+  previousOpenTokenIds: string[];
+}): Promise<Array<{ tokenId: string; size: string }>> {
+  const snapshots = await fetchPolymarketDataApiPositionSnapshots(
+    inputs.address,
+  );
+  const dataApiTokenIds = snapshots.map((snapshot) => snapshot.tokenId);
+  const tokenIds = Array.from(
+    new Set([...dataApiTokenIds, ...inputs.previousOpenTokenIds]),
+  );
+  if (tokenIds.length === 0) return [];
+
+  const output: Array<{ tokenId: string; size: string }> = [];
+  const chunkSize = 200;
+  for (let i = 0; i < tokenIds.length; i += chunkSize) {
+    const chunk = tokenIds.slice(i, i + chunkSize);
+    const balances = await fetchErc1155BalancesByOwner({
+      rpcUrl: env.polygonRpcUrl,
+      timeoutMs: env.polygonRpcTimeoutMs,
+      contractAddress: env.polymarketConditionalTokensAddress,
+      owner: inputs.address,
+      tokenIds: chunk,
+    });
+    for (const tokenId of chunk) {
+      const balance = balances.get(tokenId) ?? 0n;
+      if (balance <= 0n) continue;
+      output.push({ tokenId, size: ethers.formatUnits(balance, 6) });
+    }
+  }
+  return output;
+}
+
+async function fetchLimitlessAutoTrackedTokenBalances(
+  address: string,
+): Promise<Array<{ tokenId: string; size: string }>> {
+  const upstream = await limitlessRequest({
+    method: "GET",
+    requestPath: `/portfolio/${encodeURIComponent(address)}/positions`,
+    auth: "none",
+  });
+  if (!upstream.ok) {
+    const message =
+      isRecord(upstream.payload) && typeof upstream.payload.message === "string"
+        ? upstream.payload.message.toLowerCase()
+        : "";
+    if (isLimitlessPublicPortfolioUserNotFound(upstream.payload)) return [];
+    throw new Error(
+      message
+        ? `Limitless auto-tracked portfolio scan failed: ${message}`
+        : "Limitless auto-tracked portfolio scan failed.",
+    );
+  }
+  if (isLimitlessPublicPortfolioUserNotFound(upstream.payload)) return [];
+  const tokenBalances = extractLimitlessTokenBalances(upstream.payload);
+  if (
+    tokenBalances.length === 0 &&
+    !isRecognizedLimitlessPortfolioContainer(upstream.payload)
+  ) {
+    throw new Error(
+      "Limitless auto-tracked portfolio scan returned an unrecognized empty payload.",
+    );
+  }
+  return tokenBalances
+    .map((balance) => ({
+      tokenId: normalizeLimitlessScopedTokenId(balance.tokenId),
+      size: balance.size,
+    }))
+    .filter(
+      (balance): balance is { tokenId: string; size: string } =>
+        Boolean(balance.tokenId),
+    );
+}
+
+function isRecognizedLimitlessPortfolioContainer(payload: unknown): boolean {
+  if (Array.isArray(payload)) return true;
+  if (!isRecord(payload)) return false;
+  const roots: unknown[] = [payload];
+  if (payload.data) {
+    roots.push(payload.data);
+    if (isRecord(payload.data) && payload.data.data) {
+      roots.push(payload.data.data);
+    }
+  }
+  const keys = [
+    "clob",
+    "amm",
+    "positions",
+    "clobPositions",
+    "clob_positions",
+    "clobPosition",
+    "clob_position",
+  ];
+  return roots.some((root) => {
+    if (Array.isArray(root)) return true;
+    if (!isRecord(root)) return false;
+    return keys.some((key) => Array.isArray(root[key]));
+  });
+}
+
+async function fetchKalshiAutoTrackedTokenBalances(
+  address: string,
+  telemetry: WalletIntelRetryTelemetry,
+): Promise<Array<{ tokenId: string; size: string }>> {
+  const balances = await runWithTelemetry(telemetry, () =>
+    fetchSolanaTokenBalancesByOwner({
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      owner: address,
+      includeToken2022: true,
+    }),
+  );
+  return balances.map((balance) => ({
+    tokenId: `sol:${balance.mint}`,
+    size: balance.uiAmountString,
+  }));
+}
+
+export async function upsertRecentTopHolderTrackingSubjects(
+  client: Queryable,
+  inputs: {
+    candidates: RecentTopHolderTrackingCandidate[];
+    limit: number;
+    selectedAt: Date;
+  },
+): Promise<number> {
+  const cappedLimit = Math.max(0, Math.trunc(inputs.limit));
+  if (cappedLimit <= 0 || inputs.candidates.length === 0) return 0;
+
+  const bestByWalletVenue = new Map<string, RecentTopHolderTrackingCandidate>();
+  for (const candidate of inputs.candidates) {
+    if (!Number.isFinite(candidate.sizeUsd) || candidate.sizeUsd <= 0) continue;
+    const key = buildAutoTrackedWalletVenueKey(
+      candidate.walletId,
+      candidate.venue,
+    );
+    const existing = bestByWalletVenue.get(key);
+    if (!existing || candidate.sizeUsd > existing.sizeUsd) {
+      bestByWalletVenue.set(key, candidate);
+    }
+  }
+
+  const subjects = Array.from(bestByWalletVenue.values())
+    .sort((a, b) => b.sizeUsd - a.sizeUsd)
+    .slice(0, cappedLimit)
+    .map<WalletTrackingSubjectInput>((candidate, index) => ({
+      walletId: candidate.walletId,
+      venue: candidate.venue,
+      source: "recent_top_holder",
+      priority: 200 + Math.max(0, cappedLimit - index),
+      reason: "recent_top_holder",
+      metadata: {
+        marketId: candidate.marketId,
+        side: candidate.side,
+        sizeUsd: candidate.sizeUsd,
+        shares: candidate.shares,
+        snapshotAt: candidate.snapshotAt.toISOString(),
+      },
+      selectedAt: inputs.selectedAt,
+    }));
+
+  return upsertWalletTrackingSubjects(client, subjects);
+}
+
+export async function upsertWhaleTrackingSubjects(
+  client: Queryable,
+  inputs: { asOf: Date; limit: number },
+): Promise<number> {
+  const limit = Math.max(0, Math.trunc(inputs.limit));
+  if (limit <= 0) return 0;
+  const { rows } = await client.query<{
+    wallet_id: string;
+    venue: Venue;
+    max_size_usd: string | null;
+    last_activity_at: Date | string | null;
+  }>(
+    `
+      with whale_wallets as (
+        select tm.wallet_id
+        from wallet_tags t
+        join wallet_tag_map tm on tm.tag_id = t.id
+        where t.slug = 'whale'
+      ),
+      ranked as (
+        select
+          wa.wallet_id::text as wallet_id,
+          wa.venue,
+          max(wa.size_usd)::text as max_size_usd,
+          max(wa.occurred_at) as last_activity_at
+        from wallet_activity_events wa
+        join whale_wallets ww on ww.wallet_id = wa.wallet_id
+        join wallets w on w.id = wa.wallet_id
+        where wa.venue in ('polymarket', 'limitless', 'kalshi')
+          and wa.activity_type in ('delta', 'trade', 'holder')
+          and wa.occurred_at >= $2::timestamptz - interval '7 days'
+          and wa.occurred_at <= $2::timestamptz
+          and (
+            (wa.venue = 'polymarket' and w.chain = 'polygon') or
+            (wa.venue = 'limitless' and w.chain = 'base') or
+            (wa.venue = 'kalshi' and w.chain = 'solana')
+          )
+        group by wa.wallet_id, wa.venue
+      )
+      select wallet_id, venue, max_size_usd, last_activity_at
+      from ranked
+      order by coalesce(max_size_usd::numeric, 0) desc, last_activity_at desc nulls last
+      limit $1
+    `,
+    [limit, inputs.asOf],
+  );
+
+  return upsertWalletTrackingSubjects(
+    client,
+    rows.map((row, index) => ({
+      walletId: row.wallet_id,
+      venue: row.venue,
+      source: "whale",
+      priority: 300 + Math.max(0, limit - index),
+      reason: "whale_tag_recent_activity",
+      metadata: {
+        maxSizeUsd: row.max_size_usd != null ? Number(row.max_size_usd) : null,
+        lastActivityAt:
+          row.last_activity_at instanceof Date
+            ? row.last_activity_at.toISOString()
+            : row.last_activity_at,
+      },
+      selectedAt: inputs.asOf,
+    })),
+  );
+}
+
+export async function markAutoTrackedWalletRefreshAttempted(
+  client: Queryable,
+  inputs: { attemptedAt: Date; wallets: AutoTrackedWalletRow[] },
+): Promise<void> {
+  if (inputs.wallets.length === 0) return;
+  await client.query(
+    `
+      with attempted as (
+        select distinct *
+        from unnest($1::uuid[], $2::text[]) as x(wallet_id, venue)
+      )
+      update wallet_tracking_subjects wts
+      set
+        last_refresh_attempted_at = $3,
+        updated_at = now()
+      from attempted a
+      where wts.wallet_id = a.wallet_id
+        and wts.venue = a.venue
+        and wts.status = 'active'
+    `,
+    [
+      inputs.wallets.map((row) => row.wallet_id),
+      inputs.wallets.map((row) => row.venue),
+      inputs.attemptedAt,
+    ],
+  );
+}
+
+export async function markAutoTrackedWalletsRefreshed(
+  client: Queryable,
+  inputs: { refreshedAt: Date; wallets: AutoTrackedWalletRow[] },
+): Promise<void> {
+  if (inputs.wallets.length === 0) return;
+  await client.query(
+    `
+      with refreshed as (
+        select distinct *
+        from unnest($1::uuid[], $2::text[]) as x(wallet_id, venue)
+      )
+      update wallet_tracking_subjects wts
+      set
+        last_refreshed_at = $3,
+        updated_at = now()
+      from refreshed r
+      where wts.wallet_id = r.wallet_id
+        and wts.venue = r.venue
+        and wts.status = 'active'
+    `,
+    [
+      inputs.wallets.map((row) => row.wallet_id),
+      inputs.wallets.map((row) => row.venue),
+      inputs.refreshedAt,
+    ],
+  );
+}
+
+export async function collectAutoTrackedWalletSnapshotRows(
+  client: Queryable,
+  inputs: {
+    autoTrackedWallets: AutoTrackedWalletRow[];
+    previousOpenPositions: AutoTrackedPreviousOpenPositionRow[];
+    snapshotAt: Date;
+    tokenIdsByVenue: Record<Venue, string[]>;
+    tokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>>;
+    telemetry: WalletIntelRefreshTelemetry;
+    followedFetchConcurrency: number;
+    touchedWalletIds: Set<string>;
+  },
+): Promise<AutoTrackedCollectionResult> {
+  if (inputs.autoTrackedWallets.length === 0) {
+    return {
+      processed: 0,
+      rowInserts: 0,
+      activityRows: 0,
+      marketIds: [],
+      previousOpenMarketKeys: [],
+      attemptedWallets: [],
+      refreshedWallets: [],
+    };
+  }
+
+  let processed = 0;
+  let rowInserts = 0;
+  const marketIds = new Set<string>();
+  const attemptedWallets: AutoTrackedWalletRow[] = [];
+  const refreshedWallets: AutoTrackedWalletRow[] = [];
+  const successfulWalletVenueKeys = new Set<string>();
+
+  await mapWithConcurrency(
+    inputs.autoTrackedWallets,
+    inputs.followedFetchConcurrency,
+    async (tracked) => {
+      processed += 1;
+      attemptedWallets.push(tracked);
+      inputs.touchedWalletIds.add(tracked.wallet_id);
+      try {
+        let tokenBalances: Array<{ tokenId: string; size: string }> = [];
+        const previousOpenTokenIds = previousOpenTokenIdsForTrackedWallet(
+          inputs.previousOpenPositions,
+          tracked,
+        );
+
+        if (tracked.venue === "polymarket" && tracked.chain === "polygon") {
+          const address = normalizeAddress(tracked.address, "polygon");
+          if (!address) return;
+          tokenBalances = await fetchPolymarketAutoTrackedTokenBalances({
+            address,
+            previousOpenTokenIds,
+          });
+        } else if (tracked.venue === "limitless" && tracked.chain === "base") {
+          const address = normalizeAddress(tracked.address, "base");
+          if (!address) return;
+          tokenBalances = await fetchLimitlessAutoTrackedTokenBalances(address);
+        } else if (tracked.venue === "kalshi" && tracked.chain === "solana") {
+          tokenBalances = await fetchKalshiAutoTrackedTokenBalances(
+            tracked.address,
+            inputs.telemetry.followedSnapshotSolana,
+          );
+        } else {
+          return;
+        }
+
+        const discoveredTokenIds = tokenBalances.map(
+          (balance) => balance.tokenId,
+        );
+        const tokenIdsForIndex = [...discoveredTokenIds, ...previousOpenTokenIds];
+        if (tracked.venue === "polymarket") {
+          await backfillPolymarketUnifiedTokensForWalletIntel(
+            client,
+            tokenIdsForIndex,
+          );
+        } else if (tracked.venue === "kalshi") {
+          await backfillKalshiUnifiedTokensForWalletIntel(
+            client,
+            tokenIdsForIndex,
+          );
+        }
+        const tokenIndex = await loadTokenIndexEntriesForVenue(client, {
+          venue: tracked.venue,
+          tokenIds: tokenIdsForIndex,
+        });
+        for (const [tokenId, entry] of tokenIndex.entries()) {
+          if (!inputs.tokenIndexByVenue[tracked.venue].has(tokenId)) {
+            inputs.tokenIndexByVenue[tracked.venue].set(tokenId, entry);
+          }
+        }
+        const snapshot = await snapshotAutoTrackedWalletTokenBalances(client, {
+          walletId: tracked.wallet_id,
+          venue: tracked.venue,
+          tokenBalances,
+          tokenIndex,
+          occurredAt: inputs.snapshotAt,
+        });
+        rowInserts += snapshot.inserted;
+        for (const marketId of snapshot.marketIds) marketIds.add(marketId);
+        for (const row of previousOpenRowsForTrackedWallet(
+          inputs.previousOpenPositions,
+          tracked,
+        )) {
+          marketIds.add(row.market_id);
+        }
+        refreshedWallets.push(tracked);
+        successfulWalletVenueKeys.add(
+          buildAutoTrackedWalletVenueKey(tracked.wallet_id, tracked.venue),
+        );
+      } catch (error) {
+        console.error(
+          "[wallets:intel:refresh] auto-tracked wallet snapshot failed",
+          {
+            walletId: tracked.wallet_id,
+            venue: tracked.venue,
+          },
+          error,
+        );
+      }
+    },
+  );
+
+  const previousOpenMarketKeys = buildPreviousOpenMarketKeysForSuccessfulScans(
+    inputs.previousOpenPositions,
+    successfulWalletVenueKeys,
+  );
+
+  console.log("[wallets:intel:refresh] auto-tracked wallets", {
+    selected: inputs.autoTrackedWallets.length,
+    processed,
+    rowInserts,
+    refreshed: refreshedWallets.length,
+    previousOpenPositions: inputs.previousOpenPositions.length,
+    previousOpenMarketKeys: previousOpenMarketKeys.length,
+  });
+
+  return {
+    processed,
+    rowInserts,
+    activityRows: rowInserts,
+    marketIds: Array.from(marketIds),
+    previousOpenMarketKeys,
+    attemptedWallets,
+    refreshedWallets,
+  };
+}
+
 async function refreshTouchedWalletArtifacts(
   client: Queryable,
   inputs: {
     touchedWalletIds: Set<string>;
     selectedMarketIds: string[];
+    previousOpenMarketKeys?: SnapshotDeltaMarketKey[];
     snapshotAt: Date;
     tagIds: Record<string, string>;
   },
@@ -1994,6 +3137,7 @@ async function refreshTouchedWalletArtifacts(
         walletIds,
         occurredAt: inputs.snapshotAt,
         marketIds: inputs.selectedMarketIds,
+        extraPreviousMarketKeys: inputs.previousOpenMarketKeys ?? [],
       }),
   );
 
@@ -2131,7 +3275,7 @@ async function runWalletIntelArtifactStage<T>(
   }
 }
 
-async function snapshotFollowedWalletHoldingsSolana(
+export async function snapshotFollowedWalletHoldingsSolana(
   client: Queryable,
   inputs: {
     walletId: string;
@@ -2141,6 +3285,7 @@ async function snapshotFollowedWalletHoldingsSolana(
     occurredAt: Date;
     balances?: SolanaTokenBalance[] | null;
     telemetry?: WalletIntelRetryTelemetry | null;
+    metadataSource?: string;
   },
 ): Promise<number> {
   if (inputs.tokenMints.length === 0) return 0;
@@ -2197,7 +3342,7 @@ async function snapshotFollowedWalletHoldingsSolana(
       sizeUsd,
       price: entry.price,
       metadata: {
-        source: "followed_wallet",
+        source: inputs.metadataSource ?? "followed_wallet",
         tokenId: entry.tokenId,
         onchainTokenId: mint,
         shares: amount,
@@ -2987,21 +4132,29 @@ async function fetchPreviousSnapshotDeltaRows(
   return rows;
 }
 
-async function applySnapshotDeltas(
+export async function applySnapshotDeltas(
   client: Queryable,
   inputs: {
     walletIds: string[];
     occurredAt: Date;
     marketIds: string[];
+    extraPreviousMarketKeys?: SnapshotDeltaMarketKey[];
   },
 ): Promise<{ inserts: number; updates: number }> {
   const walletIds = Array.from(new Set(inputs.walletIds));
-  if (walletIds.length === 0 || inputs.marketIds.length === 0) {
+  const extraPreviousMarketKeys = inputs.extraPreviousMarketKeys ?? [];
+  const marketIds = Array.from(
+    new Set([
+      ...inputs.marketIds,
+      ...extraPreviousMarketKeys.map((row) => row.market_id),
+    ]),
+  );
+  if (walletIds.length === 0 || marketIds.length === 0) {
     return { inserts: 0, updates: 0 };
   }
 
   const eligibleMarketIds = await filterTrackableMarketIds(client, {
-    marketIds: inputs.marketIds,
+    marketIds,
     asOf: inputs.occurredAt,
   });
   if (eligibleMarketIds.length === 0) {
@@ -3014,6 +4167,12 @@ async function applySnapshotDeltas(
     walletIds,
     SNAPSHOT_DELTA_WALLET_CHUNK_SIZE,
   )) {
+    const walletChunkSet = new Set(walletChunk);
+    const extraKeysForChunk = extraPreviousMarketKeys.filter(
+      (row) =>
+        walletChunkSet.has(row.wallet_id) &&
+        eligibleMarketIds.includes(row.market_id),
+    );
     const currentRows = await client.query<SnapshotDeltaRow>(
       `
       select wallet_id, venue, market_id, outcome_side, shares, price, metadata
@@ -3025,7 +4184,9 @@ async function applySnapshotDeltas(
       [walletChunk, inputs.occurredAt, eligibleMarketIds],
     );
 
-    if (currentRows.rows.length === 0) continue;
+    if (currentRows.rows.length === 0 && extraKeysForChunk.length === 0) {
+      continue;
+    }
 
     const currentMarketKeysByKey = new Map<string, SnapshotDeltaMarketKey>();
     for (const row of currentRows.rows) {
@@ -3036,6 +4197,11 @@ async function applySnapshotDeltas(
         venue: row.venue,
         market_id: row.market_id,
       });
+    }
+    for (const row of extraKeysForChunk) {
+      const key = `${row.wallet_id}|${row.venue}|${row.market_id}`;
+      if (currentMarketKeysByKey.has(key)) continue;
+      currentMarketKeysByKey.set(key, row);
     }
     const currentMarketKeys = Array.from(currentMarketKeysByKey.values());
     const prevWalletRows = await client.query<{ wallet_id: string }>(
@@ -5520,12 +6686,16 @@ async function runSnapshot(snapshotAt: Date) {
     let deltaUpdates = 0;
     let followedProcessed = 0;
     let followedRows = 0;
+    let autoTrackedProcessed = 0;
+    let autoTrackedRows = 0;
     let internalProcessed = 0;
     let internalSnapshotRows = 0;
     let internalActivityRows = 0;
     let holderRateLimitErrors = 0;
     let holderAbortErrors = 0;
     let holderOtherErrors = 0;
+    const recentTopHolderTrackingCandidates: RecentTopHolderTrackingCandidate[] =
+      [];
 
     const marketResults = (
       await fetchMarketHolderDataBatch({
@@ -5580,20 +6750,13 @@ async function runSnapshot(snapshotAt: Date) {
       if (!data) continue;
 
       const maybeAddToken = (tokenId: string | null, side: "YES" | "NO") => {
-        if (!tokenId) return;
-        const onchainTokenId = normalizeOnchainTokenId(venue, tokenId);
-        if (!onchainTokenId) return;
-        const bucket = tokenIndexByVenue[venue];
-        if (!bucket.has(onchainTokenId)) {
-          bucket.set(onchainTokenId, {
-            marketId: market.id,
-            venue,
-            tokenId,
-            side,
-            price: data.priceBySide[side],
-          });
-          tokenIdsByVenue[venue].push(onchainTokenId);
-        }
+        addTokenIndexEntry(tokenIndexByVenue, tokenIdsByVenue, {
+          marketId: market.id,
+          price: data.priceBySide[side],
+          side,
+          tokenId,
+          venue,
+        });
       };
 
       maybeAddToken(data.tokenIdsBySide.YES, "YES");
@@ -5634,6 +6797,22 @@ async function runSnapshot(snapshotAt: Date) {
           const price = data.priceBySide[side] ?? null;
           const sizeUsd =
             price != null ? Number((shares * price).toFixed(6)) : null;
+          if (
+            walletIntelRefreshPolicy.autoTrackedWalletEnabled &&
+            sizeUsd != null &&
+            Number.isFinite(sizeUsd) &&
+            sizeUsd > 0
+          ) {
+            recentTopHolderTrackingCandidates.push({
+              walletId,
+              venue,
+              marketId: market.id,
+              side,
+              sizeUsd,
+              shares,
+              snapshotAt,
+            });
+          }
 
           await upsertWalletPositionSnapshot(client, {
             walletId,
@@ -5705,19 +6884,84 @@ async function runSnapshot(snapshotAt: Date) {
       });
     }
 
-    tokenIdsByVenue.polymarket = capTokenIds(
-      tokenIdsByVenue.polymarket,
-      walletIntelRefreshPolicy.tokenLimitPoly,
+    if (walletIntelRefreshPolicy.autoTrackedWalletEnabled) {
+      const producerLimit = Math.max(
+        1,
+        walletIntelRefreshPolicy.autoTrackedWalletLimit * 4,
+      );
+      const [recentTopHolderSubjects, whaleSubjects] = await Promise.all([
+        upsertRecentTopHolderTrackingSubjects(client, {
+          candidates: recentTopHolderTrackingCandidates,
+          limit: producerLimit,
+          selectedAt: snapshotAt,
+        }),
+        upsertWhaleTrackingSubjects(client, {
+          asOf: snapshotAt,
+          limit: producerLimit,
+        }),
+      ]);
+      if (recentTopHolderSubjects > 0 || whaleSubjects > 0) {
+        console.log("[wallets:intel:refresh] tracking subjects upserted", {
+          recentTopHolder: recentTopHolderSubjects,
+          whale: whaleSubjects,
+        });
+      }
+    }
+
+    const autoTrackedWallets = walletIntelRefreshPolicy.autoTrackedWalletEnabled
+      ? await loadAutoTrackedWalletRows(client, {
+          asOf: snapshotAt,
+          attemptBackoffMinutes:
+            walletIntelRefreshPolicy.autoTrackedWalletAttemptBackoffMinutes,
+          limit: walletIntelRefreshPolicy.autoTrackedWalletLimit,
+          refreshHours: walletIntelRefreshPolicy.autoTrackedWalletRefreshHours,
+          subjectTtlDays: walletIntelRefreshPolicy.autoTrackedSubjectTtlDays,
+        })
+      : [];
+    const autoTrackedPreviousOpenPositions =
+      walletIntelRefreshPolicy.autoTrackedWalletEnabled
+        ? await loadAutoTrackedPreviousOpenPositions(client, {
+            snapshotAt,
+            wallets: autoTrackedWallets,
+          })
+        : [];
+    const cappedSelectedTokenUniverse = capWalletIntelSelectedTokenUniverse(
+      tokenIdsByVenue,
+      tokenIndexByVenue,
+      walletIntelRefreshPolicy,
     );
-    tokenIdsByVenue.limitless = capTokenIds(
-      tokenIdsByVenue.limitless,
-      walletIntelRefreshPolicy.tokenLimitLimitless,
+    const cappedTokenCounts: Record<Venue, number> = {
+      polymarket: cappedSelectedTokenUniverse.tokenIdsByVenue.polymarket.length,
+      limitless: cappedSelectedTokenUniverse.tokenIdsByVenue.limitless.length,
+      kalshi: cappedSelectedTokenUniverse.tokenIdsByVenue.kalshi.length,
+    };
+    const droppedTokenCounts: Record<Venue, number> = {
+      polymarket: Math.max(
+        0,
+        tokenIdsByVenue.polymarket.length - cappedTokenCounts.polymarket,
+      ),
+      limitless: Math.max(
+        0,
+        tokenIdsByVenue.limitless.length - cappedTokenCounts.limitless,
+      ),
+      kalshi: Math.max(
+        0,
+        tokenIdsByVenue.kalshi.length - cappedTokenCounts.kalshi,
+      ),
+    };
+    if (
+      droppedTokenCounts.polymarket ||
+      droppedTokenCounts.limitless ||
+      droppedTokenCounts.kalshi
+    ) {
+      console.warn("[wallets:intel:refresh] selected token universe capped", {
+        kept: cappedTokenCounts,
+        dropped: droppedTokenCounts,
+      });
+    }
+    await enqueueWalletIntelMarketRefresh(
+      cappedSelectedTokenUniverse.tokenIdsByVenue,
     );
-    tokenIdsByVenue.kalshi = capTokenIds(
-      tokenIdsByVenue.kalshi,
-      walletIntelRefreshPolicy.tokenLimitKalshi,
-    );
-    await enqueueWalletIntelMarketRefresh(tokenIdsByVenue);
 
     const followedWallets = await client.query<{
       user_id: string;
@@ -5738,8 +6982,8 @@ async function runSnapshot(snapshotAt: Date) {
     const followedCollection = await collectFollowedWalletSnapshotRows(client, {
       followedWallets: followedWallets.rows,
       snapshotAt,
-      tokenIdsByVenue,
-      tokenIndexByVenue,
+      tokenIdsByVenue: cappedSelectedTokenUniverse.tokenIdsByVenue,
+      tokenIndexByVenue: cappedSelectedTokenUniverse.tokenIndexByVenue,
       telemetry,
       followedFetchConcurrency,
       touchedWalletIds,
@@ -5750,6 +6994,31 @@ async function runSnapshot(snapshotAt: Date) {
     followedRows += followedCollection.rowInserts;
     activityRows += followedCollection.activityRows;
 
+    const autoTrackedCollection = await collectAutoTrackedWalletSnapshotRows(
+      client,
+      {
+        autoTrackedWallets,
+        previousOpenPositions: autoTrackedPreviousOpenPositions,
+        snapshotAt,
+        tokenIdsByVenue: cappedSelectedTokenUniverse.tokenIdsByVenue,
+        tokenIndexByVenue: cappedSelectedTokenUniverse.tokenIndexByVenue,
+        telemetry,
+        followedFetchConcurrency,
+        touchedWalletIds,
+      },
+    );
+    autoTrackedProcessed = autoTrackedCollection.processed;
+    autoTrackedRows = autoTrackedCollection.rowInserts;
+    activityRows += autoTrackedCollection.activityRows;
+    await markAutoTrackedWalletRefreshAttempted(client, {
+      attemptedAt: snapshotAt,
+      wallets: autoTrackedCollection.attemptedWallets,
+    });
+    await markAutoTrackedWalletsRefreshed(client, {
+      refreshedAt: snapshotAt,
+      wallets: autoTrackedCollection.refreshedWallets,
+    });
+
     const internalCollection = await collectInternalHunchWalletIntel(client, {
       snapshotAt,
       touchedWalletIds,
@@ -5759,12 +7028,17 @@ async function runSnapshot(snapshotAt: Date) {
     internalActivityRows = internalCollection.activityRows;
     activityRows += internalSnapshotRows + internalActivityRows;
     const artifactMarketIds = Array.from(
-      new Set([...selectedMarketIds, ...internalCollection.marketIds]),
+      new Set([
+        ...selectedMarketIds,
+        ...autoTrackedCollection.marketIds,
+        ...internalCollection.marketIds,
+      ]),
     );
 
     const artifactRefresh = await refreshTouchedWalletArtifacts(client, {
       touchedWalletIds,
       selectedMarketIds: artifactMarketIds,
+      previousOpenMarketKeys: autoTrackedCollection.previousOpenMarketKeys,
       snapshotAt,
       tagIds,
     });
@@ -5779,7 +7053,7 @@ async function runSnapshot(snapshotAt: Date) {
 
     const runFinishedAt = new Date();
     console.log(
-      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors} onchainStateSelected=${onchainStateRefresh.selected} onchainIdentitiesInspected=${onchainStateRefresh.identitiesInspected} onchainIdentityErrors=${onchainStateRefresh.identityErrors} identityNamesSelected=${onchainStateRefresh.identityNamesSelected} identityNamesUpdated=${onchainStateRefresh.identityNamesUpdated} identityNamesPolymarketResolved=${onchainStateRefresh.identityNamesPolymarketResolved} identityNamesPolymarketNotFound=${onchainStateRefresh.identityNamesPolymarketNotFound} identityNamesPolymarketFresh=${onchainStateRefresh.identityNamesPolymarketFresh} identityNamesPolymarketErrors=${onchainStateRefresh.identityNamesPolymarketErrors} identityNamesEnsSkipped=${onchainStateRefresh.identityNamesEnsSkipped} onchainOwnersUpserted=${onchainStateRefresh.ownersUpserted} onchainBalancesFetched=${onchainStateRefresh.balancesFetched} onchainBalanceSubjectsFetched=${onchainStateRefresh.balanceSubjectsFetched} onchainOwnerBalanceSubjects=${onchainStateRefresh.ownerBalanceSubjects} onchainSkippedInvalidAddresses=${onchainStateRefresh.skippedInvalidAddresses} onchainStateUpserts=${onchainStateRefresh.stateUpserts}`,
+      `[wallets:intel:refresh] done finishedAt=${runFinishedAt.toISOString()} durationMs=${runFinishedAt.getTime() - runStartedAt.getTime()} markets=${marketsProcessed} wallets=${touchedWalletIds.size} rows=${activityRows} followed=${followedProcessed} followedRows=${followedRows} autoTracked=${autoTrackedProcessed} autoTrackedRows=${autoTrackedRows} internal=${internalProcessed} internalSnapshotRows=${internalSnapshotRows} internalActivityRows=${internalActivityRows} deltaInserts=${deltaInserts} deltaUpdates=${deltaUpdates} safeLinkSelected=${whaleOwnersLinked.selected} safeLinkInspected=${whaleOwnersLinked.inspected} whaleOwnersLinked=${whaleOwnersLinked.linked} safeLinkErrors=${whaleOwnersLinked.errors} polymarketProxyLinkSelected=${polymarketProxyOwnersLinked.selected} polymarketProxyLinkInspected=${polymarketProxyOwnersLinked.inspected} polymarketProxyOwnersLinked=${polymarketProxyOwnersLinked.linked} polymarketProxyLinkSkipped=${polymarketProxyOwnersLinked.skipped} polymarketProxyLinkErrors=${polymarketProxyOwnersLinked.errors} onchainStateSelected=${onchainStateRefresh.selected} onchainIdentitiesInspected=${onchainStateRefresh.identitiesInspected} onchainIdentityErrors=${onchainStateRefresh.identityErrors} identityNamesSelected=${onchainStateRefresh.identityNamesSelected} identityNamesUpdated=${onchainStateRefresh.identityNamesUpdated} identityNamesPolymarketResolved=${onchainStateRefresh.identityNamesPolymarketResolved} identityNamesPolymarketNotFound=${onchainStateRefresh.identityNamesPolymarketNotFound} identityNamesPolymarketFresh=${onchainStateRefresh.identityNamesPolymarketFresh} identityNamesPolymarketErrors=${onchainStateRefresh.identityNamesPolymarketErrors} identityNamesEnsSkipped=${onchainStateRefresh.identityNamesEnsSkipped} onchainOwnersUpserted=${onchainStateRefresh.ownersUpserted} onchainBalancesFetched=${onchainStateRefresh.balancesFetched} onchainBalanceSubjectsFetched=${onchainStateRefresh.balanceSubjectsFetched} onchainOwnerBalanceSubjects=${onchainStateRefresh.ownerBalanceSubjects} onchainSkippedInvalidAddresses=${onchainStateRefresh.skippedInvalidAddresses} onchainStateUpserts=${onchainStateRefresh.stateUpserts}`,
     );
   } finally {
     client.release();
@@ -5789,6 +7063,7 @@ async function runSnapshot(snapshotAt: Date) {
 async function main() {
   const lockClient = await pool.connect();
   try {
+    const cliArgs = parseWalletIntelRefreshCliArgs();
     const locked = await acquireRefreshAdvisoryLock(lockClient);
     if (!locked) {
       console.warn(
@@ -5798,12 +7073,25 @@ async function main() {
     }
 
     const [refreshPolicy, whalePolicy] = await Promise.all([
-      resolveWalletIntelRefreshPolicy(pool),
+      cliArgs.ignoreRuntimePolicy
+        ? Promise.resolve({
+            effective: getIntelPolicyDefaults("wallet_intel_refresh"),
+          })
+        : resolveWalletIntelRefreshPolicy(pool),
       resolveAiWhaleProfilesPolicy(pool),
     ]);
-    walletIntelRefreshPolicy = refreshPolicy.effective;
+    walletIntelRefreshPolicy = applyWalletIntelRefreshCliArgs(
+      refreshPolicy.effective,
+      cliArgs,
+    );
     aiWhaleProfilesPolicy = whalePolicy.effective;
     hiddenOwnPositionSnapshotSuppressionCache.clear();
+    if (cliArgs.printEffectivePolicy) {
+      console.log("[wallets:intel:refresh] effective wallet intel policy", {
+        ignoreRuntimePolicy: cliArgs.ignoreRuntimePolicy,
+        walletIntelRefreshPolicy,
+      });
+    }
 
     const runAt = new Date();
     const baseSnapshot = bucketDate(
@@ -5885,9 +7173,14 @@ async function main() {
   }
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error("[wallets:intel:refresh] failed", error);
-    process.exit(1);
-  });
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main()
+    .then(() => process.exit(0))
+    .catch((error) => {
+      console.error("[wallets:intel:refresh] failed", error);
+      process.exit(1);
+    });
+}

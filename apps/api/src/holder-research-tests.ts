@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 
+import { env } from "./env.js";
 import {
   buildHolderResearchSystemPrompt,
   buildHolderResearchTriageSystemPrompt,
@@ -40,6 +41,7 @@ import {
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
+  persistHolderResearchNotes,
   selectHolderResearchCandidates,
   type HolderResearchHolder,
   type HolderResearchMarketInput,
@@ -3590,6 +3592,69 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(decision.summary, /Under 2\.5 total goals/);
       assert.doesNotMatch(decision.headline, /NO O\/U/);
       assert.doesNotMatch(decision.summary, /NO O\/U/);
+    },
+  },
+  {
+    name: "published holder research note upserts signal candidate tracking subjects from env policy",
+    run: async () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+      const output = buildDeterministicHolderResearchDecision(candidate, p);
+      assert.equal(output.status, "PUBLISH");
+
+      const trackingSubjectParams: unknown[][] = [];
+      const originalAutoTracked = env.walletIntelAutoTrackedWalletEnabled;
+      env.walletIntelAutoTrackedWalletEnabled = true;
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql === "begin" || sql === "commit" || sql === "rollback") {
+            return { rows: [], rowCount: 0 };
+          }
+          if (sql.includes("insert into ai_notes")) {
+            return {
+              rows: [{ id: "00000000-0000-4000-8000-000000000321" }],
+              rowCount: 1,
+            };
+          }
+          if (sql.includes("from runtime_policies")) {
+            assert.equal(params[0], "wallet_intel_refresh");
+            return { rows: [], rowCount: 0 };
+          }
+          if (sql.includes("insert into wallet_tracking_subjects")) {
+            trackingSubjectParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          if (sql.includes("select n.id") && sql.includes("from ai_notes n")) {
+            return { rows: [], rowCount: 0 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      try {
+        const stats = await persistHolderResearchNotes(client as never, {
+          runnerRunId: "holder-research-test-run",
+          decisions: [{ candidate, output, modelMeta: {} }],
+          policy: p,
+        });
+
+        assert.equal(stats.persisted, 1);
+        assert.equal(trackingSubjectParams.length > 0, true);
+        assert.equal(trackingSubjectParams[0]?.[1], "polymarket");
+        assert.equal(trackingSubjectParams[0]?.[2], "signal_candidate");
+        assert.equal(
+          (trackingSubjectParams[0]?.[5] as string).includes(
+            candidate.market.marketId,
+          ),
+          true,
+        );
+      } finally {
+        env.walletIntelAutoTrackedWalletEnabled = originalAutoTracked;
+      }
     },
   },
   {

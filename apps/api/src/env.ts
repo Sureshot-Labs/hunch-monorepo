@@ -635,6 +635,33 @@ const walletIntelTokenLimitKalshi = optionalPositiveInt(
   "WALLET_INTEL_TOKEN_LIMIT_KALSHI",
   2_000,
 );
+const walletIntelHolderLimit = optionalPositiveInt(
+  "WALLET_INTEL_HOLDER_LIMIT",
+  50,
+);
+const walletIntelSnapshotHours = optionalPositiveInt(
+  "WALLET_INTEL_SNAPSHOT_HOURS",
+  6,
+);
+const walletIntelAutoTrackedWalletEnabled =
+  parseOptionalBool(process.env.WALLET_INTEL_AUTO_TRACKED_WALLET_ENABLED) ??
+  false;
+const walletIntelAutoTrackedWalletLimit = optionalNonNegativeInt(
+  "WALLET_INTEL_AUTO_TRACKED_WALLET_LIMIT",
+  150,
+);
+const walletIntelAutoTrackedWalletRefreshHours = optionalPositiveInt(
+  "WALLET_INTEL_AUTO_TRACKED_WALLET_REFRESH_HOURS",
+  walletIntelSnapshotHours,
+);
+const walletIntelAutoTrackedWalletAttemptBackoffMinutes = optionalPositiveInt(
+  "WALLET_INTEL_AUTO_TRACKED_WALLET_ATTEMPT_BACKOFF_MINUTES",
+  30,
+);
+const walletIntelAutoTrackedSubjectTtlDays = optionalNonNegativeInt(
+  "WALLET_INTEL_AUTO_TRACKED_SUBJECT_TTL_DAYS",
+  14,
+);
 const walletIntelBackfillMaxSteps = optionalPositiveInt(
   "WALLET_INTEL_BACKFILL_MAX_STEPS",
   6,
@@ -1024,11 +1051,13 @@ export const env = {
   walletIntelSelectionModePoly,
   walletIntelSelectionModeKalshi,
   walletIntelSelectionModeLimitless,
-  walletIntelHolderLimit: optionalPositiveInt("WALLET_INTEL_HOLDER_LIMIT", 20),
-  walletIntelSnapshotHours: optionalPositiveInt(
-    "WALLET_INTEL_SNAPSHOT_HOURS",
-    6,
-  ),
+  walletIntelHolderLimit,
+  walletIntelSnapshotHours,
+  walletIntelAutoTrackedWalletEnabled,
+  walletIntelAutoTrackedWalletLimit,
+  walletIntelAutoTrackedWalletRefreshHours,
+  walletIntelAutoTrackedWalletAttemptBackoffMinutes,
+  walletIntelAutoTrackedSubjectTtlDays,
   walletIntelBackfillSnapshots: optionalNonNegativeInt(
     "WALLET_INTEL_BACKFILL_SNAPSHOTS",
     0,

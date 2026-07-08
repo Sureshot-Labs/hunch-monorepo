@@ -76,9 +76,24 @@ import {
   resolveSparklineBucketHours,
 } from "./services/wallet-intel-series.js";
 import {
+  POLYMARKET_HOLDER_LIMIT_MAX,
   fetchMarketHolderData,
   fetchMarketHolderDataBatch,
 } from "./services/holders-core.js";
+import {
+  applyWalletIntelRefreshCliArgs,
+  applySnapshotDeltas,
+  capWalletIntelSelectedTokenUniverse,
+  collectAutoTrackedWalletSnapshotRows,
+  dedupeFollowedWalletRowsForSnapshotWork,
+  loadAutoTrackedWalletRows,
+  markAutoTrackedWalletRefreshAttempted,
+  markAutoTrackedWalletsRefreshed,
+  parseWalletIntelRefreshCliArgs,
+  snapshotFollowedWalletHoldingsEvm,
+  upsertRecentTopHolderTrackingSubjects,
+  upsertWhaleTrackingSubjects,
+} from "./wallet-intel-refresh.js";
 import {
   normalizeOutcomeSideForApi,
   normalizeOutcomeSideForStorage,
@@ -442,6 +457,72 @@ const tests: TestCase[] = [
       assert.equal(resolved.effective.internalHunchWalletLimit, 0);
       assert.equal(resolved.effective.internalHunchFillLookbackDays, 7);
       assert.equal(resolved.effective.internalHunchFillLimit, 100);
+    },
+  },
+  {
+    name: "wallet intel refresh policy exposes auto-tracked freshness controls",
+    run: async () => {
+      const defaults = getIntelPolicyDefaults("wallet_intel_refresh");
+      assert.equal(defaults.autoTrackedWalletEnabled, false);
+      assert.equal(defaults.autoTrackedWalletLimit, 150);
+      assert.equal(defaults.autoTrackedWalletRefreshHours, defaults.snapshotHours);
+      assert.equal(defaults.autoTrackedWalletAttemptBackoffMinutes, 30);
+      assert.equal(defaults.autoTrackedSubjectTtlDays, 14);
+
+      const db = {
+        query: async (_sql: string) => ({
+          rows: [
+            {
+              id: "00000000-0000-0000-0000-000000000099",
+              policy_key: "wallet_intel_refresh",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              payload: {
+                autoTrackedWalletEnabled: true,
+                autoTrackedWalletLimit: 25,
+                autoTrackedWalletRefreshHours: 2,
+                autoTrackedWalletAttemptBackoffMinutes: 45,
+                autoTrackedSubjectTtlDays: 3,
+              },
+              created_by: null,
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        }),
+      } as import("./db.js").DbQuery;
+
+      const resolved = await resolveIntelPolicy(db, "wallet_intel_refresh");
+      assert.equal(resolved.source, "db");
+      assert.equal(resolved.effective.autoTrackedWalletEnabled, true);
+      assert.equal(resolved.effective.autoTrackedWalletLimit, 25);
+      assert.equal(resolved.effective.autoTrackedWalletRefreshHours, 2);
+      assert.equal(resolved.effective.autoTrackedWalletAttemptBackoffMinutes, 45);
+      assert.equal(resolved.effective.autoTrackedSubjectTtlDays, 3);
+    },
+  },
+  {
+    name: "wallet intel refresh CLI overrides effective policy without DB writes",
+    run: () => {
+      const defaults = getIntelPolicyDefaults("wallet_intel_refresh");
+      const args = parseWalletIntelRefreshCliArgs([
+        "--ignore-runtime-policy",
+        "--print-effective-policy",
+        "--auto-tracked-wallets=true",
+        "--holder-limit=50",
+        "--auto-tracked-wallet-limit=150",
+        "--auto-tracked-wallet-refresh-hours=6",
+        "--auto-tracked-attempt-backoff-minutes=30",
+        "--auto-tracked-subject-ttl-days=14",
+      ]);
+      const effective = applyWalletIntelRefreshCliArgs(defaults, args);
+
+      assert.equal(args.ignoreRuntimePolicy, true);
+      assert.equal(args.printEffectivePolicy, true);
+      assert.equal(effective.autoTrackedWalletEnabled, true);
+      assert.equal(effective.holderLimit, 50);
+      assert.equal(effective.autoTrackedWalletLimit, 150);
+      assert.equal(effective.autoTrackedWalletRefreshHours, 6);
+      assert.equal(effective.autoTrackedWalletAttemptBackoffMinutes, 30);
+      assert.equal(effective.autoTrackedSubjectTtlDays, 14);
     },
   },
   {
@@ -3551,6 +3632,1054 @@ const tests: TestCase[] = [
       assert.equal(parsedHistory.includeSmall, false);
       assert.equal(parsedHistory.minPositionShares, 2);
       assert.equal(parsedHistory.minPositionUsd, 0.1);
+    },
+  },
+  {
+    name: "followed snapshot work dedupes duplicate followers by wallet and chain",
+    run: () => {
+      const deduped = dedupeFollowedWalletRowsForSnapshotWork([
+        {
+          user_id: "user-1",
+          wallet_id: "wallet-1",
+          address: "0x1",
+          chain: "polygon",
+        },
+        {
+          user_id: "user-2",
+          wallet_id: "wallet-1",
+          address: "0x1",
+          chain: "polygon",
+        },
+        {
+          user_id: "user-3",
+          wallet_id: "wallet-1",
+          address: "0x1",
+          chain: "base",
+        },
+      ]);
+
+      assert.deepEqual(
+        deduped.map((row) => `${row.user_id}:${row.wallet_id}:${row.chain}`),
+        ["user-1:wallet-1:polygon", "user-3:wallet-1:base"],
+      );
+    },
+  },
+  {
+    name: "recent top-holder producer upserts capped tracking subjects",
+    run: async () => {
+      const insertParams: unknown[][] = [];
+      const client = {
+        query: async (_sql: string, params: unknown[] = []) => {
+          insertParams.push(params);
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      const upserted = await upsertRecentTopHolderTrackingSubjects(
+        client as never,
+        {
+          limit: 2,
+          selectedAt: new Date("2026-01-02T00:00:00.000Z"),
+          candidates: [
+            {
+              walletId: "11111111-1111-4111-8111-111111111111",
+              venue: "polymarket",
+              marketId: "polymarket:market-1",
+              side: "YES",
+              sizeUsd: 10,
+              shares: 20,
+              snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            },
+            {
+              walletId: "22222222-2222-4222-8222-222222222222",
+              venue: "limitless",
+              marketId: "limitless:market-2",
+              side: "NO",
+              sizeUsd: 50,
+              shares: 80,
+              snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            },
+            {
+              walletId: "33333333-3333-4333-8333-333333333333",
+              venue: "kalshi",
+              marketId: "kalshi:market-3",
+              side: "YES",
+              sizeUsd: 30,
+              shares: 60,
+              snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            },
+          ],
+        },
+      );
+
+      assert.equal(upserted, 2);
+      assert.equal(insertParams.length, 2);
+      assert.equal(insertParams[0]?.[0], "22222222-2222-4222-8222-222222222222");
+      assert.equal(insertParams[0]?.[2], "recent_top_holder");
+      assert.equal(insertParams[1]?.[0], "33333333-3333-4333-8333-333333333333");
+    },
+  },
+  {
+    name: "selected-market token universe applies venue caps before followed fanout",
+    run: () => {
+      const tokenIdsByVenue = {
+        polymarket: ["poly-1", "poly-2"],
+        limitless: ["limitless-1", "limitless-2"],
+        kalshi: ["kalshi-1"],
+      };
+      const tokenIndexByVenue = {
+        polymarket: new Map([
+          [
+            "poly-1",
+            {
+              marketId: "polymarket:1",
+              venue: "polymarket" as const,
+              tokenId: "poly-1",
+              side: "YES" as const,
+              price: 0.5,
+            },
+          ],
+          [
+            "poly-2",
+            {
+              marketId: "polymarket:2",
+              venue: "polymarket" as const,
+              tokenId: "poly-2",
+              side: "NO" as const,
+              price: 0.4,
+            },
+          ],
+        ]),
+        limitless: new Map([
+          [
+            "limitless-1",
+            {
+              marketId: "limitless:1",
+              venue: "limitless" as const,
+              tokenId: "limitless:1",
+              side: "YES" as const,
+              price: 0.6,
+            },
+          ],
+          [
+            "limitless-2",
+            {
+              marketId: "limitless:2",
+              venue: "limitless" as const,
+              tokenId: "limitless:2",
+              side: "NO" as const,
+              price: 0.3,
+            },
+          ],
+        ]),
+        kalshi: new Map([
+          [
+            "kalshi-1",
+            {
+              marketId: "kalshi:1",
+              venue: "kalshi" as const,
+              tokenId: "sol:kalshi-1",
+              side: "YES" as const,
+              price: 0.7,
+            },
+          ],
+        ]),
+      };
+
+      const capped = capWalletIntelSelectedTokenUniverse(
+        tokenIdsByVenue,
+        tokenIndexByVenue,
+        {
+          tokenLimitPoly: 1,
+          tokenLimitLimitless: 1,
+          tokenLimitKalshi: 5,
+        },
+      );
+
+      assert.deepEqual(capped.tokenIdsByVenue.polymarket, ["poly-1"]);
+      assert.deepEqual(capped.tokenIdsByVenue.limitless, ["limitless-1"]);
+      assert.deepEqual(capped.tokenIdsByVenue.kalshi, ["kalshi-1"]);
+      assert.equal(capped.tokenIndexByVenue.polymarket.has("poly-2"), false);
+      assert.equal(
+        capped.tokenIndexByVenue.limitless.has("limitless-2"),
+        false,
+      );
+      assert.equal(tokenIdsByVenue.polymarket.length, 2);
+    },
+  },
+  {
+    name: "auto-tracked due selection enforces failed-attempt backoff and subject ttl",
+    run: async () => {
+      const queries: Array<{ sql: string; params: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          queries.push({ sql, params });
+          return { rows: [] };
+        },
+      };
+      const asOf = new Date("2026-01-02T00:00:00.000Z");
+
+      await loadAutoTrackedWalletRows(client as never, {
+        asOf,
+        attemptBackoffMinutes: 30,
+        limit: 150,
+        refreshHours: 6,
+        subjectTtlDays: 14,
+      });
+
+      assert.match(queries[0]?.sql ?? "", /last_refresh_attempted_at/);
+      assert.match(queries[0]?.sql ?? "", /last_selected_at/);
+      assert.deepEqual(queries[0]?.params, [150, asOf, 6, 30, 14]);
+    },
+  },
+  {
+    name: "whale producer upserts existing whale-tagged wallets by venue",
+    run: async () => {
+      const insertParams: unknown[][] = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("with whale_wallets")) {
+            assert.equal(params[0], 4);
+            return {
+              rows: [
+                {
+                  wallet_id: "11111111-1111-4111-8111-111111111111",
+                  venue: "polymarket",
+                  max_size_usd: "123.45",
+                  last_activity_at: new Date("2026-01-02T00:00:00.000Z"),
+                },
+              ],
+              rowCount: 1,
+            };
+          }
+          insertParams.push(params);
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      const upserted = await upsertWhaleTrackingSubjects(client as never, {
+        asOf: new Date("2026-01-02T00:00:00.000Z"),
+        limit: 4,
+      });
+
+      assert.equal(upserted, 1);
+      assert.equal(insertParams[0]?.[0], "11111111-1111-4111-8111-111111111111");
+      assert.equal(insertParams[0]?.[1], "polymarket");
+      assert.equal(insertParams[0]?.[2], "whale");
+    },
+  },
+  {
+    name: "auto-tracked EVM snapshot writes wallet intel snapshots without follows or positions",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const snapshotParams: unknown[][] = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          queries.push({ params, sql });
+          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+            return { rows: [{ suppressed: false }] };
+          }
+          if (sql.includes("insert into wallet_position_snapshots")) {
+            snapshotParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      const inserted = await snapshotFollowedWalletHoldingsEvm(
+        client as never,
+        {
+          walletId: "11111111-1111-4111-8111-111111111111",
+          address: "0x1111111111111111111111111111111111111111",
+          venue: "polymarket",
+          rpcUrl: "unused",
+          rpcTimeoutMs: 1_000,
+          contractAddress: "0x2222222222222222222222222222222222222222",
+          tokenIds: ["token-1"],
+          tokenIndex: new Map([
+            [
+              "token-1",
+              {
+                marketId: "polymarket:market-1",
+                venue: "polymarket",
+                tokenId: "token-1",
+                side: "YES",
+                price: 0.5,
+              },
+            ],
+          ]),
+          occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+          prefetchedBalances: [{ tokenId: "token-1", size: "4" }],
+          metadataSource: "auto_tracked_wallet",
+        },
+      );
+
+      assert.equal(inserted, 1);
+      assert.equal((snapshotParams[0]?.[7] as Record<string, unknown>).source, "auto_tracked_wallet");
+      assert.equal(
+        queries.some((query) => query.sql.includes("wallet_follows")),
+        false,
+      );
+      assert.equal(
+        queries.some((query) => query.sql.includes("insert into positions")),
+        false,
+      );
+    },
+  },
+  {
+    name: "auto-tracked Limitless scan discovers holdings outside selected markets",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalLimitlessBase = env.limitlessApiBase;
+      env.limitlessApiBase = "https://limitless.example";
+      const snapshotParams: unknown[][] = [];
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        assert.equal(url.pathname, "/portfolio/0x1111111111111111111111111111111111111111/positions");
+        return new Response(
+          JSON.stringify({
+            data: {
+              clobPositions: [
+                {
+                  market: {
+                    position_ids: ["123", "456"],
+                  },
+                  tokensBalance: {
+                    yes: "7000000",
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("from unified_tokens ut")) {
+            assert.equal(sql.includes("top.last_price"), false);
+            assert.match(sql, /um\.last_price/);
+            assert.deepEqual(params[1], ["123"]);
+            return {
+              rows: [
+                {
+                  token_id: "limitless:123",
+                  market_id: "limitless:outside-market",
+                  side: "YES",
+                  best_bid: "0.4",
+                  best_ask: "0.6",
+                  mid: null,
+                  last_price: null,
+                },
+              ],
+            };
+          }
+          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+            return { rows: [{ suppressed: false }] };
+          }
+          if (sql.includes("insert into wallet_position_snapshots")) {
+            snapshotParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      try {
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                address: "0x1111111111111111111111111111111111111111",
+                chain: "base",
+                venue: "limitless",
+                sources: ["recent_top_holder"],
+                priority: 100,
+              },
+            ],
+            previousOpenPositions: [],
+            snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {} as never,
+            followedFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+          },
+        );
+
+        assert.equal(result.rowInserts, 1);
+        assert.deepEqual(result.marketIds, ["limitless:outside-market"]);
+        assert.equal(snapshotParams[0]?.[2], "limitless:outside-market");
+        assert.equal(
+          (snapshotParams[0]?.[7] as Record<string, unknown>).source,
+          "auto_tracked_wallet",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.limitlessApiBase = originalLimitlessBase;
+      }
+    },
+  },
+  {
+    name: "auto-tracked Polymarket scan discovers Data API holdings outside selected markets",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalDataApiBase = env.polymarketDataApiBase;
+      const originalRpcUrl = env.polygonRpcUrl;
+      const originalContract = env.polymarketConditionalTokensAddress;
+      env.polymarketDataApiBase = "https://poly-data.example";
+      env.polygonRpcUrl = "https://polygon-rpc.example";
+      env.polymarketConditionalTokensAddress =
+        "0x2222222222222222222222222222222222222222";
+      const erc1155 = new Interface([
+        "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
+      ]);
+      const snapshotParams: unknown[][] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        if (url.hostname === "poly-data.example") {
+          return new Response(
+            JSON.stringify([{ asset: "123", avgPrice: "0.42" }]),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        assert.equal(url.hostname, "polygon-rpc.example");
+        assert.equal(init?.method, "POST");
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: erc1155.encodeFunctionResult("balanceOfBatch", [
+              [5_000_000n],
+            ]),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("insert into unified_tokens")) {
+            assert.deepEqual(params[0], ["123"]);
+            return { rows: [], rowCount: 1 };
+          }
+          if (sql.includes("from unified_tokens ut")) {
+            return {
+              rows: [
+                {
+                  token_id: "123",
+                  market_id: "polymarket:outside-market",
+                  side: "YES",
+                  best_bid: "0.2",
+                  best_ask: "0.4",
+                  mid: null,
+                  last_price: null,
+                },
+              ],
+            };
+          }
+          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+            return { rows: [{ suppressed: false }] };
+          }
+          if (sql.includes("insert into wallet_position_snapshots")) {
+            snapshotParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      try {
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                address: "0x1111111111111111111111111111111111111111",
+                chain: "polygon",
+                venue: "polymarket",
+                sources: ["recent_top_holder"],
+                priority: 100,
+              },
+            ],
+            previousOpenPositions: [],
+            snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {} as never,
+            followedFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+          },
+        );
+
+        assert.equal(result.rowInserts, 1);
+        assert.deepEqual(result.marketIds, ["polymarket:outside-market"]);
+        assert.equal(snapshotParams[0]?.[4], 5);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.polymarketDataApiBase = originalDataApiBase;
+        env.polygonRpcUrl = originalRpcUrl;
+        env.polymarketConditionalTokensAddress = originalContract;
+      }
+    },
+  },
+  {
+    name: "auto-tracked Kalshi scan discovers Solana holdings outside selected markets",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalSolanaRpcUrls = env.solanaRpcUrls;
+      env.solanaRpcUrls = ["https://solana-rpc.example"];
+      let rpcCalls = 0;
+      const snapshotParams: unknown[][] = [];
+      globalThis.fetch = async () => {
+        rpcCalls += 1;
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              value:
+                rpcCalls === 1
+                  ? [
+                      {
+                        pubkey: "token-account-1",
+                        account: {
+                          data: {
+                            parsed: {
+                              info: {
+                                mint: "mint-outside",
+                                owner: "sol-wallet",
+                                tokenAmount: {
+                                  amount: "2500000",
+                                  decimals: 6,
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    ]
+                  : [],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("insert into unified_tokens")) {
+            assert.deepEqual(params[0], ["sol:mint-outside"]);
+            return { rows: [], rowCount: 1 };
+          }
+          if (sql.includes("from unified_tokens ut")) {
+            return {
+              rows: [
+                {
+                  token_id: "sol:mint-outside",
+                  market_id: "kalshi:outside-market",
+                  side: "NO",
+                  best_bid: null,
+                  best_ask: null,
+                  mid: "0.7",
+                  last_price: null,
+                },
+              ],
+            };
+          }
+          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+            return { rows: [{ suppressed: false }] };
+          }
+          if (sql.includes("insert into wallet_position_snapshots")) {
+            snapshotParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      try {
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                address: "sol-wallet",
+                chain: "solana",
+                venue: "kalshi",
+                sources: ["recent_top_holder"],
+                priority: 100,
+              },
+            ],
+            previousOpenPositions: [],
+            snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {
+              followedSnapshotSolana: {
+                attempted: 0,
+                succeeded: 0,
+                failed: 0,
+                aborted: 0,
+                rateLimited: 0,
+                otherErrors: 0,
+                skipped: 0,
+                estimatedCalls: 0,
+                actualCalls: 0,
+              },
+            } as never,
+            followedFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+          },
+        );
+
+        assert.equal(result.rowInserts, 1);
+        assert.deepEqual(result.marketIds, ["kalshi:outside-market"]);
+        assert.equal(snapshotParams[0]?.[4], 2.5);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.solanaRpcUrls = originalSolanaRpcUrls;
+      }
+    },
+  },
+  {
+    name: "auto-tracked failed scan is attempted but not refreshed",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalLimitlessBase = env.limitlessApiBase;
+      env.limitlessApiBase = "https://limitless.example";
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ message: "upstream down" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      const client = {
+        query: async () => ({ rows: [], rowCount: 1 }),
+      };
+
+      try {
+        const wallet = {
+          wallet_id: "11111111-1111-4111-8111-111111111111",
+          address: "0x1111111111111111111111111111111111111111",
+          chain: "base" as const,
+          venue: "limitless" as const,
+          sources: ["recent_top_holder" as const],
+          priority: 100,
+        };
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [wallet],
+            previousOpenPositions: [],
+            snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {} as never,
+            followedFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+          },
+        );
+
+        assert.equal(result.attemptedWallets.length, 1);
+        assert.equal(result.refreshedWallets.length, 0);
+
+        const updateSql: string[] = [];
+        const updateClient = {
+          query: async (sql: string) => {
+            updateSql.push(sql);
+            return { rows: [], rowCount: 1 };
+          },
+        };
+        await markAutoTrackedWalletRefreshAttempted(updateClient as never, {
+          attemptedAt: new Date("2026-01-02T00:00:00.000Z"),
+          wallets: result.attemptedWallets,
+        });
+        await markAutoTrackedWalletsRefreshed(updateClient as never, {
+          refreshedAt: new Date("2026-01-02T00:00:00.000Z"),
+          wallets: result.refreshedWallets,
+        });
+
+        assert.equal(updateSql.length, 1);
+        assert.match(updateSql[0] ?? "", /last_refresh_attempted_at/);
+        assert.doesNotMatch(updateSql[0] ?? "", /last_refreshed_at/);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.limitlessApiBase = originalLimitlessBase;
+      }
+    },
+  },
+  {
+    name: "auto-tracked Limitless unrecognized empty payload is not authoritative",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalLimitlessBase = env.limitlessApiBase;
+      env.limitlessApiBase = "https://limitless.example";
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ data: { unexpectedPositions: [] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      const client = {
+        query: async () => ({ rows: [], rowCount: 1 }),
+      };
+
+      try {
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                address: "0x1111111111111111111111111111111111111111",
+                chain: "base",
+                venue: "limitless",
+                sources: ["recent_top_holder"],
+                priority: 100,
+              },
+            ],
+            previousOpenPositions: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                venue: "limitless",
+                market_id: "limitless:previous-market",
+                outcome_side: "YES",
+                token_id: "limitless:999",
+                price: "0.5",
+              },
+            ],
+            snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {} as never,
+            followedFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+          },
+        );
+
+        assert.equal(result.refreshedWallets.length, 0);
+        assert.deepEqual(result.previousOpenMarketKeys, []);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.limitlessApiBase = originalLimitlessBase;
+      }
+    },
+  },
+  {
+    name: "auto-tracked previous opens bypass selected token caps for closeout",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalLimitlessBase = env.limitlessApiBase;
+      env.limitlessApiBase = "https://limitless.example";
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ message: "user not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      const client = {
+        query: async () => ({ rows: [], rowCount: 1 }),
+      };
+
+      try {
+        const result = await collectAutoTrackedWalletSnapshotRows(
+          client as never,
+          {
+            autoTrackedWallets: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                address: "0x1111111111111111111111111111111111111111",
+                chain: "base",
+                venue: "limitless",
+                sources: ["recent_top_holder"],
+                priority: 100,
+              },
+            ],
+            previousOpenPositions: [
+              {
+                wallet_id: "11111111-1111-4111-8111-111111111111",
+                venue: "limitless",
+                market_id: "limitless:previous-market",
+                outcome_side: "YES",
+                token_id: "limitless:999",
+                price: "0.5",
+              },
+            ],
+            snapshotAt: new Date("2026-01-02T00:00:00.000Z"),
+            tokenIdsByVenue: { polymarket: [], limitless: [], kalshi: [] },
+            tokenIndexByVenue: {
+              polymarket: new Map(),
+              limitless: new Map(),
+              kalshi: new Map(),
+            },
+            telemetry: {} as never,
+            followedFetchConcurrency: 1,
+            touchedWalletIds: new Set(),
+          },
+        );
+
+        assert.equal(result.refreshedWallets.length, 1);
+        assert.deepEqual(result.previousOpenMarketKeys, [
+          {
+            wallet_id: "11111111-1111-4111-8111-111111111111",
+            venue: "limitless",
+            market_id: "limitless:previous-market",
+          },
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.limitlessApiBase = originalLimitlessBase;
+      }
+    },
+  },
+  {
+    name: "auto-tracked previous open market key emits zero snapshot and sell delta",
+    run: async () => {
+      const walletId = "11111111-1111-4111-8111-111111111111";
+      const activityParams: unknown[][] = [];
+      const snapshotParams: unknown[][] = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("from unified_markets")) {
+            return { rows: [{ id: "polymarket:market-1" }] };
+          }
+          if (
+            sql.includes("from wallet_position_snapshots") &&
+            sql.includes("snapshot_at = $2")
+          ) {
+            return { rows: [] };
+          }
+          if (sql.includes("with wallet_set")) {
+            return { rows: [{ wallet_id: walletId }] };
+          }
+          if (sql.includes("from current_markets cm")) {
+            return {
+              rows: [
+                {
+                  wallet_id: walletId,
+                  venue: "polymarket",
+                  market_id: "polymarket:market-1",
+                  outcome_side: "YES",
+                  shares: "10",
+                  price: "0.5",
+                  metadata: {
+                    source: "auto_tracked_wallet",
+                    tokenId: "token-yes",
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes("insert into wallet_activity_events")) {
+            activityParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+            return { rows: [{ suppressed: false }] };
+          }
+          if (sql.includes("insert into wallet_position_snapshots")) {
+            snapshotParams.push(params);
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 1 };
+        },
+      };
+
+      const result = await applySnapshotDeltas(client as never, {
+        walletIds: [walletId],
+        occurredAt: new Date("2026-01-02T00:00:00.000Z"),
+        marketIds: [],
+        extraPreviousMarketKeys: [
+          {
+            wallet_id: walletId,
+            venue: "polymarket",
+            market_id: "polymarket:market-1",
+          },
+        ],
+      });
+
+      assert.equal(result.updates, 1);
+      assert.equal(activityParams.length, 1);
+      assert.equal(activityParams[0]?.[4], "SELL");
+      assert.equal(activityParams[0]?.[5], 10);
+      assert.equal(snapshotParams.length, 1);
+      assert.equal(snapshotParams[0]?.[4], 0);
+      assert.equal((snapshotParams[0]?.[7] as Record<string, unknown>).source, "snapshot_zero");
+      assert.equal(
+        (snapshotParams[0]?.[7] as Record<string, unknown>).snapshotSource,
+        "auto_tracked_wallet",
+      );
+    },
+  },
+  {
+    name: "Polymarket holder fetch sends holder limit 50",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requestedLimit: string | null = null;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        assert.equal(url.pathname, "/holders");
+        requestedLimit = url.searchParams.get("limit");
+        return new Response(
+          JSON.stringify([
+            {
+              holders: [
+                {
+                  proxyWallet: "0x1111111111111111111111111111111111111111",
+                  outcomeIndex: 0,
+                  amount: "10",
+                },
+              ],
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "polymarket:market-1",
+                  venue: "polymarket",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: "condition-1",
+                  token_yes: "yes-token",
+                  token_no: "no-token",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) return { rows: [] };
+          if (queryCount === 3) {
+            return {
+              rows: [
+                { token_id: "yes-token", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "no-token", best_bid: "0.45", best_ask: "0.55" },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "polymarket:market-1",
+          limit: 50,
+          client: client as never,
+        });
+        assert.equal(requestedLimit, "50");
+        assert.equal(result.holders.length, 1);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "Polymarket holder fetch clamps extreme limits at safety max",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requestedLimit: string | null = null;
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/holders") {
+          requestedLimit = url.searchParams.get("limit");
+        }
+        return new Response(
+          JSON.stringify([
+            {
+              holders: [
+                {
+                  proxyWallet: "0x1111111111111111111111111111111111111111",
+                  outcomeIndex: 0,
+                  amount: "10",
+                },
+              ],
+            },
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "polymarket:market-1",
+                  venue: "polymarket",
+                  title: "Test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: "condition-1",
+                  token_yes: "yes-token",
+                  token_no: "no-token",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) return { rows: [] };
+          if (queryCount === 3) {
+            return {
+              rows: [
+                { token_id: "yes-token", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "no-token", best_bid: "0.45", best_ask: "0.55" },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        await fetchMarketHolderData({
+          marketId: "polymarket:market-1",
+          limit: 999,
+          client: client as never,
+        });
+        assert.equal(requestedLimit, String(POLYMARKET_HOLDER_LIMIT_MAX));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   },
   {

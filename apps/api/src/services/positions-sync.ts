@@ -585,7 +585,7 @@ async function fetchErc1155BalancesByOwnersWithCache(inputs: {
   return output;
 }
 
-type PolymarketDataApiPositionSnapshot = {
+export type PolymarketDataApiPositionSnapshot = {
   tokenId: string;
   averagePrice: string | null;
 };
@@ -700,7 +700,7 @@ function extractPolymarketDataApiPositionSnapshots(
   );
 }
 
-async function fetchPolymarketDataApiPositionSnapshots(
+export async function fetchPolymarketDataApiPositionSnapshots(
   owner: string,
 ): Promise<PolymarketDataApiPositionSnapshot[]> {
   const controller = new AbortController();

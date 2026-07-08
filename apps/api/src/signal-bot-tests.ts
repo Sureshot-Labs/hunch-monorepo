@@ -37,6 +37,7 @@ import {
   sendSignalBotStatsReport,
   signalBotLockKey,
   TelegramBotApiClient,
+  resolveSignalBotLatestSnapshotMaxAgeMs,
   type SignalBotNote,
   type SignalBotRedisLike,
   type TelegramBotCallbackQuery,
@@ -712,6 +713,7 @@ function followthroughFlowRow(overrides: Record<string, unknown> = {}) {
     outcome_side: "YES",
     baseline_shares: null,
     latest_shares: "100",
+    latest_snapshot_at: "2026-01-02T00:30:00.000Z",
     latest_size_usd: "5500",
     positive_usd: "5000",
     negative_usd: "0",
@@ -7141,6 +7143,57 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "followthrough does not count stale latest snapshot as still holding",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 1,
+        signalBotFollowthroughMinPriceMoveCents: 1,
+        snapshotHours: 1,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "1000",
+          latest_snapshot_at: "2025-12-31T00:00:00.000Z",
+          latest_shares: "1010",
+          latest_size_usd: "5555",
+          net_shares: "10",
+          net_usd: "500",
+          positive_usd: "500",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      const delivery = db.queries
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
+        .at(-1);
+      assert.ok(delivery);
+      const metrics = JSON.parse(String(delivery.params[8]));
+      assert.equal(metrics.stillHoldingWallets, 0);
+      assert.equal(metrics.estimatedOpenPnlUsd, null);
+      assert.ok(metrics.dataQualityTags.includes("stale_latest_snapshots"));
+    },
+  },
+  {
     name: "followthrough policy can enable only resolved wins",
     run: async () => {
       const redis = new FakeRedis();
@@ -7389,6 +7442,29 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
         "p:event-1|market-1|Y|10",
       );
+    },
+  },
+  {
+    name: "followthrough freshness uses env snapshot hours when policy row is absent",
+    run: async () => {
+      const originalSnapshotHours = process.env.WALLET_INTEL_SNAPSHOT_HOURS;
+      process.env.WALLET_INTEL_SNAPSHOT_HOURS = "48";
+      const db = {
+        query: async () => ({ rows: [] }),
+      };
+
+      try {
+        const maxAgeMs = await resolveSignalBotLatestSnapshotMaxAgeMs(
+          db as never,
+        );
+        assert.equal(maxAgeMs, 96 * 60 * 60 * 1_000);
+      } finally {
+        if (originalSnapshotHours == null) {
+          delete process.env.WALLET_INTEL_SNAPSHOT_HOURS;
+        } else {
+          process.env.WALLET_INTEL_SNAPSHOT_HOURS = originalSnapshotHours;
+        }
+      }
     },
   },
 ];
