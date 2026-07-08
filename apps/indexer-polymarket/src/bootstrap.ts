@@ -16,6 +16,7 @@ import {
   mapToUnifiedMarket,
 } from "./mappers.js";
 import {
+  writeResolvedTerminalTokenTops,
   upsertUnifiedTokens,
   writeUnifiedBookTops,
   type UnifiedEventRow,
@@ -162,6 +163,51 @@ async function publishPolymarketMarketUpdates(
       );
     }),
   );
+}
+
+async function publishPolymarketTerminalTops(
+  rows: Array<{
+    sourceMarket: TPolymarketMarket;
+    market: UnifiedMarketRow;
+  }>,
+): Promise<number> {
+  const observedAt = new Date();
+  const tsMs = observedAt.getTime();
+  const multi = redis.multi();
+  let tokensPublished = 0;
+
+  for (const row of rows) {
+    if (!row.market.resolved_outcome && row.market.resolved_outcome_pct == null) {
+      continue;
+    }
+    const { yes, no } = clobTokenPair(row.sourceMarket);
+    if (!yes && !no) continue;
+
+    const result = await writeResolvedTerminalTokenTops(pool, {
+      marketId: row.market.id,
+      noTokenId: no,
+      observedAt,
+      resolvedOutcome: row.market.resolved_outcome ?? null,
+      resolvedOutcomePct: row.market.resolved_outcome_pct ?? null,
+      yesTokenId: yes,
+    });
+
+    for (const tokenPrice of result.tokenPrices) {
+      const tick = {
+        token_id: tokenPrice.tokenId,
+        best_bid: tokenPrice.price,
+        best_ask: tokenPrice.price,
+        ts: tsMs,
+      };
+      const tickJson = JSON.stringify(tick);
+      multi.set(`top:${tokenPrice.tokenId}`, tickJson, { EX: 60 });
+      multi.publish(`prices:${tokenPrice.tokenId}`, tickJson);
+      tokensPublished += 1;
+    }
+  }
+
+  if (tokensPublished > 0) await multi.exec();
+  return tokensPublished;
 }
 
 type SyncCounters = {
@@ -399,6 +445,12 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
         marketIndex += 1;
       }
     }
+    await timedPhase(
+      timings,
+      "processEvents.publishTerminalTops",
+      () => publishPolymarketTerminalTops(updateRows),
+      { markets: updateRows.length },
+    );
     await timedPhase(
       timings,
       "processEvents.publishMarketUpdates",
@@ -1267,6 +1319,18 @@ async function refreshMarketRefs(
       const unifiedMarket = unifiedMarketRows[index];
       return unifiedMarket ? [{ row, unifiedMarket }] : [];
     },
+  );
+  await timedPhase(
+    timings,
+    "refreshMarketRefs.publishTerminalTops",
+    () =>
+      publishPolymarketTerminalTops(
+        refreshedMarketPairs.map(({ row, unifiedMarket }) => ({
+          sourceMarket: row.market,
+          market: unifiedMarket,
+        })),
+      ),
+    { markets: refreshedMarketPairs.length },
   );
   const tsMs = Date.now();
   const stateQueue = new PQueue({ concurrency: 20 });

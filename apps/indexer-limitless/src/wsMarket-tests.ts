@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 
+import { resolveTerminalTokenPrices } from "@hunch/db";
+
 import { env } from "./env.js";
 import {
   addMarketWSDemandTargets,
@@ -47,6 +49,21 @@ test("inferLimitlessResolvedOutcome prefers explicit index over fallback", () =>
     }),
     "NO",
   );
+});
+
+test("resolveTerminalTokenPrices maps binary and scalar outcomes", () => {
+  assert.deepEqual(resolveTerminalTokenPrices({ resolvedOutcome: "YES" }), {
+    yes: 1,
+    no: 0,
+  });
+  assert.deepEqual(resolveTerminalTokenPrices({ resolvedOutcome: "no" }), {
+    yes: 0,
+    no: 1,
+  });
+  assert.deepEqual(resolveTerminalTokenPrices({ resolvedOutcomePct: 2500 }), {
+    yes: 0.25,
+    no: 0.75,
+  });
 });
 
 test("parseLimitlessWsTimestamp accepts seconds and milliseconds", () => {

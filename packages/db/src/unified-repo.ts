@@ -1,6 +1,8 @@
 import { chunkArray, normalizePriceValue } from "@hunch/shared";
 import { Pool } from "pg";
 
+type Queryable = Pick<Pool, "query">;
+
 type BookTopCacheEntry = {
   bestBid: number | null;
   bestAsk: number | null;
@@ -13,6 +15,17 @@ type UnifiedBookTopWriteInput = {
   tokenId: string;
   touchLatestWhenUnchanged?: boolean;
   ts: Date;
+};
+
+export type TerminalTokenPrices = {
+  no: number;
+  yes: number;
+};
+
+export type ResolvedTerminalTokenTop = {
+  price: number;
+  side: "YES" | "NO";
+  tokenId: string;
 };
 
 const BOOK_TOP_DEDUPE_EPSILON = 1e-9;
@@ -80,6 +93,58 @@ function shouldSkipBookTopWrite(
   }
 
   return true;
+}
+
+function normalizeResolvedOutcome(
+  value: string | null | undefined,
+): "YES" | "NO" | null {
+  const normalized = value?.trim().toUpperCase();
+  if (normalized === "YES") return "YES";
+  if (normalized === "NO") return "NO";
+  return null;
+}
+
+function normalizeResolvedOutcomePct(value: unknown): number | null {
+  if (value == null) return null;
+  const numeric =
+    typeof value === "string" && value.trim() !== ""
+      ? Number(value)
+      : typeof value === "number"
+        ? value
+        : NaN;
+  if (!Number.isFinite(numeric)) return null;
+  const probability = Math.abs(numeric) <= 1 ? numeric : numeric / 10_000;
+  return Math.max(0, Math.min(1, probability));
+}
+
+export function resolveTerminalTokenPrices(input: {
+  resolvedOutcome?: string | null;
+  resolvedOutcomePct?: number | string | null;
+}): TerminalTokenPrices | null {
+  const resolvedOutcome = normalizeResolvedOutcome(input.resolvedOutcome);
+  if (resolvedOutcome === "YES") return { yes: 1, no: 0 };
+  if (resolvedOutcome === "NO") return { yes: 0, no: 1 };
+
+  const yes = normalizeResolvedOutcomePct(input.resolvedOutcomePct);
+  if (yes == null) return null;
+  return { yes, no: Math.max(0, Math.min(1, 1 - yes)) };
+}
+
+function terminalTopRows(input: {
+  noTokenId?: string | null;
+  prices: TerminalTokenPrices;
+  yesTokenId?: string | null;
+}): ResolvedTerminalTokenTop[] {
+  const rows: ResolvedTerminalTokenTop[] = [];
+  const yesTokenId = input.yesTokenId?.trim();
+  if (yesTokenId) {
+    rows.push({ tokenId: yesTokenId, side: "YES", price: input.prices.yes });
+  }
+  const noTokenId = input.noTokenId?.trim();
+  if (noTokenId) {
+    rows.push({ tokenId: noTokenId, side: "NO", price: input.prices.no });
+  }
+  return rows;
 }
 
 // Types for unified tables
@@ -1668,6 +1733,95 @@ export async function writeUnifiedBookTop(
       bookTopWriteInFlight.delete(tokenId);
     }
   }
+}
+
+export async function writeResolvedTerminalTokenTops(
+  pool: Queryable,
+  input: {
+    marketId?: string | null;
+    noTokenId?: string | null;
+    observedAt: Date;
+    resolvedOutcome?: string | null;
+    resolvedOutcomePct?: number | string | null;
+    yesTokenId?: string | null;
+  },
+): Promise<{
+  tokenPrices: ResolvedTerminalTokenTop[];
+  yesPrice: number | null;
+}> {
+  const prices = resolveTerminalTokenPrices({
+    resolvedOutcome: input.resolvedOutcome,
+    resolvedOutcomePct: input.resolvedOutcomePct,
+  });
+  if (!prices) return { tokenPrices: [], yesPrice: null };
+
+  const tokenPrices = terminalTopRows({
+    noTokenId: input.noTokenId,
+    prices,
+    yesTokenId: input.yesTokenId,
+  });
+  if (tokenPrices.length > 0) {
+    const ts = input.observedAt.toISOString();
+    const payload = tokenPrices.map((row) => ({
+      token_id: row.tokenId,
+      venue: venueFromUnifiedTokenId(row.tokenId),
+      price: row.price,
+    }));
+
+    await pool.query(
+      `
+        insert into unified_token_top_latest (
+          token_id,
+          venue,
+          ts,
+          best_bid,
+          best_ask,
+          mid,
+          spread,
+          updated_at
+        )
+        select
+          token_id,
+          venue,
+          $2::timestamptz,
+          price,
+          price,
+          price,
+          0::numeric,
+          now()
+        from jsonb_to_recordset($1::jsonb) as input(
+          token_id text,
+          venue text,
+          price numeric
+        )
+        on conflict (token_id) do update
+          set venue = excluded.venue,
+              ts = excluded.ts,
+              best_bid = excluded.best_bid,
+              best_ask = excluded.best_ask,
+              mid = excluded.mid,
+              spread = excluded.spread,
+              updated_at = now()
+        where excluded.ts >= unified_token_top_latest.ts
+      `,
+      [JSON.stringify(payload), ts],
+    );
+  }
+
+  const marketId = input.marketId?.trim();
+  if (marketId) {
+    await pool.query(
+      `
+        update unified_markets
+        set last_price = $2,
+            updated_at_db = now()
+        where id = $1
+      `,
+      [marketId, prices.yes],
+    );
+  }
+
+  return { tokenPrices, yesPrice: prices.yes };
 }
 
 export async function writeUnifiedBookTops(

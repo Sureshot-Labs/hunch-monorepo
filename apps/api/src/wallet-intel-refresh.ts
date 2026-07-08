@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import type { PoolClient } from "pg";
 
+import { resolveTerminalTokenPrices } from "@hunch/db";
 import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
 import { ethers } from "ethers";
 import { chunkArray, isAbortError, isRpcRateLimit } from "@hunch/shared";
@@ -198,7 +199,7 @@ export type TokenIndexEntry = {
   side: "YES" | "NO";
   price: number | null;
   priceFresh?: boolean;
-  priceSource?: "top_of_book" | "legacy_fallback" | null;
+  priceSource?: "top_of_book" | "legacy_fallback" | "terminal" | null;
   priceUpdatedAt?: string | null;
 };
 
@@ -2594,6 +2595,11 @@ function resolveMarkPrice(row: {
   );
 }
 
+function isNearlySamePrice(a: number | null, b: number | null): boolean {
+  if (a == null || b == null) return false;
+  return Math.abs(a - b) <= 1e-9;
+}
+
 async function backfillPolymarketUnifiedTokensForWalletIntel(
   client: Queryable,
   tokenIds: string[],
@@ -2754,6 +2760,9 @@ async function loadTokenIndexEntriesForVenue(
     best_ask: string | null;
     mid: string | null;
     last_price: string | null;
+    resolved_outcome: string | null;
+    resolved_outcome_pct: string | null;
+    status: string | null;
   }>(
     `
       with wanted as (
@@ -2767,7 +2776,10 @@ async function loadTokenIndexEntriesForVenue(
         top.best_bid,
         top.best_ask,
         top.mid,
-        um.last_price
+        um.last_price,
+        um.resolved_outcome,
+        um.resolved_outcome_pct::text as resolved_outcome_pct,
+        um.status::text as status
       from wanted w
       join unified_tokens ut
         on ut.token_id = w.token_id
@@ -2807,6 +2819,28 @@ async function loadTokenIndexEntriesForVenue(
       : null;
     const price =
       freshPriceMaxAgeMs != null ? topPrice : resolveMarkPrice(row);
+    const terminalPrices = resolveTerminalTokenPrices({
+      resolvedOutcome: row.resolved_outcome,
+      resolvedOutcomePct: row.resolved_outcome_pct,
+    });
+    const terminalPrice =
+      terminalPrices != null
+        ? row.side === "YES"
+          ? terminalPrices.yes
+          : terminalPrices.no
+        : null;
+    const priceSource =
+      price != null &&
+      row.status === "SETTLED" &&
+      isNearlySamePrice(price, terminalPrice)
+        ? "terminal"
+        : freshPriceMaxAgeMs != null
+          ? price != null
+            ? "top_of_book"
+            : null
+          : price != null
+            ? "legacy_fallback"
+            : null;
     index.set(key, {
       marketId: row.market_id,
       venue: inputs.venue,
@@ -2814,14 +2848,7 @@ async function loadTokenIndexEntriesForVenue(
       side: row.side,
       price,
       priceFresh: freshPriceMaxAgeMs != null ? price != null : undefined,
-      priceSource:
-        freshPriceMaxAgeMs != null
-          ? price != null
-            ? "top_of_book"
-            : null
-          : price != null
-            ? "legacy_fallback"
-            : null,
+      priceSource,
       priceUpdatedAt:
         Number.isFinite(topTsMs) && topTsMs > 0
           ? new Date(topTsMs).toISOString()

@@ -31,6 +31,7 @@ import {
   mapToUnifiedMarket,
 } from "./mappers.js";
 import {
+  writeResolvedTerminalTokenTops,
   upsertUnifiedEvent,
   upsertUnifiedMarket,
   upsertUnifiedTokens,
@@ -194,6 +195,41 @@ async function publishTokenTopNow(
   ]);
 }
 
+async function publishResolvedTerminalTopTicks(input: {
+  marketId: string;
+  noTokenId: string | null;
+  observedAt: Date;
+  resolvedOutcome?: string | null;
+  resolvedOutcomePct?: number | string | null;
+  yesTokenId: string | null;
+}): Promise<number> {
+  const result = await writeResolvedTerminalTokenTops(pool, {
+    marketId: input.marketId,
+    noTokenId: input.noTokenId,
+    observedAt: input.observedAt,
+    resolvedOutcome: input.resolvedOutcome,
+    resolvedOutcomePct: input.resolvedOutcomePct,
+    yesTokenId: input.yesTokenId,
+  });
+  if (result.tokenPrices.length === 0) return 0;
+
+  const tsMs = input.observedAt.getTime();
+  const multi = redis.multi();
+  for (const row of result.tokenPrices) {
+    const tick = {
+      token_id: row.tokenId,
+      best_bid: row.price,
+      best_ask: row.price,
+      ts: tsMs,
+    };
+    const tickJson = JSON.stringify(tick);
+    multi.set(`top:${row.tokenId}`, tickJson, { EX: 60 });
+    multi.publish(`prices:${row.tokenId}`, tickJson);
+  }
+  await multi.exec();
+  return result.tokenPrices.length;
+}
+
 async function publishClobTopWithSibling(input: {
   directTokenId: string;
   bestBid: number | null;
@@ -271,6 +307,27 @@ async function publishLimitlessMarketStates(
       );
     }),
   );
+}
+
+async function publishLimitlessTerminalTops(
+  markets: UnifiedMarketRow[],
+): Promise<number> {
+  const observedAt = new Date();
+  let published = 0;
+  for (const market of markets) {
+    if (!market.resolved_outcome && market.resolved_outcome_pct == null) {
+      continue;
+    }
+    published += await publishResolvedTerminalTopTicks({
+      marketId: market.id,
+      noTokenId: prefixLimitlessToken(market.token_no) ?? null,
+      observedAt,
+      resolvedOutcome: market.resolved_outcome ?? null,
+      resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+      yesTokenId: prefixLimitlessToken(market.token_yes) ?? null,
+    });
+  }
+  return published;
 }
 
 async function publishLimitlessMarketUpdates(
@@ -1915,6 +1972,7 @@ async function processLimitlessMarket(
     embedItems[0] = { ...embedItems[0], top_markets: topMarkets };
   }
 
+  await publishLimitlessTerminalTops(eventMarkets);
   if (options.publishMarketState) {
     await publishLimitlessMarketStates(eventMarkets);
   }

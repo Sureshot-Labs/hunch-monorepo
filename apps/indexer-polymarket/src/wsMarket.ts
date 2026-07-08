@@ -1,4 +1,5 @@
 import {
+  writeResolvedTerminalTokenTops,
   upsertUnifiedTokens,
   writeUnifiedBookTop,
   writeUnifiedLastTrade,
@@ -355,6 +356,51 @@ async function resolveTokensByVenueMarketId(
   return rows.map((row) => row.token_id);
 }
 
+async function resolveTokenMarketRefByVenueMarketId(
+  venueMarketId: string,
+): Promise<TokenMarketRef | null> {
+  const { rows } = await pool.query<{
+    market_id: string;
+    venue_market_id: string;
+    condition_id: string | null;
+    token_yes: string | null;
+    token_no: string | null;
+  }>(
+    `
+      select
+        m.id as market_id,
+        m.venue_market_id,
+        m.condition_id,
+        yes_token.token_id as token_yes,
+        no_token.token_id as token_no
+      from unified_markets m
+      left join unified_market_tokens yes_token
+        on yes_token.market_id = m.id
+       and yes_token.outcome_side = 'YES'
+      left join unified_market_tokens no_token
+        on no_token.market_id = m.id
+       and no_token.outcome_side = 'NO'
+      where m.venue = 'polymarket'
+        and m.venue_market_id = $1
+      limit 1
+    `,
+    [venueMarketId],
+  );
+
+  const row = rows[0];
+  if (!row) return null;
+  const ref = {
+    marketId: row.market_id,
+    venueMarketId: row.venue_market_id,
+    conditionId: row.condition_id ?? null,
+    tokenYes: row.token_yes ?? null,
+    tokenNo: row.token_no ?? null,
+  };
+  if (ref.tokenYes) setTokenMarketRefCache(ref.tokenYes, ref);
+  if (ref.tokenNo) setTokenMarketRefCache(ref.tokenNo, ref);
+  return ref;
+}
+
 function resolveOutcomeFromWinner(
   ref: TokenMarketRef | null,
   requested: "YES" | "NO" | null,
@@ -660,6 +706,39 @@ async function publishTopTickNow(
   ]);
 }
 
+async function publishResolvedTerminalTopTicks(input: {
+  marketId: string;
+  noTokenId: string | null;
+  observedAtMs: number;
+  resolvedOutcome: "YES" | "NO" | null;
+  yesTokenId: string | null;
+}): Promise<void> {
+  if (!input.resolvedOutcome) return;
+  const observedAt = new Date(input.observedAtMs);
+  const result = await writeResolvedTerminalTokenTops(pool, {
+    marketId: input.marketId,
+    noTokenId: input.noTokenId,
+    observedAt,
+    resolvedOutcome: input.resolvedOutcome,
+    yesTokenId: input.yesTokenId,
+  });
+  if (result.tokenPrices.length === 0) return;
+
+  const multi = redis.multi();
+  for (const row of result.tokenPrices) {
+    const tick = {
+      token_id: row.tokenId,
+      best_bid: row.price,
+      best_ask: row.price,
+      ts: input.observedAtMs,
+    };
+    const tickJson = JSON.stringify(tick);
+    multi.set(`top:${row.tokenId}`, tickJson, { EX: 60 });
+    multi.publish(`prices:${row.tokenId}`, tickJson);
+  }
+  await multi.exec();
+}
+
 async function publishTopTick(
   tokenId: string,
   bestBidValue: number | null,
@@ -739,12 +818,31 @@ async function publishMarketState(
     );
     if (ref) {
       await setPolymarketResolved(ref, resolvedOutcome, stateUpdate.ts);
+      await publishResolvedTerminalTopTicks({
+        marketId: ref.marketId,
+        noTokenId: ref.tokenNo,
+        observedAtMs: Date.now(),
+        resolvedOutcome,
+        yesTokenId: ref.tokenYes,
+      });
     } else if (stateUpdate.venueMarketId) {
       await setResolvedByVenueMarketId(
         stateUpdate.venueMarketId,
         resolvedOutcome,
         stateUpdate.ts,
       );
+      const venueRef = await resolveTokenMarketRefByVenueMarketId(
+        stateUpdate.venueMarketId,
+      );
+      if (venueRef) {
+        await publishResolvedTerminalTopTicks({
+          marketId: venueRef.marketId,
+          noTokenId: venueRef.tokenNo,
+          observedAtMs: Date.now(),
+          resolvedOutcome,
+          yesTokenId: venueRef.tokenYes,
+        });
+      }
     }
   }
 }

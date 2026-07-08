@@ -1,6 +1,8 @@
 export type {
   UnifiedEventRow,
   UnifiedMarketRow,
+  ResolvedTerminalTokenTop,
+  TerminalTokenPrices,
   UpsertUnifiedEventsResult,
   UpsertUnifiedMarketsResult,
   UpsertUnifiedTokensResult,
@@ -20,6 +22,8 @@ export {
   upsertUnifiedMarkets,
   upsertUnifiedToken,
   upsertUnifiedTokens,
+  resolveTerminalTokenPrices,
+  writeResolvedTerminalTokenTops,
   writeUnifiedBookTop,
   writeUnifiedBookTops,
   writeUnifiedLastTrade,

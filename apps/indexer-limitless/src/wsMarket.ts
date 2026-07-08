@@ -1,6 +1,6 @@
 import PQueue from "p-queue";
 import { io, type Socket } from "socket.io-client";
-import { writeUnifiedBookTop } from "@hunch/db";
+import { writeResolvedTerminalTokenTops, writeUnifiedBookTop } from "@hunch/db";
 import { createTopTickGate, publishMarketState } from "@hunch/infra";
 
 import { env } from "./env.js";
@@ -388,6 +388,38 @@ async function publishTokenTopNow(
   ]);
 }
 
+async function publishResolvedTerminalTopTicks(input: {
+  marketId: string;
+  noTokenId: string | null;
+  observedAt: Date;
+  resolvedOutcome: LimitlessResolvedOutcome;
+  yesTokenId: string | null;
+}): Promise<void> {
+  const result = await writeResolvedTerminalTokenTops(pool, {
+    marketId: input.marketId,
+    noTokenId: input.noTokenId,
+    observedAt: input.observedAt,
+    resolvedOutcome: input.resolvedOutcome,
+    yesTokenId: input.yesTokenId,
+  });
+  if (result.tokenPrices.length === 0) return;
+
+  const tsMs = input.observedAt.getTime();
+  const multi = redis.multi();
+  for (const row of result.tokenPrices) {
+    const tick = {
+      token_id: row.tokenId,
+      best_bid: row.price,
+      best_ask: row.price,
+      ts: tsMs,
+    };
+    const tickJson = JSON.stringify(tick);
+    multi.set(`top:${row.tokenId}`, tickJson, { EX: 60 });
+    multi.publish(`prices:${row.tokenId}`, tickJson);
+  }
+  await multi.exec();
+}
+
 async function publishClobTopWithSibling(input: {
   directTokenId: string;
   bestBid: number | null;
@@ -712,8 +744,6 @@ async function updateResolvedMarketRows(
       update unified_markets
       set status = 'SETTLED',
           resolved_outcome = $2,
-          best_bid = $3,
-          best_ask = $3,
           last_price = $3,
           metadata = jsonb_set(
             jsonb_set(
@@ -792,10 +822,13 @@ export async function applyLimitlessResolvedMarketTop(
   }
 
   const ts = inputs.ts ?? new Date();
-  const yesPrice = resolvedOutcome === "YES" ? 1 : 0;
-  const noPrice = resolvedOutcome === "NO" ? 1 : 0;
-  await publishTokenTopNow(ref.tokenYes, yesPrice, yesPrice, ts.getTime());
-  await publishTokenTopNow(ref.tokenNo, noPrice, noPrice, ts.getTime());
+  await publishResolvedTerminalTopTicks({
+    marketId: ref.marketId,
+    noTokenId: ref.tokenNo,
+    observedAt: ts,
+    resolvedOutcome,
+    yesTokenId: ref.tokenYes,
+  });
   await updateResolvedMarketRows(ref, resolvedOutcome, ts, inputs.source);
 
   await publishMarketState({

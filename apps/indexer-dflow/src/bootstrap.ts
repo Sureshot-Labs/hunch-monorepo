@@ -16,6 +16,7 @@ import {
   type PriceRefreshRedis,
 } from "@hunch/infra";
 import {
+  writeResolvedTerminalTokenTops,
   upsertUnifiedEvents,
   upsertUnifiedMarkets as upsertUnifiedMarketsBase,
   upsertUnifiedTokens,
@@ -484,6 +485,41 @@ async function publishTokenTopNow(
   ]);
 }
 
+async function publishResolvedTerminalTopTicks(input: {
+  marketId: string;
+  noTokenId: string | null;
+  observedAt: Date;
+  resolvedOutcome?: string | null;
+  resolvedOutcomePct?: number | string | null;
+  yesTokenId: string | null;
+}): Promise<number> {
+  const result = await writeResolvedTerminalTokenTops(pool, {
+    marketId: input.marketId,
+    noTokenId: input.noTokenId,
+    observedAt: input.observedAt,
+    resolvedOutcome: input.resolvedOutcome,
+    resolvedOutcomePct: input.resolvedOutcomePct,
+    yesTokenId: input.yesTokenId,
+  });
+  if (result.tokenPrices.length === 0) return 0;
+
+  const tsMs = input.observedAt.getTime();
+  const multi = redis.multi();
+  for (const row of result.tokenPrices) {
+    const tick = {
+      token_id: row.tokenId,
+      best_bid: row.price,
+      best_ask: row.price,
+      ts: tsMs,
+    };
+    const tickJson = JSON.stringify(tick);
+    multi.set(`top:${row.tokenId}`, tickJson, { EX: 60 });
+    multi.publish(`prices:${row.tokenId}`, tickJson);
+  }
+  await multi.exec();
+  return result.tokenPrices.length;
+}
+
 function isDflowNativeAcceptingOrders(metadata: unknown): boolean {
   if (
     typeof metadata !== "object" ||
@@ -515,6 +551,15 @@ function resolveDflowAcceptingOrders(
     isMarketTimeOpen(market, nowMs) &&
     isDflowNativeAcceptingOrders(market.metadata)
   );
+}
+
+function hasResolvedTerminalPrice(
+  market: {
+    resolved_outcome?: string | null;
+    resolved_outcome_pct?: number | string | null;
+  },
+): boolean {
+  return Boolean(market.resolved_outcome || market.resolved_outcome_pct != null);
 }
 
 function clampHotProbeLimit(limit: number): number {
@@ -1048,24 +1093,34 @@ async function publishTokenTopsForTokenIds(
   tokenIds: string[],
 ): Promise<number> {
   const { rows } = await pool.query<{
+    market_id: string;
     token_id: string;
+    token_yes: string | null;
+    token_no: string | null;
     side: "YES" | "NO";
     best_bid: number | null;
     best_ask: number | null;
     status: UnifiedMarketRow["status"];
     close_time: Date | null;
     expiration_time: Date | null;
+    resolved_outcome: string | null;
+    resolved_outcome_pct: number | null;
     metadata: unknown;
   }>(
     `
       select
+        m.id as market_id,
         t.token_id,
+        m.token_yes,
+        m.token_no,
         t.side,
         m.best_bid,
         m.best_ask,
         m.status,
         m.close_time,
         m.expiration_time,
+        m.resolved_outcome,
+        m.resolved_outcome_pct,
         m.metadata
       from unified_tokens t
       join unified_markets m on m.id = t.market_id
@@ -1078,7 +1133,14 @@ async function publishTokenTopsForTokenIds(
 
   const ts = new Date();
   const tsMs = ts.getTime();
-  const publish = rows.map((row) => {
+  const terminalMarkets = new Map<string, (typeof rows)[number]>();
+  const publish: Array<{
+    bestAsk: number | null;
+    bestBid: number | null;
+    tokenId: string;
+  }> = [];
+
+  for (const row of rows) {
     const acceptingOrders = resolveDflowAcceptingOrders(
       {
         status: row.status,
@@ -1089,17 +1151,30 @@ async function publishTokenTopsForTokenIds(
       tsMs,
     );
     if (!acceptingOrders) {
-      return { tokenId: row.token_id, bestBid: null, bestAsk: null };
+      if (hasResolvedTerminalPrice(row)) {
+        terminalMarkets.set(row.market_id, row);
+      }
+      continue;
     }
 
     const yesBid = row.best_bid != null ? Number(row.best_bid) : null;
     const yesAsk = row.best_ask != null ? Number(row.best_ask) : null;
     const bestBid = row.side === "YES" ? yesBid : deriveNoBid(yesAsk);
     const bestAsk = row.side === "YES" ? yesAsk : deriveNoAsk(yesBid);
-    return { tokenId: row.token_id, bestBid, bestAsk };
-  });
+    publish.push({ tokenId: row.token_id, bestBid, bestAsk });
+  }
 
-  if (!publish.length) return 0;
+  let published = 0;
+  for (const market of terminalMarkets.values()) {
+    published += await publishResolvedTerminalTopTicks({
+      marketId: market.market_id,
+      noTokenId: market.token_no ?? null,
+      observedAt: ts,
+      resolvedOutcome: market.resolved_outcome ?? null,
+      resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+      yesTokenId: market.token_yes ?? null,
+    });
+  }
 
   const q = new PQueue({ concurrency: 20 });
   await Promise.all(
@@ -1108,7 +1183,7 @@ async function publishTokenTopsForTokenIds(
     ),
   );
 
-  return publish.length;
+  return published + publish.length;
 }
 
 async function publishDflowMarketStates(
@@ -1124,7 +1199,7 @@ async function publishDflowMarketStates(
         (tokenId): tokenId is string => Boolean(tokenId),
       );
       const acceptingOrders = resolveDflowAcceptingOrders(market, tsMs);
-      return tokenIds.map((tokenId) =>
+      const tasks: Array<Promise<void> | undefined> = tokenIds.map((tokenId) =>
         q.add(async () => {
           await publishMarketState({
             redis,
@@ -1140,11 +1215,23 @@ async function publishDflowMarketStates(
             resolvedOutcome: market.resolved_outcome ?? null,
             tsMs,
           });
-          if (!acceptingOrders) {
-            await publishTokenTopNow(tokenId, null, null, tsMs);
-          }
         }),
       );
+      if (!acceptingOrders && hasResolvedTerminalPrice(market)) {
+        tasks.push(
+          q.add(() =>
+            publishResolvedTerminalTopTicks({
+              marketId: market.id,
+              noTokenId: market.token_no ?? null,
+              observedAt: new Date(tsMs),
+              resolvedOutcome: market.resolved_outcome ?? null,
+              resolvedOutcomePct: market.resolved_outcome_pct ?? null,
+              yesTokenId: market.token_yes ?? null,
+            }).then(() => undefined),
+          ),
+        );
+      }
+      return tasks;
     }),
   );
 }
