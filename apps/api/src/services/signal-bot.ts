@@ -444,13 +444,15 @@ const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const SIGNAL_BOT_COPY_FLOW_HEADLINES = [
-  "🔥 Copy traders are flowing into this signal",
-  "🔥 This signal is getting copied",
-  "🔥 Traders are still following this call",
-  "🔥 Copy flow is building here",
-  "🔥 More wallets are joining this side",
+  "🔥 Copy flow is building before price moves",
+  "👀 People are quietly joining this side",
+  "🔥 This call is starting to get copied",
+  "👀 Wallets are still leaning into this",
+  "🔥 More wallets are moving into this trade",
+  "👀 Price is flat. Flow is not.",
   "🔥 This call is starting to get traction",
 ] as const;
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v2";
 const TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
 const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const MARKDOWN_V2_SPECIAL_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
@@ -1066,14 +1068,16 @@ export function buildSignalBotMessage(input: {
   const price = buySide ? resolveSignalBotBuyPrice(note, buySide) : null;
   const title = escapeTelegramMarkdownV2(note.title);
   const contextLine = formatSignalContextLine(note);
-  const credentialLines = formatSignalCredentialLines(note);
+  const credentialLines = formatSignalBotWhyItMattersLines(note);
   const buySideCopy = buySide ? buildSignalBotSideCopy(note, buySide) : null;
-  const marketTitleLine = formatMarketTitleLine(note, buySide);
   const winConditionLine = buySideCopy?.winCondition
     ? `This wins if there are ${buySideCopy.winCondition}.`
     : null;
-  const priceLine = formatPriceLine(note);
-  const timeLeftLine = formatTimeLeftLine(note);
+  const whyInterestingLine = formatSignalBotWhyInterestingLine({
+    buySide,
+    note,
+    price,
+  });
   const marketUrl = note.eventId
     ? buildSignalBotOpenMarketUrl({
         appBaseUrl: input.appBaseUrl,
@@ -1122,18 +1126,12 @@ export function buildSignalBotMessage(input: {
   const titleLine = categoryEmoji
     ? `${categoryEmoji} ${titleMarkdown}`
     : titleMarkdown;
-  const metaLine = [formatSignalBotSignalLabel(note), priceLine, timeLeftLine]
-    .filter((value): value is string => Boolean(value))
-    .join(" · ");
   const lines = [
     titleLine,
-    escapeTelegramMarkdownV2(metaLine),
-    ...(marketTitleLine
-      ? [escapeTelegramMarkdownV2(`📍 ${marketTitleLine}`)]
-      : []),
-    ...(winConditionLine ? [escapeTelegramMarkdownV2(winConditionLine)] : []),
     "",
     summary,
+    ...(whyInterestingLine ? ["", renderBodyText(whyInterestingLine)] : []),
+    ...(winConditionLine ? ["", escapeTelegramMarkdownV2(winConditionLine)] : []),
     ...(credentialLines.length > 0
       ? ["", ...credentialLines.map(escapeTelegramMarkdownV2)]
       : []),
@@ -3513,20 +3511,6 @@ function formatFollowthroughMarketLine(
   return candidate.market_title || candidate.title;
 }
 
-function formatSignalBotElapsedTime(from: string, to: string): string {
-  const fromMs = new Date(from).getTime();
-  const toMs = new Date(to).getTime();
-  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
-    return "just now";
-  }
-  const minutes = Math.max(1, Math.round((toMs - fromMs) / 60_000));
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h`;
-  const days = Math.round(hours / 24);
-  return `${days}d`;
-}
-
 function formatSignalBotFollowthroughRead(input: {
   hasWalletEvidence: boolean;
   kind: Extract<
@@ -3536,12 +3520,12 @@ function formatSignalBotFollowthroughRead(input: {
   sideCopy: MarketSideCopy | null;
   stats: SignalBotFollowthroughStats;
 }): string {
-  const side = input.sideCopy?.plainPosition ?? "the signal side";
+  const side = input.sideCopy?.plainPosition ?? "the call side";
   if (input.kind === "resolved_win") {
-    return `${side} closed green. The follow-through note is the result, not a fresh entry signal.`;
+    return `${side} closed green. This is performance tracking, not a fresh entry.`;
   }
   if (input.kind === "resolved_loss") {
-    return `${side} closed red. Treat this as performance tracking, not a fresh entry signal.`;
+    return `${side} closed red. Treat this as performance tracking, not a fresh entry.`;
   }
   if (!input.hasWalletEvidence) {
     return "The market moved with the read, but tracked wallet follow-through is thin so far.";
@@ -3555,10 +3539,29 @@ function formatSignalBotFollowthroughRead(input: {
   return "Price has not moved much yet, but copy flow is still leaning with the call.";
 }
 
+function isSignalBotFollowthroughCooling(
+  stats: SignalBotFollowthroughStats,
+): boolean {
+  return (
+    (stats.trimmedWallets > stats.joinedOrAddedWallets &&
+      stats.netSignalSideFlowUsd <= 0) ||
+    (stats.exitedWallets > 0 && stats.joinedOrAddedWallets === 0)
+  );
+}
+
 function selectSignalBotCopyFlowHeadline(input: {
   candidate: SignalBotFollowthroughCandidateRow;
   stats: SignalBotFollowthroughStats;
 }): string {
+  if (isSignalBotFollowthroughCooling(input.stats)) {
+    return "⚠️ Copy flow is cooling off";
+  }
+  if (
+    input.stats.priceMoveCents != null &&
+    Math.abs(input.stats.priceMoveCents) < 0.5
+  ) {
+    return "👀 Price is flat. Flow is not.";
+  }
   const seed = [
     input.candidate.thread_root_note_id,
     input.candidate.market_id,
@@ -3572,6 +3575,40 @@ function selectSignalBotCopyFlowHeadline(input: {
   }
   return SIGNAL_BOT_COPY_FLOW_HEADLINES[
     hash % SIGNAL_BOT_COPY_FLOW_HEADLINES.length
+  ];
+}
+
+function formatSignalBotFollowthroughActivityLine(
+  stats: SignalBotFollowthroughStats,
+): string {
+  const trimmedOnly = Math.max(0, stats.trimmedWallets - stats.exitedWallets);
+  const parts: string[] = [];
+  if (stats.joinedOrAddedWallets > 0) {
+    parts.push(`${stats.joinedOrAddedWallets} wallets added`);
+  }
+  if (trimmedOnly > 0) parts.push(`${trimmedOnly} trimmed`);
+  if (stats.exitedWallets > 0) parts.push(`${stats.exitedWallets} exited`);
+  if (stats.stillHoldingWallets > 0) {
+    parts.push(`${stats.stillHoldingWallets} still hold`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "No major wallet change yet";
+}
+
+function formatSignalBotFollowthroughStatLines(input: {
+  priceLine: string;
+  stats: SignalBotFollowthroughStats;
+}): string[] {
+  const pnlLine =
+    input.stats.estimatedOpenPnlUsd != null
+      ? `Est. open PnL: ${formatSignedCompactUsd(
+          input.stats.estimatedOpenPnlUsd,
+        )}`
+      : null;
+  return [
+    `${formatSignedCompactUsd(input.stats.netSignalSideFlowUsd)} net copy flow`,
+    formatSignalBotFollowthroughActivityLine(input.stats),
+    input.priceLine,
+    ...(pnlLine ? [pnlLine] : []),
   ];
 }
 
@@ -3599,33 +3636,25 @@ function buildSignalBotFollowthroughMessage(input: {
           stats.markPrice,
         )} (${formatSignedCentsMove(stats.priceMoveCents)})`
       : `${sideLabel}: price move unavailable`;
-  const flowLine = `${formatSignedCompactUsd(stats.netSignalSideFlowUsd)} net tracked flow`;
-  const trimmedOrExitedWallets = stats.trimmedWallets;
-  const activityLine = `${stats.joinedOrAddedWallets} wallets added · ${trimmedOrExitedWallets} trimmed/exited · ${stats.stillHoldingWallets} still hold`;
-  const pnlLine =
-    stats.estimatedOpenPnlUsd != null
-      ? `Est. open PnL: ${formatSignedCompactUsd(stats.estimatedOpenPnlUsd)}`
-      : null;
-  const timeLine = `Time since signal: ${formatSignalBotElapsedTime(
-    stats.baselineAt,
-    stats.asOf,
-  )}`;
   const hasWalletEvidence =
-    stats.joinedOrAddedWallets > 0 || stats.netSignalSideFlowUsd > 0;
+    stats.joinedOrAddedWallets > 0 ||
+    stats.netSignalSideFlowUsd > 0 ||
+    stats.trimmedWallets > 0 ||
+    stats.exitedWallets > 0;
   const header =
     input.kind === "resolved_win"
-      ? "🏁 Signal side won"
+      ? "🏁 Call side won"
       : input.kind === "resolved_loss"
-        ? "🏁 Signal side lost"
+        ? "🏁 Call side lost"
         : hasWalletEvidence
           ? selectSignalBotCopyFlowHeadline({
               candidate: input.candidate,
               stats,
             })
           : stats.priceMoveCents != null && stats.priceMoveCents > 0
-            ? "📈 Market moved with the signal"
+            ? "📈 Market moved with the read"
             : "⚠️ Copy flow is thin here";
-  const resultLine = "Since the signal:";
+  const resultLine = "Since the call:";
   const footerLine = formatSignalBotFollowthroughRead({
     hasWalletEvidence,
     kind: input.kind,
@@ -3637,11 +3666,7 @@ function buildSignalBotFollowthroughMessage(input: {
     "",
     `📍 ${title}`,
     resultLine,
-    flowLine,
-    activityLine,
-    priceLine,
-    ...(pnlLine ? [pnlLine] : []),
-    timeLine,
+    ...formatSignalBotFollowthroughStatLines({ priceLine, stats }),
     "",
     footerLine,
   ]
@@ -4481,18 +4506,6 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
   };
 }
 
-function resolveSidePrice(
-  note: SignalBotNote,
-  side: "NO" | "YES",
-): number | null {
-  const yesPrice =
-    note.bestBid != null && note.bestAsk != null
-      ? (note.bestBid + note.bestAsk) / 2
-      : note.lastPrice;
-  if (yesPrice == null) return null;
-  return side === "YES" ? yesPrice : 1 - yesPrice;
-}
-
 function normalizeProbability(value: number | null | undefined): number | null {
   return value != null && Number.isFinite(value) && value >= 0 && value <= 1
     ? value
@@ -4622,7 +4635,7 @@ function buildSignalBotCopyAudit(input: {
     input.buySide === "YES" ? yesCopy : input.buySide === "NO" ? noCopy : null;
   return {
     activeSide: input.buySide,
-    copyVersion: "signal_bot_copy_v1",
+    copyVersion: SIGNAL_BOT_COPY_VERSION,
     marketSegment: input.note.marketSegment,
     priceSnapshot: {
       bestAsk: input.note.bestAsk,
@@ -4651,7 +4664,7 @@ function buildSignalBotFollowthroughCopyAudit(input: {
         : null;
   return {
     activeSide: input.stats.signalSide,
-    copyVersion: "signal_bot_copy_v1",
+    copyVersion: SIGNAL_BOT_COPY_VERSION,
     priceSnapshot: {
       bestAsk: toNumber(input.candidate.best_ask),
       bestBid: toNumber(input.candidate.best_bid),
@@ -4785,116 +4798,77 @@ function formatCompactAmount(value: number): string {
   return value.toFixed(decimals).replace(/\.0$/, "");
 }
 
-function formatPriceLine(note: SignalBotNote): string | null {
-  const yes = resolveSidePrice(note, "YES");
-  if (yes == null) return null;
-  const yesLabel = formatSignalBotOutcomeDisplayLabel(note, "YES", "price");
-  const noLabel = formatSignalBotOutcomeDisplayLabel(note, "NO", "price");
-  return `${yesLabel} ${formatCents(yes)} / ${noLabel} ${formatCents(1 - yes)}`;
+function shouldMentionSignalBotPriceInBody(price: number | null): boolean {
+  return price != null && (price <= 0.15 || price >= 0.85);
 }
 
-function formatTimeLeftLine(
-  note: Pick<SignalBotNote, "closeTime" | "createdAt" | "expirationTime">,
-): string | null {
-  const raw = note.closeTime ?? note.expirationTime;
-  if (!raw) return null;
-  const endMs = new Date(raw).getTime();
-  const startMs = new Date(note.createdAt).getTime();
-  if (
-    !Number.isFinite(endMs) ||
-    !Number.isFinite(startMs) ||
-    endMs <= startMs
-  ) {
-    return null;
-  }
-
-  const minutes = Math.max(1, Math.round((endMs - startMs) / 60_000));
-  if (minutes < 60) return `⏳ ${minutes}m left`;
-
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `⏳ ${hours}h left`;
-
-  const days = Math.round(hours / 24);
-  if (days < 14) return `⏳ ${days}d left`;
-
-  return `⏳ ${Math.round(days / 7)}w left`;
-}
-
-function formatSignalCredentialLines(note: SignalBotNote): string[] {
-  const bullets = note.holderCredentialBullets.slice(0, 2);
-  if (bullets.length === 0) return [];
-  const header =
-    note.holderActorMode === "sharp_cluster"
-      ? "Why this cluster matters:"
-      : "Why this wallet matters:";
-  return [header, ...bullets.map((bullet) => `• ${bullet}`)];
-}
-
-function isHighConvictionSignal(
-  note: Pick<SignalBotNote, "modelMeta">,
-): boolean {
+function formatSignalBotActorLabel(note: SignalBotNote): string {
+  if (note.holderActorMode === "sharp_cluster") return "these wallets";
   return (
-    note.modelMeta.execution_priority === "high_conviction" ||
-    note.modelMeta.executionPriority === "high_conviction"
+    note.holderIdentityDisplayName?.trim() ||
+    note.holderDisplayName?.trim() ||
+    "this wallet"
   );
 }
 
-function formatSignalBotSignalLabel(note: SignalBotNote): string {
-  let label: string;
-  if (note.holderActorMode === "sharp_cluster") label = "⚡ Strong wallets";
-  else {
-    const bucket = String(note.primaryTargetMeta.bucket ?? "").toLowerCase();
-    switch (bucket) {
-      case "sharp_minority":
-      case "sharp_side":
-        label = "⚡ Strong holder";
-        break;
-      case "sharp_split":
-      case "clean_disagreement":
-        label = "⚖️ Split holders";
-        break;
-      case "recent_flow":
-        label = "🌊 Recent flow";
-        break;
-      case "event_bridge":
-        label = "🔗 Cross-market";
-        break;
-      case "concentration_risk":
-        label = "⚠️ Concentrated holder";
-        break;
-      case "followup_existing":
-        label = "🔄 Signal update";
-        break;
-      default:
-        label = "🔎 Holder signal";
-        break;
-    }
+function formatSignalBotPositionContext(note: SignalBotNote): string {
+  const details: string[] = [];
+  if (note.holderPositionUsd != null && note.holderPositionUsd > 0) {
+    details.push(`${formatCompactUsd(note.holderPositionUsd)} still on`);
   }
-  return isHighConvictionSignal(note) ? label.replace(/^\S+/, "🔥") : label;
+  if (note.holderOpenPnlUsd != null) {
+    details.push(`${formatSignedCompactUsd(note.holderOpenPnlUsd)} open PnL`);
+  }
+  return details.length > 0 ? `, with ${details.join(" and ")}` : "";
 }
 
-function formatMarketTitleLine(
-  note: SignalBotNote,
-  side: "NO" | "YES" | null,
-): string | null {
-  if (side) {
-    const copy = buildSignalBotSideCopy(note, side);
-    if (copy.marketLine && shouldUseSignalBotCopyMarketLine(copy)) {
-      return copy.marketLine;
+function formatSignalBotWhyInterestingLine(input: {
+  buySide: "NO" | "YES" | null;
+  note: SignalBotNote;
+  price: number | null;
+}): string | null {
+  const holderSide = input.note.holderSide;
+  if (holderSide && input.buySide && holderSide !== input.buySide) return null;
+  const side = holderSide ?? input.buySide;
+  if (!side) return null;
+  const sideCopy = buildSignalBotSideCopy(input.note, side);
+  const sideLabel = sideCopy.plainPosition ?? side;
+  const marketTitle = input.note.marketTitle?.trim();
+  const priceSubject =
+    sideCopy.copyKind === "team_yes_no" && side === "YES" && marketTitle
+      ? marketTitle
+      : sideCopy.sideLabel || sideCopy.priceLabel || side;
+  const actor = formatSignalBotActorLabel(input.note);
+  const positionContext = formatSignalBotPositionContext(input.note);
+  const priceIsUseful = shouldMentionSignalBotPriceInBody(input.price);
+  if (input.note.holderActorMode === "sharp_cluster") {
+    if (priceIsUseful && input.price != null) {
+      return `The interesting part is that ${priceSubject} is still around ${formatCents(
+        input.price,
+      )}, while these wallets are still leaning that way${positionContext}.`;
     }
+    return `The interesting part is that these wallets are still leaning ${sideLabel}${positionContext}.`;
   }
-  const unique: string[] = [];
-  for (const raw of [note.eventTitle, note.marketTitle]) {
-    const title = raw?.trim().replace(/\s+/g, " ");
-    if (!title) continue;
-    if (
-      unique.some((existing) => existing.toLowerCase() === title.toLowerCase())
-    ) {
-      continue;
-    }
-    unique.push(title);
+  if (priceIsUseful && input.price != null) {
+    return `${priceSubject} is still around ${formatCents(
+      input.price,
+    )}, but ${actor} has not backed off${positionContext}.`;
   }
-  return unique.join(" · ") || null;
+  return `${actor} is still holding ${sideLabel}${positionContext}.`;
+}
+
+function formatSignalBotWhyItMattersLines(note: SignalBotNote): string[] {
+  const seen = new Set<string>();
+  const bullets: string[] = [];
+  for (const rawBullet of note.holderCredentialBullets) {
+    const bullet = rawBullet.trim();
+    if (!bullet || seen.has(bullet)) continue;
+    seen.add(bullet);
+    bullets.push(bullet);
+    if (bullets.length >= 3) break;
+  }
+  if (bullets.length === 0) return [];
+  return ["Why it matters:", ...bullets.map((bullet) => `• ${bullet}`)];
 }
 
 function formatSignalContextLine(note: SignalBotNote): string | null {

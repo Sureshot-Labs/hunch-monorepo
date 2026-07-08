@@ -5036,10 +5036,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         /^\*\[Sharp YES interest\]\(https:\/\/app\.hunch\.trade\/events\/polymarket%3Aevent-1\?/,
       );
-      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /🎯 82%/);
-      assert.match(message.text, /📍 Test event · Will test resolve Yes\?/);
-      assert.match(message.text, /Why this wallet matters:/);
+      assert.match(
+        message.text,
+        /this wallet is still holding YES, with \$12\\.3K still on and \\-\$123 open PnL\\./,
+      );
+      assert.match(message.text, /Why it matters:/);
+      assert.doesNotMatch(
+        message.text,
+        /Why this wallet matters|Why this cluster matters/,
+      );
       assert.match(message.text, /• Up \$2\\.5K over the last 30 days/);
       assert.match(message.text, /• Won 65% of recent trades/);
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
@@ -5062,6 +5069,34 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(rows[0]?.[0]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
       assert.match(rows[1]?.[0]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
       assert.match(rows[1]?.[1]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
+    },
+  },
+  {
+    name: "message mentions cents naturally only when price is central",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          bestAsk: 0.03,
+          bestBid: 0.02,
+          description:
+            "Morocco is a long shot, but the wallet is still there.",
+          holderCredentialBullets: [
+            "Up $1.3M over the last 30 days",
+            "Beat market prices by 27 points across 21 resolved bets",
+            "Still holding while the market barely prices it",
+          ],
+          marketTitle: "Morocco",
+          title: "athelstan still has not sold Morocco",
+        }),
+      });
+      assert.match(message.text, /Morocco is still around 3¢/);
+      assert.match(
+        message.text,
+        /• Still holding while the market barely prices it/,
+      );
+      assert.doesNotMatch(message.text, /YES 2¢ \/ NO 98¢/);
     },
   },
   {
@@ -5137,7 +5172,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           modelMeta: { execution_priority: "high_conviction" },
         }),
       });
-      assert.match(single.text, /🔥 Strong holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(single.text, /Strong holder · YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(single.text, /High conviction|Top signal/i);
 
       const cluster = buildSignalBotMessage({
@@ -5148,7 +5183,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           modelMeta: { execution_priority: "high_conviction" },
         }),
       });
-      assert.match(cluster.text, /🔥 Strong wallets · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(cluster.text, /Strong wallets · YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -5212,11 +5247,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
       assert.equal(rows[1]?.[0]?.text, "👤 Wallet · YES $12.3K (-$123 PnL)");
-      assert.match(message.text, /📍 World Cup Winner · France/);
-      assert.match(
-        message.text,
-        /⚡ Strong holder · YES 31¢ \/ NO 69¢/,
-      );
+      assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -5246,16 +5277,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         message.text,
-        /📍 Portugal vs Spain · Under 2\\.5 total goals/,
-      );
-      assert.match(
-        message.text,
         /This wins if there are 0\\-2 total goals\\./,
       );
-      assert.match(
-        message.text,
-        /Over 2\\.5 total goals 31¢ \/ Under 2\\.5 total goals 69¢/,
-      );
+      assert.doesNotMatch(message.text, /Over 2\\.5 total goals 31¢/);
       assert.equal(message.text.includes("NO O/U 2.5"), false);
     },
   },
@@ -5289,7 +5313,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
-      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -5375,45 +5399,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message renders time left from close or expiration",
+    name: "message omits standalone time-left metadata",
     run: () => {
-      const minuteMessage = buildSignalBotMessage({
+      const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({ closeTime: "2026-01-01T00:45:00.000Z" }),
       });
-      assert.match(
-        minuteMessage.text,
-        /⚡ Strong holder · YES 31¢ \/ NO 69¢ · ⏳ 45m left/,
-      );
-
-      const hourMessage = buildSignalBotMessage({
-        appBaseUrl: "https://app.hunch.trade",
-        buyAmountUsd: 10,
-        note: note({ closeTime: "2026-01-01T05:00:00.000Z" }),
-      });
-      assert.match(hourMessage.text, /⏳ 5h left/);
-
-      const dayMessage = buildSignalBotMessage({
-        appBaseUrl: "https://app.hunch.trade",
-        buyAmountUsd: 10,
-        note: note({ expirationTime: "2026-01-04T00:00:00.000Z" }),
-      });
-      assert.match(dayMessage.text, /⏳ 3d left/);
-
-      const weekMessage = buildSignalBotMessage({
-        appBaseUrl: "https://app.hunch.trade",
-        buyAmountUsd: 10,
-        note: note({ closeTime: "2026-02-05T00:00:00.000Z" }),
-      });
-      assert.match(weekMessage.text, /⏳ 5w left/);
-
-      const expiredMessage = buildSignalBotMessage({
-        appBaseUrl: "https://app.hunch.trade",
-        buyAmountUsd: 10,
-        note: note({ closeTime: "2025-12-31T23:59:00.000Z" }),
-      });
-      assert.doesNotMatch(expiredMessage.text, /left/);
+      assert.doesNotMatch(message.text, /⏳ 45m left/);
+      assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
     },
   },
   {
@@ -5441,10 +5435,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(message.text, /^🎮 \*\[@TestWallet backs Beta Team/);
-      assert.match(
-        message.text,
-        /⚡ Strong holder · Alpha Team 31¢ \/ Beta Team 69¢/,
-      );
+      assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy Beta Team · Poly 70¢");
       assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi Beta Team 48¢");
       assert.equal(
@@ -5466,7 +5457,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.match(message.text, /⚡ Strong holder · VLA 31¢ \/ VLB 69¢/);
+      assert.doesNotMatch(message.text, /VLA 31¢ \/ VLB 69¢/);
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy VLB · Poly 70¢");
       assert.equal(rows[1]?.[0]?.text, "👤 Wallet · VLB $12.3K (-$123 PnL)");
     },
@@ -5543,8 +5534,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         rows[1]?.[0]?.text,
         "👥 Top wallet · YES $12.3K (-$123 PnL)",
       );
-      assert.match(message.text, /⚡ Strong wallets · YES 31¢ \/ NO 69¢/);
-      assert.match(message.text, /Why this cluster matters:/);
+      assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
+      assert.match(message.text, /Why it matters:/);
+      assert.doesNotMatch(message.text, /Why this cluster matters:/);
       assert.match(
         message.text,
         /• Up \$14\\.0K combined over the last 30 days/,
@@ -5566,7 +5558,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         /Why this wallet matters|Why this cluster matters/,
       );
-      assert.match(message.text, /⚡ Strong holder · YES 31¢ \/ NO 69¢/);
+      assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /confidence/i);
     },
   },
@@ -6477,7 +6469,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v1");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v2");
     },
   },
   {
@@ -6646,7 +6638,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Copy traders are flowing into this signal|This signal is getting copied|Traders are still following this call|Copy flow is building here|More wallets are joining this side|This call is starting to get traction/,
+        /Copy flow is building before price moves|People are quietly joining this side|This call is starting to get copied|Wallets are still leaning into this|More wallets are moving into this trade|Price is flat\\. Flow is not\\.|This call is starting to get traction/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /wallets added/);
       assert.match(
@@ -6764,7 +6756,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
       assert.match(text, /World Cup Winner · Argentina/);
-      assert.match(text, /net tracked flow/);
+      assert.match(text, /net copy flow/);
       assert.match(text, /YES: 40¢ → 55¢/);
       assert.doesNotMatch(text, /net tracked YES flow/);
     },
@@ -6806,7 +6798,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /net tracked flow/);
+      assert.match(text, /net copy flow/);
       assert.match(text, /NYG: 40¢ → 55¢/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -6866,17 +6858,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /🔥 (Copy traders are flowing into this signal|This signal is getting copied|Traders are still following this call|Copy flow is building here|More wallets are joining this side|This call is starting to get traction)/,
+        /(🔥|👀) (Copy flow is building before price moves|People are quietly joining this side|This call is starting to get copied|Wallets are still leaning into this|More wallets are moving into this trade|Price is flat\\. Flow is not\\.|This call is starting to get traction)/,
       );
       assert.match(
         text,
         /📍 Portugal vs Spain · Under 2\\.5 total goals/,
       );
-      assert.match(text, /Since the signal:/);
-      assert.match(text, /net tracked flow/);
-      assert.match(text, /1 wallets added · 0 trimmed\/exited · 1 still hold/);
+      assert.match(text, /Since the call:/);
+      assert.match(text, /net copy flow/);
+      assert.match(text, /1 wallets added · 1 still hold/);
       assert.match(text, /Under 2\\.5 total goals: 40¢ → 43¢/);
-      assert.match(text, /Time since signal: 25h/);
+      assert.doesNotMatch(text, /Time since signal/);
     },
   },
   {
@@ -7001,7 +6993,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Market moved with the signal/,
+        /Market moved with the read/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
@@ -7010,6 +7002,50 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
+    },
+  },
+  {
+    name: "followthrough cooling copy calls out exits",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 10,
+      };
+      db.candidateRows = [followthroughCandidateRow()];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "100",
+          latest_shares: "0",
+          latest_size_usd: "0",
+          negative_usd: "3000",
+          net_shares: "-100",
+          net_usd: "-3000",
+          positive_usd: "0",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(text, /Copy flow is cooling off/);
+      assert.match(text, /1 exited/);
+      assert.doesNotMatch(text, /0 trimmed/);
     },
   },
   {
@@ -7134,7 +7170,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedWin, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Signal side won/);
+      assert.match(telegram.messages[0]?.text ?? "", /Call side won/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>
@@ -7175,7 +7211,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedLoss, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Signal side lost/);
+      assert.match(telegram.messages[0]?.text ?? "", /Call side lost/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>
