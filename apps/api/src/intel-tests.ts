@@ -466,8 +466,14 @@ const tests: TestCase[] = [
       assert.equal(defaults.autoTrackedWalletEnabled, false);
       assert.equal(defaults.autoTrackedWalletLimit, 150);
       assert.equal(defaults.autoTrackedWalletRefreshHours, defaults.snapshotHours);
+      assert.equal(defaults.marketFetchConcurrency, 2);
+      assert.equal(defaults.followedFetchConcurrency, 2);
+      assert.equal(defaults.autoTrackedWalletFetchConcurrency, 2);
       assert.equal(defaults.autoTrackedWalletAttemptBackoffMinutes, 30);
       assert.equal(defaults.autoTrackedSubjectTtlDays, 14);
+      assert.equal(defaults.autoTrackedFreshPriceCheckEnabled, true);
+      assert.equal(defaults.freshPriceMaxAgeMs, 900000);
+      assert.equal(defaults.freshPriceTimeoutMs, 30000);
 
       const db = {
         query: async (_sql: string) => ({
@@ -480,8 +486,14 @@ const tests: TestCase[] = [
                 autoTrackedWalletEnabled: true,
                 autoTrackedWalletLimit: 25,
                 autoTrackedWalletRefreshHours: 2,
+                marketFetchConcurrency: 3,
+                followedFetchConcurrency: 4,
+                autoTrackedWalletFetchConcurrency: 8,
                 autoTrackedWalletAttemptBackoffMinutes: 45,
                 autoTrackedSubjectTtlDays: 3,
+                autoTrackedFreshPriceCheckEnabled: false,
+                freshPriceMaxAgeMs: 120000,
+                freshPriceTimeoutMs: 0,
               },
               created_by: null,
               created_at: new Date("2026-01-01T00:00:00.000Z"),
@@ -495,8 +507,14 @@ const tests: TestCase[] = [
       assert.equal(resolved.effective.autoTrackedWalletEnabled, true);
       assert.equal(resolved.effective.autoTrackedWalletLimit, 25);
       assert.equal(resolved.effective.autoTrackedWalletRefreshHours, 2);
+      assert.equal(resolved.effective.marketFetchConcurrency, 3);
+      assert.equal(resolved.effective.followedFetchConcurrency, 4);
+      assert.equal(resolved.effective.autoTrackedWalletFetchConcurrency, 8);
       assert.equal(resolved.effective.autoTrackedWalletAttemptBackoffMinutes, 45);
       assert.equal(resolved.effective.autoTrackedSubjectTtlDays, 3);
+      assert.equal(resolved.effective.autoTrackedFreshPriceCheckEnabled, false);
+      assert.equal(resolved.effective.freshPriceMaxAgeMs, 120000);
+      assert.equal(resolved.effective.freshPriceTimeoutMs, 0);
     },
   },
   {
@@ -507,22 +525,34 @@ const tests: TestCase[] = [
         "--ignore-runtime-policy",
         "--print-effective-policy",
         "--auto-tracked-wallets=true",
+        "--auto-tracked-fresh-price-check=false",
         "--holder-limit=50",
+        "--market-fetch-concurrency=4",
+        "--followed-fetch-concurrency=4",
         "--auto-tracked-wallet-limit=150",
         "--auto-tracked-wallet-refresh-hours=6",
+        "--auto-tracked-wallet-fetch-concurrency=8",
         "--auto-tracked-attempt-backoff-minutes=30",
         "--auto-tracked-subject-ttl-days=14",
+        "--fresh-price-max-age-ms=900000",
+        "--fresh-price-timeout-ms=60000",
       ]);
       const effective = applyWalletIntelRefreshCliArgs(defaults, args);
 
       assert.equal(args.ignoreRuntimePolicy, true);
       assert.equal(args.printEffectivePolicy, true);
       assert.equal(effective.autoTrackedWalletEnabled, true);
+      assert.equal(effective.autoTrackedFreshPriceCheckEnabled, false);
       assert.equal(effective.holderLimit, 50);
+      assert.equal(effective.marketFetchConcurrency, 4);
+      assert.equal(effective.followedFetchConcurrency, 4);
       assert.equal(effective.autoTrackedWalletLimit, 150);
       assert.equal(effective.autoTrackedWalletRefreshHours, 6);
+      assert.equal(effective.autoTrackedWalletFetchConcurrency, 8);
       assert.equal(effective.autoTrackedWalletAttemptBackoffMinutes, 30);
       assert.equal(effective.autoTrackedSubjectTtlDays, 14);
+      assert.equal(effective.freshPriceMaxAgeMs, 900000);
+      assert.equal(effective.freshPriceTimeoutMs, 60000);
     },
   },
   {
@@ -3932,7 +3962,9 @@ const tests: TestCase[] = [
     run: async () => {
       const originalFetch = globalThis.fetch;
       const originalLimitlessBase = env.limitlessApiBase;
+      const originalPriceRefreshQueueEnabled = env.priceRefreshQueueEnabled;
       env.limitlessApiBase = "https://limitless.example";
+      env.priceRefreshQueueEnabled = false;
       const snapshotParams: unknown[][] = [];
       globalThis.fetch = async (input) => {
         const url = new URL(String(input));
@@ -3958,10 +3990,10 @@ const tests: TestCase[] = [
 
       const client = {
         query: async (sql: string, params: unknown[] = []) => {
-          if (sql.includes("from unified_tokens ut")) {
+          if (sql.includes("unified_tokens ut")) {
             assert.equal(sql.includes("top.last_price"), false);
             assert.match(sql, /um\.last_price/);
-            assert.deepEqual(params[1], ["123"]);
+            assert.deepEqual(params[1], ["123", "limitless:123"]);
             return {
               rows: [
                 {
@@ -3981,7 +4013,12 @@ const tests: TestCase[] = [
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
             snapshotParams.push(params);
-            return { rows: [], rowCount: 1 };
+            return {
+              rows: [
+                { inserted: 1, market_ids: ["limitless:outside-market"] },
+              ],
+              rowCount: 1,
+            };
           }
           return { rows: [], rowCount: 1 };
         },
@@ -4010,21 +4047,25 @@ const tests: TestCase[] = [
               kalshi: new Map(),
             },
             telemetry: {} as never,
-            followedFetchConcurrency: 1,
+            autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
           },
         );
 
         assert.equal(result.rowInserts, 1);
         assert.deepEqual(result.marketIds, ["limitless:outside-market"]);
-        assert.equal(snapshotParams[0]?.[2], "limitless:outside-market");
+        const payload = JSON.parse(String(snapshotParams[0]?.[0])) as Array<
+          Record<string, unknown>
+        >;
+        assert.equal(payload[0]?.market_id, "limitless:outside-market");
         assert.equal(
-          (snapshotParams[0]?.[7] as Record<string, unknown>).source,
+          ((payload[0]?.metadata as Record<string, unknown>) ?? {}).source,
           "auto_tracked_wallet",
         );
       } finally {
         globalThis.fetch = originalFetch;
         env.limitlessApiBase = originalLimitlessBase;
+        env.priceRefreshQueueEnabled = originalPriceRefreshQueueEnabled;
       }
     },
   },
@@ -4035,10 +4076,12 @@ const tests: TestCase[] = [
       const originalDataApiBase = env.polymarketDataApiBase;
       const originalRpcUrl = env.polygonRpcUrl;
       const originalContract = env.polymarketConditionalTokensAddress;
+      const originalPriceRefreshQueueEnabled = env.priceRefreshQueueEnabled;
       env.polymarketDataApiBase = "https://poly-data.example";
       env.polygonRpcUrl = "https://polygon-rpc.example";
       env.polymarketConditionalTokensAddress =
         "0x2222222222222222222222222222222222222222";
+      env.priceRefreshQueueEnabled = false;
       const erc1155 = new Interface([
         "function balanceOfBatch(address[] accounts, uint256[] ids) view returns (uint256[])",
       ]);
@@ -4070,7 +4113,7 @@ const tests: TestCase[] = [
             assert.deepEqual(params[0], ["123"]);
             return { rows: [], rowCount: 1 };
           }
-          if (sql.includes("from unified_tokens ut")) {
+          if (sql.includes("unified_tokens ut")) {
             return {
               rows: [
                 {
@@ -4090,7 +4133,12 @@ const tests: TestCase[] = [
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
             snapshotParams.push(params);
-            return { rows: [], rowCount: 1 };
+            return {
+              rows: [
+                { inserted: 1, market_ids: ["polymarket:outside-market"] },
+              ],
+              rowCount: 1,
+            };
           }
           return { rows: [], rowCount: 1 };
         },
@@ -4119,19 +4167,23 @@ const tests: TestCase[] = [
               kalshi: new Map(),
             },
             telemetry: {} as never,
-            followedFetchConcurrency: 1,
+            autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
           },
         );
 
         assert.equal(result.rowInserts, 1);
         assert.deepEqual(result.marketIds, ["polymarket:outside-market"]);
-        assert.equal(snapshotParams[0]?.[4], 5);
+        const payload = JSON.parse(String(snapshotParams[0]?.[0])) as Array<
+          Record<string, unknown>
+        >;
+        assert.equal(payload[0]?.shares, "5");
       } finally {
         globalThis.fetch = originalFetch;
         env.polymarketDataApiBase = originalDataApiBase;
         env.polygonRpcUrl = originalRpcUrl;
         env.polymarketConditionalTokensAddress = originalContract;
+        env.priceRefreshQueueEnabled = originalPriceRefreshQueueEnabled;
       }
     },
   },
@@ -4140,7 +4192,9 @@ const tests: TestCase[] = [
     run: async () => {
       const originalFetch = globalThis.fetch;
       const originalSolanaRpcUrls = env.solanaRpcUrls;
+      const originalPriceRefreshQueueEnabled = env.priceRefreshQueueEnabled;
       env.solanaRpcUrls = ["https://solana-rpc.example"];
+      env.priceRefreshQueueEnabled = false;
       let rpcCalls = 0;
       const snapshotParams: unknown[][] = [];
       globalThis.fetch = async () => {
@@ -4183,7 +4237,7 @@ const tests: TestCase[] = [
             assert.deepEqual(params[0], ["sol:mint-outside"]);
             return { rows: [], rowCount: 1 };
           }
-          if (sql.includes("from unified_tokens ut")) {
+          if (sql.includes("unified_tokens ut")) {
             return {
               rows: [
                 {
@@ -4203,7 +4257,10 @@ const tests: TestCase[] = [
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
             snapshotParams.push(params);
-            return { rows: [], rowCount: 1 };
+            return {
+              rows: [{ inserted: 1, market_ids: ["kalshi:outside-market"] }],
+              rowCount: 1,
+            };
           }
           return { rows: [], rowCount: 1 };
         },
@@ -4244,17 +4301,21 @@ const tests: TestCase[] = [
                 actualCalls: 0,
               },
             } as never,
-            followedFetchConcurrency: 1,
+            autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
           },
         );
 
         assert.equal(result.rowInserts, 1);
         assert.deepEqual(result.marketIds, ["kalshi:outside-market"]);
-        assert.equal(snapshotParams[0]?.[4], 2.5);
+        const payload = JSON.parse(String(snapshotParams[0]?.[0])) as Array<
+          Record<string, unknown>
+        >;
+        assert.equal(payload[0]?.shares, "2.5");
       } finally {
         globalThis.fetch = originalFetch;
         env.solanaRpcUrls = originalSolanaRpcUrls;
+        env.priceRefreshQueueEnabled = originalPriceRefreshQueueEnabled;
       }
     },
   },
@@ -4295,7 +4356,7 @@ const tests: TestCase[] = [
               kalshi: new Map(),
             },
             telemetry: {} as never,
-            followedFetchConcurrency: 1,
+            autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
           },
         );
@@ -4375,7 +4436,7 @@ const tests: TestCase[] = [
               kalshi: new Map(),
             },
             telemetry: {} as never,
-            followedFetchConcurrency: 1,
+            autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
           },
         );
@@ -4435,7 +4496,7 @@ const tests: TestCase[] = [
               kalshi: new Map(),
             },
             telemetry: {} as never,
-            followedFetchConcurrency: 1,
+            autoTrackedWalletFetchConcurrency: 1,
             touchedWalletIds: new Set(),
           },
         );

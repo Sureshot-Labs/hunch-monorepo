@@ -662,6 +662,23 @@ const walletIntelAutoTrackedSubjectTtlDays = optionalNonNegativeInt(
   "WALLET_INTEL_AUTO_TRACKED_SUBJECT_TTL_DAYS",
   14,
 );
+const walletIntelAutoTrackedWalletFetchConcurrency = optionalIntInRange(
+  "WALLET_INTEL_AUTO_TRACKED_WALLET_FETCH_CONCURRENCY",
+  2,
+  1,
+  8,
+);
+const walletIntelAutoTrackedFreshPriceCheckEnabled =
+  parseOptionalBool(process.env.WALLET_INTEL_AUTO_TRACKED_FRESH_PRICE_CHECK_ENABLED) ??
+  true;
+const walletIntelFreshPriceMaxAgeMs = optionalPositiveInt(
+  "WALLET_INTEL_FRESH_PRICE_MAX_AGE_MS",
+  15 * 60 * 1_000,
+);
+const walletIntelFreshPriceTimeoutMs = optionalNonNegativeInt(
+  "WALLET_INTEL_FRESH_PRICE_TIMEOUT_MS",
+  30_000,
+);
 const walletIntelBackfillMaxSteps = optionalPositiveInt(
   "WALLET_INTEL_BACKFILL_MAX_STEPS",
   6,
@@ -1021,13 +1038,13 @@ export const env = {
     "WALLET_INTEL_MARKET_FETCH_CONCURRENCY",
     2,
     1,
-    4,
+    8,
   ),
   walletIntelFollowedFetchConcurrency: optionalIntInRange(
     "WALLET_INTEL_FOLLOWED_FETCH_CONCURRENCY",
     2,
     1,
-    2,
+    8,
   ),
   walletIntelFollowedPrefetchTimeoutMs: optionalPositiveInt(
     "WALLET_INTEL_FOLLOWED_PREFETCH_TIMEOUT_MS",
@@ -1058,6 +1075,10 @@ export const env = {
   walletIntelAutoTrackedWalletRefreshHours,
   walletIntelAutoTrackedWalletAttemptBackoffMinutes,
   walletIntelAutoTrackedSubjectTtlDays,
+  walletIntelAutoTrackedWalletFetchConcurrency,
+  walletIntelAutoTrackedFreshPriceCheckEnabled,
+  walletIntelFreshPriceMaxAgeMs,
+  walletIntelFreshPriceTimeoutMs,
   walletIntelBackfillSnapshots: optionalNonNegativeInt(
     "WALLET_INTEL_BACKFILL_SNAPSHOTS",
     0,

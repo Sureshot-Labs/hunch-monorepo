@@ -104,11 +104,17 @@ export type WalletIntelRefreshPolicy = {
   tokenLimitKalshi: number;
   holderLimit: number;
   snapshotHours: number;
+  marketFetchConcurrency: number;
+  followedFetchConcurrency: number;
   autoTrackedWalletEnabled: boolean;
   autoTrackedWalletLimit: number;
   autoTrackedWalletRefreshHours: number;
+  autoTrackedWalletFetchConcurrency: number;
   autoTrackedWalletAttemptBackoffMinutes: number;
   autoTrackedSubjectTtlDays: number;
+  autoTrackedFreshPriceCheckEnabled: boolean;
+  freshPriceMaxAgeMs: number;
+  freshPriceTimeoutMs: number;
   backfillSnapshots: number;
   backfillMaxSteps: number;
   retentionDaysSnapshots: number;
@@ -665,11 +671,17 @@ const walletIntelRefreshSchema = z
     tokenLimitKalshi: positiveInt,
     holderLimit: positiveInt,
     snapshotHours: positiveInt,
+    marketFetchConcurrency: positiveInt.max(8),
+    followedFetchConcurrency: positiveInt.max(8),
     autoTrackedWalletEnabled: strictBoolean,
     autoTrackedWalletLimit: nonNegativeInt,
     autoTrackedWalletRefreshHours: positiveInt,
+    autoTrackedWalletFetchConcurrency: positiveInt.max(8),
     autoTrackedWalletAttemptBackoffMinutes: positiveInt,
     autoTrackedSubjectTtlDays: nonNegativeInt,
+    autoTrackedFreshPriceCheckEnabled: strictBoolean,
+    freshPriceMaxAgeMs: positiveInt,
+    freshPriceTimeoutMs: nonNegativeInt,
     backfillSnapshots: nonNegativeInt,
     backfillMaxSteps: positiveInt,
     retentionDaysSnapshots: nonNegativeInt,
@@ -1433,13 +1445,21 @@ function getDefaults(): IntelPolicyMap {
       tokenLimitKalshi: env.walletIntelTokenLimitKalshi,
       holderLimit: env.walletIntelHolderLimit,
       snapshotHours: env.walletIntelSnapshotHours,
+      marketFetchConcurrency: env.walletIntelMarketFetchConcurrency,
+      followedFetchConcurrency: env.walletIntelFollowedFetchConcurrency,
       autoTrackedWalletEnabled: env.walletIntelAutoTrackedWalletEnabled,
       autoTrackedWalletLimit: env.walletIntelAutoTrackedWalletLimit,
       autoTrackedWalletRefreshHours:
         env.walletIntelAutoTrackedWalletRefreshHours,
+      autoTrackedWalletFetchConcurrency:
+        env.walletIntelAutoTrackedWalletFetchConcurrency,
       autoTrackedWalletAttemptBackoffMinutes:
         env.walletIntelAutoTrackedWalletAttemptBackoffMinutes,
       autoTrackedSubjectTtlDays: env.walletIntelAutoTrackedSubjectTtlDays,
+      autoTrackedFreshPriceCheckEnabled:
+        env.walletIntelAutoTrackedFreshPriceCheckEnabled,
+      freshPriceMaxAgeMs: env.walletIntelFreshPriceMaxAgeMs,
+      freshPriceTimeoutMs: env.walletIntelFreshPriceTimeoutMs,
       backfillSnapshots: env.walletIntelBackfillSnapshots,
       backfillMaxSteps: env.walletIntelBackfillMaxSteps,
       retentionDaysSnapshots: env.walletIntelRetentionDaysSnapshots,
@@ -1903,6 +1923,16 @@ function normalizeRefreshPolicy(
     tokenLimitKalshi: Math.max(1, Math.trunc(policy.tokenLimitKalshi)),
     holderLimit: Math.max(1, Math.trunc(policy.holderLimit)),
     snapshotHours: Math.max(1, Math.trunc(policy.snapshotHours)),
+    marketFetchConcurrency: clamp(
+      Math.trunc(policy.marketFetchConcurrency),
+      1,
+      8,
+    ),
+    followedFetchConcurrency: clamp(
+      Math.trunc(policy.followedFetchConcurrency),
+      1,
+      8,
+    ),
     autoTrackedWalletEnabled: Boolean(policy.autoTrackedWalletEnabled),
     autoTrackedWalletLimit: Math.max(
       0,
@@ -1912,6 +1942,11 @@ function normalizeRefreshPolicy(
       1,
       Math.trunc(policy.autoTrackedWalletRefreshHours),
     ),
+    autoTrackedWalletFetchConcurrency: clamp(
+      Math.trunc(policy.autoTrackedWalletFetchConcurrency),
+      1,
+      8,
+    ),
     autoTrackedWalletAttemptBackoffMinutes: Math.max(
       1,
       Math.trunc(policy.autoTrackedWalletAttemptBackoffMinutes),
@@ -1920,6 +1955,11 @@ function normalizeRefreshPolicy(
       0,
       Math.trunc(policy.autoTrackedSubjectTtlDays),
     ),
+    autoTrackedFreshPriceCheckEnabled: Boolean(
+      policy.autoTrackedFreshPriceCheckEnabled,
+    ),
+    freshPriceMaxAgeMs: Math.max(1, Math.trunc(policy.freshPriceMaxAgeMs)),
+    freshPriceTimeoutMs: Math.max(0, Math.trunc(policy.freshPriceTimeoutMs)),
     backfillSnapshots: Math.max(0, Math.trunc(policy.backfillSnapshots)),
     backfillMaxSteps: Math.max(1, Math.trunc(policy.backfillMaxSteps)),
     retentionDaysSnapshots: Math.max(
