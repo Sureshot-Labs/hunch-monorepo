@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import type {
@@ -101,6 +102,7 @@ export type WalletAttributionBuildOptions = {
   filterLabels?: WalletAttributionLabelKey[] | null;
 };
 
+type Queryable = Pick<PoolClient, "query">;
 type VenueKey = "polymarket" | "kalshi" | "limitless";
 
 type WalletVenueStats = {
@@ -174,6 +176,26 @@ type RatioRow = {
   max_stake_to_market_vol_ratio: string | null;
 };
 
+type PersistedVenueStatsRow = {
+  wallet_id: string;
+  attribution_venue_stats_30d: unknown | null;
+  attribution_specialist_policy_hash: string | null;
+  attribution_specialist_as_of: Date | null;
+};
+
+type PersistedWalletVenueStats = {
+  venue: VenueKey;
+  volume30dUsd: number;
+  trades30d: number;
+  activeDays30d: number;
+  activeHours30d: number;
+  activeUtcHourSlots30d: number;
+  maxStakeUsd: number;
+  medianStakeUsd: number | null;
+  topCategoryFamily: SpecialistFamily | null;
+  topCategoryShare: number | null;
+};
+
 type ExposureRow = {
   wallet_id: string;
   exposure_usd: string | null;
@@ -190,6 +212,9 @@ type InferredOutcomeRow = {
 };
 
 type SpecialistFamily = MarketCategoryFamily;
+
+export const WALLET_SPECIALIST_ATTRIBUTION_CLASSIFIER_VERSION = "v1";
+export const WALLET_SPECIALIST_ATTRIBUTION_MAX_STALE_MS = 36 * 60 * 60 * 1000;
 
 const SPECIALIST_LABEL_BY_FAMILY: Record<
   SpecialistFamily,
@@ -319,6 +344,50 @@ const SPECIALIST_LABEL_SET = new Set<WalletAttributionLabelKey>([
 ]);
 
 const VENUE_ORDER_FALLBACK: VenueKey[] = ["polymarket", "kalshi", "limitless"];
+
+export function isSpecialistAttributionLabel(
+  label: WalletAttributionLabelKey,
+): boolean {
+  return SPECIALIST_LABEL_SET.has(label);
+}
+
+export function resolveSpecialistAttributionPolicyHash(
+  policy: WalletIntelAttributionPolicy,
+): string {
+  const payload = {
+    classifierVersion: WALLET_SPECIALIST_ATTRIBUTION_CLASSIFIER_VERSION,
+    venueCapabilities: {
+      polymarket: {
+        specialistEnabled:
+          policy.venueCapabilities.polymarket.specialistEnabled,
+      },
+      kalshi: {
+        specialistEnabled: policy.venueCapabilities.kalshi.specialistEnabled,
+      },
+      limitless: {
+        specialistEnabled: policy.venueCapabilities.limitless.specialistEnabled,
+      },
+    },
+    venueThresholds: {
+      polymarket: {
+        specialistCategoryShareMin:
+          policy.venueThresholds.polymarket.specialistCategoryShareMin,
+      },
+      kalshi: {
+        specialistCategoryShareMin:
+          policy.venueThresholds.kalshi.specialistCategoryShareMin,
+      },
+      limitless: {
+        specialistCategoryShareMin:
+          policy.venueThresholds.limitless.specialistCategoryShareMin,
+      },
+    },
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(payload))
+    .digest("hex")
+    .slice(0, 24);
+}
 
 const REASON_PRIORITY: Record<string, number> = {
   high_risk_longshot: 0,
@@ -584,8 +653,8 @@ function normalizeVenueOrder(policy: WalletIntelAttributionPolicy): VenueKey[] {
   return values;
 }
 
-async function loadVenueStats(
-  client: PoolClient,
+async function loadLiveVenueStats(
+  client: Queryable,
   walletIds: string[],
   options?: {
     includeCategoryStats?: boolean;
@@ -825,6 +894,344 @@ async function loadVenueStats(
   }
 
   return byWallet;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeSpecialistFamily(value: unknown): SpecialistFamily | null {
+  if (typeof value !== "string") return null;
+  return value in SPECIALIST_LABEL_BY_FAMILY
+    ? (value as SpecialistFamily)
+    : null;
+}
+
+function serializePersistedVenueStats(
+  venue: VenueKey,
+  stats: WalletVenueStats,
+): PersistedWalletVenueStats {
+  return {
+    venue,
+    volume30dUsd: stats.volume30dUsd,
+    trades30d: stats.trades30d,
+    activeDays30d: stats.activeDays30d,
+    activeHours30d: stats.activeHours30d,
+    activeUtcHourSlots30d: stats.activeUtcHourSlots30d,
+    maxStakeUsd: stats.maxStakeUsd,
+    medianStakeUsd: stats.medianStakeUsd,
+    topCategoryFamily: stats.topCategoryFamily,
+    topCategoryShare: stats.topCategoryShare,
+  };
+}
+
+function parsePersistedVenueStats(
+  value: unknown,
+): Map<VenueKey, WalletVenueStats> | null {
+  if (!Array.isArray(value)) return null;
+  const map = new Map<VenueKey, WalletVenueStats>();
+  for (const item of value) {
+    if (!isPlainRecord(item)) return null;
+    const venue = parseVenue(
+      typeof item.venue === "string" ? item.venue : null,
+    );
+    if (!venue) return null;
+    map.set(venue, {
+      volume30dUsd: Math.max(0, toNumber(item.volume30dUsd) ?? 0),
+      trades30d: Math.max(0, Math.trunc(toNumber(item.trades30d) ?? 0)),
+      activeDays30d: Math.max(0, Math.trunc(toNumber(item.activeDays30d) ?? 0)),
+      activeHours30d: Math.max(
+        0,
+        Math.trunc(toNumber(item.activeHours30d) ?? 0),
+      ),
+      activeUtcHourSlots30d: Math.max(
+        0,
+        Math.trunc(toNumber(item.activeUtcHourSlots30d) ?? 0),
+      ),
+      maxStakeUsd: Math.max(0, toNumber(item.maxStakeUsd) ?? 0),
+      medianStakeUsd: toNumber(item.medianStakeUsd),
+      maxStakeToMarketVolRatio: null,
+      topCategoryFamily: normalizeSpecialistFamily(item.topCategoryFamily),
+      topCategoryShare: toNumber(item.topCategoryShare),
+    });
+  }
+  return map;
+}
+
+async function loadPersistedSpecialistVenueStats(
+  client: Queryable,
+  walletIds: string[],
+  policy: WalletIntelAttributionPolicy,
+): Promise<Map<string, Map<VenueKey, WalletVenueStats>>> {
+  const byWallet = new Map<string, Map<VenueKey, WalletVenueStats>>();
+  if (walletIds.length === 0) return byWallet;
+  const policyHash = resolveSpecialistAttributionPolicyHash(policy);
+  const staleBefore = new Date(
+    Date.now() - WALLET_SPECIALIST_ATTRIBUTION_MAX_STALE_MS,
+  );
+  const rows = await client.query<PersistedVenueStatsRow>(
+    `
+      select
+        wallet_id,
+        attribution_venue_stats_30d,
+        attribution_specialist_policy_hash,
+        attribution_specialist_as_of
+      from wallet_intel_selector_snapshot
+      where wallet_id = any($1::uuid[])
+        and attribution_specialist_policy_hash = $2
+        and attribution_specialist_as_of >= $3::timestamptz
+    `,
+    [walletIds, policyHash, staleBefore],
+  );
+  for (const row of rows.rows) {
+    const stats = parsePersistedVenueStats(row.attribution_venue_stats_30d);
+    if (!stats) continue;
+    byWallet.set(row.wallet_id, stats);
+  }
+  return byWallet;
+}
+
+async function applyVenueRatioStats(
+  client: Queryable,
+  byWallet: Map<string, Map<VenueKey, WalletVenueStats>>,
+  walletIds: string[],
+): Promise<void> {
+  if (walletIds.length === 0) return;
+  const ratioRows = await client.query<RatioRow>(
+    `
+      with wallet_market as (
+        select
+          wah.wallet_id,
+          wah.venue,
+          wah.market_id,
+          sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as wallet_notional_24h
+        from wallet_activity_hourly wah
+        where wah.wallet_id = any($1::uuid[])
+          and wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - interval '24 hours'
+        group by wah.wallet_id, wah.venue, wah.market_id
+      ),
+      market_scope as (
+        select distinct venue, market_id
+        from wallet_market
+      ),
+      market_total as (
+        select
+          wah.venue,
+          wah.market_id,
+          sum(coalesce(wah.abs_delta_usd, abs(wah.signed_delta_usd), 0)) as market_notional_24h
+        from wallet_activity_hourly wah
+        join market_scope ms
+          on ms.venue = wah.venue
+         and ms.market_id = wah.market_id
+        where wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - interval '24 hours'
+        group by wah.venue, wah.market_id
+      )
+      select
+        wm.wallet_id,
+        wm.venue,
+        max(
+          case
+            when mt.market_notional_24h > 0
+              then wm.wallet_notional_24h / mt.market_notional_24h
+            else null
+          end
+        ) as max_stake_to_market_vol_ratio
+      from wallet_market wm
+      left join market_total mt
+        on mt.venue = wm.venue
+       and mt.market_id = wm.market_id
+      group by wm.wallet_id, wm.venue
+    `,
+    [walletIds],
+  );
+
+  for (const row of ratioRows.rows) {
+    const venue = parseVenue(row.venue);
+    if (!venue) continue;
+    const walletMap = byWallet.get(row.wallet_id);
+    const stats = walletMap?.get(venue);
+    if (!stats) continue;
+    stats.maxStakeToMarketVolRatio = toNumber(
+      row.max_stake_to_market_vol_ratio,
+    );
+  }
+}
+
+async function loadVenueStats(
+  client: Queryable,
+  walletIds: string[],
+  policy: WalletIntelAttributionPolicy,
+  options?: {
+    includeCategoryStats?: boolean;
+    includeRatioStats?: boolean;
+  },
+): Promise<Map<string, Map<VenueKey, WalletVenueStats>>> {
+  const byWallet = new Map<string, Map<VenueKey, WalletVenueStats>>();
+  if (walletIds.length === 0) return byWallet;
+  const includeCategoryStats = options?.includeCategoryStats ?? true;
+  const includeRatioStats = options?.includeRatioStats ?? true;
+
+  if (!includeCategoryStats) {
+    return loadLiveVenueStats(client, walletIds, {
+      includeCategoryStats: false,
+      includeRatioStats,
+    });
+  }
+
+  const persisted = await loadPersistedSpecialistVenueStats(
+    client,
+    walletIds,
+    policy,
+  );
+  for (const [walletId, stats] of persisted) {
+    byWallet.set(walletId, stats);
+  }
+
+  const missingWalletIds = walletIds.filter(
+    (walletId) => !byWallet.has(walletId),
+  );
+  if (missingWalletIds.length > 0) {
+    const liveStats = await loadLiveVenueStats(client, missingWalletIds, {
+      includeCategoryStats: true,
+      includeRatioStats: false,
+    });
+    for (const [walletId, stats] of liveStats) {
+      byWallet.set(walletId, stats);
+    }
+  }
+
+  if (includeRatioStats) {
+    await applyVenueRatioStats(client, byWallet, walletIds);
+  }
+
+  return byWallet;
+}
+
+function resolveSpecialistLabelsForVenueStats(
+  statsByVenue: Map<VenueKey, WalletVenueStats>,
+  policy: WalletIntelAttributionPolicy,
+): WalletAttributionLabelKey[] {
+  const labels = new Set<WalletAttributionLabelKey>();
+  for (const [venue, stats] of statsByVenue.entries()) {
+    const thresholds = policy.venueThresholds[venue];
+    if (
+      policy.venueCapabilities[venue].specialistEnabled &&
+      isPositiveThreshold(thresholds.specialistCategoryShareMin) &&
+      stats.topCategoryFamily &&
+      stats.topCategoryShare != null &&
+      stats.topCategoryShare >= thresholds.specialistCategoryShareMin
+    ) {
+      labels.add(SPECIALIST_LABEL_BY_FAMILY[stats.topCategoryFamily]);
+    }
+  }
+  return sortAttributionLabels(labels).filter((label) =>
+    SPECIALIST_LABEL_SET.has(label),
+  );
+}
+
+export type RefreshWalletSpecialistAttributionResult = {
+  processed: number;
+  updated: number;
+  policyHash: string;
+  asOf: Date;
+};
+
+export async function refreshWalletSpecialistAttribution(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    policy: WalletIntelAttributionPolicy;
+    asOf: Date;
+  },
+): Promise<RefreshWalletSpecialistAttributionResult> {
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  const policyHash = resolveSpecialistAttributionPolicyHash(inputs.policy);
+  if (walletIds.length === 0) {
+    return { processed: 0, updated: 0, policyHash, asOf: inputs.asOf };
+  }
+
+  const statsByWallet = await loadLiveVenueStats(client, walletIds, {
+    includeCategoryStats: true,
+    includeRatioStats: false,
+  });
+  const payload = walletIds.map((walletId) => {
+    const statsByVenue =
+      statsByWallet.get(walletId) ?? new Map<VenueKey, WalletVenueStats>();
+    const labels = resolveSpecialistLabelsForVenueStats(
+      statsByVenue,
+      inputs.policy,
+    );
+    const venueStats = Array.from(statsByVenue.entries()).map(
+      ([venue, stats]) => serializePersistedVenueStats(venue, stats),
+    );
+    return {
+      walletId,
+      labels,
+      venueStats,
+    };
+  });
+
+  const result = await client.query<{ wallet_id: string }>(
+    `
+      with input_rows as (
+        select *
+        from jsonb_to_recordset($1::jsonb) as x(
+          "walletId" text,
+          labels jsonb,
+          "venueStats" jsonb
+        )
+      ),
+      normalized as (
+        select
+          "walletId"::uuid as wallet_id,
+          coalesce(
+            array(
+              select jsonb_array_elements_text(coalesce(labels, '[]'::jsonb))
+            ),
+            '{}'::text[]
+          ) as labels,
+          coalesce("venueStats", '[]'::jsonb) as venue_stats
+        from input_rows
+      )
+      insert into wallet_intel_selector_snapshot (
+        wallet_id,
+        attribution_specialist_labels_30d,
+        attribution_venue_stats_30d,
+        attribution_specialist_policy_hash,
+        attribution_specialist_as_of,
+        updated_at
+      )
+      select
+        wallet_id,
+        labels,
+        venue_stats,
+        $2::text,
+        $3::timestamptz,
+        now()
+      from normalized
+      on conflict (wallet_id) do update
+        set attribution_specialist_labels_30d =
+              excluded.attribution_specialist_labels_30d,
+            attribution_venue_stats_30d =
+              excluded.attribution_venue_stats_30d,
+            attribution_specialist_policy_hash =
+              excluded.attribution_specialist_policy_hash,
+            attribution_specialist_as_of =
+              excluded.attribution_specialist_as_of,
+            updated_at = excluded.updated_at
+      returning wallet_id
+    `,
+    [JSON.stringify(payload), policyHash, inputs.asOf],
+  );
+
+  return {
+    processed: walletIds.length,
+    updated: result.rowCount ?? result.rows.length,
+    policyHash,
+    asOf: inputs.asOf,
+  };
 }
 
 async function loadComputedStats(
@@ -1329,7 +1736,7 @@ export async function buildWalletAttributionMap(
   const includeRatioStats =
     mode === "full" || requestedLabels.has("market_mover");
   const walletIds = wallets.map((wallet) => wallet.walletId);
-  const venueStatsByWallet = await loadVenueStats(client, walletIds, {
+  const venueStatsByWallet = await loadVenueStats(client, walletIds, policy, {
     includeCategoryStats,
     includeRatioStats,
   });

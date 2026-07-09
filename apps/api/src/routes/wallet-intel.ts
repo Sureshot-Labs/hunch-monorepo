@@ -104,8 +104,11 @@ import {
 import {
   buildSignalPresentation,
   buildWalletAttributionMap,
+  isSpecialistAttributionLabel,
   normalizeAttributionLabelFilters,
   normalizeAttributionPrimaryFilters,
+  resolveSpecialistAttributionPolicyHash,
+  WALLET_SPECIALIST_ATTRIBUTION_MAX_STALE_MS,
   walletMatchesFilters,
   type WalletAttribution,
   type WalletAttributionLabelKey,
@@ -3975,8 +3978,10 @@ function canUseExactAttributionSqlLabelFilter(
   return (
     primaryFilters.length === 0 &&
     labelFilters.length > 0 &&
-    labelFilters.every((value) =>
-      EXACT_ATTRIBUTION_SQL_LABEL_FILTERS.has(value),
+    labelFilters.every(
+      (value) =>
+        EXACT_ATTRIBUTION_SQL_LABEL_FILTERS.has(value) ||
+        isSpecialistAttributionLabel(value),
     )
   );
 }
@@ -4948,6 +4953,21 @@ async function withWalletIntelQuerySettings<T>(
   }
 }
 
+async function runWalletIntelParallelQuery<T>(
+  task: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    return await withWalletIntelQuerySettings(
+      client,
+      walletPositionRouteQuerySettings,
+      () => task(client),
+    );
+  } finally {
+    client.release();
+  }
+}
+
 export const walletPositionRouteQuerySettings = {
   workMem: "48MB",
   disableJit: true,
@@ -5815,6 +5835,89 @@ async function loadWalletIdsForMarketMoverLabel(
   return rows.rows.map((row) => row.wallet_id);
 }
 
+async function loadWalletIdsForSpecialistLabel(
+  client: PoolClient,
+  walletIds: string[],
+  attributionPolicy: Awaited<
+    ReturnType<typeof resolveWalletIntelAttributionPolicy>
+  >["effective"],
+  label: WalletAttributionLabelKey,
+): Promise<string[]> {
+  if (walletIds.length === 0) return [];
+  const policyHash = resolveSpecialistAttributionPolicyHash(attributionPolicy);
+  const staleBefore = new Date(
+    Date.now() - WALLET_SPECIALIST_ATTRIBUTION_MAX_STALE_MS,
+  );
+  const snapshotRows = await client.query<{
+    wallet_id: string;
+    attribution_specialist_labels_30d: string[] | null;
+  }>(
+    `
+      select
+        wallet_id,
+        attribution_specialist_labels_30d
+      from wallet_intel_selector_snapshot
+      where wallet_id = any($1::uuid[])
+        and attribution_specialist_policy_hash = $2
+        and attribution_specialist_as_of >= $3::timestamptz
+    `,
+    [walletIds, policyHash, staleBefore],
+  );
+
+  const freshWalletIds = new Set<string>();
+  const matchedWalletIds = new Set<string>();
+  for (const row of snapshotRows.rows) {
+    freshWalletIds.add(row.wallet_id);
+    if ((row.attribution_specialist_labels_30d ?? []).includes(label)) {
+      matchedWalletIds.add(row.wallet_id);
+    }
+  }
+
+  const fallbackWalletIds = walletIds.filter(
+    (walletId) => !freshWalletIds.has(walletId),
+  );
+  if (fallbackWalletIds.length > 0) {
+    const rows = await loadWalletAttributionFilterRowsByIds(
+      client,
+      fallbackWalletIds,
+    );
+    const attributionMap = await buildWalletAttributionMap(
+      client,
+      rows.map((row) =>
+        buildWalletAttributionInput({
+          walletId: row.id,
+          tags: row.tags,
+          metrics: null,
+          inferredWinRate: null,
+          inferredResolvedCount: null,
+          trackedExposureUsd: null,
+          topChanges: [],
+        }),
+      ),
+      attributionPolicy,
+      {
+        mode: "filters",
+        filterLabels: [label],
+      },
+    );
+    for (const row of rows) {
+      if (
+        walletMatchesFilters(row.tags, attributionMap.get(row.id), {
+          tags: [],
+          tagMode: "any",
+          primary: [],
+          labels: [label],
+          labelMode: "any",
+        })
+      ) {
+        matchedWalletIds.add(row.id);
+      }
+    }
+  }
+
+  return walletIds.filter((walletId) => matchedWalletIds.has(walletId));
+}
+
 async function filterWalletIdsByExactAttributionLabels(
   client: PoolClient,
   walletIds: string[],
@@ -5857,6 +5960,16 @@ async function filterWalletIdsByExactAttributionLabels(
             ),
           );
         default:
+          if (isSpecialistAttributionLabel(label)) {
+            return new Set(
+              await loadWalletIdsForSpecialistLabel(
+                client,
+                walletIds,
+                attributionPolicy,
+                label,
+              ),
+            );
+          }
           return new Set<string>();
       }
     }),
@@ -5976,6 +6089,108 @@ async function filterWalletIdsByAttribution(
       }),
     )
     .map((row) => row.id);
+}
+
+type WalletActivitySummaryOptions = Parameters<
+  typeof fetchWalletActivityTopChanges
+>[2];
+
+type WalletActivitySummaryPageContext = {
+  pageRows: CandidateWalletRow[];
+  pageTopChangesMap: Map<string, WalletActivityTopChange[]>;
+  pageSignalSummaryMap: Map<string, WalletActivitySignalSummary>;
+  sparklineMap: Map<string, WalletActivitySparkline>;
+  followerCountsMap: Map<string, number>;
+  openPositionStatsMap: Awaited<
+    ReturnType<typeof loadWalletOpenPositionStatsPreferRollupMap>
+  >;
+  portfolioPerformanceMap: Map<string, WalletPortfolioPerformance>;
+  resolvedTradeStatsMap: Map<string, WalletResolvedTradeStats>;
+  mmDiagnosticsByWallet: Map<string, WalletMmDiagnostics>;
+};
+
+async function loadWalletActivitySummaryPageContext(inputs: {
+  userId: string | null;
+  pagedIds: string[];
+  summaryOptions: WalletActivitySummaryOptions;
+  attributionSummaryOptions: WalletActivitySummaryOptions;
+  includeSparkline: boolean;
+  sparklineMetric: WalletSparklineMetric;
+  windowHours: number;
+  refreshPolicy: Awaited<
+    ReturnType<typeof resolveWalletIntelRefreshPolicy>
+  >["effective"];
+}): Promise<WalletActivitySummaryPageContext> {
+  const [pageRows, activityMaps, displayMaps, performanceMaps] =
+    await Promise.all([
+      runWalletIntelParallelQuery((parallelClient) =>
+        loadWalletRowsByIds(
+          parallelClient,
+          inputs.userId,
+          inputs.pagedIds,
+          null,
+        ),
+      ),
+      runWalletIntelParallelQuery(async (parallelClient) => ({
+        pageTopChangesMap: await fetchWalletActivityTopChanges(
+          parallelClient,
+          inputs.pagedIds,
+          inputs.summaryOptions,
+        ),
+        pageSignalSummaryMap: await fetchWalletActivitySignalSummary(
+          parallelClient,
+          inputs.pagedIds,
+          inputs.attributionSummaryOptions,
+        ),
+      })),
+      runWalletIntelParallelQuery(async (parallelClient) => ({
+        sparklineMap: inputs.includeSparkline
+          ? await fetchWalletSparklineMap(parallelClient, inputs.pagedIds, {
+              metric: inputs.sparklineMetric,
+              windowHours: inputs.windowHours,
+            })
+          : new Map<string, WalletActivitySparkline>(),
+        followerCountsMap: await loadWalletFollowerCountsMap(
+          parallelClient,
+          inputs.pagedIds,
+        ),
+        openPositionStatsMap: await loadWalletOpenPositionStatsPreferRollupMap(
+          parallelClient,
+          inputs.pagedIds,
+        ),
+      })),
+      runWalletIntelParallelQuery(async (parallelClient) => ({
+        portfolioPerformanceMap: await loadWalletPortfolioPerformanceMap(
+          parallelClient,
+          inputs.pagedIds,
+          { rangeHours: 720 },
+        ),
+        resolvedTradeStatsMap: await loadWalletResolvedTradeStatsMap(
+          parallelClient,
+          inputs.pagedIds,
+        ),
+      })),
+    ]);
+
+  const mmDiagnosticsByWallet = await runWalletIntelParallelQuery(
+    (parallelClient) =>
+      loadWalletMmDiagnosticsMap(
+        parallelClient,
+        pageRows.map((row) => ({
+          walletId: row.id,
+          chain: row.chain,
+        })),
+        inputs.refreshPolicy,
+      ),
+  );
+
+  return {
+    pageRows,
+    ...activityMaps,
+    ...displayMaps,
+    ...performanceMaps,
+    mmDiagnosticsByWallet,
+  };
 }
 
 async function loadWalletIdsForSummaryScope(
@@ -9837,52 +10052,26 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               if (pagedIds.length === 0) {
                 return { ok: true, items: [] };
               }
-              const pageRows = await loadWalletRowsByIds(
-                client,
+              const {
+                pageRows,
+                pageTopChangesMap,
+                pageSignalSummaryMap,
+                sparklineMap,
+                followerCountsMap,
+                openPositionStatsMap,
+                portfolioPerformanceMap,
+                resolvedTradeStatsMap,
+                mmDiagnosticsByWallet,
+              } = await loadWalletActivitySummaryPageContext({
                 userId,
                 pagedIds,
-                null,
-              );
-              const pageTopChangesMap = await fetchWalletActivityTopChanges(
-                client,
-                pagedIds,
                 summaryOptions,
-              );
-              const pageSignalSummaryMap =
-                await fetchWalletActivitySignalSummary(
-                  client,
-                  pagedIds,
-                  attributionSummaryOptions,
-                );
-              const sparklineMap = query.includeSparkline
-                ? await fetchWalletSparklineMap(client, pagedIds, {
-                    metric: query.sparklineMetric,
-                    windowHours,
-                  })
-                : new Map<string, WalletActivitySparkline>();
-              const followerCountsMap = await loadWalletFollowerCountsMap(
-                client,
-                pagedIds,
-              );
-              const openPositionStatsMap =
-                await loadWalletOpenPositionStatsPreferRollupMap(
-                  client,
-                  pagedIds,
-                );
-              const portfolioPerformanceMap =
-                await loadWalletPortfolioPerformanceMap(client, pagedIds, {
-                  rangeHours: 720,
-                });
-              const resolvedTradeStatsMap =
-                await loadWalletResolvedTradeStatsMap(client, pagedIds);
-              const mmDiagnosticsByWallet = await loadWalletMmDiagnosticsMap(
-                client,
-                pageRows.map((row) => ({
-                  walletId: row.id,
-                  chain: row.chain,
-                })),
-                refreshPolicy.effective,
-              );
+                attributionSummaryOptions,
+                includeSparkline: query.includeSparkline,
+                sparklineMetric: query.sparklineMetric,
+                windowHours,
+                refreshPolicy: refreshPolicy.effective,
+              });
               const rowById = new Map(
                 pageRows.map((row) => {
                   const resolvedStats = resolvedTradeStatsMap.get(row.id);

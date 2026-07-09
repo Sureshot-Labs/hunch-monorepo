@@ -66,11 +66,14 @@ import { refreshWalletMetrics } from "./services/wallet-metrics-refresh.js";
 import { buildWalletFinalOutcomeSampleActionSql } from "./services/wallet-final-outcome-samples.js";
 import { resolveWalletIdentityNames } from "./services/wallet-identity-names.js";
 import { runWhaleProfiles } from "./services/whale-profiles.js";
+import { refreshWalletSpecialistAttribution } from "./services/wallet-attribution.js";
 import {
   getIntelPolicyDefaults,
   resolveAiWhaleProfilesPolicy,
+  resolveWalletIntelAttributionPolicy,
   resolveWalletIntelRefreshPolicy,
   type AiWhaleProfilesPolicy,
+  type WalletIntelAttributionPolicy,
   type WalletIntelRefreshPolicy,
 } from "./services/runtime-policies.js";
 import {
@@ -3596,6 +3599,7 @@ async function refreshTouchedWalletArtifacts(
     previousOpenMarketKeys?: SnapshotDeltaMarketKey[];
     snapshotAt: Date;
     tagIds: Record<string, string>;
+    attributionPolicy: WalletIntelAttributionPolicy;
   },
 ): Promise<{ deltaInserts: number; deltaUpdates: number }> {
   const walletIds = Array.from(inputs.touchedWalletIds);
@@ -3674,6 +3678,16 @@ async function refreshTouchedWalletArtifacts(
         walletIds: aggregateWalletIds,
         since: activitySince,
         enteredLateHours: 24,
+      }),
+  );
+  await runWalletIntelArtifactStage(
+    "specialistAttribution",
+    aggregateStageCounts,
+    () =>
+      refreshWalletSpecialistAttribution(client, {
+        walletIds: aggregateWalletIds,
+        policy: inputs.attributionPolicy,
+        asOf: inputs.snapshotAt,
       }),
   );
   await runWalletIntelArtifactStage(
@@ -6973,7 +6987,9 @@ async function runSnapshot(snapshotAt: Date) {
   const marketLimitPerVenue = walletIntelRefreshPolicy.marketLimitPerVenue;
   const marketLimitKalshi = walletIntelRefreshPolicy.marketLimitKalshi;
   const telemetry = createRefreshTelemetry();
-  const marketFetchConcurrency = walletIntelRefreshPolicy.marketFetchConcurrency;
+  const marketFetchConcurrency =
+    walletIntelRefreshPolicy.marketFetchConcurrency;
+  const attributionPolicy = await resolveWalletIntelAttributionPolicy(pool);
   const followedFetchConcurrency =
     walletIntelRefreshPolicy.followedFetchConcurrency;
   const autoTrackedWalletFetchConcurrency =
@@ -7519,6 +7535,7 @@ async function runSnapshot(snapshotAt: Date) {
       previousOpenMarketKeys: autoTrackedCollection.previousOpenMarketKeys,
       snapshotAt,
       tagIds,
+      attributionPolicy: attributionPolicy.effective,
     });
     deltaInserts += artifactRefresh.deltaInserts;
     deltaUpdates += artifactRefresh.deltaUpdates;

@@ -21,7 +21,9 @@ import {
 } from "./services/wallet-intel-filters.js";
 import {
   buildSignalPresentation,
+  isSpecialistAttributionLabel,
   minPositiveThreshold,
+  resolveSpecialistAttributionPolicyHash,
   walletMatchesFilters,
 } from "./services/wallet-attribution.js";
 import {
@@ -2460,6 +2462,42 @@ const tests: TestCase[] = [
         },
       );
       assert.equal(matchedAny, true);
+    },
+  },
+  {
+    name: "specialist attribution helpers identify labels and hash policy inputs",
+    run: () => {
+      const basePolicy = getIntelPolicyDefaults("wallet_intel_attribution");
+      assert.equal(isSpecialistAttributionLabel("politics_specialist"), true);
+      assert.equal(isSpecialistAttributionLabel("high_conviction"), false);
+
+      const baseHash = resolveSpecialistAttributionPolicyHash(basePolicy);
+      const changedThresholdHash = resolveSpecialistAttributionPolicyHash({
+        ...basePolicy,
+        venueThresholds: {
+          ...basePolicy.venueThresholds,
+          polymarket: {
+            ...basePolicy.venueThresholds.polymarket,
+            specialistCategoryShareMin:
+              basePolicy.venueThresholds.polymarket.specialistCategoryShareMin +
+              0.01,
+          },
+        },
+      });
+      const changedCapabilityHash = resolveSpecialistAttributionPolicyHash({
+        ...basePolicy,
+        venueCapabilities: {
+          ...basePolicy.venueCapabilities,
+          kalshi: {
+            specialistEnabled:
+              !basePolicy.venueCapabilities.kalshi.specialistEnabled,
+          },
+        },
+      });
+
+      assert.notEqual(baseHash, changedThresholdHash);
+      assert.notEqual(baseHash, changedCapabilityHash);
+      assert.equal(baseHash.length, 24);
     },
   },
   {
