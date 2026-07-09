@@ -7,6 +7,20 @@ import {
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
 const POSITION_DELTA_APPLIED_MARKER = "_hunchPositionDeltaAppliedAt";
+const LIMITLESS_HISTORY_FALLBACK_STATUSES = [
+  "submitted",
+  "open",
+  "pending",
+  "matched",
+  "filled",
+  "expired",
+  "live",
+  "active",
+  "delayed",
+  "unconfirmed",
+  "partial_filled",
+  "partially_filled",
+];
 
 export function positionDeltaAppliedSqlExpression(
   payloadExpression = "order_payload",
@@ -78,10 +92,7 @@ export function hasPositionDeltaApplied(payload: unknown, depth = 0): boolean {
   if (depth > 2) return false;
   const record = payload as Record<string, unknown>;
   if (
-    Object.prototype.hasOwnProperty.call(
-      record,
-      "_hunchPositionDeltaAppliedAt",
-    )
+    Object.prototype.hasOwnProperty.call(record, "_hunchPositionDeltaAppliedAt")
   ) {
     return true;
   }
@@ -298,9 +309,7 @@ async function storeOrderInTx(
     }
     if (!existing.order_payload && inputs.orderPayload != null) {
       paramCount += 1;
-      updates.push(
-        positionDeltaPreservingPayloadUpdateSql(`$${paramCount}`),
-      );
+      updates.push(positionDeltaPreservingPayloadUpdateSql(`$${paramCount}`));
       params.push(JSON.stringify(inputs.orderPayload));
     }
     if (!existing.order_payload_version && inputs.orderPayloadVersion) {
@@ -328,9 +337,7 @@ async function storeOrderInTx(
         venue_order_id: inputs.venueOrderId,
         status: existing.status ?? inputs.status,
         posted_at: existing.posted_at ?? inputs.postedAt ?? new Date(),
-        position_delta_applied: hasPositionDeltaApplied(
-          existing.order_payload,
-        ),
+        position_delta_applied: hasPositionDeltaApplied(existing.order_payload),
       },
     };
   }
@@ -481,7 +488,6 @@ export async function findLimitlessHistoryMatch(
           and side = $3
           and (wallet_address is null or wallet_address = $4 or signer_address = $4)
           and ($5::text is null or order_type is null or order_type = $5)
-          and status in ('submitted', 'open', 'pending', 'matched', 'filled', 'expired')
           and (venue_order_id is null or venue_order_id not like 'history:%')
           and (
             ($6::text is not null and venue_order_id = $6)
@@ -492,7 +498,16 @@ export async function findLimitlessHistoryMatch(
               and jsonb_typeof(order_payload) = 'object'
               and (
                 order_payload->>'clientOrderId' = $8
+                or order_payload->'submitted'->>'clientOrderId' = $8
+                or order_payload->'payload'->>'clientOrderId' = $8
+                or order_payload->'submitted'->'payload'->>'clientOrderId' = $8
+                or order_payload->'_hunchSubmitted'->>'clientOrderId' = $8
+                or order_payload->'_hunchUpstream'->'execution'->>'clientOrderId' = $8
+                or order_payload->'_hunchUpstream'->'order'->'execution'->>'clientOrderId' = $8
                 or order_payload->'reconcileKeys'->>'clientOrderId' = $8
+                or order_payload->'submitted'->'reconcileKeys'->>'clientOrderId' = $8
+                or order_payload->'payload'->'reconcileKeys'->>'clientOrderId' = $8
+                or order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId' = $8
               )
             )
           )
@@ -547,7 +562,7 @@ export async function findLimitlessHistoryMatch(
         and side = $3
         and (wallet_address is null or wallet_address = $4 or signer_address = $4)
         and ($5::text is null or order_type is null or order_type = $5)
-        and status in ('submitted', 'open', 'pending', 'matched', 'filled', 'expired')
+        and status = any($8::text[])
         and (venue_order_id is null or venue_order_id not like 'history:%')
         and posted_at between $6 and $7
       order by posted_at desc nulls last
@@ -561,6 +576,7 @@ export async function findLimitlessHistoryMatch(
       inputs.orderType,
       from,
       to,
+      LIMITLESS_HISTORY_FALLBACK_STATUSES,
     ],
   );
 

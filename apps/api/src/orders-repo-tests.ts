@@ -138,7 +138,49 @@ await test("Limitless history matching tries deterministic identifiers before ti
   assert.equal(match?.id, "order-1");
   assert.equal(capturedSql.length, 1);
   assert.match(capturedSql[0] ?? "", /clientOrderId/);
+  assert.match(
+    capturedSql[0] ?? "",
+    /order_payload->'submitted'->>'clientOrderId'/,
+  );
+  assert.match(
+    capturedSql[0] ?? "",
+    /order_payload->'payload'->>'clientOrderId'/,
+  );
+  assert.match(
+    capturedSql[0] ?? "",
+    /order_payload->'_hunchUpstream'->'execution'->>'clientOrderId'/,
+  );
+  assert.doesNotMatch(capturedSql[0] ?? "", /status in/i);
   assert.doesNotMatch(capturedSql[0] ?? "", /posted_at between/i);
+});
+
+await test("Limitless history fallback includes live and unconfirmed statuses", async () => {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      capturedSql.push(sql);
+      capturedParams.push(params ?? []);
+      return { rowCount: 0, rows: [] };
+    },
+  } as unknown as Pool;
+
+  const match = await findLimitlessHistoryMatch(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    tokenId: "token-1",
+    side: "BUY",
+    orderType: "FOK",
+    postedAt: new Date("2026-05-17T00:00:00.000Z"),
+  });
+
+  assert.equal(match, null);
+  assert.equal(capturedSql.length, 1);
+  assert.match(capturedSql[0] ?? "", /status = any\(\$8::text\[\]\)/i);
+  assert.ok(Array.isArray(capturedParams[0]?.[7]));
+  assert.ok((capturedParams[0]?.[7] as string[]).includes("live"));
+  assert.ok((capturedParams[0]?.[7] as string[]).includes("unconfirmed"));
+  assert.ok((capturedParams[0]?.[7] as string[]).includes("partial_filled"));
 });
 
 await test("updateOrderFromHistory preserves position marker when wrapping payload", async () => {
@@ -186,8 +228,7 @@ await test("storeOrder reads nested position delta markers on existing orders", 
               posted_at: new Date("2026-05-17T00:00:00.000Z"),
               order_payload: {
                 submitted: {
-                  _hunchPositionDeltaAppliedAt:
-                    "2026-05-17T00:00:00.000Z",
+                  _hunchPositionDeltaAppliedAt: "2026-05-17T00:00:00.000Z",
                 },
                 history: {},
               },

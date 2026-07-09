@@ -10,6 +10,9 @@ import {
 import {
   computePolymarketClobOpenOrderLocks,
   computePolymarketExecutableFunds,
+  evaluatePolymarketBuyApprovalReadiness,
+  POLYMARKET_BUY_APPROVAL_THRESHOLD,
+  polymarketAllowanceSatisfiesBuyApproval,
 } from "./services/polymarket-max-spend.js";
 import type { PolymarketFeePolicySnapshot } from "./services/polymarket-builder-fees.js";
 
@@ -392,6 +395,68 @@ const tests: TestCase[] = [
         (error) =>
           error instanceof PolymarketQuoteError &&
           error.reason === "missing_top_of_book",
+      );
+    },
+  },
+  {
+    name: "buy approval helper uses high allowance threshold",
+    run: () => {
+      assert.equal(
+        polymarketAllowanceSatisfiesBuyApproval(
+          POLYMARKET_BUY_APPROVAL_THRESHOLD - 1n,
+        ),
+        false,
+      );
+      assert.equal(
+        polymarketAllowanceSatisfiesBuyApproval(
+          POLYMARKET_BUY_APPROVAL_THRESHOLD,
+        ),
+        true,
+      );
+    },
+  },
+  {
+    name: "normal market approval readiness requires only normal exchange",
+    run: () => {
+      assert.deepEqual(
+        evaluatePolymarketBuyApprovalReadiness({
+          allowanceExchange: POLYMARKET_BUY_APPROVAL_THRESHOLD,
+          allowanceNegRisk: 0n,
+          allowanceNegRiskAdapter: 0n,
+          negRisk: false,
+          negRiskAdapterConfigured: true,
+        }),
+        { missing: [], ok: true },
+      );
+    },
+  },
+  {
+    name: "neg-risk approval readiness requires exchange and adapter",
+    run: () => {
+      assert.deepEqual(
+        evaluatePolymarketBuyApprovalReadiness({
+          allowanceExchange: POLYMARKET_BUY_APPROVAL_THRESHOLD,
+          allowanceNegRisk: POLYMARKET_BUY_APPROVAL_THRESHOLD,
+          allowanceNegRiskAdapter: 0n,
+          negRisk: true,
+          negRiskAdapterConfigured: true,
+        }),
+        { missing: ["negRiskAdapter"], ok: false },
+      );
+    },
+  },
+  {
+    name: "unknown market approval readiness fails closed for both venues",
+    run: () => {
+      assert.deepEqual(
+        evaluatePolymarketBuyApprovalReadiness({
+          allowanceExchange: 0n,
+          allowanceNegRisk: 0n,
+          allowanceNegRiskAdapter: null,
+          negRisk: null,
+          negRiskAdapterConfigured: false,
+        }),
+        { missing: ["exchange", "negRiskExchange"], ok: false },
       );
     },
   },

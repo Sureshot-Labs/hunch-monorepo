@@ -769,9 +769,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       for (const venue of venues) {
         const prepared: PreparedTrade = {
           authorizationMode:
-            venue === "kalshi"
-              ? "embedded_privy_solana"
-              : "embedded_privy_evm",
+            venue === "kalshi" ? "embedded_privy_solana" : "embedded_privy_evm",
           authorizationRequests: [],
           expiresAt: new Date("2026-07-07T12:00:00Z"),
           intent: {
@@ -2186,8 +2184,28 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(statements[0] ?? "", /expires_at <=/);
       assert.match(statements[1] ?? "", /FROM orders o/);
       assert.match(statements[1] ?? "", /telegramIntentId/);
+      assert.match(
+        statements[1] ?? "",
+        /order_payload->'history'->>'telegramIntentId'/,
+      );
+      assert.match(
+        statements[1] ?? "",
+        /prepared_snapshot->'reconcileKeys'->>'clientOrderId'/,
+      );
+      assert.match(
+        statements[1] ?? "",
+        /order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId'/,
+      );
       assert.match(statements[2] ?? "", /FROM executions e/);
       assert.match(statements[2] ?? "", /telegramIntentId/);
+      assert.match(
+        statements[2] ?? "",
+        /e\.raw->'history'->'reconcileKeys'->>'intentId'/,
+      );
+      assert.match(
+        statements[2] ?? "",
+        /prepared_snapshot->'reconcileKeys'->>'txSignature'/,
+      );
       assert.match(statements[3] ?? "", /venue_order_id IS NULL/);
       assert.match(statements[3] ?? "", /submit_started_at IS NULL/);
       assert.match(statements[4] ?? "", /status = 'reconcile_required'/);
@@ -2198,7 +2216,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "buy callback with unresolved same market side intent does not enter confirming",
+    name: "buy callback with unresolved same market opposing side intent does not enter confirming",
     run: async () => {
       const telegram = new FakeTelegram();
       let updateCount = 0;
@@ -2237,7 +2255,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   venue: "polymarket",
                   market_id: "market-1",
                   event_id: "event-1",
-                  side: "YES",
+                  side: "NO",
                   amount_usd: "10",
                   status: "draft",
                   quote_snapshot: {},
@@ -2405,13 +2423,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           walletType: "solana",
         },
       ];
-      assert.deepEqual(resolveInternalPrivyWalletCandidatesForProfile(profiles), [
-        {
-          privyWalletId: "evm-wallet",
-          walletAddress: "0x0000000000000000000000000000000000000001",
-          walletChain: "ethereum",
-        },
-      ]);
+      assert.deepEqual(
+        resolveInternalPrivyWalletCandidatesForProfile(profiles),
+        [
+          {
+            privyWalletId: "evm-wallet",
+            walletAddress: "0x0000000000000000000000000000000000000001",
+            walletChain: "ethereum",
+          },
+        ],
+      );
     },
   },
   {
@@ -2427,22 +2448,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         privyAny.getUserById = async () => {
           throw new Error("privy unavailable");
         };
-        await assert.rejects(
-          async () => {
-            await resolveInternalPrivyWalletCandidates({
-              app: {
-                log: {
-                  warn: () => {
-                    warnCount += 1;
-                  },
+        await assert.rejects(async () => {
+          await resolveInternalPrivyWalletCandidates({
+            app: {
+              log: {
+                warn: () => {
+                  warnCount += 1;
                 },
-              } as never,
-              privyUserId: "privy-1",
-            });
-            downstreamCalled = true;
-          },
-          /internal_privy_wallet_lookup_failed/,
-        );
+              },
+            } as never,
+            privyUserId: "privy-1",
+          });
+          downstreamCalled = true;
+        }, /internal_privy_wallet_lookup_failed/);
         assert.equal(downstreamCalled, false);
         assert.equal(warnCount, 1);
       } finally {
@@ -2611,8 +2629,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   wallet_type: wallet.type,
                   is_primary: Boolean(wallet.isPrimary),
                   created_at:
-                    wallet.createdAt ??
-                    new Date(Date.UTC(2026, 0, index + 1)),
+                    wallet.createdAt ?? new Date(Date.UTC(2026, 0, index + 1)),
                 })),
               };
             }
@@ -2790,6 +2807,58 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "kalshi",
         ]);
         assert.deepEqual(status.walletSetupIssues, []);
+      }
+
+      {
+        const solanaSelected = "SoSelected333333333333333333333333333333333";
+        const { db, storedAuthorizations } = makeDb({
+          verifiedWallets: [
+            {
+              address: "0x0000000000000000000000000000000000000001",
+              type: "ethereum",
+              isPrimary: true,
+            },
+            {
+              address: solanaSelected,
+              type: "solana",
+              isPrimary: true,
+            },
+          ],
+        });
+        const status = await enableTelegramBotTrading(db as never, {
+          buildKalshiEligibilityForWallet: async () => ({
+            checkedAt: "2026-07-08T00:00:00.000Z",
+            expiresAt: "2026-07-08T01:00:00.000Z",
+            geoAllowed: true,
+            proofVerified: true,
+          }),
+          enabledVenues: ["polymarket", "limitless", "kalshi"],
+          internalWallets: [
+            {
+              privyWalletId: "evm-wallet",
+              walletAddress: "0x0000000000000000000000000000000000000001",
+              walletChain: "ethereum",
+            },
+            {
+              privyWalletId: "solana-selected-wallet",
+              walletAddress: solanaSelected,
+              walletChain: "solana",
+            },
+          ],
+          privyWalletId: "solana-selected-wallet",
+          userId: "user-1",
+        });
+        assert.equal(storedAuthorizations.length, 1);
+        assert.equal(
+          storedAuthorizations[0]?.privyWalletId,
+          "solana-selected-wallet",
+        );
+        assert.deepEqual(storedAuthorizations[0]?.enabledVenues, ["kalshi"]);
+        assert.deepEqual(status.enabledVenues, ["kalshi"]);
+        assert.deepEqual(
+          status.walletSetupIssues.map((issue) => issue.walletChain),
+          ["ethereum"],
+        );
       }
 
       {
@@ -3556,6 +3625,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             };
             await (
               input as {
+                onBeforeBroadcast?: () => unknown;
+                onSubmitted?: (submitResult: unknown) => unknown;
+              }
+            ).onBeforeBroadcast?.();
+            await (
+              input as {
                 onSubmitted?: (submitResult: unknown) => unknown;
               }
             ).onSubmitted?.(submitResult);
@@ -3628,11 +3703,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.deepEqual(
         updateStatuses.map((entry) => entry.status),
-        ["executing", "executing", "executing", "submitted"],
+        ["executing", "executing", "executing", "executing", "submitted"],
       );
-      assert.equal(updateStatuses[2]?.venueOrderId, "venue-order-1");
-      assert.equal(updateStatuses[3]?.errorCode, "persistence_failed");
       assert.equal(updateStatuses[3]?.venueOrderId, "venue-order-1");
+      assert.equal(updateStatuses[4]?.errorCode, "persistence_failed");
+      assert.equal(updateStatuses[4]?.venueOrderId, "venue-order-1");
       assert.equal(quotedSlippageBps, 500);
       assert.match(
         telegram.callbackAnswers[0]?.text ?? "",
@@ -3964,6 +4039,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             };
             await (
               input as {
+                onBeforeBroadcast?: () => unknown;
+                onSubmitted?: (submitResult: unknown) => unknown;
+              }
+            ).onBeforeBroadcast?.();
+            await (
+              input as {
                 onSubmitted?: (submitResult: unknown) => unknown;
               }
             ).onSubmitted?.(submitResult);
@@ -4027,9 +4108,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.deepEqual(
         updateStatuses.map((entry) => entry.status),
-        ["executing", "executing", "executing", "failed"],
+        ["executing", "executing", "executing", "executing", "failed"],
       );
-      assert.equal(updateStatuses[3]?.errorCode, "no_fill");
+      assert.equal(updateStatuses[4]?.errorCode, "no_fill");
       assert.equal(telegram.callbackAnswers[0]?.text, "No fill.");
       assert.match(telegram.messages[0]?.text ?? "", /No fill/);
     },
@@ -4227,11 +4308,219 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "trading confirm leaves pre-broadcast Kalshi validation failure failed",
+    run: async () => {
+      const telegram = new FakeTelegram();
+      const updateAttempts: Array<{
+        errorCode: unknown;
+        markSubmitStarted: unknown;
+        preparedSnapshot: boolean;
+        status: unknown;
+      }> = [];
+      const db = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (/from runtime_policies/i.test(sql)) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  payload: {
+                    tradingEnabled: true,
+                    tradingActions: ["buy"],
+                    tradingVenues: ["kalshi"],
+                    buyAmountPresetsUsd: [10],
+                    maxTradeAmountUsd: 50,
+                    maxSlippageBps: 500,
+                    intentTtlSec: 120,
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_trade_intents i")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  telegram_user_id: "999",
+                  user_id: "user-1",
+                  authorization_id: "authorization-1",
+                  chat_id: "999",
+                  telegram_message_id: null,
+                  action: "buy",
+                  venue: "kalshi",
+                  market_id: "market-1",
+                  event_id: "event-1",
+                  side: "YES",
+                  amount_usd: "10",
+                  status: "confirming",
+                  quote_snapshot: {},
+                  policy_snapshot: {},
+                  expires_at: new Date(Date.now() + 60_000),
+                  market_title: "Market",
+                  market_status: "ACTIVE",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM telegram_bot_trading_authorizations a")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "authorization-1",
+                  user_id: "user-1",
+                  telegram_user_id: "999",
+                  privy_user_id: "privy-1",
+                  wallet_address: "11111111111111111111111111111111",
+                  wallet_chain: "solana",
+                  privy_wallet_id: "wallet-1",
+                  enabled: true,
+                  enabled_venues: ["kalshi"],
+                  max_amount_usd: "50",
+                },
+              ],
+            };
+          }
+          if (sql.includes("FROM unified_markets m")) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "market-1",
+                  venue: "kalshi",
+                  venue_market_id: "venue-market-1",
+                  event_id: "event-1",
+                  event_title: "Event",
+                  title: "Market",
+                  status: "ACTIVE",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  metadata: { dflowNativeAcceptingOrders: true },
+                  close_time: new Date(Date.now() + 60_000),
+                  expiration_time: null,
+                  event_end_time: null,
+                  best_bid: "0.4",
+                  best_ask: "0.6",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (
+            sql.includes("UPDATE telegram_trade_intents") &&
+            sql.includes("SET status = $2")
+          ) {
+            updateAttempts.push({
+              status: params?.[1],
+              errorCode: params?.[2],
+              markSubmitStarted: params?.[12],
+              preparedSnapshot: params?.[10] != null,
+            });
+            return { rowCount: 1, rows: [{ id: params?.[0] }] };
+          }
+          return { rowCount: 0, rows: [] };
+        },
+      };
+      const handled = await handleTelegramBotTradingCallback({
+        answerCallbackQuery: (input) => telegram.answerCallbackQuery(input),
+        appBaseUrl: "https://app.hunch.trade",
+        callbackQuery: buildTradeCallbackQuery({
+          data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+        }),
+        db: db as never,
+        sendMessage: (message) => telegram.sendMessage(message as never),
+        trading: {
+          executePreparedTrade: async () => {
+            throw new Error("Kalshi transaction could not be validated");
+          },
+          getReadiness: async () => ({
+            ready: true,
+            executable: true,
+            reasonCode: null,
+            message: null,
+            setupRequired: false,
+            capabilities: {
+              venue: "kalshi",
+              supportsBuy: true,
+              supportsSell: false,
+              supportsCancel: false,
+              supportsOrderSync: false,
+              supportsPositionSync: false,
+              supportsExecutionSync: true,
+              supportsSetup: false,
+              authorizationModes: ["embedded_privy_solana"],
+            },
+          }),
+          normalizeError: (_venue: string, error: unknown) => ({
+            code: "trade_submission_failed",
+            message:
+              error instanceof Error ? error.message : "submission failed",
+            statusCode: 502,
+            venue: "kalshi",
+            raw: error,
+          }),
+          prepareTrade: async (input: never) => ({
+            preparedId: "prepared",
+            venue: "kalshi",
+            intent: (input as { intent: unknown }).intent,
+            quote: null,
+            authorizationMode: "embedded_privy_solana",
+            authorizationRequests: [],
+            venuePayload: {},
+            expiresAt: null,
+          }),
+          quote: async (input: never) => ({
+            venue: "kalshi",
+            target: (input as { intent: { target: unknown } }).intent.target,
+            action: "BUY",
+            amount: { type: "usd", value: "10" },
+            price: 0.5,
+            estimatedShares: 20,
+            estimatedNotionalUsd: 10,
+            maxSpendUsd: 10,
+            minReceiveShares: 20,
+            fees: {},
+            expiresAt: null,
+          }),
+        } as never,
+      });
+
+      assert.equal(handled, true);
+      assert.deepEqual(updateAttempts, [
+        {
+          status: "executing",
+          errorCode: null,
+          markSubmitStarted: false,
+          preparedSnapshot: false,
+        },
+        {
+          status: "executing",
+          errorCode: null,
+          markSubmitStarted: false,
+          preparedSnapshot: true,
+        },
+        {
+          status: "failed",
+          errorCode: "trade_submission_failed",
+          markSubmitStarted: false,
+          preparedSnapshot: false,
+        },
+      ]);
+      assert.match(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /trade failed/i,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /could not be validated/i);
+    },
+  },
+  {
     name: "trading confirm marks no-ref post-submit-start failures unknown",
     run: async () => {
       const telegram = new FakeTelegram();
       const updateAttempts: Array<{
         errorCode: unknown;
+        markSubmitStarted: unknown;
         preparedSnapshot: boolean;
         status: unknown;
       }> = [];
@@ -4332,6 +4621,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             updateAttempts.push({
               status: params?.[1],
               errorCode: params?.[2],
+              markSubmitStarted: params?.[12],
               preparedSnapshot: params?.[10] != null,
             });
             return { rowCount: 1, rows: [{ id: params?.[0] }] };
@@ -4348,7 +4638,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         trading: {
-          executePreparedTrade: async () => {
+          executePreparedTrade: async (input: never) => {
+            await (
+              input as {
+                onBeforeBroadcast?: () => unknown;
+              }
+            ).onBeforeBroadcast?.();
             throw new Error("connection dropped after submit started");
           },
           getReadiness: async () => ({
@@ -4404,11 +4699,28 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(handled, true);
       assert.deepEqual(updateAttempts, [
-        { status: "executing", errorCode: null, preparedSnapshot: false },
-        { status: "executing", errorCode: null, preparedSnapshot: true },
+        {
+          status: "executing",
+          errorCode: null,
+          markSubmitStarted: false,
+          preparedSnapshot: false,
+        },
+        {
+          status: "executing",
+          errorCode: null,
+          markSubmitStarted: false,
+          preparedSnapshot: true,
+        },
+        {
+          status: "executing",
+          errorCode: null,
+          markSubmitStarted: true,
+          preparedSnapshot: false,
+        },
         {
           status: "reconcile_required",
           errorCode: "submit_state_unknown",
+          markSubmitStarted: false,
           preparedSnapshot: false,
         },
       ]);
@@ -5074,8 +5386,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           holderSide: "NO",
           modelMeta: {
             external_research: {
-              summary:
-                "Public news does not explain @Valen9 positioning.",
+              summary: "Public news does not explain @Valen9 positioning.",
             },
           },
           title: "Valen9 fades Iran withdrawal deadline risk",
@@ -5114,8 +5425,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note({
           bestAsk: 0.03,
           bestBid: 0.02,
-          description:
-            "Morocco is a long shot, but the wallet is still there.",
+          description: "Morocco is a long shot, but the wallet is still there.",
           holderCredentialBullets: [
             "Up $1.3M over the last 30 days",
             "Beat market prices by 27 points across 21 resolved bets",
@@ -5309,10 +5619,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         rows[1]?.[0]?.text ?? "",
         /^👤 Wallet · Under 2\.5 total goals /,
       );
-      assert.match(
-        message.text,
-        /This wins if there are 0\\-2 total goals\\./,
-      );
+      assert.match(message.text, /This wins if there are 0\\-2 total goals\\./);
       assert.doesNotMatch(message.text, /Over 2\\.5 total goals 31¢/);
       assert.equal(message.text.includes("NO O/U 2.5"), false);
     },
@@ -6894,10 +7201,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         text,
         /(🔥|👀) (Copy flow is building before price moves|People are quietly joining this side|This call is starting to get copied|Wallets are still leaning into this|More wallets are moving into this trade|Price is flat\\. Flow is not\\.|This call is starting to get traction)/,
       );
-      assert.match(
-        text,
-        /📍 Portugal vs Spain · Under 2\\.5 total goals/,
-      );
+      assert.match(text, /📍 Portugal vs Spain · Under 2\\.5 total goals/);
       assert.match(text, /Since the call:/);
       assert.match(text, /net copy flow/);
       assert.match(text, /1 wallets added · 1 still hold/);

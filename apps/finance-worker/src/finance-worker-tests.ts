@@ -3,6 +3,12 @@
 import assert from "node:assert/strict";
 
 import { env } from "./env.js";
+import {
+  loadFinanceJobsModuleForSmoke,
+  resetFinanceJobsModuleLoaderForTests,
+  runTelegramTradeIntentReconcileJob,
+  setFinanceJobsModuleLoaderForTests,
+} from "./finance-jobs.js";
 import { buildJobs } from "./main.js";
 
 type TestCase = {
@@ -52,20 +58,19 @@ const tests: TestCase[] = [
   {
     name: "telegram trade intent reconcile follows explicit execute-enabled env",
     run: () => {
-      const disabledExecute = buildJobs(buildTestEnv({ executeEnabled: false }))
-        .find(
-          (candidate) =>
-            candidate.name === "telegram_trade_intents_reconcile",
-        );
+      const disabledExecute = buildJobs(
+        buildTestEnv({ executeEnabled: false }),
+      ).find(
+        (candidate) => candidate.name === "telegram_trade_intents_reconcile",
+      );
       const enabledExecute = buildJobs(
         buildTestEnv({
           executeEnabled: true,
           telegramTradeIntentsEnabled: true,
         }),
       ).find(
-          (candidate) =>
-            candidate.name === "telegram_trade_intents_reconcile",
-        );
+        (candidate) => candidate.name === "telegram_trade_intents_reconcile",
+      );
       assert.equal(disabledExecute?.enabled, false);
       assert.equal(enabledExecute?.enabled, true);
     },
@@ -94,6 +99,59 @@ const tests: TestCase[] = [
       } finally {
         console.warn = originalWarn;
       }
+    },
+  },
+  {
+    name: "finance job bridge uses injected module loader once",
+    run: async () => {
+      let loadCount = 0;
+      let reconcileArgs: unknown = null;
+      setFinanceJobsModuleLoaderForTests(async () => {
+        loadCount += 1;
+        return {
+          runApiCacheWarmJob: async () => null,
+          runFeesCollectJob: async () => ({
+            collected: 0,
+            dryRunCount: 0,
+            skippedError: 0,
+            skippedLive: 0,
+            skippedNoCharge: 0,
+            skippedNothing: 0,
+          }),
+          runFeesReconcileJob: async () => null,
+          runKalshiExecutionReconcileJob: async () => null,
+          runRewardsPayoutJob: async () => null,
+          runTelegramTradeIntentReconcileJob: async (overrides) => {
+            reconcileArgs = overrides;
+            return { ok: true };
+          },
+          runTreasurySweepJob: async () => null,
+        };
+      });
+      try {
+        const first = await runTelegramTradeIntentReconcileJob({
+          executingGraceMs: 1234,
+        });
+        const second = await runTelegramTradeIntentReconcileJob({
+          executingGraceMs: 5678,
+        });
+        assert.deepEqual(first, { ok: true });
+        assert.deepEqual(second, { ok: true });
+        assert.equal(loadCount, 1);
+        assert.deepEqual(reconcileArgs, { executingGraceMs: 5678 });
+      } finally {
+        resetFinanceJobsModuleLoaderForTests();
+      }
+    },
+  },
+  {
+    name: "finance job bridge dynamic import exposes API jobs module",
+    run: async () => {
+      resetFinanceJobsModuleLoaderForTests();
+      const jobs = await loadFinanceJobsModuleForSmoke();
+      assert.equal(typeof jobs.runTelegramTradeIntentReconcileJob, "function");
+      assert.equal(typeof jobs.runFeesCollectJob, "function");
+      resetFinanceJobsModuleLoaderForTests();
     },
   },
 ];

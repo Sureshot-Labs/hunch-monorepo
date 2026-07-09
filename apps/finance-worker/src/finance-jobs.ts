@@ -73,9 +73,13 @@ type FinanceJobsModule = {
   ) => Promise<unknown>;
 };
 
-let modulePromise: Promise<FinanceJobsModule> | null = null;
+type FinanceJobsModuleLoader = () => Promise<FinanceJobsModule>;
 
-async function loadFinanceJobsModule(): Promise<FinanceJobsModule> {
+let modulePromise: Promise<FinanceJobsModule> | null = null;
+let financeJobsModuleLoader: FinanceJobsModuleLoader =
+  loadFinanceJobsModuleDefault;
+
+async function loadFinanceJobsModuleDefault(): Promise<FinanceJobsModule> {
   const isTsxRuntime = import.meta.url.endsWith(".ts");
   if (isTsxRuntime) {
     const sourceUrl = new URL(
@@ -91,9 +95,25 @@ async function loadFinanceJobsModule(): Promise<FinanceJobsModule> {
 
 async function getFinanceJobsModule(): Promise<FinanceJobsModule> {
   if (!modulePromise) {
-    modulePromise = loadFinanceJobsModule();
+    modulePromise = financeJobsModuleLoader();
   }
   return modulePromise;
+}
+
+export function setFinanceJobsModuleLoaderForTests(
+  loader: FinanceJobsModuleLoader,
+): void {
+  modulePromise = null;
+  financeJobsModuleLoader = loader;
+}
+
+export function resetFinanceJobsModuleLoaderForTests(): void {
+  modulePromise = null;
+  financeJobsModuleLoader = loadFinanceJobsModuleDefault;
+}
+
+export async function loadFinanceJobsModuleForSmoke(): Promise<FinanceJobsModule> {
+  return getFinanceJobsModule();
 }
 
 export async function runFeesCollectJob(

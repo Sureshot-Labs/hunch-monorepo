@@ -100,6 +100,7 @@ import type {
   ApplyTradeEffectsInput,
   PersistedTrade,
   PreparedTrade,
+  SubmitPreparedTradeInput,
   SubmitResult,
   TradeEffectsResult,
   TradeIntent,
@@ -4490,6 +4491,7 @@ async function prepareTrade(
 }
 
 async function submitLimitlessAmmPreparedTrade(input: {
+  onBeforeBroadcast?: () => Promise<void> | void;
   payload: LimitlessAmmPreparedPayload;
   prepared: PreparedTrade;
 }): Promise<SubmitResult> {
@@ -4522,9 +4524,16 @@ async function submitLimitlessAmmPreparedTrade(input: {
   }
 
   const allowanceRaw = snapshot.allowanceAmm ?? 0n;
+  let beforeBroadcastMarked = false;
+  const markBeforeBroadcast = async () => {
+    if (beforeBroadcastMarked) return;
+    await input.onBeforeBroadcast?.();
+    beforeBroadcastMarked = true;
+  };
   if (allowanceRaw < amountUsdRaw) {
     const approvalAmount =
       approvalTargetRaw >= amountUsdRaw ? approvalTargetRaw : amountUsdRaw;
+    await markBeforeBroadcast();
     await sendLimitlessServerEvmTransaction({
       data: encodeLimitlessAmmUsdcApproval(marketAddress, approvalAmount),
       label: "Limitless AMM USDC approval",
@@ -4534,6 +4543,7 @@ async function submitLimitlessAmmPreparedTrade(input: {
     });
   }
 
+  await markBeforeBroadcast();
   const txHash = await sendLimitlessServerEvmTransaction({
     data: encodeLimitlessAmmBuy({
       amountUsdRaw,
@@ -4571,12 +4581,18 @@ function isLimitlessAmmPreparedPayload(
 }
 
 async function submitPreparedTrade(
-  prepared: PreparedTrade,
+  input: SubmitPreparedTradeInput,
 ): Promise<SubmitResult> {
+  const prepared = input.prepared;
   const payload = parseLimitlessPreparedPayload(prepared);
   if (isLimitlessAmmPreparedPayload(payload)) {
-    return submitLimitlessAmmPreparedTrade({ payload, prepared });
+    return submitLimitlessAmmPreparedTrade({
+      onBeforeBroadcast: input.onBeforeBroadcast,
+      payload,
+      prepared,
+    });
   }
+  await input.onBeforeBroadcast?.();
   const upstream = await submitLimitlessClobOrderToVenue({
     requestAuth: payload.requestAuth,
     body: {
@@ -4830,14 +4846,13 @@ export function createLimitlessTradingExecutionService(
     quote: (input) => quote(ctx, input),
     prepareTrade: (input) =>
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
-    submitPreparedTrade: (input) => submitPreparedTrade(input.prepared),
+    submitPreparedTrade,
     persistTrade: (input) => persistTrade(ctx, input),
     applyTradeEffects: (input) => applyLimitlessTradeEffects(ctx, input),
     executePreparedTrade: (input) =>
       executePreparedTradeLifecycle({
         executeInput: input,
-        submitPreparedTrade: (submitInput) =>
-          submitPreparedTrade(submitInput.prepared),
+        submitPreparedTrade,
         persistTrade: (persistInput) => persistTrade(ctx, persistInput),
         applyTradeEffects: (effectsInput) =>
           applyLimitlessTradeEffects(ctx, effectsInput),

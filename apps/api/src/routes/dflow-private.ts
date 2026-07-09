@@ -12,10 +12,13 @@ import {
   evaluateGeoFence,
   type GeoFenceConfig,
 } from "../lib/geo-fence.js";
-import {
-  fetchKalshiNormalizedOrderStatus,
-} from "../services/kalshi-executions.js";
+import { fetchKalshiNormalizedOrderStatus } from "../services/kalshi-executions.js";
 import { resolveKalshiProofRequirement } from "../services/kalshi-trade-eligibility.js";
+import {
+  deriveKalshiDflowTransactionContext,
+  KalshiDflowTransactionValidationError,
+  validateKalshiDflowTransaction,
+} from "../services/kalshi-dflow-transaction-safety.js";
 import {
   buildKalshiDflowOrderRoute,
   buildKalshiDflowSwapRoute,
@@ -346,9 +349,16 @@ async function enforceKalshiProof(args: {
   return false;
 }
 
+type DflowPrivateRouteOptions = {
+  strictKalshiSubmit?: boolean;
+};
+
 // Mounted under /trade/kalshi and /trade/dflow (alias).
-export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
+export const dflowPrivateRoutes: FastifyPluginAsync<
+  DflowPrivateRouteOptions
+> = async (app, options) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const strictKalshiSubmit = Boolean(options.strictKalshiSubmit);
   const geoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -656,7 +666,7 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
             query.inputMint,
             query.outputMint,
           ]).catch((error) =>
-              app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
+            app.log.warn({ error }, "Failed to mark DFlow route unavailable"),
           );
         }
         reply.code(result.statusCode);
@@ -751,8 +761,86 @@ export const dflowPrivateRoutes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      if (!ensureDflowReady(reply)) return;
+
+      const body = request.body;
+      const userPublicKey = body.userPublicKey?.trim();
+      if (strictKalshiSubmit && !userPublicKey) {
+        reply.code(400);
+        return reply.send({
+          error: "userPublicKey is required",
+          code: "kalshi_transaction_context_required",
+        });
+      }
+      if (userPublicKey && userPublicKey !== walletAddress.trim()) {
+        reply.code(400);
+        return reply.send({
+          error: "userPublicKey must match the selected wallet",
+        });
+      }
+
+      const context = deriveKalshiDflowTransactionContext({
+        amountInRaw: body.amountInRaw,
+        amountOutRaw: body.amountOutRaw,
+        inputMint: body.inputMint,
+        minOutRaw: body.minOutRaw,
+        outputMint: body.outputMint,
+        quoteResponse: body.quoteResponse,
+      });
+      if (strictKalshiSubmit && !context) {
+        reply.code(400);
+        return reply.send({
+          error:
+            "Kalshi submit requires deterministic transaction context.",
+          code: "kalshi_transaction_context_required",
+        });
+      }
+      if (strictKalshiSubmit || context) {
+        const proofAllowed = await enforceKalshiProof({
+          user,
+          walletAddress,
+          inputMint: context?.inputMint ?? null,
+          outputMint: context?.outputMint ?? null,
+          hasDeterministicIntent: Boolean(context),
+          app,
+          reply,
+        });
+        if (!proofAllowed) return;
+      }
+
+      if (context?.inputMint === env.solanaUsdcMint) {
+        try {
+          await validateKalshiDflowTransaction({
+            ...context,
+            expectedInputMint: env.solanaUsdcMint,
+            rpcTimeoutMs: env.solanaRpcTimeoutMs,
+            rpcUrls: env.solanaRpcUrls,
+            transaction: body.signedTransaction,
+            walletAddress,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Kalshi transaction could not be validated.";
+          app.log.warn(
+            { error, userId: user.id, walletAddress },
+            "DFlow submit transaction validation failed",
+          );
+          reply.code(400);
+          return reply.send({
+            error: "Kalshi transaction could not be validated.",
+            code:
+              error instanceof KalshiDflowTransactionValidationError
+                ? error.code
+                : "kalshi_transaction_invalid",
+            message,
+          });
+        }
+      }
+
       const result = await submitKalshiDflowSignedTransactionRoute({
-        body: request.body,
+        body,
       });
       if (!result.ok) {
         app.log.error(

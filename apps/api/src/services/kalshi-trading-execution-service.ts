@@ -54,10 +54,15 @@ import {
   hasFreshKalshiTradeEligibility,
   kalshiTradeEligibilityMessage,
 } from "./kalshi-trade-eligibility.js";
+import {
+  validateKalshiDflowTransaction,
+  type KalshiDflowTransactionFacts,
+} from "./kalshi-dflow-transaction-safety.js";
 import type {
   ApplyTradeEffectsInput,
   PersistedTrade,
   PreparedTrade,
+  SubmitPreparedTradeInput,
   SubmitResult,
   TradeEffectsResult,
   TradeIntent,
@@ -78,6 +83,7 @@ type KalshiPreparedPayload = PreparedPayloadBase & {
   quotePayload: unknown;
   swapPayload: unknown;
   transaction: string;
+  validation: KalshiDflowTransactionFacts;
 };
 
 const capabilities = createCapability({
@@ -130,7 +136,9 @@ export async function buildKalshiDflowOrderRoute(input: {
       ...(query.platformFeeScale != null
         ? { platformFeeScale: query.platformFeeScale }
         : {}),
-      ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
+      ...(query.platformFeeMode
+        ? { platformFeeMode: query.platformFeeMode }
+        : {}),
       ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
     },
   });
@@ -197,7 +205,9 @@ export async function quoteKalshiDflowRoute(input: {
       ...(query.platformFeeScale != null
         ? { platformFeeScale: query.platformFeeScale }
         : {}),
-      ...(query.platformFeeMode ? { platformFeeMode: query.platformFeeMode } : {}),
+      ...(query.platformFeeMode
+        ? { platformFeeMode: query.platformFeeMode }
+        : {}),
       ...(query.feeAccount ? { feeAccount: query.feeAccount } : {}),
     },
   });
@@ -291,7 +301,9 @@ export async function submitKalshiDflowSignedTransactionRoute(input: {
       ...(input.body.skipPreflight != null
         ? { skipPreflight: input.body.skipPreflight }
         : {}),
-      ...(input.body.maxRetries != null ? { maxRetries: input.body.maxRetries } : {}),
+      ...(input.body.maxRetries != null
+        ? { maxRetries: input.body.maxRetries }
+        : {}),
     });
     return { ok: true, payload: { ok: true, signature } };
   } catch {
@@ -435,7 +447,8 @@ export async function recordKalshiDflowExecutionRoute(input: {
       outcome: execution.outcome,
       inputMint: execution.input_mint,
       outputMint: execution.output_mint,
-      amountIn: execution.amount_in != null ? Number(execution.amount_in) : null,
+      amountIn:
+        execution.amount_in != null ? Number(execution.amount_in) : null,
       amountOut:
         execution.amount_out != null ? Number(execution.amount_out) : null,
       inputDecimals: execution.input_decimals ?? null,
@@ -696,6 +709,32 @@ async function prepareTrade(
       venue: "kalshi",
     });
   }
+  const amountInRaw = rawUsd(amountUsd(intent));
+  const amountOutRaw =
+    readString(isRecord(quotePayload) ? quotePayload.outAmount : null) ??
+    readString(isRecord(quotePayload) ? quotePayload.outputAmount : null);
+  let validation: KalshiDflowTransactionFacts;
+  try {
+    validation = await validateKalshiDflowTransaction({
+      amountInRaw,
+      amountOutRaw,
+      expectedInputMint: env.solanaUsdcMint,
+      inputMint: env.solanaUsdcMint,
+      outputMint,
+      rpcTimeoutMs: env.solanaRpcTimeoutMs,
+      rpcUrls: env.solanaRpcUrls,
+      transaction,
+      walletAddress: intent.walletAddress,
+    });
+  } catch {
+    throw tradingError({
+      code: "trade_submission_failed",
+      message:
+        "Kalshi transaction could not be validated. Refresh quote and try again.",
+      statusCode: 502,
+      venue: "kalshi",
+    });
+  }
   const payload: KalshiPreparedPayload = {
     kind: "kalshi",
     inputMint: env.solanaUsdcMint,
@@ -703,18 +742,13 @@ async function prepareTrade(
     quotePayload,
     swapPayload: swap.payload,
     transaction,
-    amountInRaw: rawUsd(amountUsd(intent)),
-    amountOutRaw:
-      readString(isRecord(quotePayload) ? quotePayload.outAmount : null) ??
-      readString(isRecord(quotePayload) ? quotePayload.outputAmount : null),
+    amountInRaw,
+    amountOutRaw,
     quoteId:
       readString(isRecord(quotePayload) ? quotePayload.quoteId : null) ??
       readString(isRecord(quotePayload) ? quotePayload.id : null),
+    validation,
   };
-  const transactionDigest = crypto
-    .createHash("sha256")
-    .update(transaction)
-    .digest("hex");
   return {
     preparedId: crypto.randomUUID(),
     venue: "kalshi",
@@ -729,7 +763,7 @@ async function prepareTrade(
       intentId: intent.id ?? null,
       outputMint: payload.outputMint,
       quoteId: payload.quoteId,
-      transactionDigest,
+      transactionDigest: validation.transactionDigest,
       venue: "kalshi",
     },
     venuePayload: payload,
@@ -738,13 +772,37 @@ async function prepareTrade(
 }
 
 async function submitPreparedTrade(
-  prepared: PreparedTrade,
+  input: SubmitPreparedTradeInput,
 ): Promise<SubmitResult> {
+  const prepared = input.prepared;
   requireFreshKalshiEligibility(prepared.intent);
   const payload = parsePreparedPayload<KalshiPreparedPayload>(
     prepared,
     "kalshi",
   );
+  try {
+    await validateKalshiDflowTransaction({
+      amountInRaw: payload.validation.amountInRaw,
+      amountOutRaw: payload.validation.amountOutRaw ?? payload.amountOutRaw,
+      expectedInputMint: env.solanaUsdcMint,
+      inputMint: payload.validation.inputMint,
+      minOutRaw: payload.validation.minOutRaw,
+      outputMint: payload.validation.outputMint,
+      rpcTimeoutMs: env.solanaRpcTimeoutMs,
+      rpcUrls: env.solanaRpcUrls,
+      transaction: payload.transaction,
+      walletAddress: prepared.intent.walletAddress,
+    });
+  } catch {
+    throw tradingError({
+      code: "trade_submission_failed",
+      message:
+        "Kalshi transaction could not be validated. Refresh quote and try again.",
+      statusCode: 502,
+      venue: "kalshi",
+    });
+  }
+  await input.onBeforeBroadcast?.();
   const result =
     await createServerWalletClient().walletApi.solana.signAndSendTransaction({
       walletId: getPrivyWalletId(prepared.intent),
@@ -804,7 +862,8 @@ async function persistTrade(
     quoteId: payload.quoteId,
     txSignature: input.submitResult.txSignature,
     venueOrderId: input.submitResult.venueOrderId,
-    status: normalizeKalshiExecutionStatus(input.submitResult.status) ?? "submitted",
+    status:
+      normalizeKalshiExecutionStatus(input.submitResult.status) ?? "submitted",
     raw: mergeKalshiExecutionRaw(input.submitResult.raw, {
       ...buildTelegramTradeSourceMetadata(input),
       purpose: "trade",
@@ -851,14 +910,13 @@ export function createKalshiTradingExecutionService(
     quote: (input) => quote(ctx, input),
     prepareTrade: (input) =>
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
-    submitPreparedTrade: (input) => submitPreparedTrade(input.prepared),
+    submitPreparedTrade,
     persistTrade: (input) => persistTrade(ctx, input),
     applyTradeEffects: (input) => applyKalshiTradeEffects(ctx, input),
     executePreparedTrade: (input) =>
       executePreparedTradeLifecycle({
         executeInput: input,
-        submitPreparedTrade: (submitInput) =>
-          submitPreparedTrade(submitInput.prepared),
+        submitPreparedTrade,
         persistTrade: (persistInput) => persistTrade(ctx, persistInput),
         applyTradeEffects: (effectsInput) =>
           applyKalshiTradeEffects(ctx, effectsInput),

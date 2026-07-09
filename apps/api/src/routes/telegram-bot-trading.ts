@@ -5,14 +5,8 @@ import { z } from "zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
-import {
-  evaluateGeoFence,
-  type GeoFenceConfig,
-} from "../lib/geo-fence.js";
-import {
-  PrivyService,
-  type PrivyWalletProfile,
-} from "../privy-service.js";
+import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
+import { PrivyService, type PrivyWalletProfile } from "../privy-service.js";
 import { createApiTradingApplicationService } from "../services/api-trading-service.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
@@ -201,7 +195,10 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
 
   const requireInternal = async (
     request: { headers: Record<string, unknown> },
-    reply: { code: (statusCode: number) => unknown; send: (body: unknown) => unknown },
+    reply: {
+      code: (statusCode: number) => unknown;
+      send: (body: unknown) => unknown;
+    },
   ) => {
     if (isInternalTradingAuthorized(request)) return;
     reply.code(401);
@@ -259,10 +256,13 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       }),
   );
 
-  const handleInternalCallback = async (request: {
-    body: z.infer<typeof internalCallbackBodySchema>;
-    params?: z.infer<typeof internalIntentParamsSchema>;
-  }, expectedType?: "buy" | "cancel" | "confirm") =>
+  const handleInternalCallback = async (
+    request: {
+      body: z.infer<typeof internalCallbackBodySchema>;
+      params?: z.infer<typeof internalIntentParamsSchema>;
+    },
+    expectedType?: "buy" | "cancel" | "confirm",
+  ) =>
     captureTelegramBotTradingCallback({
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
@@ -346,9 +346,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           : Promise.resolve(null),
       ]);
       let walletSetupIssues =
-        status?.linked && status.userId
-          ? status.walletSetupIssues
-          : [];
+        status?.linked && status.userId ? status.walletSetupIssues : [];
       if (status?.linked && status.userId) {
         walletSetupIssues =
           await resolveTelegramBotTradingStatusWalletSetupIssues({
@@ -417,35 +415,44 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           app,
           privyUserId: user.privyUserId,
         });
-        const status = await enableTelegramBotTrading(pool, {
-          buildKalshiEligibilityForWallet: (walletAddress) =>
-            buildKalshiEligibilityForRequest({
-              geoFenceConfig: kalshiGeoFenceConfig,
-              request,
-              user,
-              walletAddress,
-            }),
-          enabledVenues: body.enabledVenues as
-            | TelegramBotTradingVenue[]
-            | undefined,
-          internalWallets,
-          preferredWalletAddress: body.walletAddress ?? null,
-          userId: user.id,
-        }, createTradingForRequest(request));
+        const status = await enableTelegramBotTrading(
+          pool,
+          {
+            buildKalshiEligibilityForWallet: (walletAddress) =>
+              buildKalshiEligibilityForRequest({
+                geoFenceConfig: kalshiGeoFenceConfig,
+                request,
+                user,
+                walletAddress,
+              }),
+            enabledVenues: body.enabledVenues as
+              | TelegramBotTradingVenue[]
+              | undefined,
+            internalWallets,
+            preferredWalletAddress: body.walletAddress ?? null,
+            privyWalletId: body.privyWalletId ?? null,
+            userId: user.id,
+          },
+          createTradingForRequest(request),
+        );
         return reply.send({ ok: true, status });
       } catch (error) {
         const message =
-          error instanceof Error && error.message === "telegram_account_required"
+          error instanceof Error &&
+          error.message === "telegram_account_required"
             ? "Telegram account is required before enabling bot trading."
             : error instanceof Error &&
                 error.message === "internal_trading_wallet_required"
               ? "Create an internal Hunch Trading Wallet before enabling Telegram bot trading."
-            : error instanceof Error &&
-                error.message === "no_compatible_venues_for_wallet"
-              ? "No compatible bot trading venues are enabled."
-            : "Unable to enable Telegram bot trading.";
+              : error instanceof Error &&
+                  error.message === "no_compatible_venues_for_wallet"
+                ? "No compatible bot trading venues are enabled."
+                : "Unable to enable Telegram bot trading.";
         reply.code(400);
-        return reply.send({ error: "telegram_bot_trading_enable_failed", message });
+        return reply.send({
+          error: "telegram_bot_trading_enable_failed",
+          message,
+        });
       }
     },
   );

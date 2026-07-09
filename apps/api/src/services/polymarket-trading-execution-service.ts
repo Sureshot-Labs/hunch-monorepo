@@ -53,6 +53,7 @@ import type {
 import {
   resolvePolymarketFeePolicySnapshot,
   validatePolymarketOrderBuilderCodeForConfig,
+  type PolymarketFeePolicySnapshot,
 } from "./polymarket-builder-fees.js";
 import {
   extractOrderArray,
@@ -119,16 +120,24 @@ import {
 } from "./polymarket-order-execution.js";
 import { syncPolymarketTradesForSigner } from "./positions-sync.js";
 import { fetchOpenOrderCollateralLocks } from "./open-order-collateral.js";
-import { PolymarketQuoteError } from "./polymarket-quote.js";
+import {
+  calculatePolymarketQuote,
+  loadPolymarketQuoteContext,
+  PolymarketQuoteError,
+  type PolymarketQuoteResult,
+} from "./polymarket-quote.js";
 import {
   computePolymarketClobOpenOrderLocks,
   computePolymarketExecutableFunds,
+  evaluatePolymarketBuyApprovalReadiness,
+  polymarketAllowanceSatisfiesBuyApproval,
   type PolymarketFunderExecutionKind,
 } from "./polymarket-max-spend.js";
 import type {
   PersistedTrade,
   PersistTradeInput,
   PreparedTrade,
+  SubmitPreparedTradeInput,
   SubmitResult,
   TradeIntent,
   TradeQuote,
@@ -149,7 +158,9 @@ const POLYMARKET_SUBMIT_SETTLEMENT_ATTEMPTS = 5;
 const POLYMARKET_SUBMIT_SETTLEMENT_DELAY_MS = 800;
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
-type PolymarketL2RequestResult = Awaited<ReturnType<typeof polymarketL2Request>>;
+type PolymarketL2RequestResult = Awaited<
+  ReturnType<typeof polymarketL2Request>
+>;
 
 const ORDER_TYPE_STRING =
   "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)";
@@ -193,6 +204,10 @@ type PolymarketPreparedPayload = PreparedPayloadBase & {
   price: number | null;
   size: number | null;
   tokenId: string | null;
+};
+
+type PolymarketBotQuoteRaw = PolymarketQuoteResult & {
+  feePolicySnapshot?: PolymarketFeePolicySnapshot | null;
 };
 
 type PolymarketSide = "BUY" | "SELL";
@@ -424,7 +439,6 @@ const capabilities = createCapability({
   authorizationMode: "embedded_privy_evm",
   venue: "polymarket",
 });
-const EMBEDDED_APPROVAL_THRESHOLD = 1n << 255n;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -466,7 +480,7 @@ function normalizeEvmAddress(value: string | null | undefined): string | null {
 function approvalSatisfiesEmbeddedAutomation(
   value: bigint | null | undefined,
 ): boolean {
-  return Boolean(value != null && value >= EMBEDDED_APPROVAL_THRESHOLD);
+  return polymarketAllowanceSatisfiesBuyApproval(value);
 }
 
 function isEvmAddress(value: string | null | undefined): value is string {
@@ -5273,6 +5287,45 @@ function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
     : env.polymarketExchangeAddress;
 }
 
+function readPolymarketNegRiskFromMarket(
+  market: Awaited<ReturnType<typeof loadMarketForVenue>>,
+): boolean | null {
+  if (!isRecord(market.metadata)) return null;
+  if (typeof market.metadata.negRisk === "boolean") {
+    return market.metadata.negRisk;
+  }
+  if (typeof market.metadata.neg_risk === "boolean") {
+    return market.metadata.neg_risk;
+  }
+  return null;
+}
+
+function readPolymarketNegRisk(input: {
+  market: Awaited<ReturnType<typeof loadMarketForVenue>>;
+  quote?: unknown;
+}): boolean | null {
+  if (isRecord(input.quote) && typeof input.quote.negRisk === "boolean") {
+    return input.quote.negRisk;
+  }
+  return readPolymarketNegRiskFromMarket(input.market);
+}
+
+function readPolymarketFeePolicySnapshot(
+  value: unknown,
+): PolymarketFeePolicySnapshot | null {
+  if (
+    !isRecord(value) ||
+    value.venue !== "polymarket" ||
+    typeof value.builderCode !== "string" ||
+    typeof value.collectionMode !== "string" ||
+    typeof value.builderTakerFeeBps !== "number" ||
+    typeof value.builderMakerFeeBps !== "number"
+  ) {
+    return null;
+  }
+  return value as PolymarketFeePolicySnapshot;
+}
+
 function parseBigIntValue(
   value: string | number | bigint | null | undefined,
 ): bigint | null {
@@ -5382,6 +5435,7 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
   creds: PolymarketL2Credentials;
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
+  negRisk?: boolean | null;
   pool: ApiTradingApplicationServiceInput["pool"];
   signer: string;
   userId: string;
@@ -5394,6 +5448,7 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
   signerPusdTopUpRaw: bigint;
   signerUsdceTopUpRaw: bigint;
   usesSignerTopUp: boolean;
+  buyApproval: { missing: string[]; ok: boolean };
 }> {
   const signerNormalized = toChecksumAddress(inputs.signer);
   const funderNormalized = toChecksumAddress(inputs.funder);
@@ -5443,7 +5498,7 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
     liveCollateralLocks.get(signerLockKey),
   );
 
-  return computePolymarketExecutableFunds({
+  const funds = computePolymarketExecutableFunds({
     signer: signerNormalized,
     funder: funderNormalized,
     funderExecutionKind: inputs.funderExecutionKind,
@@ -5453,6 +5508,16 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
     signerLockedRaw,
     signerUsdceRaw: snapshot.signerUsdceBalance,
   });
+  return {
+    ...funds,
+    buyApproval: evaluatePolymarketBuyApprovalReadiness({
+      allowanceExchange: snapshot.allowanceExchange,
+      allowanceNegRisk: snapshot.allowanceNegRisk,
+      allowanceNegRiskAdapter: snapshot.allowanceNegRiskAdapter,
+      negRisk: inputs.negRisk,
+      negRiskAdapterConfigured: Boolean(negRiskAdapterAddress),
+    }),
+  };
 }
 
 function readMakerAmountFromOrderPayload(orderPayload: unknown): bigint | null {
@@ -6257,13 +6322,15 @@ async function getReadiness(
       setupRequired: true,
     });
   }
+  let targetMarket: Awaited<ReturnType<typeof loadMarketForVenue>> | null =
+    null;
   if (input.target?.marketId) {
-    const market = await loadMarketForVenue(
+    targetMarket = await loadMarketForVenue(
       ctx.pool,
       input.target.marketId,
       "polymarket",
     );
-    if (!isOrderable(market)) {
+    if (!isOrderable(targetMarket)) {
       return readiness("polymarket", capabilities, {
         ok: false,
         code: "market_not_orderable",
@@ -6328,10 +6395,21 @@ async function getReadiness(
       creds: l2Creds,
       funder: funders.recommended.funder,
       funderExecutionKind,
+      negRisk: targetMarket
+        ? readPolymarketNegRiskFromMarket(targetMarket)
+        : null,
       pool: ctx.pool,
       signer,
       userId: input.actor.userId,
     });
+    if (!funds.buyApproval.ok) {
+      return readiness("polymarket", capabilities, {
+        ok: false,
+        code: "insufficient_readiness",
+        message: "Polymarket buy approvals are missing.",
+        setupRequired: true,
+      });
+    }
     if (funds.executableFundsRaw <= 0n) {
       return readiness("polymarket", capabilities, {
         ok: false,
@@ -6374,16 +6452,24 @@ async function quote(
       venue: "polymarket",
     });
   }
-  const orderQuote = await quotePolymarketOrder(ctx.pool, {
+  const quoteContext = await loadPolymarketQuoteContext(ctx.pool, {
+    tokenId,
+    logWarn: (args) =>
+      ctx.logger?.warn?.(args, "Polymarket bot quote context warning"),
+  });
+  const orderQuote = calculatePolymarketQuote({
     tokenId,
     side: "BUY",
     orderType: "FOK",
     amountType: "usd",
     amountUsdInput: amountUsd(intent),
     slippageBps: intent.slippageBps ?? 100,
-    logWarn: (args) =>
-      ctx.logger?.warn?.(args, "Polymarket bot quote context warning"),
+    context: quoteContext,
   });
+  const raw: PolymarketBotQuoteRaw = {
+    ...orderQuote,
+    feePolicySnapshot: quoteContext.feePolicySnapshot,
+  };
   return {
     venue: "polymarket",
     target: { ...intent.target, tokenId, raw: { market } },
@@ -6403,7 +6489,7 @@ async function quote(
       totalFeeEstimateRaw: orderQuote.totalFeeEstimateRaw,
     },
     expiresAt: new Date(Date.now() + 30_000),
-    raw: orderQuote,
+    raw,
   };
 }
 
@@ -6461,18 +6547,36 @@ async function prepareTrade(
     });
   }
 
-  const rawQuote =
-    extractQuoteRaw<{
-      exchangeAddress?: string | null;
-      makerAmount: string;
-      price: number;
-      size: number;
-      takerAmount: string;
-    }>(input.quote) ?? (await quote(ctx, { intent })).raw;
+  let rawQuote =
+    extractQuoteRaw<PolymarketBotQuoteRaw>(input.quote) ??
+    ((await quote(ctx, { intent })).raw as PolymarketBotQuoteRaw);
   if (!isRecord(rawQuote)) {
     throw tradingError({
       code: "quote_unavailable",
       message: "Polymarket quote is unavailable.",
+      venue: "polymarket",
+    });
+  }
+  let feePolicySnapshot = readPolymarketFeePolicySnapshot(
+    rawQuote.feePolicySnapshot,
+  );
+  if (rawQuote.totalRequiredUsdcRaw == null || !feePolicySnapshot) {
+    rawQuote = (await quote(ctx, { intent })).raw as PolymarketBotQuoteRaw;
+    feePolicySnapshot = readPolymarketFeePolicySnapshot(
+      isRecord(rawQuote) ? rawQuote.feePolicySnapshot : null,
+    );
+  }
+  if (!isRecord(rawQuote) || rawQuote.totalRequiredUsdcRaw == null) {
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Polymarket fee-inclusive quote is unavailable.",
+      venue: "polymarket",
+    });
+  }
+  if (!feePolicySnapshot) {
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Polymarket quote fee policy is unavailable.",
       venue: "polymarket",
     });
   }
@@ -6484,9 +6588,16 @@ async function prepareTrade(
     typeof rawMakerAmount === "bigint"
       ? parseBigIntValue(rawMakerAmount)
       : null;
+  const requiredSpendRaw = parseBigIntValue(rawQuote.totalRequiredUsdcRaw);
   const funderExecutionKind =
     resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
-  if (!makerAmountRaw || makerAmountRaw <= 0n || !funderExecutionKind) {
+  if (
+    !makerAmountRaw ||
+    makerAmountRaw <= 0n ||
+    !requiredSpendRaw ||
+    requiredSpendRaw <= 0n ||
+    !funderExecutionKind
+  ) {
     throw tradingError({
       code: "invalid_trade_request",
       message: "Polymarket order spend is invalid.",
@@ -6497,11 +6608,19 @@ async function prepareTrade(
     creds: l2Creds,
     funder: candidate.funder,
     funderExecutionKind,
+    negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
     pool: ctx.pool,
     signer,
     userId: intent.actor.userId,
   });
-  if (executableFunds.executableFundsRaw < makerAmountRaw) {
+  if (!executableFunds.buyApproval.ok) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Polymarket buy approvals are missing.",
+      venue: "polymarket",
+    });
+  }
+  if (executableFunds.executableFundsRaw < requiredSpendRaw) {
     throw tradingError({
       code: "insufficient_readiness",
       message: "Insufficient executable Polymarket funds for this bot buy.",
@@ -6511,10 +6630,9 @@ async function prepareTrade(
 
   const exchangeAddress =
     readString(rawQuote.exchangeAddress) ??
-    (isRecord(market.metadata) && market.metadata.negRisk === true
+    (readPolymarketNegRisk({ market, quote: rawQuote }) === true
       ? env.polymarketNegRiskExchangeAddress
       : env.polymarketExchangeAddress);
-  const feePolicySnapshot = await resolvePolymarketFeePolicySnapshot(ctx.pool);
   const builderValidation = validatePolymarketOrderBuilderCodeForConfig(
     feePolicySnapshot.builderCode,
     {
@@ -6610,8 +6728,9 @@ function extractStatus(payload: unknown): string | null {
 
 async function submitPreparedTrade(
   ctx: ApiTradingApplicationServiceInput,
-  prepared: PreparedTrade,
+  input: SubmitPreparedTradeInput,
 ): Promise<SubmitResult> {
+  const prepared = input.prepared;
   const payload = parsePreparedPayload<PolymarketPreparedPayload>(
     prepared,
     "polymarket",
@@ -6640,6 +6759,7 @@ async function submitPreparedTrade(
     apiSecret: creds.apiSecret,
     apiPassphrase: creds.apiPassphrase,
   };
+  await input.onBeforeBroadcast?.();
   const upstream = await submitPolymarketClobOrderWithRetry({
     address: signer,
     body: requestBody,
@@ -6825,14 +6945,14 @@ export function createPolymarketTradingExecutionService(
     quote: (input) => quote(ctx, input),
     prepareTrade: (input) =>
       prepareTrade(ctx, { intent: input.intent, quote: input.quote ?? null }),
-    submitPreparedTrade: (input) => submitPreparedTrade(ctx, input.prepared),
+    submitPreparedTrade: (input) => submitPreparedTrade(ctx, input),
     persistTrade: (input) => persistTrade(ctx, input),
     applyTradeEffects: (input) => applyOrderTradeEffects(ctx, input),
     executePreparedTrade: (input) =>
       executePreparedTradeLifecycle({
         executeInput: input,
         submitPreparedTrade: (submitInput) =>
-          submitPreparedTrade(ctx, submitInput.prepared),
+          submitPreparedTrade(ctx, submitInput),
         persistTrade: (persistInput) => persistTrade(ctx, persistInput),
         applyTradeEffects: (effectsInput) =>
           applyOrderTradeEffects(ctx, effectsInput),

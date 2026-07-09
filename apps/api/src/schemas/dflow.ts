@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { zRequiredString } from "./common.js";
 
+const zNumberish = z.union([z.string(), z.number()]);
+
 export const dflowExecutionStatusSchema = z.enum([
   "submitted",
   "open",
@@ -48,9 +50,14 @@ export const dflowSubmitBodySchema = z.object({
   signedTransaction: zRequiredString("signedTransaction is required"),
   skipPreflight: z.boolean().optional(),
   maxRetries: z.coerce.number().int().min(0).optional(),
+  userPublicKey: z.string().optional(),
+  inputMint: z.string().optional(),
+  outputMint: z.string().optional(),
+  amountInRaw: zNumberish.optional(),
+  amountOutRaw: zNumberish.optional(),
+  minOutRaw: zNumberish.optional(),
+  quoteResponse: z.unknown().optional(),
 });
-
-const zNumberish = z.union([z.string(), z.number()]);
 
 export const dflowExecutionBodySchema = z.object({
   marketId: z.string().optional(),

@@ -56,8 +56,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(embeddedWalletRoutes);
   await app.register(polymarketPrivateRoutes, { prefix: "/trade/polymarket" });
   await app.register(limitlessPrivateRoutes, { prefix: "/trade/limitless" });
-  await app.register(dflowPrivateRoutes, { prefix: "/trade/kalshi" });
-  await app.register(dflowPrivateRoutes, { prefix: "/trade/dflow" });
+  await app.register(dflowPrivateRoutes, {
+    prefix: "/trade/kalshi",
+    strictKalshiSubmit: true,
+  });
+  await app.register(dflowPrivateRoutes, {
+    prefix: "/trade/dflow",
+    strictKalshiSubmit: false,
+  });
   await app.register(polymarketProxyRoutes);
   await app.register(solanaRoutes);
   await app.register(pricesSseRoutes);

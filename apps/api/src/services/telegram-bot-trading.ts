@@ -368,10 +368,13 @@ function buildTelegramBotTradingWalletSetupIssues(input: {
   requestedVenues: readonly TelegramBotTradingVenue[];
 }): TelegramBotTradingWalletSetupIssue[] {
   const selectedChains = new Set(input.selectedWalletChains);
+  const missingChains = new Set<TelegramBotTradingWalletChain>();
   const issues: TelegramBotTradingWalletSetupIssue[] = [];
   for (const venue of input.requestedVenues) {
     const walletChain = walletChainForVenue(venue);
     if (selectedChains.has(walletChain)) continue;
+    if (missingChains.has(walletChain)) continue;
+    missingChains.add(walletChain);
     issues.push({
       code: "internal_wallet_missing",
       message: internalWalletMissingMessage(walletChain),
@@ -384,8 +387,15 @@ function buildTelegramBotTradingWalletSetupIssues(input: {
 
 function buildInternalWalletCandidateLookup(
   candidates: readonly TelegramBotTradingInternalWalletCandidate[],
-): Map<string, TelegramBotTradingInternalWalletCandidate> {
-  const out = new Map<string, TelegramBotTradingInternalWalletCandidate>();
+): {
+  byAddress: Map<string, TelegramBotTradingInternalWalletCandidate>;
+  byId: Map<string, TelegramBotTradingInternalWalletCandidate>;
+} {
+  const byAddress = new Map<
+    string,
+    TelegramBotTradingInternalWalletCandidate
+  >();
+  const byId = new Map<string, TelegramBotTradingInternalWalletCandidate>();
   for (const candidate of candidates) {
     const walletId = candidate.privyWalletId.trim();
     const address = normalizeWalletAddressForChain(
@@ -393,16 +403,19 @@ function buildInternalWalletCandidateLookup(
       candidate.walletChain,
     );
     if (!walletId || !address) continue;
-    out.set(`${candidate.walletChain}:${address}`, {
+    const normalized = {
       ...candidate,
       privyWalletId: walletId,
-    });
+    };
+    byAddress.set(`${candidate.walletChain}:${address}`, normalized);
+    byId.set(`${candidate.walletChain}:${walletId}`, normalized);
   }
-  return out;
+  return { byAddress, byId };
 }
 
 function selectInternalWalletForChain(input: {
-  internalWallets: Map<string, TelegramBotTradingInternalWalletCandidate>;
+  internalWallets: ReturnType<typeof buildInternalWalletCandidateLookup>;
+  preferredPrivyWalletId?: string | null;
   preferredWalletAddress?: string | null;
   verifiedWallets: readonly VerifiedTelegramBotTradingWalletRow[];
   walletChain: TelegramBotTradingWalletChain;
@@ -414,7 +427,7 @@ function selectInternalWalletForChain(input: {
         wallet.wallet_address,
         input.walletChain,
       );
-      const internal = input.internalWallets.get(
+      const internal = input.internalWallets.byAddress.get(
         `${input.walletChain}:${normalizedAddress}`,
       );
       return internal
@@ -439,6 +452,24 @@ function selectInternalWalletForChain(input: {
     });
   if (eligible.length === 0) return null;
 
+  const preferredPrivyWalletId = input.preferredPrivyWalletId?.trim();
+  if (preferredPrivyWalletId) {
+    const preferredInternal = input.internalWallets.byId.get(
+      `${input.walletChain}:${preferredPrivyWalletId}`,
+    );
+    if (!preferredInternal) return null;
+    const selectedById = eligible.find(
+      (wallet) => wallet.internal.privyWalletId === preferredPrivyWalletId,
+    );
+    return selectedById
+      ? {
+          privyWalletId: selectedById.internal.privyWalletId,
+          walletAddress: selectedById.walletAddress,
+          walletChain: input.walletChain,
+        }
+      : null;
+  }
+
   const preferredAddress = normalizeWalletAddressForChain(
     input.preferredWalletAddress,
     input.walletChain,
@@ -457,6 +488,7 @@ function selectInternalWalletForChain(input: {
 
 function buildTelegramBotTradingWalletSelection(input: {
   internalWallets: readonly TelegramBotTradingInternalWalletCandidate[];
+  preferredPrivyWalletId?: string | null;
   preferredWalletAddress?: string | null;
   requestedVenues: readonly TelegramBotTradingVenue[];
   verifiedWallets: readonly VerifiedTelegramBotTradingWalletRow[];
@@ -479,6 +511,7 @@ function buildTelegramBotTradingWalletSelection(input: {
   for (const walletChain of requestedChains) {
     const selected = selectInternalWalletForChain({
       internalWallets,
+      preferredPrivyWalletId: input.preferredPrivyWalletId,
       preferredWalletAddress: input.preferredWalletAddress,
       verifiedWallets: input.verifiedWallets,
       walletChain,
@@ -1057,6 +1090,7 @@ export async function enableTelegramBotTrading(
     input.preferredWalletAddress ?? input.walletAddress ?? null;
   const walletSelection = buildTelegramBotTradingWalletSelection({
     internalWallets: input.internalWallets ?? [],
+    preferredPrivyWalletId: input.privyWalletId,
     preferredWalletAddress,
     requestedVenues: enabledVenueSource,
     verifiedWallets: await loadVerifiedTelegramBotTradingWallets(
@@ -1336,14 +1370,15 @@ async function loadUnresolvedTelegramTradeIntent(
   const result = await db.query<UnresolvedTelegramTradeIntentRow>(
     `SELECT id, side, status, error_code
        FROM telegram_trade_intents tti
-      WHERE telegram_user_id = $1
-        AND market_id = $2
-        AND ($3::text IS NULL OR side = $3)
-        AND ($4::uuid IS NULL OR id <> $4::uuid)
-        AND (
-          status = ANY($5::text[])
-          OR (status = 'submitted' AND error_code = 'reconcile_required')
-        )
+	     WHERE telegram_user_id = $1
+	        AND market_id = $2
+	        AND ($3::text IS NULL OR side = $3)
+	        AND ($4::uuid IS NULL OR id <> $4::uuid)
+	        AND (
+	          (status = 'confirming' AND expires_at > now())
+	          OR status = ANY($5::text[])
+	          OR (status = 'submitted' AND error_code = 'reconcile_required')
+	        )
       ORDER BY updated_at DESC
       LIMIT 1`,
     [
@@ -1351,7 +1386,7 @@ async function loadUnresolvedTelegramTradeIntent(
       input.marketId,
       input.side ?? null,
       input.excludeIntentId ?? null,
-      ["confirming", "executing", "reconcile_required"],
+      ["executing", "reconcile_required"],
     ],
   );
   return result.rows[0] ?? null;
@@ -1364,12 +1399,13 @@ async function countUnresolvedTelegramTradeIntents(
   const result = await db.query<{ count: string }>(
     `SELECT count(*)::text AS count
        FROM telegram_trade_intents tti
-      WHERE telegram_user_id = $1
-        AND (
-          status = ANY($2::text[])
-          OR (status = 'submitted' AND error_code = 'reconcile_required')
-        )`,
-    [telegramUserId, ["confirming", "executing", "reconcile_required"]],
+	     WHERE telegram_user_id = $1
+	        AND (
+	          (status = 'confirming' AND expires_at > now())
+	          OR status = ANY($2::text[])
+	          OR (status = 'submitted' AND error_code = 'reconcile_required')
+	        )`,
+    [telegramUserId, ["executing", "reconcile_required"]],
   );
   const parsed = Number(result.rows[0]?.count ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -1396,43 +1432,31 @@ async function withOptionalTransaction<T>(
   }
 }
 
-async function lockTelegramIntentMarketSide(
+async function lockTelegramIntentMarket(
   db: DbQuery,
   input: {
     marketId: string;
-    side: TelegramBotTradingSide;
     telegramUserId: string;
   },
 ): Promise<void> {
-  await db.query(
-    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-    [
-      [
-        "telegram-bot-trade",
-        input.telegramUserId,
-        input.marketId,
-        input.side,
-      ].join(":"),
-    ],
-  );
+  await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    ["telegram-bot-trade", input.telegramUserId, input.marketId].join(":"),
+  ]);
 }
 
 async function transitionIntentToConfirming(input: {
   authorization: TelegramBotTradingAuthorizationRow;
   db: DbQuery;
   intent: TelegramTradeIntentRow;
-  side: TelegramBotTradingSide;
 }): Promise<"blocked" | "confirmed" | "overtaken"> {
   return withOptionalTransaction(input.db, async (client) => {
-    await lockTelegramIntentMarketSide(client, {
+    await lockTelegramIntentMarket(client, {
       marketId: input.intent.market_id,
-      side: input.side,
       telegramUserId: input.intent.telegram_user_id,
     });
     const unresolved = await loadUnresolvedTelegramTradeIntent(client, {
       excludeIntentId: input.intent.id,
       marketId: input.intent.market_id,
-      side: input.side,
       telegramUserId: input.intent.telegram_user_id,
     });
     if (unresolved) return "blocked";
@@ -1448,6 +1472,23 @@ async function transitionIntentToConfirming(input: {
       db: client,
       intentId: input.intent.id,
     });
+    await client.query(
+      `UPDATE telegram_trade_intents
+          SET status = 'cancelled',
+              error_code = coalesce(error_code, 'superseded_by_intent'),
+              error_message = coalesce(error_message, 'Another trade intent for this market was selected.'),
+              updated_at = now()
+        WHERE telegram_user_id = $1
+          AND market_id = $2
+          AND id <> $3::uuid
+          AND status = ANY($4::text[])`,
+      [
+        input.intent.telegram_user_id,
+        input.intent.market_id,
+        input.intent.id,
+        ["draft", "previewed"],
+      ],
+    );
     return "confirmed";
   });
 }
@@ -1762,9 +1803,9 @@ async function finalizeSubmittedIntent(input: {
 }): Promise<boolean> {
   const hasDurableRefs = Boolean(
     input.orderId ??
-      input.executionId ??
-      input.venueOrderId ??
-      input.txSignature,
+    input.executionId ??
+    input.venueOrderId ??
+    input.txSignature,
   );
   return updateIntentStatus({
     allowedStatuses: ["executing"],
@@ -1831,7 +1872,47 @@ export async function reconcileStaleTelegramTradeIntents(
         AND o.venue = ti.venue
         AND o.order_payload IS NOT NULL
         AND jsonb_typeof(o.order_payload) = 'object'
-        AND o.order_payload->>'telegramIntentId' = ti.id::text
+        AND (
+          o.order_payload->>'telegramIntentId' = ti.id::text
+          OR o.order_payload->'submitted'->>'telegramIntentId' = ti.id::text
+          OR o.order_payload->'history'->>'telegramIntentId' = ti.id::text
+          OR o.order_payload->'payload'->>'telegramIntentId' = ti.id::text
+          OR o.order_payload->'submitted'->'payload'->>'telegramIntentId' = ti.id::text
+          OR o.order_payload->'reconcileKeys'->>'intentId' = ti.id::text
+          OR o.order_payload->'reconcileKeys'->>'telegramIntentId' = ti.id::text
+          OR o.order_payload->'submitted'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR o.order_payload->'history'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR o.order_payload->'payload'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR o.order_payload->'submitted'->'payload'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR (ti.venue_order_id IS NOT NULL AND o.venue_order_id = ti.venue_order_id)
+          OR (ti.tx_signature IS NOT NULL AND o.order_hash = ti.tx_signature)
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'venueOrderId' IS NOT NULL
+            AND o.venue_order_id = ti.prepared_snapshot->'reconcileKeys'->>'venueOrderId'
+          )
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'orderHash' IS NOT NULL
+            AND o.order_hash = ti.prepared_snapshot->'reconcileKeys'->>'orderHash'
+          )
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'txSignature' IS NOT NULL
+            AND o.order_hash = ti.prepared_snapshot->'reconcileKeys'->>'txSignature'
+          )
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId' IS NOT NULL
+            AND (
+              o.order_payload->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'submitted'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'history'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'payload'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'submitted'->'payload'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'submitted'->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'payload'->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR o.order_payload->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+            )
+          )
+        )
       RETURNING ti.id`,
     [["executing", "reconcile_required", "submitted"]],
   );
@@ -1855,7 +1936,47 @@ export async function reconcileStaleTelegramTradeIntents(
         AND e.venue = ti.venue
         AND e.raw IS NOT NULL
         AND jsonb_typeof(e.raw) = 'object'
-        AND e.raw->>'telegramIntentId' = ti.id::text
+        AND (
+          e.raw->>'telegramIntentId' = ti.id::text
+          OR e.raw->'submitted'->>'telegramIntentId' = ti.id::text
+          OR e.raw->'history'->>'telegramIntentId' = ti.id::text
+          OR e.raw->'payload'->>'telegramIntentId' = ti.id::text
+          OR e.raw->'submitted'->'payload'->>'telegramIntentId' = ti.id::text
+          OR e.raw->'reconcileKeys'->>'intentId' = ti.id::text
+          OR e.raw->'reconcileKeys'->>'telegramIntentId' = ti.id::text
+          OR e.raw->'submitted'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR e.raw->'history'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR e.raw->'payload'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR e.raw->'submitted'->'payload'->'reconcileKeys'->>'intentId' = ti.id::text
+          OR (ti.venue_order_id IS NOT NULL AND e.venue_order_id = ti.venue_order_id)
+          OR (ti.tx_signature IS NOT NULL AND e.tx_signature = ti.tx_signature)
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'venueOrderId' IS NOT NULL
+            AND e.venue_order_id = ti.prepared_snapshot->'reconcileKeys'->>'venueOrderId'
+          )
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'txSignature' IS NOT NULL
+            AND e.tx_signature = ti.prepared_snapshot->'reconcileKeys'->>'txSignature'
+          )
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'orderHash' IS NOT NULL
+            AND e.tx_signature = ti.prepared_snapshot->'reconcileKeys'->>'orderHash'
+          )
+          OR (
+            ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId' IS NOT NULL
+            AND (
+              e.raw->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'submitted'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'history'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'payload'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'submitted'->'payload'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'submitted'->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'payload'->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+              OR e.raw->'submitted'->'payload'->'reconcileKeys'->>'clientOrderId' = ti.prepared_snapshot->'reconcileKeys'->>'clientOrderId'
+            )
+          )
+        )
       RETURNING ti.id`,
     [["executing", "reconcile_required", "submitted"]],
   );
@@ -2236,7 +2357,6 @@ export async function handleTelegramBotTradingCallback(
       authorization,
       db: input.db,
       intent,
-      side,
     });
     if (confirming === "blocked") {
       await input.answerCallbackQuery({
@@ -2376,7 +2496,6 @@ export async function handleTelegramBotTradingCallback(
       allowedStatuses: ["executing"],
       db: input.db,
       intentId: intent.id,
-      markSubmitStarted: true,
       preparedSnapshot,
       result: { quote },
       status: "executing",
@@ -2389,9 +2508,22 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
-    submitStarted = true;
     const executed = await trading.executePreparedTrade({
       prepared,
+      onBeforeBroadcast: async () => {
+        const submitMarked = await updateIntentStatus({
+          allowedStatuses: ["executing"],
+          db: input.db,
+          intentId: intent.id,
+          markSubmitStarted: true,
+          result: { quote },
+          status: "executing",
+        });
+        if (!submitMarked) {
+          throw new Error("Trade intent is no longer active before submit.");
+        }
+        submitStarted = true;
+      },
       onSubmitted: async (submitResult) => {
         const submitVenueOrderId =
           submitResult.venueOrderId ?? submitResult.txSignature;

@@ -18,6 +18,46 @@ function positiveBigInt(value: bigint | null | undefined): bigint {
   return value != null && value > 0n ? value : 0n;
 }
 
+export const POLYMARKET_BUY_APPROVAL_THRESHOLD = 1n << 255n;
+
+export function polymarketAllowanceSatisfiesBuyApproval(
+  value: bigint | null | undefined,
+): boolean {
+  return Boolean(value != null && value >= POLYMARKET_BUY_APPROVAL_THRESHOLD);
+}
+
+export function evaluatePolymarketBuyApprovalReadiness(inputs: {
+  allowanceExchange: bigint | null | undefined;
+  allowanceNegRisk: bigint | null | undefined;
+  allowanceNegRiskAdapter?: bigint | null | undefined;
+  negRisk: boolean | null | undefined;
+  negRiskAdapterConfigured?: boolean | null | undefined;
+}): { missing: string[]; ok: boolean } {
+  const missing: string[] = [];
+  const requireExchange = inputs.negRisk !== true;
+  const requireNegRisk = inputs.negRisk !== false;
+  if (
+    requireExchange &&
+    !polymarketAllowanceSatisfiesBuyApproval(inputs.allowanceExchange)
+  ) {
+    missing.push("exchange");
+  }
+  if (
+    requireNegRisk &&
+    !polymarketAllowanceSatisfiesBuyApproval(inputs.allowanceNegRisk)
+  ) {
+    missing.push("negRiskExchange");
+  }
+  if (
+    requireNegRisk &&
+    inputs.negRiskAdapterConfigured &&
+    !polymarketAllowanceSatisfiesBuyApproval(inputs.allowanceNegRiskAdapter)
+  ) {
+    missing.push("negRiskAdapter");
+  }
+  return { missing, ok: missing.length === 0 };
+}
+
 export function computePolymarketExecutableFunds(inputs: {
   signer: string;
   funder: string;

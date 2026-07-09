@@ -152,6 +152,7 @@ export type PreparedTrade = {
 };
 
 export type SubmitPreparedTradeInput = {
+  onBeforeBroadcast?: () => Promise<void> | void;
   prepared: PreparedTrade;
   signatures?: Array<{ id: string; signature: string }>;
   now?: Date;
@@ -212,6 +213,7 @@ export type ExecutedPreparedTradeError = {
 };
 
 export type ExecutePreparedTradeInput = {
+  onBeforeBroadcast?: () => Promise<void> | void;
   onSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
   prepared: PreparedTrade;
   signatures?: Array<{ id: string; signature: string }>;

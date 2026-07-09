@@ -89,6 +89,7 @@ export async function executePreparedTradeLifecycle(input: {
 }): Promise<ExecutedPreparedTrade> {
   const submitResult = await input.submitPreparedTrade({
     now: input.executeInput.now,
+    onBeforeBroadcast: input.executeInput.onBeforeBroadcast,
     prepared: input.executeInput.prepared,
     signatures: input.executeInput.signatures,
   });
