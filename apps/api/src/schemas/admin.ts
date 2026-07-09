@@ -566,6 +566,94 @@ export const adminManualPointsParamsSchema = z.object({
   id: z.string().uuid(),
 });
 
+const adminRewardsBulkAdjustmentRunKeySchema = z
+  .string()
+  .trim()
+  .min(3)
+  .max(80)
+  .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, {
+    message:
+      "Run key must use lowercase letters, numbers, and dashes, and cannot start or end with a dash",
+  });
+
+const adminRewardsBulkAdjustmentBaseSchema = z
+  .object({
+    runKey: adminRewardsBulkAdjustmentRunKeySchema,
+    mode: z.enum(["fixed_amount", "top_up_to_points", "top_up_to_tier"]),
+    visibility: z.enum(["hidden", "visible"]).default("hidden"),
+    amount: z.coerce.number().finite().positive().optional(),
+    targetPoints: z.coerce.number().finite().positive().optional(),
+    targetTier: z.coerce.number().int().min(0).optional(),
+    targetBasis: z.enum(["tier_points", "public_points"]).optional(),
+    cohort: z.object({
+      createdBefore: z.string().datetime(),
+      activeOnly: z.boolean().default(true),
+      excludeAdmins: z.boolean().default(true),
+      requireWallet: z.boolean().default(false),
+    }),
+  })
+  .superRefine((value, ctx) => {
+    if (value.mode === "fixed_amount" && value.amount == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["amount"],
+        message: "Provide amount for fixed_amount",
+      });
+    }
+
+    if (value.mode === "top_up_to_points") {
+      if (value.targetPoints == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["targetPoints"],
+          message: "Provide targetPoints for top_up_to_points",
+        });
+      }
+      if (!value.targetBasis) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["targetBasis"],
+          message: "Provide targetBasis for top_up_to_points",
+        });
+      }
+      if (
+        value.visibility === "hidden" &&
+        value.targetBasis === "public_points"
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["visibility"],
+          message: "Hidden grants cannot top up public points",
+        });
+      }
+    }
+
+    if (value.mode === "top_up_to_tier") {
+      if (value.targetTier == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["targetTier"],
+          message: "Provide targetTier for top_up_to_tier",
+        });
+      }
+      if (value.targetBasis && value.targetBasis !== "tier_points") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["targetBasis"],
+          message: "Tier top-ups always use tier points",
+        });
+      }
+    }
+  });
+
+export const adminRewardsBulkAdjustmentPreviewSchema =
+  adminRewardsBulkAdjustmentBaseSchema;
+
+export const adminRewardsBulkAdjustmentExecuteSchema =
+  adminRewardsBulkAdjustmentBaseSchema.safeExtend({
+    confirm: z.literal("EXECUTE BULK ADJUSTMENT"),
+  });
+
 export const adminRewardsTreasuryQuerySchema = z.object({
   chainId: z.string().trim().min(1).optional(),
 });
@@ -634,6 +722,12 @@ export type AdminIntelPolicyParams = z.infer<
 >;
 export type AdminIntelPolicyBody = z.infer<typeof adminIntelPolicyBodySchema>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
+export type AdminRewardsBulkAdjustmentPreviewBody = z.infer<
+  typeof adminRewardsBulkAdjustmentPreviewSchema
+>;
+export type AdminRewardsBulkAdjustmentExecuteBody = z.infer<
+  typeof adminRewardsBulkAdjustmentExecuteSchema
+>;
 export type AdminRewardsTreasuryQuery = z.infer<
   typeof adminRewardsTreasuryQuerySchema
 >;

@@ -87,6 +87,8 @@ import {
   adminManualPointsParamsSchema,
   adminManualPointsQuerySchema,
   adminPointsSchema,
+  adminRewardsBulkAdjustmentExecuteSchema,
+  adminRewardsBulkAdjustmentPreviewSchema,
   adminRewardsMultiplierOverrideParamsSchema,
   adminRewardsMultiplierOverrideSchema,
   adminRewardsMultiplierOverridesQuerySchema,
@@ -139,6 +141,13 @@ import {
 import { getAdminUserFinanceSummary } from "../services/admin-user-finance-summary.js";
 import { listAdminUsers } from "../services/admin-users-list.js";
 import {
+  AdminRewardsBulkAdjustmentInputError,
+  AdminRewardsBulkAdjustmentRetryExhaustedError,
+  executeAdminRewardsBulkAdjustment,
+  previewAdminRewardsBulkAdjustment,
+  retryAdminRewardsBulkAdjustmentExecute,
+} from "../services/admin-rewards-bulk-adjustments.js";
+import {
   fetchUnifiedMarketIdsByEventId,
   fetchUnifiedOrderById,
   fetchUnifiedOrders,
@@ -147,6 +156,15 @@ import {
 
 const MAX_FEE_SCALE = 10_000;
 const MAX_FEE_BPS = 10_000;
+async function executeAdminRewardsBulkAdjustmentWithRetry(
+  body: Parameters<typeof executeAdminRewardsBulkAdjustment>[1],
+) {
+  return retryAdminRewardsBulkAdjustmentExecute(() =>
+    tx(pool, async (client: PoolClient) =>
+      executeAdminRewardsBulkAdjustment(client, body),
+    ),
+  );
+}
 const MAX_POLY_BUILDER_TAKER_FEE_BPS = 100;
 const MAX_POLY_BUILDER_MAKER_FEE_BPS = 50;
 const MAX_FEE_COLLECT_ATTEMPTS = 5;
@@ -6633,6 +6651,61 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           createdAt: rows[0]?.created_at ?? effectiveAt,
         },
       });
+    },
+  );
+
+  z.post(
+    "/admin/rewards/bulk-adjustments/preview",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
+      schema: { body: adminRewardsBulkAdjustmentPreviewSchema },
+    },
+    async (request, reply) => {
+      try {
+        const result = await previewAdminRewardsBulkAdjustment(
+          pool,
+          request.body,
+        );
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
+      } catch (error) {
+        if (error instanceof AdminRewardsBulkAdjustmentInputError) {
+          reply.code(400);
+          return reply.send({ error: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  z.post(
+    "/admin/rewards/bulk-adjustments/execute",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "rewards:write",
+      }),
+      schema: { body: adminRewardsBulkAdjustmentExecuteSchema },
+    },
+    async (request, reply) => {
+      try {
+        const result = await executeAdminRewardsBulkAdjustmentWithRetry(
+          request.body,
+        );
+        reply.header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(result);
+      } catch (error) {
+        if (error instanceof AdminRewardsBulkAdjustmentInputError) {
+          reply.code(400);
+          return reply.send({ error: error.message });
+        }
+        if (error instanceof AdminRewardsBulkAdjustmentRetryExhaustedError) {
+          reply.code(409);
+          return reply.send({ error: error.message });
+        }
+        throw error;
+      }
     },
   );
 

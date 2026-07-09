@@ -23,6 +23,12 @@ import {
   type RewardsPolicy,
 } from "./services/rewards.js";
 import {
+  AdminRewardsBulkAdjustmentRetryExhaustedError,
+  executeAdminRewardsBulkAdjustment,
+  previewAdminRewardsBulkAdjustment,
+  retryAdminRewardsBulkAdjustmentExecute,
+} from "./services/admin-rewards-bulk-adjustments.js";
+import {
   buildPublicPointsContributionSql,
   buildVolumeContributionSql,
   fetchAdminManualVolumeEvents,
@@ -877,6 +883,148 @@ function createAdminManualPointsDb(seed: {
       throw new Error(
         `Unhandled SQL in admin manual points test db call ${calls}: ${sql}`,
       );
+    },
+  } as import("./db.js").DbQuery;
+}
+
+type BulkAdjustmentTestUser = {
+  id: string;
+  createdAt: Date;
+  publicPoints: number;
+  tierPoints: number;
+  email?: string | null;
+  username?: string | null;
+  displayName?: string | null;
+  walletAddress?: string | null;
+  isActive?: boolean;
+  isAdmin?: boolean;
+  existing?: Map<string, number>;
+};
+
+function createBulkAdjustmentDb(seed: {
+  users: BulkAdjustmentTestUser[];
+  tiers?: Array<{
+    tier: number;
+    name: string;
+    points: number;
+    cashbackBps: number;
+  }>;
+  capture?: { insertCalls: number; queries: string[] };
+}): import("./db.js").DbQuery {
+  const tiers =
+    seed.tiers ??
+    [
+      { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
+      { tier: 5, name: "Sage", points: 350_000, cashbackBps: 4500 },
+    ];
+  const capture = seed.capture ?? { insertCalls: 0, queries: [] };
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      capture.queries.push(sql);
+      if (
+        sql.includes("set transaction isolation level serializable") ||
+        sql.includes("pg_advisory_xact_lock")
+      ) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("from rewards_policy")) {
+        return {
+          rows: [
+            {
+              id: "policy-1",
+              effective_at: new Date("2026-01-01T00:00:00.000Z"),
+              tiers,
+              referral_bonus: [{ minReferrals: 1, bonusBps: 100 }],
+              created_at: new Date("2026-01-01T00:00:00.000Z"),
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("from users u")) {
+        const hiddenSourcePrefix = String(params?.[0] ?? "");
+        const visibleSourcePrefix = String(params?.[1] ?? "");
+        const createdBefore = params?.[2] as Date;
+        const requireActive = sql.includes("coalesce(u.is_active, true)");
+        const excludeAdmins = sql.includes("coalesce(u.is_admin, false)");
+        const requireWallet = sql.includes("required_wallet");
+        const rows = seed.users
+          .filter((user) => user.createdAt <= createdBefore)
+          .filter((user) => !requireActive || user.isActive !== false)
+          .filter((user) => !excludeAdmins || user.isAdmin !== true)
+          .filter((user) => !requireWallet || Boolean(user.walletAddress))
+          .map((user) => {
+            const hiddenSourceId = `${hiddenSourcePrefix}${user.id}`;
+            const visibleSourceId = `${visibleSourcePrefix}${user.id}`;
+            const publicExcludedPoints =
+              user.existing?.get(visibleSourceId) ?? 0;
+            const tierExcludedPoints =
+              (user.existing?.get(hiddenSourceId) ?? 0) +
+              publicExcludedPoints;
+            const existingSourceId = user.existing?.has(hiddenSourceId)
+              ? hiddenSourceId
+              : user.existing?.has(visibleSourceId)
+                ? visibleSourceId
+                : null;
+            return {
+              id: user.id,
+              email: user.email ?? null,
+              username: user.username ?? null,
+              display_name: user.displayName ?? null,
+              created_at: user.createdAt,
+              wallet_address: user.walletAddress ?? null,
+              public_points_basis: String(
+                user.publicPoints - publicExcludedPoints,
+              ),
+              tier_points_basis: String(user.tierPoints - tierExcludedPoints),
+              existing_source_id: existingSourceId,
+            };
+          });
+        return { rows };
+      }
+
+      if (sql.includes("jsonb_to_recordset")) {
+        capture.insertCalls += 1;
+        const rows = JSON.parse(String(params?.[0] ?? "[]")) as Array<{
+          user_id: string;
+          hidden_source_id: string;
+          source_id: string;
+          visible_source_id: string;
+          points: number;
+        }>;
+        let inserted = 0;
+        let insertedPoints = 0;
+        for (const row of rows) {
+          const user = seed.users.find((item) => item.id === row.user_id);
+          if (!user) continue;
+          user.existing = user.existing ?? new Map<string, number>();
+          if (
+            user.existing.has(row.hidden_source_id) ||
+            user.existing.has(row.visible_source_id)
+          ) {
+            continue;
+          }
+          const points = Number(row.points);
+          user.existing.set(row.source_id, points);
+          user.tierPoints += points;
+          if (row.source_id.startsWith("manual-visible:")) {
+            user.publicPoints += points;
+          }
+          inserted += 1;
+          insertedPoints += points;
+        }
+        return {
+          rows: [
+            {
+              inserted: String(inserted),
+              inserted_points: String(insertedPoints),
+            },
+          ],
+        };
+      }
+
+      throw new Error(`Unhandled SQL in bulk adjustment test db: ${sql}`);
     },
   } as import("./db.js").DbQuery;
 }
@@ -2630,6 +2778,399 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "bulk adjustment preview is read-only and creates deterministic hidden sources",
+    run: async () => {
+      const capture = { insertCalls: 0, queries: [] as string[] };
+      const db = createBulkAdjustmentDb({
+        capture,
+        users: [
+          {
+            id: "11111111-1111-1111-1111-111111111111",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 10,
+            tierPoints: 20,
+          },
+        ],
+      });
+
+      const result = await previewAdminRewardsBulkAdjustment(db, {
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "fixed_amount",
+        runKey: "early-users-test",
+        visibility: "hidden",
+        amount: 500,
+      });
+
+      assert.equal(capture.insertCalls, 0);
+      assert.equal(result.summary.matched, 1);
+      assert.equal(result.summary.eligible, 1);
+      assert.equal(
+        result.items[0]?.sourceId,
+        "manual:bulk:early-users-test:11111111-1111-1111-1111-111111111111",
+      );
+      assert.equal(result.items[0]?.resultingPublicPoints, 10);
+      assert.equal(result.items[0]?.resultingTierPoints, 520);
+    },
+  },
+  {
+    name: "bulk adjustment visible fixed grant creates visible source and public points",
+    run: async () => {
+      const capture = { insertCalls: 0, queries: [] as string[] };
+      const db = createBulkAdjustmentDb({
+        capture,
+        users: [
+          {
+            id: "22222222-2222-2222-2222-222222222222",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 10,
+            tierPoints: 20,
+          },
+        ],
+      });
+
+      const result = await executeAdminRewardsBulkAdjustment(db, {
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "fixed_amount",
+        runKey: "visible-test",
+        visibility: "visible",
+        amount: 25,
+        confirm: "EXECUTE BULK ADJUSTMENT",
+      });
+
+      assert.equal(result.summary.inserted, 1);
+      assert.match(
+        capture.queries[0] ?? "",
+        /set transaction isolation level serializable/i,
+      );
+      assert.match(capture.queries[1] ?? "", /pg_advisory_xact_lock/i);
+      assert.equal(
+        result.items[0]?.sourceId,
+        "manual-visible:bulk:visible-test:22222222-2222-2222-2222-222222222222",
+      );
+      assert.equal(result.items[0]?.resultingPublicPoints, 35);
+      assert.equal(result.items[0]?.resultingTierPoints, 45);
+    },
+  },
+  {
+    name: "bulk adjustment retry helper retries transient write conflicts",
+    run: async () => {
+      let attempts = 0;
+
+      const result = await retryAdminRewardsBulkAdjustmentExecute(async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          const error = new Error("serialization failure") as Error & {
+            code: string;
+          };
+          error.code = attempts === 1 ? "40001" : "40P01";
+          throw error;
+        }
+        return "ok";
+      });
+
+      assert.equal(result, "ok");
+      assert.equal(attempts, 3);
+    },
+  },
+  {
+    name: "bulk adjustment retry helper returns conflict after max transient retries",
+    run: async () => {
+      let attempts = 0;
+
+      await assert.rejects(
+        () =>
+          retryAdminRewardsBulkAdjustmentExecute(async () => {
+            attempts += 1;
+            const error = new Error("serialization failure") as Error & {
+              code: string;
+            };
+            error.code = "40001";
+            throw error;
+          }),
+        AdminRewardsBulkAdjustmentRetryExhaustedError,
+      );
+
+      assert.equal(attempts, 3);
+    },
+  },
+  {
+    name: "bulk adjustment retry helper rethrows unexpected errors",
+    run: async () => {
+      let attempts = 0;
+      const unexpected = new Error("database unavailable");
+
+      await assert.rejects(
+        () =>
+          retryAdminRewardsBulkAdjustmentExecute(async () => {
+            attempts += 1;
+            throw unexpected;
+          }),
+        (error: unknown) => {
+          assert.equal(error, unexpected);
+          return true;
+        },
+      );
+
+      assert.equal(attempts, 1);
+    },
+  },
+  {
+    name: "bulk adjustment top-up to tier resolves active policy and skips users above target",
+    run: async () => {
+      const db = createBulkAdjustmentDb({
+        tiers: [
+          { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
+          { tier: 3, name: "Analyst", points: 30_000, cashbackBps: 3500 },
+        ],
+        users: [
+          {
+            id: "33333333-3333-3333-3333-333333333333",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 100,
+            tierPoints: 10_000,
+          },
+          {
+            id: "44444444-4444-4444-4444-444444444444",
+            createdAt: new Date("2026-01-02T00:00:00.000Z"),
+            publicPoints: 40_000,
+            tierPoints: 40_000,
+          },
+        ],
+      });
+
+      const result = await previewAdminRewardsBulkAdjustment(db, {
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "top_up_to_tier",
+        runKey: "tier-test",
+        visibility: "hidden",
+        targetTier: 3,
+      });
+
+      assert.equal(result.targetPoints, 30_000);
+      assert.equal(result.summary.matched, 2);
+      assert.equal(result.summary.eligible, 1);
+      assert.equal(result.summary.skipped, 1);
+      assert.equal(result.items[0]?.grantAmount, 20_000);
+      assert.equal(result.items[1]?.skippedReason, "at_or_above_target");
+    },
+  },
+  {
+    name: "bulk adjustment execute is idempotent for repeated run key",
+    run: async () => {
+      const db = createBulkAdjustmentDb({
+        users: [
+          {
+            id: "55555555-5555-5555-5555-555555555555",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 0,
+            tierPoints: 0,
+          },
+        ],
+      });
+      const body = {
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "top_up_to_points" as const,
+        runKey: "retry-test",
+        visibility: "hidden" as const,
+        targetBasis: "tier_points" as const,
+        targetPoints: 100,
+        confirm: "EXECUTE BULK ADJUSTMENT" as const,
+      };
+
+      const first = await executeAdminRewardsBulkAdjustment(db, body);
+      const second = await executeAdminRewardsBulkAdjustment(db, body);
+
+      assert.equal(first.summary.inserted, 1);
+      assert.equal(first.summary.alreadyExisting, 0);
+      assert.equal(second.summary.inserted, 0);
+      assert.equal(second.summary.alreadyExisting, 1);
+      assert.equal(second.items[0]?.grantAmount, 100);
+      assert.equal(second.items[0]?.existing, true);
+    },
+  },
+  {
+    name: "bulk adjustment run key is idempotent across visibility",
+    run: async () => {
+      const db = createBulkAdjustmentDb({
+        users: [
+          {
+            id: "77777777-7777-7777-7777-777777777777",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 0,
+            tierPoints: 0,
+          },
+        ],
+      });
+      const base = {
+        amount: 50,
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "fixed_amount" as const,
+        runKey: "same-run-visibility",
+        confirm: "EXECUTE BULK ADJUSTMENT" as const,
+      };
+
+      const hidden = await executeAdminRewardsBulkAdjustment(db, {
+        ...base,
+        visibility: "hidden",
+      });
+      const visible = await executeAdminRewardsBulkAdjustment(db, {
+        ...base,
+        visibility: "visible",
+      });
+
+      assert.equal(hidden.summary.inserted, 1);
+      assert.equal(visible.summary.inserted, 0);
+      assert.equal(visible.summary.alreadyExisting, 1);
+      assert.equal(visible.items[0]?.existing, true);
+      assert.equal(
+        visible.items[0]?.sourceId,
+        "manual-visible:bulk:same-run-visibility:77777777-7777-7777-7777-777777777777",
+      );
+    },
+  },
+  {
+    name: "bulk adjustment preview detects existing row from either visibility prefix",
+    run: async () => {
+      const existing = new Map<string, number>([
+        [
+          "manual-visible:bulk:existing-prefix:88888888-8888-8888-8888-888888888888",
+          75,
+        ],
+      ]);
+      const db = createBulkAdjustmentDb({
+        users: [
+          {
+            id: "88888888-8888-8888-8888-888888888888",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 75,
+            tierPoints: 75,
+            existing,
+          },
+        ],
+      });
+
+      const result = await previewAdminRewardsBulkAdjustment(db, {
+        amount: 75,
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "fixed_amount",
+        runKey: "existing-prefix",
+        visibility: "hidden",
+      });
+
+      assert.equal(result.summary.alreadyExisting, 1);
+      assert.equal(result.items[0]?.existing, true);
+      assert.equal(
+        result.items[0]?.sourceId,
+        "manual:bulk:existing-prefix:88888888-8888-8888-8888-888888888888",
+      );
+    },
+  },
+  {
+    name: "bulk adjustment point basis excludes existing current-run sources",
+    run: async () => {
+      const existing = new Map<string, number>([
+        [
+          "manual-visible:bulk:exclude-current-run:99999999-9999-9999-9999-999999999999",
+          50,
+        ],
+      ]);
+      const db = createBulkAdjustmentDb({
+        users: [
+          {
+            id: "99999999-9999-9999-9999-999999999999",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 150,
+            tierPoints: 150,
+            existing,
+          },
+        ],
+      });
+
+      const result = await previewAdminRewardsBulkAdjustment(db, {
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "top_up_to_points",
+        runKey: "exclude-current-run",
+        targetBasis: "tier_points",
+        targetPoints: 200,
+        visibility: "hidden",
+      });
+
+      assert.equal(result.items[0]?.tierPoints, 100);
+      assert.equal(result.items[0]?.publicPoints, 100);
+      assert.equal(result.items[0]?.grantAmount, 100);
+      assert.equal(result.items[0]?.existing, true);
+    },
+  },
+  {
+    name: "bulk adjustment visible tier top-up warns that public points increase",
+    run: async () => {
+      const db = createBulkAdjustmentDb({
+        users: [
+          {
+            id: "66666666-6666-6666-6666-666666666666",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            publicPoints: 5,
+            tierPoints: 10,
+          },
+        ],
+      });
+
+      const result = await previewAdminRewardsBulkAdjustment(db, {
+        cohort: {
+          activeOnly: true,
+          createdBefore: "2026-07-09T00:00:00.000Z",
+          excludeAdmins: true,
+          requireWallet: false,
+        },
+        mode: "top_up_to_points",
+        runKey: "visible-tier-warning",
+        visibility: "visible",
+        targetBasis: "tier_points",
+        targetPoints: 20,
+      });
+
+      assert.equal(result.warnings.length, 1);
+      assert.equal(result.items[0]?.grantAmount, 10);
+      assert.equal(result.items[0]?.resultingPublicPoints, 15);
+      assert.equal(result.items[0]?.resultingTierPoints, 20);
+    },
+  },
+  {
     name: "fetchReferralsForUser aggregates frozen referral bonus and maps numeric fields",
     run: async () => {
       const capture: { sql?: string; params?: unknown[] } = {};
@@ -2724,7 +3265,9 @@ try {
     }
   }
 } finally {
-  await pool.end();
+  if (!process.argv[1]?.endsWith("test-runner.ts")) {
+    await pool.end();
+  }
 }
 
 console.log(`[rewards-tests] passed ${passed}/${tests.length}`);
