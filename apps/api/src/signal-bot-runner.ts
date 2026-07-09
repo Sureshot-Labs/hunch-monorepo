@@ -11,6 +11,7 @@ import {
 
 import {
   acquireSignalBotLock,
+  drainSignalBotConfirmTasks,
   parseSignalBotAggMarketConfig,
   parseSignalBotConfig,
   pollSignalBotCommands,
@@ -348,6 +349,10 @@ export async function runSignalBotRunner(): Promise<void> {
     }
   } finally {
     clearInterval(lockHeartbeat);
+    const drainedConfirmTasks = await drainSignalBotConfirmTasks(10_000);
+    if (!drainedConfirmTasks) {
+      log("signal_bot_confirm_tasks_drain_timeout");
+    }
     await releaseSignalBotLock({ owner, redis }).catch(() => undefined);
     await dbPool?.end().catch(() => undefined);
     await redis.quit().catch(() => undefined);

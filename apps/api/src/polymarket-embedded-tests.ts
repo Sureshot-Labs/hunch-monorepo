@@ -7,6 +7,7 @@ import {
   buildEmbeddedPolymarketConnectRequest,
   buildEmbeddedPolymarketTypedDataRequest,
   prepareEmbeddedPolymarketSignerApprovalRequests,
+  prepareEmbeddedPolymarketSignerApprovalTransactions,
   type EmbeddedPolymarketTypedData,
   type EmbeddedPolymarketWalletContext,
 } from "./services/polymarket-embedded.js";
@@ -159,6 +160,38 @@ const tests: TestCase[] = [
       assert.ok(
         requests.every((request) => request.id.startsWith("approval-")),
       );
+      const transactions = prepareEmbeddedPolymarketSignerApprovalTransactions({
+        signer: walletContext.signer,
+        funder: walletContext.signer,
+        currentApprovals: {
+          exchangeApproved: false,
+          negRiskExchangeApproved: false,
+          negRiskAdapterApproved: false,
+          ctfCollateralAdapterApproved: false,
+          negRiskCollateralAdapterApproved: false,
+          feeCollectorApproved: false,
+          exchangeAllowanceOk: false,
+          negRiskExchangeAllowanceOk: false,
+          negRiskAdapterAllowanceOk: false,
+          feeCollectorAllowanceOk: false,
+        },
+      });
+      assert.equal(transactions.length, requests.length);
+      const methodNames = transactions.map(
+        (transaction) =>
+          tokenInterface.parseTransaction({ data: transaction.data })?.name,
+      );
+      assert.ok(methodNames.includes("approve"));
+      assert.ok(methodNames.includes("setApprovalForAll"));
+      for (const [index, transaction] of transactions.entries()) {
+        const requestTransaction = (
+          requests[index]?.input.body.params as {
+            transaction: { data: string; to: string };
+          }
+        ).transaction;
+        assert.equal(requestTransaction.to, transaction.to);
+        assert.equal(requestTransaction.data, transaction.data);
+      }
     },
   },
   {

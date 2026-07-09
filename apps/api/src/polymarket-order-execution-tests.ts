@@ -559,14 +559,20 @@ const tests: TestCase[] = [
   {
     name: "plain not found cancel reasons enter closed-order reconcile",
     run: () => {
-      const source = readApiSourceFile("routes", "polymarket-private.ts");
+      const source = readApiSourceFile(
+        "services",
+        "polymarket-trading-execution-service.ts",
+      );
       assert.match(source, /normalized\.includes\("not found"\)/);
     },
   },
   {
     name: "clob execution evidence is deferred until stored fills exist",
     run: () => {
-      const source = readApiSourceFile("routes", "polymarket-private.ts");
+      const source = readApiSourceFile(
+        "services",
+        "polymarket-trading-execution-service.ts",
+      );
       assert.match(source, /hasPolymarketOrderExecutionEvidence\(row\.id\)/);
       assert.match(source, /markPolymarketDelayedOrderUnconfirmed/);
       assert.match(
@@ -578,7 +584,10 @@ const tests: TestCase[] = [
   {
     name: "targeted order sync has auth wallet legacy fallback",
     run: () => {
-      const source = readApiSourceFile("routes", "polymarket-private.ts");
+      const source = readApiSourceFile(
+        "services",
+        "polymarket-trading-execution-service.ts",
+      );
       assert.match(source, /targetedAuthFallback/);
       assert.match(source, /authFallbackSigner/);
       assert.match(source, /!usedCredentials &&/);

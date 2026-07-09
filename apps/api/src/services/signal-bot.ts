@@ -42,6 +42,7 @@ import {
   buildSignalBotMarketStartParam,
   normalizeTelegramMiniAppLinkBase,
 } from "./signal-bot-mini-app-links.js";
+import { parseTelegramBotTradingCallbackData } from "./telegram-bot-trading-client.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 
@@ -1160,7 +1161,9 @@ export function buildSignalBotMessage(input: {
     "",
     summary,
     ...(whyInterestingLine ? ["", renderBodyText(whyInterestingLine)] : []),
-    ...(winConditionLine ? ["", escapeTelegramMarkdownV2(winConditionLine)] : []),
+    ...(winConditionLine
+      ? ["", escapeTelegramMarkdownV2(winConditionLine)]
+      : []),
     ...(credentialLines.length > 0
       ? ["", ...credentialLines.map(escapeTelegramMarkdownV2)]
       : []),
@@ -1446,8 +1449,10 @@ function buildSignalBotFollowthroughKeyboard(input: {
           text: formatSignalBotBuyButtonText({
             price: buyPrice,
             side,
-            sideLabel: buildSignalBotFollowthroughSideCopy(input.candidate, side)
-              .buttonLabel,
+            sideLabel: buildSignalBotFollowthroughSideCopy(
+              input.candidate,
+              side,
+            ).buttonLabel,
             venue: input.candidate.venue,
           }),
           webUrl: webTradeUrl,
@@ -1838,7 +1843,9 @@ export async function handleSignalBotCommand(input: {
   if (command === "market") {
     const marketRef = parseSignalBotCommandFirstArg(input.message.text);
     if (!marketRef) {
-      await input.sendMessage(buildPlainReply(chatId, "Usage: /market <market_id or URL>"));
+      await input.sendMessage(
+        buildPlainReply(chatId, "Usage: /market <market_id or URL>"),
+      );
       return true;
     }
     if (input.message.chat.type !== "private" || !input.message.from?.id) {
@@ -1854,7 +1861,9 @@ export async function handleSignalBotCommand(input: {
       telegramUserId: input.message.from.id,
     }) ?? Promise.resolve(false));
     if (!sent) {
-      await input.sendMessage(buildPlainReply(chatId, "Unable to render market card."));
+      await input.sendMessage(
+        buildPlainReply(chatId, "Unable to render market card."),
+      );
     }
     return true;
   }
@@ -1905,11 +1914,15 @@ export async function handleSignalBotCommand(input: {
   if (command === "test_trade") {
     const marketRef = parseSignalBotCommandFirstArg(input.message.text);
     if (!marketRef) {
-      await input.sendMessage(buildPlainReply(chatId, "Usage: /test_trade <market_id or URL>"));
+      await input.sendMessage(
+        buildPlainReply(chatId, "Usage: /test_trade <market_id or URL>"),
+      );
       return true;
     }
     if (!input.message.from?.id) {
-      await input.sendMessage(buildPlainReply(chatId, "Missing Telegram user id."));
+      await input.sendMessage(
+        buildPlainReply(chatId, "Missing Telegram user id."),
+      );
       return true;
     }
     const sent = await (input.sendTradeMarket?.({
@@ -1922,12 +1935,36 @@ export async function handleSignalBotCommand(input: {
     await input.sendMessage(
       buildPlainReply(
         chatId,
-        sent ? "Sent trade card preview." : "Unable to render trade card preview.",
+        sent
+          ? "Sent trade card preview."
+          : "Unable to render trade card preview.",
       ),
     );
     return true;
   }
   return true;
+}
+
+const MAX_BACKGROUND_CONFIRM_CALLBACKS = 4;
+const backgroundConfirmCallbacks = new Set<Promise<void>>();
+
+export async function drainSignalBotConfirmTasks(
+  timeoutMs = 10_000,
+): Promise<boolean> {
+  const pending = Array.from(backgroundConfirmCallbacks);
+  if (pending.length === 0) return true;
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      Promise.allSettled(pending).then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function pollSignalBotCommands(input: {
@@ -1959,7 +1996,9 @@ export async function pollSignalBotCommands(input: {
     chatId: string,
     telegramUserId: number,
   ) => Promise<SignalBotDisableTradingResult>;
-  handleCallback?: (callbackQuery: TelegramBotCallbackQuery) => Promise<boolean>;
+  handleCallback?: (
+    callbackQuery: TelegramBotCallbackQuery,
+  ) => Promise<boolean>;
   telegram: SignalBotTelegramClient;
 }): Promise<number> {
   const offset = await readSignalBotUpdateOffset(input.redis);
@@ -2000,14 +2039,50 @@ export async function pollSignalBotCommands(input: {
         if (didHandle) handled += 1;
       }
       if (update.callback_query) {
+        const callbackQuery = update.callback_query;
+        const parsedCallback = parseTelegramBotTradingCallbackData(
+          callbackQuery.data,
+        );
+        if (parsedCallback?.type === "confirm" && input.handleCallback) {
+          if (
+            backgroundConfirmCallbacks.size >= MAX_BACKGROUND_CONFIRM_CALLBACKS
+          ) {
+            await input.telegram
+              .answerCallbackQuery({
+                callbackQueryId: callbackQuery.id,
+                showAlert: true,
+                text: "Bot is busy. Retry confirmation shortly.",
+              })
+              .catch(() => undefined);
+            handled += 1;
+            continue;
+          }
+          const task = (async () => {
+            try {
+              await input.handleCallback?.(callbackQuery);
+            } catch {
+              await input.telegram
+                .answerCallbackQuery({
+                  callbackQueryId: callbackQuery.id,
+                  showAlert: true,
+                  text: "Action failed. Check /trade_status before retrying.",
+                })
+                .catch(() => undefined);
+            }
+          })();
+          backgroundConfirmCallbacks.add(task);
+          void task.finally(() => backgroundConfirmCallbacks.delete(task));
+          handled += 1;
+          continue;
+        }
         let didHandle = false;
         try {
-          didHandle = (await input.handleCallback?.(update.callback_query)) ?? false;
+          didHandle = (await input.handleCallback?.(callbackQuery)) ?? false;
         } catch {
           didHandle = true;
           await input.telegram
             .answerCallbackQuery({
-              callbackQueryId: update.callback_query.id,
+              callbackQueryId: callbackQuery.id,
               showAlert: true,
               text: "Action failed. Try again.",
             })
@@ -3579,10 +3654,7 @@ function resolveSignalBotFollowthroughKind(input: {
   ) {
     return null;
   }
-  if (
-    policy.requirePositiveFlowForStats &&
-    stats.netSignalSideFlowUsd <= 0
-  ) {
+  if (policy.requirePositiveFlowForStats && stats.netSignalSideFlowUsd <= 0) {
     return null;
   }
   const priceMovePass =
@@ -5104,7 +5176,10 @@ function publicHelpText(input: { miniAppEnabled: boolean }): string {
   ].join("\n");
 }
 
-function helpText(input: { isAdmin: boolean; miniAppEnabled: boolean }): string {
+function helpText(input: {
+  isAdmin: boolean;
+  miniAppEnabled: boolean;
+}): string {
   if (!input.isAdmin) return publicHelpText(input);
   return [
     publicHelpText(input),

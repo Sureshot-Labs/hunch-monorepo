@@ -1,9 +1,6 @@
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
-import {
-  PrivyService,
-  type PrivyWalletApiClient,
-} from "../privy-service.js";
+import { PrivyService, type PrivyWalletApiClient } from "../privy-service.js";
 import type { TradeIntent } from "./trading-types.js";
 import { tradingError } from "./api-trading-utils.js";
 
@@ -41,6 +38,36 @@ export function createServerWalletClient(): PrivyWalletApiClient {
   });
 }
 
+export async function assertServerEvmWalletAuthorization(input: {
+  privyUserId: string | null | undefined;
+  signer: string;
+  walletId: string;
+}): Promise<void> {
+  const privyUserId = input.privyUserId?.trim() ?? "";
+  if (!privyUserId) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Trading authorization is missing a Privy user id.",
+    });
+  }
+  const walletId = input.walletId.trim();
+  const signer = input.signer.trim().toLowerCase();
+  const privyUser = await PrivyService.getUserById(privyUserId);
+  const wallet = PrivyService.classifyWallets(privyUser).find(
+    (candidate) =>
+      candidate.walletType === "ethereum" &&
+      candidate.isInternalWallet &&
+      candidate.address.toLowerCase() === signer,
+  );
+  if (!wallet || wallet.walletId?.trim() !== walletId) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message:
+        "Selected Trading Wallet does not match its Privy authorization.",
+    });
+  }
+}
+
 export async function signEvmTypedData(input: {
   walletClient: PrivyWalletApiClient;
   walletId: string;
@@ -57,6 +84,21 @@ export async function signEvmTypedData(input: {
     address: input.signer,
     chainType: "ethereum",
     typedData: input.typedData,
+  });
+  return result.signature;
+}
+
+export async function signEvmMessage(input: {
+  walletClient: PrivyWalletApiClient;
+  walletId: string;
+  signer: string;
+  message: string | Uint8Array;
+}): Promise<string> {
+  const result = await input.walletClient.walletApi.ethereum.signMessage({
+    walletId: input.walletId,
+    address: input.signer,
+    chainType: "ethereum",
+    message: input.message,
   });
   return result.signature;
 }

@@ -113,7 +113,10 @@ const tests: TestCase[] = [
     run: async () => {
       const params = new URLSearchParams(makeValidInitData());
       params.delete("hash");
-      await assertValidationError(() => validate(params.toString()), "missing_hash");
+      await assertValidationError(
+        () => validate(params.toString()),
+        "missing_hash",
+      );
     },
   },
   {
@@ -160,7 +163,10 @@ const tests: TestCase[] = [
     name: "unsafe Telegram start_param formats are ignored",
     run: () => {
       assert.equal(normalizeTelegramStartParam("ref_ABC123"), "ref_ABC123");
-      assert.equal(normalizeTelegramStartParam("event_event-123"), "event_event-123");
+      assert.equal(
+        normalizeTelegramStartParam("event_event-123"),
+        "event_event-123",
+      );
       assert.equal(
         normalizeTelegramStartParam("e_cG9seW1hcmtldDpldmVudC0x"),
         "e_cG9seW1hcmtldDpldmVudC0x",
@@ -172,9 +178,7 @@ const tests: TestCase[] = [
         "b_cG9seW1hcmtldDpldmVudC0xfHBvbHltYXJrZXQ6bWFya2V0LTF8WXwxMA",
       );
       assert.equal(
-        normalizeTelegramStartParam(
-          "m_cDpldmVudC0xfG1hcmtldC0xfFk",
-        ),
+        normalizeTelegramStartParam("m_cDpldmVudC0xfG1hcmtldC0xfFk"),
         "m_cDpldmVudC0xfG1hcmtldC0xfFk",
       );
       assert.equal(
@@ -206,6 +210,7 @@ const tests: TestCase[] = [
       };
       const originalEnvTelegramMiniAppEnabled =
         mutableEnv.telegramMiniAppEnabled;
+      mutableEnv.telegramMiniAppEnabled = true;
       const app = Fastify({ logger: false });
       app.setValidatorCompiler(validatorCompiler);
       app.setSerializerCompiler(serializerCompiler);
@@ -251,7 +256,8 @@ const tests: TestCase[] = [
         if (originalEnabled === undefined)
           delete process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED;
         else process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED = originalEnabled;
-        if (originalToken === undefined) delete process.env.HUNCH_TELEGRAM_BOT_TOKEN;
+        if (originalToken === undefined)
+          delete process.env.HUNCH_TELEGRAM_BOT_TOKEN;
         else process.env.HUNCH_TELEGRAM_BOT_TOKEN = originalToken;
       }
     },

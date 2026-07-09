@@ -110,6 +110,12 @@ type PrivyEthereumSignTypedDataInput = {
   chainType?: "ethereum";
   typedData: PrivyEthereumTypedData;
 };
+type PrivyEthereumSignMessageInput = {
+  walletId?: string;
+  address?: string;
+  chainType?: "ethereum";
+  message: string | Uint8Array;
+};
 type PrivySolanaSignAndSendTransactionInput = {
   walletId?: string;
   transaction: string | Uint8Array;
@@ -123,6 +129,9 @@ export type PrivyWalletApiClient = {
       ): Promise<{ hash: string }>;
       signTypedData(
         input: PrivyEthereumSignTypedDataInput,
+      ): Promise<{ signature: string }>;
+      signMessage(
+        input: PrivyEthereumSignMessageInput,
       ): Promise<{ signature: string }>;
     };
     solana: {
@@ -195,8 +204,7 @@ function readStringOrNumber(
   snakeKey?: string,
 ): string | null {
   const value = record[camelKey] ?? (snakeKey ? record[snakeKey] : undefined);
-  if (typeof value === "string" && value.trim().length > 0)
-    return value.trim();
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.trunc(value).toString();
   }
@@ -449,6 +457,16 @@ export class PrivyService {
                     primary_type: input.typedData.primaryType,
                   },
                 },
+                ...(authorization_context ? { authorization_context } : {}),
+              });
+          },
+          async signMessage(input) {
+            return await privyClient
+              .wallets()
+              .ethereum()
+              .signMessage(requireWalletId(input.walletId), {
+                address: input.address,
+                message: input.message,
                 ...(authorization_context ? { authorization_context } : {}),
               });
           },
@@ -746,7 +764,9 @@ export class PrivyService {
   }
 
   private static getTelegramUserId(privyUser: PrivyUser): string | null {
-    return this.extractTelegramAccount(privyUser)?.telegramUserId.trim() || null;
+    return (
+      this.extractTelegramAccount(privyUser)?.telegramUserId.trim() || null
+    );
   }
 
   private static hasExpectedWalletDelta(

@@ -64,6 +64,17 @@ export function createApiTradingApplicationService(
       executorFor(executeInput.prepared.venue).executePreparedTrade(
         executeInput,
       ),
+    ensureReadiness: async (readinessInput) => {
+      const executor = executorFor(readinessInput.venue);
+      if (executor.ensureReadiness) {
+        return executor.ensureReadiness(readinessInput);
+      }
+      return {
+        readiness: await executor.getReadiness(readinessInput),
+        changed: false,
+        sideEffects: [],
+      };
+    },
     getReadiness: (readinessInput) =>
       executorFor(readinessInput.venue).getReadiness(readinessInput),
     listCapabilities: () =>
@@ -77,7 +88,8 @@ export function createApiTradingApplicationService(
       executorFor(persistInput.intent.venue).persistTrade(persistInput),
     prepareTrade: (prepareInput) =>
       executorFor(prepareInput.intent.venue).prepareTrade(prepareInput),
-    quote: (quoteInput) => executorFor(quoteInput.intent.venue).quote(quoteInput),
+    quote: (quoteInput) =>
+      executorFor(quoteInput.intent.venue).quote(quoteInput),
     submitPreparedTrade: (submitInput) =>
       executorFor(submitInput.prepared.venue).submitPreparedTrade(submitInput),
   };

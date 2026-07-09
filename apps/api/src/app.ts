@@ -15,6 +15,9 @@ import { enforceGlobalRateLimit } from "./lib/global-rate-limit.js";
 import { flushPendingMarketRefreshes } from "./lib/market-refresh.js";
 import { isRecord } from "./lib/type-guards.js";
 import { env } from "./env.js";
+import { pool } from "./db.js";
+import { createApiTradingApplicationService } from "./services/api-trading-service.js";
+import { reconcileTelegramVenueIntents } from "./services/telegram-bot-trading-venue-reconcile.js";
 
 function sanitizeErrorEnvelope(
   payload: unknown,
@@ -49,6 +52,36 @@ export async function buildApp() {
     logger: true,
     trustProxy,
   }).withTypeProvider<ZodTypeProvider>();
+  let telegramVenueReconcileTimer: NodeJS.Timeout | null = null;
+  let telegramVenueReconcileRun: Promise<unknown> | null = null;
+
+  if (env.telegramVenueReconcileEnabled) {
+    const runTelegramVenueReconcile = () => {
+      if (telegramVenueReconcileRun) return;
+      const trading = createApiTradingApplicationService({
+        logger: app.log,
+        pool,
+      });
+      telegramVenueReconcileRun = reconcileTelegramVenueIntents(pool, trading, {
+        dryRun: false,
+        limit: env.telegramVenueReconcileBatchSize,
+      })
+        .then((summary) => {
+          app.log.info({ summary }, "Telegram venue reconcile sweep completed");
+        })
+        .catch((error) => {
+          app.log.warn({ error }, "Telegram venue reconcile sweep failed");
+        })
+        .finally(() => {
+          telegramVenueReconcileRun = null;
+        });
+    };
+    telegramVenueReconcileTimer = setInterval(
+      runTelegramVenueReconcile,
+      env.telegramVenueReconcileIntervalSec * 1_000,
+    );
+    telegramVenueReconcileTimer.unref?.();
+  }
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
@@ -63,6 +96,11 @@ export async function buildApp() {
     if (req._t0 != null) onReqEnd(req._t0);
   });
   app.addHook("onClose", async () => {
+    if (telegramVenueReconcileTimer) {
+      clearInterval(telegramVenueReconcileTimer);
+      telegramVenueReconcileTimer = null;
+    }
+    await telegramVenueReconcileRun;
     await flushPendingMarketRefreshes();
     await closeRedis();
   });

@@ -8,8 +8,10 @@ import { env } from "../env.js";
 import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
 import { PrivyService, type PrivyWalletProfile } from "../privy-service.js";
 import { createApiTradingApplicationService } from "../services/api-trading-service.js";
+import { reconcileTelegramVenueIntents } from "../services/telegram-bot-trading-venue-reconcile.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
+  buildUnlinkedTelegramBotTradingStatus,
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
@@ -17,8 +19,10 @@ import {
   disableTelegramBotTradingForTelegramUser,
   enableTelegramBotTrading,
   getTelegramBotTradingStatus,
+  reconcileStaleTelegramTradeIntents,
   resolveTelegramBotTradingWalletSetupIssues,
   resolveTelegramBotTradingPolicy,
+  TelegramBotTradingEnableError,
   type TelegramBotTradingInternalWalletCandidate,
   type TelegramBotTradingWalletSetupIssue,
   type TelegramBotTradingVenue,
@@ -32,6 +36,7 @@ const enableBodySchema = z
       .optional(),
     privyWalletId: z.string().trim().min(1).max(256).optional().nullable(),
     walletAddress: z.string().trim().min(1).optional().nullable(),
+    maxAmountUsd: z.number().int().positive().optional().nullable(),
   })
   .strict();
 
@@ -152,6 +157,22 @@ export async function resolveTelegramBotTradingStatusWalletSetupIssues(input: {
   });
 }
 
+export function isTelegramBotTradingReconciliationEnabled(input: {
+  financeDbReconcileEnabled: boolean;
+  venueReconcileEnabled: boolean;
+}): boolean {
+  return input.financeDbReconcileEnabled && input.venueReconcileEnabled;
+}
+
+export async function reconcileTelegramBotTradingStatus(input: {
+  reconciliationEnabled: boolean;
+  reconcileLocal: () => Promise<unknown>;
+  reconcileVenue: () => Promise<unknown>;
+}): Promise<void> {
+  await input.reconcileLocal();
+  if (input.reconciliationEnabled) await input.reconcileVenue();
+}
+
 async function buildKalshiEligibilityForRequest(input: {
   request: FastifyRequest;
   walletAddress: string;
@@ -179,6 +200,10 @@ async function buildKalshiEligibilityForRequest(input: {
 
 export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
   const api = app.withTypeProvider<ZodTypeProvider>();
+  const reconciliationEnabled = isTelegramBotTradingReconciliationEnabled({
+    financeDbReconcileEnabled: env.financeTelegramTradeIntentsEnabled,
+    venueReconcileEnabled: env.telegramVenueReconcileEnabled,
+  });
   const kalshiGeoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -211,12 +236,44 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       preHandler: requireInternal,
       schema: { body: internalStatusBodySchema },
     },
-    async (request) =>
-      buildTelegramBotTradingStatusMessage(
+    async (request) => {
+      const trading = createTradingForRequest(request);
+      await reconcileTelegramBotTradingStatus({
+        reconciliationEnabled,
+        reconcileLocal: () =>
+          reconcileStaleTelegramTradeIntents(pool, {
+            telegramUserId: String(request.body.telegramUserId),
+          }).catch((error) => {
+            app.log.warn(
+              { error, telegramUserId: request.body.telegramUserId },
+              "Telegram local reconcile before trade status failed",
+            );
+          }),
+        reconcileVenue: () =>
+          reconcileTelegramVenueIntents(pool, trading, {
+            dryRun: false,
+            limit: 3,
+            telegramUserId: request.body.telegramUserId,
+          }).catch((error) => {
+            app.log.warn(
+              { error, telegramUserId: request.body.telegramUserId },
+              "Telegram venue reconcile before trade status failed",
+            );
+          }),
+      });
+      const message = await buildTelegramBotTradingStatusMessage(
         pool,
         request.body.telegramUserId,
-        createTradingForRequest(request),
-      ),
+        trading,
+        { reconcileLocal: false },
+      );
+      return reconciliationEnabled
+        ? message
+        : {
+            ...message,
+            text: `${message.text}\n\nRequired API and finance reconciliation: disabled\\. Trading confirmation is unavailable\\.`,
+          };
+    },
   );
 
   api.post(
@@ -244,16 +301,26 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       schema: { body: internalMarketCardBodySchema },
     },
     async (request) =>
-      buildTelegramBotTradingMarketMessage({
-        appBaseUrl: request.body.appBaseUrl,
-        chatId: request.body.chatId,
-        db: pool,
-        isAdminTest: request.body.isAdminTest,
-        marketRef: request.body.marketRef,
-        telegramMessageId: request.body.telegramMessageId,
-        telegramUserId: request.body.telegramUserId,
-        trading: createTradingForRequest(request),
-      }),
+      reconciliationEnabled
+        ? buildTelegramBotTradingMarketMessage({
+            appBaseUrl: request.body.appBaseUrl,
+            chatId: request.body.chatId,
+            db: pool,
+            isAdminTest: request.body.isAdminTest,
+            marketRef: request.body.marketRef,
+            telegramMessageId: request.body.telegramMessageId,
+            telegramUserId: request.body.telegramUserId,
+            trading: createTradingForRequest(request),
+          })
+        : {
+            parse_mode: "MarkdownV2" as const,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "Open in Hunch", url: request.body.appBaseUrl }],
+              ],
+            },
+            text: "Trading is temporarily unavailable\\. Open Hunch to trade\\.",
+          },
   );
 
   const handleInternalCallback = async (
@@ -262,15 +329,41 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       params?: z.infer<typeof internalIntentParamsSchema>;
     },
     expectedType?: "buy" | "cancel" | "confirm",
-  ) =>
-    captureTelegramBotTradingCallback({
+  ) => {
+    if (expectedType === "confirm" && !reconciliationEnabled) {
+      const chatId = request.body.callbackQuery.message?.chat?.id;
+      const text =
+        "Trading is temporarily unavailable because required reconciliation is not enabled.";
+      return {
+        handled: true,
+        answers: [
+          {
+            callbackQueryId: request.body.callbackQuery.id,
+            showAlert: true,
+            text,
+          },
+        ],
+        messages:
+          chatId == null
+            ? []
+            : [
+                {
+                  chat_id: String(chatId),
+                  text,
+                },
+              ],
+      };
+    }
+    return captureTelegramBotTradingCallback({
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
       db: pool,
       expectedIntentId: request.params?.id ?? null,
       expectedType: expectedType ?? null,
+      log: app.log,
       trading: createTradingForRequest(request as FastifyRequest),
     });
+  };
 
   const handleInternalPreviewCallback = async (request: {
     body: z.infer<typeof internalCallbackBodySchema>;
@@ -280,6 +373,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       callbackQuery: request.body.callbackQuery,
       db: pool,
       expectedType: "buy",
+      log: app.log,
       trading: createTradingForRequest(request as FastifyRequest),
     });
 
@@ -353,7 +447,10 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
             app,
             db: pool,
             privyUserId: user.privyUserId,
-            requestedVenues: policy.tradingVenues,
+            requestedVenues:
+              status.enabled && status.enabledVenues.length > 0
+                ? status.enabledVenues
+                : policy.tradingVenues,
             userId: status.userId,
           });
       }
@@ -362,28 +459,29 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
             ...status,
             walletSetupIssues,
           }
-        : {
-            authorizationId: null,
-            activeAuthorization: null,
-            authorizations: [],
-            directExecutionReady: false,
-            enabled: false,
-            enabledVenues: [],
-            linked: false,
-            maxAmountUsd: null,
+        : buildUnlinkedTelegramBotTradingStatus({
             privyUserId: user.privyUserId ?? null,
-            privyWalletId: null,
             setupIssue: "Telegram is not linked to this Hunch account.",
             telegramUserId,
-            username: null,
             userId: user.id,
-            walletAddress: null,
-            walletChain: null,
-            walletSetupIssues: [],
-          };
+          });
+      request.log.debug(
+        {
+          directExecutionReady: statusPayload.directExecutionReady,
+          enabled: statusPayload.enabled,
+          userId: user.id,
+          venues: statusPayload.venueStatuses.map((venueStatus) => ({
+            executable: venueStatus.executable,
+            reasonCode: venueStatus.reasonCode,
+            state: venueStatus.state,
+            venue: venueStatus.venue,
+          })),
+        },
+        "Telegram bot trading readiness status evaluated",
+      );
       return reply.send({
         policy: {
-          tradingEnabled: policy.tradingEnabled,
+          tradingEnabled: policy.tradingEnabled && reconciliationEnabled,
           tradingActions: policy.tradingActions,
           tradingVenues: policy.tradingVenues,
           buyAmountPresetsUsd: policy.buyAmountPresetsUsd,
@@ -411,10 +509,21 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       }
       try {
         const body = request.body;
-        const internalWallets = await resolveInternalPrivyWalletCandidates({
-          app,
-          privyUserId: user.privyUserId,
-        });
+        const disableAll = body.enabledVenues?.length === 0;
+        if (!disableAll && !reconciliationEnabled) {
+          reply.code(503);
+          return reply.send({
+            error: "telegram_venue_reconcile_required",
+            message:
+              "Telegram bot trading cannot be enabled until API and finance reconciliation are enabled.",
+          });
+        }
+        const internalWallets = disableAll
+          ? []
+          : await resolveInternalPrivyWalletCandidates({
+              app,
+              privyUserId: user.privyUserId,
+            });
         const status = await enableTelegramBotTrading(
           pool,
           {
@@ -429,6 +538,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
               | TelegramBotTradingVenue[]
               | undefined,
             internalWallets,
+            maxAmountUsd: body.maxAmountUsd ?? null,
             preferredWalletAddress: body.walletAddress ?? null,
             privyWalletId: body.privyWalletId ?? null,
             userId: user.id,
@@ -437,6 +547,14 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
         );
         return reply.send({ ok: true, status });
       } catch (error) {
+        if (error instanceof TelegramBotTradingEnableError) {
+          reply.code(error.statusCode);
+          return reply.send({
+            error: error.code,
+            message: error.message,
+            walletSetupIssues: error.walletSetupIssues,
+          });
+        }
         const message =
           error instanceof Error &&
           error.message === "telegram_account_required"

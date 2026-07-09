@@ -531,6 +531,25 @@ export async function waitForEmbeddedEthereumTransactionReceipt(inputs: {
   );
 }
 
+export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
+  chainId: number;
+  txHash: string;
+}): Promise<{
+  blockNumber: number;
+  succeeded: boolean;
+  transactionHash: string;
+} | null> {
+  const receipt = await evmProviderForChain(
+    inputs.chainId,
+  ).getTransactionReceipt(inputs.txHash);
+  if (!receipt) return null;
+  return {
+    blockNumber: receipt.blockNumber,
+    succeeded: receipt.status === 1,
+    transactionHash: receipt.hash,
+  };
+}
+
 export async function resolveEmbeddedEthereumWalletContext(inputs: {
   user: User;
   signer: string;
@@ -630,6 +649,7 @@ export function prepareEmbeddedEthereumTransactionRequests(inputs: {
 
 export async function executeServerEmbeddedEthereumTransaction(inputs: {
   chainId: number;
+  onSubmitted?: (txHash: string) => void | Promise<void>;
   signer: string;
   timeoutMs?: number;
   transaction: EmbeddedEthereumTransactionSpec;
@@ -677,6 +697,7 @@ export async function executeServerEmbeddedEthereumTransaction(inputs: {
       `${inputs.transaction.label} did not return a transaction hash.`,
     );
   }
+  await inputs.onSubmitted?.(txHash);
   await waitForEvmTransaction(
     chainId,
     txHash,

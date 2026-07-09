@@ -21,6 +21,7 @@ import { tryRecordReferralFirstTradeConversion } from "./analytics-referrals.js"
 import {
   amountUsd,
   applyOrderTradeEffects,
+  assertServerEvmWalletAuthorization,
   createCapability,
   createServerWalletClient,
   buildTelegramTradeSourceMetadata,
@@ -76,6 +77,7 @@ import {
 } from "./embedded-execution-singleflight.js";
 import { requestPolymarketCredentials } from "./polymarket-credentials.js";
 import {
+  buildEmbeddedPolymarketConnectPayload,
   buildEmbeddedPolymarketConnectRequest,
   buildEmbeddedPolymarketOrderRequest,
   buildEmbeddedPolymarketTypedDataRequest,
@@ -84,9 +86,11 @@ import {
   executeEmbeddedPolymarketTypedDataRequest,
   executeEmbeddedSignerApprovalRequests,
   prepareEmbeddedPolymarketSignerApprovalRequests,
+  prepareEmbeddedPolymarketSignerApprovalTransactions,
   resolveEmbeddedPolymarketWalletContext,
   type DepositWalletBatchPurpose,
   type EmbeddedPolymarketTypedData,
+  type EmbeddedPolymarketWalletReference,
   type PolymarketOrderPayload,
 } from "./polymarket-embedded.js";
 import {
@@ -134,6 +138,8 @@ import {
   type PolymarketFunderExecutionKind,
 } from "./polymarket-max-spend.js";
 import type {
+  EnsureReadinessInput,
+  EnsureReadinessResult,
   PersistedTrade,
   PersistTradeInput,
   PreparedTrade,
@@ -505,17 +511,39 @@ function buildPolymarketCancelSignerCandidates(inputs: {
   );
 }
 
-export async function resolveEmbeddedPolymarketEnsureReadyState(input: {
-  requestedFunder?: string | null;
-  signer: string;
-  user: User;
-}) {
-  const context = await resolveEmbeddedPolymarketWalletContext({
-    user: input.user,
-    signer: input.signer,
-  });
-  let credsInfo = await AuthService.getVenueCredentialsInfo(
-    input.user.id,
+type EmbeddedPolymarketEnsureReadyIdentity =
+  | { user: User; userId?: never; walletId?: never }
+  | { user?: never; userId: string; walletId: string };
+
+export async function resolveEmbeddedPolymarketEnsureReadyState(
+  input: {
+    requestedFunder?: string | null;
+    signer: string;
+  } & EmbeddedPolymarketEnsureReadyIdentity,
+) {
+  const userId = input.user?.id ?? input.userId?.trim() ?? "";
+  if (!userId) {
+    throw new Error("Polymarket readiness requires a user id.");
+  }
+  const context: EmbeddedPolymarketWalletReference = input.user
+    ? await resolveEmbeddedPolymarketWalletContext({
+        user: input.user,
+        signer: input.signer,
+      })
+    : {
+        signer:
+          normalizeEvmAddress(input.signer) ??
+          (() => {
+            throw new Error("Polymarket readiness requires a valid signer.");
+          })(),
+        walletId:
+          input.walletId?.trim() ||
+          (() => {
+            throw new Error("Polymarket readiness requires a wallet id.");
+          })(),
+      };
+  const credsInfo = await AuthService.getVenueCredentialsInfo(
+    userId,
     "polymarket",
     input.signer,
   );
@@ -563,44 +591,6 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(input: {
     ? (desiredDistinctCandidate?.funder ?? null)
     : null;
   const effectiveFunder = effectiveDistinctFunder ?? input.signer;
-  const shouldClearStoredFunder = Boolean(
-    storedFunder &&
-    normalizeEvmAddress(storedFunder) !== signerNormalized &&
-    !effectiveDistinctFunder,
-  );
-  const shouldUpdateStoredFunder = Boolean(
-    credsInfo &&
-    effectiveDistinctFunder &&
-    normalizeEvmAddress(credsInfo?.funderAddress ?? null) !==
-      normalizeEvmAddress(effectiveDistinctFunder),
-  );
-
-  if (shouldClearStoredFunder) {
-    await AuthService.updateVenueFunderAddress(
-      input.user.id,
-      input.signer,
-      "polymarket",
-      null,
-    );
-    credsInfo = await AuthService.getVenueCredentialsInfo(
-      input.user.id,
-      "polymarket",
-      input.signer,
-    );
-  } else if (shouldUpdateStoredFunder && effectiveDistinctFunder) {
-    await AuthService.updateVenueFunderAddress(
-      input.user.id,
-      input.signer,
-      "polymarket",
-      effectiveDistinctFunder,
-    );
-    credsInfo = await AuthService.getVenueCredentialsInfo(
-      input.user.id,
-      "polymarket",
-      input.signer,
-    );
-  }
-
   const snapshot = await fetchPolymarketOnchainSnapshot({
     rpcUrl: env.polygonRpcUrl,
     timeoutMs: env.polygonRpcTimeoutMs,
@@ -614,37 +604,49 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(input: {
     feeCollectorAddress: null,
   });
 
+  const currentApprovals = {
+    exchangeApproved: snapshot.okExchange,
+    negRiskExchangeApproved: snapshot.okNegRisk,
+    negRiskAdapterApproved: env.polymarketNegRiskAdapterAddress
+      ? (snapshot.okNegRiskAdapter ?? false)
+      : true,
+    ctfCollateralAdapterApproved: env.polymarketCtfCollateralAdapterAddress
+      ? (snapshot.okCtfCollateralAdapter ?? false)
+      : true,
+    negRiskCollateralAdapterApproved:
+      env.polymarketNegRiskCollateralAdapterAddress
+        ? (snapshot.okNegRiskCollateralAdapter ?? false)
+        : true,
+    feeCollectorApproved: true,
+    exchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
+      snapshot.allowanceExchange,
+    ),
+    negRiskExchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
+      snapshot.allowanceNegRisk,
+    ),
+    negRiskAdapterAllowanceOk: env.polymarketNegRiskAdapterAddress
+      ? approvalSatisfiesEmbeddedAutomation(
+          snapshot.allowanceNegRiskAdapter ?? null,
+        )
+      : true,
+    feeCollectorAllowanceOk: true,
+  };
   const approvalRequests = prepareEmbeddedPolymarketSignerApprovalRequests({
     context,
     funder: effectiveFunder,
-    currentApprovals: {
-      exchangeApproved: snapshot.okExchange,
-      negRiskExchangeApproved: snapshot.okNegRisk,
-      negRiskAdapterApproved: env.polymarketNegRiskAdapterAddress
-        ? (snapshot.okNegRiskAdapter ?? false)
-        : true,
-      ctfCollateralAdapterApproved: env.polymarketCtfCollateralAdapterAddress
-        ? (snapshot.okCtfCollateralAdapter ?? false)
-        : true,
-      negRiskCollateralAdapterApproved:
-        env.polymarketNegRiskCollateralAdapterAddress
-          ? (snapshot.okNegRiskCollateralAdapter ?? false)
-          : true,
-      feeCollectorApproved: true,
-      exchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
-        snapshot.allowanceExchange,
-      ),
-      negRiskExchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
-        snapshot.allowanceNegRisk,
-      ),
-      negRiskAdapterAllowanceOk: env.polymarketNegRiskAdapterAddress
-        ? approvalSatisfiesEmbeddedAutomation(
-            snapshot.allowanceNegRiskAdapter ?? null,
-          )
-        : true,
-      feeCollectorAllowanceOk: true,
-    },
+    currentApprovals,
   });
+  const approvalTransactions =
+    prepareEmbeddedPolymarketSignerApprovalTransactions({
+      signer: context.signer,
+      funder: effectiveFunder,
+      currentApprovals,
+    });
+  const setupApprovalsReady = Object.values(currentApprovals).every(Boolean);
+
+  if (approvalRequests.length !== approvalTransactions.length) {
+    throw new Error("Polymarket approval plan is inconsistent.");
+  }
 
   return {
     context,
@@ -652,7 +654,12 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(input: {
     effectiveFunder,
     effectiveDistinctFunder,
     approvalRequests,
-    clearedStoredFunder: shouldClearStoredFunder,
+    approvalTransactions,
+    setupApprovalsReady,
+    // Readiness inspection must never mutate or clear the stored funder. A
+    // transient Polygon RPC failure is not evidence that a deposit wallet
+    // disappeared.
+    clearedStoredFunder: false,
   };
 }
 
@@ -1686,6 +1693,76 @@ export async function fetchPolymarketClobOrderExecutionEvidence(inputs: {
       statusHint: null,
     };
   }
+}
+
+export async function inspectPolymarketSubmittedOrder(inputs: {
+  log?: { warn: (payload: unknown, message?: string) => void };
+  orderHash: string;
+  signer: string;
+  userId: string;
+}): Promise<{
+  state: "found" | "not_found" | "unavailable";
+  submitResult: SubmitResult | null;
+  raw: unknown;
+}> {
+  const creds = await AuthService.getVenueCredentials(
+    inputs.userId,
+    "polymarket",
+    inputs.signer,
+  );
+  if (!creds?.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
+    return {
+      state: "unavailable",
+      submitResult: null,
+      raw: { reason: "credentials_unavailable" },
+    };
+  }
+  const evidence = await fetchPolymarketClobOrderExecutionEvidence({
+    creds: {
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      apiPassphrase: creds.apiPassphrase,
+    },
+    log: inputs.log ?? { warn: () => undefined },
+    orderId: inputs.orderHash,
+    signer: inputs.signer,
+  });
+  if (!evidence.checked) {
+    return { state: "unavailable", submitResult: null, raw: evidence };
+  }
+  if (evidence.orderStatus === "not_found") {
+    return { state: "not_found", submitResult: null, raw: evidence };
+  }
+  const venueOrderId = extractOrderId(evidence.payload);
+  if (!venueOrderId) {
+    return { state: "unavailable", submitResult: null, raw: evidence };
+  }
+  const normalizedStatus = evidence.orderStatus?.trim().toLowerCase() ?? "";
+  const status: SubmitResult["status"] = evidence.hasExecution
+    ? "filled"
+    : ["cancelled", "canceled", "expired", "unmatched", "no_fill"].includes(
+          normalizedStatus,
+        )
+      ? "no_fill"
+      : ["failed", "rejected"].includes(normalizedStatus)
+        ? "failed"
+        : ["live", "open"].includes(normalizedStatus)
+          ? "open"
+          : "submitted";
+  return {
+    state: "found",
+    submitResult: {
+      venue: "polymarket",
+      status,
+      venueOrderId,
+      orderHash: inputs.orderHash,
+      txSignature: null,
+      price: evidence.externalFillPrice,
+      size: evidence.externalFilledSize,
+      raw: { evidence, status: evidence.orderStatus },
+    },
+    raw: evidence,
+  };
 }
 
 function isPolymarketClobOpenStatus(status: string | null | undefined) {
@@ -5381,6 +5458,288 @@ function resolvePolymarketFunderExecutionKindForMaxSpend(
   return null;
 }
 
+type PolymarketFunderReadinessInspection =
+  | {
+      funderCandidate: PolymarketFunderCandidate;
+      funderExecutionKind: Exclude<PolymarketFunderExecutionKind, null>;
+      funders: Awaited<ReturnType<typeof derivePolymarketFunders>>;
+      readiness: null;
+    }
+  | {
+      funderCandidate: null;
+      funderExecutionKind: null;
+      funders: null;
+      readiness: TradingReadiness;
+    };
+
+async function inspectPolymarketFunderReadiness(input: {
+  deriveFunders: () => Promise<
+    Awaited<ReturnType<typeof derivePolymarketFunders>>
+  >;
+  onError?: (error: unknown) => void;
+  setupApprovalsReady: boolean;
+  storedFunder: string | null;
+}): Promise<PolymarketFunderReadinessInspection> {
+  let funders: Awaited<ReturnType<typeof derivePolymarketFunders>>;
+  try {
+    funders = await input.deriveFunders();
+  } catch (error) {
+    input.onError?.(error);
+    return {
+      funderCandidate: null,
+      funderExecutionKind: null,
+      funders: null,
+      readiness: readiness("polymarket", capabilities, {
+        ok: false,
+        code: "polymarket_funder_status_unavailable",
+        message: "Polymarket deposit wallet status is temporarily unavailable.",
+      }),
+    };
+  }
+  const normalizedStoredFunder = normalizeEvmAddress(input.storedFunder);
+  const storedFunderInspectionUnknown = Boolean(
+    normalizedStoredFunder &&
+    funders.candidates.some(
+      (candidate) =>
+        normalizeEvmAddress(candidate.funder) === normalizedStoredFunder &&
+        candidate.contractKind === "UNKNOWN",
+    ),
+  );
+  if (storedFunderInspectionUnknown) {
+    return {
+      funderCandidate: null,
+      funderExecutionKind: null,
+      funders: null,
+      readiness: readiness("polymarket", capabilities, {
+        ok: false,
+        code: "polymarket_funder_status_unavailable",
+        message: "Polymarket deposit wallet status is temporarily unavailable.",
+      }),
+    };
+  }
+  if (!funders.recommended) {
+    const code = "polymarket_funder_not_ready";
+    const message =
+      "Deploy or select a Polymarket deposit wallet before bot trading.";
+    return {
+      funderCandidate: null,
+      funderExecutionKind: null,
+      funders: null,
+      readiness: readiness("polymarket", capabilities, {
+        ok: false,
+        code,
+        message,
+        repair: { kind: "app_required", code, message },
+        setupRequired: true,
+      }),
+    };
+  }
+  const funderExecutionKind = resolvePolymarketFunderExecutionKindForMaxSpend(
+    funders.recommended,
+  );
+  if (!funderExecutionKind) {
+    const code = "polymarket_funder_not_ready";
+    const message = "Polymarket funder is not executable for bot trading.";
+    return {
+      funderCandidate: null,
+      funderExecutionKind: null,
+      funders: null,
+      readiness: readiness("polymarket", capabilities, {
+        ok: false,
+        code,
+        message,
+        repair: { kind: "app_required", code, message },
+        setupRequired: true,
+      }),
+    };
+  }
+  if (!input.setupApprovalsReady) {
+    const code = "polymarket_approvals_missing";
+    const message = "Polymarket setup approvals are missing.";
+    return {
+      funderCandidate: null,
+      funderExecutionKind: null,
+      funders: null,
+      readiness: readiness("polymarket", capabilities, {
+        ok: false,
+        code,
+        message,
+        repair: {
+          kind: "app_required",
+          code,
+          message,
+          sideEffect: "approval",
+        },
+        setupRequired: true,
+      }),
+    };
+  }
+  return {
+    funderCandidate: funders.recommended,
+    funderExecutionKind,
+    funders,
+    readiness: null,
+  };
+}
+
+function evaluatePolymarketCredentialReadiness(input: {
+  canAutoRepair: boolean;
+  credentialsReady: boolean;
+}): TradingReadiness | null {
+  if (input.credentialsReady) return null;
+  return polymarketCredentialMissingReadiness(input.canAutoRepair);
+}
+
+function polymarketCredentialMissingReadiness(
+  canAutoRepair: boolean,
+): TradingReadiness {
+  const code = "polymarket_clob_credentials_missing";
+  const message = "Connect Polymarket CLOB credentials before bot trading.";
+  return readiness("polymarket", capabilities, {
+    ok: false,
+    code,
+    message,
+    repair: {
+      kind: canAutoRepair ? "auto" : "app_required",
+      code,
+      message,
+      sideEffect: "credential",
+    },
+    setupRequired: true,
+  });
+}
+
+function evaluatePolymarketFundsReadiness(input: {
+  buyApprovalOk: boolean;
+  executableFundsRaw: bigint;
+}): TradingReadiness {
+  if (!input.buyApprovalOk) {
+    const code = "polymarket_approvals_missing";
+    const message = "Polymarket setup approvals are missing.";
+    return readiness("polymarket", capabilities, {
+      ok: false,
+      code,
+      message,
+      repair: {
+        kind: "app_required",
+        code,
+        message,
+        sideEffect: "approval",
+      },
+      setupRequired: true,
+    });
+  }
+  if (input.executableFundsRaw <= 0n) {
+    return readiness("polymarket", capabilities, {
+      ok: false,
+      code: "polymarket_no_executable_funds",
+      maxExecutableBuyUsd: 0,
+      message: "No executable Polymarket funds are available.",
+      setupRequired: true,
+    });
+  }
+  return readiness("polymarket", capabilities, {
+    ok: true,
+    maxExecutableBuyUsd: Number(input.executableFundsRaw) / USDC_SCALE,
+  });
+}
+
+function inspectPolymarketPreparedQuote(input: {
+  candidate: PolymarketFunderCandidate;
+  rawQuote: unknown;
+}): {
+  feePolicySnapshot: PolymarketFeePolicySnapshot;
+  funderExecutionKind: Exclude<PolymarketFunderExecutionKind, null>;
+  makerAmountRaw: bigint;
+  rawQuote: PolymarketBotQuoteRaw;
+  requiredSpendRaw: bigint;
+} {
+  if (
+    !isRecord(input.rawQuote) ||
+    input.rawQuote.totalRequiredUsdcRaw == null
+  ) {
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Polymarket fee-inclusive quote is unavailable.",
+      venue: "polymarket",
+    });
+  }
+  const feePolicySnapshot = readPolymarketFeePolicySnapshot(
+    input.rawQuote.feePolicySnapshot,
+  );
+  if (!feePolicySnapshot) {
+    throw tradingError({
+      code: "quote_unavailable",
+      message: "Polymarket quote fee policy is unavailable.",
+      venue: "polymarket",
+    });
+  }
+  const rawMakerAmount = input.rawQuote.makerAmount;
+  const makerAmountRaw =
+    rawMakerAmount == null ||
+    typeof rawMakerAmount === "string" ||
+    typeof rawMakerAmount === "number" ||
+    typeof rawMakerAmount === "bigint"
+      ? parseBigIntValue(rawMakerAmount)
+      : null;
+  const requiredSpendRaw = parseBigIntValue(
+    input.rawQuote.totalRequiredUsdcRaw as string | number | bigint,
+  );
+  const funderExecutionKind = resolvePolymarketFunderExecutionKindForMaxSpend(
+    input.candidate,
+  );
+  if (
+    !makerAmountRaw ||
+    makerAmountRaw <= 0n ||
+    !requiredSpendRaw ||
+    requiredSpendRaw <= 0n ||
+    !funderExecutionKind
+  ) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Polymarket order spend is invalid.",
+      venue: "polymarket",
+    });
+  }
+  return {
+    feePolicySnapshot,
+    funderExecutionKind,
+    makerAmountRaw,
+    rawQuote: input.rawQuote as PolymarketBotQuoteRaw,
+    requiredSpendRaw,
+  };
+}
+
+function assertPolymarketPreparedFunds(input: {
+  buyApprovalOk: boolean;
+  executableFundsRaw: bigint;
+  requiredSpendRaw: bigint;
+}): void {
+  if (!input.buyApprovalOk) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Polymarket buy approvals are missing.",
+      venue: "polymarket",
+    });
+  }
+  if (input.executableFundsRaw < input.requiredSpendRaw) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Insufficient executable Polymarket funds for this bot buy.",
+      venue: "polymarket",
+    });
+  }
+}
+
+export const polymarketTradingExecutionTestHooks = {
+  assertPreparedFunds: assertPolymarketPreparedFunds,
+  evaluateCredentialReadiness: evaluatePolymarketCredentialReadiness,
+  evaluateFundsReadiness: evaluatePolymarketFundsReadiness,
+  inspectPreparedQuote: inspectPolymarketPreparedQuote,
+  inspectFunderReadiness: inspectPolymarketFunderReadiness,
+  repairCredentials: repairPolymarketCredentials,
+};
+
 function findPolymarketFunderCandidateByAddress(
   candidates: PolymarketFunderCandidate[],
   address: string,
@@ -6283,7 +6642,11 @@ async function getReadiness(
       message: "Telegram bot trading currently supports buy only.",
     });
   }
-  if (!input.privyWalletId) {
+  const walletId =
+    input.executionAuthorization?.privyWalletId?.trim() ??
+    input.privyWalletId?.trim() ??
+    "";
+  if (!walletId) {
     return readiness("polymarket", capabilities, {
       ok: false,
       code: "insufficient_readiness",
@@ -6347,53 +6710,68 @@ async function getReadiness(
       message: "Polymarket bot trading requires a valid EVM address.",
     });
   }
+  let setupState: Awaited<
+    ReturnType<typeof resolveEmbeddedPolymarketEnsureReadyState>
+  >;
+  try {
+    setupState = await resolveEmbeddedPolymarketEnsureReadyState({
+      signer,
+      userId: input.actor.userId,
+      walletId,
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(
+      { error, userId: input.actor.userId, walletAddress: signer },
+      "Polymarket bot setup readiness check failed",
+    );
+    return readiness("polymarket", capabilities, {
+      ok: false,
+      code: "insufficient_readiness",
+      message: "Polymarket setup status is unavailable.",
+      setupRequired: true,
+    });
+  }
+  const canAutoRepair = Boolean(
+    input.executionAuthorization?.privyUserId?.trim(),
+  );
+  const storedFunder =
+    setupState.effectiveDistinctFunder ??
+    setupState.credsInfo?.funderAddress ??
+    null;
+  const funderInspection = await inspectPolymarketFunderReadiness({
+    deriveFunders: () =>
+      derivePolymarketFunders({
+        signer,
+        storedFunder,
+        includeMagicProxy: true,
+      }),
+    onError: (error) =>
+      ctx.logger?.warn?.(
+        { error, userId: input.actor.userId, walletAddress: signer },
+        "Polymarket bot funder readiness check failed",
+      ),
+    setupApprovalsReady: setupState.setupApprovalsReady,
+    storedFunder,
+  });
+  if (funderInspection.readiness) return funderInspection.readiness;
+  const { funderCandidate, funderExecutionKind } = funderInspection;
   const creds = await AuthService.getVenueCredentials(
     input.actor.userId,
     "polymarket",
     signer,
   );
   if (!creds?.apiKey || !creds.apiSecret || !creds.apiPassphrase) {
-    return readiness("polymarket", capabilities, {
-      ok: false,
-      code: "insufficient_readiness",
-      message: "Connect Polymarket CLOB credentials before bot trading.",
-      setupRequired: true,
-    });
+    return polymarketCredentialMissingReadiness(canAutoRepair);
   }
   const l2Creds: PolymarketL2Credentials = {
     apiKey: creds.apiKey,
     apiSecret: creds.apiSecret,
     apiPassphrase: creds.apiPassphrase,
   };
-  const funders = await derivePolymarketFunders({
-    signer,
-    storedFunder: creds.funderAddress ?? null,
-    includeMagicProxy: true,
-  });
-  if (!funders.recommended) {
-    return readiness("polymarket", capabilities, {
-      ok: false,
-      code: "insufficient_readiness",
-      message:
-        "Deploy or select a Polymarket deposit wallet before bot trading.",
-      setupRequired: true,
-    });
-  }
-  const funderExecutionKind = resolvePolymarketFunderExecutionKindForMaxSpend(
-    funders.recommended,
-  );
-  if (!funderExecutionKind) {
-    return readiness("polymarket", capabilities, {
-      ok: false,
-      code: "insufficient_readiness",
-      message: "Polymarket funder is not executable for bot trading.",
-      setupRequired: true,
-    });
-  }
   try {
     const funds = await resolvePolymarketMaxSpendFunds({
       creds: l2Creds,
-      funder: funders.recommended.funder,
+      funder: funderCandidate.funder,
       funderExecutionKind,
       negRisk: targetMarket
         ? readPolymarketNegRiskFromMarket(targetMarket)
@@ -6402,22 +6780,10 @@ async function getReadiness(
       signer,
       userId: input.actor.userId,
     });
-    if (!funds.buyApproval.ok) {
-      return readiness("polymarket", capabilities, {
-        ok: false,
-        code: "insufficient_readiness",
-        message: "Polymarket buy approvals are missing.",
-        setupRequired: true,
-      });
-    }
-    if (funds.executableFundsRaw <= 0n) {
-      return readiness("polymarket", capabilities, {
-        ok: false,
-        code: "insufficient_readiness",
-        message: "No executable Polymarket funds are available.",
-        setupRequired: true,
-      });
-    }
+    return evaluatePolymarketFundsReadiness({
+      buyApprovalOk: funds.buyApproval.ok,
+      executableFundsRaw: funds.executableFundsRaw,
+    });
   } catch (error) {
     ctx.logger?.warn?.(
       { error, userId: input.actor.userId, walletAddress: signer },
@@ -6430,7 +6796,165 @@ async function getReadiness(
       setupRequired: true,
     });
   }
-  return readiness("polymarket", capabilities, { ok: true });
+}
+
+type PolymarketCredentialRepairDependencies = {
+  createCredentials: typeof AuthService.createOrUpdateVenueCredentials;
+  createWalletClient: typeof createServerWalletClient;
+  deriveFunders: typeof derivePolymarketFunders;
+  getCredentials: typeof AuthService.getVenueCredentials;
+  nonce: () => number;
+  nowMs: () => number;
+  requestCredentials: typeof requestPolymarketCredentials;
+  resolveState: typeof resolveEmbeddedPolymarketEnsureReadyState;
+  signTypedData: typeof signEvmTypedData;
+};
+
+const polymarketCredentialRepairDependencies: PolymarketCredentialRepairDependencies =
+  {
+    createCredentials: AuthService.createOrUpdateVenueCredentials,
+    createWalletClient: createServerWalletClient,
+    deriveFunders: derivePolymarketFunders,
+    getCredentials: AuthService.getVenueCredentials,
+    nonce: () => crypto.randomInt(1_000_000_000),
+    nowMs: () => Date.now(),
+    requestCredentials: requestPolymarketCredentials,
+    resolveState: resolveEmbeddedPolymarketEnsureReadyState,
+    signTypedData: signEvmTypedData,
+  };
+
+async function repairPolymarketCredentials(
+  input: { signer: string; userId: string; walletId: string },
+  dependencies: PolymarketCredentialRepairDependencies = polymarketCredentialRepairDependencies,
+): Promise<{ sideEffects: EnsureReadinessResult["sideEffects"] }> {
+  const state = await dependencies.resolveState({
+    signer: input.signer,
+    userId: input.userId,
+    walletId: input.walletId,
+  });
+  const funders = await dependencies.deriveFunders({
+    signer: input.signer,
+    storedFunder:
+      state.effectiveDistinctFunder ?? state.credsInfo?.funderAddress ?? null,
+    includeMagicProxy: true,
+  });
+  if (!funders.recommended || !state.setupApprovalsReady) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message:
+        "Polymarket deposit wallet and approvals must be completed in Hunch.",
+      venue: "polymarket",
+    });
+  }
+  const existingCreds = await dependencies.getCredentials(
+    input.userId,
+    "polymarket",
+    input.signer,
+  );
+  if (
+    existingCreds?.apiKey &&
+    existingCreds.apiSecret &&
+    existingCreds.apiPassphrase
+  ) {
+    return { sideEffects: [] };
+  }
+  const timestamp = Math.floor(dependencies.nowMs() / 1_000).toString();
+  const nonce = dependencies.nonce();
+  const signature = await dependencies.signTypedData({
+    walletClient: dependencies.createWalletClient(),
+    walletId: input.walletId,
+    signer: input.signer,
+    typedData: buildEmbeddedPolymarketConnectPayload({
+      signer: input.signer,
+      timestamp,
+      nonce,
+    }),
+  });
+  const { apiKey, apiSecret, passphrase } =
+    await dependencies.requestCredentials({
+      walletAddress: input.signer,
+      signature,
+      timestamp,
+      nonce,
+    });
+  await dependencies.createCredentials(
+    input.userId,
+    input.signer,
+    "polymarket",
+    apiKey,
+    apiSecret,
+    {
+      passphrase,
+      ...(state.effectiveDistinctFunder
+        ? { funderAddress: state.effectiveDistinctFunder }
+        : {}),
+    },
+  );
+  return { sideEffects: ["credential"] };
+}
+
+async function ensureReadiness(
+  ctx: ApiTradingApplicationServiceInput,
+  input: EnsureReadinessInput,
+): Promise<EnsureReadinessResult> {
+  const initial = input.existingReadiness ?? (await getReadiness(ctx, input));
+  if (initial.executable || initial.repair?.kind !== "auto") {
+    return { readiness: initial, changed: false, sideEffects: [] };
+  }
+
+  const signer = toChecksumAddress(input.walletAddress);
+  const walletId =
+    input.executionAuthorization?.privyWalletId?.trim() ??
+    input.privyWalletId?.trim() ??
+    "";
+  if (!signer || !walletId) {
+    return { readiness: initial, changed: false, sideEffects: [] };
+  }
+
+  const sideEffects: EnsureReadinessResult["sideEffects"] = [];
+  let repairError: unknown = null;
+  try {
+    await assertServerEvmWalletAuthorization({
+      privyUserId: input.executionAuthorization?.privyUserId,
+      signer,
+      walletId,
+    });
+    const execution = await runEmbeddedExecutionSingleFlight({
+      key: buildEmbeddedExecutionSingleFlightKey(
+        "polymarket-private",
+        "embedded-ensure-ready",
+        signer.toLowerCase(),
+      ),
+      run: () =>
+        repairPolymarketCredentials({
+          signer,
+          userId: input.actor.userId,
+          walletId,
+        }),
+    });
+    for (const effect of execution.sideEffects) {
+      if (!sideEffects.includes(effect)) sideEffects.push(effect);
+    }
+  } catch (error) {
+    repairError = error;
+  }
+
+  const finalReadiness = await getReadiness(ctx, input).catch(() => initial);
+  return {
+    readiness: finalReadiness,
+    changed: sideEffects.length > 0,
+    sideEffects,
+    raw: {
+      ...(repairError
+        ? {
+            error:
+              repairError instanceof Error
+                ? repairError.message
+                : "Readiness repair failed",
+          }
+        : {}),
+    },
+  };
 }
 
 async function quote(
@@ -6566,44 +7090,10 @@ async function prepareTrade(
       isRecord(rawQuote) ? rawQuote.feePolicySnapshot : null,
     );
   }
-  if (!isRecord(rawQuote) || rawQuote.totalRequiredUsdcRaw == null) {
-    throw tradingError({
-      code: "quote_unavailable",
-      message: "Polymarket fee-inclusive quote is unavailable.",
-      venue: "polymarket",
-    });
-  }
-  if (!feePolicySnapshot) {
-    throw tradingError({
-      code: "quote_unavailable",
-      message: "Polymarket quote fee policy is unavailable.",
-      venue: "polymarket",
-    });
-  }
-  const rawMakerAmount = rawQuote.makerAmount;
-  const makerAmountRaw =
-    rawMakerAmount == null ||
-    typeof rawMakerAmount === "string" ||
-    typeof rawMakerAmount === "number" ||
-    typeof rawMakerAmount === "bigint"
-      ? parseBigIntValue(rawMakerAmount)
-      : null;
-  const requiredSpendRaw = parseBigIntValue(rawQuote.totalRequiredUsdcRaw);
-  const funderExecutionKind =
-    resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
-  if (
-    !makerAmountRaw ||
-    makerAmountRaw <= 0n ||
-    !requiredSpendRaw ||
-    requiredSpendRaw <= 0n ||
-    !funderExecutionKind
-  ) {
-    throw tradingError({
-      code: "invalid_trade_request",
-      message: "Polymarket order spend is invalid.",
-      venue: "polymarket",
-    });
-  }
+  const preparedQuote = inspectPolymarketPreparedQuote({ candidate, rawQuote });
+  rawQuote = preparedQuote.rawQuote;
+  feePolicySnapshot = preparedQuote.feePolicySnapshot;
+  const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
   const executableFunds = await resolvePolymarketMaxSpendFunds({
     creds: l2Creds,
     funder: candidate.funder,
@@ -6613,20 +7103,11 @@ async function prepareTrade(
     signer,
     userId: intent.actor.userId,
   });
-  if (!executableFunds.buyApproval.ok) {
-    throw tradingError({
-      code: "insufficient_readiness",
-      message: "Polymarket buy approvals are missing.",
-      venue: "polymarket",
-    });
-  }
-  if (executableFunds.executableFundsRaw < requiredSpendRaw) {
-    throw tradingError({
-      code: "insufficient_readiness",
-      message: "Insufficient executable Polymarket funds for this bot buy.",
-      venue: "polymarket",
-    });
-  }
+  assertPolymarketPreparedFunds({
+    buyApprovalOk: executableFunds.buyApproval.ok,
+    executableFundsRaw: executableFunds.executableFundsRaw,
+    requiredSpendRaw,
+  });
 
   const exchangeAddress =
     readString(rawQuote.exchangeAddress) ??
@@ -6814,6 +7295,16 @@ async function submitPreparedTrade(
       venue: "polymarket",
     });
   }
+  await input.onBroadcastSubmitted?.({
+    venue: "polymarket",
+    status: "submitted",
+    venueOrderId,
+    orderHash: payload.orderHash,
+    txSignature: null,
+    price: payload.price,
+    size: payload.size,
+    raw: { payload: upstream.payload, prepared: payload },
+  });
 
   const statusRaw = extractStatus(upstream.payload) ?? "submitted";
   const immediateFill = extractPolymarketImmediateFill({
@@ -6895,9 +7386,11 @@ async function persistTrade(
   const storedStatus =
     input.submitResult.status === "filled"
       ? "matched"
-      : submitRawStatus === POLYMARKET_UNCONFIRMED_STATUS
-        ? POLYMARKET_UNCONFIRMED_STATUS
-        : "submitted";
+      : input.submitResult.status === "no_fill"
+        ? "expired"
+        : submitRawStatus === POLYMARKET_UNCONFIRMED_STATUS
+          ? POLYMARKET_UNCONFIRMED_STATUS
+          : "submitted";
   const stored = await storeOrder(ctx.pool, {
     userId: input.intent.actor.userId,
     walletAddress: payload.positionWalletAddress,
@@ -6941,6 +7434,7 @@ export function createPolymarketTradingExecutionService(
   return {
     venue: "polymarket",
     capabilities: () => capabilities,
+    ensureReadiness: (input) => ensureReadiness(ctx, input),
     getReadiness: (input) => getReadiness(ctx, input),
     quote: (input) => quote(ctx, input),
     prepareTrade: (input) =>

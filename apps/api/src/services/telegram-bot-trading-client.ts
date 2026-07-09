@@ -237,6 +237,13 @@ export function createTelegramBotTradingInternalApiClient(input: {
           : parsed.type === "cancel"
             ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/cancel`
             : `/internal/telegram-bot/trading/intents/${parsed.intentId}/execute`;
+      const confirmAcknowledged = parsed.type === "confirm";
+      if (confirmAcknowledged) {
+        await callbackInput.answerCallbackQuery({
+          callbackQueryId: callbackInput.callbackQuery.id,
+          text: "Processing trade…",
+        });
+      }
       let result: CapturedTelegramBotTradingCallbackResult;
       try {
         result = await post<CapturedTelegramBotTradingCallbackResult>(
@@ -254,11 +261,6 @@ export function createTelegramBotTradingInternalApiClient(input: {
         ) {
           const text =
             "Trade status is unknown. Use /trade_status or open Hunch before retrying.";
-          await callbackInput.answerCallbackQuery({
-            callbackQueryId: callbackInput.callbackQuery.id,
-            showAlert: true,
-            text,
-          });
           const chatId = callbackInput.callbackQuery.message?.chat?.id;
           if (chatId != null) {
             await callbackInput.sendMessage({
@@ -268,10 +270,22 @@ export function createTelegramBotTradingInternalApiClient(input: {
           }
           return true;
         }
+        if (parsed.type === "confirm") {
+          const chatId = callbackInput.callbackQuery.message?.chat?.id;
+          if (chatId != null) {
+            await callbackInput.sendMessage({
+              chat_id: String(chatId),
+              text: "Trade execution failed or its status is unknown. Use /trade_status or open Hunch before retrying.",
+            });
+          }
+          return true;
+        }
         throw error;
       }
-      for (const answer of result.answers) {
-        await callbackInput.answerCallbackQuery(answer);
+      if (!confirmAcknowledged) {
+        for (const answer of result.answers) {
+          await callbackInput.answerCallbackQuery(answer);
+        }
       }
       for (const message of result.messages) {
         await callbackInput.sendMessage(message);

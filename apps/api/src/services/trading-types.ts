@@ -3,7 +3,11 @@ export type ExternalTradingVenue = string & {
   readonly __externalTradingVenue: unique symbol;
 };
 
-export type TradeActorKind = "admin_test" | "telegram_bot" | "web_app" | "worker";
+export type TradeActorKind =
+  | "admin_test"
+  | "telegram_bot"
+  | "web_app"
+  | "worker";
 
 export type TradeActor = {
   kind: TradeActorKind;
@@ -67,7 +71,20 @@ export type KalshiTradeEligibility = {
 
 export type TradeExecutionAuthorization = {
   kalshiEligibility?: KalshiTradeEligibility | null;
+  privyUserId?: string | null;
   privyWalletId?: string | null;
+};
+
+export type TradingReadinessRepairSideEffect =
+  | "approval"
+  | "connection"
+  | "credential";
+
+export type TradingReadinessRepair = {
+  kind: "app_required" | "auto";
+  code: string;
+  message: string;
+  sideEffect?: TradingReadinessRepairSideEffect;
 };
 
 export type TradingReadiness = {
@@ -77,6 +94,19 @@ export type TradingReadiness = {
   message: string | null;
   setupRequired: boolean;
   capabilities: VenueTradingCapabilities;
+  maxExecutableBuyUsd?: number | null;
+  repair?: TradingReadinessRepair;
+  raw?: unknown;
+};
+
+export type EnsureReadinessInput = TradingReadinessInput & {
+  existingReadiness?: TradingReadiness | null;
+};
+
+export type EnsureReadinessResult = {
+  readiness: TradingReadiness;
+  changed: boolean;
+  sideEffects: TradingReadinessRepairSideEffect[];
   raw?: unknown;
 };
 
@@ -151,8 +181,16 @@ export type PreparedTrade = {
   expiresAt: Date | null;
 };
 
-export type SubmitPreparedTradeInput = {
+export type TradeSubmitLifecycleCallbacks = {
+  onBroadcastSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
   onBeforeBroadcast?: () => Promise<void> | void;
+  onSetupTransactionSubmitted?: (input: {
+    kind: "approval";
+    txHash: string;
+  }) => Promise<void> | void;
+};
+
+export type SubmitPreparedTradeInput = TradeSubmitLifecycleCallbacks & {
   prepared: PreparedTrade;
   signatures?: Array<{ id: string; signature: string }>;
   now?: Date;
@@ -212,12 +250,8 @@ export type ExecutedPreparedTradeError = {
   statusCode: number;
 };
 
-export type ExecutePreparedTradeInput = {
-  onBeforeBroadcast?: () => Promise<void> | void;
+export type ExecutePreparedTradeInput = SubmitPreparedTradeInput & {
   onSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
-  prepared: PreparedTrade;
-  signatures?: Array<{ id: string; signature: string }>;
-  now?: Date;
 };
 
 export type ExecutedPreparedTrade = {

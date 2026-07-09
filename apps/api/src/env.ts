@@ -669,8 +669,9 @@ const walletIntelAutoTrackedWalletFetchConcurrency = optionalIntInRange(
   8,
 );
 const walletIntelAutoTrackedFreshPriceCheckEnabled =
-  parseOptionalBool(process.env.WALLET_INTEL_AUTO_TRACKED_FRESH_PRICE_CHECK_ENABLED) ??
-  true;
+  parseOptionalBool(
+    process.env.WALLET_INTEL_AUTO_TRACKED_FRESH_PRICE_CHECK_ENABLED,
+  ) ?? true;
 const walletIntelFreshPriceMaxAgeMs = optionalPositiveInt(
   "WALLET_INTEL_FRESH_PRICE_MAX_AGE_MS",
   15 * 60 * 1_000,
@@ -1226,6 +1227,26 @@ export const env = {
   privyWebhookSecret: process.env.PRIVY_WEBHOOK_SECRET?.trim() || "",
   telegramBotInternalApiToken:
     process.env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || "",
+  financeTelegramTradeIntentsEnabled:
+    (parseOptionalBool(process.env.HUNCH_FINANCE_WORKER_ENABLED) ?? false) &&
+    (parseOptionalBool(
+      process.env.HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED,
+    ) ??
+      parseOptionalBool(process.env.HUNCH_FINANCE_EXECUTE) ??
+      false),
+  telegramVenueReconcileEnabled:
+    parseOptionalBool(process.env.HUNCH_TELEGRAM_VENUE_RECONCILE_ENABLED) ??
+    false,
+  telegramVenueReconcileIntervalSec: optionalPositiveInt(
+    "HUNCH_TELEGRAM_VENUE_RECONCILE_INTERVAL_SEC",
+    60,
+  ),
+  telegramVenueReconcileBatchSize: optionalIntInRange(
+    "HUNCH_TELEGRAM_VENUE_RECONCILE_BATCH_SIZE",
+    5,
+    1,
+    25,
+  ),
   metricsAuthToken: process.env.METRICS_AUTH_TOKEN?.trim() || "",
   pricesSseMaxTokens: optionalPositiveInt("API_PRICES_SSE_MAX_TOKENS", 64),
   pricesSseMaxConnectionsPerIp: optionalPositiveInt(

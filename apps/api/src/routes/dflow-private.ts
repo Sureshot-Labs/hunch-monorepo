@@ -13,6 +13,10 @@ import {
   type GeoFenceConfig,
 } from "../lib/geo-fence.js";
 import { fetchKalshiNormalizedOrderStatus } from "../services/kalshi-executions.js";
+import {
+  isKalshiMarketMintContextValid,
+  loadMarketForVenue,
+} from "../services/api-trading-market-repo.js";
 import { resolveKalshiProofRequirement } from "../services/kalshi-trade-eligibility.js";
 import {
   deriveKalshiDflowTransactionContext,
@@ -790,16 +794,53 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
       if (strictKalshiSubmit && !context) {
         reply.code(400);
         return reply.send({
-          error:
-            "Kalshi submit requires deterministic transaction context.",
+          error: "Kalshi submit requires deterministic transaction context.",
           code: "kalshi_transaction_context_required",
         });
+      }
+      if (strictKalshiSubmit) {
+        const marketId = body.marketId?.trim();
+        if (!marketId) {
+          reply.code(400);
+          return reply.send({
+            error: "marketId is required",
+            code: "kalshi_transaction_context_required",
+          });
+        }
+        let market: Awaited<ReturnType<typeof loadMarketForVenue>>;
+        try {
+          market = await loadMarketForVenue(pool, marketId, "kalshi");
+        } catch (error) {
+          reply.code(400);
+          return reply.send({
+            error: "Kalshi market is invalid.",
+            code: "kalshi_transaction_market_invalid",
+            message:
+              error instanceof Error ? error.message : "Market not found.",
+          });
+        }
+        if (
+          !isKalshiMarketMintContextValid({
+            inputMint: context?.inputMint,
+            market,
+            outputMint: context?.outputMint,
+            usdcMint: env.solanaUsdcMint,
+          })
+        ) {
+          reply.code(400);
+          return reply.send({
+            error: "Kalshi transaction mints do not match the selected market.",
+            code: "kalshi_transaction_market_mismatch",
+          });
+        }
       }
       if (strictKalshiSubmit || context) {
         const proofAllowed = await enforceKalshiProof({
           user,
           walletAddress,
-          inputMint: context?.inputMint ?? null,
+          inputMint: strictKalshiSubmit
+            ? env.solanaUsdcMint
+            : (context?.inputMint ?? null),
           outputMint: context?.outputMint ?? null,
           hasDeterministicIntent: Boolean(context),
           app,
@@ -808,7 +849,10 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
         if (!proofAllowed) return;
       }
 
-      if (context?.inputMint === env.solanaUsdcMint) {
+      if (
+        context &&
+        (strictKalshiSubmit || context.inputMint === env.solanaUsdcMint)
+      ) {
         try {
           await validateKalshiDflowTransaction({
             ...context,

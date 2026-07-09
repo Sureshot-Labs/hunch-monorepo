@@ -1,6 +1,10 @@
 import type { Pool } from "@hunch/infra";
 
 import type { User } from "../auth.js";
+import {
+  computeAcceptingOrders,
+  readDflowNativeAcceptingOrders,
+} from "../lib/market-availability.js";
 import type { SupportedBotTradingVenue } from "./api-trading-types.js";
 import type {
   TradingReadiness,
@@ -13,8 +17,10 @@ export type ApiTradeMarket = {
   clob_token_ids: string | null;
   close_time: Date | null;
   event_id: string | null;
+  event_end_time: Date | null;
   expiration_time: Date | null;
   id: string;
+  is_initialized: boolean | null;
   metadata: unknown;
   outcomes: string | null;
   slug: string | null;
@@ -115,11 +121,13 @@ export async function loadMarket(
        venue::text AS venue,
        venue_market_id,
        event_id,
+       (SELECT e.end_date FROM unified_events e WHERE e.id = unified_markets.event_id) AS event_end_time,
        title,
        slug,
        status::text AS status,
        outcomes,
        metadata,
+       is_initialized,
        CASE
          WHEN venue = 'polymarket' AND clob_token_ids IS NOT NULL AND clob_token_ids <> ''
            THEN clob_token_ids::jsonb->>0
@@ -178,12 +186,47 @@ export async function loadMarketForVenue(
   return market;
 }
 
-export function isOrderable(market: ApiTradeMarket): boolean {
-  const status = market.status?.toLowerCase() ?? null;
-  if (status && !["active", "open", "trading"].includes(status)) return false;
-  if (market.accepting_orders === false) return false;
-  const close = market.close_time?.getTime() ?? market.expiration_time?.getTime();
-  return close == null || close > Date.now();
+export function isOrderable(
+  market: Pick<
+    ApiTradeMarket,
+    | "accepting_orders"
+    | "close_time"
+    | "event_end_time"
+    | "expiration_time"
+    | "metadata"
+    | "status"
+    | "venue"
+  >,
+): boolean {
+  return computeAcceptingOrders({
+    venue: market.venue,
+    status: market.status,
+    pmAcceptingOrders: market.accepting_orders,
+    closeTime: market.close_time,
+    expirationTime: market.expiration_time,
+    eventEndTime: market.event_end_time,
+    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(market.metadata),
+  });
+}
+
+export function isKalshiMarketMintContextValid(input: {
+  inputMint: string | null | undefined;
+  market: Pick<ApiTradeMarket, "token_no" | "token_yes">;
+  outputMint: string | null | undefined;
+  usdcMint: string;
+}): boolean {
+  const normalizeMint = (mint: string | null | undefined) => {
+    const trimmed = mint?.trim() ?? "";
+    return trimmed.startsWith("sol:") ? trimmed.slice(4) : trimmed;
+  };
+  const expectedUsdc = normalizeMint(input.usdcMint);
+  const inputMint = normalizeMint(input.inputMint);
+  const outputMint = normalizeMint(input.outputMint);
+  if (!expectedUsdc || inputMint !== expectedUsdc || !outputMint) return false;
+  return [input.market.token_yes, input.market.token_no]
+    .map(normalizeMint)
+    .filter(Boolean)
+    .includes(outputMint);
 }
 
 export function tokenForSide(
@@ -205,8 +248,19 @@ export function readiness(
   venue: SupportedBotTradingVenue,
   capabilities: VenueTradingCapabilities,
   input:
-    | { ok: true; message?: string | null }
-    | { ok: false; code: string; message: string; setupRequired?: boolean },
+    | {
+        ok: true;
+        maxExecutableBuyUsd?: number | null;
+        message?: string | null;
+      }
+    | {
+        ok: false;
+        code: string;
+        maxExecutableBuyUsd?: number | null;
+        message: string;
+        repair?: TradingReadiness["repair"];
+        setupRequired?: boolean;
+      },
 ): TradingReadiness {
   return {
     ready: input.ok,
@@ -215,6 +269,10 @@ export function readiness(
     message: input.ok ? (input.message ?? null) : input.message,
     setupRequired: input.ok ? false : (input.setupRequired ?? false),
     capabilities,
+    ...(input.maxExecutableBuyUsd !== undefined
+      ? { maxExecutableBuyUsd: input.maxExecutableBuyUsd }
+      : {}),
+    ...(!input.ok && input.repair ? { repair: input.repair } : {}),
   };
 }
 

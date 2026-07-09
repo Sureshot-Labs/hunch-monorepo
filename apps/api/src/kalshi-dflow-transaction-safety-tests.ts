@@ -119,6 +119,46 @@ const tests: TestCase[] = [
           outputMint,
         },
       );
+      assert.equal(
+        deriveKalshiDflowTransactionContext({
+          amountInRaw: "1000000",
+          inputMint: DEFAULT_SOLANA_USDC_MINT,
+          outputMint,
+        }),
+        null,
+      );
+    },
+  },
+  {
+    name: "rejects changed input debit before broadcast",
+    run: async () => {
+      const wallet = Keypair.generate().publicKey;
+      const outputMint = Keypair.generate().publicKey;
+      const transaction = buildTransaction({
+        amountInRaw: 1_000_000n,
+        minOutRaw: 500_000n,
+        outputMint,
+        wallet,
+      });
+      await assert.rejects(
+        () =>
+          validateKalshiDflowTransaction({
+            amountInRaw: "1000000",
+            expectedInputMint: DEFAULT_SOLANA_USDC_MINT,
+            inputMint: DEFAULT_SOLANA_USDC_MINT,
+            minOutRaw: "500000",
+            outputMint: outputMint.toBase58(),
+            tokenAccountInfoLoader: async () => null,
+            transactionSimulationLoader: async () => ({
+              inputTokenSpendRaw: 1_100_000n,
+              outputTokenReceiveRaw: 500_000n,
+              solDebitLamports: 5_000n,
+            }),
+            transaction,
+            walletAddress: wallet.toBase58(),
+          }),
+        /input amount does not match/,
+      );
     },
   },
   {

@@ -58,6 +58,10 @@ import {
   validateKalshiDflowTransaction,
   type KalshiDflowTransactionFacts,
 } from "./kalshi-dflow-transaction-safety.js";
+import {
+  fetchSolanaBalanceLamports,
+  fetchSolanaTokenBalanceByOwnerAndMint,
+} from "./solana-rpc.js";
 import type {
   ApplyTradeEffectsInput,
   PersistedTrade,
@@ -91,6 +95,9 @@ const capabilities = createCapability({
   supportsExecutionSync: true,
   venue: "kalshi",
 });
+
+const KALSHI_TX_FEE_SOL_LAMPORTS = 5_000_000n;
+const KALSHI_MARKET_INIT_SOL_LAMPORTS = 20_000_000n;
 
 export async function buildKalshiDflowOrderRoute(input: {
   query: {
@@ -484,13 +491,60 @@ function kalshiEligibilityReadiness(
   eligibility: KalshiTradeEligibility | null | undefined,
 ): TradingReadiness | null {
   if (hasFreshKalshiTradeEligibility(eligibility)) return null;
+  const code = "kalshi_eligibility_refresh_required";
+  const message = kalshiTradeEligibilityMessage(eligibility);
   return readiness("kalshi", capabilities, {
     ok: false,
-    code: "insufficient_readiness",
-    message: kalshiTradeEligibilityMessage(eligibility),
+    code,
+    message,
+    repair: { kind: "app_required", code, message },
     setupRequired: true,
   });
 }
+
+function evaluateKalshiFundingReadiness(input: {
+  marketInitialized: boolean | null;
+  solLamports: bigint;
+  usdcAmount: bigint;
+  usdcDecimals: number;
+}): TradingReadiness {
+  const requiredSolLamports =
+    input.marketInitialized === false
+      ? KALSHI_MARKET_INIT_SOL_LAMPORTS
+      : KALSHI_TX_FEE_SOL_LAMPORTS;
+  const maxExecutableBuyUsd =
+    Number(input.usdcAmount) / 10 ** input.usdcDecimals;
+  if (input.solLamports < requiredSolLamports) {
+    return readiness("kalshi", capabilities, {
+      ok: false,
+      code: "kalshi_sol_funding_required",
+      maxExecutableBuyUsd,
+      message:
+        input.marketInitialized === false
+          ? "Kalshi wallet needs at least 0.02 SOL for market account setup."
+          : "Kalshi wallet needs at least 0.005 SOL for transaction fees.",
+      setupRequired: true,
+    });
+  }
+  if (input.usdcAmount <= 0n) {
+    return readiness("kalshi", capabilities, {
+      ok: false,
+      code: "kalshi_no_executable_funds",
+      maxExecutableBuyUsd: 0,
+      message: "No Kalshi USDC funds are available for bot trading.",
+      setupRequired: true,
+    });
+  }
+  return readiness("kalshi", capabilities, {
+    ok: true,
+    maxExecutableBuyUsd,
+  });
+}
+
+export const kalshiTradingExecutionTestHooks = {
+  evaluateFundingReadiness: evaluateKalshiFundingReadiness,
+  eligibilityReadiness: kalshiEligibilityReadiness,
+};
 
 function requireFreshKalshiEligibility(intent: TradeIntent): void {
   if (
@@ -511,6 +565,8 @@ async function getReadiness(
   ctx: ApiTradingApplicationServiceInput,
   input: TradingReadinessInput,
 ): Promise<TradingReadiness> {
+  let targetMarket: Awaited<ReturnType<typeof loadMarketForVenue>> | null =
+    null;
   if (input.action && input.action !== "BUY") {
     return readiness("kalshi", capabilities, {
       ok: false,
@@ -563,6 +619,7 @@ async function getReadiness(
       input.target.marketId,
       "kalshi",
     );
+    targetMarket = market;
     if (
       !kalshiMarketOrderable({
         acceptingOrders: market.accepting_orders,
@@ -591,7 +648,43 @@ async function getReadiness(
       setupRequired: true,
     });
   }
-  return readiness("kalshi", capabilities, { ok: true });
+  try {
+    const [solLamports, usdc] = await Promise.all([
+      fetchSolanaBalanceLamports({
+        rpcUrls: env.solanaRpcUrls,
+        timeoutMs: env.solanaRpcTimeoutMs,
+        owner: input.walletAddress,
+      }),
+      fetchSolanaTokenBalanceByOwnerAndMint({
+        rpcUrls: env.solanaRpcUrls,
+        timeoutMs: env.solanaRpcTimeoutMs,
+        owner: input.walletAddress,
+        mint: env.solanaUsdcMint,
+      }),
+    ]);
+    const usdcAmount = usdc?.amount ?? 0n;
+    const usdcDecimals = usdc?.decimals ?? 6;
+    return evaluateKalshiFundingReadiness({
+      marketInitialized: targetMarket?.is_initialized ?? null,
+      solLamports,
+      usdcAmount,
+      usdcDecimals,
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(
+      {
+        error,
+        userId: input.actor.userId,
+        walletAddress: input.walletAddress,
+      },
+      "Kalshi bot funding readiness check failed",
+    );
+    return readiness("kalshi", capabilities, {
+      ok: false,
+      code: "kalshi_balance_status_unavailable",
+      message: "Kalshi wallet balances are temporarily unavailable.",
+    });
+  }
 }
 
 async function quote(
@@ -816,6 +909,16 @@ async function submitPreparedTrade(
       venue: "kalshi",
     });
   }
+  await input.onBroadcastSubmitted?.({
+    venue: "kalshi",
+    status: "submitted",
+    venueOrderId: null,
+    orderHash: null,
+    txSignature: result.hash,
+    price: null,
+    size: null,
+    raw: { prepared: payload, txSignature: result.hash },
+  });
   return {
     venue: "kalshi",
     status: "submitted",

@@ -2,7 +2,10 @@ import crypto from "node:crypto";
 import { ethers } from "ethers";
 
 import { isRecord } from "../lib/type-guards.js";
-import { normalizeTradingError, TradingServiceError } from "./trading-errors.js";
+import {
+  normalizeTradingError,
+  TradingServiceError,
+} from "./trading-errors.js";
 import type {
   ApplyTradeEffectsInput,
   ExecutedPreparedTradeError,
@@ -89,7 +92,9 @@ export async function executePreparedTradeLifecycle(input: {
 }): Promise<ExecutedPreparedTrade> {
   const submitResult = await input.submitPreparedTrade({
     now: input.executeInput.now,
+    onBroadcastSubmitted: input.executeInput.onBroadcastSubmitted,
     onBeforeBroadcast: input.executeInput.onBeforeBroadcast,
+    onSetupTransactionSubmitted: input.executeInput.onSetupTransactionSubmitted,
     prepared: input.executeInput.prepared,
     signatures: input.executeInput.signatures,
   });
@@ -199,7 +204,9 @@ export function amountUsd(intent: TradeIntent): number {
 }
 
 export function normalizeSide(value: unknown): "NO" | "YES" {
-  const normalized = String(value ?? "").trim().toUpperCase();
+  const normalized = String(value ?? "")
+    .trim()
+    .toUpperCase();
   if (normalized === "YES" || normalized === "NO") return normalized;
   throw tradingError({
     code: "invalid_trade_request",

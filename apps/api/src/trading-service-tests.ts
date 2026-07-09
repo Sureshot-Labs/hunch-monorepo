@@ -6,9 +6,18 @@ import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Pool } from "@hunch/infra";
+import { ethers } from "ethers";
 
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
+import { isKalshiMarketMintContextValid } from "./services/api-trading-market-repo.js";
 import { executePreparedTradeLifecycle } from "./services/api-trading-utils.js";
+import { signEvmMessage } from "./services/api-trading-wallet-signing.js";
+import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
+import {
+  isLimitlessBotClobExecutable,
+  limitlessTradingExecutionTestHooks,
+} from "./services/limitless-trading-execution-service.js";
+import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
 import type { PreparedTrade, SubmitResult } from "./services/trading-types.js";
 
 type TestCase = {
@@ -71,6 +80,556 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Kalshi strict submit market binding accepts only server USDC and selected market mints",
+    run: () => {
+      const market = {
+        token_yes: "sol:YesMint11111111111111111111111111111111111",
+        token_no: "NoMint111111111111111111111111111111111111",
+      };
+      assert.equal(
+        isKalshiMarketMintContextValid({
+          inputMint: "UsdcMint1111111111111111111111111111111111",
+          market,
+          outputMint: "YesMint11111111111111111111111111111111111",
+          usdcMint: "UsdcMint1111111111111111111111111111111111",
+        }),
+        true,
+      );
+      assert.equal(
+        isKalshiMarketMintContextValid({
+          inputMint: "FakeUsdc11111111111111111111111111111111111",
+          market,
+          outputMint: "YesMint11111111111111111111111111111111111",
+          usdcMint: "UsdcMint1111111111111111111111111111111111",
+        }),
+        false,
+      );
+      assert.equal(
+        isKalshiMarketMintContextValid({
+          inputMint: "UsdcMint1111111111111111111111111111111111",
+          market,
+          outputMint: "OtherMarketMint11111111111111111111111111111",
+          usdcMint: "UsdcMint1111111111111111111111111111111111",
+        }),
+        false,
+      );
+    },
+  },
+  {
+    name: "Polymarket readiness decisions are fail-closed and side-effect free",
+    run: async () => {
+      const signer = "0x0000000000000000000000000000000000000001";
+      const storedFunder = "0x0000000000000000000000000000000000000002";
+      const readyCandidate = {
+        contractKind: "CONTRACT" as const,
+        deployed: true,
+        expectedContract: true,
+        funder: storedFunder,
+        signatureType: 3 as const,
+        source: "stored" as const,
+      };
+      let caughtErrors = 0;
+      const unavailable =
+        await polymarketTradingExecutionTestHooks.inspectFunderReadiness({
+          deriveFunders: async () => {
+            throw new Error("rpc timeout");
+          },
+          onError: () => {
+            caughtErrors += 1;
+          },
+          setupApprovalsReady: true,
+          storedFunder,
+        });
+      assert.equal(caughtErrors, 1);
+      assert.equal(
+        unavailable.readiness?.reasonCode,
+        "polymarket_funder_status_unavailable",
+      );
+      assert.equal(unavailable.readiness?.repair ?? null, null);
+
+      const missingDeposit =
+        await polymarketTradingExecutionTestHooks.inspectFunderReadiness({
+          deriveFunders: async () => ({
+            candidates: [],
+            recommended: null,
+            signer,
+            storedFunder: null,
+            warnings: [],
+          }),
+          setupApprovalsReady: false,
+          storedFunder: null,
+        });
+      assert.equal(
+        missingDeposit.readiness?.reasonCode,
+        "polymarket_funder_not_ready",
+      );
+      assert.equal(missingDeposit.readiness?.repair?.kind, "app_required");
+
+      const missingApprovals =
+        await polymarketTradingExecutionTestHooks.inspectFunderReadiness({
+          deriveFunders: async () => ({
+            candidates: [readyCandidate],
+            recommended: readyCandidate,
+            signer,
+            storedFunder,
+            warnings: [],
+          }),
+          setupApprovalsReady: false,
+          storedFunder,
+        });
+      assert.equal(
+        missingApprovals.readiness?.reasonCode,
+        "polymarket_approvals_missing",
+      );
+      assert.equal(missingApprovals.readiness?.repair?.kind, "app_required");
+
+      const setupReady =
+        await polymarketTradingExecutionTestHooks.inspectFunderReadiness({
+          deriveFunders: async () => ({
+            candidates: [readyCandidate],
+            recommended: readyCandidate,
+            signer,
+            storedFunder,
+            warnings: [],
+          }),
+          setupApprovalsReady: true,
+          storedFunder,
+        });
+      assert.equal(setupReady.readiness, null);
+      assert.equal(setupReady.funderExecutionKind, "deposit_wallet");
+
+      const repairCalls: string[] = [];
+      const repaired =
+        await polymarketTradingExecutionTestHooks.repairCredentials(
+          { signer, userId: "user-1", walletId: "wallet-1" },
+          {
+            createCredentials: async () => {
+              repairCalls.push("save-credentials");
+              return undefined;
+            },
+            createWalletClient: () => ({}) as never,
+            deriveFunders: async () => {
+              repairCalls.push("derive-funder");
+              return {
+                candidates: [readyCandidate],
+                recommended: readyCandidate,
+                signer,
+                storedFunder,
+                warnings: [],
+              };
+            },
+            getCredentials: async () => {
+              repairCalls.push("read-credentials");
+              return null;
+            },
+            nonce: () => 7,
+            nowMs: () => 1_700_000_000_000,
+            requestCredentials: async () => {
+              repairCalls.push("request-credentials");
+              return {
+                apiKey: "key",
+                apiSecret: "secret",
+                passphrase: "passphrase",
+              };
+            },
+            resolveState: async () => {
+              repairCalls.push("inspect-setup");
+              return {
+                credsInfo: null,
+                effectiveDistinctFunder: storedFunder,
+                setupApprovalsReady: true,
+              } as never;
+            },
+            signTypedData: async () => {
+              repairCalls.push("sign-credential");
+              return "0xsignature";
+            },
+          } as never,
+        );
+      assert.deepEqual(repaired.sideEffects, ["credential"]);
+      assert.deepEqual(repairCalls, [
+        "inspect-setup",
+        "derive-funder",
+        "read-credentials",
+        "sign-credential",
+        "request-credentials",
+        "save-credentials",
+      ]);
+
+      let unsafeSigningCalls = 0;
+      await assert.rejects(
+        () =>
+          polymarketTradingExecutionTestHooks.repairCredentials(
+            { signer, userId: "user-1", walletId: "wallet-1" },
+            {
+              deriveFunders: async () => ({
+                candidates: [readyCandidate],
+                recommended: readyCandidate,
+                signer,
+                storedFunder,
+                warnings: [],
+              }),
+              resolveState: async () =>
+                ({
+                  credsInfo: null,
+                  effectiveDistinctFunder: storedFunder,
+                  setupApprovalsReady: false,
+                }) as never,
+              signTypedData: async () => {
+                unsafeSigningCalls += 1;
+                return "0xunsafe";
+              },
+            } as never,
+          ),
+        /deposit wallet and approvals must be completed/i,
+      );
+      assert.equal(unsafeSigningCalls, 0);
+
+      const credentials =
+        polymarketTradingExecutionTestHooks.evaluateCredentialReadiness({
+          canAutoRepair: true,
+          credentialsReady: false,
+        });
+      assert.equal(credentials?.repair?.kind, "auto");
+      assert.equal(credentials?.repair?.sideEffect, "credential");
+
+      const missingFundsApproval =
+        polymarketTradingExecutionTestHooks.evaluateFundsReadiness({
+          buyApprovalOk: false,
+          executableFundsRaw: 10_000_000n,
+        });
+      assert.equal(
+        missingFundsApproval.reasonCode,
+        "polymarket_approvals_missing",
+      );
+      assert.equal(missingFundsApproval.repair?.kind, "app_required");
+      const unfunded =
+        polymarketTradingExecutionTestHooks.evaluateFundsReadiness({
+          buyApprovalOk: true,
+          executableFundsRaw: 0n,
+        });
+      assert.equal(unfunded.executable, false);
+      assert.equal(unfunded.maxExecutableBuyUsd, 0);
+      const funded = polymarketTradingExecutionTestHooks.evaluateFundsReadiness(
+        {
+          buyApprovalOk: true,
+          executableFundsRaw: 12_500_000n,
+        },
+      );
+      assert.equal(funded.executable, true);
+      assert.equal(funded.maxExecutableBuyUsd, 12.5);
+
+      const preparedQuote =
+        polymarketTradingExecutionTestHooks.inspectPreparedQuote({
+          candidate: readyCandidate,
+          rawQuote: {
+            feePolicySnapshot: {
+              builderCode: `0x${"11".repeat(32)}`,
+              builderMakerFeeBps: 0,
+              builderTakerFeeBps: 50,
+              collectionMode: "builder",
+              venue: "polymarket",
+            },
+            makerAmount: "10000000",
+            takerAmount: "20000000",
+            totalRequiredUsdcRaw: "10500000",
+          },
+        });
+      assert.equal(preparedQuote.requiredSpendRaw, 10_500_000n);
+      assert.equal(preparedQuote.funderExecutionKind, "deposit_wallet");
+      assert.throws(
+        () =>
+          polymarketTradingExecutionTestHooks.inspectPreparedQuote({
+            candidate: readyCandidate,
+            rawQuote: {
+              makerAmount: "10000000",
+              totalRequiredUsdcRaw: "10500000",
+            },
+          }),
+        /fee policy is unavailable/,
+      );
+      assert.throws(
+        () =>
+          polymarketTradingExecutionTestHooks.assertPreparedFunds({
+            buyApprovalOk: true,
+            executableFundsRaw: 10_000_000n,
+            requiredSpendRaw: preparedQuote.requiredSpendRaw,
+          }),
+        /Insufficient executable Polymarket funds/,
+      );
+    },
+  },
+  {
+    name: "Limitless and Kalshi readiness decisions expose repair and funding states",
+    run: () => {
+      assert.equal(isLimitlessBotClobExecutable(), false);
+      const connect =
+        limitlessTradingExecutionTestHooks.buildConnectionReadiness({
+          autoRepairable: true,
+          code: "limitless_connect_required",
+          message: "Connect Limitless.",
+        });
+      assert.equal(connect.executable, false);
+      assert.equal(connect.repair?.kind, "auto");
+      assert.equal(connect.repair?.sideEffect, "connection");
+      const reconnect =
+        limitlessTradingExecutionTestHooks.buildConnectionReadiness({
+          autoRepairable: false,
+          code: "limitless_reconnect_required",
+          message: "Reconnect Limitless.",
+        });
+      assert.equal(reconnect.repair?.kind, "app_required");
+      const noLimitlessFunds =
+        limitlessTradingExecutionTestHooks.evaluateBalanceReadiness(0n);
+      assert.equal(
+        noLimitlessFunds.reasonCode,
+        "limitless_no_executable_funds",
+      );
+      assert.equal(noLimitlessFunds.maxExecutableBuyUsd, 0);
+      const limitlessFunded =
+        limitlessTradingExecutionTestHooks.evaluateBalanceReadiness(
+          12_500_000n,
+        );
+      assert.equal(limitlessFunded.executable, true);
+      assert.equal(limitlessFunded.maxExecutableBuyUsd, 12.5);
+
+      const staleEligibility =
+        kalshiTradingExecutionTestHooks.eligibilityReadiness({
+          checkedAt: "2020-01-01T00:00:00.000Z",
+          expiresAt: "2020-01-01T01:00:00.000Z",
+          geoAllowed: true,
+          proofVerified: true,
+        });
+      assert.equal(
+        staleEligibility?.reasonCode,
+        "kalshi_eligibility_refresh_required",
+      );
+      assert.equal(staleEligibility?.repair?.kind, "app_required");
+      const freshEligibility =
+        kalshiTradingExecutionTestHooks.eligibilityReadiness({
+          checkedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          geoAllowed: true,
+          proofVerified: true,
+        });
+      assert.equal(freshEligibility, null);
+
+      const initFunding =
+        kalshiTradingExecutionTestHooks.evaluateFundingReadiness({
+          marketInitialized: false,
+          solLamports: 19_999_999n,
+          usdcAmount: 5_000_000n,
+          usdcDecimals: 6,
+        });
+      assert.equal(initFunding.reasonCode, "kalshi_sol_funding_required");
+      assert.equal(initFunding.maxExecutableBuyUsd, 5);
+      assert.match(initFunding.message ?? "", /0\.02 SOL/);
+      const noKalshiFunds =
+        kalshiTradingExecutionTestHooks.evaluateFundingReadiness({
+          marketInitialized: true,
+          solLamports: 5_000_000n,
+          usdcAmount: 0n,
+          usdcDecimals: 6,
+        });
+      assert.equal(noKalshiFunds.reasonCode, "kalshi_no_executable_funds");
+      const kalshiFunded =
+        kalshiTradingExecutionTestHooks.evaluateFundingReadiness({
+          marketInitialized: true,
+          solLamports: 5_000_000n,
+          usdcAmount: 7_500_000n,
+          usdcDecimals: 6,
+        });
+      assert.equal(kalshiFunded.executable, true);
+      assert.equal(kalshiFunded.maxExecutableBuyUsd, 7.5);
+    },
+  },
+  {
+    name: "Limitless AMM approval and buy callbacks preserve the submit boundary",
+    run: async () => {
+      const amountUsdRaw = 10_000_000n;
+      const prepared = {
+        authorizationMode: "embedded_privy_evm",
+        authorizationRequests: [],
+        expiresAt: null,
+        intent: {
+          action: "BUY",
+          actor: { kind: "telegram_bot", userId: "user-1" },
+          amount: { type: "usd", value: "10" },
+          executionAuthorization: {
+            privyUserId: "privy-1",
+            privyWalletId: "wallet-1",
+          },
+          id: "intent-1",
+          idempotencyKey: "telegram-bot:intent-1",
+          orderType: "FOK",
+          target: {
+            marketId: "market-1",
+            outcome: "YES",
+            tokenId: "token-1",
+            venue: "limitless",
+          },
+          venue: "limitless",
+          walletAddress: "0x0000000000000000000000000000000000000001",
+          walletChain: "ethereum",
+        },
+        preparedId: "prepared-1",
+        quote: null,
+        reconcileKeys: {},
+        venue: "limitless",
+        venuePayload: {},
+      } as unknown as PreparedTrade;
+      const payload = {
+        allowanceRaw: "0",
+        amountUsd: 10,
+        amountUsdRaw: amountUsdRaw.toString(),
+        approvalAmountRaw: amountUsdRaw.toString(),
+        approvalRequired: true,
+        kind: "limitless",
+        marketAddress: "0x0000000000000000000000000000000000000002",
+        minOutcomeTokensRaw: "19000000",
+        outcomeIndex: 0,
+        price: 0.5,
+        sharesRaw: "20000000",
+        size: 20,
+        tokenId: "token-1",
+        tradeType: "amm",
+      };
+      const events: string[] = [];
+      let snapshots = 0;
+      const result =
+        await limitlessTradingExecutionTestHooks.submitAmmPreparedTrade(
+          {
+            onBeforeBroadcast: () => {
+              events.push("before-buy");
+            },
+            onBroadcastSubmitted: (submitted) => {
+              events.push(`buy-ref:${submitted.txSignature}`);
+            },
+            onSetupTransactionSubmitted: (setup) => {
+              events.push(`setup-ref:${setup.txHash}`);
+            },
+            payload: payload as never,
+            prepared,
+          },
+          {
+            fetchOnchainSnapshot: async () => {
+              snapshots += 1;
+              return {
+                allowanceAmm: snapshots === 1 ? 0n : amountUsdRaw,
+                usdcBalance: amountUsdRaw,
+              } as never;
+            },
+            sendTransaction: async (transaction) => {
+              events.push(transaction.label);
+              if (transaction.label.includes("approval")) {
+                const decoded = new ethers.Interface([
+                  "function approve(address spender,uint256 value)",
+                ]).decodeFunctionData("approve", transaction.data);
+                assert.equal(decoded[1], amountUsdRaw);
+                await transaction.onSubmitted?.("0xapproval");
+                return "0xapproval";
+              }
+              await transaction.onSubmitted?.("0xbuy");
+              return "0xbuy";
+            },
+          },
+        );
+      assert.equal(result.txSignature, "0xbuy");
+      assert.deepEqual(events, [
+        "Limitless AMM USDC approval",
+        "setup-ref:0xapproval",
+        "before-buy",
+        "Limitless AMM buy",
+        "buy-ref:0xbuy",
+      ]);
+
+      const timeoutEvents: string[] = [];
+      await assert.rejects(
+        () =>
+          limitlessTradingExecutionTestHooks.submitAmmPreparedTrade(
+            {
+              onBeforeBroadcast: () => {
+                timeoutEvents.push("before-buy");
+              },
+              onBroadcastSubmitted: (submitted) => {
+                timeoutEvents.push(`buy-ref:${submitted.txSignature}`);
+              },
+              payload: payload as never,
+              prepared,
+            },
+            {
+              fetchOnchainSnapshot: async () =>
+                ({
+                  allowanceAmm: amountUsdRaw,
+                  usdcBalance: amountUsdRaw,
+                }) as never,
+              sendTransaction: async (transaction) => {
+                await transaction.onSubmitted?.("0xtimeout");
+                throw new Error("receipt timeout");
+              },
+            },
+          ),
+        /receipt timeout/,
+      );
+      assert.deepEqual(timeoutEvents, ["before-buy", "buy-ref:0xtimeout"]);
+
+      const approvalFailureEvents: string[] = [];
+      await assert.rejects(
+        () =>
+          limitlessTradingExecutionTestHooks.submitAmmPreparedTrade(
+            {
+              onBeforeBroadcast: () => {
+                approvalFailureEvents.push("before-buy");
+              },
+              onSetupTransactionSubmitted: (setup) => {
+                approvalFailureEvents.push(`setup-ref:${setup.txHash}`);
+              },
+              payload: payload as never,
+              prepared,
+            },
+            {
+              fetchOnchainSnapshot: async () =>
+                ({ allowanceAmm: 0n, usdcBalance: amountUsdRaw }) as never,
+              sendTransaction: async (transaction) => {
+                await transaction.onSubmitted?.("0xapproval-failed");
+                throw new Error("approval receipt failed");
+              },
+            },
+          ),
+        /approval receipt failed/,
+      );
+      assert.deepEqual(approvalFailureEvents, ["setup-ref:0xapproval-failed"]);
+    },
+  },
+  {
+    name: "server EVM message signing returns the Privy signature",
+    run: async () => {
+      let captured: unknown = null;
+      const signature = await signEvmMessage({
+        walletClient: {
+          walletApi: {
+            ethereum: {
+              signMessage: async (input: unknown) => {
+                captured = input;
+                return { signature: "0xsigned" };
+              },
+            },
+          },
+        } as never,
+        walletId: "wallet-1",
+        signer: "0x0000000000000000000000000000000000000001",
+        message: "Sign in to Limitless",
+      });
+      assert.equal(signature, "0xsigned");
+      assert.deepEqual(captured, {
+        walletId: "wallet-1",
+        address: "0x0000000000000000000000000000000000000001",
+        chainType: "ethereum",
+        message: "Sign in to Limitless",
+      });
+    },
+  },
   {
     name: "trading lifecycle persists accepted submit when onSubmitted throws",
     run: async () => {
@@ -805,7 +1364,10 @@ const tests: TestCase[] = [
       );
       assert.match(executorBlock, /executePreparedTradeLifecycle/);
       assert.match(executorBlock, /persistTrade\(ctx, persistInput\)/);
-      assert.match(executorBlock, /applyOrderTradeEffects\(ctx, effectsInput\)/);
+      assert.match(
+        executorBlock,
+        /applyOrderTradeEffects\(ctx, effectsInput\)/,
+      );
     },
   },
   {
@@ -907,7 +1469,10 @@ const tests: TestCase[] = [
       assert.match(confirmLifecycleBlock, /trading\.prepareTrade/);
       assert.match(confirmLifecycleBlock, /trading\.executePreparedTrade/);
       assert.match(confirmLifecycleBlock, /onSubmitted/);
-      assert.doesNotMatch(confirmLifecycleBlock, /trading\.submitPreparedTrade/);
+      assert.doesNotMatch(
+        confirmLifecycleBlock,
+        /trading\.submitPreparedTrade/,
+      );
       assert.doesNotMatch(confirmLifecycleBlock, /trading\.persistTrade/);
       assert.doesNotMatch(confirmLifecycleBlock, /trading\.applyTradeEffects/);
     },
@@ -951,19 +1516,12 @@ const tests: TestCase[] = [
         limitlessHistory,
         /result\.kind === "stored" \|\| !result\.order\.position_delta_applied/,
       );
-      assert.doesNotMatch(
-        limitlessHistory,
-        /markOrderPositionDeltaApplied/,
-      );
+      assert.doesNotMatch(limitlessHistory, /markOrderPositionDeltaApplied/);
     },
   },
   {
-    name: "bot trading readiness and persistence preserve venue-specific safety checks",
+    name: "venue persistence preserves venue-specific safety checks",
     run: () => {
-      const polymarket = readFileSync(
-        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
-        "utf8",
-      );
       const limitless = readFileSync(
         resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
         "utf8",
@@ -977,17 +1535,6 @@ const tests: TestCase[] = [
         "utf8",
       );
 
-      const polymarketReadinessBlock = sourceSlice(
-        polymarket,
-        "async function getReadiness(",
-        "async function quote(",
-      );
-      assert.match(
-        polymarketReadinessBlock,
-        /resolvePolymarketMaxSpendFunds/,
-      );
-      assert.match(polymarketReadinessBlock, /executableFundsRaw <= 0n/);
-
       const limitlessExchangeBlock = sourceSlice(
         limitless,
         "function extractLimitlessMarketExchangeAddress(",
@@ -996,8 +1543,14 @@ const tests: TestCase[] = [
       assert.match(limitlessExchangeBlock, /venueExchange/);
       assert.match(limitlessExchangeBlock, /venue_exchange/);
       assert.match(limitlessExchangeBlock, /negRiskExchange/);
-      assert.match(limitless, /extractLimitlessMarketExchangeAddress\(market\.metadata\)/);
-      assert.match(limitless, /upsertLimitlessVenueShareAccrualFromOrderPayload/);
+      assert.match(
+        limitless,
+        /extractLimitlessMarketExchangeAddress\(market\.metadata\)/,
+      );
+      assert.match(
+        limitless,
+        /upsertLimitlessVenueShareAccrualFromOrderPayload/,
+      );
       assert.match(limitless, /upstreamPayload/);
       assert.match(limitless, /isLimitlessBotClobExecutable/);
       assert.match(limitless, /limitless_clob_slippage_guard_unavailable/);
@@ -1008,7 +1561,10 @@ const tests: TestCase[] = [
 
       assert.match(kalshi, /extractDflowErrorCode/);
       assert.match(kalshi, /code === "route_not_found"/);
-      assert.doesNotMatch(kalshi, /upstream\.payload\.code === "route_not_found"/);
+      assert.doesNotMatch(
+        kalshi,
+        /upstream\.payload\.code === "route_not_found"/,
+      );
       assert.match(kalshi, /resolveKalshiExecutionSettlementStatus/);
       assert.match(kalshi, /clientStatus/);
       assert.match(kalshi, /executionStatus = "submitted"/);
@@ -1026,7 +1582,10 @@ const tests: TestCase[] = [
         kalshiRecordBlock,
         /const statusMode = input\.statusMode \?\? "verified"/,
       );
-      assert.match(kalshiRecordBlock, /statusMode === "verified" && txSignature/);
+      assert.match(
+        kalshiRecordBlock,
+        /statusMode === "verified" && txSignature/,
+      );
       assert.match(
         kalshiRecordBlock,
         /statusMode === "verified" && isClientTerminal/,
@@ -1046,114 +1605,7 @@ const tests: TestCase[] = [
       assert.match(migration, /ADD COLUMN IF NOT EXISTS submit_started_at/);
       assert.match(migration, /'reconcile_required'/);
       assert.match(migration, /status NOT IN \('submitted', 'filled'\)/);
-      assert.doesNotMatch(
-        migration,
-        /prepared_snapshot <> '\{\}'::jsonb/,
-      );
-    },
-  },
-  {
-    name: "Limitless bot AMM path is backend-executed and receipt-gated",
-    run: () => {
-      const limitless = readFileSync(
-        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
-        "utf8",
-      );
-      const readinessBlock = sourceSlice(
-        limitless,
-        "async function getReadiness(",
-        "async function quote(",
-      );
-      assert.match(limitless, /readString\(metadata\.tradeType\)/);
-      assert.match(readinessBlock, /readLimitlessAmmMarketAddress/);
-      assert.doesNotMatch(
-        readinessBlock,
-        /AMM bot execution is not route-equivalent/,
-      );
-
-      const quoteBlock = sourceSlice(
-        limitless,
-        "async function quote(",
-        "function canonicalLimitlessOrderPayload",
-      );
-      assert.match(quoteBlock, /quoteLimitlessAmmTrade/);
-      assert.match(quoteBlock, /kind: "limitless_amm"/);
-
-      const prepareAmmBlock = sourceSlice(
-        limitless,
-        "async function prepareLimitlessAmmTrade(",
-        "async function prepareTrade(",
-      );
-      assert.match(prepareAmmBlock, /fetchLimitlessOnchainSnapshot/);
-      assert.match(prepareAmmBlock, /allowanceRaw < amountRaw/);
-      assert.match(prepareAmmBlock, /minOutcomeTokensRaw/);
-
-      const submitAmmBlock = sourceSlice(
-        limitless,
-        "async function submitLimitlessAmmPreparedTrade(",
-        "function parseLimitlessPreparedPayload",
-      );
-      assert.match(submitAmmBlock, /sendLimitlessServerEvmTransaction/);
-      assert.match(submitAmmBlock, /encodeLimitlessAmmUsdcApproval/);
-      assert.match(submitAmmBlock, /encodeLimitlessAmmBuy/);
-      assert.match(submitAmmBlock, /status: "filled"/);
-
-      const sendBlock = sourceSlice(
-        limitless,
-        "async function sendLimitlessServerEvmTransaction(",
-        "async function getReadiness(",
-      );
-      assert.match(sendBlock, /executeServerEmbeddedEthereumTransaction/);
-
-      const recordBlock = sourceSlice(
-        limitless,
-        "export async function recordLimitlessAmmOrder(",
-        "function isLimitlessAmmMarket",
-      );
-      assert.match(recordBlock, /waitForEmbeddedEthereumTransactionReceipt/);
-      assert.match(recordBlock, /settlementMode === "legacy_assume_filled"/);
-      assert.match(recordBlock, /settlementMode === "confirmed"/);
-      assert.match(
-        recordBlock,
-        /Limitless AMM transaction not confirmed yet; recording pending order/,
-      );
-      assert.match(
-        recordBlock,
-        /const status = onchainConfirmed \? "filled" : "submitted"/,
-      );
-      assert.match(recordBlock, /onchainConfirmed/);
-      assert.match(recordBlock, /includes\("failed onchain"\)/);
-      assert.match(recordBlock, /statusCode: 409/);
-      assert.match(recordBlock, /dbOrderId: stored\.order\.id/);
-
-      const persistBlock = sourceSlice(
-        limitless,
-        "async function persistTrade(",
-        "async function applyLimitlessTradeEffects",
-      );
-      assert.match(persistBlock, /orderId: recorded\.payload\.dbOrderId/);
-      assert.match(
-        persistBlock,
-        /_hunchUpstream:\s*upstreamPayload/,
-      );
-      assert.match(persistBlock, /upstreamPayload,\s*filledAt,/);
-
-      const embeddedEthereum = readFileSync(
-        resolve(apiSrcDir, "services/embedded-ethereum.ts"),
-        "utf8",
-      );
-      const serverEvmBlock = sourceSlice(
-        embeddedEthereum,
-        "export async function executeServerEmbeddedEthereumTransaction(",
-        "export async function executeEmbeddedEthereumTransactionRequests(",
-      );
-      assert.match(serverEvmBlock, /walletApi\.ethereum\.sendTransaction/);
-      assert.match(serverEvmBlock, /waitForEvmTransaction/);
-
-      assert.match(
-        limitless,
-        /applyTradeEffects: \(input\) => applyLimitlessTradeEffects/,
-      );
+      assert.doesNotMatch(migration, /prepared_snapshot <> '\{\}'::jsonb/);
     },
   },
   {

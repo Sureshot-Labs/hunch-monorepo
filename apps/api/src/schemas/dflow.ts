@@ -48,6 +48,7 @@ export const dflowSwapBodySchema = z.object({
 
 export const dflowSubmitBodySchema = z.object({
   signedTransaction: zRequiredString("signedTransaction is required"),
+  marketId: z.string().trim().min(1).optional(),
   skipPreflight: z.boolean().optional(),
   maxRetries: z.coerce.number().int().min(0).optional(),
   userPublicKey: z.string().optional(),

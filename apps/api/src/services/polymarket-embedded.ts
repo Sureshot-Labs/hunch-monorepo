@@ -7,6 +7,7 @@ import {
   type PrivyWalletProfile,
   PrivyService,
 } from "../privy-service.js";
+import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "./polymarket-onchain.js";
 
@@ -227,6 +228,17 @@ export type EmbeddedPolymarketWalletContext = {
   walletId: string;
 };
 
+export type EmbeddedPolymarketWalletReference = Pick<
+  EmbeddedPolymarketWalletContext,
+  "signer" | "walletId"
+>;
+
+export type EmbeddedPolymarketSignerApprovalTransaction =
+  EmbeddedEthereumTransactionSpec & {
+    data: string;
+    sponsor: true;
+  };
+
 export type EmbeddedPolymarketContext = {
   signer: string;
   walletProfile: PrivyWalletProfile;
@@ -254,6 +266,12 @@ function normalizeHex(value: string | null | undefined): string | null {
   const trimmed = value.trim();
   if (!/^0x[0-9a-fA-F]+$/.test(trimmed)) return null;
   return trimmed.toLowerCase();
+}
+
+function requireHex(value: string, message: string): string {
+  const normalized = normalizeHex(value);
+  if (!normalized) throw new Error(message);
+  return normalized;
 }
 
 function getRequestTransaction(request: EmbeddedPrivyAuthorizationRequest): {
@@ -1265,7 +1283,7 @@ export function buildEmbeddedPolymarketTypedDataRequest(inputs: {
 }
 
 export function buildEmbeddedPolymarketConnectRequest(inputs: {
-  context: EmbeddedPolymarketWalletContext;
+  context: EmbeddedPolymarketWalletReference;
   timestamp: string;
   nonce: number;
 }): EmbeddedPrivyAuthorizationRequest {
@@ -1422,13 +1440,12 @@ export function buildEmbeddedPolymarketFeeAuthRequest(inputs: {
 }
 
 function buildEmbeddedSignerApprovalRequest(inputs: {
-  context: EmbeddedPolymarketWalletContext;
-  task: ApprovalTask;
-  requestId: string;
+  context: EmbeddedPolymarketWalletReference;
+  transaction: EmbeddedPolymarketSignerApprovalTransaction;
 }): EmbeddedPrivyAuthorizationRequest {
   return createPrivyWalletRpcRequest({
-    id: inputs.requestId,
-    label: inputs.task.description,
+    id: inputs.transaction.id,
+    label: inputs.transaction.label,
     walletId: inputs.context.walletId,
     body: {
       method: "eth_sendTransaction",
@@ -1437,8 +1454,8 @@ function buildEmbeddedSignerApprovalRequest(inputs: {
       params: {
         transaction: {
           from: inputs.context.signer,
-          to: requireAddress(inputs.task.target, "Invalid approval target."),
-          data: normalizeHex(inputs.task.data),
+          to: inputs.transaction.to,
+          data: inputs.transaction.data,
         },
       },
     },
@@ -1804,8 +1821,8 @@ function buildApprovalTasks(inputs: {
   return tasks;
 }
 
-export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
-  context: EmbeddedPolymarketWalletContext;
+export function prepareEmbeddedPolymarketSignerApprovalTransactions(inputs: {
+  signer: string;
   funder: string;
   currentApprovals: {
     exchangeApproved: boolean;
@@ -1819,19 +1836,39 @@ export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
     negRiskAdapterAllowanceOk: boolean;
     feeCollectorAllowanceOk: boolean;
   };
-}): EmbeddedPrivyAuthorizationRequest[] {
+}): EmbeddedPolymarketSignerApprovalTransaction[] {
   const funder = requireAddress(inputs.funder, "Invalid Polymarket funder.");
-  if (funder.toLowerCase() !== inputs.context.signer.toLowerCase()) {
+  const signer = requireAddress(inputs.signer, "Invalid Polymarket signer.");
+  if (funder.toLowerCase() !== signer.toLowerCase()) {
     return [];
   }
   return buildApprovalTasks({
     funder,
     currentApprovals: inputs.currentApprovals,
-  }).map((task, index) =>
+  }).map((task, index) => ({
+    data: requireHex(task.data, "Invalid approval transaction data."),
+    id: `approval-${index}`,
+    label: task.description,
+    sponsor: true,
+    to: requireAddress(task.target, "Invalid approval target."),
+  }));
+}
+
+export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
+  context: EmbeddedPolymarketWalletReference;
+  funder: string;
+  currentApprovals: Parameters<
+    typeof prepareEmbeddedPolymarketSignerApprovalTransactions
+  >[0]["currentApprovals"];
+}): EmbeddedPrivyAuthorizationRequest[] {
+  return prepareEmbeddedPolymarketSignerApprovalTransactions({
+    signer: inputs.context.signer,
+    funder: inputs.funder,
+    currentApprovals: inputs.currentApprovals,
+  }).map((transaction) =>
     buildEmbeddedSignerApprovalRequest({
       context: inputs.context,
-      task,
-      requestId: `approval-${index}`,
+      transaction,
     }),
   );
 }
