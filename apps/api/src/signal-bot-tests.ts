@@ -1373,7 +1373,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           disableTrading: async () => testCase.result,
           message: {
             chat: { id: 999, first_name: "Kreedle", type: "private" },
-            from: { id: 999 },
+            from: { id: 123 },
             text: "/disable_trading",
           },
           redis,
@@ -1469,7 +1469,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         message: {
           chat: { id: 999, first_name: "Kreedle", type: "private" },
-          from: { id: 999 },
+          from: { id: 123 },
           message_id: 12,
           text: "/market polymarket:market-1",
         },
@@ -1486,7 +1486,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         marketRef: "polymarket:market-1",
         telegramMessageId: 12,
-        telegramUserId: 999,
+        telegramUserId: 123,
       });
       assert.equal(telegram.messages.length, 0);
     },
@@ -1504,7 +1504,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         message: {
           chat: { id: -100, title: "Group", type: "group" },
-          from: { id: 999 },
+          from: { id: 123 },
           text: "/market polymarket:market-1",
         },
         redis,
@@ -2231,7 +2231,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         {
           message: {
             chat: { id: 999, type: "private" },
-            from: { id: 999 },
+            from: { id: 123 },
             message_id: 2,
             text: "/trade_status",
           },
@@ -2344,7 +2344,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         {
           message: {
             chat: { id: 999, type: "private" },
-            from: { id: 999 },
+            from: { id: 123 },
             message_id: 1,
             text: "/trade_status",
           },
@@ -6058,32 +6058,100 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "public start help is Mini App aware and hides admin controls",
+    name: "public start and help are Mini App aware and expose no slash commands",
     run: async () => {
-      const redis = new FakeRedis();
-      const telegram = new FakeTelegram();
-      const handled = await handleSignalBotCommand({
-        config: parseSignalBotConfig({
-          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
-          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
-            "https://t.me/hunch_bot/hunch",
-          HUNCH_SIGNAL_BOT_TOKEN: "token",
-        }),
-        message: {
-          chat: { id: -1, title: "Group", type: "group" },
-          from: { id: 999 },
-          text: "/start",
-        },
-        redis,
-        sendMessage: (message) => telegram.sendMessage(message),
-        sendTestSignal: async () => false,
-      });
-      assert.equal(handled, true);
-      const text = telegram.messages[0]?.text ?? "";
-      assert.match(text, /Public help/);
-      assert.match(text, /Hunch Mini App/);
-      assert.doesNotMatch(text, /enable\\_signals/);
-      assert.doesNotMatch(text, /test\\_signal/);
+      for (const command of ["/start", "/help"]) {
+        const redis = new FakeRedis();
+        const telegram = new FakeTelegram();
+        const handled = await handleSignalBotCommand({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+            HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+              "https://t.me/hunch_bot/hunch",
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+          }),
+          message: {
+            chat: { id: -1, title: "Group", type: "group" },
+            from: { id: 999 },
+            text: command,
+          },
+          redis,
+          sendMessage: (message) => telegram.sendMessage(message),
+          sendTestSignal: async () => false,
+        });
+        assert.equal(handled, true);
+        const text = telegram.messages[0]?.text ?? "";
+        assert.match(text, /Hunch Signal Bot/);
+        assert.match(text, /Hunch Mini App/);
+        assert.doesNotMatch(text, /Commands/);
+        assert.doesNotMatch(
+          text,
+          /\/(?:start|help|status|trade|market|disable|enable|stats|test)/,
+        );
+      }
+    },
+  },
+  {
+    name: "public users cannot execute signal or trading slash commands",
+    run: async () => {
+      const commands = [
+        "/enable_signals",
+        "/disable_signals",
+        "/status",
+        "/stats",
+        "/trade_status",
+        "/market polymarket:market-1",
+        "/disable_trading",
+        "/test_followthrough stats",
+        "/test_signal",
+        "/test_trade polymarket:market-1",
+      ];
+      for (const command of commands) {
+        const redis = new FakeRedis();
+        const telegram = new FakeTelegram();
+        let sideEffects = 0;
+        const handled = await handleSignalBotCommand({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+          }),
+          disableTrading: async () => {
+            sideEffects += 1;
+            return "disabled";
+          },
+          message: {
+            chat: { id: 999, first_name: "Public user", type: "private" },
+            from: { id: 999 },
+            text: command,
+          },
+          redis,
+          sendMessage: (message) => telegram.sendMessage(message),
+          sendStatsReport: async () => {
+            sideEffects += 1;
+            return true;
+          },
+          sendTestFollowthrough: async () => {
+            sideEffects += 1;
+            return true;
+          },
+          sendTestSignal: async () => {
+            sideEffects += 1;
+            return true;
+          },
+          sendTradeMarket: async () => {
+            sideEffects += 1;
+            return true;
+          },
+          sendTradeStatus: async () => {
+            sideEffects += 1;
+            return true;
+          },
+        });
+        assert.equal(handled, true);
+        assert.equal(sideEffects, 0);
+        assert.equal(await getSignalBotChatState(redis, "999"), null);
+        assert.match(telegram.messages[0]?.text ?? "", /Not authorized/);
+      }
     },
   },
   {
@@ -6107,12 +6175,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(handled, true);
       const text = telegram.messages[0]?.text ?? "";
-      assert.match(text, /Public help/);
+      assert.match(text, /Hunch Signal Bot/);
       assert.match(text, /Admin controls/);
       assert.match(text, /enable\\_signals/);
+      assert.match(text, /trade\\_status/);
+      assert.match(text, /\/market/);
+      assert.match(text, /disable\\_trading/);
       assert.match(text, /test\\_followthrough/);
       assert.match(text, /test\\_signal/);
-      assert.match(text, /Buttons open Hunch web links/);
+      assert.match(text, /Signal buttons open Hunch web links/);
     },
   },
   {
@@ -6417,7 +6488,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         message: {
           chat: { id: -1, title: "Group", type: "group" },
-          from: { id: 999 },
+          from: { id: 123 },
           text: "/status",
         },
         redis,

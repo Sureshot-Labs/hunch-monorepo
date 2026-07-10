@@ -1681,15 +1681,7 @@ export async function handleSignalBotCommand(input: {
   const targetChatId = parseSignalBotCommandTargetChatId(input.message.text);
   const isAdmin = isSignalBotAdmin(input.config, input.message.from?.id);
 
-  if (
-    !isAdmin &&
-    (command === "disable_signals" ||
-      command === "enable_signals" ||
-      command === "stats" ||
-      command === "test_followthrough" ||
-      command === "test_signal" ||
-      command === "test_trade")
-  ) {
+  if (!isAdmin && command !== "start" && command !== "help") {
     await input.sendMessage(buildPlainReply(chatId, "Not authorized."));
     return true;
   }
@@ -5160,19 +5152,10 @@ function publicHelpText(input: { miniAppEnabled: boolean }): string {
   return [
     "Hunch Signal Bot",
     "",
-    "Public help",
-    "Signal messages include buttons to open markets, wallet profiles, and trade tickets in Hunch.",
+    "Follow Hunch market signals and open the app to explore markets and trading opportunities.",
     input.miniAppEnabled
-      ? "In Telegram, supported buttons open the Hunch Mini App."
-      : "Buttons open Hunch web links.",
-    "",
-    "Commands",
-    "/start - show this intro",
-    "/help - show help",
-    "/status - show signal status for this chat",
-    "/trade_status - show private trading readiness",
-    "/market <market_id or URL> - open a private trading card",
-    "/disable_trading - disable Telegram bot trading",
+      ? "Use Get Hunch to open the Hunch Mini App."
+      : "Signal buttons open Hunch web links.",
   ].join("\n");
 }
 
@@ -5191,6 +5174,9 @@ function helpText(input: {
     "/disable_signals <channel_id> - disable a channel",
     "/status [channel_id] - show signal status",
     "/stats [24h|7d|30d] [detail] - show signal performance",
+    "/trade_status - show private trading readiness",
+    "/market <market_id or URL> - open a private trading card",
+    "/disable_trading - disable Telegram bot trading",
     "/test_followthrough [stats|win|loss] [channel_id] - preview a follow-up",
     "/test_signal [channel_id] - send latest eligible signal",
     "/test_trade <market_id or URL> - preview a private trade card",
