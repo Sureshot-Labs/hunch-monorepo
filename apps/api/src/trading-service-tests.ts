@@ -304,7 +304,7 @@ const tests: TestCase[] = [
         signerId: string;
       }> = [];
       let quorumPublicKeys = [publicKey];
-      let walletOwnerId = "user-1";
+      let classifiedWalletId = "wallet-1";
       let policy = buildValidPolymarketBotPolicy();
       const dependencies: PrivySignerInspectorDependencies = {
         classifyWallets: () => [
@@ -312,7 +312,7 @@ const tests: TestCase[] = [
             address: walletAddress,
             isInternalWallet: true,
             source: "embedded",
-            walletId: "wallet-1",
+            walletId: classifiedWalletId,
             walletType: "ethereum",
           },
         ],
@@ -328,7 +328,6 @@ const tests: TestCase[] = [
           address: walletAddress,
           chainType: "ethereum",
           id: "wallet-1",
-          ownerId: walletOwnerId,
           policyIds: [],
         }),
         getPolicyMetadata: async () => policy,
@@ -353,9 +352,9 @@ const tests: TestCase[] = [
         walletChain: "ethereum",
       });
 
-      walletOwnerId = "another-user";
+      classifiedWalletId = "another-wallet";
       assert.equal((await inspect(true)).state, "unsafe_configuration");
-      walletOwnerId = "user-1";
+      classifiedWalletId = "wallet-1";
 
       additionalSigners = [
         { overridePolicyIds: ["policy-1"], signerId: "signer-1" },

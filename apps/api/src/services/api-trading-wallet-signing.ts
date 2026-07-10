@@ -597,6 +597,8 @@ export async function inspectServerEvmWalletAuthorization(input: {
     });
   }
 
+  // Privy Wallet API owner_id is a key-quorum ID, not the user's did:privy ID.
+  // Establish user ownership from the authenticated user's internal wallets.
   const ownedWallet = dependencies
     .classifyWallets(user)
     .find(
@@ -609,13 +611,13 @@ export async function inspectServerEvmWalletAuthorization(input: {
   if (
     !ownedWallet ||
     wallet.id !== walletId ||
-    wallet.ownerId !== privyUserId ||
     wallet.chainType !== "ethereum" ||
     wallet.address.toLowerCase() !== walletAddress
   ) {
     return signerStatus({
       ...common,
-      message: "Selected Trading Wallet does not match its Privy owner.",
+      message:
+        "Selected Trading Wallet does not match the authenticated Privy user.",
       state: "unsafe_configuration",
     });
   }

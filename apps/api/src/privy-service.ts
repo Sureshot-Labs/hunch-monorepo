@@ -45,7 +45,6 @@ export type PrivyManagedWalletMetadata = {
   address: string;
   chainType: PrivyWalletType;
   id: string;
-  ownerId: string | null;
   policyIds: string[];
 };
 export type PrivyKeyQuorumMetadata = {
@@ -588,7 +587,6 @@ export class PrivyService {
         address: wallet.address,
         chainType: wallet.chain_type,
         id: wallet.id,
-        ownerId: wallet.owner_id,
         policyIds: [...wallet.policy_ids],
       };
     } catch (error) {
