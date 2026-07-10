@@ -23,6 +23,7 @@ import {
   buildFeedSearchResultWindow,
   type FeedInputs,
 } from "../repos/unified-read.js";
+import { resolveWalletTagId } from "../repos/wallet-tags.js";
 import type { PgParams } from "../server-types.js";
 import {
   compareWalletActivitySummaryStats,
@@ -3986,17 +3987,6 @@ function canUseExactAttributionSqlLabelFilter(
   );
 }
 
-async function resolveWhaleTagId(client: PoolClient): Promise<string> {
-  const result = await client.query<{ id: string }>(
-    `select id from wallet_tags where slug = 'whale' limit 1`,
-  );
-  const whaleTagId = result.rows[0]?.id ?? null;
-  if (!whaleTagId) {
-    throw new Error("Missing wallet_tags.slug='whale' record");
-  }
-  return whaleTagId;
-}
-
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   const size = Math.max(1, Math.trunc(chunkSize));
   const chunks: T[][] = [];
@@ -5467,7 +5457,7 @@ async function loadActiveWalletIds(
 }
 
 async function loadWhaleWalletIds(client: PoolClient): Promise<string[]> {
-  const whaleTagId = await resolveWhaleTagId(client);
+  const whaleTagId = await resolveWalletTagId(client, "whale");
   const rows = await client.query<{ wallet_id: string }>(
     `
       select tm.wallet_id
@@ -8776,7 +8766,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               10,
               Math.trunc(queryControls.whalesBatchSize),
             );
-            const whaleTagId = await resolveWhaleTagId(client);
+            const whaleTagId = await resolveWalletTagId(client, "whale");
             const useSlimWhaleSelector =
               categoryFilter.length === 0 &&
               tagsFilter.length === 0 &&

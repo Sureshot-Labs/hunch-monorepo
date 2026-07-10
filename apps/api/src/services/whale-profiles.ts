@@ -3,8 +3,9 @@ import crypto from "node:crypto";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 
-import { pool } from "../db.js";
+import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
+import { resolveWalletTagId } from "../repos/wallet-tags.js";
 import {
   normalizeOutcomeSideForApi,
   outcomeLabelOrSide,
@@ -41,6 +42,7 @@ import {
 import { extractWalletIdentityDisplayFields } from "./wallet-identity-names.js";
 
 const PROFILE_VERSION = "v12";
+const MAX_TRACKER_SURFACE_WALLETS = 100;
 const CATEGORY_VALUES = [
   "politics",
   "crypto",
@@ -336,7 +338,7 @@ type WhaleRow = {
   source_hits: number;
 };
 
-type WhaleSelectableRow = {
+export type WhaleSelectableRow = {
   id: string;
   last_activity_at: Date | null;
   rank_tracker_recent: number | string | null;
@@ -350,7 +352,7 @@ type WhaleSelectableRow = {
 
 type WhaleSelectionRow = WhaleSelectableRow;
 
-type WhaleProfileSourceKey =
+export type WhaleProfileSourceKey =
   | "trackerRecent"
   | "trackerPnl"
   | "trackerWinRate"
@@ -358,7 +360,7 @@ type WhaleProfileSourceKey =
   | "pnl"
   | "signals";
 
-type WhaleProfileSourceDef = {
+export type WhaleProfileSourceDef = {
   key: WhaleProfileSourceKey;
   targetLimit: number;
   fetchLimit: number;
@@ -1219,7 +1221,7 @@ function getWhaleProfileSourceRows<T extends WhaleSelectableRow>(
     });
 }
 
-function selectWhaleProfileRows<T extends WhaleSelectableRow>(
+export function selectWhaleProfileRows<T extends WhaleSelectableRow>(
   rows: T[],
   limit: number,
   sources: WhaleProfileSourceDef[],
@@ -1334,9 +1336,10 @@ async function loadTrackerSurfaceIds(
     .map((row) => row.walletId);
 }
 
-async function loadWhaleSelectionRows(
-  client: PoolClient,
+export async function loadWhaleSelectionRows(
+  client: DbQuery,
   params: {
+    whaleTagId: string;
     windowDays: number;
     limit: number;
     trackerWindowHours: number;
@@ -1360,10 +1363,9 @@ async function loadWhaleSelectionRows(
   const result = await client.query<WhaleSelectionRow>(
     `
       with whale_wallets as (
-        select distinct tm.wallet_id
+        select tm.wallet_id
         from wallet_tag_map tm
-        join wallet_tags t on t.id = tm.tag_id
-        where t.slug = 'whale'
+        where tm.tag_id = $18::uuid
       ),
       tracker_surface as (
         select
@@ -1429,66 +1431,46 @@ async function loadWhaleSelectionRows(
         left join tracker_fallback_start fs on fs.wallet_id = ts.id
         left join tracker_end_snap es on es.wallet_id = ts.id
       ),
-      latest_metrics as (
-        select distinct on (s.wallet_id)
-          s.wallet_id,
-          s.volume_usd as metrics_volume,
-          s.pnl_usd as metrics_pnl,
-          s.trades_count as metrics_trades,
-          s.win_rate as metrics_win_rate,
-          s.resolved_edge_sample_count as metrics_resolved_edge_sample_count,
-          s.resolved_actual_win_rate as metrics_resolved_actual_win_rate,
-          s.resolved_expected_win_rate as metrics_resolved_expected_win_rate,
-          s.resolved_win_rate_edge as metrics_resolved_win_rate_edge,
-          s.resolved_edge_z_score as metrics_resolved_edge_z_score,
-          s.resolved_brier_score as metrics_resolved_brier_score,
-          s.resolved_stake_weighted_edge as metrics_resolved_stake_weighted_edge,
-          s.resolved_stake_usd as metrics_resolved_stake_usd,
-          s.last_trade_at as metrics_last_trade_at
-        from wallet_metrics_snapshots s
-        join selection_wallets sw on sw.id = s.wallet_id
-        where s.period = '30d'
-          and ${aggregateWalletMetricsFilterSql("s")}
-        order by s.wallet_id, s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
-      ),
-      activity as (
+      signal_activity as (
         select
           wah.wallet_id,
-          max(wah.hour_bucket) as last_activity_at,
-          bool_or(wah.activity_type in ('delta', 'trade')) as has_trade_activity,
-          bool_or(wah.activity_type = 'holder') as has_holder_activity,
-          max(coalesce(wah.max_abs_delta_usd, 0)) filter (
-            where wah.activity_type in ('delta', 'trade')
-              and wah.hour_bucket >= now() - ($9::text || ' hours')::interval
-          ) as signal_abs_usd
+          max(coalesce(wah.max_abs_delta_usd, 0)) as signal_abs_usd
         from wallet_activity_hourly wah
         join selection_wallets sw on sw.id = wah.wallet_id
-        where wah.activity_type in ('delta', 'trade', 'holder')
-          and wah.hour_bucket >= now() - ($1::text || ' days')::interval
+        where wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= now() - ($9::text || ' hours')::interval
         group by wah.wallet_id
       ),
       wallet_base as (
         select
           w.id,
           coalesce(
-            activity.last_activity_at,
-            metrics.metrics_last_trade_at,
+            case
+              when selector.last_activity_at >=
+                now() - ($1::text || ' days')::interval
+                then selector.last_activity_at
+              else null
+            end,
+            selector.metrics_last_trade_at_30d,
             w.last_seen_at
           ) as last_activity_at,
           ts.rank_tracker_recent,
-          coalesce(tpp.tracker_visible_pnl, metrics.metrics_pnl) as tracker_visible_pnl,
-          metrics.metrics_pnl,
-          metrics.metrics_win_rate,
-          metrics.metrics_trades,
-          coalesce(activity.signal_abs_usd, 0) as signal_abs_usd,
+          coalesce(
+            tpp.tracker_visible_pnl,
+            selector.metrics_pnl_30d
+          ) as tracker_visible_pnl,
+          selector.metrics_pnl_30d as metrics_pnl,
+          selector.metrics_win_rate_30d as metrics_win_rate,
+          selector.metrics_trades_30d as metrics_trades,
+          coalesce(signal_activity.signal_abs_usd, 0) as signal_abs_usd,
           case
             when w.chain = 'solana'
               then coalesce(
-                nullif(metrics.metrics_volume, 0),
-                exposure.exposure_usd,
+                nullif(selector.metrics_volume_30d, 0),
+                selector.exposure_usd,
                 0
               )
-            else coalesce(metrics.metrics_volume, 0)
+            else coalesce(selector.metrics_volume_30d, 0)
           end as whale_score,
           (ww.wallet_id is not null) as is_whale_candidate
         from selection_wallets sw
@@ -1496,9 +1478,9 @@ async function loadWhaleSelectionRows(
         left join whale_wallets ww on ww.wallet_id = w.id
         left join tracker_surface ts on ts.id = w.id
         left join tracker_portfolio_pnl tpp on tpp.id = w.id
-        left join latest_metrics metrics on metrics.wallet_id = w.id
-        left join activity on activity.wallet_id = w.id
-        left join wallet_position_exposure exposure on exposure.wallet_id = w.id
+        left join wallet_intel_selector_snapshot selector
+          on selector.wallet_id = w.id
+        left join signal_activity on signal_activity.wallet_id = w.id
       ),
       tracker_pnl_ranked as (
         select
@@ -1642,6 +1624,7 @@ async function loadWhaleSelectionRows(
       params.pnlFetchLimit,
       params.signalsFetchLimit,
       params.candidateFetchLimit,
+      params.whaleTagId,
     ],
   );
   return result.rows;
@@ -2639,6 +2622,10 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       selectTrackerPnlLimit,
       selectTrackerWinRateLimit,
     );
+    trackerSurfaceLimit = Math.min(
+      trackerSurfaceLimit,
+      MAX_TRACKER_SURFACE_WALLETS,
+    );
   }
   if (
     selectTrackerRecentLimit === 0 &&
@@ -2744,6 +2731,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
   const client = await pool.connect();
   try {
     await client.query("SET statement_timeout = '120s'");
+    const whaleTagId = await resolveWalletTagId(client, "whale");
     const trackerSurfaceIds =
       trackerSurfaceLimit > 0
         ? await loadTrackerSurfaceIds(client, {
@@ -2760,6 +2748,7 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
       sample: trackerSurfaceIds.slice(0, 5),
     });
     const whaleSelectionRows = await loadWhaleSelectionRows(client, {
+      whaleTagId,
       windowDays,
       limit,
       trackerWindowHours,

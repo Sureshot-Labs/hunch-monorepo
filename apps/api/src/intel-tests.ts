@@ -123,13 +123,18 @@ import {
   resolvePolymarketOwnerAddresses,
   resolvePolymarketTrackedTokenUniverse,
 } from "./services/positions-sync.js";
+import { resolveWalletTagId } from "./repos/wallet-tags.js";
 import {
   computeProfileSideBias,
+  loadWhaleSelectionRows,
   mapWhaleMarketToProfileMarket,
   normalizeWhaleProfile,
   parseProfileJson,
+  selectWhaleProfileRows,
   sortTrackerSurfaceSummaryStats,
   summarizeProfileMarkets,
+  type WhaleProfileSourceDef,
+  type WhaleSelectableRow,
 } from "./services/whale-profiles.js";
 import { fetchSolanaBalanceLamports } from "./services/solana-rpc.js";
 import {
@@ -591,6 +596,227 @@ const tests: TestCase[] = [
       assert.equal(resolved.invalidOverride, false);
       assert.equal(resolved.effective.selectionMode, "hybrid");
       assert.equal(resolved.effective.selectionTrackerSort, "last_activity");
+    },
+  },
+  {
+    name: "wallet tag resolver uses a parameterized slug and preserves missing-tag failure",
+    run: async () => {
+      const queries: Array<{ sql: string; values: unknown[] | undefined }> = [];
+      const foundDb = {
+        query: async (sql: string, values?: unknown[]) => {
+          queries.push({ sql, values });
+          return {
+            rows: [{ id: "00000000-0000-0000-0000-000000000099" }],
+          };
+        },
+      } as import("./db.js").DbQuery;
+
+      assert.equal(
+        await resolveWalletTagId(foundDb, "whale"),
+        "00000000-0000-0000-0000-000000000099",
+      );
+      assert.match(queries[0]?.sql ?? "", /where slug = \$1 limit 1/i);
+      assert.deepEqual(queries[0]?.values, ["whale"]);
+
+      const missingDb = {
+        query: async () => ({ rows: [] }),
+      } as unknown as import("./db.js").DbQuery;
+      await assert.rejects(
+        () => resolveWalletTagId(missingDb, "whale"),
+        /Missing wallet_tags\.slug='whale' record/,
+      );
+    },
+  },
+  {
+    name: "whale profile selection SQL uses tag id and canonical selector snapshot",
+    run: async () => {
+      let capturedSql = "";
+      let capturedValues: unknown[] | undefined;
+      const db = {
+        query: async (sql: string, values?: unknown[]) => {
+          capturedSql = sql;
+          capturedValues = values;
+          return { rows: [] };
+        },
+      } as import("./db.js").DbQuery;
+      const whaleTagId = "00000000-0000-0000-0000-000000000099";
+      const trackerSurfaceIds = [
+        "00000000-0000-0000-0000-000000000101",
+        "00000000-0000-0000-0000-000000000102",
+      ];
+
+      const rows = await loadWhaleSelectionRows(db, {
+        whaleTagId,
+        windowDays: 30,
+        limit: 60,
+        trackerWindowHours: 24,
+        signalsWindowHours: 24,
+        trackerSurfaceIds,
+        selectTrackerRecentLimit: 15,
+        selectTrackerPnlLimit: 15,
+        selectTrackerWinRateLimit: 15,
+        selectRecentLimit: 15,
+        selectPnlLimit: 15,
+        selectSignalsLimit: 15,
+        trackerRecentFetchLimit: 75,
+        trackerPnlFetchLimit: 75,
+        trackerWinRateFetchLimit: 75,
+        recentFetchLimit: 75,
+        pnlFetchLimit: 75,
+        signalsFetchLimit: 75,
+        candidateFetchLimit: 450,
+      });
+
+      assert.deepEqual(rows, []);
+      assert.match(
+        capturedSql,
+        /from wallet_tag_map tm\s+where tm\.tag_id = \$18::uuid/i,
+      );
+      assert.doesNotMatch(capturedSql, /join wallet_tags/i);
+      assert.match(
+        capturedSql,
+        /left join wallet_intel_selector_snapshot selector/i,
+      );
+      assert.doesNotMatch(capturedSql, /s\.period = '30d'/i);
+      assert.doesNotMatch(capturedSql, /wallet_position_exposure/i);
+      assert.match(
+        capturedSql,
+        /wah\.hour_bucket >= now\(\) - \(\$9::text \|\| ' hours'\)::interval/i,
+      );
+      assert.match(
+        capturedSql,
+        /selector\.last_activity_at >=\s+now\(\) - \(\$1::text \|\| ' days'\)::interval/i,
+      );
+      assert.match(
+        capturedSql,
+        /nullif\(selector\.metrics_volume_30d, 0\),\s+selector\.exposure_usd/i,
+      );
+      assert.deepEqual(capturedValues, [
+        30,
+        60,
+        15,
+        15,
+        15,
+        15,
+        15,
+        15,
+        24,
+        trackerSurfaceIds,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        450,
+        whaleTagId,
+      ]);
+    },
+  },
+  {
+    name: "whale profile source selection preserves ranks coverage and deduplication",
+    run: () => {
+      const baseRow = (id: string): WhaleSelectableRow => ({
+        id,
+        last_activity_at: new Date("2026-07-10T00:00:00.000Z"),
+        rank_tracker_recent: null,
+        rank_tracker_pnl: null,
+        rank_tracker_win_rate: null,
+        rank_recent: null,
+        rank_pnl: null,
+        rank_signal: null,
+        source_hits: 1,
+      });
+      const shared = {
+        ...baseRow("shared"),
+        rank_tracker_recent: 1,
+        rank_tracker_pnl: 1,
+        rank_tracker_win_rate: 1,
+        rank_recent: 1,
+        rank_pnl: 1,
+        rank_signal: 1,
+        source_hits: 6,
+      };
+      const rows: WhaleSelectableRow[] = [
+        shared,
+        { ...baseRow("tracker-pnl"), rank_tracker_pnl: 2 },
+        { ...baseRow("tracker-win"), rank_tracker_win_rate: 2 },
+        { ...baseRow("recent"), rank_recent: 2 },
+        { ...baseRow("pnl"), rank_pnl: 2 },
+        { ...baseRow("signal"), rank_signal: 2 },
+      ];
+      const rank = (value: number | string | null): number | null =>
+        value == null ? null : Number(value);
+      const sources: WhaleProfileSourceDef[] = [
+        {
+          key: "trackerRecent",
+          targetLimit: 1,
+          fetchLimit: 2,
+          rankOf: (row) => rank(row.rank_tracker_recent),
+        },
+        {
+          key: "trackerPnl",
+          targetLimit: 1,
+          fetchLimit: 2,
+          rankOf: (row) => rank(row.rank_tracker_pnl),
+        },
+        {
+          key: "trackerWinRate",
+          targetLimit: 1,
+          fetchLimit: 2,
+          rankOf: (row) => rank(row.rank_tracker_win_rate),
+        },
+        {
+          key: "recent",
+          targetLimit: 1,
+          fetchLimit: 2,
+          rankOf: (row) => rank(row.rank_recent),
+        },
+        {
+          key: "pnl",
+          targetLimit: 1,
+          fetchLimit: 2,
+          rankOf: (row) => rank(row.rank_pnl),
+        },
+        {
+          key: "signals",
+          targetLimit: 1,
+          fetchLimit: 2,
+          rankOf: (row) => rank(row.rank_signal),
+        },
+      ];
+
+      const selected = selectWhaleProfileRows(rows, 6, sources);
+      assert.deepEqual(
+        selected.rows.map((row) => row.id),
+        ["shared", "tracker-pnl", "tracker-win", "recent", "pnl", "signal"],
+      );
+      assert.deepEqual(selected.pinnedCoverage, {
+        trackerRecent: 1,
+        trackerPnl: 1,
+        trackerWinRate: 1,
+        recent: 1,
+        pnl: 1,
+        signals: 1,
+      });
+
+      const rankedRows = Array.from({ length: 75 }, (_, index) => ({
+        ...baseRow(`ranked-${index + 1}`),
+        rank_recent: index + 1,
+      }));
+      const capped = selectWhaleProfileRows(rankedRows, 60, [
+        {
+          key: "recent",
+          targetLimit: 60,
+          fetchLimit: 75,
+          rankOf: (row) => rank(row.rank_recent),
+        },
+      ]);
+      assert.equal(capped.rows.length, 60);
+      assert.equal(new Set(capped.rows.map((row) => row.id)).size, 60);
+      assert.equal(capped.rows[0]?.id, "ranked-1");
+      assert.equal(capped.rows.at(-1)?.id, "ranked-60");
+      assert.equal(capped.pinnedCoverage.recent, 60);
     },
   },
   {
