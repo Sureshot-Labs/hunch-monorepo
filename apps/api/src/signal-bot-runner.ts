@@ -36,6 +36,16 @@ function log(event: string, fields?: Record<string, unknown>): void {
   );
 }
 
+function logTradingInternalApiFailure(
+  operation: "callback" | "disable" | "market-card" | "status",
+  error: unknown,
+): void {
+  log("signal_bot_trading_internal_api_error", {
+    operation,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -223,11 +233,14 @@ export async function runSignalBotRunner(): Promise<void> {
             const message = tradingInternalApi
               ? await tradingInternalApi
                   .buildStatusMessage(telegramUserId)
-                  .catch(() => ({
-                    parse_mode: "MarkdownV2" as const,
-                    reply_markup: undefined,
-                    text: "Trading is unavailable right now\\. Open Hunch to trade\\.",
-                  }))
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("status", error);
+                    return {
+                      parse_mode: "MarkdownV2" as const,
+                      reply_markup: undefined,
+                      text: "Trading is unavailable right now\\. Open Hunch to trade\\.",
+                    };
+                  })
               : {
                   parse_mode: "MarkdownV2" as const,
                   reply_markup: undefined,
@@ -246,7 +259,10 @@ export async function runSignalBotRunner(): Promise<void> {
             tradingInternalApi
               ? await tradingInternalApi
                   .disableTrading(telegramUserId)
-                  .catch(() => "unavailable" as const)
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("disable", error);
+                    return "unavailable" as const;
+                  })
               : "unavailable",
           sendTradeMarket: async (input) => {
             const message = tradingInternalApi
@@ -259,15 +275,18 @@ export async function runSignalBotRunner(): Promise<void> {
                     telegramMessageId: input.telegramMessageId,
                     telegramUserId: input.telegramUserId,
                   })
-                  .catch(() => ({
-                    parse_mode: "MarkdownV2" as const,
-                    reply_markup: {
-                      inline_keyboard: [
-                        [{ text: "Open in Hunch", url: config.appBaseUrl }],
-                      ],
-                    },
-                    text: "Trading is unavailable\\. Open Hunch to trade\\.",
-                  }))
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("market-card", error);
+                    return {
+                      parse_mode: "MarkdownV2" as const,
+                      reply_markup: {
+                        inline_keyboard: [
+                          [{ text: "Open in Hunch", url: config.appBaseUrl }],
+                        ],
+                      },
+                      text: "Trading is unavailable\\. Open Hunch to trade\\.",
+                    };
+                  })
               : {
                   parse_mode: "MarkdownV2" as const,
                   reply_markup: {
@@ -301,7 +320,8 @@ export async function runSignalBotRunner(): Promise<void> {
                         parse_mode: message.parse_mode ?? "MarkdownV2",
                       }),
                   })
-                  .catch(async () => {
+                  .catch(async (error: unknown) => {
+                    logTradingInternalApiFailure("callback", error);
                     await telegram.answerCallbackQuery({
                       callbackQueryId: callbackQuery.id,
                       showAlert: true,

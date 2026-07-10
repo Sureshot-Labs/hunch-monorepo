@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 
 import type { DbQuery } from "../db.js";
 import { isRecord } from "../lib/type-guards.js";
-import { isOrderable } from "./api-trading-market-repo.js";
+import {
+  findTradeMarketById,
+  findTradeMarketByRef,
+  isOrderable,
+  type ApiTradeMarket,
+} from "./api-trading-market-repo.js";
 import {
   resolveSignalBotTradingPolicyFromDb,
   type SignalBotPolicy,
@@ -76,24 +81,7 @@ type TelegramBotTradingAuthorizationRow = {
   max_amount_usd: string | null;
 };
 
-type TelegramBotMarketRow = {
-  accepting_orders: boolean | null;
-  id: string;
-  venue: TelegramBotTradingVenue;
-  venue_market_id: string;
-  event_id: string;
-  event_title: string | null;
-  title: string;
-  status: string;
-  outcomes: string | null;
-  metadata: unknown;
-  close_time: Date | null;
-  expiration_time: Date | null;
-  event_end_time: Date | null;
-  best_bid: string | null;
-  best_ask: string | null;
-  last_price: string | null;
-};
+type TelegramBotMarketRow = ApiTradeMarket;
 
 type SubmittedTradeRefs = {
   submitResult: SubmitResult;
@@ -1549,36 +1537,7 @@ async function resolveMarketByRef(
 ): Promise<TelegramBotMarketRow | null> {
   const normalized = normalizeMarketRef(marketRef);
   if (!normalized) return null;
-  const result = await db.query<TelegramBotMarketRow>(
-    `SELECT
-       m.id,
-       m.venue,
-       m.venue_market_id,
-       m.event_id,
-       e.title AS event_title,
-       m.title,
-       m.status::text AS status,
-       m.outcomes,
-       m.metadata,
-       m.accepting_orders,
-       m.close_time,
-       m.expiration_time,
-       e.end_date AS event_end_time,
-       m.best_bid,
-       m.best_ask,
-       m.last_price
-     FROM unified_markets m
-     LEFT JOIN unified_events e ON e.id = m.event_id
-     WHERE m.id = $1
-        OR m.venue_market_id = $1
-        OR m.slug = $1
-     ORDER BY
-       CASE WHEN m.id = $1 THEN 0 WHEN m.venue_market_id = $1 THEN 1 ELSE 2 END,
-       m.updated_at_db DESC NULLS LAST
-     LIMIT 1`,
-    [normalized],
-  );
-  const row = result.rows[0];
+  const row = await findTradeMarketByRef(db, normalized);
   if (!row) return null;
   const venue = normalizeVenue(row.venue);
   return venue ? { ...row, venue } : null;
@@ -1588,31 +1547,7 @@ async function loadMarketById(
   db: DbQuery,
   marketId: string,
 ): Promise<TelegramBotMarketRow | null> {
-  const result = await db.query<TelegramBotMarketRow>(
-    `SELECT
-       m.id,
-       m.venue,
-       m.venue_market_id,
-       m.event_id,
-       e.title AS event_title,
-       m.title,
-       m.status::text AS status,
-       m.outcomes,
-       m.metadata,
-       m.accepting_orders,
-       m.close_time,
-       m.expiration_time,
-       e.end_date AS event_end_time,
-       m.best_bid,
-       m.best_ask,
-       m.last_price
-     FROM unified_markets m
-     LEFT JOIN unified_events e ON e.id = m.event_id
-     WHERE m.id = $1
-     LIMIT 1`,
-    [marketId],
-  );
-  const row = result.rows[0];
+  const row = await findTradeMarketById(db, marketId);
   if (!row) return null;
   const venue = normalizeVenue(row.venue);
   return venue ? { ...row, venue } : null;

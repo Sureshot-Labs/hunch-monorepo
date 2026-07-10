@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 
 import type { User } from "../auth.js";
+import type { DbQuery } from "../db.js";
 import {
   computeAcceptingOrders,
   readDflowNativeAcceptingOrders,
@@ -14,23 +15,94 @@ import { readNumber, tradingError } from "./api-trading-utils.js";
 
 export type ApiTradeMarket = {
   accepting_orders: boolean | null;
+  best_ask: string | null;
+  best_bid: string | null;
   clob_token_ids: string | null;
   close_time: Date | null;
-  event_id: string | null;
+  event_id: string;
   event_end_time: Date | null;
+  event_title: string | null;
   expiration_time: Date | null;
   id: string;
   is_initialized: boolean | null;
+  last_price: string | null;
   metadata: unknown;
   outcomes: string | null;
   slug: string | null;
-  status: string | null;
-  title: string | null;
+  status: string;
+  title: string;
   token_no: string | null;
   token_yes: string | null;
   venue: SupportedBotTradingVenue;
-  venue_market_id: string | null;
+  venue_market_id: string;
 };
+
+const TRADE_MARKET_SELECT_SQL = `SELECT
+       m.id,
+       m.venue::text AS venue,
+       m.venue_market_id,
+       m.event_id,
+       e.title AS event_title,
+       e.end_date AS event_end_time,
+       m.title,
+       m.slug,
+       m.status::text AS status,
+       m.outcomes,
+       m.metadata,
+       m.is_initialized,
+       CASE
+         WHEN m.venue = 'polymarket' AND m.clob_token_ids IS NOT NULL AND m.clob_token_ids <> ''
+           THEN m.clob_token_ids::jsonb->>0
+         ELSE m.token_yes
+       END AS token_yes,
+       CASE
+         WHEN m.venue = 'polymarket' AND m.clob_token_ids IS NOT NULL AND m.clob_token_ids <> ''
+           THEN m.clob_token_ids::jsonb->>1
+         ELSE m.token_no
+       END AS token_no,
+       m.clob_token_ids,
+       pm.accepting_orders AS accepting_orders,
+       m.close_time,
+       m.expiration_time,
+       m.best_bid,
+       m.best_ask,
+       m.last_price
+     FROM unified_markets m
+     LEFT JOIN unified_events e ON e.id = m.event_id
+     LEFT JOIN polymarket_markets pm
+       ON pm.id = m.venue_market_id
+      AND m.venue = 'polymarket'`;
+
+export async function findTradeMarketById(
+  db: DbQuery,
+  marketId: string,
+): Promise<ApiTradeMarket | null> {
+  const { rows } = await db.query<ApiTradeMarket>(
+    `${TRADE_MARKET_SELECT_SQL}
+     WHERE m.id = $1
+     LIMIT 1`,
+    [marketId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function findTradeMarketByRef(
+  db: DbQuery,
+  marketRef: string,
+): Promise<ApiTradeMarket | null> {
+  const { rows } = await db.query<ApiTradeMarket>(
+    `${TRADE_MARKET_SELECT_SQL}
+     WHERE m.id = $1
+        OR m.venue_market_id = $1
+        OR m.slug = $1
+     ORDER BY
+       CASE WHEN m.id = $1 THEN 0 WHEN m.venue_market_id = $1 THEN 1 ELSE 2 END,
+       m.updated_at_db DESC NULLS LAST
+     LIMIT 1`,
+    [marketRef],
+  );
+  return rows[0] ?? null;
+}
 
 export async function loadUser(pool: Pool, userId: string): Promise<User> {
   const { rows } = await pool.query<{
@@ -105,7 +177,7 @@ export async function verifyLinkedWallet(input: {
 }
 
 export async function loadMarket(
-  pool: Pool,
+  db: DbQuery,
   marketId: string | null | undefined,
 ): Promise<ApiTradeMarket> {
   if (!marketId) {
@@ -115,39 +187,7 @@ export async function loadMarket(
       statusCode: 400,
     });
   }
-  const { rows } = await pool.query<ApiTradeMarket>(
-    `SELECT
-       id,
-       venue::text AS venue,
-       venue_market_id,
-       event_id,
-       (SELECT e.end_date FROM unified_events e WHERE e.id = unified_markets.event_id) AS event_end_time,
-       title,
-       slug,
-       status::text AS status,
-       outcomes,
-       metadata,
-       is_initialized,
-       CASE
-         WHEN venue = 'polymarket' AND clob_token_ids IS NOT NULL AND clob_token_ids <> ''
-           THEN clob_token_ids::jsonb->>0
-         ELSE token_yes
-       END AS token_yes,
-       CASE
-         WHEN venue = 'polymarket' AND clob_token_ids IS NOT NULL AND clob_token_ids <> ''
-           THEN clob_token_ids::jsonb->>1
-         ELSE token_no
-       END AS token_no,
-       clob_token_ids,
-       accepting_orders,
-       close_time,
-       expiration_time
-     FROM unified_markets
-     WHERE id = $1
-     LIMIT 1`,
-    [marketId],
-  );
-  const row = rows[0];
+  const row = await findTradeMarketById(db, marketId);
   if (!row) {
     throw tradingError({
       code: "invalid_trade_request",
@@ -170,11 +210,11 @@ export async function loadMarket(
 }
 
 export async function loadMarketForVenue(
-  pool: Pool,
+  db: DbQuery,
   marketId: string | null | undefined,
   venue: SupportedBotTradingVenue,
 ): Promise<ApiTradeMarket> {
-  const market = await loadMarket(pool, marketId);
+  const market = await loadMarket(db, marketId);
   if (market.venue !== venue) {
     throw tradingError({
       code: "invalid_trade_request",

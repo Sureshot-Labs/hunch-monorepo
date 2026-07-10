@@ -9,7 +9,13 @@ import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
-import { isKalshiMarketMintContextValid } from "./services/api-trading-market-repo.js";
+import {
+  findTradeMarketById,
+  findTradeMarketByRef,
+  isKalshiMarketMintContextValid,
+  loadMarketForVenue,
+  type ApiTradeMarket,
+} from "./services/api-trading-market-repo.js";
 import { executePreparedTradeLifecycle } from "./services/api-trading-utils.js";
 import { signEvmMessage } from "./services/api-trading-wallet-signing.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
@@ -80,6 +86,70 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "trading market loaders share the canonical venue-aware projection",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const market: ApiTradeMarket = {
+        accepting_orders: true,
+        best_ask: "0.55",
+        best_bid: "0.45",
+        clob_token_ids: '["yes-token","no-token"]',
+        close_time: new Date(Date.now() + 60_000),
+        event_end_time: new Date(Date.now() + 60_000),
+        event_id: "polymarket:event-1",
+        event_title: "Event",
+        expiration_time: new Date(Date.now() + 60_000),
+        id: "polymarket:market-1",
+        is_initialized: true,
+        last_price: "0.5",
+        metadata: {},
+        outcomes: '["Yes","No"]',
+        slug: "market-1",
+        status: "ACTIVE",
+        title: "Market",
+        token_no: "no-token",
+        token_yes: "yes-token",
+        venue: "polymarket",
+        venue_market_id: "market-1",
+      };
+      const db = {
+        query: async (sql: string, params: unknown[] = []) => {
+          queries.push({ params, sql });
+          return { rowCount: 1, rows: [market] };
+        },
+      };
+
+      assert.equal(
+        (await findTradeMarketById(db as never, market.id))?.id,
+        market.id,
+      );
+      assert.equal(
+        (await findTradeMarketByRef(db as never, market.slug ?? ""))?.id,
+        market.id,
+      );
+      assert.equal(
+        (await loadMarketForVenue(db as never, market.id, "polymarket")).id,
+        market.id,
+      );
+      assert.equal(queries.length, 3);
+      for (const query of queries) {
+        assert.match(
+          query.sql,
+          /LEFT JOIN polymarket_markets pm\s+ON pm\.id = m\.venue_market_id\s+AND m\.venue = 'polymarket'/,
+        );
+        assert.match(query.sql, /pm\.accepting_orders AS accepting_orders/);
+        assert.doesNotMatch(query.sql, /(^|[^a-z_])m\.accepting_orders/i);
+        assert.doesNotMatch(query.sql, /^\s*accepting_orders[,\s]/m);
+      }
+      assert.match(
+        queries[1]?.sql ?? "",
+        /CASE WHEN m\.id = \$1 THEN 0 WHEN m\.venue_market_id = \$1 THEN 1 ELSE 2 END/,
+      );
+      assert.deepEqual(queries[1]?.params, [market.slug]);
+      assert.deepEqual(queries[2]?.params, [market.id]);
+    },
+  },
   {
     name: "Kalshi strict submit market binding accepts only server USDC and selected market mints",
     run: () => {
@@ -1661,6 +1731,22 @@ const tests: TestCase[] = [
         false,
         "signal-bot-runner runtime imports must not transitively reach API trading execution",
       );
+      const runnerSource = readFileSync(
+        resolve(apiSrcDir, "signal-bot-runner.ts"),
+        "utf8",
+      );
+      assert.match(runnerSource, /signal_bot_trading_internal_api_error/);
+      for (const operation of [
+        "status",
+        "market-card",
+        "disable",
+        "callback",
+      ]) {
+        assert.match(
+          runnerSource,
+          new RegExp(`logTradingInternalApiFailure\\("${operation}"`),
+        );
+      }
     },
   },
 ];
