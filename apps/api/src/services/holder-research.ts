@@ -4383,10 +4383,11 @@ export function buildDeterministicHolderResearchDecision(
     confidence: clamp01(candidate.score),
     signal_type: candidate.signalType,
     direction: candidate.direction,
-    headline: `${titlePrefix}: ${sideCopy?.plainPosition ?? candidate.market.marketTitle}`.slice(
-      0,
-      140,
-    ),
+    headline:
+      `${titlePrefix}: ${sideCopy?.plainPosition ?? candidate.market.marketTitle}`.slice(
+        0,
+        140,
+      ),
     summary,
     rationale:
       status === "PUBLISH"
@@ -4764,9 +4765,7 @@ export async function persistHolderResearchNotes(
             score: candidate.score,
             bucket: candidate.bucket,
             side: candidate.side,
-            sideCopy: sideCopy
-              ? compactHolderResearchSideCopy(sideCopy)
-              : null,
+            sideCopy: sideCopy ? compactHolderResearchSideCopy(sideCopy) : null,
             quality: buildHolderResearchQualityAssessment(
               candidate,
               params.policy,

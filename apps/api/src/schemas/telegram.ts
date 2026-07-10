@@ -1,7 +1,11 @@
 import { z } from "zod";
 
 export const telegramContextBodySchema = z.object({
-  initDataRaw: z.string().trim().min(1).max(8 * 1024),
+  initDataRaw: z
+    .string()
+    .trim()
+    .min(1)
+    .max(8 * 1024),
 });
 
 export const telegramContextSuccessResponseSchema = z.object({

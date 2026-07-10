@@ -25,7 +25,9 @@ export const DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES: SignalBotFollowthroughType[
 function isSignalBotFollowthroughType(
   value: string,
 ): value is SignalBotFollowthroughType {
-  return value === "stats" || value === "resolved_win" || value === "resolved_loss";
+  return (
+    value === "stats" || value === "resolved_win" || value === "resolved_loss"
+  );
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -95,7 +97,11 @@ export function normalizeSignalBotFollowthroughPolicy(
       types.length > 0
         ? Array.from(new Set(types))
         : DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
-    minAgeHours: clampSignalBotNumber(Math.trunc(policy.minAgeHours), 1, 24 * 365),
+    minAgeHours: clampSignalBotNumber(
+      Math.trunc(policy.minAgeHours),
+      1,
+      24 * 365,
+    ),
     maxPerTick: clampSignalBotNumber(Math.trunc(policy.maxPerTick), 1, 100),
     minJoinedOrAdded: clampSignalBotNumber(
       Math.trunc(policy.minJoinedOrAdded),

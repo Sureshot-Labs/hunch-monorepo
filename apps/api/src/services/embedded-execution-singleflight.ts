@@ -82,9 +82,13 @@ async function writeRedisSettledValue<T>(input: {
   ttlMs: number;
   value: T;
 }): Promise<void> {
-  await input.redis.set(input.resultKey, JSON.stringify({ value: input.value }), {
-    EX: ttlMsToRedisSeconds(input.ttlMs),
-  });
+  await input.redis.set(
+    input.resultKey,
+    JSON.stringify({ value: input.value }),
+    {
+      EX: ttlMsToRedisSeconds(input.ttlMs),
+    },
+  );
 }
 
 async function releaseRedisLock(input: {
@@ -204,8 +208,7 @@ export async function runEmbeddedExecutionSingleFlight<T>(inputs: {
       const locked = await redis.set(lockKey, redisLockOwner, {
         NX: true,
         EX: ttlMsToRedisSeconds(
-          inputs.redisLockTtlMs ??
-            DEFAULT_EMBEDDED_EXECUTION_REDIS_LOCK_TTL_MS,
+          inputs.redisLockTtlMs ?? DEFAULT_EMBEDDED_EXECUTION_REDIS_LOCK_TTL_MS,
         ),
       });
       if (locked !== "OK") {

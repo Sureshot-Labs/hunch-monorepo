@@ -1,4 +1,8 @@
-import type { TradingError, TradingErrorCode, TradingVenue } from "./trading-types.js";
+import type {
+  TradingError,
+  TradingErrorCode,
+  TradingVenue,
+} from "./trading-types.js";
 
 export class TradingServiceError extends Error {
   readonly code: TradingErrorCode;
@@ -64,7 +68,8 @@ export function normalizeTradingError(
         ? record.message
         : (fallback?.message ?? "Trading request failed");
     const statusCode =
-      typeof record.statusCode === "number" && Number.isFinite(record.statusCode)
+      typeof record.statusCode === "number" &&
+      Number.isFinite(record.statusCode)
         ? record.statusCode
         : typeof record.status === "number" && Number.isFinite(record.status)
           ? record.status

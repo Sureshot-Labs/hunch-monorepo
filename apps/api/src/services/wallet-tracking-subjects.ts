@@ -4,10 +4,7 @@ import { resolveWalletIntelRefreshPolicy } from "./runtime-policies.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
-export type WalletTrackingSubjectVenue =
-  | "polymarket"
-  | "limitless"
-  | "kalshi";
+export type WalletTrackingSubjectVenue = "polymarket" | "limitless" | "kalshi";
 
 export type WalletTrackingSubjectSource =
   | "whale"
@@ -47,7 +44,9 @@ export async function upsertWalletTrackingSubjects(
       deduped.set(key, subject);
       continue;
     }
-    if (normalizePriority(subject.priority) > normalizePriority(existing.priority)) {
+    if (
+      normalizePriority(subject.priority) > normalizePriority(existing.priority)
+    ) {
       deduped.set(key, subject);
     }
   }

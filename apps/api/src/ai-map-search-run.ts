@@ -30,7 +30,17 @@ import {
   type RankedRepresentativeMarket,
 } from "./services/market-map-representative.js";
 import { isMarketMapUsable } from "./services/market-map-quality.js";
-import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
+import { resolveAiCost } from "./lib/ai-cost.js";
+import {
+  countAiCitations,
+  countAiToolAttempts,
+  EMPTY_AI_USAGE,
+  extractAiOutputText,
+  extractAiServerSideToolUsage,
+  extractAiSuccessfulToolCount,
+  extractAiUsageMetrics,
+} from "./lib/ai-response.js";
+import type { AiUsageMetrics as UsageMetrics } from "./lib/ai-response.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 const DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1";
@@ -89,28 +99,6 @@ let activeRunContext: MapSearchRunContext = DEFAULT_RUN_CONTEXT;
 function logPrefix(): string {
   return `[${activeRunContext.scriptTag}]`;
 }
-
-type ToolUsageDetails = {
-  web_search_calls: number;
-  x_search_calls: number;
-  code_interpreter_calls: number;
-  file_search_calls: number;
-  mcp_calls: number;
-  document_search_calls: number;
-};
-
-type UsageMetrics = {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  reasoningTokens: number;
-  cachedInputTokens: number;
-  numServerSideToolsUsed: number;
-  toolUsageDetails: ToolUsageDetails;
-  providerCostUsd: number | null;
-  providerCostField: string | null;
-  providerCostUsdTicks: number | null;
-};
 
 type CostEstimate = {
   inputCostUsd: number;
@@ -417,28 +405,6 @@ type Args = {
   priceOutputPerM: number;
   priceWebPer1k: number;
   priceXPer1k: number;
-};
-
-const ZERO_TOOL_USAGE: ToolUsageDetails = {
-  web_search_calls: 0,
-  x_search_calls: 0,
-  code_interpreter_calls: 0,
-  file_search_calls: 0,
-  mcp_calls: 0,
-  document_search_calls: 0,
-};
-
-const ZERO_USAGE: UsageMetrics = {
-  inputTokens: 0,
-  outputTokens: 0,
-  totalTokens: 0,
-  reasoningTokens: 0,
-  cachedInputTokens: 0,
-  numServerSideToolsUsed: 0,
-  toolUsageDetails: ZERO_TOOL_USAGE,
-  providerCostUsd: null,
-  providerCostField: null,
-  providerCostUsdTicks: null,
 };
 
 const ZERO_COST: CostEstimate = {
@@ -912,175 +878,6 @@ function stringifyPayload(value: unknown): string {
   }
 }
 
-function extractOutputItems(payload: unknown): Array<Record<string, unknown>> {
-  if (!payload || typeof payload !== "object") return [];
-  const output = (payload as Record<string, unknown>).output;
-  if (!Array.isArray(output)) return [];
-  return output.filter((item) => item && typeof item === "object") as Array<
-    Record<string, unknown>
-  >;
-}
-
-function extractOutputText(payload: unknown): string {
-  if (!payload || typeof payload !== "object") return "";
-  const obj = payload as Record<string, unknown>;
-  if (
-    typeof obj.output_text === "string" &&
-    obj.output_text.trim().length > 0
-  ) {
-    return obj.output_text;
-  }
-  const items = extractOutputItems(payload);
-  const parts: string[] = [];
-  for (const item of items) {
-    if (item.type !== "message") continue;
-    const content = item.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const text = (block as Record<string, unknown>).text;
-      if (typeof text === "string" && text.trim().length > 0) {
-        parts.push(text);
-      }
-    }
-  }
-  return parts.join("\n\n");
-}
-
-function extractCitationsCount(payload: unknown): number {
-  const urls = new Set<string>();
-  if (payload && typeof payload === "object") {
-    const citations = (payload as Record<string, unknown>).citations;
-    if (Array.isArray(citations)) {
-      for (const citation of citations) {
-        if (!citation || typeof citation !== "object") continue;
-        const url = (citation as Record<string, unknown>).url;
-        if (typeof url === "string" && url.trim().length > 0) {
-          urls.add(url.trim());
-        }
-      }
-    }
-  }
-  const outputItems = extractOutputItems(payload);
-  for (const output of outputItems) {
-    if (output.type !== "message") continue;
-    const content = output.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const annotations = (block as Record<string, unknown>).annotations;
-      if (!Array.isArray(annotations)) continue;
-      for (const annotation of annotations) {
-        if (!annotation || typeof annotation !== "object") continue;
-        const url = (annotation as Record<string, unknown>).url;
-        if (typeof url === "string" && url.trim().length > 0) {
-          urls.add(url.trim());
-        }
-      }
-    }
-  }
-  return urls.size;
-}
-
-function extractServerSideToolUsage(
-  payload: unknown,
-): Record<string, unknown> | null {
-  if (!payload || typeof payload !== "object") return null;
-  const top = (payload as Record<string, unknown>).server_side_tool_usage;
-  if (top && typeof top === "object" && !Array.isArray(top)) {
-    return top as Record<string, unknown>;
-  }
-  const usage = (payload as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object") return null;
-  const details = (usage as Record<string, unknown>)
-    .server_side_tool_usage_details;
-  if (details && typeof details === "object" && !Array.isArray(details)) {
-    return details as Record<string, unknown>;
-  }
-  return null;
-}
-
-function extractSuccessfulToolCount(payload: unknown): number {
-  if (!payload || typeof payload !== "object") return 0;
-  const usage = (payload as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object") return 0;
-  const direct = (usage as Record<string, unknown>).num_server_side_tools_used;
-  if (typeof direct === "number" && Number.isFinite(direct) && direct > 0) {
-    return direct;
-  }
-  const details = extractServerSideToolUsage(payload);
-  if (!details) return 0;
-  return Object.values(details).reduce<number>((sum, value) => {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return sum + value;
-    }
-    return sum;
-  }, 0);
-}
-
-function extractUsageMetrics(payload: unknown): UsageMetrics {
-  if (!payload || typeof payload !== "object") return ZERO_USAGE;
-  const usage = (payload as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object") return ZERO_USAGE;
-  const obj = usage as Record<string, unknown>;
-  const inputTokens = Number(obj.input_tokens ?? obj.prompt_tokens ?? 0);
-  const outputTokens = Number(obj.output_tokens ?? obj.completion_tokens ?? 0);
-  const totalTokens = Number(obj.total_tokens ?? inputTokens + outputTokens);
-  const inputDetails =
-    obj.input_tokens_details && typeof obj.input_tokens_details === "object"
-      ? (obj.input_tokens_details as Record<string, unknown>)
-      : obj.prompt_tokens_details &&
-          typeof obj.prompt_tokens_details === "object"
-        ? (obj.prompt_tokens_details as Record<string, unknown>)
-        : null;
-  const outputDetails =
-    obj.output_tokens_details && typeof obj.output_tokens_details === "object"
-      ? (obj.output_tokens_details as Record<string, unknown>)
-      : obj.completion_tokens_details &&
-          typeof obj.completion_tokens_details === "object"
-        ? (obj.completion_tokens_details as Record<string, unknown>)
-        : null;
-  const detailsRaw = obj.server_side_tool_usage_details;
-  const detailsObj =
-    detailsRaw && typeof detailsRaw === "object" && !Array.isArray(detailsRaw)
-      ? (detailsRaw as Record<string, unknown>)
-      : null;
-  const topLevelUsage = extractServerSideToolUsage(payload) ?? {};
-  const webFallback = Number(
-    topLevelUsage.SERVER_SIDE_TOOL_WEB_SEARCH ??
-      topLevelUsage.web_search_calls ??
-      0,
-  );
-  const xFallback = Number(
-    topLevelUsage.SERVER_SIDE_TOOL_X_SEARCH ??
-      topLevelUsage.x_search_calls ??
-      0,
-  );
-  const toolUsageDetails: ToolUsageDetails = {
-    web_search_calls: Number(detailsObj?.web_search_calls ?? webFallback),
-    x_search_calls: Number(detailsObj?.x_search_calls ?? xFallback),
-    code_interpreter_calls: Number(detailsObj?.code_interpreter_calls ?? 0),
-    file_search_calls: Number(detailsObj?.file_search_calls ?? 0),
-    mcp_calls: Number(detailsObj?.mcp_calls ?? 0),
-    document_search_calls: Number(detailsObj?.document_search_calls ?? 0),
-  };
-  const providerCost = extractProviderCostUsd(payload);
-  return {
-    inputTokens: Number.isFinite(inputTokens) ? inputTokens : 0,
-    outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0,
-    totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
-    reasoningTokens: Number(
-      outputDetails?.reasoning_tokens ?? outputDetails?.reasoning ?? 0,
-    ),
-    cachedInputTokens: Number(inputDetails?.cached_tokens ?? 0),
-    numServerSideToolsUsed: Number(obj.num_server_side_tools_used ?? 0),
-    toolUsageDetails,
-    providerCostUsd: providerCost.providerCostUsd,
-    providerCostField: providerCost.providerCostField,
-    providerCostUsdTicks: providerCost.providerCostUsdTicks,
-  };
-}
-
 function computeEstimatedCost(args: Args, usage: UsageMetrics): CostEstimate {
   const resolved = resolveAiCost({
     inputTokens: usage.inputTokens,
@@ -1107,25 +904,6 @@ function computeEstimatedCost(args: Args, usage: UsageMetrics): CostEstimate {
     costSource: resolved.costSource,
     totalCostUsd: resolved.estimatedCostUsd,
   };
-}
-
-function extractToolAttemptCount(payload: unknown): number {
-  if (!payload || typeof payload !== "object") return 0;
-  const topToolCalls = (payload as Record<string, unknown>).tool_calls;
-  if (Array.isArray(topToolCalls)) return topToolCalls.length;
-  const outputItems = extractOutputItems(payload);
-  return outputItems.filter((output) => {
-    const type = output.type;
-    if (typeof type !== "string") return false;
-    return (
-      type === "web_search_call" ||
-      type === "x_search_call" ||
-      type === "custom_tool_call" ||
-      type === "code_interpreter_call" ||
-      type === "file_search_call" ||
-      type === "mcp_call"
-    );
-  }).length;
 }
 
 function extractToolCallCount(usage: unknown): number {
@@ -1788,15 +1566,15 @@ async function callXaiOnce(
     } catch {
       // keep raw text
     }
-    const outputText = extractOutputText(payload);
+    const outputText = extractAiOutputText(payload);
     const payloadText = stringifyPayload(payload);
     const resolvedOutputText = outputText || payloadText;
-    const usage = extractUsageMetrics(payload);
+    const usage = extractAiUsageMetrics(payload);
     const costEstimate = computeEstimatedCost(args, usage);
-    const serverSideUsage = extractServerSideToolUsage(payload);
+    const serverSideUsage = extractAiServerSideToolUsage(payload);
     const toolCallCount = Math.max(
       extractToolCallCount(serverSideUsage),
-      extractSuccessfulToolCount(payload),
+      extractAiSuccessfulToolCount(payload),
     );
     return {
       ok: response.ok,
@@ -1806,9 +1584,9 @@ async function callXaiOnce(
       outputText: resolvedOutputText,
       outputPreview: preview(resolvedOutputText),
       outputTextLength: resolvedOutputText.length,
-      citationsCount: extractCitationsCount(payload),
-      toolAttemptCount: extractToolAttemptCount(payload),
-      successfulToolCount: extractSuccessfulToolCount(payload),
+      citationsCount: countAiCitations(payload),
+      toolAttemptCount: countAiToolAttempts(payload),
+      successfulToolCount: extractAiSuccessfulToolCount(payload),
       toolCallCount,
       usage,
       costEstimate,
@@ -1832,7 +1610,7 @@ async function callXaiOnce(
       toolAttemptCount: 0,
       successfulToolCount: 0,
       toolCallCount: 0,
-      usage: ZERO_USAGE,
+      usage: EMPTY_AI_USAGE,
       costEstimate: ZERO_COST,
       finishReason: null,
       rawResponse: null,
@@ -1881,7 +1659,7 @@ async function callXaiWithRetry(
       toolAttemptCount: 0,
       successfulToolCount: 0,
       toolCallCount: 0,
-      usage: ZERO_USAGE,
+      usage: EMPTY_AI_USAGE,
       costEstimate: ZERO_COST,
       finishReason: null,
       rawResponse: null,
@@ -3356,7 +3134,7 @@ export async function runMapSearch(
               toolAttemptCount: 0,
               successfulToolCount: 0,
               toolCallCount: 0,
-              usage: ZERO_USAGE,
+              usage: EMPTY_AI_USAGE,
               costEstimate: ZERO_COST,
               finishReason: null,
               rawResponse: null,
@@ -3399,7 +3177,7 @@ export async function runMapSearch(
               toolAttemptCount: 0,
               successfulToolCount: 0,
               toolCallCount: 0,
-              usage: ZERO_USAGE,
+              usage: EMPTY_AI_USAGE,
               costEstimate: ZERO_COST,
               finishReason: null,
               rawResponse: null,

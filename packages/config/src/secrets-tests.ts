@@ -313,7 +313,10 @@ test("bundle builder writes only allowlisted secret keys", () => {
   ]);
   const sanitized = fs.readFileSync(result.sanitizedEnvPath, "utf8");
   assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_ADMIN_USER_IDS="), false);
-  assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN="), false);
+  assert.equal(
+    sanitized.includes("HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN="),
+    false,
+  );
   assert.equal(sanitized.includes("HUNCH_SIGNAL_BOT_TOKEN="), false);
   assert.equal(sanitized.includes("HUNCH_TELEGRAM_BOT_TOKEN="), false);
   assert.equal(sanitized.includes("JWT_SECRET="), false);

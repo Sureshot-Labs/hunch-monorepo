@@ -29,6 +29,7 @@ import {
 import {
   buildTopMarketsText,
   claimDuePriceRefreshTokens,
+  clampHotTokenProbeLimit,
   enqueueEmbedItems,
   filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
@@ -36,6 +37,7 @@ import {
   publishMarketState,
   publishMarketUpdate,
   requeuePriceRefreshTokens,
+  selectRecentHotTokenIds,
   type EmbedQueueItem,
   type PriceRefreshQueueClaimSide,
   type PriceRefreshRedis,
@@ -177,7 +179,10 @@ async function publishPolymarketTerminalTops(
   let tokensPublished = 0;
 
   for (const row of rows) {
-    if (!row.market.resolved_outcome && row.market.resolved_outcome_pct == null) {
+    if (
+      !row.market.resolved_outcome &&
+      row.market.resolved_outcome_pct == null
+    ) {
       continue;
     }
     const { yes, no } = clobTokenPair(row.sourceMarket);
@@ -1668,56 +1673,18 @@ function splitBudget(total: number, hotShare: number): { hotBudget: number } {
   return { hotBudget };
 }
 
-function clampHotProbeLimit(limit: number): number {
-  return Math.max(200, Math.min(2000, Math.trunc(limit)));
-}
-
 async function fetchHotTokenIds(limit?: number): Promise<string[]> {
   if (env.hotTokensMax <= 0 && env.hotStreamTokensMax <= 0) return [];
   await ensureRedis();
-  const mergedCap = Math.max(env.hotTokensMax, env.hotStreamTokensMax);
-  const resolvedLimit =
-    typeof limit === "number" && Number.isFinite(limit)
-      ? Math.max(0, Math.trunc(limit))
-      : mergedCap;
-  if (resolvedLimit <= 0) return [];
-
-  const readHotSet = async (
-    key: string,
-    maxTokens: number,
-    ttlSec: number,
-  ): Promise<string[]> => {
-    const readMax = Math.min(maxTokens, resolvedLimit);
-    if (readMax <= 0) return [];
-    const cutoff = Date.now() - ttlSec * 1000;
-    await redis.zRemRangeByScore(key, 0, cutoff);
-    return redis.zRange(key, 0, readMax - 1, { REV: true });
-  };
-
   try {
-    const [streamIds, hotIds] = await Promise.all([
-      readHotSet(
-        "hot:tokens:stream:polymarket",
-        env.hotStreamTokensMax,
-        env.hotStreamTokensTtlSec,
-      ),
-      readHotSet(
-        "hot:tokens:polymarket",
-        env.hotTokensMax,
-        env.hotTokensTtlSec,
-      ),
-    ]);
-
-    const maxOut = Math.min(mergedCap, resolvedLimit);
-    const out: string[] = [];
-    const seen = new Set<string>();
-    for (const tokenId of [...streamIds, ...hotIds]) {
-      if (seen.has(tokenId)) continue;
-      seen.add(tokenId);
-      out.push(tokenId);
-      if (out.length >= maxOut) break;
-    }
-    return out;
+    return await selectRecentHotTokenIds(redis, {
+      hotStreamTokensMax: env.hotStreamTokensMax,
+      hotStreamTokensTtlSec: env.hotStreamTokensTtlSec,
+      hotTokensMax: env.hotTokensMax,
+      hotTokensTtlSec: env.hotTokensTtlSec,
+      limit,
+      venue: "polymarket",
+    });
   } catch (error) {
     log.warn("Failed to fetch hot tokens", error);
     return [];
@@ -2009,12 +1976,12 @@ async function fetchDurationReserveTokens(): Promise<string[]> {
 }
 
 export async function selectHotTokenIds(): Promise<string[]> {
-  const probeLimit = clampHotProbeLimit(env.wsSubset * 10);
+  const probeLimit = clampHotTokenProbeLimit(env.wsSubset * 10);
   return fetchHotTokenIds(probeLimit);
 }
 
 async function fetchHotEventIdsFromTokens(): Promise<string[]> {
-  const probeLimit = clampHotProbeLimit(env.hotStatusMaxEvents * 10);
+  const probeLimit = clampHotTokenProbeLimit(env.hotStatusMaxEvents * 10);
   const tokenIds = await fetchHotTokenIds(probeLimit);
   if (!tokenIds.length) return [];
   return fetchEventIdsForTokenIds(tokenIds, env.hotStatusMaxEvents);
@@ -2041,7 +2008,7 @@ export async function syncHotEventStatuses(): Promise<void> {
 export async function selectWsTokenIds(): Promise<string[]> {
   const { hotBudget } = splitBudget(env.wsSubset, env.wsHotShare);
   const durationTokens = await fetchDurationReserveTokens();
-  const probeLimit = clampHotProbeLimit(
+  const probeLimit = clampHotTokenProbeLimit(
     Math.max(env.wsSubset * 10, hotBudget * 20),
   );
   const hotTokenIds = await fetchHotTokenIds(probeLimit);

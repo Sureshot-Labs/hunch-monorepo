@@ -911,12 +911,10 @@ function createBulkAdjustmentDb(seed: {
   }>;
   capture?: { insertCalls: number; queries: string[] };
 }): import("./db.js").DbQuery {
-  const tiers =
-    seed.tiers ??
-    [
-      { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
-      { tier: 5, name: "Sage", points: 350_000, cashbackBps: 4500 },
-    ];
+  const tiers = seed.tiers ?? [
+    { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
+    { tier: 5, name: "Sage", points: 350_000, cashbackBps: 4500 },
+  ];
   const capture = seed.capture ?? { insertCalls: 0, queries: [] };
   return {
     query: async (sql: string, params?: unknown[]) => {
@@ -960,8 +958,7 @@ function createBulkAdjustmentDb(seed: {
             const publicExcludedPoints =
               user.existing?.get(visibleSourceId) ?? 0;
             const tierExcludedPoints =
-              (user.existing?.get(hiddenSourceId) ?? 0) +
-              publicExcludedPoints;
+              (user.existing?.get(hiddenSourceId) ?? 0) + publicExcludedPoints;
             const existingSourceId = user.existing?.has(hiddenSourceId)
               ? hiddenSourceId
               : user.existing?.has(visibleSourceId)

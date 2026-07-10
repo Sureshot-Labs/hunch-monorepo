@@ -360,10 +360,7 @@ async function fetchTokenBalanceRaw(input: {
     );
     return parsePositiveRawAmount(response.value.amount) ?? 0n;
   } catch (error) {
-    if (
-      input.missingAccountAsZero &&
-      isMissingSolanaTokenAccountError(error)
-    ) {
+    if (input.missingAccountAsZero && isMissingSolanaTokenAccountError(error)) {
       return 0n;
     }
     throw error;

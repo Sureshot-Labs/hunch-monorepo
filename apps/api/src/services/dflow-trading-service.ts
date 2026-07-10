@@ -1,7 +1,4 @@
-import {
-  dflowRequest,
-  type DflowRequestResult,
-} from "./dflow-client.js";
+import { dflowRequest, type DflowRequestResult } from "./dflow-client.js";
 import { sendSolanaRawTransaction } from "./solana-rpc.js";
 
 type DflowQueryValue = string | number | boolean | undefined;

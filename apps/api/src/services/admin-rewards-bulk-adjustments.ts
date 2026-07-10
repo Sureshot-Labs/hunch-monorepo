@@ -155,10 +155,7 @@ function buildBulkSourcePrefix(input: BulkAdjustmentBody): string {
   return input.visibility === "visible" ? prefixes.visible : prefixes.hidden;
 }
 
-function buildBulkSourceIds(input: {
-  runKey: string;
-  userId: string;
-}): {
+function buildBulkSourceIds(input: { runKey: string; userId: string }): {
   hidden: string;
   visible: string;
 } {
@@ -361,7 +358,9 @@ function buildResult(input: {
   targetPoints: number | null;
   targetTier: number | null;
 }): AdminRewardsBulkAdjustmentResult {
-  const eligibleEntries = input.entries.filter((entry) => entry.grantAmount > 0);
+  const eligibleEntries = input.entries.filter(
+    (entry) => entry.grantAmount > 0,
+  );
   const alreadyExisting = eligibleEntries.filter((entry) => entry.existing);
   const totalPoints = roundPoints(
     eligibleEntries.reduce((total, entry) => total + entry.grantAmount, 0),

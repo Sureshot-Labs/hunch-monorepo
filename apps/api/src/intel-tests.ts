@@ -467,7 +467,10 @@ const tests: TestCase[] = [
       const defaults = getIntelPolicyDefaults("wallet_intel_refresh");
       assert.equal(defaults.autoTrackedWalletEnabled, false);
       assert.equal(defaults.autoTrackedWalletLimit, 150);
-      assert.equal(defaults.autoTrackedWalletRefreshHours, defaults.snapshotHours);
+      assert.equal(
+        defaults.autoTrackedWalletRefreshHours,
+        defaults.snapshotHours,
+      );
       assert.equal(defaults.marketFetchConcurrency, 2);
       assert.equal(defaults.followedFetchConcurrency, 2);
       assert.equal(defaults.autoTrackedWalletFetchConcurrency, 2);
@@ -512,7 +515,10 @@ const tests: TestCase[] = [
       assert.equal(resolved.effective.marketFetchConcurrency, 3);
       assert.equal(resolved.effective.followedFetchConcurrency, 4);
       assert.equal(resolved.effective.autoTrackedWalletFetchConcurrency, 8);
-      assert.equal(resolved.effective.autoTrackedWalletAttemptBackoffMinutes, 45);
+      assert.equal(
+        resolved.effective.autoTrackedWalletAttemptBackoffMinutes,
+        45,
+      );
       assert.equal(resolved.effective.autoTrackedSubjectTtlDays, 3);
       assert.equal(resolved.effective.autoTrackedFreshPriceCheckEnabled, false);
       assert.equal(resolved.effective.freshPriceMaxAgeMs, 120000);
@@ -3782,9 +3788,15 @@ const tests: TestCase[] = [
 
       assert.equal(upserted, 2);
       assert.equal(insertParams.length, 2);
-      assert.equal(insertParams[0]?.[0], "22222222-2222-4222-8222-222222222222");
+      assert.equal(
+        insertParams[0]?.[0],
+        "22222222-2222-4222-8222-222222222222",
+      );
       assert.equal(insertParams[0]?.[2], "recent_top_holder");
-      assert.equal(insertParams[1]?.[0], "33333333-3333-4333-8333-333333333333");
+      assert.equal(
+        insertParams[1]?.[0],
+        "33333333-3333-4333-8333-333333333333",
+      );
     },
   },
   {
@@ -3931,7 +3943,10 @@ const tests: TestCase[] = [
       });
 
       assert.equal(upserted, 1);
-      assert.equal(insertParams[0]?.[0], "11111111-1111-4111-8111-111111111111");
+      assert.equal(
+        insertParams[0]?.[0],
+        "11111111-1111-4111-8111-111111111111",
+      );
       assert.equal(insertParams[0]?.[1], "polymarket");
       assert.equal(insertParams[0]?.[2], "whale");
     },
@@ -3944,7 +3959,10 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string, params: unknown[] = []) => {
           queries.push({ params, sql });
-          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+          if (
+            sql.includes("from wallets w") &&
+            sql.includes("join positions hp")
+          ) {
             return { rows: [{ suppressed: false }] };
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
@@ -3984,7 +4002,10 @@ const tests: TestCase[] = [
       );
 
       assert.equal(inserted, 1);
-      assert.equal((snapshotParams[0]?.[7] as Record<string, unknown>).source, "auto_tracked_wallet");
+      assert.equal(
+        (snapshotParams[0]?.[7] as Record<string, unknown>).source,
+        "auto_tracked_wallet",
+      );
       assert.equal(
         queries.some((query) => query.sql.includes("wallet_follows")),
         false,
@@ -4006,7 +4027,10 @@ const tests: TestCase[] = [
       const snapshotParams: unknown[][] = [];
       globalThis.fetch = async (input) => {
         const url = new URL(String(input));
-        assert.equal(url.pathname, "/portfolio/0x1111111111111111111111111111111111111111/positions");
+        assert.equal(
+          url.pathname,
+          "/portfolio/0x1111111111111111111111111111111111111111/positions",
+        );
         return new Response(
           JSON.stringify({
             data: {
@@ -4046,15 +4070,16 @@ const tests: TestCase[] = [
               ],
             };
           }
-          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+          if (
+            sql.includes("from wallets w") &&
+            sql.includes("join positions hp")
+          ) {
             return { rows: [{ suppressed: false }] };
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
             snapshotParams.push(params);
             return {
-              rows: [
-                { inserted: 1, market_ids: ["limitless:outside-market"] },
-              ],
+              rows: [{ inserted: 1, market_ids: ["limitless:outside-market"] }],
               rowCount: 1,
             };
           }
@@ -4166,7 +4191,10 @@ const tests: TestCase[] = [
               ],
             };
           }
-          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+          if (
+            sql.includes("from wallets w") &&
+            sql.includes("join positions hp")
+          ) {
             return { rows: [{ suppressed: false }] };
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
@@ -4290,7 +4318,10 @@ const tests: TestCase[] = [
               ],
             };
           }
-          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+          if (
+            sql.includes("from wallets w") &&
+            sql.includes("join positions hp")
+          ) {
             return { rows: [{ suppressed: false }] };
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
@@ -4595,7 +4626,10 @@ const tests: TestCase[] = [
             activityParams.push(params);
             return { rows: [], rowCount: 1 };
           }
-          if (sql.includes("from wallets w") && sql.includes("join positions hp")) {
+          if (
+            sql.includes("from wallets w") &&
+            sql.includes("join positions hp")
+          ) {
             return { rows: [{ suppressed: false }] };
           }
           if (sql.includes("insert into wallet_position_snapshots")) {
@@ -4625,7 +4659,10 @@ const tests: TestCase[] = [
       assert.equal(activityParams[0]?.[5], 10);
       assert.equal(snapshotParams.length, 1);
       assert.equal(snapshotParams[0]?.[4], 0);
-      assert.equal((snapshotParams[0]?.[7] as Record<string, unknown>).source, "snapshot_zero");
+      assert.equal(
+        (snapshotParams[0]?.[7] as Record<string, unknown>).source,
+        "snapshot_zero",
+      );
       assert.equal(
         (snapshotParams[0]?.[7] as Record<string, unknown>).snapshotSource,
         "auto_tracked_wallet",

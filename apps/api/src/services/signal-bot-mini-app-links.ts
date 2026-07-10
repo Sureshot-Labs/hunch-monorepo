@@ -33,9 +33,7 @@ function fitSignalBotStartParam(value: string): string | null {
   return value.length <= TELEGRAM_STARTAPP_MAX_LENGTH ? value : null;
 }
 
-export function buildSignalBotEventStartParam(
-  eventId: string,
-): string | null {
+export function buildSignalBotEventStartParam(eventId: string): string | null {
   const normalized = eventId.trim();
   if (!isSignalBotRouteId(normalized)) return null;
   if (SIGNAL_BOT_SAFE_ROUTE_ID_RE.test(normalized)) {
@@ -65,9 +63,7 @@ export function buildSignalBotBuyStartParam(input: {
   const eventParts = splitSignalBotRouteId(eventId);
   const marketParts = splitSignalBotRouteId(marketId);
   const compactVenueCode =
-    eventParts &&
-    marketParts &&
-    eventParts.venue === marketParts.venue
+    eventParts && marketParts && eventParts.venue === marketParts.venue
       ? SIGNAL_BOT_MINI_APP_VENUE_CODES[eventParts.venue]
       : null;
   const payload =
@@ -98,9 +94,7 @@ export function buildSignalBotMarketStartParam(input: {
   const eventParts = splitSignalBotRouteId(eventId);
   const marketParts = marketId ? splitSignalBotRouteId(marketId) : null;
   const compactVenueCode =
-    eventParts &&
-    marketParts &&
-    eventParts.venue === marketParts.venue
+    eventParts && marketParts && eventParts.venue === marketParts.venue
       ? SIGNAL_BOT_MINI_APP_VENUE_CODES[eventParts.venue]
       : null;
   const payload =

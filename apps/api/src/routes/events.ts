@@ -13,9 +13,9 @@ import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import { resolveSecurityClientIp } from "../lib/request-ip.js";
 import { isRecord } from "../lib/type-guards.js";
+import { extractLimitlessMetadata } from "../lib/limitless-metadata.js";
 import {
   parseMetadata,
-  pickString,
   resolveEventDescription,
   resolveMarketDescription,
 } from "../lib/metadata-description.js";
@@ -129,71 +129,6 @@ function parseTimestampSeconds(value: unknown): number | null {
 function isExpiredAt(value: unknown, nowSec: number): boolean {
   const ts = parseTimestampSeconds(value);
   return ts != null && ts <= nowSec;
-}
-
-type LimitlessMeta = {
-  negRiskRequestId?: string;
-  negRiskMarketId?: string;
-  venueAdapter?: string;
-  venueExchange?: string;
-};
-
-function pickFirstString(
-  obj: Record<string, unknown> | null,
-  keys: readonly string[],
-): string | undefined {
-  if (!obj) return undefined;
-  for (const key of keys) {
-    const value = pickString(obj, key);
-    if (value) return value;
-  }
-  return undefined;
-}
-
-function pickVenueField(
-  obj: Record<string, unknown> | null,
-  key: string,
-): string | undefined {
-  if (!obj) return undefined;
-  const venue = obj.venue;
-  if (!isRecord(venue)) return undefined;
-  const value = venue[key];
-  return typeof value === "string" && value.trim().length ? value : undefined;
-}
-
-function extractLimitlessMeta(
-  marketMeta: unknown,
-  eventMeta: unknown,
-): LimitlessMeta {
-  const market = parseMetadata(marketMeta);
-  const event = parseMetadata(eventMeta);
-  const venueExchange =
-    pickFirstString(market, [
-      "venueExchange",
-      "exchangeAddress",
-      "exchange",
-      "negRiskExchange",
-    ]) ??
-    pickVenueField(market, "exchange") ??
-    pickVenueField(market, "exchangeAddress") ??
-    pickFirstString(event, [
-      "venueExchange",
-      "exchangeAddress",
-      "exchange",
-      "negRiskExchange",
-    ]) ??
-    pickVenueField(event, "exchange") ??
-    pickVenueField(event, "exchangeAddress");
-
-  return {
-    negRiskRequestId: pickString(market, "negRiskRequestId"),
-    negRiskMarketId:
-      pickString(market, "negRiskMarketId") ??
-      pickString(event, "negRiskMarketId"),
-    venueAdapter:
-      pickString(market, "venueAdapter") ?? pickString(event, "venueAdapter"),
-    venueExchange,
-  };
 }
 
 function resolveTokenPair(row: EventDetailsRow): TokenPair {
@@ -448,7 +383,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         const eventMetadata = parseMetadata(firstRow.event_metadata);
         const eventLimitlessMeta =
           firstRow.event_venue === "limitless"
-            ? extractLimitlessMeta(null, eventMetadata)
+            ? extractLimitlessMetadata(null, eventMetadata)
             : null;
         const sportsFixtureResult = await fetchFifa2026SportsFixtureForEvent(
           pool,
@@ -552,7 +487,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           const marketMeta = parseMetadata(row.market_metadata);
           const limitlessMeta =
             row.market_venue === "limitless"
-              ? extractLimitlessMeta(marketMeta, eventMetadata)
+              ? extractLimitlessMetadata(marketMeta, eventMetadata)
               : null;
           const isLimitlessNegRisk = Boolean(
             limitlessMeta?.negRiskRequestId ||
@@ -562,11 +497,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           );
           const tradeType =
             row.market_venue === "limitless"
-              ? (pickString(marketMeta, "tradeType") ?? null)
+              ? (limitlessMeta?.tradeType ?? null)
               : null;
           const marketAddress =
             row.market_venue === "limitless"
-              ? (pickString(marketMeta, "address") ?? null)
+              ? (limitlessMeta?.marketAddress ?? null)
               : null;
 
           // Parse token IDs based on venue

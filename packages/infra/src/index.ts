@@ -40,6 +40,10 @@ export {
 } from "./price-refresh.js";
 export { requestFreshMarketPrices } from "./fresh-market-prices.js";
 export {
+  clampHotTokenProbeLimit,
+  selectRecentHotTokenIds,
+} from "./hot-tokens.js";
+export {
   INDEXER_STATS_KEYS,
   INDEXER_STATS_TTL_SEC,
   updateIndexerStats,
@@ -85,6 +89,10 @@ export type {
   FreshMarketPriceTokenRef,
   VenuePriceRefreshAdapter,
 } from "./fresh-market-prices.js";
+export type {
+  HotTokenRedis,
+  SelectRecentHotTokenIdsInputs,
+} from "./hot-tokens.js";
 export type {
   IndexerStatsPatch,
   IndexerStatsRedis,

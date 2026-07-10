@@ -125,7 +125,8 @@ function verifyTelegramHash(input: {
   const expected = Buffer.from(expectedHash, "hex");
   const received = Buffer.from(input.hash, "hex");
   return (
-    expected.length === received.length && crypto.timingSafeEqual(expected, received)
+    expected.length === received.length &&
+    crypto.timingSafeEqual(expected, received)
   );
 }
 

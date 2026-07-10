@@ -1705,7 +1705,10 @@ type FollowedWalletRow = {
   chain: Chain;
 };
 
-type AutoTrackedWalletSource = "recent_top_holder" | "signal_candidate" | "whale";
+type AutoTrackedWalletSource =
+  | "recent_top_holder"
+  | "signal_candidate"
+  | "whale";
 
 type AutoTrackedWalletRow = {
   wallet_id: string;
@@ -2547,7 +2550,10 @@ async function loadAutoTrackedPreviousOpenPositions(
     }));
 }
 
-function buildAutoTrackedWalletVenueKey(walletId: string, venue: Venue): string {
+function buildAutoTrackedWalletVenueKey(
+  walletId: string,
+  venue: Venue,
+): string {
   return `${walletId}:${venue}`;
 }
 
@@ -2815,13 +2821,11 @@ async function loadTokenIndexEntriesForVenue(
           ? Date.parse(row.top_ts)
           : NaN;
     const topIsFresh =
-      minFreshMs == null ||
-      (Number.isFinite(topTsMs) && topTsMs >= minFreshMs);
+      minFreshMs == null || (Number.isFinite(topTsMs) && topTsMs >= minFreshMs);
     const topPrice = topIsFresh
       ? resolveMidPrice(row.best_bid, row.best_ask, row.mid)
       : null;
-    const price =
-      freshPriceMaxAgeMs != null ? topPrice : resolveMarkPrice(row);
+    const price = freshPriceMaxAgeMs != null ? topPrice : resolveMarkPrice(row);
     const terminalPrices = resolveTerminalTokenPrices({
       resolvedOutcome: row.resolved_outcome,
       resolvedOutcomePct: row.resolved_outcome_pct,
@@ -3086,9 +3090,8 @@ async function fetchLimitlessAutoTrackedTokenBalances(
       tokenId: normalizeLimitlessScopedTokenId(balance.tokenId),
       size: balance.size,
     }))
-    .filter(
-      (balance): balance is { tokenId: string; size: string } =>
-        Boolean(balance.tokenId),
+    .filter((balance): balance is { tokenId: string; size: string } =>
+      Boolean(balance.tokenId),
     );
 }
 
@@ -3340,64 +3343,71 @@ export async function collectAutoTrackedWalletSnapshotRows(
 
   const fetched = (
     await mapWithConcurrency(
-    inputs.autoTrackedWallets,
+      inputs.autoTrackedWallets,
       inputs.autoTrackedWalletFetchConcurrency,
-    async (tracked) => {
-      processed += 1;
-      attemptedWallets.push(tracked);
-      inputs.touchedWalletIds.add(tracked.wallet_id);
-      try {
-        let tokenBalances: Array<{ tokenId: string; size: string }> = [];
-        const previousOpenTokenIds = previousOpenTokenIdsForTrackedWallet(
-          inputs.previousOpenPositions,
-          tracked,
-        );
-
-        if (tracked.venue === "polymarket" && tracked.chain === "polygon") {
-          const address = normalizeAddress(tracked.address, "polygon");
-          if (!address) return null;
-          tokenBalances = await fetchPolymarketAutoTrackedTokenBalances({
-            address,
-            previousOpenTokenIds,
-          });
-        } else if (tracked.venue === "limitless" && tracked.chain === "base") {
-          const address = normalizeAddress(tracked.address, "base");
-          if (!address) return null;
-          tokenBalances = await fetchLimitlessAutoTrackedTokenBalances(address);
-        } else if (tracked.venue === "kalshi" && tracked.chain === "solana") {
-          tokenBalances = await fetchKalshiAutoTrackedTokenBalances(
-            tracked.address,
-            inputs.telemetry.followedSnapshotSolana,
-          );
-        } else {
-          return null;
-        }
-
-        const discoveredTokenIds = tokenBalances.map(
-          (balance) => balance.tokenId,
-        );
-        const tokenIdsForIndex = [...discoveredTokenIds, ...previousOpenTokenIds];
-        return {
-          tracked,
-          tokenBalances,
-          tokenIdsForIndex,
-          previousOpenRows: previousOpenRowsForTrackedWallet(
+      async (tracked) => {
+        processed += 1;
+        attemptedWallets.push(tracked);
+        inputs.touchedWalletIds.add(tracked.wallet_id);
+        try {
+          let tokenBalances: Array<{ tokenId: string; size: string }> = [];
+          const previousOpenTokenIds = previousOpenTokenIdsForTrackedWallet(
             inputs.previousOpenPositions,
             tracked,
-          ),
-        };
-      } catch (error) {
-        console.error(
-          "[wallets:intel:refresh] auto-tracked wallet snapshot failed",
-          {
-            walletId: tracked.wallet_id,
-            venue: tracked.venue,
-          },
-          error,
-        );
-        return null;
-      }
-    },
+          );
+
+          if (tracked.venue === "polymarket" && tracked.chain === "polygon") {
+            const address = normalizeAddress(tracked.address, "polygon");
+            if (!address) return null;
+            tokenBalances = await fetchPolymarketAutoTrackedTokenBalances({
+              address,
+              previousOpenTokenIds,
+            });
+          } else if (
+            tracked.venue === "limitless" &&
+            tracked.chain === "base"
+          ) {
+            const address = normalizeAddress(tracked.address, "base");
+            if (!address) return null;
+            tokenBalances =
+              await fetchLimitlessAutoTrackedTokenBalances(address);
+          } else if (tracked.venue === "kalshi" && tracked.chain === "solana") {
+            tokenBalances = await fetchKalshiAutoTrackedTokenBalances(
+              tracked.address,
+              inputs.telemetry.followedSnapshotSolana,
+            );
+          } else {
+            return null;
+          }
+
+          const discoveredTokenIds = tokenBalances.map(
+            (balance) => balance.tokenId,
+          );
+          const tokenIdsForIndex = [
+            ...discoveredTokenIds,
+            ...previousOpenTokenIds,
+          ];
+          return {
+            tracked,
+            tokenBalances,
+            tokenIdsForIndex,
+            previousOpenRows: previousOpenRowsForTrackedWallet(
+              inputs.previousOpenPositions,
+              tracked,
+            ),
+          };
+        } catch (error) {
+          console.error(
+            "[wallets:intel:refresh] auto-tracked wallet snapshot failed",
+            {
+              walletId: tracked.wallet_id,
+              venue: tracked.venue,
+            },
+            error,
+          );
+          return null;
+        }
+      },
     )
   ).filter(
     (
@@ -3445,12 +3455,14 @@ export async function collectAutoTrackedWalletSnapshotRows(
   ]);
   const backfillDurationMs = Date.now() - backfillStartedAt;
 
-  const prePriceTokenIndexByVenue: Record<Venue, Map<string, TokenIndexEntry>> =
-    {
-      polymarket: new Map(),
-      limitless: new Map(),
-      kalshi: new Map(),
-    };
+  const prePriceTokenIndexByVenue: Record<
+    Venue,
+    Map<string, TokenIndexEntry>
+  > = {
+    polymarket: new Map(),
+    limitless: new Map(),
+    kalshi: new Map(),
+  };
   const indexStartedAt = Date.now();
   await Promise.all(
     (["polymarket", "limitless", "kalshi"] as Venue[]).map(async (venue) => {

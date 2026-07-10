@@ -82,7 +82,10 @@ export function abbreviateMarketSideLabel(
   return normalized;
 }
 
-function readableLabel(label: string, maxLength = BUTTON_LABEL_MAX_CHARS): string {
+function readableLabel(
+  label: string,
+  maxLength = BUTTON_LABEL_MAX_CHARS,
+): string {
   const trimmed = label.trim().replace(/\s+/g, " ");
   if (!trimmed) return "";
   if (trimmed.length <= maxLength) return trimmed;
@@ -130,7 +133,10 @@ function parseTotalLine(input: MarketSideCopyInput): number | null {
   return null;
 }
 
-function isTotalMarket(input: MarketSideCopyInput, explicitLabel: string | null) {
+function isTotalMarket(
+  input: MarketSideCopyInput,
+  explicitLabel: string | null,
+) {
   const label = explicitLabel?.trim().toLowerCase();
   if (label === "over" || label === "under") return true;
   return /\b(o\/u|over\s*\/\s*under|total goals?|total points?|total runs?)\b/i.test(
@@ -164,9 +170,7 @@ function totalWinCondition(
       ? `more than ${line} ${noun}`
       : `fewer than ${line} ${noun}`;
   }
-  return direction === "over"
-    ? `${floor + 1}+ ${noun}`
-    : `0-${floor} ${noun}`;
+  return direction === "over" ? `${floor + 1}+ ${noun}` : `0-${floor} ${noun}`;
 }
 
 function cleanGenericMarketTitle(input: MarketSideCopyInput): string | null {
@@ -185,7 +189,10 @@ function cleanGenericMarketTitle(input: MarketSideCopyInput): string | null {
   return normalized;
 }
 
-function buildMarketLine(input: MarketSideCopyInput, label: string): string | null {
+function buildMarketLine(
+  input: MarketSideCopyInput,
+  label: string,
+): string | null {
   const event = cleanText(input.eventTitle);
   const market = cleanText(input.marketTitle);
   if (
@@ -259,7 +266,9 @@ function buildFallbackCopy(input: MarketSideCopyInput): MarketSideCopy {
   };
 }
 
-export function buildMarketSideCopy(input: MarketSideCopyInput): MarketSideCopy {
+export function buildMarketSideCopy(
+  input: MarketSideCopyInput,
+): MarketSideCopy {
   const outcomes = parseMarketOutcomes(input.outcomes);
   const explicitOutcomeLabel = outcomeLabelForSide(outcomes, input.side);
   if (isTotalMarket(input, explicitOutcomeLabel)) {

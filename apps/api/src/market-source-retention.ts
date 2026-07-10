@@ -1,5 +1,10 @@
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import {
+  hasCliFlag as hasFlag,
+  readCliValues as readValues,
+  readPositiveInt,
+} from "./lib/cli-args.js";
 
 type Args = {
   confirmDelete: boolean;
@@ -39,53 +44,6 @@ const DEFAULT_CUTOFF_DAYS = 90;
 const DEFAULT_LIMIT = 50_000;
 const DEFAULT_SAMPLE_LIMIT = 20;
 const ALLOWED_VENUES = new Set(["polymarket", "limitless"]);
-
-function readValues(argv: string[], name: string): string[] {
-  const key = `--${name}`;
-  const values: string[] = [];
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg.startsWith(`${key}=`)) {
-      const value = arg.slice(key.length + 1).trim();
-      if (value.length) values.push(value);
-      continue;
-    }
-    if (arg === key) {
-      const value = argv[index + 1];
-      if (value && !value.startsWith("--")) {
-        values.push(value.trim());
-        index += 1;
-      }
-    }
-  }
-
-  return values.flatMap((value) =>
-    value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean),
-  );
-}
-
-function hasFlag(argv: string[], name: string): boolean {
-  return argv.includes(`--${name}`);
-}
-
-function readPositiveInt(
-  argv: string[],
-  name: string,
-  fallback: number,
-): number {
-  const raw = readValues(argv, name)[0];
-  if (!raw) return fallback;
-
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`--${name} must be a positive integer`);
-  }
-  return Math.trunc(parsed);
-}
 
 function normalizeVenues(values: string[]): string[] {
   const venues = values.map((entry) => entry.toLowerCase());

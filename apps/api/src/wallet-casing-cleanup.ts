@@ -2,6 +2,7 @@
 
 import type { Pool, PoolClient } from "@hunch/infra";
 import { pool } from "./db.js";
+import { hasCliFlag as hasFlag, readPositiveInt } from "./lib/cli-args.js";
 import { recomputePositionMetricsForWalletInTx } from "./services/positions-metrics.js";
 
 type Args = {
@@ -58,55 +59,18 @@ type Queryable = Pick<PoolClient, "query">;
 const DEFAULT_SAMPLE_LIMIT = 20;
 const EVM_SQL = "^0x[0-9a-fA-F]{40}$";
 
-function hasFlag(argv: string[], name: string): boolean {
-  return argv.includes(`--${name}`);
-}
-
-function readValues(argv: string[], name: string): string[] {
-  const key = `--${name}`;
-  const values: string[] = [];
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg.startsWith(`${key}=`)) {
-      const value = arg.slice(key.length + 1).trim();
-      if (value.length) values.push(value);
-      continue;
-    }
-    if (arg === key) {
-      const value = argv[index + 1];
-      if (value && !value.startsWith("--")) {
-        values.push(value.trim());
-        index += 1;
-      }
-    }
-  }
-
-  return values;
-}
-
-function readPositiveInt(
-  argv: string[],
-  name: string,
-  fallback: number,
-): number {
-  const raw = readValues(argv, name)[0];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`--${name} must be a positive integer`);
-  }
-  return Math.trunc(parsed);
-}
-
 export function parseArgs(argvInput: string[]): Args {
   const argv = argvInput.filter((arg) => arg !== "--");
   return {
     confirmFix: hasFlag(argv, "confirm-fix"),
     execute: hasFlag(argv, "execute"),
     json: hasFlag(argv, "json"),
-    sampleLimit: readPositiveInt(argv, "sample", DEFAULT_SAMPLE_LIMIT),
-    statementTimeoutSec: readPositiveInt(argv, "statement-timeout-sec", 180),
+    sampleLimit: readPositiveInt(argv, "sample", DEFAULT_SAMPLE_LIMIT, {
+      splitCommas: false,
+    }),
+    statementTimeoutSec: readPositiveInt(argv, "statement-timeout-sec", 180, {
+      splitCommas: false,
+    }),
   };
 }
 

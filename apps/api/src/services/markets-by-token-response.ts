@@ -5,82 +5,12 @@ import {
 } from "../lib/market-availability.js";
 import {
   parseMetadata,
-  pickString,
   resolveEventDescription,
   resolveMarketDescription,
 } from "../lib/metadata-description.js";
-import { isRecord } from "../lib/type-guards.js";
+import { extractLimitlessMetadata } from "../lib/limitless-metadata.js";
 import type { MarketByTokenRow } from "../repos/unified-read.js";
 import { normalizeRedemptionStatus } from "./redemption-status.js";
-
-type LimitlessMeta = {
-  negRiskRequestId?: string;
-  negRiskMarketId?: string;
-  venueAdapter?: string;
-  venueExchange?: string;
-  marketAddress?: string;
-  tradeType?: string;
-};
-
-function pickFirstString(
-  obj: Record<string, unknown> | null,
-  keys: readonly string[],
-): string | undefined {
-  if (!obj) return undefined;
-  for (const key of keys) {
-    const value = pickString(obj, key);
-    if (value) return value;
-  }
-  return undefined;
-}
-
-function pickVenueField(
-  obj: Record<string, unknown> | null,
-  key: string,
-): string | undefined {
-  if (!obj) return undefined;
-  const venue = obj.venue;
-  if (!isRecord(venue)) return undefined;
-  const value = venue[key];
-  return typeof value === "string" && value.trim().length ? value : undefined;
-}
-
-function extractLimitlessMeta(
-  marketMeta: unknown,
-  eventMeta: unknown,
-): LimitlessMeta {
-  const market = parseMetadata(marketMeta);
-  const event = parseMetadata(eventMeta);
-  const venueExchange =
-    pickFirstString(market, [
-      "venueExchange",
-      "exchangeAddress",
-      "exchange",
-      "negRiskExchange",
-    ]) ??
-    pickVenueField(market, "exchange") ??
-    pickVenueField(market, "exchangeAddress") ??
-    pickFirstString(event, [
-      "venueExchange",
-      "exchangeAddress",
-      "exchange",
-      "negRiskExchange",
-    ]) ??
-    pickVenueField(event, "exchange") ??
-    pickVenueField(event, "exchangeAddress");
-
-  return {
-    negRiskRequestId: pickString(market, "negRiskRequestId"),
-    negRiskMarketId:
-      pickString(market, "negRiskMarketId") ??
-      pickString(event, "negRiskMarketId"),
-    venueAdapter:
-      pickString(market, "venueAdapter") ?? pickString(event, "venueAdapter"),
-    venueExchange,
-    marketAddress: pickString(market, "address"),
-    tradeType: pickString(market, "tradeType"),
-  };
-}
 
 export function mapMarketsByTokenRows(
   rows: MarketByTokenRow[],
@@ -96,7 +26,7 @@ export function mapMarketsByTokenRows(
     const eventMetadata = parseMetadata(row.event_metadata);
     const limitlessMeta =
       row.venue === "limitless"
-        ? extractLimitlessMeta(marketMetadata, eventMetadata)
+        ? extractLimitlessMetadata(marketMetadata, eventMetadata)
         : null;
     const isLimitlessNegRisk = Boolean(
       limitlessMeta?.negRiskRequestId ||

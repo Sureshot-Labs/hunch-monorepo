@@ -3,6 +3,14 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { config } from "dotenv";
 import { createHash } from "crypto";
+import {
+  countAiCitations,
+  countAiToolAttempts,
+  extractAiOutputText,
+  extractAiServerSideToolUsage,
+  extractAiSuccessfulToolCount,
+  extractAiUsageMetrics,
+} from "./lib/ai-response.js";
 
 const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -500,177 +508,17 @@ function stringifyPayload(value: unknown): string {
   }
 }
 
-function extractOutputText(payload: unknown): string {
-  if (!payload || typeof payload !== "object") return "";
-  const obj = payload as Record<string, unknown>;
-  if (typeof obj.output_text === "string") return obj.output_text;
-
-  const output = obj.output;
-  if (!Array.isArray(output)) return "";
-  const parts: string[] = [];
-  for (const message of output) {
-    if (!message || typeof message !== "object") continue;
-    const content = (message as Record<string, unknown>).content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const text = (block as Record<string, unknown>).text;
-      if (typeof text === "string" && text.length > 0) {
-        parts.push(text);
-      }
-    }
-  }
-  return parts.join("\n\n");
-}
-
-function extractOutputItems(payload: unknown): Array<Record<string, unknown>> {
-  if (!payload || typeof payload !== "object") return [];
-  const output = (payload as Record<string, unknown>).output;
-  if (!Array.isArray(output)) return [];
-  return output.filter((item) => item && typeof item === "object") as Array<
-    Record<string, unknown>
-  >;
-}
-
-function extractCitationsCount(payload: unknown): number {
-  const urls = new Set<string>();
-  if (payload && typeof payload === "object") {
-    const citations = (payload as Record<string, unknown>).citations;
-    if (Array.isArray(citations)) {
-      for (const citation of citations) {
-        if (!citation || typeof citation !== "object") continue;
-        const url = (citation as Record<string, unknown>).url;
-        if (typeof url === "string" && url.trim().length > 0) {
-          urls.add(url.trim());
-        }
-      }
-    }
-  }
-  const outputItems = extractOutputItems(payload);
-  for (const output of outputItems) {
-    if (output.type !== "message") continue;
-    const content = output.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const annotations = (block as Record<string, unknown>).annotations;
-      if (!Array.isArray(annotations)) continue;
-      for (const annotation of annotations) {
-        if (!annotation || typeof annotation !== "object") continue;
-        const url = (annotation as Record<string, unknown>).url;
-        if (typeof url === "string" && url.trim().length > 0) {
-          urls.add(url.trim());
-        }
-      }
-    }
-  }
-  return urls.size;
-}
-
-function extractServerSideToolUsage(
-  payload: unknown,
-): Record<string, unknown> | null {
-  if (!payload || typeof payload !== "object") return null;
-  const top = (payload as Record<string, unknown>).server_side_tool_usage;
-  if (top && typeof top === "object" && !Array.isArray(top)) {
-    return top as Record<string, unknown>;
-  }
-  const usage = (payload as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object") return null;
-  const details = (usage as Record<string, unknown>)
-    .server_side_tool_usage_details;
-  if (details && typeof details === "object" && !Array.isArray(details)) {
-    return details as Record<string, unknown>;
-  }
-  return null;
-}
-
-function extractSuccessfulToolCount(payload: unknown): number {
-  if (!payload || typeof payload !== "object") return 0;
-  const usage = (payload as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object") return 0;
-  const direct = (usage as Record<string, unknown>).num_server_side_tools_used;
-  if (typeof direct === "number" && Number.isFinite(direct) && direct > 0) {
-    return direct;
-  }
-  const details = extractServerSideToolUsage(payload);
-  if (!details) return 0;
-  return Object.values(details).reduce<number>((sum, value) => {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return sum + value;
-    }
-    return sum;
-  }, 0);
-}
-
 function extractUsageMetrics(payload: unknown): UsageMetrics {
-  if (!payload || typeof payload !== "object") return ZERO_USAGE;
-  const usage = (payload as Record<string, unknown>).usage;
-  if (!usage || typeof usage !== "object") return ZERO_USAGE;
-  const obj = usage as Record<string, unknown>;
-  const inputTokens = Number(obj.input_tokens ?? obj.prompt_tokens ?? 0);
-  const outputTokens = Number(obj.output_tokens ?? obj.completion_tokens ?? 0);
-  const totalTokens = Number(obj.total_tokens ?? inputTokens + outputTokens);
-  const inputDetails =
-    obj.input_tokens_details && typeof obj.input_tokens_details === "object"
-      ? (obj.input_tokens_details as Record<string, unknown>)
-      : obj.prompt_tokens_details &&
-          typeof obj.prompt_tokens_details === "object"
-        ? (obj.prompt_tokens_details as Record<string, unknown>)
-        : null;
-  const outputDetails =
-    obj.output_tokens_details && typeof obj.output_tokens_details === "object"
-      ? (obj.output_tokens_details as Record<string, unknown>)
-      : obj.completion_tokens_details &&
-          typeof obj.completion_tokens_details === "object"
-        ? (obj.completion_tokens_details as Record<string, unknown>)
-        : null;
-  const cachedInputTokens = Number(inputDetails?.cached_tokens ?? 0);
-  const reasoningTokens = Number(outputDetails?.reasoning_tokens ?? 0);
-  const numServerSideToolsUsed = Number(obj.num_server_side_tools_used ?? 0);
-  const providerCostUsdTicksRaw = obj.cost_in_usd_ticks;
-  const providerCostUsdTicks =
-    typeof providerCostUsdTicksRaw === "number" &&
-    Number.isFinite(providerCostUsdTicksRaw)
-      ? providerCostUsdTicksRaw
-      : null;
-  const detailsRaw = obj.server_side_tool_usage_details;
-  const detailsObj =
-    detailsRaw && typeof detailsRaw === "object" && !Array.isArray(detailsRaw)
-      ? (detailsRaw as Record<string, unknown>)
-      : null;
-  const topLevelUsage = extractServerSideToolUsage(payload) ?? {};
-  const webFallback = Number(
-    topLevelUsage.SERVER_SIDE_TOOL_WEB_SEARCH ??
-      topLevelUsage.web_search_calls ??
-      0,
-  );
-  const xFallback = Number(
-    topLevelUsage.SERVER_SIDE_TOOL_X_SEARCH ??
-      topLevelUsage.x_search_calls ??
-      0,
-  );
-  const toolUsageDetails: ToolUsageDetails = {
-    web_search_calls: Number(detailsObj?.web_search_calls ?? webFallback),
-    x_search_calls: Number(detailsObj?.x_search_calls ?? xFallback),
-    code_interpreter_calls: Number(detailsObj?.code_interpreter_calls ?? 0),
-    file_search_calls: Number(detailsObj?.file_search_calls ?? 0),
-    mcp_calls: Number(detailsObj?.mcp_calls ?? 0),
-    document_search_calls: Number(detailsObj?.document_search_calls ?? 0),
-  };
+  const usage = extractAiUsageMetrics(payload);
   return {
-    inputTokens: Number.isFinite(inputTokens) ? inputTokens : 0,
-    outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0,
-    totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
-    reasoningTokens: Number.isFinite(reasoningTokens) ? reasoningTokens : 0,
-    cachedInputTokens: Number.isFinite(cachedInputTokens)
-      ? cachedInputTokens
-      : 0,
-    numServerSideToolsUsed: Number.isFinite(numServerSideToolsUsed)
-      ? numServerSideToolsUsed
-      : 0,
-    toolUsageDetails,
-    providerCostUsdTicks,
+    cachedInputTokens: usage.cachedInputTokens,
+    inputTokens: usage.inputTokens,
+    numServerSideToolsUsed: usage.numServerSideToolsUsed,
+    outputTokens: usage.outputTokens,
+    providerCostUsdTicks: usage.providerCostUsdTicks,
+    reasoningTokens: usage.reasoningTokens,
+    toolUsageDetails: usage.toolUsageDetails,
+    totalTokens: usage.totalTokens,
   };
 }
 
@@ -688,25 +536,6 @@ function computeEstimatedCost(args: Args, usage: UsageMetrics): CostEstimate {
     toolCostUsd,
     totalCostUsd: tokenCostUsd + toolCostUsd,
   };
-}
-
-function extractToolAttemptCount(payload: unknown): number {
-  if (!payload || typeof payload !== "object") return 0;
-  const topToolCalls = (payload as Record<string, unknown>).tool_calls;
-  if (Array.isArray(topToolCalls)) return topToolCalls.length;
-  const outputItems = extractOutputItems(payload);
-  return outputItems.filter((output) => {
-    const type = output.type;
-    if (typeof type !== "string") return false;
-    return (
-      type === "web_search_call" ||
-      type === "x_search_call" ||
-      type === "custom_tool_call" ||
-      type === "code_interpreter_call" ||
-      type === "file_search_call" ||
-      type === "mcp_call"
-    );
-  }).length;
 }
 
 function normalizeDomain(raw: string): string {
@@ -1075,7 +904,7 @@ async function callXaiOnce(
     } catch {
       // keep raw text
     }
-    const outputText = extractOutputText(payload);
+    const outputText = extractAiOutputText(payload);
     const payloadText = stringifyPayload(payload);
     const resolvedOutputText = outputText || payloadText;
     const usage = extractUsageMetrics(payload);
@@ -1090,12 +919,12 @@ async function callXaiOnce(
       outputText: resolvedOutputText,
       outputPreview: preview(resolvedOutputText),
       outputTextLength: resolvedOutputText.length,
-      citationsCount: extractCitationsCount(payload),
-      toolAttemptCount: extractToolAttemptCount(payload),
-      successfulToolCount: extractSuccessfulToolCount(payload),
+      citationsCount: countAiCitations(payload),
+      toolAttemptCount: countAiToolAttempts(payload),
+      successfulToolCount: extractAiSuccessfulToolCount(payload),
       usage,
       costEstimate: computeEstimatedCost(args, usage),
-      serverSideToolUsage: extractServerSideToolUsage(payload),
+      serverSideToolUsage: extractAiServerSideToolUsage(payload),
       rawResponse: payload,
       ...(response.ok
         ? {}

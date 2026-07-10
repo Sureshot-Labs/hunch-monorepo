@@ -143,9 +143,7 @@ export async function isTelegramTradeIntentReconcileSchemaReady(
     `,
   );
   const row = result.rows[0];
-  return Boolean(
-    row?.has_telegram_trade_intents && row.has_submit_started_at,
-  );
+  return Boolean(row?.has_telegram_trade_intents && row.has_submit_started_at);
 }
 
 export async function runTelegramTradeIntentReconcileJob(

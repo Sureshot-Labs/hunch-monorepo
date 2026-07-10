@@ -1,4 +1,5 @@
 import { pool } from "./db.js";
+import { hasCliFlag as hasFlag, readPositiveInt } from "./lib/cli-args.js";
 
 type Args = {
   dryRun: boolean;
@@ -12,56 +13,27 @@ const DEFAULT_LIMIT = 50_000;
 const RETENTION_LOCK_KEY_1 = 4208;
 const RETENTION_LOCK_KEY_2 = 1;
 
-function readValues(argv: string[], name: string): string[] {
-  const key = `--${name}`;
-  const values: string[] = [];
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg.startsWith(`${key}=`)) {
-      const value = arg.slice(key.length + 1).trim();
-      if (value.length) values.push(value);
-      continue;
-    }
-    if (arg === key) {
-      const value = argv[i + 1];
-      if (value && !value.startsWith("--")) {
-        values.push(value.trim());
-        i += 1;
-      }
-    }
-  }
-
-  return values.filter(Boolean);
-}
-
-function hasFlag(argv: string[], name: string): boolean {
-  return argv.includes(`--${name}`);
-}
-
-function readPositiveInt(
-  argv: string[],
-  name: string,
-  fallback: number,
-): number {
-  const raw = readValues(argv, name)[0];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.trunc(parsed);
-}
-
 function parseArgs(argvInput: string[]): Args {
   const argv = argvInput.filter((arg) => arg !== "--");
+  const positiveIntOptions = {
+    invalid: "fallback" as const,
+    splitCommas: false,
+  };
   return {
     dryRun: hasFlag(argv, "dry-run"),
-    limit: readPositiveInt(argv, "limit", DEFAULT_LIMIT),
+    limit: readPositiveInt(argv, "limit", DEFAULT_LIMIT, positiveIntOptions),
     retentionDays: readPositiveInt(
       argv,
       "retention-days",
       DEFAULT_RETENTION_DAYS,
+      positiveIntOptions,
     ),
-    statementTimeoutSec: readPositiveInt(argv, "statement-timeout-sec", 120),
+    statementTimeoutSec: readPositiveInt(
+      argv,
+      "statement-timeout-sec",
+      120,
+      positiveIntOptions,
+    ),
   };
 }
 

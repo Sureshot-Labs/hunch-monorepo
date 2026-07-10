@@ -3077,7 +3077,9 @@ function normalizeMerged<K extends IntelPolicyKey>(
         merged as ArbitrageDefaultsPolicy,
       ) as IntelPolicyMap[K];
     case "signal_bot":
-      return normalizeSignalBotPolicy(merged as SignalBotPolicy) as IntelPolicyMap[K];
+      return normalizeSignalBotPolicy(
+        merged as SignalBotPolicy,
+      ) as IntelPolicyMap[K];
     default:
       return merged;
   }

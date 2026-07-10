@@ -1,6 +1,7 @@
 import { chunkArray } from "@hunch/shared";
 
 import { pool } from "./db.js";
+import { hasCliFlag as hasFlag, readCliValues } from "./lib/cli-args.js";
 import { refreshWalletMetrics } from "./services/wallet-metrics-refresh.js";
 
 type Args = {
@@ -18,30 +19,7 @@ type Args = {
 };
 
 function readValues(argv: string[], name: string): string[] {
-  const key = `--${name}`;
-  const values: string[] = [];
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg.startsWith(`${key}=`)) {
-      const value = arg.slice(key.length + 1).trim();
-      if (value.length) values.push(value);
-      continue;
-    }
-    if (arg === key) {
-      const value = argv[i + 1];
-      if (value && !value.startsWith("--")) {
-        values.push(value.trim());
-        i += 1;
-      }
-    }
-  }
-
-  return values.filter(Boolean);
-}
-
-function hasFlag(argv: string[], name: string): boolean {
-  return argv.includes(`--${name}`);
+  return readCliValues(argv, name, { splitCommas: false });
 }
 
 function readNumber(

@@ -4,6 +4,7 @@ import type { UnifiedEventRow, UnifiedMarketRow } from "@hunch/db";
 import {
   buildTopMarketsText,
   claimDuePriceRefreshTokens,
+  clampHotTokenProbeLimit,
   enqueueEmbedItems,
   filterStalePriceRefreshTokens,
   getPriceRefreshQueueBacklog,
@@ -11,6 +12,7 @@ import {
   publishMarketState,
   publishMarketUpdate,
   requeuePriceRefreshTokens,
+  selectRecentHotTokenIds,
   type EmbedQueueItem,
   type PriceRefreshQueueClaimSide,
   type PriceRefreshRedis,
@@ -553,61 +555,27 @@ function resolveDflowAcceptingOrders(
   );
 }
 
-function hasResolvedTerminalPrice(
-  market: {
-    resolved_outcome?: string | null;
-    resolved_outcome_pct?: number | string | null;
-  },
-): boolean {
-  return Boolean(market.resolved_outcome || market.resolved_outcome_pct != null);
-}
-
-function clampHotProbeLimit(limit: number): number {
-  return Math.max(200, Math.min(2000, Math.trunc(limit)));
+function hasResolvedTerminalPrice(market: {
+  resolved_outcome?: string | null;
+  resolved_outcome_pct?: number | string | null;
+}): boolean {
+  return Boolean(
+    market.resolved_outcome || market.resolved_outcome_pct != null,
+  );
 }
 
 async function fetchHotTokenIds(limit?: number): Promise<string[]> {
   if (env.hotTokensMax <= 0 && env.hotStreamTokensMax <= 0) return [];
   await ensureRedis();
-  const mergedCap = Math.max(env.hotTokensMax, env.hotStreamTokensMax);
-  const resolvedLimit =
-    typeof limit === "number" && Number.isFinite(limit)
-      ? Math.max(0, Math.trunc(limit))
-      : mergedCap;
-  if (resolvedLimit <= 0) return [];
-
-  const readHotSet = async (
-    key: string,
-    maxTokens: number,
-    ttlSec: number,
-  ): Promise<string[]> => {
-    const readMax = Math.min(maxTokens, resolvedLimit);
-    if (readMax <= 0) return [];
-    const cutoff = Date.now() - ttlSec * 1000;
-    await redis.zRemRangeByScore(key, 0, cutoff);
-    return redis.zRange(key, 0, readMax - 1, { REV: true });
-  };
-
   try {
-    const [streamIds, hotIds] = await Promise.all([
-      readHotSet(
-        "hot:tokens:stream:dflow",
-        env.hotStreamTokensMax,
-        env.hotStreamTokensTtlSec,
-      ),
-      readHotSet("hot:tokens:dflow", env.hotTokensMax, env.hotTokensTtlSec),
-    ]);
-
-    const maxOut = Math.min(mergedCap, resolvedLimit);
-    const out: string[] = [];
-    const seen = new Set<string>();
-    for (const tokenId of [...streamIds, ...hotIds]) {
-      if (seen.has(tokenId)) continue;
-      seen.add(tokenId);
-      out.push(tokenId);
-      if (out.length >= maxOut) break;
-    }
-    return out;
+    return await selectRecentHotTokenIds(redis, {
+      hotStreamTokensMax: env.hotStreamTokensMax,
+      hotStreamTokensTtlSec: env.hotStreamTokensTtlSec,
+      hotTokensMax: env.hotTokensMax,
+      hotTokensTtlSec: env.hotTokensTtlSec,
+      limit,
+      venue: "dflow",
+    });
   } catch (error) {
     log.warn("Failed to fetch hot tokens", error);
     return [];
@@ -814,7 +782,7 @@ async function fetchTickersForEventIds(eventIds: string[]): Promise<string[]> {
 
 async function fetchHotTickersOrdered(): Promise<string[]> {
   const hotTokenIds = await fetchHotTokenIds(
-    clampHotProbeLimit(env.wsSubset * 12),
+    clampHotTokenProbeLimit(env.wsSubset * 12),
   );
   const positionTokenIds = await fetchPositionTokenIds();
 
@@ -914,7 +882,7 @@ async function fetchDurationReserveTickers(): Promise<string[]> {
 
 async function fetchTradeTokenIds(): Promise<string[]> {
   const hotTokenIds = await fetchHotTokenIds(
-    clampHotProbeLimit(env.tradesTokenLimit * 8),
+    clampHotTokenProbeLimit(env.tradesTokenLimit * 8),
   );
   const positionTokenIds = await fetchPositionTokenIds();
   const tokenIds = Array.from(
@@ -1084,7 +1052,7 @@ function deriveNoAsk(yesBid: number | null): number | null {
 
 async function refreshHotTokenTops(): Promise<number> {
   const tokenIds = await fetchHotTokenIds(
-    clampHotProbeLimit(env.wsSubset * 10),
+    clampHotTokenProbeLimit(env.wsSubset * 10),
   );
   return publishTokenTopsForTokenIds(tokenIds);
 }
@@ -1494,7 +1462,7 @@ export async function syncHotMarketStatuses(): Promise<{
   if (!env.dflowEnabled) return { processedMarkets: 0 };
 
   const hotTokenIds = await fetchHotTokenIds(
-    clampHotProbeLimit(env.wsSubset * 12),
+    clampHotTokenProbeLimit(env.wsSubset * 12),
   );
   const positionTokenIds = await fetchPositionTokenIds();
   return syncMarketStatusesForTokenIds(

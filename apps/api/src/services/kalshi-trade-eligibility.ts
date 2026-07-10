@@ -66,7 +66,8 @@ export function resolveKalshiProofRequirement(input: {
   proofEnabled: boolean;
   usdcMint: string;
 }): KalshiProofRequirement {
-  if (!input.proofEnabled) return { decision: "disabled", requiresProof: false };
+  if (!input.proofEnabled)
+    return { decision: "disabled", requiresProof: false };
   if (input.proofBypassed) {
     return { decision: "bypassed", requiresProof: false };
   }
