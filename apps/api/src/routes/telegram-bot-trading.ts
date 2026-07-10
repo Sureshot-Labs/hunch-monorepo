@@ -7,7 +7,11 @@ import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
 import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
 import { PrivyService, type PrivyWalletProfile } from "../privy-service.js";
-import { createApiTradingApplicationService } from "../services/api-trading-service.js";
+import {
+  createApiTradingApplicationService,
+  type ApiBotTradingExecutor,
+} from "../services/api-trading-service.js";
+import { inspectServerEvmWalletAuthorization } from "../services/api-trading-wallet-signing.js";
 import { reconcileTelegramVenueIntents } from "../services/telegram-bot-trading-venue-reconcile.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
@@ -198,12 +202,35 @@ async function buildKalshiEligibilityForRequest(input: {
   };
 }
 
-export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
+export type TelegramBotTradingRouteDependencies = {
+  authPreHandler?: ReturnType<typeof createAuthMiddleware>;
+  createTrading?: (request: FastifyRequest) => ApiBotTradingExecutor;
+  db?: DbQuery;
+  reconciliationEnabled?: boolean;
+  resolveInternalWallets?: (input: {
+    app: Parameters<FastifyPluginAsync>[0];
+    privyUserId: string | null | undefined;
+  }) => Promise<TelegramBotTradingInternalWalletCandidate[]>;
+  signerInspector?: typeof inspectServerEvmWalletAuthorization;
+};
+
+async function registerTelegramBotTradingRoutes(
+  app: Parameters<FastifyPluginAsync>[0],
+  dependencies: TelegramBotTradingRouteDependencies,
+): Promise<void> {
   const api = app.withTypeProvider<ZodTypeProvider>();
-  const reconciliationEnabled = isTelegramBotTradingReconciliationEnabled({
-    financeDbReconcileEnabled: env.financeTelegramTradeIntentsEnabled,
-    venueReconcileEnabled: env.telegramVenueReconcileEnabled,
-  });
+  const db = dependencies.db ?? pool;
+  const reconciliationEnabled =
+    dependencies.reconciliationEnabled ??
+    isTelegramBotTradingReconciliationEnabled({
+      financeDbReconcileEnabled: env.financeTelegramTradeIntentsEnabled,
+      venueReconcileEnabled: env.telegramVenueReconcileEnabled,
+    });
+  const authPreHandler = dependencies.authPreHandler ?? createAuthMiddleware();
+  const signerInspector =
+    dependencies.signerInspector ?? inspectServerEvmWalletAuthorization;
+  const resolveInternalWallets =
+    dependencies.resolveInternalWallets ?? resolveInternalPrivyWalletCandidates;
   const kalshiGeoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -212,6 +239,9 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
     proxySecret: env.proxySecret,
   };
   const createTradingForRequest = (_request: FastifyRequest) => {
+    if (dependencies.createTrading) {
+      return dependencies.createTrading(_request);
+    }
     return createApiTradingApplicationService({
       logger: app.log,
       pool,
@@ -241,7 +271,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       await reconcileTelegramBotTradingStatus({
         reconciliationEnabled,
         reconcileLocal: () =>
-          reconcileStaleTelegramTradeIntents(pool, {
+          reconcileStaleTelegramTradeIntents(db, {
             telegramUserId: String(request.body.telegramUserId),
           }).catch((error) => {
             app.log.warn(
@@ -250,7 +280,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
             );
           }),
         reconcileVenue: () =>
-          reconcileTelegramVenueIntents(pool, trading, {
+          reconcileTelegramVenueIntents(db, trading, {
             dryRun: false,
             limit: 3,
             telegramUserId: request.body.telegramUserId,
@@ -262,7 +292,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           }),
       });
       const message = await buildTelegramBotTradingStatusMessage(
-        pool,
+        db,
         request.body.telegramUserId,
         trading,
         { reconcileLocal: false },
@@ -284,7 +314,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request) => {
       const disabled = await disableTelegramBotTradingForTelegramUser(
-        pool,
+        db,
         request.body.telegramUserId,
       );
       return {
@@ -305,7 +335,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
         ? buildTelegramBotTradingMarketMessage({
             appBaseUrl: request.body.appBaseUrl,
             chatId: request.body.chatId,
-            db: pool,
+            db,
             isAdminTest: request.body.isAdminTest,
             marketRef: request.body.marketRef,
             telegramMessageId: request.body.telegramMessageId,
@@ -357,10 +387,11 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
     return captureTelegramBotTradingCallback({
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
-      db: pool,
+      db,
       expectedIntentId: request.params?.id ?? null,
       expectedType: expectedType ?? null,
       log: app.log,
+      signerInspector,
       trading: createTradingForRequest(request as FastifyRequest),
     });
   };
@@ -371,9 +402,10 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
     captureTelegramBotTradingCallback({
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
-      db: pool,
+      db,
       expectedType: "buy",
       log: app.log,
+      signerInspector,
       trading: createTradingForRequest(request as FastifyRequest),
     });
 
@@ -412,14 +444,14 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
 
   api.get(
     "/telegram/bot-trading/status",
-    { preHandler: createAuthMiddleware() },
+    { preHandler: authPreHandler },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
-      const telegramResult = await pool.query<{
+      const telegramResult = await db.query<{
         telegram_user_id: string;
       }>(
         `SELECT telegram_user_id
@@ -430,31 +462,41 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
       );
       const telegramUserId = telegramResult.rows[0]?.telegram_user_id ?? null;
       const [policy, status] = await Promise.all([
-        resolveTelegramBotTradingPolicy(pool),
+        resolveTelegramBotTradingPolicy(db),
         telegramUserId
           ? getTelegramBotTradingStatus(
-              pool,
+              db,
               telegramUserId,
               createTradingForRequest(request),
+              signerInspector,
             )
           : Promise.resolve(null),
       ]);
       let walletSetupIssues =
         status?.linked && status.userId ? status.walletSetupIssues : [];
+      let internalWallets: TelegramBotTradingInternalWalletCandidate[] = [];
+      try {
+        internalWallets = await resolveInternalWallets({
+          app,
+          privyUserId: user.privyUserId,
+        });
+      } catch {
+        // The status remains fail-closed; the wallet lookup already logs details.
+      }
       if (status?.linked && status.userId) {
-        walletSetupIssues =
-          await resolveTelegramBotTradingStatusWalletSetupIssues({
-            app,
-            db: pool,
-            privyUserId: user.privyUserId,
+        walletSetupIssues = await resolveTelegramBotTradingWalletSetupIssues(
+          db,
+          {
+            internalWallets,
             requestedVenues:
               status.enabled && status.enabledVenues.length > 0
                 ? status.enabledVenues
                 : policy.tradingVenues,
             userId: status.userId,
-          });
+          },
+        );
       }
-      const statusPayload = status
+      const baseStatusPayload = status
         ? {
             ...status,
             walletSetupIssues,
@@ -465,6 +507,30 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
             telegramUserId,
             userId: user.id,
           });
+      const signerWallets = [...baseStatusPayload.signerWallets];
+      const knownWallets = new Set(
+        signerWallets.map(
+          (wallet) =>
+            `${wallet.privyWalletId}:${wallet.walletAddress.toLowerCase()}`,
+        ),
+      );
+      for (const wallet of internalWallets) {
+        if (wallet.walletChain !== "ethereum") continue;
+        const key = `${wallet.privyWalletId}:${wallet.walletAddress.toLowerCase()}`;
+        if (knownWallets.has(key)) continue;
+        signerWallets.push({
+          privyWalletId: wallet.privyWalletId,
+          signerStatus: await signerInspector({
+            authorizationEnabled: false,
+            privyUserId: user.privyUserId,
+            signer: wallet.walletAddress,
+            walletId: wallet.privyWalletId,
+          }),
+          walletAddress: wallet.walletAddress,
+          walletChain: "ethereum",
+        });
+      }
+      const statusPayload = { ...baseStatusPayload, signerWallets };
       request.log.debug(
         {
           directExecutionReady: statusPayload.directExecutionReady,
@@ -483,7 +549,9 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
         policy: {
           tradingEnabled: policy.tradingEnabled && reconciliationEnabled,
           tradingActions: policy.tradingActions,
-          tradingVenues: policy.tradingVenues,
+          tradingVenues: policy.tradingVenues.filter(
+            (venue) => venue === "polymarket",
+          ),
           buyAmountPresetsUsd: policy.buyAmountPresetsUsd,
           maxTradeAmountUsd: policy.maxTradeAmountUsd,
           maxSlippageBps: policy.maxSlippageBps,
@@ -498,7 +566,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
   api.post(
     "/telegram/bot-trading/enable",
     {
-      preHandler: createAuthMiddleware(),
+      preHandler: authPreHandler,
       schema: { body: enableBodySchema },
     },
     async (request, reply) => {
@@ -520,12 +588,12 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
         }
         const internalWallets = disableAll
           ? []
-          : await resolveInternalPrivyWalletCandidates({
+          : await resolveInternalWallets({
               app,
               privyUserId: user.privyUserId,
             });
         const status = await enableTelegramBotTrading(
-          pool,
+          db,
           {
             buildKalshiEligibilityForWallet: (walletAddress) =>
               buildKalshiEligibilityForRequest({
@@ -541,6 +609,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
             maxAmountUsd: body.maxAmountUsd ?? null,
             preferredWalletAddress: body.walletAddress ?? null,
             privyWalletId: body.privyWalletId ?? null,
+            signerInspector,
             userId: user.id,
           },
           createTradingForRequest(request),
@@ -551,6 +620,7 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
           reply.code(error.statusCode);
           return reply.send({
             error: error.code,
+            grants: error.grants,
             message: error.message,
             walletSetupIssues: error.walletSetupIssues,
           });
@@ -577,15 +647,23 @@ export const telegramBotTradingRoutes: FastifyPluginAsync = async (app) => {
 
   api.post(
     "/telegram/bot-trading/disable",
-    { preHandler: createAuthMiddleware() },
+    { preHandler: authPreHandler },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
       }
-      await disableTelegramBotTradingForUser(pool, user.id);
+      await disableTelegramBotTradingForUser(db, user.id);
       return reply.send({ ok: true });
     },
   );
-};
+}
+
+export function createTelegramBotTradingRoutes(
+  dependencies: TelegramBotTradingRouteDependencies = {},
+): FastifyPluginAsync {
+  return (app) => registerTelegramBotTradingRoutes(app, dependencies);
+}
+
+export const telegramBotTradingRoutes = createTelegramBotTradingRoutes();

@@ -1222,8 +1222,16 @@ export const env = {
   ),
   privyAppId: req("PRIVY_APP_ID"),
   privyAppSecret: req("PRIVY_APP_SECRET"),
+  privyWalletAuthorizationId:
+    process.env.PRIVY_WALLET_AUTHORIZATION_ID?.trim() || "",
   privyWalletAuthorizationKey:
     process.env.PRIVY_WALLET_AUTHORIZATION_KEY?.trim() || "",
+  privyPolymarketBotBuyPolicyId:
+    process.env.PRIVY_POLYMARKET_BOT_BUY_POLICY_ID?.trim() || "",
+  privyPolymarketBotBuyPolicyMaxUsd: optionalNonNegativeNumber(
+    "PRIVY_POLYMARKET_BOT_BUY_POLICY_MAX_USD",
+    0,
+  ),
   privyWebhookSecret: process.env.PRIVY_WEBHOOK_SECRET?.trim() || "",
   telegramBotInternalApiToken:
     process.env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || "",

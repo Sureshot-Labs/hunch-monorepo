@@ -49,6 +49,7 @@ import {
 import {
   buildPreparedTradeSnapshot,
   buildTelegramBotTradingMarketMessage,
+  disableTelegramBotTradingForUser,
   enableTelegramBotTrading,
   getTelegramBotTradingStatus,
   handleTelegramBotTradingCallback,
@@ -71,11 +72,65 @@ import {
 } from "./privy-service.js";
 import type {
   PreparedTrade,
+  TradeIntent,
+  TradeQuote,
   TradingReadiness,
   TradingVenue,
 } from "./services/trading-types.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
+import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
+
+const readyTelegramSignerStatus: PrivyServerSignerStatus = {
+  attached: true,
+  canRemoveAllSigners: true,
+  grant: {
+    policyIds: ["policy-1"],
+    signerId: "signer-1",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    walletChain: "ethereum",
+  },
+  message: null,
+  policyId: "policy-1",
+  policyMaxBuyUsd: 50,
+  signerId: "signer-1",
+  state: "ready",
+};
+
+const readyTelegramSignerInspector = async (input: {
+  authorizationEnabled: boolean;
+}) =>
+  input.authorizationEnabled
+    ? readyTelegramSignerStatus
+    : {
+        ...readyTelegramSignerStatus,
+        message: "Bot access is still attached and must be revoked.",
+        state: "revoke_required" as const,
+      };
+
+function buildTestTelegramQuote(
+  intent: TradeIntent,
+  overrides: Partial<TradeQuote> = {},
+): TradeQuote {
+  const amountUsd = Number(intent.amount.value);
+  return {
+    action: "BUY",
+    amount: intent.amount,
+    currentPrice: 0.5,
+    estimatedNotionalUsd: amountUsd,
+    estimatedShares: amountUsd / 0.525,
+    expiresAt: new Date(Date.now() + 30_000),
+    fees: {},
+    maxSpendUsd: amountUsd,
+    meetsVenueMinimum: true,
+    minimumOrderSizeShares: 5,
+    minReceiveShares: amountUsd / 0.525,
+    price: 0.525,
+    target: intent.target,
+    venue: intent.venue,
+    ...overrides,
+  };
+}
 
 class FakeRedis implements SignalBotRedisLike {
   readonly strings = new Map<string, string>();
@@ -1350,7 +1405,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const cases = [
         {
-          expected: /Telegram bot trading disabled/,
+          expected: /Telegram trading disabled/,
           result: "disabled" as const,
         },
         {
@@ -1382,6 +1437,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         });
         assert.equal(handled, true);
         assert.match(telegram.messages[0]?.text ?? "", testCase.expected);
+        if (testCase.result !== "unavailable") {
+          assert.equal(
+            telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
+            "Revoke access in Hunch",
+          );
+          assert.match(
+            telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.url ??
+              "",
+            /\/settings\/telegram-trading$/,
+          );
+        }
       }
     },
   },
@@ -1663,6 +1729,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               ],
             };
           }
+          if (
+            sql.includes("FROM telegram_bot_trading_authorizations") &&
+            sql.includes("SELECT enabled")
+          ) {
+            return { rowCount: 1, rows: [{ enabled: true }] };
+          }
           if (sql.includes("INSERT INTO telegram_trade_intents")) {
             insertCount += 1;
             throw new Error("preview should not insert intents");
@@ -1676,6 +1748,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         isAdminTest: true,
         marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
         telegramUserId: 999,
         trading: {
           getReadiness: async () => ({
@@ -1817,8 +1890,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         db: db as never,
         marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
         telegramUserId: 999,
         trading: {
+          quote: async ({ intent }: { intent: TradeIntent }) =>
+            buildTestTelegramQuote(intent),
           getReadiness: async () =>
             readinessMode === "disabled"
               ? buildTestPolymarketReadiness({
@@ -1851,8 +1927,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         db: db as never,
         marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
         telegramUserId: 999,
         trading: {
+          quote: async ({ intent }: { intent: TradeIntent }) =>
+            buildTestTelegramQuote(intent),
           getReadiness: async () =>
             readinessMode === "auto"
               ? buildTestPolymarketReadiness({
@@ -1864,12 +1943,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               : ({} as never),
         } as never,
       });
-      assert.equal(insertCount, 4);
+      assert.equal(insertCount, 2);
       const repairableButtons =
         repairableMessage.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
         repairableButtons.filter((button) => "callback_data" in button).length,
-        4,
+        2,
+      );
+      assert.match(repairableMessage.text, /Buttons valid for 2 minutes/);
+      assert.match(
+        repairableButtons.find((button) => "callback_data" in button)?.text ??
+          "",
+        /Buy YES · 50¢ · Spend \$10/,
       );
       assert.doesNotMatch(repairableMessage.text, /approvals are missing/);
 
@@ -1879,13 +1964,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         db: db as never,
         marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
         telegramUserId: 999,
         trading: {
           getReadiness: async () =>
             buildTestPolymarketReadiness({ executable: true }),
         } as never,
       });
-      assert.equal(insertCount, 4);
+      assert.equal(insertCount, 2);
       assert.equal(
         closedMessage.reply_markup?.inline_keyboard
           .flat()
@@ -2009,6 +2095,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         db: db as never,
         marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
         telegramUserId: 999,
         trading: {
           getReadiness: async () => ({
@@ -2141,6 +2228,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "999",
         db: db as never,
         marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
         telegramUserId: 999,
         trading: {
           getReadiness: async () => ({
@@ -2899,6 +2987,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           getReadiness: async () => ({
             ready: true,
@@ -3242,19 +3331,24 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               }
               return { rowCount: 1, rows: [] };
             }
-            if (
-              sql.includes("UPDATE telegram_bot_trading_authorizations") &&
-              sql.includes("wallet_chain = ANY")
-            ) {
-              const walletChains = new Set(
-                (params?.[1] as string[] | undefined) ?? [],
-              );
+            if (sql.includes("UPDATE telegram_bot_trading_authorizations")) {
+              const walletChains = sql.includes("wallet_chain = ANY")
+                ? new Set((params?.[1] as string[] | undefined) ?? [])
+                : null;
               for (const authorization of storedAuthorizations) {
-                if (!walletChains.has(authorization.walletChain)) continue;
+                if (
+                  walletChains &&
+                  !walletChains.has(authorization.walletChain)
+                ) {
+                  continue;
+                }
                 if (authorization.enabled) stats.disabledRows += 1;
                 authorization.enabled = false;
               }
-              return { rowCount: 1, rows: [] };
+              return { rowCount: storedAuthorizations.length, rows: [] };
+            }
+            if (sql.includes("UPDATE telegram_trade_intents")) {
+              return { rowCount: 0, rows: [] };
             }
             if (sql.includes("FROM user_telegram_accounts uta")) {
               return {
@@ -3309,70 +3403,52 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ],
         });
         let kalshiEligibilityWalletAddress: string | null = null;
-        const status = await enableTelegramBotTrading(db as never, {
-          buildKalshiEligibilityForWallet: async (walletAddress) => {
-            kalshiEligibilityWalletAddress = walletAddress;
-            return {
-              checkedAt: "2026-07-08T00:00:00.000Z",
-              expiresAt: "2026-07-08T01:00:00.000Z",
-              geoAllowed: true,
-              proofVerified: true,
-            };
-          },
-          enabledVenues: ["polymarket", "limitless", "kalshi"],
-          internalWallets: [
-            {
-              privyWalletId: "evm-primary-wallet",
-              walletAddress: "0x0000000000000000000000000000000000000001",
-              walletChain: "ethereum",
-            },
-            {
-              privyWalletId: "evm-preferred-wallet",
-              walletAddress: "0x0000000000000000000000000000000000000002",
-              walletChain: "ethereum",
-            },
-            {
-              privyWalletId: "solana-unselected-wallet",
-              walletAddress: solanaUnselected,
-              walletChain: "solana",
-            },
-            {
-              privyWalletId: "solana-selected-wallet",
-              walletAddress: solanaSelected,
-              walletChain: "solana",
-            },
-          ],
-          preferredWalletAddress: "0x0000000000000000000000000000000000000002",
-          userId: "user-1",
-        });
-        assert.equal(storedAuthorizations.length, 2);
-        assert.deepEqual(storedAuthorizations[0]?.enabledVenues, [
-          "polymarket",
-          "limitless",
-        ]);
-        assert.equal(
-          storedAuthorizations[0]?.privyWalletId,
-          "evm-preferred-wallet",
+        await assert.rejects(
+          () =>
+            enableTelegramBotTrading(db as never, {
+              buildKalshiEligibilityForWallet: async (walletAddress) => {
+                kalshiEligibilityWalletAddress = walletAddress;
+                return {
+                  checkedAt: "2026-07-08T00:00:00.000Z",
+                  expiresAt: "2026-07-08T01:00:00.000Z",
+                  geoAllowed: true,
+                  proofVerified: true,
+                };
+              },
+              enabledVenues: ["polymarket", "limitless", "kalshi"],
+              internalWallets: [
+                {
+                  privyWalletId: "evm-primary-wallet",
+                  walletAddress: "0x0000000000000000000000000000000000000001",
+                  walletChain: "ethereum",
+                },
+                {
+                  privyWalletId: "evm-preferred-wallet",
+                  walletAddress: "0x0000000000000000000000000000000000000002",
+                  walletChain: "ethereum",
+                },
+                {
+                  privyWalletId: "solana-unselected-wallet",
+                  walletAddress: solanaUnselected,
+                  walletChain: "solana",
+                },
+                {
+                  privyWalletId: "solana-selected-wallet",
+                  walletAddress: solanaSelected,
+                  walletChain: "solana",
+                },
+              ],
+              preferredWalletAddress:
+                "0x0000000000000000000000000000000000000002",
+              userId: "user-1",
+            }),
+          (error: unknown) =>
+            (error as { code?: string }).code ===
+            "privy_policy_unsupported_for_venue",
         );
-        assert.deepEqual(storedAuthorizations[1]?.enabledVenues, ["kalshi"]);
-        assert.equal(
-          storedAuthorizations[1]?.privyWalletId,
-          "solana-selected-wallet",
-        );
-        assert.equal(kalshiEligibilityWalletAddress, solanaSelected);
-        assert.deepEqual(storedAuthorizations[1]?.limits.kalshiEligibility, {
-          checkedAt: "2026-07-08T00:00:00.000Z",
-          expiresAt: "2026-07-08T01:00:00.000Z",
-          geoAllowed: true,
-          proofVerified: true,
-        });
-        assert.deepEqual(status.enabledVenues, [
-          "polymarket",
-          "limitless",
-          "kalshi",
-        ]);
-        assert.deepEqual(status.walletSetupIssues, []);
-        assert.deepEqual(stats.maxAmounts, [50, 50]);
+        assert.equal(storedAuthorizations.length, 0);
+        assert.equal(kalshiEligibilityWalletAddress, null);
+        assert.deepEqual(stats.maxAmounts, []);
       }
 
       {
@@ -3385,7 +3461,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ],
         });
         await enableTelegramBotTrading(db as never, {
-          enabledVenues: ["polymarket", "limitless"],
+          enabledVenues: ["polymarket"],
           internalWallets: [
             {
               privyWalletId: "evm-wallet",
@@ -3394,6 +3470,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             },
           ],
           maxAmountUsd: 10,
+          signerInspector: readyTelegramSignerInspector,
           userId: "user-1",
         });
         assert.deepEqual(stats.maxAmounts, [10]);
@@ -3491,7 +3568,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             geoAllowed: true,
             proofVerified: true,
           }),
-          enabledVenues: ["polymarket", "limitless", "kalshi"],
+          enabledVenues: ["polymarket"],
           internalWallets: [
             {
               privyWalletId: "evm-wallet",
@@ -3504,27 +3581,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               walletChain: "solana",
             },
           ],
-          privyWalletId: "solana-selected-wallet",
+          privyWalletId: "evm-wallet",
+          signerInspector: readyTelegramSignerInspector,
           userId: "user-1",
         });
-        assert.equal(storedAuthorizations.length, 2);
-        assert.equal(
-          storedAuthorizations.find(
-            (authorization) => authorization.walletChain === "solana",
-          )?.privyWalletId,
-          "solana-selected-wallet",
-        );
+        assert.equal(storedAuthorizations.length, 1);
         assert.equal(
           storedAuthorizations.find(
             (authorization) => authorization.walletChain === "ethereum",
           )?.privyWalletId,
           "evm-wallet",
         );
-        assert.deepEqual(status.enabledVenues, [
-          "polymarket",
-          "limitless",
-          "kalshi",
-        ]);
+        assert.deepEqual(status.enabledVenues, ["polymarket"]);
         assert.deepEqual(status.walletSetupIssues, []);
       }
 
@@ -3543,7 +3611,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ],
         });
         await enableTelegramBotTrading(db as never, {
-          enabledVenues: ["polymarket", "limitless"],
+          enabledVenues: ["polymarket"],
           internalWallets: [
             {
               privyWalletId: "evm-primary-wallet",
@@ -3557,6 +3625,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             },
           ],
           preferredWalletAddress: "0x0000000000000000000000000000000000009999",
+          signerInspector: readyTelegramSignerInspector,
           userId: "user-1",
         });
         assert.equal(
@@ -3598,7 +3667,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }),
           (error: unknown) =>
             (error as { code?: string }).code ===
-            "internal_trading_wallet_required",
+            "privy_policy_unsupported_for_venue",
         );
         const solanaAuthorization = storedAuthorizations.find(
           (authorization) => authorization.walletChain === "solana",
@@ -3734,7 +3803,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }),
           (error: unknown) =>
             (error as { code?: string }).code ===
-            "internal_trading_wallet_required",
+            "privy_policy_unsupported_for_venue",
         );
         assert.equal(stats.upserts, 0);
         assert.equal(stats.disabledRows, 0);
@@ -3824,10 +3893,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram status stays partially ready when one enabled venue is unavailable",
+    name: "Telegram status fail-closes legacy non-Polymarket authorizations",
     run: async () => {
+      let disableCount = 0;
       const db = {
         query: async (sql: string) => {
+          if (sql.includes("UPDATE telegram_bot_trading_authorizations")) {
+            disableCount += 1;
+            return { rowCount: 1, rows: [] };
+          }
+          if (sql.includes("UPDATE telegram_trade_intents")) {
+            return { rowCount: 0, rows: [] };
+          }
           assert.match(sql, /FROM user_telegram_accounts uta/);
           return {
             rowCount: 1,
@@ -3852,49 +3929,63 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           };
         },
       };
-      const status = await getTelegramBotTradingStatus(db as never, "999", {
-        getReadiness: async (input: { venue: string }) => ({
-          ready: input.venue === "polymarket",
-          executable: input.venue === "polymarket",
-          reasonCode:
-            input.venue === "polymarket"
-              ? null
-              : "limitless_balance_status_unavailable",
-          message:
-            input.venue === "polymarket"
-              ? null
-              : "Limitless balance status is temporarily unavailable.",
-          setupRequired: false,
-          capabilities: {
-            venue: input.venue,
-            supportsBuy: true,
-            supportsSell: false,
-            supportsCancel: false,
-            supportsOrderSync: false,
-            supportsPositionSync: false,
-            supportsExecutionSync: false,
-            supportsSetup: false,
-            authorizationModes: ["server_delegated"],
-          },
-        }),
-      } as never);
+      const status = await getTelegramBotTradingStatus(
+        db as never,
+        "999",
+        {
+          getReadiness: async (input: { venue: string }) => ({
+            ready: input.venue === "polymarket",
+            executable: input.venue === "polymarket",
+            reasonCode:
+              input.venue === "polymarket"
+                ? null
+                : "limitless_balance_status_unavailable",
+            message:
+              input.venue === "polymarket"
+                ? null
+                : "Limitless balance status is temporarily unavailable.",
+            setupRequired: false,
+            capabilities: {
+              venue: input.venue,
+              supportsBuy: true,
+              supportsSell: false,
+              supportsCancel: false,
+              supportsOrderSync: false,
+              supportsPositionSync: false,
+              supportsExecutionSync: false,
+              supportsSetup: false,
+              authorizationModes: ["server_delegated"],
+            },
+          }),
+        } as never,
+        readyTelegramSignerInspector,
+      );
       assert.equal(status.directExecutionReady, false);
+      assert.equal(status.enabled, false);
+      assert.equal(disableCount, 1);
       assert.deepEqual(
-        status.venueStatuses.map((venueStatus) => [
+        (status.authorizations[0]?.venueStatuses ?? []).map((venueStatus) => [
           venueStatus.venue,
           venueStatus.state,
           venueStatus.executable,
         ]),
         [
-          ["polymarket", "ready", true],
-          ["limitless", "unavailable", false],
+          ["polymarket", "app_setup", false],
+          ["limitless", "app_setup", false],
         ],
       );
-      assert.equal(status.venueStatuses[0]?.message, null);
+      assert.equal(
+        status.authorizations[0]?.venueStatuses[0]?.reasonCode,
+        "privy_server_signer_revoke_required",
+      );
+      assert.equal(
+        status.authorizations[0]?.venueStatuses[1]?.reasonCode,
+        "privy_policy_unsupported_for_venue",
+      );
     },
   },
   {
-    name: "Telegram bot enable rolls back the first chain when the second upsert fails",
+    name: "Telegram bot enable rejects unsupported venues before a transaction",
     run: async () => {
       const storedChains: string[] = [];
       const transactionStatements: string[] = [];
@@ -3999,10 +4090,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             ],
             userId: "user-1",
           }),
-        /second upsert failed/,
+        (error: unknown) =>
+          (error as { code?: string }).code ===
+          "privy_policy_unsupported_for_venue",
       );
       assert.deepEqual(storedChains, []);
-      assert.deepEqual(transactionStatements.slice(-2), ["INSERT", "ROLLBACK"]);
+      assert.deepEqual(transactionStatements, []);
     },
   },
   {
@@ -4029,7 +4122,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   event_id: "event-1",
                   side: "YES",
                   amount_usd: "10",
+                  error_code: "quote_changed",
+                  error_message: "Price moved.",
                   status: "failed",
+                  submit_started_at: null,
                   quote_snapshot: {},
                   policy_snapshot: {},
                   expires_at: new Date(Date.now() + 60_000),
@@ -4058,7 +4154,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(updateCount, 0);
       assert.match(
         telegram.callbackAnswers[0]?.text ?? "",
-        /already processed/,
+        /failed before submission.*Nothing was sent/,
       );
     },
   },
@@ -4373,6 +4469,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           getReadiness: async () =>
             buildTestPolymarketReadiness({ executable: true }),
@@ -4402,6 +4499,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let quotedSlippageBps: unknown = null;
       const db = {
         query: async (sql: string, params?: unknown[]) => {
+          if (
+            sql.includes("FROM telegram_bot_trading_authorizations") &&
+            sql.includes("SELECT enabled")
+          ) {
+            return { rowCount: 1, rows: [{ enabled: true }] };
+          }
           if (/from runtime_policies/i.test(sql)) {
             return {
               rowCount: 1,
@@ -4516,6 +4619,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async (input: never) => {
             const submitResult = {
@@ -4635,6 +4739,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let executeCalls = 0;
       const db = {
         query: async (sql: string, params?: unknown[]) => {
+          if (
+            sql.includes("FROM telegram_bot_trading_authorizations") &&
+            sql.includes("SELECT enabled")
+          ) {
+            return { rowCount: 1, rows: [{ enabled: true }] };
+          }
           if (/from runtime_policies/i.test(sql)) {
             return {
               rowCount: 1,
@@ -4748,6 +4858,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async () => {
             executeCalls += 1;
@@ -4805,10 +4916,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         { status: "executing", markSubmitStarted: false },
         { status: "failed", markSubmitStarted: false },
       ]);
-      assert.match(
-        telegram.callbackAnswers[0]?.text ?? "",
-        /exceeds your max buy/i,
-      );
+      assert.match(telegram.callbackAnswers[0]?.text ?? "", /Price moved/i);
     },
   },
   {
@@ -4930,6 +5038,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async (input: never) => {
             const submitResult = {
@@ -5145,6 +5254,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async () => {
             executeCalls += 1;
@@ -5226,6 +5336,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: createPolymarketConfirmDb(updates) as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           ensureReadiness: async () => {
             ensureCalls += 1;
@@ -5290,6 +5401,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: createPolymarketConfirmDb(updates) as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async (input: never) => {
             const lifecycle = input as {
@@ -5369,6 +5481,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: createPolymarketConfirmDb(updates) as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           ensureReadiness: async () => {
             calls.push("repair");
@@ -5595,6 +5708,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async () => {
             throw new Error("Kalshi transaction could not be validated");
@@ -5799,6 +5913,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db: db as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
+        signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async (input: never) => {
             await (
@@ -9082,6 +9197,144 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           process.env.WALLET_INTEL_SNAPSHOT_HOURS = originalSnapshotHours;
         }
       }
+    },
+  },
+  {
+    name: "Telegram market options lift venue minimum and hide sides above total-spend cap",
+    run: async () => {
+      const authorization = {
+        enabled: true,
+        enabled_venues: ["polymarket"],
+        id: "authorization-1",
+        limits: {},
+        max_amount_usd: "5",
+        privy_user_id: "privy-1",
+        privy_wallet_id: "wallet-1",
+        telegram_user_id: "999",
+        user_id: "user-1",
+        wallet_address: "0x0000000000000000000000000000000000000001",
+        wallet_chain: "ethereum",
+      } as const;
+      const market = {
+        accepting_orders: true,
+        best_ask: "0.062",
+        best_bid: "0.06",
+        clob_token_ids: '["yes-token","no-token"]',
+        close_time: new Date(Date.now() + 60_000),
+        event_end_time: null,
+        event_id: "event-1",
+        event_title: "Event",
+        expiration_time: null,
+        id: "market-1",
+        is_initialized: true,
+        last_price: "0.061",
+        metadata: {},
+        outcomes: '["YES","NO"]',
+        slug: "market",
+        status: "ACTIVE",
+        title: "Market",
+        token_no: "no-token",
+        token_yes: "yes-token",
+        venue: "polymarket",
+        venue_market_id: "venue-market-1",
+      } as const;
+      const quotedAmounts: number[] = [];
+      const trading = {
+        quote: async ({ intent }: { intent: TradeIntent }) => {
+          const amountUsd = Number(intent.amount.value);
+          quotedAmounts.push(amountUsd);
+          if (intent.outcome === "NO") {
+            const meetsVenueMinimum = amountUsd >= 4.7;
+            return buildTestTelegramQuote(intent, {
+              currentPrice: 0.939,
+              maxSpendUsd: meetsVenueMinimum ? 4.99 : 1.01,
+              meetsVenueMinimum,
+              minimumOrderSizeShares: 5,
+              price: 0.94,
+            });
+          }
+          return buildTestTelegramQuote(intent, {
+            currentPrice: 0.062,
+            maxSpendUsd: 1.06,
+            minimumOrderSizeShares: 5,
+            price: 0.066,
+          });
+        },
+      };
+
+      const yes =
+        await telegramBotTradingTestHooks.resolveTelegramExecutableBuyOption({
+          authorization: authorization as never,
+          market: market as never,
+          maxAmountUsd: 2,
+          maxExecutableBuyUsd: 2,
+          maxSlippageBps: 500,
+          nominalAmountUsd: 1,
+          side: "YES",
+          trading: trading as never,
+        });
+      const noWithinTwo =
+        await telegramBotTradingTestHooks.resolveTelegramExecutableBuyOption({
+          authorization: authorization as never,
+          market: market as never,
+          maxAmountUsd: 2,
+          maxExecutableBuyUsd: 2,
+          maxSlippageBps: 500,
+          nominalAmountUsd: 1,
+          side: "NO",
+          trading: trading as never,
+        });
+      const noWithinFive =
+        await telegramBotTradingTestHooks.resolveTelegramExecutableBuyOption({
+          authorization: authorization as never,
+          market: market as never,
+          maxAmountUsd: 5,
+          maxExecutableBuyUsd: 5,
+          maxSlippageBps: 500,
+          nominalAmountUsd: 1,
+          side: "NO",
+          trading: trading as never,
+        });
+
+      assert.equal(yes?.amountUsd, 1);
+      assert.equal(yes?.currentPrice, 0.062);
+      assert.equal(noWithinTwo, null);
+      assert.equal(noWithinFive?.amountUsd, 4.7);
+      assert.equal(noWithinFive?.maxSpendUsd, 4.99);
+      assert.ok((noWithinFive?.maxSpendUsd ?? Infinity) <= 5);
+      assert.deepEqual(quotedAmounts, [1, 1, 4.7, 1, 4.7]);
+    },
+  },
+  {
+    name: "Telegram local disable cancels only pre-submit intents",
+    run: async () => {
+      const queries: Array<{ params: unknown[]; sql: string }> = [];
+      const disabled = await disableTelegramBotTradingForUser(
+        {
+          query: async (sql: string, params: unknown[] = []) => {
+            queries.push({ params, sql });
+            return {
+              rowCount: sql.includes(
+                "UPDATE telegram_bot_trading_authorizations",
+              )
+                ? 1
+                : 3,
+              rows: [],
+            };
+          },
+        } as never,
+        "user-1",
+      );
+      assert.equal(disabled, 1);
+      assert.equal(queries.length, 2);
+      assert.deepEqual(queries[1]?.params[1], [
+        "draft",
+        "previewed",
+        "confirming",
+      ]);
+      assert.doesNotMatch(queries[1]?.sql ?? "", /executing|submitted/);
+      assert.match(queries[1]?.sql ?? "", /authorization_disabled/);
+      assert.match(queries[1]?.sql ?? "", /FROM user_telegram_accounts/);
     },
   },
 ];

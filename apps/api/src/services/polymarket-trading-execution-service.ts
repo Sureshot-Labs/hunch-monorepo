@@ -66,6 +66,11 @@ import {
   type PolymarketL2Credentials,
 } from "./polymarket-clob-l2.js";
 import {
+  POLYMARKET_ORDER_TYPE_STRING,
+  POLYMARKET_ORDER_TYPES,
+  POLYMARKET_TYPED_DATA_SIGN_TYPES,
+} from "./polymarket-signing-schema.js";
+import {
   derivePolymarketFunders,
   type PolymarketFunderCandidate,
 } from "./polymarket-funder.js";
@@ -167,37 +172,6 @@ const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 type PolymarketL2RequestResult = Awaited<
   ReturnType<typeof polymarketL2Request>
 >;
-
-const ORDER_TYPE_STRING =
-  "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)";
-
-const POLYMARKET_ORDER_TYPES = {
-  Order: [
-    { name: "salt", type: "uint256" },
-    { name: "maker", type: "address" },
-    { name: "signer", type: "address" },
-    { name: "tokenId", type: "uint256" },
-    { name: "makerAmount", type: "uint256" },
-    { name: "takerAmount", type: "uint256" },
-    { name: "side", type: "uint8" },
-    { name: "signatureType", type: "uint8" },
-    { name: "timestamp", type: "uint256" },
-    { name: "metadata", type: "bytes32" },
-    { name: "builder", type: "bytes32" },
-  ],
-} as const;
-
-const POLYMARKET_TYPED_DATA_SIGN_TYPES = {
-  TypedDataSign: [
-    { name: "contents", type: "Order" },
-    { name: "name", type: "string" },
-    { name: "version", type: "string" },
-    { name: "chainId", type: "uint256" },
-    { name: "verifyingContract", type: "address" },
-    { name: "salt", type: "bytes32" },
-  ],
-  ...POLYMARKET_ORDER_TYPES,
-} as const;
 
 type PolymarketPreparedPayload = PreparedPayloadBase & {
   exchangeAddress: string;
@@ -6119,7 +6093,9 @@ function buildWrappedDepositWalletSignature(input: {
     >,
     input.message,
   );
-  const typeStringHex = ethers.hexlify(ethers.toUtf8Bytes(ORDER_TYPE_STRING));
+  const typeStringHex = ethers.hexlify(
+    ethers.toUtf8Bytes(POLYMARKET_ORDER_TYPE_STRING),
+  );
   const lenHex = (186).toString(16).padStart(4, "0");
   return `0x${input.innerSignature.replace(/^0x/, "")}${domainSep.slice(2)}${contentsHash.slice(2)}${typeStringHex.slice(2)}${lenHex}`;
 }
@@ -6917,6 +6893,7 @@ async function ensureReadiness(
     await assertServerEvmWalletAuthorization({
       privyUserId: input.executionAuthorization?.privyUserId,
       signer,
+      venue: "polymarket",
       walletId,
     });
     const execution = await runEmbeddedExecutionSingleFlight({
@@ -6999,6 +6976,7 @@ async function quote(
     target: { ...intent.target, tokenId, raw: { market } },
     action: "BUY",
     amount: intent.amount,
+    currentPrice: orderQuote.bestAsk,
     price: orderQuote.price,
     estimatedShares: orderQuote.size,
     estimatedNotionalUsd: orderQuote.amountUsdUsed,
@@ -7007,6 +6985,8 @@ async function quote(
         ? Number(orderQuote.totalRequiredUsdcRaw) / USDC_SCALE
         : orderQuote.amountUsdUsed,
     minReceiveShares: orderQuote.size,
+    minimumOrderSizeShares: orderQuote.orderMinSize,
+    meetsVenueMinimum: orderQuote.violatesMinOrderSize !== true,
     fees: {
       platformFeeEstimateRaw: orderQuote.platformFeeEstimateRaw,
       builderFeeEstimateRaw: orderQuote.builderFeeEstimateRaw,

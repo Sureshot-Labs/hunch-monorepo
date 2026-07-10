@@ -10,10 +10,15 @@ import {
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "./polymarket-onchain.js";
+import {
+  POLYMARKET_AUTH_MESSAGE,
+  POLYMARKET_AUTH_TYPES,
+  POLYMARKET_ORDER_TYPES,
+  POLYMARKET_POLYGON_CHAIN_ID,
+} from "./polymarket-signing-schema.js";
 
-const POLY_CHAIN_ID = 137;
+const POLY_CHAIN_ID = POLYMARKET_POLYGON_CHAIN_ID;
 const POLY_CAIP2 = "eip155:137";
-const AUTH_MESSAGE = "This message attests that I control the given wallet";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const MAX_UINT256 = `0x${"f".repeat(64)}` as const;
 const ERC20_APPROVE_SELECTOR = "0x095ea7b3";
@@ -31,31 +36,6 @@ const POLYMARKET_AUTH_DOMAIN_TYPES = [
   { name: "version", type: "string" },
   { name: "chainId", type: "uint256" },
 ] as const;
-
-const POLYMARKET_AUTH_TYPES = {
-  ClobAuth: [
-    { name: "address", type: "address" },
-    { name: "timestamp", type: "string" },
-    { name: "nonce", type: "uint256" },
-    { name: "message", type: "string" },
-  ],
-} as const;
-
-const POLYMARKET_ORDER_TYPES_V2 = {
-  Order: [
-    { name: "salt", type: "uint256" },
-    { name: "maker", type: "address" },
-    { name: "signer", type: "address" },
-    { name: "tokenId", type: "uint256" },
-    { name: "makerAmount", type: "uint256" },
-    { name: "takerAmount", type: "uint256" },
-    { name: "side", type: "uint8" },
-    { name: "signatureType", type: "uint8" },
-    { name: "timestamp", type: "uint256" },
-    { name: "metadata", type: "bytes32" },
-    { name: "builder", type: "bytes32" },
-  ],
-} as const;
 
 const FEE_AUTH_TYPES = {
   FeeAuth: [
@@ -1343,7 +1323,7 @@ function buildEmbeddedPolymarketOrderTypedData(inputs: {
     },
     types: {
       EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-      Order: POLYMARKET_ORDER_TYPES_V2.Order,
+      Order: POLYMARKET_ORDER_TYPES.Order,
     },
     primaryType: "Order",
     message: typedPayload,
@@ -1573,7 +1553,7 @@ export function buildEmbeddedPolymarketConnectPayload(inputs: {
       address: signer,
       timestamp: inputs.timestamp,
       nonce: inputs.nonce.toString(),
-      message: AUTH_MESSAGE,
+      message: POLYMARKET_AUTH_MESSAGE,
     },
   } as const;
 }
@@ -1628,7 +1608,7 @@ export async function signEmbeddedPolymarketOrder(inputs: {
       },
       types: {
         EIP712Domain: POLYMARKET_DOMAIN_TYPES,
-        Order: POLYMARKET_ORDER_TYPES_V2.Order,
+        Order: POLYMARKET_ORDER_TYPES.Order,
       },
       primaryType: "Order",
       message: typedPayload,

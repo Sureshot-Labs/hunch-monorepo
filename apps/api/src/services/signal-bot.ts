@@ -1820,16 +1820,40 @@ export async function handleSignalBotCommand(input: {
       chatId,
       input.message.from.id,
     ) ?? Promise.resolve("unavailable" as const));
-    await input.sendMessage(
-      buildPlainReply(
-        chatId,
+    if (disableResult === "unavailable") {
+      await input.sendMessage(
+        buildPlainReply(
+          chatId,
+          "Trading is unavailable right now. Open Hunch to trade.",
+        ),
+      );
+      return true;
+    }
+    const reply = buildPlainReply(
+      chatId,
+      [
         disableResult === "disabled"
-          ? "Telegram bot trading disabled."
-          : disableResult === "already_disabled"
-            ? "Telegram bot trading was already disabled."
-            : "Trading is unavailable right now. Open Hunch to trade.",
-      ),
+          ? "Telegram trading disabled."
+          : "Telegram trading was already disabled.",
+        "Open Hunch Settings to revoke bot access from your Trading Wallet.",
+      ].join("\n"),
     );
+    await input.sendMessage({
+      ...reply,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "Revoke access in Hunch",
+              url: new URL(
+                "/settings/telegram-trading",
+                input.config.appBaseUrl,
+              ).toString(),
+            },
+          ],
+        ],
+      },
+    });
     return true;
   }
   if (command === "market") {

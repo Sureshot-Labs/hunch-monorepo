@@ -81,7 +81,7 @@ export function getDefaultSignalBotPolicy(): SignalBotPolicy {
     tradingEnabled: false,
     tradingActions: ["buy"],
     tradingVenues: ["polymarket", "limitless", "kalshi"],
-    buyAmountPresetsUsd: [10, 25, 50],
+    buyAmountPresetsUsd: [1],
     maxTradeAmountUsd: 50,
     maxSlippageBps: 500,
     intentTtlSec: 120,

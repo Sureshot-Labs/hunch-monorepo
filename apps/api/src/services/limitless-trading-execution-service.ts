@@ -4135,6 +4135,7 @@ async function ensureReadiness(
     await assertServerEvmWalletAuthorization({
       privyUserId: input.executionAuthorization?.privyUserId,
       signer,
+      venue: "limitless",
       walletId,
     });
     const signingMessageResult = await fetchLimitlessSigningMessageRoute();

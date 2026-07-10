@@ -138,11 +138,14 @@ export type TradeQuote = {
   target: TradeTarget;
   action: TradeSide;
   amount: TradeAmount;
+  currentPrice?: number | null;
   price: number | null;
   estimatedShares: number | null;
   estimatedNotionalUsd: number | null;
   maxSpendUsd: number | null;
   minReceiveShares: number | null;
+  minimumOrderSizeShares?: number | null;
+  meetsVenueMinimum?: boolean | null;
   fees: Record<string, unknown>;
   expiresAt: Date | null;
   raw?: unknown;

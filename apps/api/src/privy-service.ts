@@ -37,6 +37,29 @@ export type PrivyWalletProfile = PrivyWallet & {
   isInternalWallet: boolean;
   walletId?: string | null;
 };
+export type PrivyManagedWalletMetadata = {
+  additionalSigners: Array<{
+    overridePolicyIds: string[];
+    signerId: string;
+  }>;
+  address: string;
+  chainType: PrivyWalletType;
+  id: string;
+  ownerId: string | null;
+  policyIds: string[];
+};
+export type PrivyKeyQuorumMetadata = {
+  authorizationPublicKeys: string[];
+  authorizationThreshold: number | null;
+  id: string;
+  nestedKeyQuorumIds: string[];
+  userIds: string[];
+};
+export type PrivyPolicyMetadata = {
+  chainType: PrivyWalletType;
+  id: string;
+  rules: Array<Record<string, unknown>>;
+};
 export type PrivyTelegramAccount = {
   telegramUserId: string;
   firstName?: string | null;
@@ -545,6 +568,79 @@ export class PrivyService {
     } catch (error) {
       throw new PrivyUpstreamError(
         `Failed to fetch Privy user by id: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  static async getManagedWalletMetadata(
+    walletId: string,
+  ): Promise<PrivyManagedWalletMetadata> {
+    try {
+      const wallet = await privyClient.wallets().get(walletId);
+      if (wallet.chain_type !== "ethereum" && wallet.chain_type !== "solana") {
+        throw new Error(`Unsupported Privy wallet chain: ${wallet.chain_type}`);
+      }
+      return {
+        additionalSigners: wallet.additional_signers.map((signer) => ({
+          overridePolicyIds: [...(signer.override_policy_ids ?? [])],
+          signerId: signer.signer_id,
+        })),
+        address: wallet.address,
+        chainType: wallet.chain_type,
+        id: wallet.id,
+        ownerId: wallet.owner_id,
+        policyIds: [...wallet.policy_ids],
+      };
+    } catch (error) {
+      throw new PrivyUpstreamError(
+        `Failed to fetch Privy wallet metadata: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  static async getKeyQuorumMetadata(
+    keyQuorumId: string,
+  ): Promise<PrivyKeyQuorumMetadata> {
+    try {
+      const quorum = await privyClient.keyQuorums().get(keyQuorumId);
+      return {
+        authorizationPublicKeys: quorum.authorization_keys.map(
+          (key) => key.public_key,
+        ),
+        authorizationThreshold: quorum.authorization_threshold,
+        id: quorum.id,
+        nestedKeyQuorumIds: [...(quorum.key_quorum_ids ?? [])],
+        userIds: [...(quorum.user_ids ?? [])],
+      };
+    } catch (error) {
+      throw new PrivyUpstreamError(
+        `Failed to fetch Privy key quorum metadata: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
+  }
+
+  static async getPolicyMetadata(
+    policyId: string,
+  ): Promise<PrivyPolicyMetadata> {
+    try {
+      const policy = await privyClient.policies().get(policyId);
+      if (policy.chain_type !== "ethereum" && policy.chain_type !== "solana") {
+        throw new Error(`Unsupported Privy policy chain: ${policy.chain_type}`);
+      }
+      return {
+        chainType: policy.chain_type,
+        id: policy.id,
+        rules: policy.rules.map((rule) => ({
+          action: rule.action,
+          conditions: rule.conditions,
+          id: rule.id,
+          method: rule.method,
+          name: rule.name,
+        })),
+      };
+    } catch (error) {
+      throw new PrivyUpstreamError(
+        `Failed to fetch Privy policy metadata: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     }
   }

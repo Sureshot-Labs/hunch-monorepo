@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,7 @@ import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
+import type { PrivyPolicyMetadata } from "./privy-service.js";
 import {
   findTradeMarketById,
   findTradeMarketByRef,
@@ -17,13 +19,26 @@ import {
   type ApiTradeMarket,
 } from "./services/api-trading-market-repo.js";
 import { executePreparedTradeLifecycle } from "./services/api-trading-utils.js";
-import { signEvmMessage } from "./services/api-trading-wallet-signing.js";
+import {
+  inspectServerEvmWalletAuthorization,
+  signEvmMessage,
+  validatePolymarketBotPolicy,
+  validatePolymarketBotTypedData,
+  type PrivyServerSignerConfiguration,
+  type PrivySignerInspectorDependencies,
+} from "./services/api-trading-wallet-signing.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
 import {
   isLimitlessBotClobExecutable,
   limitlessTradingExecutionTestHooks,
 } from "./services/limitless-trading-execution-service.js";
 import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
+import {
+  POLYMARKET_AUTH_MESSAGE,
+  POLYMARKET_AUTH_TYPES,
+  POLYMARKET_ORDER_TYPES,
+  POLYMARKET_TYPED_DATA_SIGN_TYPES,
+} from "./services/polymarket-signing-schema.js";
 import type { PreparedTrade, SubmitResult } from "./services/trading-types.js";
 
 type TestCase = {
@@ -32,6 +47,110 @@ type TestCase = {
 };
 
 const apiSrcDir = dirname(fileURLToPath(import.meta.url));
+
+const policyExchangeAddresses = [
+  "0x0000000000000000000000000000000000000001",
+  "0x0000000000000000000000000000000000000002",
+] as const;
+
+function typedMessageCondition(input: {
+  field: string;
+  operator: "eq" | "lte";
+  primaryType: "ClobAuth" | "Order" | "TypedDataSign";
+  value: string;
+}) {
+  return {
+    field: input.field,
+    field_source: "ethereum_typed_data_message",
+    operator: input.operator,
+    typed_data: {
+      primary_type: input.primaryType,
+      types:
+        input.primaryType === "ClobAuth"
+          ? POLYMARKET_AUTH_TYPES
+          : input.primaryType === "Order"
+            ? POLYMARKET_ORDER_TYPES
+            : POLYMARKET_TYPED_DATA_SIGN_TYPES,
+    },
+    value: input.value,
+  };
+}
+
+function buildValidPolymarketBotPolicy(): PrivyPolicyMetadata {
+  const chainCondition = {
+    field: "chain_id",
+    field_source: "ethereum_typed_data_domain",
+    operator: "eq",
+    value: "137",
+  };
+  const exchangeCondition = {
+    field: "verifying_contract",
+    field_source: "ethereum_typed_data_domain",
+    operator: "in",
+    value: [...policyExchangeAddresses],
+  };
+  const orderConditions = (
+    primaryType: "Order" | "TypedDataSign",
+    prefix: "" | "contents.",
+    signatureType: "2" | "3",
+  ) => [
+    chainCondition,
+    exchangeCondition,
+    typedMessageCondition({
+      field: `${prefix}side`,
+      operator: "eq",
+      primaryType,
+      value: "0",
+    }),
+    typedMessageCondition({
+      field: `${prefix}signatureType`,
+      operator: "eq",
+      primaryType,
+      value: signatureType,
+    }),
+    typedMessageCondition({
+      field: `${prefix}makerAmount`,
+      operator: "lte",
+      primaryType,
+      value: "2000000",
+    }),
+  ];
+  return {
+    chainType: "ethereum",
+    id: "policy-1",
+    rules: [
+      {
+        action: "ALLOW",
+        conditions: [
+          chainCondition,
+          typedMessageCondition({
+            field: "message",
+            operator: "eq",
+            primaryType: "ClobAuth",
+            value: POLYMARKET_AUTH_MESSAGE,
+          }),
+        ],
+        id: "clob-auth",
+        method: "eth_signTypedData_v4",
+        name: "ClobAuth",
+      },
+      {
+        action: "ALLOW",
+        conditions: orderConditions("Order", "", "2"),
+        id: "direct-order",
+        method: "eth_signTypedData_v4",
+        name: "Direct order",
+      },
+      {
+        action: "ALLOW",
+        conditions: orderConditions("TypedDataSign", "contents.", "3"),
+        id: "deposit-order",
+        method: "eth_signTypedData_v4",
+        name: "Deposit wallet order",
+      },
+    ],
+  };
+}
 
 function resolveRelativeImport(
   fromFile: string,
@@ -86,6 +205,292 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Polymarket bot policy accepts only the canonical Polygon BUY surface",
+    run: () => {
+      const validPolicy = buildValidPolymarketBotPolicy();
+      assert.equal(
+        validatePolymarketBotPolicy({
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          policy: validPolicy,
+        }).valid,
+        true,
+      );
+
+      for (const mutate of [
+        (policy: PrivyPolicyMetadata) => {
+          policy.rules[0] = {
+            ...(policy.rules[0] ?? {}),
+            method: "personal_sign",
+          };
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const condition = policy.rules[1]?.conditions;
+          if (Array.isArray(condition) && condition[0]) {
+            (condition[0] as Record<string, unknown>).value = "1";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const condition = policy.rules[1]?.conditions;
+          if (Array.isArray(condition) && condition[0]) {
+            (condition[0] as Record<string, unknown>).field = "chainId";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const condition = policy.rules[1]?.conditions;
+          if (Array.isArray(condition) && condition[1]) {
+            (condition[1] as Record<string, unknown>).field =
+              "verifyingContract";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const condition = policy.rules[1]?.conditions;
+          if (Array.isArray(condition) && condition[2]) {
+            (condition[2] as Record<string, unknown>).value = "1";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const condition = policy.rules[1]?.conditions;
+          if (Array.isArray(condition) && condition[4]) {
+            (condition[4] as Record<string, unknown>).value = "2000001";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
+          policy.rules.push({
+            action: "DENY",
+            conditions: [],
+            id: "deny-all",
+            method: "*",
+            name: "Deny all",
+          });
+        },
+      ]) {
+        const unsafePolicy = structuredClone(validPolicy);
+        mutate(unsafePolicy);
+        assert.equal(
+          validatePolymarketBotPolicy({
+            exchangeAddresses: policyExchangeAddresses,
+            maxBuyUsd: 2,
+            policy: unsafePolicy,
+          }).valid,
+          false,
+        );
+      }
+    },
+  },
+  {
+    name: "Privy server signer inspector enforces quorum, policy, grant and revoke lifecycle",
+    run: async () => {
+      const keyPair = crypto.generateKeyPairSync("ec", {
+        namedCurve: "prime256v1",
+      });
+      const authorizationKey = `wallet-auth:${keyPair.privateKey
+        .export({ format: "der", type: "pkcs8" })
+        .toString("base64")}`;
+      const publicKey = keyPair.publicKey
+        .export({ format: "der", type: "spki" })
+        .toString("base64");
+      const configuration: PrivyServerSignerConfiguration = {
+        authorizationId: "signer-1",
+        authorizationKey,
+        exchangeAddresses: [...policyExchangeAddresses],
+        policyId: "policy-1",
+        policyMaxBuyUsd: 2,
+      };
+      const walletAddress = "0x0000000000000000000000000000000000000010";
+      let additionalSigners: Array<{
+        overridePolicyIds: string[];
+        signerId: string;
+      }> = [];
+      let quorumPublicKeys = [publicKey];
+      let walletOwnerId = "user-1";
+      let policy = buildValidPolymarketBotPolicy();
+      const dependencies: PrivySignerInspectorDependencies = {
+        classifyWallets: () => [
+          {
+            address: walletAddress,
+            isInternalWallet: true,
+            source: "embedded",
+            walletId: "wallet-1",
+            walletType: "ethereum",
+          },
+        ],
+        getKeyQuorumMetadata: async () => ({
+          authorizationPublicKeys: quorumPublicKeys,
+          authorizationThreshold: 1,
+          id: "signer-1",
+          nestedKeyQuorumIds: [],
+          userIds: [],
+        }),
+        getManagedWalletMetadata: async () => ({
+          additionalSigners,
+          address: walletAddress,
+          chainType: "ethereum",
+          id: "wallet-1",
+          ownerId: walletOwnerId,
+          policyIds: [],
+        }),
+        getPolicyMetadata: async () => policy,
+        getUserById: async () => ({ id: "user-1" }) as never,
+      };
+      const inspect = (authorizationEnabled: boolean) =>
+        inspectServerEvmWalletAuthorization({
+          authorizationEnabled,
+          configuration,
+          dependencies,
+          privyUserId: "user-1",
+          signer: walletAddress,
+          walletId: "wallet-1",
+        });
+
+      const grantRequired = await inspect(true);
+      assert.equal(grantRequired.state, "grant_required");
+      assert.deepEqual(grantRequired.grant, {
+        policyIds: ["policy-1"],
+        signerId: "signer-1",
+        walletAddress,
+        walletChain: "ethereum",
+      });
+
+      walletOwnerId = "another-user";
+      assert.equal((await inspect(true)).state, "unsafe_configuration");
+      walletOwnerId = "user-1";
+
+      additionalSigners = [
+        { overridePolicyIds: ["policy-1"], signerId: "signer-1" },
+      ];
+      assert.equal((await inspect(true)).state, "ready");
+      const revokeRequired = await inspect(false);
+      assert.equal(revokeRequired.state, "revoke_required");
+      assert.equal(revokeRequired.canRemoveAllSigners, true);
+
+      additionalSigners.push({
+        overridePolicyIds: [],
+        signerId: "foreign-signer",
+      });
+      const unsafe = await inspect(true);
+      assert.equal(unsafe.state, "unsafe_configuration");
+      assert.equal(unsafe.canRemoveAllSigners, false);
+
+      additionalSigners = [
+        { overridePolicyIds: ["wrong-policy"], signerId: "signer-1" },
+      ];
+      assert.equal((await inspect(true)).state, "unsafe_configuration");
+
+      additionalSigners = [
+        { overridePolicyIds: ["policy-1"], signerId: "signer-1" },
+      ];
+      quorumPublicKeys = [Buffer.from("wrong-key").toString("base64")];
+      const mismatchedKey = await inspect(true);
+      assert.equal(mismatchedKey.state, "policy_invalid");
+      assert.equal(mismatchedKey.attached, true);
+
+      quorumPublicKeys = [publicKey];
+      policy = structuredClone(policy);
+      policy.rules.push({
+        action: "ALLOW",
+        conditions: [],
+        id: "unsafe-method",
+        method: "eth_sendTransaction",
+        name: "Unsafe",
+      });
+      assert.equal((await inspect(true)).state, "policy_invalid");
+    },
+  },
+  {
+    name: "server signer rejects typed data outside canonical Polymarket BUY domains",
+    run: () => {
+      const signer = "0x0000000000000000000000000000000000000010";
+      const typedData = {
+        domain: {
+          chainId: 137,
+          name: "Polymarket CTF Exchange",
+          verifyingContract: String(policyExchangeAddresses[0]),
+          version: "2",
+        },
+        message: {
+          builder: `0x${"0".repeat(64)}`,
+          maker: signer,
+          makerAmount: "1000000",
+          metadata: `0x${"0".repeat(64)}`,
+          salt: "1",
+          side: 0,
+          signatureType: 2,
+          signer,
+          takerAmount: "15000000",
+          timestamp: "0",
+          tokenId: "1",
+        },
+        primaryType: "Order",
+        types: POLYMARKET_ORDER_TYPES,
+      };
+      assert.equal(
+        validatePolymarketBotTypedData({
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          signer,
+          typedData,
+        }).valid,
+        true,
+      );
+      const depositWallet = "0x0000000000000000000000000000000000000020";
+      const wrappedTypedData = {
+        domain: typedData.domain,
+        message: {
+          chainId: 137,
+          contents: {
+            ...typedData.message,
+            maker: depositWallet,
+            signatureType: 3,
+            signer: depositWallet,
+          },
+          name: "DepositWallet",
+          salt: `0x${"0".repeat(64)}`,
+          verifyingContract: depositWallet,
+          version: "1",
+        },
+        primaryType: "TypedDataSign",
+        types: POLYMARKET_TYPED_DATA_SIGN_TYPES,
+      };
+      assert.equal(
+        validatePolymarketBotTypedData({
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          signer,
+          typedData: wrappedTypedData,
+        }).valid,
+        true,
+      );
+      for (const mutate of [
+        (value: typeof typedData) => {
+          value.domain.chainId = 1;
+        },
+        (value: typeof typedData) => {
+          value.domain.verifyingContract =
+            "0x0000000000000000000000000000000000000099";
+        },
+        (value: typeof typedData) => {
+          value.message.side = 1;
+        },
+        (value: typeof typedData) => {
+          value.message.makerAmount = "2000001";
+        },
+      ]) {
+        const rejected = structuredClone(typedData);
+        mutate(rejected);
+        assert.equal(
+          validatePolymarketBotTypedData({
+            exchangeAddresses: policyExchangeAddresses,
+            maxBuyUsd: 2,
+            signer,
+            typedData: rejected,
+          }).valid,
+          false,
+        );
+      }
+    },
+  },
   {
     name: "trading market loaders share the canonical venue-aware projection",
     run: async () => {
