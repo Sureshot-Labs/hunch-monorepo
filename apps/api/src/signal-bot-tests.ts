@@ -4099,6 +4099,109 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "Telegram bot enable does not reconnect an active transaction client",
+    run: async () => {
+      let connectCount = 0;
+      let enabled = false;
+      const authorizationRow = () => ({
+        id: "authorization-1",
+        user_id: "user-1",
+        privy_user_id: "privy-1",
+        telegram_user_id: "999",
+        username: "user",
+        wallet_address: "0x0000000000000000000000000000000000000001",
+        wallet_chain: "ethereum",
+        privy_wallet_id: "wallet-1",
+        enabled,
+        enabled_venues: ["polymarket"],
+        max_amount_usd: "2",
+        limits: {},
+        disabled_at: enabled ? null : new Date(),
+        last_verified_at: new Date(),
+      });
+      const rootQuery = async (sql: string) => {
+        if (/FROM users u/i.test(sql)) {
+          return {
+            rowCount: 1,
+            rows: [{ privy_user_id: "privy-1", telegram_user_id: "999" }],
+          };
+        }
+        if (/from runtime_policies/i.test(sql)) {
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                payload: {
+                  tradingEnabled: true,
+                  tradingActions: ["buy"],
+                  tradingVenues: ["polymarket"],
+                  buyAmountPresetsUsd: [1],
+                  maxTradeAmountUsd: 2,
+                  maxSlippageBps: 500,
+                  intentTtlSec: 120,
+                },
+              },
+            ],
+          };
+        }
+        if (sql.includes("FROM user_wallets uw")) {
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                wallet_address: "0x0000000000000000000000000000000000000001",
+                wallet_type: "ethereum",
+                is_primary: true,
+                created_at: new Date("2026-01-01T00:00:00Z"),
+              },
+            ],
+          };
+        }
+        if (sql.includes("FROM user_telegram_accounts uta")) {
+          return { rowCount: 1, rows: [authorizationRow()] };
+        }
+        return { rowCount: 0, rows: [] };
+      };
+      const transactionClient = {
+        connect: async () => {
+          throw new Error("Client has already been connected");
+        },
+        query: async (sql: string) => {
+          if (sql.includes("INSERT INTO telegram_bot_trading_authorizations")) {
+            enabled = true;
+            return { rowCount: 1, rows: [] };
+          }
+          return { rowCount: 0, rows: [] };
+        },
+        release: () => undefined,
+      };
+      const db = {
+        query: rootQuery,
+        connect: async () => {
+          connectCount += 1;
+          return transactionClient;
+        },
+      };
+
+      const status = await enableTelegramBotTrading(db as never, {
+        enabledVenues: ["polymarket"],
+        internalWallets: [
+          {
+            privyWalletId: "wallet-1",
+            walletAddress: "0x0000000000000000000000000000000000000001",
+            walletChain: "ethereum",
+          },
+        ],
+        maxAmountUsd: 2,
+        signerInspector: readyTelegramSignerInspector,
+        userId: "user-1",
+      });
+
+      assert.equal(connectCount, 1);
+      assert.equal(status.enabled, true);
+    },
+  },
+  {
     name: "trading callback does not advance terminal intents",
     run: async () => {
       const telegram = new FakeTelegram();

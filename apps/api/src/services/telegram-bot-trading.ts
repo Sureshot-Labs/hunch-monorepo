@@ -1942,7 +1942,12 @@ async function withOptionalTransaction<T>(
   const client = await db.connect();
   try {
     await client.query("BEGIN");
-    const result = await callback(client);
+    // Pass only the query capability into nested helpers. pg.PoolClient also
+    // exposes connect(), but calling it again throws "already been connected".
+    const transactionDb: DbQuery = {
+      query: client.query.bind(client),
+    };
+    const result = await callback(transactionDb);
     await client.query("COMMIT");
     return result;
   } catch (error) {
