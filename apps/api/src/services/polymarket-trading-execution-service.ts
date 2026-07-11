@@ -34,7 +34,6 @@ import {
   normalizeSide,
   parsePreparedPayload,
   POLYGON_CHAIN_ID,
-  randomUint256SaltDecimal,
   readiness,
   readNumber,
   readString,
@@ -5711,6 +5710,7 @@ export const polymarketTradingExecutionTestHooks = {
   evaluateFundsReadiness: evaluatePolymarketFundsReadiness,
   inspectPreparedQuote: inspectPolymarketPreparedQuote,
   inspectFunderReadiness: inspectPolymarketFunderReadiness,
+  normalizeOrderForPayload,
   normalizeOrderForPrivyPolicy: normalizePolymarketOrderForPrivyPolicy,
   repairCredentials: repairPolymarketCredentials,
 };
@@ -6110,6 +6110,10 @@ function normalizePolymarketOrderForPrivyPolicy(
     if (value !== null) normalized[field] = value;
   }
   return normalized;
+}
+
+function randomPolymarketOrderSalt(): string {
+  return crypto.randomInt(1, Date.now()).toString();
 }
 
 async function signPolymarketOrder(input: {
@@ -7127,7 +7131,7 @@ async function prepareTrade(
   const signerForPayload =
     candidate.signatureType === 3 ? candidate.funder : signer;
   const order = {
-    salt: randomUint256SaltDecimal(),
+    salt: randomPolymarketOrderSalt(),
     maker: candidate.funder,
     signer: signerForPayload,
     tokenId,
@@ -7135,7 +7139,7 @@ async function prepareTrade(
     takerAmount: String(rawQuote.takerAmount),
     side: 0,
     signatureType: candidate.signatureType,
-    timestamp: Math.floor(Date.now() / 1000).toString(),
+    timestamp: Date.now().toString(),
     metadata: ZERO_BYTES32,
     builder: feePolicySnapshot.builderCode,
     expiration: "0",
@@ -7147,7 +7151,11 @@ async function prepareTrade(
     signer,
     walletId: getPrivyWalletId(intent),
   });
-  const orderPayload = { ...order, signature };
+  const orderPayload = {
+    ...order,
+    ...normalizeOrderForPayload(order, "BUY"),
+    signature,
+  };
   const orderHash = await fetchPolymarketOrderHashV2({
     rpcUrl: env.polygonRpcUrl,
     timeoutMs: env.polygonRpcTimeoutMs,

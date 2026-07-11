@@ -28,6 +28,7 @@ import type {
   SubmitResult,
   TradeExecutionAuthorization,
   TradeIntent,
+  TradingError,
   TradeQuote,
   TradeTarget,
   TradingReadiness,
@@ -863,9 +864,16 @@ function venueStatusFromReadiness(input: {
 }
 
 export const telegramBotTradingTestHooks = {
+  isDefinitiveSubmitRejection,
   resolveTelegramExecutableBuyOption,
   venueStatusFromReadiness,
 };
+
+function isDefinitiveSubmitRejection(
+  error: Pick<TradingError, "code" | "statusCode">,
+): boolean {
+  return error.code === "trade_submission_failed" && error.statusCode === 400;
+}
 
 function effectiveMaxTradeAmountUsd(
   policy: SignalBotPolicy,
@@ -3683,6 +3691,8 @@ export async function handleTelegramBotTradingCallback(
   } catch (error) {
     const normalized = trading.normalizeError(intent.venue, error);
     const submitted = submittedRefs as SubmittedTradeRefs | null;
+    const definitiveSubmitRejection =
+      submitStarted && isDefinitiveSubmitRejection(normalized);
     if (submitted) {
       input.log?.warn?.(
         {
@@ -3731,7 +3741,7 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
-    if (submitStarted) {
+    if (submitStarted && !definitiveSubmitRejection) {
       input.log?.warn?.(
         {
           errorCode: normalized.code,
@@ -3789,8 +3799,9 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text:
-        normalized.code === "unsupported_capability"
+      text: definitiveSubmitRejection
+        ? "Trade rejected. Nothing was submitted."
+        : normalized.code === "unsupported_capability"
           ? "Open Hunch to place this trade."
           : "Trade failed. Check the bot message.",
     });
@@ -3806,9 +3817,11 @@ export async function handleTelegramBotTradingCallback(
         inline_keyboard: [[{ text: "Open in Hunch", url: url.toString() }]],
       },
       text: escapeMarkdown(
-        normalized.code === "unsupported_capability"
-          ? "This venue is not executable from the bot yet. Open Hunch to trade."
-          : normalized.message,
+        definitiveSubmitRejection
+          ? `${intent.venue} rejected the order. Nothing was submitted.\n${normalized.message}`
+          : normalized.code === "unsupported_capability"
+            ? "This venue is not executable from the bot yet. Open Hunch to trade."
+            : normalized.message,
       ),
     });
   }

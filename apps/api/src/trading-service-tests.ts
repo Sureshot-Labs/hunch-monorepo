@@ -508,6 +508,22 @@ const tests: TestCase[] = [
           signatureType: "3",
         },
       );
+      assert.deepEqual(
+        polymarketTradingExecutionTestHooks.normalizeOrderForPayload(
+          {
+            ...order,
+            salt: "777109195663",
+            timestamp: "1783768779432",
+          },
+          "BUY",
+        ),
+        {
+          ...order,
+          salt: 777109195663,
+          side: "BUY",
+          timestamp: "1783768779432",
+        },
+      );
     },
   },
   {

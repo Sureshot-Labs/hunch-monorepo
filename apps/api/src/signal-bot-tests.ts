@@ -3815,6 +3815,32 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "Telegram submit classification keeps only ambiguous failures unknown",
+    run: () => {
+      assert.equal(
+        telegramBotTradingTestHooks.isDefinitiveSubmitRejection({
+          code: "trade_submission_failed",
+          statusCode: 400,
+        }),
+        true,
+      );
+      assert.equal(
+        telegramBotTradingTestHooks.isDefinitiveSubmitRejection({
+          code: "trade_submission_failed",
+          statusCode: 502,
+        }),
+        false,
+      );
+      assert.equal(
+        telegramBotTradingTestHooks.isDefinitiveSubmitRejection({
+          code: "network_error",
+          statusCode: 400,
+        }),
+        false,
+      );
+    },
+  },
+  {
     name: "Telegram venue status serializes ready, setup, funding and unavailable states",
     run: () => {
       const authorization = {
