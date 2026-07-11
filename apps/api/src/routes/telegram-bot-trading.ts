@@ -625,6 +625,14 @@ async function registerTelegramBotTradingRoutes(
             walletSetupIssues: error.walletSetupIssues,
           });
         }
+        app.log.error(
+          {
+            err: error,
+            operation: "telegram-bot-trading-enable",
+            userId: user.id,
+          },
+          "Telegram bot trading enable failed unexpectedly",
+        );
         const message =
           error instanceof Error &&
           error.message === "telegram_account_required"

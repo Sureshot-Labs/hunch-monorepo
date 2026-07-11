@@ -968,6 +968,30 @@ function marketToTradeTarget(market: TelegramBotMarketRow): TradeTarget {
   };
 }
 
+function unavailableTelegramTradingReadiness(input: {
+  message: string;
+  venue: TelegramBotTradingVenue;
+}): TradingReadiness {
+  return {
+    ready: false,
+    executable: false,
+    reasonCode: "internal_api_unavailable",
+    message: input.message,
+    setupRequired: false,
+    capabilities: {
+      venue: input.venue,
+      supportsBuy: false,
+      supportsSell: false,
+      supportsCancel: false,
+      supportsOrderSync: false,
+      supportsPositionSync: false,
+      supportsExecutionSync: false,
+      supportsSetup: false,
+      authorizationModes: ["unsupported"],
+    },
+  };
+}
+
 async function resolveTelegramTradingReadiness(input: {
   authorization?: TelegramBotTradingAuthorizationRow | null;
   market?: TelegramBotMarketRow | null;
@@ -977,26 +1001,21 @@ async function resolveTelegramTradingReadiness(input: {
 }): Promise<TradingReadiness> {
   const trading = input.trading;
   if (!trading) {
-    return {
-      ready: false,
-      executable: false,
-      reasonCode: "internal_api_unavailable",
+    return unavailableTelegramTradingReadiness({
       message: "Direct bot trading is unavailable. Open Hunch to trade.",
-      setupRequired: false,
-      capabilities: {
-        venue: input.venue,
-        supportsBuy: false,
-        supportsSell: false,
-        supportsCancel: false,
-        supportsOrderSync: false,
-        supportsPositionSync: false,
-        supportsExecutionSync: false,
-        supportsSetup: false,
-        authorizationModes: ["unsupported"],
-      },
-    };
+      venue: input.venue,
+    });
   }
-  return trading.getReadiness(buildTelegramTradingReadinessInput(input));
+  try {
+    return await trading.getReadiness(
+      buildTelegramTradingReadinessInput(input),
+    );
+  } catch {
+    return unavailableTelegramTradingReadiness({
+      message: "Trading venue readiness is temporarily unavailable.",
+      venue: input.venue,
+    });
+  }
 }
 
 function buildTelegramTradingReadinessInput(input: {

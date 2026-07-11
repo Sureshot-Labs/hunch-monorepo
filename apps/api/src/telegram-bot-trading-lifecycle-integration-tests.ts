@@ -137,6 +137,7 @@ try {
     updatedAt: now,
   };
   let signerAttached = false;
+  let readinessUnavailable = false;
   const signerInspector = async (input: {
     authorizationEnabled: boolean;
     signer: string;
@@ -173,24 +174,29 @@ try {
     };
   };
   const trading = {
-    getReadiness: async () => ({
-      capabilities: {
-        authorizationModes: ["server_delegated"],
-        supportsBuy: true,
-        supportsCancel: false,
-        supportsExecutionSync: false,
-        supportsOrderSync: false,
-        supportsPositionSync: false,
-        supportsSell: false,
-        supportsSetup: false,
-        venue: "polymarket" as const,
-      },
-      executable: true,
-      message: null,
-      ready: true,
-      reasonCode: null,
-      setupRequired: false,
-    }),
+    getReadiness: async () => {
+      if (readinessUnavailable) {
+        throw new Error("transient readiness failure");
+      }
+      return {
+        capabilities: {
+          authorizationModes: ["server_delegated"],
+          supportsBuy: true,
+          supportsCancel: false,
+          supportsExecutionSync: false,
+          supportsOrderSync: false,
+          supportsPositionSync: false,
+          supportsSell: false,
+          supportsSetup: false,
+          venue: "polymarket" as const,
+        },
+        executable: true,
+        message: null,
+        ready: true,
+        reasonCode: null,
+        setupRequired: false,
+      };
+    },
   } as unknown as ApiBotTradingExecutor;
 
   const app = Fastify({ logger: false });
@@ -254,9 +260,22 @@ try {
   );
 
   signerAttached = true;
+  readinessUnavailable = true;
   const enabled = await enable();
   assert.equal(enabled.statusCode, 200, enabled.body);
-  assert.equal(enabled.json().status.directExecutionReady, true);
+  assert.equal(enabled.json().status.enabled, true);
+  assert.equal(enabled.json().status.directExecutionReady, false);
+  assert.equal(
+    enabled.json().status.venueStatuses[0]?.reasonCode,
+    "internal_api_unavailable",
+  );
+  readinessUnavailable = false;
+  const recoveredReadiness = await app.inject({
+    method: "GET",
+    url: "/telegram/bot-trading/status",
+  });
+  assert.equal(recoveredReadiness.statusCode, 200);
+  assert.equal(recoveredReadiness.json().status.directExecutionReady, true);
   const authorization = (
     await client.query<{ id: string }>(
       `select id
