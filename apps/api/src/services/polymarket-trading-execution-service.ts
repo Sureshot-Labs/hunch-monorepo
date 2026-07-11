@@ -5706,6 +5706,7 @@ function assertPolymarketPreparedFunds(input: {
 
 export const polymarketTradingExecutionTestHooks = {
   assertPreparedFunds: assertPolymarketPreparedFunds,
+  buildSignedOrderPayloads: buildPolymarketSignedOrderPayloads,
   evaluateCredentialReadiness: evaluatePolymarketCredentialReadiness,
   evaluateFundsReadiness: evaluatePolymarketFundsReadiness,
   inspectPreparedQuote: inspectPolymarketPreparedQuote,
@@ -6051,6 +6052,29 @@ function normalizeOrderForHash(
     metadata,
     builder,
     signature,
+  };
+}
+
+function buildPolymarketSignedOrderPayloads(input: {
+  order: Record<string, unknown>;
+  side: PolymarketSide;
+  signature: string;
+}): {
+  clobOrder: Record<string, unknown>;
+  hashOrder: NormalizedPolymarketOrderV2;
+} {
+  const signedOrder = { ...input.order, signature: input.signature };
+  const hashOrder = normalizeOrderForHash(signedOrder, input.side);
+  if (!hashOrder) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Signed Polymarket order is missing required hash fields.",
+      venue: "polymarket",
+    });
+  }
+  return {
+    clobOrder: normalizeOrderForPayload(signedOrder, input.side),
+    hashOrder,
   };
 }
 
@@ -7151,16 +7175,17 @@ async function prepareTrade(
     signer,
     walletId: getPrivyWalletId(intent),
   });
-  const orderPayload = {
-    ...order,
-    ...normalizeOrderForPayload(order, "BUY"),
-    signature,
-  };
+  const { clobOrder: orderPayload, hashOrder } =
+    buildPolymarketSignedOrderPayloads({
+      order,
+      side: "BUY",
+      signature,
+    });
   const orderHash = await fetchPolymarketOrderHashV2({
     rpcUrl: env.polygonRpcUrl,
     timeoutMs: env.polygonRpcTimeoutMs,
     exchangeAddress,
-    order: orderPayload,
+    order: hashOrder,
   });
 
   return {

@@ -527,6 +527,40 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Polymarket bot keeps CLOB and order-hash side representations separate",
+    run: () => {
+      const payloads =
+        polymarketTradingExecutionTestHooks.buildSignedOrderPayloads({
+          order: {
+            salt: "777109195663",
+            maker: "0x0000000000000000000000000000000000000001",
+            signer: "0x0000000000000000000000000000000000000001",
+            tokenId:
+              "44632793419668141561343859504077903947361590865219599333832862239708628173864",
+            makerAmount: "1000000",
+            takerAmount: "1003000",
+            side: 0,
+            signatureType: 3,
+            timestamp: "1783768779432",
+            metadata:
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+            builder:
+              "0x0383467ec0c0a88fe7030bf324e02425af407431d6f3182a2a1d0c307e9091f8",
+            expiration: "0",
+          },
+          side: "BUY",
+          signature: "0xsigned",
+        });
+
+      assert.equal(payloads.clobOrder.side, "BUY");
+      assert.equal(payloads.hashOrder.side, 0);
+      assert.equal(payloads.clobOrder.signatureType, 3);
+      assert.equal(payloads.hashOrder.signatureType, 3);
+      assert.equal(payloads.clobOrder.signature, "0xsigned");
+      assert.equal(payloads.hashOrder.signature, "0xsigned");
+    },
+  },
+  {
     name: "trading market loaders share the canonical venue-aware projection",
     run: async () => {
       const queries: Array<{ params: unknown[]; sql: string }> = [];
