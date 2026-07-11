@@ -5711,6 +5711,7 @@ export const polymarketTradingExecutionTestHooks = {
   evaluateFundsReadiness: evaluatePolymarketFundsReadiness,
   inspectPreparedQuote: inspectPolymarketPreparedQuote,
   inspectFunderReadiness: inspectPolymarketFunderReadiness,
+  normalizeOrderForPrivyPolicy: normalizePolymarketOrderForPrivyPolicy,
   repairCredentials: repairPolymarketCredentials,
 };
 
@@ -6100,6 +6101,17 @@ function buildWrappedDepositWalletSignature(input: {
   return `0x${input.innerSignature.replace(/^0x/, "")}${domainSep.slice(2)}${contentsHash.slice(2)}${typeStringHex.slice(2)}${lenHex}`;
 }
 
+function normalizePolymarketOrderForPrivyPolicy(
+  order: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = { ...order };
+  for (const field of ["side", "signatureType"] as const) {
+    const value = normalizeNumberishString(order[field]);
+    if (value !== null) normalized[field] = value;
+  }
+  return normalized;
+}
+
 async function signPolymarketOrder(input: {
   candidate: PolymarketFunderCandidate;
   exchangeAddress: string;
@@ -6113,6 +6125,7 @@ async function signPolymarketOrder(input: {
     chainId: POLYGON_CHAIN_ID,
     verifyingContract: input.exchangeAddress,
   };
+  const signingOrder = normalizePolymarketOrderForPrivyPolicy(input.order);
   const walletClient = createServerWalletClient();
 
   if (input.candidate.signatureType === 3) {
@@ -6121,7 +6134,7 @@ async function signPolymarketOrder(input: {
       types: POLYMARKET_TYPED_DATA_SIGN_TYPES,
       primaryType: "TypedDataSign",
       message: {
-        contents: input.order,
+        contents: signingOrder,
         name: "DepositWallet",
         version: "1",
         chainId: POLYGON_CHAIN_ID,
@@ -6138,7 +6151,7 @@ async function signPolymarketOrder(input: {
     return buildWrappedDepositWalletSignature({
       appDomain,
       innerSignature,
-      message: input.order,
+      message: signingOrder,
     });
   }
 
@@ -6158,7 +6171,7 @@ async function signPolymarketOrder(input: {
       domain: appDomain,
       types: POLYMARKET_ORDER_TYPES,
       primaryType: "Order",
-      message: input.order,
+      message: signingOrder,
     },
   });
 }

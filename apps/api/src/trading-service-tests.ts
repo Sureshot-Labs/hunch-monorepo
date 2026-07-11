@@ -491,6 +491,26 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Polymarket bot stringifies policy-controlled EIP-712 integers",
+    run: () => {
+      const order = {
+        salt: "1",
+        makerAmount: "1000000",
+        side: 0,
+        signatureType: 3,
+        expiration: "0",
+      };
+      assert.deepEqual(
+        polymarketTradingExecutionTestHooks.normalizeOrderForPrivyPolicy(order),
+        {
+          ...order,
+          side: "0",
+          signatureType: "3",
+        },
+      );
+    },
+  },
+  {
     name: "trading market loaders share the canonical venue-aware projection",
     run: async () => {
       const queries: Array<{ params: unknown[]; sql: string }> = [];
