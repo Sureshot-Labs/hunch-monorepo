@@ -5,6 +5,7 @@ import { resolveKalshiExecutionSettlementStatus } from "./kalshi-executions.js";
 import { LIMITLESS_CLOB_CHAIN_ID } from "./limitless-trading-service.js";
 import { inspectPolymarketSubmittedOrder } from "./polymarket-trading-execution-service.js";
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
+import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error.js";
 import type {
   PreparedTradeAuthorizationMode,
   PreparedTrade,
@@ -25,6 +26,7 @@ type VenueReconcileIntentRow = {
   status: string;
   prepared_snapshot: Record<string, unknown> | null;
   quote_snapshot: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
   venue_order_id: string | null;
   tx_signature: string | null;
   wallet_address: string | null;
@@ -303,6 +305,59 @@ async function recordAuditOnly(input: {
   );
 }
 
+function storedSubmitError(
+  row: VenueReconcileIntentRow,
+): Record<string, unknown> | null {
+  return row.result && isRecord(row.result.error) ? row.result.error : null;
+}
+
+function isDefinitiveRejectedNotFound(
+  row: VenueReconcileIntentRow,
+  venueState: string,
+): boolean {
+  return (
+    row.venue === "polymarket" &&
+    row.status === "reconcile_required" &&
+    venueState === "not_found" &&
+    !row.venue_order_id &&
+    !row.tx_signature &&
+    isDefinitiveSubmitRejection(storedSubmitError(row))
+  );
+}
+
+async function finalizeDefinitiveRejectedIntent(input: {
+  db: DbQuery;
+  intentId: string;
+  state: string;
+}): Promise<void> {
+  await input.db.query(
+    `UPDATE telegram_trade_intents
+        SET status = 'failed',
+            error_code = 'venue_submit_rejected',
+            error_message = 'Venue rejected the order before acceptance. Nothing was submitted.',
+            result = coalesce(result, '{}'::jsonb) || $2::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND status = 'reconcile_required'
+        AND venue_order_id IS NULL
+        AND tx_signature IS NULL
+        AND order_id IS NULL
+        AND execution_id IS NULL
+        AND result->'error'->>'code' = 'trade_submission_failed'
+        AND result->'error'->>'statusCode' = '400'`,
+    [
+      input.intentId,
+      JSON.stringify({
+        venueReconcile: {
+          checkedAt: new Date().toISOString(),
+          state: input.state,
+          terminal: true,
+        },
+      }),
+    ],
+  );
+}
+
 async function finalizeRecoveredIntent(input: {
   db: DbQuery;
   intentId: string;
@@ -372,6 +427,7 @@ async function loadCandidates(
        ti.status,
        ti.prepared_snapshot,
        ti.quote_snapshot,
+       ti.result,
        ti.venue_order_id,
        ti.tx_signature,
        a.wallet_address,
@@ -505,6 +561,19 @@ export async function reconcileTelegramVenueIntents(
       }
       const submitResult = inspection.submitResult;
       if (!submitResult) {
+        if (isDefinitiveRejectedNotFound(row, inspection.state)) {
+          item.result = "failed";
+          summary.failedVerified += 1;
+          summary.items.push(item);
+          if (!summary.dryRun) {
+            await finalizeDefinitiveRejectedIntent({
+              db: client,
+              intentId: row.id,
+              state: inspection.state,
+            });
+          }
+          continue;
+        }
         item.result = inspection.state.startsWith("missing_")
           ? "skipped"
           : "pending";

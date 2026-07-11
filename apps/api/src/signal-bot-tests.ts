@@ -2734,6 +2734,161 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "venue reconciliation fails a stored definitive rejection once venue confirms not found",
+    run: async () => {
+      const statements: string[] = [];
+      const candidate = {
+        id: "00000000-0000-4000-8000-000000000001",
+        telegram_user_id: "999",
+        user_id: "user-1",
+        authorization_id: "authorization-1",
+        venue: "polymarket",
+        market_id: "market-1",
+        event_id: "event-1",
+        side: "YES",
+        amount_usd: "1",
+        status: "reconcile_required",
+        prepared_snapshot: {
+          authorizationMode: "embedded_privy_evm",
+          preparedId: "prepared-1",
+          reconcileKeys: { orderHash: "0xorder" },
+          recoveryPayload: { kind: "polymarket" },
+        },
+        quote_snapshot: {},
+        result: {
+          error: {
+            code: "trade_submission_failed",
+            message: "Invalid order payload",
+            statusCode: 400,
+          },
+        },
+        venue_order_id: null,
+        tx_signature: null,
+        wallet_address: "0x0000000000000000000000000000000000000001",
+        wallet_chain: "ethereum",
+        privy_user_id: "privy-1",
+        privy_wallet_id: "wallet-1",
+        limits: {},
+        venue_market_id: "venue-market-1",
+        market_title: "Market",
+        market_status: "ACTIVE",
+        outcomes: JSON.stringify(["YES", "NO"]),
+        market_metadata: {},
+        updated_at: new Date(Date.now() - 1_000),
+      };
+      const db = {
+        query: async () => ({ rows: [{ ready: true }] }),
+        connect: async () => ({
+          query: async (sql: string) => {
+            statements.push(sql);
+            if (sql.includes("pg_try_advisory_xact_lock")) {
+              return { rows: [{ locked: true }] };
+            }
+            if (sql.includes("FROM telegram_trade_intents ti")) {
+              return { rows: [candidate] };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+          release: () => undefined,
+        }),
+      };
+      const result = await reconcileTelegramVenueIntents(
+        db as never,
+        {} as never,
+        { dryRun: false },
+        {
+          inspectVenueSubmit: async () => ({
+            state: "not_found",
+            submitResult: null,
+          }),
+        } as never,
+      );
+
+      assert.equal(result.inspected, 1);
+      assert.equal(result.failedVerified, 1);
+      assert.equal(result.pending, 0);
+      assert.equal(result.items[0]?.result, "failed");
+      const terminalUpdate = statements.find((sql) =>
+        sql.includes("error_code = 'venue_submit_rejected'"),
+      );
+      assert.ok(terminalUpdate);
+      assert.match(terminalUpdate, /venue_order_id IS NULL/);
+      assert.match(terminalUpdate, /order_id IS NULL/);
+      assert.match(terminalUpdate, /statusCode' = '400'/);
+    },
+  },
+  {
+    name: "venue reconciliation keeps ambiguous submit failures pending when venue says not found",
+    run: async () => {
+      const statements: string[] = [];
+      const db = {
+        query: async () => ({ rows: [{ ready: true }] }),
+        connect: async () => ({
+          query: async (sql: string) => {
+            statements.push(sql);
+            if (sql.includes("pg_try_advisory_xact_lock")) {
+              return { rows: [{ locked: true }] };
+            }
+            if (sql.includes("FROM telegram_trade_intents ti")) {
+              return {
+                rows: [
+                  {
+                    id: "00000000-0000-4000-8000-000000000001",
+                    telegram_user_id: "999",
+                    user_id: "user-1",
+                    authorization_id: "authorization-1",
+                    venue: "polymarket",
+                    market_id: "market-1",
+                    event_id: "event-1",
+                    side: "YES",
+                    amount_usd: "1",
+                    status: "reconcile_required",
+                    prepared_snapshot: {
+                      reconcileKeys: { orderHash: "0xorder" },
+                    },
+                    quote_snapshot: {},
+                    result: {
+                      error: {
+                        code: "trade_submission_failed",
+                        statusCode: 502,
+                      },
+                    },
+                    venue_order_id: null,
+                    tx_signature: null,
+                    updated_at: new Date(Date.now() - 1_000),
+                  },
+                ],
+              };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+          release: () => undefined,
+        }),
+      };
+      const result = await reconcileTelegramVenueIntents(
+        db as never,
+        {} as never,
+        { dryRun: false },
+        {
+          inspectVenueSubmit: async () => ({
+            state: "not_found",
+            submitResult: null,
+          }),
+        } as never,
+      );
+
+      assert.equal(result.failedVerified, 0);
+      assert.equal(result.pending, 1);
+      assert.equal(result.items[0]?.result, "pending");
+      assert.equal(
+        statements.some((sql) =>
+          sql.includes("error_code = 'venue_submit_rejected'"),
+        ),
+        false,
+      );
+    },
+  },
+  {
     name: "venue reconciliation retries persistence and stops after recovery",
     run: async () => {
       let resolved = false;

@@ -28,19 +28,24 @@ import type {
   SubmitResult,
   TradeExecutionAuthorization,
   TradeIntent,
-  TradingError,
   TradeQuote,
   TradeTarget,
   TradingReadiness,
   TradingReadinessInput,
   TradingReadinessRepairSideEffect,
 } from "./trading-types.js";
+import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error.js";
 import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
 
 export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell";
 export type TelegramBotTradingSide = "NO" | "YES";
 export type TelegramBotTradingWalletChain = "ethereum" | "solana";
+
+const EXISTING_TRADE_RESOLVING_MESSAGE =
+  "Existing trade is still resolving. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
+const UNKNOWN_TRADE_RESOLVING_MESSAGE =
+  "Trade status is unknown. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
 
 export type TelegramBotTradingButton =
   | { text: string; callback_data: string }
@@ -868,12 +873,6 @@ export const telegramBotTradingTestHooks = {
   resolveTelegramExecutableBuyOption,
   venueStatusFromReadiness,
 };
-
-function isDefinitiveSubmitRejection(
-  error: Pick<TradingError, "code" | "statusCode">,
-): boolean {
-  return error.code === "trade_submission_failed" && error.statusCode === 400;
-}
 
 function effectiveMaxTradeAmountUsd(
   policy: SignalBotPolicy,
@@ -2068,7 +2067,7 @@ export async function buildTelegramBotTradingStatusMessage(
   ];
   if (unresolvedIntentCount > 0) {
     lines.push(
-      `Resolving trades: ${unresolvedIntentCount}. Check Hunch before retrying those markets.`,
+      `Resolving trades: ${unresolvedIntentCount}. The bot is checking the venue automatically; no action is needed.`,
     );
   }
   if (status.setupIssue) lines.push("", status.setupIssue);
@@ -2190,10 +2189,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (input.isAdminTest) {
     lines.push("", "Preview only - trade buttons are not created.");
   } else if (unresolvedIntent) {
-    lines.push(
-      "",
-      "Existing trade is still resolving. Check /trade_status before retrying.",
-    );
+    lines.push("", EXISTING_TRADE_RESOLVING_MESSAGE);
   }
   if (!policy.tradingEnabled) {
     lines.push("", "Trading is disabled by runtime policy.");
@@ -2796,7 +2792,7 @@ async function answerIntentAlreadyProcessed(
         case "executing":
           return "Trade is already being processed.";
         case "reconcile_required":
-          return "Trade status is unknown. Check Hunch before retrying.";
+          return UNKNOWN_TRADE_RESOLVING_MESSAGE;
         case "expired":
           return "These buttons expired. Send /market again.";
         case "failed":
@@ -3040,8 +3036,7 @@ export async function handleTelegramBotTradingCallback(
       telegramUserId: intent.telegram_user_id,
     });
     if (unresolvedIntent) {
-      const text =
-        "Existing trade is still resolving. Check /trade_status before retrying.";
+      const text = EXISTING_TRADE_RESOLVING_MESSAGE;
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
@@ -3171,9 +3166,7 @@ export async function handleTelegramBotTradingCallback(
       await input.sendMessage({
         chat_id: chatId,
         parse_mode: "MarkdownV2",
-        text: escapeMarkdown(
-          "Existing trade is still resolving. Check /trade_status before retrying.",
-        ),
+        text: escapeMarkdown(EXISTING_TRADE_RESOLVING_MESSAGE),
       });
       return true;
     }
@@ -3751,8 +3744,7 @@ export async function handleTelegramBotTradingCallback(
         },
         "Telegram trade submit state is unknown and has no venue reference",
       );
-      const unknownMessage =
-        "Trade status is unknown. Check Hunch before retrying.";
+      const unknownMessage = UNKNOWN_TRADE_RESOLVING_MESSAGE;
       await updateIntentStatus({
         allowedStatuses: ["executing"],
         db: input.db,
@@ -3778,7 +3770,7 @@ export async function handleTelegramBotTradingCallback(
             "Trade status is unknown.",
             `${intent.venue} · ${intent.market_title}`,
             `${side} · ${formatUsd(amountUsd)}`,
-            "Check Hunch before retrying.",
+            "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
           ].join("\n"),
         ),
       });
