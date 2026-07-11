@@ -170,6 +170,12 @@ export type PrepareTradeInput = {
   intent: TradeIntent;
   quote?: TradeQuote | null;
   now?: Date;
+  onSetupTransactionSubmitted?: (input: {
+    kind: "approval" | "funding_router";
+    referenceId?: string | null;
+    transactionId?: string | null;
+    txHash: string | null;
+  }) => Promise<void> | void;
 };
 
 export type PreparedTrade = {
@@ -188,8 +194,10 @@ export type TradeSubmitLifecycleCallbacks = {
   onBroadcastSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
   onBeforeBroadcast?: () => Promise<void> | void;
   onSetupTransactionSubmitted?: (input: {
-    kind: "approval";
-    txHash: string;
+    kind: "approval" | "funding_router";
+    referenceId?: string | null;
+    transactionId?: string | null;
+    txHash: string | null;
   }) => Promise<void> | void;
 };
 

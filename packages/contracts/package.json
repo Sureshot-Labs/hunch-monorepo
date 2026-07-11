@@ -12,6 +12,7 @@
     "abi:export": "ts-node scripts/export-abis.ts",
     "deploy": "hardhat run scripts/deploy.ts",
     "deploy:clob-v2": "hardhat run scripts/deploy-clob-v2.ts",
+    "deploy:funding-router": "hardhat run scripts/deploy-funding-router.ts --network polygon",
     "demo": "node demo/server.js",
     "typecheck": "tsc -p tsconfig.build.json --noEmit"
   },

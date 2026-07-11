@@ -756,6 +756,8 @@ const POLYMARKET_NEG_RISK_EXCHANGE_V2_ADDRESS =
   "0xe2222d279d744050d28e00520010520000310F59";
 const POLYMARKET_COLLATERAL_ONRAMP_ADDRESS =
   "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+const POLYMARKET_FUNDING_ROUTER_ADDRESS =
+  "0x0fEF62E1CD0600C132070855A45443852940EE72";
 const POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS =
   "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
 const POLYMARKET_CTF_COLLATERAL_ADAPTER_ADDRESS =
@@ -781,6 +783,35 @@ function resolvePolymarketPusdAddress(): string {
 }
 
 const polymarketPusdAddress = resolvePolymarketPusdAddress();
+const polymarketUsdceAddress =
+  process.env.POLYMARKET_USDCE_ADDRESS?.trim() || POLYMARKET_USDCE_ADDRESS;
+const polymarketCollateralOnrampAddress =
+  process.env.POLYMARKET_COLLATERAL_ONRAMP_ADDRESS?.trim() ||
+  POLYMARKET_COLLATERAL_ONRAMP_ADDRESS;
+const polymarketFundingRouterAddress =
+  process.env.POLYMARKET_FUNDING_ROUTER_ADDRESS?.trim() || "";
+if (
+  polymarketFundingRouterAddress &&
+  polymarketFundingRouterAddress.toLowerCase() !==
+    POLYMARKET_FUNDING_ROUTER_ADDRESS.toLowerCase()
+) {
+  throw new Error(
+    `[env] POLYMARKET_FUNDING_ROUTER_ADDRESS must be the verified immutable router ${POLYMARKET_FUNDING_ROUTER_ADDRESS}`,
+  );
+}
+if (
+  polymarketFundingRouterAddress &&
+  (polymarketPusdAddress.toLowerCase() !==
+    POLYMARKET_PUSD_ADDRESS.toLowerCase() ||
+    polymarketUsdceAddress.toLowerCase() !==
+      POLYMARKET_USDCE_ADDRESS.toLowerCase() ||
+    polymarketCollateralOnrampAddress.toLowerCase() !==
+      POLYMARKET_COLLATERAL_ONRAMP_ADDRESS.toLowerCase())
+) {
+  throw new Error(
+    "[env] POLYMARKET_FUNDING_ROUTER_ADDRESS requires canonical Polygon pUSD, USDC.e, and CollateralOnramp addresses",
+  );
+}
 const aggMarketCredential = resolveAggMarketCredential();
 
 export const env = {
@@ -1385,8 +1416,7 @@ export const env = {
   polymarketClobBase:
     process.env.POLYMARKET_CLOB_BASE?.trim() || "https://clob.polymarket.com",
   polymarketPusdAddress,
-  polymarketUsdceAddress:
-    process.env.POLYMARKET_USDCE_ADDRESS?.trim() || POLYMARKET_USDCE_ADDRESS,
+  polymarketUsdceAddress,
   // Compatibility alias for older API response fields. This is pUSD for CLOB V2.
   polymarketUsdcAddress: polymarketPusdAddress,
   polymarketExchangeAddress:
@@ -1395,9 +1425,8 @@ export const env = {
   polymarketNegRiskExchangeAddress:
     process.env.POLYMARKET_NEG_RISK_EXCHANGE_ADDRESS?.trim() ||
     POLYMARKET_NEG_RISK_EXCHANGE_V2_ADDRESS,
-  polymarketCollateralOnrampAddress:
-    process.env.POLYMARKET_COLLATERAL_ONRAMP_ADDRESS?.trim() ||
-    POLYMARKET_COLLATERAL_ONRAMP_ADDRESS,
+  polymarketCollateralOnrampAddress,
+  polymarketFundingRouterAddress,
   polymarketCollateralOfframpAddress:
     process.env.POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS?.trim() ||
     POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS,

@@ -1,6 +1,10 @@
 import type { DbQuery } from "../db.js";
 import { isRecord } from "../lib/type-guards.js";
-import { fetchEmbeddedEthereumTransactionReceipt } from "./embedded-ethereum.js";
+import {
+  fetchEmbeddedEthereumPrivyTransaction,
+  fetchEmbeddedEthereumPrivyTransactionByReference,
+  fetchEmbeddedEthereumTransactionReceipt,
+} from "./embedded-ethereum.js";
 import { resolveKalshiExecutionSettlementStatus } from "./kalshi-executions.js";
 import { LIMITLESS_CLOB_CHAIN_ID } from "./limitless-trading-service.js";
 import { inspectPolymarketSubmittedOrder } from "./polymarket-trading-execution-service.js";
@@ -186,12 +190,80 @@ function limitlessTxHash(row: VenueReconcileIntentRow): string | null {
   return venueOrderId?.match(/^amm:(0x[0-9a-f]{64}):/i)?.[1] ?? null;
 }
 
+function fundingRouterReference(row: VenueReconcileIntentRow): {
+  referenceId: string | null;
+  transactionId: string | null;
+  txHash: string | null;
+} | null {
+  const transactions = row.result?.setupTransactions;
+  if (!Array.isArray(transactions)) return null;
+  for (const transaction of transactions) {
+    if (!isRecord(transaction) || transaction.kind !== "funding_router") {
+      continue;
+    }
+    const txHash = readString(transaction.txHash);
+    const transactionId = readString(transaction.transactionId);
+    const referenceId = readString(transaction.referenceId);
+    if (
+      /^0x[0-9a-f]{64}$/i.test(txHash ?? "") ||
+      transactionId ||
+      referenceId
+    ) {
+      return {
+        referenceId,
+        transactionId,
+        txHash: /^0x[0-9a-f]{64}$/i.test(txHash ?? "") ? txHash : null,
+      };
+    }
+  }
+  return null;
+}
+
 async function inspectVenueSubmit(
   row: VenueReconcileIntentRow,
 ): Promise<{ state: string; submitResult: SubmitResult | null }> {
   const keys = preparedKeys(row.prepared_snapshot);
   if (row.venue === "polymarket") {
     const orderHash = readString(keys?.orderHash);
+    const fundingReference = fundingRouterReference(row);
+    if (!orderHash && fundingReference) {
+      let fundingTxHash = fundingReference.txHash;
+      if (!fundingTxHash) {
+        const privyTransaction = fundingReference.transactionId
+          ? await fetchEmbeddedEthereumPrivyTransaction({
+              transactionId: fundingReference.transactionId,
+            })
+          : fundingReference.referenceId
+            ? await fetchEmbeddedEthereumPrivyTransactionByReference({
+                referenceId: fundingReference.referenceId,
+              })
+            : null;
+        if (!privyTransaction) {
+          return { state: "funding_pending", submitResult: null };
+        }
+        if (
+          privyTransaction.status === "execution_reverted" ||
+          privyTransaction.status === "failed" ||
+          privyTransaction.status === "provider_error" ||
+          privyTransaction.status === "replaced"
+        ) {
+          return { state: "funding_reverted", submitResult: null };
+        }
+        fundingTxHash = privyTransaction.transactionHash;
+      }
+      if (!fundingTxHash) {
+        return { state: "funding_pending", submitResult: null };
+      }
+      const receipt = await fetchEmbeddedEthereumTransactionReceipt({
+        chainId: 137,
+        txHash: fundingTxHash,
+      });
+      if (!receipt) return { state: "funding_pending", submitResult: null };
+      return {
+        state: receipt.succeeded ? "funding_confirmed" : "funding_reverted",
+        submitResult: null,
+      };
+    }
     if (!orderHash || !row.user_id || !row.wallet_address) {
       return { state: "missing_order_hash", submitResult: null };
     }
@@ -354,6 +426,43 @@ async function finalizeDefinitiveRejectedIntent(input: {
           terminal: true,
         },
       }),
+    ],
+  );
+}
+
+async function finalizeFundingOnlyIntent(input: {
+  db: DbQuery;
+  intentId: string;
+  state: "funding_confirmed" | "funding_reverted";
+}): Promise<void> {
+  const confirmed = input.state === "funding_confirmed";
+  await input.db.query(
+    `UPDATE telegram_trade_intents
+        SET status = 'failed',
+            error_code = $2,
+            error_message = $3,
+            result = coalesce(result, '{}'::jsonb) || $4::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND status = ANY($5::text[])
+        AND order_id IS NULL
+        AND execution_id IS NULL
+        AND venue_order_id IS NULL
+        AND tx_signature IS NULL`,
+    [
+      input.intentId,
+      confirmed ? "funding_confirmed_order_not_submitted" : "funding_reverted",
+      confirmed
+        ? "Funding confirmed; no CLOB order was submitted. A fresh retry is safe."
+        : "Funding transaction reverted; no CLOB order was submitted.",
+      JSON.stringify({
+        venueReconcile: {
+          checkedAt: new Date().toISOString(),
+          state: input.state,
+          terminal: true,
+        },
+      }),
+      ["executing", "reconcile_required"],
     ],
   );
 }
@@ -561,6 +670,22 @@ export async function reconcileTelegramVenueIntents(
       }
       const submitResult = inspection.submitResult;
       if (!submitResult) {
+        if (
+          inspection.state === "funding_confirmed" ||
+          inspection.state === "funding_reverted"
+        ) {
+          item.result = "failed";
+          summary.failedVerified += 1;
+          summary.items.push(item);
+          if (!summary.dryRun) {
+            await finalizeFundingOnlyIntent({
+              db: client,
+              intentId: row.id,
+              state: inspection.state,
+            });
+          }
+          continue;
+        }
         if (isDefinitiveRejectedNotFound(row, inspection.state)) {
           item.result = "failed";
           summary.failedVerified += 1;

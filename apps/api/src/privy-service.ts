@@ -124,6 +124,7 @@ type PrivyEthereumSendTransactionInput = {
   chainType?: "ethereum";
   caip2: string;
   sponsor?: boolean;
+  referenceId?: string;
   transaction: PrivyEthereumTransaction;
 };
 type PrivyEthereumSignTypedDataInput = {
@@ -146,9 +147,12 @@ type PrivySolanaSignAndSendTransactionInput = {
 export type PrivyWalletApiClient = {
   walletApi: {
     ethereum: {
-      sendTransaction(
-        input: PrivyEthereumSendTransactionInput,
-      ): Promise<{ hash: string }>;
+      sendTransaction(input: PrivyEthereumSendTransactionInput): Promise<{
+        hash: string;
+        referenceId: string | null;
+        transactionId: string | null;
+        userOperationHash: string | null;
+      }>;
       signTypedData(
         input: PrivyEthereumSignTypedDataInput,
       ): Promise<{ signature: string }>;
@@ -452,18 +456,27 @@ export class PrivyService {
       walletApi: {
         ethereum: {
           async sendTransaction(input) {
-            return await privyClient
+            const result = await privyClient
               .wallets()
               .ethereum()
               .sendTransaction(requireWalletId(input.walletId), {
                 address: input.address,
                 caip2: input.caip2,
                 sponsor: input.sponsor,
+                ...(input.referenceId
+                  ? { reference_id: input.referenceId }
+                  : {}),
                 params: {
                   transaction: normalizePrivyTransaction(input.transaction),
                 },
                 ...(authorization_context ? { authorization_context } : {}),
               });
+            return {
+              hash: result.hash,
+              referenceId: result.reference_id ?? null,
+              transactionId: result.transaction_id ?? null,
+              userOperationHash: result.user_operation_hash ?? null,
+            };
           },
           async signTypedData(input) {
             return await privyClient

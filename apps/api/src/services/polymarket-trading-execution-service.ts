@@ -35,6 +35,7 @@ import {
   parsePreparedPayload,
   POLYGON_CHAIN_ID,
   readiness,
+  resolvePolymarketBotPolicyFundingCapRaw,
   readNumber,
   readString,
   signEvmTypedData,
@@ -141,15 +142,21 @@ import {
   polymarketAllowanceSatisfiesBuyApproval,
   type PolymarketFunderExecutionKind,
 } from "./polymarket-max-spend.js";
+import {
+  buildPolymarketFundingPlan,
+  PolymarketFundingPlanError,
+  type PolymarketFundingPlan,
+} from "./polymarket-funding-router.js";
+import { executeServerEmbeddedEthereumTransaction } from "./embedded-ethereum.js";
 import type {
   EnsureReadinessInput,
   EnsureReadinessResult,
   PersistedTrade,
   PersistTradeInput,
+  PrepareTradeInput,
   PreparedTrade,
   SubmitPreparedTradeInput,
   SubmitResult,
-  TradeIntent,
   TradeQuote,
   TradeQuoteInput,
   TradingReadiness,
@@ -187,6 +194,7 @@ type PolymarketPreparedPayload = PreparedPayloadBase & {
 
 type PolymarketBotQuoteRaw = PolymarketQuoteResult & {
   feePolicySnapshot?: PolymarketFeePolicySnapshot | null;
+  fundingPlan?: PolymarketFundingPlan | null;
 };
 
 type PolymarketSide = "BUY" | "SELL";
@@ -3253,9 +3261,70 @@ export async function quotePolymarketOrderRoute(input: {
         ),
     });
 
+    let fundingPlan: PolymarketFundingPlan | null = null;
+    let fundingPlanError: string | null = null;
+    if (body.side === "BUY") {
+      try {
+        const signer = toChecksumAddress(input.signer);
+        const creds = signer
+          ? await AuthService.getVenueCredentials(
+              input.userId,
+              "polymarket",
+              signer,
+            )
+          : null;
+        if (signer && creds?.apiKey && creds.apiSecret && creds.apiPassphrase) {
+          const funders = await derivePolymarketFunders({
+            signer,
+            storedFunder: creds.funderAddress ?? null,
+            includeMagicProxy: true,
+          });
+          const candidate = funders.recommended;
+          const funderExecutionKind =
+            resolvePolymarketFunderExecutionKindForMaxSpend(candidate);
+          const requiredSpendRaw = parseBigIntValue(quote.totalRequiredUsdcRaw);
+          if (candidate && funderExecutionKind && requiredSpendRaw) {
+            const funds = await resolvePolymarketMaxSpendFunds({
+              creds: {
+                apiKey: creds.apiKey,
+                apiSecret: creds.apiSecret,
+                apiPassphrase: creds.apiPassphrase,
+              },
+              funder: candidate.funder,
+              funderExecutionKind,
+              negRisk: quote.negRisk,
+              pool: input.pool,
+              signer,
+              userId: input.userId,
+            });
+            fundingPlan = buildPreparedPolymarketFundingPlan({
+              signer,
+              funder: candidate.funder,
+              funderExecutionKind,
+              funds,
+              requiredSpendRaw,
+            });
+          }
+        }
+      } catch (error) {
+        fundingPlanError =
+          error instanceof Error
+            ? error.message
+            : "Polymarket funding plan is unavailable.";
+        input.log?.warn?.(
+          { error, signer: input.signer, tokenId },
+          "Failed to build Polymarket funding plan for quote",
+        );
+      }
+    }
+
     return {
       ok: true,
-      payload: quote,
+      payload: {
+        ...quote,
+        fundingPlan,
+        fundingPlanError,
+      },
     };
   } catch (error) {
     if (error instanceof PolymarketQuoteError) {
@@ -4051,6 +4120,7 @@ export async function fetchPolymarketAccountRoute(input: {
           ctfCollateralAdapterAddress,
           negRiskCollateralAdapterAddress,
           feeCollectorAddress: null,
+          fundingRouterAddress: env.polymarketFundingRouterAddress || null,
         }),
       ]);
 
@@ -4156,6 +4226,18 @@ export async function fetchPolymarketAccountRoute(input: {
           balance: ethers.formatUnits(signerNativeUsdcBalance, 6),
           balanceRaw: signerNativeUsdcBalance.toString(),
         },
+        fundingRouter: env.polymarketFundingRouterAddress
+          ? {
+              address: env.polymarketFundingRouterAddress,
+              nonce: snapshot.fundingRouterNonce?.toString() ?? null,
+              pUsdAllowanceRaw:
+                snapshot.fundingRouterPusdAllowance?.toString() ?? null,
+              usdceAllowanceRaw:
+                snapshot.fundingRouterUsdceAllowance?.toString() ?? null,
+              depositUsdceAllowanceRaw:
+                snapshot.fundingRouterDepositUsdceAllowance?.toString() ?? null,
+            }
+          : null,
         conditionalTokens: {
           contractAddress: env.polymarketConditionalTokensAddress,
           isApprovedForAll: {
@@ -5770,6 +5852,7 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
   creds: PolymarketL2Credentials;
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
+  fundingCapRaw?: bigint | null;
   negRisk?: boolean | null;
   pool: ApiTradingApplicationServiceInput["pool"];
   signer: string;
@@ -5777,6 +5860,7 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
 }): Promise<{
   executableFundsRaw: bigint;
   funderPusdRaw: bigint;
+  funderUsdceRaw: bigint;
   funderPusdAvailableRaw: bigint;
   funderLockedRaw: bigint;
   signerLockedRaw: bigint;
@@ -5784,6 +5868,11 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
   signerUsdceTopUpRaw: bigint;
   usesSignerTopUp: boolean;
   buyApproval: { missing: string[]; ok: boolean };
+  fundingCapRaw: bigint;
+  fundingRouterNonce: bigint | null;
+  fundingRouterDepositUsdceAllowance: bigint | null;
+  fundingRouterPusdAllowance: bigint | null;
+  fundingRouterUsdceAllowance: bigint | null;
 }> {
   const signerNormalized = toChecksumAddress(inputs.signer);
   const funderNormalized = toChecksumAddress(inputs.funder);
@@ -5810,6 +5899,10 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
         includeFeeCollectorNonce: false,
         negRiskAdapterAddress,
         feeCollectorAddress: null,
+        fundingRouterAddress:
+          includeSignerUsdc && env.polymarketFundingRouterAddress
+            ? env.polymarketFundingRouterAddress
+            : null,
       }),
       fetchOpenOrderCollateralLocks(inputs.pool, {
         userId: inputs.userId,
@@ -5843,8 +5936,44 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
     signerLockedRaw,
     signerUsdceRaw: snapshot.signerUsdceBalance,
   });
+  const routerPusdAvailableRaw =
+    snapshot.fundingRouterPusdAllowance == null
+      ? 0n
+      : funds.signerPusdTopUpRaw < snapshot.fundingRouterPusdAllowance
+        ? funds.signerPusdTopUpRaw
+        : snapshot.fundingRouterPusdAllowance;
+  const routerUsdceAvailableRaw =
+    snapshot.fundingRouterUsdceAllowance == null
+      ? 0n
+      : funds.signerUsdceTopUpRaw < snapshot.fundingRouterUsdceAllowance
+        ? funds.signerUsdceTopUpRaw
+        : snapshot.fundingRouterUsdceAllowance;
+  const routerDepositUsdceAvailableRaw =
+    snapshot.fundingRouterDepositUsdceAllowance == null
+      ? 0n
+      : snapshot.usdceBalance < snapshot.fundingRouterDepositUsdceAllowance
+        ? snapshot.usdceBalance
+        : snapshot.fundingRouterDepositUsdceAllowance;
+  const routerTopUpAvailableRaw =
+    routerDepositUsdceAvailableRaw +
+    routerPusdAvailableRaw +
+    routerUsdceAvailableRaw;
+  const fundingCapRaw =
+    inputs.fundingCapRaw == null
+      ? routerTopUpAvailableRaw
+      : inputs.fundingCapRaw > 0n
+        ? inputs.fundingCapRaw
+        : 0n;
+  const cappedRouterTopUpRaw =
+    routerTopUpAvailableRaw < fundingCapRaw
+      ? routerTopUpAvailableRaw
+      : fundingCapRaw;
   return {
     ...funds,
+    funderUsdceRaw: snapshot.usdceBalance,
+    executableFundsRaw:
+      funds.funderPusdAvailableRaw +
+      (funds.usesSignerTopUp ? cappedRouterTopUpRaw : 0n),
     buyApproval: evaluatePolymarketBuyApprovalReadiness({
       allowanceExchange: snapshot.allowanceExchange,
       allowanceNegRisk: snapshot.allowanceNegRisk,
@@ -5852,7 +5981,70 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
       negRisk: inputs.negRisk,
       negRiskAdapterConfigured: Boolean(negRiskAdapterAddress),
     }),
+    fundingRouterNonce: snapshot.fundingRouterNonce,
+    fundingRouterDepositUsdceAllowance:
+      snapshot.fundingRouterDepositUsdceAllowance,
+    fundingCapRaw,
+    fundingRouterPusdAllowance: snapshot.fundingRouterPusdAllowance,
+    fundingRouterUsdceAllowance: snapshot.fundingRouterUsdceAllowance,
   };
+}
+
+function buildPreparedPolymarketFundingPlan(input: {
+  funder: string;
+  funderExecutionKind: PolymarketFunderExecutionKind;
+  funds: Awaited<ReturnType<typeof resolvePolymarketMaxSpendFunds>>;
+  requiredSpendRaw: bigint;
+  signer: string;
+}): PolymarketFundingPlan | null {
+  if (input.requiredSpendRaw <= input.funds.funderPusdAvailableRaw) return null;
+  if (input.funderExecutionKind !== "deposit_wallet") {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Polymarket funder has insufficient available pUSD.",
+      venue: "polymarket",
+    });
+  }
+  if (
+    !env.polymarketFundingRouterAddress ||
+    input.funds.fundingRouterNonce == null ||
+    input.funds.fundingRouterDepositUsdceAllowance == null ||
+    input.funds.fundingRouterPusdAllowance == null ||
+    input.funds.fundingRouterUsdceAllowance == null
+  ) {
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: "Polymarket funding router is not configured or approved.",
+      venue: "polymarket",
+    });
+  }
+  try {
+    return buildPolymarketFundingPlan({
+      signer: input.signer,
+      depositWallet: input.funder,
+      routerAddress: env.polymarketFundingRouterAddress,
+      routerNonce: input.funds.fundingRouterNonce,
+      requiredRaw: input.requiredSpendRaw,
+      depositPusdRaw: input.funds.funderPusdRaw,
+      depositUsdceRaw: input.funds.funderUsdceRaw,
+      depositRouterUsdceAllowanceRaw:
+        input.funds.fundingRouterDepositUsdceAllowance,
+      depositLockedRaw: input.funds.funderLockedRaw,
+      signerPusdRaw: input.funds.signerPusdTopUpRaw,
+      signerLockedRaw: 0n,
+      signerUsdceRaw: input.funds.signerUsdceTopUpRaw,
+      routerPusdAllowanceRaw: input.funds.fundingRouterPusdAllowance,
+      routerUsdceAllowanceRaw: input.funds.fundingRouterUsdceAllowance,
+      fundingCapRaw: input.funds.fundingCapRaw,
+    });
+  } catch (error) {
+    if (!(error instanceof PolymarketFundingPlanError)) throw error;
+    throw tradingError({
+      code: "insufficient_readiness",
+      message: error.message,
+      venue: "polymarket",
+    });
+  }
 }
 
 function readMakerAmountFromOrderPayload(orderPayload: unknown): bigint | null {
@@ -6786,10 +6978,12 @@ async function getReadiness(
     apiPassphrase: creds.apiPassphrase,
   };
   try {
+    const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
     const funds = await resolvePolymarketMaxSpendFunds({
       creds: l2Creds,
       funder: funderCandidate.funder,
       funderExecutionKind,
+      fundingCapRaw: policyFundingCapRaw,
       negRisk: targetMarket
         ? readPolymarketNegRiskFromMarket(targetMarket)
         : null,
@@ -7040,7 +7234,7 @@ async function quote(
 
 async function prepareTrade(
   ctx: ApiTradingApplicationServiceInput,
-  input: { intent: TradeIntent; quote?: TradeQuote | null },
+  input: PrepareTradeInput,
 ): Promise<PreparedTrade> {
   const intent = input.intent;
   const market = await loadMarketForVenue(
@@ -7115,21 +7309,6 @@ async function prepareTrade(
   rawQuote = preparedQuote.rawQuote;
   feePolicySnapshot = preparedQuote.feePolicySnapshot;
   const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
-  const executableFunds = await resolvePolymarketMaxSpendFunds({
-    creds: l2Creds,
-    funder: candidate.funder,
-    funderExecutionKind,
-    negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
-    pool: ctx.pool,
-    signer,
-    userId: intent.actor.userId,
-  });
-  assertPolymarketPreparedFunds({
-    buyApprovalOk: executableFunds.buyApproval.ok,
-    executableFundsRaw: executableFunds.executableFundsRaw,
-    requiredSpendRaw,
-  });
-
   const exchangeAddress =
     readString(rawQuote.exchangeAddress) ??
     (readPolymarketNegRisk({ market, quote: rawQuote }) === true
@@ -7151,6 +7330,113 @@ async function prepareTrade(
       venue: "polymarket",
     });
   }
+  const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
+  let executableFunds = await resolvePolymarketMaxSpendFunds({
+    creds: l2Creds,
+    funder: candidate.funder,
+    funderExecutionKind,
+    fundingCapRaw: policyFundingCapRaw,
+    negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
+    pool: ctx.pool,
+    signer,
+    userId: intent.actor.userId,
+  });
+  assertPolymarketPreparedFunds({
+    buyApprovalOk: executableFunds.buyApproval.ok,
+    executableFundsRaw: executableFunds.executableFundsRaw,
+    requiredSpendRaw,
+  });
+  const fundingPlan = buildPreparedPolymarketFundingPlan({
+    signer,
+    funder: candidate.funder,
+    funderExecutionKind,
+    funds: executableFunds,
+    requiredSpendRaw,
+  });
+  if (fundingPlan) {
+    const fundingReferenceId = `hunch:tgfund:${
+      intent.id?.trim() ||
+      crypto
+        .createHash("sha256")
+        .update(intent.idempotencyKey)
+        .digest("hex")
+        .slice(0, 40)
+    }`;
+    let acceptedTransactionId: string | null = null;
+    await assertServerEvmWalletAuthorization({
+      privyUserId: intent.executionAuthorization?.privyUserId,
+      signer,
+      venue: "polymarket",
+      walletId: getPrivyWalletId(intent),
+    });
+    await executeServerEmbeddedEthereumTransaction({
+      chainId: POLYGON_CHAIN_ID,
+      signer,
+      walletId: getPrivyWalletId(intent),
+      walletClient: createServerWalletClient(),
+      transaction: {
+        id: "polymarket-funding-router",
+        label: "Polymarket funding router",
+        to: fundingPlan.routerAddress,
+        data: fundingPlan.calldata,
+        value: "0x0",
+        sponsor: true,
+        referenceId: fundingReferenceId.slice(0, 64),
+      },
+      onAccepted: async (reference) => {
+        acceptedTransactionId = reference.transactionId;
+        await input.onSetupTransactionSubmitted?.({
+          kind: "funding_router",
+          referenceId: reference.referenceId ?? fundingReferenceId.slice(0, 64),
+          transactionId: reference.transactionId,
+          txHash: reference.txHash,
+        });
+      },
+      onSubmitted: (txHash) =>
+        input.onSetupTransactionSubmitted?.({
+          kind: "funding_router",
+          referenceId: fundingReferenceId.slice(0, 64),
+          transactionId: acceptedTransactionId,
+          txHash,
+        }),
+    });
+
+    const balanceSync = await syncPolymarketBalanceAllowanceRoute({
+      body: { assetType: "COLLATERAL", signatureType: 3 },
+      log: ctx.logger,
+      signer,
+      userId: intent.actor.userId,
+    });
+    if (!balanceSync.ok) {
+      throw tradingError({
+        code: "insufficient_readiness",
+        message: "Polymarket balance sync failed after funding.",
+        venue: "polymarket",
+      });
+    }
+    executableFunds = await resolvePolymarketMaxSpendFunds({
+      creds: l2Creds,
+      funder: candidate.funder,
+      funderExecutionKind,
+      fundingCapRaw: policyFundingCapRaw,
+      negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
+      pool: ctx.pool,
+      signer,
+      userId: intent.actor.userId,
+    });
+    if (executableFunds.funderPusdAvailableRaw < requiredSpendRaw) {
+      throw tradingError({
+        code: "insufficient_readiness",
+        message: "Polymarket funding was confirmed but funds are unavailable.",
+        venue: "polymarket",
+      });
+    }
+  }
+  assertPolymarketPreparedFunds({
+    buyApprovalOk: executableFunds.buyApproval.ok,
+    executableFundsRaw: executableFunds.executableFundsRaw,
+    requiredSpendRaw,
+  });
 
   const signerForPayload =
     candidate.signatureType === 3 ? candidate.funder : signer;

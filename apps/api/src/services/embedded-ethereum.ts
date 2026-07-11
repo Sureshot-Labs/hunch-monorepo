@@ -30,6 +30,7 @@ export type EmbeddedEthereumTransactionSpec = {
   value?: string | null;
   gas?: string | null;
   sponsor?: boolean;
+  referenceId?: string;
 };
 
 export type EmbeddedEthereumWalletContext = {
@@ -47,6 +48,19 @@ type PrivyTransactionStatus =
   | "finalized"
   | "provider_error"
   | "pending";
+
+export type EmbeddedEthereumAcceptedReference = {
+  referenceId: string | null;
+  transactionId: string | null;
+  txHash: string | null;
+  userOperationHash: string | null;
+};
+
+type EmbeddedEthereumPrivyTransaction = {
+  status: PrivyTransactionStatus | null;
+  transactionHash: string | null;
+  transactionId: string | null;
+};
 
 const TOKEN_IFACE = new ethers.Interface([
   "function approve(address spender,uint256 value) returns (bool)",
@@ -442,48 +456,97 @@ async function waitForTokenPostcondition(
   throw new Error(`${context} did not update on-chain in time.`);
 }
 
+export async function fetchEmbeddedEthereumPrivyTransaction(input: {
+  transactionId: string;
+}): Promise<EmbeddedEthereumPrivyTransaction> {
+  const response = await fetch(
+    `${PRIVY_WALLET_API_BASE_URL}/v1/transactions/${input.transactionId}`,
+    {
+      method: "GET",
+      headers: buildPrivyAppAuthHeaders(),
+    },
+  );
+  const payload = (await response.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
+  if (!response.ok) {
+    const message =
+      (payload &&
+        typeof payload.error === "string" &&
+        payload.error.trim().length > 0 &&
+        payload.error) ||
+      (payload &&
+        typeof payload.message === "string" &&
+        payload.message.trim().length > 0 &&
+        payload.message) ||
+      `Privy transaction lookup failed (${response.status})`;
+    throw new Error(message);
+  }
+
+  const status =
+    payload && typeof payload.status === "string"
+      ? (payload.status as PrivyTransactionStatus)
+      : null;
+  const transactionHash =
+    payload &&
+    typeof payload.transaction_hash === "string" &&
+    payload.transaction_hash.trim().length > 0
+      ? payload.transaction_hash.trim()
+      : null;
+
+  return { status, transactionHash, transactionId: input.transactionId };
+}
+
+export async function fetchEmbeddedEthereumPrivyTransactionByReference(input: {
+  referenceId: string;
+}): Promise<EmbeddedEthereumPrivyTransaction | null> {
+  const url = new URL(`${PRIVY_WALLET_API_BASE_URL}/v1/transactions`);
+  url.searchParams.set("reference_id", input.referenceId);
+  const response = await fetch(url, {
+    method: "GET",
+    headers: buildPrivyAppAuthHeaders(),
+  });
+  const payload = (await response.json().catch(() => null)) as unknown;
+  if (!response.ok) {
+    throw new Error(`Privy reference lookup failed (${response.status})`);
+  }
+  const records = Array.isArray(payload)
+    ? payload
+    : payload &&
+        typeof payload === "object" &&
+        "data" in payload &&
+        Array.isArray(payload.data)
+      ? payload.data
+      : [];
+  const record = records.find((entry): entry is Record<string, unknown> =>
+    Boolean(entry && typeof entry === "object" && !Array.isArray(entry)),
+  );
+  if (!record) return null;
+  return {
+    status:
+      typeof record.status === "string"
+        ? (record.status as PrivyTransactionStatus)
+        : null,
+    transactionHash:
+      typeof record.transaction_hash === "string" && record.transaction_hash
+        ? record.transaction_hash
+        : null,
+    transactionId:
+      typeof record.transaction_id === "string" && record.transaction_id
+        ? record.transaction_id
+        : null,
+  };
+}
+
 async function waitForPrivyTransaction(
   transactionId: string,
   context: string,
 ): Promise<string | null> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
-    const response = await fetch(
-      `${PRIVY_WALLET_API_BASE_URL}/v1/transactions/${transactionId}`,
-      {
-        method: "GET",
-        headers: buildPrivyAppAuthHeaders(),
-      },
-    );
-    const payload = (await response.json().catch(() => null)) as Record<
-      string,
-      unknown
-    > | null;
-    if (!response.ok) {
-      const message =
-        (payload &&
-          typeof payload.error === "string" &&
-          payload.error.trim().length > 0 &&
-          payload.error) ||
-        (payload &&
-          typeof payload.message === "string" &&
-          payload.message.trim().length > 0 &&
-          payload.message) ||
-        `Privy transaction lookup failed (${response.status})`;
-      throw new Error(message);
-    }
-
-    const status =
-      payload && typeof payload.status === "string"
-        ? (payload.status as PrivyTransactionStatus)
-        : null;
-    const transactionHash =
-      payload &&
-      typeof payload.transaction_hash === "string" &&
-      payload.transaction_hash.trim().length > 0
-        ? payload.transaction_hash.trim()
-        : null;
-
+    const { status, transactionHash } =
+      await fetchEmbeddedEthereumPrivyTransaction({ transactionId });
     if (status === "confirmed" || status === "finalized") {
       return transactionHash;
     }
@@ -649,6 +712,9 @@ export function prepareEmbeddedEthereumTransactionRequests(inputs: {
 
 export async function executeServerEmbeddedEthereumTransaction(inputs: {
   chainId: number;
+  onAccepted?: (
+    reference: EmbeddedEthereumAcceptedReference,
+  ) => void | Promise<void>;
   onSubmitted?: (txHash: string) => void | Promise<void>;
   signer: string;
   timeoutMs?: number;
@@ -682,6 +748,7 @@ export async function executeServerEmbeddedEthereumTransaction(inputs: {
     address: signer,
     caip2: `eip155:${chainId}`,
     sponsor: inputs.transaction.sponsor !== false,
+    referenceId: inputs.transaction.referenceId,
     transaction: {
       from: signer,
       to,
@@ -691,7 +758,20 @@ export async function executeServerEmbeddedEthereumTransaction(inputs: {
     },
     walletId: inputs.walletId,
   });
-  const txHash = result.hash?.trim() ?? "";
+  let txHash = result.hash?.trim() ?? "";
+  await inputs.onAccepted?.({
+    referenceId: result.referenceId,
+    transactionId: result.transactionId,
+    txHash: txHash || null,
+    userOperationHash: result.userOperationHash,
+  });
+  if (!txHash && result.transactionId) {
+    txHash =
+      (await waitForPrivyTransaction(
+        result.transactionId,
+        inputs.transaction.label,
+      )) ?? "";
+  }
   if (!txHash) {
     throw new Error(
       `${inputs.transaction.label} did not return a transaction hash.`,

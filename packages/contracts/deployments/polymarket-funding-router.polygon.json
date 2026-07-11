@@ -1,0 +1,49 @@
+{
+  "contract": "PolymarketFundingRouter",
+  "version": 2,
+  "network": "polygon",
+  "chainId": 137,
+  "address": "0x0fEF62E1CD0600C132070855A45443852940EE72",
+  "deployer": "0xFb81D1C2320E5407e75E9EBE1209161C0114f156",
+  "deployerMode": "ephemeral-memory",
+  "transactionHash": "0x6d9f2c3f8a040307ea56d70e5a2360d159e60704b5bfb1b3bb319af8af6ba0b5",
+  "blockNumber": 90059087,
+  "runtimeCodeHash": "0xc486c5e867028d6caf964199b4f18a5fb7f80e6e7579c50c22115b45fdea15f5",
+  "runtimeBytecodeVerification": {
+    "artifactCodeHash": "0xc486c5e867028d6caf964199b4f18a5fb7f80e6e7579c50c22115b45fdea15f5",
+    "onchainCodeHash": "0xc486c5e867028d6caf964199b4f18a5fb7f80e6e7579c50c22115b45fdea15f5",
+    "status": "verified"
+  },
+  "dependencies": {
+    "pUsd": {
+      "address": "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+      "codeHash": "0xaaa52c8cc8a0e3fd27ce756cc6b4e70c51423e9b597b11f32d3e49f8b1fc890d"
+    },
+    "usdce": {
+      "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+      "codeHash": "0xa97604bff5b11d790aca38bf9f6189369ea260f08365b428fc2ef73390fddcef"
+    },
+    "onramp": {
+      "address": "0x93070a847efEf7F70739046A929D47a521F5B8ee",
+      "codeHash": "0x89eaba6b38dda7ebd07176f42f9e9f70dbadd46b7cbf826d15341729b19bb389"
+    },
+    "factory": {
+      "address": "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07",
+      "codeHash": "0xaaa52c8cc8a0e3fd27ce756cc6b4e70c51423e9b597b11f32d3e49f8b1fc890d"
+    },
+    "beacon": {
+      "address": "0x7A18EDfe055488A3128f01F563e5B479D92ffc3a",
+      "codeHash": "0xf87b06a1302051471df08ff79a938757509569e16b7a7efa55a3ea7b29b0b9d1"
+    },
+    "legacyImplementation": {
+      "address": "0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB",
+      "codeHash": "0xbabc418cce8628b3ddd4d7a68ece146f6ec8a8ea4171b6b453acbfc2a2c0bf77"
+    }
+  },
+  "goldenVector": {
+    "owner": "0x09c88f1d3cdd98c356a21434cd4af40cce795314",
+    "depositWallet": "0x496f46AA7500563E7f577D12CB8193421F2963C7"
+  },
+  "explorerVerification": "not_published",
+  "createdAt": "2026-07-11T18:13:50.987Z"
+}

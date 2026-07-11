@@ -107,8 +107,10 @@ type TelegramReadinessRepairAudit = {
 };
 
 type TelegramSetupTransactionAudit = {
-  kind: "approval";
-  txHash: string;
+  kind: "approval" | "funding_router";
+  referenceId?: string | null;
+  transactionId?: string | null;
+  txHash: string | null;
 };
 
 type TelegramTradeQuotePreview = {
@@ -3475,9 +3477,46 @@ export async function handleTelegramBotTradingCallback(
       });
       return true;
     }
+    const recordSetupTransaction = async (
+      setupTransaction: TelegramSetupTransactionAudit,
+    ) => {
+      const existingIndex = setupTransactions.findIndex(
+        (entry) =>
+          (setupTransaction.referenceId &&
+            entry.referenceId === setupTransaction.referenceId) ||
+          (setupTransaction.transactionId &&
+            entry.transactionId === setupTransaction.transactionId) ||
+          (setupTransaction.txHash && entry.txHash === setupTransaction.txHash),
+      );
+      if (existingIndex >= 0) {
+        setupTransactions[existingIndex] = {
+          ...setupTransactions[existingIndex],
+          ...setupTransaction,
+        };
+      } else {
+        setupTransactions.push(setupTransaction);
+      }
+      input.log?.info?.(
+        {
+          intentId: intent.id,
+          setupKind: setupTransaction.kind,
+          txHash: setupTransaction.txHash,
+          venue: intent.venue,
+        },
+        "Telegram trade setup transaction submitted",
+      );
+      await updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: input.db,
+        intentId: intent.id,
+        result: withReadinessRepair({ quote }),
+        status: "executing",
+      });
+    };
     const prepared = await trading.prepareTrade({
       intent: sharedIntent,
       quote,
+      onSetupTransactionSubmitted: recordSetupTransaction,
     });
     const preparedSnapshot = buildPreparedTradeSnapshot(prepared);
     const preparedRecorded = await updateIntentStatus({
@@ -3566,31 +3605,7 @@ export async function handleTelegramBotTradingCallback(
           "Telegram trade reached irreversible submit boundary",
         );
       },
-      onSetupTransactionSubmitted: async (setupTransaction) => {
-        if (
-          !setupTransactions.some(
-            (entry) => entry.txHash === setupTransaction.txHash,
-          )
-        ) {
-          setupTransactions.push(setupTransaction);
-        }
-        input.log?.info?.(
-          {
-            intentId: intent.id,
-            setupKind: setupTransaction.kind,
-            txHash: setupTransaction.txHash,
-            venue: intent.venue,
-          },
-          "Telegram trade setup transaction submitted",
-        );
-        await updateIntentStatus({
-          allowedStatuses: ["executing"],
-          db: input.db,
-          intentId: intent.id,
-          result: withReadinessRepair({ quote }),
-          status: "executing",
-        });
-      },
+      onSetupTransactionSubmitted: recordSetupTransaction,
       onSubmitted: recordSubmittedReference,
     });
     const { effects, persisted, postSubmitError, submitResult } = executed;
@@ -3772,6 +3787,36 @@ export async function handleTelegramBotTradingCallback(
             `${side} · ${formatUsd(amountUsd)}`,
             "The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.",
           ].join("\n"),
+        ),
+      });
+      return true;
+    }
+    if (
+      setupTransactions.some(
+        (transaction) => transaction.kind === "funding_router",
+      )
+    ) {
+      const unknownMessage =
+        "Funding was submitted and is being checked automatically. Do not retry yet.";
+      await updateIntentStatus({
+        allowedStatuses: ["executing"],
+        db: input.db,
+        errorCode: "funding_state_unknown",
+        errorMessage: unknownMessage,
+        intentId: intent.id,
+        result: withReadinessRepair({ error: normalized, venue: intent.venue }),
+        status: "reconcile_required",
+      });
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: unknownMessage,
+      });
+      await input.sendMessage({
+        chat_id: chatId,
+        parse_mode: "MarkdownV2",
+        text: escapeMarkdown(
+          "Funding status is being checked automatically. /trade_status will clear this trade after confirmation or revert; do not retry yet.",
         ),
       });
       return true;

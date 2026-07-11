@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
+import { env } from "./env.js";
 import {
   buildEmbeddedPolymarketConnectPayload,
   buildEmbeddedPolymarketConnectRequest,
@@ -241,6 +242,23 @@ const tests: TestCase[] = [
 
         assert.equal(request.id, "polymarket-deposit-wallet-batch");
       }
+    },
+  },
+  {
+    name: "embedded deposit wallet batch allows USDC.e funding-router approval",
+    run: () => {
+      const request = buildEmbeddedPolymarketTypedDataRequest({
+        context: walletContext,
+        typedData: buildDepositWalletBatchTypedData({
+          target: env.polymarketUsdceAddress,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("approve", [
+            env.polymarketFundingRouterAddress,
+            (BigInt(1) << BigInt(256)) - BigInt(1),
+          ]),
+        }),
+      });
+      assert.equal(request.id, "polymarket-typed-data-signature");
     },
   },
   {

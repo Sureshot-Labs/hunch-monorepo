@@ -63,6 +63,7 @@ export type PrivyServerSignerConfiguration = {
   exchangeAddresses: [string, string];
   policyId: string;
   policyMaxBuyUsd: number;
+  fundingRouterAddress: string;
 };
 
 const defaultInspectorDependencies: PrivySignerInspectorDependencies = {
@@ -75,6 +76,7 @@ const defaultInspectorDependencies: PrivySignerInspectorDependencies = {
 };
 
 type PolicyValidationResult = {
+  fundingMaxRaw?: bigint | null;
   issues: string[];
   valid: boolean;
 };
@@ -215,8 +217,89 @@ function coveredExchangeAddresses(input: {
   return new Set(values);
 }
 
+function hasExactFundingAbi(condition: Record<string, unknown>): boolean {
+  const abi = condition.abi;
+  if (!Array.isArray(abi) || abi.length !== 1 || !isRecord(abi[0])) {
+    return false;
+  }
+  const item = abi[0];
+  if (
+    item.type !== "function" ||
+    item.name !== "fund" ||
+    item.stateMutability !== "nonpayable" ||
+    !Array.isArray(item.inputs) ||
+    item.inputs.length !== 3
+  ) {
+    return false;
+  }
+  const inputs = item.inputs;
+  return ["expectedNonce", "totalAmount", "pUsdAmount"].every((name, index) => {
+    const parameter = inputs[index];
+    return (
+      isRecord(parameter) &&
+      parameter.name === name &&
+      parameter.type === "uint256"
+    );
+  });
+}
+
+function readExactFundingRuleCap(input: {
+  conditions: Record<string, unknown>[];
+  routerAddress: string;
+}): bigint | null {
+  const transactionConditions = [
+    ["chain_id", String(POLYMARKET_POLYGON_CHAIN_ID)],
+    ["to", input.routerAddress],
+    ["value", "0x0"],
+  ] as const;
+  if (
+    !transactionConditions.every(([field, value]) =>
+      hasExactCondition({
+        conditions: input.conditions,
+        field,
+        fieldSource: "ethereum_transaction",
+        value,
+      }),
+    )
+  ) {
+    return null;
+  }
+  const calldataConditions = input.conditions.filter(
+    (condition) => condition.field_source === "ethereum_calldata",
+  );
+  if (calldataConditions.length !== 2) return null;
+  const functionName = calldataConditions.find(
+    (condition) => condition.field === "function_name",
+  );
+  const totalAmount = calldataConditions.find(
+    (condition) => condition.field === "fund.totalAmount",
+  );
+  if (
+    !functionName ||
+    functionName.operator !== "eq" ||
+    !stringValues(functionName.value).some(
+      (value) => normalizeScalar(value) === "fund",
+    ) ||
+    !hasExactFundingAbi(functionName) ||
+    !totalAmount ||
+    totalAmount.operator !== "lte" ||
+    !hasExactFundingAbi(totalAmount)
+  ) {
+    return null;
+  }
+  const values = stringValues(totalAmount.value);
+  if (values.length !== 1) return null;
+  try {
+    const cap = BigInt(values[0] ?? "");
+    return cap > 0n ? cap : null;
+  } catch {
+    return null;
+  }
+}
+
 export function validatePolymarketBotPolicy(input: {
   exchangeAddresses: readonly string[];
+  fundingRouterAddress: string;
   maxBuyUsd: number;
   policy: PrivyPolicyMetadata;
 }): PolicyValidationResult {
@@ -226,6 +309,10 @@ export function validatePolymarketBotPolicy(input: {
   }
   if (!Number.isFinite(input.maxBuyUsd) || input.maxBuyUsd <= 0) {
     issues.push("Policy max buy must be positive.");
+  }
+  const normalizedFundingRouter = normalizeScalar(input.fundingRouterAddress);
+  if (!EVM_ADDRESS_RE.test(normalizedFundingRouter)) {
+    issues.push("Funding router address must be configured.");
   }
   const allowedExchangeAddresses = new Set(
     input.exchangeAddresses.map(normalizeScalar).filter(Boolean),
@@ -237,6 +324,8 @@ export function validatePolymarketBotPolicy(input: {
     Math.round(Math.max(0, input.maxBuyUsd) * 1_000_000),
   );
   let clobAuthCovered = false;
+  let fundingCovered = false;
+  let fundingMaxRaw: bigint | null = null;
   const directCoverage = new Set<string>();
   const depositCoverage = new Set<string>();
   const allowRules = input.policy.rules.filter(
@@ -247,18 +336,33 @@ export function validatePolymarketBotPolicy(input: {
     input.policy.rules.some(
       (rule) =>
         rule.action === "DENY" &&
-        (rule.method === "*" || rule.method === "eth_signTypedData_v4"),
+        (rule.method === "*" ||
+          rule.method === "eth_signTypedData_v4" ||
+          rule.method === "eth_sendTransaction"),
     )
   ) {
     issues.push("Policy contains a DENY rule that overlaps bot signing.");
   }
 
   for (const rule of allowRules) {
+    const conditions = readPolicyConditions(rule);
+    if (rule.method === "eth_sendTransaction") {
+      const ruleFundingMaxRaw = readExactFundingRuleCap({
+        conditions,
+        routerAddress: normalizedFundingRouter,
+      });
+      if (fundingCovered || ruleFundingMaxRaw == null) {
+        issues.push("Funding ALLOW rule is missing or unsafe.");
+      } else {
+        fundingCovered = true;
+        fundingMaxRaw = ruleFundingMaxRaw;
+      }
+      continue;
+    }
     if (rule.method !== "eth_signTypedData_v4") {
       issues.push(`Unsafe allowed method: ${String(rule.method)}.`);
       continue;
     }
-    const conditions = readPolicyConditions(rule);
     if (
       !hasExactCondition({
         conditions,
@@ -347,6 +451,7 @@ export function validatePolymarketBotPolicy(input: {
   }
 
   if (!clobAuthCovered) issues.push("Canonical ClobAuth rule is missing.");
+  if (!fundingCovered) issues.push("Canonical funding router rule is missing.");
   for (const exchangeAddress of allowedExchangeAddresses) {
     if (!directCoverage.has(exchangeAddress)) {
       issues.push(`Direct Order rule does not cover ${exchangeAddress}.`);
@@ -357,7 +462,73 @@ export function validatePolymarketBotPolicy(input: {
       );
     }
   }
-  return { issues, valid: issues.length === 0 };
+  return {
+    fundingMaxRaw: issues.length === 0 ? fundingMaxRaw : null,
+    issues,
+    valid: issues.length === 0,
+  };
+}
+
+const POLICY_FUNDING_CAP_CACHE_TTL_MS = 15_000;
+let policyFundingCapCache: {
+  expiresAt: number;
+  key: string;
+  value: Promise<bigint>;
+} | null = null;
+
+export async function resolvePolymarketBotPolicyFundingCapRaw(): Promise<bigint> {
+  const policyId = env.privyPolymarketBotBuyPolicyId.trim();
+  const fundingRouterAddress = env.polymarketFundingRouterAddress.trim();
+  const policyMaxBuyUsd = env.privyPolymarketBotBuyPolicyMaxUsd;
+  const exchangeAddresses = [
+    env.polymarketExchangeAddress,
+    env.polymarketNegRiskExchangeAddress,
+  ] as const;
+  if (!policyId || !fundingRouterAddress || policyMaxBuyUsd <= 0) {
+    throw new Error("Polymarket bot policy configuration is incomplete.");
+  }
+  const key = [
+    policyId,
+    fundingRouterAddress.toLowerCase(),
+    String(policyMaxBuyUsd),
+    ...exchangeAddresses.map((address) => address.toLowerCase()),
+  ].join("|");
+  const now = Date.now();
+  if (
+    policyFundingCapCache?.key === key &&
+    policyFundingCapCache.expiresAt > now
+  ) {
+    return policyFundingCapCache.value;
+  }
+
+  const value = (async () => {
+    const policy = await PrivyService.getPolicyMetadata(policyId);
+    const validation = validatePolymarketBotPolicy({
+      exchangeAddresses,
+      fundingRouterAddress,
+      maxBuyUsd: policyMaxBuyUsd,
+      policy,
+    });
+    if (
+      policy.id !== policyId ||
+      !validation.valid ||
+      validation.fundingMaxRaw == null
+    ) {
+      throw new Error("Configured Privy Polymarket policy is unsafe.");
+    }
+    return validation.fundingMaxRaw;
+  })();
+  policyFundingCapCache = {
+    expiresAt: now + POLICY_FUNDING_CAP_CACHE_TTL_MS,
+    key,
+    value,
+  };
+  try {
+    return await value;
+  } catch (error) {
+    if (policyFundingCapCache?.value === value) policyFundingCapCache = null;
+    throw error;
+  }
 }
 
 function normalizePublicKey(publicKey: string): string {
@@ -535,6 +706,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
     ],
     policyId: env.privyPolymarketBotBuyPolicyId,
     policyMaxBuyUsd: env.privyPolymarketBotBuyPolicyMaxUsd,
+    fundingRouterAddress: env.polymarketFundingRouterAddress,
   };
   const signerId = configuration.authorizationId.trim();
   const policyId = configuration.policyId.trim();
@@ -544,7 +716,8 @@ export async function inspectServerEvmWalletAuthorization(input: {
     !signerId ||
     !configuration.authorizationKey ||
     !policyId ||
-    policyMaxBuyUsd <= 0
+    policyMaxBuyUsd <= 0 ||
+    !configuration.fundingRouterAddress
   ) {
     return signerStatus({
       ...common,
@@ -685,6 +858,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
   }
   const policyValidation = validatePolymarketBotPolicy({
     exchangeAddresses: configuration.exchangeAddresses,
+    fundingRouterAddress: configuration.fundingRouterAddress,
     maxBuyUsd: policyMaxBuyUsd,
     policy,
   });
@@ -749,7 +923,8 @@ export function hasServerWalletClientConfig(): boolean {
     env.privyWalletAuthorizationId &&
     env.privyWalletAuthorizationKey &&
     env.privyPolymarketBotBuyPolicyId &&
-    env.privyPolymarketBotBuyPolicyMaxUsd > 0,
+    env.privyPolymarketBotBuyPolicyMaxUsd > 0 &&
+    env.polymarketFundingRouterAddress,
   );
 }
 

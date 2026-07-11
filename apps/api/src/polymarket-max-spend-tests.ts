@@ -15,6 +15,11 @@ import {
   polymarketAllowanceSatisfiesBuyApproval,
 } from "./services/polymarket-max-spend.js";
 import type { PolymarketFeePolicySnapshot } from "./services/polymarket-builder-fees.js";
+import {
+  buildPolymarketFundingPlan,
+  decodePolymarketFundingCalldata,
+  PolymarketFundingPlanError,
+} from "./services/polymarket-funding-router.js";
 
 type TestCase = {
   name: string;
@@ -23,6 +28,9 @@ type TestCase = {
 
 const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000";
+const SIGNER = "0x0000000000000000000000000000000000000011";
+const DEPOSIT = "0x0000000000000000000000000000000000000022";
+const ROUTER = "0x0000000000000000000000000000000000000033";
 
 const noFeePolicy: PolymarketFeePolicySnapshot = {
   venue: "polymarket",
@@ -457,6 +465,130 @@ const tests: TestCase[] = [
           negRiskAdapterConfigured: false,
         }),
         { missing: ["exchange", "negRiskExchange"], ok: false },
+      );
+    },
+  },
+  {
+    name: "funding planner creates one mixed router call for the exact shortfall",
+    run: () => {
+      const plan = buildPolymarketFundingPlan({
+        signer: SIGNER,
+        depositWallet: DEPOSIT,
+        routerAddress: ROUTER,
+        routerNonce: 7n,
+        requiredRaw: 1_060_000n,
+        depositPusdRaw: 100_000n,
+        depositUsdceRaw: 0n,
+        depositRouterUsdceAllowanceRaw: 0n,
+        depositLockedRaw: 20_000n,
+        signerPusdRaw: 400_000n,
+        signerLockedRaw: 50_000n,
+        signerUsdceRaw: 630_000n,
+        routerPusdAllowanceRaw: 350_000n,
+        routerUsdceAllowanceRaw: 630_000n,
+        fundingCapRaw: 2_200_000n,
+      });
+      assert.ok(plan);
+      assert.equal(plan.depositAvailableRaw, "80000");
+      assert.equal(plan.totalAmountRaw, "980000");
+      assert.equal(plan.pUsdAmountRaw, "350000");
+      assert.equal(plan.usdceAmountRaw, "630000");
+      assert.deepEqual(decodePolymarketFundingCalldata(plan.calldata), {
+        expectedNonce: 7n,
+        totalAmount: 980_000n,
+        pUsdAmount: 350_000n,
+      });
+    },
+  },
+  {
+    name: "funding planner returns no operation when deposit funds are sufficient",
+    run: () => {
+      assert.equal(
+        buildPolymarketFundingPlan({
+          signer: SIGNER,
+          depositWallet: DEPOSIT,
+          routerAddress: ROUTER,
+          routerNonce: 0n,
+          requiredRaw: 1_000_000n,
+          depositPusdRaw: 1_200_000n,
+          depositUsdceRaw: 0n,
+          depositRouterUsdceAllowanceRaw: 0n,
+          depositLockedRaw: 100_000n,
+          signerPusdRaw: 0n,
+          signerUsdceRaw: 0n,
+          routerPusdAllowanceRaw: 0n,
+          routerUsdceAllowanceRaw: 0n,
+          fundingCapRaw: 2_200_000n,
+        }),
+        null,
+      );
+    },
+  },
+  {
+    name: "funding planner uses deposit USDC.e before signer collateral",
+    run: () => {
+      const plan = buildPolymarketFundingPlan({
+        signer: SIGNER,
+        depositWallet: DEPOSIT,
+        routerAddress: ROUTER,
+        routerNonce: 3n,
+        requiredRaw: 1_060_000n,
+        depositPusdRaw: 60_000n,
+        depositUsdceRaw: 700_000n,
+        depositRouterUsdceAllowanceRaw: 700_000n,
+        signerPusdRaw: 200_000n,
+        signerUsdceRaw: 100_000n,
+        routerPusdAllowanceRaw: 200_000n,
+        routerUsdceAllowanceRaw: 100_000n,
+        fundingCapRaw: 2_200_000n,
+      });
+      assert.ok(plan);
+      assert.equal(plan.totalAmountRaw, "1000000");
+      assert.equal(plan.depositUsdceAmountRaw, "700000");
+      assert.equal(plan.pUsdAmountRaw, "200000");
+      assert.equal(plan.signerUsdceAmountRaw, "100000");
+      assert.equal(plan.usdceAmountRaw, "800000");
+    },
+  },
+  {
+    name: "funding planner fails closed on cap, balance, and allowance",
+    run: () => {
+      const base = {
+        signer: SIGNER,
+        depositWallet: DEPOSIT,
+        routerAddress: ROUTER,
+        routerNonce: 0n,
+        requiredRaw: 1_060_000n,
+        depositPusdRaw: 0n,
+        depositUsdceRaw: 0n,
+        depositRouterUsdceAllowanceRaw: 0n,
+        signerPusdRaw: 500_000n,
+        signerUsdceRaw: 560_000n,
+        routerPusdAllowanceRaw: 500_000n,
+        routerUsdceAllowanceRaw: 560_000n,
+        fundingCapRaw: 2_200_000n,
+      };
+      assert.throws(
+        () => buildPolymarketFundingPlan({ ...base, fundingCapRaw: 1n }),
+        (error) =>
+          error instanceof PolymarketFundingPlanError &&
+          error.code === "cap_exceeded",
+      );
+      assert.throws(
+        () => buildPolymarketFundingPlan({ ...base, signerUsdceRaw: 1n }),
+        (error) =>
+          error instanceof PolymarketFundingPlanError &&
+          error.code === "insufficient_balance",
+      );
+      assert.throws(
+        () =>
+          buildPolymarketFundingPlan({
+            ...base,
+            routerUsdceAllowanceRaw: 1n,
+          }),
+        (error) =>
+          error instanceof PolymarketFundingPlanError &&
+          error.code === "allowance_missing",
       );
     },
   },

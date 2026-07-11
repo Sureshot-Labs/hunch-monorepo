@@ -2734,6 +2734,92 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "venue reconciliation releases a funding-only executing crash window for safe retry",
+    run: async () => {
+      const updates: Array<{ params: unknown[]; sql: string }> = [];
+      const row = {
+        id: "00000000-0000-4000-8000-000000000001",
+        telegram_user_id: "999",
+        user_id: "user-1",
+        authorization_id: "authorization-1",
+        venue: "polymarket",
+        market_id: "market-1",
+        event_id: "event-1",
+        side: "YES",
+        amount_usd: "1",
+        status: "executing",
+        prepared_snapshot: null,
+        quote_snapshot: {},
+        result: {
+          setupTransactions: [
+            {
+              kind: "funding_router",
+              referenceId: "hunch:tgfund:test",
+              transactionId: "privy-transaction-1",
+              txHash: null,
+            },
+          ],
+        },
+        venue_order_id: null,
+        tx_signature: null,
+        wallet_address: "0x0000000000000000000000000000000000000001",
+        wallet_chain: "ethereum",
+        privy_user_id: "privy-1",
+        privy_wallet_id: "wallet-1",
+        limits: {},
+        venue_market_id: "venue-market-1",
+        market_title: "Market",
+        market_status: "ACTIVE",
+        outcomes: JSON.stringify(["YES", "NO"]),
+        market_metadata: {},
+        updated_at: new Date(),
+      };
+      const db = {
+        query: async () => ({ rows: [{ ready: true }] }),
+        connect: async () => ({
+          query: async (sql: string, params: unknown[] = []) => {
+            if (sql.includes("pg_try_advisory_xact_lock")) {
+              return { rows: [{ locked: true }] };
+            }
+            if (sql.includes("FROM telegram_trade_intents ti")) {
+              return { rows: [row] };
+            }
+            if (sql.includes("UPDATE telegram_trade_intents")) {
+              updates.push({ params, sql });
+            }
+            return { rowCount: 1, rows: [] };
+          },
+          release: () => undefined,
+        }),
+      };
+      const result = await reconcileTelegramVenueIntents(
+        db as never,
+        {} as never,
+        { dryRun: false },
+        {
+          inspectVenueSubmit: async () => ({
+            state: "funding_confirmed",
+            submitResult: null,
+          }),
+        },
+      );
+      assert.equal(result.failedVerified, 1);
+      assert.equal(result.items[0]?.venueState, "funding_confirmed");
+      assert.equal(updates.length, 1);
+      assert.match(updates[0]?.sql ?? "", /SET status = 'failed'/);
+      assert.match(updates[0]?.sql ?? "", /order_id IS NULL/);
+      assert.match(updates[0]?.sql ?? "", /execution_id IS NULL/);
+      assert.equal(
+        updates[0]?.params[1],
+        "funding_confirmed_order_not_submitted",
+      );
+      assert.deepEqual(updates[0]?.params[4], [
+        "executing",
+        "reconcile_required",
+      ]);
+    },
+  },
+  {
     name: "venue reconciliation fails a stored definitive rejection once venue confirms not found",
     run: async () => {
       const statements: string[] = [];

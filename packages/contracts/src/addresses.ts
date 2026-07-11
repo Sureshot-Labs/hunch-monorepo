@@ -34,6 +34,10 @@ export const POLYMARKET_COLLATERAL_OFFRAMP: Record<"polygon", Address> = {
   polygon: "0x2957922Eb93258b93368531d39fAcCA3B4dC5854",
 };
 
+export const POLYMARKET_FUNDING_ROUTER: Record<"polygon", Address> = {
+  polygon: "0x0fEF62E1CD0600C132070855A45443852940EE72",
+};
+
 export const POLYMARKET_CONDITIONAL_TOKENS: Record<"polygon", Address> = {
   polygon: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
 };

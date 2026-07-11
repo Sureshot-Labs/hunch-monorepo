@@ -52,6 +52,8 @@ const policyExchangeAddresses = [
   "0x0000000000000000000000000000000000000001",
   "0x0000000000000000000000000000000000000002",
 ] as const;
+const policyFundingRouterAddress = "0x0000000000000000000000000000000000000003";
+const policyFundingMaxRaw = 2_200_000n;
 
 function typedMessageCondition(input: {
   field: string;
@@ -148,6 +150,70 @@ function buildValidPolymarketBotPolicy(): PrivyPolicyMetadata {
         method: "eth_signTypedData_v4",
         name: "Deposit wallet order",
       },
+      {
+        action: "ALLOW",
+        conditions: [
+          {
+            field: "chain_id",
+            field_source: "ethereum_transaction",
+            operator: "eq",
+            value: "137",
+          },
+          {
+            field: "to",
+            field_source: "ethereum_transaction",
+            operator: "eq",
+            value: policyFundingRouterAddress,
+          },
+          {
+            field: "value",
+            field_source: "ethereum_transaction",
+            operator: "eq",
+            value: "0x0",
+          },
+          {
+            abi: [
+              {
+                type: "function",
+                name: "fund",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "expectedNonce", type: "uint256" },
+                  { name: "totalAmount", type: "uint256" },
+                  { name: "pUsdAmount", type: "uint256" },
+                ],
+                outputs: [],
+              },
+            ],
+            field: "function_name",
+            field_source: "ethereum_calldata",
+            operator: "eq",
+            value: "fund",
+          },
+          {
+            abi: [
+              {
+                type: "function",
+                name: "fund",
+                stateMutability: "nonpayable",
+                inputs: [
+                  { name: "expectedNonce", type: "uint256" },
+                  { name: "totalAmount", type: "uint256" },
+                  { name: "pUsdAmount", type: "uint256" },
+                ],
+                outputs: [],
+              },
+            ],
+            field: "fund.totalAmount",
+            field_source: "ethereum_calldata",
+            operator: "lte",
+            value: "2200000",
+          },
+        ],
+        id: "funding-router",
+        method: "eth_sendTransaction",
+        name: "Funding router",
+      },
     ],
   };
 }
@@ -209,14 +275,27 @@ const tests: TestCase[] = [
     name: "Polymarket bot policy accepts only the canonical Polygon BUY surface",
     run: () => {
       const validPolicy = buildValidPolymarketBotPolicy();
-      assert.equal(
-        validatePolymarketBotPolicy({
-          exchangeAddresses: policyExchangeAddresses,
-          maxBuyUsd: 2,
-          policy: validPolicy,
-        }).valid,
-        true,
-      );
+      const validation = validatePolymarketBotPolicy({
+        exchangeAddresses: policyExchangeAddresses,
+        fundingRouterAddress: policyFundingRouterAddress,
+        maxBuyUsd: 2,
+        policy: validPolicy,
+      });
+      assert.equal(validation.valid, true);
+      assert.equal(validation.fundingMaxRaw, policyFundingMaxRaw);
+
+      const raisedFundingPolicy = structuredClone(validPolicy);
+      const fundingConditions = raisedFundingPolicy.rules[3]?.conditions;
+      assert.ok(Array.isArray(fundingConditions));
+      (fundingConditions[4] as Record<string, unknown>).value = "50000000";
+      const raisedValidation = validatePolymarketBotPolicy({
+        exchangeAddresses: policyExchangeAddresses,
+        fundingRouterAddress: policyFundingRouterAddress,
+        maxBuyUsd: 2,
+        policy: raisedFundingPolicy,
+      });
+      assert.equal(raisedValidation.valid, true);
+      assert.equal(raisedValidation.fundingMaxRaw, 50_000_000n);
 
       for (const mutate of [
         (policy: PrivyPolicyMetadata) => {
@@ -257,6 +336,18 @@ const tests: TestCase[] = [
           }
         },
         (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[3]?.conditions;
+          if (Array.isArray(conditions) && conditions[3]) {
+            (conditions[3] as Record<string, unknown>).value = "wrap";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[3]?.conditions;
+          if (Array.isArray(conditions) && conditions[4]) {
+            (conditions[4] as Record<string, unknown>).field = "totalAmount";
+          }
+        },
+        (policy: PrivyPolicyMetadata) => {
           policy.rules.push({
             action: "DENY",
             conditions: [],
@@ -271,6 +362,7 @@ const tests: TestCase[] = [
         assert.equal(
           validatePolymarketBotPolicy({
             exchangeAddresses: policyExchangeAddresses,
+            fundingRouterAddress: policyFundingRouterAddress,
             maxBuyUsd: 2,
             policy: unsafePolicy,
           }).valid,
@@ -297,6 +389,7 @@ const tests: TestCase[] = [
         exchangeAddresses: [...policyExchangeAddresses],
         policyId: "policy-1",
         policyMaxBuyUsd: 2,
+        fundingRouterAddress: policyFundingRouterAddress,
       };
       const walletAddress = "0x0000000000000000000000000000000000000010";
       let additionalSigners: Array<{
@@ -2188,6 +2281,58 @@ const tests: TestCase[] = [
       await assert.rejects(
         trading.prepareTrade({ intent, quote: null }),
         /Market not found/,
+      );
+
+      const executionSource = readFileSync(
+        resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
+        "utf8",
+      );
+      const prepareBlock = sourceSlice(
+        executionSource,
+        "async function prepareTrade(",
+        "function extractPolymarketMessage",
+      );
+      const preflightIndex = prepareBlock.indexOf(
+        "assertPolymarketPreparedFunds",
+      );
+      const fundingIndex = prepareBlock.indexOf(
+        "executeServerEmbeddedEthereumTransaction",
+      );
+      const builderValidationIndex = prepareBlock.indexOf(
+        "validatePolymarketOrderBuilderCodeForConfig",
+      );
+      assert.notEqual(preflightIndex, -1);
+      assert.notEqual(fundingIndex, -1);
+      assert.notEqual(builderValidationIndex, -1);
+      assert.ok(
+        preflightIndex < fundingIndex,
+        "Polymarket order/funds preflight must run before router funding",
+      );
+      assert.ok(
+        builderValidationIndex < fundingIndex,
+        "Polymarket builder validation must run before router funding",
+      );
+      const accountBlock = sourceSlice(
+        executionSource,
+        "export async function fetchPolymarketAccountRoute",
+        "export async function syncPolymarketOrdersRoute",
+      );
+      assert.doesNotMatch(
+        accountBlock,
+        /resolvePolymarketBotPolicyFundingCapRaw|fundingMaxRaw/,
+      );
+      const quoteRouteBlock = sourceSlice(
+        executionSource,
+        "export async function quotePolymarketOrderRoute",
+        "export async function derivePolymarketFundersRoute",
+      );
+      assert.doesNotMatch(quoteRouteBlock, /fundingCapRaw:/);
+
+      const envSource = readFileSync(resolve(apiSrcDir, "env.ts"), "utf8");
+      assert.match(envSource, /0x0fEF62E1CD0600C132070855A45443852940EE72/);
+      assert.match(
+        envSource,
+        /POLYMARKET_FUNDING_ROUTER_ADDRESS must be the verified immutable router/,
       );
     },
   },

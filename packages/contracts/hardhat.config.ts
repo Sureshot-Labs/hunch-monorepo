@@ -37,10 +37,15 @@ const polygonDeployerKey = normalizeHexPrivateKey(
 );
 
 const networks: HardhatUserConfig["networks"] = {};
-if (polygonRpcUrl && polygonDeployerKey) {
+if (polygonRpcUrl && process.env.POLYGON_FORK === "1") {
+  networks.hardhat = {
+    forking: { url: polygonRpcUrl },
+  };
+}
+if (polygonRpcUrl) {
   networks.polygon = {
     url: polygonRpcUrl,
-    accounts: [polygonDeployerKey],
+    accounts: polygonDeployerKey ? [polygonDeployerKey] : [],
   };
 }
 
