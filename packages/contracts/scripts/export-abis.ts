@@ -46,7 +46,7 @@ function main() {
     }
     const artifact = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
     const outPath = path.join(outDir, entry.outFile);
-    fs.writeFileSync(outPath, JSON.stringify(artifact.abi, null, 2));
+    fs.writeFileSync(outPath, `${JSON.stringify(artifact.abi, null, 2)}\n`);
   }
 
   console.log(`Exported ${exportsList.length} ABI files to ${outDir}`);

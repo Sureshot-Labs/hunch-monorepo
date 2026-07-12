@@ -1,3 +1,5 @@
+import { buildTelegramTradeProgressMessage } from "./telegram-bot-trading-presentation.js";
+
 export type TelegramBotTradingClientButton =
   | { text: string; callback_data: string }
   | { text: string; url: string };
@@ -19,6 +21,13 @@ export type TelegramBotTradingClientCallbackInput = {
     text?: string;
   }) => Promise<unknown>;
   appBaseUrl: string;
+  editMessageText?: (input: {
+    chat_id: string;
+    message_id: number;
+    parse_mode?: "MarkdownV2";
+    reply_markup?: TelegramBotTradingClientReplyMarkup;
+    text: string;
+  }) => Promise<unknown>;
   callbackQuery: {
     data?: string;
     from?: { id?: number };
@@ -78,15 +87,23 @@ const DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS = 120_000;
 const EXACT_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export function parseTelegramBotTradingCallbackData(
-  data: string | undefined,
-): { intentId: string; type: "buy" | "cancel" | "confirm" } | null {
+export function parseTelegramBotTradingCallbackData(data: string | undefined): {
+  intentId: string;
+  type: "buy" | "sell" | "redeem" | "cancel" | "confirm";
+} | null {
   if (!data) return null;
   const parts = data.split(":");
   if (parts.length !== 3) return null;
   const [prefix, type, intentId] = parts;
   if (prefix !== TELEGRAM_BOT_TRADING_CALLBACK_PREFIX) return null;
-  if (type !== "buy" && type !== "confirm" && type !== "cancel") return null;
+  if (
+    type !== "buy" &&
+    type !== "sell" &&
+    type !== "redeem" &&
+    type !== "confirm" &&
+    type !== "cancel"
+  )
+    return null;
   if (!EXACT_UUID_RE.test(intentId ?? "")) return null;
   return { type, intentId };
 }
@@ -232,7 +249,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
         return true;
       }
       const path =
-        parsed.type === "buy"
+        parsed.type === "buy" ||
+        parsed.type === "sell" ||
+        parsed.type === "redeem"
           ? "/internal/telegram-bot/trading/preview-intent"
           : parsed.type === "cancel"
             ? `/internal/telegram-bot/trading/intents/${parsed.intentId}/cancel`
@@ -243,6 +262,19 @@ export function createTelegramBotTradingInternalApiClient(input: {
           callbackQueryId: callbackInput.callbackQuery.id,
           text: "Processing trade…",
         });
+        const chatId = callbackInput.callbackQuery.message?.chat?.id;
+        const messageId = callbackInput.callbackQuery.message?.message_id;
+        if (chatId != null && messageId != null) {
+          await callbackInput
+            .editMessageText?.({
+              chat_id: String(chatId),
+              message_id: messageId,
+              parse_mode: "MarkdownV2",
+              reply_markup: { inline_keyboard: [] },
+              text: buildTelegramTradeProgressMessage("processing"),
+            })
+            .catch(() => undefined);
+        }
       }
       let result: CapturedTelegramBotTradingCallbackResult;
       try {
@@ -259,14 +291,30 @@ export function createTelegramBotTradingInternalApiClient(input: {
           parsed.type === "confirm" &&
           error instanceof TelegramBotTradingInternalApiTimeoutError
         ) {
-          const text =
-            "Trade status is unknown. Use /trade_status or open Hunch before retrying.";
+          const text = buildTelegramTradeProgressMessage("resolving");
           const chatId = callbackInput.callbackQuery.message?.chat?.id;
+          const messageId = callbackInput.callbackQuery.message?.message_id;
           if (chatId != null) {
-            await callbackInput.sendMessage({
-              chat_id: String(chatId),
-              text,
-            });
+            const edited =
+              messageId != null
+                ? await callbackInput
+                    .editMessageText?.({
+                      chat_id: String(chatId),
+                      message_id: messageId,
+                      parse_mode: "MarkdownV2",
+                      reply_markup: { inline_keyboard: [] },
+                      text,
+                    })
+                    .then(() => true)
+                    .catch(() => false)
+                : false;
+            if (!edited) {
+              await callbackInput.sendMessage({
+                chat_id: String(chatId),
+                parse_mode: "MarkdownV2",
+                text,
+              });
+            }
           }
           return true;
         }
@@ -287,7 +335,33 @@ export function createTelegramBotTradingInternalApiClient(input: {
           await callbackInput.answerCallbackQuery(answer);
         }
       }
-      for (const message of result.messages) {
+      const terminalMessage = confirmAcknowledged
+        ? result.messages.at(-1)
+        : null;
+      const chatId = callbackInput.callbackQuery.message?.chat?.id;
+      const messageId = callbackInput.callbackQuery.message?.message_id;
+      let terminalEdited = false;
+      if (terminalMessage && chatId != null && messageId != null) {
+        terminalEdited =
+          (await callbackInput
+            .editMessageText?.({
+              chat_id: String(chatId),
+              message_id: messageId,
+              parse_mode: terminalMessage.parse_mode,
+              reply_markup: terminalMessage.reply_markup,
+              text: terminalMessage.text,
+            })
+            .then(() => true)
+            .catch(() => false)) ?? false;
+      }
+      for (const [index, message] of result.messages.entries()) {
+        if (
+          terminalEdited &&
+          confirmAcknowledged &&
+          index === result.messages.length - 1
+        ) {
+          continue;
+        }
         await callbackInput.sendMessage(message);
       }
       return result.handled;

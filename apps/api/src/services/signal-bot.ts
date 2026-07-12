@@ -242,6 +242,14 @@ export type SignalBotTelegramClient = {
     offset: number | null;
     timeoutSec: number;
   }): Promise<TelegramBotUpdate[]>;
+  editMessageText?(input: {
+    chat_id: string;
+    disable_web_page_preview: boolean;
+    message_id: number;
+    parse_mode: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  }): Promise<TelegramSendResult>;
   sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
 };
 
@@ -4500,6 +4508,38 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       }),
     });
     return response.json().catch(() => null);
+  }
+
+  async editMessageText(input: {
+    chat_id: string;
+    disable_web_page_preview: boolean;
+    message_id: number;
+    parse_mode: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  }): Promise<TelegramSendResult> {
+    const response = await fetch(`${this.baseUrl}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const payload = (await response.json().catch(() => null)) as {
+      description?: string;
+      ok?: boolean;
+      result?: { message_id?: number };
+    } | null;
+    if (response.ok && payload?.ok) {
+      const messageId = payload.result?.message_id;
+      return {
+        messageId: typeof messageId === "number" ? messageId : input.message_id,
+        ok: true,
+      };
+    }
+    return {
+      error: "other",
+      message: payload?.description ?? `HTTP ${response.status}`,
+      ok: false,
+    };
   }
 
   async sendMessage(

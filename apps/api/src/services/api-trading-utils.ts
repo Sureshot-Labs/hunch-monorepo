@@ -37,12 +37,13 @@ export type PreparedPayloadBase = {
 export function createCapability(input: {
   authorizationMode: "embedded_privy_evm" | "embedded_privy_solana";
   supportsExecutionSync?: boolean;
+  supportsSell?: boolean;
   venue: SupportedBotTradingVenue;
 }): VenueTradingCapabilities {
   return {
     venue: input.venue,
     supportsBuy: true,
-    supportsSell: false,
+    supportsSell: input.supportsSell ?? false,
     supportsCancel: false,
     supportsOrderSync: false,
     supportsPositionSync: false,
@@ -197,6 +198,25 @@ export function amountUsd(intent: TradeIntent): number {
     throw tradingError({
       code: "invalid_trade_request",
       message: "Trade amount must be positive.",
+      venue: intent.venue,
+    });
+  }
+  return amount;
+}
+
+export function amountShares(intent: TradeIntent): number {
+  if (intent.amount.type !== "shares") {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Telegram bot sells require an exact share amount.",
+      venue: intent.venue,
+    });
+  }
+  const amount = Number(intent.amount.value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Sell shares must be positive.",
       venue: intent.venue,
     });
   }

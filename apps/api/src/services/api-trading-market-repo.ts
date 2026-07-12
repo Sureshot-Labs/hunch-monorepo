@@ -19,6 +19,7 @@ export type ApiTradeMarket = {
   best_bid: string | null;
   clob_token_ids: string | null;
   close_time: Date | null;
+  condition_id?: string | null;
   event_id: string;
   event_end_time: Date | null;
   event_title: string | null;
@@ -27,7 +28,11 @@ export type ApiTradeMarket = {
   is_initialized: boolean | null;
   last_price: string | null;
   metadata: unknown;
+  neg_risk?: boolean | null;
+  neg_risk_parent_condition_id?: string | null;
+  neg_risk_request_id?: string | null;
   outcomes: string | null;
+  question_id?: string | null;
   slug: string | null;
   status: string;
   title: string;
@@ -61,6 +66,11 @@ const TRADE_MARKET_SELECT_SQL = `SELECT
          ELSE m.token_no
        END AS token_no,
        m.clob_token_ids,
+       coalesce(m.condition_id, pm.condition_id) AS condition_id,
+       pm.neg_risk AS neg_risk,
+       pm_parent.condition_id AS neg_risk_parent_condition_id,
+       pm.neg_risk_request_id AS neg_risk_request_id,
+       pm.question_id AS question_id,
        pm.accepting_orders AS accepting_orders,
        m.close_time,
        m.expiration_time,
@@ -71,7 +81,9 @@ const TRADE_MARKET_SELECT_SQL = `SELECT
      LEFT JOIN unified_events e ON e.id = m.event_id
      LEFT JOIN polymarket_markets pm
        ON pm.id = m.venue_market_id
-      AND m.venue = 'polymarket'`;
+      AND m.venue = 'polymarket'
+     LEFT JOIN polymarket_markets pm_parent
+       ON pm_parent.question_id = coalesce(pm.neg_risk_market_id, pm.raw->>'negRiskMarketID')`;
 
 export async function findTradeMarketById(
   db: DbQuery,

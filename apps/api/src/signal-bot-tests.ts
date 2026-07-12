@@ -78,6 +78,11 @@ import type {
   TradingVenue,
 } from "./services/trading-types.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
+import {
+  buildTelegramTradeProgressMessage,
+  escapeTelegramMarkdownV2 as escapeTradingMarkdownV2,
+  formatTelegramTtl,
+} from "./services/telegram-bot-trading-presentation.js";
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 
@@ -991,6 +996,25 @@ function decodeStartAppPayload(startParam: string): string {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "Telegram trading presentation escapes dynamic text and formats progress",
+    run: () => {
+      assert.equal(
+        escapeTradingMarkdownV2("Market_[x]."),
+        "Market\\_\\[x\\]\\.",
+      );
+      assert.equal(formatTelegramTtl(120), "2 minutes");
+      assert.match(
+        buildTelegramTradeProgressMessage("processing"),
+        /Processing trade/,
+      );
+      assert.match(
+        buildTelegramTradeProgressMessage("resolving"),
+        /checking automatically/,
+      );
+      assert.match(buildTelegramTradeProgressMessage("resolving"), /\\\./);
+    },
+  },
+  {
     name: "prepared trade snapshots keep only redacted recovery data",
     run: () => {
       const venues: TradingVenue[] = ["polymarket", "limitless", "kalshi"];
@@ -1510,7 +1534,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(handled, true);
         assert.equal(answers[0]?.showAlert, undefined);
         assert.equal(answers[0]?.text, "Processing trade…");
-        assert.match(messages[0]?.text ?? "", /before retrying/i);
+        assert.match(messages[0]?.text ?? "", /checking automatically/i);
+        assert.match(messages[0]?.text ?? "", /do not retry this market/i);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -4165,6 +4190,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let disableCount = 0;
       const db = {
         query: async (sql: string) => {
+          if (sql.includes("runtime_policies")) {
+            return { rowCount: 0, rows: [] };
+          }
           if (sql.includes("UPDATE telegram_bot_trading_authorizations")) {
             disableCount += 1;
             return { rowCount: 1, rows: [] };
@@ -6157,7 +6185,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
       ]);
       assert.match(telegram.callbackAnswers[0]?.text ?? "", /trade failed/i);
-      assert.match(telegram.messages[0]?.text ?? "", /could not be validated/i);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /before a confirmed venue submission/i,
+      );
     },
   },
   {
@@ -6444,7 +6475,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "signal bot trading policy preserves explicitly disabled buy actions",
+    name: "signal bot trading policy preserves explicitly configured actions",
     run: () => {
       const emptyActions = normalizeSignalBotPolicy({
         tradingEnabled: true,
@@ -6468,7 +6499,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         intentTtlSec: 120,
         requireConfirmation: true,
       });
-      assert.deepEqual(sellOnlyActions.tradingActions, []);
+      assert.deepEqual(sellOnlyActions.tradingActions, ["sell"]);
       assert.equal(sellOnlyActions.requireConfirmation, true);
 
       const buyActions = normalizeSignalBotPolicy({
@@ -6505,7 +6536,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         intentTtlSec: 120,
         requireConfirmation: false,
       });
-      assert.deepEqual(buyAndSellActions.tradingActions, ["buy"]);
+      assert.deepEqual(buyAndSellActions.tradingActions, ["buy", "sell"]);
       assert.equal(buyAndSellActions.requireConfirmation, true);
     },
   },

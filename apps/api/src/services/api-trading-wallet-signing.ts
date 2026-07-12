@@ -18,7 +18,12 @@ import {
   POLYMARKET_POLYGON_CHAIN_ID,
   POLYMARKET_TYPED_DATA_SIGN_TYPES,
 } from "./polymarket-signing-schema.js";
-import type { TradeIntent, TradingVenue } from "./trading-types.js";
+import {
+  type DepositWalletBatchTypedData,
+  POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES,
+  validateCanonicalRedemptionBatch,
+} from "./polymarket-deposit-wallet-relayer.js";
+import type { TradeIntent, TradeSide, TradingVenue } from "./trading-types.js";
 import { tradingError } from "./api-trading-utils.js";
 
 export type PrivySignerState =
@@ -64,6 +69,9 @@ export type PrivyServerSignerConfiguration = {
   policyId: string;
   policyMaxBuyUsd: number;
   fundingRouterAddress: string;
+  builderCode?: string;
+  sellPolicyId?: string;
+  redeemPolicyId?: string;
 };
 
 const defaultInspectorDependencies: PrivySignerInspectorDependencies = {
@@ -131,6 +139,24 @@ function hasExactCondition(input: {
   }).includes(normalizeScalar(input.value));
 }
 
+function hasExactZeroCondition(input: {
+  conditions: Record<string, unknown>[];
+  field: string;
+  fieldSource: string;
+}): boolean {
+  const values = conditionValues({ ...input, operators: ["eq"] });
+  return (
+    values.length === 1 &&
+    (() => {
+      try {
+        return BigInt(values[0] ?? "") === 0n;
+      } catch {
+        return false;
+      }
+    })()
+  );
+}
+
 function normalizeTypedDataFields(value: unknown): TypedDataField[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((field) => {
@@ -158,14 +184,16 @@ function fieldsEqual(
 
 function hasTypedDataSchema(input: {
   conditions: Record<string, unknown>[];
-  primaryType: "ClobAuth" | "Order" | "TypedDataSign";
+  primaryType: "Batch" | "ClobAuth" | "Order" | "TypedDataSign";
 }): boolean {
   const expectedTypes: Record<string, readonly TypedDataField[]> =
-    input.primaryType === "ClobAuth"
-      ? POLYMARKET_AUTH_TYPES
-      : input.primaryType === "Order"
-        ? POLYMARKET_ORDER_TYPES
-        : POLYMARKET_TYPED_DATA_SIGN_TYPES;
+    input.primaryType === "Batch"
+      ? POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES
+      : input.primaryType === "ClobAuth"
+        ? POLYMARKET_AUTH_TYPES
+        : input.primaryType === "Order"
+          ? POLYMARKET_ORDER_TYPES
+          : POLYMARKET_TYPED_DATA_SIGN_TYPES;
   return input.conditions.some((condition) => {
     if (condition.field_source !== "ethereum_typed_data_message") return false;
     const typedData = condition.typed_data;
@@ -469,6 +497,193 @@ export function validatePolymarketBotPolicy(input: {
   };
 }
 
+export function validatePolymarketBotSellPolicy(input: {
+  builderCode: string;
+  exchangeAddresses: readonly string[];
+  policy: PrivyPolicyMetadata;
+}): PolicyValidationResult {
+  const issues: string[] = [];
+  const allowedExchangeAddresses = new Set(
+    input.exchangeAddresses.map(normalizeScalar).filter(Boolean),
+  );
+  const builderCode = normalizeScalar(input.builderCode);
+  if (!/^0x[a-f0-9]{64}$/.test(builderCode)) {
+    issues.push("SELL policy requires the canonical Hunch builder code.");
+  }
+  if (input.policy.chainType !== "ethereum") {
+    issues.push("Policy chain type must be ethereum (EVM). ");
+  }
+  const coverage = new Set<string>();
+  const allowRules = input.policy.rules.filter(
+    (rule) => rule.action === "ALLOW",
+  );
+  if (allowRules.length === 0) issues.push("Policy has no ALLOW rules.");
+  for (const rule of allowRules) {
+    if (rule.method !== "eth_signTypedData_v4") {
+      issues.push(`Unsafe allowed method: ${String(rule.method)}.`);
+      continue;
+    }
+    const conditions = readPolicyConditions(rule);
+    if (
+      !hasExactCondition({
+        conditions,
+        field: "chain_id",
+        fieldSource: "ethereum_typed_data_domain",
+        value: String(POLYMARKET_POLYGON_CHAIN_ID),
+      }) ||
+      !hasTypedDataSchema({ conditions, primaryType: "TypedDataSign" })
+    ) {
+      issues.push(
+        "SELL rule must use canonical DepositWallet typed data on Polygon.",
+      );
+      continue;
+    }
+    const exchanges = coveredExchangeAddresses({
+      allowedExchangeAddresses,
+      conditions,
+    });
+    if (!exchanges) {
+      issues.push("SELL rule has an unsafe exchange allowlist.");
+      continue;
+    }
+    if (
+      !hasExactCondition({
+        conditions,
+        field: "contents.side",
+        fieldSource: "ethereum_typed_data_message",
+        value: "1",
+      }) ||
+      !hasExactCondition({
+        conditions,
+        field: "contents.signatureType",
+        fieldSource: "ethereum_typed_data_message",
+        value: "3",
+      }) ||
+      !hasExactCondition({
+        conditions,
+        field: "contents.builder",
+        fieldSource: "ethereum_typed_data_message",
+        value: builderCode,
+      })
+    ) {
+      issues.push(
+        "SELL rule must require side 1, signatureType 3 and the Hunch builder.",
+      );
+      continue;
+    }
+    for (const exchange of exchanges) coverage.add(exchange);
+  }
+  if (
+    input.policy.rules.some(
+      (rule) => rule.action === "ALLOW" && rule.method === "*",
+    )
+  ) {
+    issues.push("SELL policy contains a wildcard ALLOW rule.");
+  }
+  if (
+    input.policy.rules.some(
+      (rule) =>
+        rule.action === "DENY" &&
+        (rule.method === "*" || rule.method === "eth_signTypedData_v4"),
+    )
+  ) {
+    issues.push("SELL policy contains an overlapping DENY rule.");
+  }
+  for (const exchange of allowedExchangeAddresses) {
+    if (!coverage.has(exchange)) {
+      issues.push(`Deposit-wallet SELL rule does not cover ${exchange}.`);
+    }
+  }
+  return { issues, valid: issues.length === 0 };
+}
+
+export function validatePolymarketBotRedeemPolicy(input: {
+  adapterAddresses: readonly string[];
+  policy: PrivyPolicyMetadata;
+}): PolicyValidationResult {
+  const issues: string[] = [];
+  const allowedAdapters = new Set(
+    input.adapterAddresses.map(normalizeScalar).filter(Boolean),
+  );
+  if (input.policy.chainType !== "ethereum") {
+    issues.push("Policy chain type must be ethereum (EVM). ");
+  }
+  if (
+    allowedAdapters.size !== 2 ||
+    [...allowedAdapters].some((adapter) => !EVM_ADDRESS_RE.test(adapter))
+  ) {
+    issues.push("Canonical redemption adapters must be configured.");
+  }
+  const allowRules = input.policy.rules.filter(
+    (rule) => rule.action === "ALLOW",
+  );
+  if (allowRules.length === 0) issues.push("REDEEM policy has no ALLOW rule.");
+  const coveredAdapters = new Set<string>();
+  for (const rule of allowRules) {
+    if (rule.method !== "eth_signTypedData_v4") {
+      issues.push("REDEEM policy must allow only eth_signTypedData_v4.");
+      continue;
+    }
+    const conditions = readPolicyConditions(rule);
+    if (
+      !hasExactCondition({
+        conditions,
+        field: "chain_id",
+        fieldSource: "ethereum_typed_data_domain",
+        value: String(POLYMARKET_POLYGON_CHAIN_ID),
+      }) ||
+      !hasTypedDataSchema({ conditions, primaryType: "Batch" }) ||
+      !hasExactZeroCondition({
+        conditions,
+        field: "calls.value",
+        fieldSource: "ethereum_typed_data_message",
+      })
+    ) {
+      issues.push(
+        "REDEEM rule must use the canonical zero-value DepositWallet Batch schema on Polygon.",
+      );
+      continue;
+    }
+    const targets = conditionValues({
+      conditions,
+      field: "calls.target",
+      fieldSource: "ethereum_typed_data_message",
+      operators: ["eq", "in"],
+    });
+    if (
+      targets.length === 0 ||
+      targets.some((target) => !allowedAdapters.has(target))
+    ) {
+      issues.push("REDEEM rule has an unsafe adapter target allowlist.");
+      continue;
+    }
+    for (const target of targets) coveredAdapters.add(target);
+  }
+  if (
+    input.policy.rules.some(
+      (candidate) => candidate.action === "ALLOW" && candidate.method === "*",
+    )
+  ) {
+    issues.push("REDEEM policy contains a wildcard ALLOW rule.");
+  }
+  if (
+    input.policy.rules.some(
+      (candidate) =>
+        candidate.action === "DENY" &&
+        (candidate.method === "*" ||
+          candidate.method === "eth_signTypedData_v4"),
+    )
+  ) {
+    issues.push("REDEEM policy contains an overlapping DENY rule.");
+  }
+  for (const adapter of allowedAdapters) {
+    if (!coveredAdapters.has(adapter)) {
+      issues.push(`DepositWallet REDEEM rule does not cover ${adapter}.`);
+    }
+  }
+  return { issues, valid: issues.length === 0 };
+}
+
 const POLICY_FUNDING_CAP_CACHE_TTL_MS = 15_000;
 let policyFundingCapCache: {
   expiresAt: number;
@@ -583,6 +798,8 @@ function numericValue(value: unknown): bigint | null {
 }
 
 export function validatePolymarketBotTypedData(input: {
+  action?: TradeSide;
+  builderCode?: string;
   exchangeAddresses: readonly string[];
   maxBuyUsd: number;
   signer: string;
@@ -657,17 +874,38 @@ export function validatePolymarketBotTypedData(input: {
           String(message.verifyingContract).toLowerCase()
       : EVM_ADDRESS_RE.test(String(order.signer).toLowerCase()) &&
         String(order.signer).toLowerCase() === signer;
+  const expectedAction = input.action ?? "BUY";
+  const expectedSide = expectedAction === "BUY" ? 0n : 1n;
   if (
-    numericValue(order.side) !== 0n ||
+    numericValue(order.side) !== expectedSide ||
     numericValue(order.signatureType) !== expectedSignatureType ||
     !orderSignerMatches
   ) {
-    issues.push("Polymarket order must be a BUY signed by the Trading Wallet.");
+    issues.push(
+      `Polymarket order must be a ${expectedAction} signed by the Trading Wallet.`,
+    );
   }
-  const makerAmount = numericValue(order.makerAmount);
-  const maxMakerAmount = BigInt(Math.round(input.maxBuyUsd * 1_000_000));
-  if (makerAmount == null || makerAmount < 0n || makerAmount > maxMakerAmount) {
-    issues.push("Polymarket order exceeds the configured makerAmount cap.");
+  if (expectedAction === "SELL") {
+    const builderCode = normalizeScalar(input.builderCode ?? "");
+    if (
+      !/^0x[a-f0-9]{64}$/.test(builderCode) ||
+      normalizeScalar(String(order.builder ?? "")) !== builderCode
+    ) {
+      issues.push(
+        "Polymarket SELL order must use the canonical Hunch builder.",
+      );
+    }
+  }
+  if (expectedAction === "BUY") {
+    const makerAmount = numericValue(order.makerAmount);
+    const maxMakerAmount = BigInt(Math.round(input.maxBuyUsd * 1_000_000));
+    if (
+      makerAmount == null ||
+      makerAmount < 0n ||
+      makerAmount > maxMakerAmount
+    ) {
+      issues.push("Polymarket order exceeds the configured makerAmount cap.");
+    }
   }
   return { issues, valid: issues.length === 0 };
 }
@@ -690,6 +928,8 @@ function signerStatus(
 }
 
 export async function inspectServerEvmWalletAuthorization(input: {
+  action?: TradeSide;
+  requiredActions?: Array<TradeSide | "REDEEM">;
   authorizationEnabled: boolean;
   configuration?: PrivyServerSignerConfiguration;
   dependencies?: PrivySignerInspectorDependencies;
@@ -707,17 +947,34 @@ export async function inspectServerEvmWalletAuthorization(input: {
     policyId: env.privyPolymarketBotBuyPolicyId,
     policyMaxBuyUsd: env.privyPolymarketBotBuyPolicyMaxUsd,
     fundingRouterAddress: env.polymarketFundingRouterAddress,
+    builderCode: env.polymarketBuilderCode,
+    sellPolicyId: env.privyPolymarketBotSellPolicyId,
+    redeemPolicyId: env.privyPolymarketBotRedeemPolicyId,
   };
   const signerId = configuration.authorizationId.trim();
   const policyId = configuration.policyId.trim();
   const policyMaxBuyUsd = configuration.policyMaxBuyUsd;
+  const requiredActions = Array.from(
+    new Set(input.requiredActions ?? [input.action ?? "BUY"]),
+  );
+  const configuredPolicies = new Map<TradeSide | "REDEEM", string>([
+    ["BUY", policyId],
+    ["SELL", configuration.sellPolicyId?.trim() ?? ""],
+    ["REDEEM", configuration.redeemPolicyId?.trim() ?? ""],
+  ]);
+  const requiredPolicyIds = requiredActions
+    .map((action) => configuredPolicies.get(action) ?? "")
+    .filter(Boolean);
   const common = { policyId, policyMaxBuyUsd, signerId };
   if (
     !signerId ||
     !configuration.authorizationKey ||
     !policyId ||
     policyMaxBuyUsd <= 0 ||
-    !configuration.fundingRouterAddress
+    !configuration.fundingRouterAddress ||
+    requiredPolicyIds.length !== requiredActions.length ||
+    (requiredActions.includes("SELL") &&
+      !/^0x[a-fA-F0-9]{64}$/.test(configuration.builderCode?.trim() ?? ""))
   ) {
     return signerStatus({
       ...common,
@@ -754,13 +1011,11 @@ export async function inspectServerEvmWalletAuthorization(input: {
   let user: PrivyUser;
   let wallet: PrivyManagedWalletMetadata;
   let quorum: PrivyKeyQuorumMetadata;
-  let policy: PrivyPolicyMetadata;
   try {
-    [user, wallet, quorum, policy] = await Promise.all([
+    [user, wallet, quorum] = await Promise.all([
       dependencies.getUserById(privyUserId),
       dependencies.getManagedWalletMetadata(walletId),
       dependencies.getKeyQuorumMetadata(signerId),
-      dependencies.getPolicyMetadata(policyId),
     ]);
   } catch {
     return signerStatus({
@@ -804,7 +1059,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
   const canRemoveAllSigners =
     foreignSigners.length === 0 && matchingSigners.length <= 1;
   const grant: PrivyServerSignerGrant = {
-    policyIds: [policyId],
+    policyIds: requiredPolicyIds,
     signerId,
     walletAddress,
     walletChain: "ethereum",
@@ -821,10 +1076,16 @@ export async function inspectServerEvmWalletAuthorization(input: {
     });
   }
   const matchingSigner = matchingSigners[0];
+  const allowedPolicyIds = new Set(
+    Array.from(configuredPolicies.values()).filter(Boolean),
+  );
+  const attachedPolicyIds = matchingSigner?.overridePolicyIds ?? [];
+  grant.policyIds = Array.from(
+    new Set([...attachedPolicyIds, ...requiredPolicyIds]),
+  );
   if (
     matchingSigner &&
-    (matchingSigner.overridePolicyIds.length !== 1 ||
-      matchingSigner.overridePolicyIds[0] !== policyId)
+    attachedPolicyIds.some((id) => !allowedPolicyIds.has(id))
   ) {
     return signerStatus({
       ...common,
@@ -856,13 +1117,62 @@ export async function inspectServerEvmWalletAuthorization(input: {
       state: "policy_invalid",
     });
   }
-  const policyValidation = validatePolymarketBotPolicy({
-    exchangeAddresses: configuration.exchangeAddresses,
-    fundingRouterAddress: configuration.fundingRouterAddress,
-    maxBuyUsd: policyMaxBuyUsd,
-    policy,
-  });
-  if (policy.id !== policyId || !policyValidation.valid) {
+  const policyIdsToValidate = Array.from(
+    new Set([...requiredPolicyIds, ...attachedPolicyIds]),
+  );
+  let policies: PrivyPolicyMetadata[];
+  try {
+    policies = await Promise.all(
+      policyIdsToValidate.map((id) => dependencies.getPolicyMetadata(id)),
+    );
+  } catch {
+    policies = [];
+  }
+  const policiesById = new Map(policies.map((policy) => [policy.id, policy]));
+  const buyPolicy = policiesById.get(policyId);
+  const sellPolicyId = configuration.sellPolicyId?.trim() ?? "";
+  const redeemPolicyId = configuration.redeemPolicyId?.trim() ?? "";
+  const buyValid =
+    !policyIdsToValidate.includes(policyId) ||
+    Boolean(
+      buyPolicy &&
+      validatePolymarketBotPolicy({
+        exchangeAddresses: configuration.exchangeAddresses,
+        fundingRouterAddress: configuration.fundingRouterAddress,
+        maxBuyUsd: policyMaxBuyUsd,
+        policy: buyPolicy,
+      }).valid,
+    );
+  const sellValid =
+    !sellPolicyId ||
+    !policyIdsToValidate.includes(sellPolicyId) ||
+    Boolean(
+      policiesById.get(sellPolicyId) &&
+      validatePolymarketBotSellPolicy({
+        builderCode: configuration.builderCode?.trim() ?? "",
+        exchangeAddresses: configuration.exchangeAddresses,
+        policy: policiesById.get(sellPolicyId) as PrivyPolicyMetadata,
+      }).valid,
+    );
+  const redeemValid =
+    !redeemPolicyId ||
+    !policyIdsToValidate.includes(redeemPolicyId) ||
+    Boolean(
+      policiesById.get(redeemPolicyId) &&
+      validatePolymarketBotRedeemPolicy({
+        adapterAddresses: [
+          env.polymarketCtfCollateralAdapterAddress,
+          env.polymarketNegRiskCollateralAdapterAddress,
+        ],
+        policy: policiesById.get(redeemPolicyId) as PrivyPolicyMetadata,
+      }).valid,
+    );
+  if (
+    policies.length !== policyIdsToValidate.length ||
+    !buyValid ||
+    !sellValid ||
+    !redeemValid
+  ) {
     return signerStatus({
       ...common,
       attached: Boolean(matchingSigner),
@@ -873,12 +1183,18 @@ export async function inspectServerEvmWalletAuthorization(input: {
     });
   }
 
-  if (!matchingSigner) {
+  const missingRequiredPolicy = requiredPolicyIds.some(
+    (id) => !attachedPolicyIds.includes(id),
+  );
+  if (!matchingSigner || missingRequiredPolicy) {
     return signerStatus({
       ...common,
+      attached: Boolean(matchingSigner),
       canRemoveAllSigners,
       grant,
-      message: "Grant bot access to this Trading Wallet in Hunch Settings.",
+      message: missingRequiredPolicy
+        ? "Grant the missing bot action policies to this Trading Wallet."
+        : "Grant bot access to this Trading Wallet in Hunch Settings.",
       state: "grant_required",
     });
   }
@@ -979,6 +1295,8 @@ export async function assertServerEvmWalletOwnership(input: {
 }
 
 export async function assertServerEvmWalletAuthorization(input: {
+  action?: TradeSide;
+  requiredActions?: Array<TradeSide | "REDEEM">;
   privyUserId: string | null | undefined;
   signer: string;
   venue: TradingVenue;
@@ -992,6 +1310,8 @@ export async function assertServerEvmWalletAuthorization(input: {
     });
   }
   const status = await inspectServerEvmWalletAuthorization({
+    action: input.action,
+    requiredActions: input.requiredActions,
     authorizationEnabled: true,
     privyUserId: input.privyUserId,
     signer: input.signer,
@@ -1007,6 +1327,7 @@ export async function assertServerEvmWalletAuthorization(input: {
 }
 
 export async function signEvmTypedData(input: {
+  action?: TradeSide;
   walletClient: PrivyWalletApiClient;
   walletId: string;
   signer: string;
@@ -1018,6 +1339,8 @@ export async function signEvmTypedData(input: {
   };
 }): Promise<string> {
   const validation = validatePolymarketBotTypedData({
+    action: input.action,
+    builderCode: env.polymarketBuilderCode,
     exchangeAddresses: [
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
@@ -1029,8 +1352,40 @@ export async function signEvmTypedData(input: {
   if (!validation.valid) {
     throw tradingError({
       code: "privy_polymarket_typed_data_rejected",
+      message: `Server signer rejected typed data outside the Polymarket ${input.action ?? "BUY"} policy.`,
+      venue: "polymarket",
+    });
+  }
+  const result = await input.walletClient.walletApi.ethereum.signTypedData({
+    walletId: input.walletId,
+    address: input.signer,
+    chainType: "ethereum",
+    typedData: input.typedData,
+  });
+  return result.signature;
+}
+
+export async function signPolymarketRedemptionBatch(input: {
+  adapterAddress: string;
+  calldata: string;
+  depositWalletAddress: string;
+  signer: string;
+  typedData: DepositWalletBatchTypedData;
+  walletClient: PrivyWalletApiClient;
+  walletId: string;
+}): Promise<string> {
+  if (
+    !validateCanonicalRedemptionBatch({
+      adapterAddress: input.adapterAddress,
+      calldata: input.calldata,
+      depositWalletAddress: input.depositWalletAddress,
+      typedData: input.typedData,
+    })
+  ) {
+    throw tradingError({
+      code: "privy_polymarket_redemption_batch_rejected",
       message:
-        "Server signer rejected typed data outside the Polymarket BUY policy.",
+        "Server signer rejected a DepositWallet batch outside the canonical Polymarket redemption adapter path.",
       venue: "polymarket",
     });
   }

@@ -142,7 +142,9 @@ export type TradeQuote = {
   price: number | null;
   estimatedShares: number | null;
   estimatedNotionalUsd: number | null;
+  availableShares?: number | null;
   maxSpendUsd: number | null;
+  minimumReceiveUsd?: number | null;
   minReceiveShares: number | null;
   minimumOrderSizeShares?: number | null;
   meetsVenueMinimum?: boolean | null;
@@ -171,7 +173,7 @@ export type PrepareTradeInput = {
   quote?: TradeQuote | null;
   now?: Date;
   onSetupTransactionSubmitted?: (input: {
-    kind: "approval" | "funding_router";
+    kind: "approval" | "funding_router" | "redemption_adapter";
     referenceId?: string | null;
     transactionId?: string | null;
     txHash: string | null;
@@ -194,7 +196,7 @@ export type TradeSubmitLifecycleCallbacks = {
   onBroadcastSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
   onBeforeBroadcast?: () => Promise<void> | void;
   onSetupTransactionSubmitted?: (input: {
-    kind: "approval" | "funding_router";
+    kind: "approval" | "funding_router" | "redemption_adapter";
     referenceId?: string | null;
     transactionId?: string | null;
     txHash: string | null;

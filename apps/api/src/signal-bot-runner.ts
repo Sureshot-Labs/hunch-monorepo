@@ -313,6 +313,12 @@ export async function runSignalBotRunner(): Promise<void> {
                       telegram.answerCallbackQuery(answer),
                     appBaseUrl: config.appBaseUrl,
                     callbackQuery,
+                    editMessageText: (message) =>
+                      telegram.editMessageText({
+                        ...message,
+                        disable_web_page_preview: true,
+                        parse_mode: message.parse_mode ?? "MarkdownV2",
+                      }),
                     sendMessage: (message) =>
                       telegram.sendMessage({
                         ...message,

@@ -16,6 +16,7 @@ import { reconcileTelegramVenueIntents } from "../services/telegram-bot-trading-
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
   buildUnlinkedTelegramBotTradingStatus,
+  buildTelegramBotTradingActionStatuses,
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
@@ -358,7 +359,7 @@ async function registerTelegramBotTradingRoutes(
       body: z.infer<typeof internalCallbackBodySchema>;
       params?: z.infer<typeof internalIntentParamsSchema>;
     },
-    expectedType?: "buy" | "cancel" | "confirm",
+    expectedType?: "buy" | "sell" | "redeem" | "cancel" | "confirm",
   ) => {
     if (expectedType === "confirm" && !reconciliationEnabled) {
       const chatId = request.body.callbackQuery.message?.chat?.id;
@@ -403,7 +404,7 @@ async function registerTelegramBotTradingRoutes(
       appBaseUrl: request.body.appBaseUrl,
       callbackQuery: request.body.callbackQuery,
       db,
-      expectedType: "buy",
+      expectedType: null,
       log: app.log,
       signerInspector,
       trading: createTradingForRequest(request as FastifyRequest),
@@ -522,6 +523,11 @@ async function registerTelegramBotTradingRoutes(
           privyWalletId: wallet.privyWalletId,
           signerStatus: await signerInspector({
             authorizationEnabled: false,
+            requiredActions: policy.tradingActions.map((action) =>
+              action === "redeem"
+                ? "REDEEM"
+                : (action.toUpperCase() as "BUY" | "SELL"),
+            ),
             privyUserId: user.privyUserId,
             signer: wallet.walletAddress,
             walletId: wallet.privyWalletId,
@@ -530,7 +536,23 @@ async function registerTelegramBotTradingRoutes(
           walletChain: "ethereum",
         });
       }
-      const statusPayload = { ...baseStatusPayload, signerWallets };
+      const statusPayload = {
+        ...baseStatusPayload,
+        actionStatuses: status
+          ? baseStatusPayload.actionStatuses
+          : buildTelegramBotTradingActionStatuses({
+              actions: policy.tradingActions,
+              directExecutionReady: false,
+              sellConfigured: Boolean(env.privyPolymarketBotSellPolicyId),
+              redeemConfigured: Boolean(
+                env.privyPolymarketBotRedeemPolicyId &&
+                env.polymarketBuilderApiKey &&
+                env.polymarketBuilderApiSecret &&
+                env.polymarketBuilderApiPassphrase,
+              ),
+            }),
+        signerWallets,
+      };
       request.log.debug(
         {
           directExecutionReady: statusPayload.directExecutionReady,

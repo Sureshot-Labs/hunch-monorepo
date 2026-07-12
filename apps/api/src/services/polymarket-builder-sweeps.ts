@@ -3,11 +3,15 @@ import type { Pool } from "pg";
 
 import { env } from "../env.js";
 import { usdcMicroToDecimalString } from "../lib/usdc.js";
+import {
+  buildDepositWalletBatchTypedData,
+  POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS,
+  type DepositWalletCall,
+} from "./polymarket-deposit-wallet-relayer.js";
 
-const POLYGON_CHAIN_ID = 137;
+export { buildDepositWalletBatchTypedData } from "./polymarket-deposit-wallet-relayer.js";
+
 const RELAYER_BASE_URL = "https://relayer-v2.polymarket.com";
-const DEPOSIT_WALLET_FACTORY_ADDRESS =
-  "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07";
 const SUCCESS_RELAYER_STATES = new Set(["STATE_MINED", "STATE_CONFIRMED"]);
 const FAILED_RELAYER_STATES = new Set(["STATE_FAILED", "STATE_INVALID"]);
 
@@ -19,12 +23,6 @@ const ERC20_ABI = [
 const DEPOSIT_WALLET_OWNER_ABI = [
   "function owner() view returns (address)",
 ] as const;
-
-type DepositWalletCall = {
-  target: string;
-  value: string;
-  data: string;
-};
 
 type RelayerTransaction = {
   transactionID?: string;
@@ -91,47 +89,6 @@ export function computePolymarketBuilderSweepAmount(inputs: {
 export function deriveAddressFromPrivateKey(privateKey: string): string {
   const normalized = normalizePrivateKey(privateKey);
   return ethers.getAddress(new ethers.Wallet(normalized).address);
-}
-
-export function buildDepositWalletBatchTypedData(inputs: {
-  depositWalletAddress: string;
-  nonce: string;
-  deadline: string;
-  calls: DepositWalletCall[];
-}) {
-  const depositWalletAddress = ethers.getAddress(inputs.depositWalletAddress);
-  return {
-    domain: {
-      name: "DepositWallet",
-      version: "1",
-      chainId: POLYGON_CHAIN_ID,
-      verifyingContract: depositWalletAddress,
-    },
-    types: {
-      Call: [
-        { name: "target", type: "address" },
-        { name: "value", type: "uint256" },
-        { name: "data", type: "bytes" },
-      ],
-      Batch: [
-        { name: "wallet", type: "address" },
-        { name: "nonce", type: "uint256" },
-        { name: "deadline", type: "uint256" },
-        { name: "calls", type: "Call[]" },
-      ],
-    },
-    primaryType: "Batch" as const,
-    message: {
-      wallet: depositWalletAddress,
-      nonce: BigInt(inputs.nonce),
-      deadline: BigInt(inputs.deadline),
-      calls: inputs.calls.map((call) => ({
-        target: ethers.getAddress(call.target),
-        value: BigInt(call.value || "0"),
-        data: call.data,
-      })),
-    },
-  };
 }
 
 export async function runPolymarketBuilderSweep(
@@ -284,7 +241,7 @@ export async function runPolymarketBuilderSweep(
     const submitBody = {
       type: "WALLET",
       from: configured.ownerAddress,
-      to: DEPOSIT_WALLET_FACTORY_ADDRESS,
+      to: POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS,
       nonce,
       signature,
       depositWalletParams: {

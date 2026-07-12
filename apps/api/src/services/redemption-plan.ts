@@ -26,6 +26,10 @@ export type RedemptionPlan = {
   payoutTokenAddress?: string | null;
   operatorApprovalAddress?: string | null;
   payoutAmountRaw?: string | null;
+  executionKind?: "external_adapter" | null;
+  yesBalanceRaw?: string | null;
+  noBalanceRaw?: string | null;
+  expectedPayoutRaw?: string | null;
   conditionResolved: boolean | null;
   resolvedOutcome: RedemptionResolvedOutcome;
   resolvedOutcomePct: number | null;
@@ -71,6 +75,10 @@ export function buildReadyRedemptionPlan(inputs: {
   payoutTokenAddress?: string | null;
   operatorApprovalAddress?: string | null;
   payoutAmountRaw?: string | null;
+  executionKind?: "external_adapter" | null;
+  yesBalanceRaw?: string | null;
+  noBalanceRaw?: string | null;
+  expectedPayoutRaw?: string | null;
   conditionResolved?: boolean | null;
   resolvedOutcome?: RedemptionResolvedOutcome;
   resolvedOutcomePct?: number | null;
@@ -95,6 +103,18 @@ export function buildReadyRedemptionPlan(inputs: {
       : {}),
     ...(inputs.payoutAmountRaw !== undefined
       ? { payoutAmountRaw: inputs.payoutAmountRaw }
+      : {}),
+    ...(inputs.executionKind !== undefined
+      ? { executionKind: inputs.executionKind }
+      : {}),
+    ...(inputs.yesBalanceRaw !== undefined
+      ? { yesBalanceRaw: inputs.yesBalanceRaw }
+      : {}),
+    ...(inputs.noBalanceRaw !== undefined
+      ? { noBalanceRaw: inputs.noBalanceRaw }
+      : {}),
+    ...(inputs.expectedPayoutRaw !== undefined
+      ? { expectedPayoutRaw: inputs.expectedPayoutRaw }
       : {}),
     conditionResolved: inputs.conditionResolved ?? null,
     resolvedOutcome: inputs.resolvedOutcome ?? null,

@@ -33,3 +33,8 @@ BRANCH_PROTECTION_CHECKLIST.md
 SECURITY_REVIEW_REPORT.md
 untracked/
 
+# Hardhat generated output (root formatting uses this ignore file)
+packages/contracts/artifacts/
+packages/contracts/hh-cache/
+packages/contracts/typechain/
+packages/contracts/typechain-types/

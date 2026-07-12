@@ -38,6 +38,17 @@ export const POLYMARKET_FUNDING_ROUTER: Record<"polygon", Address> = {
   polygon: "0x0fEF62E1CD0600C132070855A45443852940EE72",
 };
 
+export const POLYMARKET_CTF_COLLATERAL_ADAPTER: Record<"polygon", Address> = {
+  polygon: "0xAdA100Db00Ca00073811820692005400218FcE1f",
+};
+
+export const POLYMARKET_NEG_RISK_CTF_COLLATERAL_ADAPTER: Record<
+  "polygon",
+  Address
+> = {
+  polygon: "0xadA2005600Dec949baf300f4C6120000bDB6eAab",
+};
+
 export const POLYMARKET_CONDITIONAL_TOKENS: Record<"polygon", Address> = {
   polygon: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
 };

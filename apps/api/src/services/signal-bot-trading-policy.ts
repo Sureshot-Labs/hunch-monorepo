@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { DbQuery } from "../db.js";
 import { fetchActiveRuntimePolicy } from "../repos/runtime-policies.js";
 
-export type SignalBotTradingAction = "buy" | "sell";
+export type SignalBotTradingAction = "buy" | "sell" | "redeem";
 export type SignalBotTradingVenue = "polymarket" | "limitless" | "kalshi";
 
 export type SignalBotPolicy = {
@@ -29,7 +29,7 @@ const strictBoolean = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
-const signalBotTradingActionSchema = z.enum(["buy", "sell"]);
+const signalBotTradingActionSchema = z.enum(["buy", "sell", "redeem"]);
 const signalBotTradingVenueSchema = z.enum([
   "polymarket",
   "limitless",
@@ -108,8 +108,7 @@ export function normalizeSignalBotPolicy(
       ),
     ),
   );
-  const tradingActions: SignalBotTradingAction[] =
-    requestedTradingActions.includes("buy") ? ["buy"] : [];
+  const tradingActions: SignalBotTradingAction[] = requestedTradingActions;
   const venues = Array.from(
     new Set(
       policy.tradingVenues.filter(

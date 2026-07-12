@@ -22,17 +22,32 @@ import { executePreparedTradeLifecycle } from "./services/api-trading-utils.js";
 import {
   inspectServerEvmWalletAuthorization,
   signEvmMessage,
+  signPolymarketRedemptionBatch,
   validatePolymarketBotPolicy,
+  validatePolymarketBotRedeemPolicy,
+  validatePolymarketBotSellPolicy,
   validatePolymarketBotTypedData,
   type PrivyServerSignerConfiguration,
   type PrivySignerInspectorDependencies,
 } from "./services/api-trading-wallet-signing.js";
+import {
+  buildDepositWalletBatchTypedData,
+  buildDepositWalletSubmitBody,
+  POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES,
+  POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS,
+  sumTokenTransfersTo,
+  validateCanonicalRedemptionBatch,
+} from "./services/polymarket-deposit-wallet-relayer.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
 import {
   isLimitlessBotClobExecutable,
   limitlessTradingExecutionTestHooks,
 } from "./services/limitless-trading-execution-service.js";
 import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
+import {
+  computePolymarketClobOpenPositionLocks,
+  polymarketPositionLockKey,
+} from "./services/polymarket-max-spend.js";
 import {
   POLYMARKET_AUTH_MESSAGE,
   POLYMARKET_AUTH_TYPES,
@@ -54,6 +69,11 @@ const policyExchangeAddresses = [
 ] as const;
 const policyFundingRouterAddress = "0x0000000000000000000000000000000000000003";
 const policyFundingMaxRaw = 2_200_000n;
+const policyBuilderCode = `0x${"11".repeat(32)}`;
+const policyRedemptionAdapterAddresses = [
+  "0x0000000000000000000000000000000000000004",
+  "0x0000000000000000000000000000000000000005",
+] as const;
 
 function typedMessageCondition(input: {
   field: string;
@@ -218,6 +238,94 @@ function buildValidPolymarketBotPolicy(): PrivyPolicyMetadata {
   };
 }
 
+function buildValidPolymarketSellPolicy(): PrivyPolicyMetadata {
+  return {
+    chainType: "ethereum",
+    id: "sell-policy",
+    rules: [
+      {
+        action: "ALLOW",
+        conditions: [
+          {
+            field: "chain_id",
+            field_source: "ethereum_typed_data_domain",
+            operator: "eq",
+            value: "137",
+          },
+          {
+            field: "verifying_contract",
+            field_source: "ethereum_typed_data_domain",
+            operator: "in",
+            value: [...policyExchangeAddresses],
+          },
+          typedMessageCondition({
+            field: "contents.side",
+            operator: "eq",
+            primaryType: "TypedDataSign",
+            value: "1",
+          }),
+          typedMessageCondition({
+            field: "contents.signatureType",
+            operator: "eq",
+            primaryType: "TypedDataSign",
+            value: "3",
+          }),
+          typedMessageCondition({
+            field: "contents.builder",
+            operator: "eq",
+            primaryType: "TypedDataSign",
+            value: policyBuilderCode,
+          }),
+        ],
+        id: "deposit-sell",
+        method: "eth_signTypedData_v4",
+        name: "Deposit wallet SELL",
+      },
+    ],
+  };
+}
+
+function buildValidPolymarketRedeemPolicy(): PrivyPolicyMetadata {
+  const typedData = {
+    primary_type: "Batch",
+    types: POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES,
+  };
+  return {
+    chainType: "ethereum",
+    id: "redeem-policy",
+    rules: [
+      {
+        action: "ALLOW",
+        conditions: [
+          {
+            field: "chain_id",
+            field_source: "ethereum_typed_data_domain",
+            operator: "eq",
+            value: "137",
+          },
+          {
+            field: "calls.target",
+            field_source: "ethereum_typed_data_message",
+            operator: "in",
+            typed_data: typedData,
+            value: [...policyRedemptionAdapterAddresses],
+          },
+          {
+            field: "calls.value",
+            field_source: "ethereum_typed_data_message",
+            operator: "eq",
+            typed_data: typedData,
+            value: "0",
+          },
+        ],
+        id: "deposit-wallet-redemption",
+        method: "eth_signTypedData_v4",
+        name: "DepositWallet canonical redemption adapters",
+      },
+    ],
+  };
+}
+
 function resolveRelativeImport(
   fromFile: string,
   specifier: string,
@@ -372,6 +480,137 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Polymarket SELL and REDEEM policies reject broader permissions",
+    run: () => {
+      const sell = buildValidPolymarketSellPolicy();
+      assert.equal(
+        validatePolymarketBotSellPolicy({
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          policy: sell,
+        }).valid,
+        true,
+      );
+      for (const mutate of [
+        (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[0]?.conditions;
+          assert.ok(Array.isArray(conditions));
+          (conditions[2] as Record<string, unknown>).value = "0";
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[0]?.conditions;
+          assert.ok(Array.isArray(conditions));
+          (conditions[4] as Record<string, unknown>).value =
+            `0x${"22".repeat(32)}`;
+        },
+        (policy: PrivyPolicyMetadata) => {
+          policy.rules.push({
+            action: "ALLOW",
+            conditions: [],
+            id: "wildcard",
+            method: "*",
+            name: "Wildcard",
+          });
+        },
+      ]) {
+        const unsafe = structuredClone(sell);
+        mutate(unsafe);
+        assert.equal(
+          validatePolymarketBotSellPolicy({
+            builderCode: policyBuilderCode,
+            exchangeAddresses: policyExchangeAddresses,
+            policy: unsafe,
+          }).valid,
+          false,
+        );
+      }
+
+      const redeem = buildValidPolymarketRedeemPolicy();
+      assert.equal(
+        validatePolymarketBotRedeemPolicy({
+          adapterAddresses: policyRedemptionAdapterAddresses,
+          policy: redeem,
+        }).valid,
+        true,
+      );
+      for (const mutate of [
+        (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[0]?.conditions;
+          assert.ok(Array.isArray(conditions));
+          (conditions[1] as Record<string, unknown>).value = [
+            "0x0000000000000000000000000000000000000099",
+          ];
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[0]?.conditions;
+          assert.ok(Array.isArray(conditions));
+          (conditions[2] as Record<string, unknown>).value = "1";
+        },
+        (policy: PrivyPolicyMetadata) => {
+          const conditions = policy.rules[0]?.conditions;
+          assert.ok(Array.isArray(conditions));
+          (conditions[1] as Record<string, unknown>).field = "calls.data";
+        },
+      ]) {
+        const unsafe = structuredClone(redeem);
+        mutate(unsafe);
+        assert.equal(
+          validatePolymarketBotRedeemPolicy({
+            adapterAddresses: policyRedemptionAdapterAddresses,
+            policy: unsafe,
+          }).valid,
+          false,
+        );
+      }
+    },
+  },
+  {
+    name: "Polymarket SELL keeps exact raw shares and subtracts live locks",
+    run: () => {
+      const raw = 9_007_199_254_740_993n;
+      assert.equal(
+        polymarketTradingExecutionTestHooks.sharesAmountRaw({
+          amount: { type: "shares", value: ethers.formatUnits(raw, 6) },
+          raw: { sharesRaw: raw.toString() },
+        } as never),
+        raw,
+      );
+      assert.throws(() =>
+        polymarketTradingExecutionTestHooks.sharesAmountRaw({
+          amount: { type: "shares", value: "1" },
+          raw: { sharesRaw: "1000001" },
+        } as never),
+      );
+
+      const wallet = "0x0000000000000000000000000000000000000010";
+      const locks = computePolymarketClobOpenPositionLocks({
+        wallet,
+        orders: [
+          {
+            asset_id: "123",
+            maker_address: wallet,
+            original_size: "10.500000",
+            side: "SELL",
+            size_matched: "2.250000",
+            type: "GTC",
+          },
+          {
+            asset_id: "123",
+            maker_address: wallet,
+            original_size: "99",
+            side: "BUY",
+            size_matched: "0",
+            type: "GTC",
+          },
+        ],
+      });
+      assert.equal(
+        locks.get(polymarketPositionLockKey(wallet, "123")),
+        8_250_000n,
+      );
+    },
+  },
+  {
     name: "Privy server signer inspector enforces quorum, policy, grant and revoke lifecycle",
     run: async () => {
       const keyPair = crypto.generateKeyPairSync("ec", {
@@ -491,7 +730,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "server signer rejects typed data outside canonical Polymarket BUY domains",
+    name: "server signer rejects typed data outside canonical Polymarket action domains",
     run: () => {
       const signer = "0x0000000000000000000000000000000000000010";
       const typedData = {
@@ -553,6 +792,32 @@ const tests: TestCase[] = [
           typedData: wrappedTypedData,
         }).valid,
         true,
+      );
+      const sellTypedData = structuredClone(wrappedTypedData);
+      sellTypedData.message.contents.side = 1;
+      sellTypedData.message.contents.builder = policyBuilderCode;
+      assert.equal(
+        validatePolymarketBotTypedData({
+          action: "SELL",
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          signer,
+          typedData: sellTypedData,
+        }).valid,
+        true,
+      );
+      sellTypedData.message.contents.builder = `0x${"22".repeat(32)}`;
+      assert.equal(
+        validatePolymarketBotTypedData({
+          action: "SELL",
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          maxBuyUsd: 2,
+          signer,
+          typedData: sellTypedData,
+        }).valid,
+        false,
       );
       for (const mutate of [
         (value: typeof typedData) => {
@@ -706,6 +971,14 @@ const tests: TestCase[] = [
           /LEFT JOIN polymarket_markets pm\s+ON pm\.id = m\.venue_market_id\s+AND m\.venue = 'polymarket'/,
         );
         assert.match(query.sql, /pm\.accepting_orders AS accepting_orders/);
+        assert.match(
+          query.sql,
+          /coalesce\(m\.condition_id, pm\.condition_id\) AS condition_id/,
+        );
+        assert.match(
+          query.sql,
+          /pm_parent\.condition_id AS neg_risk_parent_condition_id/,
+        );
         assert.doesNotMatch(query.sql, /(^|[^a-z_])m\.accepting_orders/i);
         assert.doesNotMatch(query.sql, /^\s*accepting_orders[,\s]/m);
       }
@@ -1240,6 +1513,112 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Polymarket bot redemption signs exactly one canonical adapter Batch",
+    run: async () => {
+      const owner = "0x0000000000000000000000000000000000000010";
+      const deposit = "0x0000000000000000000000000000000000000020";
+      const adapter = policyRedemptionAdapterAddresses[0];
+      const calldata = "0x12345678";
+      const calls = [{ target: adapter, value: "0", data: calldata }];
+      const typedData = buildDepositWalletBatchTypedData({
+        depositWalletAddress: deposit,
+        nonce: "7",
+        deadline: "2000000000",
+        calls,
+      });
+      assert.equal(
+        validateCanonicalRedemptionBatch({
+          adapterAddress: adapter,
+          calldata,
+          depositWalletAddress: deposit,
+          typedData,
+        }),
+        true,
+      );
+      let signed = false;
+      const signature = await signPolymarketRedemptionBatch({
+        adapterAddress: adapter,
+        calldata,
+        depositWalletAddress: deposit,
+        signer: owner,
+        typedData,
+        walletClient: {
+          walletApi: {
+            ethereum: {
+              signTypedData: async () => {
+                signed = true;
+                return { signature: "0xsigned" };
+              },
+            },
+          },
+        } as never,
+        walletId: "wallet-1",
+      });
+      assert.equal(signature, "0xsigned");
+      assert.equal(signed, true);
+      const submit = buildDepositWalletSubmitBody({
+        ownerAddress: owner,
+        depositWalletAddress: deposit,
+        nonce: "7",
+        deadline: "2000000000",
+        calls,
+        signature,
+      });
+      assert.equal(submit.type, "WALLET");
+      assert.equal(submit.to, POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS);
+      assert.equal(submit.depositWalletParams.calls.length, 1);
+
+      const unsafeTypedData = buildDepositWalletBatchTypedData({
+        depositWalletAddress: deposit,
+        nonce: "7",
+        deadline: "2000000000",
+        calls: [
+          ...calls,
+          {
+            target: "0x0000000000000000000000000000000000000099",
+            value: "0",
+            data: "0x",
+          },
+        ],
+      });
+      await assert.rejects(
+        () =>
+          signPolymarketRedemptionBatch({
+            adapterAddress: adapter,
+            calldata,
+            depositWalletAddress: deposit,
+            signer: owner,
+            typedData: unsafeTypedData,
+            walletClient: {} as never,
+            walletId: "wallet-1",
+          }),
+        /outside the canonical Polymarket redemption adapter path/,
+      );
+
+      const transferTopic = ethers.id("Transfer(address,address,uint256)");
+      const addressTopic = (address: string) =>
+        ethers.zeroPadValue(address, 32);
+      assert.equal(
+        sumTokenTransfersTo({
+          logs: [
+            {
+              address: "0x0000000000000000000000000000000000000030",
+              topics: [
+                transferTopic,
+                addressTopic(owner),
+                addressTopic(deposit),
+              ],
+              data: ethers.zeroPadValue(ethers.toBeHex(1_250_000n), 32),
+            },
+          ],
+          recipient: deposit,
+          tokenAddress: "0x0000000000000000000000000000000000000030",
+        }),
+        1_250_000n,
+      );
+    },
+  },
+  {
     name: "server EVM message signing returns the Privy signature",
     run: async () => {
       let captured: unknown = null;
@@ -1354,7 +1733,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "API-owned trading execution advertises venue buy capabilities",
+    name: "API-owned trading execution advertises venue action capabilities",
     run: async () => {
       const trading = createApiTradingApplicationService({
         pool: {} as Pool,
@@ -1368,7 +1747,10 @@ const tests: TestCase[] = [
       );
       for (const capability of capabilities) {
         assert.equal(capability.supportsBuy, true);
-        assert.equal(capability.supportsSell, false);
+        assert.equal(
+          capability.supportsSell,
+          capability.venue === "polymarket",
+        );
         assert.equal(capability.supportsSetup, false);
         assert.equal(
           capability.authorizationModes.includes("unsupported"),
@@ -2243,6 +2625,18 @@ const tests: TestCase[] = [
       assert.match(migration, /'reconcile_required'/);
       assert.match(migration, /status NOT IN \('submitted', 'filled'\)/);
       assert.doesNotMatch(migration, /prepared_snapshot <> '\{\}'::jsonb/);
+
+      const actionMigration = readFileSync(
+        resolve(
+          apiSrcDir,
+          "../../../packages/db/migrations/0172_telegram_trade_intent_actions.sql",
+        ),
+        "utf8",
+      );
+      assert.match(actionMigration, /action IN \('buy', 'sell', 'redeem'\)/);
+      assert.match(actionMigration, /sell_percent IN \(50, 100\)/);
+      assert.match(actionMigration, /shares_raw::numeric > 0/);
+      assert.match(actionMigration, /action = 'redeem'[\s\S]*side IS NULL/);
     },
   },
   {

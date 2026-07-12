@@ -8,6 +8,16 @@ import {
 import { resolveKalshiExecutionSettlementStatus } from "./kalshi-executions.js";
 import { LIMITLESS_CLOB_CHAIN_ID } from "./limitless-trading-service.js";
 import { inspectPolymarketSubmittedOrder } from "./polymarket-trading-execution-service.js";
+import {
+  fetchPolymarketRelayerTransaction,
+  POLYMARKET_RELAYER_FAILED_STATES,
+  POLYMARKET_RELAYER_SUCCESS_STATES,
+  sumTokenTransfersTo,
+} from "./polymarket-deposit-wallet-relayer.js";
+import {
+  buildRedemptionNotification,
+  createNotificationSafe,
+} from "./notifications.js";
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
 import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error.js";
 import type {
@@ -18,6 +28,7 @@ import type {
 } from "./trading-types.js";
 
 type VenueReconcileIntentRow = {
+  action: "buy" | "sell" | "redeem";
   id: string;
   telegram_user_id: string;
   user_id: string | null;
@@ -27,6 +38,7 @@ type VenueReconcileIntentRow = {
   event_id: string | null;
   side: "NO" | "YES" | null;
   amount_usd: string | null;
+  shares_raw: string | null;
   status: string;
   prepared_snapshot: Record<string, unknown> | null;
   quote_snapshot: Record<string, unknown> | null;
@@ -84,6 +96,16 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function formatMicroShares(raw: string): string {
+  const value = BigInt(raw);
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n)
+    .toString()
+    .padStart(6, "0")
+    .replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
 function preparedKeys(
   snapshot: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
@@ -107,7 +129,9 @@ function reconstructTradeIntent(
     !row.user_id ||
     !row.authorization_id ||
     !row.side ||
-    !row.amount_usd ||
+    (row.action === "buy" && !row.amount_usd) ||
+    (row.action === "sell" && !row.shares_raw) ||
+    row.action === "redeem" ||
     !row.wallet_address ||
     !row.wallet_chain
   ) {
@@ -147,12 +171,21 @@ function reconstructTradeIntent(
     },
     walletAddress: row.wallet_address,
     walletChain: row.wallet_chain,
-    action: "BUY",
+    action: row.action === "sell" ? "SELL" : "BUY",
     outcome: row.side,
-    amount: { type: "usd", value: row.amount_usd },
+    amount:
+      row.action === "sell"
+        ? {
+            type: "shares",
+            value: formatMicroShares(row.shares_raw as string),
+          }
+        : { type: "usd", value: row.amount_usd as string },
     orderType: "FOK",
     idempotencyKey: `telegram-bot:${row.id}`,
-    raw: { recovered: true },
+    raw: {
+      recovered: true,
+      ...(row.action === "sell" ? { sharesRaw: row.shares_raw } : {}),
+    },
   };
 }
 
@@ -222,6 +255,82 @@ function fundingRouterReference(row: VenueReconcileIntentRow): {
 async function inspectVenueSubmit(
   row: VenueReconcileIntentRow,
 ): Promise<{ state: string; submitResult: SubmitResult | null }> {
+  if (row.action === "redeem") {
+    const setup = isRecord(row.result?.setupTransaction)
+      ? row.result?.setupTransaction
+      : null;
+    let txHash = readString(row.tx_signature) ?? readString(setup?.txHash);
+    const transactionId = readString(setup?.transactionId);
+    if (!txHash) {
+      const transaction = transactionId
+        ? await fetchPolymarketRelayerTransaction(transactionId)
+        : null;
+      if (!transaction) return { state: "redeem_pending", submitResult: null };
+      if (POLYMARKET_RELAYER_FAILED_STATES.has(transaction.state ?? "")) {
+        return {
+          state: "redeem_reverted",
+          submitResult: {
+            venue: "polymarket",
+            status: "failed",
+            venueOrderId: null,
+            orderHash: null,
+            txSignature: transaction.transactionHash ?? null,
+            price: null,
+            size: null,
+            raw: { transaction },
+          },
+        };
+      }
+      if (!POLYMARKET_RELAYER_SUCCESS_STATES.has(transaction.state ?? "")) {
+        return { state: "redeem_pending", submitResult: null };
+      }
+      txHash = transaction.transactionHash ?? null;
+    }
+    if (!txHash) return { state: "redeem_pending", submitResult: null };
+    const receipt = await fetchEmbeddedEthereumTransactionReceipt({
+      chainId: 137,
+      txHash,
+    });
+    if (!receipt) return { state: "redeem_pending", submitResult: null };
+    const plan = isRecord(row.result?.plan) ? row.result.plan : null;
+    const depositWallet = readString(setup?.depositWallet);
+    const payoutTokenAddress = readString(plan?.payoutTokenAddress);
+    const expectedPayoutRaw = readString(plan?.expectedPayoutRaw);
+    const actualPayoutRaw =
+      receipt.succeeded && depositWallet && payoutTokenAddress
+        ? sumTokenTransfersTo({
+            logs: receipt.logs,
+            recipient: depositWallet,
+            tokenAddress: payoutTokenAddress,
+          })
+        : 0n;
+    const succeeded = Boolean(
+      receipt.succeeded &&
+      expectedPayoutRaw &&
+      actualPayoutRaw >= BigInt(expectedPayoutRaw),
+    );
+    return {
+      state: succeeded
+        ? "redeem_confirmed"
+        : receipt.succeeded
+          ? "redeem_payout_missing"
+          : "redeem_reverted",
+      submitResult: {
+        venue: "polymarket",
+        status: succeeded ? "filled" : "failed",
+        venueOrderId: null,
+        orderHash: null,
+        txSignature: txHash,
+        price: null,
+        size: null,
+        raw: {
+          receipt,
+          redemption: true,
+          actualPayoutRaw: actualPayoutRaw.toString(),
+        },
+      },
+    };
+  }
   const keys = preparedKeys(row.prepared_snapshot);
   if (row.venue === "polymarket") {
     const orderHash = readString(keys?.orderHash);
@@ -525,6 +634,7 @@ async function loadCandidates(
   const result = await db.query<VenueReconcileIntentRow>(
     `SELECT
        ti.id,
+       ti.action,
        ti.telegram_user_id,
        ti.user_id,
        ti.authorization_id,
@@ -533,6 +643,7 @@ async function loadCandidates(
        ti.event_id,
        ti.side,
        ti.amount_usd,
+       ti.shares_raw,
        ti.status,
        ti.prepared_snapshot,
        ti.quote_snapshot,
@@ -716,6 +827,65 @@ export async function reconcileTelegramVenueIntents(
       }
       item.result = "verified";
       if (summary.dryRun) {
+        summary.items.push(item);
+        continue;
+      }
+      if (row.action === "redeem") {
+        const failed = submitResult.status === "failed";
+        await client.query(
+          `UPDATE telegram_trade_intents
+              SET status = $2,
+                  error_code = $3,
+                  error_message = $4,
+                  tx_signature = coalesce(tx_signature, $5),
+                  submitted_at = coalesce(submitted_at, now()),
+                  result = coalesce(result, '{}'::jsonb) || $6::jsonb,
+                  updated_at = now()
+            WHERE id = $1
+              AND status = ANY($7::text[])`,
+          [
+            row.id,
+            failed ? "failed" : "filled",
+            failed ? inspection.state : null,
+            failed
+              ? inspection.state === "redeem_payout_missing"
+                ? "Redemption transaction did not deliver the expected pUSD payout."
+                : "Redemption transaction reverted."
+              : null,
+            submitResult.txSignature,
+            JSON.stringify({
+              venueReconcile: {
+                checkedAt: new Date().toISOString(),
+                state: inspection.state,
+                submitResult,
+              },
+            }),
+            ["executing", "reconcile_required", "submitted"],
+          ],
+        );
+        const payoutRaw = isRecord(submitResult.raw)
+          ? readString(submitResult.raw.actualPayoutRaw)
+          : null;
+        const setup = isRecord(row.result?.setupTransaction)
+          ? row.result.setupTransaction
+          : null;
+        if (!failed && payoutRaw && row.user_id) {
+          await createNotificationSafe(
+            client,
+            buildRedemptionNotification({
+              amountUsd: payoutRaw ? Number(payoutRaw) / 1_000_000 : null,
+              marketId: row.market_id,
+              txHash: submitResult.txSignature,
+              userId: row.user_id,
+              venue: "polymarket",
+              walletAddress:
+                readString(setup?.depositWallet) ?? row.wallet_address,
+            }),
+          );
+        }
+        if (failed) summary.failedVerified += 1;
+        else summary.recovered += 1;
+        item.result = failed ? "failed" : "recovered";
         summary.items.push(item);
         continue;
       }

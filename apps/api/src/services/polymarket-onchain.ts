@@ -91,6 +91,7 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   negRiskCollateralAdapterAddress?: string | null;
   feeCollectorAddress?: string | null;
   fundingRouterAddress?: string | null;
+  extraConditionalOperatorAddresses?: string[];
 }): Promise<Snapshot> {
   const signer = ethers.getAddress(inputs.signer);
   const funder = ethers.getAddress(inputs.funder);
@@ -209,6 +210,7 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   const extraConditionalOperators = [
     ctfCollateralAdapterAddress,
     negRiskCollateralAdapterAddress,
+    ...(inputs.extraConditionalOperatorAddresses ?? []),
   ]
     .map((value) => value.trim())
     .filter((value) => value.length > 0);

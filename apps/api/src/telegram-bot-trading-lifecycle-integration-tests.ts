@@ -286,6 +286,28 @@ try {
     )
   ).rows[0];
   assert.ok(authorization?.id);
+  const actionRows = await client.query<{ action: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, action, venue, market_id,
+       side, amount_usd, sell_percent, shares_raw, status, expires_at,
+       idempotency_key
+     ) values
+       ($1, $2, $3, 'sell', 'polymarket', $4, 'YES', null, 50, '1000000', 'failed', now() + interval '2 minutes', $5),
+       ($1, $2, $3, 'redeem', 'polymarket', $4, null, null, null, null, 'failed', now() + interval '2 minutes', $6)
+     returning action`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      `sell-${suffix}`,
+      `redeem-${suffix}`,
+    ],
+  );
+  assert.deepEqual(actionRows.rows.map((row) => row.action).sort(), [
+    "redeem",
+    "sell",
+  ]);
 
   const insertIntent = (status: "draft" | "executing") =>
     client.query(
@@ -388,7 +410,7 @@ try {
 
   await app.close();
   console.log(
-    "[telegram-bot-trading-lifecycle-integration-tests] passed 24/24",
+    "[telegram-bot-trading-lifecycle-integration-tests] passed 27/27",
   );
 } finally {
   await client.query("rollback");

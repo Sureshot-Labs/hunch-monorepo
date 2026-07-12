@@ -491,7 +491,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "embedded deposit wallet redeem batch allows direct and adapter redemption calls",
+    name: "embedded deposit wallet redeem batch allows only canonical pUSD collateral adapters",
     run: () => {
       const pusd = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
       const conditionId =
@@ -502,15 +502,7 @@ const tests: TestCase[] = [
         "redeemPositions(address,bytes32,bytes32,uint256[])",
         [pusd, zeroParent, conditionId, [1n]],
       );
-      const legacyNegRiskRedeemData = tokenInterface.encodeFunctionData(
-        "redeemPositions(bytes32,uint256[])",
-        [conditionId, [1n, 0n]],
-      );
       for (const call of [
-        {
-          target: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
-          data: standardRedeemData,
-        },
         {
           target: "0xAdA100Db00Ca00073811820692005400218FcE1f",
           data: standardRedeemData,
@@ -518,10 +510,6 @@ const tests: TestCase[] = [
         {
           target: "0xadA2005600Dec949baf300f4C6120000bDB6eAab",
           data: standardRedeemData,
-        },
-        {
-          target: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
-          data: legacyNegRiskRedeemData,
         },
       ]) {
         const request = buildEmbeddedPolymarketTypedDataRequest({
@@ -535,6 +523,24 @@ const tests: TestCase[] = [
         });
 
         assert.equal(request.id, "polymarket-typed-data-signature");
+      }
+      for (const target of [
+        "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+        "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+      ]) {
+        assert.throws(
+          () =>
+            buildEmbeddedPolymarketTypedDataRequest({
+              context: walletContext,
+              depositWalletBatchPurpose: "redeem",
+              typedData: buildDepositWalletBatchTypedData({
+                target,
+                value: "0",
+                data: standardRedeemData,
+              }),
+            }),
+          /Unsupported deposit wallet redemption call/,
+        );
       }
     },
   },

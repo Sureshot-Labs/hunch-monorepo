@@ -147,3 +147,47 @@ export function computePolymarketClobOpenOrderLocks(inputs: {
 
   return locks;
 }
+
+function decimalToRaw(value: string | null): bigint {
+  if (!value || !/^\d+(\.\d+)?$/.test(value.trim())) return 0n;
+  const [whole, fraction = ""] = value.trim().split(".");
+  return (
+    BigInt(whole || "0") * 1_000_000n +
+    BigInt((fraction + "000000").slice(0, 6))
+  );
+}
+
+export function polymarketPositionLockKey(
+  wallet: string,
+  tokenId: string,
+): string {
+  return `${normalizeCollateralWalletKey(wallet)}:${tokenId.trim()}`;
+}
+
+export function computePolymarketClobOpenPositionLocks(inputs: {
+  orders: unknown[];
+  wallet: string;
+}): Map<string, bigint> {
+  const wallet = normalizeCollateralWalletKey(inputs.wallet);
+  const locks = new Map<string, bigint>();
+  if (!wallet) return locks;
+  for (const rawOrder of inputs.orders) {
+    const order = normalizeOpenOrder(rawOrder);
+    if (!order || order.side?.toUpperCase() !== "SELL" || !order.assetId) {
+      continue;
+    }
+    const orderType = order.type?.trim().toUpperCase() ?? "";
+    if (orderType && orderType !== "GTC" && orderType !== "GTD") continue;
+    const maker = normalizeCollateralWalletKey(
+      order.makerAddress ?? order.owner,
+    );
+    if (maker !== wallet) continue;
+    const original = decimalToRaw(order.originalSize);
+    const filled = decimalToRaw(order.sizeMatched);
+    const remaining = original > filled ? original - filled : 0n;
+    if (remaining <= 0n) continue;
+    const key = polymarketPositionLockKey(wallet, order.assetId);
+    locks.set(key, (locks.get(key) ?? 0n) + remaining);
+  }
+  return locks;
+}

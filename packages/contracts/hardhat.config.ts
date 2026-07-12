@@ -38,8 +38,14 @@ const polygonDeployerKey = normalizeHexPrivateKey(
 
 const networks: HardhatUserConfig["networks"] = {};
 if (polygonRpcUrl && process.env.POLYGON_FORK === "1") {
+  const configuredBlock = Number(process.env.POLYGON_FORK_BLOCK_NUMBER);
   networks.hardhat = {
-    forking: { url: polygonRpcUrl },
+    forking: {
+      url: polygonRpcUrl,
+      ...(Number.isSafeInteger(configuredBlock) && configuredBlock > 0
+        ? { blockNumber: configuredBlock }
+        : {}),
+    },
   };
 }
 if (polygonRpcUrl) {

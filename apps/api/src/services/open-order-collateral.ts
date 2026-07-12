@@ -24,6 +24,14 @@ type OpenOrderCollateralRow = {
   order_payload: unknown | null;
 };
 
+type OpenOrderPositionRow = {
+  wallet_key: string | null;
+  token_id: string | null;
+  size: string | number | null;
+  filled_size: string | number | null;
+  order_payload: unknown | null;
+};
+
 export type OpenOrderCollateralLocks = {
   polymarket: Map<string, bigint>;
   limitless: Map<string, bigint>;
@@ -238,5 +246,44 @@ export async function fetchOpenOrderCollateralLocks(
     }
   }
 
+  return locks;
+}
+
+export async function fetchPolymarketOpenOrderPositionLocks(
+  pool: Pick<Pool, "query">,
+  inputs: { userId: string; wallet: string },
+): Promise<Map<string, bigint>> {
+  const wallet = normalizeCollateralWalletKey(inputs.wallet);
+  const locks = new Map<string, bigint>();
+  if (!wallet) return locks;
+  const { rows } = await pool.query<OpenOrderPositionRow>(
+    `SELECT
+       lower(coalesce(nullif(o.order_payload->>'maker', ''), o.wallet_address, o.signer_address)) AS wallet_key,
+       coalesce(nullif(o.order_payload->>'tokenId', ''), o.token_id) AS token_id,
+       o.size,
+       o.filled_size,
+       o.order_payload
+     FROM orders o
+     WHERE o.user_id = $1
+       AND lower(o.venue) = 'polymarket'
+       AND lower(coalesce(o.status, '')) = ANY($2::text[])
+       AND o.cancelled_at IS NULL
+       AND upper(coalesce(o.side, '')) = 'SELL'
+       AND (o.order_type IS NULL OR upper(o.order_type) IN ('GTC', 'GTD'))
+       AND lower(coalesce(nullif(o.order_payload->>'maker', ''), o.wallet_address, o.signer_address)) = $3`,
+    [inputs.userId, [...OPEN_ORDER_STATUSES], wallet],
+  );
+  for (const row of rows) {
+    const tokenId = row.token_id?.trim();
+    if (!tokenId) continue;
+    const signed = readSignedAmounts("polymarket", row.order_payload);
+    const original =
+      signed?.makerAmountRaw ?? parseDecimalToMicro(row.size) ?? 0n;
+    const filled = parseDecimalToMicro(row.filled_size) ?? 0n;
+    const remaining = original > filled ? original - filled : 0n;
+    if (remaining <= 0n) continue;
+    const key = `${wallet}:${tokenId}`;
+    locks.set(key, (locks.get(key) ?? 0n) + remaining);
+  }
   return locks;
 }

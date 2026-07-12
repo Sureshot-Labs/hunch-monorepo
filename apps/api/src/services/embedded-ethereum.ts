@@ -599,6 +599,7 @@ export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
   txHash: string;
 }): Promise<{
   blockNumber: number;
+  logs: Array<{ address: string; data: string; topics: readonly string[] }>;
   succeeded: boolean;
   transactionHash: string;
 } | null> {
@@ -608,6 +609,11 @@ export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
   if (!receipt) return null;
   return {
     blockNumber: receipt.blockNumber,
+    logs: receipt.logs.map((log) => ({
+      address: log.address,
+      data: log.data,
+      topics: log.topics,
+    })),
     succeeded: receipt.status === 1,
     transactionHash: receipt.hash,
   };
