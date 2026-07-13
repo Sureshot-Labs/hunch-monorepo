@@ -22,6 +22,27 @@ export type {
   MarketSidePriceState,
   PriceTopInput,
 } from "./price-state.js";
+export {
+  buildVenueLifecyclePolicyRevision,
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  filterVenuesByLifecycleCapability,
+  getVenueLifecycleCapabilities,
+  getVenuesWithLifecycleCapability,
+  HUNCH_VENUES,
+  normalizeHunchVenue,
+  parseVenueLifecyclePolicy,
+  venueHasLifecycleCapability,
+  venueLifecyclePolicySchema,
+} from "./venue-lifecycle.js";
+export type {
+  HunchVenue,
+  VenueIndexerMode,
+  VenueLifecycleCapabilities,
+  VenueLifecycleCapability,
+  VenueLifecycleMode,
+  VenueLifecyclePolicy,
+  VenueLifecyclePolicyEntry,
+} from "./venue-lifecycle.js";
 
 export type EventEnvelope<T> = {
   type: string;

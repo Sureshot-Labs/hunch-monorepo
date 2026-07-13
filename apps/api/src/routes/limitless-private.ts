@@ -852,6 +852,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       const result = await quoteLimitlessAmmRoute({
         query: request.query,
         log: request.log,
+        pool,
       });
       if (!result.ok) {
         reply.code(result.statusCode);
@@ -914,6 +915,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         userId: user.id,
         signer,
         log: app.log,
+        pool,
       });
       if (!result.ok) {
         reply.code(result.statusCode);

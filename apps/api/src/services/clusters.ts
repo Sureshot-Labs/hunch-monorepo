@@ -37,6 +37,14 @@ export type ClusterMarketSummary = {
   aggVenueMarketId?: string | null;
   aggVenueEventId?: string | null;
   matchMethod?: string | null;
+  outcomeMapping?: {
+    confidence: number;
+    method: "exact_title" | "selected_participant" | "source_identity";
+    sourceYesTo: "NO" | "YES";
+  } | null;
+  active?: boolean;
+  orderable?: boolean;
+  priceAsOf?: string | null;
   marketSlug: string | null;
   eventSlug: string | null;
   marketImage: string | null;
@@ -170,6 +178,60 @@ export function hasSameInferredSelectedParticipant(
   const rightSelected = inferSelectedParticipant(right);
   if (!leftSelected || !rightSelected) return true;
   return intersectionSize(leftSelected.tokens, rightSelected.tokens) > 0;
+}
+
+function haveEquivalentParticipantUniverse(
+  left: ClusterMarketSummary,
+  right: ClusterMarketSummary,
+): boolean {
+  const leftParticipants = extractMatchParticipantGroups(
+    left.eventTitle ?? left.marketTitle,
+  );
+  const rightParticipants = extractMatchParticipantGroups(
+    right.eventTitle ?? right.marketTitle,
+  );
+  if (leftParticipants.length !== 2 || rightParticipants.length !== 2) {
+    return false;
+  }
+  const sameOrder =
+    intersectionSize(leftParticipants[0].tokens, rightParticipants[0].tokens) >
+      0 &&
+    intersectionSize(leftParticipants[1].tokens, rightParticipants[1].tokens) >
+      0;
+  const reverseOrder =
+    intersectionSize(leftParticipants[0].tokens, rightParticipants[1].tokens) >
+      0 &&
+    intersectionSize(leftParticipants[1].tokens, rightParticipants[0].tokens) >
+      0;
+  return sameOrder || reverseOrder;
+}
+
+export function resolveExplicitMarketOutcomeMapping(
+  source: ClusterMarketSummary,
+  target: ClusterMarketSummary,
+): NonNullable<ClusterMarketSummary["outcomeMapping"]> | null {
+  if (source.marketId === target.marketId) {
+    return { confidence: 1, method: "source_identity", sourceYesTo: "YES" };
+  }
+
+  const sourceTitle = normalizeComparableText(source.marketTitle);
+  const targetTitle = normalizeComparableText(target.marketTitle);
+  if (sourceTitle && sourceTitle === targetTitle) {
+    return { confidence: 1, method: "exact_title", sourceYesTo: "YES" };
+  }
+
+  if (!haveEquivalentParticipantUniverse(source, target)) return null;
+  const sourceSelected = inferSelectedParticipant(source);
+  const targetSelected = inferSelectedParticipant(target);
+  if (!sourceSelected || !targetSelected) return null;
+  return {
+    confidence: 0.98,
+    method: "selected_participant",
+    sourceYesTo:
+      intersectionSize(sourceSelected.tokens, targetSelected.tokens) > 0
+        ? "YES"
+        : "NO",
+  };
 }
 
 function resolveComparablePrice(

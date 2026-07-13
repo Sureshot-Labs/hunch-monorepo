@@ -22,6 +22,7 @@ import {
   clustersQuerySchema,
 } from "../schemas/clusters.js";
 import { env } from "../env.js";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
 const INDEX_KEY = "ai:cluster:index";
 const META_KEY = "ai:cluster:meta";
@@ -136,6 +137,30 @@ function formatClusterSummary(id: string, hash: ClusterHash) {
   };
 }
 
+function filterClusterSummaryVenues(
+  cluster: ReturnType<typeof formatClusterSummary>,
+  allowedVenues: ReadonlySet<string>,
+): ReturnType<typeof formatClusterSummary> {
+  const venueCounts = Object.fromEntries(
+    Object.entries(cluster.venueCounts).filter(([venue]) =>
+      allowedVenues.has(venue),
+    ),
+  );
+  const markets = cluster.markets.filter((market) =>
+    allowedVenues.has(market.venue),
+  );
+  return {
+    ...cluster,
+    marketCount: Object.values(venueCounts).reduce(
+      (sum, count) => sum + count,
+      0,
+    ),
+    markets,
+    venueCount: Object.keys(venueCounts).length,
+    venueCounts,
+  };
+}
+
 function compareClustersBySort(
   left: ReturnType<typeof formatClusterSummary>,
   right: ReturnType<typeof formatClusterSummary>,
@@ -184,10 +209,13 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
     { schema: { querystring: clustersQuerySchema } },
     async (request, reply) => {
       const query = request.query;
-      const [arbitrageDefaults, aiClustersPolicy] = await Promise.all([
-        resolveArbitrageDefaultsPolicy(pool),
-        resolveAiClustersPolicy(pool),
-      ]);
+      const [arbitrageDefaults, aiClustersPolicy, lifecycle] =
+        await Promise.all([
+          resolveArbitrageDefaultsPolicy(pool),
+          resolveAiClustersPolicy(pool),
+          filterVenuesForLifecycleCapability(pool, null, "discovery"),
+        ]);
+      const allowedVenues = new Set(lifecycle.venues);
       const defaults = {
         limit: arbitrageDefaults.effective.limit,
         minVenueCount: arbitrageDefaults.effective.minVenueCount,
@@ -257,7 +285,10 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           const hash = Object.fromEntries(
             fields.map((field, fieldIdx) => [field, values?.[fieldIdx] ?? ""]),
           ) as ClusterHash;
-          return formatClusterSummary(ids[idx], hash);
+          return filterClusterSummaryVenues(
+            formatClusterSummary(ids[idx], hash),
+            allowedVenues,
+          );
         })
         .filter((cluster) => cluster.marketCount > 0);
 
@@ -406,6 +437,12 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
     { schema: { params: clusterParamsSchema } },
     async (request, reply) => {
       const { id } = request.params;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        null,
+        "discovery",
+      );
+      const allowedVenues = new Set(lifecycle.venues);
       const { redis, status } = await getRedisStatus();
       if (!redis) {
         const error =
@@ -421,7 +458,10 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: "Cluster not found" });
       }
 
-      const cluster = formatClusterSummary(id, hash);
+      const cluster = filterClusterSummaryVenues(
+        formatClusterSummary(id, hash),
+        allowedVenues,
+      );
       const marketIds = parseJson<string[]>(hash.market_ids, []);
       if (!marketIds.length) {
         return { cluster, markets: [] };
@@ -488,10 +528,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
           left join unified_market_activity_metrics_24h mam
             on mam.market_id = m.id
           where m.id = any($1::text[])
+            and m.venue = any($2::text[])
             and m.status = 'ACTIVE'
             and e.status = 'ACTIVE'
         `,
-        [marketIds],
+        [marketIds, lifecycle.venues],
       );
 
       const byId = new Map<string, ClusterMarketSummary>();

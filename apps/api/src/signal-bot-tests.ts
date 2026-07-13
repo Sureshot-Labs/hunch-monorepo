@@ -5,6 +5,11 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { QueryResult, QueryResultRow } from "pg";
+import {
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  parseVenueLifecyclePolicy,
+  venueHasLifecycleCapability,
+} from "@hunch/shared";
 
 import {
   acquireSignalBotLock,
@@ -85,6 +90,16 @@ import {
 } from "./services/telegram-bot-trading-presentation.js";
 import { normalizeSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
+import { resolveSignalDeliveryTarget } from "./services/signal-delivery-target.js";
+import {
+  createDiscordSignalTransport,
+  createTelegramSignalTransport,
+  createXSignalTransport,
+  renderDiscordSignalDelivery,
+  renderTelegramSignalDelivery,
+  renderXSignalDelivery,
+  type SignalDeliveryView,
+} from "./services/signal-delivery.js";
 
 const readyTelegramSignerStatus: PrivyServerSignerStatus = {
   attached: true,
@@ -611,33 +626,92 @@ class FakeDb {
       };
     }
     if (sql.includes("from unified_market_tokens")) {
+      const marketIds = new Set(
+        Array.isArray(params[0]) ? (params[0] as string[]) : [],
+      );
+      const rows = marketIds.size
+        ? this.marketTokenRows.filter((row) =>
+            marketIds.has(String((row as { market_id?: unknown }).market_id)),
+          )
+        : this.marketTokenRows;
       return {
         command: "SELECT",
         fields: [],
         oid: 0,
-        rowCount: this.marketTokenRows.length,
-        rows: this.marketTokenRows as T[],
+        rowCount: rows.length,
+        rows: rows as unknown as T[],
       };
     }
     if (sql.includes("from unified_token_top_latest")) {
+      const tokenIds = new Set(
+        Array.isArray(params[0]) ? (params[0] as string[]) : [],
+      );
+      const rows = tokenIds.size
+        ? this.tokenTopRows.filter((row) =>
+            tokenIds.has(String((row as { token_id?: unknown }).token_id)),
+          )
+        : this.tokenTopRows;
       return {
         command: "SELECT",
         fields: [],
         oid: 0,
-        rowCount: this.tokenTopRows.length,
-        rows: this.tokenTopRows as T[],
+        rowCount: rows.length,
+        rows: rows as T[],
+      };
+    }
+    if (
+      sql.includes("FROM unified_markets m") &&
+      sql.includes("WHERE m.id = $1")
+    ) {
+      const row = this.marketRows.find(
+        (market) => String((market as { id?: unknown }).id) === params[0],
+      );
+      const rows = row
+        ? [
+            {
+              accepting_orders: true,
+              close_time: new Date("2999-01-01T00:00:00.000Z"),
+              event_end_time: null,
+              event_id: "polymarket:event-1",
+              event_title: "Test event",
+              expiration_time: null,
+              is_initialized: true,
+              metadata: {},
+              outcomes: '["YES","NO"]',
+              slug: "test-market",
+              status: "ACTIVE",
+              title: "Test market",
+              venue_market_id: "market-1",
+              ...row,
+            },
+          ]
+        : [];
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: rows.length,
+        rows: rows as unknown as T[],
       };
     }
     if (
       sql.includes("from unified_markets") &&
       sql.includes("where id = any")
     ) {
+      const marketIds = new Set(
+        Array.isArray(params[0]) ? (params[0] as string[]) : [],
+      );
+      const rows = marketIds.size
+        ? this.marketRows.filter((row) =>
+            marketIds.has(String((row as { id?: unknown }).id)),
+          )
+        : this.marketRows;
       return {
         command: "SELECT",
         fields: [],
         oid: 0,
-        rowCount: this.marketRows.length,
-        rows: this.marketRows as T[],
+        rowCount: rows.length,
+        rows: rows as T[],
       };
     }
     const minConfidence = Number(params[0] ?? 0);
@@ -921,6 +995,7 @@ function followthroughCandidateRow(overrides: Record<string, unknown> = {}) {
         side: "YES",
       },
     },
+    root_metrics: {},
     target_meta: { side: "YES" },
     market_id: "polymarket:market-1",
     event_id: "polymarket:event-1",
@@ -5101,6 +5176,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               estimatedShares: 20,
               estimatedNotionalUsd: 10,
               maxSpendUsd: 10,
+              meetsVenueMinimum: false,
+              minimumOrderSizeShares: 100,
               minReceiveShares: 20,
               fees: {},
               expiresAt: null,
@@ -6616,6 +6693,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ),
         false,
       );
+      const runnerSource = readFileSync(
+        resolve(apiSrcDir, "signal-bot-runner.ts"),
+        "utf8",
+      );
+      assert.match(
+        runnerSource,
+        /createSignalBotTelegramTransport\(telegram\)/,
+      );
+      assert.match(runnerSource, /transports:\s*signalTransports/);
+      assert.match(
+        runnerSource,
+        /publishSignalBotFollowthroughTick\([\s\S]*?transports:\s*signalTransports/,
+      );
+      assert.doesNotMatch(runnerSource, /create(?:Discord|X)SignalTransport/);
       const retentionSelector = readFileSync(
         new URL("./market-retention-selector.ts", import.meta.url),
         "utf8",
@@ -8200,7 +8291,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publish renders cheaper alternative from resolver",
+    name: "publish routes the primary CTA to the resolved destination",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -8220,11 +8311,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db,
         redis,
         resolveCheaperAlternative: async () => ({
-          eventId: "kalshi:event-1",
-          marketId: "kalshi:market-1",
+          eventId: "limitless:event-1",
+          marketId: "limitless:market-1",
           price: 0.29,
           side: "YES",
-          venue: "kalshi",
+          venue: "limitless",
         }),
         telegram,
       });
@@ -8233,8 +8324,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.aggMatched, 0);
       assert.equal(result.sent, 1);
       assert.equal(
-        telegram.messages[0]?.reply_markup?.inline_keyboard[1]?.[0]?.text,
-        "💸 Cheaper: Kalshi YES 29¢",
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
+        "🟠 Buy YES · Limitless 29¢",
       );
     },
   },
@@ -8367,11 +8458,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           market_id: "polymarket:market-1",
           title: "Stale first signal",
         }),
-        noteRow({
-          id: "00000000-0000-4000-8000-000000000002",
-          market_id: null,
-          title: "Later valid signal",
-        }),
       ];
       db.marketRows = [
         {
@@ -8382,6 +8468,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           clob_token_ids: null,
           best_bid: null,
           best_ask: null,
+          last_price: null,
+        },
+        {
+          id: "polymarket:market-2",
+          venue: "polymarket",
+          token_yes: "yes-token-2",
+          token_no: "no-token-2",
+          clob_token_ids: null,
+          best_bid: "0.30",
+          best_ask: "0.32",
           last_price: null,
         },
       ];
@@ -8396,6 +8492,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "no-token",
           best_bid: null,
           best_ask: null,
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+        {
+          token_id: "yes-token-2",
+          best_bid: "0.30",
+          best_ask: "0.32",
+          ts: "2999-01-01T00:00:00.000Z",
+        },
+        {
+          token_id: "no-token-2",
+          best_bid: "0.68",
+          best_ask: "0.70",
           ts: "2999-01-01T00:00:00.000Z",
         },
       ];
@@ -8417,6 +8525,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(result.priceGuardDeferred, 1);
         assert.equal(result.priceGuardStaleExpired, 0);
       }
+
+      db.rows.push(
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000002",
+          market_id: "polymarket:market-2",
+          title: "Later valid signal",
+        }),
+      );
 
       const result = await publishSignalBotTick({
         config,
@@ -8797,7 +8913,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         signalBotFollowthroughMinNetFlowUsd: 100_000,
         signalBotFollowthroughMinPriceMoveCents: 100,
       };
-      db.candidateRows = [followthroughCandidateRow()];
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: {
+            delivery: {
+              view: {
+                target: {
+                  eventId: "limitless:event-2",
+                  marketId: "limitless:market-2",
+                  price: 0.31,
+                  side: "NO",
+                  venue: "limitless",
+                },
+              },
+            },
+          },
+        }),
+      ];
       db.flowRows = [
         followthroughFlowRow({ baseline_shares: "0", wallet_id: "wallet-1" }),
         followthroughFlowRow({
@@ -8841,7 +8973,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(keyboard?.length, 1);
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
-      assert.match(readStartAppParam(keyboard?.[0]?.[0]?.url), /^m_/);
+      const startParam = readStartAppParam(keyboard?.[0]?.[0]?.url);
+      assert.match(startParam, /^m_/);
+      assert.equal(
+        Buffer.from(startParam.slice(2), "base64url").toString("utf8"),
+        "l:event-2|market-2|N",
+      );
       const candidateQuery = db.queries.find((query) =>
         query.sql.includes("from signal_bot_messages root"),
       );
@@ -8860,6 +8997,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(metrics.joinedOrAddedWallets, 2);
       assert.equal(metrics.netSignalSideFlowUsd, 9500);
       assert.equal(metrics.fallbackStandalone, false);
+      assert.equal(
+        metrics.delivery?.view?.target?.marketId,
+        "limitless:market-2",
+      );
       const flowQuery = db.queries.find((query) =>
         query.sql.includes("from wallet_activity_events"),
       );
@@ -9655,7 +9796,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "Telegram market options lift venue minimum and hide sides above total-spend cap",
+    name: "Telegram Polymarket FOK options keep venue minimum informational",
     run: async () => {
       const authorization = {
         enabled: true,
@@ -9699,11 +9840,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           const amountUsd = Number(intent.amount.value);
           quotedAmounts.push(amountUsd);
           if (intent.outcome === "NO") {
-            const meetsVenueMinimum = amountUsd >= 4.7;
             return buildTestTelegramQuote(intent, {
               currentPrice: 0.939,
-              maxSpendUsd: meetsVenueMinimum ? 4.99 : 1.01,
-              meetsVenueMinimum,
+              maxSpendUsd: 1.01,
+              meetsVenueMinimum: false,
               minimumOrderSizeShares: 5,
               price: 0.94,
             });
@@ -9753,11 +9893,301 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(yes?.amountUsd, 1);
       assert.equal(yes?.currentPrice, 0.062);
-      assert.equal(noWithinTwo, null);
-      assert.equal(noWithinFive?.amountUsd, 4.7);
-      assert.equal(noWithinFive?.maxSpendUsd, 4.99);
+      assert.equal(noWithinTwo?.amountUsd, 1);
+      assert.equal(noWithinTwo?.maxSpendUsd, 1.01);
+      assert.equal(noWithinFive?.amountUsd, 1);
+      assert.equal(noWithinFive?.maxSpendUsd, 1.01);
       assert.ok((noWithinFive?.maxSpendUsd ?? Infinity) <= 5);
-      assert.deepEqual(quotedAmounts, [1, 1, 4.7, 1, 4.7]);
+      assert.deepEqual(quotedAmounts, [1, 1, 1]);
+    },
+  },
+  {
+    name: "Telegram venue minimum predicate blocks SELL, limit, and non-Polymarket orders",
+    run: () => {
+      const predicate =
+        telegramBotTradingTestHooks.isTelegramVenueMinimumBlocking;
+      assert.equal(
+        predicate({
+          action: "BUY",
+          meetsVenueMinimum: false,
+          orderType: "FOK",
+          venue: "polymarket",
+        }),
+        false,
+      );
+      assert.equal(
+        predicate({
+          action: "SELL",
+          meetsVenueMinimum: false,
+          orderType: "FOK",
+          venue: "polymarket",
+        }),
+        true,
+      );
+      assert.equal(
+        predicate({
+          action: "BUY",
+          meetsVenueMinimum: false,
+          orderType: "GTC",
+          venue: "polymarket",
+        }),
+        true,
+      );
+      assert.equal(
+        predicate({
+          action: "BUY",
+          meetsVenueMinimum: false,
+          orderType: "FOK",
+          venue: "limitless",
+        }),
+        true,
+      );
+    },
+  },
+  {
+    name: "venue lifecycle requires a full snapshot and fails closed for unknown venues",
+    run: () => {
+      assert.equal(
+        parseVenueLifecyclePolicy({
+          version: 1,
+          venues: {
+            polymarket: { lifecycle: "active", indexerMode: "full" },
+          },
+        }),
+        null,
+      );
+      assert.equal(
+        venueHasLifecycleCapability(
+          DEFAULT_VENUE_LIFECYCLE_POLICY,
+          "polymarket",
+          "increaseExposure",
+        ),
+        true,
+      );
+      assert.equal(
+        venueHasLifecycleCapability(
+          DEFAULT_VENUE_LIFECYCLE_POLICY,
+          "kalshi",
+          "increaseExposure",
+        ),
+        false,
+      );
+      assert.equal(
+        venueHasLifecycleCapability(
+          DEFAULT_VENUE_LIFECYCLE_POLICY,
+          "unknown",
+          "accountRead",
+        ),
+        false,
+      );
+    },
+  },
+  {
+    name: "signal destination resolver maps outcomes explicitly and chooses the cheapest allowed venue",
+    run: () => {
+      const now = Date.parse("2026-07-13T12:00:00.000Z");
+      const resolution = resolveSignalDeliveryTarget({
+        candidates: [
+          {
+            active: true,
+            eventId: "source-event",
+            executablePrice: 0.42,
+            matchMethod: "source_identity",
+            mappedSide: "NO",
+            mappingConfidence: 1,
+            mappingMethod: "source_identity",
+            marketId: "source-market",
+            orderable: true,
+            priceAsOf: "2026-07-13T11:59:30.000Z",
+            sourceSide: "NO",
+            venue: "polymarket",
+          },
+          {
+            active: true,
+            eventId: "target-event",
+            executablePrice: 0.39,
+            matchMethod: "conditionId",
+            mappedSide: "YES",
+            mappingConfidence: 0.98,
+            mappingMethod: "agg_explicit",
+            marketId: "target-market",
+            orderable: true,
+            priceAsOf: "2026-07-13T11:59:40.000Z",
+            sourceSide: "NO",
+            venue: "limitless",
+          },
+          {
+            active: true,
+            eventId: "blocked-event",
+            executablePrice: 0.2,
+            matchMethod: "externalIdentifier",
+            mappedSide: "NO",
+            mappingConfidence: 1,
+            mappingMethod: "agg_explicit",
+            marketId: "blocked-market",
+            orderable: true,
+            priceAsOf: "2026-07-13T11:59:50.000Z",
+            sourceSide: "NO",
+            venue: "kalshi",
+          },
+          {
+            active: true,
+            eventId: "closed-event",
+            executablePrice: 0.1,
+            matchMethod: "conditionId",
+            mappedSide: "YES",
+            mappingConfidence: 1,
+            mappingMethod: "agg_explicit",
+            marketId: "closed-market",
+            orderable: false,
+            priceAsOf: "2026-07-13T11:59:55.000Z",
+            sourceSide: "NO",
+            venue: "limitless",
+          },
+        ],
+        destinationPolicy: {
+          fallback: "skip",
+          selectionMode: "best-executable",
+          targetVenues: ["kalshi", "limitless", "polymarket"],
+        },
+        lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
+        nowMs: now,
+        sourceSide: "NO",
+      });
+      assert.equal(resolution.reason, null);
+      assert.equal(resolution.target?.marketId, "target-market");
+      assert.equal(resolution.target?.mappedSide, "YES");
+
+      const stale = resolveSignalDeliveryTarget({
+        candidates: [
+          {
+            active: true,
+            eventId: "event",
+            executablePrice: 0.1,
+            matchMethod: "conditionId",
+            mappedSide: "YES",
+            mappingConfidence: 1,
+            mappingMethod: "agg_explicit",
+            marketId: "market",
+            orderable: true,
+            priceAsOf: "2026-07-13T11:00:00.000Z",
+            sourceSide: "YES",
+            venue: "limitless",
+          },
+        ],
+        destinationPolicy: {
+          fallback: "skip",
+          selectionMode: "best-executable",
+          targetVenues: ["limitless"],
+        },
+        lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
+        nowMs: now,
+        sourceSide: "YES",
+      });
+      assert.equal(stale.reason, "stale_price");
+
+      const ambiguous = resolveSignalDeliveryTarget({
+        candidates: [
+          {
+            active: true,
+            eventId: "event",
+            executablePrice: 0.1,
+            matchMethod: "",
+            mappedSide: "YES",
+            mappingConfidence: 1,
+            mappingMethod: "",
+            marketId: "market",
+            orderable: true,
+            priceAsOf: "2026-07-13T11:59:55.000Z",
+            sourceSide: "YES",
+            venue: "limitless",
+          },
+        ],
+        destinationPolicy: {
+          fallback: "skip",
+          selectionMode: "best-executable",
+          targetVenues: ["limitless"],
+        },
+        lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
+        nowMs: now,
+        sourceSide: "YES",
+      });
+      assert.equal(ambiguous.reason, "ambiguous_mapping");
+    },
+  },
+  {
+    name: "Discord and X signal renderers remain pure and transport bounded",
+    run: async () => {
+      const view: SignalDeliveryView = {
+        contextLines: ["Context line"],
+        credentialLines: ["Wallet has a strong recent record"],
+        holder: {
+          address: "0x1",
+          displayName: "Sharp wallet",
+          positionUsd: 100,
+          side: "YES",
+        },
+        kind: "initial",
+        source: {
+          eventId: "source-event",
+          marketId: "source-market",
+          side: "YES",
+          venue: "polymarket",
+        },
+        summary: "A mapped signal is executable on the target venue.",
+        target: {
+          eventId: "target-event",
+          marketId: "target-market",
+          price: 0.31,
+          side: "NO",
+          tradeUrl:
+            "https://app.hunch.trade/events/target-event?market=target-market",
+          venue: "limitless",
+        },
+        thread: {},
+        title: "Signal title",
+      };
+      const discord = renderDiscordSignalDelivery(view);
+      assert.equal(discord.buttons?.[0]?.label, "Open in Hunch");
+      assert.equal(
+        discord.embeds?.[0]?.fields[0]?.value,
+        "limitless · NO · 31.0¢",
+      );
+      const x = renderXSignalDelivery(view, 80);
+      assert.ok((x.thread ?? []).length > 1);
+      assert.equal(
+        (x.thread ?? []).every((post) => post.length <= 80),
+        true,
+      );
+
+      const telegram = renderTelegramSignalDelivery(view);
+      assert.equal(telegram.telegram?.parseMode, "MarkdownV2");
+      assert.match(telegram.text, /Signal title/);
+
+      const sent: Array<{ kind: string; text: string }> = [];
+      const telegramTransport = createTelegramSignalTransport(
+        async (payload) => {
+          sent.push({ kind: "telegram", text: payload.text });
+          return { deliveryId: "telegram-1", ok: true };
+        },
+      );
+      const discordTransport = createDiscordSignalTransport(async (payload) => {
+        sent.push({ kind: "discord", text: payload.text });
+        return { deliveryId: "discord-1", ok: true };
+      });
+      const xTransport = createXSignalTransport(async (payload) => {
+        sent.push({ kind: "x", text: payload.text });
+        return { deliveryId: "x-1", ok: true };
+      });
+      await telegramTransport.send(telegramTransport.render(view));
+      await discordTransport.send(discordTransport.render(view));
+      await xTransport.send(xTransport.render(view));
+      assert.deepEqual(
+        sent.map((item) => item.kind),
+        ["telegram", "discord", "x"],
+      );
+      assert.equal(telegramTransport.capabilities.edits, true);
+      assert.equal(xTransport.capabilities.maxLength, 280);
     },
   },
   {

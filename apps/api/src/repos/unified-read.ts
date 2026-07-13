@@ -461,9 +461,11 @@ function buildFeedMarketCandidateExtraSql(args: {
   if (hasSearch) {
     clauses.push("m.event_id in (select id from search_events)");
   }
-  if (inputs.venues?.length) {
+  if (inputs.venues) {
     clauses.push(
-      `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${add(inputs.venues)}::text[])`,
+      inputs.venues.length
+        ? `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${add(inputs.venues)}::text[])`
+        : "false",
     );
   }
   if (inputs.categories?.length) {
@@ -644,12 +646,16 @@ function buildFeedSearchEarlyFilterSql(args: {
     }
   };
 
-  if (inputs.venues?.length) {
-    const venuesParam = add(inputs.venues);
-    pushFilter(
-      `e.venue = ANY(${venuesParam}::text[])`,
-      `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${venuesParam}::text[])`,
-    );
+  if (inputs.venues) {
+    if (inputs.venues.length) {
+      const venuesParam = add(inputs.venues);
+      pushFilter(
+        `e.venue = ANY(${venuesParam}::text[])`,
+        `${venueTarget === "market" ? "m" : "e"}.venue = ANY(${venuesParam}::text[])`,
+      );
+    } else {
+      pushFilter("false", "false");
+    }
   }
   if (inputs.categories?.length) {
     const categoriesParam = add(inputs.categories);
@@ -1043,8 +1049,12 @@ function buildFeedEventWhere(args: {
   if (requireNamedCategory) {
     where.push("e.category is not null", "btrim(e.category) <> ''");
   }
-  if (inputs.venues?.length) {
-    where.push(`e.venue = ANY(${add(inputs.venues)}::text[])`);
+  if (inputs.venues) {
+    where.push(
+      inputs.venues.length
+        ? `e.venue = ANY(${add(inputs.venues)}::text[])`
+        : "false",
+    );
   }
   if (inputs.categories?.length) {
     where.push(`lower(e.category) = ANY(${add(inputs.categories)}::text[])`);
@@ -3376,8 +3386,12 @@ export async function fetchFavoriteFeedEventPage(
     where.push(favoriteDurationSql);
   }
 
-  if (inputs.venues?.length) {
-    where.push(`m.venue = ANY(${add(inputs.venues)}::text[])`);
+  if (inputs.venues) {
+    where.push(
+      inputs.venues.length
+        ? `m.venue = ANY(${add(inputs.venues)}::text[])`
+        : "false",
+    );
   }
   if (inputs.categories?.length) {
     where.push(`lower(e.category) = ANY(${add(inputs.categories)}::text[])`);

@@ -46,6 +46,7 @@ import { fetchLimitlessOnchainSnapshot } from "./limitless-onchain.js";
 import { buildLimitlessRedemptionPlan } from "./limitless-redemption-plan.js";
 import { fetchConditionalTokensPayouts } from "./limitless-redemption.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
+import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 import {
   amountUsd,
   applyOrderTradeEffects,
@@ -1900,10 +1901,24 @@ export async function fetchLimitlessRedemptionStatusRoute(input: {
 
 export async function buildLimitlessRedemptionPlanRoute(input: {
   log?: LimitlessRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
   query: LimitlessRedemptionPlanQuery;
   signer: string;
   userId: string;
 }): Promise<LimitlessRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "limitless",
+      "REDEEM",
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless redemption is temporarily disabled" },
+    };
+  }
   if (!isEvmWallet(input.signer)) {
     return {
       ok: false,
@@ -2316,6 +2331,19 @@ export async function cancelLimitlessOrderRoute(input: {
   signer: string;
   userId: string;
 }): Promise<LimitlessRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "limitless",
+      "CANCEL",
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless cancellations are temporarily disabled" },
+    };
+  }
   const storedWalletContext = await fetchStoredOrderWalletContext(input.pool, {
     userId: input.userId,
     venue: "limitless",
@@ -2412,6 +2440,19 @@ export async function cancelLimitlessOrdersBatchRoute(input: {
   signer: string;
   userId: string;
 }): Promise<LimitlessRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "limitless",
+      "CANCEL",
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless cancellations are temporarily disabled" },
+    };
+  }
   const partnerAuth = await resolveLimitlessRouteAuth({
     userId: input.userId,
     walletAddress: input.signer,
@@ -2478,6 +2519,19 @@ export async function cancelAllLimitlessOrdersRoute(input: {
   slug: string;
   userId: string;
 }): Promise<LimitlessRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "limitless",
+      "CANCEL",
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless cancellations are temporarily disabled" },
+    };
+  }
   const partnerAuth = await resolveLimitlessRouteAuth({
     userId: input.userId,
     walletAddress: input.signer,
@@ -2882,6 +2936,24 @@ export async function submitLimitlessClientSignedOrder(input: {
     };
   }
 
+  const side = normalizeOrderSide(input.body.order.side);
+  if (!side) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "Order side must be BUY/SELL (or 0/1)" },
+    };
+  }
+  if (
+    !(await venueLifecycleAllowsTradingAction(input.pool, "limitless", side))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless trading action is temporarily disabled" },
+    };
+  }
+
   const partnerAuth = await resolveLimitlessRouteAuth({
     userId: input.userId,
     walletAddress: signer,
@@ -2934,15 +3006,6 @@ export async function submitLimitlessClientSignedOrder(input: {
       ok: false,
       statusCode: 400,
       payload: { error: "Selected wallet is not a valid EVM address" },
-    };
-  }
-
-  const side = normalizeOrderSide(order.side);
-  if (!side) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: { error: "Order side must be BUY/SELL (or 0/1)" },
     };
   }
 
@@ -3450,7 +3513,21 @@ export async function submitLimitlessClientSignedOrder(input: {
 export async function quoteLimitlessAmmRoute(input: {
   query: LimitlessAmmQuoteQuery;
   log?: LimitlessRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
 }): Promise<LimitlessAmmQuoteRouteResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "limitless",
+      input.query.side,
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Limitless trading action is temporarily disabled" },
+    };
+  }
   const amountUsdRaw =
     input.query.amountUsdRaw != null ? BigInt(input.query.amountUsdRaw) : null;
   const amountSharesRaw =

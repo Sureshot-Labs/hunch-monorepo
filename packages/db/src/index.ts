@@ -29,3 +29,12 @@ export {
   writeUnifiedLastTrade,
 } from "./unified-repo.js";
 export { getVenueId } from "./venues-repo.js";
+export {
+  fetchActiveRuntimePolicy,
+  isMissingRuntimePoliciesTable,
+  listActiveRuntimePolicies,
+} from "./runtime-policies.js";
+export type {
+  RuntimePolicyQuery,
+  RuntimePolicyRow,
+} from "./runtime-policies.js";

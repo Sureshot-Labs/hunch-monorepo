@@ -32,6 +32,10 @@ import {
 } from "../services/kalshi-trading-execution-service.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
+  resolveCollateralPairTradingAction,
+  venueLifecycleAllowsTradingAction,
+} from "../services/venue-lifecycle.js";
+import {
   fetchSolanaBalanceLamports,
   fetchSolanaSignatureStatus,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -76,6 +80,35 @@ function ensureDflowReady(reply: {
   if (env.dflowApiKey && env.dflowApiKey.trim().length > 0) return true;
   reply.code(400);
   reply.send({ error: "Missing DFLOW_API_KEY" });
+  return false;
+}
+
+async function enforceKalshiLifecycle(input: {
+  inputMint: string | null | undefined;
+  outputMint: string | null | undefined;
+  reply: {
+    code: (status: number) => unknown;
+    send: (payload: unknown) => unknown;
+  };
+}): Promise<boolean> {
+  const action = resolveCollateralPairTradingAction({
+    collateralAsset: env.solanaUsdcMint,
+    inputAsset: input.inputMint,
+    outputAsset: input.outputMint,
+  });
+  const allowed = action
+    ? await venueLifecycleAllowsTradingAction(pool, "kalshi", action)
+    : (await venueLifecycleAllowsTradingAction(pool, "kalshi", "BUY")) &&
+      (await venueLifecycleAllowsTradingAction(pool, "kalshi", "SELL"));
+  if (allowed) return true;
+  input.reply.code(409);
+  input.reply.send({
+    code: "venue_lifecycle_blocked",
+    error: action
+      ? `Kalshi ${action.toLowerCase()} is temporarily disabled.`
+      : "Kalshi trade direction is unavailable under the current venue policy.",
+    venue: "kalshi",
+  });
   return false;
 }
 
@@ -492,6 +525,15 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
           error: "userPublicKey must match the selected wallet",
         });
       }
+      if (
+        !(await enforceKalshiLifecycle({
+          inputMint: query.inputMint,
+          outputMint: query.outputMint,
+          reply,
+        }))
+      ) {
+        return;
+      }
 
       const proofAllowed = await enforceKalshiProof({
         user,
@@ -638,6 +680,16 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
 
       const query = request.query;
 
+      if (
+        !(await enforceKalshiLifecycle({
+          inputMint: query.inputMint,
+          outputMint: query.outputMint,
+          reply,
+        }))
+      ) {
+        return;
+      }
+
       const proofAllowed = await enforceKalshiProof({
         user,
         walletAddress,
@@ -718,6 +770,15 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
       }
 
       const mintPair = findMintPair(body.quoteResponse);
+      if (
+        !(await enforceKalshiLifecycle({
+          inputMint: mintPair?.inputMint,
+          outputMint: mintPair?.outputMint,
+          reply,
+        }))
+      ) {
+        return;
+      }
       const proofAllowed = await enforceKalshiProof({
         user,
         walletAddress,
@@ -797,6 +858,15 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
           error: "Kalshi submit requires deterministic transaction context.",
           code: "kalshi_transaction_context_required",
         });
+      }
+      if (
+        !(await enforceKalshiLifecycle({
+          inputMint: context?.inputMint,
+          outputMint: context?.outputMint,
+          reply,
+        }))
+      ) {
+        return;
       }
       if (strictKalshiSubmit) {
         const marketId = body.marketId?.trim();

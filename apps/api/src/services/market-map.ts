@@ -425,6 +425,11 @@ export function applyVenueFilterToNode(
   const metrics = aggregateNodeMetricsForVenues(node, venues);
   const breakdown = node.venueBreakdown ?? {};
   const breakdownEntries = Object.entries(breakdown);
+  const filteredBreakdown = Object.fromEntries(
+    breakdownEntries.filter(
+      ([venue]) => !venues || venues.size === 0 || venues.has(venue),
+    ),
+  ) as Record<MarketMapVenue, MarketMapNodeVenueMetrics>;
   let dominantVenue: string | null = null;
   if (breakdownEntries.length > 0) {
     dominantVenue =
@@ -449,6 +454,7 @@ export function applyVenueFilterToNode(
     venue: dominantVenue ?? node.venue,
     dominantVenue,
     venueCount,
+    venueBreakdown: filteredBreakdown,
     eventCount: metrics.eventCount,
     sumVolume24h: metrics.sumVolume24h,
     sumLiquidity: metrics.sumLiquidity,

@@ -29,6 +29,7 @@ import {
   fetchFeedMarketsDirect,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
 const FOR_YOU_MIN_VOLUME_24H = 100;
 const FOR_YOU_MIN_LIQUIDITY = 1000;
@@ -99,6 +100,39 @@ function enqueueFeedMarketRefreshForBody(body: string): void {
     if (isRecord(parsed)) enqueueFeedMarketRefreshForData(parsed.data);
   } catch {
     // Cache body is controlled by this route. If it is somehow invalid, skip warming.
+  }
+}
+
+function filterCachedFeedBodyForVenues(
+  body: string,
+  allowedVenues: ReadonlySet<string>,
+): string | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed.data)) return null;
+    let changed = false;
+    const data = parsed.data.flatMap((event) => {
+      if (!isRecord(event) || !Array.isArray(event.markets)) {
+        changed = true;
+        return [];
+      }
+      const markets = event.markets.filter(
+        (market) =>
+          isRecord(market) &&
+          typeof market.venue === "string" &&
+          allowedVenues.has(market.venue),
+      );
+      if (markets.length !== event.markets.length) changed = true;
+      if (markets.length === 0) {
+        changed = true;
+        return [];
+      }
+      return markets === event.markets ? [event] : [{ ...event, markets }];
+    });
+    if (!changed) return body;
+    return JSON.stringify({ ...parsed, count: data.length, data });
+  } catch {
+    return null;
   }
 }
 
@@ -344,7 +378,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           : q.event_scope === "single"
             ? "single"
             : undefined;
-      const venues = q.venue;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        q.venue,
+        "discovery",
+      );
+      const { venues } = lifecycle;
       const category = q.category;
       const categories = q.categories;
       const filter = q.filter;
@@ -371,14 +410,17 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v29:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v29:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
 
       // serve from cache if present, with proper ETag/304 handling
       if (cacheEnabled && r) {
-        const cachedBody = await r.get(cacheKey);
+        const rawCachedBody = await r.get(cacheKey);
+        const cachedBody = rawCachedBody
+          ? filterCachedFeedBodyForVenues(rawCachedBody, new Set(venues))
+          : null;
         if (cachedBody) {
           const etag = `W/"${crypto
             .createHash("sha1")
@@ -657,7 +699,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           : q.event_scope === "single"
             ? "single"
             : undefined;
-      const venues = q.venue;
+      const { venues } = await filterVenuesForLifecycleCapability(
+        pool,
+        q.venue,
+        "discovery",
+      );
       const category = q.category;
       const categories = q.categories;
       const filter = q.filter;
@@ -945,7 +991,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const nowMs = Date.now();
       const minVol = resolveMinTotalVolumeFilter(query);
       const minLiquidity = query.min_liquidity;
-      const venues = query.venue;
+      const { venues } = await filterVenuesForLifecycleCapability(
+        pool,
+        query.venue,
+        "discovery",
+      );
       const categories = query.categories;
       const minProb = query.min_prob;
       const maxProb = query.max_prob;

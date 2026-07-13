@@ -390,6 +390,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
 
       const result = await buildPolymarketRedemptionPlanRoute({
         log: request.log,
+        pool,
         query: request.query,
         signer,
         userId: user.id,

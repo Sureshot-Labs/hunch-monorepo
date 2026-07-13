@@ -12,6 +12,7 @@ import {
   TradingServiceError,
 } from "./trading-errors.js";
 import type { TradingVenue } from "./trading-types.js";
+import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 
 export type {
   ApiBotTradingExecutor,
@@ -57,13 +58,38 @@ export function createApiTradingApplicationService(
     return executor;
   };
 
+  const assertIntentAllowed = async (intent: {
+    action: "BUY" | "SELL";
+    actor: { kind: string };
+    venue: TradingVenue;
+  }): Promise<void> => {
+    const allowed = await venueLifecycleAllowsTradingAction(
+      input.pool,
+      intent.venue,
+      intent.action,
+      { automation: intent.actor.kind === "telegram_bot" },
+    );
+    if (allowed) return;
+    throw new TradingServiceError({
+      code: "venue_lifecycle_blocked",
+      message:
+        intent.action === "BUY"
+          ? "This venue is not accepting new exposure."
+          : "This venue is unavailable for position exits.",
+      statusCode: 409,
+      venue: intent.venue,
+    });
+  };
+
   return {
     applyTradeEffects: (effectsInput) =>
       executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
-    executePreparedTrade: (executeInput) =>
-      executorFor(executeInput.prepared.venue).executePreparedTrade(
+    executePreparedTrade: async (executeInput) => {
+      await assertIntentAllowed(executeInput.prepared.intent);
+      return executorFor(executeInput.prepared.venue).executePreparedTrade(
         executeInput,
-      ),
+      );
+    },
     ensureReadiness: async (readinessInput) => {
       const executor = executorFor(readinessInput.venue);
       if (executor.ensureReadiness) {
@@ -86,11 +112,19 @@ export function createApiTradingApplicationService(
       }),
     persistTrade: (persistInput) =>
       executorFor(persistInput.intent.venue).persistTrade(persistInput),
-    prepareTrade: (prepareInput) =>
-      executorFor(prepareInput.intent.venue).prepareTrade(prepareInput),
-    quote: (quoteInput) =>
-      executorFor(quoteInput.intent.venue).quote(quoteInput),
-    submitPreparedTrade: (submitInput) =>
-      executorFor(submitInput.prepared.venue).submitPreparedTrade(submitInput),
+    prepareTrade: async (prepareInput) => {
+      await assertIntentAllowed(prepareInput.intent);
+      return executorFor(prepareInput.intent.venue).prepareTrade(prepareInput);
+    },
+    quote: async (quoteInput) => {
+      await assertIntentAllowed(quoteInput.intent);
+      return executorFor(quoteInput.intent.venue).quote(quoteInput);
+    },
+    submitPreparedTrade: async (submitInput) => {
+      await assertIntentAllowed(submitInput.prepared.intent);
+      return executorFor(submitInput.prepared.venue).submitPreparedTrade(
+        submitInput,
+      );
+    },
   };
 }

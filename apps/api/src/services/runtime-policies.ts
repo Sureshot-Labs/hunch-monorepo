@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  buildVenueLifecyclePolicyRevision,
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  venueLifecyclePolicySchema,
+  type VenueLifecyclePolicy,
+} from "@hunch/shared";
 
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
@@ -41,11 +47,14 @@ export const INTEL_POLICY_KEYS = [
   "holder_research",
   "arbitrage_defaults",
   "signal_bot",
+  "venue_lifecycle",
 ] as const;
 
 export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 
-type PolicySource = "env" | "db";
+type PolicySource<K extends IntelPolicyKey> = K extends "venue_lifecycle"
+  ? "default" | "db"
+  : "env" | "db";
 
 export type AuthAccessState = "off" | "prompt" | "required";
 
@@ -590,11 +599,12 @@ type IntelPolicyMap = {
   holder_research: HolderResearchPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
   signal_bot: SignalBotPolicy;
+  venue_lifecycle: VenueLifecyclePolicy;
 };
 
 type IntelPolicyResult<K extends IntelPolicyKey> = {
   key: K;
-  source: PolicySource;
+  source: PolicySource<K>;
   effectiveAt: Date | null;
   createdAt: Date | null;
   defaults: IntelPolicyMap[K];
@@ -1258,6 +1268,7 @@ const policySchemas = {
   holder_research: holderResearchSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
   signal_bot: signalBotSchema,
+  venue_lifecycle: venueLifecyclePolicySchema,
 } as const;
 
 const warnedInvalidOverrides = new Set<string>();
@@ -1846,6 +1857,7 @@ function getDefaults(): IntelPolicyMap {
       minQualityScore: 0.6,
     },
     signal_bot: getDefaultSignalBotPolicy(),
+    venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
   };
 }
 
@@ -3080,6 +3092,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeSignalBotPolicy(
         merged as SignalBotPolicy,
       ) as IntelPolicyMap[K];
+    case "venue_lifecycle":
+      return venueLifecyclePolicySchema.parse(merged) as IntelPolicyMap[K];
     default:
       return merged;
   }
@@ -3149,6 +3163,9 @@ function sanitizeOverridePayload(
     case "signal_bot": {
       return sanitizeSignalBotPolicyOverride(record);
     }
+    case "venue_lifecycle": {
+      return record;
+    }
     default:
       return record;
   }
@@ -3182,7 +3199,9 @@ function resolveFromRow<K extends IntelPolicyKey>(
   if (!row) {
     return {
       key,
-      source: "env",
+      source: (key === "venue_lifecycle"
+        ? "default"
+        : "env") as PolicySource<K>,
       effectiveAt: null,
       createdAt: null,
       defaults,
@@ -3192,21 +3211,26 @@ function resolveFromRow<K extends IntelPolicyKey>(
     };
   }
 
+  const effectiveAt =
+    row.effective_at instanceof Date ? row.effective_at : null;
+  const createdAt = row.created_at instanceof Date ? row.created_at : null;
   const parsed = validateOverride(key, row.payload);
   if (!parsed.valid || !parsed.value) {
-    const warnKey = `${key}:${row.effective_at.toISOString()}`;
+    const warnKey = `${key}:${effectiveAt?.toISOString() ?? "unknown"}`;
     if (!warnedInvalidOverrides.has(warnKey)) {
       warnedInvalidOverrides.add(warnKey);
       console.warn(
-        "[runtime-policies] Invalid policy override payload; falling back to env defaults",
-        { policyKey: key, effectiveAt: row.effective_at.toISOString() },
+        "[runtime-policies] Invalid policy override payload; falling back to defaults",
+        { policyKey: key, effectiveAt: effectiveAt?.toISOString() ?? null },
       );
     }
     return {
       key,
-      source: "env",
-      effectiveAt: row.effective_at,
-      createdAt: row.created_at,
+      source: (key === "venue_lifecycle"
+        ? "default"
+        : "env") as PolicySource<K>,
+      effectiveAt,
+      createdAt,
       defaults,
       override: null,
       effective: normalizeMerged(key, defaults),
@@ -3219,9 +3243,9 @@ function resolveFromRow<K extends IntelPolicyKey>(
 
   return {
     key,
-    source: "db",
-    effectiveAt: row.effective_at,
-    createdAt: row.created_at,
+    source: "db" as PolicySource<K>,
+    effectiveAt,
+    createdAt,
     defaults,
     override: parsed.value,
     effective,
@@ -3286,6 +3310,10 @@ export async function resolveAllIntelPolicies(
       byKey.get("arbitrage_defaults") ?? null,
     ),
     signal_bot: resolveFromRow("signal_bot", byKey.get("signal_bot") ?? null),
+    venue_lifecycle: resolveFromRow(
+      "venue_lifecycle",
+      byKey.get("venue_lifecycle") ?? null,
+    ),
   };
 }
 
@@ -3339,4 +3367,53 @@ export async function resolveAuthAccessPolicy(pool: DbQuery) {
 
 export async function resolveSignalBotPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "signal_bot");
+}
+
+const VENUE_LIFECYCLE_CACHE_TTL_MS = 15_000;
+let venueLifecyclePolicyCache = new WeakMap<
+  object,
+  {
+    expiresAt: number;
+    result: IntelPolicyResult<"venue_lifecycle"> & { revision: string };
+  }
+>();
+
+export function clearVenueLifecyclePolicyCache(pool?: DbQuery): void {
+  if (pool && typeof pool === "object") {
+    venueLifecyclePolicyCache.delete(pool as object);
+    return;
+  }
+  venueLifecyclePolicyCache = new WeakMap();
+}
+
+export function resolvedVenueLifecyclePolicyRevision(result: {
+  effectiveAt: Date | string | null;
+  invalidOverride: boolean;
+  source: "db" | "default" | "env";
+}): string {
+  return buildVenueLifecyclePolicyRevision(
+    result.source === "db" && !result.invalidOverride
+      ? result.effectiveAt
+      : null,
+  );
+}
+
+export async function resolveVenueLifecyclePolicy(
+  pool: DbQuery,
+): Promise<IntelPolicyResult<"venue_lifecycle"> & { revision: string }> {
+  const cacheKey = pool as object;
+  const now = Date.now();
+  const cached = venueLifecyclePolicyCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.result;
+
+  const resolved = await resolveIntelPolicy(pool, "venue_lifecycle");
+  const result = {
+    ...resolved,
+    revision: resolvedVenueLifecyclePolicyRevision(resolved),
+  };
+  venueLifecyclePolicyCache.set(cacheKey, {
+    expiresAt: now + VENUE_LIFECYCLE_CACHE_TTL_MS,
+    result,
+  });
+  return result;
 }

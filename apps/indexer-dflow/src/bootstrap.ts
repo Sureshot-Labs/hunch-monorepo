@@ -81,13 +81,23 @@ type DflowUnifiedTokenRow = {
 };
 
 type DflowMarketInsertFilterResult = {
+  blockedNewMarketIds: Set<string>;
   marketRows: UnifiedMarketRow[];
   skippedStaleNewMarketIds: Set<string>;
 };
 
 type MarketStatusRefreshOptions = {
+  allowNewMarkets?: boolean;
   includeSiblings?: boolean;
+  publishDiscoveryUpdates?: boolean;
   publishMarketState?: boolean;
+};
+
+export type DflowMaintenanceTargets = {
+  marketIds: string[];
+  reasons: Record<string, number>;
+  tickers: string[];
+  tokenIds: string[];
 };
 
 const STATUS_BATCH_LIMIT = 100;
@@ -134,6 +144,14 @@ export function shouldSkipStaleDflowNewMarketInsert(
   return terminalMs < nowMs - STALE_DFLOW_NEW_MARKET_INSERT_MS;
 }
 
+export function shouldBlockDflowNewMarketInsert(
+  marketId: string,
+  existingMarketIds: ReadonlySet<string>,
+  allowNewMarkets: boolean,
+): boolean {
+  return !allowNewMarkets && !existingMarketIds.has(marketId);
+}
+
 async function loadExistingDflowMarketIds(
   rows: UnifiedMarketRow[],
 ): Promise<Set<string>> {
@@ -153,22 +171,46 @@ async function loadExistingDflowMarketIds(
 
 async function filterStaleDflowNewMarketInserts(
   rows: UnifiedMarketRow[],
+  options: { allowNewMarkets?: boolean } = {},
 ): Promise<DflowMarketInsertFilterResult> {
   if (!rows.length) {
-    return { marketRows: [], skippedStaleNewMarketIds: new Set() };
+    return {
+      blockedNewMarketIds: new Set(),
+      marketRows: [],
+      skippedStaleNewMarketIds: new Set(),
+    };
   }
 
   const existingMarketIds = await loadExistingDflowMarketIds(rows);
   const nowMs = Date.now();
+  const blockedNewMarketIds = new Set<string>();
   const marketRows: UnifiedMarketRow[] = [];
   const skippedStaleNewMarketIds = new Set<string>();
 
   for (const row of rows) {
+    if (
+      shouldBlockDflowNewMarketInsert(
+        row.id,
+        existingMarketIds,
+        options.allowNewMarkets !== false,
+      )
+    ) {
+      blockedNewMarketIds.add(row.id);
+      continue;
+    }
     if (shouldSkipStaleDflowNewMarketInsert(row, existingMarketIds, nowMs)) {
       skippedStaleNewMarketIds.add(row.id);
       continue;
     }
     marketRows.push(row);
+  }
+
+  if (blockedNewMarketIds.size) {
+    log.info("DFlow maintenance blocked new market inserts", {
+      inputRows: rows.length,
+      blockedRows: blockedNewMarketIds.size,
+      sampleMarketIds: Array.from(blockedNewMarketIds).slice(0, 5),
+    });
   }
 
   if (skippedStaleNewMarketIds.size) {
@@ -180,7 +222,7 @@ async function filterStaleDflowNewMarketInserts(
     });
   }
 
-  return { marketRows, skippedStaleNewMarketIds };
+  return { blockedNewMarketIds, marketRows, skippedStaleNewMarketIds };
 }
 
 function filterTokenRowsForSkippedMarkets(
@@ -721,6 +763,106 @@ async function fetchPositionTokenIds(
   return rows.map((row) => row.token_id).filter(Boolean);
 }
 
+export async function loadDflowMaintenanceTargets(): Promise<DflowMaintenanceTargets> {
+  const { rows } = await pool.query<{
+    market_id: string;
+    reason: string;
+    ticker: string;
+    token_id: string;
+  }>(`
+    with raw_refs as (
+      select 'position'::text as reason, t.market_id, p.token_id
+      from positions p
+      join unified_tokens t on t.token_id = p.token_id
+      join unified_markets m on m.id = t.market_id and m.venue = 'kalshi'
+      where p.venue = 'kalshi'
+        and abs(coalesce(p.size, 0)) > 0
+
+      union all
+
+      select 'order'::text as reason, t.market_id, o.token_id
+      from orders o
+      join unified_tokens t on t.token_id = o.token_id
+      join unified_markets m on m.id = t.market_id and m.venue = 'kalshi'
+      where o.venue = 'kalshi'
+        and lower(coalesce(o.status, '')) in (
+          'pending', 'submitted', 'live', 'partially_filled',
+          'delayed', 'unconfirmed', 'open', 'unknown'
+        )
+        and greatest(coalesce(o.size, 0) - coalesce(o.filled_size, 0), 0) > 0
+        and o.cancelled_at is null
+
+      union all
+
+      select 'execution'::text as reason, e.unified_market_id, null::text
+      from executions e
+      join unified_markets m
+        on m.id = e.unified_market_id
+       and m.venue = 'kalshi'
+      where e.venue = 'kalshi'
+        and lower(coalesce(e.status, 'unknown')) in (
+          'pending', 'submitted', 'open', 'pending_close',
+          'unknown', 'unconfirmed'
+        )
+
+      union all
+
+      select 'telegram_intent'::text as reason, ti.market_id, null::text
+      from telegram_trade_intents ti
+      join unified_markets m on m.id = ti.market_id and m.venue = 'kalshi'
+      where ti.venue = 'kalshi'
+        and ti.status in ('executing', 'submitted', 'reconcile_required')
+    ),
+    expanded as (
+      select distinct r.reason, r.market_id, r.token_id
+      from raw_refs r
+      where r.token_id is not null
+
+      union
+
+      select distinct r.reason, r.market_id, t.token_id
+      from raw_refs r
+      join unified_tokens t on t.market_id = r.market_id
+      where r.token_id is null
+        and t.token_id like 'sol:%'
+    )
+    select
+      e.reason,
+      e.market_id,
+      m.venue_market_id as ticker,
+      e.token_id
+    from expanded e
+    join unified_markets m on m.id = e.market_id and m.venue = 'kalshi'
+    where m.venue_market_id is not null
+      and e.token_id like 'sol:%'
+    order by e.reason, e.market_id, e.token_id
+  `);
+
+  const marketIds = new Set<string>();
+  const tickers = new Set<string>();
+  const tokenIds = new Set<string>();
+  const reasons: Record<string, number> = {};
+  const reasonTargets = new Map<string, Set<string>>();
+  for (const row of rows) {
+    marketIds.add(row.market_id);
+    tickers.add(row.ticker);
+    tokenIds.add(row.token_id);
+    const targets = reasonTargets.get(row.reason) ?? new Set<string>();
+    targets.add(row.market_id);
+    reasonTargets.set(row.reason, targets);
+  }
+  for (const [reason, targets] of reasonTargets) {
+    reasons[reason] = targets.size;
+  }
+
+  return {
+    marketIds: Array.from(marketIds).sort(),
+    reasons,
+    tickers: Array.from(tickers).sort(),
+    tokenIds: Array.from(tokenIds).sort(),
+  };
+}
+
 async function fetchTickersForTokenIds(tokenIds: string[]): Promise<string[]> {
   if (!tokenIds.length) return [];
   const { rows } = await pool.query<{
@@ -891,13 +1033,10 @@ async function fetchTradeTokenIds(): Promise<string[]> {
   return tokenIds.slice(0, env.tradesTokenLimit);
 }
 
-export async function syncRecentTrades(): Promise<{
+async function syncRecentTradesForTokenIds(tokenIds: string[]): Promise<{
   tokenCount: number;
   tradeCount: number;
 }> {
-  if (!env.dflowEnabled) return { tokenCount: 0, tradeCount: 0 };
-
-  const tokenIds = await fetchTradeTokenIds();
   if (!tokenIds.length) return { tokenCount: 0, tradeCount: 0 };
 
   const [sideMap, lastTradeMap] = await Promise.all([
@@ -959,6 +1098,14 @@ export async function syncRecentTrades(): Promise<{
   );
 
   return { tokenCount: tokenIds.length, tradeCount };
+}
+
+export async function syncRecentTrades(): Promise<{
+  tokenCount: number;
+  tradeCount: number;
+}> {
+  if (!env.dflowEnabled) return { tokenCount: 0, tradeCount: 0 };
+  return syncRecentTradesForTokenIds(await fetchTradeTokenIds());
 }
 
 export async function resolveHotTickersForWs(): Promise<string[]> {
@@ -1259,15 +1406,19 @@ async function syncMarketStatusesForTokenIds(
   context: string,
   options: MarketStatusRefreshOptions = {},
 ): Promise<{
+  blockedNewMarkets: number;
   processedMarkets: number;
 }> {
-  if (!env.dflowEnabled) return { processedMarkets: 0 };
+  if (!env.dflowEnabled) {
+    return { blockedNewMarkets: 0, processedMarkets: 0 };
+  }
 
   await ensureRedis();
   await pool.query("select 1");
 
   const allTokenIds = Array.from(new Set(inputTokenIds));
   let processedMarkets = 0;
+  let blockedNewMarkets = 0;
   const touchedEventIds = new Set<string>();
 
   if (allTokenIds.length) {
@@ -1374,12 +1525,21 @@ async function syncMarketStatusesForTokenIds(
         }
       }
 
-      const marketFilter =
-        await filterStaleDflowNewMarketInserts(unifiedMarketRows);
+      const marketFilter = await filterStaleDflowNewMarketInserts(
+        unifiedMarketRows,
+        {
+          allowNewMarkets: options.allowNewMarkets,
+        },
+      );
       const persistedMarketRows = marketFilter.marketRows;
+      blockedNewMarkets += marketFilter.blockedNewMarketIds.size;
+      const skippedMarketIds = new Set([
+        ...marketFilter.blockedNewMarketIds,
+        ...marketFilter.skippedStaleNewMarketIds,
+      ]);
       const persistedTokenRows = filterTokenRowsForSkippedMarkets(
         tokenRows,
-        marketFilter.skippedStaleNewMarketIds,
+        skippedMarketIds,
       );
 
       if (persistedMarketRows.length) {
@@ -1391,17 +1551,22 @@ async function syncMarketStatusesForTokenIds(
       if (options.publishMarketState) {
         await publishDflowMarketStates(persistedMarketRows);
       }
-      try {
-        await publishDflowMarketUpdates(persistedMarketRows);
-      } catch (error) {
-        log.warn("DFlow market update publish failed", { context, error });
+      if (options.publishDiscoveryUpdates !== false) {
+        try {
+          await publishDflowMarketUpdates(persistedMarketRows);
+        } catch (error) {
+          log.warn("DFlow market update publish failed", { context, error });
+        }
       }
 
       for (const row of persistedMarketRows) {
         touchedEventIds.add(row.event_id);
       }
 
-      if (persistedMarketRows.length) {
+      if (
+        options.publishDiscoveryUpdates !== false &&
+        persistedMarketRows.length
+      ) {
         try {
           const eventTitleById = new Map(
             Array.from(eventInfoByTicker.values()).map((info) => [
@@ -1453,7 +1618,36 @@ async function syncMarketStatusesForTokenIds(
     reconciledEvents,
   });
 
-  return { processedMarkets };
+  return { blockedNewMarkets, processedMarkets };
+}
+
+export async function syncDflowMaintenanceTargets(
+  targets: DflowMaintenanceTargets,
+): Promise<{
+  blockedNewMarkets: number;
+  processedMarkets: number;
+  publishedTokenTops: number;
+  tradeCount: number;
+}> {
+  const status = await syncMarketStatusesForTokenIds(
+    targets.tokenIds,
+    "maintenance",
+    {
+      allowNewMarkets: false,
+      includeSiblings: false,
+      publishDiscoveryUpdates: false,
+      publishMarketState: true,
+    },
+  );
+  const [publishedTokenTops, trades] = await Promise.all([
+    publishTokenTopsForTokenIds(targets.tokenIds),
+    syncRecentTradesForTokenIds(targets.tokenIds),
+  ]);
+  return {
+    ...status,
+    publishedTokenTops,
+    tradeCount: trades.tradeCount,
+  };
 }
 
 export async function syncHotMarketStatuses(): Promise<{
@@ -1474,6 +1668,7 @@ export async function syncHotMarketStatuses(): Promise<{
 
 export async function processPriceRefreshQueue(
   options: {
+    allowedTokenIds?: ReadonlySet<string>;
     side?: PriceRefreshQueueClaimSide;
     logSuccess?: boolean;
   } = {},
@@ -1488,6 +1683,7 @@ export async function processPriceRefreshQueue(
   marketRefreshed?: number;
   topRefreshed?: number;
   httpFallback?: number;
+  policySkipped?: number;
   durationMs?: number;
 }> {
   const side = options.side ?? "oldest";
@@ -1497,13 +1693,29 @@ export async function processPriceRefreshQueue(
 
   await ensureRedis();
   const redisClient = redis as unknown as PriceRefreshRedis;
-  const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
+  const claimedTokenIds = await claimDuePriceRefreshTokens(redisClient, {
     venue: "dflow",
     limit: env.priceRefreshQueueBatch,
     side,
   });
-  if (!tokenIds.length) {
+  if (!claimedTokenIds.length) {
     return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
+  }
+  const tokenIds = options.allowedTokenIds
+    ? claimedTokenIds.filter((tokenId) => options.allowedTokenIds?.has(tokenId))
+    : claimedTokenIds;
+  const policySkipped = claimedTokenIds.length - tokenIds.length;
+
+  if (!tokenIds.length) {
+    const backlog = await getPriceRefreshQueueBacklog(redisClient, "dflow");
+    return {
+      backlog,
+      claimed: claimedTokenIds.length,
+      failed: 0,
+      policySkipped,
+      refreshed: 0,
+      side,
+    };
   }
 
   const startedAt = Date.now();
@@ -1525,7 +1737,8 @@ export async function processPriceRefreshQueue(
       if (options.logSuccess !== false) {
         log.info("DFlow price refresh queue processed", {
           side,
-          claimed: tokenIds.length,
+          claimed: claimedTokenIds.length,
+          policySkipped,
           freshSkipped,
           stale: 0,
           refreshed: 0,
@@ -1538,11 +1751,12 @@ export async function processPriceRefreshQueue(
         });
       }
       return {
-        claimed: tokenIds.length,
+        claimed: claimedTokenIds.length,
         refreshed: 0,
         failed: 0,
         backlog,
         side,
+        policySkipped,
         freshSkipped,
         stale: 0,
         marketRefreshed: 0,
@@ -1555,7 +1769,12 @@ export async function processPriceRefreshQueue(
     const result = await syncMarketStatusesForTokenIds(
       staleTokenIds,
       "price-refresh",
-      { includeSiblings: false, publishMarketState: true },
+      {
+        allowNewMarkets: options.allowedTokenIds ? false : undefined,
+        includeSiblings: false,
+        publishDiscoveryUpdates: options.allowedTokenIds ? false : undefined,
+        publishMarketState: true,
+      },
     );
     marketRefreshed = result.processedMarkets;
     topRefreshed = await publishTokenTopsForTokenIds(staleTokenIds);
@@ -1575,7 +1794,8 @@ export async function processPriceRefreshQueue(
   if (options.logSuccess !== false) {
     log.info("DFlow price refresh queue processed", {
       side,
-      claimed: tokenIds.length,
+      claimed: claimedTokenIds.length,
+      policySkipped,
       freshSkipped,
       stale: staleTokenIds.length,
       refreshed,
@@ -1588,11 +1808,12 @@ export async function processPriceRefreshQueue(
     });
   }
   return {
-    claimed: tokenIds.length,
+    claimed: claimedTokenIds.length,
     refreshed,
     failed,
     backlog,
     side,
+    policySkipped,
     freshSkipped,
     stale: staleTokenIds.length,
     marketRefreshed,

@@ -57,13 +57,16 @@ import {
 } from "../services/rewards.js";
 import { getRewardsTreasuryReport } from "../services/rewards-treasury.js";
 import {
+  clearVenueLifecyclePolicyCache,
   getIntelPolicySchema,
   INTEL_POLICY_KEYS,
   resolveApiCacheWarmPolicy,
   resolveAllIntelPolicies,
   resolveIntelPolicy,
+  resolvedVenueLifecyclePolicyRevision,
   type IntelPolicyKey,
 } from "../services/runtime-policies.js";
+import { clearSignalBotVenueLifecycleCache } from "../services/signal-bot-venue-lifecycle.js";
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
@@ -6013,6 +6016,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           override: item.override,
           effective: item.effective,
           invalidOverride: item.invalidOverride,
+          revision:
+            key === "venue_lifecycle"
+              ? resolvedVenueLifecyclePolicyRevision(item)
+              : null,
         };
       });
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -6045,6 +6052,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         override: item.override,
         effective: item.effective,
         invalidOverride: item.invalidOverride,
+        revision:
+          key === "venue_lifecycle"
+            ? resolvedVenueLifecyclePolicyRevision(item)
+            : null,
       });
     },
   );
@@ -6087,6 +6098,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           payload: parsed.data,
           createdBy: actorId,
         });
+        if (key === "venue_lifecycle") {
+          clearVenueLifecyclePolicyCache(pool);
+          clearSignalBotVenueLifecycleCache(pool);
+        }
         const resolved = await resolveIntelPolicy(pool, key);
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -6108,6 +6123,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             override: resolved.override,
             effective: resolved.effective,
             invalidOverride: resolved.invalidOverride,
+            revision:
+              key === "venue_lifecycle"
+                ? resolvedVenueLifecyclePolicyRevision(resolved)
+                : null,
           },
         });
       } catch (error) {

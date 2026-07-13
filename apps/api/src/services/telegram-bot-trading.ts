@@ -68,6 +68,7 @@ import {
   buildRedemptionNotification,
   createNotificationSafe,
 } from "./notifications.js";
+import { venueLifecycleAllows } from "./venue-lifecycle.js";
 
 export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell" | "redeem";
@@ -962,10 +963,25 @@ function venueStatusFromReadiness(input: {
 export const telegramBotTradingTestHooks = {
   buildTelegramSellTradeIntent,
   isDefinitiveSubmitRejection,
+  isTelegramVenueMinimumBlocking,
   marketForCallbackReadiness,
   resolveTelegramExecutableBuyOption,
   venueStatusFromReadiness,
 };
+
+export function isTelegramVenueMinimumBlocking(input: {
+  action: string;
+  meetsVenueMinimum: boolean | null | undefined;
+  orderType: string | null | undefined;
+  venue: string;
+}): boolean {
+  if (input.meetsVenueMinimum !== false) return false;
+  return !(
+    input.venue.toLowerCase() === "polymarket" &&
+    input.action.toUpperCase() === "BUY" &&
+    input.orderType?.toUpperCase() === "FOK"
+  );
+}
 
 function effectiveMaxTradeAmountUsd(
   policy: SignalBotPolicy,
@@ -1325,10 +1341,6 @@ async function resolveTelegramExecutableSellOptions(input: {
   return options;
 }
 
-function roundUsdUpToCent(value: number): number {
-  return Math.ceil((value - Number.EPSILON) * 100) / 100;
-}
-
 async function resolveTelegramExecutableBuyOption(input: {
   authorization: TelegramBotTradingAuthorizationRow;
   market: TelegramBotMarketRow;
@@ -1339,57 +1351,44 @@ async function resolveTelegramExecutableBuyOption(input: {
   side: TelegramBotTradingSide;
   trading: ApiBotTradingExecutor;
 }): Promise<TelegramExecutableBuyOption | null> {
-  let amountUsd = input.nominalAmountUsd;
+  const amountUsd = input.nominalAmountUsd;
+  const intent = buildTelegramTradeIntent({
+    amountUsd,
+    authorization: input.authorization,
+    intentId: crypto.randomUUID(),
+    market: input.market,
+    maxSlippageBps: input.maxSlippageBps,
+    side: input.side,
+  });
   let quote: TradeQuote;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      quote = await input.trading.quote({
-        intent: buildTelegramTradeIntent({
-          amountUsd,
-          authorization: input.authorization,
-          intentId: crypto.randomUUID(),
-          market: input.market,
-          maxSlippageBps: input.maxSlippageBps,
-          side: input.side,
-        }),
-      });
-    } catch {
-      return null;
-    }
-    if (quote.meetsVenueMinimum === false) {
-      const minShares = quote.minimumOrderSizeShares;
-      const maxPrice = quote.price;
-      if (
-        attempt > 0 ||
-        minShares == null ||
-        maxPrice == null ||
-        minShares <= 0 ||
-        maxPrice <= 0
-      ) {
-        return null;
-      }
-      const liftedAmountUsd = roundUsdUpToCent(minShares * maxPrice);
-      amountUsd =
-        liftedAmountUsd > amountUsd
-          ? liftedAmountUsd
-          : roundUsdUpToCent(amountUsd + 0.01);
-      continue;
-    }
-    const currentPrice = quote.currentPrice;
-    const maxSpendUsd = quote.maxSpendUsd ?? amountUsd;
-    if (
-      currentPrice == null ||
-      !Number.isFinite(currentPrice) ||
-      currentPrice <= 0 ||
-      maxSpendUsd > input.maxAmountUsd ||
-      (input.maxExecutableBuyUsd != null &&
-        maxSpendUsd > input.maxExecutableBuyUsd)
-    ) {
-      return null;
-    }
-    return { amountUsd, currentPrice, maxSpendUsd, quote, side: input.side };
+  try {
+    quote = await input.trading.quote({ intent });
+  } catch {
+    return null;
   }
-  return null;
+  if (
+    isTelegramVenueMinimumBlocking({
+      action: intent.action,
+      meetsVenueMinimum: quote.meetsVenueMinimum,
+      orderType: intent.orderType,
+      venue: intent.venue,
+    })
+  ) {
+    return null;
+  }
+  const currentPrice = quote.currentPrice;
+  const maxSpendUsd = quote.maxSpendUsd ?? amountUsd;
+  if (
+    currentPrice == null ||
+    !Number.isFinite(currentPrice) ||
+    currentPrice <= 0 ||
+    maxSpendUsd > input.maxAmountUsd ||
+    (input.maxExecutableBuyUsd != null &&
+      maxSpendUsd > input.maxExecutableBuyUsd)
+  ) {
+    return null;
+  }
+  return { amountUsd, currentPrice, maxSpendUsd, quote, side: input.side };
 }
 
 function openMarketUrl(
@@ -2648,6 +2647,13 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   );
   const authorizationVenueAllowed =
     authorization != null && authorizationVenues.includes(market.venue);
+  const [automationAllowed, buyAllowed, redeemAllowed, sellAllowed] =
+    await Promise.all([
+      venueLifecycleAllows(input.db, market.venue, "automation"),
+      venueLifecycleAllows(input.db, market.venue, "increaseExposure"),
+      venueLifecycleAllows(input.db, market.venue, "redeem"),
+      venueLifecycleAllows(input.db, market.venue, "reduceExposure"),
+    ]);
   const maxAmountUsd = effectiveMaxTradeAmountUsd(
     policy,
     authorization?.max_amount_usd ?? status.maxAmountUsd,
@@ -2668,6 +2674,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const canBuildBuyOptions =
     !input.isAdminTest &&
     !unresolvedIntent &&
+    automationAllowed &&
+    buyAllowed &&
     policy.tradingEnabled &&
     policy.tradingActions.includes("buy") &&
     policyVenueAllowed &&
@@ -2705,6 +2713,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const canBuildSellOptions =
     !input.isAdminTest &&
     !unresolvedIntent &&
+    automationAllowed &&
+    sellAllowed &&
     market.venue === "polymarket" &&
     policy.tradingEnabled &&
     policy.tradingActions.includes("sell") &&
@@ -2734,6 +2744,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const redeemPlan =
     !input.isAdminTest &&
     !unresolvedIntent &&
+    automationAllowed &&
+    redeemAllowed &&
     market.venue === "polymarket" &&
     policy.tradingEnabled &&
     policy.tradingActions.includes("redeem") &&
@@ -3459,7 +3471,12 @@ async function handleTelegramRedeemCallback(input: {
   policy: SignalBotPolicy;
 }): Promise<boolean> {
   const { authorization, callback, chatId, intent, market, policy } = input;
+  const lifecycleReady =
+    market != null &&
+    (await venueLifecycleAllows(callback.db, market.venue, "automation")) &&
+    (await venueLifecycleAllows(callback.db, market.venue, "redeem"));
   if (
+    !lifecycleReady ||
     !policy.tradingEnabled ||
     !policy.tradingActions.includes("redeem") ||
     !authorization?.enabled ||
@@ -4136,7 +4153,14 @@ export async function handleTelegramBotTradingCallback(
     }
     const previewMaxSpendUsd =
       action === "BUY" ? (previewQuote.maxSpendUsd ?? amountUsd) : null;
-    if (previewQuote.meetsVenueMinimum === false) {
+    if (
+      isTelegramVenueMinimumBlocking({
+        action: previewIntent.action,
+        meetsVenueMinimum: previewQuote.meetsVenueMinimum,
+        orderType: previewIntent.orderType,
+        venue: previewIntent.venue,
+      })
+    ) {
       await updateIntentStatus({
         allowedStatuses: ["draft", "previewed"],
         db: input.db,
@@ -4466,8 +4490,14 @@ export async function handleTelegramBotTradingCallback(
     const quote = await trading.quote({ intent: sharedIntent });
     const quoteMaxSpendUsd =
       action === "BUY" ? (quote.maxSpendUsd ?? amountUsd) : null;
+    const venueMinimumBlocking = isTelegramVenueMinimumBlocking({
+      action: sharedIntent.action,
+      meetsVenueMinimum: quote.meetsVenueMinimum,
+      orderType: sharedIntent.orderType,
+      venue: sharedIntent.venue,
+    });
     if (
-      quote.meetsVenueMinimum === false ||
+      venueMinimumBlocking ||
       (action === "BUY" &&
         quoteMaxSpendUsd != null &&
         quoteMaxSpendUsd > maxAmountUsd) ||
@@ -4479,14 +4509,12 @@ export async function handleTelegramBotTradingCallback(
       await updateIntentStatus({
         allowedStatuses: ["executing"],
         db: input.db,
-        errorCode:
-          quote.meetsVenueMinimum === false
-            ? "quote_changed"
-            : "max_spend_exceeded",
-        errorMessage:
-          quote.meetsVenueMinimum === false
-            ? "Price moved and the order no longer meets venue minimum."
-            : "Quote max spend exceeds the Telegram bot max buy.",
+        errorCode: venueMinimumBlocking
+          ? "quote_changed"
+          : "max_spend_exceeded",
+        errorMessage: venueMinimumBlocking
+          ? "Price moved and the order no longer meets venue minimum."
+          : "Quote max spend exceeds the Telegram bot max buy.",
         intentId: intent.id,
         result: withReadinessRepair({
           maxAmountUsd,

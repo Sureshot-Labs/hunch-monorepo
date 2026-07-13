@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import {
   computeClusterMetrics,
+  resolveExplicitMarketOutcomeMapping,
   type ClusterMarketSummary,
 } from "./services/clusters.js";
 
@@ -99,4 +100,57 @@ test("keeps same-side winner markets on raw yes probability scale", () => {
   const metrics = computeClusterMetrics([kalshi, polymarket]);
   assert.ok(metrics.priceSpread != null);
   assert.ok(Math.abs(metrics.priceSpread - 0.0025) < 1e-9);
+});
+
+test("maps identical market titles to the same YES outcome", () => {
+  const source = buildMarket({
+    marketId: "poly-spain",
+    eventTitle: "World Cup Winner",
+    marketTitle: "Spain",
+  });
+  const target = buildMarket({
+    marketId: "limitless-spain",
+    eventTitle: "FIFA World Cup Winner",
+    marketTitle: "Spain",
+  });
+
+  assert.deepEqual(resolveExplicitMarketOutcomeMapping(source, target), {
+    confidence: 1,
+    method: "exact_title",
+    sourceYesTo: "YES",
+  });
+});
+
+test("inverts YES when matched head-to-head markets select opposite participants", () => {
+  const source = buildMarket({
+    marketId: "poly-alpha",
+    eventTitle: "Alpha vs Beta",
+    marketTitle: "Alpha",
+  });
+  const target = buildMarket({
+    marketId: "limitless-beta",
+    eventTitle: "Beta vs Alpha",
+    marketTitle: "Beta",
+  });
+
+  assert.deepEqual(resolveExplicitMarketOutcomeMapping(source, target), {
+    confidence: 0.98,
+    method: "selected_participant",
+    sourceYesTo: "NO",
+  });
+});
+
+test("fails closed when an AGG match has no explicit outcome mapping", () => {
+  const source = buildMarket({
+    marketId: "poly-rate-cut",
+    eventTitle: "Federal Reserve decision",
+    marketTitle: "Rate cut in September",
+  });
+  const target = buildMarket({
+    marketId: "limitless-rate-cut",
+    eventTitle: "US monetary policy",
+    marketTitle: "Fed changes rates",
+  });
+
+  assert.equal(resolveExplicitMarketOutcomeMapping(source, target), null);
 });

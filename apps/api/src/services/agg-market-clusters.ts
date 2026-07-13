@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
 import type { DbQuery } from "../db.js";
+import { buildBroadOrderableMarketSql } from "../lib/market-availability.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   buildMarketSummary,
   computeClusterMetrics,
-  hasSameInferredSelectedParticipant,
+  resolveExplicitMarketOutcomeMapping,
   type ClusterMarketSummary,
 } from "./clusters.js";
 import {
@@ -14,6 +15,7 @@ import {
   type AggSupportedVenue,
   type AggVenueMarket,
 } from "./agg-market-client.js";
+import { filterSignalBotVenuesForLifecycleCapability } from "./signal-bot-venue-lifecycle.js";
 
 type AggClusterMarketRow = {
   id: string;
@@ -207,6 +209,7 @@ export type AggClusterListCacheMetadata = {
 };
 
 type ResolvedAggMidpoint = {
+  timestamp: string | null;
   value: number;
   side: "yes" | "no" | "unknown";
 };
@@ -341,18 +344,26 @@ function resolveAggMidpoint(
     (outcome) => normalizeLabel(outcome.label) === "yes",
   );
   const yesValue = toProbability(yesOutcome?.midpoint ?? yesOutcome?.price);
-  if (yesValue != null) return { value: yesValue, side: "yes" };
+  if (yesValue != null) {
+    return { timestamp: midpoint.timestamp, value: yesValue, side: "yes" };
+  }
 
   const noOutcome = midpoint.outcomes.find(
     (outcome) => normalizeLabel(outcome.label) === "no",
   );
   const noValue = toProbability(noOutcome?.midpoint ?? noOutcome?.price);
-  if (noValue != null) return { value: noValue, side: "no" };
+  if (noValue != null) {
+    return { timestamp: midpoint.timestamp, value: noValue, side: "no" };
+  }
 
   const topLevelValue = toProbability(midpoint.midpoint ?? midpoint.price);
   return topLevelValue == null
     ? null
-    : { value: topLevelValue, side: "unknown" };
+    : {
+        timestamp: midpoint.timestamp,
+        value: topLevelValue,
+        side: "unknown",
+      };
 }
 
 function orientAggMidpointToDbYes(params: {
@@ -553,10 +564,14 @@ async function loadMatchedMarketRows(
         e.category as event_category
       from unified_markets m
       join unified_events e on e.id = m.event_id
+      left join polymarket_markets pm
+        on pm.id = m.venue_market_id
+       and m.venue = 'polymarket'
       left join unified_market_activity_metrics_24h mam
         on mam.market_id = m.id
       where m.status = 'ACTIVE'
         and e.status = 'ACTIVE'
+        and ${buildBroadOrderableMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "now()", pmAlias: "pm" })}
         and (m.close_time is null or m.close_time > now())
         and (m.expiration_time is null or m.expiration_time > now())
         and m.venue = any($1::text[])
@@ -638,10 +653,14 @@ async function loadSeedMarketRow(
         e.category as event_category
       from unified_markets m
       join unified_events e on e.id = m.event_id
+      left join polymarket_markets pm
+        on pm.id = m.venue_market_id
+       and m.venue = 'polymarket'
       left join unified_market_activity_metrics_24h mam
         on mam.market_id = m.id
       where m.status = 'ACTIVE'
         and e.status = 'ACTIVE'
+        and ${buildBroadOrderableMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "now()", pmAlias: "pm" })}
         and (m.close_time is null or m.close_time > now())
         and (m.expiration_time is null or m.expiration_time > now())
         and (m.id = $1 or m.venue_market_id = $1)
@@ -863,11 +882,18 @@ function buildMatchedAlternativesResponseFromCluster(params: {
   if (!orderedSeed) return null;
 
   const alternatives = ordered.alternatives
-    .filter((market) => hasSameInferredSelectedParticipant(orderedSeed, market))
+    .filter(
+      (market) =>
+        resolveExplicitMarketOutcomeMapping(orderedSeed, market) != null,
+    )
     .slice(0, params.outputLimit);
   if (!alternatives.length) return null;
 
-  const markets = [orderedSeed, ...alternatives];
+  const markets = [orderedSeed, ...alternatives].map((market) => ({
+    ...market,
+    outcomeMapping: resolveExplicitMarketOutcomeMapping(orderedSeed, market),
+  }));
+  const mappedAlternatives = markets.slice(1);
   const metrics = computeClusterMetrics(markets);
 
   return {
@@ -881,7 +907,7 @@ function buildMatchedAlternativesResponseFromCluster(params: {
     lowestYesMid: resolveLowestMidpoint(markets, "yes"),
     lowestNoMid: resolveLowestMidpoint(markets, "no"),
     markets,
-    alternatives,
+    alternatives: mappedAlternatives,
     matchDiagnostics: matchDiagnosticsForMarkets(
       params.cluster.matchDiagnostics,
       markets,
@@ -889,7 +915,7 @@ function buildMatchedAlternativesResponseFromCluster(params: {
   };
 }
 
-function filterParticipantConsistentMarkets(
+function filterOutcomeMappableMarkets(
   markets: ClusterMarketSummary[],
 ): ClusterMarketSummary[] {
   if (markets.length < 2) return markets;
@@ -901,7 +927,7 @@ function filterParticipantConsistentMarkets(
       if (
         market !== first &&
         candidate.every((existing) =>
-          hasSameInferredSelectedParticipant(existing, market),
+          Boolean(resolveExplicitMarketOutcomeMapping(existing, market)),
         )
       ) {
         candidate.push(market);
@@ -980,18 +1006,22 @@ function buildAggClusterSummaries(params: {
       if (yesMid == null) continue;
       markets.push({
         ...baseSummary,
+        active: true,
         source: "agg",
         pricingSource: "agg_midpoint",
         aggVenueMarketId: aggMarket.aggMarketId,
         aggVenueEventId: aggMarket.venueEventId,
         matchMethod: matched.matchMethod,
+        orderable: true,
+        outcomeMapping: null,
+        priceAsOf: aggMarket.midpoint.timestamp,
         marketTitle: matched.row.title ?? aggMarket.question,
         yesMid,
         noMid: 1 - yesMid,
       });
     }
 
-    const comparableMarkets = filterParticipantConsistentMarkets(markets);
+    const comparableMarkets = filterOutcomeMappableMarkets(markets);
     const venueSet = new Set(comparableMarkets.map((market) => market.venue));
     if (comparableMarkets.length < 2 || venueSet.size < 2) continue;
 
@@ -1365,12 +1395,33 @@ export async function getAggClusterListResponseCachedWithMetadata(params: {
   response: AggClusterListResponse;
   cache: AggClusterListCacheMetadata;
 }> {
-  const key = buildAggClusterListCacheKey(params.query);
+  const requestedVenues =
+    params.query.venues?.split(",") ?? AGG_SUPPORTED_VENUES;
+  const lifecycle = await filterSignalBotVenuesForLifecycleCapability(
+    params.db,
+    requestedVenues,
+    "discovery",
+  );
+  const venues = lifecycle.venues.filter((venue) =>
+    AGG_SUPPORTED_VENUES.includes(venue as AggSupportedVenue),
+  ) as AggSupportedVenue[];
+  if (venues.length === 0) {
+    return {
+      response: {
+        generatedAt: new Date().toISOString(),
+        defaults: DEFAULTS,
+        items: [],
+      },
+      cache: { status: "skip", layer: "none" },
+    };
+  }
+  const query = { ...params.query, venues: venues.join(",") };
+  const key = `${lifecycle.revision}:${buildAggClusterListCacheKey(query)}`;
   const now = Date.now();
 
   if (params.ttlSec <= 0) {
     const response = await buildAggClusterListResponse({
-      query: params.query,
+      query,
       client: params.client,
       db: params.db,
     });
@@ -1386,7 +1437,7 @@ export async function getAggClusterListResponseCachedWithMetadata(params: {
   }
 
   const cacheClient = params.cacheClient ?? null;
-  const redisKey = buildAggClusterListRedisCacheKey(params.query);
+  const redisKey = `${buildAggClusterListRedisCacheKey(query)}:${lifecycle.revision}`;
   let cacheStatus: AggClusterListCacheStatus = cacheClient ? "miss" : "skip";
 
   if (cacheClient) {
@@ -1414,7 +1465,7 @@ export async function getAggClusterListResponseCachedWithMetadata(params: {
   }
 
   const response = await buildAggClusterListResponse({
-    query: params.query,
+    query,
     client: params.client,
     db: params.db,
   });
@@ -1577,18 +1628,40 @@ export async function getAggMarketAlternativesResponseCachedWithMetadata(params:
   cache: AggMarketAlternativesCacheMetadata;
   response: AggMarketAlternativesResponse | null;
 }> {
+  const requestedVenues =
+    params.query.venues?.split(",") ?? AGG_SUPPORTED_VENUES;
+  const lifecycle = await filterSignalBotVenuesForLifecycleCapability(
+    params.db,
+    requestedVenues,
+    "discovery",
+  );
+  const venues = lifecycle.venues.filter((venue) =>
+    AGG_SUPPORTED_VENUES.includes(venue as AggSupportedVenue),
+  ) as AggSupportedVenue[];
+  if (venues.length === 0) {
+    return {
+      cache: { kind: "not_found", layer: "none", status: "skip" },
+      response: buildNotFoundAlternativesResponse({
+        eventId: null,
+        generatedAt: new Date().toISOString(),
+        marketId: params.marketId,
+      }),
+    };
+  }
+  const query = { ...params.query, venues: venues.join(",") };
   let cacheStatus: AggMarketAlternativesCacheStatus = "skip";
   let cacheLayer: AggMarketAlternativesCacheLayer = "none";
   let cacheKind: AggMarketAlternativesCacheKind | null = null;
   const redisCacheKey = buildAggMarketAlternativesRedisCacheKey(
     params.marketId,
-    params.query,
+    query,
   );
+  const lifecycleRedisCacheKey = `${redisCacheKey}:${lifecycle.revision}`;
 
   if (params.cacheClient) {
     cacheLayer = "redis";
     try {
-      const cached = await params.cacheClient.get(redisCacheKey);
+      const cached = await params.cacheClient.get(lifecycleRedisCacheKey);
       const parsed =
         cached == null ? null : parseAggMarketAlternativesResponse(cached);
       if (parsed) {
@@ -1613,7 +1686,7 @@ export async function getAggMarketAlternativesResponseCachedWithMetadata(params:
     client: params.client,
     db: params.db,
     marketId: params.marketId,
-    query: params.query,
+    query,
     ttlSec: params.matchedTtlSec,
   });
   if (!response) {
@@ -1630,9 +1703,13 @@ export async function getAggMarketAlternativesResponseCachedWithMetadata(params:
   });
   if (params.cacheClient && ttlSec > 0) {
     try {
-      await params.cacheClient.set(redisCacheKey, JSON.stringify(response), {
-        EX: ttlSec,
-      });
+      await params.cacheClient.set(
+        lifecycleRedisCacheKey,
+        JSON.stringify(response),
+        {
+          EX: ttlSec,
+        },
+      );
     } catch (error) {
       params.onCacheError?.("write", error);
     }

@@ -8,6 +8,7 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { getRedisStatus } from "./redis.js";
 import { insertRuntimePolicy } from "./repos/runtime-policies.js";
+import { clearVenueLifecyclePolicyCache } from "./services/runtime-policies.js";
 import {
   marketMapActiveKey,
   marketMapRunNodeEventsKey,
@@ -53,7 +54,9 @@ type NodeEventsPayload = {
 
 type MarketMapPayload = {
   items: Array<{
+    eventCount?: number;
     id: string;
+    venueBreakdown?: Partial<Record<MarketMapVenue, MarketMapNodeVenueMetrics>>;
     eventsPreview?: Array<{
       eventId: string;
       venue: string;
@@ -551,6 +554,22 @@ async function main() {
       venuesEnabled: ["polymarket", "kalshi", "limitless"],
     },
   });
+  const venueLifecyclePolicy = await insertRuntimePolicy(pool, {
+    policyKey: "venue_lifecycle",
+    effectiveAt: new Date(),
+    createdBy: null,
+    payload: {
+      version: 1,
+      venues: {
+        polymarket: { lifecycle: "active", indexerMode: "full" },
+        limitless: { lifecycle: "active", indexerMode: "full" },
+        kalshi: { lifecycle: "active", indexerMode: "full" },
+        hyperliquid: { lifecycle: "active", indexerMode: "full" },
+      },
+    },
+  });
+  let exitOnlyLifecyclePolicyId: string | null = null;
+  clearVenueLifecyclePolicyCache(pool);
 
   const events = [
     buildEvent({
@@ -1116,6 +1135,53 @@ async function main() {
       activeFallbackMarketId,
     );
 
+    const exitOnlyLifecyclePolicy = await insertRuntimePolicy(pool, {
+      policyKey: "venue_lifecycle",
+      effectiveAt: new Date(),
+      createdBy: null,
+      payload: {
+        version: 1,
+        venues: {
+          polymarket: { lifecycle: "active", indexerMode: "full" },
+          limitless: { lifecycle: "active", indexerMode: "full" },
+          kalshi: { lifecycle: "exit-only", indexerMode: "maintenance" },
+          hyperliquid: { lifecycle: "unreleased", indexerMode: "off" },
+        },
+      },
+    });
+    exitOnlyLifecyclePolicyId = exitOnlyLifecyclePolicy.id;
+    clearVenueLifecyclePolicyCache(pool);
+
+    const lifecycleFilteredEvents = await requestNodeEvents({
+      app,
+      nodeId,
+      query: { sort_by: "volume24h", sort_dir: "desc" },
+    });
+    assert.equal(lifecycleFilteredEvents.total, 4);
+    assert.deepEqual(ids(lifecycleFilteredEvents), [
+      `event-c-${suiteId}`,
+      `event-a-${suiteId}`,
+      `event-e-${suiteId}`,
+      `event-d-${suiteId}`,
+    ]);
+
+    const lifecycleFilteredMap = await requestMarketMap({
+      app,
+      query: {
+        level: 1,
+        includeChildrenPreview: true,
+        childrenPreviewLimit: 8,
+      },
+    });
+    const lifecycleFilteredRoot = lifecycleFilteredMap.items.find(
+      (item) => item.id === rootNodeId,
+    );
+    assert.equal(lifecycleFilteredRoot?.eventCount, 4);
+    assert.deepEqual(
+      Object.keys(lifecycleFilteredRoot?.venueBreakdown ?? {}).sort(),
+      ["limitless", "polymarket"],
+    );
+
     console.log("[market-map-routes-tests] ok node event sorting");
   } finally {
     await pool.query(
@@ -1132,6 +1198,15 @@ async function main() {
       [`event-a-${suiteId}`, fallbackEventId],
     ]);
     await pool.query("delete from runtime_policies where id = $1", [policy.id]);
+    await pool.query("delete from runtime_policies where id = $1", [
+      venueLifecyclePolicy.id,
+    ]);
+    if (exitOnlyLifecyclePolicyId) {
+      await pool.query("delete from runtime_policies where id = $1", [
+        exitOnlyLifecyclePolicyId,
+      ]);
+    }
+    clearVenueLifecyclePolicyCache(pool);
     if (previousActiveRunId) {
       await redis.set(marketMapActiveKey(), previousActiveRunId);
     } else {

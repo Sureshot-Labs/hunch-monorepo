@@ -11,6 +11,7 @@ import {
 
 import {
   acquireSignalBotLock,
+  createSignalBotTelegramTransport,
   drainSignalBotConfirmTasks,
   parseSignalBotAggMarketConfig,
   parseSignalBotConfig,
@@ -149,6 +150,7 @@ export async function runSignalBotRunner(): Promise<void> {
 
   let dbPool: Pool | null = null;
   const telegram = new TelegramBotApiClient(config.token);
+  const signalTransports = [createSignalBotTelegramTransport(telegram)];
   const botUsername = await telegram
     .getMe()
     .then((user) => user.username ?? null)
@@ -202,6 +204,7 @@ export async function runSignalBotRunner(): Promise<void> {
         const handledCommands = await pollSignalBotCommands({
           botUsername,
           config,
+          db,
           redis,
           sendStatsReport: (chatId, period, detail) =>
             sendSignalBotStatsReport({
@@ -355,6 +358,7 @@ export async function runSignalBotRunner(): Promise<void> {
             db,
             redis,
             telegram,
+            transports: signalTransports,
           });
           log("signal_bot_publish_tick", result);
           const followthrough = await publishSignalBotFollowthroughTick({
@@ -362,6 +366,7 @@ export async function runSignalBotRunner(): Promise<void> {
             db,
             redis,
             telegram,
+            transports: signalTransports,
           });
           log("signal_bot_followthrough_tick", followthrough);
           nextPublishAt = now + config.publishIntervalSec * 1_000;

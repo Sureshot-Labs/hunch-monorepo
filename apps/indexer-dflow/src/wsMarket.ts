@@ -33,6 +33,7 @@ const mq = new PQueue({ concurrency: Number(env.wsConcurrency || 8) });
 let redisBound = false;
 let shutdownBound = false;
 let currentWs: WebSocket | null = null;
+let reconnectEnabled = true;
 let desiredTickers: string[] = [];
 let tickerTokens = new Map<string, TickerTokens>();
 const missingTickers = new Set<string>();
@@ -284,6 +285,7 @@ async function syncSubscriptions(ws: WebSocket, tickers: string[]) {
 }
 
 export function startMarketWS(initialTickers: string[], attempt = 0) {
+  reconnectEnabled = true;
   desiredTickers = uniqueTickers(initialTickers).slice(0, env.wsSubset);
   state.subscribed = new Set();
   state.all = false;
@@ -381,6 +383,8 @@ export function startMarketWS(initialTickers: string[], attempt = 0) {
     if (pingInterval) clearInterval(pingInterval);
     clearMsgLogger();
     log.warn("WS closed", code, reason.toString());
+    currentWs = null;
+    if (!reconnectEnabled) return;
     const max = 30_000;
     const base = 1000 * 2 ** Math.min(attempt, 5);
     const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
@@ -397,4 +401,20 @@ export function updateMarketWSSubscriptions(nextTickers: string[]): void {
   if (!ws) return;
   if (ws.readyState !== WebSocket.OPEN) return;
   void syncSubscriptions(ws, desiredTickers);
+}
+
+export function stopMarketWS(): void {
+  reconnectEnabled = false;
+  desiredTickers = [];
+  state.subscribed = new Set();
+  state.all = false;
+  clearMsgLogger();
+  const ws = currentWs;
+  currentWs = null;
+  if (!ws) return;
+  try {
+    ws.close();
+  } catch {
+    // The lifecycle guard must remain fail-safe even during socket teardown.
+  }
 }

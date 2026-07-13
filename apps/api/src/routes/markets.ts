@@ -66,6 +66,7 @@ import {
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { normalizeRedemptionStatus } from "../services/redemption-status.js";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 import {
   fetchFifa2026SportsFixtureForEvent,
   fillMissingSportsFixturesInBackground,
@@ -659,6 +660,14 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       } = request.query;
       const cappedLimit = Math.min(200, Math.max(1, limit ?? 20));
       const active = activeOnly ?? true;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        venue ? [venue] : null,
+        "discovery",
+      );
+      if (lifecycle.venues.length === 0) {
+        return reply.send({ items: [], cache_status: "disabled" as const });
+      }
       const maxScore =
         cutoff != null && Number.isFinite(cutoff) ? cutoff : undefined;
       const excludeMarketSet = new Set(
@@ -729,6 +738,8 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             limit: cappedLimit,
             active,
             venue: venue ?? "",
+            lifecycleRevision: lifecycle.revision,
+            lifecycleVenues: lifecycle.venues,
             maxScore: maxScore ?? null,
             seriesKey: baseSeriesKey ?? "",
             excludeMarkets: Array.from(excludeMarketSet).sort(),
@@ -760,7 +771,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
 
       const filters: string[] = [];
       if (active) filters.push("@status:{ACTIVE}");
-      if (venue) filters.push(`@venue:{${venue}}`);
+      filters.push(`@venue:{${lifecycle.venues.join("|")}}`);
       const filterClause = filters.length ? `(${filters.join(" ")})` : "*";
       const query = `${filterClause}=>[KNN ${cappedLimit} @embedding $vec AS score]`;
 

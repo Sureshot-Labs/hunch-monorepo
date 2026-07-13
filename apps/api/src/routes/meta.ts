@@ -1,5 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import {
+  getVenueLifecycleCapabilities,
+  HUNCH_VENUES,
+  normalizeHunchVenue,
+  venueHasLifecycleCapability,
+} from "@hunch/shared";
 
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -10,6 +16,7 @@ import {
   feedFacetQuerySchema,
   resolveMinTotalVolumeFilter,
 } from "../schemas/feed.js";
+import { resolveVenueLifecyclePolicy } from "../services/runtime-policies.js";
 
 type CategoryRow = {
   venue: string;
@@ -29,7 +36,11 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   z.get("/meta/categories", async (_req, reply) => {
-    const cacheKey = "meta:categories:v1";
+    const lifecycle = await resolveVenueLifecyclePolicy(pool);
+    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
+      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
+    );
+    const cacheKey = `meta:categories:v2:${lifecycle.revision}`;
     const r = await getRedis();
 
     if (r) {
@@ -45,18 +56,22 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       }
     }
 
-    const { rows } = await pool.query<CategoryRow>(`
+    const { rows } = await pool.query<CategoryRow>(
+      `
       select
         venue,
         lower(category) as category,
         count(*)::int as events
       from unified_events
       where status = 'ACTIVE'
+        and venue = any($1::text[])
         and category is not null
         and btrim(category) <> ''
       group by venue, lower(category)
       order by events desc, venue asc, category asc
-    `);
+    `,
+      [discoverableVenues],
+    );
 
     const byCategory = new Map<
       string,
@@ -127,7 +142,11 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           : q.event_scope === "single"
             ? "single"
             : undefined;
-      const venues = q.venue;
+      const lifecycle = await resolveVenueLifecyclePolicy(pool);
+      const requestedVenues = q.venue ?? HUNCH_VENUES;
+      const venues = requestedVenues.filter((venue) =>
+        venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
+      );
       const filter = q.filter;
       const minProb = q.min_prob;
       const maxProb = q.max_prob;
@@ -138,7 +157,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const ageWithinHours = q.age_within_hours;
 
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `meta:categories:facets:v4:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const cacheKey = `meta:categories:facets:v5:${lifecycle.revision}:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
       const staleCacheKey = `${cacheKey}:stale`;
       const refreshLockKey = `${cacheKey}:refresh`;
       const r = await getRedis();
@@ -188,11 +207,18 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
             sevenDaysAgo,
             sevenDaysFromNow,
           }),
-          pool.query<{ category: string }>(`
-            select category
-            from unified_event_active_categories
-            order by category asc
-          `),
+          pool.query<{ category: string }>(
+            `
+              select distinct lower(category) as category
+              from unified_events
+              where status = 'ACTIVE'
+                and venue = any($1::text[])
+                and category is not null
+                and btrim(category) <> ''
+              order by category asc
+            `,
+            [venues],
+          ),
         ]);
 
         const categoriesMap = new Map<
@@ -311,7 +337,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get("/meta/venues", async (_req, reply) => {
-    const cacheKey = "meta:venues:v1";
+    const lifecycle = await resolveVenueLifecyclePolicy(pool);
+    const cacheKey = `meta:venues:v2:${lifecycle.revision}`;
     const r = await getRedis();
 
     if (r) {
@@ -321,7 +348,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         reply.header(
           "Cache-Control",
-          "public, max-age=600, stale-while-revalidate=1200",
+          "public, max-age=30, stale-while-revalidate=60",
         );
         return reply.send(cached);
       }
@@ -351,7 +378,14 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       order by venue asc
     `);
 
-    const venues = rows.map((row) => {
+    const venues = rows.flatMap((row) => {
+      const venue = normalizeHunchVenue(row.venue);
+      if (
+        !venue ||
+        !venueHasLifecycleCapability(lifecycle.effective, venue, "discovery")
+      ) {
+        return [];
+      }
       const activeMarkets = Number(row.active_markets) || 0;
       const withVolume = Number(row.markets_with_volume) || 0;
       const withLiquidity = Number(row.markets_with_liquidity) || 0;
@@ -362,39 +396,61 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const priceCoverage = activeMarkets > 0 ? withPrice / activeMarkets : 0;
       const score = (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
 
-      return {
-        venue: row.venue,
-        activeMarkets,
-        counts: {
-          withVolume,
-          withLiquidity,
-          withPrice,
+      return [
+        {
+          venue,
+          activeMarkets,
+          counts: {
+            withVolume,
+            withLiquidity,
+            withPrice,
+          },
+          coverage: {
+            volume: volumeCoverage,
+            liquidity: liquidityCoverage,
+            price: priceCoverage,
+            score,
+          },
         },
-        coverage: {
-          volume: volumeCoverage,
-          liquidity: liquidityCoverage,
-          price: priceCoverage,
-          score,
-        },
-      };
+      ];
     });
+
+    const policyVenues = Object.fromEntries(
+      HUNCH_VENUES.map((venue) => [
+        venue,
+        {
+          ...lifecycle.effective.venues[venue],
+          capabilities: getVenueLifecycleCapabilities(
+            lifecycle.effective,
+            venue,
+          ),
+        },
+      ]),
+    );
 
     const payload = {
       total: venues.length,
       generatedAt: new Date().toISOString(),
       venues,
+      policy: {
+        source: lifecycle.source,
+        effectiveAt: lifecycle.effectiveAt?.toISOString() ?? null,
+        invalidOverride: lifecycle.invalidOverride,
+        revision: lifecycle.revision,
+        venues: policyVenues,
+      },
     };
     const body = JSON.stringify(payload);
 
     if (r) {
-      await r.set(cacheKey, body, { EX: 600 });
+      await r.set(cacheKey, body, { EX: 60 });
       reply.header("x-cache", "miss");
     }
 
     reply.header("Content-Type", "application/json; charset=utf-8");
     reply.header(
       "Cache-Control",
-      "public, max-age=600, stale-while-revalidate=1200",
+      "public, max-age=30, stale-while-revalidate=60",
     );
     return reply.send(body);
   });

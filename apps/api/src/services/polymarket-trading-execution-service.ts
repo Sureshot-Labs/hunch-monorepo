@@ -17,6 +17,7 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { applyOptimisticPositionTrade } from "./positions-optimistic.js";
+import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 import { tryRecordReferralFirstTradeConversion } from "./analytics-referrals.js";
 import {
   amountUsd,
@@ -3222,6 +3223,19 @@ export async function quotePolymarketOrderRoute(input: {
   signer: string;
   userId: string;
 }): Promise<PolymarketRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "polymarket",
+      input.body.side,
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Polymarket trading action is temporarily disabled" },
+    };
+  }
   if (!input.signer.startsWith("0x")) {
     return {
       ok: false,
@@ -3478,10 +3492,24 @@ export async function derivePolymarketFundersBatchRoute(input: {
 
 export async function buildPolymarketRedemptionPlanRoute(input: {
   log?: PolymarketRouteLogger | null;
+  pool: ApiTradingApplicationServiceInput["pool"];
   query: PolymarketRedemptionPlanQuery;
   signer: string;
   userId: string;
 }): Promise<PolymarketRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "polymarket",
+      "REDEEM",
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Polymarket redemption is temporarily disabled" },
+    };
+  }
   if (!input.signer.startsWith("0x")) {
     return {
       ok: false,
@@ -3789,6 +3817,15 @@ export async function computePolymarketMaxSpendRoute(input: {
   signer: string;
   userId: string;
 }): Promise<PolymarketRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(input.pool, "polymarket", "BUY"))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Polymarket buys are temporarily disabled" },
+    };
+  }
   const signer = input.signer;
   if (!signer.startsWith("0x")) {
     return {
@@ -4671,6 +4708,19 @@ export async function cancelPolymarketOrderRoute(input: {
   requestedWalletAddress?: string | null;
   userId: string;
 }): Promise<PolymarketRouteOperationResult> {
+  if (
+    !(await venueLifecycleAllowsTradingAction(
+      input.pool,
+      "polymarket",
+      "CANCEL",
+    ))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Polymarket cancellations are temporarily disabled" },
+    };
+  }
   const warnLog = requiredWarnLogger(input.log);
   const notificationLog = optionalWarnLogger(input.log);
   const storedOrderWalletContext = await fetchStoredOrderWalletContext(
@@ -6559,6 +6609,26 @@ export async function submitPolymarketClientSignedOrder(input: {
     };
   }
 
+  const side = normalizeOrderSide(input.body.order.side);
+  if (!side) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "Order side must be BUY/SELL (or 0/1)",
+      },
+    };
+  }
+  if (
+    !(await venueLifecycleAllowsTradingAction(input.pool, "polymarket", side))
+  ) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: { error: "Polymarket trading action is temporarily disabled" },
+    };
+  }
+
   const creds = await AuthService.getVenueCredentials(
     input.userId,
     "polymarket",
@@ -6586,17 +6656,6 @@ export async function submitPolymarketClientSignedOrder(input: {
       ok: false,
       statusCode: 400,
       payload: { error: walletValidation.error },
-    };
-  }
-
-  const side = normalizeOrderSide(order.side);
-  if (!side) {
-    return {
-      ok: false,
-      statusCode: 400,
-      payload: {
-        error: "Order side must be BUY/SELL (or 0/1)",
-      },
     };
   }
 

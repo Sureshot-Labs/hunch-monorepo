@@ -13,6 +13,8 @@ export type IndexerStatsRedis = {
 
 export type IndexerStatsPatch = Partial<{
   hotRefresh: Record<string, unknown>;
+  lifecycle: Record<string, unknown>;
+  maintenance: Record<string, unknown>;
   priceRefresh: Record<string, unknown>;
   priceRefreshHttpFallback: Record<string, unknown>;
   ws: Record<string, unknown>;

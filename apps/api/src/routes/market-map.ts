@@ -53,6 +53,7 @@ import {
   type MarketMapDropReason,
 } from "../services/market-map-quality.js";
 import { resolveMarketMapPolicy } from "../services/runtime-policies.js";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
 function buildWeakEtag(body: string): string {
   return `W/"${crypto.createHash("sha1").update(body).digest("hex")}"`;
@@ -171,6 +172,117 @@ function requestMarketMapBodyRefresh(body: string, logLabel: string): void {
     const payload = safeJsonParse<unknown>(body);
     if (payload != null) requestMarketMapPayloadRefreshNow(payload, logLabel);
   });
+}
+
+function signalSummaryAllowedForVenues(
+  signal: MarketMapSignalSummary,
+  venues: ReadonlySet<MarketMapVenue>,
+): boolean {
+  return (
+    !signal.targetVenue || venues.has(signal.targetVenue as MarketMapVenue)
+  );
+}
+
+function filterCachedMarketMapEvent(
+  event: MarketMapEventSummary,
+  venues: ReadonlySet<MarketMapVenue>,
+): MarketMapEventSummary | null {
+  if (!venues.has(event.venue)) return null;
+  const signalsPreview = event.signalsPreview?.filter((signal) =>
+    signalSummaryAllowedForVenues(signal, venues),
+  );
+  const topSignal =
+    event.topSignal && signalSummaryAllowedForVenues(event.topSignal, venues)
+      ? event.topSignal
+      : null;
+  return { ...event, signalsPreview, topSignal };
+}
+
+function filterCachedMarketMapNode(
+  node: MarketMapNode,
+  venues: ReadonlySet<MarketMapVenue>,
+): MarketMapNode | null {
+  const filtered = applyVenueFilterToNode(node, venues);
+  if (filtered.eventCount <= 0) return null;
+  const eventsPreview = filtered.eventsPreview
+    ?.map((event) => filterCachedMarketMapEvent(event, venues))
+    .filter((event): event is MarketMapEventSummary => event != null);
+  const childrenPreview = filtered.childrenPreview
+    ?.map((child) => filterCachedMarketMapNode(child as MarketMapNode, venues))
+    .filter((child): child is MarketMapNode => child != null);
+  const signalsPreview = filtered.signalsPreview?.filter((signal) =>
+    signalSummaryAllowedForVenues(signal, venues),
+  );
+  const topSignal =
+    filtered.topSignal &&
+    signalSummaryAllowedForVenues(filtered.topSignal, venues)
+      ? filtered.topSignal
+      : null;
+  return {
+    ...filtered,
+    childrenPreview,
+    eventsPreview,
+    signalsPreview,
+    topSignal,
+  };
+}
+
+function filterCachedMarketMapBody(
+  body: string,
+  venues: readonly MarketMapVenue[],
+): string | null {
+  const parsed = safeJsonParse<Record<string, unknown>>(body);
+  if (!parsed) return null;
+  const allowed = new Set(venues);
+  const next: Record<string, unknown> = { ...parsed, venues: [...venues] };
+
+  if (Array.isArray(parsed.items)) {
+    const nodeItems = parsed.items.every(
+      (item) => isRecord(item) && "venueBreakdown" in item,
+    );
+    if (nodeItems) {
+      next.items = (parsed.items as MarketMapNode[])
+        .map((node) => filterCachedMarketMapNode(node, allowed))
+        .filter((node): node is MarketMapNode => node != null);
+    } else {
+      const items = (parsed.items as MarketMapEventSummary[])
+        .map((event) => filterCachedMarketMapEvent(event, allowed))
+        .filter((event): event is MarketMapEventSummary => event != null);
+      const removed = parsed.items.length - items.length;
+      next.items = items;
+      if (typeof parsed.total === "number" && removed > 0) {
+        next.total = Math.max(0, parsed.total - removed);
+      }
+    }
+  }
+
+  for (const key of [
+    "trendingNow",
+    "volumeMovers24h",
+    "liquidityMovers24h",
+    "topMovers24h",
+  ]) {
+    const events = parsed[key];
+    if (!Array.isArray(events)) continue;
+    next[key] = (events as MarketMapEventSummary[])
+      .map((event) => filterCachedMarketMapEvent(event, allowed))
+      .filter((event): event is MarketMapEventSummary => event != null);
+  }
+
+  if (isRecord(parsed.node)) {
+    next.node = filterCachedMarketMapNode(
+      parsed.node as MarketMapNode,
+      allowed,
+    );
+  }
+  if (isRecord(parsed.countsByVenue)) {
+    next.countsByVenue = Object.fromEntries(
+      Object.entries(parsed.countsByVenue).filter(([venue]) =>
+        allowed.has(venue as MarketMapVenue),
+      ),
+    );
+  }
+  return JSON.stringify(next);
 }
 
 function metricForEvent(
@@ -1941,11 +2053,17 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
 
       const requestedVenues = parseMarketMapVenuesQuery(query.venues);
       const allowedVenueSet = new Set(effective.venuesEnabled);
-      const venues =
+      const policyVenues =
         (requestedVenues.length > 0
           ? requestedVenues.filter((venue) => allowedVenueSet.has(venue))
           : effective.venuesEnabled
         ).slice() || [];
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        policyVenues,
+        "discovery",
+      );
+      const { venues } = lifecycle;
       if (venues.length === 0) {
         return reply.code(400).send({
           error: "No enabled venues selected for market map",
@@ -2023,6 +2141,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const cacheKey = [
         "market-map:v4",
         runId,
+        lifecycle.revision,
         policyCacheVersion,
         String(level),
         parentId ?? "",
@@ -2038,7 +2157,10 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       ].join(":");
       let skipCacheWrite = false;
       if (cacheEnabled) {
-        const cachedBody = await redis.get(cacheKey);
+        const rawCachedBody = await redis.get(cacheKey);
+        const cachedBody = rawCachedBody
+          ? filterCachedMarketMapBody(rawCachedBody, venues as MarketMapVenue[])
+          : null;
         if (cachedBody) {
           const etag = buildWeakEtag(cachedBody);
           requestMarketMapBodyRefresh(cachedBody, "market-map");
@@ -2656,10 +2778,16 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
 
       const requestedVenues = parseMarketMapVenuesQuery(request.query.venues);
       const allowedVenueSet = new Set(policy.effective.venuesEnabled);
-      const venues =
+      const policyVenues =
         requestedVenues.length > 0
           ? requestedVenues.filter((venue) => allowedVenueSet.has(venue))
           : policy.effective.venuesEnabled;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        policyVenues,
+        "discovery",
+      );
+      const { venues } = lifecycle;
       if (venues.length === 0) {
         return reply.code(400).send({
           error: "No enabled venues selected for market map sidebars",
@@ -2735,6 +2863,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       ].join(":");
       const cacheKey = [
         "market-map:sidebars:v4",
+        lifecycle.revision,
         policyCacheVersion,
         venues.slice().sort().join(","),
         String(defaultLimit),
@@ -2747,7 +2876,13 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         const { redis } = await getRedisStatus();
         sidebarRedis = redis;
         if (sidebarRedis) {
-          const cachedBody = await sidebarRedis.get(cacheKey);
+          const rawCachedBody = await sidebarRedis.get(cacheKey);
+          const cachedBody = rawCachedBody
+            ? filterCachedMarketMapBody(
+                rawCachedBody,
+                venues as MarketMapVenue[],
+              )
+            : null;
           if (cachedBody) {
             const etag = buildWeakEtag(cachedBody);
             requestMarketMapBodyRefresh(cachedBody, "market-map:sidebars");
@@ -2964,10 +3099,16 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const nodeId = request.params.id;
       const queryVenues = parseMarketMapVenuesQuery(request.query.venues);
       const allowedVenueSet = new Set(policy.effective.venuesEnabled);
-      const selectedVenues =
+      const policyVenues =
         queryVenues.length > 0
           ? queryVenues.filter((venue) => allowedVenueSet.has(venue))
           : policy.effective.venuesEnabled;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        policyVenues,
+        "discovery",
+      );
+      const { venues: selectedVenues } = lifecycle;
       const selectedVenueSet = new Set<MarketMapVenue>(selectedVenues);
       const offset = request.query.offset ?? 0;
       const limit = request.query.limit ?? 100;
@@ -2984,6 +3125,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       const cacheKey = [
         "market-map:node-events:v4",
         runId,
+        lifecycle.revision,
         policyCacheVersion,
         nodeId,
         selectedVenues.slice().sort().join(","),
@@ -2995,7 +3137,13 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       ].join(":");
       let skipCacheWrite = false;
       if (cacheEnabled) {
-        const cachedBody = await redis.get(cacheKey);
+        const rawCachedBody = await redis.get(cacheKey);
+        const cachedBody = rawCachedBody
+          ? filterCachedMarketMapBody(
+              rawCachedBody,
+              selectedVenues as MarketMapVenue[],
+            )
+          : null;
         if (cachedBody) {
           const etag = buildWeakEtag(cachedBody);
           requestMarketMapBodyRefresh(cachedBody, "market-map:node-events");

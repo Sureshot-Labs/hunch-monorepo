@@ -5,24 +5,38 @@ import {
 } from "@hunch/infra";
 
 import {
+  loadDflowMaintenanceTargets,
   processPriceRefreshQueue,
   syncCatchUpFromCursor,
   syncHotMarketStatuses,
   syncHotWindow,
   syncNonActiveSweep,
   syncRecentTrades,
+  syncDflowMaintenanceTargets,
   resolveHotTickersForWs,
 } from "./bootstrap.js";
+import { pool } from "./db.js";
 import { env } from "./env.js";
 import { log } from "./log.js";
 import { ensureRedis, redis } from "./redis.js";
-import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
+import {
+  startMarketWS,
+  stopMarketWS,
+  updateMarketWSSubscriptions,
+} from "./wsMarket.js";
+import {
+  resolveDflowRuntimeMode,
+  type DflowRuntimeMode,
+} from "./runtime-mode.js";
 
 let running = false;
 let wsRefreshRunning = false;
 let wsStarted = false;
 let bootstrapRuns = 0;
 let priceRefreshRunning = false;
+let lastMode: DflowRuntimeMode["mode"] | null = null;
+let lastModeTransitionAt: string | null = null;
+let catchupRevision: string | null = null;
 
 type PriceRefreshResult = Awaited<ReturnType<typeof processPriceRefreshQueue>>;
 
@@ -49,6 +63,7 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       marketRefreshed: acc.marketRefreshed + (result.marketRefreshed ?? 0),
       topRefreshed: acc.topRefreshed + (result.topRefreshed ?? 0),
       httpFallback: acc.httpFallback + (result.httpFallback ?? 0),
+      policySkipped: acc.policySkipped + (result.policySkipped ?? 0),
       claimedBySide: {
         oldest:
           acc.claimedBySide.oldest +
@@ -68,9 +83,51 @@ function aggregatePriceRefreshResults(results: PriceRefreshResult[]) {
       marketRefreshed: 0,
       topRefreshed: 0,
       httpFallback: 0,
+      policySkipped: 0,
       claimedBySide: { oldest: 0, newest: 0 },
     },
   );
+}
+
+async function readRuntimeMode(): Promise<DflowRuntimeMode> {
+  const runtime = await resolveDflowRuntimeMode(pool, {
+    dflowEnabled: env.dflowEnabled,
+  });
+  if (lastMode !== runtime.mode) {
+    lastMode = runtime.mode;
+    lastModeTransitionAt = new Date().toISOString();
+    log.info("DFlow lifecycle mode changed", {
+      mode: runtime.mode,
+      revision: runtime.revision,
+      source: runtime.source,
+    });
+  }
+  return runtime;
+}
+
+async function writeLifecycleStats(runtime: DflowRuntimeMode): Promise<void> {
+  await writeStats({
+    lifecycle: {
+      mode: runtime.mode,
+      source: runtime.source,
+      policyRevision: runtime.revision,
+      lastModeTransition: lastModeTransitionAt,
+    },
+  });
+}
+
+function ensureFullCatchup(runtime: DflowRuntimeMode): void {
+  if (runtime.mode !== "full" || catchupRevision === runtime.revision) return;
+  catchupRevision = runtime.revision;
+  void syncCatchUpFromCursor().catch((e) => {
+    catchupRevision = null;
+    if (isPgSetupIssue(e)) {
+      log.warn(`catch-up blocked: ${formatPgError(e)}`);
+      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
+    } else {
+      log.warn("catch-up err", e);
+    }
+  });
 }
 
 function priceRefreshSideForConsumer(index: number): "oldest" | "newest" {
@@ -84,6 +141,34 @@ async function periodicBootstrap() {
   bootstrapRuns += 1;
   const startedAt = Date.now();
   try {
+    const runtime = await readRuntimeMode();
+    await writeLifecycleStats(runtime);
+    if (runtime.mode === "off") {
+      stopMarketWS();
+      wsStarted = false;
+      return;
+    }
+    if (runtime.mode === "maintenance") {
+      const targets = await loadDflowMaintenanceTargets();
+      const maintenance = await syncDflowMaintenanceTargets(targets);
+      await writeStats({
+        maintenance: {
+          lastSuccessfulMaintenance: new Date().toISOString(),
+          durationMs: Date.now() - startedAt,
+          targetCount: targets.marketIds.length,
+          targetCountByReason: targets.reasons,
+          targetTickers: targets.tickers.length,
+          targetTokens: targets.tokenIds.length,
+          blockedNewMarkets: maintenance.blockedNewMarkets,
+          processedMarkets: maintenance.processedMarkets,
+          publishedTokenTops: maintenance.publishedTokenTops,
+          tradeCount: maintenance.tradeCount,
+        },
+        lastError: null,
+      });
+      return;
+    }
+    ensureFullCatchup(runtime);
     const hot = await syncHotWindow();
     const status = await syncHotMarketStatuses();
     if (env.nonActiveSweepEnabled && runNo % env.nonActiveSweepEvery === 0) {
@@ -126,7 +211,22 @@ async function periodicWsRefresh() {
   wsRefreshRunning = true;
   const startedAt = Date.now();
   try {
-    const tickers = await resolveHotTickersForWs();
+    const runtime = await readRuntimeMode();
+    await writeLifecycleStats(runtime);
+    if (runtime.mode === "off") {
+      stopMarketWS();
+      wsStarted = false;
+      return;
+    }
+    const tickers =
+      runtime.mode === "maintenance"
+        ? (await loadDflowMaintenanceTargets()).tickers
+        : await resolveHotTickersForWs();
+    if (tickers.length === 0) {
+      stopMarketWS();
+      wsStarted = false;
+      return;
+    }
     if (!wsStarted && tickers.length > 0) {
       const ws = startMarketWS(tickers);
       wsStarted = ws != null;
@@ -175,10 +275,18 @@ async function periodicPriceRefresh() {
   priceRefreshRunning = true;
   const startedAt = Date.now();
   try {
+    const runtime = await readRuntimeMode();
+    await writeLifecycleStats(runtime);
+    if (runtime.mode === "off") return;
+    const allowedTokenIds =
+      runtime.mode === "maintenance"
+        ? new Set((await loadDflowMaintenanceTargets()).tokenIds)
+        : undefined;
     const consumers = env.priceRefreshQueueConsumers;
     const results = await Promise.all(
       Array.from({ length: consumers }, (_, consumerIndex) =>
         processPriceRefreshQueue({
+          allowedTokenIds,
           side: priceRefreshSideForConsumer(consumerIndex),
           logSuccess: false,
         }),
@@ -202,6 +310,8 @@ async function periodicPriceRefresh() {
         marketRefreshed: aggregate.marketRefreshed,
         topRefreshed: aggregate.topRefreshed,
         httpFallback: aggregate.httpFallback,
+        policySkipped: aggregate.policySkipped,
+        skippedQueueItems: aggregate.policySkipped,
         failed: aggregate.failed,
         backlog: aggregate.backlog,
         durationMs,
@@ -214,6 +324,7 @@ async function periodicPriceRefresh() {
         consumers,
         batch: env.priceRefreshQueueBatch,
         ...aggregate,
+        skippedQueueItems: aggregate.policySkipped,
       },
       lastError: null,
     });
@@ -239,18 +350,7 @@ async function periodicPriceRefresh() {
 async function main() {
   await periodicBootstrap();
   await periodicPriceRefresh();
-  const tickers = await resolveHotTickersForWs();
-  const ws = startMarketWS(tickers);
-  wsStarted = ws != null;
-
-  void syncCatchUpFromCursor().catch((e) => {
-    if (isPgSetupIssue(e)) {
-      log.warn(`catch-up blocked: ${formatPgError(e)}`);
-      log.warn("Start infra with `pnpm infra:up` and run `pnpm migrate`.");
-    } else {
-      log.warn("catch-up err", e);
-    }
-  });
+  await periodicWsRefresh();
 
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
   setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);

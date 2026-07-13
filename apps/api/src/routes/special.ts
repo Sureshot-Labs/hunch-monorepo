@@ -37,6 +37,7 @@ import {
   getFifa2026TeamsRankingPayload,
   getFifa2026TeamsRankingCacheControl,
 } from "../services/fifa-world-rankings.js";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
 type FifaSpecialRouteTestHooks = {
   getRedisStatus?: typeof getRedisStatusDefault;
@@ -731,6 +732,11 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
 
   z.get("/special/fifa-2026/live", async (req, reply) => {
     const now = routeNow();
+    const lifecycle = await filterVenuesForLifecycleCapability(
+      pool,
+      null,
+      "discovery",
+    );
     const redisContext = await (
       fifaSpecialRouteTestHooks.getRedisStatus ?? getRedisStatusDefault
     )();
@@ -741,7 +747,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         ? Math.min(env.feedTtlSec, FIFA_LIVE_CACHE_TTL_SEC)
         : 0;
     const cacheEnabled = cacheTtl > 0;
-    const cacheKey = "special:fifa-2026:live:v1";
+    const cacheKey = `special:fifa-2026:live:v2:${lifecycle.revision}`;
     const staleCacheKey = `${cacheKey}:stale`;
 
     if (cacheEnabled && r) {
@@ -779,6 +785,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       offset: 0,
       view: "events",
       sections: ["match_prop", "match_result"],
+      venues: lifecycle.venues,
       sort: "time",
       sortDir: "asc",
       nowParam: now.toISOString(),
@@ -911,6 +918,11 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
     },
     async (req, reply) => {
       const q = req.query;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        q.venue ?? null,
+        "discovery",
+      );
       const view = q.view === "markets" ? "markets" : "events";
       const searchQuery = normalizeFifaSpecialSearchQuery(q.q);
       const sort = (q.sort ?? "featured") as FifaSpecialSort;
@@ -918,12 +930,12 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         q.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
       const now = routeNow();
       const sectionsKey = q.section?.join(",") ?? "";
-      const venuesKey = q.venue?.join(",") ?? "";
+      const venuesKey = lifecycle.venues.join(",");
       const groupCodesKey = q.group_code?.join(",") ?? "";
       const teamGroupCodesKey = q.team_group_code?.join(",") ?? "";
       const cacheTtl = env.feedTtlSec;
       const cacheEnabled = cacheTtl > 0;
-      const cacheKey = `special:fifa-2026:v6:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
+      const cacheKey = `special:fifa-2026:v7:${lifecycle.revision}:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
       const staleCacheKey = `${cacheKey}:stale`;
       const staleTtl = Math.max(cacheTtl * 60, 6 * 60 * 60);
       const redisContext = await (
@@ -1005,7 +1017,10 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         offset: q.offset,
         view,
         q: searchQuery,
-        venues: q.venue,
+        venues:
+          lifecycle.venues.length > 0
+            ? lifecycle.venues
+            : ["__lifecycle_disabled__"],
         sections: q.section,
         groupCodes: q.group_code,
         teamGroupCodes: q.team_group_code,

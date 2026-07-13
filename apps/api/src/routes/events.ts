@@ -54,6 +54,7 @@ import {
   shouldUseDbCandlestickFallback,
 } from "../services/candlestick-history.js";
 import { polymarketClient } from "../services/polymarket-client.js";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 import {
   fetchFifa2026SportsFixtureForEvent,
   fillMissingSportsFixturesInBackground,
@@ -746,6 +747,21 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         series_title: string | null;
       };
 
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        [row.venue],
+        "discovery",
+      );
+      if (lifecycle.venues.length === 0) {
+        return reply.send({
+          eventId: row.id,
+          venue: row.venue,
+          seriesKey: row.series_key,
+          seriesTitle: row.series_title,
+          events: [],
+        });
+      }
+
       if (!row.series_key) {
         return reply.send({
           eventId: row.id,
@@ -890,6 +906,15 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const cappedLimit = Math.min(200, Math.max(1, limit ?? 20));
       const active = activeOnly ?? true;
       const withDetails = includeDetails ?? false;
+      const lifecycle = await filterVenuesForLifecycleCapability(
+        pool,
+        venue ? [venue] : null,
+        "discovery",
+      );
+      const lifecycleVenueSet = new Set<string>(lifecycle.venues);
+      if (venue && lifecycle.venues.length === 0) {
+        return reply.send({ items: [], cache_status: "disabled" as const });
+      }
       const maxScore =
         cutoff != null && Number.isFinite(cutoff) ? cutoff : undefined;
       const now = new Date();
@@ -954,6 +979,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             limit: cappedLimit,
             active,
             venue: venue ?? "",
+            lifecycleRevision: lifecycle.revision,
+            lifecycleVenues: lifecycle.venues,
             maxScore: maxScore ?? null,
             marketId: marketId ?? "",
             seriesKey: baseSeriesKey ?? "",
@@ -1132,6 +1159,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 venue: best.venue ?? "unknown",
               }),
             );
+            eventItems = eventItems.filter((item) =>
+              lifecycleVenueSet.has(item.venue),
+            );
 
             if (!venue && eventItems.length > 0) {
               const byVenue = new Map<
@@ -1216,9 +1246,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
-        const searchVenues = venue
-          ? [venue]
-          : (["polymarket", "kalshi", "limitless"] as const);
+        const searchVenues = lifecycle.venues.filter(
+          (candidate) => candidate !== "hyperliquid",
+        );
         const perVenueLimit = venue
           ? cappedLimit
           : Math.min(
@@ -1309,6 +1339,13 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             });
           }
         }
+
+        filteredItems = filteredItems.filter((item) => {
+          const candidateVenue = eventMeta.get(item.eventId)?.venue;
+          return (
+            candidateVenue != null && lifecycleVenueSet.has(candidateVenue)
+          );
+        });
 
         if (active && filteredItems.length > 0) {
           filteredItems = filteredItems.filter((item) => {
