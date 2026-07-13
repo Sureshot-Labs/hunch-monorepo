@@ -12040,39 +12040,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           async () => {
             const rows = await client.query<WalletPositionRouteRow>(
               `
-            with position_keys as (
-              select distinct
-                ws.venue,
-                ws.market_id,
-                ws.outcome_side
-              from wallet_position_snapshots ws
-              where ${historyWhere}
-                and (
-                  coalesce(ws.shares, 0) > 0
-                  or greatest(
-                    coalesce(ws.size_usd, 0),
-                    abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
-                  ) > 0
-                )
-            ),
-            market_keys as (
-              select
-                pk.venue,
-                pk.market_id,
-                pk.outcome_side,
-                coalesce(um.close_time, um.expiration_time) as terminal_at
-              from position_keys pk
-              join unified_markets um on um.id = pk.market_id
-              where (
-                  um.resolved_outcome is not null
-                  or upper(coalesce(um.status::text, '')) in ('CLOSED', 'SETTLED', 'ARCHIVED')
-                  or (
-                    coalesce(um.close_time, um.expiration_time) is not null
-                    and coalesce(um.close_time, um.expiration_time) < now()
-                  )
-                )
-            ),
-            terminal_rows as (
+            with terminal_rows as (
               select
                 ws.wallet_id,
                 ws.venue,
@@ -12087,28 +12055,56 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.price,
                 ws.snapshot_at,
                 ws.metadata
-              from market_keys mk
-              join lateral (
-                select ws.*
-                from wallet_position_snapshots ws
-                where ws.wallet_id = $${walletParam}::uuid
-                  and ws.venue = mk.venue
-                  and ws.market_id = mk.market_id
-                  and ws.outcome_side = mk.outcome_side
-                  and (
-                    coalesce(ws.shares, 0) > 0
-                    or greatest(
-                      coalesce(ws.size_usd, 0),
-                      abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
-                    ) > 0
+              from wallet_position_snapshots ws
+              join (
+                select
+                  id,
+                  coalesce(close_time, expiration_time) as terminal_at
+                from unified_markets
+                where resolved_outcome is not null
+                  or upper(coalesce(status::text, ''))
+                    in ('CLOSED', 'SETTLED', 'ARCHIVED')
+                  or (
+                    coalesce(close_time, expiration_time) is not null
+                    and coalesce(close_time, expiration_time) < now()
                   )
-                  and (
-                    mk.terminal_at is null
-                    or ws.snapshot_at <= mk.terminal_at
-                  )
-                order by ws.snapshot_at desc
-                limit 1
-              ) ws on true
+              ) terminal_market
+                on terminal_market.id = ws.market_id
+              where ${historyWhere}
+                and (
+                  coalesce(ws.shares, 0) > 0
+                  or greatest(
+                    coalesce(ws.size_usd, 0),
+                    abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
+                  ) > 0
+                )
+                and (
+                  terminal_market.terminal_at is null
+                  or ws.snapshot_at <= terminal_market.terminal_at
+                )
+                and not exists (
+                  select 1
+                  from wallet_position_snapshots newer
+                  where newer.wallet_id = ws.wallet_id
+                    and newer.venue = ws.venue
+                    and newer.market_id = ws.market_id
+                    and newer.outcome_side = ws.outcome_side
+                    and newer.snapshot_at > ws.snapshot_at
+                    and (
+                      terminal_market.terminal_at is null
+                      or newer.snapshot_at <= terminal_market.terminal_at
+                    )
+                    and (
+                      coalesce(newer.shares, 0) > 0
+                      or greatest(
+                        coalesce(newer.size_usd, 0),
+                        abs(
+                          coalesce(newer.shares, 0)
+                          * coalesce(newer.price, 0)
+                        )
+                      ) > 0
+                    )
+                )
             )
             select
               tr.wallet_id,

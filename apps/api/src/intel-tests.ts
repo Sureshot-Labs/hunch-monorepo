@@ -31,6 +31,7 @@ import {
   NET_SHARES_EPSILON,
   resolveApproxYesMarkPrice,
 } from "./services/wallet-intel-pnl.js";
+import { loadLatestWalletPositionNowMap } from "./services/wallet-position-approx.js";
 import {
   computeWalletLedgerApproxMetricTotals,
   replayWalletPositionLedgerRows,
@@ -290,6 +291,39 @@ function createTestSignalRow(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "latest wallet position lookup bounds each wallet venue to one snapshot",
+    run: async () => {
+      const queries: string[] = [];
+      const client = {
+        query: async (sql: string) => {
+          queries.push(sql);
+          return { rows: [] };
+        },
+      } as unknown as Parameters<typeof loadLatestWalletPositionNowMap>[0];
+
+      const result = await loadLatestWalletPositionNowMap(client, [
+        {
+          walletId: "00000000-0000-0000-0000-000000000001",
+          venue: "polymarket",
+          marketId: "polymarket:test-market",
+          outcomeSide: "YES",
+        },
+      ]);
+
+      assert.equal(result.size, 0);
+      assert.equal(queries.length, 1);
+      assert.match(queries[0] ?? "", /join lateral\s*\(/i);
+      assert.match(
+        queries[0] ?? "",
+        /order by ws\.snapshot_at desc\s*limit 1/i,
+      );
+      assert.doesNotMatch(
+        queries[0] ?? "",
+        /distinct on \(ws\.wallet_id, ws\.venue\)/i,
+      );
+    },
+  },
   {
     name: "ai cost extractor supports OpenRouter usage.cost",
     run: () => {

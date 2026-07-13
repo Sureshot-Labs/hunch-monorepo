@@ -357,18 +357,22 @@ export async function loadLatestWalletPositionNowMap(
         )
       ),
       latest as (
-        select distinct on (ws.wallet_id, ws.venue)
-          ws.wallet_id,
-          ws.venue,
-          ws.snapshot_at
-        from wallet_position_snapshots ws
-        join (
+        select
+          input_wallets.wallet_id,
+          input_wallets.venue,
+          latest_snapshot.snapshot_at
+        from (
           select distinct wallet_id, venue
           from input_keys
         ) input_wallets
-          on input_wallets.wallet_id = ws.wallet_id
-         and input_wallets.venue = ws.venue
-        order by ws.wallet_id, ws.venue, ws.snapshot_at desc
+        join lateral (
+          select ws.snapshot_at
+          from wallet_position_snapshots ws
+          where ws.wallet_id = input_wallets.wallet_id
+            and ws.venue = input_wallets.venue
+          order by ws.snapshot_at desc
+          limit 1
+        ) latest_snapshot on true
       )
       select
         ik.wallet_id,
