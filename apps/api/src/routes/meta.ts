@@ -354,29 +354,46 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       }
     }
 
-    const { rows } = await pool.query<VenueCoverageRow>(`
-      select
-        venue,
-        count(*) filter (where status = 'ACTIVE')::int as active_markets,
-        count(*) filter (
+    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
+      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
+    );
+    const { rows } = await pool.query<VenueCoverageRow>(
+      `
+        with requested_venues as (
+          select unnest($1::text[]) as venue
+        ),
+        active_coverage as (
+          select
+            venue,
+            count(*)::int as active_markets,
+            count(*) filter (
+              where coalesce(volume_24h, 0) > 0 or coalesce(volume_total, 0) > 0
+            )::int as markets_with_volume,
+            count(*) filter (
+              where
+                (liquidity is not null and liquidity > 0)
+                or (open_interest is not null and open_interest > 0)
+            )::int as markets_with_liquidity,
+            count(*) filter (
+              where best_bid is not null or best_ask is not null or last_price is not null
+            )::int as markets_with_price
+          from unified_markets
           where status = 'ACTIVE'
-            and (coalesce(volume_24h, 0) > 0 or coalesce(volume_total, 0) > 0)
-        )::int as markets_with_volume,
-        count(*) filter (
-          where status = 'ACTIVE'
-            and (
-              (liquidity is not null and liquidity > 0)
-              or (open_interest is not null and open_interest > 0)
-            )
-        )::int as markets_with_liquidity,
-        count(*) filter (
-          where status = 'ACTIVE'
-            and (best_bid is not null or best_ask is not null or last_price is not null)
-        )::int as markets_with_price
-      from unified_markets
-      group by venue
-      order by venue asc
-    `);
+            and venue = any($1::text[])
+          group by venue
+        )
+        select
+          requested.venue,
+          coalesce(coverage.active_markets, 0)::int as active_markets,
+          coalesce(coverage.markets_with_volume, 0)::int as markets_with_volume,
+          coalesce(coverage.markets_with_liquidity, 0)::int as markets_with_liquidity,
+          coalesce(coverage.markets_with_price, 0)::int as markets_with_price
+        from requested_venues requested
+        left join active_coverage coverage on coverage.venue = requested.venue
+        order by requested.venue asc
+      `,
+      [discoverableVenues],
+    );
 
     const venues = rows.flatMap((row) => {
       const venue = normalizeHunchVenue(row.venue);

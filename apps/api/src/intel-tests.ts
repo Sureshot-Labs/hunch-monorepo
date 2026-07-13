@@ -54,6 +54,8 @@ import {
   resolveWalletBadges,
   resolveWalletPrimaryLabel,
   resolveWalletSecondaryLabels,
+  resolveWalletPositionHistoryInitialSeed,
+  expandWalletPositionHistorySeed,
   resolveWalletHeadlineTag,
   resolveWalletTopLabelVariant,
   signalItemToTopChange,
@@ -66,6 +68,7 @@ import {
 } from "./lib/ai-pricing.js";
 import {
   DEFAULT_MIN_UNUSUAL_BASELINE_SAMPLES,
+  FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL,
   compareWalletActivitySummaryStats,
   computeWalletActivityImportanceScore,
   computeRobustUnusualScore,
@@ -3966,6 +3969,52 @@ const tests: TestCase[] = [
       assert.equal(parsedHistory.includeSmall, false);
       assert.equal(parsedHistory.minPositionShares, 2);
       assert.equal(parsedHistory.minPositionUsd, 0.1);
+    },
+  },
+  {
+    name: "wallet position history seed is page-aware and expands geometrically",
+    run: () => {
+      assert.equal(
+        resolveWalletPositionHistoryInitialSeed({ limit: 80, offset: 0 }),
+        5_184,
+      );
+      assert.equal(
+        resolveWalletPositionHistoryInitialSeed({ limit: 10, offset: 0 }),
+        5_000,
+      );
+      assert.equal(
+        resolveWalletPositionHistoryInitialSeed({ limit: 80, offset: 200 }),
+        17_984,
+      );
+      assert.equal(expandWalletPositionHistorySeed(5_000), 20_000);
+    },
+  },
+  {
+    name: "wallet signal SQL filters eligibility before bounded history",
+    run: () => {
+      const sql = FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL;
+      const eventsIndex = sql.indexOf("events_window as materialized");
+      const eligibilityIndex = sql.indexOf("eligible_window as materialized");
+      const walletSetIndex = sql.indexOf("eligible_wallet_set as materialized");
+      const historyIndex = sql.indexOf("history as materialized");
+      assert.ok(eventsIndex >= 0);
+      assert.ok(eligibilityIndex > eventsIndex);
+      assert.ok(walletSetIndex > eligibilityIndex);
+      assert.ok(historyIndex > walletSetIndex);
+      assert.match(
+        sql,
+        /join eligible_wallet_set ews on ews\.wallet_id = wah\.wallet_id/,
+      );
+      assert.doesNotMatch(
+        sql.slice(historyIndex, sql.indexOf("enriched as", historyIndex)),
+        /join wallet_set/,
+      );
+      assert.match(sql, /signal_values\.odds <= \$5::numeric/);
+      assert.match(sql, /signal_values\.stake_usd >= \$6::numeric/);
+      assert.match(
+        sql,
+        /coalesce\(payout\.potential_payout_usd, 0\) >= \$7::numeric/,
+      );
     },
   },
   {

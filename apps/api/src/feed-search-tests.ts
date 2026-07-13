@@ -1100,8 +1100,8 @@ async function main() {
       });
       assert.equal(response.statusCode, 200);
       const payload = response.json<FeedPayload>();
-      assert.equal(payload.data[0]?.eventId, events[2].id);
-      assert.equal(payload.data[1]?.eventId, events[3].id);
+      assert.equal(payload.data[0]?.eventId, events[3].id);
+      assert.equal(payload.data.length, 1);
     }
 
     {
@@ -1119,7 +1119,7 @@ async function main() {
       const payload = response.json<FeedPayload>();
       assert.deepEqual(
         payload.data.map((event) => event.eventId),
-        [events[13].id, events[2].id],
+        [events[13].id, events[1].id],
       );
     }
   } finally {

@@ -437,6 +437,82 @@ async function assertDirectMarketSqlShape(): Promise<void> {
 
   const singleSql = await captureMarketSql("single");
   assert.match(singleSql, /where market_count = 1/);
+
+  const captureFastMarketSql = async (sort: string): Promise<string[]> => {
+    const capturedSql: string[] = [];
+    let substantiveQueryIndex = 0;
+    const runQuery = async (sql: string) => {
+      const normalized = sql.trim().toLowerCase();
+      if (
+        normalized === "begin" ||
+        normalized === "commit" ||
+        normalized === "rollback" ||
+        normalized.startsWith("set local ")
+      ) {
+        return { rows: [] };
+      }
+      capturedSql.push(sql);
+      substantiveQueryIndex += 1;
+      if (substantiveQueryIndex > 1) return { rows: [] };
+      return sort === "trending"
+        ? { rows: [{ ids: ["market-1"], candidate_count: 1_000 }] }
+        : { rows: [{ id: "market-1" }] };
+    };
+    const fakePool = {
+      query: runQuery,
+      async connect() {
+        return { query: runQuery, release() {} };
+      },
+    } as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
+
+    await fetchFeedMarketsDirect(fakePool, {
+      limit: 1,
+      offset: 0,
+      minVol: 0,
+      minLiquidity: 0,
+      view: "markets",
+      venues: ["polymarket", "limitless"],
+      sort,
+      sortDir: "desc",
+      nowParam: now.toISOString(),
+      sevenDaysAgo: new Date(
+        now.getTime() - 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      sevenDaysFromNow: new Date(
+        now.getTime() + 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+    });
+    return capturedSql;
+  };
+
+  const change24hSql = await captureFastMarketSql("change24h");
+  assert.match(change24hSql[0], /from unified_market_change_24h metric/);
+  assert.match(change24hSql[0], /cross join lateral/);
+  assert.doesNotMatch(
+    change24hSql[0],
+    /orderable_market_candidates as materialized/,
+  );
+  assert.match(change24hSql[1], /from unnest\(\$\d+::text\[\]\)/);
+  assert.doesNotMatch(
+    change24hSql[1],
+    /orderable_market_candidates as materialized/,
+  );
+
+  const trendingV2Sql = await captureFastMarketSql("trending_v2");
+  assert.match(trendingV2Sql[0], /from unified_market_trade_24h metric/);
+  assert.match(trendingV2Sql[0], /limitless_candidates as materialized/);
+  assert.match(trendingV2Sql[0], /union all/);
+
+  const legacyTrendingSql = await captureFastMarketSql("trending");
+  assert.match(
+    legacyTrendingSql[0],
+    /ranked_market_candidates as materialized/,
+  );
+  assert.match(legacyTrendingSql[0], /valid_ranked_markets as materialized/);
+  assert.doesNotMatch(
+    legacyTrendingSql[0],
+    /orderable_market_candidates as materialized/,
+  );
 }
 
 async function assertEventFeedSqlShape(): Promise<void> {
@@ -463,11 +539,13 @@ async function assertEventFeedSqlShape(): Promise<void> {
   ): Promise<{ capturedSql: string[]; capturedParams: unknown[][] }> => {
     const capturedSql: string[] = [];
     const capturedParams: unknown[][] = [];
+    const ids = Array.from(
+      { length: rowCount },
+      (_, index) => `event-${index}`,
+    );
     const fakePool = createSqlCapturePool(
       capturedSql,
-      Array.from({ length: rowCount }, (_, index) => ({
-        id: `event-${index}`,
-      })),
+      [{ ids, candidate_count: rowCount }],
       capturedParams,
     ) as unknown as Parameters<typeof fetchFeedEventIds>[0];
 
@@ -551,14 +629,64 @@ async function assertEventFeedSqlShape(): Promise<void> {
       sort: "trending",
     });
 
-    assert.equal(capturedSql.length, 2);
+    assert.equal(capturedSql.length, 1);
     assert.match(capturedSql[0], /ranked_event_candidates as materialized/);
-    assert.match(capturedSql[1], /select\s+e\.id[\s\S]*from unified_events e/s);
-    assert.match(capturedSql[1], /exists \(/s);
-    assert.match(
-      capturedSql[1],
-      /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
+    assert.doesNotMatch(
+      capturedSql[0],
+      /orderable_market_candidates as materialized/,
     );
+  }
+
+  {
+    const capturedSql: string[] = [];
+    const capturedParams: unknown[][] = [];
+    let queryIndex = 0;
+    const runQuery = async (sql: string, params: unknown[] = []) => {
+      const normalized = sql.trim().toLowerCase();
+      if (
+        normalized === "begin" ||
+        normalized === "commit" ||
+        normalized === "rollback" ||
+        normalized.startsWith("set local ")
+      ) {
+        return { rows: [] };
+      }
+      capturedSql.push(sql);
+      capturedParams.push([...params]);
+      queryIndex += 1;
+      return queryIndex === 1
+        ? { rows: [{ ids: ["event-0"], candidate_count: 1_000 }] }
+        : {
+            rows: [
+              {
+                ids: Array.from(
+                  { length: baseInputs.limit },
+                  (_, index) => `event-${index}`,
+                ),
+                candidate_count: 4_000,
+              },
+            ],
+          };
+    };
+    const fakePool = {
+      query: runQuery,
+      async connect() {
+        return { query: runQuery, release() {} };
+      },
+    } as unknown as Parameters<typeof fetchFeedEventIds>[0];
+
+    const rows = await fetchFeedEventIds(fakePool, {
+      ...baseInputs,
+      sort: "trending",
+    });
+
+    assert.equal(capturedSql.length, 2);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      ["event-0", "event-1", "event-2", "event-3", "event-4"],
+    );
+    assert.ok(capturedParams[0]?.includes(1_000));
+    assert.ok(capturedParams[1]?.includes(4_000));
   }
 }
 
@@ -876,9 +1004,8 @@ async function main() {
         category: categoryGamma,
       },
       category: categoryAlpha,
-      expectedEvents: 2,
+      expectedEvents: 1,
       expectedVenues: {
-        kalshi: 1,
         polymarket: 1,
       },
     });
@@ -908,7 +1035,7 @@ async function main() {
       },
     });
 
-    const alphaEventIds = [events[0].id, events[1].id, events[2].id];
+    const alphaEventIds = [events[0].id, events[2].id];
     await assertEventFeed({
       app,
       query: {
@@ -1055,7 +1182,7 @@ async function main() {
         });
         assert.equal(facetResponse.statusCode, 200);
         const facetPayload = facetResponse.json<CategoriesFacetPayload>();
-        assert.equal(findCategory(facetPayload, categoryAlpha).events, 3);
+        assert.equal(findCategory(facetPayload, categoryAlpha).events, 2);
       }
     }
 

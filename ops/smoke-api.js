@@ -95,7 +95,7 @@ async function httpJson(baseUrl, pathname, opts) {
   }
 }
 
-async function httpText(baseUrl, pathname, opts) {
+async function httpText(baseUrl, pathname, opts, requestOpts = {}) {
   const url = new URL(pathname, baseUrl).toString();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), opts.timeoutMs);
@@ -104,11 +104,17 @@ async function httpText(baseUrl, pathname, opts) {
   try {
     const res = await fetchImpl(url, {
       method: "GET",
-      headers: { Accept: "*/*" },
+      headers: { Accept: "*/*", ...requestOpts.headers },
       signal: controller.signal,
     });
     const ms = Date.now() - t0;
     const text = await res.text();
+    if (res.status === 404 && requestOpts.optionalNotFound) {
+      console.log(
+        `[404] GET ${pathname} ${ms}ms skipped=${requestOpts.optionalNotFound}`,
+      );
+      return null;
+    }
     console.log(`[${res.status}] GET ${pathname} ${ms}ms bytes=${text.length}`);
     if (!res.ok) {
       const snippet = text.slice(0, 800);
@@ -138,6 +144,7 @@ async function main() {
   const verbose = hasFlag("--verbose");
 
   const opts = { timeoutMs, verbose };
+  const metricsAuthToken = process.env.METRICS_AUTH_TOKEN?.trim();
 
   console.log(`[smoke] base=${baseUrl} venue=${venue} limit=${limit}`);
 
@@ -145,7 +152,12 @@ async function main() {
   assert(health && health.ok === true, "Expected /health to return { ok: true }");
 
   await httpJson(baseUrl, "/price-history/status", opts);
-  await httpText(baseUrl, "/metrics", opts);
+  await httpText(baseUrl, "/metrics", opts, {
+    optionalNotFound: "metrics_disabled",
+    headers: metricsAuthToken
+      ? { "x-metrics-token": metricsAuthToken }
+      : undefined,
+  });
 
   const feed = await httpJson(
     baseUrl,
@@ -200,4 +212,3 @@ main().catch((err) => {
   console.error(err instanceof Error ? err.stack || err.message : err);
   process.exit(1);
 });
-

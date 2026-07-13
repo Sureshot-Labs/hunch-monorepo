@@ -1426,7 +1426,7 @@ ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
   offset $25
 `;
 
-const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
+export const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
   with wallet_set as (
     select unnest($1::uuid[]) as wallet_id
   ),
@@ -1439,31 +1439,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       $4::int as top_changes_hint,
       $19::int as min_baseline_sample_count_hint
   ),
-  history as (
-    with history_events as (
-      select
-        wah.wallet_id,
-        wah.market_id,
-        max(wah.last_occurred_at) as last_prior_activity_at
-      from wallet_activity_hourly wah
-      join wallet_set ws on ws.wallet_id = wah.wallet_id
-      where wah.activity_type in ('delta', 'trade')
-        and wah.last_occurred_at < (select ts from window_start)
-        and (
-          $11::int = 0
-          or wah.last_occurred_at >= now() - ($11::text || ' days')::interval
-        )
-      group by wah.wallet_id, wah.market_id
-    )
-    select
-      ws.wallet_id,
-      count(he.market_id)::int as prior_distinct_markets,
-      max(he.last_prior_activity_at) as last_prior_activity_at
-    from wallet_set ws
-    left join history_events he on he.wallet_id = ws.wallet_id
-    group by ws.wallet_id
-  ),
-  events_window as (
+  events_window as materialized (
     select
       wah.wallet_id,
       wah.venue,
@@ -1482,11 +1458,9 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       and wah.hour_bucket >= now() - ($2::text || ' hours')::interval
     group by wah.wallet_id, wah.venue, wah.market_id, wah.outcome_side
   ),
-  enriched as (
+  events_with_market as materialized (
     select
       ew.*,
-      h.prior_distinct_markets,
-      h.last_prior_activity_at,
       um.title as market_title,
       um.image as market_image,
       um.icon as market_icon,
@@ -1506,9 +1480,83 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       lower(coalesce(um.category, ue.category)) as category,
       um.last_price as market_last_price
     from events_window ew
-    left join history h on h.wallet_id = ew.wallet_id
     left join unified_markets um on um.id = ew.market_id
     left join unified_events ue on ue.id = um.event_id
+  ),
+  eligible_window as materialized (
+    select
+      ewm.*,
+      signal_values.stake_usd,
+      signal_values.odds,
+      payout.potential_payout_usd
+    from events_with_market ewm
+    cross join lateral (
+      select
+        coalesce(ewm.gross_abs_delta_usd, abs(ewm.signed_delta_usd), 0) as stake_usd,
+        case
+          when ewm.last_price is not null then ewm.last_price
+          when upper(coalesce(ewm.outcome_side, '')) = 'NO'
+            and ewm.market_last_price is not null
+            then 1 - ewm.market_last_price
+          else ewm.market_last_price
+        end as odds
+    ) signal_values
+    cross join lateral (
+      select case
+        when signal_values.odds > 0
+          then signal_values.stake_usd / signal_values.odds
+        else null
+      end as potential_payout_usd
+    ) payout
+    where ewm.change_action in ('OPENED', 'INCREASED')
+      and ewm.accepting_orders = true
+      and upper(coalesce(ewm.market_status::text, '')) = 'ACTIVE'
+      and nullif(btrim(coalesce(ewm.resolved_outcome, '')), '') is null
+      and coalesce(ewm.close_time, ewm.expiration_time) is not null
+      and coalesce(ewm.close_time, ewm.expiration_time) > now()
+      and signal_values.odds is not null
+      and signal_values.odds <= $5::numeric
+      and signal_values.stake_usd >= $6::numeric
+      and (
+        $7::numeric <= 0
+        or coalesce(payout.potential_payout_usd, 0) >= $7::numeric
+      )
+  ),
+  eligible_wallet_set as materialized (
+    select distinct wallet_id
+    from eligible_window
+  ),
+  history as materialized (
+    with history_events as (
+      select
+        wah.wallet_id,
+        wah.market_id,
+        max(wah.last_occurred_at) as last_prior_activity_at
+      from wallet_activity_hourly wah
+      join eligible_wallet_set ews on ews.wallet_id = wah.wallet_id
+      where wah.activity_type in ('delta', 'trade')
+        and wah.last_occurred_at < (select ts from window_start)
+        and (
+          $11::int = 0
+          or wah.last_occurred_at >= now() - ($11::text || ' days')::interval
+        )
+      group by wah.wallet_id, wah.market_id
+    )
+    select
+      ews.wallet_id,
+      count(he.market_id)::int as prior_distinct_markets,
+      max(he.last_prior_activity_at) as last_prior_activity_at
+    from eligible_wallet_set ews
+    left join history_events he on he.wallet_id = ews.wallet_id
+    group by ews.wallet_id
+  ),
+  enriched as (
+    select
+      ew.*,
+      h.prior_distinct_markets,
+      h.last_prior_activity_at
+    from eligible_window ew
+    left join history h on h.wallet_id = ew.wallet_id
   ),
   scored_rows as (
     select
@@ -1533,35 +1581,9 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
       e.outcome_side,
       e.signed_delta_shares,
       e.signed_delta_usd,
-      coalesce(e.gross_abs_delta_usd, abs(e.signed_delta_usd), 0) as stake_usd,
-      case
-        when e.last_price is not null then e.last_price
-        when upper(coalesce(e.outcome_side, '')) = 'NO'
-          and e.market_last_price is not null
-          then 1 - e.market_last_price
-        else e.market_last_price
-      end as odds,
-      case
-        when
-          case
-            when e.last_price is not null then e.last_price
-            when upper(coalesce(e.outcome_side, '')) = 'NO'
-              and e.market_last_price is not null
-              then 1 - e.market_last_price
-            else e.market_last_price
-          end > 0
-          then coalesce(e.gross_abs_delta_usd, abs(e.signed_delta_usd), 0)
-            / (
-              case
-                when e.last_price is not null then e.last_price
-                when upper(coalesce(e.outcome_side, '')) = 'NO'
-                  and e.market_last_price is not null
-                  then 1 - e.market_last_price
-                else e.market_last_price
-              end
-            )
-        else null
-      end as potential_payout_usd,
+      e.stake_usd,
+      e.odds,
+      e.potential_payout_usd,
       case
         when e.last_prior_activity_at is not null
           and e.last_occurred_at is not null
@@ -1594,8 +1616,7 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
             case
               when $6::numeric <= 0 then 0
               else least(
-                coalesce(coalesce(e.gross_abs_delta_usd, abs(e.signed_delta_usd), 0), 0)
-                / $6::numeric,
+                coalesce(e.stake_usd, 0) / $6::numeric,
                 1
               )
             end
@@ -1604,29 +1625,13 @@ const FETCH_WALLET_ACTIVITY_SIGNAL_ROWS_FAST_SQL = `
         + (
           $14::numeric * (
             case
-              when (
-                case
-                  when e.last_price is not null then e.last_price
-                  when upper(coalesce(e.outcome_side, '')) = 'NO'
-                    and e.market_last_price is not null
-                    then 1 - e.market_last_price
-                  else e.market_last_price
-                end
-              ) is null or $5::numeric <= 0 then 0
+              when e.odds is null or $5::numeric <= 0 then 0
               else greatest(
                 0,
                 least(
                   1,
                   (
-                    $5::numeric - (
-                      case
-                        when e.last_price is not null then e.last_price
-                        when upper(coalesce(e.outcome_side, '')) = 'NO'
-                          and e.market_last_price is not null
-                          then 1 - e.market_last_price
-                        else e.market_last_price
-                      end
-                    )
+                    $5::numeric - e.odds
                   ) / $5::numeric
                 )
               )

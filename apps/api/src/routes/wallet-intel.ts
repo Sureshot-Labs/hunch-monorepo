@@ -1352,6 +1352,34 @@ function inferVenueFromMarketId(
   return null;
 }
 
+const WALLET_POSITION_HISTORY_MIN_SEED = 5_000;
+const WALLET_POSITION_HISTORY_SEED_FACTOR = 64;
+const WALLET_POSITION_HISTORY_EXPANSION_FACTOR = 4;
+
+export function resolveWalletPositionHistoryInitialSeed(input: {
+  limit: number;
+  offset: number;
+}): number {
+  return Math.max(
+    WALLET_POSITION_HISTORY_MIN_SEED,
+    (input.limit + input.offset + 1) * WALLET_POSITION_HISTORY_SEED_FACTOR,
+  );
+}
+
+export function expandWalletPositionHistorySeed(seed: number): number {
+  return seed * WALLET_POSITION_HISTORY_EXPANSION_FACTOR;
+}
+
+function buildPositiveWalletPositionSnapshotSql(alias: string): string {
+  return `(
+    coalesce(${alias}.shares, 0) > 0
+    or greatest(
+      coalesce(${alias}.size_usd, 0),
+      abs(coalesce(${alias}.shares, 0) * coalesce(${alias}.price, 0))
+    ) > 0
+  )`;
+}
+
 function normalizeMarketStatusFilter(status: string): string {
   return status === "OPEN" ? "ACTIVE" : status;
 }
@@ -11931,35 +11959,32 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(cached.body);
       }
 
-      const params: Array<string | number | boolean | null> = [
-        userId,
-        query.walletId,
-      ];
-      let idx = 3;
-      const userParam = 1;
-      const walletParam = 2;
       const derivedVenue = inferVenueFromMarketId(query.marketId);
+      const effectiveVenue = query.venue ?? derivedVenue;
+      const historyScopeValues: PgParams = [query.walletId];
+      if (effectiveVenue) historyScopeValues.push(effectiveVenue);
+      if (query.marketId) historyScopeValues.push(query.marketId);
+      if (query.outcomeSide) historyScopeValues.push(query.outcomeSide);
+      const buildHistoryScopeSql = (alias: string, startIndex: number) => {
+        let scopeIndex = startIndex;
+        const clauses = [`${alias}.wallet_id = $${scopeIndex++}::uuid`];
+        if (effectiveVenue) {
+          clauses.push(`${alias}.venue = $${scopeIndex++}::text`);
+        }
+        if (query.marketId) {
+          clauses.push(`${alias}.market_id = $${scopeIndex++}::text`);
+        }
+        if (query.outcomeSide) {
+          clauses.push(`${alias}.outcome_side = $${scopeIndex++}::text`);
+        }
+        return clauses.join(" and ");
+      };
 
-      let historyWhere = `ws.wallet_id = $${walletParam}`;
-      if (query.venue) {
-        const venueParam = idx++;
-        historyWhere += ` and ws.venue = $${venueParam}`;
-        params.push(query.venue);
-      } else if (derivedVenue) {
-        const venueParam = idx++;
-        historyWhere += ` and ws.venue = $${venueParam}`;
-        params.push(derivedVenue);
-      }
-
-      if (query.marketId) {
-        historyWhere += ` and ws.market_id = $${idx++}::text`;
-        params.push(query.marketId);
-      }
-
-      if (query.outcomeSide) {
-        historyWhere += ` and ws.outcome_side = $${idx++}::text`;
-        params.push(query.outcomeSide);
-      }
+      const params: PgParams = [userId, ...historyScopeValues];
+      let idx = params.length + 1;
+      const userParam = 1;
+      const historyWhere = buildHistoryScopeSql("ws", 2);
+      const seedHistoryWhere = buildHistoryScopeSql("ws", 1);
 
       const historyPositionFilterSql = query.includeSmall
         ? "true"
@@ -12028,9 +12053,8 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
         outerWhere += ` and ${historyMarketClauses.join(" and ")}`;
       }
 
-      params.push(query.limit + 1, query.offset);
-      const limitParam = idx++;
-      const offsetParam = idx++;
+      const targetRowCount = query.limit + query.offset + 1;
+      const initialSeed = resolveWalletPositionHistoryInitialSeed(query);
 
       const client = await pool.connect();
       try {
@@ -12038,9 +12062,42 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
           client,
           walletPositionRouteQuerySettings,
           async () => {
-            const rows = await client.query<WalletPositionRouteRow>(
-              `
-            with terminal_rows as (
+            let seedLimit = initialSeed;
+            let selectedRows: WalletPositionRouteRow[] = [];
+
+            for (;;) {
+              const seedBoundaryParams: PgParams = [
+                ...historyScopeValues,
+                seedLimit - 1,
+              ];
+              const seedOffsetParam = seedBoundaryParams.length;
+              const seedBoundaryResult = await client.query<{
+                snapshot_at: Date;
+              }>(
+                `
+                  select ws.snapshot_at
+                  from wallet_position_snapshots ws
+                  where ${seedHistoryWhere}
+                    and ${buildPositiveWalletPositionSnapshotSql("ws")}
+                  order by ws.snapshot_at desc
+                  limit 1
+                  offset $${seedOffsetParam}::integer
+                `,
+                seedBoundaryParams,
+              );
+              const seedBoundary =
+                seedBoundaryResult.rows[0]?.snapshot_at ?? null;
+              const historyExhausted = seedBoundary == null;
+              const attemptParams: PgParams = [
+                ...params,
+                seedBoundary,
+                targetRowCount,
+              ];
+              const seedBoundaryParam = idx;
+              const targetParam = idx + 1;
+              const rows = await client.query<WalletPositionRouteRow>(
+                `
+            with seed_rows as materialized (
               select
                 ws.wallet_id,
                 ws.venue,
@@ -12056,55 +12113,56 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ws.snapshot_at,
                 ws.metadata
               from wallet_position_snapshots ws
-              join (
+              where ${historyWhere}
+                and ${buildPositiveWalletPositionSnapshotSql("ws")}
+                and (
+                  $${seedBoundaryParam}::timestamptz is null
+                  or ws.snapshot_at >= $${seedBoundaryParam}::timestamptz
+                )
+            ),
+            seed_market_ids as materialized (
+              select distinct market_id
+              from seed_rows
+            ),
+            terminal_markets as materialized (
                 select
-                  id,
-                  coalesce(close_time, expiration_time) as terminal_at
-                from unified_markets
-                where resolved_outcome is not null
-                  or upper(coalesce(status::text, ''))
+                  um.id,
+                  coalesce(um.close_time, um.expiration_time) as terminal_at
+                from unified_markets um
+                join seed_market_ids seed_market on seed_market.market_id = um.id
+                where um.resolved_outcome is not null
+                  or upper(coalesce(um.status::text, ''))
                     in ('CLOSED', 'SETTLED', 'ARCHIVED')
                   or (
-                    coalesce(close_time, expiration_time) is not null
-                    and coalesce(close_time, expiration_time) < now()
+                    coalesce(um.close_time, um.expiration_time) is not null
+                    and coalesce(um.close_time, um.expiration_time) < now()
                   )
-              ) terminal_market
-                on terminal_market.id = ws.market_id
-              where ${historyWhere}
-                and (
-                  coalesce(ws.shares, 0) > 0
-                  or greatest(
-                    coalesce(ws.size_usd, 0),
-                    abs(coalesce(ws.shares, 0) * coalesce(ws.price, 0))
-                  ) > 0
-                )
-                and (
+            ),
+            valid_seed_rows as materialized (
+              select seed.*
+              from seed_rows seed
+              join terminal_markets terminal_market
+                on terminal_market.id = seed.market_id
+              where (
                   terminal_market.terminal_at is null
-                  or ws.snapshot_at <= terminal_market.terminal_at
+                  or seed.snapshot_at <= terminal_market.terminal_at
                 )
-                and not exists (
-                  select 1
-                  from wallet_position_snapshots newer
-                  where newer.wallet_id = ws.wallet_id
-                    and newer.venue = ws.venue
-                    and newer.market_id = ws.market_id
-                    and newer.outcome_side = ws.outcome_side
-                    and newer.snapshot_at > ws.snapshot_at
-                    and (
-                      terminal_market.terminal_at is null
-                      or newer.snapshot_at <= terminal_market.terminal_at
-                    )
-                    and (
-                      coalesce(newer.shares, 0) > 0
-                      or greatest(
-                        coalesce(newer.size_usd, 0),
-                        abs(
-                          coalesce(newer.shares, 0)
-                          * coalesce(newer.price, 0)
-                        )
-                      ) > 0
-                    )
-                )
+            ),
+            terminal_rows as materialized (
+              select distinct on (
+                valid.wallet_id,
+                valid.venue,
+                valid.market_id,
+                valid.outcome_side
+              )
+                valid.*
+              from valid_seed_rows valid
+              order by
+                valid.wallet_id,
+                valid.venue,
+                valid.market_id,
+                valid.outcome_side,
+                valid.snapshot_at desc
             )
             select
               tr.wallet_id,
@@ -12161,16 +12219,23 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               tr.size_usd desc nulls last,
               tr.shares desc nulls last,
               coalesce(um.title, tr.market_id) asc
-            limit $${limitParam}::integer
-            offset $${offsetParam}::integer
+            limit $${targetParam}::integer
           `,
-              params,
-            );
+                attemptParams,
+              );
 
-            const hasMore = rows.rows.length > query.limit;
+              selectedRows = rows.rows;
+              if (selectedRows.length >= targetRowCount || historyExhausted) {
+                break;
+              }
+              seedLimit = expandWalletPositionHistorySeed(seedLimit);
+            }
+
+            const offsetRows = selectedRows.slice(query.offset);
+            const hasMore = offsetRows.length > query.limit;
             const pageRows = hasMore
-              ? rows.rows.slice(0, query.limit)
-              : rows.rows;
+              ? offsetRows.slice(0, query.limit)
+              : offsetRows;
             const items = await buildWalletPositionRouteItems(client, pageRows);
 
             return {
