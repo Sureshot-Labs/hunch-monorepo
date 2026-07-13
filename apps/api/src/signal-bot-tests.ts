@@ -91,6 +91,8 @@ const readyTelegramSignerStatus: PrivyServerSignerStatus = {
   canRemoveAllSigners: true,
   grant: {
     policyIds: ["policy-1"],
+    policyProfile: "buy",
+    replaceExistingSigner: false,
     signerId: "signer-1",
     walletAddress: "0x0000000000000000000000000000000000000001",
     walletChain: "ethereum",

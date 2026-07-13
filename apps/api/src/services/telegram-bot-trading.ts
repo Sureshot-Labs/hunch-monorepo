@@ -24,6 +24,7 @@ import {
   inspectServerEvmWalletAuthorization,
   assertServerEvmWalletAuthorization,
   createServerWalletClient,
+  hasConfiguredPrivyBotPolicyForActions,
   signPolymarketRedemptionBatch,
   type PrivyServerSignerGrant,
   type PrivyServerSignerStatus,
@@ -1755,7 +1756,9 @@ export async function getTelegramBotTradingStatus(
       actions: runtimePolicy.tradingActions,
       directExecutionReady,
       readiness: actionReadiness,
-      sellConfigured: Boolean(env.privyPolymarketBotSellPolicyId),
+      sellConfigured:
+        runtimePolicy.tradingActions.includes("sell") &&
+        hasConfiguredPrivyBotPolicyForActions(requiredActions),
       redeemConfigured: Boolean(
         env.privyPolymarketBotRedeemPolicyId &&
         env.polymarketBuilderApiKey &&
@@ -1968,7 +1971,9 @@ export async function enableTelegramBotTrading(
     });
     if (signerStatus.state === "grant_required" && signerStatus.grant) {
       throw new TelegramBotTradingEnableError({
-        code: "privy_server_signer_grant_required",
+        code: signerStatus.grant.replaceExistingSigner
+          ? "privy_server_signer_replacement_required"
+          : "privy_server_signer_grant_required",
         grants: [signerStatus.grant],
         message: signerStatus.message ?? "Grant bot access in Hunch Settings.",
         statusCode: 409,

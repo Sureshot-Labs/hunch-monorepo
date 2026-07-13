@@ -24,9 +24,11 @@ import {
   signEvmMessage,
   signPolymarketRedemptionBatch,
   validatePolymarketBotPolicy,
+  validatePolymarketBotPolicyProfile,
   validatePolymarketBotRedeemPolicy,
   validatePolymarketBotSellPolicy,
   validatePolymarketBotTypedData,
+  resolvePrivyBotPolicyProfile,
   type PrivyServerSignerConfiguration,
   type PrivySignerInspectorDependencies,
 } from "./services/api-trading-wallet-signing.js";
@@ -252,6 +254,26 @@ function buildValidPolymarketSellPolicy(): PrivyPolicyMetadata {
             operator: "eq",
             value: "137",
           },
+          typedMessageCondition({
+            field: "message",
+            operator: "eq",
+            primaryType: "ClobAuth",
+            value: POLYMARKET_AUTH_MESSAGE,
+          }),
+        ],
+        id: "sell-clob-auth",
+        method: "eth_signTypedData_v4",
+        name: "SELL ClobAuth",
+      },
+      {
+        action: "ALLOW",
+        conditions: [
+          {
+            field: "chain_id",
+            field_source: "ethereum_typed_data_domain",
+            operator: "eq",
+            value: "137",
+          },
           {
             field: "verifying_contract",
             field_source: "ethereum_typed_data_domain",
@@ -282,6 +304,16 @@ function buildValidPolymarketSellPolicy(): PrivyPolicyMetadata {
         name: "Deposit wallet SELL",
       },
     ],
+  };
+}
+
+function buildValidPolymarketBuySellPolicy(): PrivyPolicyMetadata {
+  const buy = buildValidPolymarketBotPolicy();
+  const sell = buildValidPolymarketSellPolicy();
+  return {
+    ...buy,
+    id: "buy-sell-policy",
+    rules: [...buy.rules, structuredClone(sell.rules[1] as never)],
   };
 }
 
@@ -379,6 +411,22 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Privy bot policy resolver selects one exact action profile",
+    run: () => {
+      assert.equal(resolvePrivyBotPolicyProfile(["BUY"]), "buy");
+      assert.equal(resolvePrivyBotPolicyProfile(["SELL"]), "sell");
+      assert.equal(resolvePrivyBotPolicyProfile(["SELL", "BUY"]), "buy_sell");
+      assert.equal(resolvePrivyBotPolicyProfile([]), null);
+      assert.throws(() => resolvePrivyBotPolicyProfile(["REDEEM"]));
+      const secretsSource = readFileSync(
+        resolve(apiSrcDir, "../../../packages/config/src/secrets.ts"),
+        "utf8",
+      );
+      assert.match(secretsSource, /PRIVY_POLYMARKET_BOT_SELL_POLICY_ID/);
+      assert.match(secretsSource, /PRIVY_POLYMARKET_BOT_BUY_SELL_POLICY_ID/);
+    },
+  },
   {
     name: "Polymarket bot policy accepts only the canonical Polygon BUY surface",
     run: () => {
@@ -491,14 +539,24 @@ const tests: TestCase[] = [
         }).valid,
         true,
       );
+      const sellWithoutClobAuth = structuredClone(sell);
+      sellWithoutClobAuth.rules.shift();
+      assert.equal(
+        validatePolymarketBotSellPolicy({
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          policy: sellWithoutClobAuth,
+        }).valid,
+        false,
+      );
       for (const mutate of [
         (policy: PrivyPolicyMetadata) => {
-          const conditions = policy.rules[0]?.conditions;
+          const conditions = policy.rules[1]?.conditions;
           assert.ok(Array.isArray(conditions));
           (conditions[2] as Record<string, unknown>).value = "0";
         },
         (policy: PrivyPolicyMetadata) => {
-          const conditions = policy.rules[0]?.conditions;
+          const conditions = policy.rules[1]?.conditions;
           assert.ok(Array.isArray(conditions));
           (conditions[4] as Record<string, unknown>).value =
             `0x${"22".repeat(32)}`;
@@ -524,6 +582,37 @@ const tests: TestCase[] = [
           false,
         );
       }
+
+      const combined = buildValidPolymarketBuySellPolicy();
+      const combinedValidation = validatePolymarketBotPolicyProfile({
+        builderCode: policyBuilderCode,
+        exchangeAddresses: policyExchangeAddresses,
+        fundingRouterAddress: policyFundingRouterAddress,
+        maxBuyUsd: 2,
+        policy: combined,
+        profile: "buy_sell",
+      });
+      assert.equal(combinedValidation.valid, true);
+      assert.equal(combinedValidation.fundingMaxRaw, policyFundingMaxRaw);
+      const combinedWithWildcard = structuredClone(combined);
+      combinedWithWildcard.rules.push({
+        action: "ALLOW",
+        conditions: [],
+        id: "combined-wildcard",
+        method: "*",
+        name: "Wildcard",
+      });
+      assert.equal(
+        validatePolymarketBotPolicyProfile({
+          builderCode: policyBuilderCode,
+          exchangeAddresses: policyExchangeAddresses,
+          fundingRouterAddress: policyFundingRouterAddress,
+          maxBuyUsd: 2,
+          policy: combinedWithWildcard,
+          profile: "buy_sell",
+        }).valid,
+        false,
+      );
 
       const redeem = buildValidPolymarketRedeemPolicy();
       assert.equal(
@@ -625,10 +714,13 @@ const tests: TestCase[] = [
       const configuration: PrivyServerSignerConfiguration = {
         authorizationId: "signer-1",
         authorizationKey,
+        builderCode: policyBuilderCode,
+        buySellPolicyId: "buy-sell-policy",
         exchangeAddresses: [...policyExchangeAddresses],
         policyId: "policy-1",
         policyMaxBuyUsd: 2,
         fundingRouterAddress: policyFundingRouterAddress,
+        sellPolicyId: "sell-policy",
       };
       const walletAddress = "0x0000000000000000000000000000000000000010";
       let additionalSigners: Array<{
@@ -637,7 +729,11 @@ const tests: TestCase[] = [
       }> = [];
       let quorumPublicKeys = [publicKey];
       let classifiedWalletId = "wallet-1";
-      let policy = buildValidPolymarketBotPolicy();
+      const policies = new Map<string, PrivyPolicyMetadata>([
+        ["policy-1", buildValidPolymarketBotPolicy()],
+        ["sell-policy", buildValidPolymarketSellPolicy()],
+        ["buy-sell-policy", buildValidPolymarketBuySellPolicy()],
+      ]);
       const dependencies: PrivySignerInspectorDependencies = {
         classifyWallets: () => [
           {
@@ -662,15 +758,23 @@ const tests: TestCase[] = [
           id: "wallet-1",
           policyIds: [],
         }),
-        getPolicyMetadata: async () => policy,
+        getPolicyMetadata: async (id) => {
+          const policy = policies.get(id);
+          if (!policy) throw new Error(`Missing policy ${id}`);
+          return policy;
+        },
         getUserById: async () => ({ id: "user-1" }) as never,
       };
-      const inspect = (authorizationEnabled: boolean) =>
+      const inspect = (
+        authorizationEnabled: boolean,
+        requiredActions: Array<"BUY" | "SELL"> = ["BUY"],
+      ) =>
         inspectServerEvmWalletAuthorization({
           authorizationEnabled,
           configuration,
           dependencies,
           privyUserId: "user-1",
+          requiredActions,
           signer: walletAddress,
           walletId: "wallet-1",
         });
@@ -679,6 +783,8 @@ const tests: TestCase[] = [
       assert.equal(grantRequired.state, "grant_required");
       assert.deepEqual(grantRequired.grant, {
         policyIds: ["policy-1"],
+        policyProfile: "buy",
+        replaceExistingSigner: false,
         signerId: "signer-1",
         walletAddress,
         walletChain: "ethereum",
@@ -692,6 +798,33 @@ const tests: TestCase[] = [
         { overridePolicyIds: ["policy-1"], signerId: "signer-1" },
       ];
       assert.equal((await inspect(true)).state, "ready");
+      const combinedReplacement = await inspect(true, ["BUY", "SELL"]);
+      assert.equal(combinedReplacement.state, "grant_required");
+      assert.deepEqual(combinedReplacement.grant, {
+        policyIds: ["buy-sell-policy"],
+        policyProfile: "buy_sell",
+        replaceExistingSigner: true,
+        signerId: "signer-1",
+        walletAddress,
+        walletChain: "ethereum",
+      });
+      additionalSigners = [
+        {
+          overridePolicyIds: ["buy-sell-policy"],
+          signerId: "signer-1",
+        },
+      ];
+      assert.equal((await inspect(true, ["BUY", "SELL"])).state, "ready");
+      assert.equal((await inspect(true, ["SELL"])).state, "ready");
+      assert.equal((await inspect(true, ["BUY"])).state, "ready");
+      additionalSigners = [
+        { overridePolicyIds: ["sell-policy"], signerId: "signer-1" },
+      ];
+      assert.equal((await inspect(true, ["SELL"])).state, "ready");
+      assert.equal((await inspect(true, ["BUY"])).state, "grant_required");
+      additionalSigners = [
+        { overridePolicyIds: ["policy-1"], signerId: "signer-1" },
+      ];
       const revokeRequired = await inspect(false);
       assert.equal(revokeRequired.state, "revoke_required");
       assert.equal(revokeRequired.canRemoveAllSigners, true);
@@ -710,6 +843,33 @@ const tests: TestCase[] = [
       assert.equal((await inspect(true)).state, "unsafe_configuration");
 
       additionalSigners = [
+        {
+          overridePolicyIds: ["policy-1", "buy-sell-policy"],
+          signerId: "signer-1",
+        },
+      ];
+      assert.equal((await inspect(true)).state, "unsafe_configuration");
+
+      const mismatchedCombinedCap = buildValidPolymarketBuySellPolicy();
+      const combinedFundingConditions =
+        mismatchedCombinedCap.rules[3]?.conditions;
+      assert.ok(Array.isArray(combinedFundingConditions));
+      (combinedFundingConditions[4] as Record<string, unknown>).value =
+        "50000000";
+      policies.set("buy-sell-policy", mismatchedCombinedCap);
+      additionalSigners = [
+        {
+          overridePolicyIds: ["buy-sell-policy"],
+          signerId: "signer-1",
+        },
+      ];
+      assert.equal(
+        (await inspect(true, ["BUY", "SELL"])).state,
+        "policy_invalid",
+      );
+      policies.set("buy-sell-policy", buildValidPolymarketBuySellPolicy());
+
+      additionalSigners = [
         { overridePolicyIds: ["policy-1"], signerId: "signer-1" },
       ];
       quorumPublicKeys = [Buffer.from("wrong-key").toString("base64")];
@@ -718,14 +878,17 @@ const tests: TestCase[] = [
       assert.equal(mismatchedKey.attached, true);
 
       quorumPublicKeys = [publicKey];
-      policy = structuredClone(policy);
-      policy.rules.push({
+      const unsafeBuyPolicy = structuredClone(
+        policies.get("policy-1") as PrivyPolicyMetadata,
+      );
+      unsafeBuyPolicy.rules.push({
         action: "ALLOW",
         conditions: [],
         id: "unsafe-method",
         method: "eth_sendTransaction",
         name: "Unsafe",
       });
+      policies.set("policy-1", unsafeBuyPolicy);
       assert.equal((await inspect(true)).state, "policy_invalid");
     },
   },
@@ -2681,6 +2844,12 @@ const tests: TestCase[] = [
         resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
         "utf8",
       );
+      const ensureBlock = sourceSlice(
+        executionSource,
+        "async function ensureReadiness(",
+        "async function quote(",
+      );
+      assert.match(ensureBlock, /action: input\.action \?\? "BUY"/);
       const prepareBlock = sourceSlice(
         executionSource,
         "async function prepareTrade(",

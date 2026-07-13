@@ -137,13 +137,16 @@ try {
     updatedAt: now,
   };
   let signerAttached = false;
+  let replacementRequired = false;
   let readinessUnavailable = false;
   const signerInspector = async (input: {
     authorizationEnabled: boolean;
     signer: string;
   }): Promise<PrivyServerSignerStatus> => {
     const grant = {
-      policyIds: [policyId],
+      policyIds: [policyId] as [string],
+      policyProfile: "buy" as const,
+      replaceExistingSigner: replacementRequired,
       signerId,
       walletAddress: input.signer,
       walletChain: "ethereum" as const,
@@ -154,6 +157,18 @@ try {
         canRemoveAllSigners: true,
         grant,
         message: "Grant bot access in Hunch Settings.",
+        policyId,
+        policyMaxBuyUsd: 2,
+        signerId,
+        state: "grant_required",
+      };
+    }
+    if (replacementRequired) {
+      return {
+        attached: true,
+        canRemoveAllSigners: true,
+        grant,
+        message: "Replace signer policy.",
         policyId,
         policyMaxBuyUsd: 2,
         signerId,
@@ -240,6 +255,8 @@ try {
   assert.deepEqual(grantRequired.json().grants, [
     {
       policyIds: [policyId],
+      policyProfile: "buy",
+      replaceExistingSigner: false,
       signerId,
       walletAddress,
       walletChain: "ethereum",
@@ -276,6 +293,15 @@ try {
   });
   assert.equal(recoveredReadiness.statusCode, 200);
   assert.equal(recoveredReadiness.json().status.directExecutionReady, true);
+  replacementRequired = true;
+  const replacement = await enable();
+  assert.equal(replacement.statusCode, 409);
+  assert.equal(
+    replacement.json().error,
+    "privy_server_signer_replacement_required",
+  );
+  assert.equal(replacement.json().grants[0]?.replaceExistingSigner, true);
+  replacementRequired = false;
   const authorization = (
     await client.query<{ id: string }>(
       `select id

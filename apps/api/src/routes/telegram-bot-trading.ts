@@ -11,7 +11,10 @@ import {
   createApiTradingApplicationService,
   type ApiBotTradingExecutor,
 } from "../services/api-trading-service.js";
-import { inspectServerEvmWalletAuthorization } from "../services/api-trading-wallet-signing.js";
+import {
+  hasConfiguredPrivyBotPolicyForActions,
+  inspectServerEvmWalletAuthorization,
+} from "../services/api-trading-wallet-signing.js";
 import { reconcileTelegramVenueIntents } from "../services/telegram-bot-trading-venue-reconcile.js";
 import { verifyProofAddress } from "../services/proof-client.js";
 import {
@@ -543,7 +546,15 @@ async function registerTelegramBotTradingRoutes(
           : buildTelegramBotTradingActionStatuses({
               actions: policy.tradingActions,
               directExecutionReady: false,
-              sellConfigured: Boolean(env.privyPolymarketBotSellPolicyId),
+              sellConfigured:
+                policy.tradingActions.includes("sell") &&
+                hasConfiguredPrivyBotPolicyForActions(
+                  policy.tradingActions.map((action) =>
+                    action === "redeem"
+                      ? "REDEEM"
+                      : (action.toUpperCase() as "BUY" | "SELL"),
+                  ),
+                ),
               redeemConfigured: Boolean(
                 env.privyPolymarketBotRedeemPolicyId &&
                 env.polymarketBuilderApiKey &&

@@ -7116,7 +7116,10 @@ async function getReadiness(
     apiPassphrase: creds.apiPassphrase,
   };
   if (input.action === "SELL") {
-    if (!env.privyPolymarketBotSellPolicyId) {
+    if (
+      !env.privyPolymarketBotSellPolicyId &&
+      !env.privyPolymarketBotBuySellPolicyId
+    ) {
       return readiness("polymarket", capabilities, {
         ok: false,
         code: "privy_sell_policy_not_configured",
@@ -7336,6 +7339,7 @@ async function ensureReadiness(
   let repairError: unknown = null;
   try {
     await assertServerEvmWalletAuthorization({
+      action: input.action ?? "BUY",
       privyUserId: input.executionAuthorization?.privyUserId,
       signer,
       venue: "polymarket",
@@ -7637,6 +7641,7 @@ async function prepareTrade(
       }`;
       let acceptedTransactionId: string | null = null;
       await assertServerEvmWalletAuthorization({
+        action: "BUY",
         privyUserId: intent.executionAuthorization?.privyUserId,
         signer,
         venue: "polymarket",
