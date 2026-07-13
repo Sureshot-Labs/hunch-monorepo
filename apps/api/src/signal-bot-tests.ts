@@ -6543,6 +6543,58 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "Telegram SELL callbacks reuse fixed shares until the final fresh prepare check",
+    run: () => {
+      const market = {
+        id: "market-1",
+        venue: "polymarket",
+        venue_market_id: "venue-market-1",
+        event_id: "event-1",
+        event_title: "Event",
+        title: "Market",
+        status: "ACTIVE",
+        outcomes: ["YES", "NO"],
+        metadata: {},
+        token_yes: "token-yes",
+        token_no: "token-no",
+      } as never;
+      const intent = telegramBotTradingTestHooks.buildTelegramSellTradeIntent({
+        authorization: {
+          id: "authorization-1",
+          user_id: "user-1",
+          telegram_user_id: "999",
+          privy_user_id: "privy-1",
+          wallet_address: "0x0000000000000000000000000000000000000001",
+          wallet_chain: "ethereum",
+          privy_wallet_id: "wallet-1",
+          enabled: true,
+          enabled_venues: ["polymarket"],
+          limits: {},
+          max_amount_usd: "2",
+        },
+        intentId: "00000000-0000-4000-8000-000000000001",
+        market,
+        maxSlippageBps: 500,
+        sharesRaw: 4_750_001n,
+        side: "YES",
+      });
+
+      assert.equal(intent.action, "SELL");
+      assert.ok(intent.raw && typeof intent.raw === "object");
+      const raw = intent.raw as Record<string, unknown>;
+      assert.equal(raw.sharesRaw, "4750001");
+      assert.equal(raw.availableSharesRaw, "4750001");
+      assert.equal(
+        telegramBotTradingTestHooks.marketForCallbackReadiness("SELL", market),
+        null,
+      );
+      assert.equal(
+        telegramBotTradingTestHooks.marketForCallbackReadiness("BUY", market),
+        market,
+      );
+    },
+  },
+  {
     name: "telegram bot trading modules stay sidecar-safe",
     run: () => {
       const graph = collectRuntimeImportGraph(

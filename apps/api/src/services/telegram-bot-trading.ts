@@ -960,7 +960,9 @@ function venueStatusFromReadiness(input: {
 }
 
 export const telegramBotTradingTestHooks = {
+  buildTelegramSellTradeIntent,
   isDefinitiveSubmitRejection,
+  marketForCallbackReadiness,
   resolveTelegramExecutableBuyOption,
   venueStatusFromReadiness,
 };
@@ -1214,11 +1216,21 @@ function buildTelegramSellTradeIntent(input: {
     },
     raw: {
       sharesRaw: input.sharesRaw.toString(),
-      ...(input.availableSharesRaw != null
-        ? { availableSharesRaw: input.availableSharesRaw.toString() }
-        : {}),
+      availableSharesRaw: (
+        input.availableSharesRaw ?? input.sharesRaw
+      ).toString(),
     },
   };
+}
+
+function marketForCallbackReadiness(
+  action: "BUY" | "SELL",
+  market: TelegramBotMarketRow,
+): TelegramBotMarketRow | null {
+  // SELL quantity is fixed when the button is created. Preview and execution
+  // reuse that snapshot; prepareTrade performs the single fresh balance,
+  // live-lock and approval check immediately before signing.
+  return action === "SELL" ? null : market;
 }
 
 type TelegramExecutableBuyOption = {
@@ -3973,7 +3985,7 @@ export async function handleTelegramBotTradingCallback(
       ? await resolveTelegramTradingReadiness({
           action: action === "SELL" ? "SELL" : "BUY",
           authorization,
-          market,
+          market: marketForCallbackReadiness(action, market),
           trading: input.trading,
           venue: intent.venue,
         })
