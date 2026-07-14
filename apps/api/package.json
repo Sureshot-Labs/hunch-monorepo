@@ -49,6 +49,7 @@
     "ai:wallet:profiles": "tsx src/ai-wallet-profiles.ts",
     "wallets:intel:refresh": "tsx src/wallet-intel-refresh.ts",
     "wallets:intel:attribution-backfill": "tsx src/wallet-specialist-attribution-backfill.ts",
+    "wallets:intel:position-rollup-backfill": "tsx src/wallet-position-rollup-backfill.ts",
     "wallets:intel:internal-hunch-cleanup": "tsx src/wallet-intel-internal-hunch-cleanup.ts",
     "wallets:metrics:refresh": "tsx src/wallet-metrics-refresh.ts",
     "wallets:intel:experiments": "tsx src/wallet-intel-experiments.ts",
@@ -78,6 +79,7 @@
     "ai:map-signals:runner": "tsx src/ai-map-signals-runner.ts",
     "ai:holder-research:run": "tsx src/ai-holder-research-run.ts",
     "ai:holder-research:audit": "tsx src/ai-holder-research-audit.ts",
+    "ai:holder-research:observations": "tsx src/ai-holder-research-observations.ts",
     "ai:holder-research:runner": "tsx src/ai-holder-research-runner.ts",
     "signal:bot": "tsx src/signal-bot-runner.ts"
   },

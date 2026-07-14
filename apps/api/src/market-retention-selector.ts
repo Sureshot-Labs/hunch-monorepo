@@ -191,6 +191,16 @@ function protectedRefsSql(
     from ${candidatePoolTable} c
     join wallet_position_snapshots ws on ws.venue = c.venue and ws.market_id = c.market_id
     union
+    select distinct c.market_id, 'wallet_position_exposure_open_positions' as reason
+    from wallet_position_exposure exposure
+    cross join lateral jsonb_array_elements(exposure.open_positions) position
+    join ${candidatePoolTable} c on c.market_id = position->>'marketId'
+    union
+    select distinct c.market_id, 'holder_research_candidate_observations' as reason
+    from ${candidatePoolTable} c
+    join holder_research_candidate_observations observation
+      on observation.source_market_id = c.market_id
+    union
     select distinct c.market_id, 'wallet_activity_events' as reason
     from ${candidatePoolTable} c
     join wallet_activity_events wa on wa.venue = c.venue and wa.market_id = c.market_id
@@ -556,6 +566,14 @@ async function queryBatchSummary(
         select 'unified_market_activity_metrics_24h' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
         from unified_market_activity_metrics_24h x
         join candidate_pool c on c.market_id = x.market_id
+        union all
+        select
+          'wallet_position_exposure_open_positions' as label,
+          count(distinct c.market_id)::text as markets,
+          count(*)::text as rows
+        from wallet_position_exposure exposure
+        cross join lateral jsonb_array_elements(exposure.open_positions) position
+        join candidate_pool c on c.market_id = position->>'marketId'
         union all
         select 'unified_event_activity_metrics_24h' as label, count(distinct c.event_id)::text as markets, count(*)::text as rows
         from unified_event_activity_metrics_24h x

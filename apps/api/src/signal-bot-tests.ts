@@ -1171,6 +1171,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         minPriceMoveCents: 10,
         requirePositiveFlowForStats: false,
         minDataQuality: "any",
+        terminalInitialCutoff: null,
       });
       assert.equal(config.telegramMiniAppLinkBase, null);
     },
@@ -8060,7 +8061,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(report, /📊 Hunch signals · 7D/);
       assert.match(report, /💰 \$10 each: \+\$7\.44 \(\+6\.2%\)/);
-      assert.match(report, /🔥 High conviction: \+18\.0% avg vs all \+6\.2%/);
+      assert.doesNotMatch(report, /High conviction|conviction/i);
       assert.match(report, /🎯 Resolved: 3W \/ 1L \(75%\)/);
       assert.doesNotMatch(
         report,
@@ -8120,8 +8121,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
       });
       assert.match(report, /By category/);
-      assert.match(report, /By conviction/);
-      assert.match(report, /🔥 High conviction/);
+      assert.doesNotMatch(report, /By conviction|High conviction/i);
       assert.match(report, /Soccer games/);
       assert.match(report, /Wallet clusters/);
       assert.match(report, /Strong same-side wallets/);
@@ -8255,7 +8255,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /evaluated|missingEntry|entryQuality|note_id/i,
       );
       assert.match(queries[0]?.sql ?? "", /n\.confidence >=/);
-      assert.match(queries[0]?.sql ?? "", /n\.status = 'active'/);
+      assert.doesNotMatch(queries[0]?.sql ?? "", /n\.status = 'active'/);
+      assert.match(queries[0]?.sql ?? "", /sbm\.message_kind = 'initial'/);
       assert.match(queries[0]?.sql ?? "", /n\.direction in \('up', 'down'\)/);
       assert.equal(queries[0]?.params.includes(0.7), true);
     },
@@ -9522,7 +9523,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "followthrough policy can enable only resolved wins",
+    name: "legacy resolved-win policy publishes the paired terminal loss",
     run: async () => {
       const redis = new FakeRedis();
       await enableFollowthroughTestChat(redis);
@@ -9530,47 +9531,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       db.runtimePayload = {
         signalBotFollowthroughEnabled: true,
         signalBotFollowthroughTypes: ["resolved_win"],
-      };
-      db.candidateRows = [
-        followthroughCandidateRow({
-          accepting_orders: false,
-          resolved_outcome: "YES",
-        }),
-      ];
-      const telegram = new FakeTelegram();
-      const result = await publishSignalBotFollowthroughTick({
-        config: parseSignalBotConfig({
-          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
-          HUNCH_SIGNAL_BOT_TOKEN: "token",
-        }),
-        db,
-        now: new Date("2026-01-02T01:00:00.000Z"),
-        redis,
-        telegram,
-      });
-
-      assert.equal(result.sent, 1);
-      assert.equal(result.sentResolvedWin, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Call side won/);
-      assert.equal(telegram.messages[0]?.reply_markup, undefined);
-      const delivery = db.queries
-        .filter((query) =>
-          query.sql.includes("insert into signal_bot_messages"),
-        )
-        .at(-1);
-      assert.ok(delivery);
-      assert.equal(delivery.params[3], "resolved_win");
-    },
-  },
-  {
-    name: "followthrough policy can enable only resolved losses",
-    run: async () => {
-      const redis = new FakeRedis();
-      await enableFollowthroughTestChat(redis);
-      const db = new FakeFollowthroughDb();
-      db.runtimePayload = {
-        signalBotFollowthroughEnabled: true,
-        signalBotFollowthroughTypes: ["resolved_loss"],
+        signalBotTerminalInitialCutoff: "2025-12-01T00:00:00.000Z",
       };
       db.candidateRows = [
         followthroughCandidateRow({
@@ -9604,6 +9565,48 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "legacy resolved-loss policy publishes the paired terminal win",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["resolved_loss"],
+        signalBotTerminalInitialCutoff: "2025-12-01T00:00:00.000Z",
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          accepting_orders: false,
+          resolved_outcome: "YES",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      assert.equal(result.sentResolvedWin, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Call side won/);
+      assert.equal(telegram.messages[0]?.reply_markup, undefined);
+      const delivery = db.queries
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
+        .at(-1);
+      assert.ok(delivery);
+      assert.equal(delivery.params[3], "resolved_win");
+    },
+  },
+  {
     name: "followthrough ignores terminal prices for resolved closeouts",
     run: async () => {
       const redis = new FakeRedis();
@@ -9612,6 +9615,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       db.runtimePayload = {
         signalBotFollowthroughEnabled: true,
         signalBotFollowthroughTypes: ["resolved_win", "resolved_loss"],
+        signalBotTerminalInitialCutoff: "2025-12-01T00:00:00.000Z",
       };
       db.candidateRows = [
         followthroughCandidateRow({

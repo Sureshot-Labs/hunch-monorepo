@@ -18,27 +18,41 @@ import {
   type ResolvedCost,
 } from "./lib/ai-cost.js";
 import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
+import { stripSourceMarkup } from "./lib/source-markup.js";
 import {
   buildHolderResearchSystemPrompt,
+  buildHolderResearchSystemPromptV2,
   buildHolderResearchTriageSystemPrompt,
+  buildHolderResearchTriageSystemPromptV2,
   buildHolderResearchTriageUserPrompt,
+  buildHolderResearchTriageUserPromptV2,
   buildHolderResearchUserPrompt,
+  buildHolderResearchUserPromptV2,
   parseHolderResearchAgentOutputV1,
+  parseHolderResearchExternalResearchV2,
+  parseHolderResearchFinalOutputV2,
   parseHolderResearchTriageOutputV1,
+  parseHolderResearchTriageOutputV2,
   type HolderResearchAgentOutputV1,
+  type HolderResearchExternalResearchV2,
+  type HolderResearchTriageDecisionV2,
   type HolderResearchTriageOutputV1,
 } from "./schemas/holder-research.js";
 import {
+  adaptHolderResearchFinalOutputV2,
   applyHolderResearchPreviousDecisionContext,
   applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
+  buildHolderResearchCandidatePromptJsonV2,
   buildHolderResearchDecisionCacheKey,
   buildHolderResearchDecisionCacheRecord,
   buildHolderResearchExternalSearchInput,
+  buildHolderResearchExternalSearchInputV2,
   buildHolderResearchSelectionDiagnostics,
   buildHolderResearchTriageCandidatePromptJson,
+  buildHolderResearchTriageCandidatePromptJsonV2,
   enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
   enrichHolderResearchMarketTypeMetrics,
@@ -47,6 +61,7 @@ import {
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   loadHolderResearchCalibrationMemo,
   loadHolderResearchCandidates,
+  listHolderResearchPromptEvidenceIdsV2,
   parseHolderResearchCachedDecision,
   persistHolderResearchNotes,
   selectHolderResearchCandidates,
@@ -55,6 +70,14 @@ import {
   type HolderResearchPersistDecision,
   type HolderResearchSelectionDiagnostics,
 } from "./services/holder-research.js";
+import {
+  linkHolderResearchObservationNotes,
+  loadHolderResearchSupplyHealth,
+  persistHolderResearchCandidateObservations,
+  pruneHolderResearchCandidateObservations,
+  updateHolderResearchObservationStages,
+  type HolderResearchObservationStageUpdate,
+} from "./services/holder-research-observations.js";
 import {
   auditHolderResearchSignalPerformance,
   type HolderResearchPerformanceAuditResult,
@@ -109,8 +132,9 @@ type HolderResearchModelDecision = {
   cost: ResolvedCost;
 };
 
-type HolderResearchTriageDecision =
-  HolderResearchTriageOutputV1["decisions"][number];
+type HolderResearchTriageDecision = HolderResearchTriageDecisionV2 & {
+  legacyPriority?: number;
+};
 
 type HolderResearchTriageModelResult = {
   decisions: HolderResearchTriageDecision[];
@@ -135,14 +159,12 @@ export type HolderResearchRunOptions = {
 const CLI_REDIS_CONNECT_TIMEOUT_MS = 5_000;
 const HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
 
-type ExternalResearchResult = {
-  status: "skipped" | "dry_run" | "ok" | "no_public_context" | "error";
+type ExternalResearchResult = Omit<
+  HolderResearchExternalResearchV2,
+  "status" | "summary"
+> & {
+  status: HolderResearchExternalResearchV2["status"] | "skipped" | "dry_run";
   summary: string | null;
-  citations: Array<{
-    title: string | null;
-    url: string | null;
-    source: string | null;
-  }>;
   costUsd: number;
   toolCalls: number;
   error: string | null;
@@ -158,6 +180,7 @@ type HolderResearchRunReport = {
   policy: {
     enabled: boolean;
     source: "env" | "db";
+    pipelineV2Mode: HolderResearchPolicy["pipelineV2Mode"];
     maxAgentCallsPerRun: number;
     maxPublishPerRun: number;
     maxCandidatePool: number;
@@ -239,8 +262,9 @@ type HolderResearchRunReport = {
   triageDecisions: Array<{
     key: string;
     action: string;
-    priority: number;
-    needsExternalSearch: boolean;
+    priority: number | null;
+    reasonCodes: string[];
+    researchNeed: string;
     reason: string;
   }>;
   selected: Array<{
@@ -495,13 +519,13 @@ function extractCitations(
             ? obj.title
             : typeof obj.name === "string"
               ? obj.name
-              : null,
+              : url,
         url,
-        source:
-          typeof obj.source === "string"
-            ? obj.source
-            : typeof obj.domain === "string"
-              ? obj.domain
+        publishedAt:
+          typeof obj.published_at === "string"
+            ? obj.published_at
+            : typeof obj.publishedAt === "string"
+              ? obj.publishedAt
               : null,
       });
     }
@@ -517,7 +541,7 @@ function extractCitations(
     }
   };
   visit(payload, 0);
-  return citations.slice(0, 8);
+  return citations.slice(0, 3);
 }
 
 function extractMarkdownCitations(
@@ -530,39 +554,21 @@ function extractMarkdownCitations(
   )) {
     const rawTitle =
       match[1]?.replaceAll("[", "").replaceAll("]", "").trim() || null;
-    const title = rawTitle && !/^\d+$/.test(rawTitle) ? rawTitle : null;
     const url = match[2]?.trim() || null;
     if (!url || seen.has(url)) continue;
     seen.add(url);
-    let source: string | null = null;
-    try {
-      source = new URL(url).hostname.replace(/^www\./, "");
-    } catch {
-      source = null;
-    }
-    citations.push({ title, url, source });
-    if (citations.length >= 6) break;
+    citations.push({
+      title: rawTitle && !/^\d+$/.test(rawTitle) ? rawTitle : url,
+      url,
+      publishedAt: null,
+    });
+    if (citations.length >= 3) break;
   }
   return citations;
 }
 
-function stripExternalResearchSourceMarkup(text: string): string {
-  return text
-    .replace(/\[\[?\d+\]?\]\([^)]*$/g, "")
-    .replace(/\[[^\]]+\]\(https?:\/\/[^)\s]*$/gi, "")
-    .replace(/\[\[?\d+\]?\]\([^)]+\)/g, "")
-    .replace(/\[(\d+)\]\(https?:\/\/[^)]+\)/gi, "")
-    .replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/gi, "$1")
-    .replace(/https?:\/\/\S+/gi, "")
-    .replace(/\[\[?\d+\]?\]?/g, "")
-    .replace(/[*_`~>#]/g, "")
-    .replace(/\s+([,.;:!?])/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function compactExternalResearchSummary(text: string): string {
-  const cleaned = stripExternalResearchSourceMarkup(text);
+  const cleaned = stripSourceMarkup(text);
   if (!cleaned) return "No public context found.";
   const sentences = cleaned
     .split(/(?<=[.!?])\s+/)
@@ -624,53 +630,95 @@ export function buildHolderResearchExternalSearchSystemPrompt(): string {
   ].join(" ");
 }
 
+export function buildHolderResearchExternalSearchSystemPromptV2(): string {
+  return [
+    "You investigate one bounded outside-information question for a prediction-market holder candidate.",
+    "Use web_search and x_search, then return only one JSON object.",
+    "The object must contain status (ok | no_evidence | error), verdict (supports_holder_side | supports_opposite_side | already_public | unexplained | mixed | unknown), timing (before_holder | around_holder | after_holder | unknown), summary, and citations.",
+    "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
+    "Compare dated evidence with the supplied first/last holder activity. Use after_holder only when the public evidence clearly appeared after holder activity.",
+    "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
+    HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
+    "If evidence is absent or timing cannot be established, say so rather than inventing a catalyst.",
+  ].join(" ");
+}
+
+function emptyExternalResearchResult(input: {
+  status: ExternalResearchResult["status"];
+  error?: string | null;
+  summary?: string | null;
+  costUsd?: number;
+  toolCalls?: number;
+}): ExternalResearchResult {
+  return {
+    status: input.status,
+    verdict: "unknown",
+    timing: "unknown",
+    summary: input.summary ?? null,
+    citations: [],
+    costUsd: input.costUsd ?? 0,
+    toolCalls: input.toolCalls ?? 0,
+    error: input.error ?? null,
+  };
+}
+
+function canonicalExternalResearchV2(
+  result: ExternalResearchResult | null,
+): HolderResearchExternalResearchV2 {
+  if (!result) {
+    return {
+      status: "no_evidence",
+      verdict: "unknown",
+      timing: "unknown",
+      summary: "External research was not requested for this candidate.",
+      citations: [],
+    };
+  }
+  return {
+    status:
+      result.status === "ok" ||
+      result.status === "no_evidence" ||
+      result.status === "error"
+        ? result.status
+        : "no_evidence",
+    verdict: result.verdict,
+    timing: result.timing,
+    summary: result.summary ?? "No external evidence was available.",
+    citations: result.citations.slice(0, 3),
+  };
+}
+
 async function runExternalResearch(params: {
   candidate: HolderResearchCandidate;
   policy: HolderResearchPolicy;
   dryRun: boolean;
+  researchNeed: HolderResearchTriageDecisionV2["research_need"];
+  useV2: boolean;
 }): Promise<ExternalResearchResult> {
   if (!params.policy.externalSearchEnabled) {
-    return {
-      status: "skipped",
-      summary: null,
-      citations: [],
-      costUsd: 0,
-      toolCalls: 0,
-      error: null,
-    };
+    return emptyExternalResearchResult({ status: "skipped" });
   }
   if (params.candidate.score < params.policy.externalSearchMinScore) {
-    return {
+    return emptyExternalResearchResult({
       status: "skipped",
-      summary: null,
-      citations: [],
-      costUsd: 0,
-      toolCalls: 0,
       error: "below_external_search_score_gate",
-    };
+    });
   }
   if (params.dryRun) {
-    return {
+    return emptyExternalResearchResult({
       status: "dry_run",
       summary:
         "Dry-run: external web/X search would run for this shortlisted candidate.",
-      citations: [],
       costUsd: params.policy.estimatedExternalSearchCostUsd,
-      toolCalls: 0,
-      error: null,
-    };
+    });
   }
 
   const apiKey = process.env.XAI_API_KEY?.trim();
   if (!apiKey) {
-    return {
+    return emptyExternalResearchResult({
       status: "error",
-      summary: null,
-      citations: [],
-      costUsd: 0,
-      toolCalls: 0,
       error: "XAI_API_KEY missing",
-    };
+    });
   }
 
   const now = new Date();
@@ -697,12 +745,20 @@ async function runExternalResearch(params: {
         input: [
           {
             role: "system",
-            content: buildHolderResearchExternalSearchSystemPrompt(),
+            content: params.useV2
+              ? buildHolderResearchExternalSearchSystemPromptV2()
+              : buildHolderResearchExternalSearchSystemPrompt(),
           },
           {
             role: "user",
             content: JSON.stringify(
-              buildHolderResearchExternalSearchInput(params.candidate),
+              params.useV2
+                ? buildHolderResearchExternalSearchInputV2(
+                    params.candidate,
+                    params.policy,
+                    params.researchNeed,
+                  )
+                : buildHolderResearchExternalSearchInput(params.candidate),
             ),
           },
         ],
@@ -726,13 +782,32 @@ async function runExternalResearch(params: {
     }
     const text = extractResponseText(payload);
     if (!response.ok) {
-      return {
+      return emptyExternalResearchResult({
         status: "error",
-        summary: null,
-        citations: [],
-        costUsd: 0,
         toolCalls: extractServerToolCallCount(payload),
         error: `HTTP ${response.status}: ${text.slice(0, 300)}`,
+      });
+    }
+    if (params.useV2) {
+      let structured: HolderResearchExternalResearchV2;
+      try {
+        structured = parseHolderResearchExternalResearchV2(
+          parseModelJsonObject(text),
+        );
+      } catch {
+        structured = parseHolderResearchExternalResearchV2(null);
+      }
+      const providerCitations = extractCitations(payload);
+      return {
+        ...structured,
+        citations:
+          structured.citations.length > 0
+            ? structured.citations.slice(0, 3)
+            : providerCitations,
+        costUsd: params.policy.estimatedExternalSearchCostUsd,
+        toolCalls: extractServerToolCallCount(payload),
+        error:
+          structured.status === "error" ? "invalid_structured_research" : null,
       };
     }
     const summary = compactExternalResearchSummary(text);
@@ -743,7 +818,9 @@ async function runExternalResearch(params: {
         summary.length > 0 &&
         !summary.toLowerCase().includes("no public context")
           ? "ok"
-          : "no_public_context",
+          : "no_evidence",
+      verdict: "unknown",
+      timing: "unknown",
       summary: summary || "No public context found.",
       citations:
         payloadCitations.length > 0 ? payloadCitations : markdownCitations,
@@ -752,14 +829,10 @@ async function runExternalResearch(params: {
       error: null,
     };
   } catch (error) {
-    return {
+    return emptyExternalResearchResult({
       status: "error",
-      summary: null,
-      citations: [],
-      costUsd: 0,
-      toolCalls: 0,
       error: error instanceof Error ? error.message : String(error),
-    };
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -957,6 +1030,64 @@ export function parseHolderResearchTriageModelContent(
   }
 }
 
+export function parseHolderResearchTriageModelContentV2(
+  content: string,
+  allowedCandidateKeys: Iterable<string>,
+) {
+  try {
+    return parseHolderResearchTriageOutputV2(
+      parseModelJsonObject(content),
+      allowedCandidateKeys,
+    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("unknown candidate keys")
+    ) {
+      throw error;
+    }
+    const decisions = extractCompleteJsonObjectsFromArray(content);
+    if (decisions.length === 0) throw error;
+    return parseHolderResearchTriageOutputV2(
+      {
+        version: "holder_research_triage_v2",
+        decisions,
+      },
+      allowedCandidateKeys,
+    );
+  }
+}
+
+export function assertHolderResearchEvidenceIdsAllowed(
+  evidenceIds: string[],
+  allowedEvidenceIds: string[],
+): void {
+  const invalidEvidenceIds = evidenceIds.filter(
+    (id) => !allowedEvidenceIds.includes(id),
+  );
+  if (invalidEvidenceIds.length > 0) {
+    throw new Error(
+      `Model returned unknown evidence ids: ${invalidEvidenceIds.join(", ")}`,
+    );
+  }
+}
+
+function adaptHolderResearchTriageDecisionV1(
+  decision: HolderResearchTriageOutputV1["decisions"][number],
+): HolderResearchTriageDecision {
+  return {
+    key: decision.key,
+    action: decision.action,
+    reason_codes:
+      decision.action === "investigate"
+        ? ["research_needed"]
+        : ["insufficient_evidence"],
+    research_need: decision.needs_external_search ? "market_context" : "none",
+    reason: decision.reason,
+    legacyPriority: decision.priority,
+  };
+}
+
 class HolderResearchTriageParseError extends Error {
   contentLength: number | null;
   finishReason: string | null;
@@ -1041,21 +1172,48 @@ export function selectHolderResearchTriageFallbackCandidates(
   return sortTriageFallbackCandidates(pool).slice(0, remaining);
 }
 
+export function selectHolderResearchTriageInvestigations(
+  eligible: Array<{
+    candidate: HolderResearchCandidate;
+    decision: HolderResearchTriageDecision;
+  }>,
+  input: { limit: number; useV2: boolean },
+) {
+  const ordered = input.useV2
+    ? eligible
+    : [...eligible].sort(
+        (left, right) =>
+          (right.decision.legacyPriority ?? 0) -
+          (left.decision.legacyPriority ?? 0),
+      );
+  return ordered.slice(0, Math.max(0, input.limit));
+}
+
 async function callHolderResearchTriageModel(params: {
   candidates: HolderResearchCandidate[];
   policy: HolderResearchPolicy;
   maxInvestigate: number;
   calibrationMemo: string[];
+  useV2: boolean;
 }): Promise<HolderResearchTriageModelResult> {
   const candidateJson = params.candidates.map((candidate) =>
-    buildHolderResearchTriageCandidatePromptJson(candidate, params.policy),
+    params.useV2
+      ? buildHolderResearchTriageCandidatePromptJsonV2(candidate, params.policy)
+      : buildHolderResearchTriageCandidatePromptJson(candidate, params.policy),
   );
-  const systemPrompt = buildHolderResearchTriageSystemPrompt();
-  const userPrompt = buildHolderResearchTriageUserPrompt({
-    candidates: candidateJson,
-    maxInvestigate: params.maxInvestigate,
-    calibrationMemo: params.calibrationMemo,
-  });
+  const systemPrompt = params.useV2
+    ? buildHolderResearchTriageSystemPromptV2()
+    : buildHolderResearchTriageSystemPrompt();
+  const userPrompt = params.useV2
+    ? buildHolderResearchTriageUserPromptV2({
+        candidates: candidateJson,
+        maxInvestigate: params.maxInvestigate,
+      })
+    : buildHolderResearchTriageUserPrompt({
+        candidates: candidateJson,
+        maxInvestigate: params.maxInvestigate,
+        calibrationMemo: params.calibrationMemo,
+      });
 
   if (!env.openRouterKey) {
     throw new Error("OPENROUTER_API_KEY missing");
@@ -1097,12 +1255,16 @@ async function callHolderResearchTriageModel(params: {
     const choice = payload.choices?.[0];
     const content = choice?.message?.content;
     if (!content) throw new Error("OpenRouter triage response missing content");
-    let output: HolderResearchTriageOutputV1;
+    let decisions: HolderResearchTriageDecision[];
     try {
-      output = parseHolderResearchTriageModelContent(
-        content,
-        params.candidates.map((candidate) => candidate.key),
-      );
+      const allowedKeys = params.candidates.map((candidate) => candidate.key);
+      decisions = params.useV2
+        ? parseHolderResearchTriageModelContentV2(content, allowedKeys)
+            .decisions
+        : parseHolderResearchTriageModelContent(
+            content,
+            allowedKeys,
+          ).decisions.map(adaptHolderResearchTriageDecisionV1);
     } catch (error) {
       throw new HolderResearchTriageParseError(
         error instanceof Error
@@ -1132,11 +1294,11 @@ async function callHolderResearchTriageModel(params: {
     });
 
     return {
-      decisions: output.decisions,
+      decisions,
       cost,
       modelMeta: {
         model: params.policy.triageModel,
-        mode: "openrouter_triage",
+        mode: params.useV2 ? "openrouter_triage_v2" : "openrouter_triage_v1",
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: payload.usage?.total_tokens ?? null,
@@ -1155,23 +1317,37 @@ async function callHolderResearchModel(params: {
   candidate: HolderResearchCandidate;
   policy: HolderResearchPolicy;
   externalResearch: ExternalResearchResult | null;
+  useV2: boolean;
 }): Promise<HolderResearchModelDecision> {
   if (!env.openRouterKey) {
     throw new Error("OPENROUTER_API_KEY missing");
   }
 
-  const candidateJson = {
-    ...buildHolderResearchCandidatePromptJson(params.candidate, params.policy),
-    externalResearch: params.externalResearch,
-  };
-  const allowedEvidenceIds = params.candidate.evidence.map(
-    (evidence) => evidence.id,
+  const externalResearchV2 = canonicalExternalResearchV2(
+    params.externalResearch,
   );
-  const systemPrompt = buildHolderResearchSystemPrompt();
-  const userPrompt = buildHolderResearchUserPrompt({
-    candidateJson,
-    allowedEvidenceIds,
-  });
+  const candidateJson = params.useV2
+    ? buildHolderResearchCandidatePromptJsonV2(
+        params.candidate,
+        params.policy,
+        externalResearchV2,
+      )
+    : {
+        ...buildHolderResearchCandidatePromptJson(
+          params.candidate,
+          params.policy,
+        ),
+        externalResearch: params.externalResearch,
+      };
+  const allowedEvidenceIds = params.useV2
+    ? listHolderResearchPromptEvidenceIdsV2(params.candidate, params.policy)
+    : params.candidate.evidence.map((evidence) => evidence.id);
+  const systemPrompt = params.useV2
+    ? buildHolderResearchSystemPromptV2()
+    : buildHolderResearchSystemPrompt();
+  const userPrompt = params.useV2
+    ? buildHolderResearchUserPromptV2({ candidateJson, allowedEvidenceIds })
+    : buildHolderResearchUserPrompt({ candidateJson, allowedEvidenceIds });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
 
@@ -1211,15 +1387,27 @@ async function callHolderResearchModel(params: {
     if (!content) throw new Error("OpenRouter response missing content");
 
     const parsedJson = parseModelJsonObject(content);
-    const output = parseHolderResearchAgentOutputV1(parsedJson);
-    const invalidEvidenceIds = output.evidence_ids.filter(
-      (id) => !allowedEvidenceIds.includes(id),
+    const parsedOutput = params.useV2
+      ? parseHolderResearchFinalOutputV2(parsedJson)
+      : parseHolderResearchAgentOutputV1(parsedJson);
+    assertHolderResearchEvidenceIdsAllowed(
+      parsedOutput.evidence_ids,
+      allowedEvidenceIds,
     );
-    if (invalidEvidenceIds.length > 0) {
-      throw new Error(
-        `Model returned unknown evidence ids: ${invalidEvidenceIds.join(", ")}`,
-      );
-    }
+    const output = params.useV2
+      ? adaptHolderResearchFinalOutputV2({
+          candidate: params.candidate,
+          output: parsedOutput as ReturnType<
+            typeof parseHolderResearchFinalOutputV2
+          >,
+          externalResearch: externalResearchV2,
+          policy: params.policy,
+        })
+      : (parsedOutput as HolderResearchAgentOutputV1);
+    assertHolderResearchEvidenceIdsAllowed(
+      output.evidence_ids,
+      params.candidate.evidence.map((evidence) => evidence.id),
+    );
 
     const pricing = getOpenRouterModelPricingPerM(params.policy.model);
     const provider = extractProviderCostUsd(payload);
@@ -1244,7 +1432,15 @@ async function callHolderResearchModel(params: {
       modelMeta: {
         model: params.policy.model,
         external_research: params.externalResearch,
-        mode: "openrouter",
+        mode: params.useV2 ? "openrouter_v2" : "openrouter_v1",
+        final_v2:
+          params.useV2 && "verdict" in parsedOutput
+            ? {
+                verdict: parsedOutput.verdict,
+                evidence_assessment: parsedOutput.evidence_assessment,
+                reason_codes: parsedOutput.reason_codes,
+              }
+            : null,
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: payload.usage?.total_tokens ?? null,
@@ -1306,6 +1502,7 @@ async function synthesizeCandidate(params: {
   policy: HolderResearchPolicy;
   callModel: boolean;
   externalResearch: ExternalResearchResult | null;
+  useV2: boolean;
 }): Promise<HolderResearchModelDecision> {
   if (params.callModel) {
     try {
@@ -1313,6 +1510,7 @@ async function synthesizeCandidate(params: {
         candidate: params.candidate,
         policy: params.policy,
         externalResearch: params.externalResearch,
+        useV2: params.useV2,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1336,17 +1534,31 @@ async function synthesizeCandidate(params: {
     }
   }
 
-  const candidateJson = {
-    ...buildHolderResearchCandidatePromptJson(params.candidate, params.policy),
-    externalResearch: params.externalResearch,
-  };
-  const systemPrompt = buildHolderResearchSystemPrompt();
-  const userPrompt = buildHolderResearchUserPrompt({
-    candidateJson,
-    allowedEvidenceIds: params.candidate.evidence.map(
-      (evidence) => evidence.id,
-    ),
-  });
+  const externalResearchV2 = canonicalExternalResearchV2(
+    params.externalResearch,
+  );
+  const candidateJson = params.useV2
+    ? buildHolderResearchCandidatePromptJsonV2(
+        params.candidate,
+        params.policy,
+        externalResearchV2,
+      )
+    : {
+        ...buildHolderResearchCandidatePromptJson(
+          params.candidate,
+          params.policy,
+        ),
+        externalResearch: params.externalResearch,
+      };
+  const systemPrompt = params.useV2
+    ? buildHolderResearchSystemPromptV2()
+    : buildHolderResearchSystemPrompt();
+  const allowedEvidenceIds = params.useV2
+    ? listHolderResearchPromptEvidenceIdsV2(params.candidate, params.policy)
+    : params.candidate.evidence.map((evidence) => evidence.id);
+  const userPrompt = params.useV2
+    ? buildHolderResearchUserPromptV2({ candidateJson, allowedEvidenceIds })
+    : buildHolderResearchUserPrompt({ candidateJson, allowedEvidenceIds });
   const cost = params.policy.dryRun
     ? estimateDryRunCost({
         systemPrompt,
@@ -1364,7 +1576,9 @@ async function synthesizeCandidate(params: {
     modelMeta: {
       model: params.policy.model,
       external_research: params.externalResearch,
-      mode: "deterministic_dry_run",
+      mode: params.useV2
+        ? "deterministic_dry_run_v2_prompt"
+        : "deterministic_dry_run_v1_prompt",
       estimated_cost_usd: cost.estimatedCostUsd,
       charged_cost_usd: 0,
       pricing_known: getOpenRouterModelPricingPerM(params.policy.model) != null,
@@ -1525,7 +1739,7 @@ async function maybeWriteDecisionCache(params: {
       policy: params.policy,
     });
     await params.redis.set(
-      buildHolderResearchDecisionCacheKey(params.candidate.key),
+      buildHolderResearchDecisionCacheKey(params.candidate.thesisKey),
       JSON.stringify(cacheRecord),
       { EX: params.policy.decisionCacheTtlHours * 3_600 },
     );
@@ -1556,10 +1770,19 @@ export async function runHolderResearch(
   options: HolderResearchRunOptions = {},
 ): Promise<HolderResearchRunReport> {
   const startedAt = Date.now();
-  const runId = `holder_research:${new Date().toISOString()}:${randomUUID()}`;
+  const observedAt = new Date();
+  const runId = `holder_research:${observedAt.toISOString()}:${randomUUID()}`;
   const policyResult = await resolveHolderResearchPolicy(pool);
   const walletIntelPolicyResult = await resolveWalletIntelRefreshPolicy(pool);
   const policy = withPolicyOverrides(policyResult.effective, args);
+  const observeV2 = policy.pipelineV2Mode !== "off";
+  const useV2Triage =
+    policy.pipelineV2Mode === "triage" ||
+    policy.pipelineV2Mode === "research" ||
+    policy.pipelineV2Mode === "active";
+  const useV2Research =
+    policy.pipelineV2Mode === "research" || policy.pipelineV2Mode === "active";
+  const useV2Final = policy.pipelineV2Mode === "active";
   const mmThresholds = {
     whaleUsd: walletIntelPolicyResult.effective.whaleUsd,
     whaleUsdSolana: walletIntelPolicyResult.effective.whaleUsdSolana,
@@ -1637,6 +1860,54 @@ export async function runHolderResearch(
       selectedWithFreshPrices,
       selectionPolicy,
     );
+    if (observeV2 && !policy.dryRun) {
+      try {
+        const observationWrite =
+          await persistHolderResearchCandidateObservations(client, {
+            runId,
+            observedAt,
+            candidates: selectedWithFreshPrices,
+            policy,
+          });
+        const supplyHealth = await loadHolderResearchSupplyHealth(
+          client,
+          observedAt,
+        );
+        const pruned = await pruneHolderResearchCandidateObservations(client);
+        toolCalls.push({
+          name: "candidate_observations_v2",
+          count: observationWrite.written,
+          status: "ok",
+          detail: `mode=${policy.pipelineV2Mode} median7d=${supplyHealth.medianCandidatesPerDay} zeroDays=${supplyHealth.consecutiveZeroDays} healthy=${supplyHealth.healthy} pruned=${pruned.deleted}`,
+        });
+        if (!supplyHealth.healthy) {
+          console.warn("[holder-research] candidate supply health degraded", {
+            medianCandidatesPerDay: supplyHealth.medianCandidatesPerDay,
+            consecutiveZeroDays: supplyHealth.consecutiveZeroDays,
+            days: supplyHealth.days,
+          });
+        }
+      } catch (error) {
+        toolCalls.push({
+          name: "candidate_observations_v2",
+          count: 0,
+          status: "error",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+        console.warn("[holder-research] candidate observations unavailable", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } else {
+      toolCalls.push({
+        name: "candidate_observations_v2",
+        count: 0,
+        status: "skipped",
+        detail: policy.dryRun
+          ? "dry-run does not write telemetry"
+          : "pipelineV2Mode=off",
+      });
+    }
     const calibrationMemo = policy.calibrationMemoEnabled
       ? await loadHolderResearchCalibrationMemo(client, policy)
       : [];
@@ -1726,7 +1997,9 @@ export async function runHolderResearch(
       let cacheEvaluation: HolderResearchDecisionCacheEvaluation | null = null;
       if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
         decisionCache.checked += 1;
-        const cacheKey = buildHolderResearchDecisionCacheKey(candidate.key);
+        const cacheKey = buildHolderResearchDecisionCacheKey(
+          candidate.thesisKey,
+        );
         try {
           const rawCached = await options.decisionCacheRedis.get(cacheKey);
           const cachedDecision = parseHolderResearchCachedDecision(rawCached);
@@ -1801,6 +2074,7 @@ export async function runHolderResearch(
             policy,
             maxInvestigate: policy.maxAgentCallsPerRun - finalCandidates.length,
             calibrationMemo,
+            useV2: useV2Triage,
           });
         } catch (error) {
           const message =
@@ -1822,16 +2096,18 @@ export async function runHolderResearch(
             const triageDecision: HolderResearchTriageDecision = {
               key: candidate.key,
               action: "investigate",
-              priority: 1,
-              needs_external_search: true,
+              reason_codes: ["research_needed"],
+              research_need: "market_context",
               reason: "Deterministic fallback after triage error.",
+              legacyPriority: 1,
             };
             triageByKey.set(candidate.key, triageDecision);
             triageDecisions.push({
               key: triageDecision.key,
               action: triageDecision.action,
-              priority: triageDecision.priority,
-              needsExternalSearch: triageDecision.needs_external_search,
+              priority: triageDecision.legacyPriority ?? null,
+              reasonCodes: triageDecision.reason_codes,
+              researchNeed: triageDecision.research_need,
               reason: triageDecision.reason,
             });
             finalCandidates.push(candidate);
@@ -1883,13 +2159,16 @@ export async function runHolderResearch(
           triageDecisions.push({
             key: triageDecision.key,
             action: triageDecision.action,
-            priority: triageDecision.priority,
-            needsExternalSearch: triageDecision.needs_external_search,
+            priority: triageDecision.legacyPriority ?? null,
+            reasonCodes: triageDecision.reason_codes,
+            researchNeed: triageDecision.research_need,
             reason: triageDecision.reason,
           });
           if (
             triageDecision.action === "investigate" &&
-            triageDecision.priority >= policy.minTriageInvestigatePriority
+            (useV2Triage ||
+              (triageDecision.legacyPriority ?? 0) >=
+                policy.minTriageInvestigatePriority)
           ) {
             eligibleInvestigations.push({
               candidate,
@@ -1915,11 +2194,13 @@ export async function runHolderResearch(
           0,
           policy.maxAgentCallsPerRun - finalCandidates.length,
         );
-        const selectedInvestigations = eligibleInvestigations
-          .sort(
-            (left, right) => right.decision.priority - left.decision.priority,
-          )
-          .slice(0, remainingBudget);
+        const selectedInvestigations = selectHolderResearchTriageInvestigations(
+          eligibleInvestigations,
+          {
+            limit: remainingBudget,
+            useV2: useV2Triage,
+          },
+        );
         for (const { candidate } of selectedInvestigations) {
           finalCandidates.push(candidate);
           triage.investigate += 1;
@@ -1996,18 +2277,19 @@ export async function runHolderResearch(
       }
 
       const triageDecision = triageByKey.get(candidate.key);
+      const researchNeed = triageDecision?.research_need ?? "none";
       let externalResearch: ExternalResearchResult | null = null;
       if (
         policy.externalSearchEnabled &&
         externalSearchCalls < policy.maxExternalSearchCallsPerRun &&
-        (policy.forceExternalSearchForInvestigations ||
-          triageDecision == null ||
-          triageDecision.needs_external_search)
+        (policy.forceExternalSearchForInvestigations || researchNeed !== "none")
       ) {
         externalResearch = await runExternalResearch({
           candidate,
           policy,
           dryRun: policy.dryRun,
+          researchNeed,
+          useV2: useV2Research,
         });
         if (
           externalResearch.status !== "skipped" ||
@@ -2023,6 +2305,7 @@ export async function runHolderResearch(
         policy,
         callModel: args.callModel,
         externalResearch,
+        useV2: useV2Final,
       });
       const gatedOutput = applyHolderResearchPublishQualityGate({
         candidate,
@@ -2111,6 +2394,75 @@ export async function runHolderResearch(
       detail: args.callModel ? "OpenRouter" : "no network call",
     });
 
+    if (observeV2 && !policy.dryRun) {
+      try {
+        const updateByThesis = new Map<
+          string,
+          HolderResearchObservationStageUpdate
+        >();
+        const selectedByKey = new Map(
+          selectedWithFreshPrices.map((candidate) => [
+            candidate.key,
+            candidate,
+          ]),
+        );
+        for (const candidate of selectedWithFreshPrices) {
+          updateByThesis.set(candidate.thesisKey, {
+            thesisKey: candidate.thesisKey,
+          });
+        }
+        for (const [candidateKey, triageDecision] of triageByKey) {
+          const candidate = selectedByKey.get(candidateKey);
+          if (!candidate) continue;
+          updateByThesis.set(candidate.thesisKey, {
+            ...updateByThesis.get(candidate.thesisKey),
+            thesisKey: candidate.thesisKey,
+            triageAction: triageDecision.action,
+          });
+        }
+        for (const [candidateKey, research] of externalResearchByKey) {
+          const candidate = selectedByKey.get(candidateKey);
+          if (!candidate) continue;
+          updateByThesis.set(candidate.thesisKey, {
+            ...updateByThesis.get(candidate.thesisKey),
+            thesisKey: candidate.thesisKey,
+            researchVerdict: research.verdict,
+          });
+        }
+        for (const decision of decisions) {
+          updateByThesis.set(decision.candidate.thesisKey, {
+            ...updateByThesis.get(decision.candidate.thesisKey),
+            thesisKey: decision.candidate.thesisKey,
+            finalVerdict:
+              decision.output.status === "PUBLISH"
+                ? "publish"
+                : decision.output.status === "CONTEXT"
+                  ? "context"
+                  : "skip",
+          });
+        }
+        const stageUpdate = await updateHolderResearchObservationStages(
+          client,
+          {
+            runId,
+            updates: Array.from(updateByThesis.values()),
+          },
+        );
+        toolCalls.push({
+          name: "candidate_observation_stages_v2",
+          count: stageUpdate.updated,
+          status: "ok",
+        });
+      } catch (error) {
+        toolCalls.push({
+          name: "candidate_observation_stages_v2",
+          count: 0,
+          status: "error",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     let persistence: HolderResearchRunReport["persistence"] = null;
     const shouldPersist =
       !policy.dryRun && policy.persistNotes && args.callModel;
@@ -2124,6 +2476,15 @@ export async function runHolderResearch(
           modelMeta: decision.modelMeta,
         })),
       });
+      if (observeV2) {
+        try {
+          await linkHolderResearchObservationNotes(client, runId);
+        } catch (error) {
+          console.warn("[holder-research] observation note link skipped", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
     }
     toolCalls.push({
       name: "note_persistence",
@@ -2214,6 +2575,7 @@ export async function runHolderResearch(
       policy: {
         enabled: policy.enabled,
         source: policyResult.source,
+        pipelineV2Mode: policy.pipelineV2Mode,
         maxAgentCallsPerRun: policy.maxAgentCallsPerRun,
         maxPublishPerRun: policy.maxPublishPerRun,
         maxCandidatePool: policy.maxCandidatePool,

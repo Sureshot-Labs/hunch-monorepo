@@ -173,6 +173,7 @@ export type HolderResearchPolicy = {
   enabled: boolean;
   dryRun: boolean;
   persistNotes: boolean;
+  pipelineV2Mode: "off" | "shadow" | "triage" | "research" | "active";
   signalBotFollowthroughEnabled: boolean;
   signalBotFollowthroughTypes: Array<
     "resolved_loss" | "resolved_win" | "stats"
@@ -184,6 +185,7 @@ export type HolderResearchPolicy = {
   signalBotFollowthroughMinPriceMoveCents: number;
   signalBotFollowthroughRequirePositiveFlowForStats: boolean;
   signalBotFollowthroughMinDataQuality: "any" | "clean" | "usable";
+  signalBotTerminalInitialCutoff: string | null;
   externalSearchEnabled: boolean;
   externalSearchModel: string;
   maxExternalSearchCallsPerRun: number;
@@ -239,6 +241,9 @@ export type HolderResearchPolicy = {
   singleGameSportsMinWinRate: number;
   singleGameSportsRequirePositivePnl: boolean;
   priceAgainstSignalBlockPp: number;
+  minPublishEntryPrice: number;
+  maxPublishHorizonHours: number;
+  sportsOutrightPublishMode: "context_only" | "enabled";
   decisionCacheEnabled: boolean;
   decisionCacheTtlHours: number;
   skipCooldownHours: number;
@@ -267,6 +272,7 @@ export type HolderResearchPolicy = {
   candidateLookbackHours: number;
   activityLookbackHours: number;
   noteCooldownHours: number;
+  holderResearchPositionSource: "legacy" | "shadow" | "rollup";
   minScore: number;
   publishMinScore: number;
   minSidePositionUsd: number;
@@ -955,6 +961,7 @@ const holderResearchSchema = z
     enabled: strictBoolean,
     dryRun: strictBoolean,
     persistNotes: strictBoolean,
+    pipelineV2Mode: z.enum(["off", "shadow", "triage", "research", "active"]),
     signalBotFollowthroughEnabled: strictBoolean,
     signalBotFollowthroughTypes: z
       .array(z.enum(["stats", "resolved_win", "resolved_loss"]))
@@ -966,6 +973,7 @@ const holderResearchSchema = z
     signalBotFollowthroughMinPriceMoveCents: nonNegativeNumber.max(100),
     signalBotFollowthroughRequirePositiveFlowForStats: strictBoolean,
     signalBotFollowthroughMinDataQuality: z.enum(["any", "usable", "clean"]),
+    signalBotTerminalInitialCutoff: z.string().datetime().nullable(),
     externalSearchEnabled: strictBoolean,
     externalSearchModel: z.string().trim().min(1).max(200),
     maxExternalSearchCallsPerRun: nonNegativeInt.max(100),
@@ -1021,6 +1029,9 @@ const holderResearchSchema = z
     singleGameSportsMinWinRate: ratio,
     singleGameSportsRequirePositivePnl: strictBoolean,
     priceAgainstSignalBlockPp: ratio,
+    minPublishEntryPrice: ratio,
+    maxPublishHorizonHours: positiveInt.max(24 * 365 * 10),
+    sportsOutrightPublishMode: z.enum(["context_only", "enabled"]),
     decisionCacheEnabled: strictBoolean,
     decisionCacheTtlHours: positiveInt.max(24 * 365),
     skipCooldownHours: positiveInt.max(24 * 365),
@@ -1049,6 +1060,7 @@ const holderResearchSchema = z
     candidateLookbackHours: positiveInt.max(24 * 90),
     activityLookbackHours: positiveInt.max(24 * 30),
     noteCooldownHours: positiveInt.max(24 * 365),
+    holderResearchPositionSource: z.enum(["legacy", "shadow", "rollup"]),
     minScore: ratio,
     publishMinScore: ratio,
     minSidePositionUsd: nonNegativeNumber,
@@ -1721,6 +1733,7 @@ function getDefaults(): IntelPolicyMap {
       enabled: false,
       dryRun: true,
       persistNotes: false,
+      pipelineV2Mode: "shadow",
       signalBotFollowthroughEnabled: false,
       signalBotFollowthroughTypes: DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
       signalBotFollowthroughMinAgeHours: 24,
@@ -1730,6 +1743,7 @@ function getDefaults(): IntelPolicyMap {
       signalBotFollowthroughMinPriceMoveCents: 10,
       signalBotFollowthroughRequirePositiveFlowForStats: false,
       signalBotFollowthroughMinDataQuality: "any",
+      signalBotTerminalInitialCutoff: null,
       externalSearchEnabled: false,
       externalSearchModel:
         process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
@@ -1791,6 +1805,9 @@ function getDefaults(): IntelPolicyMap {
       singleGameSportsMinWinRate: 0.65,
       singleGameSportsRequirePositivePnl: true,
       priceAgainstSignalBlockPp: 0.05,
+      minPublishEntryPrice: 0.1,
+      maxPublishHorizonHours: 24 * 30,
+      sportsOutrightPublishMode: "context_only",
       decisionCacheEnabled: true,
       decisionCacheTtlHours: 336,
       skipCooldownHours: 12,
@@ -1818,7 +1835,8 @@ function getDefaults(): IntelPolicyMap {
       maxOutputTokens: 2_000,
       candidateLookbackHours: 72,
       activityLookbackHours: 24,
-      noteCooldownHours: 12,
+      noteCooldownHours: 24,
+      holderResearchPositionSource: "legacy",
       minScore: 0.45,
       publishMinScore: 0.72,
       minSidePositionUsd: 25_000,
@@ -2679,6 +2697,13 @@ function normalizeHolderResearchPolicy(
     enabled: Boolean(policy.enabled),
     dryRun: Boolean(policy.dryRun),
     persistNotes: Boolean(policy.persistNotes),
+    pipelineV2Mode:
+      policy.pipelineV2Mode === "active" ||
+      policy.pipelineV2Mode === "research" ||
+      policy.pipelineV2Mode === "triage" ||
+      policy.pipelineV2Mode === "shadow"
+        ? policy.pipelineV2Mode
+        : "off",
     signalBotFollowthroughEnabled: Boolean(
       policy.signalBotFollowthroughEnabled,
     ),
@@ -2719,6 +2744,11 @@ function normalizeHolderResearchPolicy(
       policy.signalBotFollowthroughMinDataQuality === "clean"
         ? policy.signalBotFollowthroughMinDataQuality
         : "any",
+    signalBotTerminalInitialCutoff:
+      typeof policy.signalBotTerminalInitialCutoff === "string" &&
+      Number.isFinite(new Date(policy.signalBotTerminalInitialCutoff).getTime())
+        ? new Date(policy.signalBotTerminalInitialCutoff).toISOString()
+        : null,
     externalSearchEnabled: Boolean(policy.externalSearchEnabled),
     externalSearchModel:
       policy.externalSearchModel.trim() || "grok-4-1-fast-reasoning",
@@ -2883,6 +2913,16 @@ function normalizeHolderResearchPolicy(
       policy.singleGameSportsRequirePositivePnl,
     ),
     priceAgainstSignalBlockPp: clamp(policy.priceAgainstSignalBlockPp, 0, 1),
+    minPublishEntryPrice: clamp(policy.minPublishEntryPrice, 0, 1),
+    maxPublishHorizonHours: clamp(
+      Math.trunc(policy.maxPublishHorizonHours),
+      1,
+      24 * 365 * 10,
+    ),
+    sportsOutrightPublishMode:
+      policy.sportsOutrightPublishMode === "enabled"
+        ? "enabled"
+        : "context_only",
     decisionCacheEnabled: Boolean(policy.decisionCacheEnabled),
     decisionCacheTtlHours: clamp(
       Math.trunc(policy.decisionCacheTtlHours),
@@ -2954,6 +2994,11 @@ function normalizeHolderResearchPolicy(
       24 * 30,
     ),
     noteCooldownHours: clamp(Math.trunc(policy.noteCooldownHours), 1, 24 * 365),
+    holderResearchPositionSource:
+      policy.holderResearchPositionSource === "shadow" ||
+      policy.holderResearchPositionSource === "rollup"
+        ? policy.holderResearchPositionSource
+        : "legacy",
     minScore,
     publishMinScore: clamp(policy.publishMinScore, minScore, 1),
     minSidePositionUsd: Math.max(0, policy.minSidePositionUsd),

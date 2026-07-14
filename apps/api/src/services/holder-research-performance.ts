@@ -64,6 +64,8 @@ export type HolderResearchSignalPerformance = {
   version: 1;
   evaluatedAt: string;
   noteId: string;
+  thesisKey: string;
+  tradeKey: string;
   marketId: string;
   venue: string;
   bucket: string | null;
@@ -83,7 +85,11 @@ export type HolderResearchSignalPerformance = {
   currentYesProbability: number | null;
   finalYesProbability: number | null;
   entryPrice: number | null;
-  entryPriceSource: "signal_snapshot" | "nearest_trade" | "missing";
+  entryPriceSource:
+    | "frozen_delivery"
+    | "signal_snapshot"
+    | "nearest_trade"
+    | "missing";
   entryQuality:
     | "exact_snapshot"
     | "near_trade"
@@ -94,6 +100,7 @@ export type HolderResearchSignalPerformance = {
   markPriceSource: HolderResearchMarkPriceSource;
   pnlPerShare: number | null;
   pnlPerDollar: number | null;
+  excessProbability: number | null;
   sideAdjustedPriceMove: number | null;
   priceSourceQuality: "exact" | "approximate" | "missing";
   resolvedOutcome: HolderResearchSignalSide | null;
@@ -121,6 +128,10 @@ export type HolderResearchPerformanceAggregate = {
   averageRoi: number | null;
   medianRoi: number | null;
   totalPnlPerDollar: number;
+  expectedWins?: number;
+  excessProbability?: number;
+  excessZ?: number | null;
+  entryQualityCoverage?: number | null;
 };
 
 export type HolderResearchPerformanceAuditResult = {
@@ -163,9 +174,11 @@ export type HolderResearchPerformanceAuditOptions = {
   minConfidence?: number | null;
   approxEntryBeforeHours?: number;
   approxEntryAfterHours?: number;
+  deliveredInitialOnly?: boolean;
 };
 
 type HolderResearchPerformanceNoteRow = {
+  observation_id?: string | null;
   note_id: string;
   direction: string | null;
   confidence: string | number | null;
@@ -193,6 +206,9 @@ type HolderResearchPerformanceNoteRow = {
   market_token_yes: string | null;
   market_token_no: string | null;
   clob_token_ids: string | null;
+  frozen_entry_price?: string | number | null;
+  frozen_side?: string | null;
+  thesis_key?: string | null;
 };
 
 type NearestTradeRow = {
@@ -208,11 +224,22 @@ type NearestTrade = {
   distanceMinutes: number | null;
 };
 
-type MutableAggregate = HolderResearchPerformanceAggregate & {
+type MutableAggregate = Omit<
+  HolderResearchPerformanceAggregate,
+  "entryQualityCoverage" | "excessProbability" | "excessZ" | "expectedWins"
+> & {
+  entryQualityCoverage: number | null;
+  excessProbability: number;
+  excessZ: number | null;
+  expectedWins: number;
   rois: number[];
+  excessVariance: number;
 };
 
 const DEFAULT_NEAR_TRADE_MAX_MINUTES = 120;
+export const HOLDER_RESEARCH_CALIBRATION_POSITIVE_MIN_SAMPLES = 30;
+export const HOLDER_RESEARCH_CALIBRATION_CAUTION_MIN_SAMPLES = 15;
+export const HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z = 1.64;
 export const HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS = 2;
 export const HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS = 24;
 
@@ -623,7 +650,7 @@ function samePerformance(
 async function loadNearestTrades(
   client: DbQuery,
   requests: Array<{
-    noteId: string;
+    requestId: string;
     tokenId: string;
     createdAt: string;
   }>,
@@ -635,14 +662,14 @@ async function loadNearestTrades(
     `
       with input as (
         select
-          note_id::uuid as note_id,
+          request_id,
           token_id,
           created_at::timestamptz as created_at
         from jsonb_to_recordset($1::jsonb)
-          as x(note_id text, token_id text, created_at text)
+          as x(request_id text, token_id text, created_at text)
       )
-      select distinct on (i.note_id)
-        i.note_id::text as note_id,
+      select distinct on (i.request_id)
+        i.request_id as note_id,
         t.price,
         t.ts,
         (abs(extract(epoch from (t.ts - i.created_at))) / 60.0)::numeric
@@ -652,12 +679,13 @@ async function loadNearestTrades(
         on t.token_id = i.token_id
        and t.ts >= i.created_at - ($2::numeric * interval '1 hour')
        and t.ts <= i.created_at + ($3::numeric * interval '1 hour')
-      order by i.note_id, abs(extract(epoch from (t.ts - i.created_at))), t.ts desc
+      order by i.request_id, abs(extract(epoch from (t.ts - i.created_at))), t.ts desc
     `,
     [
       JSON.stringify(
         requests.map((request) => ({
-          note_id: request.noteId,
+          request_id: request.requestId,
+          note_id: request.requestId,
           token_id: request.tokenId,
           created_at: request.createdAt,
         })),
@@ -688,6 +716,8 @@ async function loadNearestTrades(
 function resolveSignalSide(
   row: HolderResearchPerformanceNoteRow,
 ): HolderResearchSignalSide | null {
+  const frozenSide = normalizeSide(row.frozen_side);
+  if (frozenSide) return frozenSide;
   const targetSide = normalizeSide(objectRecord(row.target_meta).side);
   return targetSide ?? sideFromDirection(row.direction);
 }
@@ -790,6 +820,16 @@ function resolveEntryPrice(input: {
   quality: HolderResearchSignalPerformance["priceSourceQuality"];
   entryQuality: HolderResearchSignalPerformance["entryQuality"];
 } {
+  const frozenEntryPrice = normalizePrice(input.row.frozen_entry_price);
+  if (frozenEntryPrice != null) {
+    return {
+      price: frozenEntryPrice,
+      source: "frozen_delivery",
+      distanceMinutes: null,
+      quality: "exact",
+      entryQuality: "exact_snapshot",
+    };
+  }
   const snapshot = readSignalSnapshot(input.row.metrics);
   if (
     snapshot &&
@@ -892,6 +932,12 @@ function buildPerformanceForRow(input: {
     pnlPerShare != null && entry.price != null && entry.price > 0
       ? pnlPerShare / entry.price
       : null;
+  const resolvedPayout =
+    state === "resolved" && mark.price != null ? mark.price : null;
+  const excessProbability =
+    resolvedPayout != null && entry.price != null
+      ? resolvedPayout - entry.price
+      : null;
   const outcome: HolderResearchSignalPerformance["outcome"] =
     state === "open"
       ? "open"
@@ -908,10 +954,15 @@ function buildPerformanceForRow(input: {
   const marketType = rowMarketType(input.row);
   const marketSegment = rowMarketSegment(input.row);
   const primaryHolder = primaryHolderRecord(input.row.model_meta);
+  const thesisKey =
+    input.row.thesis_key?.trim() ||
+    `holder_research:v2:${input.row.market_id}:${side ?? "MIXED"}`;
   return {
     version: 1,
     evaluatedAt: new Date().toISOString(),
     noteId: input.row.note_id,
+    thesisKey,
+    tradeKey: `${thesisKey}:${input.row.market_id}:${side ?? "MIXED"}`,
     marketId: input.row.market_id,
     venue: input.row.venue,
     bucket: metricBucket(input.row.metrics, input.row.target_meta),
@@ -938,6 +989,7 @@ function buildPerformanceForRow(input: {
     markPriceSource: mark.source,
     pnlPerShare,
     pnlPerDollar,
+    excessProbability,
     sideAdjustedPriceMove: pnlPerShare,
     priceSourceQuality: entry.quality,
     resolvedOutcome: normalizeSide(input.row.resolved_outcome),
@@ -971,7 +1023,12 @@ function emptyMutableAggregate(): MutableAggregate {
     averageRoi: null,
     medianRoi: null,
     totalPnlPerDollar: 0,
+    expectedWins: 0,
+    excessProbability: 0,
+    excessZ: null,
+    entryQualityCoverage: null,
     rois: [],
+    excessVariance: 0,
   };
 }
 
@@ -987,6 +1044,15 @@ function addAggregateItem(
   else aggregate.unknown += 1;
   if (item.outcome === "correct") aggregate.correct += 1;
   else if (item.outcome === "wrong") aggregate.wrong += 1;
+  if (
+    item.state === "resolved" &&
+    item.entryPrice != null &&
+    item.excessProbability != null
+  ) {
+    aggregate.expectedWins += item.entryPrice;
+    aggregate.excessProbability += item.excessProbability;
+    aggregate.excessVariance += item.entryPrice * (1 - item.entryPrice);
+  }
   if (item.pnlPerDollar != null) {
     aggregate.rois.push(item.pnlPerDollar);
     aggregate.totalPnlPerDollar += item.pnlPerDollar;
@@ -1011,7 +1077,7 @@ function finalizeAggregate(
         ? rois[Math.floor(rois.length / 2)]
         : (rois[rois.length / 2 - 1] + rois[rois.length / 2]) / 2;
   const resolvedWithKnownOutcome = aggregate.correct + aggregate.wrong;
-  const { rois: _rois, ...result } = aggregate;
+  const { excessVariance, rois: _rois, ...result } = aggregate;
   void _rois;
   return {
     ...result,
@@ -1021,6 +1087,12 @@ function finalizeAggregate(
         : null,
     averageRoi,
     medianRoi,
+    excessZ:
+      excessVariance > 0
+        ? aggregate.excessProbability / Math.sqrt(excessVariance)
+        : null,
+    entryQualityCoverage:
+      aggregate.notes > 0 ? aggregate.withEntry / aggregate.notes : null,
   };
 }
 
@@ -1115,10 +1187,48 @@ export async function auditHolderResearchSignalPerformance(
     marketAlias: "m",
     eventAlias: "e",
   });
+  const deliveryJoin = options.deliveredInitialOnly
+    ? `
+      join lateral (
+        select distinct on (target_market_id, target_side)
+          target_market_id,
+          target_side,
+          target_price
+        from (
+          select
+            nullif(sbm.metrics #>> '{delivery,view,target,marketId}', '') as target_market_id,
+            upper(nullif(sbm.metrics #>> '{delivery,view,target,side}', '')) as target_side,
+            nullif(sbm.metrics #>> '{delivery,view,target,price}', '')::numeric as target_price,
+            sbm.sent_at
+          from signal_bot_messages sbm
+          where sbm.note_id = n.id
+            and sbm.message_kind = 'initial'
+            and coalesce(sbm.metrics->>'status', 'sent') = 'sent'
+        ) delivered
+        where target_market_id is not null
+          and target_side in ('YES', 'NO')
+          and target_price between 0 and 1
+        order by target_market_id, target_side, sent_at asc
+      ) delivery on true
+    `
+    : "";
+  const marketJoin = options.deliveredInitialOnly
+    ? "join unified_markets m on m.id = delivery.target_market_id"
+    : "join unified_markets m on m.id = t.target_id";
   const { rows } = await client.query<HolderResearchPerformanceNoteRow>(
     `
       select
         n.id as note_id,
+        n.id::text || ':' || m.id || ':' || coalesce(
+          ${options.deliveredInitialOnly ? "delivery.target_side" : "upper(t.target_meta->>'side')"},
+          'MIXED'
+        ) as observation_id,
+        coalesce(
+          n.lineage->>'thesis_key',
+          'holder_research:v2:' || n.source_id || ':' || upper(coalesce(n.lineage->>'side', t.target_meta->>'side', 'MIXED'))
+        ) as thesis_key,
+        ${options.deliveredInitialOnly ? "delivery.target_side" : "null::text"} as frozen_side,
+        ${options.deliveredInitialOnly ? "delivery.target_price" : "null::numeric"} as frozen_entry_price,
         n.direction,
         n.confidence,
         n.created_at,
@@ -1150,7 +1260,8 @@ export async function auditHolderResearchSignalPerformance(
         on t.note_id = n.id
        and t.target_kind = 'market'
        and t.is_primary = true
-      join unified_markets m on m.id = t.target_id
+      ${deliveryJoin}
+      ${marketJoin}
       left join unified_events e on e.id = m.event_id
       left join lateral (
         select token_id
@@ -1167,7 +1278,7 @@ export async function auditHolderResearchSignalPerformance(
         limit 1
       ) token_no on true
       where ${where.join("\n        and ")}
-      order by n.created_at desc, n.id desc
+      order by n.created_at desc, n.id desc, m.id, frozen_side
       limit $${limitParam}::int
     `,
     params,
@@ -1176,6 +1287,7 @@ export async function auditHolderResearchSignalPerformance(
   const fallbackRequests = rows.flatMap((row) => {
     const side = resolveSignalSide(row);
     if (!side) return [];
+    if (normalizePrice(row.frozen_entry_price) != null) return [];
     const snapshot = readSignalSnapshot(row.metrics);
     if (
       snapshot &&
@@ -1188,7 +1300,13 @@ export async function auditHolderResearchSignalPerformance(
     const createdAt = toIso(row.created_at);
     const tokenId = resolveSideToken(row, side);
     if (!createdAt || !tokenId) return [];
-    return [{ noteId: row.note_id, tokenId, createdAt }];
+    return [
+      {
+        requestId: row.observation_id ?? row.note_id,
+        tokenId,
+        createdAt,
+      },
+    ];
   });
   const nearestTrades = await loadNearestTrades(
     client,
@@ -1215,7 +1333,8 @@ export async function auditHolderResearchSignalPerformance(
   for (const row of rows) {
     const performance = buildPerformanceForRow({
       row,
-      nearestTrade: nearestTrades.get(row.note_id) ?? null,
+      nearestTrade:
+        nearestTrades.get(row.observation_id ?? row.note_id) ?? null,
     });
     if (!performance) continue;
     if (performance.state === "open" && options.includeOpen === false) continue;
@@ -1237,7 +1356,7 @@ export async function auditHolderResearchSignalPerformance(
       stats.unchanged += 1;
       continue;
     }
-    if (!options.persist) continue;
+    if (!options.persist || options.deliveredInitialOnly) continue;
     try {
       const result = await client.query(
         `
@@ -1269,30 +1388,127 @@ export async function auditHolderResearchSignalPerformance(
   };
 }
 
+function dedupeDeliveredPerformanceTrades(
+  items: HolderResearchSignalPerformance[],
+): HolderResearchSignalPerformance[] {
+  const byTradeKey = new Map<string, HolderResearchSignalPerformance>();
+  for (const item of items) {
+    const current = byTradeKey.get(item.tradeKey);
+    if (!current || item.createdAt < current.createdAt) {
+      byTradeKey.set(item.tradeKey, item);
+    }
+  }
+  return [...byTradeKey.values()];
+}
+
+export function buildHolderResearchCalibrationMemoFromItems(
+  rawItems: HolderResearchSignalPerformance[],
+  policy: HolderResearchPolicy,
+): string[] {
+  const items = dedupeDeliveredPerformanceTrades(rawItems).filter(
+    (item) =>
+      item.state === "resolved" &&
+      item.entryPrice != null &&
+      item.pnlPerDollar != null &&
+      item.excessProbability != null,
+  );
+  const minimumResolved = Math.max(
+    policy.performanceCalibrationMinSamples,
+    policy.performanceCalibrationMinResolvedSamples,
+  );
+  const positiveMinimum = Math.max(
+    minimumResolved,
+    HOLDER_RESEARCH_CALIBRATION_POSITIVE_MIN_SAMPLES,
+  );
+  const cautionMinimum = Math.max(
+    minimumResolved,
+    HOLDER_RESEARCH_CALIBRATION_CAUTION_MIN_SAMPLES,
+  );
+  if (items.length < minimumResolved) return [];
+
+  const groups: Array<{
+    label: string;
+    items: HolderResearchSignalPerformance[];
+  }> = [{ label: "all delivered trades", items }];
+  for (const segment of new Set(items.map((item) => item.marketSegment))) {
+    groups.push({
+      label: formatMarketSegmentLabel(segment).toLowerCase(),
+      items: items.filter((item) => item.marketSegment === segment),
+    });
+  }
+  for (const bucket of new Set(items.map((item) => item.bucket))) {
+    if (!bucket) continue;
+    groups.push({
+      label: bucket.replace(/_/g, " "),
+      items: items.filter((item) => item.bucket === bucket),
+    });
+  }
+
+  const positive: string[] = [];
+  const caution: string[] = [];
+  const seenCohorts = new Set<string>();
+  for (const group of groups) {
+    const cohortKey = group.items
+      .map((item) => item.tradeKey)
+      .sort()
+      .join("|");
+    if (seenCohorts.has(cohortKey)) continue;
+    seenCohorts.add(cohortKey);
+    const aggregate = aggregateItems(group.items).overall;
+    if (
+      group.items.length >= positiveMinimum &&
+      aggregate.averageRoi != null &&
+      aggregate.averageRoi > 0 &&
+      aggregate.excessZ != null &&
+      aggregate.excessZ >= HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z
+    ) {
+      positive.push(
+        `Positive calibrated pattern: ${group.label} has ${group.items.length} independent trades, mean ROI ${(aggregate.averageRoi * 100).toFixed(1)}%, excess z=${aggregate.excessZ.toFixed(2)}, and ${aggregate.correct} actual wins versus ${(aggregate.expectedWins ?? 0).toFixed(1)} expected at entry.`,
+      );
+      continue;
+    }
+    if (
+      group.items.length >= cautionMinimum &&
+      aggregate.averageRoi != null &&
+      aggregate.averageRoi < 0
+    ) {
+      const evidence =
+        aggregate.excessZ != null &&
+        aggregate.excessZ <= -HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z
+          ? "statistically supported negative edge"
+          : "observed losses, not yet statistically proven negative edge";
+      caution.push(
+        `Calibration caution: ${group.label} has ${group.items.length} independent trades and mean ROI ${(aggregate.averageRoi * 100).toFixed(1)}% (${evidence}; excess z=${aggregate.excessZ?.toFixed(2) ?? "n/a"}).`,
+      );
+    }
+  }
+  return [...caution, ...positive].slice(0, 4);
+}
+
 export async function loadHolderResearchPerformanceCalibrationMemo(
   client: DbQuery,
   policy: HolderResearchPolicy,
 ): Promise<string[]> {
   if (!policy.calibrationMemoEnabled) return [];
-  const { rows } = await client.query<{
-    note_id: string;
-    created_at: Date | string | null;
-    outcome: string | null;
-    market_type: string | null;
-    market_segment: string | null;
-    actor_mode: string | null;
-    bucket: string | null;
-    market_id: string | null;
-    signal_side: string | null;
-    entry_quality: string | null;
-    entry_approx_distance_minutes: string | number | null;
-    pnl_per_dollar: string | number | null;
-    state: string | null;
-    primary_holder_wallet_id: string | null;
-    primary_holder_label: string | null;
-    primary_holder_pnl_30d_usd: string | number | null;
-    primary_holder_position_usd: string | number | null;
-  }>(
+  const audit = await auditHolderResearchSignalPerformance(client, {
+    approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
+    approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
+    deliveredInitialOnly: true,
+    includeOpen: false,
+    includeResolved: true,
+    limit: 1_000,
+    lookbackHours: policy.performanceAuditLookbackHours,
+    persist: false,
+  });
+  return buildHolderResearchCalibrationMemoFromItems(audit.items, policy);
+}
+
+export async function loadLegacyHolderResearchPerformanceCalibrationMemo(
+  client: DbQuery,
+  policy: HolderResearchPolicy,
+): Promise<string[]> {
+  if (!policy.calibrationMemoEnabled) return [];
+  const { rows } = await client.query<HolderResearchCalibrationRow>(
     `
       select
         n.id as note_id,

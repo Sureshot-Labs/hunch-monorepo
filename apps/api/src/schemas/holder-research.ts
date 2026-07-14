@@ -41,8 +41,8 @@ export const holderResearchAgentOutputV1Schema = z
         "unknown",
       ])
       .optional(),
-    execution_priority: holderResearchExecutionPrioritySchema,
-    execution_priority_reason: z.string().trim().max(180),
+    execution_priority: holderResearchExecutionPrioritySchema.default("normal"),
+    execution_priority_reason: z.string().trim().max(180).default(""),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
     caveats: z.array(z.string().trim().min(1).max(180)).max(3),
   })
@@ -88,6 +88,117 @@ export type HolderResearchTriageAction = z.infer<
 >;
 export type HolderResearchTriageOutputV1 = z.infer<
   typeof holderResearchTriageOutputV1Schema
+>;
+
+export const holderResearchTriageReasonCodeV2Schema = z.enum([
+  "strong_actor",
+  "early_position",
+  "aligned_flow",
+  "opposed_flow",
+  "already_priced",
+  "weak_credentials",
+  "insufficient_evidence",
+  "research_needed",
+]);
+
+export const holderResearchResearchNeedV2Schema = z.enum([
+  "none",
+  "news_timing",
+  "market_context",
+  "resolution_context",
+]);
+
+export const holderResearchTriageOutputV2Schema = z
+  .object({
+    version: z.literal("holder_research_triage_v2"),
+    decisions: z
+      .array(
+        z
+          .object({
+            key: z.string().trim().min(1).max(240),
+            action: holderResearchTriageActionSchema,
+            reason_codes: z
+              .array(holderResearchTriageReasonCodeV2Schema)
+              .max(6),
+            research_need: holderResearchResearchNeedV2Schema,
+            reason: z.string().trim().min(4).max(220),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+
+export type HolderResearchTriageOutputV2 = z.infer<
+  typeof holderResearchTriageOutputV2Schema
+>;
+export type HolderResearchTriageDecisionV2 =
+  HolderResearchTriageOutputV2["decisions"][number];
+
+export const holderResearchExternalResearchV2Schema = z
+  .object({
+    status: z.enum(["ok", "no_evidence", "error"]),
+    verdict: z.enum([
+      "supports_holder_side",
+      "supports_opposite_side",
+      "already_public",
+      "unexplained",
+      "mixed",
+      "unknown",
+    ]),
+    timing: z.enum([
+      "before_holder",
+      "around_holder",
+      "after_holder",
+      "unknown",
+    ]),
+    summary: z.string().trim().max(320),
+    citations: z
+      .array(
+        z
+          .object({
+            title: z.string().trim().min(1).max(200),
+            url: z.string().url().max(2_000),
+            publishedAt: z.string().datetime().nullable(),
+          })
+          .strict(),
+      )
+      .max(3),
+  })
+  .strict();
+
+export type HolderResearchExternalResearchV2 = z.infer<
+  typeof holderResearchExternalResearchV2Schema
+>;
+
+export const holderResearchFinalOutputV2Schema = z
+  .object({
+    version: z.literal("holder_research_v2"),
+    verdict: z.enum(["publish", "context", "skip"]),
+    evidence_assessment: z.enum([
+      "strong",
+      "adequate",
+      "mixed",
+      "contradicted",
+      "insufficient",
+    ]),
+    reason_codes: z.array(z.string().trim().min(1).max(80)).max(8),
+    rationale: z.string().trim().min(8).max(260),
+    evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
+    copy: z
+      .object({
+        headline: z.string().trim().min(8).max(140),
+        why_now: z.string().trim().min(16).max(260),
+        caveats: z.array(z.string().trim().min(1).max(180)).max(2),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
+export type HolderResearchFinalOutputV2 = z.infer<
+  typeof holderResearchFinalOutputV2Schema
 >;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -139,11 +250,7 @@ export function parseHolderResearchAgentOutputV1(
   value: unknown,
 ): HolderResearchAgentOutputV1 {
   const record = asRecord(value);
-  const executionPriority =
-    record.status === "PUBLISH" &&
-    record.execution_priority === "high_conviction"
-      ? "high_conviction"
-      : "normal";
+  const executionPriority = "normal" as const;
   const repaired = {
     version: record.version,
     status: record.status,
@@ -164,14 +271,28 @@ export function parseHolderResearchAgentOutputV1(
     ),
     public_context_risk: record.public_context_risk,
     execution_priority: executionPriority,
-    execution_priority_reason:
-      executionPriority === "high_conviction"
-        ? asTrimmedString(record.execution_priority_reason, "", 180)
-        : "",
+    execution_priority_reason: "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
     caveats: asStringArray(record.caveats, 3, 180),
   };
   return holderResearchAgentOutputV1Schema.parse(repaired);
+}
+
+function parseHolderResearchTriageDecisionBase(
+  entry: unknown,
+  allowed: Set<string> | null,
+  unknown: string[],
+) {
+  const item = asRecord(entry);
+  const key = asTrimmedString(item.key, "", 240);
+  if (!key) return null;
+  if (allowed && !allowed.has(key)) {
+    unknown.push(key);
+    return null;
+  }
+  const action = holderResearchTriageActionSchema.safeParse(item.action);
+  if (!action.success) return null;
+  return { action: action.data, item, key };
 }
 
 export function parseHolderResearchTriageOutputV1(
@@ -186,31 +307,26 @@ export function parseHolderResearchTriageOutputV1(
     version: record.version ?? "holder_research_triage_v1",
     decisions: rawDecisions
       .map((entry) => {
-        const item = asRecord(entry);
-        const key = asTrimmedString(item.key, "", 240);
-        if (!key) return null;
-        if (allowed && !allowed.has(key)) {
-          unknown.push(key);
-          return null;
-        }
-        const actionResult = holderResearchTriageActionSchema.safeParse(
-          item.action,
+        const base = parseHolderResearchTriageDecisionBase(
+          entry,
+          allowed,
+          unknown,
         );
-        if (!actionResult.success) return null;
-        const priority = Number(item.priority);
+        if (!base) return null;
+        const priority = Number(base.item.priority);
         if (!Number.isFinite(priority)) return null;
         const needsExternalSearch =
-          typeof item.needs_external_search === "boolean"
-            ? item.needs_external_search
-            : typeof item.needs_external_search === "string"
-              ? item.needs_external_search.trim().toLowerCase() === "true"
-              : Boolean(item.needs_external_search);
+          typeof base.item.needs_external_search === "boolean"
+            ? base.item.needs_external_search
+            : typeof base.item.needs_external_search === "string"
+              ? base.item.needs_external_search.trim().toLowerCase() === "true"
+              : Boolean(base.item.needs_external_search);
         return {
-          key,
-          action: actionResult.data,
+          key: base.key,
+          action: base.action,
           priority,
           needs_external_search: needsExternalSearch,
-          reason: asTrimmedString(item.reason, "No reason supplied.", 220),
+          reason: asTrimmedString(base.item.reason, "No reason supplied.", 220),
         };
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
@@ -222,6 +338,104 @@ export function parseHolderResearchTriageOutputV1(
   }
   const parsed = holderResearchTriageOutputV1Schema.parse(repaired);
   return parsed;
+}
+
+export function parseHolderResearchTriageOutputV2(
+  value: unknown,
+  allowedCandidateKeys?: Iterable<string>,
+): HolderResearchTriageOutputV2 {
+  const record = asRecord(value);
+  const rawDecisions = Array.isArray(record.decisions) ? record.decisions : [];
+  const allowed = allowedCandidateKeys ? new Set(allowedCandidateKeys) : null;
+  const unknown: string[] = [];
+  const decisions = rawDecisions
+    .map((entry) => {
+      const base = parseHolderResearchTriageDecisionBase(
+        entry,
+        allowed,
+        unknown,
+      );
+      if (!base) return null;
+      const researchNeed = holderResearchResearchNeedV2Schema.safeParse(
+        base.item.research_need,
+      );
+      if (!researchNeed.success) return null;
+      const reasonCodes = Array.isArray(base.item.reason_codes)
+        ? base.item.reason_codes
+            .map((reason) =>
+              holderResearchTriageReasonCodeV2Schema.safeParse(reason),
+            )
+            .filter((reason) => reason.success)
+            .map((reason) => reason.data)
+        : [];
+      return {
+        key: base.key,
+        action: base.action,
+        reason_codes: Array.from(new Set(reasonCodes)).slice(0, 6),
+        research_need: researchNeed.data,
+        reason: asTrimmedString(base.item.reason, "No reason supplied.", 220),
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  if (unknown.length > 0) {
+    throw new Error(
+      `Triage returned unknown candidate keys: ${unknown.join(", ")}`,
+    );
+  }
+  return holderResearchTriageOutputV2Schema.parse({
+    version: record.version ?? "holder_research_triage_v2",
+    decisions,
+  });
+}
+
+export function parseHolderResearchExternalResearchV2(
+  value: unknown,
+): HolderResearchExternalResearchV2 {
+  const record = asRecord(value);
+  const parsed = holderResearchExternalResearchV2Schema.safeParse(record);
+  if (parsed.success) return parsed.data;
+  return {
+    status: "error",
+    verdict: "unknown",
+    timing: "unknown",
+    summary: "External research response could not be validated.",
+    citations: [],
+  };
+}
+
+export function parseHolderResearchFinalOutputV2(
+  value: unknown,
+): HolderResearchFinalOutputV2 {
+  const record = asRecord(value);
+  const copy = record.copy == null ? null : asRecord(record.copy);
+  return holderResearchFinalOutputV2Schema.parse({
+    version: record.version,
+    verdict: record.verdict,
+    evidence_assessment: record.evidence_assessment,
+    reason_codes: asStringArray(record.reason_codes, 8, 80),
+    rationale: asTrimmedString(
+      record.rationale,
+      "The supplied evidence did not support publication.",
+      260,
+    ),
+    evidence_ids: asStringArray(record.evidence_ids, 6, 160),
+    copy:
+      copy == null
+        ? null
+        : {
+            headline: asTrimmedString(
+              copy.headline,
+              "Holder positioning deserves attention",
+              140,
+            ),
+            why_now: asTrimmedString(
+              copy.why_now,
+              "The current positioning adds a timely reason to review this market.",
+              260,
+            ),
+            caveats: asStringArray(copy.caveats, 2, 180),
+          },
+  });
 }
 
 export function buildHolderResearchTriageSystemPrompt(): string {
@@ -280,6 +494,52 @@ export function buildHolderResearchTriageUserPrompt(input: {
   });
 }
 
+export function buildHolderResearchTriageSystemPromptV2(): string {
+  return [
+    "You are the bounded triage stage for Hunch holder research.",
+    "Return exactly one JSON object matching holder_research_triage_v2 and one decision per supplied key.",
+    "Candidates are already ordered by deterministic selection. Filter them; do not invent a second ranking.",
+    "Use only decisionFeatures. Missing values are unknown, never zero.",
+    "Investigate only a directional, publish-eligible candidate with adequate holder credentials and a timely reason to look.",
+    "Watch means useful context that is not ready for final synthesis. Skip means weak, stale, contradicted, or redundant evidence.",
+    "Use selectedSide and oppositeSide symmetrically. Edge is supporting evidence only with Z, samples, stake, and exposure.",
+    "For opposed flow, already-priced movement, repeats, and weak credentials, prefer watch or skip unless a strong cluster remains clearly informative.",
+    "Choose research_need only for the single unanswered question most likely to change the decision.",
+    "Do not include wallet identifiers, visible publication copy, probabilities of success, or model priority scores.",
+  ].join("\n");
+}
+
+export function buildHolderResearchTriageUserPromptV2(input: {
+  candidates: unknown[];
+  maxInvestigate: number;
+}): string {
+  return JSON.stringify({
+    task: "Filter deterministic holder-research candidates before final synthesis.",
+    output_contract: {
+      version: "holder_research_triage_v2",
+      decisions: [
+        {
+          key: "one supplied key",
+          action: "investigate | watch | skip",
+          reason_codes:
+            "subset of strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed",
+          research_need:
+            "none | news_timing | market_context | resolution_context",
+          reason: "one short internal reason",
+        },
+      ],
+    },
+    rules: [
+      "Preserve supplied order; action filters candidates and is not a ranking score.",
+      "A deterministic blocker cannot be overridden.",
+      "Raw win rate is intentionally absent; use calibrated edge together with Z and sample size.",
+      "Opposing sharp evidence is a conflict, not proof that either side is correct.",
+      `Mark no more than ${input.maxInvestigate} candidates investigate unless the caller supplied fewer candidates.`,
+    ],
+    candidates: input.candidates,
+  });
+}
+
 export function buildHolderResearchSystemPrompt(): string {
   return [
     "You write Hunch holder-research signals like a strong trader sharing a reason to look now in a private trading group.",
@@ -297,7 +557,6 @@ export function buildHolderResearchSystemPrompt(): string {
     "For team NO/fade markets, do not write awkward phrases like 'NO France' or synthetic button labels like 'France not to win'. Use 'fading France', 'against France', or the supplied sideCopy wording.",
     "Use candidate.quality as deterministic guardrails. If credentialStrength is contradicted or weak, do not call the wallet smart, strong, skilled, proven, or good.",
     "Use candidate.quality.flowProfile, repeatProfile, and riskTags: unsupported_crypto_single and negative_single_minority should not be PUBLISH; mixed/opposed flow, risky repeats, public-priced high entry, and uncertain holder-entry context lower confidence and need a clear reason to publish.",
-    "Set execution_priority=high_conviction only for rare PUBLISH signals where the wallet evidence is unusually clean, directional, and actionable. Use normal for ordinary publishable signals and all CONTEXT/SKIP outputs.",
     "Write credentials in normal language: say 'won recent trades' or 'beat market prices', not 'winRate', 'resolved edge', 'z-score', 'n=', or 'sample count'.",
     "Use 'is holding' or 'backs' by default. Only say 'entered' when supplied evidence explicitly proves a recent open or increase.",
     "Edge is supporting evidence only when sample count, stake, trades, and open exposure are strong. Never publish an edge-only claim.",
@@ -368,9 +627,6 @@ export function buildHolderResearchUserPrompt(input: {
       rationale: "one short sentence explaining the decision quality",
       public_context_risk:
         "confirms_holder | fully_explains_move | conflicts_holder | unknown",
-      execution_priority: "normal | high_conviction",
-      execution_priority_reason:
-        "short internal reason when execution_priority is high_conviction, else empty string",
       evidence_ids: "subset of allowedEvidenceIds",
       caveats: "0-2 short important limitations",
     },
@@ -393,7 +649,6 @@ export function buildHolderResearchUserPrompt(input: {
       "Holder identityDisplayName is factual context only; preserve it verbatim if used and never infer a biography from it.",
       "Use normal-user language for credentials; avoid analytics field names and jargon.",
       "Use candidate.quality.flowProfile, repeatProfile, and riskTags when deciding status. Treat unsupported_crypto_single and negative_single_minority as non-publishable.",
-      "Use execution_priority=high_conviction rarely, only for PUBLISH with a clear side, strong wallet or wallet-cluster evidence, fresh/actionable pricing, and no hard quality blockers. Otherwise use normal.",
       "Use delegated search only to answer whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain it, or is mixed.",
       "Do not demote only because public information partly explains the move; ask whether wallets are still on a side the market is not fully pricing.",
       "Compare holder activity/snapshot timing against dated public headlines; early holder positioning can be a publishable signal even if later news supports it.",
@@ -403,6 +658,55 @@ export function buildHolderResearchUserPrompt(input: {
       "PUBLISH should be a directional holder-backed signal with actor.mode single_holder or sharp_cluster; disagreement or risk-only reads are CONTEXT unless they clearly support one side.",
       "If holder data adds a timely reason to look now, choose PUBLISH.",
       "If the signal is only mildly interesting, mostly repeats public news, or is too noisy/concentrated to be useful, choose CONTEXT or SKIP and say why briefly.",
+    ],
+    allowedEvidenceIds: input.allowedEvidenceIds,
+    candidate: input.candidateJson,
+  });
+}
+
+export function buildHolderResearchSystemPromptV2(): string {
+  return [
+    "You are the final evidence-assessment and copy stage for Hunch holder research.",
+    "Return exactly one JSON object matching holder_research_v2.",
+    "The backend owns side, direction, bucket, price, credentials, and publication safety. Do not restate or change those fields.",
+    "Use only decisionFeatures, selected holder evidence, supplied internal evidence, and structured externalResearch.",
+    "Choose publish only when the holder evidence is strong or adequate, directional, timely, and not contradicted.",
+    "Mixed, contradicted, or insufficient evidence cannot be publish.",
+    "External verdict supports_opposite_side cannot be publish. already_public needs a distinct holder-timing or persistence reason.",
+    "Do not claim the holder acted before news unless externalResearch.timing is after_holder.",
+    "The product renders the exact market side, executable price, and credential lines deterministically. Write only a truthful headline and why-now sentence.",
+    "Do not include wallet identifiers, addresses, raw metric names, z-score notation, sample notation, or invented numeric claims.",
+    "If verdict is context or skip, copy must be null.",
+  ].join("\n");
+}
+
+export function buildHolderResearchUserPromptV2(input: {
+  candidateJson: unknown;
+  allowedEvidenceIds: string[];
+}): string {
+  return JSON.stringify({
+    task: "Assess one holder-positioning thesis and, only if publishable, write its non-deterministic copy.",
+    output_contract: {
+      version: "holder_research_v2",
+      verdict: "publish | context | skip",
+      evidence_assessment:
+        "strong | adequate | mixed | contradicted | insufficient",
+      reason_codes: "short machine-readable reasons",
+      rationale: "one short internal sentence",
+      evidence_ids: "subset of allowedEvidenceIds",
+      copy: {
+        headline: "5-10 word thesis without raw price or wallet identifiers",
+        why_now:
+          "one concise sentence explaining why the holder behavior matters now",
+        caveats: "0-2 material limitations",
+      },
+    },
+    rules: [
+      "Use null copy for context or skip.",
+      "Do not repeat deterministic market, side, price, or credential lines.",
+      "Do not infer entry timing from a position snapshot alone.",
+      "Treat edge as historical supporting evidence, never a guarantee for this market.",
+      "Use external research only through its validated verdict, timing, summary, and citations.",
     ],
     allowedEvidenceIds: input.allowedEvidenceIds,
     candidate: input.candidateJson,

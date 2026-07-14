@@ -48,6 +48,21 @@ export type WalletMarketSegmentMetric = WalletMarketTypeMetric & {
   marketSegment: MarketSegment;
 };
 
+export type WalletTaxonomyRequirement = {
+  walletId: string;
+  marketType: MarketType;
+  marketSegment: MarketSegment;
+};
+
+export type WalletTaxonomyLoadDiagnostics = {
+  requestedWallets: number;
+  hourlyCandidatePairs: number;
+  selectedExactPairs: number;
+  rawRowsReturned: number;
+  sqlDurationMs: number;
+  totalEnrichmentDurationMs: number;
+};
+
 type WalletMarketTypeActivityRow = {
   wallet_id: string;
   market_id: string;
@@ -73,6 +88,20 @@ type WalletMarketTypeActivityRow = {
   best_bid: string | null;
   last_price: string | null;
 };
+
+type WalletTaxonomyCandidatePair = Pick<
+  WalletMarketTypeActivityRow,
+  | "wallet_id"
+  | "market_id"
+  | "market_category"
+  | "event_category"
+  | "series_key"
+  | "series_title"
+  | "event_title"
+  | "market_title"
+  | "close_time"
+  | "expiration_time"
+>;
 
 type MetricAggregate = {
   walletId: string;
@@ -210,27 +239,89 @@ export async function loadWalletMarketTaxonomyMetricsMaps(
     walletIds: string[];
     asOf?: Date;
     periodDays?: number;
+    requirements?: WalletTaxonomyRequirement[];
   },
 ): Promise<{
   marketSegmentMetricsByKey: Map<string, WalletMarketSegmentMetric>;
   marketTypeMetricsByKey: Map<string, WalletMarketTypeMetric>;
+  diagnostics: WalletTaxonomyLoadDiagnostics;
 }> {
+  const startedAt = performance.now();
   const walletIds = Array.from(new Set(inputs.walletIds));
+  const emptyDiagnostics = (): WalletTaxonomyLoadDiagnostics => ({
+    requestedWallets: walletIds.length,
+    hourlyCandidatePairs: 0,
+    selectedExactPairs: 0,
+    rawRowsReturned: 0,
+    sqlDurationMs: 0,
+    totalEnrichmentDurationMs: performance.now() - startedAt,
+  });
   if (walletIds.length === 0) {
     return {
       marketSegmentMetricsByKey: new Map(),
       marketTypeMetricsByKey: new Map(),
+      diagnostics: emptyDiagnostics(),
     };
   }
 
   const asOf = inputs.asOf ?? new Date();
   const since = periodStart(asOf, Math.max(1, inputs.periodDays ?? 30));
-  const rows = await loadWalletMarketTypeActivityRows(
-    client,
-    walletIds,
-    asOf,
-    since,
-  );
+  let hourlyCandidatePairs = 0;
+  let selectedExactPairs = 0;
+  let sqlDurationMs = 0;
+  let rows: WalletMarketTypeActivityRow[];
+  if (inputs.requirements) {
+    if (inputs.requirements.length === 0) {
+      return {
+        marketSegmentMetricsByKey: new Map(),
+        marketTypeMetricsByKey: new Map(),
+        diagnostics: emptyDiagnostics(),
+      };
+    }
+    const hourlyStartedAt = performance.now();
+    const candidatePairs = await loadWalletTaxonomyCandidatePairs(
+      client,
+      walletIds,
+      asOf,
+      since,
+    );
+    sqlDurationMs += performance.now() - hourlyStartedAt;
+    hourlyCandidatePairs = candidatePairs.length;
+    const exactPairs = selectWalletTaxonomyExactPairs({
+      candidatePairs,
+      requirements: inputs.requirements,
+      asOf,
+    });
+    selectedExactPairs = exactPairs.length;
+    if (exactPairs.length === 0) {
+      return {
+        marketSegmentMetricsByKey: new Map(),
+        marketTypeMetricsByKey: new Map(),
+        diagnostics: {
+          ...emptyDiagnostics(),
+          hourlyCandidatePairs,
+          sqlDurationMs,
+        },
+      };
+    }
+    const rawStartedAt = performance.now();
+    rows = await loadWalletMarketTypeActivityRowsForPairs(
+      client,
+      exactPairs,
+      asOf,
+      since,
+    );
+    sqlDurationMs += performance.now() - rawStartedAt;
+  } else {
+    const rawStartedAt = performance.now();
+    rows = await loadWalletMarketTypeActivityRows(
+      client,
+      walletIds,
+      asOf,
+      since,
+    );
+    sqlDurationMs += performance.now() - rawStartedAt;
+  }
   return {
     marketSegmentMetricsByKey: buildWalletClassifiedMetricsMapFromRows(
       rows,
@@ -242,7 +333,163 @@ export async function loadWalletMarketTaxonomyMetricsMaps(
       asOf,
       "marketType",
     ),
+    diagnostics: {
+      requestedWallets: walletIds.length,
+      hourlyCandidatePairs,
+      selectedExactPairs,
+      rawRowsReturned: rows.length,
+      sqlDurationMs,
+      totalEnrichmentDurationMs: performance.now() - startedAt,
+    },
   };
+}
+
+export function selectWalletTaxonomyExactPairs(inputs: {
+  candidatePairs: WalletTaxonomyCandidatePair[];
+  requirements: WalletTaxonomyRequirement[];
+  asOf: Date;
+}): Array<{ walletId: string; marketId: string }> {
+  const requirementsByWallet = new Map<
+    string,
+    Array<Pick<WalletTaxonomyRequirement, "marketType" | "marketSegment">>
+  >();
+  for (const requirement of inputs.requirements) {
+    const existing = requirementsByWallet.get(requirement.walletId) ?? [];
+    existing.push(requirement);
+    requirementsByWallet.set(requirement.walletId, existing);
+  }
+
+  const selected = new Map<string, { walletId: string; marketId: string }>();
+  for (const pair of inputs.candidatePairs) {
+    const requirements = requirementsByWallet.get(pair.wallet_id) ?? [];
+    if (requirements.length === 0) continue;
+    const marketType = rowMarketType(
+      pair as WalletMarketTypeActivityRow,
+      inputs.asOf,
+    );
+    const marketSegment = rowMarketSegment(
+      pair as WalletMarketTypeActivityRow,
+      inputs.asOf,
+    );
+    if (
+      !requirements.some(
+        (requirement) =>
+          requirement.marketType === marketType ||
+          requirement.marketSegment === marketSegment,
+      )
+    ) {
+      continue;
+    }
+    selected.set(`${pair.wallet_id}:${pair.market_id}`, {
+      walletId: pair.wallet_id,
+      marketId: pair.market_id,
+    });
+  }
+  return Array.from(selected.values());
+}
+
+async function loadWalletTaxonomyCandidatePairs(
+  client: Queryable,
+  walletIds: string[],
+  asOf: Date,
+  since: Date,
+): Promise<WalletTaxonomyCandidatePair[]> {
+  const { rows } = await client.query<WalletTaxonomyCandidatePair>(
+    `
+      with hourly_pairs as materialized (
+        select distinct wah.wallet_id, wah.market_id
+        from wallet_activity_hourly wah
+        where wah.wallet_id = any($1::uuid[])
+          and wah.activity_type in ('delta', 'trade')
+          and wah.hour_bucket >= date_trunc('hour', $3::timestamptz)
+          and wah.hour_bucket <= $2::timestamptz
+      )
+      select
+        hp.wallet_id,
+        hp.market_id,
+        um.category as market_category,
+        ue.category as event_category,
+        ue.series_key,
+        ue.series_title,
+        ue.title as event_title,
+        um.title as market_title,
+        um.close_time,
+        um.expiration_time
+      from hourly_pairs hp
+      left join unified_markets um on um.id = hp.market_id
+      left join unified_events ue on ue.id = um.event_id
+    `,
+    [walletIds, asOf, since],
+  );
+  return rows;
+}
+
+async function loadWalletMarketTypeActivityRowsForPairs(
+  client: Queryable,
+  pairs: Array<{ walletId: string; marketId: string }>,
+  asOf: Date,
+  since: Date,
+): Promise<WalletMarketTypeActivityRow[]> {
+  const { rows } = await client.query<WalletMarketTypeActivityRow>(
+    `
+      with requested_pairs as materialized (
+        select wallet_id, market_id
+        from unnest($1::uuid[], $2::text[]) as requested(wallet_id, market_id)
+      )
+      select
+        wa.wallet_id,
+        wa.market_id,
+        wa.outcome_side,
+        wa.action,
+        wa.delta_shares::text as delta_shares,
+        wa.size_usd::text as size_usd,
+        wa.price::text as price,
+        wa.occurred_at,
+        wa.created_at,
+        wa.id,
+        um.category as market_category,
+        ue.category as event_category,
+        ue.series_key,
+        ue.series_title,
+        ue.title as event_title,
+        um.title as market_title,
+        um.close_time,
+        um.expiration_time,
+        upper(coalesce(um.resolved_outcome::text, '')) as resolved_outcome,
+        um.resolved_outcome_pct::text as resolved_outcome_pct,
+        um.best_ask::text as best_ask,
+        um.best_bid::text as best_bid,
+        um.last_price::text as last_price
+      from requested_pairs requested
+      join wallet_activity_events wa
+        on wa.wallet_id = requested.wallet_id
+       and wa.market_id = requested.market_id
+      left join unified_markets um on um.id = wa.market_id
+      left join unified_events ue on ue.id = um.event_id
+      where wa.activity_type in ('delta', 'trade')
+        and wa.occurred_at <= $3::timestamptz
+        and wa.occurred_at >= $4::timestamptz
+        and ${buildSnapshotDeltaTrackableActivitySql({
+          activityAlias: "wa",
+          marketAlias: "um",
+          eventAlias: "ue",
+        })}
+      order by
+        wa.wallet_id,
+        wa.market_id,
+        wa.outcome_side,
+        wa.occurred_at asc,
+        wa.created_at asc nulls last,
+        wa.id asc
+    `,
+    [
+      pairs.map((pair) => pair.walletId),
+      pairs.map((pair) => pair.marketId),
+      asOf,
+      since,
+    ],
+  );
+  return rows;
 }
 
 async function loadWalletClassifiedMetricsMap(

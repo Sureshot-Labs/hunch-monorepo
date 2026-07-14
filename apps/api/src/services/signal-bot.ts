@@ -11,6 +11,7 @@ import {
 import type { DbQuery } from "../db.js";
 import { findTradeMarketById, isOrderable } from "./api-trading-market-repo.js";
 import { resolveAggMarketCredential } from "../lib/agg-market-credentials.js";
+import { stripSourceMarkup } from "../lib/source-markup.js";
 import { createAggMarketClient } from "./agg-market-client.js";
 import {
   getAggMarketAlternativesResponseCachedWithMetadata,
@@ -1135,6 +1136,7 @@ export function buildSignalBotMessage(input: {
   chatType?: string | null;
   cheaperAlternative?: SignalBotCheaperAlternative | null;
   deliveryTarget?: SignalBotCheaperAlternative | null;
+  messageKind?: "initial" | "research_update";
   note: SignalBotNote;
   telegramMiniAppLinkBase?: string | null;
 }): {
@@ -1205,6 +1207,9 @@ export function buildSignalBotMessage(input: {
     ? `${categoryEmoji} ${titleMarkdown}`
     : titleMarkdown;
   const lines = [
+    ...(input.messageKind === "research_update"
+      ? ["*Research update*", ""]
+      : []),
     titleLine,
     "",
     summary,
@@ -1219,6 +1224,25 @@ export function buildSignalBotMessage(input: {
   ];
 
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
+  if (input.messageKind === "research_update") {
+    if (note.eventId && marketUrl) {
+      keyboardRows.push([
+        buildSignalBotTelegramButton({
+          appBaseUrl: input.appBaseUrl,
+          chatType: input.chatType,
+          miniAppLinkBase: input.telegramMiniAppLinkBase,
+          startParam: marketStartParam,
+          text: "↗️ Open market",
+          webUrl: marketUrl,
+        }),
+      ]);
+    }
+    return {
+      keyboard:
+        keyboardRows.length > 0 ? { inline_keyboard: keyboardRows } : undefined,
+      text: lines.join("\n"),
+    };
+  }
   if (note.eventId && note.marketId && buySide) {
     const tradeTarget = input.deliveryTarget ?? {
       eventId: note.eventId,
@@ -3008,10 +3032,30 @@ async function loadSignalBotThreadContext(input: {
             as reply_to_message_id,
           prior.thread_root_note_id::text as thread_root_note_id
         from signal_bot_messages prior
-        join ai_note_targets prior_market
-          on prior_market.note_id = prior.note_id
-         and prior_market.target_kind = 'market'
-         and prior_market.is_primary = true
+        join ai_notes prior_note on prior_note.id = prior.note_id
+        join ai_notes current_note on current_note.id = $2::uuid
+        left join lateral (
+          select target.target_meta
+          from ai_note_targets target
+          where target.note_id = prior_note.id
+            and target.target_kind = 'market'
+          order by
+            target.is_primary desc,
+            target.target_rank asc,
+            target.target_id asc
+          limit 1
+        ) prior_target on true
+        left join lateral (
+          select target.target_meta
+          from ai_note_targets target
+          where target.note_id = current_note.id
+            and target.target_kind = 'market'
+          order by
+            target.is_primary desc,
+            target.target_rank asc,
+            target.target_id asc
+          limit 1
+        ) current_target on true
         left join signal_bot_messages root
           on root.chat_id = prior.chat_id
          and root.note_id = prior.thread_root_note_id
@@ -3019,11 +3063,25 @@ async function loadSignalBotThreadContext(input: {
         where prior.chat_id = $1
           and prior.note_id <> $2::uuid
           and prior.message_kind in ('initial', 'research_update')
-          and prior_market.target_id = $3
+          and coalesce(
+            prior_note.lineage->>'thesis_key',
+            'holder_research:v2:' || prior_note.source_id || ':' || upper(coalesce(
+              nullif(prior_note.lineage->>'side', ''),
+              nullif(prior_target.target_meta->>'side', ''),
+              'MIXED'
+            ))
+          ) = coalesce(
+            current_note.lineage->>'thesis_key',
+            'holder_research:v2:' || current_note.source_id || ':' || upper(coalesce(
+              nullif(current_note.lineage->>'side', ''),
+              nullif(current_target.target_meta->>'side', ''),
+              'MIXED'
+            ))
+          )
         order by prior.baseline_at asc, prior.sent_at asc
         limit 1
       `,
-      [input.chatId, input.note.id, input.note.marketId],
+      [input.chatId, input.note.id],
     );
     const row = rows[0];
     if (!row?.thread_root_note_id) return initial;
@@ -3373,22 +3431,25 @@ function buildNeutralSignalDeliveryView(input: {
   sourceSide: "NO" | "YES" | null;
   target: SignalBotCheaperAlternative | null;
 }): SignalDeliveryView {
-  const target = input.target
-    ? {
-        eventId: input.target.eventId,
-        marketId: input.target.marketId,
-        price: input.target.price,
-        side: input.target.side,
-        tradeUrl: buildSignalBotTradeUrl({
-          amountUsd: input.buyAmountUsd,
-          appBaseUrl: input.appBaseUrl,
-          eventId: input.target.eventId,
-          marketId: input.target.marketId,
-          side: input.target.side,
-        }),
-        venue: input.target.venue,
-      }
-    : null;
+  const target =
+    input.kind === "research_update"
+      ? null
+      : input.target
+        ? {
+            eventId: input.target.eventId,
+            marketId: input.target.marketId,
+            price: input.target.price,
+            side: input.target.side,
+            tradeUrl: buildSignalBotTradeUrl({
+              amountUsd: input.buyAmountUsd,
+              appBaseUrl: input.appBaseUrl,
+              eventId: input.target.eventId,
+              marketId: input.target.marketId,
+              side: input.target.side,
+            }),
+            venue: input.target.venue,
+          }
+        : null;
   return {
     contextLines: input.note.rationale ? [input.note.rationale] : [],
     credentialLines: input.note.holderCredentialBullets,
@@ -3490,9 +3551,15 @@ export async function publishSignalBotTick(input: {
         signalBotSendCooldownKey(chatId, note.id),
       );
       if (sendCooldown) break;
+      const thread = await loadSignalBotThreadContext({
+        chatId,
+        db: input.db,
+        note,
+      });
+      const isResearchUpdate = thread.messageKind === "research_update";
       const buySide = resolveSignalBotBuySide(note);
       let verifiedSourceBuyPrice: number | null = null;
-      if (buySide) {
+      if (buySide && !isResearchUpdate) {
         const priceGuard = await loadSignalBotPriceGuardBlockers({
           buySide,
           db: input.db,
@@ -3558,7 +3625,7 @@ export async function publishSignalBotTick(input: {
             "signalDelivery",
           ),
         };
-      if (buySide) {
+      if (buySide && !isResearchUpdate) {
         if (input.resolveCheaperAlternative) {
           cheaperAlternative = await input.resolveCheaperAlternative({
             buySide,
@@ -3655,13 +3722,9 @@ export async function publishSignalBotTick(input: {
         chatType: state.chatType,
         cheaperAlternative,
         deliveryTarget,
+        messageKind: thread.messageKind,
         note,
         telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
-      });
-      const thread = await loadSignalBotThreadContext({
-        chatId,
-        db: input.db,
-        note,
       });
       const deliveryView = buildNeutralSignalDeliveryView({
         appBaseUrl: input.config.appBaseUrl,
@@ -3974,8 +4037,9 @@ async function loadSignalBotFollowthroughCandidates(input: {
   if (input.chatIds.length === 0) return [];
   const statsEnabled = input.policy.types.includes("stats");
   const resolvedEnabled =
-    input.policy.types.includes("resolved_win") ||
-    input.policy.types.includes("resolved_loss");
+    input.policy.terminalInitialCutoff != null &&
+    (input.policy.types.includes("resolved_win") ||
+      input.policy.types.includes("resolved_loss"));
   if (!statsEnabled && !resolvedEnabled) return [];
   const acceptingSql = buildWalletIntelAcceptingOrdersSql({
     eventAlias: "e",
@@ -4052,6 +4116,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
             )
             or (
               $2::boolean
+              and root.sent_at >= $8::timestamptz
               and (
                 $7::boolean
                 or not exists (
@@ -4085,6 +4150,7 @@ async function loadSignalBotFollowthroughCandidates(input: {
           input.now.getTime() - FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
         ).toISOString(),
         input.mode === "preview",
+        input.policy.terminalInitialCutoff,
       ],
     );
     return rows;
@@ -4390,20 +4456,10 @@ function resolveSignalBotFollowthroughKind(input: {
   "followthrough_stats" | "resolved_loss" | "resolved_win"
 > | null {
   const { policy, stats } = input;
-  if (
-    stats.outcome === "win" &&
-    policy.types.includes("resolved_win") &&
-    signalBotFollowthroughQualityRank(stats.dataQuality) >=
-      signalBotFollowthroughQualityRank(policy.minDataQuality)
-  ) {
+  if (stats.outcome === "win" && policy.types.includes("resolved_win")) {
     return "resolved_win";
   }
-  if (
-    stats.outcome === "loss" &&
-    policy.types.includes("resolved_loss") &&
-    signalBotFollowthroughQualityRank(stats.dataQuality) >=
-      signalBotFollowthroughQualityRank(policy.minDataQuality)
-  ) {
+  if (stats.outcome === "loss" && policy.types.includes("resolved_loss")) {
     return "resolved_loss";
   }
   if (stats.state !== "open" || !policy.types.includes("stats")) return null;
@@ -4923,18 +4979,10 @@ export function buildSignalBotStatsReport(input: {
     measuredSignals > 0
       ? `💰 $${input.buyAmountUsd} each: ${formatSignedUsd(totalPnlUsd)} (${formatSignedPercent(roi)})`
       : `💰 $${input.buyAmountUsd} each: waiting for price data`;
-  const highConviction =
-    input.result.aggregates.byExecutionPriority?.high_conviction;
-  const highConvictionLine =
-    highConviction?.notes && highConviction.averageRoi != null
-      ? `🔥 High conviction: ${formatSignedPercent(highConviction.averageRoi)} avg vs all ${formatSignedPercent(overall.averageRoi)}`
-      : null;
-
   const lines = [
     `📊 Hunch signals · ${periodLabel}`,
     "",
     pnlLine,
-    ...(highConvictionLine ? [highConvictionLine] : []),
     resolvedLine,
     `📈 Marked up: ${overall.positive} · down: ${overall.negative}`,
     `⏳ Open: ${overall.open} · 🏁 Resolved: ${overall.resolved}`,
@@ -4958,13 +5006,6 @@ function buildSignalBotStatsDetailLines(
   input: { buyAmountUsd: number },
 ): string[] {
   const lines: string[] = ["Details"];
-  const convictionLines = formatStatsAggregateGroup({
-    amountUsd: input.buyAmountUsd,
-    formatter: formatStatsExecutionPriorityLabel,
-    group: result.aggregates.byExecutionPriority ?? {},
-    title: "By conviction",
-  });
-  if (convictionLines.length > 0) lines.push(...convictionLines);
   const segmentLines = formatStatsAggregateGroup({
     amountUsd: input.buyAmountUsd,
     formatter: formatMarketSegmentLabel,
@@ -5069,17 +5110,6 @@ function formatStatsActorLabel(value: string): string {
   }
 }
 
-function formatStatsExecutionPriorityLabel(value: string): string {
-  switch (value) {
-    case "high_conviction":
-      return "🔥 High conviction";
-    case "normal":
-      return "Normal";
-    default:
-      return value.replace(/_/g, " ");
-  }
-}
-
 export async function sendSignalBotStatsReport(input: {
   chatId: string;
   config: SignalBotConfig;
@@ -5089,7 +5119,8 @@ export async function sendSignalBotStatsReport(input: {
   telegram: SignalBotTelegramClient;
 }): Promise<boolean> {
   const result = await auditHolderResearchSignalPerformance(input.db, {
-    activeOnly: true,
+    deliveredInitialOnly: true,
+    activeOnly: false,
     approxEntryAfterHours: HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
     approxEntryBeforeHours:
       HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
@@ -5941,7 +5972,7 @@ function formatSignalContextLine(note: SignalBotNote): string | null {
   const external = asObject(note.modelMeta.external_research);
   const summary =
     typeof external.summary === "string"
-      ? stripMarkdownAndSources(external.summary)
+      ? stripSourceMarkup(external.summary)
       : "";
   const timingMatch = summary.match(
     /public (?:info|information|context|news) ([^.]{0,80})\./i,
@@ -5963,21 +5994,6 @@ function formatSignalContextLine(note: SignalBotNote): string | null {
   if (note.rationale)
     return `💡 ${truncateAtBoundary(note.rationale, SIGNAL_CONTEXT_MAX_CHARS)}`;
   return null;
-}
-
-function stripMarkdownAndSources(value: string): string {
-  return value
-    .replace(/\[\[?\d+\]?\]\([^)]*$/g, "")
-    .replace(/\[[^\]]+\]\(https?:\/\/[^)\s]*$/gi, "")
-    .replace(/\[\[?\d+\]?\]\([^)]+\)/g, "")
-    .replace(/\[(\d+)\]\(https?:\/\/[^)]+\)/gi, "")
-    .replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/gi, "$1")
-    .replace(/https?:\/\/\S+/gi, "")
-    .replace(/\[\[?\d+\]?\]?/g, "")
-    .replace(/[*_`~>#]/g, "")
-    .replace(/\s+([,.;:!?])/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function truncateAtBoundary(value: string, max: number): string {

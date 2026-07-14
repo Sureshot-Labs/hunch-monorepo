@@ -5168,7 +5168,7 @@ async function refreshWalletActivityHourly(
   }
 }
 
-async function refreshWalletPositionExposure(
+export async function refreshWalletPositionExposure(
   client: Queryable,
   inputs: {
     walletIds: string[];
@@ -5230,28 +5230,29 @@ async function refreshWalletPositionExposure(
       latest as (
         select
           input.wallet_id,
-          wv.venue,
+          latest_snapshot.venue,
           latest_snapshot.snapshot_at
         from wallet_set input
-        join wallet_venues wv on wv.wallet_id = input.wallet_id
         join lateral (
-          select ws.snapshot_at
+          select distinct on (ws.venue)
+            ws.venue,
+            ws.snapshot_at
           from wallet_position_snapshots ws
           where ws.wallet_id = input.wallet_id
-            and ws.venue = wv.venue
             and ws.snapshot_at <= $2::timestamptz
-          order by ws.snapshot_at desc
-          limit 1
+          order by ws.venue, ws.snapshot_at desc
         ) latest_snapshot on true
       ),
       latest_rows as (
         select
           ws.wallet_id,
+          ws.venue,
           ws.market_id,
           case
             when ws.outcome_side in ('YES', 'NO') then ws.outcome_side
             else '__OTHER__'
           end as outcome_side,
+          greatest(coalesce(ws.shares, 0), 0) as shares,
           greatest(
             coalesce(
               ws.size_usd,
@@ -5259,7 +5260,14 @@ async function refreshWalletPositionExposure(
               0
             ),
             0
-          ) as leg_notional_usd
+          ) as leg_notional_usd,
+          case
+            when ws.price is null then null
+            when ws.price < 0 then 0::numeric
+            when ws.price > 1 then least(1::numeric, ws.price / 100::numeric)
+            else least(1::numeric, ws.price)
+          end as price,
+          ws.snapshot_at
         from wallet_position_snapshots ws
         join latest l
           on l.wallet_id = ws.wallet_id
@@ -5289,6 +5297,27 @@ async function refreshWalletPositionExposure(
         from latest_rows
         group by wallet_id, market_id
       ),
+      position_rollup as (
+        select
+          wallet_id,
+          jsonb_agg(
+            jsonb_build_object(
+              'venue', venue,
+              'marketId', market_id,
+              'outcomeSide', outcome_side,
+              'shares', shares::text,
+              'sizeUsd', leg_notional_usd::text,
+              'price', case when price is null then null else price::text end,
+              'snapshotAt', snapshot_at
+            )
+            order by venue, market_id, outcome_side
+          ) filter (
+            where outcome_side in ('YES', 'NO')
+              and (shares > 0.000000001 or leg_notional_usd > 0)
+          ) as open_positions
+        from latest_rows
+        group by wallet_id
+      ),
       exposure as (
         select
           wallet_id,
@@ -5312,10 +5341,12 @@ async function refreshWalletPositionExposure(
           coalesce(ops.open_markets_count, 0) as open_markets_count,
           ops.avg_open_position_size_usd,
           ops.avg_open_entry_price,
-          ops.avg_open_entry_approx
+          ops.avg_open_entry_approx,
+          coalesce(pr.open_positions, '[]'::jsonb) as open_positions
         from wallet_set ws
         left join exposure e on e.wallet_id = ws.wallet_id
         left join open_position_stats ops on ops.wallet_id = ws.wallet_id
+        left join position_rollup pr on pr.wallet_id = ws.wallet_id
       )
       insert into wallet_position_exposure (
         wallet_id,
@@ -5329,6 +5360,8 @@ async function refreshWalletPositionExposure(
         avg_open_position_size_usd,
         avg_open_entry_price,
         avg_open_entry_approx,
+        open_positions,
+        open_positions_version,
         as_of
       )
       select
@@ -5346,6 +5379,8 @@ async function refreshWalletPositionExposure(
         avg_open_position_size_usd,
         avg_open_entry_price,
         avg_open_entry_approx,
+        open_positions,
+        1,
         $2::timestamptz
       from final_rows
       on conflict (wallet_id)
@@ -5360,12 +5395,365 @@ async function refreshWalletPositionExposure(
         avg_open_position_size_usd = excluded.avg_open_position_size_usd,
         avg_open_entry_price = excluded.avg_open_entry_price,
         avg_open_entry_approx = excluded.avg_open_entry_approx,
+        open_positions = excluded.open_positions,
+        open_positions_version = excluded.open_positions_version,
         as_of = excluded.as_of,
         updated_at = now()
     `,
       [chunk, inputs.asOf, JSON.stringify(openPositionStatsPayload)],
     );
   }
+}
+
+type WalletPositionRollupComparisonRow = {
+  wallet_id: string;
+  rollup_present: boolean;
+  as_of_matches: boolean;
+  expected_positions: string | number;
+  actual_positions: string | number;
+  membership_mismatches: string | number;
+  shares_mismatches: string | number;
+  size_usd_mismatches: string | number;
+  price_mismatches: string | number;
+  snapshot_at_mismatches: string | number;
+  expected_open_markets: string | number;
+  actual_open_markets: string | number;
+  expected_total_exposure_usd: string | number;
+  actual_total_exposure_usd: string | number;
+};
+
+export type WalletPositionRollupComparisonMismatch = {
+  walletId: string;
+  rollupPresent: boolean;
+  asOfMatches: boolean;
+  expectedPositions: number;
+  actualPositions: number;
+  membershipMismatches: number;
+  sharesMismatches: number;
+  sizeUsdMismatches: number;
+  priceMismatches: number;
+  snapshotAtMismatches: number;
+  expectedOpenMarkets: number;
+  actualOpenMarkets: number;
+  expectedTotalExposureUsd: number;
+  actualTotalExposureUsd: number;
+};
+
+export type WalletPositionRollupComparison = {
+  requestedWallets: number;
+  comparedWallets: number;
+  matchedWallets: number;
+  mismatchedWallets: number;
+  missingRollupWallets: number;
+  asOfMismatches: number;
+  membershipMismatches: number;
+  numericMismatches: number;
+  snapshotAtMismatches: number;
+  openMarketCountMismatches: number;
+  totalExposureMismatches: number;
+  mismatchSamples: WalletPositionRollupComparisonMismatch[];
+};
+
+function comparisonNumber(value: string | number | null | undefined): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export async function compareWalletPositionRollups(
+  client: Queryable,
+  inputs: {
+    walletIds: string[];
+    asOf: Date;
+    numericTolerance?: number;
+    sampleLimit?: number;
+  },
+): Promise<WalletPositionRollupComparison> {
+  const walletIds = Array.from(new Set(inputs.walletIds));
+  const numericTolerance = Math.max(0, inputs.numericTolerance ?? 1e-9);
+  const sampleLimit = Math.max(0, Math.trunc(inputs.sampleLimit ?? 10));
+  if (walletIds.length === 0) {
+    return {
+      requestedWallets: 0,
+      comparedWallets: 0,
+      matchedWallets: 0,
+      mismatchedWallets: 0,
+      missingRollupWallets: 0,
+      asOfMismatches: 0,
+      membershipMismatches: 0,
+      numericMismatches: 0,
+      snapshotAtMismatches: 0,
+      openMarketCountMismatches: 0,
+      totalExposureMismatches: 0,
+      mismatchSamples: [],
+    };
+  }
+
+  const trackableSql = buildWalletIntelTrackableMarketSql({
+    marketAlias: "market",
+    eventAlias: "event",
+    asOfSql: "$2::timestamptz",
+  });
+  const { rows } = await client.query<WalletPositionRollupComparisonRow>(
+    `
+      with wallet_set as materialized (
+        select unnest($1::uuid[]) as wallet_id
+      ),
+      latest as materialized (
+        select
+          input.wallet_id,
+          latest_snapshot.venue,
+          latest_snapshot.snapshot_at
+        from wallet_set input
+        join lateral (
+          select distinct on (snapshot.venue)
+            snapshot.venue,
+            snapshot.snapshot_at
+          from wallet_position_snapshots snapshot
+          where snapshot.wallet_id = input.wallet_id
+            and snapshot.snapshot_at <= $2::timestamptz
+          order by snapshot.venue, snapshot.snapshot_at desc
+        ) latest_snapshot on true
+      ),
+      expected_rows as materialized (
+        select
+          snapshot.wallet_id,
+          snapshot.venue,
+          snapshot.market_id,
+          upper(snapshot.outcome_side) as outcome_side,
+          greatest(coalesce(snapshot.shares, 0), 0)::numeric as shares,
+          greatest(
+            coalesce(
+              snapshot.size_usd,
+              abs(coalesce(snapshot.shares, 0) * coalesce(snapshot.price, 0)),
+              0
+            ),
+            0
+          )::numeric as size_usd,
+          case
+            when snapshot.price is null then null
+            when snapshot.price < 0 then 0::numeric
+            when snapshot.price > 1 then least(1::numeric, snapshot.price / 100::numeric)
+            else least(1::numeric, snapshot.price)
+          end as price,
+          snapshot.snapshot_at
+        from latest
+        join wallet_position_snapshots snapshot
+          on snapshot.wallet_id = latest.wallet_id
+         and snapshot.venue = latest.venue
+         and snapshot.snapshot_at = latest.snapshot_at
+        join unified_markets market on market.id = snapshot.market_id
+        left join unified_events event on event.id = market.event_id
+        where ${trackableSql}
+          and upper(snapshot.outcome_side) in ('YES', 'NO')
+          and (
+            greatest(coalesce(snapshot.shares, 0), 0) > 0.000000001
+            or greatest(
+              coalesce(
+                snapshot.size_usd,
+                abs(coalesce(snapshot.shares, 0) * coalesce(snapshot.price, 0)),
+                0
+              ),
+              0
+            ) > 0
+          )
+      ),
+      actual_rows as materialized (
+        select
+          exposure.wallet_id,
+          position.venue,
+          position."marketId" as market_id,
+          upper(position."outcomeSide") as outcome_side,
+          position.shares,
+          position."sizeUsd" as size_usd,
+          position.price,
+          position."snapshotAt" as snapshot_at
+        from wallet_position_exposure exposure
+        join wallet_set input on input.wallet_id = exposure.wallet_id
+        cross join lateral jsonb_to_recordset(exposure.open_positions) as position(
+          venue text,
+          "marketId" text,
+          "outcomeSide" text,
+          shares numeric,
+          "sizeUsd" numeric,
+          price numeric,
+          "snapshotAt" timestamptz
+        )
+        where exposure.open_positions_version = 1
+          and jsonb_typeof(exposure.open_positions) = 'array'
+      ),
+      joined_rows as materialized (
+        select
+          coalesce(expected.wallet_id, actual.wallet_id) as wallet_id,
+          expected.venue as expected_venue,
+          expected.market_id as expected_market_id,
+          expected.outcome_side as expected_outcome_side,
+          expected.shares as expected_shares,
+          expected.size_usd as expected_size_usd,
+          expected.price as expected_price,
+          expected.snapshot_at as expected_snapshot_at,
+          actual.venue as actual_venue,
+          actual.market_id as actual_market_id,
+          actual.outcome_side as actual_outcome_side,
+          actual.shares as actual_shares,
+          actual.size_usd as actual_size_usd,
+          actual.price as actual_price,
+          actual.snapshot_at as actual_snapshot_at
+        from expected_rows expected
+        full outer join actual_rows actual
+          on actual.wallet_id = expected.wallet_id
+         and actual.venue = expected.venue
+         and actual.market_id = expected.market_id
+         and actual.outcome_side = expected.outcome_side
+      ),
+      per_wallet as (
+        select
+          wallet_id,
+          count(*) filter (where expected_market_id is not null) as expected_positions,
+          count(*) filter (where actual_market_id is not null) as actual_positions,
+          count(*) filter (
+            where expected_market_id is null or actual_market_id is null
+          ) as membership_mismatches,
+          count(*) filter (
+            where expected_market_id is not null
+              and actual_market_id is not null
+              and abs(expected_shares - actual_shares) > $3::numeric
+          ) as shares_mismatches,
+          count(*) filter (
+            where expected_market_id is not null
+              and actual_market_id is not null
+              and abs(expected_size_usd - actual_size_usd) > $3::numeric
+          ) as size_usd_mismatches,
+          count(*) filter (
+            where expected_market_id is not null
+              and actual_market_id is not null
+              and (
+                (expected_price is null) <> (actual_price is null)
+                or (
+                  expected_price is not null
+                  and actual_price is not null
+                  and abs(expected_price - actual_price) > $3::numeric
+                )
+              )
+          ) as price_mismatches,
+          count(*) filter (
+            where expected_market_id is not null
+              and actual_market_id is not null
+              and expected_snapshot_at is distinct from actual_snapshot_at
+          ) as snapshot_at_mismatches,
+          count(distinct (expected_venue, expected_market_id)) filter (
+            where expected_market_id is not null
+          ) as expected_open_markets,
+          count(distinct (actual_venue, actual_market_id)) filter (
+            where actual_market_id is not null
+          ) as actual_open_markets,
+          coalesce(sum(expected_size_usd), 0) as expected_total_exposure_usd,
+          coalesce(sum(actual_size_usd), 0) as actual_total_exposure_usd
+        from joined_rows
+        group by wallet_id
+      )
+      select
+        input.wallet_id::text as wallet_id,
+        (
+          exposure.wallet_id is not null
+          and exposure.open_positions_version = 1
+          and jsonb_typeof(exposure.open_positions) = 'array'
+        ) as rollup_present,
+        coalesce(exposure.as_of = $2::timestamptz, false) as as_of_matches,
+        coalesce(compared.expected_positions, 0)::text as expected_positions,
+        coalesce(compared.actual_positions, 0)::text as actual_positions,
+        coalesce(compared.membership_mismatches, 0)::text as membership_mismatches,
+        coalesce(compared.shares_mismatches, 0)::text as shares_mismatches,
+        coalesce(compared.size_usd_mismatches, 0)::text as size_usd_mismatches,
+        coalesce(compared.price_mismatches, 0)::text as price_mismatches,
+        coalesce(compared.snapshot_at_mismatches, 0)::text as snapshot_at_mismatches,
+        coalesce(compared.expected_open_markets, 0)::text as expected_open_markets,
+        coalesce(compared.actual_open_markets, 0)::text as actual_open_markets,
+        coalesce(compared.expected_total_exposure_usd, 0)::text as expected_total_exposure_usd,
+        coalesce(compared.actual_total_exposure_usd, 0)::text as actual_total_exposure_usd
+      from wallet_set input
+      left join wallet_position_exposure exposure
+        on exposure.wallet_id = input.wallet_id
+      left join per_wallet compared on compared.wallet_id = input.wallet_id
+      order by input.wallet_id
+    `,
+    [walletIds, inputs.asOf, numericTolerance],
+  );
+
+  let matchedWallets = 0;
+  let missingRollupWallets = 0;
+  let asOfMismatches = 0;
+  let membershipMismatches = 0;
+  let numericMismatches = 0;
+  let snapshotAtMismatches = 0;
+  let openMarketCountMismatches = 0;
+  let totalExposureMismatches = 0;
+  const mismatchSamples: WalletPositionRollupComparisonMismatch[] = [];
+  for (const row of rows) {
+    const mismatch: WalletPositionRollupComparisonMismatch = {
+      walletId: row.wallet_id,
+      rollupPresent: row.rollup_present,
+      asOfMatches: row.as_of_matches,
+      expectedPositions: comparisonNumber(row.expected_positions),
+      actualPositions: comparisonNumber(row.actual_positions),
+      membershipMismatches: comparisonNumber(row.membership_mismatches),
+      sharesMismatches: comparisonNumber(row.shares_mismatches),
+      sizeUsdMismatches: comparisonNumber(row.size_usd_mismatches),
+      priceMismatches: comparisonNumber(row.price_mismatches),
+      snapshotAtMismatches: comparisonNumber(row.snapshot_at_mismatches),
+      expectedOpenMarkets: comparisonNumber(row.expected_open_markets),
+      actualOpenMarkets: comparisonNumber(row.actual_open_markets),
+      expectedTotalExposureUsd: comparisonNumber(
+        row.expected_total_exposure_usd,
+      ),
+      actualTotalExposureUsd: comparisonNumber(row.actual_total_exposure_usd),
+    };
+    const numericMismatchCount =
+      mismatch.sharesMismatches +
+      mismatch.sizeUsdMismatches +
+      mismatch.priceMismatches;
+    const openMarketMismatch =
+      mismatch.expectedOpenMarkets !== mismatch.actualOpenMarkets;
+    const totalExposureMismatch =
+      Math.abs(
+        mismatch.expectedTotalExposureUsd - mismatch.actualTotalExposureUsd,
+      ) > numericTolerance;
+    const matches =
+      mismatch.rollupPresent &&
+      mismatch.asOfMatches &&
+      mismatch.expectedPositions === mismatch.actualPositions &&
+      mismatch.membershipMismatches === 0 &&
+      numericMismatchCount === 0 &&
+      mismatch.snapshotAtMismatches === 0 &&
+      !openMarketMismatch &&
+      !totalExposureMismatch;
+    if (matches) {
+      matchedWallets += 1;
+      continue;
+    }
+    if (!mismatch.rollupPresent) missingRollupWallets += 1;
+    if (!mismatch.asOfMatches) asOfMismatches += 1;
+    membershipMismatches += mismatch.membershipMismatches;
+    numericMismatches += numericMismatchCount;
+    snapshotAtMismatches += mismatch.snapshotAtMismatches;
+    if (openMarketMismatch) openMarketCountMismatches += 1;
+    if (totalExposureMismatch) totalExposureMismatches += 1;
+    if (mismatchSamples.length < sampleLimit) mismatchSamples.push(mismatch);
+  }
+
+  return {
+    requestedWallets: walletIds.length,
+    comparedWallets: rows.length,
+    matchedWallets,
+    mismatchedWallets: rows.length - matchedWallets,
+    missingRollupWallets,
+    asOfMismatches,
+    membershipMismatches,
+    numericMismatches,
+    snapshotAtMismatches,
+    openMarketCountMismatches,
+    totalExposureMismatches,
+    mismatchSamples,
+  };
 }
 
 async function refreshWalletInferredOutcomes(

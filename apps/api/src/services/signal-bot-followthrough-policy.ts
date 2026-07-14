@@ -17,10 +17,27 @@ export type SignalBotFollowthroughPolicy = {
   minPriceMoveCents: number;
   requirePositiveFlowForStats: boolean;
   minDataQuality: SignalBotFollowthroughDataQuality;
+  terminalInitialCutoff: string | null;
 };
 
 export const DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES: SignalBotFollowthroughType[] =
   ["stats", "resolved_win", "resolved_loss"];
+
+function normalizeSignalBotFollowthroughTypes(
+  input: SignalBotFollowthroughType[],
+): SignalBotFollowthroughType[] {
+  const types = Array.from(new Set(input.filter(isSignalBotFollowthroughType)));
+  if (types.length === 0) return DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES;
+
+  // Terminal outcomes are an atomic track-record feature. Legacy runtime
+  // policies commonly enabled only resolved_win; preserving that shape would
+  // selectively publish winners and silently suppress losses.
+  if (types.includes("resolved_win") || types.includes("resolved_loss")) {
+    if (!types.includes("resolved_win")) types.push("resolved_win");
+    if (!types.includes("resolved_loss")) types.push("resolved_loss");
+  }
+  return types;
+}
 
 function isSignalBotFollowthroughType(
   value: string,
@@ -81,6 +98,12 @@ function toNumber(value: unknown): number | null {
   return null;
 }
 
+function parseIsoDate(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -90,13 +113,9 @@ function asObject(value: unknown): Record<string, unknown> {
 export function normalizeSignalBotFollowthroughPolicy(
   policy: SignalBotFollowthroughPolicy,
 ): SignalBotFollowthroughPolicy {
-  const types = policy.types.filter(isSignalBotFollowthroughType);
   return {
     enabled: Boolean(policy.enabled),
-    types:
-      types.length > 0
-        ? Array.from(new Set(types))
-        : DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
+    types: normalizeSignalBotFollowthroughTypes(policy.types),
     minAgeHours: clampSignalBotNumber(
       Math.trunc(policy.minAgeHours),
       1,
@@ -115,6 +134,7 @@ export function normalizeSignalBotFollowthroughPolicy(
       policy.minDataQuality,
       "any",
     ),
+    terminalInitialCutoff: parseIsoDate(policy.terminalInitialCutoff),
   };
 }
 
@@ -154,6 +174,9 @@ export function defaultSignalBotFollowthroughPolicy(
     minDataQuality: parseSignalBotFollowthroughDataQuality(
       env.HUNCH_SIGNAL_BOT_FOLLOWTHROUGH_MIN_DATA_QUALITY,
       "any",
+    ),
+    terminalInitialCutoff: parseIsoDate(
+      env.HUNCH_SIGNAL_BOT_TERMINAL_INITIAL_CUTOFF,
     ),
   });
 }
@@ -195,6 +218,10 @@ export function mergeSignalBotFollowthroughPolicy(
       raw.signalBotFollowthroughMinDataQuality,
       defaults.minDataQuality,
     ),
+    terminalInitialCutoff:
+      "signalBotTerminalInitialCutoff" in raw
+        ? parseIsoDate(raw.signalBotTerminalInitialCutoff)
+        : defaults.terminalInitialCutoff,
   });
 }
 
