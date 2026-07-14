@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Interface } from "ethers";
 
 import { isRetryableHttpStatus, parseRetryAfterMs } from "@hunch/shared";
@@ -662,6 +663,56 @@ const tests: TestCase[] = [
         () => resolveWalletTagId(missingDb, "whale"),
         /Missing wallet_tags\.slug='whale' record/,
       );
+    },
+  },
+  {
+    name: "wallet selector migration serializes canonical refresh without changing projection",
+    run: () => {
+      const previousMigration = readFileSync(
+        new URL(
+          "../../../packages/db/migrations/0160_wallet_resolved_edge_metrics.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const lockMigration = readFileSync(
+        new URL(
+          "../../../packages/db/migrations/0176_wallet_intel_selector_snapshot_lock.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const functionStart =
+        "CREATE OR REPLACE FUNCTION refresh_wallet_intel_selector_snapshot()";
+      const jobStart =
+        "CREATE OR REPLACE FUNCTION refresh_wallet_intel_selector_snapshot_job(";
+      const previousCore = previousMigration.slice(
+        previousMigration.indexOf(functionStart),
+      );
+      const currentCore = lockMigration.slice(
+        lockMigration.indexOf(functionStart),
+        lockMigration.indexOf(jobStart),
+      );
+      const currentProjection = currentCore.replace(
+        / {2}-- Serialize selector writers[^\n]*\n {2}SELECT pg_advisory_xact_lock\(4207, 1\);\n\n/,
+        "",
+      );
+      assert.equal(currentProjection.trim(), previousCore.trim());
+
+      const currentLockIndex = currentCore.indexOf(
+        "SELECT pg_advisory_xact_lock(4207, 1)",
+      );
+      assert.ok(currentLockIndex >= 0);
+      assert.ok(currentLockIndex < currentCore.indexOf("WITH latest_metrics"));
+
+      const job = lockMigration.slice(lockMigration.indexOf(jobStart));
+      assert.match(job, /pg_try_advisory_xact_lock\(4207, 1\)/);
+      assert.match(job, /wallet intel refresh active/);
+      assert.ok(
+        job.indexOf("pg_try_advisory_xact_lock") <
+          job.indexOf("refresh_wallet_intel_selector_snapshot()"),
+      );
+      assert.doesNotMatch(lockMigration, /add_job|alter_job/i);
     },
   },
   {
