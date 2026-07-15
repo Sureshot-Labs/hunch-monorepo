@@ -43,6 +43,7 @@ import {
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchCandidatePromptJsonV2,
   buildHolderResearchCandidatesFromMarket,
+  buildHolderResearchObservationPool,
   buildHolderResearchExternalSearchInput,
   buildHolderResearchExternalSearchInputV2,
   buildHolderResearchCandidateActionability,
@@ -54,6 +55,7 @@ import {
   diffHolderResearchDecisionSnapshots,
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
+  enrichHolderResearchFirstObservedActivity,
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
@@ -67,6 +69,8 @@ import {
 import {
   buildHolderResearchObservationCalibrationReport,
   buildHolderResearchObservationRankingTelemetryV2,
+  loadHolderResearchObservationCalibration,
+  loadHolderResearchSupplyHealth,
   persistHolderResearchCandidateObservations,
   summarizeHolderResearchSupply,
 } from "./services/holder-research-observations.js";
@@ -379,6 +383,118 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(nullable.selectedSide?.bestZ30d, null);
       assert.equal(nullable.selectedSide?.resolvedSamples30d, null);
       assert.equal(nullable.selectedSide?.exposureWeightedEdge30d, null);
+    },
+  },
+  {
+    name: "V2 observation pool is pre-quota, bounded, deduplicated, and keeps required candidates",
+    run: () => {
+      const p = policy();
+      const base = sharpMinorityCandidate(p);
+      const candidates = Array.from({ length: 5 }, (_, index) => ({
+        ...base,
+        key: `candidate-${index + 1}`,
+        thesisKey: `holder_research:v2:market-${index + 1}:NO`,
+        score: 0.95 - index * 0.1,
+        cooldownUntil:
+          index === 4 ? "2027-01-01T00:00:00.000Z" : base.cooldownUntil,
+        market: {
+          ...base.market,
+          marketId: `market-${index + 1}`,
+          eventId: `event-${index + 1}`,
+        },
+      }));
+      const highestRanked = candidates[0];
+      const required = candidates[4];
+      assert.ok(highestRanked);
+      assert.ok(required);
+      const duplicateThesis = {
+        ...highestRanked,
+        key: "candidate-duplicate",
+        score: 0.2,
+      };
+
+      const pool = buildHolderResearchObservationPool({
+        candidates: [...candidates, duplicateThesis],
+        requiredCandidates: [required],
+        policy: p,
+        limit: 3,
+      });
+
+      assert.equal(pool.length, 3);
+      assert.deepEqual(
+        pool.map((entry) => entry.candidateRank),
+        [1, 2, 5],
+      );
+      assert.ok(
+        pool.some((entry) => entry.candidate.thesisKey === required.thesisKey),
+      );
+      assert.equal(
+        new Set(pool.map((entry) => entry.candidate.thesisKey)).size,
+        pool.length,
+      );
+    },
+  },
+  {
+    name: "V2 first activity enrichment uses exact hourly wallet-market-side pairs",
+    run: async () => {
+      const p = policy();
+      const candidate = sharpMinorityCandidate(p);
+      let capturedSql = "";
+      let capturedParams: readonly unknown[] | undefined;
+      const firstActivityAt = "2026-01-01T12:00:00.000Z";
+      const primaryHolder = candidate.market.holders[0];
+      assert.ok(primaryHolder);
+      const db = {
+        query: async (sql: string, params?: readonly unknown[]) => {
+          capturedSql = sql;
+          capturedParams = params;
+          return {
+            rows: [
+              {
+                wallet_id: primaryHolder.walletId,
+                market_id: candidate.market.marketId,
+                outcome_side: candidate.side,
+                first_activity_at: firstActivityAt,
+              },
+            ],
+          };
+        },
+      } as unknown as import("pg").PoolClient;
+      const observedAt = new Date("2026-01-02T12:00:00.000Z");
+
+      const [enriched] = await enrichHolderResearchFirstObservedActivity(
+        db,
+        [candidate],
+        p,
+        observedAt,
+      );
+
+      assert.ok(enriched);
+      assert.equal(enriched?.market.firstObservedActivityAt, firstActivityAt);
+      const features = buildHolderResearchDecisionFeaturesV2(
+        enriched,
+        p,
+        observedAt,
+      );
+      assert.equal(features.timing.firstActivityAt, firstActivityAt);
+      assert.equal(features.timing.firstActivityAgeHours, 24);
+      assert.match(
+        capturedSql,
+        /unnest\(\$1::uuid\[\], \$2::text\[\], \$3::text\[\]\)/i,
+      );
+      assert.match(capturedSql, /activity\.wallet_id = requested\.wallet_id/i);
+      assert.match(capturedSql, /activity\.market_id = requested\.market_id/i);
+      assert.match(
+        capturedSql,
+        /activity\.outcome_side = requested\.outcome_side/i,
+      );
+      assert.match(capturedSql, /interval '30 days'/i);
+      assert.deepEqual(capturedParams, [
+        [primaryHolder.walletId],
+        [candidate.market.marketId],
+        [candidate.side],
+        observedAt.toISOString(),
+      ]);
     },
   },
   {
@@ -892,10 +1008,17 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const written = await persistHolderResearchCandidateObservations(db, {
         runId: "holder_research:test",
         observedAt: new Date("2026-01-02T00:00:00.000Z"),
-        candidates: [candidate],
+        observations: [{ candidate, candidateRank: 7 }],
         policy: p,
       });
       assert.equal(written.written, 1);
+      const [observation] = payload as Array<{
+        candidate_rank: number;
+        shadow_rank: number;
+      }>;
+      assert.ok(observation);
+      assert.equal(observation.candidate_rank, 7);
+      assert.equal(observation.shadow_rank, 1);
       const serialized = JSON.stringify(payload);
       assert.doesNotMatch(serialized, /walletId|0xyes|0xno|winRate30d/);
       assert.match(serialized, /shadow_rank/);
@@ -923,6 +1046,38 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       ]);
       assert.equal(unhealthy.consecutiveZeroDays, 3);
       assert.equal(unhealthy.healthy, false);
+    },
+  },
+  {
+    name: "V2 supply and calibration require a fresh checked price",
+    run: async () => {
+      const queries: string[] = [];
+      const db = {
+        query: async (sql: string) => {
+          queries.push(sql);
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+
+      await loadHolderResearchSupplyHealth(
+        db,
+        new Date("2026-01-07T00:00:00.000Z"),
+      );
+      await loadHolderResearchObservationCalibration(db);
+
+      assert.equal(queries.length, 2);
+      const supplyQuery = queries[0];
+      const calibrationQuery = queries[1];
+      assert.ok(supplyQuery);
+      assert.ok(calibrationQuery);
+      assert.match(
+        supplyQuery,
+        /decision_features #>> '\{market,priceCheckedAt\}'[^\n]+is not null/i,
+      );
+      assert.match(
+        calibrationQuery,
+        /decision_features #>> '\{market,priceCheckedAt\}'[\s\S]+is not null/i,
+      );
     },
   },
   {

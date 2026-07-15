@@ -188,6 +188,7 @@ export type HolderResearchMarketInput = {
   holders: HolderResearchHolder[];
   recentActivityUsd: number;
   recentActivityAt: string | null;
+  firstObservedActivityAt?: string | null;
   crossMarketWalletCount: number;
   previousNote: HolderResearchPreviousNote | null;
 };
@@ -419,6 +420,11 @@ export type HolderResearchSelectionResult = {
       | "support_only"
       | "actionability";
   }>;
+};
+
+export type HolderResearchObservationCandidate = {
+  candidate: HolderResearchCandidate;
+  candidateRank: number;
 };
 
 export type HolderResearchPersistDecision = {
@@ -2101,11 +2107,15 @@ export function buildHolderResearchDecisionFeaturesV2(
         .slice(0, 3),
     },
     timing: {
-      // Historical position snapshots do not prove the first trade time.
-      firstActivityAt: null,
+      // This is the earliest exact-pair activity observed in the bounded
+      // hourly window, not proof of the holder's lifetime first trade.
+      firstActivityAt: candidate.market.firstObservedActivityAt ?? null,
       lastActivityAt: candidate.market.recentActivityAt,
       positionSnapshotAt,
-      firstActivityAgeHours: null,
+      firstActivityAgeHours: ageHoursFromIso(
+        candidate.market.firstObservedActivityAt ?? null,
+        now,
+      ),
       lastActivityAgeHours: ageHoursFromIso(
         candidate.market.recentActivityAt,
         now,
@@ -3085,6 +3095,63 @@ function compareHolderResearchCandidates(
     if (priorityDelta !== 0) return priorityDelta;
     return b.score - a.score;
   };
+}
+
+export function buildHolderResearchObservationPool(input: {
+  candidates: HolderResearchCandidate[];
+  requiredCandidates: HolderResearchCandidate[];
+  policy: HolderResearchPolicy;
+  limit: number;
+}): HolderResearchObservationCandidate[] {
+  const rankedByThesis = new Map<string, HolderResearchCandidate>();
+  const rankedCandidates = [...input.candidates]
+    .filter(
+      (candidate) =>
+        candidate.side != null &&
+        !buildHolderResearchCandidateActionability(candidate, input.policy)
+          .supportOnly,
+    )
+    .sort(compareHolderResearchCandidates(input.policy));
+  for (const candidate of rankedCandidates) {
+    if (!rankedByThesis.has(candidate.thesisKey)) {
+      rankedByThesis.set(candidate.thesisKey, candidate);
+    }
+  }
+
+  const ranked = Array.from(rankedByThesis.values());
+  const rankByThesis = new Map(
+    ranked.map((candidate, index) => [candidate.thesisKey, index + 1]),
+  );
+  const requiredByThesis = new Map<string, HolderResearchCandidate>();
+  for (const candidate of input.requiredCandidates) {
+    if (
+      candidate.side == null ||
+      buildHolderResearchCandidateActionability(candidate, input.policy)
+        .supportOnly ||
+      !rankByThesis.has(candidate.thesisKey)
+    ) {
+      continue;
+    }
+    requiredByThesis.set(candidate.thesisKey, candidate);
+  }
+
+  const limit = Math.max(0, Math.trunc(input.limit));
+  if (limit === 0) return [];
+  const selected = new Map<string, HolderResearchCandidate>(requiredByThesis);
+  for (const candidate of ranked) {
+    if (selected.size >= limit) break;
+    if (!selected.has(candidate.thesisKey)) {
+      selected.set(candidate.thesisKey, candidate);
+    }
+  }
+
+  return Array.from(selected.values())
+    .map((candidate) => ({
+      candidate,
+      candidateRank: rankByThesis.get(candidate.thesisKey) ?? ranked.length + 1,
+    }))
+    .sort((left, right) => left.candidateRank - right.candidateRank)
+    .slice(0, limit);
 }
 
 function buildSupportOnlyEvidence(
@@ -4191,6 +4258,120 @@ export async function loadHolderResearchCandidates(
     await attachHolderResearchCandidateHistory(client, candidates, policy),
     policy,
   );
+}
+
+type HolderResearchFirstObservedActivityRow = {
+  wallet_id: string;
+  market_id: string;
+  outcome_side: HolderResearchSideKey;
+  first_activity_at: Date | string | null;
+};
+
+export async function enrichHolderResearchFirstObservedActivity(
+  client: Queryable,
+  candidates: HolderResearchCandidate[],
+  policy: HolderResearchPolicy,
+  observedAt: Date = new Date(),
+): Promise<HolderResearchCandidate[]> {
+  if (candidates.length === 0) return candidates;
+
+  const pairByKey = new Map<
+    string,
+    { marketId: string; outcomeSide: HolderResearchSideKey; walletId: string }
+  >();
+  for (const candidate of candidates) {
+    if (!candidate.side) continue;
+    for (const holder of candidate.market.holders) {
+      if (
+        holder.side !== candidate.side ||
+        !isSharpHolder(holder, policy) ||
+        holder.positionUsd <= 0
+      ) {
+        continue;
+      }
+      const key = `${holder.walletId}:${candidate.market.marketId}:${holder.side}`;
+      pairByKey.set(key, {
+        walletId: holder.walletId,
+        marketId: candidate.market.marketId,
+        outcomeSide: holder.side,
+      });
+    }
+  }
+  const pairs = Array.from(pairByKey.values());
+  if (pairs.length === 0) return candidates;
+
+  const { rows } = await client.query<HolderResearchFirstObservedActivityRow>(
+    `
+      with requested_pairs as materialized (
+        select wallet_id, market_id, outcome_side
+        from unnest($1::uuid[], $2::text[], $3::text[])
+          as requested(wallet_id, market_id, outcome_side)
+      )
+      select
+        requested.wallet_id::text as wallet_id,
+        requested.market_id,
+        requested.outcome_side,
+        min(coalesce(activity.last_occurred_at, activity.hour_bucket))
+          as first_activity_at
+      from requested_pairs requested
+      join wallet_activity_hourly activity
+        on activity.wallet_id = requested.wallet_id
+       and activity.market_id = requested.market_id
+       and activity.outcome_side = requested.outcome_side
+      where activity.activity_type in ('delta', 'trade')
+        and activity.hour_bucket >= $4::timestamptz - interval '30 days'
+        and activity.hour_bucket <= $4::timestamptz
+      group by
+        requested.wallet_id,
+        requested.market_id,
+        requested.outcome_side
+    `,
+    [
+      pairs.map((pair) => pair.walletId),
+      pairs.map((pair) => pair.marketId),
+      pairs.map((pair) => pair.outcomeSide),
+      observedAt.toISOString(),
+    ],
+  );
+  const firstActivityByPair = new Map(
+    rows.flatMap((row) => {
+      const firstActivityAt = toIso(row.first_activity_at);
+      return firstActivityAt
+        ? [
+            [
+              `${row.wallet_id}:${row.market_id}:${row.outcome_side}`,
+              firstActivityAt,
+            ] as const,
+          ]
+        : [];
+    }),
+  );
+
+  return candidates.map((candidate) => {
+    if (!candidate.side) return candidate;
+    const firstObservedActivityAt = candidate.market.holders
+      .filter(
+        (holder) =>
+          holder.side === candidate.side &&
+          holder.positionUsd > 0 &&
+          isSharpHolder(holder, policy),
+      )
+      .map((holder) =>
+        firstActivityByPair.get(
+          `${holder.walletId}:${candidate.market.marketId}:${holder.side}`,
+        ),
+      )
+      .filter((value): value is string => value != null)
+      .sort()[0];
+    if (!firstObservedActivityAt) return candidate;
+    return {
+      ...candidate,
+      market: {
+        ...candidate.market,
+        firstObservedActivityAt,
+      },
+    };
+  });
 }
 
 export async function enrichHolderResearchLivePositions(

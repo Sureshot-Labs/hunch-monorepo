@@ -41,7 +41,7 @@ import {
 } from "./wallet-metrics-constants.js";
 import { extractWalletIdentityDisplayFields } from "./wallet-identity-names.js";
 
-const PROFILE_VERSION = "v12";
+const PROFILE_VERSION = "v13";
 const MAX_TRACKER_SURFACE_WALLETS = 100;
 const CATEGORY_VALUES = [
   "politics",
@@ -153,10 +153,6 @@ type WhaleProfileInput = {
     weighted_avg_held_odds: number | null;
     high_probability_exposure_share: number | null;
     low_probability_exposure_share: number | null;
-  };
-  inferred: {
-    win_rate: number | null;
-    resolved_count: number | null;
   };
   exposure: {
     gross_usd: number | null;
@@ -322,13 +318,9 @@ type WhaleRow = {
   net_imbalance_usd: string | null;
   hedge_ratio: string | null;
   two_sided_markets: number | null;
-  whale_score: string | null;
-  signal_abs_usd: string | null;
   last_activity_at: Date | null;
   has_trade_activity: boolean | null;
   has_holder_activity: boolean | null;
-  inferred_wins: number | null;
-  inferred_total: number | null;
   rank_tracker_recent: number | string | null;
   rank_tracker_pnl: number | string | null;
   rank_tracker_win_rate: number | string | null;
@@ -1630,20 +1622,16 @@ export async function loadWhaleSelectionRows(
   return result.rows;
 }
 
-async function loadWhaleRowsByIds(
-  client: PoolClient,
+export async function loadWhaleRowsByIds(
+  client: DbQuery,
   params: {
     walletIds: string[];
     windowDays: number;
-    signalsWindowHours: number;
   },
 ): Promise<Map<string, Omit<WhaleRow, keyof WhaleSelectableRow>>> {
   if (params.walletIds.length === 0) return new Map();
   const result = await client.query<
-    Omit<WhaleRow, keyof WhaleSelectableRow> & {
-      id: string;
-      last_activity_at: Date | null;
-    }
+    Omit<WhaleRow, keyof WhaleSelectableRow> & { id: string }
   >(
     `
       with selected_wallets as (
@@ -1661,80 +1649,39 @@ async function loadWhaleRowsByIds(
         (w.metadata->>'kind' = 'safe') as is_safe,
         owner.owner_address,
         owner.owner_label,
-        metrics.metrics_volume,
-        metrics.metrics_pnl,
-        metrics.metrics_trades,
-        metrics.metrics_roi,
-        metrics.metrics_win_rate,
-        metrics.metrics_resolved_edge_sample_count,
-        metrics.metrics_resolved_actual_win_rate,
-        metrics.metrics_resolved_expected_win_rate,
-        metrics.metrics_resolved_win_rate_edge,
-        metrics.metrics_resolved_edge_z_score,
-        metrics.metrics_resolved_brier_score,
-        metrics.metrics_resolved_stake_weighted_edge,
-        metrics.metrics_resolved_stake_usd,
-        metrics.metrics_last_trade_at,
-        exposure.exposure_usd,
-        exposure.hedged_notional_usd,
-        exposure.net_imbalance_usd,
-        exposure.hedge_ratio,
-        exposure.two_sided_markets,
-        coalesce(activity.last_activity_at, metrics.metrics_last_trade_at, w.last_seen_at) as last_activity_at,
-        activity.has_trade_activity,
-        activity.has_holder_activity,
-        signal.signal_abs_usd,
-        case
-          when w.chain = 'solana'
-            then coalesce(nullif(metrics.metrics_volume, 0), exposure.exposure_usd, 0)
-          else coalesce(metrics.metrics_volume, 0)
-        end as whale_score,
-        inferred.wins as inferred_wins,
-        inferred.total as inferred_total
+        selector.metrics_volume_30d as metrics_volume,
+        selector.metrics_pnl_30d as metrics_pnl,
+        selector.metrics_trades_30d as metrics_trades,
+        selector.metrics_roi_30d as metrics_roi,
+        selector.metrics_win_rate_30d as metrics_win_rate,
+        selector.metrics_resolved_edge_sample_count_30d as metrics_resolved_edge_sample_count,
+        selector.metrics_resolved_actual_win_rate_30d as metrics_resolved_actual_win_rate,
+        selector.metrics_resolved_expected_win_rate_30d as metrics_resolved_expected_win_rate,
+        selector.metrics_resolved_win_rate_edge_30d as metrics_resolved_win_rate_edge,
+        selector.metrics_resolved_edge_z_score_30d as metrics_resolved_edge_z_score,
+        selector.metrics_resolved_brier_score_30d as metrics_resolved_brier_score,
+        selector.metrics_resolved_stake_weighted_edge_30d as metrics_resolved_stake_weighted_edge,
+        selector.metrics_resolved_stake_usd_30d as metrics_resolved_stake_usd,
+        selector.metrics_last_trade_at_30d as metrics_last_trade_at,
+        selector.exposure_usd,
+        selector.hedged_notional_usd,
+        selector.net_imbalance_usd,
+        selector.hedge_ratio,
+        selector.two_sided_markets,
+        coalesce(
+          selector.last_trade_activity_at >=
+            now() - ($2::text || ' days')::interval,
+          false
+        ) as has_trade_activity,
+        coalesce(
+          selector.last_holder_activity_at >=
+            now() - ($2::text || ' days')::interval,
+          false
+        ) as has_holder_activity
       from selected_wallets sw
       join wallets w on w.id = sw.id
-      left join lateral (
-        select
-          s.volume_usd as metrics_volume,
-          s.pnl_usd as metrics_pnl,
-          s.trades_count as metrics_trades,
-          s.roi as metrics_roi,
-          s.win_rate as metrics_win_rate,
-          s.resolved_edge_sample_count as metrics_resolved_edge_sample_count,
-          s.resolved_actual_win_rate as metrics_resolved_actual_win_rate,
-          s.resolved_expected_win_rate as metrics_resolved_expected_win_rate,
-          s.resolved_win_rate_edge as metrics_resolved_win_rate_edge,
-          s.resolved_edge_z_score as metrics_resolved_edge_z_score,
-          s.resolved_brier_score as metrics_resolved_brier_score,
-          s.resolved_stake_weighted_edge as metrics_resolved_stake_weighted_edge,
-          s.resolved_stake_usd as metrics_resolved_stake_usd,
-          s.last_trade_at as metrics_last_trade_at
-        from wallet_metrics_snapshots s
-        where s.wallet_id = w.id
-          and s.period = '30d'
-          and ${aggregateWalletMetricsFilterSql("s")}
-        order by s.as_of desc, ${aggregateWalletMetricsPreferenceSql("s")}
-        limit 1
-      ) metrics on true
-      left join lateral (
-        select
-          max(wa.occurred_at) as last_activity_at,
-          bool_or(wa.activity_type in ('delta', 'trade')) as has_trade_activity,
-          bool_or(wa.activity_type = 'holder') as has_holder_activity
-        from wallet_activity_events wa
-        where wa.wallet_id = w.id
-          and wa.activity_type in ('delta', 'trade', 'holder')
-          and wa.occurred_at >= now() - ($2::text || ' days')::interval
-      ) activity on true
-      left join lateral (
-        select
-          max(coalesce(wah.max_abs_delta_usd, 0)) as signal_abs_usd
-        from wallet_activity_hourly wah
-        where wah.wallet_id = w.id
-          and wah.activity_type in ('delta', 'trade')
-          and wah.hour_bucket >= now() - ($3::text || ' hours')::interval
-      ) signal on true
-      left join wallet_position_exposure exposure on exposure.wallet_id = w.id
+      left join wallet_intel_selector_snapshot selector
+        on selector.wallet_id = w.id
       left join lateral (
         select
           w2.address as owner_address,
@@ -1787,59 +1734,14 @@ async function loadWhaleRowsByIds(
             safe_owner.owner_label
           ) as owner_label
       ) owner on true
-      left join lateral (
-        with latest as (
-          select distinct on (ws.market_id, ws.outcome_side)
-            ws.market_id,
-            ws.outcome_side,
-            ws.shares
-          from wallet_position_snapshots ws
-          where ws.wallet_id = w.id
-            and ws.shares > 0
-          order by ws.market_id, ws.outcome_side, ws.snapshot_at desc
-        ),
-        agg as (
-          select
-            market_id,
-            sum(case when outcome_side = 'YES' then shares else 0 end) as yes_shares,
-            sum(case when outcome_side = 'NO' then shares else 0 end) as no_shares
-          from latest
-          group by market_id
-        ),
-        resolved as (
-          select
-            agg.market_id,
-            agg.yes_shares,
-            agg.no_shares,
-            upper(m.resolved_outcome) as resolved_outcome
-          from agg
-          join unified_markets m on m.id = agg.market_id
-          where m.resolved_outcome is not null
-            and upper(m.resolved_outcome) in ('YES', 'NO')
-        ),
-        eligible as (
-          select *
-          from resolved
-          where (yes_shares > 0 and coalesce(no_shares, 0) = 0)
-             or (no_shares > 0 and coalesce(yes_shares, 0) = 0)
-        )
-        select
-          count(*) filter (
-            where (resolved_outcome = 'YES' and yes_shares > 0 and no_shares = 0)
-               or (resolved_outcome = 'NO' and no_shares > 0 and yes_shares = 0)
-          ) as wins,
-          count(*)::int as total
-        from eligible
-      ) inferred on true
       order by sw.ordinality asc
     `,
-    [params.walletIds, params.windowDays, params.signalsWindowHours],
+    [params.walletIds, params.windowDays],
   );
 
   const byId = new Map<string, Omit<WhaleRow, keyof WhaleSelectableRow>>();
   for (const row of result.rows) {
-    const { id, last_activity_at, ...rest } = row;
-    void last_activity_at;
+    const { id, ...rest } = row;
     byId.set(id, rest);
   }
   return byId;
@@ -2431,14 +2333,6 @@ function buildProfileInput(
       pnl_to_volume_ratio: pnlToVolumeRatio,
     },
     positioning_context: positioningContext,
-    inferred: {
-      win_rate:
-        wallet.inferred_total && wallet.inferred_total > 0
-          ? (wallet.inferred_wins ?? 0) / wallet.inferred_total
-          : null,
-      resolved_count:
-        wallet.inferred_total != null ? Number(wallet.inferred_total) : null,
-    },
     exposure: {
       gross_usd: effectiveGrossUsd,
       net_imbalance_usd: parseNumber(wallet.net_imbalance_usd),
@@ -2829,7 +2723,6 @@ export async function runWhaleProfiles(options: WhaleProfileOptions) {
     const whaleHydrationMap = await loadWhaleRowsByIds(client, {
       walletIds: selectedWhaleSelectionRows.map((row) => row.id),
       windowDays,
-      signalsWindowHours,
     });
     const selectedWhaleRows: WhaleRow[] = selectedWhaleSelectionRows
       .map((row) => {

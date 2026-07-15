@@ -51,9 +51,11 @@ import {
   buildHolderResearchExternalSearchInput,
   buildHolderResearchExternalSearchInputV2,
   buildHolderResearchSelectionDiagnostics,
+  buildHolderResearchObservationPool,
   buildHolderResearchTriageCandidatePromptJson,
   buildHolderResearchTriageCandidatePromptJsonV2,
   enrichHolderResearchHolderContext,
+  enrichHolderResearchFirstObservedActivity,
   enrichHolderResearchLivePositions,
   enrichHolderResearchMarketTypeMetrics,
   evaluateResolvedHolderResearchNotes,
@@ -68,6 +70,7 @@ import {
   type HolderResearchCandidate,
   type HolderResearchDecisionCacheEvaluation,
   type HolderResearchPersistDecision,
+  type HolderResearchObservationCandidate,
   type HolderResearchSelectionDiagnostics,
 } from "./services/holder-research.js";
 import {
@@ -1848,13 +1851,72 @@ export async function runHolderResearch(
       client,
       selectedWithContext,
     );
+    let observationPool: HolderResearchObservationCandidate[] = [];
+    let priceCheckCandidates = selectedWithTypeMetrics;
+    if (observeV2 && !policy.dryRun) {
+      observationPool = buildHolderResearchObservationPool({
+        candidates,
+        requiredCandidates: selectedWithTypeMetrics.slice(
+          0,
+          policy.livePriceCheckMaxCandidatesPerRun,
+        ),
+        policy,
+        limit: policy.livePriceCheckMaxCandidatesPerRun,
+      });
+      let observationCandidates = observationPool.map(
+        (entry) => entry.candidate,
+      );
+      try {
+        observationCandidates = await enrichHolderResearchFirstObservedActivity(
+          client,
+          observationCandidates,
+          policy,
+          observedAt,
+        );
+      } catch (error) {
+        console.warn(
+          "[holder-research] first observed activity enrichment skipped",
+          {
+            candidates: observationCandidates.length,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+      const rankByThesis = new Map(
+        observationPool.map((entry) => [
+          entry.candidate.thesisKey,
+          entry.candidateRank,
+        ]),
+      );
+      observationPool = observationCandidates.map((candidate) => ({
+        candidate,
+        candidateRank:
+          rankByThesis.get(candidate.thesisKey) ?? Number.MAX_SAFE_INTEGER,
+      }));
+      priceCheckCandidates = observationCandidates;
+    }
     const priceCheck = await applyFreshPriceChecksToCandidates({
-      candidates: selectedWithTypeMetrics,
+      candidates: priceCheckCandidates,
       client,
       policy,
       redis: options.priceRefreshRedis,
     });
-    const selectedWithFreshPrices = priceCheck.candidates;
+    const freshByThesis = new Map(
+      priceCheck.candidates.map((candidate) => [
+        candidate.thesisKey,
+        candidate,
+      ]),
+    );
+    const selectedWithFreshPrices = selectedWithTypeMetrics.map(
+      (candidate) => freshByThesis.get(candidate.thesisKey) ?? candidate,
+    );
+    if (observationPool.length > 0) {
+      observationPool = observationPool.map((entry) => ({
+        ...entry,
+        candidate:
+          freshByThesis.get(entry.candidate.thesisKey) ?? entry.candidate,
+      }));
+    }
     const selectionDiagnostics = buildHolderResearchSelectionDiagnostics(
       candidates,
       selectedWithFreshPrices,
@@ -1866,7 +1928,7 @@ export async function runHolderResearch(
           await persistHolderResearchCandidateObservations(client, {
             runId,
             observedAt,
-            candidates: selectedWithFreshPrices,
+            observations: observationPool,
             policy,
           });
         const supplyHealth = await loadHolderResearchSupplyHealth(
@@ -1958,9 +2020,9 @@ export async function runHolderResearch(
     });
     toolCalls.push({
       name: "live_price_check",
-      count: selectedWithFreshPrices.length,
+      count: priceCheckCandidates.length,
       status: priceCheck.status,
-      detail: priceCheck.detail,
+      detail: `${priceCheck.detail} selected=${selectedWithFreshPrices.length}`,
     });
     toolCalls.push({
       name: "calibration_memo",
