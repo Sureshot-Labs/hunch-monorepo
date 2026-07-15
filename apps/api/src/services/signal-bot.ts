@@ -1818,6 +1818,7 @@ export type SignalBotMenuScreenName =
   | "notification_trading"
   | "notifications"
   | "performance"
+  | "positions"
   | "settings"
   | "signals"
   | "trading";
@@ -1978,6 +1979,7 @@ export function buildSignalBotMenuScreen(input: {
     const rows: TelegramInlineKeyboard["inline_keyboard"] = [
       [callback("trading:market_input", "💸 Trade a market")],
       [callback("trading:status", "👤 My trading")],
+      [callback("positions", "💼 My positions")],
       [miniAppButton],
       [callback("settings", "⚙️ Settings")],
       [callback("help", "❓ How it works")],
@@ -1996,6 +1998,18 @@ export function buildSignalBotMenuScreen(input: {
         "",
         escapeTelegramMarkdownV2("Choose what you want to do."),
         ...noticeLines,
+      ].join("\n"),
+    };
+  }
+  if (input.screen === "positions") {
+    return {
+      keyboard: {
+        inline_keyboard: [buildSignalBotMenuNavRow({ parent: "home" })],
+      },
+      text: [
+        formatTelegramBold("💼 My positions"),
+        "",
+        escapeTelegramMarkdownV2("Updating positions…"),
       ].join("\n"),
     };
   }
@@ -2488,6 +2502,7 @@ function parseSignalBotMenuCallback(
     case "trading":
     case "help":
     case "performance":
+    case "positions":
     case "settings":
     case "admin":
       return { kind: "screen", screen: route };
@@ -2641,6 +2656,11 @@ export async function handleSignalBotMenuCallback(input: {
     detail: boolean,
   ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
+  loadPositions?: (telegramUserId: number) => Promise<{
+    parse_mode?: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  }>;
   sendTradeStatus?: (
     chatId: string,
     telegramUserId: number,
@@ -2683,7 +2703,8 @@ export async function handleSignalBotMenuCallback(input: {
     callbackQueryId: input.callbackQuery.id,
     ...(route.kind === "stats" ||
     route.kind === "trading_status" ||
-    route.kind === "admin_preview"
+    route.kind === "admin_preview" ||
+    (route.kind === "screen" && route.screen === "positions")
       ? { text: "Working…" }
       : {}),
   });
@@ -2742,6 +2763,81 @@ export async function handleSignalBotMenuCallback(input: {
       screen: signalBotMenuScreenForNotificationTopic(route.topic),
       transport: input.telegram,
     });
+    return true;
+  }
+  if (route.kind === "screen" && route.screen === "positions") {
+    await clearSignalBotMenuInput({
+      chatId,
+      redis: input.redis,
+      telegramUserId,
+    });
+    await sendOrEditSignalBotMenuScreen({
+      chatId,
+      config: input.config,
+      isAdmin,
+      messageId,
+      screen: "positions",
+      transport: input.telegram,
+    });
+    let positionsMessage: {
+      parse_mode?: "MarkdownV2";
+      reply_markup?: TelegramInlineKeyboard;
+      text: string;
+    };
+    try {
+      positionsMessage = input.loadPositions
+        ? await input.loadPositions(telegramUserId)
+        : {
+            parse_mode: "MarkdownV2",
+            text: "*💼 My positions*\n\nPositions are unavailable right now\\.",
+          };
+    } catch {
+      positionsMessage = {
+        parse_mode: "MarkdownV2",
+        text: "*💼 My positions*\n\nPositions are unavailable right now\\.",
+      };
+    }
+    const keyboard: TelegramInlineKeyboard = {
+      inline_keyboard: [
+        ...(positionsMessage.reply_markup?.inline_keyboard ?? [
+          [
+            buildSignalBotMainMiniAppButton({
+              appBaseUrl: input.config.appBaseUrl,
+              miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
+            }),
+          ],
+        ]),
+        [
+          {
+            callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + "home",
+            text: "🏠 Home",
+          },
+        ],
+      ],
+    };
+    const editResult =
+      messageId != null
+        ? await input.telegram.editMessageText?.({
+            chat_id: chatId,
+            disable_web_page_preview: true,
+            message_id: messageId,
+            parse_mode: positionsMessage.parse_mode ?? "MarkdownV2",
+            reply_markup: keyboard,
+            text: positionsMessage.text,
+          })
+        : null;
+    if (
+      !editResult?.ok &&
+      !/message is not modified/i.test(editResult?.message ?? "")
+    ) {
+      await input.telegram.sendMessage({
+        chat_id: chatId,
+        disable_web_page_preview: true,
+        parse_mode: positionsMessage.parse_mode ?? "MarkdownV2",
+        reply_markup: keyboard,
+        text: positionsMessage.text,
+      });
+    }
     return true;
   }
   if (route.kind === "trading_status") {
@@ -3494,6 +3590,11 @@ export async function pollSignalBotCommands(input: {
     kind: SignalBotFollowthroughPreviewKind,
   ) => Promise<boolean>;
   sendTestSignal: (chatId: string) => Promise<boolean>;
+  loadPositions?: (telegramUserId: number) => Promise<{
+    parse_mode?: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  }>;
   sendTradeMarket?: (input: {
     chatId: string;
     isAdminTest?: boolean;
@@ -3583,6 +3684,7 @@ export async function pollSignalBotCommands(input: {
           config: input.config,
           db: input.db,
           redis: input.redis,
+          loadPositions: input.loadPositions,
           sendStatsReport: input.sendStatsReport,
           sendTestSignal: input.sendTestSignal,
           sendTradeStatus: input.sendTradeStatus,

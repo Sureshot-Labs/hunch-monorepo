@@ -12,8 +12,10 @@ not a request to build a second delivery worker.
 
 ## Already Implemented Locally
 
-Migrations `0177_telegram_user_notifications.sql` and
-`0178_telegram_notification_delivery_safety.sql` add:
+Migrations `0177_telegram_user_notifications.sql`,
+`0178_telegram_notification_delivery_safety.sql`,
+`0179_position_resolution_observed_at.sql`, and
+`0180_position_resolution_observed_index.sql` add:
 
 - `telegram_notification_preferences` with seven topic preferences and
   `enabled_at` cutoffs;
@@ -35,9 +37,14 @@ The API implementation adds:
 - blocked/missing-user handling without unlinking identity or trading access;
 - MarkdownV2 messages with at most one contextual Mini App CTA;
 - a runner loop for enqueue and delivery.
-- a typed `telegram_notifications` runtime policy with independent activity
-  enqueue, position-signal enqueue, and delivery gates. All three compiled
-  defaults are `false`.
+- a minute-resolution producer that uses cached open positions, writes one
+  canonical win/loss/settled notification, then best-effort syncs only the
+  affected wallet and venue;
+- a `My positions` bot action that refreshes on demand and renders the cached
+  portfolio without introducing global polling;
+- a typed `telegram_notifications` runtime policy with independent resolution
+  producer, activity enqueue, position-signal enqueue, and delivery gates. All
+  four compiled defaults are `false`.
 
 Only an explicit private `/start` marks a linked account reachable. Linking,
 `/menu`, `/settings`, callbacks, or relinking do not. Position signals are
@@ -61,8 +68,8 @@ verified during this work.
 
 ## Migration and Deploy Plan
 
-1. Apply migrations 0177 and 0178 in filename order; never rewrite either after
-   it has been applied.
+1. Apply migrations 0177 through 0180 in filename order; never rewrite an
+   applied migration.
 2. Deploy the database migrations before code that reads the new tables.
 3. Deploy API services and the signal-bot runner. With no runtime-policy row,
    enqueue and delivery remain disabled.
@@ -128,7 +135,7 @@ reachable again.
 
 ## Acceptance Criteria
 
-- Migration ownership for 0177 and forward migration 0178 is recorded.
+- Migration ownership for 0177 through 0180 is recorded.
 - Every supported event produces at most one message per user/event key.
 - Preferences are checked at enqueue and again before delivery.
 - Topic re-enable does not backfill older activity.

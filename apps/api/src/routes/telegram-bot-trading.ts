@@ -36,6 +36,7 @@ import {
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
 import type { KalshiTradeEligibility } from "../services/trading-types.js";
+import { buildTelegramPositionsMessage } from "../services/telegram-bot-positions.js";
 
 const enableBodySchema = z
   .object({
@@ -64,6 +65,10 @@ const internalStatusBodySchema = z
     telegramUserId: z.union([z.string(), z.number()]),
   })
   .strict();
+
+const internalPositionsBodySchema = internalStatusBodySchema.extend({
+  appBaseUrl: z.string().trim().url(),
+});
 
 const internalDisableBodySchema = z
   .object({
@@ -98,6 +103,14 @@ const internalCallbackBodySchema = z
 const internalIntentParamsSchema = z
   .object({
     id: z.string().uuid(),
+  })
+  .strict();
+
+const internalIntentReceiptBodySchema = z
+  .object({
+    delivery: z.enum(["edit", "send"]),
+    messageId: z.number().int().positive().optional().nullable(),
+    telegramUserId: z.union([z.string(), z.number()]),
   })
   .strict();
 
@@ -216,6 +229,7 @@ export type TelegramBotTradingRouteDependencies = {
     privyUserId: string | null | undefined;
   }) => Promise<TelegramBotTradingInternalWalletCandidate[]>;
   signerInspector?: typeof inspectServerEvmWalletAuthorization;
+  buildPositionsMessage?: typeof buildTelegramPositionsMessage;
 };
 
 async function registerTelegramBotTradingRoutes(
@@ -235,6 +249,8 @@ async function registerTelegramBotTradingRoutes(
     dependencies.signerInspector ?? inspectServerEvmWalletAuthorization;
   const resolveInternalWallets =
     dependencies.resolveInternalWallets ?? resolveInternalPrivyWalletCandidates;
+  const buildPositionsMessage =
+    dependencies.buildPositionsMessage ?? buildTelegramPositionsMessage;
   const kalshiGeoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -263,6 +279,20 @@ async function registerTelegramBotTradingRoutes(
     reply.code(401);
     return reply.send({ error: "Unauthorized" });
   };
+
+  api.post(
+    "/internal/telegram-bot/positions",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalPositionsBodySchema },
+    },
+    (request) =>
+      buildPositionsMessage({
+        appBaseUrl: request.body.appBaseUrl,
+        pool,
+        telegramUserId: request.body.telegramUserId,
+      }),
+  );
 
   api.post(
     "/internal/telegram-bot/trading/status",
@@ -420,6 +450,42 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalCallbackBodySchema },
     },
     handleInternalPreviewCallback,
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading/intents/:id/receipt",
+    {
+      preHandler: requireInternal,
+      schema: {
+        body: internalIntentReceiptBodySchema,
+        params: internalIntentParamsSchema,
+      },
+    },
+    async (request) => {
+      const result = await db.query(
+        `
+          update telegram_trade_intents
+          set result = coalesce(result, '{}'::jsonb) || jsonb_build_object(
+                'telegramReceipt',
+                jsonb_build_object(
+                  'deliveredAt', now(),
+                  'delivery', $3::text,
+                  'messageId', $4::bigint
+                )
+              ),
+              updated_at = now()
+          where id = $1::uuid
+            and telegram_user_id = $2::text
+        `,
+        [
+          request.params.id,
+          String(request.body.telegramUserId),
+          request.body.delivery,
+          request.body.messageId ?? null,
+        ],
+      );
+      return { marked: (result.rowCount ?? 0) > 0 };
+    },
   );
 
   api.post(

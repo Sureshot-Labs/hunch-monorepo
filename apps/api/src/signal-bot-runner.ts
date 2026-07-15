@@ -46,7 +46,7 @@ function log(event: string, fields?: Record<string, unknown>): void {
 }
 
 function logTradingInternalApiFailure(
-  operation: "callback" | "disable" | "market-card" | "status",
+  operation: "callback" | "disable" | "market-card" | "positions" | "status",
   error: unknown,
 ): void {
   log("signal_bot_trading_internal_api_error", {
@@ -251,6 +251,18 @@ export async function runSignalBotRunner(): Promise<void> {
               redis,
               telegram,
             }),
+          loadPositions: (telegramUserId) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .buildPositionsMessage({
+                    appBaseUrl: config.appBaseUrl,
+                    telegramUserId,
+                  })
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("positions", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Positions API is unavailable")),
           sendTradeStatus: async (chatId, telegramUserId) => {
             const message = tradingInternalApi
               ? await tradingInternalApi

@@ -5,6 +5,7 @@ import {
   runFeesCollectJob,
   runFeesReconcileJob,
   runKalshiExecutionReconcileJob,
+  runPositionResolutionNotificationJob,
   runRewardsPayoutJob,
   runTelegramTradeIntentReconcileJob,
   runTreasurySweepJob,
@@ -117,6 +118,16 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
           executingGraceMs:
             workerEnv.telegramTradeIntentsExecutingGraceSec * 1000,
         }),
+    },
+    {
+      name: "position_resolution_notifications",
+      enabled: true,
+      intervalSec: 60,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: workerEnv.maxRetries,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      run: () => runPositionResolutionNotificationJob(),
     },
     {
       name: "treasury_sweep",

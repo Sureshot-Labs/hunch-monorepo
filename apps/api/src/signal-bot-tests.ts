@@ -1253,6 +1253,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(regularLabels, [
         "💸 Trade a market",
         "👤 My trading",
+        "💼 My positions",
         "Open Hunch",
         "⚙️ Settings",
         "❓ How it works",
@@ -2331,6 +2332,68 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token: "token",
         });
         await assert.rejects(() => client.buildStatusMessage(999), /timed out/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading client records a successful terminal edit receipt",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const requests: Array<{ body: unknown; url: string }> = [];
+      globalThis.fetch = (async (input, init) => {
+        const url = String(input);
+        requests.push({
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+          url,
+        });
+        const payload = url.endsWith("/receipt")
+          ? { marked: true }
+          : {
+              answers: [],
+              handled: true,
+              messages: [
+                {
+                  chat_id: "999",
+                  parse_mode: "MarkdownV2",
+                  text: "Trade filled\\.",
+                },
+              ],
+            };
+        return new Response(JSON.stringify(payload), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        const handled = await client.handleCallback({
+          answerCallbackQuery: async () => ({ ok: true }),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-receipt",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 77,
+            },
+          },
+          editMessageText: async () => ({ messageId: 77, ok: true }),
+          sendMessage: async () => ({ messageId: 78, ok: true }),
+        });
+        assert.equal(handled, true);
+        assert.equal(requests.length, 2);
+        assert.match(requests[1]?.url ?? "", /\/receipt$/);
+        assert.deepEqual(requests[1]?.body, {
+          delivery: "edit",
+          messageId: 77,
+          telegramUserId: 999,
+        });
       } finally {
         globalThis.fetch = originalFetch;
       }

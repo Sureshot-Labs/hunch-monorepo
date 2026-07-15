@@ -62,6 +62,7 @@ type FinanceJobsModule = {
   runTelegramTradeIntentReconcileJob: (
     overrides?: Partial<ReconcileTelegramTradeIntentsOptions>,
   ) => Promise<unknown>;
+  runPositionResolutionNotificationJob: () => Promise<unknown>;
   runRewardsPayoutJob: (
     overrides?: Partial<RewardsPayoutOptions>,
   ) => Promise<unknown>;
@@ -142,6 +143,11 @@ export async function runTelegramTradeIntentReconcileJob(
 ): Promise<unknown> {
   const jobs = await getFinanceJobsModule();
   return jobs.runTelegramTradeIntentReconcileJob(overrides);
+}
+
+export async function runPositionResolutionNotificationJob(): Promise<unknown> {
+  const jobs = await getFinanceJobsModule();
+  return jobs.runPositionResolutionNotificationJob();
 }
 
 export async function runRewardsPayoutJob(

@@ -57,6 +57,10 @@ export type TelegramBotTradingInternalApiClient = {
   buildStatusMessage: (
     telegramUserId: string | number,
   ) => Promise<TelegramBotTradingClientMessage>;
+  buildPositionsMessage: (input: {
+    appBaseUrl: string;
+    telegramUserId: string | number;
+  }) => Promise<TelegramBotTradingClientMessage>;
   disableTrading: (
     telegramUserId: string | number,
   ) => Promise<"already_disabled" | "disabled" | "unavailable">;
@@ -114,6 +118,22 @@ function isTelegramBotTradingCallbackData(data: string | undefined): boolean {
     data === TELEGRAM_BOT_TRADING_CALLBACK_PREFIX ||
     data.startsWith(`${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:`)
   );
+}
+
+function readSuccessfulTelegramResult(value: unknown): {
+  messageId: number | null;
+  ok: boolean;
+} {
+  if (!value || typeof value !== "object")
+    return { messageId: null, ok: false };
+  const result = value as { messageId?: unknown; ok?: unknown };
+  return {
+    messageId:
+      typeof result.messageId === "number" && Number.isInteger(result.messageId)
+        ? result.messageId
+        : null,
+    ok: result.ok === true,
+  };
 }
 
 async function readInternalApiJson<T>(response: Response): Promise<T> {
@@ -212,6 +232,12 @@ export function createTelegramBotTradingInternalApiClient(input: {
       ? Math.trunc(input.executeTimeoutMs ?? 0)
       : DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS;
   return {
+    buildPositionsMessage: (body) =>
+      post<TelegramBotTradingClientMessage>(
+        "/internal/telegram-bot/positions",
+        body,
+        { timeoutMs: executeTimeoutMs },
+      ),
     buildMarketMessage: (body) =>
       post<TelegramBotTradingClientMessage>(
         "/internal/telegram-bot/trading/market-card",
@@ -341,18 +367,24 @@ export function createTelegramBotTradingInternalApiClient(input: {
       const chatId = callbackInput.callbackQuery.message?.chat?.id;
       const messageId = callbackInput.callbackQuery.message?.message_id;
       let terminalEdited = false;
+      let receiptDelivery: "edit" | "send" | null = null;
+      let receiptMessageId: number | null = null;
       if (terminalMessage && chatId != null && messageId != null) {
-        terminalEdited =
-          (await callbackInput
-            .editMessageText?.({
-              chat_id: String(chatId),
-              message_id: messageId,
-              parse_mode: terminalMessage.parse_mode,
-              reply_markup: terminalMessage.reply_markup,
-              text: terminalMessage.text,
-            })
-            .then(() => true)
-            .catch(() => false)) ?? false;
+        const editResult = await callbackInput
+          .editMessageText?.({
+            chat_id: String(chatId),
+            message_id: messageId,
+            parse_mode: terminalMessage.parse_mode,
+            reply_markup: terminalMessage.reply_markup,
+            text: terminalMessage.text,
+          })
+          .catch(() => null);
+        const successfulEdit = readSuccessfulTelegramResult(editResult);
+        terminalEdited = successfulEdit.ok;
+        if (terminalEdited) {
+          receiptDelivery = "edit";
+          receiptMessageId = successfulEdit.messageId ?? messageId;
+        }
       }
       for (const [index, message] of result.messages.entries()) {
         if (
@@ -362,7 +394,24 @@ export function createTelegramBotTradingInternalApiClient(input: {
         ) {
           continue;
         }
-        await callbackInput.sendMessage(message);
+        const sendResult = await callbackInput.sendMessage(message);
+        if (confirmAcknowledged && index === result.messages.length - 1) {
+          const successfulSend = readSuccessfulTelegramResult(sendResult);
+          if (successfulSend.ok) {
+            receiptDelivery = "send";
+            receiptMessageId = successfulSend.messageId;
+          }
+        }
+      }
+      if (confirmAcknowledged && receiptDelivery) {
+        await post(
+          `/internal/telegram-bot/trading/intents/${parsed.intentId}/receipt`,
+          {
+            delivery: receiptDelivery,
+            messageId: receiptMessageId,
+            telegramUserId: callbackInput.callbackQuery.from?.id,
+          },
+        ).catch(() => undefined);
       }
       return result.handled;
     },
