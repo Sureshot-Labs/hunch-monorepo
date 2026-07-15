@@ -6,7 +6,10 @@ import crypto from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { pool } from "./db.js";
-import { loadWhaleSelectionRows } from "./services/whale-profiles.js";
+import {
+  loadWhaleRowsByIds,
+  loadWhaleSelectionRows,
+} from "./services/whale-profiles.js";
 
 type FixtureWallet = {
   chain?: "polygon" | "solana";
@@ -359,7 +362,18 @@ try {
   assert.ok(Math.abs(oldActivity.getTime() - ago(20 * 24).getTime()) < 1_000);
   assert.ok(Number(byId.get(walletIds.oldSnapshotActivity)?.rank_signal) > 1);
 
-  console.log("[whale-profile-selection-integration-tests] passed 17/17");
+  const hydration = await loadWhaleRowsByIds(client, {
+    walletIds: Object.values(walletIds),
+    windowDays: 30,
+  });
+  assert.equal(hydration.size, Object.keys(walletIds).length);
+  assert.equal(
+    Number(hydration.get(walletIds.trackerPnl)?.metrics_volume),
+    500,
+  );
+  assert.equal(hydration.get(walletIds.missingSnapshot)?.metrics_volume, null);
+
+  console.log("[whale-profile-selection-integration-tests] passed 20/20");
 } finally {
   await client.query("rollback");
   client.release();

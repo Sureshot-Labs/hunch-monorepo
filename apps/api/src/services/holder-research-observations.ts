@@ -5,6 +5,7 @@ import {
   isSharpHolder,
   scoreHolderResearchCandidateShadowV2,
   type HolderResearchCandidate,
+  type HolderResearchObservationCandidate,
 } from "./holder-research.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import {
@@ -325,12 +326,12 @@ export async function persistHolderResearchCandidateObservations(
   input: {
     runId: string;
     observedAt: Date;
-    candidates: HolderResearchCandidate[];
+    observations: HolderResearchObservationCandidate[];
     policy: HolderResearchPolicy;
   },
 ): Promise<{ written: number }> {
-  const observations = input.candidates
-    .map((candidate, index) => {
+  const observations = input.observations
+    .map(({ candidate, candidateRank }) => {
       const features = buildHolderResearchDecisionFeaturesV2(
         candidate,
         input.policy,
@@ -338,7 +339,7 @@ export async function persistHolderResearchCandidateObservations(
       );
       return {
         candidate,
-        candidateRank: index + 1,
+        candidateRank,
         features,
         shadowScore: scoreHolderResearchCandidateShadowV2(
           features,
@@ -525,6 +526,7 @@ export async function loadHolderResearchSupplyHealth(
         from holder_research_candidate_observations
         where observed_at >= date_trunc('day', $1::timestamptz) - interval '6 days'
           and coalesce((decision_features #>> '{gates,publishEligible}')::boolean, false)
+          and nullif(decision_features #>> '{market,priceCheckedAt}', '') is not null
         group by 1
       )
       select
@@ -576,6 +578,10 @@ export async function loadHolderResearchObservationCalibration(
             (observation.decision_features #>> '{gates,publishEligible}')::boolean,
             false
           )
+          and nullif(
+            observation.decision_features #>> '{market,priceCheckedAt}',
+            ''
+          ) is not null
           and nullif(observation.decision_features #>> '{market,entryPrice}', '')::numeric > 0
           and nullif(observation.decision_features #>> '{market,entryPrice}', '')::numeric < 1
         order by observation.thesis_key, observation.observed_at, observation.id

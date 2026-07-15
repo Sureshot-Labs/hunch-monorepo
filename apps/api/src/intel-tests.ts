@@ -131,6 +131,7 @@ import {
 import { resolveWalletTagId } from "./repos/wallet-tags.js";
 import {
   computeProfileSideBias,
+  loadWhaleRowsByIds,
   loadWhaleSelectionRows,
   mapWhaleMarketToProfileMarket,
   normalizeWhaleProfile,
@@ -799,6 +800,79 @@ const tests: TestCase[] = [
         450,
         whaleTagId,
       ]);
+    },
+  },
+  {
+    name: "whale hydration uses only canonical selector data and keeps wallets without snapshots",
+    run: async () => {
+      let capturedSql = "";
+      let capturedValues: unknown[] | undefined;
+      const walletId = "00000000-0000-0000-0000-000000000201";
+      const db = {
+        query: async (sql: string, values?: unknown[]) => {
+          capturedSql = sql;
+          capturedValues = values;
+          return {
+            rows: [
+              {
+                id: walletId,
+                address: "0x0000000000000000000000000000000000000201",
+                chain: "polygon",
+                metadata: {},
+                source_label: null,
+                identity_display_name: null,
+                identity_display_name_source: null,
+                identity_profile_url: null,
+                is_safe: false,
+                owner_address: null,
+                owner_label: null,
+                metrics_volume: null,
+                metrics_pnl: null,
+                metrics_trades: null,
+                metrics_roi: null,
+                metrics_win_rate: null,
+                metrics_resolved_edge_sample_count: null,
+                metrics_resolved_actual_win_rate: null,
+                metrics_resolved_expected_win_rate: null,
+                metrics_resolved_win_rate_edge: null,
+                metrics_resolved_edge_z_score: null,
+                metrics_resolved_brier_score: null,
+                metrics_resolved_stake_weighted_edge: null,
+                metrics_resolved_stake_usd: null,
+                metrics_last_trade_at: null,
+                exposure_usd: null,
+                hedged_notional_usd: null,
+                net_imbalance_usd: null,
+                hedge_ratio: null,
+                two_sided_markets: null,
+                last_activity_at: null,
+                has_trade_activity: false,
+                has_holder_activity: false,
+              },
+            ],
+          };
+        },
+      } as unknown as import("./db.js").DbQuery;
+
+      const rows = await loadWhaleRowsByIds(db, {
+        walletIds: [walletId],
+        windowDays: 30,
+      });
+
+      assert.equal(rows.size, 1);
+      assert.equal(rows.get(walletId)?.metrics_volume, null);
+      assert.equal(rows.get(walletId)?.has_trade_activity, false);
+      assert.match(
+        capturedSql,
+        /left join wallet_intel_selector_snapshot selector/i,
+      );
+      assert.doesNotMatch(capturedSql, /wallet_metrics_snapshots/i);
+      assert.doesNotMatch(capturedSql, /wallet_activity_events/i);
+      assert.doesNotMatch(capturedSql, /wallet_activity_hourly/i);
+      assert.doesNotMatch(capturedSql, /wallet_position_snapshots/i);
+      assert.doesNotMatch(capturedSql, /wallet_position_exposure/i);
+      assert.doesNotMatch(capturedSql, /signal_abs_usd|inferred/i);
+      assert.deepEqual(capturedValues, [[walletId], 30]);
     },
   },
   {

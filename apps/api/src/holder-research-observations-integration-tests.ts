@@ -19,6 +19,8 @@ try {
   const runId = "holder-research-observations-integration";
   const freshThesis = "holder_research:v2:integration-fresh:YES";
   const staleThesis = "holder_research:v2:integration-stale:NO";
+  const uncheckedThesis = "holder_research:v2:integration-unchecked:YES";
+  const supplyNow = new Date("2099-01-07T12:00:00.000Z");
 
   await client.query(
     `insert into holder_research_candidate_observations (
@@ -35,12 +37,18 @@ try {
        shadow_score,
        shadow_rank
      ) values
-       ($1, now(), $2, 'integration-fresh', 'YES', 'sharp_side', 'fresh', 2,
-        '{"version":2,"gates":{"publishEligible":true}}'::jsonb, 1, 0.8, 1),
+       ($1, $4::timestamptz, $2, 'integration-fresh', 'YES', 'sharp_side', 'fresh', 2,
+        '{"version":2,"market":{"priceCheckedAt":"2026-01-01T00:00:00.000Z"},"gates":{"publishEligible":true}}'::jsonb,
+        1, 0.8, 1),
        ($1, now() - interval '100 years', $3, 'integration-stale', 'NO',
         'sharp_minority', 'stale', 2,
-        '{"version":2,"gates":{"publishEligible":true}}'::jsonb, 2, 0.4, 2)`,
-    [runId, freshThesis, staleThesis],
+        '{"version":2,"market":{"priceCheckedAt":"2026-01-01T00:00:00.000Z"},"gates":{"publishEligible":true}}'::jsonb,
+        2, 0.4, 2),
+       ($1, $4::timestamptz, $5, 'integration-unchecked', 'YES', 'sharp_side',
+        'unchecked', 2,
+        '{"version":2,"market":{"priceCheckedAt":null},"gates":{"publishEligible":true}}'::jsonb,
+        3, 0.3, 3)`,
+    [runId, freshThesis, staleThesis, supplyNow.toISOString(), uncheckedThesis],
   );
 
   const stages = await updateHolderResearchObservationStages(db, {
@@ -72,9 +80,9 @@ try {
     final_verdict: "publish",
   });
 
-  const supply = await loadHolderResearchSupplyHealth(db);
+  const supply = await loadHolderResearchSupplyHealth(db, supplyNow);
   assert.ok(supply.days.length === 7);
-  assert.ok(supply.days.at(-1)?.candidates ?? 0 >= 1);
+  assert.equal(supply.days.at(-1)?.candidates, 1);
 
   const pruned = await pruneHolderResearchCandidateObservations(db, {
     retentionDays: 90,
