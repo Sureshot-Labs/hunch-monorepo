@@ -649,7 +649,7 @@ export async function syncLimitlessHistoryForWallet(
               userId: inputs.userId,
               venue: "limitless",
               status: "filled",
-              side,
+              action: side,
               size,
               price,
               orderId: match.venueOrderId ?? match.id,

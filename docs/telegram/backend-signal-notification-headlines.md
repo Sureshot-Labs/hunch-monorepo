@@ -1,7 +1,7 @@
 # Backend Task: Notification-First Signal Headlines
 
-Status: ready for backend implementation  
-Priority: P0 before the next public-channel copy rollout  
+Status: V4 implemented locally; live preview QA required
+Priority: P0 before the next public-channel copy rollout
 Depends on: normalized market identity and current follow-through metrics
 
 ## Goal
@@ -40,18 +40,15 @@ generic headlines or information-withholding teasers:
 
 ## Current State
 
-`SIGNAL_BOT_COPY_FLOW_HEADLINES` contains hooks such as:
+The pure V4 headline builder is implemented. It uses normalized
+`MarketSideCopy`, deterministic story priority, tested price bands, safe NO
+fallbacks, and an 80-grapheme lint signal without destructive truncation.
+Public Telegram rendering and the neutral delivery view share the same builder.
 
-- `More wallets are moving into this trade`;
-- `This call is starting to get copied`;
-- `People are quietly joining this side`.
-
-Cooling and flat-price cases have some semantic selection, but most positive
-hooks are selected from a stable hash for variety. The exact market and the
-actual movement appear later. A notification may therefore show excitement
-without telling the user what market moved or by how much.
-
-The current copy version is `signal_bot_copy_v3`.
+The current copy version is `signal_bot_copy_v4`. The old hash-selected generic
+flow hooks are no longer used. Copy metrics persist subject provenance, story,
+template, primary/supporting metrics, visible length, and lint status. Live
+iOS, Android, and Desktop preview QA remains required before rollout.
 
 ## Editorial Model: Market, Event, Result
 

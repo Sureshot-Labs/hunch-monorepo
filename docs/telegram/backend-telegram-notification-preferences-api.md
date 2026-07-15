@@ -100,10 +100,9 @@ Return these as separate facts:
 - topic booleans: the user's desired delivery choices.
 
 An account link alone must not be presented as proof that proactive messaging
-works. Backend should review the current `reachable DEFAULT true` behavior in
-migration 0177 against the actual linking flow. If a link can be created before
-the bot observes `/start`, effective reachability must remain false until that
-start occurs.
+works. Forward migration 0178 changes the effective default to
+`reachable=false`; only an explicit private `/start` changes it to true. Menu,
+settings, callbacks, link, and relink preserve the current unreachable state.
 
 Unlinking Telegram must not delete the user's topic choices. It should make the
 channel unavailable while preserving preferences for an intentional relink.

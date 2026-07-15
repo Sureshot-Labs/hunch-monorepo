@@ -64,7 +64,7 @@ export async function ensureTelegramNotificationPreferences(input: {
       )
       select
         uta.user_id,
-        true,
+        $2::boolean,
         null,
         case when $2::boolean then now() else null end
       from user_telegram_accounts uta
@@ -72,42 +72,62 @@ export async function ensureTelegramNotificationPreferences(input: {
       on conflict (user_id) do update
       set
         order_filled_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.order_filled = true
             then now()
           else telegram_notification_preferences.order_filled_enabled_at
         end,
         order_issues_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.order_issues = true
             then now()
           else telegram_notification_preferences.order_issues_enabled_at
         end,
         position_resolved_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.position_resolved = true
             then now()
           else telegram_notification_preferences.position_resolved_enabled_at
         end,
         deposit_received_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.deposit_received = true
             then now()
           else telegram_notification_preferences.deposit_received_enabled_at
         end,
         bridge_updates_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.bridge_updates = true
             then now()
           else telegram_notification_preferences.bridge_updates_enabled_at
         end,
         payouts_rewards_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.payouts_rewards = true
             then now()
           else telegram_notification_preferences.payouts_rewards_enabled_at
         end,
         position_signals_enabled_at = case
-          when telegram_notification_preferences.reachable = false
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.position_signals = true
             then now()
           else telegram_notification_preferences.position_signals_enabled_at
         end,
-        reachable = true,
-        blocked_at = null,
+        reachable = case
+          when $2::boolean then true
+          else telegram_notification_preferences.reachable
+        end,
+        blocked_at = case
+          when $2::boolean then null
+          else telegram_notification_preferences.blocked_at
+        end,
         last_started_at = case
           when $2::boolean then now()
           else telegram_notification_preferences.last_started_at

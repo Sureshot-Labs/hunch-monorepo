@@ -36,6 +36,12 @@ import {
   type MarketSideCopy,
 } from "./market-side-copy.js";
 import {
+  buildSignalNotificationHeadline,
+  buildSignalNotificationSubject,
+  type SignalNotificationHeadline,
+  type SignalNotificationSubject,
+} from "./signal-notification-headline.js";
+import {
   defaultSignalBotFollowthroughPolicy,
   resolveSignalBotFollowthroughPolicy,
   type SignalBotFollowthroughDataQuality,
@@ -313,6 +319,9 @@ export type SignalBotNote = {
   confidence: number | null;
   modelMeta: Record<string, unknown>;
   createdAt: string;
+  revisionKind: "initial" | "research_update";
+  thesisKey: string;
+  thesisRootNoteId: string;
   primaryTargetMeta: Record<string, unknown>;
   marketId: string | null;
   eventId: string | null;
@@ -416,6 +425,9 @@ type SignalBotNoteRow = {
   confidence: string | number | null;
   model_meta: unknown;
   created_at: Date | string;
+  revision_kind: string | null;
+  thesis_key: string | null;
+  thesis_root_note_id: string | null;
   primary_target_meta: unknown;
   market_id: string | null;
   event_id: string | null;
@@ -504,16 +516,7 @@ const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_FLOW_HEADLINES = [
-  "🔥 Copy flow is building before price moves",
-  "👀 People are quietly joining this side",
-  "🔥 This call is starting to get copied",
-  "👀 Wallets are still leaning into this",
-  "🔥 More wallets are moving into this trade",
-  "👀 Price is flat. Flow is not.",
-  "🔥 This call is starting to get traction",
-] as const;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v3";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v4";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const SIGNAL_BOT_MENU_INPUT_KEY_PREFIX = "tg:signal_bot:v1:menu_input";
 const SIGNAL_BOT_MENU_INPUT_TTL_SEC = 10 * 60;
@@ -1344,10 +1347,12 @@ export function buildSignalBotMessage(input: {
   const renderedContextLine = contextLine
     ? bodyRenderer.render(contextLine)
     : null;
-  const categoryEmoji = formatSignalBotMarketEmoji(note);
-  const titleLine = categoryEmoji
-    ? `${categoryEmoji} ${formatTelegramBold(note.title)}`
-    : formatTelegramBold(note.title);
+  const notificationCopy = buildSignalBotInitialNotificationCopy({
+    messageKind: input.messageKind ?? "initial",
+    note,
+    side: buySide,
+  });
+  const titleLine = formatTelegramBold(notificationCopy.headline.text);
   const marketIdentity = splitSignalBotMarketIdentity({
     eventTitle: note.eventTitle,
     fallbackTitle: note.title,
@@ -3062,7 +3067,7 @@ export async function handleSignalBotCommand(input: {
       );
       return true;
     }
-    if (input.db && input.message.from?.id) {
+    if (command === "start" && input.db && input.message.from?.id) {
       await ensureTelegramNotificationPreferences({
         db: input.db,
         markStarted: true,
@@ -3088,13 +3093,6 @@ export async function handleSignalBotCommand(input: {
         }),
       );
       return true;
-    }
-    if (input.db && input.message.from?.id) {
-      await ensureTelegramNotificationPreferences({
-        db: input.db,
-        markStarted: true,
-        telegramUserId: input.message.from.id,
-      }).catch(() => null);
     }
     await sendOrEditSignalBotMenuScreen({
       chatId,
@@ -4759,6 +4757,11 @@ function buildNeutralSignalDeliveryView(input: {
   sourceSide: "NO" | "YES" | null;
   target: SignalBotCheaperAlternative | null;
 }): SignalDeliveryView {
+  const notificationCopy = buildSignalBotInitialNotificationCopy({
+    messageKind: input.kind,
+    note: input.note,
+    side: input.sourceSide,
+  });
   const target =
     input.kind === "research_update"
       ? null
@@ -4802,7 +4805,7 @@ function buildNeutralSignalDeliveryView(input: {
     summary: input.note.description,
     target,
     thread: {},
-    title: input.note.title,
+    title: notificationCopy.headline.text,
   };
 }
 
@@ -5089,7 +5092,11 @@ export async function publishSignalBotTick(input: {
           messageId: result.messageId,
           messageKind: thread.messageKind,
           metrics: {
-            copy: buildSignalBotCopyAudit({ buySide, note }),
+            copy: buildSignalBotCopyAudit({
+              buySide,
+              messageKind: thread.messageKind,
+              note,
+            }),
             delivery: {
               lifecycleRevision: lifecycle.revision,
               policy: destinationPolicy,
@@ -5875,35 +5882,6 @@ function isSignalBotFollowthroughCooling(
   );
 }
 
-function selectSignalBotCopyFlowHeadline(input: {
-  candidate: SignalBotFollowthroughCandidateRow;
-  stats: SignalBotFollowthroughStats;
-}): string {
-  if (isSignalBotFollowthroughCooling(input.stats)) {
-    return "⚠️ Copy flow is cooling off";
-  }
-  if (
-    input.stats.priceMoveCents != null &&
-    Math.abs(input.stats.priceMoveCents) < 0.5
-  ) {
-    return "👀 Price is flat. Flow is not.";
-  }
-  const seed = [
-    input.candidate.thread_root_note_id,
-    input.candidate.market_id,
-    input.stats.signalSide,
-    input.stats.joinedOrAddedWallets,
-    Math.round(input.stats.netSignalSideFlowUsd),
-  ].join(":");
-  let hash = 0;
-  for (const char of seed) {
-    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  }
-  return SIGNAL_BOT_COPY_FLOW_HEADLINES[
-    hash % SIGNAL_BOT_COPY_FLOW_HEADLINES.length
-  ];
-}
-
 function formatSignalBotFollowthroughActivityLine(
   stats: SignalBotFollowthroughStats,
 ): string {
@@ -6027,19 +6005,8 @@ function buildSignalBotFollowthroughMessage(input: {
     stats.netSignalSideFlowUsd > 0 ||
     stats.trimmedWallets > 0 ||
     stats.exitedWallets > 0;
-  const header =
-    input.kind === "resolved_win"
-      ? "🏁 Call side won"
-      : input.kind === "resolved_loss"
-        ? "🏁 Call side lost"
-        : hasWalletEvidence
-          ? selectSignalBotCopyFlowHeadline({
-              candidate: input.candidate,
-              stats,
-            })
-          : stats.priceMoveCents != null && stats.priceMoveCents > 0
-            ? "📈 Market moved with the read"
-            : "⚠️ Copy flow is thin here";
+  const notificationCopy = buildSignalBotFollowthroughNotificationCopy(input);
+  const header = notificationCopy.headline.text;
   const footerLine = formatSignalBotFollowthroughRead({
     hasWalletEvidence,
     kind: input.kind,
@@ -6084,6 +6051,7 @@ function buildNeutralSignalFollowthroughView(input: {
   stats: SignalBotFollowthroughStats;
   target: SignalBotCheaperAlternative | null;
 }): SignalDeliveryView {
+  const notificationCopy = buildSignalBotFollowthroughNotificationCopy(input);
   const target = input.target
     ? {
         eventId: input.target.eventId,
@@ -6143,7 +6111,7 @@ function buildNeutralSignalFollowthroughView(input: {
       input.replyToMessageId == null
         ? {}
         : { rootDeliveryId: String(input.replyToMessageId) },
-    title: formatFollowthroughMarketLine(input.candidate),
+    title: notificationCopy.headline.text,
   };
 }
 
@@ -6256,6 +6224,7 @@ export async function publishSignalBotFollowthroughTick(input: {
     });
     const copyAudit = buildSignalBotFollowthroughCopyAudit({
       candidate,
+      kind,
       stats,
     });
     const target = resolveSignalBotFollowthroughDeliveryTarget(candidate);
@@ -6579,6 +6548,18 @@ export async function loadSignalBotNotes(
         n.confidence,
         n.model_meta,
         n.created_at::text as created_at,
+        coalesce(nullif(n.lineage->>'revision_kind', ''), 'initial')
+          as revision_kind,
+        coalesce(
+          nullif(n.lineage->>'thesis_key', ''),
+          'holder_research:v2:' || n.source_id || ':' || upper(coalesce(
+            nullif(n.lineage->>'side', ''),
+            nullif(pt.target_meta->>'side', ''),
+            'MIXED'
+          ))
+        ) as thesis_key,
+        coalesce(nullif(n.lineage->>'thesis_root_note_id', ''), n.id::text)
+          as thesis_root_note_id,
         pt.target_meta as primary_target_meta,
         m.id as market_id,
         m.event_id,
@@ -6925,7 +6906,10 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
 export async function configureSignalBotTelegramUi(input: {
   config: SignalBotConfig;
   telegram: Pick<TelegramBotApiClient, "setChatMenuButton" | "setMyCommands">;
-}): Promise<void> {
+}): Promise<{
+  configured: number;
+  failures: Array<{ error: string; operation: string }>;
+}> {
   const publicCommands: TelegramBotCommandDefinition[] = [
     { command: "start", description: "Open Hunch menu" },
     { command: "menu", description: "Open Hunch menu" },
@@ -6943,33 +6927,57 @@ export async function configureSignalBotTelegramUi(input: {
     { command: "test_followthrough", description: "Preview follow-through" },
     { command: "test_trade", description: "Preview a trade card" },
   ];
-  await input.telegram.setMyCommands({
-    commands: publicCommands,
-    scope: { type: "all_private_chats" },
-  });
+  const failures: Array<{ error: string; operation: string }> = [];
+  let configured = 0;
+  const attempt = async (
+    operation: string,
+    action: () => Promise<void>,
+  ): Promise<void> => {
+    try {
+      await action();
+      configured += 1;
+    } catch (error) {
+      failures.push({
+        error: error instanceof Error ? error.message : String(error),
+        operation,
+      });
+    }
+  };
+
+  await attempt("commands:private", () =>
+    input.telegram.setMyCommands({
+      commands: publicCommands,
+      scope: { type: "all_private_chats" },
+    }),
+  );
   for (const adminUserId of [...input.config.adminUserIds].sort(
     (a, b) => a - b,
   )) {
-    await input.telegram.setMyCommands({
-      commands: adminCommands,
-      scope: { chat_id: adminUserId, type: "chat" },
-    });
+    await attempt(`commands:admin:${adminUserId}`, () =>
+      input.telegram.setMyCommands({
+        commands: adminCommands,
+        scope: { chat_id: adminUserId, type: "chat" },
+      }),
+    );
   }
-  await input.telegram.setChatMenuButton({
-    menu_button:
-      input.config.telegramMiniAppLinkBase != null
-        ? {
-            text: "Open Hunch",
-            type: "web_app",
-            web_app: {
-              url: new URL(
-                TELEGRAM_WEB_APP_ENTRY_PATH,
-                input.config.appBaseUrl,
-              ).toString(),
-            },
-          }
-        : { type: "commands" },
-  });
+  await attempt("menu-button:default", () =>
+    input.telegram.setChatMenuButton({
+      menu_button:
+        input.config.telegramMiniAppLinkBase != null
+          ? {
+              text: "Open Hunch",
+              type: "web_app",
+              web_app: {
+                url: new URL(
+                  TELEGRAM_WEB_APP_ENTRY_PATH,
+                  input.config.appBaseUrl,
+                ).toString(),
+              },
+            }
+          : { type: "commands" },
+    }),
+  );
+  return { configured, failures };
 }
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
@@ -7092,6 +7100,11 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     confidence: toNumber(row.confidence),
     modelMeta: asObject(row.model_meta),
     createdAt: toIso(row.created_at),
+    revisionKind:
+      row.revision_kind === "research_update" ? "research_update" : "initial",
+    thesisKey:
+      row.thesis_key ?? `holder_research:v2:${row.market_id ?? row.id}:MIXED`,
+    thesisRootNoteId: row.thesis_root_note_id ?? row.id,
     primaryTargetMeta: asObject(row.primary_target_meta),
     marketId: row.market_id,
     eventId: row.event_id,
@@ -7219,6 +7232,95 @@ function buildSignalBotFollowthroughSideCopy(
   );
 }
 
+function fallbackSignalNotificationSubject(
+  title: string,
+): SignalNotificationSubject {
+  return {
+    preservedFields: ["predicate"],
+    source: "safe_full_title",
+    text: title.trim() || "This market",
+    version: "signal_notification_subject_v1",
+  };
+}
+
+function buildSignalBotInitialNotificationCopy(input: {
+  messageKind: "initial" | "research_update";
+  note: SignalBotNote;
+  side: "NO" | "YES" | null;
+}): {
+  headline: SignalNotificationHeadline;
+  subject: SignalNotificationSubject;
+} {
+  const sideCopy = input.side
+    ? buildSignalBotSideCopy(input.note, input.side)
+    : null;
+  const subject =
+    input.side && sideCopy
+      ? buildSignalNotificationSubject({
+          eventTitle: input.note.eventTitle,
+          marketTitle: input.note.marketTitle,
+          side: input.side,
+          sideCopy,
+        })
+      : fallbackSignalNotificationSubject(
+          input.note.marketTitle ?? input.note.eventTitle ?? "This market",
+        );
+  return {
+    headline: buildSignalNotificationHeadline({
+      currentPrice: input.side
+        ? resolveSignalBotBuyPrice(input.note, input.side)
+        : null,
+      kind: input.messageKind,
+      subject,
+    }),
+    subject,
+  };
+}
+
+function buildSignalBotFollowthroughNotificationCopy(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  stats: SignalBotFollowthroughStats;
+}): {
+  headline: SignalNotificationHeadline;
+  subject: SignalNotificationSubject;
+} {
+  const sideCopy = input.stats.signalSide
+    ? buildSignalBotFollowthroughSideCopy(
+        input.candidate,
+        input.stats.signalSide,
+      )
+    : null;
+  const subject =
+    input.stats.signalSide && sideCopy
+      ? buildSignalNotificationSubject({
+          eventTitle: input.candidate.event_title,
+          marketTitle: input.candidate.market_title,
+          side: input.stats.signalSide,
+          sideCopy,
+        })
+      : fallbackSignalNotificationSubject(
+          input.candidate.market_title ??
+            input.candidate.event_title ??
+            "This market",
+        );
+  return {
+    headline: buildSignalNotificationHeadline({
+      cooling: isSignalBotFollowthroughCooling(input.stats),
+      currentPrice: input.stats.markPrice,
+      joinedWallets: input.stats.joinedOrAddedWallets,
+      kind: input.kind === "followthrough_stats" ? "stats" : input.kind,
+      netCopyFlowUsd: input.stats.netSignalSideFlowUsd,
+      priceMoveCents: input.stats.priceMoveCents,
+      subject,
+    }),
+    subject,
+  };
+}
+
 function formatSignalBotOutcomeDisplayLabel(
   note: SignalBotMarketCopySource,
   side: "NO" | "YES",
@@ -7250,16 +7352,23 @@ function shouldUseSignalBotCopyMarketLine(copy: MarketSideCopy): boolean {
 
 function buildSignalBotCopyAudit(input: {
   buySide: "NO" | "YES" | null;
+  messageKind: "initial" | "research_update";
   note: SignalBotNote;
 }) {
   const yesCopy = buildSignalBotSideCopy(input.note, "YES");
   const noCopy = buildSignalBotSideCopy(input.note, "NO");
   const activeCopy =
     input.buySide === "YES" ? yesCopy : input.buySide === "NO" ? noCopy : null;
+  const notification = buildSignalBotInitialNotificationCopy({
+    messageKind: input.messageKind,
+    note: input.note,
+    side: input.buySide,
+  });
   return {
     activeSide: input.buySide,
     copyVersion: SIGNAL_BOT_COPY_VERSION,
     marketSegment: input.note.marketSegment,
+    notification,
     priceSnapshot: {
       bestAsk: input.note.bestAsk,
       bestBid: input.note.bestBid,
@@ -7275,6 +7384,10 @@ function buildSignalBotCopyAudit(input: {
 
 function buildSignalBotFollowthroughCopyAudit(input: {
   candidate: SignalBotFollowthroughCandidateRow;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
   stats: SignalBotFollowthroughStats;
 }) {
   const yesCopy = buildSignalBotFollowthroughSideCopy(input.candidate, "YES");
@@ -7285,9 +7398,11 @@ function buildSignalBotFollowthroughCopyAudit(input: {
       : input.stats.signalSide === "NO"
         ? noCopy
         : null;
+  const notification = buildSignalBotFollowthroughNotificationCopy(input);
   return {
     activeSide: input.stats.signalSide,
     copyVersion: SIGNAL_BOT_COPY_VERSION,
+    notification,
     priceSnapshot: {
       bestAsk: toNumber(input.candidate.best_ask),
       bestBid: toNumber(input.candidate.best_bid),
@@ -7299,54 +7414,6 @@ function buildSignalBotFollowthroughCopyAudit(input: {
       NO: compactSignalBotCopyAudit(noCopy),
     },
   };
-}
-
-function formatSignalBotMarketEmoji(
-  note: Pick<SignalBotNote, "marketSegment">,
-): string | null {
-  switch (note.marketSegment) {
-    case "sports_soccer_game":
-      return "⚽";
-    case "sports_tennis_game":
-      return "🎾";
-    case "sports_baseball_game":
-      return "⚾";
-    case "sports_basketball_game":
-      return "🏀";
-    case "sports_cricket_game":
-      return "🏏";
-    case "sports_esports_game":
-      return "🎮";
-    case "sports_outright":
-      return "🏆";
-    case "sports_other_game":
-      return "🏟️";
-    case "crypto_btc":
-      return "₿";
-    case "crypto_eth":
-    case "crypto_alt":
-      return "🪙";
-    case "macro_rates":
-      return "🏦";
-    case "macro_commodities":
-      return "🛢️";
-    case "macro_equities":
-      return "📈";
-    case "politics_geo":
-      return "🌐";
-    case "tech_ai":
-      return "🤖";
-    case "mentions":
-      return "📣";
-    case "entertainment":
-      return "🎬";
-    case "weather":
-      return "🌦️";
-    case "health":
-      return "🏥";
-    default:
-      return null;
-  }
 }
 
 function formatVenueLabel(value: string | null | undefined): string | null {

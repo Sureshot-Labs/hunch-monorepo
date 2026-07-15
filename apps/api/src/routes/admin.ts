@@ -67,6 +67,7 @@ import {
   type IntelPolicyKey,
 } from "../services/runtime-policies.js";
 import { clearSignalBotVenueLifecycleCache } from "../services/signal-bot-venue-lifecycle.js";
+import { clearTelegramNotificationsPolicyCache } from "../services/telegram-notification-policy.js";
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
@@ -6101,6 +6102,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         if (key === "venue_lifecycle") {
           clearVenueLifecyclePolicyCache(pool);
           clearSignalBotVenueLifecycleCache(pool);
+        }
+        if (key === "telegram_notifications") {
+          clearTelegramNotificationsPolicyCache(pool);
         }
         const resolved = await resolveIntelPolicy(pool, key);
 

@@ -2511,7 +2511,7 @@ export async function syncPolymarketTradesForSigner(
           userId: inputs.userId,
           venue: "polymarket",
           status: "matched",
-          side: order.side ?? stats.fillSide,
+          action: order.side ?? stats.fillSide,
           size: stats.size,
           price: avgPrice,
           orderId: order.venue_order_id ?? order.id,

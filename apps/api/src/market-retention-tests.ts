@@ -376,6 +376,65 @@ await test("unified retention protects Limitless token_yes/token_no position var
   }
 });
 
+await test("unified retention protects Telegram outbox market references", async () => {
+  const rawTokenId = numericTokenId();
+  const marketId = `retention-telegram:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+
+  try {
+    await insertUnifiedLimitlessMarket({ marketId, rawTokenId });
+    await pool.query(
+      `
+        insert into telegram_notification_outbox (
+          user_id,
+          event_key,
+          topic,
+          event_occurred_at,
+          payload,
+          status
+        )
+        values (
+          $1::uuid,
+          $2,
+          'order_filled',
+          now(),
+          jsonb_build_object(
+            'kind', 'activity',
+            'data', jsonb_build_object('marketId', $3::text)
+          ),
+          'sent'
+        )
+      `,
+      [userId, `telegram-retention:${marketId}`, marketId],
+    );
+
+    const report = await runApiScriptJson("market-retention-selector.ts", [
+      "--venue=limitless",
+      "--cutoff-days=30",
+      "--limit=50000",
+      "--sample=200",
+      "--json",
+    ]);
+    const rows = summaryRows(report, "batchSummary");
+    assert.ok(
+      countFor(rows, {
+        section: "protected_by_reason",
+        label: "telegram_notification_outbox",
+      }) >= 1,
+    );
+    const samples = summaryRows(report, "removableSamples");
+    assert.equal(
+      samples.some((row) => row.marketId === marketId),
+      false,
+    );
+  } finally {
+    await cleanupUnifiedRetentionTest(userId, marketId, [
+      rawTokenId,
+      `other-${rawTokenId}`,
+    ]);
+  }
+});
+
 await test("source retention protects Limitless source markets referenced by positions and orders", async () => {
   const positionRawTokenId = numericTokenId();
   const orderRawTokenId = numericTokenId();

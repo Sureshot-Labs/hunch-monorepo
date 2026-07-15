@@ -201,6 +201,14 @@ function protectedRefsSql(
     join holder_research_candidate_observations observation
       on observation.source_market_id = c.market_id
     union
+    select distinct c.market_id, 'telegram_notification_outbox' as reason
+    from telegram_notification_outbox outbox
+    join ${candidatePoolTable} c
+      on c.market_id = coalesce(
+        nullif(outbox.payload->>'marketId', ''),
+        nullif(outbox.payload #>> '{data,marketId}', '')
+      )
+    union
     select distinct c.market_id, 'wallet_activity_events' as reason
     from ${candidatePoolTable} c
     join wallet_activity_events wa on wa.venue = c.venue and wa.market_id = c.market_id

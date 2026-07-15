@@ -247,6 +247,9 @@ export function buildOrderNotification(input: {
   userId: string;
   venue: string;
   status?: string | null;
+  action?: string | null;
+  outcomeSide?: "NO" | "YES" | null;
+  /** @deprecated Use action or outcomeSide when the caller knows the meaning. */
   side?: string | null;
   size?: number | string | null;
   price?: number | string | null;
@@ -289,8 +292,24 @@ export function buildOrderNotification(input: {
 
   const size = readPositiveNumber(input.size);
   const price = readPositiveNumber(input.price);
+  const normalizedLegacySide = input.side?.trim().toUpperCase() ?? null;
+  const normalizedExplicitAction = input.action?.trim().toUpperCase() ?? null;
+  const action =
+    (normalizedExplicitAction === "BUY" || normalizedExplicitAction === "SELL"
+      ? normalizedExplicitAction
+      : null) ??
+    (normalizedLegacySide === "BUY" || normalizedLegacySide === "SELL"
+      ? normalizedLegacySide
+      : null);
+  const outcomeSide =
+    input.outcomeSide ??
+    (normalizedLegacySide === "YES" || normalizedLegacySide === "NO"
+      ? normalizedLegacySide
+      : null);
   const parts: string[] = [formatVenue(input.venue)];
-  if (input.side) parts.push(input.side);
+  if (action) parts.push(action);
+  else if (outcomeSide) parts.push(outcomeSide);
+  else if (input.side) parts.push(input.side);
   if (size != null) {
     parts.push(formatNumber(size, 4));
   }
@@ -314,6 +333,8 @@ export function buildOrderNotification(input: {
     data: {
       venue: input.venue,
       status: displayStatus,
+      action,
+      outcomeSide,
       side: input.side ?? null,
       size,
       price,

@@ -26,6 +26,11 @@ import {
   signalBotSchema,
   type SignalBotPolicy,
 } from "./signal-bot-trading-policy.js";
+import {
+  DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
+  telegramNotificationsPolicySchema,
+  type TelegramNotificationsPolicyV1,
+} from "./telegram-notification-policy.js";
 
 export type {
   SignalBotPolicy,
@@ -47,12 +52,15 @@ export const INTEL_POLICY_KEYS = [
   "holder_research",
   "arbitrage_defaults",
   "signal_bot",
+  "telegram_notifications",
   "venue_lifecycle",
 ] as const;
 
 export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 
-type PolicySource<K extends IntelPolicyKey> = K extends "venue_lifecycle"
+type PolicySource<K extends IntelPolicyKey> = K extends
+  | "telegram_notifications"
+  | "venue_lifecycle"
   ? "default" | "db"
   : "env" | "db";
 
@@ -605,6 +613,7 @@ type IntelPolicyMap = {
   holder_research: HolderResearchPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
   signal_bot: SignalBotPolicy;
+  telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
 };
 
@@ -1280,6 +1289,7 @@ const policySchemas = {
   holder_research: holderResearchSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
   signal_bot: signalBotSchema,
+  telegram_notifications: telegramNotificationsPolicySchema,
   venue_lifecycle: venueLifecyclePolicySchema,
 } as const;
 
@@ -1875,6 +1885,7 @@ function getDefaults(): IntelPolicyMap {
       minQualityScore: 0.6,
     },
     signal_bot: getDefaultSignalBotPolicy(),
+    telegram_notifications: DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
   };
 }
@@ -3137,6 +3148,10 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeSignalBotPolicy(
         merged as SignalBotPolicy,
       ) as IntelPolicyMap[K];
+    case "telegram_notifications":
+      return telegramNotificationsPolicySchema.parse(
+        merged,
+      ) as IntelPolicyMap[K];
     case "venue_lifecycle":
       return venueLifecyclePolicySchema.parse(merged) as IntelPolicyMap[K];
     default:
@@ -3208,6 +3223,9 @@ function sanitizeOverridePayload(
     case "signal_bot": {
       return sanitizeSignalBotPolicyOverride(record);
     }
+    case "telegram_notifications": {
+      return record;
+    }
     case "venue_lifecycle": {
       return record;
     }
@@ -3244,7 +3262,7 @@ function resolveFromRow<K extends IntelPolicyKey>(
   if (!row) {
     return {
       key,
-      source: (key === "venue_lifecycle"
+      source: (key === "venue_lifecycle" || key === "telegram_notifications"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt: null,
@@ -3271,7 +3289,7 @@ function resolveFromRow<K extends IntelPolicyKey>(
     }
     return {
       key,
-      source: (key === "venue_lifecycle"
+      source: (key === "venue_lifecycle" || key === "telegram_notifications"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt,
@@ -3355,6 +3373,10 @@ export async function resolveAllIntelPolicies(
       byKey.get("arbitrage_defaults") ?? null,
     ),
     signal_bot: resolveFromRow("signal_bot", byKey.get("signal_bot") ?? null),
+    telegram_notifications: resolveFromRow(
+      "telegram_notifications",
+      byKey.get("telegram_notifications") ?? null,
+    ),
     venue_lifecycle: resolveFromRow(
       "venue_lifecycle",
       byKey.get("venue_lifecycle") ?? null,

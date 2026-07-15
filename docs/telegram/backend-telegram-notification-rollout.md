@@ -1,7 +1,7 @@
 # Backend Task: Telegram Notification Production Rollout
 
-Status: implementation exists locally; migration, operations, and live QA required  
-Priority: P0  
+Status: implementation exists locally; production migration, operations, and live QA required
+Priority: P0
 Depends on: current worktree and deployment ownership
 
 ## Goal
@@ -12,7 +12,8 @@ not a request to build a second delivery worker.
 
 ## Already Implemented Locally
 
-Migration `0177_telegram_user_notifications.sql` adds:
+Migrations `0177_telegram_user_notifications.sql` and
+`0178_telegram_notification_delivery_safety.sql` add:
 
 - `telegram_notification_preferences` with seven topic preferences and
   `enabled_at` cutoffs;
@@ -20,6 +21,8 @@ Migration `0177_telegram_user_notifications.sql` adds:
 - `telegram_notification_cursors`;
 - preference creation on Telegram account link;
 - reachable/blocked state.
+- immutable `event_occurred_at`, safe defaults, cursor indexes, and bounded
+  terminal-row retention support.
 
 The API implementation adds:
 
@@ -32,6 +35,13 @@ The API implementation adds:
 - blocked/missing-user handling without unlinking identity or trading access;
 - MarkdownV2 messages with at most one contextual Mini App CTA;
 - a runner loop for enqueue and delivery.
+- a typed `telegram_notifications` runtime policy with independent activity
+  enqueue, position-signal enqueue, and delivery gates. All three compiled
+  defaults are `false`.
+
+Only an explicit private `/start` marks a linked account reachable. Linking,
+`/menu`, `/settings`, callbacks, or relinking do not. Position signals are
+opt-in and default to off.
 
 Current activity mapping:
 
@@ -45,20 +55,21 @@ Current activity mapping:
 | `payouts_rewards`   | `redemption_completed`, `reward_claim_confirmed`, `reward_claim_failed` |
 | `position_signals`  | eligible Hunch notes for exact markets in owned positions               |
 
-The migration was not applied to a live database and live Telegram delivery
-was not verified during this work.
+Both migrations were applied and integration-tested against the local database.
+They were not applied to a live database, and live Telegram delivery was not
+verified during this work.
 
 ## Migration and Deploy Plan
 
-1. Determine whether any environment has applied an earlier migration 0177.
-2. If none has, finalize and apply 0177 normally. If one has, create the next
-   forward migration; never edit applied migration history.
-3. Deploy the database migration before code that reads the new tables.
-4. Deploy API services and the signal-bot runner with a production kill switch
-   for enqueue/delivery if one does not already exist.
-5. Verify all required Telegram and Mini App configuration in the target
+1. Apply migrations 0177 and 0178 in filename order; never rewrite either after
+   it has been applied.
+2. Deploy the database migrations before code that reads the new tables.
+3. Deploy API services and the signal-bot runner. With no runtime-policy row,
+   enqueue and delivery remain disabled.
+4. Verify all required Telegram and Mini App configuration in the target
    environment.
-6. Enable one test account, complete live event QA, then expand rollout while
+5. Publish the full typed runtime policy one gate at a time for one test
+   account, complete live event QA, then expand rollout while
    monitoring the outbox.
 
 The migration review must also confirm:
@@ -117,7 +128,7 @@ reachable again.
 
 ## Acceptance Criteria
 
-- Migration ownership and the 0177/forward-migration decision are recorded.
+- Migration ownership for 0177 and forward migration 0178 is recorded.
 - Every supported event produces at most one message per user/event key.
 - Preferences are checked at enqueue and again before delivery.
 - Topic re-enable does not backfill older activity.

@@ -27,10 +27,12 @@ import {
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
 import {
+  cleanupTelegramNotificationOutbox,
   deliverTelegramNotificationOutbox,
   enqueueTelegramActivityNotifications,
   enqueueTelegramPositionSignals,
 } from "./services/telegram-notification-delivery.js";
+import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
@@ -166,13 +168,14 @@ export async function runSignalBotRunner(): Promise<void> {
       });
       return null;
     });
-  await configureSignalBotTelegramUi({ config, telegram }).catch(
-    (error: unknown) => {
-      log("signal_bot_telegram_ui_config_failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    },
-  );
+  const telegramUi = await configureSignalBotTelegramUi({ config, telegram });
+  log("signal_bot_telegram_ui_configured", {
+    configured: telegramUi.configured,
+    failures: telegramUi.failures.length,
+  });
+  for (const failure of telegramUi.failures) {
+    log("signal_bot_telegram_ui_config_failed", failure);
+  }
 
   log("signal_bot_started", {
     adminCount: config.adminUserIds.size,
@@ -186,6 +189,8 @@ export async function runSignalBotRunner(): Promise<void> {
 
   let nextPublishAt = 0;
   let nextNotificationAt = 0;
+  let nextNotificationCleanupAt = 0;
+  let lastNotificationPolicySignature: string | null = null;
   let heartbeatLost = false;
   const lockHeartbeat = setInterval(() => {
     void refreshSignalBotLock({ owner, redis })
@@ -367,28 +372,74 @@ export async function runSignalBotRunner(): Promise<void> {
 
         const now = Date.now();
         if (!heartbeatLost && now >= nextNotificationAt) {
+          let cleaned = 0;
+          if (now >= nextNotificationCleanupAt) {
+            try {
+              cleaned = await cleanupTelegramNotificationOutbox({ db });
+              nextNotificationCleanupAt = now + 60 * 60 * 1_000;
+            } catch (error) {
+              log("signal_bot_user_notifications_cleanup_error", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
           try {
-            const activityEnqueued = await enqueueTelegramActivityNotifications(
-              { db, limit: 200 },
-            );
-            const positionSignals = await enqueueTelegramPositionSignals({
-              config,
-              limit: config.maxSignalsPerTick,
-              pool: db,
+            const resolvedPolicy = await resolveTelegramNotificationsPolicy(db);
+            const policySignature = JSON.stringify({
+              effectiveAt: resolvedPolicy.effectiveAt,
+              invalidOverride: resolvedPolicy.invalidOverride,
+              policy: resolvedPolicy.policy,
+              source: resolvedPolicy.source,
             });
-            const delivery = await deliverTelegramNotificationOutbox({
-              db,
-              limit: 25,
-              miniAppLinkBase: config.telegramMiniAppLinkBase,
-              telegram,
-            });
+            if (policySignature !== lastNotificationPolicySignature) {
+              lastNotificationPolicySignature = policySignature;
+              log("signal_bot_user_notifications_policy", {
+                effectiveAt: resolvedPolicy.effectiveAt,
+                invalidOverride: resolvedPolicy.invalidOverride,
+                ...resolvedPolicy.policy,
+                source: resolvedPolicy.source,
+              });
+            }
+
+            const activityEnqueued = resolvedPolicy.policy
+              .activityEnqueueEnabled
+              ? await enqueueTelegramActivityNotifications({
+                  limit: 200,
+                  pool: db,
+                })
+              : 0;
+            const positionSignals = resolvedPolicy.policy
+              .positionSignalEnqueueEnabled
+              ? await enqueueTelegramPositionSignals({
+                  config,
+                  limit: config.maxSignalsPerTick,
+                  pool: db,
+                })
+              : { enqueued: 0, notes: 0 };
+            const delivery = resolvedPolicy.policy.deliveryEnabled
+              ? await deliverTelegramNotificationOutbox({
+                  db,
+                  limit: 25,
+                  miniAppLinkBase: config.telegramMiniAppLinkBase,
+                  telegram,
+                })
+              : {
+                  blocked: 0,
+                  claimed: 0,
+                  deferred: 0,
+                  failed: 0,
+                  sent: 0,
+                  skipped: 0,
+                };
             if (
               activityEnqueued > 0 ||
               positionSignals.enqueued > 0 ||
-              delivery.claimed > 0
+              delivery.claimed > 0 ||
+              cleaned > 0
             ) {
               log("signal_bot_user_notifications", {
                 activityEnqueued,
+                cleaned,
                 positionSignalEnqueued: positionSignals.enqueued,
                 positionSignalNotes: positionSignals.notes,
                 ...delivery,

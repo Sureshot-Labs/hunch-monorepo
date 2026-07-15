@@ -26,6 +26,7 @@ type TelegramNotificationOutboxRow = {
 
 type TelegramNotificationDestinationRow = {
   enabled: boolean;
+  enabled_since_event: boolean;
   reachable: boolean;
   telegram_user_id: string | null;
 };
@@ -39,10 +40,12 @@ type TelegramNotificationMarket = {
 
 export type TelegramUserNotificationMessage = {
   keyboard?: TelegramInlineKeyboard;
+  replyToMessageId?: number;
   text: string;
 };
 
 const POSITION_SIGNAL_CURSOR_KEY = "telegram_position_signals_v1";
+const ACTIVITY_NOTIFICATION_CURSOR_KEY = "telegram_activity_notifications_v1";
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const MAX_DELIVERY_ATTEMPTS = 8;
 
@@ -105,6 +108,11 @@ function normalizeSide(value: string | null): "NO" | "YES" | null {
   return normalized === "YES" || normalized === "NO" ? normalized : null;
 }
 
+function normalizeAction(value: string | null): "BUY" | "SELL" | null {
+  const normalized = value?.trim().toUpperCase();
+  return normalized === "BUY" || normalized === "SELL" ? normalized : null;
+}
+
 function notificationButton(input: {
   eventId: string | null;
   marketId: string | null;
@@ -135,17 +143,19 @@ export function buildTelegramActivityNotificationMessage(input: {
   const marketTitle = input.market?.title;
   const dataSide = normalizeSide(readString(data, "outcomeSide"));
   const side = dataSide ?? input.market?.side;
+  const action =
+    normalizeAction(readString(data, "action")) ??
+    normalizeAction(readString(data, "side"));
   const size = readNumber(data, "size");
   const price = readNumber(data, "price");
   const lines: string[] = [];
-  let actionText = "View in Hunch";
+  let actionText: string | null = null;
 
   if (type === "order_filled") {
     lines.push(formatBold("✅ Order filled"));
     actionText = "View position";
   } else if (type === "deposit_received") {
     lines.push(formatBold("✅ Deposit received"));
-    actionText = "View funds";
   } else if (
     type === "bridge_completed" ||
     type === "bridge_refunded" ||
@@ -158,23 +168,20 @@ export function buildTelegramActivityNotificationMessage(input: {
           ? "↩️"
           : "⚠️";
     lines.push(formatBold(`${icon} ${title}`));
-    actionText = "View funds";
   } else if (type === "redemption_completed") {
     lines.push(formatBold("✅ Redemption completed"));
     actionText = "View position";
   } else if (type === "reward_claim_confirmed") {
     lines.push(formatBold("🎁 Cashback paid out"));
-    actionText = "View rewards";
   } else if (type === "reward_claim_failed") {
     lines.push(formatBold("⚠️ Cashback claim failed"));
-    actionText = "View rewards";
   } else if (type === "position_resolved") {
     const result = readString(data, "result");
     const resultTitle = result === "won" ? "won" : "lost";
     lines.push(
       formatBold(`🏁 Your${side ? ` ${side}` : ""} position ${resultTitle}`),
     );
-    actionText = result === "won" ? "Claim in Hunch" : "View position";
+    actionText = "View position";
   } else if (type === "order_cancelled" || type === "order_failed") {
     lines.push(formatBold(`⚠️ ${title}`));
     actionText = "Review order";
@@ -196,6 +203,7 @@ export function buildTelegramActivityNotificationMessage(input: {
     if (body) lines.push(escapeTelegramMarkdownV2(body));
   } else {
     const details: string[] = [];
+    if (action) details.push(action);
     if (side) details.push(side);
     if (size != null && size > 0 && price != null && price > 0) {
       details.push(`${formatShares(size)} shares at ${formatPrice(price)}`);
@@ -210,126 +218,218 @@ export function buildTelegramActivityNotificationMessage(input: {
       lines.push(escapeTelegramMarkdownV2(body));
     }
     if (type === "order_filled" && size && price && size > 0 && price > 0) {
+      const valueLabel =
+        action === "BUY"
+          ? "Estimated spend"
+          : action === "SELL"
+            ? "Estimated proceeds"
+            : "Estimated filled value";
       lines.push(
-        escapeTelegramMarkdownV2(`Estimated cost: ${formatUsd(size * price)}`),
+        escapeTelegramMarkdownV2(`${valueLabel}: ${formatUsd(size * price)}`),
       );
     }
   }
 
   return {
-    keyboard: notificationButton({
-      eventId: input.market?.eventId ?? null,
-      marketId: input.market?.marketId ?? null,
-      miniAppLinkBase: input.miniAppLinkBase,
-      text: actionText,
-    }),
+    keyboard: actionText
+      ? notificationButton({
+          eventId: input.market?.eventId ?? null,
+          marketId: input.market?.marketId ?? null,
+          miniAppLinkBase: input.miniAppLinkBase,
+          text: actionText,
+        })
+      : undefined,
     text: lines.join("\n"),
   };
 }
 
 export async function enqueueTelegramActivityNotifications(input: {
-  db: DbQuery;
+  consumerKey?: string;
+  pool: Pool;
   limit?: number;
 }): Promise<number> {
   const limit = Math.min(500, Math.max(1, input.limit ?? 200));
-  const { rows } = await input.db.query<{ id: string }>(
-    `
-      insert into telegram_notification_outbox (
-        user_id,
-        event_key,
-        topic,
-        notification_id,
-        payload
-      )
-      select
-        n.user_id,
-        'notification:' || n.id::text || ':' || n.type,
-        case
-          when n.type = 'order_filled' then 'order_filled'
-          when n.type in ('order_cancelled', 'order_failed') then 'order_issues'
-          when n.type = 'deposit_received' then 'deposit_received'
-          when n.type in (
-            'bridge_completed',
-            'bridge_refunded',
-            'bridge_failed'
-          ) then 'bridge_updates'
-          when n.type in (
-            'redemption_completed',
-            'reward_claim_confirmed',
-            'reward_claim_failed'
-          ) then 'payouts_rewards'
-          else 'position_resolved'
-        end,
-        n.id,
-        jsonb_build_object(
-          'kind', 'activity',
-          'type', n.type,
-          'title', n.title,
-          'body', n.body,
-          'severity', n.severity,
-          'data', coalesce(n.data, '{}'::jsonb),
-          'createdAt', n.created_at
+  const consumerKey =
+    input.consumerKey?.trim() || ACTIVITY_NOTIFICATION_CURSOR_KEY;
+  const client = await input.pool.connect();
+  try {
+    await client.query("begin");
+    const initialized = await client.query(
+      `
+        insert into telegram_notification_cursors (
+          consumer_key,
+          cursor_created_at,
+          cursor_id
         )
-      from notifications n
-      join telegram_notification_preferences preference
-        on preference.user_id = n.user_id
-       and preference.reachable = true
-      join user_telegram_accounts account
-        on account.user_id = n.user_id
-      where (
-        (
-          n.type = 'order_filled'
-          and preference.order_filled = true
-          and n.updated_at >= preference.order_filled_enabled_at
-        ) or (
-          n.type in ('order_cancelled', 'order_failed')
-          and preference.order_issues = true
-          and n.updated_at >= preference.order_issues_enabled_at
-        ) or (
-          n.type = 'position_resolved'
-          and preference.position_resolved = true
-          and n.updated_at >= preference.position_resolved_enabled_at
-        ) or (
-          n.type = 'deposit_received'
-          and preference.deposit_received = true
-          and n.updated_at >= preference.deposit_received_enabled_at
-        ) or (
-          n.type in (
+        values ($1, now(), $2::uuid)
+        on conflict (consumer_key) do nothing
+        returning consumer_key
+      `,
+      [consumerKey, ZERO_UUID],
+    );
+    if ((initialized.rowCount ?? 0) > 0) {
+      await client.query("commit");
+      return 0;
+    }
+
+    const { rows: cursorRows } = await client.query<{
+      cursor_created_at: string;
+      cursor_id: string;
+    }>(
+      `
+        select cursor_created_at::text as cursor_created_at, cursor_id
+        from telegram_notification_cursors
+        where consumer_key = $1
+        for update
+      `,
+      [consumerKey],
+    );
+    const cursor = cursorRows[0];
+    if (!cursor) throw new Error("Activity notification cursor unavailable");
+
+    const { rows } = await client.query<{
+      enqueued: string | number;
+      last_created_at: string | null;
+      last_id: string | null;
+    }>(
+      `
+        with candidates as materialized (
+          select n.*
+          from notifications n
+          where n.type in (
+            'order_filled',
+            'order_cancelled',
+            'order_failed',
+            'position_resolved',
+            'deposit_received',
             'bridge_completed',
             'bridge_refunded',
-            'bridge_failed'
-          )
-          and preference.bridge_updates = true
-          and n.updated_at >= preference.bridge_updates_enabled_at
-        ) or (
-          n.type in (
+            'bridge_failed',
             'redemption_completed',
             'reward_claim_confirmed',
             'reward_claim_failed'
           )
-          and preference.payouts_rewards = true
-          and n.updated_at >= preference.payouts_rewards_enabled_at
+            and n.created_at is not null
+            and (
+              n.created_at > $1::timestamptz
+              or (n.created_at = $1::timestamptz and n.id > $2::uuid)
+            )
+          order by n.created_at asc, n.id asc
+          limit $3
+        ),
+        inserted as (
+          insert into telegram_notification_outbox (
+            user_id,
+            event_key,
+            topic,
+            notification_id,
+            event_occurred_at,
+            payload
+          )
+          select
+            n.user_id,
+            'notification:' || n.id::text || ':' || n.type,
+            case
+              when n.type = 'order_filled' then 'order_filled'
+              when n.type in ('order_cancelled', 'order_failed') then 'order_issues'
+              when n.type = 'deposit_received' then 'deposit_received'
+              when n.type in (
+                'bridge_completed',
+                'bridge_refunded',
+                'bridge_failed'
+              ) then 'bridge_updates'
+              when n.type in (
+                'redemption_completed',
+                'reward_claim_confirmed',
+                'reward_claim_failed'
+              ) then 'payouts_rewards'
+              else 'position_resolved'
+            end,
+            n.id,
+            n.created_at,
+            jsonb_build_object(
+              'kind', 'activity',
+              'type', n.type,
+              'title', n.title,
+              'body', n.body,
+              'severity', n.severity,
+              'data', coalesce(n.data, '{}'::jsonb),
+              'createdAt', n.created_at
+            )
+          from candidates n
+          join telegram_notification_preferences preference
+            on preference.user_id = n.user_id
+           and preference.reachable = true
+          join user_telegram_accounts account
+            on account.user_id = n.user_id
+          where (
+            (n.type = 'order_filled'
+              and preference.order_filled = true
+              and n.created_at >= preference.order_filled_enabled_at)
+            or (n.type in ('order_cancelled', 'order_failed')
+              and preference.order_issues = true
+              and n.created_at >= preference.order_issues_enabled_at)
+            or (n.type = 'position_resolved'
+              and preference.position_resolved = true
+              and n.created_at >= preference.position_resolved_enabled_at)
+            or (n.type = 'deposit_received'
+              and preference.deposit_received = true
+              and n.created_at >= preference.deposit_received_enabled_at)
+            or (n.type in ('bridge_completed', 'bridge_refunded', 'bridge_failed')
+              and preference.bridge_updates = true
+              and n.created_at >= preference.bridge_updates_enabled_at)
+            or (n.type in (
+                'redemption_completed',
+                'reward_claim_confirmed',
+                'reward_claim_failed'
+              )
+              and preference.payouts_rewards = true
+              and n.created_at >= preference.payouts_rewards_enabled_at)
+          )
+          on conflict (user_id, event_key) do nothing
+          returning id
+        ),
+        last_candidate as (
+          select created_at, id
+          from candidates
+          order by created_at desc, id desc
+          limit 1
         )
-      )
-      and not exists (
-        select 1
-        from telegram_notification_outbox existing
-        where existing.user_id = n.user_id
-          and existing.event_key =
-            'notification:' || n.id::text || ':' || n.type
-      )
-      order by n.updated_at asc, n.id asc
-      limit $1
-      on conflict (user_id, event_key) do nothing
-      returning id
-    `,
-    [limit],
-  );
-  return rows.length;
+        select
+          (select count(*)::int from inserted) as enqueued,
+          last_candidate.created_at::text as last_created_at,
+          last_candidate.id as last_id
+        from (values (1)) seed(value)
+        left join last_candidate on true
+      `,
+      [cursor.cursor_created_at, cursor.cursor_id, limit],
+    );
+    const result = rows[0];
+    if (result?.last_created_at && result.last_id) {
+      await client.query(
+        `
+          update telegram_notification_cursors
+          set cursor_created_at = $2::timestamptz,
+              cursor_id = $3::uuid,
+              updated_at = now()
+          where consumer_key = $1
+        `,
+        [consumerKey, result.last_created_at, result.last_id],
+      );
+    }
+    await client.query("commit");
+    return Number(result?.enqueued ?? 0);
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 type PositionSignalRecipientRow = {
   held_sides: string[] | null;
+  root_telegram_message_id: string | number | null;
   user_id: string;
 };
 
@@ -360,7 +460,7 @@ export async function enqueueTelegramPositionSignals(input: {
   try {
     await client.query("begin");
     const { rows: cursorRows } = await client.query<{
-      cursor_created_at: Date | string;
+      cursor_created_at: string;
       cursor_id: string;
     }>(
       `
@@ -372,7 +472,7 @@ export async function enqueueTelegramPositionSignals(input: {
         values ($1, now(), $2::uuid)
         on conflict (consumer_key) do update
         set consumer_key = excluded.consumer_key
-        returning cursor_created_at, cursor_id
+        returning cursor_created_at::text as cursor_created_at, cursor_id
       `,
       [POSITION_SIGNAL_CURSOR_KEY, ZERO_UUID],
     );
@@ -380,7 +480,7 @@ export async function enqueueTelegramPositionSignals(input: {
     if (!cursor) throw new Error("Position signal cursor unavailable");
 
     const notes = await loadSignalBotNotes(client, {
-      afterCreatedAt: new Date(cursor.cursor_created_at).toISOString(),
+      afterCreatedAt: cursor.cursor_created_at,
       afterId: cursor.cursor_id,
       limit: Math.min(100, Math.max(1, input.limit ?? 25)),
       minConfidence: input.config.minConfidence,
@@ -395,7 +495,8 @@ export async function enqueueTelegramPositionSignals(input: {
               select
                 p.user_id,
                 array_agg(distinct upper(ut.side))
-                  filter (where upper(ut.side) in ('YES', 'NO')) as held_sides
+                  filter (where upper(ut.side) in ('YES', 'NO')) as held_sides,
+                root_delivery.telegram_message_id as root_telegram_message_id
               from positions p
               join unified_tokens ut
                 on ut.token_id = p.token_id
@@ -407,18 +508,33 @@ export async function enqueueTelegramPositionSignals(input: {
                and $2::timestamptz >= preference.position_signals_enabled_at
               join user_telegram_accounts account
                 on account.user_id = p.user_id
+              left join telegram_notification_outbox root_delivery
+                on root_delivery.user_id = p.user_id
+               and root_delivery.topic = 'position_signals'
+               and root_delivery.note_id = $3::uuid
+               and root_delivery.status = 'sent'
               where ut.market_id = $1
                 and p.position_scope = 'own'
                 and p.size > 0
                 and coalesce(p.is_hidden, false) = false
-              group by p.user_id
+                and (
+                  $4::text = 'initial'
+                  or root_delivery.telegram_message_id is not null
+                )
+              group by p.user_id, root_delivery.telegram_message_id
             `,
-            [note.marketId, note.createdAt],
+            [
+              note.marketId,
+              note.createdAt,
+              note.thesisRootNoteId,
+              note.revisionKind,
+            ],
           );
         const rendered = buildSignalBotMessage({
           appBaseUrl: input.config.appBaseUrl,
           buyAmountUsd: input.config.buyAmountUsd,
           chatType: "private",
+          messageKind: note.revisionKind,
           note,
           telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
         });
@@ -432,6 +548,10 @@ export async function enqueueTelegramPositionSignals(input: {
             heldSides,
             signalSide,
           });
+          const relationshipTitle =
+            note.revisionKind === "research_update"
+              ? `🔎 Research update for a market you hold`
+              : relationship;
           const { rows: inserted } = await client.query<{ id: string }>(
             `
               insert into telegram_notification_outbox (
@@ -439,6 +559,7 @@ export async function enqueueTelegramPositionSignals(input: {
                 event_key,
                 topic,
                 note_id,
+                event_occurred_at,
                 payload
               )
               values (
@@ -446,20 +567,33 @@ export async function enqueueTelegramPositionSignals(input: {
                 $2,
                 'position_signals',
                 $3::uuid,
-                $4::jsonb
+                $4::timestamptz,
+                $5::jsonb
               )
               on conflict (user_id, event_key) do nothing
               returning id
             `,
             [
               recipient.user_id,
-              `position-signal:${note.id}:initial`,
+              `position-signal:${note.thesisRootNoteId}:${note.revisionKind}:${note.id}`,
               note.id,
+              note.createdAt,
               JSON.stringify({
                 eventId: note.eventId,
                 kind: "position_signal",
                 marketId: note.marketId,
-                text: `${formatBold(relationship)}\n\n${rendered.text}`,
+                messageKind: note.revisionKind,
+                actionText:
+                  note.revisionKind === "research_update"
+                    ? "Open market"
+                    : "Review position",
+                replyToMessageId:
+                  note.revisionKind === "research_update"
+                    ? Number(recipient.root_telegram_message_id)
+                    : null,
+                text: `${formatBold(relationshipTitle)}\n\n${rendered.text}`,
+                thesisKey: note.thesisKey,
+                thesisRootNoteId: note.thesisRootNoteId,
               }),
             ],
           );
@@ -544,7 +678,17 @@ async function loadTelegramNotificationDestination(input: {
           when 'payouts_rewards' then preference.payouts_rewards
           when 'position_signals' then preference.position_signals
           else false
-        end as enabled
+        end as enabled,
+        outbox.event_occurred_at >= case outbox.topic
+          when 'order_filled' then preference.order_filled_enabled_at
+          when 'order_issues' then preference.order_issues_enabled_at
+          when 'position_resolved' then preference.position_resolved_enabled_at
+          when 'deposit_received' then preference.deposit_received_enabled_at
+          when 'bridge_updates' then preference.bridge_updates_enabled_at
+          when 'payouts_rewards' then preference.payouts_rewards_enabled_at
+          when 'position_signals' then preference.position_signals_enabled_at
+          else now()
+        end as enabled_since_event
       from telegram_notification_outbox outbox
       left join telegram_notification_preferences preference
         on preference.user_id = outbox.user_id
@@ -618,13 +762,21 @@ function buildPositionSignalMessage(input: {
   if (!isRecord(input.payload)) return null;
   const text = readString(input.payload, "text");
   if (!text) return null;
+  const actionText = readString(input.payload, "actionText");
+  const replyToMessageId = readNumber(input.payload, "replyToMessageId");
   return {
     keyboard: notificationButton({
       eventId: readString(input.payload, "eventId"),
       marketId: readString(input.payload, "marketId"),
       miniAppLinkBase: input.miniAppLinkBase,
-      text: "Review position",
+      text: actionText ?? "Open market",
     }),
+    replyToMessageId:
+      replyToMessageId != null &&
+      Number.isInteger(replyToMessageId) &&
+      replyToMessageId > 0
+        ? replyToMessageId
+        : undefined,
     text,
   };
 }
@@ -709,6 +861,35 @@ async function deferOutboxForChatRate(input: {
   );
 }
 
+export async function cleanupTelegramNotificationOutbox(input: {
+  db: DbQuery;
+  limit?: number;
+  retentionDays?: number;
+}): Promise<number> {
+  const limit = Math.min(10_000, Math.max(1, input.limit ?? 1_000));
+  const retentionDays = Math.min(
+    365,
+    Math.max(1, Math.trunc(input.retentionDays ?? 90)),
+  );
+  const result = await input.db.query(
+    `
+      with expired as (
+        select id
+        from telegram_notification_outbox
+        where status in ('sent', 'skipped', 'dead')
+          and updated_at < now() - ($1::int * interval '1 day')
+        order by updated_at asc
+        limit $2
+      )
+      delete from telegram_notification_outbox outbox
+      using expired
+      where outbox.id = expired.id
+    `,
+    [retentionDays, limit],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function deliverTelegramNotificationOutbox(input: {
   db: DbQuery;
   limit?: number;
@@ -741,13 +922,18 @@ export async function deliverTelegramNotificationOutbox(input: {
     if (
       !destination?.telegram_user_id ||
       !destination.enabled ||
+      !destination.enabled_since_event ||
       !destination.reachable
     ) {
       skipped += 1;
       await markOutboxSkipped({
         db: input.db,
         id: row.id,
-        reason: "Telegram destination or preference is unavailable.",
+        reason:
+          destination?.enabled === true &&
+          destination.enabled_since_event === false
+            ? "Notification predates the latest topic enablement."
+            : "Telegram destination or preference is unavailable.",
       });
       continue;
     }
@@ -786,6 +972,12 @@ export async function deliverTelegramNotificationOutbox(input: {
       chat_id: destination.telegram_user_id,
       disable_web_page_preview: true,
       parse_mode: "MarkdownV2",
+      reply_parameters: message.replyToMessageId
+        ? {
+            allow_sending_without_reply: false,
+            message_id: message.replyToMessageId,
+          }
+        : undefined,
       reply_markup: message.keyboard,
       text: message.text,
     });

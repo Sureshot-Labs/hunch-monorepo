@@ -803,6 +803,9 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
       },
     },
     createdAt: "2026-01-01T00:00:00.000Z",
+    revisionKind: "initial",
+    thesisKey: "holder_research:v2:polymarket:market-1:YES",
+    thesisRootNoteId: "00000000-0000-4000-8000-000000000001",
     primaryTargetMeta: { bucket: "sharp_side", side: "YES" },
     marketId: "polymarket:market-1",
     eventId: "polymarket:event-1",
@@ -854,6 +857,9 @@ function noteRow(overrides: Record<string, unknown> = {}) {
       },
     },
     created_at: new Date("2026-01-01T00:00:00.000Z"),
+    revision_kind: "initial",
+    thesis_key: "holder_research:v2:polymarket:market-1:YES",
+    thesis_root_note_id: "00000000-0000-4000-8000-000000000001",
     primary_target_meta: { bucket: "sharp_side", side: "YES" },
     market_id: "polymarket:market-1",
     event_id: "polymarket:event-1",
@@ -1524,7 +1530,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         miniAppLinkBase: "https://t.me/hunch_bot/hunch",
         payload: {
           body: "Polymarket order",
-          data: { price: 0.62, size: 100 },
+          data: { action: "BUY", price: 0.62, size: 100 },
           title: "Order filled",
           type: "order_filled",
         },
@@ -1533,7 +1539,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(order.text, /Order filled/);
       assert.match(order.text, /Fed decision in July/);
       assert.match(order.text, /100 shares at 62¢/);
-      assert.match(order.text, /Estimated cost: \$62/);
+      assert.match(order.text, /Estimated spend: \$62/);
       const orderButton = order.keyboard?.inline_keyboard.flat()[0];
       assert.ok(orderButton && "url" in orderButton);
       assert.match(orderButton.url ?? "", /^https:\/\/t\.me\/hunch_bot\/hunch/);
@@ -1562,7 +1568,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(resolved.text, /Resolved outcome: YES/);
       assert.equal(
         resolved.keyboard?.inline_keyboard.flat()[0]?.text,
-        "Claim in Hunch",
+        "View position",
       );
 
       const deposit = buildTelegramActivityNotificationMessage({
@@ -1617,20 +1623,51 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const enqueueQueries: string[] = [];
       const enqueued = await enqueueTelegramActivityNotifications({
-        db: {
-          query: async (sql: string) => {
-            enqueueQueries.push(sql);
-            return { rows: [{ id: "outbox-1" }] };
-          },
+        pool: {
+          connect: async () => ({
+            query: async (sql: string) => {
+              enqueueQueries.push(sql);
+              if (sql.includes("returning consumer_key")) {
+                return { rowCount: 0, rows: [] };
+              }
+              if (sql.includes("for update")) {
+                return {
+                  rows: [
+                    {
+                      cursor_created_at: "2026-01-01T00:00:00.000Z",
+                      cursor_id: "00000000-0000-0000-0000-000000000000",
+                    },
+                  ],
+                };
+              }
+              if (sql.includes("with candidates as materialized")) {
+                return {
+                  rows: [
+                    {
+                      enqueued: 1,
+                      last_created_at: "2026-01-01T00:00:01.000Z",
+                      last_id: "00000000-0000-4000-8000-000000000001",
+                    },
+                  ],
+                };
+              }
+              return { rows: [] };
+            },
+            release: () => undefined,
+          }),
         } as never,
       });
       assert.equal(enqueued, 1);
-      assert.match(enqueueQueries[0] ?? "", /telegram_notification_outbox/);
-      assert.match(enqueueQueries[0] ?? "", /not exists/);
-      assert.match(enqueueQueries[0] ?? "", /position_resolved_enabled_at/);
-      assert.match(enqueueQueries[0] ?? "", /deposit_received_enabled_at/);
-      assert.match(enqueueQueries[0] ?? "", /bridge_updates_enabled_at/);
-      assert.match(enqueueQueries[0] ?? "", /payouts_rewards_enabled_at/);
+      const enqueueSql = enqueueQueries.find((sql) =>
+        sql.includes("with candidates as materialized"),
+      );
+      assert.match(enqueueSql ?? "", /telegram_notification_outbox/);
+      assert.match(enqueueSql ?? "", /n\.created_at >= preference/);
+      assert.doesNotMatch(enqueueSql ?? "", /n\.updated_at/);
+      assert.match(enqueueSql ?? "", /position_resolved_enabled_at/);
+      assert.match(enqueueSql ?? "", /deposit_received_enabled_at/);
+      assert.match(enqueueSql ?? "", /bridge_updates_enabled_at/);
+      assert.match(enqueueSql ?? "", /payouts_rewards_enabled_at/);
 
       const updates: string[] = [];
       const sentMessages: TelegramSendMessageInput[] = [];
@@ -1667,6 +1704,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 rows: [
                   {
                     enabled: true,
+                    enabled_since_event: true,
                     reachable: true,
                     telegram_user_id: "999",
                   },
@@ -1743,6 +1781,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 rows: [
                   {
                     enabled: true,
+                    enabled_since_event: true,
                     reachable: true,
                     telegram_user_id: "999",
                   },
@@ -1784,6 +1823,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
     name: "position signal fan-out targets exact owned markets and records relationship copy",
     run: async () => {
+      const insertedEventKeys: string[] = [];
       const insertedPayloads: unknown[] = [];
       const client = {
         query: async (sql: string, params: unknown[] = []) => {
@@ -1807,10 +1847,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             assert.match(sql, /ut\.market_id = \$1/);
             assert.match(sql, /p\.position_scope = 'own'/);
             assert.match(sql, /p\.size > 0/);
+            assert.match(sql, /root_delivery\.status = 'sent'/);
+            assert.match(sql, /root_delivery\.telegram_message_id is not null/);
             return { rows: [{ held_sides: ["YES"], user_id: "user-1" }] };
           }
           if (sql.includes("insert into telegram_notification_outbox")) {
-            insertedPayloads.push(JSON.parse(String(params[3])));
+            insertedEventKeys.push(String(params[1]));
+            insertedPayloads.push(JSON.parse(String(params[4])));
             return { rows: [{ id: "outbox-signal-1" }] };
           }
           if (sql.includes("update telegram_notification_cursors")) {
@@ -1832,6 +1875,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(
         String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
         /supports your YES position/,
+      );
+      assert.equal(
+        (insertedPayloads[0] as { actionText?: unknown })?.actionText,
+        "Review position",
+      );
+      assert.equal(
+        (insertedPayloads[0] as { messageKind?: unknown })?.messageKind,
+        "initial",
+      );
+      assert.equal(
+        insertedEventKeys[0],
+        "position-signal:00000000-0000-4000-8000-000000000001:initial:00000000-0000-4000-8000-000000000001",
       );
     },
   },
@@ -8434,7 +8489,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .join(" "),
         /Wallet|Open market/,
       );
-      assert.match(message.text, /^\*Sharp YES interest\*/);
+      assert.match(message.text, /^\*🔥 Hunch calls YES on /);
+      assert.match(message.text.split("\n")[0] ?? "", /at 32¢\*$/);
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.match(message.text, /📍 \*Test event\*\n_YES_/);
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
@@ -8828,7 +8884,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message renders category emoji and named outcome labels",
+    name: "message renders a structured subject and named outcome labels",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -8851,7 +8907,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.match(message.text, /^🎮 \*@TestWallet backs Beta Team/);
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^\*🔥 Hunch calls .*Beta Team at 70¢\*$/,
+      );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
       assert.equal(rows[0]?.[0]?.text, "⚪ Buy Beta Team · Poly 70¢");
@@ -8985,7 +9044,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           marketTitle: " Same   market title ",
         }),
       });
-      assert.match(message.text, /^\*Sharp YES interest\*/);
+      assert.match(
+        message.text,
+        /^\*🔥 Hunch calls Same market title at 32¢\*/,
+      );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(
         message.text,
@@ -9662,7 +9724,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.priceGuardDeferred, 0);
       assert.equal(result.priceGuardStaleExpired, 1);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Later valid signal/);
+      assert.match(telegram.messages[0]?.text ?? "", /Hunch calls/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /Later valid signal/,
+      );
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000002");
     },
@@ -9705,7 +9771,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.eligibleNotes, 1);
       assert.equal(result.nonDirectionalNotes, 0);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Above threshold/);
+      assert.match(telegram.messages[0]?.text ?? "", /Hunch calls/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Below threshold/);
     },
   },
   {
@@ -9744,7 +9811,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.nonDirectionalNotes, 1);
       assert.equal(result.eligibleNotes, 1);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Directional signal/);
+      assert.match(telegram.messages[0]?.text ?? "", /Hunch calls/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
     },
   },
@@ -9826,6 +9894,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(result.sent, 1);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      const updateButtons =
+        telegram.messages[0]?.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(
+        updateButtons.some((button) => /Buy/i.test(button.text)),
+        false,
+      );
+      assert.equal(
+        updateButtons.some((button) => button.text === "↗️ Open market"),
+        true,
+      );
       const delivery = db.queries
         .filter((query) =>
           query.sql.includes("insert into signal_bot_messages"),
@@ -9890,13 +9968,47 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(delivery.params[4], 333);
       assert.equal(delivery.params[5], null);
       const metrics = JSON.parse(String(delivery.params[8])) as {
-        copy?: { copyVersion?: string };
+        copy?: {
+          copyVersion?: string;
+          notification?: {
+            headline?: {
+              lintExceeded?: boolean;
+              storyKind?: string;
+              subjectVersion?: string;
+              templateKey?: string;
+              visibleLength?: number;
+            };
+            subject?: { source?: string; version?: string };
+          };
+        };
         fallbackStandalone?: boolean;
         noteKind?: string;
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v3");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v4");
+      assert.equal(metrics.copy?.notification?.headline?.storyKind, "initial");
+      assert.equal(
+        metrics.copy?.notification?.headline?.templateKey,
+        "research_update_v1",
+      );
+      assert.equal(
+        metrics.copy?.notification?.headline?.subjectVersion,
+        "signal_notification_subject_v1",
+      );
+      assert.equal(
+        metrics.copy?.notification?.subject?.version,
+        "signal_notification_subject_v1",
+      );
+      assert.ok(metrics.copy?.notification?.subject?.source);
+      assert.equal(
+        typeof metrics.copy?.notification?.headline?.visibleLength,
+        "number",
+      );
+      assert.equal(
+        typeof metrics.copy?.notification?.headline?.lintExceeded,
+        "boolean",
+      );
     },
   },
   {
@@ -10081,7 +10193,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Copy flow is building before price moves|People are quietly joining this side|This call is starting to get copied|Wallets are still leaning into this|More wallets are moving into this trade|Price is flat\\. Flow is not\\.|This call is starting to get traction/,
+        /^\*🔥 YES on .* jumps 15\\\.0¢ to 55\\\.0¢\*/,
       );
       assert.match(telegram.messages[0]?.text ?? "", />\*2\* added/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
@@ -10315,7 +10427,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /(🔥|👀) (Copy flow is building before price moves|People are quietly joining this side|This call is starting to get copied|Wallets are still leaning into this|More wallets are moving into this trade|Price is flat\\. Flow is not\\.|This call is starting to get traction)/,
+        /^\*🔥 Portugal vs Spain · Under 2\\\.5 total goals edges up 3\\\.0¢ to 43\\\.0¢\*/,
       );
       assert.match(text, /📍 \*Portugal vs Spain\*\n_Under 2\\.5 total goals_/);
       assert.match(text, />\*Since the call\*/);
@@ -10451,7 +10563,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Market moved with the read/,
+        /^\*🔥 YES on .* jumps 15\\\.0¢ to 55\\\.0¢\*/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
@@ -10501,7 +10613,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /Copy flow is cooling off/);
+      assert.match(text, /^\*⚠️ YES on .* flow is cooling\*/);
       assert.match(text, />\*1\* exited/);
       assert.doesNotMatch(text, /0 trimmed/);
     },
@@ -10680,7 +10792,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedLoss, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Call side lost/);
+      assert.match(telegram.messages[0]?.text ?? "", /^\*🏁 YES on .* loses\*/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>
@@ -10722,7 +10834,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedWin, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Call side won/);
+      assert.match(telegram.messages[0]?.text ?? "", /^\*🏁 YES on .* wins\*/);
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>

@@ -117,7 +117,7 @@ export async function applyOrderTradeEffects(
         userId: input.intent.actor.userId,
         venue,
         status,
-        side: "BUY",
+        action: "BUY",
         size: input.submitResult.size,
         price: input.submitResult.price,
         orderId: input.submitResult.venueOrderId,

@@ -951,8 +951,8 @@ inside the allowlisted admin menu.
 ### Phase 3 — Notification settings and transactional delivery
 
 Implementation status (July 15, 2026): implemented in the API and signal-bot
-runner with migration 0177. Production migration rollout and live delivery QA
-remain.
+runner with migrations 0177 and 0178 plus a fail-closed runtime policy. Local
+integration QA passes; production migration rollout and live delivery QA remain.
 
 - add durable per-topic Telegram preferences;
 - restore Settings and `/settings` in the same release;
@@ -964,8 +964,10 @@ remain.
 
 ### Phase 4 — Position-aware signals
 
-Implementation status (July 15, 2026): exact unified-market matching is
-implemented. Cross-venue matching and per-market manual controls remain.
+Implementation status (July 15, 2026): exact unified-market matching and
+initial/research-update threading are implemented. Position signals default to
+off and require opt-in. Cross-venue matching and per-market manual controls
+remain.
 
 - fan out initial and research-update signals for exact held markets;
 - explain whether the signal supports or challenges the held side;

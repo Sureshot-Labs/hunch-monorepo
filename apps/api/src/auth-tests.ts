@@ -1823,6 +1823,9 @@ const tests: TestCase[] = [
           if (/UPDATE user_wallets SET is_primary = true/i.test(sql)) {
             return { rows: [] };
           }
+          if (/UPDATE telegram_notification_preferences/i.test(sql)) {
+            return { rows: [] };
+          }
           if (
             /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(sql)
           ) {
@@ -1867,6 +1870,20 @@ const tests: TestCase[] = [
       );
       assert.ok(telegramDelete);
       assert.deepEqual(telegramDelete.params, ["user-existing"]);
+      const preferenceUpdateIndex = calls.findIndex((call) =>
+        /UPDATE telegram_notification_preferences/i.test(call.sql),
+      );
+      const telegramDeleteIndex = calls.findIndex((call) =>
+        /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(
+          call.sql,
+        ),
+      );
+      assert.ok(preferenceUpdateIndex >= 0);
+      assert.ok(preferenceUpdateIndex < telegramDeleteIndex);
+      assert.match(
+        calls[preferenceUpdateIndex]?.sql ?? "",
+        /reachable = false/,
+      );
     },
   },
 ];

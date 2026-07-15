@@ -1,0 +1,239 @@
+import assert from "node:assert/strict";
+
+import { buildMarketSideCopy } from "./services/market-side-copy.js";
+import {
+  buildSignalNotificationHeadline,
+  buildSignalNotificationSubject,
+} from "./services/signal-notification-headline.js";
+
+function subject(input: {
+  eventTitle?: string;
+  marketTitle?: string;
+  outcomes?: unknown;
+  side?: "NO" | "YES";
+}) {
+  const side = input.side ?? "YES";
+  const sideCopy = buildMarketSideCopy({
+    eventTitle: input.eventTitle,
+    marketTitle: input.marketTitle,
+    outcomes: input.outcomes,
+    side,
+  });
+  return buildSignalNotificationSubject({
+    eventTitle: input.eventTitle,
+    marketTitle: input.marketTitle,
+    side,
+    sideCopy,
+  });
+}
+
+const tests: Array<{ name: string; run: () => void }> = [
+  {
+    name: "generic NO subjects do not invent a complementary proposition",
+    run: () => {
+      const result = subject({
+        eventTitle: "World Cup Winner",
+        marketTitle: "France",
+        side: "NO",
+      });
+      assert.equal(result.text, "NO on “World Cup Winner · France”");
+      assert.equal(result.source, "market_side_copy");
+    },
+  },
+  {
+    name: "explicit total outcomes preserve the threshold",
+    run: () => {
+      const result = subject({
+        eventTitle: "Portugal vs Spain",
+        marketTitle: "O/U 2.5 total goals",
+        outcomes: ["Over", "Under"],
+        side: "NO",
+      });
+      assert.equal(result.text, "Portugal vs Spain · Under 2.5 total goals");
+      assert.equal(result.preservedFields.includes("threshold"), true);
+    },
+  },
+  {
+    name: "resolution outranks every other story",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        cooling: true,
+        currentPrice: 1,
+        joinedWallets: 5,
+        kind: "resolved_win",
+        netCopyFlowUsd: -4_000,
+        priceMoveCents: 20,
+        subject: subject({ marketTitle: "Will it happen?" }),
+      });
+      assert.equal(result.storyKind, "resolved_win");
+      assert.match(result.text, /^🏁 .* wins$/);
+    },
+  },
+  {
+    name: "cooling outranks price and flow",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        cooling: true,
+        currentPrice: 0.7,
+        kind: "stats",
+        netCopyFlowUsd: -3_000,
+        priceMoveCents: 15,
+        subject: subject({ marketTitle: "Will it happen?" }),
+      });
+      assert.equal(result.storyKind, "cooling");
+      assert.match(result.text, /flow is cooling$/);
+      assert.equal(result.primaryMetric, "-$3K");
+    },
+  },
+  {
+    name: "opposed price and inflow produce divergence",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.45,
+        kind: "stats",
+        netCopyFlowUsd: 2_500,
+        priceMoveCents: -3,
+        subject: subject({ marketTitle: "Will it happen?" }),
+      });
+      assert.equal(result.storyKind, "divergence");
+      assert.match(result.text, /slips 3¢ despite \$2\.5K inflow$/);
+    },
+  },
+  {
+    name: "price bands use jumps rises and edges with current price",
+    run: () => {
+      const cases = [
+        { move: 10, verb: "jumps" },
+        { move: 5, verb: "rises" },
+        { move: 2, verb: "edges up" },
+        { move: -10, verb: "drops" },
+        { move: -5, verb: "falls" },
+        { move: -2, verb: "edges down" },
+      ];
+      for (const testCase of cases) {
+        const result = buildSignalNotificationHeadline({
+          currentPrice: 0.51,
+          kind: "stats",
+          priceMoveCents: testCase.move,
+          subject: subject({ marketTitle: "Will it happen?" }),
+        });
+        assert.equal(result.storyKind, "price_move");
+        assert.match(result.text, new RegExp(`${testCase.verb} .* to 51¢$`));
+      }
+    },
+  },
+  {
+    name: "sub-two-cent moves yield to flow and participation",
+    run: () => {
+      const flow = buildSignalNotificationHeadline({
+        currentPrice: 0.51,
+        joinedWallets: 4,
+        kind: "stats",
+        netCopyFlowUsd: 1_200,
+        priceMoveCents: 1.9,
+        subject: subject({ marketTitle: "Will it happen?" }),
+      });
+      assert.equal(flow.storyKind, "flow");
+      assert.doesNotMatch(flow.text, /edges/);
+
+      const participation = buildSignalNotificationHeadline({
+        currentPrice: 0.51,
+        joinedWallets: 4,
+        kind: "stats",
+        priceMoveCents: 1,
+        subject: subject({ marketTitle: "Will it happen?" }),
+      });
+      assert.equal(participation.storyKind, "participation");
+    },
+  },
+  {
+    name: "initial and research update copy remain deterministic",
+    run: () => {
+      const marketSubject = subject({ marketTitle: "Will it happen?" });
+      const initial = buildSignalNotificationHeadline({
+        currentPrice: 0.32,
+        kind: "initial",
+        subject: marketSubject,
+      });
+      const update = buildSignalNotificationHeadline({
+        currentPrice: 0.32,
+        kind: "research_update",
+        subject: marketSubject,
+      });
+      assert.match(initial.text, /^🔥 Hunch calls /);
+      assert.match(update.text, /^🔎 .* research update at 32¢$/);
+      assert.equal(update.templateKey, "research_update_v1");
+    },
+  },
+  {
+    name: "long contract subjects are linted but never truncated",
+    run: () => {
+      const longTitle =
+        "Will the international coalition complete every listed treaty obligation before December 31, 2028?";
+      const marketSubject = subject({ marketTitle: longTitle, side: "NO" });
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.41,
+        kind: "initial",
+        subject: marketSubject,
+      });
+      assert.equal(result.lintExceeded, true);
+      assert.match(result.text, /December 31, 2028/);
+      assert.doesNotMatch(result.text, /…/);
+    },
+  },
+  {
+    name: "long divergence copy drops only its supporting clause",
+    run: () => {
+      const longTitle =
+        "Will the international coalition complete every listed treaty obligation before December 31, 2028?";
+      const marketSubject = subject({ marketTitle: longTitle, side: "NO" });
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.41,
+        kind: "stats",
+        netCopyFlowUsd: 12_000,
+        priceMoveCents: -3,
+        subject: marketSubject,
+      });
+      assert.equal(result.storyKind, "divergence");
+      assert.match(result.text, /December 31, 2028/);
+      assert.match(result.text, /slips 3¢$/);
+      assert.doesNotMatch(result.text, /despite/);
+    },
+  },
+  {
+    name: "visible length counts Unicode grapheme clusters",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.5,
+        kind: "initial",
+        subject: subject({
+          eventTitle: "🇵🇹 Portugal election",
+          marketTitle: "Candidate João wins?",
+        }),
+      });
+      const expected = Array.from(
+        new Intl.Segmenter("en", { granularity: "grapheme" }).segment(
+          result.text,
+        ),
+      ).length;
+      assert.equal(result.visibleLength, expected);
+      assert.match(result.text, /🇵🇹/);
+      assert.match(result.text, /João/);
+    },
+  },
+];
+
+let passed = 0;
+for (const test of tests) {
+  try {
+    test.run();
+    passed += 1;
+  } catch (error) {
+    console.error(`[signal-notification-headline-tests] failed: ${test.name}`);
+    throw error;
+  }
+}
+
+console.log(
+  `[signal-notification-headline-tests] passed ${passed}/${tests.length}`,
+);

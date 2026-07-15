@@ -976,6 +976,14 @@ export class AuthService {
     }
 
     await client.query(
+      `UPDATE telegram_notification_preferences
+       SET reachable = false,
+           blocked_at = null,
+           updated_at = now()
+       WHERE user_id = $1`,
+      [params.userId],
+    );
+    await client.query(
       "DELETE FROM user_telegram_accounts WHERE user_id = $1",
       [params.userId],
     );

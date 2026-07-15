@@ -672,6 +672,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "holder_research",
   "arbitrage_defaults",
   "signal_bot",
+  "telegram_notifications",
   "venue_lifecycle",
 ]);
 

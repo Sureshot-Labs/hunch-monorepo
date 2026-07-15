@@ -25,6 +25,7 @@ The current worktree already contains:
 - explicit idempotent topic writes from bot callbacks;
 - durable preferences, outbox, cursor, retry, blocked-user, and per-chat rate
   handling;
+- fail-closed runtime gates and explicit `/start` reachability;
 - exact-market portfolio-signal recipient selection;
 - compact MarkdownV2 notification renderers and contextual Mini App actions;
 - API and bot tests for the implemented behavior;
@@ -33,14 +34,15 @@ The current worktree already contains:
 Primary implementation files:
 
 - `packages/db/migrations/0177_telegram_user_notifications.sql`;
+- `packages/db/migrations/0178_telegram_notification_delivery_safety.sql`;
 - `apps/api/src/services/telegram-notification-preferences.ts`;
 - `apps/api/src/services/telegram-notification-delivery.ts`;
 - `apps/api/src/services/signal-bot.ts`;
 - `apps/api/src/signal-bot-runner.ts`.
 
-This is a local baseline, not a production claim. Migration 0177 was not
-applied to a live database and Telegram delivery was not device-tested during
-this work.
+This is a local baseline, not a production claim. Migrations 0177 and 0178 were
+validated locally but were not applied to a live database, and Telegram
+delivery was not device-tested during this work.
 
 ## Tasks to Assign
 
@@ -49,7 +51,7 @@ this work.
 | P0       | [Production rollout](backend-telegram-notification-rollout.md)                  | Safely migrate, deploy, observe, replay, and live-QA the implementation already in the worktree      | Current worktree                                              |
 | P0       | [Telegram preferences API](backend-telegram-notification-preferences-api.md)    | Authenticated GET/PATCH contract so Mini App Settings and the bot share account-level Telegram state | Migration 0177 or a forward migration                         |
 | P0       | [Persistent signal channel registry](backend-signal-channel-registry.md)        | Makes public-channel destinations, policies, and cursors durable instead of Redis-only               | Postgres migration and current admin commands                 |
-| P0       | [Notification-first signal headlines](backend-signal-notification-headlines.md) | Puts the strongest verified result and market into the mobile notification preview                   | Current structured signal/follow-through metrics              |
+| P0       | [Notification-first signal headlines](backend-signal-notification-headlines.md) | Complete live mobile preview QA for the locally implemented V4 renderer                              | Current structured signal/follow-through metrics              |
 | P1       | [Resolved-position accounting](backend-position-resolution-accounting.md)       | Verified payout and realized PnL snapshot with safe fallback copy                                    | Venue settlement semantics                                    |
 | P1       | [Trusted market mappings](backend-trusted-market-mappings.md)                   | Reviewed persistent cross-venue equivalence and side orientation                                     | Market ingestion / AGG candidates                             |
 | P1       | [Signal subscription expansion](backend-telegram-signal-subscriptions.md)       | Tracked-wallet rules, per-market controls, noise policy, and trusted cross-venue fan-out             | Existing exact fan-out; trusted mappings only for cross-venue |
@@ -58,8 +60,8 @@ this work.
 Recommended order:
 
 1. Roll out and validate the existing private-notification delivery path.
-2. Persist the public-channel registry and replace generic hooks with
-   notification-first headlines before the next public copy rollout.
+2. Complete V4 device QA, then persist the public-channel registry before the
+   next public copy rollout.
 3. Add the authenticated preferences API; this can proceed in parallel once
    the migration shape is fixed.
 4. Implement resolved-position accounting and trusted mappings independently.
