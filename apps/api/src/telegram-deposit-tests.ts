@@ -5,6 +5,7 @@ import { Interface } from "ethers";
 import { handleSignalBotInteractiveMenuCallback } from "./services/telegram-bot-menu-actions.js";
 import {
   buildTelegramDepositMessage,
+  resolveCanonicalLimitlessDeposit,
   resolveCanonicalPolymarketDeposit,
   resolveCanonicalPolymarketDepositAddress,
 } from "./services/telegram-bot-deposit.js";
@@ -28,6 +29,14 @@ function depositDb(owner: string, deposit: string) {
   } as never;
 }
 
+function authorizationDb(walletAddress: string | null) {
+  return {
+    query: async () => ({
+      rows: walletAddress == null ? [] : [{ wallet_address: walletAddress }],
+    }),
+  } as never;
+}
+
 const owner = "0x1111111111111111111111111111111111111111";
 const otherOwner = "0x2222222222222222222222222222222222222222";
 const deposit = "0x3333333333333333333333333333333333333333";
@@ -47,6 +56,92 @@ function dependencies(derived = deposit, runtimeOwner = owner) {
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "Limitless deposit prefers the internal Telegram signer",
+    run: async () => {
+      assert.deepEqual(
+        await resolveCanonicalLimitlessDeposit({
+          db: authorizationDb(otherOwner),
+          internalWallets: [
+            { walletAddress: owner, walletChain: "ethereum" },
+            { walletAddress: otherOwner, walletChain: "ethereum" },
+          ],
+          telegramUserId: 20,
+        }),
+        { address: otherOwner, status: "ready" },
+      );
+    },
+  },
+  {
+    name: "Limitless deposit uses only an unambiguous internal EVM wallet",
+    run: async () => {
+      assert.deepEqual(
+        await resolveCanonicalLimitlessDeposit({
+          db: authorizationDb(null),
+          internalWallets: [
+            { walletAddress: owner, walletChain: "ethereum" },
+            { walletAddress: "solana-wallet", walletChain: "solana" },
+          ],
+          telegramUserId: 20,
+        }),
+        { address: owner, status: "ready" },
+      );
+      assert.deepEqual(
+        await resolveCanonicalLimitlessDeposit({
+          db: authorizationDb("0x5555555555555555555555555555555555555555"),
+          internalWallets: [
+            { walletAddress: owner, walletChain: "ethereum" },
+            { walletAddress: otherOwner, walletChain: "ethereum" },
+          ],
+          telegramUserId: 20,
+        }),
+        { address: null, status: "verification_failed" },
+      );
+      assert.deepEqual(
+        await resolveCanonicalLimitlessDeposit({
+          db: authorizationDb(null),
+          internalWallets: [],
+          telegramUserId: 20,
+        }),
+        { address: null, status: "setup_required" },
+      );
+    },
+  },
+  {
+    name: "Deposit menu exposes active supported venues and Limitless Base address",
+    run: async () => {
+      const menu = await buildTelegramDepositMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        dependencies: { allowedVenues: ["polymarket", "limitless"] },
+        pool: authorizationDb(null),
+        telegramUserId: 20,
+      });
+      assert.match(menu.text, /Polymarket.*Polygon/);
+      assert.match(menu.text, /Limitless.*Base/);
+      assert.match(JSON.stringify(menu.reply_markup), /deposit:limitless/);
+      assert.doesNotMatch(menu.text, /Kalshi/);
+
+      const limitless = await buildTelegramDepositMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        internalWallets: [{ walletAddress: owner, walletChain: "ethereum" }],
+        pool: authorizationDb(owner),
+        telegramUserId: 20,
+        venue: "limitless",
+      });
+      assert.equal(limitless.depositAddress, owner);
+      assert.equal(limitless.qrText, owner);
+      assert.equal(limitless.venue, "limitless");
+      assert.match(limitless.text, /Network: Base/);
+      assert.match(limitless.text, /Asset: USDC/);
+      const markup = JSON.stringify(limitless.reply_markup);
+      assert.match(markup, /deposit_qr:limitless/);
+      assert.match(markup, /venue=limitless/);
+      assert.match(
+        markup,
+        /address=0x1111111111111111111111111111111111111111/,
+      );
+    },
+  },
   {
     name: "deposit resolver accepts mixed-case canonical production vector",
     run: async () => {
@@ -132,22 +227,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         pool: depositDb(owner, deposit),
         telegramUserId: 20,
+        venue: "polymarket",
       });
       assert.match(message.text, /temporarily unavailable/);
       assert.doesNotMatch(message.text, /Finish Trading Wallet setup/);
     },
   },
   {
-    name: "QR keeps the contextual Deposit card and sends only the photo",
+    name: "QR keeps the contextual Deposit card and uses venue metadata",
     run: async () => {
       let renderCalls = 0;
       let photoCalls = 0;
+      let photoCaption = "";
+      let photoFilename = "";
       await handleSignalBotInteractiveMenuCallback({
         callbackPrefix: "hm:v1:",
         chatId: "20",
         loadDeposit: async () => ({
           qrText: deposit,
           text: "Generic deposit",
+          venue: "limitless",
         }),
         messageId: 42,
         redis: { get: async () => null },
@@ -156,13 +255,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         renderExpiredSearch: async () => undefined,
         route: { kind: "deposit", showQr: true, venue: "polymarket" },
-        sendPhoto: async () => {
+        sendPhoto: async (photo) => {
           photoCalls += 1;
+          photoCaption = photo.caption ?? "";
+          photoFilename = photo.filename;
         },
         telegramUserId: 20,
       });
       assert.equal(renderCalls, 0);
       assert.equal(photoCalls, 1);
+      assert.match(photoCaption, /Base/);
+      assert.match(photoFilename, /limitless/);
     },
   },
 ];

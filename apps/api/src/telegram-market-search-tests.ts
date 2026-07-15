@@ -38,6 +38,48 @@ const sampleResult = {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "search results preserve event question, outcome and venue presentation",
+    run: () => {
+      const message = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        query: "elon musk",
+        results: [
+          {
+            ...sampleResult,
+            eventTitle: "3rd richest person on December 31?",
+            marketTitle: "Elon Musk",
+          },
+        ],
+        sessionId: "123456789abc",
+      });
+      assert.match(message.text, /3rd richest person on December 31/);
+      assert.match(message.text, /Elon Musk/);
+      assert.match(message.text, /Polymarket/);
+      assert.doesNotMatch(message.text, /polymarket ·/);
+      assert.match(
+        message.reply_markup.inline_keyboard[0]?.[0]?.text ?? "",
+        /Elon Musk · 3rd richest person/,
+      );
+
+      const sameTitleMessage = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        query: "spain",
+        results: [
+          {
+            ...sampleResult,
+            eventTitle: "  Spain wins the World Cup  ",
+            marketTitle: "spain WINS the world cup",
+          },
+        ],
+        sessionId: "123456789abc",
+      });
+      assert.equal(
+        sameTitleMessage.text.match(/Spain wins the World Cup/gi)?.length,
+        1,
+      );
+    },
+  },
+  {
     name: "free-text search sends progress below the input and edits the new card",
     run: async () => {
       const redis = redisStore();

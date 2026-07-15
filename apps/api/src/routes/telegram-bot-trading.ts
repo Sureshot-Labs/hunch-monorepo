@@ -354,13 +354,42 @@ async function registerTelegramBotTradingRoutes(
       preHandler: requireInternal,
       schema: { body: internalDepositBodySchema },
     },
-    (request) =>
-      buildDepositMessage({
+    async (request) => {
+      const venue = request.body.venue?.trim().toLowerCase() ?? null;
+      let internalWallets:
+        | TelegramBotTradingInternalWalletCandidate[]
+        | null
+        | undefined;
+      if (venue === "limitless") {
+        const { rows } = await db.query<{ privy_user_id: string }>(
+          `select privy_user_id
+             from user_telegram_accounts
+            where telegram_user_id = $1
+            limit 1`,
+          [String(request.body.telegramUserId)],
+        );
+        const privyUserId = rows[0]?.privy_user_id ?? null;
+        if (!privyUserId) {
+          internalWallets = [];
+        } else {
+          try {
+            internalWallets = await resolveInternalWallets({
+              app,
+              privyUserId,
+            });
+          } catch {
+            internalWallets = null;
+          }
+        }
+      }
+      return buildDepositMessage({
         appBaseUrl: request.body.appBaseUrl,
+        internalWallets,
         pool: db,
         telegramUserId: request.body.telegramUserId,
         venue: request.body.venue,
-      }),
+      });
+    },
   );
 
   api.post(

@@ -2661,9 +2661,13 @@ type SignalBotMenuMessage = {
 type SignalBotMenuLoaders = {
   loadDeposit?: (input: {
     telegramUserId: number;
-    venue: string;
+    venue: string | null;
   }) => Promise<
-    SignalBotMenuMessage & { depositAddress?: string; qrText?: string }
+    SignalBotMenuMessage & {
+      depositAddress?: string;
+      qrText?: string;
+      venue?: string;
+    }
   >;
   loadMarketCard?: (input: {
     chatId: string;
@@ -2747,7 +2751,8 @@ export async function handleSignalBotMenuCallback(
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
     route.kind === "position" ||
-    route.kind === "deposit"
+    route.kind === "deposit" ||
+    route.kind === "deposit_menu"
   ) {
     return handleSignalBotInteractiveMenuCallback({
       callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,

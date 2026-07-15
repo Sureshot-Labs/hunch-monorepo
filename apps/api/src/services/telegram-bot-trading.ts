@@ -63,6 +63,10 @@ import {
   formatTelegramTtl as formatTtl,
 } from "./telegram-bot-trading-presentation.js";
 import { resolveCanonicalPolymarketDepositAddress } from "./telegram-bot-deposit.js";
+import {
+  buildTelegramMarketIdentity,
+  formatTelegramVenueLabel,
+} from "./telegram-market-identity.js";
 import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
 import { resolvePolymarketAvailablePositionRaw } from "./polymarket-trading-execution-service.js";
 import {
@@ -2849,18 +2853,23 @@ export async function buildTelegramBotTradingMarketMessage(input: {
           market,
         }).catch(() => null)
       : null;
+  const marketIdentity = buildTelegramMarketIdentity({
+    eventTitle: market.event_title,
+    marketTitle: market.title,
+  });
   const lines = [
     input.isAdminTest ? "Trade Card Preview" : "Trade This Market",
     "",
-    market.event_title ? market.event_title : market.title,
+    ...marketIdentity.lines,
   ];
-  if (market.event_title && market.event_title !== market.title) {
-    lines.push(market.title);
-  }
   if (input.context?.positionLines?.length) {
     lines.push("", ...input.context.positionLines);
   }
-  lines.push("", `${market.venue} · ${market.status}`, marketPriceLine(market));
+  lines.push(
+    "",
+    `${formatTelegramVenueLabel(market.venue)} · ${market.status}`,
+    marketPriceLine(market),
+  );
   const buyPriceSummary = buyOptions
     .map(
       (option) =>
@@ -4387,6 +4396,20 @@ export async function handleTelegramBotTradingCallback(
             reply_markup: {
               inline_keyboard: [
                 [{ text: "Convert", url: convertUrl.toString() }],
+                ...(depositAddress
+                  ? [
+                      [
+                        {
+                          copy_text: { text: depositAddress },
+                          text: "Deposit instead",
+                        } as TelegramBotTradingButton,
+                        {
+                          callback_data: "hm:v1:deposit_qr:polymarket",
+                          text: "Show QR",
+                        } as TelegramBotTradingButton,
+                      ],
+                    ]
+                  : []),
                 [
                   {
                     callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,

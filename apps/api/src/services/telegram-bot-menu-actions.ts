@@ -8,6 +8,7 @@ import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js
 
 export type SignalBotInteractiveMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
+  | { kind: "deposit_menu" }
   | { index: number; kind: "market_search_result"; sessionId: string }
   | { kind: "market_search_back"; sessionId: string }
   | { kind: "position"; positionId: string };
@@ -37,7 +38,7 @@ export function parseSignalBotInteractiveMenuRoute(
     return { kind: "position", positionId: positionMatch[1] ?? "" };
   }
   if (route === "deposit") {
-    return { kind: "deposit", showQr: false, venue: "polymarket" };
+    return { kind: "deposit_menu" };
   }
   const depositMatch = route.match(/^(deposit|deposit_qr):([a-z0-9_-]+)$/i);
   if (!depositMatch) return null;
@@ -59,6 +60,7 @@ type MenuMessage = {
   parse_mode?: "MarkdownV2";
   reply_markup?: { inline_keyboard: MenuButton[][] };
   text: string;
+  venue?: string;
 };
 
 type MenuRedis = {
@@ -70,7 +72,7 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
   chatId: string;
   loadDeposit?: (input: {
     telegramUserId: number;
-    venue: string;
+    venue: string | null;
   }) => Promise<MenuMessage & { qrText?: string }>;
   loadMarketCard?: (input: {
     chatId: string;
@@ -181,11 +183,13 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
     return true;
   }
   let depositMessage: MenuMessage & { qrText?: string };
+  const depositVenue = route.kind === "deposit" ? route.venue : null;
+  const showQr = route.kind === "deposit" && route.showQr;
   try {
     depositMessage = input.loadDeposit
       ? await input.loadDeposit({
           telegramUserId: input.telegramUserId,
-          venue: route.venue,
+          venue: depositVenue,
         })
       : {
           parse_mode: "MarkdownV2" as const,
@@ -197,7 +201,7 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
       text: "Deposit is unavailable right now\\.",
     };
   }
-  if (!route.showQr) {
+  if (!showQr) {
     await input.render({
       ...depositMessage,
       reply_markup: {
@@ -213,19 +217,24 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
       },
     });
   }
-  if (route.showQr && depositMessage.qrText && input.sendPhoto) {
+  if (showQr && depositMessage.qrText && input.sendPhoto) {
     try {
       const qr = await generateTelegramDepositQr(depositMessage.qrText);
+      const isLimitless = depositMessage.venue === "limitless";
       await input.sendPhoto({
         caption: [
-          `*${escapeTelegramMarkdownV2("Hunch deposit address")}*`,
+          `*${escapeTelegramMarkdownV2(
+            `Hunch ${isLimitless ? "Limitless" : "Polymarket"} deposit address`,
+          )}*`,
           "",
           escapeTelegramMarkdownV2(depositMessage.qrText),
           "",
-          escapeTelegramMarkdownV2("Polygon · pUSD or USDC.e"),
+          escapeTelegramMarkdownV2(
+            isLimitless ? "Base · USDC" : "Polygon · pUSD or USDC.e",
+          ),
         ].join("\n"),
         chat_id: input.chatId,
-        filename: "hunch-polymarket-deposit.png",
+        filename: `hunch-${isLimitless ? "limitless" : "polymarket"}-deposit.png`,
         parse_mode: "MarkdownV2",
         photo: qr,
         reply_markup: {

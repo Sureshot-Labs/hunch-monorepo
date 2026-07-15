@@ -4,6 +4,10 @@ import {
   compactTelegramText,
   TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
 } from "./telegram-bot-text-budget.js";
+import {
+  buildTelegramMarketIdentity,
+  formatTelegramVenueLabel,
+} from "./telegram-market-identity.js";
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
@@ -121,10 +125,21 @@ export function buildSignalBotMarketSearchScreen(input: {
   } else {
     for (const result of input.results.slice(0, 5)) {
       const index = visibleResults.length;
+      const identity = buildTelegramMarketIdentity({
+        eventTitle: result.eventTitle,
+        marketTitle: result.marketTitle,
+      });
       const block = [
-        bold(`${index + 1}. ${compactTelegramText(result.marketTitle, 160)}`),
+        bold(`${index + 1}. ${compactTelegramText(identity.lines[0], 160)}`),
+        ...(identity.lines[1]
+          ? [
+              escapeTelegramMarkdownV2(
+                compactTelegramText(identity.lines[1], 160),
+              ),
+            ]
+          : []),
         escapeTelegramMarkdownV2(
-          `${result.venue} · YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`,
+          `${formatTelegramVenueLabel(result.venue)} · YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`,
         ),
         "",
       ].join("\n");
@@ -156,7 +171,12 @@ export function buildSignalBotMarketSearchScreen(input: {
           {
             callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
             text: compactTelegramText(
-              `${index + 1}. ${result.marketTitle}`,
+              `${index + 1}. ${
+                buildTelegramMarketIdentity({
+                  eventTitle: result.eventTitle,
+                  marketTitle: result.marketTitle,
+                }).buttonLabel
+              }`,
               TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
             ),
           },

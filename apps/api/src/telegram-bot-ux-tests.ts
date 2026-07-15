@@ -114,6 +114,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         parseSignalBotInteractiveMenuRoute("deposit_qr:polymarket"),
         { kind: "deposit", showQr: true, venue: "polymarket" },
       );
+      assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit"), {
+        kind: "deposit_menu",
+      });
     },
   },
   {
