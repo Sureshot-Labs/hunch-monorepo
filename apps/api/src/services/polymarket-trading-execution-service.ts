@@ -5725,8 +5725,16 @@ function polymarketCredentialMissingReadiness(
 
 function evaluatePolymarketFundsReadiness(input: {
   buyApprovalOk: boolean;
+  controlledFundsRaw?: bigint;
   executableFundsRaw: bigint;
 }): TradingReadiness {
+  const raw = {
+    kind: "polymarket_funds_v1",
+    controlledFundsRaw: (
+      input.controlledFundsRaw ?? input.executableFundsRaw
+    ).toString(),
+    executableFundsRaw: input.executableFundsRaw.toString(),
+  };
   if (!input.buyApprovalOk) {
     const code = "polymarket_approvals_missing";
     const message = "Polymarket setup approvals are missing.";
@@ -5740,6 +5748,7 @@ function evaluatePolymarketFundsReadiness(input: {
         message,
         sideEffect: "approval",
       },
+      raw,
       setupRequired: true,
     });
   }
@@ -5749,12 +5758,14 @@ function evaluatePolymarketFundsReadiness(input: {
       code: "polymarket_no_executable_funds",
       maxExecutableBuyUsd: 0,
       message: "No executable Polymarket funds are available.",
+      raw,
       setupRequired: true,
     });
   }
   return readiness("polymarket", capabilities, {
     ok: true,
     maxExecutableBuyUsd: Number(input.executableFundsRaw) / USDC_SCALE,
+    raw,
   });
 }
 
@@ -7265,6 +7276,11 @@ async function getReadiness(
     });
     return evaluatePolymarketFundsReadiness({
       buyApprovalOk: funds.buyApproval.ok,
+      controlledFundsRaw:
+        funds.funderPusdAvailableRaw +
+        funds.funderUsdceRaw +
+        funds.signerPusdTopUpRaw +
+        funds.signerUsdceTopUpRaw,
       executableFundsRaw: funds.executableFundsRaw,
     });
   } catch (error) {

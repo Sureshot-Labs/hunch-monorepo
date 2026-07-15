@@ -69,6 +69,23 @@ import {
   type SignalDestinationPolicy,
 } from "./signal-delivery-target.js";
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
+import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
+import {
+  buildSignalBotMarketSearchScreen,
+  buildSignalBotMarketSearchUnavailableScreen,
+  writeSignalBotMarketSearchSession,
+  type SignalBotMarketSearchResult,
+} from "./telegram-bot-menu-markets.js";
+import {
+  handleSignalBotInteractiveMenuCallback,
+  parseSignalBotInteractiveMenuRoute,
+  type SignalBotInteractiveMenuRoute,
+} from "./telegram-bot-menu-actions.js";
+import { handleSignalBotMarketSearchInput } from "./telegram-bot-menu-search-input.js";
+import {
+  clearSignalBotMenuInput,
+  writeSignalBotMenuInput,
+} from "./telegram-bot-menu-state.js";
 import {
   createTelegramSignalTransport,
   escapeTelegramMarkdownV2,
@@ -246,6 +263,12 @@ export type TelegramBotMenuButton =
 
 export type TelegramInlineKeyboardButton =
   | {
+      copy_text: { text: string };
+      text: string;
+      url?: never;
+      web_app?: never;
+    }
+  | {
       text: string;
       url: string;
       web_app?: never;
@@ -304,6 +327,14 @@ export type SignalBotTelegramClient = {
     parse_mode: "MarkdownV2";
     reply_markup?: TelegramInlineKeyboard;
     text: string;
+  }): Promise<TelegramSendResult>;
+  sendPhoto?(input: {
+    caption?: string;
+    chat_id: string;
+    filename: string;
+    parse_mode?: "MarkdownV2";
+    photo: Uint8Array;
+    reply_markup?: TelegramInlineKeyboard;
   }): Promise<TelegramSendResult>;
   sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
 };
@@ -518,8 +549,6 @@ const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
 const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v4";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
-const SIGNAL_BOT_MENU_INPUT_KEY_PREFIX = "tg:signal_bot:v1:menu_input";
-const SIGNAL_BOT_MENU_INPUT_TTL_SEC = 10 * 60;
 const TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
 const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const HOLDER_LINK_STOP_LABELS = new Set([
@@ -1823,11 +1852,6 @@ export type SignalBotMenuScreenName =
   | "signals"
   | "trading";
 
-type SignalBotMenuInputState = {
-  kind: "awaiting_market_ref";
-  menuMessageId: number | null;
-};
-
 type SignalBotMenuCallbackRoute =
   | { kind: "admin_preview" }
   | { kind: "cancel_market_input" }
@@ -1843,66 +1867,13 @@ type SignalBotMenuCallbackRoute =
       period: SignalBotStatsPeriod;
     }
   | { kind: "stale" }
+  | SignalBotInteractiveMenuRoute
   | { kind: "trading_status" };
 
 type SignalBotMenuTransport = {
   editMessageText?: SignalBotTelegramClient["editMessageText"];
   sendMessage: SignalBotTelegramClient["sendMessage"];
 };
-
-function signalBotMenuInputKey(chatId: string, telegramUserId: number): string {
-  return SIGNAL_BOT_MENU_INPUT_KEY_PREFIX + ":" + chatId + ":" + telegramUserId;
-}
-
-async function clearSignalBotMenuInput(input: {
-  chatId: string;
-  redis: SignalBotRedisLike;
-  telegramUserId: number | null | undefined;
-}): Promise<void> {
-  if (!input.telegramUserId) return;
-  await input.redis.del(
-    signalBotMenuInputKey(input.chatId, input.telegramUserId),
-  );
-}
-
-async function readSignalBotMenuInput(input: {
-  chatId: string;
-  redis: SignalBotRedisLike;
-  telegramUserId: number;
-}): Promise<SignalBotMenuInputState | null> {
-  const raw = await input.redis.get(
-    signalBotMenuInputKey(input.chatId, input.telegramUserId),
-  );
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<SignalBotMenuInputState>;
-    if (parsed.kind !== "awaiting_market_ref") return null;
-    return {
-      kind: parsed.kind,
-      menuMessageId:
-        typeof parsed.menuMessageId === "number" ? parsed.menuMessageId : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function writeSignalBotMenuInput(input: {
-  chatId: string;
-  menuMessageId: number | null;
-  redis: SignalBotRedisLike;
-  telegramUserId: number;
-}): Promise<void> {
-  const state: SignalBotMenuInputState = {
-    kind: "awaiting_market_ref",
-    menuMessageId: input.menuMessageId,
-  };
-  await input.redis.set(
-    signalBotMenuInputKey(input.chatId, input.telegramUserId),
-    JSON.stringify(state),
-    { EX: SIGNAL_BOT_MENU_INPUT_TTL_SEC },
-  );
-}
 
 function buildSignalBotMainMiniAppButton(input: {
   appBaseUrl: string;
@@ -1977,12 +1948,12 @@ export function buildSignalBotMenuScreen(input: {
     `${route}:${enabled ? "off" : "on"}`;
   if (input.screen === "home") {
     const rows: TelegramInlineKeyboard["inline_keyboard"] = [
-      [callback("trading:market_input", "💸 Trade a market")],
-      [callback("trading:status", "👤 My trading")],
+      [callback("trading:market_input", "🔎 Markets")],
       [callback("positions", "💼 My positions")],
-      [miniAppButton],
-      [callback("settings", "⚙️ Settings")],
-      [callback("help", "❓ How it works")],
+      [callback("trading:status", "👤 My trading")],
+      [callback("deposit", "💳 Deposit")],
+      [callback("settings:notifications", "🔔 Notifications")],
+      [callback("settings", "⚙️ Settings"), callback("help", "❓ Help")],
     ];
     if (input.isAdmin) {
       rows.push([callback("admin", "🛠 Admin")]);
@@ -2043,10 +2014,10 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("🔎 Send a market"),
+        formatTelegramBold("🔎 Markets"),
         "",
         escapeTelegramMarkdownV2(
-          "Paste a Hunch, Polymarket, Kalshi, or Limitless market URL or ID in your next message.",
+          "Send a market name, person, team, Hunch URL, venue URL, or market ID.",
         ),
         "",
         formatTelegramItalic(
@@ -2476,6 +2447,8 @@ function parseSignalBotMenuCallback(
     return { kind: "stale" };
   }
   const route = data.slice(SIGNAL_BOT_MENU_CALLBACK_PREFIX.length);
+  const interactiveRoute = parseSignalBotInteractiveMenuRoute(route);
+  if (interactiveRoute) return interactiveRoute;
   const notificationParts = route.split(":");
   if (notificationParts.length === 3 && notificationParts[0] === "ntf") {
     const topics: Record<string, TelegramNotificationTopic> = {
@@ -2620,6 +2593,38 @@ async function sendOrEditSignalBotMenuScreen(input: {
   });
 }
 
+async function sendOrEditSignalBotMenuMessage(input: {
+  chatId: string;
+  message: {
+    parse_mode?: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  };
+  messageId?: number | null;
+  transport: SignalBotMenuTransport;
+}): Promise<TelegramSendResult> {
+  if (input.messageId != null && input.transport.editMessageText) {
+    const edited = await input.transport.editMessageText({
+      chat_id: input.chatId,
+      disable_web_page_preview: true,
+      message_id: input.messageId,
+      parse_mode: input.message.parse_mode ?? "MarkdownV2",
+      reply_markup: input.message.reply_markup,
+      text: input.message.text,
+    });
+    if (edited.ok || /message is not modified/i.test(edited.message)) {
+      return edited;
+    }
+  }
+  return input.transport.sendMessage({
+    chat_id: input.chatId,
+    disable_web_page_preview: true,
+    parse_mode: input.message.parse_mode ?? "MarkdownV2",
+    reply_markup: input.message.reply_markup,
+    text: input.message.text,
+  });
+}
+
 function buildSignalBotPrivateMenuEntry(input: {
   botUsername?: string | null;
   chatId: string;
@@ -2645,28 +2650,57 @@ function buildSignalBotPrivateMenuEntry(input: {
   };
 }
 
-export async function handleSignalBotMenuCallback(input: {
-  callbackQuery: TelegramBotCallbackQuery;
-  config: SignalBotConfig;
-  db?: DbQuery;
-  redis: SignalBotRedisLike;
-  sendStatsReport?: (
-    chatId: string,
-    period: SignalBotStatsPeriod,
-    detail: boolean,
-  ) => Promise<boolean>;
-  sendTestSignal: (chatId: string) => Promise<boolean>;
-  loadPositions?: (telegramUserId: number) => Promise<{
-    parse_mode?: "MarkdownV2";
-    reply_markup?: TelegramInlineKeyboard;
-    text: string;
-  }>;
-  sendTradeStatus?: (
-    chatId: string,
-    telegramUserId: number,
-  ) => Promise<boolean>;
-  telegram: SignalBotTelegramClient;
-}): Promise<boolean> {
+type SignalBotMenuMessage = {
+  marketFound?: boolean;
+  parse_mode?: "MarkdownV2";
+  reply_markup?: TelegramInlineKeyboard;
+  text: string;
+};
+
+type SignalBotMenuLoaders = {
+  loadDeposit?: (input: {
+    telegramUserId: number;
+    venue: string;
+  }) => Promise<
+    SignalBotMenuMessage & { depositAddress?: string; qrText?: string }
+  >;
+  loadMarketCard?: (input: {
+    chatId: string;
+    context?: { origin: "search"; returnCallbackData: string };
+    marketRef: string;
+    telegramMessageId: number | null;
+    telegramUserId: number;
+  }) => Promise<SignalBotMenuMessage>;
+  loadPositionCard?: (input: {
+    positionId: string;
+    telegramUserId: number;
+  }) => Promise<SignalBotMenuMessage>;
+  loadPositions?: (telegramUserId: number) => Promise<SignalBotMenuMessage>;
+  loadTradeStatus?: (telegramUserId: number) => Promise<SignalBotMenuMessage>;
+  searchMarkets?: (input: {
+    query?: string | null;
+  }) => Promise<SignalBotMarketSearchResult[]>;
+};
+
+export async function handleSignalBotMenuCallback(
+  input: SignalBotMenuLoaders & {
+    callbackQuery: TelegramBotCallbackQuery;
+    config: SignalBotConfig;
+    db?: DbQuery;
+    redis: SignalBotRedisLike;
+    sendStatsReport?: (
+      chatId: string,
+      period: SignalBotStatsPeriod,
+      detail: boolean,
+    ) => Promise<boolean>;
+    sendTestSignal: (chatId: string) => Promise<boolean>;
+    sendTradeStatus?: (
+      chatId: string,
+      telegramUserId: number,
+    ) => Promise<boolean>;
+    telegram: SignalBotTelegramClient;
+  },
+): Promise<boolean> {
   const route = parseSignalBotMenuCallback(input.callbackQuery.data);
   if (!route) return false;
   const message = input.callbackQuery.message;
@@ -2708,6 +2742,42 @@ export async function handleSignalBotMenuCallback(input: {
       ? { text: "Working…" }
       : {}),
   });
+  if (
+    route.kind === "market_search_result" ||
+    route.kind === "market_search_back" ||
+    route.kind === "position" ||
+    route.kind === "deposit"
+  ) {
+    return handleSignalBotInteractiveMenuCallback({
+      callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+      chatId,
+      loadDeposit: input.loadDeposit,
+      loadMarketCard: input.loadMarketCard,
+      loadPositionCard: input.loadPositionCard,
+      messageId,
+      redis: input.redis,
+      render: (interactiveMessage) =>
+        sendOrEditSignalBotMenuMessage({
+          chatId,
+          message: interactiveMessage,
+          messageId,
+          transport: input.telegram,
+        }),
+      renderExpiredSearch: () =>
+        sendOrEditSignalBotMenuScreen({
+          chatId,
+          config: input.config,
+          isAdmin,
+          messageId,
+          notice: "Search expired. Start a new search.",
+          screen: "market_input",
+          transport: input.telegram,
+        }),
+      route,
+      sendPhoto: input.telegram.sendPhoto?.bind(input.telegram),
+      telegramUserId,
+    });
+  }
   if (route.kind === "stale") {
     await clearSignalBotMenuInput({
       chatId,
@@ -2846,22 +2916,41 @@ export async function handleSignalBotMenuCallback(input: {
       redis: input.redis,
       telegramUserId,
     });
-    let sent = false;
+    let statusMessage: {
+      parse_mode?: "MarkdownV2";
+      reply_markup?: TelegramInlineKeyboard;
+      text: string;
+    };
     try {
-      sent = await (input.sendTradeStatus?.(chatId, telegramUserId) ??
-        Promise.resolve(false));
+      statusMessage = input.loadTradeStatus
+        ? await input.loadTradeStatus(telegramUserId)
+        : {
+            parse_mode: "MarkdownV2",
+            text: "Trading status is unavailable right now\\.",
+          };
     } catch {
-      sent = false;
+      statusMessage = {
+        parse_mode: "MarkdownV2",
+        text: "Trading status is unavailable right now\\.",
+      };
     }
-    await sendOrEditSignalBotMenuScreen({
+    await sendOrEditSignalBotMenuMessage({
       chatId,
-      config: input.config,
-      isAdmin,
+      message: {
+        ...statusMessage,
+        reply_markup: {
+          inline_keyboard: [
+            ...(statusMessage.reply_markup?.inline_keyboard ?? []),
+            [
+              {
+                callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + "home",
+                text: "🏠 Home",
+              },
+            ],
+          ],
+        },
+      },
       messageId,
-      notice: sent
-        ? "Trading status was sent below."
-        : "Trading status is unavailable right now.",
-      screen: "trading",
       transport: input.telegram,
     });
     return true;
@@ -2940,6 +3029,40 @@ export async function handleSignalBotMenuCallback(input: {
       redis: input.redis,
       telegramUserId,
     });
+    let results: SignalBotMarketSearchResult[];
+    try {
+      if (!input.searchMarkets) throw new Error("market_search_unavailable");
+      results = await input.searchMarkets({ query: null });
+    } catch {
+      await sendOrEditSignalBotMenuMessage({
+        chatId,
+        message: buildSignalBotMarketSearchUnavailableScreen({
+          callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+        }),
+        messageId,
+        transport: input.telegram,
+      });
+      return true;
+    }
+    const sessionId = await writeSignalBotMarketSearchSession({
+      chatId,
+      query: null,
+      redis: input.redis,
+      results,
+      telegramUserId,
+    });
+    await sendOrEditSignalBotMenuMessage({
+      chatId,
+      message: buildSignalBotMarketSearchScreen({
+        callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+        query: null,
+        results,
+        sessionId,
+      }),
+      messageId,
+      transport: input.telegram,
+    });
+    return true;
   } else {
     await clearSignalBotMenuInput({
       chatId,
@@ -2962,12 +3085,19 @@ export async function handleSignalBotMenuInput(input: {
   config: SignalBotConfig;
   message: TelegramBotMessage;
   redis: SignalBotRedisLike;
-  sendTradeMarket?: (input: {
+  loadMarketCard?: (input: {
     chatId: string;
     marketRef: string;
-    telegramMessageId?: number | null;
+    telegramMessageId: number | null;
     telegramUserId: number;
-  }) => Promise<boolean>;
+  }) => Promise<{
+    parse_mode?: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  }>;
+  searchMarkets?: (input: {
+    query?: string | null;
+  }) => Promise<SignalBotMarketSearchResult[]>;
   telegram: SignalBotTelegramClient;
 }): Promise<boolean> {
   const telegramUserId = input.message.from?.id;
@@ -2979,68 +3109,32 @@ export async function handleSignalBotMenuInput(input: {
   ) {
     return false;
   }
-  const state = await readSignalBotMenuInput({
+  return handleSignalBotMarketSearchInput({
+    callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
     chatId,
+    loadMarketCard: input.loadMarketCard,
     redis: input.redis,
+    render: (message, messageId) =>
+      sendOrEditSignalBotMenuMessage({
+        chatId,
+        message,
+        messageId,
+        transport: input.telegram,
+      }),
+    renderCancelled: (messageId) =>
+      sendOrEditSignalBotMenuScreen({
+        chatId,
+        config: input.config,
+        isAdmin: isSignalBotAdmin(input.config, telegramUserId),
+        messageId,
+        notice: "Input cancelled because a command was received.",
+        screen: "home",
+        transport: input.telegram,
+      }),
+    searchMarkets: input.searchMarkets,
     telegramUserId,
+    text: input.message.text,
   });
-  if (!state) return false;
-  const marketRef = input.message.text.trim();
-  const isAdmin = isSignalBotAdmin(input.config, telegramUserId);
-  if (!marketRef || marketRef.startsWith("/")) {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
-    await sendOrEditSignalBotMenuScreen({
-      chatId,
-      config: input.config,
-      isAdmin,
-      messageId: state.menuMessageId,
-      notice: "Input cancelled because a command was received.",
-      screen: "home",
-      transport: input.telegram,
-    });
-    return true;
-  }
-  let sent = false;
-  try {
-    sent = await (input.sendTradeMarket?.({
-      chatId,
-      marketRef,
-      telegramMessageId: input.message.message_id ?? null,
-      telegramUserId,
-    }) ?? Promise.resolve(false));
-  } catch {
-    sent = false;
-  }
-  if (sent) {
-    await clearSignalBotMenuInput({
-      chatId,
-      redis: input.redis,
-      telegramUserId,
-    });
-  } else {
-    await writeSignalBotMenuInput({
-      chatId,
-      menuMessageId: state.menuMessageId,
-      redis: input.redis,
-      telegramUserId,
-    });
-  }
-  await sendOrEditSignalBotMenuScreen({
-    chatId,
-    config: input.config,
-    isAdmin,
-    messageId: state.menuMessageId,
-    notice: sent
-      ? "Market card was sent below."
-      : "That market could not be opened. Send another URL or ID.",
-    screen: sent ? "home" : "market_input",
-    transport: input.telegram,
-  });
-  return true;
 }
 
 export async function acquireSignalBotLock(input: {
@@ -3575,46 +3669,43 @@ export async function drainSignalBotConfirmTasks(
   }
 }
 
-export async function pollSignalBotCommands(input: {
-  botUsername?: string | null;
-  config: SignalBotConfig;
-  db?: DbQuery;
-  redis: SignalBotRedisLike;
-  sendStatsReport?: (
-    chatId: string,
-    period: SignalBotStatsPeriod,
-    detail: boolean,
-  ) => Promise<boolean>;
-  sendTestFollowthrough?: (
-    chatId: string,
-    kind: SignalBotFollowthroughPreviewKind,
-  ) => Promise<boolean>;
-  sendTestSignal: (chatId: string) => Promise<boolean>;
-  loadPositions?: (telegramUserId: number) => Promise<{
-    parse_mode?: "MarkdownV2";
-    reply_markup?: TelegramInlineKeyboard;
-    text: string;
-  }>;
-  sendTradeMarket?: (input: {
-    chatId: string;
-    isAdminTest?: boolean;
-    marketRef: string;
-    telegramMessageId?: number | null;
-    telegramUserId: number;
-  }) => Promise<boolean>;
-  sendTradeStatus?: (
-    chatId: string,
-    telegramUserId: number,
-  ) => Promise<boolean>;
-  disableTrading?: (
-    chatId: string,
-    telegramUserId: number,
-  ) => Promise<SignalBotDisableTradingResult>;
-  handleCallback?: (
-    callbackQuery: TelegramBotCallbackQuery,
-  ) => Promise<boolean>;
-  telegram: SignalBotTelegramClient;
-}): Promise<number> {
+export async function pollSignalBotCommands(
+  input: SignalBotMenuLoaders & {
+    botUsername?: string | null;
+    config: SignalBotConfig;
+    db?: DbQuery;
+    redis: SignalBotRedisLike;
+    sendStatsReport?: (
+      chatId: string,
+      period: SignalBotStatsPeriod,
+      detail: boolean,
+    ) => Promise<boolean>;
+    sendTestFollowthrough?: (
+      chatId: string,
+      kind: SignalBotFollowthroughPreviewKind,
+    ) => Promise<boolean>;
+    sendTestSignal: (chatId: string) => Promise<boolean>;
+    sendTradeMarket?: (input: {
+      chatId: string;
+      isAdminTest?: boolean;
+      marketRef: string;
+      telegramMessageId?: number | null;
+      telegramUserId: number;
+    }) => Promise<boolean>;
+    sendTradeStatus?: (
+      chatId: string,
+      telegramUserId: number,
+    ) => Promise<boolean>;
+    disableTrading?: (
+      chatId: string,
+      telegramUserId: number,
+    ) => Promise<SignalBotDisableTradingResult>;
+    handleCallback?: (
+      callbackQuery: TelegramBotCallbackQuery,
+    ) => Promise<boolean>;
+    telegram: SignalBotTelegramClient;
+  },
+): Promise<number> {
   const offset = await readSignalBotUpdateOffset(input.redis);
   const updates = await input.telegram.getUpdates({
     offset,
@@ -3645,7 +3736,8 @@ export async function pollSignalBotCommands(input: {
               config: input.config,
               message: update.message,
               redis: input.redis,
-              sendTradeMarket: input.sendTradeMarket,
+              loadMarketCard: input.loadMarketCard,
+              searchMarkets: input.searchMarkets,
               telegram: input.telegram,
             });
           }
@@ -3684,7 +3776,12 @@ export async function pollSignalBotCommands(input: {
           config: input.config,
           db: input.db,
           redis: input.redis,
+          loadMarketCard: input.loadMarketCard,
+          loadDeposit: input.loadDeposit,
+          loadPositionCard: input.loadPositionCard,
           loadPositions: input.loadPositions,
+          searchMarkets: input.searchMarkets,
+          loadTradeStatus: input.loadTradeStatus,
           sendStatsReport: input.sendStatsReport,
           sendTestSignal: input.sendTestSignal,
           sendTradeStatus: input.sendTradeStatus,
@@ -6962,6 +7059,25 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       message: payload?.description ?? `HTTP ${response.status}`,
       ok: false,
     };
+  }
+
+  async sendPhoto(input: {
+    caption?: string;
+    chat_id: string;
+    filename: string;
+    parse_mode?: "MarkdownV2";
+    photo: Uint8Array;
+    reply_markup?: TelegramInlineKeyboard;
+  }): Promise<TelegramSendResult> {
+    return sendTelegramPhotoRequest({
+      baseUrl: this.baseUrl,
+      caption: input.caption,
+      chatId: input.chat_id,
+      filename: input.filename,
+      parseMode: input.parse_mode,
+      photo: input.photo,
+      replyMarkup: input.reply_markup,
+    });
   }
 
   async sendMessage(

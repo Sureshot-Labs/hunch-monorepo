@@ -2,6 +2,7 @@ import { buildTelegramTradeProgressMessage } from "./telegram-bot-trading-presen
 
 export type TelegramBotTradingClientButton =
   | { text: string; callback_data: string }
+  | { text: string; copy_text: { text: string } }
   | { text: string; url: string };
 
 export type TelegramBotTradingClientReplyMarkup = {
@@ -9,6 +10,7 @@ export type TelegramBotTradingClientReplyMarkup = {
 };
 
 export type TelegramBotTradingClientMessage = {
+  marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: TelegramBotTradingClientReplyMarkup;
   text: string;
@@ -49,6 +51,15 @@ export type TelegramBotTradingInternalApiClient = {
   buildMarketMessage: (input: {
     appBaseUrl: string;
     chatId: string | number;
+    context?: {
+      focusPositionId?: string;
+      focusPositionWalletAddress?: string | null;
+      focusSide?: "YES" | "NO";
+      origin: "direct" | "position" | "search";
+      positionLines?: string[];
+      positionRedemptionStatus?: string | null;
+      returnCallbackData?: string;
+    };
     isAdminTest?: boolean;
     marketRef: string;
     telegramMessageId?: number | null;
@@ -61,6 +72,34 @@ export type TelegramBotTradingInternalApiClient = {
     appBaseUrl: string;
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
+  buildPositionMessage: (input: {
+    appBaseUrl: string;
+    positionId: string;
+    telegramUserId: string | number;
+  }) => Promise<TelegramBotTradingClientMessage>;
+  buildDepositMessage: (input: {
+    appBaseUrl: string;
+    telegramUserId: string | number;
+    venue?: string | null;
+  }) => Promise<
+    TelegramBotTradingClientMessage & {
+      depositAddress?: string;
+      qrText?: string;
+      venue?: string;
+    }
+  >;
+  searchMarkets: (input: { query?: string | null }) => Promise<
+    Array<{
+      eventId: string;
+      eventTitle: string | null;
+      lastPrice: number | null;
+      marketId: string;
+      marketTitle: string;
+      noAsk: number | null;
+      venue: string;
+      yesAsk: number | null;
+    }>
+  >;
   disableTrading: (
     telegramUserId: string | number,
   ) => Promise<"already_disabled" | "disabled" | "unavailable">;
@@ -93,7 +132,7 @@ const EXACT_UUID_RE =
 
 export function parseTelegramBotTradingCallbackData(data: string | undefined): {
   intentId: string;
-  type: "buy" | "sell" | "redeem" | "cancel" | "confirm";
+  type: "buy" | "sell" | "redeem" | "retry_buy" | "cancel" | "confirm";
 } | null {
   if (!data) return null;
   const parts = data.split(":");
@@ -104,6 +143,7 @@ export function parseTelegramBotTradingCallbackData(data: string | undefined): {
     type !== "buy" &&
     type !== "sell" &&
     type !== "redeem" &&
+    type !== "retry_buy" &&
     type !== "confirm" &&
     type !== "cancel"
   )
@@ -238,6 +278,35 @@ export function createTelegramBotTradingInternalApiClient(input: {
         body,
         { timeoutMs: executeTimeoutMs },
       ),
+    buildPositionMessage: (body) =>
+      post<TelegramBotTradingClientMessage>(
+        `/internal/telegram-bot/positions/${body.positionId}/card`,
+        {
+          appBaseUrl: body.appBaseUrl,
+          telegramUserId: body.telegramUserId,
+        },
+      ),
+    buildDepositMessage: (body) =>
+      post<
+        TelegramBotTradingClientMessage & {
+          depositAddress?: string;
+          qrText?: string;
+          venue?: string;
+        }
+      >("/internal/telegram-bot/deposit", body),
+    searchMarkets: (body) =>
+      post<
+        Array<{
+          eventId: string;
+          eventTitle: string | null;
+          lastPrice: number | null;
+          marketId: string;
+          marketTitle: string;
+          noAsk: number | null;
+          venue: string;
+          yesAsk: number | null;
+        }>
+      >("/internal/telegram-bot/trading/market-search", body),
     buildMarketMessage: (body) =>
       post<TelegramBotTradingClientMessage>(
         "/internal/telegram-bot/trading/market-card",
@@ -276,6 +345,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
       }
       const path =
         parsed.type === "buy" ||
+        parsed.type === "retry_buy" ||
         parsed.type === "sell" ||
         parsed.type === "redeem"
           ? "/internal/telegram-bot/trading/preview-intent"
@@ -364,11 +434,27 @@ export function createTelegramBotTradingInternalApiClient(input: {
       const terminalMessage = confirmAcknowledged
         ? result.messages.at(-1)
         : null;
+      const previewMessage = !confirmAcknowledged
+        ? result.messages.at(-1)
+        : null;
       const chatId = callbackInput.callbackQuery.message?.chat?.id;
       const messageId = callbackInput.callbackQuery.message?.message_id;
       let terminalEdited = false;
       let receiptDelivery: "edit" | "send" | null = null;
       let receiptMessageId: number | null = null;
+      let previewEdited = false;
+      if (previewMessage && chatId != null && messageId != null) {
+        const editResult = await callbackInput
+          .editMessageText?.({
+            chat_id: String(chatId),
+            message_id: messageId,
+            parse_mode: previewMessage.parse_mode,
+            reply_markup: previewMessage.reply_markup,
+            text: previewMessage.text,
+          })
+          .catch(() => null);
+        previewEdited = readSuccessfulTelegramResult(editResult).ok;
+      }
       if (terminalMessage && chatId != null && messageId != null) {
         const editResult = await callbackInput
           .editMessageText?.({
@@ -387,6 +473,13 @@ export function createTelegramBotTradingInternalApiClient(input: {
         }
       }
       for (const [index, message] of result.messages.entries()) {
+        if (
+          previewEdited &&
+          !confirmAcknowledged &&
+          index === result.messages.length - 1
+        ) {
+          continue;
+        }
         if (
           terminalEdited &&
           confirmAcknowledged &&

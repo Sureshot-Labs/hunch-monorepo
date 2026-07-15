@@ -304,6 +304,7 @@ export function readiness(
         ok: true;
         maxExecutableBuyUsd?: number | null;
         message?: string | null;
+        raw?: unknown;
       }
     | {
         ok: false;
@@ -311,6 +312,7 @@ export function readiness(
         maxExecutableBuyUsd?: number | null;
         message: string;
         repair?: TradingReadiness["repair"];
+        raw?: unknown;
         setupRequired?: boolean;
       },
 ): TradingReadiness {
@@ -325,6 +327,7 @@ export function readiness(
       ? { maxExecutableBuyUsd: input.maxExecutableBuyUsd }
       : {}),
     ...(!input.ok && input.repair ? { repair: input.repair } : {}),
+    ...(input.raw !== undefined ? { raw: input.raw } : {}),
   };
 }
 

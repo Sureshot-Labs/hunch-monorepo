@@ -36,7 +36,12 @@ import {
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
 import type { KalshiTradeEligibility } from "../services/trading-types.js";
-import { buildTelegramPositionsMessage } from "../services/telegram-bot-positions.js";
+import { searchTelegramMarkets } from "../services/telegram-market-search.js";
+import { buildTelegramDepositMessage } from "../services/telegram-bot-deposit.js";
+import {
+  buildTelegramPositionsMessage,
+  loadTelegramPositions,
+} from "../services/telegram-bot-positions.js";
 
 const enableBodySchema = z
   .object({
@@ -57,6 +62,38 @@ const internalMarketCardBodySchema = z
     marketRef: z.string().trim().min(1),
     telegramMessageId: z.number().int().optional().nullable(),
     telegramUserId: z.union([z.string(), z.number()]),
+    context: z
+      .object({
+        focusPositionId: z.string().uuid().optional(),
+        focusPositionWalletAddress: z.string().optional().nullable(),
+        focusSide: z.enum(["YES", "NO"]).optional(),
+        origin: z.enum(["direct", "position", "search"]),
+        positionLines: z.array(z.string().max(240)).max(8).optional(),
+        positionRedemptionStatus: z.string().max(64).optional().nullable(),
+        returnCallbackData: z.string().max(64).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const internalMarketSearchBodySchema = z
+  .object({ query: z.string().trim().max(240).optional().nullable() })
+  .strict();
+
+const internalPositionCardBodySchema = z
+  .object({
+    appBaseUrl: z.string().trim().url(),
+    positionId: z.string().uuid(),
+    telegramUserId: z.union([z.string(), z.number()]),
+  })
+  .strict();
+
+const internalDepositBodySchema = z
+  .object({
+    appBaseUrl: z.string().trim().url(),
+    telegramUserId: z.union([z.string(), z.number()]),
+    venue: z.string().trim().max(32).optional().nullable(),
   })
   .strict();
 
@@ -229,7 +266,10 @@ export type TelegramBotTradingRouteDependencies = {
     privyUserId: string | null | undefined;
   }) => Promise<TelegramBotTradingInternalWalletCandidate[]>;
   signerInspector?: typeof inspectServerEvmWalletAuthorization;
+  buildDepositMessage?: typeof buildTelegramDepositMessage;
   buildPositionsMessage?: typeof buildTelegramPositionsMessage;
+  loadPositions?: typeof loadTelegramPositions;
+  searchMarkets?: typeof searchTelegramMarkets;
 };
 
 async function registerTelegramBotTradingRoutes(
@@ -238,6 +278,7 @@ async function registerTelegramBotTradingRoutes(
 ): Promise<void> {
   const api = app.withTypeProvider<ZodTypeProvider>();
   const db = dependencies.db ?? pool;
+  const routePool = db as typeof pool;
   const reconciliationEnabled =
     dependencies.reconciliationEnabled ??
     isTelegramBotTradingReconciliationEnabled({
@@ -251,6 +292,10 @@ async function registerTelegramBotTradingRoutes(
     dependencies.resolveInternalWallets ?? resolveInternalPrivyWalletCandidates;
   const buildPositionsMessage =
     dependencies.buildPositionsMessage ?? buildTelegramPositionsMessage;
+  const buildDepositMessage =
+    dependencies.buildDepositMessage ?? buildTelegramDepositMessage;
+  const loadPositions = dependencies.loadPositions ?? loadTelegramPositions;
+  const searchMarkets = dependencies.searchMarkets ?? searchTelegramMarkets;
   const kalshiGeoFenceConfig: GeoFenceConfig = {
     enabled: env.dflowGeoBlockEnabled,
     blockedCountries: env.dflowGeoBlockCountries,
@@ -289,9 +334,122 @@ async function registerTelegramBotTradingRoutes(
     (request) =>
       buildPositionsMessage({
         appBaseUrl: request.body.appBaseUrl,
-        pool,
+        pool: routePool,
         telegramUserId: request.body.telegramUserId,
       }),
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading/market-search",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalMarketSearchBodySchema },
+    },
+    (request) => searchMarkets({ pool: routePool, query: request.body.query }),
+  );
+
+  api.post(
+    "/internal/telegram-bot/deposit",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalDepositBodySchema },
+    },
+    (request) =>
+      buildDepositMessage({
+        appBaseUrl: request.body.appBaseUrl,
+        pool: db,
+        telegramUserId: request.body.telegramUserId,
+        venue: request.body.venue,
+      }),
+  );
+
+  api.post(
+    "/internal/telegram-bot/positions/:positionId/card",
+    {
+      preHandler: requireInternal,
+      schema: {
+        body: internalPositionCardBodySchema.omit({ positionId: true }),
+        params: z.object({ positionId: z.string().uuid() }).strict(),
+      },
+    },
+    async (request) => {
+      const loaded = await loadPositions({
+        pool: routePool,
+        sync: false,
+        telegramUserId: request.body.telegramUserId,
+      });
+      const position = loaded.snapshot.positions.find(
+        (candidate) => candidate.position.id === request.params.positionId,
+      );
+      if (!loaded.linked || !position || !position.marketId || !position.side) {
+        return {
+          parse_mode: "MarkdownV2" as const,
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  callback_data: "hm:v1:positions",
+                  text: "Back to positions",
+                },
+              ],
+            ],
+          },
+          text: "Position details are temporarily unavailable\\. The holding remains visible in My positions\\.",
+        };
+      }
+      const average =
+        position.averagePrice == null
+          ? "unavailable"
+          : `${(position.averagePrice * 100).toFixed(1)}¢`;
+      const bid =
+        position.markPrice == null
+          ? "unavailable"
+          : `${(position.markPrice * 100).toFixed(1)}¢`;
+      const pnl =
+        position.pnlUsd == null || position.pnlPercent == null
+          ? "unavailable"
+          : `${position.pnlUsd >= 0 ? "+" : ""}$${position.pnlUsd.toFixed(2)} (${position.pnlPercent >= 0 ? "+" : ""}${position.pnlPercent.toFixed(1)}%)`;
+      const matchingHoldings = loaded.snapshot.positions.filter(
+        (candidate) =>
+          candidate.marketId === position.marketId &&
+          candidate.side === position.side,
+      );
+      const walletSuffix =
+        matchingHoldings.length > 1 && position.position.walletAddress
+          ? position.position.walletAddress.slice(-6)
+          : null;
+      const settlementLine =
+        position.redemptionStatus === "redeemable"
+          ? "Ready to redeem"
+          : position.redemptionStatus === "market_open"
+            ? null
+            : position.redemptionStatus === "resolved_not_redeemable" ||
+                position.redemptionStatus === "redeemed"
+              ? "Resolved"
+              : "Waiting for settlement";
+      return buildTelegramBotTradingMarketMessage({
+        appBaseUrl: request.body.appBaseUrl,
+        chatId: String(request.body.telegramUserId),
+        context: {
+          focusPositionId: position.position.id,
+          focusPositionWalletAddress: position.position.walletAddress,
+          focusSide: position.side ?? undefined,
+          origin: "position",
+          positionLines: [
+            `${position.position.size.toFixed(4)} shares · Avg ${average}`,
+            `Live bid ${bid} · PnL ${pnl}`,
+            ...(settlementLine ? [settlementLine] : []),
+            ...(walletSuffix ? [`Wallet …${walletSuffix}`] : []),
+          ],
+          positionRedemptionStatus: position.redemptionStatus,
+          returnCallbackData: "hm:v1:positions",
+        },
+        db,
+        marketRef: position.marketId,
+        telegramUserId: request.body.telegramUserId,
+        trading: createTradingForRequest(request),
+      });
+    },
   );
 
   api.post(
@@ -369,6 +527,7 @@ async function registerTelegramBotTradingRoutes(
         ? buildTelegramBotTradingMarketMessage({
             appBaseUrl: request.body.appBaseUrl,
             chatId: request.body.chatId,
+            context: request.body.context,
             db,
             isAdminTest: request.body.isAdminTest,
             marketRef: request.body.marketRef,

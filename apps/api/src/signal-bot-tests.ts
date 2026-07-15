@@ -1243,7 +1243,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(regular.text, /Hunch/);
       assert.doesNotMatch(regular.text, /\/(?:menu|market|trade|help)/);
       assert.equal(
-        regularButtons.some((button) => button.text === "💸 Trade a market"),
+        regularButtons.some((button) => button.text === "🔎 Markets"),
         true,
       );
       assert.equal(
@@ -1251,12 +1251,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         true,
       );
       assert.deepEqual(regularLabels, [
-        "💸 Trade a market",
-        "👤 My trading",
+        "🔎 Markets",
         "💼 My positions",
-        "Open Hunch",
+        "👤 My trading",
+        "💳 Deposit",
+        "🔔 Notifications",
         "⚙️ Settings",
-        "❓ How it works",
+        "❓ Help",
       ]);
       assert.equal(
         regularButtons.some((button) => button.text === "📊 Performance"),
@@ -1266,12 +1267,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         regularButtons.some((button) => button.text === "🛠 Admin"),
         false,
       );
-      const openHunch = regularButtons.find(
-        (button) => button.text === "Open Hunch",
-      );
-      assert.ok(openHunch && "web_app" in openHunch);
-      assert.equal(openHunch.web_app?.url, "https://app.hunch.trade/tg");
-
       const admin = buildSignalBotMenuScreen({
         appBaseUrl: "https://app.hunch.trade",
         isAdmin: true,
@@ -7830,7 +7825,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           telegram.edits[0]?.reply_markup?.inline_keyboard
             .flat()
             .map((button) => button.text) ?? [];
-        assert.equal(labels.includes("💸 Trade a market"), true);
+        assert.equal(labels.includes("🔎 Markets"), true);
         assert.equal(labels.includes("🛠 Admin"), false);
       }
     },
@@ -7863,7 +7858,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         true,
       );
-      assert.match(telegram.edits.at(-1)?.text ?? "", /Send a market/);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /markets/i);
       let marketRequest:
         | {
             chatId: string;
@@ -7881,9 +7876,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           text: "https://polymarket.com/event/test-market",
         },
         redis,
-        sendTradeMarket: async (request) => {
+        loadMarketCard: async (request) => {
           marketRequest = request;
-          return true;
+          return { text: "Test market card" };
         },
         telegram,
       });
@@ -7891,10 +7886,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(marketRequest, {
         chatId: "999",
         marketRef: "https://polymarket.com/event/test-market",
-        telegramMessageId: 61,
+        telegramMessageId: 60,
         telegramUserId: 999,
       });
-      assert.match(telegram.edits.at(-1)?.text ?? "", /Market card was sent/);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /Test market card/);
       assert.equal(
         await handleSignalBotMenuInput({
           config,
@@ -11168,7 +11163,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           authorization: authorization as never,
           market: market as never,
           maxAmountUsd: 2,
-          maxExecutableBuyUsd: 2,
           maxSlippageBps: 500,
           nominalAmountUsd: 1,
           side: "YES",
@@ -11179,7 +11173,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           authorization: authorization as never,
           market: market as never,
           maxAmountUsd: 2,
-          maxExecutableBuyUsd: 2,
           maxSlippageBps: 500,
           nominalAmountUsd: 1,
           side: "NO",
@@ -11190,7 +11183,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           authorization: authorization as never,
           market: market as never,
           maxAmountUsd: 5,
-          maxExecutableBuyUsd: 5,
           maxSlippageBps: 500,
           nominalAmountUsd: 1,
           side: "NO",

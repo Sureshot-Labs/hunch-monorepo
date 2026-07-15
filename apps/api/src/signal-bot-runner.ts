@@ -46,7 +46,15 @@ function log(event: string, fields?: Record<string, unknown>): void {
 }
 
 function logTradingInternalApiFailure(
-  operation: "callback" | "disable" | "market-card" | "positions" | "status",
+  operation:
+    | "callback"
+    | "deposit"
+    | "disable"
+    | "market-card"
+    | "market-search"
+    | "position-card"
+    | "positions"
+    | "status",
   error: unknown,
 ): void {
   log("signal_bot_trading_internal_api_error", {
@@ -263,6 +271,66 @@ export async function runSignalBotRunner(): Promise<void> {
                     throw error;
                   })
               : Promise.reject(new Error("Positions API is unavailable")),
+          loadDeposit: ({ telegramUserId, venue }) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .buildDepositMessage({
+                    appBaseUrl: config.appBaseUrl,
+                    telegramUserId,
+                    venue,
+                  })
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("deposit", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Deposit API is unavailable")),
+          loadPositionCard: ({ positionId, telegramUserId }) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .buildPositionMessage({
+                    appBaseUrl: config.appBaseUrl,
+                    positionId,
+                    telegramUserId,
+                  })
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("position-card", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Positions API is unavailable")),
+          searchMarkets: (body) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .searchMarkets(body)
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("market-search", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Market search is unavailable")),
+          loadMarketCard: (input) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .buildMarketMessage({
+                    appBaseUrl: config.appBaseUrl,
+                    chatId: input.chatId,
+                    context: input.context,
+                    marketRef: input.marketRef,
+                    telegramMessageId: input.telegramMessageId,
+                    telegramUserId: input.telegramUserId,
+                  })
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("market-card", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Market card API is unavailable")),
+          loadTradeStatus: (telegramUserId) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .buildStatusMessage(telegramUserId)
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("status", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Trading status is unavailable")),
           sendTradeStatus: async (chatId, telegramUserId) => {
             const message = tradingInternalApi
               ? await tradingInternalApi
