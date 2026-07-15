@@ -233,6 +233,15 @@ export function buildSignalBotMarketSearchQueryPrompt(input: {
   };
 }
 
+export function buildSignalBotMarketSearchProgressScreen(): SignalBotMarketSearchMessage {
+  return {
+    reply_markup: { inline_keyboard: [] },
+    text: [bold("🔎 Markets"), "", escapeTelegramMarkdownV2("Searching…")].join(
+      "\n",
+    ),
+  };
+}
+
 export function buildSignalBotMarketUnavailableResultScreen(input: {
   callbackPrefix: string;
   sessionId: string;

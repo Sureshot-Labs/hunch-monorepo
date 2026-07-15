@@ -71,8 +71,8 @@ import {
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
 import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
 import {
+  buildSignalBotMarketSearchQueryPrompt,
   buildSignalBotMarketSearchScreen,
-  buildSignalBotMarketSearchUnavailableScreen,
   writeSignalBotMarketSearchSession,
   type SignalBotMarketSearchResult,
 } from "./telegram-bot-menu-markets.js";
@@ -82,6 +82,7 @@ import {
   type SignalBotInteractiveMenuRoute,
 } from "./telegram-bot-menu-actions.js";
 import { handleSignalBotMarketSearchInput } from "./telegram-bot-menu-search-input.js";
+import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   clearSignalBotMenuInput,
   writeSignalBotMenuInput,
@@ -3029,21 +3030,22 @@ export async function handleSignalBotMenuCallback(
       redis: input.redis,
       telegramUserId,
     });
+    await sendOrEditSignalBotMenuMessage({
+      chatId,
+      message: buildSignalBotMarketSearchQueryPrompt({
+        callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+      }),
+      messageId,
+      transport: input.telegram,
+    });
     let results: SignalBotMarketSearchResult[];
     try {
       if (!input.searchMarkets) throw new Error("market_search_unavailable");
       results = await input.searchMarkets({ query: null });
     } catch {
-      await sendOrEditSignalBotMenuMessage({
-        chatId,
-        message: buildSignalBotMarketSearchUnavailableScreen({
-          callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
-        }),
-        messageId,
-        transport: input.telegram,
-      });
       return true;
     }
+    if (results.length === 0) return true;
     const sessionId = await writeSignalBotMarketSearchSession({
       chatId,
       query: null,
@@ -3110,6 +3112,24 @@ export async function handleSignalBotMenuInput(input: {
     return false;
   }
   return handleSignalBotMarketSearchInput({
+    beginResponse: async (message) => {
+      const sent = await input.telegram.sendMessage({
+        chat_id: chatId,
+        disable_web_page_preview: true,
+        parse_mode: message.parse_mode ?? "MarkdownV2",
+        ...(input.message.message_id == null
+          ? {}
+          : {
+              reply_parameters: {
+                allow_sending_without_reply: true,
+                message_id: input.message.message_id,
+              },
+            }),
+        reply_markup: message.reply_markup,
+        text: message.text,
+      });
+      return sent.ok ? sent.messageId : null;
+    },
     callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
     chatId,
     loadMarketCard: input.loadMarketCard,
@@ -3758,13 +3778,19 @@ export async function pollSignalBotCommands(
           }
         } catch {
           didHandle = true;
+          const failure = buildPlainReply(
+            String(update.message.chat.id),
+            "Command failed. Try again.",
+          );
+          const replyMarkup =
+            update.message.chat.type === "private"
+              ? withTelegramPrivateNavigation({
+                  parse_mode: failure.parse_mode,
+                  text: failure.text,
+                }).reply_markup
+              : undefined;
           await input.telegram
-            .sendMessage(
-              buildPlainReply(
-                String(update.message.chat.id),
-                "Command failed. Try again.",
-              ),
-            )
+            .sendMessage({ ...failure, reply_markup: replyMarkup })
             .catch(() => undefined);
         }
         if (didHandle) handled += 1;

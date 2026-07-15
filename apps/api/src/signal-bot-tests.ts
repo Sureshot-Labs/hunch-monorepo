@@ -2337,6 +2337,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const originalFetch = globalThis.fetch;
       const requests: Array<{ body: unknown; url: string }> = [];
+      let terminalEdit: {
+        reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> };
+      } | null = null;
       globalThis.fetch = (async (input, init) => {
         const url = String(input);
         requests.push({
@@ -2378,7 +2381,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               message_id: 77,
             },
           },
-          editMessageText: async () => ({ messageId: 77, ok: true }),
+          editMessageText: async (message) => {
+            terminalEdit = message;
+            return { messageId: 77, ok: true };
+          },
           sendMessage: async () => ({ messageId: 78, ok: true }),
         });
         assert.equal(handled, true);
@@ -2389,6 +2395,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           messageId: 77,
           telegramUserId: 999,
         });
+        assert.match(JSON.stringify(terminalEdit), /My positions/);
+        assert.match(JSON.stringify(terminalEdit), /Home/);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -7886,9 +7894,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(marketRequest, {
         chatId: "999",
         marketRef: "https://polymarket.com/event/test-market",
-        telegramMessageId: 60,
+        telegramMessageId: 101,
         telegramUserId: 999,
       });
+      assert.match(telegram.messages.at(-1)?.text ?? "", /Searching/);
       assert.match(telegram.edits.at(-1)?.text ?? "", /Test market card/);
       assert.equal(
         await handleSignalBotMenuInput({

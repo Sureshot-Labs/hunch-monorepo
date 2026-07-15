@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { Interface } from "ethers";
 
 import { handleSignalBotInteractiveMenuCallback } from "./services/telegram-bot-menu-actions.js";
-import { resolveCanonicalPolymarketDepositAddress } from "./services/telegram-bot-deposit.js";
+import {
+  buildTelegramDepositMessage,
+  resolveCanonicalPolymarketDeposit,
+  resolveCanonicalPolymarketDepositAddress,
+} from "./services/telegram-bot-deposit.js";
 
 const DEPOSIT_PREFIX =
   "0x363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc545af4";
@@ -28,6 +32,8 @@ const owner = "0x1111111111111111111111111111111111111111";
 const otherOwner = "0x2222222222222222222222222222222222222222";
 const deposit = "0x3333333333333333333333333333333333333333";
 const router = "0x4444444444444444444444444444444444444444";
+const productionOwner = "0x09c88f1d3cdD98C356A21434Cd4Af40CcE795314";
+const productionDeposit = "0x496f46AA7500563E7f577D12CB8193421F2963C7";
 
 function dependencies(derived = deposit, runtimeOwner = owner) {
   return {
@@ -41,6 +47,23 @@ function dependencies(derived = deposit, runtimeOwner = owner) {
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "deposit resolver accepts mixed-case canonical production vector",
+    run: async () => {
+      assert.deepEqual(
+        await resolveCanonicalPolymarketDeposit({
+          db: depositDb(productionOwner, productionDeposit),
+          dependencies: {
+            ...dependencies(productionDeposit, productionOwner.toLowerCase()),
+            fetchCode: async () =>
+              depositRuntime(productionOwner.toLowerCase()),
+          },
+          telegramUserId: 20,
+        }),
+        { address: productionDeposit, status: "ready" },
+      );
+    },
+  },
   {
     name: "deposit resolver requires stored, derived, and runtime owner agreement",
     run: async () => {
@@ -71,10 +94,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "deposit resolver fails closed on RPC errors and missing router",
+    name: "deposit resolver distinguishes RPC errors and missing router",
     run: async () => {
-      assert.equal(
-        await resolveCanonicalPolymarketDepositAddress({
+      assert.deepEqual(
+        await resolveCanonicalPolymarketDeposit({
           db: depositDb(owner, deposit),
           dependencies: {
             ...dependencies(),
@@ -84,16 +107,34 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
           telegramUserId: 20,
         }),
-        null,
+        { address: null, status: "temporarily_unavailable" },
       );
-      assert.equal(
-        await resolveCanonicalPolymarketDepositAddress({
+      assert.deepEqual(
+        await resolveCanonicalPolymarketDeposit({
           db: depositDb(owner, deposit),
           dependencies: { fundingRouterAddress: null },
           telegramUserId: 20,
         }),
-        null,
+        { address: null, status: "temporarily_unavailable" },
       );
+    },
+  },
+  {
+    name: "deposit message does not misreport RPC failure as missing setup",
+    run: async () => {
+      const message = await buildTelegramDepositMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        dependencies: {
+          ...dependencies(),
+          fetchCall: async () => {
+            throw new Error("RPC unavailable");
+          },
+        },
+        pool: depositDb(owner, deposit),
+        telegramUserId: 20,
+      });
+      assert.match(message.text, /temporarily unavailable/);
+      assert.doesNotMatch(message.text, /Finish Trading Wallet setup/);
     },
   },
   {

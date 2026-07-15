@@ -25,16 +25,32 @@ export type TelegramDepositResolverDependencies = {
   polygonRpcUrl?: string;
 };
 
-export async function resolveCanonicalPolymarketDepositAddress(input: {
+export type TelegramPolymarketDepositResolution =
+  | { address: string; status: "ready" }
+  | {
+      address: null;
+      status:
+        | "setup_required"
+        | "temporarily_unavailable"
+        | "verification_failed";
+    };
+
+function normalizedAddress(value: string): string {
+  return ethers.getAddress(value).toLowerCase();
+}
+
+export async function resolveCanonicalPolymarketDeposit(input: {
   db: DbQuery;
   dependencies?: TelegramDepositResolverDependencies;
   telegramUserId: string | number;
-}): Promise<string | null> {
+}): Promise<TelegramPolymarketDepositResolution> {
   const fundingRouterAddress =
     input.dependencies?.fundingRouterAddress !== undefined
       ? input.dependencies.fundingRouterAddress
       : env.polymarketFundingRouterAddress;
-  if (!fundingRouterAddress) return null;
+  if (!fundingRouterAddress) {
+    return { address: null, status: "temporarily_unavailable" };
+  }
   const call = input.dependencies?.fetchCall ?? fetchEvmCall;
   const code = input.dependencies?.fetchCode ?? fetchEvmCode;
   const rpcUrl = input.dependencies?.polygonRpcUrl ?? env.polygonRpcUrl;
@@ -55,61 +71,111 @@ export async function resolveCanonicalPolymarketDepositAddress(input: {
       order by uvc.updated_at desc`,
     [String(input.telegramUserId)],
   );
+  if (rows.length === 0) {
+    return { address: null, status: "setup_required" };
+  }
+  let rpcUnavailable = false;
   for (const row of rows) {
+    let owner: string;
+    let stored: string;
     try {
-      const owner = ethers.getAddress(row.wallet_address);
-      const stored = ethers.getAddress(row.funder_address ?? "");
-      const data = fundingRouter.encodeFunctionData("depositWalletOf", [owner]);
-      const result = await call({
+      owner = ethers.getAddress(row.wallet_address);
+      stored = ethers.getAddress(row.funder_address ?? "");
+    } catch {
+      continue;
+    }
+    const data = fundingRouter.encodeFunctionData("depositWalletOf", [owner]);
+    let result: string;
+    try {
+      result = await call({
         data,
         rpcUrl,
         timeoutMs,
         to: fundingRouterAddress,
       });
+    } catch {
+      rpcUnavailable = true;
+      continue;
+    }
+    let derivedAddress: string;
+    try {
       const [derived] = fundingRouter.decodeFunctionResult(
         "depositWalletOf",
         result,
       );
-      if (ethers.getAddress(String(derived)) !== stored) continue;
-      const runtime = await code({
+      derivedAddress = normalizedAddress(String(derived));
+    } catch {
+      continue;
+    }
+    if (derivedAddress !== normalizedAddress(stored)) continue;
+    let runtime: string;
+    try {
+      runtime = await code({
         address: stored,
         bypassCache: true,
         rpcUrl,
         timeoutMs,
       });
-      if (decodePolymarketDepositWalletOwnerFromRuntime(runtime) !== owner) {
-        continue;
-      }
-      return stored;
     } catch {
+      rpcUnavailable = true;
       continue;
     }
+    const runtimeOwner = decodePolymarketDepositWalletOwnerFromRuntime(runtime);
+    let normalizedRuntimeOwner: string | null = null;
+    try {
+      normalizedRuntimeOwner = runtimeOwner
+        ? normalizedAddress(runtimeOwner)
+        : null;
+    } catch {
+      // A deployed runtime with malformed owner data is a verification
+      // failure, not a transient RPC outage.
+    }
+    if (normalizedRuntimeOwner !== normalizedAddress(owner)) {
+      continue;
+    }
+    return { address: stored, status: "ready" };
   }
-  return null;
+  return {
+    address: null,
+    status: rpcUnavailable ? "temporarily_unavailable" : "verification_failed",
+  };
+}
+
+export async function resolveCanonicalPolymarketDepositAddress(input: {
+  db: DbQuery;
+  dependencies?: TelegramDepositResolverDependencies;
+  telegramUserId: string | number;
+}): Promise<string | null> {
+  const resolution = await resolveCanonicalPolymarketDeposit(input);
+  return resolution.address;
 }
 
 export async function buildTelegramDepositMessage(input: {
   appBaseUrl: string;
+  dependencies?: TelegramDepositResolverDependencies;
   pool: DbQuery;
   telegramUserId: string | number;
   venue?: string | null;
 }): Promise<TelegramDepositMessage> {
   const venue = input.venue?.trim().toLowerCase() || "polymarket";
-  const address =
+  const resolution =
     venue === "polymarket"
-      ? await resolveCanonicalPolymarketDepositAddress({
+      ? await resolveCanonicalPolymarketDeposit({
           db: input.pool,
+          dependencies: input.dependencies,
           telegramUserId: input.telegramUserId,
         })
-      : null;
-  if (!address) {
+      : ({ address: null, status: "setup_required" } as const);
+  if (!resolution.address) {
+    const temporarilyUnavailable =
+      resolution.status === "temporarily_unavailable";
     return {
       parse_mode: "MarkdownV2",
       reply_markup: {
         inline_keyboard: [
           [
             {
-              text: "Finish setup",
+              text: temporarilyUnavailable ? "Open Hunch" : "Finish setup",
               url: new URL(
                 "/settings/telegram-trading",
                 input.appBaseUrl,
@@ -122,11 +188,16 @@ export async function buildTelegramDepositMessage(input: {
         "*💳 Deposit*",
         "",
         escapeTelegramMarkdownV2(
-          "A verified Polymarket deposit wallet is not ready yet. Finish Trading Wallet setup in Hunch.",
+          temporarilyUnavailable
+            ? "Deposit verification is temporarily unavailable. Try again or open Hunch."
+            : resolution.status === "verification_failed"
+              ? "The Polymarket deposit wallet could not be verified. Open Hunch to check Trading Wallet setup."
+              : "A verified Polymarket deposit wallet is not ready yet. Finish Trading Wallet setup in Hunch.",
         ),
       ].join("\n"),
     };
   }
+  const address = resolution.address;
   return {
     depositAddress: address,
     parse_mode: "MarkdownV2",

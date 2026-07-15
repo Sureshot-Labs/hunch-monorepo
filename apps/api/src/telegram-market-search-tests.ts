@@ -38,6 +38,39 @@ const sampleResult = {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "free-text search sends progress below the input and edits the new card",
+    run: async () => {
+      const redis = redisStore();
+      await writeSignalBotMenuInput({
+        chatId: "10",
+        menuMessageId: 42,
+        redis,
+        telegramUserId: 20,
+      });
+      const events: string[] = [];
+      await handleSignalBotMarketSearchInput({
+        beginResponse: async (message) => {
+          events.push(`send:${message.text}`);
+          return 99;
+        },
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        redis,
+        render: async (message, messageId) => {
+          events.push(`edit:${messageId}:${message.text}`);
+        },
+        renderCancelled: async () => undefined,
+        searchMarkets: async () => [sampleResult],
+        telegramUserId: 20,
+        text: "Spain",
+      });
+      assert.equal(events[0]?.startsWith("send:"), true);
+      assert.match(events[0] ?? "", /Searching/);
+      assert.equal(events[1]?.startsWith("edit:99:"), true);
+      assert.match(events[1] ?? "", /Results/);
+    },
+  },
+  {
     name: "direct market references include canonical UUIDs",
     run: () => {
       assert.equal(isDirectMarketReference(sampleResult.marketId), true);

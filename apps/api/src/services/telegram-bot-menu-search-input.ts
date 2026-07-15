@@ -1,5 +1,6 @@
 import {
   buildSignalBotMarketSearchQueryPrompt,
+  buildSignalBotMarketSearchProgressScreen,
   buildSignalBotMarketSearchScreen,
   buildSignalBotMarketSearchUnavailableScreen,
   writeSignalBotMarketSearchSession,
@@ -47,6 +48,7 @@ export function isDirectMarketReference(value: string): boolean {
 }
 
 export async function handleSignalBotMarketSearchInput(input: {
+  beginResponse?: (message: SearchMessage) => Promise<number | null>;
   callbackPrefix: string;
   chatId: string;
   loadMarketCard?: (input: {
@@ -76,11 +78,22 @@ export async function handleSignalBotMarketSearchInput(input: {
     return true;
   }
 
+  const responseMessageId =
+    (await input
+      .beginResponse?.(buildSignalBotMarketSearchProgressScreen())
+      .catch(() => null)) ?? state.menuMessageId;
+  await writeSignalBotMenuInput({
+    chatId: input.chatId,
+    menuMessageId: responseMessageId,
+    redis: input.redis,
+    telegramUserId: input.telegramUserId,
+  });
+
   const looksDirect = isDirectMarketReference(query);
   if (!looksDirect && Array.from(query).length < 2) {
     await writeSignalBotMenuInput({
       chatId: input.chatId,
-      menuMessageId: state.menuMessageId,
+      menuMessageId: responseMessageId,
       redis: input.redis,
       telegramUserId: input.telegramUserId,
     });
@@ -88,7 +101,7 @@ export async function handleSignalBotMarketSearchInput(input: {
       buildSignalBotMarketSearchQueryPrompt({
         callbackPrefix: input.callbackPrefix,
       }),
-      state.menuMessageId,
+      responseMessageId,
     );
     return true;
   }
@@ -97,13 +110,13 @@ export async function handleSignalBotMarketSearchInput(input: {
       const message = await input.loadMarketCard({
         chatId: input.chatId,
         marketRef: query,
-        telegramMessageId: state.menuMessageId,
+        telegramMessageId: responseMessageId,
         telegramUserId: input.telegramUserId,
       });
       if (message.marketFound === false) {
         await writeSignalBotMenuInput({
           chatId: input.chatId,
-          menuMessageId: state.menuMessageId,
+          menuMessageId: responseMessageId,
           redis: input.redis,
           telegramUserId: input.telegramUserId,
         });
@@ -114,17 +127,17 @@ export async function handleSignalBotMarketSearchInput(input: {
             results: [],
             sessionId: "direct",
           }),
-          state.menuMessageId,
+          responseMessageId,
         );
         return true;
       }
       await clearSignalBotMenuInput(input);
-      await input.render(message, state.menuMessageId);
+      await input.render(message, responseMessageId);
       return true;
     } catch {
       await writeSignalBotMenuInput({
         chatId: input.chatId,
-        menuMessageId: state.menuMessageId,
+        menuMessageId: responseMessageId,
         redis: input.redis,
         telegramUserId: input.telegramUserId,
       });
@@ -132,7 +145,7 @@ export async function handleSignalBotMarketSearchInput(input: {
         buildSignalBotMarketSearchUnavailableScreen({
           callbackPrefix: input.callbackPrefix,
         }),
-        state.menuMessageId,
+        responseMessageId,
       );
       return true;
     }
@@ -145,7 +158,7 @@ export async function handleSignalBotMarketSearchInput(input: {
   } catch {
     await writeSignalBotMenuInput({
       chatId: input.chatId,
-      menuMessageId: state.menuMessageId,
+      menuMessageId: responseMessageId,
       redis: input.redis,
       telegramUserId: input.telegramUserId,
     });
@@ -153,7 +166,7 @@ export async function handleSignalBotMarketSearchInput(input: {
       buildSignalBotMarketSearchUnavailableScreen({
         callbackPrefix: input.callbackPrefix,
       }),
-      state.menuMessageId,
+      responseMessageId,
     );
     return true;
   }
@@ -169,7 +182,7 @@ export async function handleSignalBotMarketSearchInput(input: {
   } else {
     await writeSignalBotMenuInput({
       chatId: input.chatId,
-      menuMessageId: state.menuMessageId,
+      menuMessageId: responseMessageId,
       redis: input.redis,
       telegramUserId: input.telegramUserId,
     });
@@ -181,7 +194,7 @@ export async function handleSignalBotMarketSearchInput(input: {
       results,
       sessionId,
     }),
-    state.menuMessageId,
+    responseMessageId,
   );
   return true;
 }

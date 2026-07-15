@@ -34,6 +34,7 @@ import {
 } from "./services/telegram-notification-delivery.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
+import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
   console.log(
@@ -348,12 +349,13 @@ export async function runSignalBotRunner(): Promise<void> {
                   reply_markup: undefined,
                   text: "Trading is unavailable right now\\. Open Hunch to trade\\.",
                 };
+            const navigableMessage = withTelegramPrivateNavigation(message);
             const result = await telegram.sendMessage({
               chat_id: chatId,
               disable_web_page_preview: true,
-              parse_mode: message.parse_mode ?? "MarkdownV2",
-              reply_markup: message.reply_markup,
-              text: message.text,
+              parse_mode: navigableMessage.parse_mode ?? "MarkdownV2",
+              reply_markup: navigableMessage.reply_markup,
+              text: navigableMessage.text,
             });
             return result.ok;
           },

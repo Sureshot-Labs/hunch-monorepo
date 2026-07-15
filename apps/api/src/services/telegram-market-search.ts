@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 
 import {
+  fetchFeedMarketSearchCandidateIds,
   fetchFeedMarketsDirect,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
@@ -51,15 +52,14 @@ export async function searchTelegramMarkets(input: {
     "discovery",
   );
   if (lifecycle.venues.length === 0) return [];
-  const rows = await fetchFeedMarketsDirect(input.pool, {
+  const baseInputs = {
     limit: 5,
     offset: 0,
     minVol: 0,
     minLiquidity: 0,
-    ...(query ? { q: query } : {}),
     view: "markets",
     venues: lifecycle.venues,
-    sort: query ? undefined : "trending_v2",
+    sort: "trending_v2",
     sortDir: "desc",
     nowParam: now.toISOString(),
     sevenDaysAgo: new Date(
@@ -68,6 +68,32 @@ export async function searchTelegramMarkets(input: {
     sevenDaysFromNow: new Date(
       now.getTime() + 7 * 24 * 60 * 60 * 1_000,
     ).toISOString(),
-  });
-  return rows.map(mapTelegramMarketSearchResult);
+  } as const;
+  if (!query) {
+    const rows = await fetchFeedMarketsDirect(input.pool, baseInputs);
+    return rows.map(mapTelegramMarketSearchResult);
+  }
+  for (const candidateLimit of [25, 100]) {
+    const candidateIds = await fetchFeedMarketSearchCandidateIds(input.pool, {
+      limit: candidateLimit,
+      now: now.toISOString(),
+      query,
+      venues: lifecycle.venues,
+    });
+    if (candidateIds.length === 0) return [];
+    const rows = await fetchFeedMarketsDirect(
+      input.pool,
+      {
+        ...baseInputs,
+        limit: candidateIds.length,
+        sort: undefined,
+        venues: undefined,
+      },
+      candidateIds,
+    );
+    if (rows.length >= 5 || candidateIds.length < candidateLimit) {
+      return rows.slice(0, 5).map(mapTelegramMarketSearchResult);
+    }
+  }
+  return [];
 }

@@ -1,4 +1,5 @@
 import { buildTelegramTradeProgressMessage } from "./telegram-bot-trading-presentation.js";
+import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 
 export type TelegramBotTradingClientButton =
   | { text: string; callback_data: string }
@@ -125,6 +126,8 @@ type CapturedTelegramBotTradingCallbackResult = {
 
 export const TELEGRAM_BOT_TRADING_CALLBACK_PREFIX = "hbt";
 const DEFAULT_INTERNAL_API_TIMEOUT_MS = 10_000;
+const TELEGRAM_MARKET_SEARCH_TIMEOUT_MS = 5_000;
+const TELEGRAM_TRENDING_MARKETS_TIMEOUT_MS = 2_000;
 const DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS = 120_000;
 
 const EXACT_UUID_RE =
@@ -306,7 +309,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
           venue: string;
           yesAsk: number | null;
         }>
-      >("/internal/telegram-bot/trading/market-search", body),
+      >("/internal/telegram-bot/trading/market-search", body, {
+        timeoutMs: body.query
+          ? TELEGRAM_MARKET_SEARCH_TIMEOUT_MS
+          : TELEGRAM_TRENDING_MARKETS_TIMEOUT_MS,
+      }),
     buildMarketMessage: (body) =>
       post<TelegramBotTradingClientMessage>(
         "/internal/telegram-bot/trading/market-card",
@@ -388,6 +395,10 @@ export function createTelegramBotTradingInternalApiClient(input: {
           error instanceof TelegramBotTradingInternalApiTimeoutError
         ) {
           const text = buildTelegramTradeProgressMessage("resolving");
+          const resolvingMessage = withTelegramPrivateNavigation({
+            parse_mode: "MarkdownV2",
+            text,
+          });
           const chatId = callbackInput.callbackQuery.message?.chat?.id;
           const messageId = callbackInput.callbackQuery.message?.message_id;
           if (chatId != null) {
@@ -397,9 +408,9 @@ export function createTelegramBotTradingInternalApiClient(input: {
                     .editMessageText?.({
                       chat_id: String(chatId),
                       message_id: messageId,
-                      parse_mode: "MarkdownV2",
-                      reply_markup: { inline_keyboard: [] },
-                      text,
+                      parse_mode: resolvingMessage.parse_mode,
+                      reply_markup: resolvingMessage.reply_markup,
+                      text: resolvingMessage.text,
                     })
                     .then(() => true)
                     .catch(() => false)
@@ -407,8 +418,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
             if (!edited) {
               await callbackInput.sendMessage({
                 chat_id: String(chatId),
-                parse_mode: "MarkdownV2",
-                text,
+                ...resolvingMessage,
               });
             }
           }
@@ -417,9 +427,12 @@ export function createTelegramBotTradingInternalApiClient(input: {
         if (parsed.type === "confirm") {
           const chatId = callbackInput.callbackQuery.message?.chat?.id;
           if (chatId != null) {
+            const failureMessage = withTelegramPrivateNavigation({
+              text: "Trade execution failed or its status is unknown. Use /trade_status or open Hunch before retrying.",
+            });
             await callbackInput.sendMessage({
               chat_id: String(chatId),
-              text: "Trade execution failed or its status is unknown. Use /trade_status or open Hunch before retrying.",
+              ...failureMessage,
             });
           }
           return true;
@@ -431,8 +444,13 @@ export function createTelegramBotTradingInternalApiClient(input: {
           await callbackInput.answerCallbackQuery(answer);
         }
       }
-      const terminalMessage = confirmAcknowledged
+      const terminalMessageRaw = confirmAcknowledged
         ? result.messages.at(-1)
+        : null;
+      const terminalMessage = terminalMessageRaw
+        ? withTelegramPrivateNavigation(terminalMessageRaw, {
+            positions: true,
+          })
         : null;
       const previewMessage = !confirmAcknowledged
         ? result.messages.at(-1)
@@ -473,6 +491,10 @@ export function createTelegramBotTradingInternalApiClient(input: {
         }
       }
       for (const [index, message] of result.messages.entries()) {
+        const deliveredMessage =
+          confirmAcknowledged && index === result.messages.length - 1
+            ? (terminalMessage ?? message)
+            : message;
         if (
           previewEdited &&
           !confirmAcknowledged &&
@@ -487,7 +509,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
         ) {
           continue;
         }
-        const sendResult = await callbackInput.sendMessage(message);
+        const sendResult = await callbackInput.sendMessage(deliveredMessage);
         if (confirmAcknowledged && index === result.messages.length - 1) {
           const successfulSend = readSuccessfulTelegramResult(sendResult);
           if (successfulSend.ok) {
