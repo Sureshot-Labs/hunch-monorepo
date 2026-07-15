@@ -580,7 +580,7 @@ export function buildDepositNotification(input: {
     body,
     severity: "success",
     data: {
-      category: "system",
+      category: "funds",
       source: input.source,
       walletAddress: input.walletAddress ?? null,
       walletType: input.walletType ?? null,

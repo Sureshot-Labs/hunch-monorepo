@@ -394,7 +394,7 @@ const tests: TestCase[] = [
             type: "deposit_received",
             body: "1 USDC deposit received on Base",
             data: {
-              category: "system",
+              category: "funds",
               source: "privy",
               walletAddress: basePayload.recipient,
               walletType: "ethereum",
@@ -1113,7 +1113,7 @@ const tests: TestCase[] = [
           "5 pUSD deposit received on Polygon",
         );
         assert.deepEqual(db.notificationInserts[0]?.data, {
-          category: "system",
+          category: "funds",
           source: "privy",
           walletAddress: basePayload.recipient,
           walletType: "ethereum",

@@ -11,6 +11,7 @@ import {
 
 import {
   acquireSignalBotLock,
+  configureSignalBotTelegramUi,
   createSignalBotTelegramTransport,
   drainSignalBotConfirmTasks,
   parseSignalBotAggMarketConfig,
@@ -25,6 +26,11 @@ import {
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
+import {
+  deliverTelegramNotificationOutbox,
+  enqueueTelegramActivityNotifications,
+  enqueueTelegramPositionSignals,
+} from "./services/telegram-notification-delivery.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
@@ -160,6 +166,13 @@ export async function runSignalBotRunner(): Promise<void> {
       });
       return null;
     });
+  await configureSignalBotTelegramUi({ config, telegram }).catch(
+    (error: unknown) => {
+      log("signal_bot_telegram_ui_config_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+  );
 
   log("signal_bot_started", {
     adminCount: config.adminUserIds.size,
@@ -172,6 +185,7 @@ export async function runSignalBotRunner(): Promise<void> {
   });
 
   let nextPublishAt = 0;
+  let nextNotificationAt = 0;
   let heartbeatLost = false;
   const lockHeartbeat = setInterval(() => {
     void refreshSignalBotLock({ owner, redis })
@@ -352,6 +366,41 @@ export async function runSignalBotRunner(): Promise<void> {
         }
 
         const now = Date.now();
+        if (!heartbeatLost && now >= nextNotificationAt) {
+          try {
+            const activityEnqueued = await enqueueTelegramActivityNotifications(
+              { db, limit: 200 },
+            );
+            const positionSignals = await enqueueTelegramPositionSignals({
+              config,
+              limit: config.maxSignalsPerTick,
+              pool: db,
+            });
+            const delivery = await deliverTelegramNotificationOutbox({
+              db,
+              limit: 25,
+              miniAppLinkBase: config.telegramMiniAppLinkBase,
+              telegram,
+            });
+            if (
+              activityEnqueued > 0 ||
+              positionSignals.enqueued > 0 ||
+              delivery.claimed > 0
+            ) {
+              log("signal_bot_user_notifications", {
+                activityEnqueued,
+                positionSignalEnqueued: positionSignals.enqueued,
+                positionSignalNotes: positionSignals.notes,
+                ...delivery,
+              });
+            }
+          } catch (error) {
+            log("signal_bot_user_notifications_error", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          nextNotificationAt = now + 5_000;
+        }
         if (!heartbeatLost && now >= nextPublishAt) {
           const result = await publishSignalBotTick({
             config,

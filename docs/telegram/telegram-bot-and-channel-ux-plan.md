@@ -1,0 +1,989 @@
+# Telegram Bot and Channel UX Plan
+
+Status: channel renderer, private bot navigation, notification Settings,
+transactional delivery, and exact-market portfolio signals implemented locally;
+production rollout, device QA, and advanced subscriptions remain  
+Scope: the private Hunch bot UI and public Telegram signal posts  
+Out of scope: redesigning channel administration and signal selection logic
+
+Backend handoff: `docs/telegram/backend-tasks.md`. This document is product and
+UX context, not a backend implementation ticket.
+
+## Goal
+
+Make Hunch feel native to Telegram instead of exposing backend commands and raw
+data as chat messages.
+
+The private bot should behave like a small application with button-first
+navigation. Public channel posts should behave like edited information posts:
+they need an immediately readable hierarchy, a compact data block, contextual
+Mini App links, and one clear call to action.
+
+Success means that a user can:
+
+- understand a post in a three-second scan;
+- distinguish the thesis, market, evidence, and conclusion without reading a
+  wall of text;
+- open the relevant Hunch Mini App route without being sent to
+  `app.hunch.trade`;
+- see one unambiguous post CTA;
+- use the private bot without learning slash commands;
+- always go Back, Home, or Cancel during a multi-step bot flow.
+
+## Product Principles
+
+1. **One screen, one purpose.** A menu screen or channel post must have one
+   primary job and one primary CTA.
+2. **Hierarchy before decoration.** Whitespace, line length, grouping,
+   blockquotes, and emphasis carry structure. Emoji are labels, not confetti.
+3. **Headlines are content, not links.** A headline must remain high-contrast
+   and readable. Links belong to contextual nouns or action phrases.
+4. **Buttons are for actions.** Background information such as a wallet or
+   market page belongs in the post body. It does not compete with `Buy`.
+5. **Mini App first.** Every production Telegram link to a Hunch market,
+   wallet, settings page, or trade flow must be a `t.me/...startapp=...` deep
+   link or a `web_app` button in a private chat.
+6. **Commands are fallback entry points.** Buttons are the primary UI. Slash
+   commands remain for Telegram discovery, deep links, and power users.
+7. **Events create messages; navigation edits them.** Signals, trade receipts,
+   and durable results may create new messages. Menu navigation edits the
+   current menu message in place.
+
+## Research Notes
+
+Telegram supports native inline keyboards, reply keyboards, command scopes,
+menu buttons that launch Mini Apps, and regular-message formatting including
+bold, italic, inline links, spoilers, code, and blockquotes:
+
+- [Telegram bot features](https://core.telegram.org/bots/features)
+- [Telegram Bot API formatting options](https://core.telegram.org/bots/api#formatting-options)
+- [Telegram Mini Apps launched from the menu button](https://core.telegram.org/bots/webapps#launching-mini-apps-from-the-menu-button)
+- [Practical button-first bot UX patterns](https://gramio.dev/guides/ux-patterns)
+
+Bot API 10.2 also introduced Rich Messages with headings, dividers, structured
+lists, tables, and richer block types on July 14, 2026. Phase 1 should not
+depend on this brand-new surface. The existing bot already uses regular
+`MarkdownV2`, which can deliver the required redesign across existing clients.
+Rich Messages should be evaluated as a later progressive enhancement after
+client compatibility and editing behavior have been tested.
+
+Public information-channel patterns reviewed for this plan:
+
+- [Watcher Guru](https://t.me/s/watcherguru) uses a stable alert label and one
+  short fact, making each post recognizable before it is read.
+- [Bloomberg](https://t.me/s/bloomberg) generally leads with one concise claim,
+  adds only the context needed to understand it, and places the destination
+  link in the story rather than turning every headline into UI chrome.
+- [Wu Blockchain](https://t.me/s/wublockchainenglish) frequently uses a
+  title-like first line followed by a compact explanatory paragraph and a
+  discreet source link.
+- [unfolded.](https://t.me/s/unfolded) is an extreme example of one-insight-per-
+  post and contextual action links.
+
+Hunch should not copy any one channel's visual identity. The useful shared
+pattern is a stable content grammar: recognizable label, standalone headline,
+short evidence, interpretation, then a quiet source/action area.
+
+## Baseline Before This Work
+
+### Private bot
+
+The following bullets record the implementation that motivated the redesign;
+the Phase 2 status below describes what is now implemented.
+
+- `/start` and public `/help` return plain text from `publicHelpText`.
+- Admin `/help` is a long list of slash commands.
+- A global authorization gate blocks every command except `/start` and
+  `/help` for non-admin users. This also blocks personal trading commands even
+  though those commands perform their own user and private-chat checks.
+- The bot does not call `setMyCommands` or `setChatMenuButton`.
+- The send-message type only accepts `TelegramInlineKeyboard`; it does not
+  model `ReplyKeyboardMarkup`, `ReplyKeyboardRemove`, or `ForceReply`.
+- Inline callbacks exist, but their router is currently trading-specific and
+  uses the `hbt:*` namespace.
+- The Telegram client already supports `answerCallbackQuery` and
+  `editMessageText`, so the main primitives for an app-like menu exist.
+
+Relevant code:
+
+- `apps/api/src/services/signal-bot.ts`
+  - `SignalBotCommand`
+  - `handleSignalBotCommand`
+  - `publicHelpText` / `helpText`
+  - `TelegramInlineKeyboardButton`
+  - `TelegramBotApiClient`
+- `apps/api/src/services/telegram-bot-trading-client.ts`
+  - `TELEGRAM_BOT_TRADING_CALLBACK_PREFIX`
+
+### Channel posts
+
+The current problems are produced deliberately by the renderer rather than by
+Telegram itself:
+
+- `buildSignalBotMessage` turns the title into a bold inline link pointing at
+  the web application.
+- `createSignalBotBodyTextRenderer` can link a wallet mention, but it receives
+  the web `holderUrl`, so the body link points at `app.hunch.trade` even when
+  Mini App deep links are configured for buttons.
+- `buildSignalBotLinkRow` adds Wallet and Open market buttons after the Buy
+  button.
+- `buildSignalBotFollowthroughKeyboard` always appends Open market after
+  conditionally adding Buy.
+- `buildSignalBotFollowthroughMessage` escapes every completed line as plain
+  MarkdownV2. It therefore cannot express bold values, italic interpretation,
+  or a quote-style metric block.
+- `formatSignalBotFollowthroughActivityLine` compresses several distinct
+  wallet states into one long line.
+- The generic Telegram renderer in `signal-delivery.ts` is also intentionally
+  flat and does not model semantic sections.
+
+Useful existing primitives:
+
+- `buildSignalBotMarketStartParam`
+- `buildSignalBotBuyStartParam`
+- `buildSignalBotHolderStartParam`
+- `buildSignalBotMiniAppEventUrl`
+- `buildSignalBotMiniAppTradeUrl`
+- `buildSignalBotMiniAppHolderUrl`
+- `buildSignalBotTelegramButton`
+
+The start-param and Mini App URL layer already exists. The problem is that it
+is only consistently used by buttons, not by links rendered inside message
+bodies.
+
+---
+
+## Part 1: Private Bot Menu
+
+### Target interaction model
+
+Use a hybrid model:
+
+1. The Telegram chat menu button says `Open Hunch` and launches the Main Mini
+   App.
+2. `/start` and `/menu` render the bot home screen with an inline keyboard.
+3. Inline callbacks drive nested navigation and edit the same message.
+4. A short scoped command list remains as a fallback.
+5. Admin operations live behind a separate dynamically visible `Admin` entry
+   and separate Telegram command scope.
+
+Do not build the primary navigation as buttons whose visible labels are slash
+commands. A Telegram Reply Keyboard sends its visible label as a user message;
+it cannot display `Performance` while secretly sending `/stats`. Friendly
+labels should route to shared intent handlers directly.
+
+### Home screen
+
+```text
+🔮 Hunch
+
+Market signals and trading without leaving Telegram.
+
+[          💸 Trade a market          ]
+[             👤 My trading             ]
+[               Open Hunch               ]
+[               ⚙️ Settings               ]
+[            ❓ How it works            ]
+```
+
+This is deliberately smaller than the bot's full capability set. The regular
+user home screen should expose only common user intentions, not every backend
+command or every report the system can produce.
+
+- `Trade a market` immediately starts market-link input; it does not add an
+  intermediate screen with another button for the same action.
+- `My trading` shows the user's connection, permission, and trade status.
+- `Open Hunch` launches the Main Mini App through a `web_app` button.
+- `Settings` controls real notification topics and links to trading
+  permissions.
+- `How it works` explains signals and the confirmation-based trade flow.
+- `Admin` is appended only for allowlisted operators and opens a separate
+  operational menu.
+
+Do not add `Latest signal` to the regular home screen. The channel is the
+signal feed, so repeating a single latest item in private chat has no clear
+job. Do not expose global `Performance` until its audience, data semantics, and
+product value are explicitly approved. Settings should remain a top-level
+destination only while it contains real user controls; notification topics and
+trading permissions now justify it.
+
+### Navigation semantics
+
+- `Back` returns to the known parent screen.
+- `Home` returns directly to the root menu.
+- `Cancel` aborts a pending input or transaction and clears its transient
+  state.
+- Every non-root screen has Back.
+- Every screen deeper than two levels has both Back and Home.
+- Destructive actions use a separate confirmation screen with the safe action
+  first.
+- Every callback calls `answerCallbackQuery` immediately, before doing slow
+  work.
+- A stale or unknown callback redraws Home with a small explanation instead of
+  ending in a dead button.
+
+Suggested callback namespace:
+
+```text
+hm:v1:home
+hm:v1:trading
+hm:v1:trading:market_input
+hm:v1:settings
+hm:v1:settings:notifications
+hm:v1:ntf:fill:{on|off}
+hm:v1:ntf:issues:{on|off}
+hm:v1:ntf:resolution:{on|off}
+hm:v1:ntf:position_signals:{on|off}
+hm:v1:help
+hm:v1:admin
+hm:v1:admin:help
+hm:v1:admin:test_signal
+hm:v1:performance:24h
+hm:v1:performance:7d
+hm:v1:performance:30d
+```
+
+Keep `hbt:*` exclusively for existing trading intents such as Buy, Sell,
+Confirm, and Cancel.
+
+The performance routes currently belong to the admin surface. Keeping them in
+the namespace does not make them public; every admin callback is authorized on
+the server again even if someone constructs callback data manually.
+
+### Admin performance screen
+
+```text
+📊 Signal performance
+
+Choose a period.
+
+[ 24h ] [ 7d ] [ 30d ]
+[ ⬜ Detailed report ]
+
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+Selecting a period or toggling detail edits the same message. The toggle label
+shows its current state (`⬜` or `✅`).
+
+### My trading screen
+
+Ready state:
+
+```text
+👤 My trading
+
+Account: Linked
+Bot trading: Enabled
+Wallet permission: Active
+
+[ Enter market link ]
+[ Trading status ] [ Trading permissions ]
+
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+Not-linked state:
+
+```text
+👤 My trading
+
+Connect Telegram to your Hunch account before trading in the bot.
+
+[ Connect Hunch account ]
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+`Enter market link` starts a short input flow:
+
+```text
+Send a Hunch, Polymarket, Kalshi, or Limitless market URL or ID.
+
+[ ✕ Cancel ]
+```
+
+Use `ForceReply` plus a Redis state keyed by chat and Telegram user, such as
+`awaiting_market_ref`. Clear it on success, Cancel, Home, timeout, or a new
+top-level command. The state should have a short TTL.
+
+### Commands and authorization
+
+Register a short public command list via `setMyCommands`:
+
+- `/start` — open the main menu;
+- `/menu` — open the main menu;
+- `/settings` — open notification and permission settings;
+- `/help` — explain the bot.
+
+Register admin commands under an admin/chat-specific scope. Command scopes are
+presentation only; backend authorization remains mandatory.
+
+Replace the global “everything except start/help is admin-only” check with a
+per-intent policy:
+
+- public navigation and explicitly approved read-only actions;
+- personal trading actions authorized by Telegram-user/account binding and
+  trading policy;
+- admin operations authorized by the existing admin allowlist.
+
+Do not expose a button until the corresponding policy decision is explicit.
+For example, determine whether global signal performance is public before
+making `Performance` available to all users.
+
+### Bot implementation tasks
+
+- Add `/menu`, `/settings`, and approved public actions to command parsing.
+- Add `setMyCommands`, `getMyCommands` for diagnostics, and
+  `setChatMenuButton` to `TelegramBotApiClient`.
+- Expand reply-markup types to include inline keyboard, reply keyboard,
+  keyboard removal, and Force Reply.
+- Create a pure screen renderer returning text and inline keyboard from a
+  typed route.
+- Create one `sendOrEditBotScreen` path shared by slash commands and callbacks.
+- Route `hm:v1:*` before the existing trading callback parser.
+- Add transient input-state storage with TTL for market URL/ID entry.
+- Add per-intent authorization instead of the current global admin gate.
+- Configure the production menu button to open the Mini App.
+- Keep navigation messages free of web previews.
+
+### Bot acceptance criteria
+
+- `/start` shows a short hero and buttons, not a command list.
+- A normal user can complete every exposed flow without typing a slash command.
+- No non-root menu screen is a dead end.
+- Menu navigation edits a single message and immediately clears the Telegram
+  callback spinner.
+- Admin-only entries are absent for regular users and still protected on the
+  server if called directly.
+- Expired callbacks and expired input state recover to a usable screen.
+- The menu button launches the Hunch Mini App.
+- Tests cover routing, authorization, Back/Home/Cancel, stale callbacks,
+  message editing, and command scopes.
+
+### Next capability: notification settings
+
+The first menu pass intentionally omitted Settings because no user-editable
+preference model or Telegram notification delivery existed behind it. Settings
+becomes a real destination once the bot can deliver and control the following
+events:
+
+- an order was filled;
+- an order failed, expired, or was cancelled;
+- a held position resolved as a win or loss;
+- a new Hunch signal concerns a market in the user's portfolio.
+
+Implementation status (July 15, 2026): Settings, `/settings`, per-topic
+preferences, the durable Telegram outbox, activity renderers, retries,
+blocked-user handling, and exact-market position-signal fan-out are
+implemented. Migration rollout and live Telegram/database QA remain. Trusted
+cross-venue position-signal matching and exact resolution PnL remain future
+work.
+
+Settings is restored to the regular Home in the same change as its backend
+behavior, rather than shipping an empty screen. The resulting Home is:
+
+```text
+🔮 Hunch
+
+[          💸 Trade a market          ]
+[             👤 My trading             ]
+[               Open Hunch               ]
+[               ⚙️ Settings               ]
+[            ❓ How it works            ]
+```
+
+### Settings information architecture
+
+The frontend Settings implementation is the product baseline, but it should
+not be copied into Telegram mechanically. It currently has five sections:
+
+- `Account`: current identity and wallet, email, and Telegram sign-in methods;
+- `Telegram trading`: bot access, authorized internal trading wallets, venues,
+  and the maximum buy amount;
+- `Wallets`: connected wallets, aliases, active-wallet selection, balances,
+  and unlink actions;
+- `Notifications`: browser pop-ups and the `Security`, `Funds`, `Trading`, and
+  `System` category filters;
+- `Signals`: tracked-wallet pop-up scope (`Following`, `Active wallet`, or
+  `All tracked`) and filter (`Positive PnL` or `All activity`).
+
+The browser notification and signal choices are currently device-local
+`localStorage` settings. They are not account-level notification preferences.
+Telegram notification preferences are server-side and must remain independent
+per delivery channel. The shared part should be the vocabulary and event
+classification, not one boolean that unexpectedly changes both browser and
+Telegram delivery.
+
+The frontend exposed a real taxonomy mismatch: Settings described `Funds` as
+“Bridge, deposit, payout”, while `deposit_received` declared
+`category: system` and the notification view model mapped deposit types to
+`System`. This work now emits `category: funds` and maps deposits into the
+frontend funds/payouts notification group.
+
+The target bot Settings home is:
+
+```text
+⚙️ Settings
+
+[ 🔔 Notifications ]
+[ 📡 Signals ]
+[ 👤 Account ]
+[ 🤖 Telegram trading ]
+[ ◀ Back ]
+```
+
+This preserves the frontend's semantic separation while adapting it to a chat
+surface:
+
+- `Notifications` contains transactional account activity, not signal rules;
+- `Signals` contains portfolio and tracked-wallet intelligence preferences;
+- `Account` is a read-only status screen with Mini App actions for account and
+  wallet management;
+- `Telegram trading` opens the existing Mini App settings route for venues,
+  signer permissions, and maximum buy amount;
+- `Wallets` is not a fifth bot-native settings screen. Connecting, switching,
+  renaming, or unlinking wallets is security-sensitive and belongs in the Mini
+  App. A `Manage wallets` action can live inside `Account`.
+
+Do not implement email connection, wallet unlinking, Telegram unlinking, or
+signer revocation as one-tap inline callbacks. Show status in the bot, then
+open the authenticated Mini App flow for the mutation and its confirmation.
+
+The target Notifications landing screen is grouped by meaning instead of
+showing an unstructured list of every event:
+
+```text
+🔔 Notifications
+
+[ 📈 Trading · 3/3 on ]
+[ 💰 Funds & payouts · 3/3 on ]
+[ 🛡 Security · 1/1 on ]
+[ 📣 Product updates · Off ]
+
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+Each category opens a child screen with explicit topic toggles:
+
+| Section         | Topics                                                         |
+| --------------- | -------------------------------------------------------------- |
+| Trading         | Order fills, order problems, position results                  |
+| Funds & payouts | Deposits received, bridge/transfer results, payouts/rewards    |
+| Security        | Account, wallet, Telegram-link, and trading-permission changes |
+| Product updates | Non-transactional Hunch announcements                          |
+
+`Deposit received` should be enabled by default. It is a high-value,
+low-volume confirmation and the backend already emits a durable
+`deposit_received` event. Delivery must happen only after the existing deposit
+finality/idempotency path has accepted the event; the bot must not invent a
+second deposit detector.
+
+Only terminal, decision-useful events should notify by default. Do not send
+both `trade_executed` and `order_filled` for one user action, intermediate
+bridge polling states, or reward-submitted noise. Product updates should be
+off by default and should not appear as a working toggle until a real producer
+and consent policy exist.
+
+The target Signals screen is separate:
+
+```text
+📡 Signals
+
+Portfolio
+[ ✅ Signals for markets I hold ]
+
+Tracked wallets
+[ ⬜ Tracked-wallet signals ]
+[ Scope · Following ]
+[ Filter · Positive PnL ]
+
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+`Signals for markets I hold` is implemented today for exact unified-market
+matches. Tracked-wallet Telegram delivery, server-side scope/filter settings,
+trusted cross-venue matching, and per-market follow/mute controls remain
+backend tasks. Tracked-wallet Telegram delivery should be opt-in because its
+event volume is materially higher than transactional activity.
+
+Quiet hours, signal digests, per-market mutes, and a temporary signal pause are
+useful later additions. They should be applied to signal/intelligence delivery
+first. Telegram users already control chat sound and OS push behavior in the
+Telegram client, so a fake bot-side `Sound` switch should not be added.
+
+The target Account screen is status plus safe deep links:
+
+```text
+👤 Account
+
+Hunch account: Linked
+Telegram: @username
+Primary wallet: 0x12…89ab
+
+[ Manage account ]
+[ Manage wallets ]
+
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+Current implementation status (July 15, 2026): the bot Settings home contains
+`Notifications`, `Signals`, `Account`, and the `Telegram trading` Mini App
+link. Notifications has separate Trading and Funds & payouts screens; Signals
+contains portfolio-market signals; Account exposes safe Mini App links. Seven
+server topics are implemented: order fills, order problems, position results,
+deposits, bridge results, payouts/rewards, and portfolio signals. Security
+events, tracked-wallet delivery, and product updates remain unavailable rather
+than appearing as fake toggles. Remaining backend tasks are indexed in
+`docs/telegram/backend-tasks.md`.
+
+The implemented notification screens edit the same menu message when a toggle
+changes:
+
+```text
+🔔 Notifications
+
+Trading
+[ ✅ Order fills ]
+[ ✅ Order problems ]
+[ ✅ Position results ]
+
+Funds & payouts
+[ ✅ Deposits received ]
+[ ✅ Bridge results ]
+[ ✅ Payouts & rewards ]
+
+[ ◀ Back ] [ 🏠 Home ]
+```
+
+Use explicit topic labels rather than one ambiguous master switch. Category
+rows summarize and navigate; they must not secretly toggle every child topic.
+
+Suggested compact callback namespace:
+
+```text
+hm:v1:settings
+hm:v1:settings:notifications
+hm:v1:settings:notifications:trading
+hm:v1:settings:notifications:funds
+hm:v1:settings:notifications:security
+hm:v1:settings:signals
+hm:v1:settings:account
+hm:v1:ntf:fill:{on|off}
+hm:v1:ntf:issues:{on|off}
+hm:v1:ntf:resolution:{on|off}
+hm:v1:ntf:deposit:{on|off}
+hm:v1:ntf:bridge:{on|off}
+hm:v1:ntf:payout:{on|off}
+hm:v1:ntf:security:{on|off}
+hm:v1:ntf:position_signals:{on|off}
+hm:v1:ntf:tracked_wallet_signals:{on|off}
+```
+
+Telegram callback data is intentionally kept short. Every toggle must resolve
+the Telegram account to a Hunch user and authorize the write on the server;
+the visible button state is not an authorization boundary.
+
+### Backend implementation status and handoff
+
+The local worktree now contains the durable preference/outbox delivery path,
+seven topic controls, transactional renderers, and exact-market portfolio
+signal fan-out described earlier in this plan. These changes still require a
+production migration, deployment ownership, observability, and device QA.
+
+Remaining backend work is intentionally maintained as bounded task documents:
+
+- notification-first public signal headlines:
+  `backend-signal-notification-headlines.md`;
+- durable public-channel registry and cursor:
+  `backend-signal-channel-registry.md`;
+- rollout and operations: `backend-telegram-notification-rollout.md`;
+- authenticated Mini App preferences API:
+  `backend-telegram-notification-preferences-api.md`;
+- verified resolution payout/PnL:
+  `backend-position-resolution-accounting.md`;
+- reviewed cross-venue equivalence: `backend-trusted-market-mappings.md`;
+- tracked-wallet, per-market, and cross-venue subscriptions:
+  `backend-telegram-signal-subscriptions.md`;
+- future security producers: `backend-security-notification-events.md`.
+
+`backend-tasks.md` is the canonical handoff index and records task order,
+dependencies, migration ownership, and work that must not be reimplemented.
+
+---
+
+## Part 2: Channel Post Content System
+
+### Content grammar
+
+Every signal post should use the same vertical hierarchy:
+
+1. **Editorial hook** — why this update matters now.
+2. **Market identity** — event/market and called side, not linked.
+3. **Evidence block** — the smallest set of values needed to support the hook.
+4. **Interpretation** — one short human sentence explaining the data.
+5. **Contextual links** — Mini App links attached to meaningful nouns or action
+   phrases.
+6. **CTA button** — exactly one CTA class according to the eligibility matrix.
+
+Whitespace is structural. Do not collapse steps 2–4 into one paragraph.
+
+### Formatting vocabulary
+
+Use regular Telegram MarkdownV2 deliberately:
+
+- **Bold:** the editorial hook, section labels, and the one or two key values.
+- _Italic:_ secondary market metadata and the concluding interpretation.
+- Blockquote: a compact metric/data card such as `Since the call`.
+- Inline link: only on contextual text such as `market details`, a real wallet
+  identity, or `view the original signal`.
+- Monospace/code: only for literal IDs, hashes, or addresses that a user may
+  copy. Do not use it for normal prices, PnL, or prose.
+- Spoiler: only for genuinely hidden content, never as decoration.
+- `────────`: optional separator between the story and a quiet source/context
+  footer. Do not insert ASCII `----------` between every section.
+
+Formatting must remain restrained. A post where every line is bold and begins
+with an emoji has no hierarchy.
+
+### Stable visual labels
+
+Keep a small semantic vocabulary:
+
+- `🔥` — accelerating participation or copy flow;
+- `👀` — early/quiet accumulation or an undernoticed divergence;
+- `⚠️` — cooling, thin follow-through, deterioration, or risk;
+- `📈` / `📉` — price move when price is the actual story;
+- `🏁` — resolved result;
+- `📍` — market identity.
+
+Use at most one leading status marker in the hook and one market marker. Metric
+rows should not each receive a random emoji.
+
+### Headline rules
+
+- The headline is bold, standalone, and never a hyperlink.
+- Use sentence case.
+- Treat the first line as the mobile push-notification preview, not only as the
+  heading of an opened post.
+- Write it as a news lead: recognizable market proposition, what changed, and
+  the verified result.
+- Prefer `July Fed “no change” jumps 11¢ to 91¢` over internal syntax such as
+  `YES +11¢ on Fed: No change`.
+- Use 80 visible grapheme clusters as an initial lint target, then establish a
+  versioned budget from iOS/Android device fixtures. Rewrite the market
+  proposition semantically; never truncate it into an ambiguous entity name.
+- Select copy semantically from the underlying state. Do not rotate equivalent
+  positive hooks by hash only for variety.
+- Do not use estimated aggregate PnL as the primary v4 headline. In the evidence
+  block it must say `Est.` and `tracked wallets`.
+
+Bad:
+
+```text
+[Sharp YES interest](https://app.hunch.trade/...)
+```
+
+Good:
+
+```text
+🔥 July Fed “no change” jumps 11¢ to 91¢
+```
+
+Also good when price is flat and flow is the story:
+
+```text
+🔥 July Fed “no change” draws $1.1M in net copy flow
+```
+
+### Follow-through redesign
+
+Current output:
+
+```text
+🔥 More wallets are moving into this trade
+
+📍 Fed Decision in July? · No change
+Since the call:
++$1.1M net copy flow
+32 wallets added · 32 trimmed · 4 exited · 64 still hold
+YES: 80¢ → 91¢ (+11¢)
+Est. open PnL: +$208K
+
+The market moved with the call and tracked wallets have not fully faded it yet.
+```
+
+Target visual structure:
+
+```text
+🔥 More wallets are moving into this trade
+
+📍 Fed Decision in July?
+No change
+
+│ Since the call
+│ +$1.1M net copy flow
+│ 32 added · 32 trimmed · 4 exited
+│ 64 wallets still hold
+│ YES  80¢ → 91¢  +11¢
+│ Est. open PnL  +$208K
+
+The market moved with the call. Tracked wallets have not fully faded it yet.
+
+Market details · Tracked wallet context
+```
+
+The `│` representation above documents the rendered Telegram blockquote. The
+actual MarkdownV2 output should use `>` quote lines, with intentional bold and
+italic spans inside the quote.
+
+Recommended emphasis inside the rendered block:
+
+- `Since the call` — bold label;
+- `+$1.1M` — bold, followed by plain `net copy flow`;
+- wallet activity split across two lines so the holding base is not buried;
+- `YES` and `+11¢` — bold when the move is the key result;
+- `Est. open PnL` — secondary label, with the value bold.
+
+The final interpretation should be italic or otherwise visually secondary. It
+must not merely repeat all the numbers above it.
+
+### Initial-signal structure
+
+```text
+👀 Sharp wallets are leaning into NO
+
+📍 Fed Decision in July?
+No change
+
+<one- or two-sentence thesis>
+
+│ Why it matters
+│ • First specific wallet credential
+│ • Second specific wallet credential
+
+<one-sentence interpretation or public context>
+
+Market details · Wallet: Valen9
+```
+
+Rules:
+
+- Do not link the hook or market heading.
+- If a real public wallet identity appears naturally in the thesis, link that
+  first meaningful mention instead of adding a generic Wallet button.
+- If no safe identity is available, use a contextual footer such as
+  `Tracked wallet context`; do not create a misleading named link.
+- Keep `Why it matters` to at most three bullets, preferably two.
+- Avoid repeating the side, price, position, and PnL in both prose and the data
+  block.
+
+### Resolution and research-update structure
+
+Resolved posts:
+
+- use `🏁 Call side won` or `🏁 Call side lost` as the standalone hook;
+- show entry, resolution, and result in a compact quote block;
+- explain the outcome in one sentence;
+- do not show Buy;
+- do not show Open market unless there is a real, useful post-resolution route.
+
+Research updates:
+
+- use `Research update` as a small italic kicker, not the main headline;
+- keep the updated conclusion as the headline;
+- clearly state what changed from the original signal;
+- link `original signal` or `market details` contextually in the body;
+- show Buy only if the normal execution and price-safety policy says it is
+  currently actionable.
+
+### Link policy
+
+Production channel posts must not contain direct `app.hunch.trade` links.
+
+Use:
+
+- `buildSignalBotMiniAppEventUrl` for market context;
+- `buildSignalBotMiniAppHolderUrl` for a wallet identity/context link;
+- `buildSignalBotMiniAppTradeUrl` for trade links when a URL button is needed;
+- existing `web_app` routes in private chats where Telegram supports them.
+
+Body link behavior:
+
+- Build the Mini App holder URL before calling the body-text renderer.
+- Do not pass the web `holderUrl` into `createSignalBotBodyTextRenderer` when a
+  Mini App link is available.
+- Do not use `marketUrl` to wrap `titleMarkdown`.
+- Add a dedicated contextual-link/footer renderer that receives Mini App URLs.
+- Link action words or nouns, not full headlines or full paragraphs.
+- Disable link previews for compact channel posts unless a future post type is
+  deliberately designed around a preview card.
+
+Production should fail closed at the link level. If `telegramMiniAppLinkBase`
+is missing or cannot encode a route, keep the informational post but omit the
+affected body link or CTA and record a visible operational diagnostic. Do not
+silently publish a web-app link. Non-production previews may retain an
+explicit, visibly marked web fallback for debugging.
+
+### CTA decision matrix
+
+| State                                             | Inline keyboard                       |
+| ------------------------------------------------- | ------------------------------------- |
+| Executable Buy is available                       | Buy button(s) only                    |
+| Buy is unavailable, market is useful and openable | One `Open market` button              |
+| Resolved/closed and no useful route               | No buttons                            |
+| Wallet context exists                             | Body link only; never a Wallet button |
+
+Additional rules:
+
+- When Buy exists, do not add Wallet or Open market buttons.
+- A cheaper executable venue may appear as a second Buy option because it is
+  the same CTA class. Limit the keyboard to the minimum useful choices.
+- If the delivery target differs from the source market, body copy must make
+  that routing clear; do not make users infer it from a venue label alone.
+- Keep labels short and action-led, for example `Buy YES · 91¢`.
+- Include the venue only when it prevents ambiguity or explains alternative
+  execution.
+- An Open market button must open the Mini App, never `app.hunch.trade`.
+
+### Channel implementation tasks
+
+1. Introduce a semantic Telegram post view instead of adding more concatenated
+   strings. It should model hook, market identity, evidence rows,
+   interpretation, contextual links, and CTA eligibility.
+2. Add safe MarkdownV2 composition helpers for bold, italic, link, quote, and
+   bullet blocks. Escape dynamic values before adding intentional markup.
+3. Refactor `buildSignalBotMessage` so the headline is plain bold text and the
+   body receives Mini App links.
+4. Replace `buildSignalBotLinkRow` with a pure CTA selector implementing the
+   decision matrix.
+5. Refactor `buildSignalBotFollowthroughMessage` and
+   `formatSignalBotFollowthroughStatLines` into structured metric rows and a
+   blockquote renderer.
+6. Change `buildSignalBotFollowthroughKeyboard` so Open market is a fallback,
+   not an unconditional second CTA.
+7. Add contextual Mini App links to initial, follow-through, research-update,
+   and appropriate resolution posts.
+8. Move Telegram-specific formatting responsibility into one renderer while
+   preserving neutral data for Discord and X transports.
+9. Increment the copy/render version so deliveries and analytics can separate
+   old and new post formats.
+10. Add a preview fixture or admin preview command for every post family.
+11. Replace generic/hash-selected positive hooks with a structured,
+    length-bounded notification headline builder. See
+    `backend-signal-notification-headlines.md`.
+12. Persist the public-channel registry, cursor, and destination policy in
+    Postgres. See `backend-signal-channel-registry.md`.
+
+### Channel acceptance criteria
+
+- No post headline is an inline link.
+- With production Mini App configuration, message text and buttons contain no
+  `https://app.hunch.trade` URL.
+- Wallet and market links appear in meaningful body context.
+- A post with Buy contains no Wallet or Open market button.
+- A post without Buy and with an openable market contains exactly one Open
+  market button.
+- Follow-through metrics render as a visually grouped block, not as an
+  unformatted paragraph.
+- Wallet activity is not compressed into an unreadable single line for larger
+  combinations of states.
+- Formatting remains valid for apostrophes, parentheses, underscores, plus and
+  minus signs, URLs, Unicode market titles, and very long outcome labels.
+- Long titles wrap without destroying the relationship between market and
+  outcome.
+- The first line contains the strongest verified metric/result and recognizable
+  market fragment within the notification headline budget.
+- Every message stays within Telegram limits after escaping and link markup.
+- Snapshot tests cover initial, follow-through, cooling, resolved win/loss,
+  research update, Buy eligible, Buy ineligible, Mini App configured, and
+  missing/invalid Mini App configuration.
+
+## Visual QA Checklist
+
+Automated string tests are not enough for Telegram formatting. Before rollout,
+send real preview messages to a private test channel and inspect:
+
+- iOS, Android, and Telegram Desktop;
+- light and dark themes;
+- narrow mobile width;
+- short and long market titles;
+- generic YES/NO and semantic outcomes;
+- positive, negative, zero, missing, and very large values;
+- single-wallet and wallet-cluster signals;
+- Buy, cheaper Buy, Open market fallback, and no-button states;
+- the actual Mini App destination reached from every body link and button.
+
+The preview must be judged as a feed item, not only as an isolated message.
+Send several different post families consecutively and verify that the stable
+hierarchy makes them recognizable without making the channel visually noisy.
+
+## Recommended Delivery Order
+
+### Phase 1 — Content renderer and CTA cleanup
+
+Implementation status (July 15, 2026): the renderer, Mini App body links, CTA
+matrix, follow-through data block, and unit coverage are implemented. A live
+preview pass on iOS, Android, and Desktop is still required before rollout.
+
+- remove linked headlines;
+- use Mini App links in message bodies;
+- implement the CTA matrix;
+- redesign follow-through metrics as a quote/data block;
+- add snapshot tests and device preview fixtures.
+
+This produces the largest visible channel improvement with limited product
+policy risk.
+
+### Phase 2 — Private bot navigation shell
+
+Implementation status (July 15, 2026): the regular Home, /start, /menu, typed
+hm:v1 navigation, Home/Back/Cancel, stale callback recovery, transient market
+input, per-intent authorization, scoped Telegram commands, and the Mini App
+menu button are implemented. Settings was added later together with real
+notification behavior. Performance and operational tools are available only
+inside the allowlisted admin menu.
+
+- add menu routes and callback namespace;
+- add `/menu`, scoped commands, and Mini App menu button;
+- implement Home, Back, Cancel, editing, and stale callback recovery;
+- separate public, personal-trading, and admin authorization.
+
+### Phase 3 — Notification settings and transactional delivery
+
+Implementation status (July 15, 2026): implemented in the API and signal-bot
+runner with migration 0177. Production migration rollout and live delivery QA
+remain.
+
+- add durable per-topic Telegram preferences;
+- restore Settings and `/settings` in the same release;
+- add the delivery outbox and retry worker;
+- deliver order fills/issues, position win/loss, deposits, bridge results, and
+  payouts/rewards;
+- recover the Telegram reachable state on `/start`;
+- keep the regular Home small as the capability is added.
+
+### Phase 4 — Position-aware signals
+
+Implementation status (July 15, 2026): exact unified-market matching is
+implemented. Cross-venue matching and per-market manual controls remain.
+
+- fan out initial and research-update signals for exact held markets;
+- explain whether the signal supports or challenges the held side;
+- add per-user/note/kind dedupe and rate limiting;
+- persist trusted cross-venue market and side mappings before expanding
+  matching beyond exact unified market IDs;
+- add per-market mute/follow controls after the global behavior is stable.
+
+### Phase 5 — Measure and refine
+
+Track by copy/render version:
+
+- post button click-through;
+- Mini App opens from body links versus buttons;
+- Buy initiation and completion;
+- menu entry and action completion;
+- callback errors and stale-state recovery;
+- post views/reactions where Telegram data is available.
+
+Do not optimize for raw button count. The core metric is whether a user
+understands the signal and reaches the intended next step with less ambiguity.
