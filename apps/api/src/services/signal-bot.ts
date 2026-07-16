@@ -838,77 +838,11 @@ function formatTelegramBlockquote(lines: string[]): string {
   return lines.map((line) => `>${line}`).join("\n");
 }
 
-type SignalBotMarketIdentity = {
-  primary: string;
-  secondary: string | null;
-};
-
 function cleanSignalBotDisplayText(
   value: string | null | undefined,
 ): string | null {
   const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
   return cleaned || null;
-}
-
-function splitSignalBotMarketIdentity(input: {
-  eventTitle: string | null | undefined;
-  fallbackTitle: string;
-  marketLine: string | null | undefined;
-  marketTitle: string | null | undefined;
-}): SignalBotMarketIdentity {
-  const eventTitle = cleanSignalBotDisplayText(input.eventTitle);
-  const marketTitle = cleanSignalBotDisplayText(input.marketTitle);
-  const marketLine =
-    cleanSignalBotDisplayText(input.marketLine) ??
-    (eventTitle &&
-    marketTitle &&
-    eventTitle.toLowerCase() !== marketTitle.toLowerCase()
-      ? `${eventTitle} · ${marketTitle}`
-      : (eventTitle ?? marketTitle ?? input.fallbackTitle));
-  for (const prefix of [eventTitle, marketTitle]) {
-    if (!prefix) continue;
-    const delimiter = `${prefix} · `;
-    if (!marketLine.toLowerCase().startsWith(delimiter.toLowerCase())) continue;
-    const secondary = cleanSignalBotDisplayText(
-      marketLine.slice(delimiter.length),
-    );
-    if (secondary && secondary.toLowerCase() !== prefix.toLowerCase()) {
-      return { primary: prefix, secondary };
-    }
-  }
-  return { primary: marketLine, secondary: null };
-}
-
-function formatSignalBotMarketIdentityLines(
-  identity: SignalBotMarketIdentity,
-): string[] {
-  return [
-    `📍 ${formatTelegramBold(identity.primary)}`,
-    ...(identity.secondary ? [formatTelegramItalic(identity.secondary)] : []),
-  ];
-}
-
-function formatSignalBotContextLinks(input: {
-  holderLabel?: string | null;
-  holderUrl?: string | null;
-  marketUrl?: string | null;
-}): string | null {
-  const links: string[] = [];
-  if (input.marketUrl) {
-    links.push(formatTelegramLink("Market details", input.marketUrl));
-  }
-  if (input.holderUrl) {
-    const holderLabel = cleanSignalBotDisplayText(input.holderLabel);
-    links.push(
-      formatTelegramLink(
-        holderLabel ? `Wallet: ${holderLabel}` : "Wallet context",
-        input.holderUrl,
-      ),
-    );
-  }
-  return links.length > 0
-    ? formatTelegramItalicMarkdown(links.join(" · "))
-    : null;
 }
 
 export function resolveSignalBotBuySide(
@@ -992,27 +926,77 @@ type SignalBotHolderLinkMatch = {
 };
 
 type SignalBotBodyTextRenderer = {
-  hasLinkedHolder(): boolean;
   render(value: string): string;
 };
 
 function createSignalBotBodyTextRenderer(
   note: SignalBotNote,
   holderUrl: string | null,
+  marketUrl: string | null,
+  marketCandidates: string[],
 ): SignalBotBodyTextRenderer {
-  const candidates = holderUrl ? buildSignalBotHolderLinkCandidates(note) : [];
+  const holderCandidates = holderUrl
+    ? buildSignalBotHolderLinkCandidates(note)
+    : [];
+  const safeMarketCandidates = marketUrl
+    ? [
+        ...new Set(
+          marketCandidates
+            .map(cleanSignalBotDisplayText)
+            .filter(
+              (value): value is string =>
+                value != null &&
+                value.length >= 3 &&
+                !["YES", "NO"].includes(value.toUpperCase()),
+            ),
+        ),
+      ].sort((a, b) => b.length - a.length)
+    : [];
   let didLinkHolder = false;
+  let didLinkMarket = false;
   return {
-    hasLinkedHolder: () => didLinkHolder,
     render: (value: string) => {
       const sanitizedValue = sanitizeSignalBotPublicHolderMentions(value, note);
-      if (!holderUrl || didLinkHolder || candidates.length === 0) {
+      const matches: Array<
+        SignalBotHolderLinkMatch & { kind: "holder" | "market"; url: string }
+      > = [];
+      if (holderUrl && !didLinkHolder && holderCandidates.length > 0) {
+        const match = findSignalBotHolderLinkMatch(
+          sanitizedValue,
+          holderCandidates,
+        );
+        if (match) matches.push({ ...match, kind: "holder", url: holderUrl });
+      }
+      if (marketUrl && !didLinkMarket && safeMarketCandidates.length > 0) {
+        const match = findSignalBotHolderLinkMatch(
+          sanitizedValue,
+          safeMarketCandidates,
+        );
+        if (match) matches.push({ ...match, kind: "market", url: marketUrl });
+      }
+      if (matches.length === 0) {
         return escapeTelegramMarkdownV2(sanitizedValue);
       }
-      const match = findSignalBotHolderLinkMatch(sanitizedValue, candidates);
-      if (!match) return escapeTelegramMarkdownV2(sanitizedValue);
-      didLinkHolder = true;
-      return renderSignalBotHolderLinkedText(sanitizedValue, match, holderUrl);
+      matches.sort(
+        (a, b) => a.index - b.index || b.label.length - a.label.length,
+      );
+      const rendered: string[] = [];
+      let cursor = 0;
+      for (const match of matches) {
+        if (match.index < cursor) continue;
+        rendered.push(
+          escapeTelegramMarkdownV2(sanitizedValue.slice(cursor, match.index)),
+          formatTelegramLink(
+            sanitizedValue.slice(match.index, match.index + match.label.length),
+            match.url,
+          ),
+        );
+        cursor = match.index + match.label.length;
+        if (match.kind === "holder") didLinkHolder = true;
+        if (match.kind === "market") didLinkMarket = true;
+      }
+      rendered.push(escapeTelegramMarkdownV2(sanitizedValue.slice(cursor)));
+      return rendered.join("");
     },
   };
 }
@@ -1201,21 +1185,6 @@ function isSignalBotNumericLinkBlockedAfter(
   return false;
 }
 
-function renderSignalBotHolderLinkedText(
-  value: string,
-  match: SignalBotHolderLinkMatch,
-  holderUrl: string,
-): string {
-  const before = value.slice(0, match.index);
-  const label = value.slice(match.index, match.index + match.label.length);
-  const after = value.slice(match.index + match.label.length);
-  return [
-    escapeTelegramMarkdownV2(before),
-    `[${escapeTelegramMarkdownV2(label)}](${escapeTelegramMarkdownV2Url(holderUrl)})`,
-    escapeTelegramMarkdownV2(after),
-  ].join("");
-}
-
 function isSignalBotPrivateChat(chatType: string | null | undefined): boolean {
   return chatType === "private";
 }
@@ -1294,7 +1263,6 @@ export function buildSignalBotMessage(input: {
   const note = input.note;
   const buySide = resolveSignalBotBuySide(note);
   const price = buySide ? resolveSignalBotBuyPrice(note, buySide) : null;
-  const contextLine = formatSignalContextLine(note);
   const credentialBullets = formatSignalBotWhyItMattersBullets(note);
   const buySideCopy = buySide ? buildSignalBotSideCopy(note, buySide) : null;
   const winConditionLine = buySideCopy?.winCondition
@@ -1339,51 +1307,45 @@ export function buildSignalBotMessage(input: {
     base: input.telegramMiniAppLinkBase,
     startParam: marketStartParam,
   });
-  const bodyRenderer = createSignalBotBodyTextRenderer(note, holderMiniAppUrl);
+  const bodyRenderer = createSignalBotBodyTextRenderer(
+    note,
+    holderMiniAppUrl,
+    marketMiniAppUrl,
+    [
+      buySideCopy?.rawOutcomeLabel ?? null,
+      buySideCopy?.sideLabel ?? null,
+      note.marketTitle,
+      note.eventTitle,
+    ].filter((value): value is string => Boolean(value)),
+  );
   const summary = bodyRenderer.render(note.description);
   const renderedWhyInterestingLine = whyInterestingLine
     ? bodyRenderer.render(whyInterestingLine)
     : null;
-  const renderedContextLine = contextLine
-    ? bodyRenderer.render(contextLine)
-    : null;
+  const contextLine = formatSignalContextLine(note);
+  const renderedContextLine =
+    contextLine &&
+    shouldIncludeSignalBotContextLine({
+      contextLine,
+      description: note.description,
+    })
+      ? bodyRenderer.render(contextLine)
+      : null;
   const notificationCopy = buildSignalBotInitialNotificationCopy({
     messageKind: input.messageKind ?? "initial",
     note,
     side: buySide,
   });
   const titleLine = formatTelegramBold(notificationCopy.headline.text);
-  const marketIdentity = splitSignalBotMarketIdentity({
-    eventTitle: note.eventTitle,
-    fallbackTitle: note.title,
-    marketLine: buySideCopy?.marketLine,
-    marketTitle: note.marketTitle,
-  });
   const credentialBlock =
     credentialBullets.length > 0
-      ? formatTelegramBlockquote([
-          formatTelegramBold("Why it matters"),
-          ...credentialBullets.map(
-            (bullet) => `• ${escapeTelegramMarkdownV2(bullet)}`,
-          ),
-        ])
+      ? formatSignalBotCredentialBlock({
+          actorMode: note.holderActorMode,
+          bullets: credentialBullets,
+        })
       : null;
-  const holderLinkLabel = buildSignalBotHolderLinkCandidates(note)[0] ?? null;
-  const contextLinks = formatSignalBotContextLinks({
-    holderLabel: holderLinkLabel,
-    holderUrl:
-      holderMiniAppUrl && !bodyRenderer.hasLinkedHolder()
-        ? holderMiniAppUrl
-        : null,
-    marketUrl: marketMiniAppUrl,
-  });
   const lines = [
-    ...(input.messageKind === "research_update"
-      ? [formatTelegramItalic("Research update"), ""]
-      : []),
     titleLine,
-    "",
-    ...formatSignalBotMarketIdentityLines(marketIdentity),
     "",
     summary,
     ...(renderedWhyInterestingLine
@@ -1392,7 +1354,6 @@ export function buildSignalBotMessage(input: {
     ...(winConditionLine ? ["", formatTelegramItalic(winConditionLine)] : []),
     ...(credentialBlock ? ["", credentialBlock] : []),
     ...(renderedContextLine ? ["", renderedContextLine] : []),
-    ...(contextLinks ? ["", contextLinks] : []),
   ];
 
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
@@ -5827,23 +5788,6 @@ function formatSignedCentsMove(value: number | null): string {
   return `${rounded >= 0 ? "+" : ""}${rounded}¢`;
 }
 
-function formatFollowthroughMarketLine(
-  candidate: SignalBotFollowthroughCandidateRow,
-): string {
-  if (candidate.event_title && candidate.market_title) {
-    if (
-      cleanSignalBotDisplayText(candidate.event_title)?.toLowerCase() ===
-      cleanSignalBotDisplayText(candidate.market_title)?.toLowerCase()
-    ) {
-      return (
-        cleanSignalBotDisplayText(candidate.event_title) ?? candidate.title
-      );
-    }
-    return `${candidate.event_title} · ${candidate.market_title}`;
-  }
-  return candidate.market_title || candidate.title;
-}
-
 function formatSignalBotFollowthroughRead(input: {
   hasWalletEvidence: boolean;
   kind: Extract<
@@ -5851,25 +5795,78 @@ function formatSignalBotFollowthroughRead(input: {
     "followthrough_stats" | "resolved_loss" | "resolved_win"
   >;
   sideCopy: MarketSideCopy | null;
+  sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): string {
-  const side = input.sideCopy?.plainPosition ?? "the call side";
+  const side = input.sideCopy?.plainPosition ?? input.sideLabel;
+  const marketLabel =
+    input.stats.markPrice == null
+      ? input.sideLabel
+      : `${input.sideLabel} at ${formatCents(input.stats.markPrice)}`;
   if (input.kind === "resolved_win") {
-    return `${side} closed green. This is performance tracking, not a fresh entry.`;
+    return `${marketLabel} closed green. This is performance tracking, not a fresh entry.`;
   }
   if (input.kind === "resolved_loss") {
-    return `${side} closed red. Treat this as performance tracking, not a fresh entry.`;
+    return `${marketLabel} closed red. Treat this as performance tracking, not a fresh entry.`;
   }
   if (!input.hasWalletEvidence) {
-    return "The market moved with the read, but tracked wallet follow-through is thin so far.";
+    return `${marketLabel} moved with the read, but tracked wallet follow-through is thin so far.`;
   }
   if (input.stats.priceMoveCents != null && input.stats.priceMoveCents > 0) {
-    return "The market moved with the call and tracked wallets have not fully faded it yet.";
+    if (input.stats.trimmedWallets > input.stats.joinedOrAddedWallets) {
+      const read =
+        input.stats.exitedWallets > 0 && input.stats.netSignalSideFlowUsd <= 0
+          ? "is up, but tracked wallets are exiting and flow has turned negative."
+          : input.stats.priceMoveCents >= 5
+            ? "moved sharply, but wallet follow-through is mixed."
+            : input.stats.netSignalSideFlowUsd > 0
+              ? "moved with the call; net flow stays positive, but more wallets trimmed than added."
+              : "moved with the call, but more wallets trimmed than added.";
+      return `${marketLabel} ${read}`;
+    }
+    if (
+      input.stats.joinedOrAddedWallets > 0 &&
+      input.stats.netSignalSideFlowUsd > 0
+    ) {
+      return `${marketLabel} moved with the call, backed by fresh wallet flow.`;
+    }
+    return `${marketLabel} moved with the call, while tracked positions remain open.`;
   }
   if (input.stats.priceMoveCents != null && input.stats.priceMoveCents < 0) {
-    return "Copy flow is still leaning with the call, but price has moved against the entry.";
+    const read =
+      input.stats.netSignalSideFlowUsd > 0
+        ? "has moved against the entry despite positive copy flow."
+        : "has moved against the entry while copy flow cools.";
+    return `${marketLabel} ${read}`;
   }
-  return "Price has not moved much yet, but copy flow is still leaning with the call.";
+  return `${marketLabel} ${
+    input.stats.netSignalSideFlowUsd > 0
+      ? "has not moved much yet, but copy flow still leans with the call."
+      : `${side} has not drawn meaningful follow-through yet.`
+  }`;
+}
+
+function formatSignalBotFollowthroughReadMarkdown(input: {
+  hasWalletEvidence: boolean;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  marketUrl: string | null;
+  sideCopy: MarketSideCopy | null;
+  sideLabel: string;
+  stats: SignalBotFollowthroughStats;
+}): string {
+  const marketLabel =
+    input.stats.markPrice == null
+      ? input.sideLabel
+      : `${input.sideLabel} at ${formatCents(input.stats.markPrice)}`;
+  const plain = formatSignalBotFollowthroughRead(input);
+  const remainder = plain.slice(marketLabel.length);
+  const linkedMarket = input.marketUrl
+    ? formatTelegramLink(marketLabel, input.marketUrl)
+    : escapeTelegramMarkdownV2(marketLabel);
+  return `${linkedMarket}${escapeTelegramMarkdownV2(remainder)}`;
 }
 
 function isSignalBotFollowthroughCooling(
@@ -5932,15 +5929,18 @@ function formatSignalBotFollowthroughActivityMarkdownLines(
   if (stats.exitedWallets > 0) {
     movement.push(`${formatTelegramBold(String(stats.exitedWallets))} exited`);
   }
-  const lines = movement.length > 0 ? [movement.join(" · ")] : [];
-  if (stats.stillHoldingWallets > 0) {
-    lines.push(
-      `${formatTelegramBold(String(stats.stillHoldingWallets))} wallets still hold`,
-    );
-  }
-  return lines.length > 0
-    ? lines
-    : [escapeTelegramMarkdownV2("No major wallet change yet")];
+  const holding =
+    stats.stillHoldingWallets > 0
+      ? `${formatTelegramBold(String(stats.stillHoldingWallets))} holding`
+      : null;
+  const activity = [...movement, ...(holding ? [holding] : [])];
+  return [
+    `${escapeTelegramMarkdownV2("Wallets")}  ${
+      activity.length > 0
+        ? activity.join(" · ")
+        : escapeTelegramMarkdownV2("No major change yet")
+    }`,
+  ];
 }
 
 function formatSignalBotFollowthroughStatBlock(input: {
@@ -5950,7 +5950,7 @@ function formatSignalBotFollowthroughStatBlock(input: {
   const priceLine =
     input.stats.entryPrice != null && input.stats.markPrice != null
       ? [
-          formatTelegramBold(input.sideLabel),
+          escapeTelegramMarkdownV2(`${input.sideLabel} price`),
           `${formatCents(input.stats.entryPrice)} → ${formatCents(input.stats.markPrice)}`,
           formatTelegramBold(formatSignedCentsMove(input.stats.priceMoveCents)),
         ].join("  ")
@@ -5959,15 +5959,16 @@ function formatSignalBotFollowthroughStatBlock(input: {
         )}`;
   const lines = [
     formatTelegramBold("Since the call"),
-    `${formatTelegramBold(
+    "",
+    `${escapeTelegramMarkdownV2("Net flow")}  ${formatTelegramBold(
       formatSignedCompactUsd(input.stats.netSignalSideFlowUsd),
-    )} net copy flow`,
+    )}`,
     ...formatSignalBotFollowthroughActivityMarkdownLines(input.stats),
     priceLine,
   ];
   if (input.stats.estimatedOpenPnlUsd != null) {
     lines.push(
-      `${formatTelegramItalic("Est. open PnL")}  ${formatTelegramBold(
+      `${escapeTelegramMarkdownV2("Est. PnL")}  ${formatTelegramBold(
         formatSignedCompactUsd(input.stats.estimatedOpenPnlUsd),
       )}`,
     );
@@ -5990,16 +5991,6 @@ function buildSignalBotFollowthroughMessage(input: {
     ? buildSignalBotFollowthroughSideCopy(input.candidate, stats.signalSide)
     : null;
   const sideLabel = sideCopy?.priceLabel ?? side;
-  const marketLine =
-    sideCopy && shouldUseSignalBotCopyMarketLine(sideCopy)
-      ? (sideCopy.marketLine ?? formatFollowthroughMarketLine(input.candidate))
-      : formatFollowthroughMarketLine(input.candidate);
-  const marketIdentity = splitSignalBotMarketIdentity({
-    eventTitle: input.candidate.event_title,
-    fallbackTitle: input.candidate.title,
-    marketLine,
-    marketTitle: input.candidate.market_title,
-  });
   const hasWalletEvidence =
     stats.joinedOrAddedWallets > 0 ||
     stats.netSignalSideFlowUsd > 0 ||
@@ -6007,12 +5998,6 @@ function buildSignalBotFollowthroughMessage(input: {
     stats.exitedWallets > 0;
   const notificationCopy = buildSignalBotFollowthroughNotificationCopy(input);
   const header = notificationCopy.headline.text;
-  const footerLine = formatSignalBotFollowthroughRead({
-    hasWalletEvidence,
-    kind: input.kind,
-    sideCopy,
-    stats,
-  });
   const marketStartParam = input.candidate.event_id
     ? buildSignalBotMarketStartParam({
         eventId: input.candidate.event_id,
@@ -6024,18 +6009,20 @@ function buildSignalBotFollowthroughMessage(input: {
     base: input.telegramMiniAppLinkBase,
     startParam: marketStartParam,
   });
-  const contextLinks = formatSignalBotContextLinks({
+  const footerLine = formatSignalBotFollowthroughReadMarkdown({
+    hasWalletEvidence,
+    kind: input.kind,
     marketUrl: marketMiniAppUrl,
+    sideCopy,
+    sideLabel,
+    stats,
   });
   return [
     formatTelegramBold(header),
     "",
-    ...formatSignalBotMarketIdentityLines(marketIdentity),
-    "",
     formatSignalBotFollowthroughStatBlock({ sideLabel, stats }),
     "",
-    formatTelegramItalic(footerLine),
-    ...(contextLinks ? ["", contextLinks] : []),
+    formatTelegramItalicMarkdown(footerLine),
   ].join("\n");
 }
 
@@ -6104,6 +6091,13 @@ function buildNeutralSignalFollowthroughView(input: {
             input.stats.signalSide,
           )
         : null,
+      sideLabel:
+        input.stats.signalSide == null
+          ? "side"
+          : buildSignalBotFollowthroughSideCopy(
+              input.candidate,
+              input.stats.signalSide,
+            ).priceLabel,
       stats: input.stats,
     }),
     target,
@@ -7239,7 +7233,7 @@ function fallbackSignalNotificationSubject(
     preservedFields: ["predicate"],
     source: "safe_full_title",
     text: title.trim() || "This market",
-    version: "signal_notification_subject_v1",
+    version: "signal_notification_subject_v2",
   };
 }
 
@@ -7267,10 +7261,17 @@ function buildSignalBotInitialNotificationCopy(input: {
         );
   return {
     headline: buildSignalNotificationHeadline({
+      actorMode: input.note.holderActorMode,
       currentPrice: input.side
         ? resolveSignalBotBuyPrice(input.note, input.side)
         : null,
+      holderPositionUsd: input.note.holderPositionUsd,
       kind: input.messageKind,
+      positionLabel:
+        sideCopy?.copyKind === "named_outcome"
+          ? sideCopy.sideLabel
+          : subject.text,
+      strongWallets: input.note.holderClusterSharpHolders,
       subject,
     }),
     subject,
@@ -7311,11 +7312,13 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
     headline: buildSignalNotificationHeadline({
       cooling: isSignalBotFollowthroughCooling(input.stats),
       currentPrice: input.stats.markPrice,
+      exitedWallets: input.stats.exitedWallets,
       joinedWallets: input.stats.joinedOrAddedWallets,
       kind: input.kind === "followthrough_stats" ? "stats" : input.kind,
       netCopyFlowUsd: input.stats.netSignalSideFlowUsd,
       priceMoveCents: input.stats.priceMoveCents,
       subject,
+      trimmedWallets: input.stats.trimmedWallets,
     }),
     subject,
   };
@@ -7344,10 +7347,6 @@ function compactSignalBotCopyAudit(copy: MarketSideCopy | null) {
     sideLabel: copy.sideLabel,
     winCondition: copy.winCondition,
   };
-}
-
-function shouldUseSignalBotCopyMarketLine(copy: MarketSideCopy): boolean {
-  return copy.copyKind !== "generic" || copy.sideLabel !== copy.side;
 }
 
 function buildSignalBotCopyAudit(input: {
@@ -7532,12 +7531,14 @@ function formatSignalBotWhyInterestingLine(input: {
   const positionContext = formatSignalBotPositionContext(input.note);
   const priceIsUseful = shouldMentionSignalBotPriceInBody(input.price);
   if (input.note.holderActorMode === "sharp_cluster") {
-    if (priceIsUseful && input.price != null) {
-      return `The interesting part is that ${priceSubject} is still around ${formatCents(
-        input.price,
-      )}, while these wallets are still leaning that way${positionContext}.`;
-    }
-    return `The interesting part is that these wallets are still leaning ${sideLabel}${positionContext}.`;
+    const clusterCapital =
+      input.note.holderClusterSharpUsd != null &&
+      input.note.holderClusterSharpUsd > 0
+        ? `, with ${formatCompactUsd(
+            input.note.holderClusterSharpUsd,
+          )} tracked across the cluster`
+        : "";
+    return `These wallets remain aligned on ${sideLabel}${clusterCapital}.`;
   }
   if (priceIsUseful && input.price != null) {
     return `${priceSubject} is still around ${formatCents(
@@ -7558,6 +7559,98 @@ function formatSignalBotWhyItMattersBullets(note: SignalBotNote): string[] {
     if (bullets.length >= 3) break;
   }
   return bullets;
+}
+
+function formatSignalBotCredentialRow(bullet: string): string {
+  const money = "(\\$[0-9][0-9,.]*(?:[KMB])?)";
+  const trackRecord = bullet.match(
+    new RegExp(`^Up ${money}(?: combined)? over the last (\\d+) days?$`, "i"),
+  );
+  if (trackRecord?.[1] && trackRecord[2]) {
+    return `▸ ${escapeTelegramMarkdownV2("Track record")}  ${formatTelegramBold(
+      `+${trackRecord[1]}`,
+    )} · ${escapeTelegramMarkdownV2(`${trackRecord[2]}d`)}`;
+  }
+  const pricingEdge = bullet.match(
+    /^Beat market prices by ([0-9]+(?:\.[0-9]+)?) points? across ([0-9]+) resolved bets?$/i,
+  );
+  if (pricingEdge?.[1] && pricingEdge[2]) {
+    return `▸ ${escapeTelegramMarkdownV2("Pricing edge")}  ${formatTelegramBold(
+      `+${pricingEdge[1]} pts`,
+    )} · ${escapeTelegramMarkdownV2(`${pricingEdge[2]} resolved`)}`;
+  }
+  const volume = bullet.match(
+    new RegExp(`^Traded ${money} over the last (\\d+) days?$`, "i"),
+  );
+  if (volume?.[1] && volume[2]) {
+    return `▸ ${escapeTelegramMarkdownV2("Volume")}  ${formatTelegramBold(
+      volume[1],
+    )} · ${escapeTelegramMarkdownV2(`${volume[2]}d`)}`;
+  }
+  const conviction = bullet.match(
+    /^([0-9]+) strong wallets? on the same side$/i,
+  );
+  if (conviction?.[1]) {
+    return `▸ ${escapeTelegramMarkdownV2("Conviction")}  ${formatTelegramBold(
+      `${conviction[1]} strong wallets`,
+    )} · ${escapeTelegramMarkdownV2("same side")}`;
+  }
+  const capital = bullet.match(
+    new RegExp(`^${money} tracked by strong wallets$`, "i"),
+  );
+  if (capital?.[1]) {
+    return `▸ ${escapeTelegramMarkdownV2("Capital tracked")}  ${formatTelegramBold(
+      capital[1],
+    )}`;
+  }
+  const winRate = bullet.match(
+    /^Won ([0-9]+(?:\.[0-9]+)?)% of recent trades$/i,
+  );
+  if (winRate?.[1]) {
+    return `▸ ${escapeTelegramMarkdownV2("Win rate")}  ${formatTelegramBold(
+      `${winRate[1]}%`,
+    )} · ${escapeTelegramMarkdownV2("recent trades")}`;
+  }
+  return `▸ ${escapeTelegramMarkdownV2(bullet)}`;
+}
+
+function formatSignalBotCredentialBlock(input: {
+  actorMode: SignalBotNote["holderActorMode"];
+  bullets: string[];
+}): string {
+  return formatTelegramBlockquote([
+    formatTelegramBold(
+      input.actorMode === "sharp_cluster" ? "The edge" : "Wallet edge",
+    ),
+    "",
+    ...input.bullets.map(formatSignalBotCredentialRow),
+  ]);
+}
+
+function shouldIncludeSignalBotContextLine(input: {
+  contextLine: string;
+  description: string;
+}): boolean {
+  const normalize = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9%$]+/g, " ")
+      .trim();
+  const description = normalize(input.description);
+  const context = normalize(input.contextLine);
+  if (!context || description.includes(context)) return false;
+  const externalMarkers =
+    /\b(outside|odds|book|books|public|news|research|preview|previews|known)\b/;
+  if (externalMarkers.test(description) && externalMarkers.test(context)) {
+    return false;
+  }
+  const descriptionTokens = new Set(
+    description.split(" ").filter((token) => token.length >= 4),
+  );
+  const contextTokens = context.split(" ").filter((token) => token.length >= 4);
+  if (contextTokens.length === 0) return false;
+  const overlap = contextTokens.filter((token) => descriptionTokens.has(token));
+  return overlap.length / contextTokens.length < 0.45;
 }
 
 function formatSignalContextLine(note: SignalBotNote): string | null {

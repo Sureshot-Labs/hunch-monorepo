@@ -36,8 +36,10 @@ const tests: Array<{ name: string; run: () => void }> = [
         marketTitle: "France",
         side: "NO",
       });
-      assert.equal(result.text, "NO on “World Cup Winner · France”");
-      assert.equal(result.source, "market_side_copy");
+      assert.equal(result.text, "NO on France winning World Cup");
+      assert.equal(result.source, "natural_market_proposition");
+      assert.doesNotMatch(result.text, /Field|not France/i);
+      assert.doesNotMatch(result.text, / · /);
     },
   },
   {
@@ -49,7 +51,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         outcomes: ["Over", "Under"],
         side: "NO",
       });
-      assert.equal(result.text, "Portugal vs Spain · Under 2.5 total goals");
+      assert.equal(result.text, "Under 2.5 total goals in Portugal vs Spain");
       assert.equal(result.preservedFields.includes("threshold"), true);
     },
   },
@@ -81,7 +83,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: subject({ marketTitle: "Will it happen?" }),
       });
       assert.equal(result.storyKind, "cooling");
-      assert.match(result.text, /flow is cooling$/);
+      assert.match(result.text, /^⚠️ .* is losing wallet support$/);
       assert.equal(result.primaryMetric, "-$3K");
     },
   },
@@ -100,7 +102,7 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
-    name: "price bands use jumps rises and edges with current price",
+    name: "price bands use jumps rises and edges with whole-cent display",
     run: () => {
       const cases = [
         { move: 10, verb: "jumps" },
@@ -160,9 +162,71 @@ const tests: Array<{ name: string; run: () => void }> = [
         kind: "research_update",
         subject: marketSubject,
       });
-      assert.match(initial.text, /^🔥 Hunch calls /);
-      assert.match(update.text, /^🔎 .* research update at 32¢$/);
-      assert.equal(update.templateKey, "research_update_v1");
+      assert.match(initial.text, /^👀 /);
+      assert.match(update.text, /^🔎 New research on .* at 32¢$/);
+      assert.equal(update.templateKey, "research_update_v2");
+    },
+  },
+  {
+    name: "large capital outranks a small price move when breadth is mixed",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.89,
+        joinedWallets: 5,
+        kind: "stats",
+        netCopyFlowUsd: 67_700,
+        priceMoveCents: 2,
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↓ 57,500",
+          side: "NO",
+        }),
+        trimmedWallets: 8,
+      });
+      assert.equal(result.storyKind, "flow");
+      assert.equal(
+        result.text,
+        "💰 $67.7K net flow backs NO on BTC hitting $57.5K in July",
+      );
+    },
+  },
+  {
+    name: "strong price momentum outranks small copy flow",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.81,
+        joinedWallets: 4,
+        kind: "stats",
+        netCopyFlowUsd: 1_300,
+        priceMoveCents: 6,
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↑ 70,000",
+          side: "NO",
+        }),
+        trimmedWallets: 5,
+      });
+      assert.equal(result.storyKind, "price_move");
+      assert.equal(
+        result.text,
+        "📈 NO on BTC hitting $70K in July rises 6¢ to 81¢",
+      );
+    },
+  },
+  {
+    name: "fire is reserved for capital and price confluence",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.62,
+        joinedWallets: 6,
+        kind: "stats",
+        netCopyFlowUsd: 45_000,
+        priceMoveCents: 7,
+        subject: subject({ marketTitle: "Will it happen?" }),
+        trimmedWallets: 2,
+      });
+      assert.equal(result.storyKind, "confluence");
+      assert.match(result.text, /^🔥 \$45K backs .* after a 7¢ move$/);
     },
   },
   {

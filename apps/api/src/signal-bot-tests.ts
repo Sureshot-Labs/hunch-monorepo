@@ -8489,28 +8489,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .join(" "),
         /Wallet|Open market/,
       );
-      assert.match(message.text, /^\*🔥 Hunch calls YES on /);
+      assert.match(message.text, /^\*💰 \$12\\\.3K backs YES on /);
       assert.match(message.text.split("\n")[0] ?? "", /at 32¢\*$/);
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
-      assert.match(message.text, /📍 \*Test event\*\n_YES_/);
+      assert.doesNotMatch(message.text, /📍/);
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /🎯 82%/);
       assert.match(
         message.text,
         /this wallet is still holding YES, with \$12\\.3K still on and \\-\$123 open PnL\\./,
       );
-      assert.match(message.text, />\*Why it matters\*/);
+      assert.match(message.text, />\*Wallet edge\*\n>/);
       assert.doesNotMatch(
         message.text,
         /Why this wallet matters|Why this cluster matters/,
       );
-      assert.match(message.text, /• Up \$2\\.5K over the last 30 days/);
-      assert.match(message.text, /• Won 65% of recent trades/);
+      assert.match(message.text, /▸ Track record.*2\\.5K.*30d/);
+      assert.match(message.text, /▸ Win rate.*65%.*recent trades/);
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
-      assert.match(
-        message.text,
-        /📰 Public info followed the holder activity\\\./,
-      );
+      assert.doesNotMatch(message.text, /📰/);
       assert.doesNotMatch(message.text, /confidence/i);
     },
   },
@@ -8522,7 +8519,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         buyAmountUsd: 10,
         note: note({
           description:
-            "@Valen9 is fading the deadline while the public news is noisy.",
+            "@Valen9 is fading the deadline while positioning is noisy.",
           direction: "down",
           holderDisplayName: "Valen9",
           holderIdentityDisplayName: "@Valen9",
@@ -8581,7 +8578,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /Morocco is still around 3¢/);
       assert.match(
         message.text,
-        /• Still holding while the market barely prices it/,
+        /▸ Still holding while the market barely prices it/,
       );
       assert.doesNotMatch(message.text, /YES 2¢ \/ NO 98¢/);
     },
@@ -8593,7 +8590,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({
+          description:
+            "TestWallet is leaning YES on Will test resolve Yes? after a quiet repricing.",
           eventId: "polymarket:event-1",
+          holderDisplayName: "TestWallet",
           marketId: "polymarket:market-1",
         }),
         telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
@@ -8607,12 +8607,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /https:\/\/app\.hunch\.trade/);
       assert.match(
         message.text,
-        /\[Market details\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=m_/,
+        /\[Will test resolve Yes\?\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=m_/,
       );
       assert.match(
         message.text,
-        /\[Wallet context\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/,
+        /\[TestWallet\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/,
       );
+      assert.doesNotMatch(message.text, /Market details|Wallet context/);
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.equal(
         decodeStartAppPayload(readStartAppParam(rows[0]?.[0]?.url)),
@@ -8909,7 +8910,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*🔥 Hunch calls .*Beta Team at 70¢\*$/,
+        /^\*💰 \$12\\\.3K backs Beta Team at 70¢\*$/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
@@ -8943,6 +8944,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({
+          description: "The holder added after a quiet repricing.",
           modelMeta: {
             external_research: {
               summary:
@@ -9005,13 +9007,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows.length, 1);
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^\*🎯 2 strong wallets back YES on .* at 32¢\*$/,
+      );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
-      assert.match(message.text, />\*Why it matters\*/);
-      assert.doesNotMatch(message.text, /Why this cluster matters:/);
+      assert.match(message.text, />\*The edge\*\n>/);
       assert.match(
         message.text,
-        /• Up \$14\\.0K combined over the last 30 days/,
+        /These wallets remain aligned on YES, with \$45K tracked across the cluster/,
       );
+      assert.doesNotMatch(message.text, /\$12\\.3K still on/);
+      assert.doesNotMatch(message.text, /Why this cluster matters:/);
+      assert.match(message.text, /▸ Track record.*14\\.0K.*30d/);
     },
   },
   {
@@ -9046,7 +9054,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text,
-        /^\*🔥 Hunch calls Same market title at 32¢\*/,
+        /^\*💰 \$12\\\.3K backs YES on Same market title at 32¢\*/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(
@@ -9062,6 +9070,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({
+          description: "The holder added after a quiet repricing.",
           modelMeta: {
             external_research: {
               summary:
@@ -9082,6 +9091,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({
+          description: "The holder added after a quiet repricing.",
           modelMeta: {
             external_research: {
               summary:
@@ -9724,7 +9734,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.priceGuardDeferred, 0);
       assert.equal(result.priceGuardStaleExpired, 1);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Hunch calls/);
+      assert.match(telegram.messages[0]?.text ?? "", /backs/);
       assert.doesNotMatch(
         telegram.messages[0]?.text ?? "",
         /Later valid signal/,
@@ -9771,7 +9781,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.eligibleNotes, 1);
       assert.equal(result.nonDirectionalNotes, 0);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Hunch calls/);
+      assert.match(telegram.messages[0]?.text ?? "", /backs/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Below threshold/);
     },
   },
@@ -9811,7 +9821,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.nonDirectionalNotes, 1);
       assert.equal(result.eligibleNotes, 1);
       assert.equal(result.sent, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Hunch calls/);
+      assert.match(telegram.messages[0]?.text ?? "", /backs/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
     },
@@ -9990,15 +10000,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(metrics.copy?.notification?.headline?.storyKind, "initial");
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
-        "research_update_v1",
+        "research_update_v2",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
-        "signal_notification_subject_v1",
+        "signal_notification_subject_v2",
       );
       assert.equal(
         metrics.copy?.notification?.subject?.version,
-        "signal_notification_subject_v1",
+        "signal_notification_subject_v2",
       );
       assert.ok(metrics.copy?.notification?.subject?.source);
       assert.equal(
@@ -10193,17 +10203,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^\*🔥 YES on .* jumps 15\\\.0¢ to 55\\\.0¢\*/,
+        /^\*📈 YES on .* jumps 15¢ to 55¢\*/,
       );
-      assert.match(telegram.messages[0]?.text ?? "", />\*2\* added/);
+      assert.match(telegram.messages[0]?.text ?? "", />Wallets {2}\*2\* added/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /\[Market details\]\(https:\/\/t\.me\/hunch_bot\/hunch\?startapp=m_/,
+        /\[YES at 55¢\]\(https:\/\/t\.me\/hunch_bot\/hunch\?startapp=m_/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /tracked wallets have not fully faded it yet/,
+        /backed by fresh wallet flow/,
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -10324,9 +10334,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /📍 \*World Cup Winner\*\n_Argentina_/);
-      assert.match(text, /net copy flow/);
-      assert.match(text, />\*YES\* {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
+      assert.doesNotMatch(text, /📍/);
+      assert.match(text, />Net flow {2}/);
+      assert.match(text, />YES price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       assert.doesNotMatch(text, /net tracked YES flow/);
     },
   },
@@ -10367,8 +10377,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /net copy flow/);
-      assert.match(text, />\*NYG\* {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
+      assert.match(text, />Net flow/);
+      assert.match(text, />NYG price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
@@ -10427,16 +10437,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /^\*🔥 Portugal vs Spain · Under 2\\\.5 total goals edges up 3\\\.0¢ to 43\\\.0¢\*/,
+        /^\*📈 Under 2\\\.5 total goals in Portugal vs Spain edges up 3¢ to 43¢\*/,
       );
-      assert.match(text, /📍 \*Portugal vs Spain\*\n_Under 2\\.5 total goals_/);
+      assert.doesNotMatch(text, /📍/);
       assert.match(text, />\*Since the call\*/);
-      assert.match(text, /net copy flow/);
-      assert.match(text, />\*1\* added/);
-      assert.match(text, />\*1\* wallets still hold/);
+      assert.match(text, />Net flow/);
+      assert.match(text, />Wallets {2}\*1\* added · \*1\* holding/);
       assert.match(
         text,
-        />\*Under 2\\.5 total goals\* {2}40¢ → 43¢ {2}\*\\\+3¢\*/,
+        />Under 2\\.5 total goals price {2}40¢ → 43¢ {2}\*\\\+3¢\*/,
       );
       assert.doesNotMatch(text, /Time since signal/);
     },
@@ -10563,11 +10572,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^\*🔥 YES on .* jumps 15\\\.0¢ to 55\\\.0¢\*/,
+        /^\*📈 YES on .* jumps 15¢ to 55¢\*/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /market moved with the read, but tracked wallet follow\\-through is thin so far/,
+        /YES at 55¢ moved with the read, but tracked wallet follow\\-through is thin so far/,
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -10613,8 +10622,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /^\*⚠️ YES on .* flow is cooling\*/);
-      assert.match(text, />\*1\* exited/);
+      assert.match(text, /^\*⚠️ YES on .* is losing wallet support\*/);
+      assert.match(text, />Wallets {2}\*1\* exited/);
+      assert.match(text, /tracked wallets are exiting/);
       assert.doesNotMatch(text, /0 trimmed/);
     },
   },

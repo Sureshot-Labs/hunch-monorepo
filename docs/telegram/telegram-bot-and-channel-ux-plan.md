@@ -592,8 +592,8 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- notification-first public signal headlines:
-  `backend-signal-notification-headlines.md`;
+- Signal Post V4 backend completion and rollout:
+  `backend-signal-post-copy-v4.md`;
 - durable public-channel registry and cursor:
   `backend-signal-channel-registry.md`;
 - rollout and operations: `backend-telegram-notification-rollout.md`;
@@ -634,8 +634,8 @@ Use regular Telegram MarkdownV2 deliberately:
 - **Bold:** the editorial hook, section labels, and the one or two key values.
 - _Italic:_ secondary market metadata and the concluding interpretation.
 - Blockquote: a compact metric/data card such as `Since the call`.
-- Inline link: only on contextual text such as `market details`, a real wallet
-  identity, or `view the original signal`.
+- Inline link: only on a market/outcome phrase or real wallet identity that
+  already belongs in the sentence. Omit the link if no natural phrase exists.
 - Monospace/code: only for literal IDs, hashes, or addresses that a user may
   copy. Do not use it for normal prices, PnL, or prose.
 - Spoiler: only for genuinely hidden content, never as decoration.
@@ -649,15 +649,18 @@ with an emoji has no hierarchy.
 
 Keep a small semantic vocabulary:
 
-- `🔥` — accelerating participation or copy flow;
+- `💰` — material net flow or a material tracked position;
+- `🔥` — independently strong capital and price evidence with no contrary
+  wallet breadth;
+- `🎯` — several credentialed wallets aligned on the same position;
 - `👀` — early/quiet accumulation or an undernoticed divergence;
 - `⚠️` — cooling, thin follow-through, deterioration, or risk;
 - `📈` / `📉` — price move when price is the actual story;
 - `🏁` — resolved result;
-- `📍` — market identity.
 
-Use at most one leading status marker in the hook and one market marker. Metric
-rows should not each receive a random emoji.
+Use one leading status marker in the hook. Do not add a second `📍` market block
+when the headline already identifies the proposition. Metric rows should not
+each receive a random emoji.
 
 ### Headline rules
 
@@ -683,17 +686,20 @@ Bad:
 [Sharp YES interest](https://app.hunch.trade/...)
 ```
 
-Good:
+Good when material flow is the strongest fact:
 
 ```text
-🔥 July Fed “no change” jumps 11¢ to 91¢
+💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
 ```
 
-Also good when price is flat and flow is the story:
+Good when price is the strongest fact:
 
 ```text
-🔥 July Fed “no change” draws $1.1M in net copy flow
+📈 NO on BTC hitting $70K in July rises 6¢ to 81¢
 ```
+
+Reserve `🔥` for genuine confluence; a positive tick or initial call alone is
+not fire-worthy.
 
 ### Follow-through redesign
 
@@ -712,24 +718,20 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Target visual structure:
+Implemented V4 structure:
 
 ```text
-🔥 More wallets are moving into this trade
-
-📍 Fed Decision in July?
-No change
+💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
 
 │ Since the call
-│ +$1.1M net copy flow
-│ 32 added · 32 trimmed · 4 exited
-│ 64 wallets still hold
-│ YES  80¢ → 91¢  +11¢
-│ Est. open PnL  +$208K
+│
+│ Net flow  +$67.7K
+│ Wallets  5 added · 8 trimmed · 15 holding
+│ NO price  87¢ → 89¢  +2¢
+│ Est. PnL  +$1.6K
 
-The market moved with the call. Tracked wallets have not fully faded it yet.
-
-Market details · Tracked wallet context
+NO at 89¢ moved with the call; net flow stays positive, but more wallets
+trimmed than added.
 ```
 
 The `│` representation above documents the rendered Telegram blockquote. The
@@ -738,11 +740,13 @@ italic spans inside the quote.
 
 Recommended emphasis inside the rendered block:
 
-- `Since the call` — bold label;
-- `+$1.1M` — bold, followed by plain `net copy flow`;
-- wallet activity split across two lines so the holding base is not buried;
-- `YES` and `+11¢` — bold when the move is the key result;
-- `Est. open PnL` — secondary label, with the value bold.
+- `Since the call` — bold label followed by a blank quoted line;
+- metric labels remain plain while important values are bold;
+- wallet adds, trims, exits, and holdings share one labeled row and wrap
+  naturally on narrow screens;
+- the price delta and estimated PnL value are bold;
+- the conclusion explicitly reports mixed breadth, exits, adverse price, or
+  thin evidence when present.
 
 The final interpretation should be italic or otherwise visually secondary. It
 must not merely repeat all the numbers above it.
@@ -750,20 +754,17 @@ must not merely repeat all the numbers above it.
 ### Initial-signal structure
 
 ```text
-👀 Sharp wallets are leaning into NO
-
-📍 Fed Decision in July?
-No change
+🎯 4 strong wallets back Bilibili Gaming at 46¢
 
 <one- or two-sentence thesis>
 
-│ Why it matters
-│ • First specific wallet credential
-│ • Second specific wallet credential
+<one concise current-position sentence when it adds information>
 
-<one-sentence interpretation or public context>
-
-Market details · Wallet: Valen9
+│ The edge
+│
+│ ▸ Track record  +$340K · 30d
+│ ▸ Conviction  4 strong wallets · same side
+│ ▸ Capital tracked  $29.4K
 ```
 
 Rules:
@@ -771,11 +772,16 @@ Rules:
 - Do not link the hook or market heading.
 - If a real public wallet identity appears naturally in the thesis, link that
   first meaningful mention instead of adding a generic Wallet button.
-- If no safe identity is available, use a contextual footer such as
-  `Tracked wallet context`; do not create a misleading named link.
-- Keep `Why it matters` to at most three bullets, preferably two.
+- If no safe identity or natural market phrase is available, omit that body
+  link. Do not add a generic navigation footer.
+- Keep `The edge` / `Wallet edge` to at most three rows, preferably two.
+- Insert a blank quote line between the section label and its rows.
+- Use one repeated list marker (`▸`) and emphasize the key value, not every
+  word.
 - Avoid repeating the side, price, position, and PnL in both prose and the data
   block.
+- Never describe a representative wallet position as aggregate cluster
+  capital; scopes must remain explicit.
 
 ### Resolution and research-update structure
 
@@ -789,10 +795,9 @@ Resolved posts:
 
 Research updates:
 
-- use `Research update` as a small italic kicker, not the main headline;
-- keep the updated conclusion as the headline;
+- use a single `🔎 New research on ...` headline, without a second kicker;
 - clearly state what changed from the original signal;
-- link `original signal` or `market details` contextually in the body;
+- link a market phrase or `original signal` contextually in the body;
 - show Buy only if the normal execution and price-safety policy says it is
   currently actionable.
 
@@ -813,8 +818,8 @@ Body link behavior:
 - Do not pass the web `holderUrl` into `createSignalBotBodyTextRenderer` when a
   Mini App link is available.
 - Do not use `marketUrl` to wrap `titleMarkdown`.
-- Add a dedicated contextual-link/footer renderer that receives Mini App URLs.
-- Link action words or nouns, not full headlines or full paragraphs.
+- Link an existing market/outcome phrase or wallet identity, not full
+  headlines, full paragraphs, or generic footer labels.
 - Disable link previews for compact channel posts unless a future post type is
   deliberately designed around a preview card.
 
@@ -845,34 +850,20 @@ Additional rules:
   execution.
 - An Open market button must open the Mini App, never `app.hunch.trade`.
 
-### Channel implementation tasks
+### Channel implementation status
 
-1. Introduce a semantic Telegram post view instead of adding more concatenated
-   strings. It should model hook, market identity, evidence rows,
-   interpretation, contextual links, and CTA eligibility.
-2. Add safe MarkdownV2 composition helpers for bold, italic, link, quote, and
-   bullet blocks. Escape dynamic values before adding intentional markup.
-3. Refactor `buildSignalBotMessage` so the headline is plain bold text and the
-   body receives Mini App links.
-4. Replace `buildSignalBotLinkRow` with a pure CTA selector implementing the
-   decision matrix.
-5. Refactor `buildSignalBotFollowthroughMessage` and
-   `formatSignalBotFollowthroughStatLines` into structured metric rows and a
-   blockquote renderer.
-6. Change `buildSignalBotFollowthroughKeyboard` so Open market is a fallback,
-   not an unconditional second CTA.
-7. Add contextual Mini App links to initial, follow-through, research-update,
-   and appropriate resolution posts.
-8. Move Telegram-specific formatting responsibility into one renderer while
-   preserving neutral data for Discord and X transports.
-9. Increment the copy/render version so deliveries and analytics can separate
-   old and new post formats.
-10. Add a preview fixture or admin preview command for every post family.
-11. Replace generic/hash-selected positive hooks with a structured,
-    length-bounded notification headline builder. See
-    `backend-signal-notification-headlines.md`.
-12. Persist the public-channel registry, cursor, and destination policy in
-    Postgres. See `backend-signal-channel-registry.md`.
+Implemented locally: standalone semantic headlines, structured evidence cards,
+mixed-state interpretations, contextual Mini App links, CTA selection,
+copy-version audit, and deterministic renderer tests.
+
+Remaining backend work:
+
+1. Add reviewed canonical Telegram subjects/outcome aliases and typed evidence
+   rows; see `backend-signal-post-copy-v4.md`.
+2. Complete real-device/channel QA and approve versioned materiality policy;
+   see `backend-signal-post-copy-v4.md`.
+3. Persist the public-channel registry, cursor, and destination policy in
+   Postgres; see `backend-signal-channel-registry.md`.
 
 ### Channel acceptance criteria
 
