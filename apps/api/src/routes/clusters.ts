@@ -12,6 +12,10 @@ import {
 } from "../services/agg-market-client.js";
 import { getAggClusterListResponseCachedWithMetadata } from "../services/agg-market-clusters.js";
 import {
+  CLUSTER_EXECUTION_MAX_MARKETS,
+  enrichClusterExecutions,
+} from "../services/cluster-execution-enrichment.js";
+import {
   resolveAiClustersPolicy,
   resolveArbitrageDefaultsPolicy,
 } from "../services/runtime-policies.js";
@@ -192,7 +196,9 @@ function requestClusterMarketRefresh(
   for (const cluster of clusters) {
     for (const market of cluster.markets) {
       if (market.marketId) marketIds.add(market.marketId);
+      if (marketIds.size >= CLUSTER_EXECUTION_MAX_MARKETS) break;
     }
+    if (marketIds.size >= CLUSTER_EXECUTION_MAX_MARKETS) break;
   }
   requestMarketRefreshForMarketRefs({
     db: pool,
@@ -360,11 +366,12 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
 
       const limit = query.limit ?? defaults.limit;
       const items = filtered.slice(0, limit);
-      requestClusterMarketRefresh(items, "clusters");
+      const enrichedItems = await enrichClusterExecutions(pool, items);
+      requestClusterMarketRefresh(enrichedItems, "clusters");
       return {
         generatedAt,
         defaults,
-        items,
+        items: enrichedItems,
       };
     },
   );
@@ -400,10 +407,15 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
               );
             },
           });
+        const enrichedItems = await enrichClusterExecutions(
+          pool,
+          response.items,
+        );
+        const enrichedResponse = { ...response, items: enrichedItems };
         reply.header("x-agg-clusters-cache", cache.status);
         reply.header("x-agg-clusters-cache-layer", cache.layer);
-        requestClusterMarketRefresh(response.items, "clusters:agg");
-        return response;
+        requestClusterMarketRefresh(enrichedItems, "clusters:agg");
+        return enrichedResponse;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -549,13 +561,21 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
         outlierSet.size > 0
           ? ordered.filter((market) => !outlierSet.has(market.marketId))
           : ordered;
+      const [enrichedCluster] = await enrichClusterExecutions(pool, [
+        { ...cluster, markets: visibleMarkets },
+      ]);
+      if (!enrichedCluster) {
+        return { cluster, markets: visibleMarkets };
+      }
 
       requestMarketRefreshForMarketRefs({
         db: pool,
-        marketIds: visibleMarkets.map((market) => market.marketId),
+        marketIds: enrichedCluster.markets
+          .slice(0, CLUSTER_EXECUTION_MAX_MARKETS)
+          .map((market) => market.marketId),
         logLabel: "clusters:detail",
       });
-      return { cluster, markets: visibleMarkets };
+      return { cluster: enrichedCluster, markets: enrichedCluster.markets };
     },
   );
 };

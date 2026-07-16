@@ -615,13 +615,13 @@ class FakeDb {
       best_ask: "0.41",
       best_bid: "0.4",
       token_id: "yes-token",
-      ts: "2999-01-01T00:00:00.000Z",
+      ts: new Date().toISOString(),
     },
     {
       best_ask: "0.61",
       best_bid: "0.6",
       token_id: "no-token",
-      ts: "2999-01-01T00:00:00.000Z",
+      ts: new Date().toISOString(),
     },
   ];
   readonly queries: Array<{ params: unknown[]; sql: string }> = [];
@@ -633,6 +633,50 @@ class FakeDb {
     const sql = String(args[0] ?? "");
     const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
     this.queries.push({ params, sql });
+    if (sql.includes("yes_top.best_ask as yes_ask")) {
+      const marketIds = new Set(
+        Array.isArray(params[0]) ? (params[0] as string[]) : [],
+      );
+      const rows = this.marketRows
+        .filter((row) => marketIds.has(String((row as { id?: unknown }).id)))
+        .map((row) => {
+          const record = row as {
+            id?: unknown;
+            token_no?: unknown;
+            token_yes?: unknown;
+            venue?: unknown;
+          };
+          const yesTop = this.tokenTopRows.find(
+            (top) =>
+              String((top as { token_id?: unknown }).token_id) ===
+              String(record.token_yes),
+          ) as Record<string, unknown> | undefined;
+          const noTop = this.tokenTopRows.find(
+            (top) =>
+              String((top as { token_id?: unknown }).token_id) ===
+              String(record.token_no),
+          ) as Record<string, unknown> | undefined;
+          return {
+            active: true,
+            market_id: record.id,
+            no_ask: noTop?.best_ask ?? null,
+            no_bid: noTop?.best_bid ?? null,
+            no_ts: noTop?.ts ?? null,
+            orderable: true,
+            venue: record.venue,
+            yes_ask: yesTop?.best_ask ?? null,
+            yes_bid: yesTop?.best_bid ?? null,
+            yes_ts: yesTop?.ts ?? null,
+          };
+        });
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: rows.length,
+        rows: rows as unknown as T[],
+      };
+    }
     if (sql.includes("from signal_bot_messages prior")) {
       return {
         command: "SELECT",
@@ -2110,9 +2154,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           alternatives: [
             {
               eventId: "kalshi:event-1",
+              executionOffers: {
+                no: null,
+                yes: {
+                  ask: 0.32,
+                  asOf: "2026-01-01T00:00:00.000Z",
+                  fresh: true,
+                  nativeOutcome: "YES",
+                },
+              },
               marketId: "kalshi:market-1",
+              outcomeMapping: {
+                confidence: 1,
+                method: "exact_title",
+                sourceYesTo: "YES",
+              },
               venue: "kalshi",
-              yesAsk: 0.32,
             },
           ] as never,
           status: "matched",
@@ -2129,9 +2186,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           alternatives: [
             {
               eventId: "kalshi:event-1",
+              executionOffers: {
+                no: null,
+                yes: {
+                  ask: 0.29,
+                  asOf: "2026-01-01T00:00:00.000Z",
+                  fresh: true,
+                  nativeOutcome: "YES",
+                },
+              },
               marketId: "kalshi:market-1",
+              outcomeMapping: {
+                confidence: 1,
+                method: "exact_title",
+                sourceYesTo: "YES",
+              },
               venue: "kalshi",
-              yesAsk: 0.29,
             },
           ] as never,
           status: "matched",
@@ -2140,6 +2210,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(cheaper.alternative?.marketId, "kalshi:market-1");
       assert.equal(cheaper.diagnostics.aggMatched, 1);
       assert.equal(cheaper.diagnostics.aggCheaperFound, 1);
+
+      const inverted = resolveSignalBotCheaperAlternativeFromAggResponse({
+        buySide: "YES",
+        note: note({ bestAsk: 0.32 }),
+        response: {
+          alternatives: [
+            {
+              eventId: "limitless:event-1",
+              executionOffers: {
+                no: null,
+                yes: {
+                  ask: 0.28,
+                  asOf: "2026-01-01T00:00:00.000Z",
+                  fresh: true,
+                  nativeOutcome: "NO",
+                },
+              },
+              marketId: "limitless:market-1",
+              outcomeMapping: {
+                confidence: 0.98,
+                method: "selected_participant",
+                sourceYesTo: "NO",
+              },
+              venue: "limitless",
+            },
+          ] as never,
+          status: "matched",
+        },
+      });
+      assert.equal(inverted.alternative?.side, "NO");
+      assert.equal(inverted.alternative?.price, 0.28);
     },
   },
   {
@@ -9694,13 +9795,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "yes-token",
           best_bid: "0.99",
           best_ask: "1.00",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token",
           best_bid: "0",
           best_ask: "0.01",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
       ];
       const telegram = new FakeTelegram();
@@ -9749,13 +9850,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "yes-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
       ];
       const telegram = new FakeTelegram();
@@ -9822,25 +9923,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "yes-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "yes-token-2",
           best_bid: "0.30",
           best_ask: "0.32",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token-2",
           best_bid: "0.68",
           best_ask: "0.70",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
       ];
       const telegram = new FakeTelegram();

@@ -20,6 +20,12 @@ import {
 } from "./agg-market-clusters.js";
 import type { ClusterMarketSummary } from "./clusters.js";
 import {
+  CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS,
+  resolveNativeOutcomeForCanonicalSide,
+  resolveStrictClusterNativeOffer,
+} from "./cluster-execution.js";
+import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
+import {
   auditHolderResearchSignalPerformance,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
@@ -557,7 +563,7 @@ const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
 const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
 const PRICE_GUARD_DEFER_KEY_PREFIX = "tg:signal_bot:v1:price_guard_defer";
-const PRICE_GUARD_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
+const PRICE_GUARD_MAX_FRESH_AGE_MS = CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS;
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
@@ -4142,9 +4148,27 @@ async function loadSignalBotPriceGuardBlockers(input: {
       marketState.priceState,
       input.buySide,
     );
+    const strictQuotes = (
+      await loadClusterMarketNativeQuotes(input.db, [input.note.marketId])
+    ).get(input.note.marketId);
+    const strictTop =
+      input.buySide === "YES" ? strictQuotes?.yes : strictQuotes?.no;
+    const strictOffer = strictTop
+      ? resolveStrictClusterNativeOffer({
+          maxAgeMs: PRICE_GUARD_MAX_FRESH_AGE_MS,
+          nativeOutcome: input.buySide,
+          nowMs: Date.now(),
+          top: strictTop,
+        })
+      : null;
+    const blockers: MarketPriceBlocker[] = sideState.blockers.filter(
+      (blocker) => blocker !== "missing_side_price",
+    );
+    if (!strictOffer) blockers.push("missing_side_price");
+    else if (!strictOffer.fresh) blockers.push("live_price_stale");
     return {
-      blockers: sideState.blockers,
-      buyPrice: sideState.buyPrice,
+      blockers: Array.from(new Set(blockers)),
+      buyPrice: strictOffer?.fresh ? strictOffer.ask : null,
       defer: false,
       orderable: true,
       timedOut: false,
@@ -4195,18 +4219,33 @@ function isStrictlyCheaperDisplayedPrice(params: {
 function pickCheaperSignalBotAlternative(input: {
   buySide: "NO" | "YES";
   note: SignalBotNote;
+  primaryPrice?: number | null;
   response: {
     alternatives: ClusterMarketSummary[];
     status: string;
   };
 }): SignalBotCheaperAlternative | null {
   if (input.response.status !== "matched") return null;
-  const primaryPrice = resolveSignalBotBuyPrice(input.note, input.buySide);
+  const primaryPrice =
+    normalizeProbability(input.primaryPrice) ??
+    (input.buySide === "YES" ? normalizeProbability(input.note.bestAsk) : null);
   if (primaryPrice == null) return null;
 
   const candidates = input.response.alternatives
     .map((market): SignalBotCheaperAlternative | null => {
-      const price = resolveMarketBuyPrice(market, input.buySide);
+      if (!market.outcomeMapping) return null;
+      const nativeSide = resolveNativeOutcomeForCanonicalSide(
+        market.outcomeMapping.sourceYesTo,
+        input.buySide,
+      );
+      const offer =
+        input.buySide === "YES"
+          ? market.executionOffers?.yes
+          : market.executionOffers?.no;
+      const price =
+        offer?.fresh && offer.nativeOutcome === nativeSide
+          ? normalizeProbability(offer.ask)
+          : null;
       if (
         price == null ||
         !market.eventId ||
@@ -4223,7 +4262,7 @@ function pickCheaperSignalBotAlternative(input: {
         eventId: market.eventId,
         marketId: market.marketId,
         price,
-        side: input.buySide,
+        side: nativeSide,
         venue: market.venue,
       };
     })
@@ -4238,6 +4277,62 @@ function pickCheaperSignalBotAlternative(input: {
       return left.marketId.localeCompare(right.marketId);
     })[0] ?? null
   );
+}
+
+async function pickStrictCheaperSignalBotAlternative(input: {
+  buySide: "NO" | "YES";
+  db: DbQuery;
+  note: SignalBotNote;
+  response: {
+    alternatives: ClusterMarketSummary[];
+    status: string;
+  };
+}): Promise<SignalBotCheaperAlternative | null> {
+  if (input.response.status !== "matched" || !input.note.marketId) {
+    return null;
+  }
+  const quotes = await loadClusterMarketNativeQuotes(input.db, [
+    input.note.marketId,
+    ...input.response.alternatives.map((market) => market.marketId),
+  ]);
+  const nowMs = Date.now();
+  const strictOffer = (marketId: string, side: "NO" | "YES") => {
+    const native = quotes.get(marketId);
+    const top = side === "YES" ? native?.yes : native?.no;
+    if (!top || !native?.active || !native.orderable) return null;
+    const offer = resolveStrictClusterNativeOffer({
+      maxAgeMs: PRICE_GUARD_MAX_FRESH_AGE_MS,
+      nativeOutcome: side,
+      nowMs,
+      top,
+    });
+    return offer?.fresh ? offer : null;
+  };
+  const primaryOffer = strictOffer(input.note.marketId, input.buySide);
+  if (!primaryOffer) return null;
+  const offerKey = input.buySide === "YES" ? "yes" : "no";
+  const alternatives = input.response.alternatives.map((market) => {
+    if (!market.outcomeMapping) return market;
+    const nativeSide = resolveNativeOutcomeForCanonicalSide(
+      market.outcomeMapping.sourceYesTo,
+      input.buySide,
+    );
+    const offer = strictOffer(market.marketId, nativeSide);
+    return {
+      ...market,
+      executionOffers: {
+        no: market.executionOffers?.no ?? null,
+        yes: market.executionOffers?.yes ?? null,
+        [offerKey]: offer,
+      },
+    };
+  });
+  return pickCheaperSignalBotAlternative({
+    buySide: input.buySide,
+    primaryPrice: primaryOffer.ask,
+    note: input.note,
+    response: { alternatives, status: input.response.status },
+  });
 }
 
 export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
@@ -4313,11 +4408,25 @@ async function resolveDefaultSignalBotCheaperAlternative(input: {
         notFoundTtlSec: aggConfig.notFoundTtlSec,
         query: SIGNAL_BOT_ALTERNATIVES_QUERY,
       });
-    return resolveSignalBotCheaperAlternativeFromAggResponse({
+    if (!response) {
+      diagnostics.aggNoResponse += 1;
+      return { alternative: null, diagnostics };
+    }
+    addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
+    if (response.status !== "matched") {
+      diagnostics.aggNotFound += 1;
+      return { alternative: null, diagnostics };
+    }
+    diagnostics.aggMatched += 1;
+    const alternative = await pickStrictCheaperSignalBotAlternative({
       buySide: input.buySide,
+      db: input.db,
       note: input.note,
       response,
     });
+    if (alternative) diagnostics.aggCheaperFound += 1;
+    else diagnostics.aggMatchedNotCheaper += 1;
+    return { alternative, diagnostics };
   } catch {
     diagnostics.aggErrors += 1;
     return { alternative: null, diagnostics };
@@ -4362,14 +4471,9 @@ function signalDeliveryCandidateFromAgg(input: {
   priceAsOf: string;
 }): SignalDeliveryCandidate | null {
   const mapping = input.market.outcomeMapping;
-  const mappedSide =
-    input.buySide === "YES"
-      ? mapping?.sourceYesTo
-      : mapping?.sourceYesTo === "YES"
-        ? "NO"
-        : mapping?.sourceYesTo === "NO"
-          ? "YES"
-          : null;
+  const mappedSide = mapping
+    ? resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, input.buySide)
+    : null;
   if (
     !mapping ||
     !mappedSide ||
@@ -4459,14 +4563,12 @@ async function resolveDefaultSignalBotDeliveryTarget(input: {
         diagnostics.aggMatched += 1;
         for (const market of response.markets) {
           const mapping = market.outcomeMapping;
-          const mappedSide =
-            input.buySide === "YES"
-              ? mapping?.sourceYesTo
-              : mapping?.sourceYesTo === "YES"
-                ? "NO"
-                : mapping?.sourceYesTo === "NO"
-                  ? "YES"
-                  : null;
+          const mappedSide = mapping
+            ? resolveNativeOutcomeForCanonicalSide(
+                mapping.sourceYesTo,
+                input.buySide,
+              )
+            : null;
           if (!mappedSide) continue;
           const priceGuard = await loadSignalBotPriceGuardBlockers({
             buySide: mappedSide,
@@ -7490,21 +7592,6 @@ function resolveSignalBotBuyPrice(
       : midpoint == null
         ? null
         : 1 - midpoint;
-}
-
-function resolveMarketBuyPrice(
-  market: Pick<ClusterMarketSummary, "noMid" | "yesAsk" | "yesBid" | "yesMid">,
-  side: "NO" | "YES",
-): number | null {
-  const bid = normalizeProbability(market.yesBid);
-  const ask = normalizeProbability(market.yesAsk);
-  const yesMid = normalizeProbability(market.yesMid);
-  const noMid = normalizeProbability(market.noMid);
-  return side === "YES"
-    ? (ask ?? yesMid ?? bid)
-    : bid != null
-      ? 1 - bid
-      : noMid;
 }
 
 function formatCents(value: number): string {

@@ -180,6 +180,7 @@ function dbRow(args: {
 function fakeClient(args: {
   markets: AggVenueMarket[];
   midpoints: AggMidpoint[];
+  nextCursor?: string | null;
   calls?: { venueMarkets: number; midpoints: number };
   venueMarketParams?: unknown[];
 }): AggMarketClient {
@@ -187,7 +188,7 @@ function fakeClient(args: {
     async getVenueMarkets(params) {
       if (args.calls) args.calls.venueMarkets += 1;
       args.venueMarketParams?.push(params);
-      return args.markets;
+      return { items: args.markets, nextCursor: args.nextCursor ?? null };
     },
     async getMidpoints(ids) {
       if (args.calls) args.calls.midpoints += 1;
@@ -320,13 +321,17 @@ await test("passes venue and venueEventId filters to AGG venue markets", async (
     baseUrl: "https://agg.example",
     fetchImpl: async (input) => {
       requested.push(String(input));
-      return new Response(JSON.stringify({ data: [] }), {
-        headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ data: [], pagination: { nextCursor: "next-100" } }),
+        {
+          headers: { "content-type": "application/json" },
+        },
+      );
     },
   });
 
-  await client.getVenueMarkets({
+  const page = await client.getVenueMarkets({
+    cursor: "current-100",
     venue: "polymarket",
     venueEventId: "90177",
     status: "open",
@@ -339,6 +344,8 @@ await test("passes venue and venueEventId filters to AGG venue markets", async (
   assert.match(url, /venueEventId=90177/);
   assert.match(url, /matchStatus=matched/);
   assert.match(url, /matchStatus=verified/);
+  assert.match(url, /cursor=current-100/);
+  assert.equal(page.nextCursor, "next-100");
 });
 
 await test("builds AGG clusters from labeled Yes midpoints and DB rows", async () => {
@@ -423,6 +430,36 @@ await test("builds AGG clusters from labeled Yes midpoints and DB rows", async (
     cluster.markets.map((row) => row.eventCategory),
     ["sports", "sports", "sports"],
   );
+});
+
+await test("forwards cursor and returns one-block deduplicated coverage", async () => {
+  const venueMarketParams: unknown[] = [];
+  const source = market({
+    externalIdentifier: "101",
+    id: "agg-poly",
+    venue: "polymarket",
+  });
+  const response = await buildAggClusterListResponse({
+    client: fakeClient({
+      markets: [source, source],
+      midpoints: [],
+      nextCursor: "cursor-200",
+      venueMarketParams,
+    }),
+    db: fakeDb([]),
+    query: { cursor: "cursor-100", sourceLimit: 100 },
+  });
+
+  assert.equal(
+    (venueMarketParams[0] as { cursor?: string } | undefined)?.cursor,
+    "cursor-100",
+  );
+  assert.deepEqual(response.coverage, {
+    complete: false,
+    nextCursor: "cursor-200",
+    pagesFetched: 1,
+    sourceMarkets: 1,
+  });
 });
 
 await test("keeps opposite participants with explicit side inversion", async () => {
@@ -1071,9 +1108,13 @@ await test("bounded broad fallback still fails closed without outcome mapping", 
     client: {
       async getVenueMarkets(params) {
         venueMarketParams.push(params);
-        return !params.venue && !params.venueEventId && !params.search
-          ? [poly]
-          : [];
+        return {
+          items:
+            !params.venue && !params.venueEventId && !params.search
+              ? [poly]
+              : [],
+          nextCursor: null,
+        };
       },
       async getMidpoints(ids) {
         const wanted = new Set(ids);
@@ -1145,7 +1186,7 @@ await test("uses cached AGG cluster list as alternatives fallback", async () => 
   const client: AggMarketClient = {
     async getVenueMarkets(params) {
       venueMarketParams.push(params);
-      return warmCache ? [poly] : [];
+      return { items: warmCache ? [poly] : [], nextCursor: null };
     },
     async getMidpoints(ids) {
       const wanted = new Set(ids);
@@ -1648,6 +1689,29 @@ await test("uses the in-memory cache for matching query params", async () => {
 
   assert.equal(calls.venueMarkets, 1);
   assert.equal(calls.midpoints, 1);
+  clearAggClustersCacheForTests();
+});
+
+await test("isolates AGG cluster cache entries by cursor", async () => {
+  clearAggClustersCacheForTests();
+  const calls = { venueMarkets: 0, midpoints: 0 };
+  const client = fakeClient({ markets: [], midpoints: [], calls });
+  const db = fakeDb([]);
+
+  await getAggClusterListResponseCached({
+    query: { cursor: "page-a", limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+  });
+  await getAggClusterListResponseCached({
+    query: { cursor: "page-b", limit: 5 },
+    client,
+    db,
+    ttlSec: 30,
+  });
+
+  assert.equal(calls.venueMarkets, 2);
   clearAggClustersCacheForTests();
 });
 

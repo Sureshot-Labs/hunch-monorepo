@@ -15,6 +15,7 @@ import {
   type AggSupportedVenue,
   type AggVenueMarket,
 } from "./agg-market-client.js";
+import type { ClusterExecutionSummary } from "./cluster-execution.js";
 import { filterSignalBotVenuesForLifecycleCapability } from "./signal-bot-venue-lifecycle.js";
 
 type AggClusterMarketRow = {
@@ -65,6 +66,7 @@ export type AggClusterSortBy = "spread" | "volume24h";
 export type AggClusterSortDir = "asc" | "desc";
 
 export type AggClustersQueryInput = {
+  cursor?: string;
   venues?: string;
   limit?: number;
   sourceLimit?: number;
@@ -99,6 +101,7 @@ export type AggClusterSummary = {
   totalLiquidity: number | null;
   volume24h: number | null;
   expiresAt: string | null;
+  execution?: ClusterExecutionSummary;
   analysis: null;
   analysisStatus: null;
   analysisUpdatedAt: null;
@@ -117,6 +120,12 @@ export type AggClusterSummary = {
 };
 
 export type AggClusterListResponse = {
+  coverage: {
+    complete: boolean;
+    nextCursor: string | null;
+    pagesFetched: number;
+    sourceMarkets: number;
+  };
   generatedAt: string;
   defaults: AggClusterDefaults;
   items: AggClusterSummary[];
@@ -1068,7 +1077,9 @@ function buildAggClusterSummaries(params: {
       });
     }
 
-    const comparableMarkets = filterOutcomeMappableMarkets(markets);
+    const comparableMarkets = filterOutcomeMappableMarkets([
+      ...new Map(markets.map((market) => [market.marketId, market])).values(),
+    ]);
     const venueSet = new Set(comparableMarkets.map((market) => market.venue));
     if (comparableMarkets.length < 2 || venueSet.size < 2) continue;
 
@@ -1174,6 +1185,7 @@ export function buildAggClusterListCacheKey(
 ): string {
   return JSON.stringify({
     venues: parseAggVenues(query.venues).join(","),
+    cursor: query.cursor?.trim() || null,
     limit: clampInt(query.limit, DEFAULTS.limit, 200),
     sourceLimit: clampInt(query.sourceLimit, 100, 100),
     minLiquidity: query.minLiquidity ?? null,
@@ -1203,6 +1215,7 @@ function readAggClusterListCachedBody(
     if (typeof parsed.generatedAt !== "string") return null;
     if (!parsed.defaults || typeof parsed.defaults !== "object") return null;
     if (!Array.isArray(parsed.items)) return null;
+    if (!parsed.coverage || typeof parsed.coverage !== "object") return null;
     return parsed;
   } catch {
     return null;
@@ -1293,7 +1306,8 @@ export async function buildAggClusterListResponse(params: {
   const sourceLimit = clampInt(params.query.sourceLimit, 100, 100);
   const outputLimit = clampInt(params.query.limit, DEFAULTS.limit, 200);
 
-  const venueMarkets = await params.client.getVenueMarkets({
+  const venueMarketsPage = await params.client.getVenueMarkets({
+    cursor: params.query.cursor,
     status: "open",
     matchStatus: ["matched", "verified"],
     limit: sourceLimit,
@@ -1301,8 +1315,9 @@ export async function buildAggClusterListResponse(params: {
     sortDir: "desc",
   });
 
+  const sourceMarkets = dedupeAggMarkets(venueMarketsPage.items);
   const clusters = await buildAggClustersFromVenueMarkets({
-    venueMarkets,
+    venueMarkets: sourceMarkets,
     venues,
     client: params.client,
     db: params.db,
@@ -1317,6 +1332,12 @@ export async function buildAggClusterListResponse(params: {
   );
 
   return {
+    coverage: {
+      complete: venueMarketsPage.nextCursor == null,
+      nextCursor: venueMarketsPage.nextCursor,
+      pagesFetched: 1,
+      sourceMarkets: sourceMarkets.length,
+    },
     generatedAt,
     defaults: DEFAULTS,
     items: sorted.slice(0, outputLimit),
@@ -1365,7 +1386,7 @@ export async function buildAggMarketAlternativesResponse(params: {
   });
 
   for (const attempt of attempts) {
-    const venueMarkets = await params.client.getVenueMarkets({
+    const venueMarketsPage = await params.client.getVenueMarkets({
       venue: attempt.venue,
       venueEventId: attempt.venueEventId,
       search: attempt.search,
@@ -1375,6 +1396,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       sortBy: "volume",
       sortDir: "desc",
     });
+    const venueMarkets = venueMarketsPage.items;
     if (!venueMarkets.length) {
       if (attempt.venue && attempt.search) diagnostics.targetSearchEmpty += 1;
       continue;
@@ -1421,13 +1443,14 @@ export async function buildAggMarketAlternativesResponse(params: {
     if (response) return response;
   }
 
-  const broadVenueMarkets = await params.client.getVenueMarkets({
+  const broadVenueMarketsPage = await params.client.getVenueMarkets({
     status: "open",
     matchStatus: ["matched", "verified"],
     limit: sourceLimit,
     sortBy: "volume",
     sortDir: "desc",
   });
+  const broadVenueMarkets = broadVenueMarketsPage.items;
   if (broadVenueMarkets.length) {
     const clusters = await buildAggClustersFromVenueMarkets({
       venueMarkets: broadVenueMarkets,
@@ -1473,8 +1496,7 @@ export async function getAggClusterListResponseCachedWithMetadata(params: {
   response: AggClusterListResponse;
   cache: AggClusterListCacheMetadata;
 }> {
-  const requestedVenues =
-    params.query.venues?.split(",") ?? AGG_SUPPORTED_VENUES;
+  const requestedVenues = parseAggVenues(params.query.venues);
   const lifecycle = await filterSignalBotVenuesForLifecycleCapability(
     params.db,
     requestedVenues,
@@ -1486,6 +1508,12 @@ export async function getAggClusterListResponseCachedWithMetadata(params: {
   if (venues.length === 0) {
     return {
       response: {
+        coverage: {
+          complete: true,
+          nextCursor: null,
+          pagesFetched: 0,
+          sourceMarkets: 0,
+        },
         generatedAt: new Date().toISOString(),
         defaults: DEFAULTS,
         items: [],
@@ -1706,8 +1734,7 @@ export async function getAggMarketAlternativesResponseCachedWithMetadata(params:
   cache: AggMarketAlternativesCacheMetadata;
   response: AggMarketAlternativesResponse | null;
 }> {
-  const requestedVenues =
-    params.query.venues?.split(",") ?? AGG_SUPPORTED_VENUES;
+  const requestedVenues = parseAggVenues(params.query.venues);
   const lifecycle = await filterSignalBotVenuesForLifecycleCapability(
     params.db,
     requestedVenues,

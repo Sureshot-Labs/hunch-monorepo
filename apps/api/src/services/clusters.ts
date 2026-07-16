@@ -1,3 +1,5 @@
+import type { ClusterMarketExecutionOffers } from "./cluster-execution.js";
+
 type ClusterMarketRow = {
   id: string;
   event_id: string;
@@ -42,6 +44,7 @@ export type ClusterMarketSummary = {
     method: "exact_title" | "selected_participant" | "source_identity";
     sourceYesTo: "NO" | "YES";
   } | null;
+  executionOffers?: ClusterMarketExecutionOffers | null;
   active?: boolean;
   orderable?: boolean;
   priceAsOf?: string | null;
