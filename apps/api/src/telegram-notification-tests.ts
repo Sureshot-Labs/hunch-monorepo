@@ -59,6 +59,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(resolved.source, "db");
       assert.equal(resolved.effectiveAt, effectiveAt);
       assert.equal(resolved.policy.activityEnqueueEnabled, true);
+      assert.equal(resolved.policy.positionResolutionProducerEnabled, false);
 
       const invalidDb = {
         query: async () => ({
@@ -245,6 +246,60 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(candidateSql ?? "", /n\.updated_at/);
       assert.match(candidateSql ?? "", /event_occurred_at/);
       assert.match(candidateSql ?? "", /last_candidate\.created_at::text/);
+    },
+  },
+  {
+    name: "Telegram-origin fill is skipped after its terminal receipt was delivered",
+    run: async () => {
+      const queries: string[] = [];
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string) => {
+            queries.push(sql);
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    id: "outbox-telegram-trade",
+                    payload: {
+                      data: {
+                        source: "telegram_bot",
+                        sourceIntentId: "11111111-1111-4111-8111-111111111111",
+                      },
+                      title: "Order filled",
+                      type: "order_filled",
+                    },
+                    topic: "order_filled",
+                    user_id: "user-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("from telegram_trade_intents")) {
+              return { rows: [{ delivered: true }] };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => {
+            throw new Error("generic fill must not be sent");
+          },
+        },
+      });
+      assert.equal(result.skipped, 1);
+      assert.equal(result.sent, 0);
+      assert.match(queries[0] ?? "", /interval '30 seconds'/);
+      assert.equal(
+        queries.some(
+          (sql) =>
+            sql.includes("status = 'skipped'") &&
+            sql.includes("last_error = $2"),
+        ),
+        true,
+      );
     },
   },
   {

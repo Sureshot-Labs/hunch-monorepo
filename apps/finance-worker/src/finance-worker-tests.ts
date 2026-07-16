@@ -40,6 +40,16 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
 
 const tests: TestCase[] = [
   {
+    name: "position resolution notification producer polls every minute behind runtime policy",
+    run: () => {
+      const job = buildJobs(buildTestEnv()).find(
+        (candidate) => candidate.name === "position_resolution_notifications",
+      );
+      assert.equal(job?.enabled, true);
+      assert.equal(job?.intervalSec, 60);
+    },
+  },
+  {
     name: "telegram trade intent reconcile job is disabled by default when execute is false",
     run: () => {
       const jobs = buildJobs(buildTestEnv());
@@ -120,6 +130,7 @@ const tests: TestCase[] = [
           }),
           runFeesReconcileJob: async () => null,
           runKalshiExecutionReconcileJob: async () => null,
+          runPositionResolutionNotificationJob: async () => null,
           runRewardsPayoutJob: async () => null,
           runTelegramTradeIntentReconcileJob: async (overrides) => {
             reconcileArgs = overrides;

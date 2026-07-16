@@ -257,6 +257,8 @@ export function buildOrderNotification(input: {
   marketId?: string | null;
   tokenId?: string | null;
   walletAddress?: string | null;
+  source?: string | null;
+  sourceIntentId?: string | null;
 }): NotificationInput {
   const status = input.status?.toLowerCase() ?? "";
   let type = "order_created";
@@ -342,6 +344,8 @@ export function buildOrderNotification(input: {
       marketId: input.marketId ?? null,
       tokenId: input.tokenId ?? null,
       walletAddress: input.walletAddress ?? null,
+      source: input.source ?? null,
+      sourceIntentId: input.sourceIntentId ?? null,
     },
     dedupeKey,
     replaceExisting: Boolean(dedupeKey),

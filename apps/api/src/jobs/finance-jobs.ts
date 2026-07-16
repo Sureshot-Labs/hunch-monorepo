@@ -30,6 +30,10 @@ import {
 } from "../api-cache-warm-runner.js";
 import { pool, type DbQuery } from "../db.js";
 import { reconcileStaleTelegramTradeIntents } from "../services/telegram-bot-trading.js";
+import {
+  runPositionResolutionNotificationProducer,
+  type PositionResolutionProducerSummary,
+} from "../services/position-resolution-producer.js";
 
 export type ReconcileTelegramTradeIntentsOptions = {
   db?: DbQuery;
@@ -185,6 +189,25 @@ export async function runTelegramTradeIntentReconcileJob(
       `submittedReconcileRequired=${summary.submittedReconcileRequired}`,
       `skipped=${summary.skipped === true}`,
     ].join(" "),
+  );
+  return summary;
+}
+
+export async function runPositionResolutionNotificationJob(): Promise<PositionResolutionProducerSummary> {
+  const summary = await runPositionResolutionNotificationProducer();
+  console.log(
+    [
+      "Position resolution notifications",
+      `candidates=${summary.candidates}`,
+      `created=${summary.notificationsCreated}`,
+      `affectedWallets=${summary.affectedWallets}`,
+      `syncSucceeded=${summary.syncSucceeded}`,
+      `syncFailed=${summary.syncFailed}`,
+      `skipped=${summary.skipped}`,
+      summary.skipReason ? `skipReason=${summary.skipReason}` : null,
+    ]
+      .filter(Boolean)
+      .join(" "),
   );
   return summary;
 }

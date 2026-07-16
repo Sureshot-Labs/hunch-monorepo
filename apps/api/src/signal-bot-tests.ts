@@ -1084,7 +1084,7 @@ function readStartAppParam(url: string | undefined): string {
 }
 
 function readWebAppStartParam(
-  button: { web_app?: { url: string } } | undefined,
+  button: { text?: string; web_app?: { url: string } } | undefined,
 ): string {
   assert.ok(button?.web_app?.url);
   const url = new URL(button.web_app.url);
@@ -1243,7 +1243,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(regular.text, /Hunch/);
       assert.doesNotMatch(regular.text, /\/(?:menu|market|trade|help)/);
       assert.equal(
-        regularButtons.some((button) => button.text === "💸 Trade a market"),
+        regularButtons.some((button) => button.text === "🔎 Markets"),
         true,
       );
       assert.equal(
@@ -1251,11 +1251,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         true,
       );
       assert.deepEqual(regularLabels, [
-        "💸 Trade a market",
+        "🔎 Markets",
+        "💼 My positions",
         "👤 My trading",
-        "Open Hunch",
+        "💳 Deposit",
+        "🔔 Notifications",
         "⚙️ Settings",
-        "❓ How it works",
+        "❓ Help",
       ]);
       assert.equal(
         regularButtons.some((button) => button.text === "📊 Performance"),
@@ -1265,12 +1267,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         regularButtons.some((button) => button.text === "🛠 Admin"),
         false,
       );
-      const openHunch = regularButtons.find(
-        (button) => button.text === "Open Hunch",
-      );
-      assert.ok(openHunch && "web_app" in openHunch);
-      assert.equal(openHunch.web_app?.url, "https://app.hunch.trade/tg");
-
       const admin = buildSignalBotMenuScreen({
         appBaseUrl: "https://app.hunch.trade",
         isAdmin: true,
@@ -2337,6 +2333,76 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "internal trading client records a successful terminal edit receipt",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const requests: Array<{ body: unknown; url: string }> = [];
+      let terminalEdit: {
+        reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> };
+      } | null = null;
+      globalThis.fetch = (async (input, init) => {
+        const url = String(input);
+        requests.push({
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+          url,
+        });
+        const payload = url.endsWith("/receipt")
+          ? { marked: true }
+          : {
+              answers: [],
+              handled: true,
+              messages: [
+                {
+                  chat_id: "999",
+                  parse_mode: "MarkdownV2",
+                  text: "Trade filled\\.",
+                },
+              ],
+            };
+        return new Response(JSON.stringify(payload), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        const handled = await client.handleCallback({
+          answerCallbackQuery: async () => ({ ok: true }),
+          appBaseUrl: "https://app.hunch.trade",
+          callbackQuery: {
+            data: "hbt:confirm:00000000-0000-4000-8000-000000000001",
+            from: { id: 999 },
+            id: "callback-receipt",
+            message: {
+              chat: { id: 999, type: "private" },
+              message_id: 77,
+            },
+          },
+          editMessageText: async (message) => {
+            terminalEdit = message;
+            return { messageId: 77, ok: true };
+          },
+          sendMessage: async () => ({ messageId: 78, ok: true }),
+        });
+        assert.equal(handled, true);
+        assert.equal(requests.length, 2);
+        assert.match(requests[1]?.url ?? "", /\/receipt$/);
+        assert.deepEqual(requests[1]?.body, {
+          delivery: "edit",
+          messageId: 77,
+          telegramUserId: 999,
+        });
+        assert.match(JSON.stringify(terminalEdit), /My positions/);
+        assert.match(JSON.stringify(terminalEdit), /Home/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "internal trading API client reports unknown status on confirm timeout",
     run: async () => {
       const originalFetch = globalThis.fetch;
@@ -2653,6 +2719,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       let insertCount = 0;
       let marketOrderable = true;
+      let marketVenue = "polymarket";
       let readinessMode: "auto" | "disabled" = "disabled";
       const db = {
         query: async (sql: string) => {
@@ -2721,7 +2788,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   id: "market-1",
-                  venue: "polymarket",
+                  venue: marketVenue,
                   venue_market_id: "venue-market-1",
                   event_id: "event-1",
                   event_title: "Event",
@@ -2843,6 +2910,59 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.match(closedMessage.text, /not open for new bot trades/i);
+
+      marketOrderable = true;
+      marketVenue = "limitless";
+      const appFallbackMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async () =>
+            buildTestPolymarketReadiness({
+              code: "unsupported_capability",
+              message: "Direct bot trading is disabled for this venue.",
+            }),
+        } as never,
+      });
+      assert.doesNotMatch(
+        appFallbackMessage.text,
+        /venue is disabled by runtime policy/i,
+      );
+      assert.match(
+        appFallbackMessage.text,
+        /Direct bot trading is not enabled for Limitless/i,
+      );
+      const appFallbackButtons =
+        appFallbackMessage.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(
+        appFallbackButtons.some((button) => "callback_data" in button),
+        false,
+      );
+      assert.deepEqual(
+        appFallbackButtons.map((button) => button.text),
+        ["Buy YES · $10", "Buy NO · $10", "Trade in Hunch"],
+      );
+      assert.equal(
+        appFallbackButtons.some((button) => "url" in button),
+        false,
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[0])),
+        "event-1|market-1|Y|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[1])),
+        "event-1|market-1|N|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[2])),
+        "event-1|market-1|",
+      );
     },
   },
   {
@@ -7767,7 +7887,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           telegram.edits[0]?.reply_markup?.inline_keyboard
             .flat()
             .map((button) => button.text) ?? [];
-        assert.equal(labels.includes("💸 Trade a market"), true);
+        assert.equal(labels.includes("🔎 Markets"), true);
         assert.equal(labels.includes("🛠 Admin"), false);
       }
     },
@@ -7800,7 +7920,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         true,
       );
-      assert.match(telegram.edits.at(-1)?.text ?? "", /Send a market/);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /markets/i);
       let marketRequest:
         | {
             chatId: string;
@@ -7818,9 +7938,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           text: "https://polymarket.com/event/test-market",
         },
         redis,
-        sendTradeMarket: async (request) => {
+        loadMarketCard: async (request) => {
           marketRequest = request;
-          return true;
+          return { text: "Test market card" };
         },
         telegram,
       });
@@ -7828,10 +7948,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(marketRequest, {
         chatId: "999",
         marketRef: "https://polymarket.com/event/test-market",
-        telegramMessageId: 61,
+        telegramMessageId: 101,
         telegramUserId: 999,
       });
-      assert.match(telegram.edits.at(-1)?.text ?? "", /Market card was sent/);
+      assert.match(telegram.messages.at(-1)?.text ?? "", /Searching/);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /Test market card/);
       assert.equal(
         await handleSignalBotMenuInput({
           config,
@@ -11115,7 +11236,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           authorization: authorization as never,
           market: market as never,
           maxAmountUsd: 2,
-          maxExecutableBuyUsd: 2,
           maxSlippageBps: 500,
           nominalAmountUsd: 1,
           side: "YES",
@@ -11126,7 +11246,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           authorization: authorization as never,
           market: market as never,
           maxAmountUsd: 2,
-          maxExecutableBuyUsd: 2,
           maxSlippageBps: 500,
           nominalAmountUsd: 1,
           side: "NO",
@@ -11137,7 +11256,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           authorization: authorization as never,
           market: market as never,
           maxAmountUsd: 5,
-          maxExecutableBuyUsd: 5,
           maxSlippageBps: 500,
           nominalAmountUsd: 1,
           side: "NO",

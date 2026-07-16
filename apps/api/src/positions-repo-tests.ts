@@ -3134,7 +3134,10 @@ await test("resolved visible loss creates one notification", async () => {
     );
     assert.equal(notificationRow.rowCount, 1);
     assert.equal(notificationRow.rows[0]?.title, "Position resolved (loss)");
-    assert.equal(notificationRow.rows[0]?.body, "Resolved with no payout");
+    assert.equal(
+      notificationRow.rows[0]?.body,
+      "The market resolved against your side",
+    );
     assert.equal(notificationRow.rows[0]?.read_at, null);
   } finally {
     await cleanupPositionTest(userId, [tokenId], [marketId]);

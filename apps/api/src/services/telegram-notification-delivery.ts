@@ -48,6 +48,8 @@ const POSITION_SIGNAL_CURSOR_KEY = "telegram_position_signals_v1";
 const ACTIVITY_NOTIFICATION_CURSOR_KEY = "telegram_activity_notifications_v1";
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const MAX_DELIVERY_ATTEMPTS = 8;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -177,7 +179,8 @@ export function buildTelegramActivityNotificationMessage(input: {
     lines.push(formatBold("⚠️ Cashback claim failed"));
   } else if (type === "position_resolved") {
     const result = readString(data, "result");
-    const resultTitle = result === "won" ? "won" : "lost";
+    const resultTitle =
+      result === "won" ? "won" : result === "lost" ? "lost" : "settled";
     lines.push(
       formatBold(`🏁 Your${side ? ` ${side}` : ""} position ${resultTitle}`),
     );
@@ -429,6 +432,7 @@ export async function enqueueTelegramActivityNotifications(input: {
 
 type PositionSignalRecipientRow = {
   held_sides: string[] | null;
+  position_snapshot_at: string | null;
   root_telegram_message_id: string | number | null;
   user_id: string;
 };
@@ -496,6 +500,7 @@ export async function enqueueTelegramPositionSignals(input: {
                 p.user_id,
                 array_agg(distinct upper(ut.side))
                   filter (where upper(ut.side) in ('YES', 'NO')) as held_sides,
+                max(coalesce(p.last_updated_at, p.updated_at))::text as position_snapshot_at,
                 root_delivery.telegram_message_id as root_telegram_message_id
               from positions p
               join unified_tokens ut
@@ -592,6 +597,8 @@ export async function enqueueTelegramPositionSignals(input: {
                     ? Number(recipient.root_telegram_message_id)
                     : null,
                 text: `${formatBold(relationshipTitle)}\n\n${rendered.text}`,
+                holdingEvidence: "cached_position",
+                positionSnapshotAt: recipient.position_snapshot_at,
                 thesisKey: note.thesisKey,
                 thesisRootNoteId: note.thesisRootNoteId,
               }),
@@ -638,6 +645,11 @@ async function claimTelegramNotificationOutbox(input: {
           status = 'sending'
           and updated_at <= now() - interval '5 minutes'
         )
+        and (
+          topic <> 'order_filled'
+          or payload #>> '{data,source}' is distinct from 'telegram_bot'
+          or event_occurred_at <= now() - interval '30 seconds'
+        )
         order by next_attempt_at asc, created_at asc
         for update skip locked
         limit $1
@@ -658,6 +670,29 @@ async function claimTelegramNotificationOutbox(input: {
     [input.limit],
   );
   return rows;
+}
+
+async function hasTelegramTradeReceipt(input: {
+  db: DbQuery;
+  payload: unknown;
+}): Promise<boolean> {
+  if (!isRecord(input.payload)) return false;
+  const data = isRecord(input.payload.data) ? input.payload.data : null;
+  if (!data || readString(data, "source") !== "telegram_bot") return false;
+  const intentId = readString(data, "sourceIntentId");
+  if (!intentId || !UUID_RE.test(intentId)) return false;
+  const { rows } = await input.db.query<{ delivered: boolean }>(
+    `
+      select exists (
+        select 1
+        from telegram_trade_intents
+        where id = $1::uuid
+          and result #>> '{telegramReceipt,deliveredAt}' is not null
+      ) as delivered
+    `,
+    [intentId],
+  );
+  return rows[0]?.delivered === true;
 }
 
 async function loadTelegramNotificationDestination(input: {
@@ -915,6 +950,18 @@ export async function deliverTelegramNotificationOutbox(input: {
   const attemptedChats = new Set<string>();
 
   for (const row of rows) {
+    if (
+      row.topic === "order_filled" &&
+      (await hasTelegramTradeReceipt({ db: input.db, payload: row.payload }))
+    ) {
+      skipped += 1;
+      await markOutboxSkipped({
+        db: input.db,
+        id: row.id,
+        reason: "Telegram trade receipt already delivered.",
+      });
+      continue;
+    }
     const destination = await loadTelegramNotificationDestination({
       db: input.db,
       outboxId: row.id,

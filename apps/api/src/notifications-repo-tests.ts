@@ -65,6 +65,28 @@ await test("order notification dedupe keys are venue scoped", async () => {
   );
 });
 
+await test("order notifications preserve Telegram receipt provenance", async () => {
+  const notification = buildOrderNotification({
+    action: "SELL",
+    orderId: "telegram-order",
+    source: "telegram_bot",
+    sourceIntentId: "11111111-1111-4111-8111-111111111111",
+    userId: "user-1",
+    venue: "polymarket",
+  });
+  assert.deepEqual(
+    {
+      source: (notification.data as { source?: unknown }).source,
+      sourceIntentId: (notification.data as { sourceIntentId?: unknown })
+        .sourceIntentId,
+    },
+    {
+      source: "telegram_bot",
+      sourceIntentId: "11111111-1111-4111-8111-111111111111",
+    },
+  );
+});
+
 await test("venue-scoped order notifications migrate legacy dedupe keys", async () => {
   const queries: string[] = [];
   const params: unknown[][] = [];

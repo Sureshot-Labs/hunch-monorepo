@@ -6,6 +6,7 @@ import type { DbQuery } from "../db.js";
 export const telegramNotificationsPolicySchema = z
   .object({
     version: z.literal(1),
+    positionResolutionProducerEnabled: z.boolean().default(false),
     activityEnqueueEnabled: z.boolean(),
     positionSignalEnqueueEnabled: z.boolean(),
     deliveryEnabled: z.boolean(),
@@ -19,6 +20,7 @@ export type TelegramNotificationsPolicyV1 = z.infer<
 export const DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY: TelegramNotificationsPolicyV1 =
   Object.freeze({
     version: 1,
+    positionResolutionProducerEnabled: false,
     activityEnqueueEnabled: false,
     positionSignalEnqueueEnabled: false,
     deliveryEnabled: false,

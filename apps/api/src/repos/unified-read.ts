@@ -3837,6 +3837,98 @@ export async function fetchFeedMarketsDirect(
   );
 }
 
+export async function fetchFeedMarketSearchCandidateIds(
+  pool: Pool,
+  input: {
+    limit: number;
+    now: string;
+    query: string;
+    venues: string[];
+  },
+): Promise<string[]> {
+  if (input.limit <= 0 || input.venues.length === 0) return [];
+  const query = input.query.trim();
+  if (!query) return [];
+  const { params, add } = createParamBuilder();
+  const queryParam = add(query);
+  const venuesParam = add(input.venues);
+  const nowParam = add(input.now);
+  const limitParam = add(input.limit);
+  const eventDocument = buildFeedSearchDocumentExpr("e", "primary");
+  const marketDocument = buildFeedSearchDocumentExpr("m", "primary");
+  const orderable = buildOrderableMarketSql({
+    eventAlias: "e",
+    marketAlias: "m",
+    nowCloseParam: nowParam,
+    nowParam,
+    pmAlias: "pm_filter",
+  });
+  const renderable = buildRenderableMarketSql({ alias: "m" });
+  const rows = await queryRowsWithLocalSettings<{ id: string }>(
+    pool,
+    `
+      with search_query as materialized (
+        select websearch_to_tsquery('english', ${queryParam}::text) as value
+      ),
+      candidate_hits as materialized (
+        select
+          m.id,
+          0 as source_priority,
+          ts_rank_cd((${marketDocument}), search_query.value) as search_rank
+        from unified_markets m
+        join unified_events e on e.id = m.event_id
+        left join polymarket_markets pm_filter
+          on pm_filter.id = m.venue_market_id
+         and m.venue = 'polymarket'
+        cross join search_query
+        where m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and m.venue = any(${venuesParam}::text[])
+          and (${marketDocument}) @@ search_query.value
+          and ${orderable}
+          and ${renderable}
+        union all
+        select
+          m.id,
+          1 as source_priority,
+          ts_rank_cd((${eventDocument}), search_query.value) as search_rank
+        from unified_events e
+        join unified_markets m on m.event_id = e.id
+        left join polymarket_markets pm_filter
+          on pm_filter.id = m.venue_market_id
+         and m.venue = 'polymarket'
+        cross join search_query
+        where m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and m.venue = any(${venuesParam}::text[])
+          and (${eventDocument}) @@ search_query.value
+          and ${orderable}
+          and ${renderable}
+      ),
+      ranked as (
+        select
+          id,
+          min(source_priority) as source_priority,
+          max(search_rank) as search_rank
+        from candidate_hits
+        group by id
+      )
+      select id
+      from ranked
+      order by source_priority, search_rank desc nulls last, id
+      limit ${limitParam}
+    `,
+    params,
+    {
+      jitOff: true,
+      statementTimeoutMs: 4_000,
+      useSearchHint: true,
+      workMem: feedSearchWorkMem(),
+    },
+  );
+  return rows.map((row) => row.id);
+}
+
 export async function fetchFavoriteFeedEventPage(
   pool: Pool,
   inputs: FeedInputs,

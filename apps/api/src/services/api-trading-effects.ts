@@ -91,7 +91,7 @@ export async function applyOrderTradeEffects(
         walletAddress,
         venue,
         tokenId,
-        side: "BUY",
+        side: input.intent.action,
         shares: input.submitResult.size,
         notionalUsd: input.submitResult.size * input.submitResult.price,
       });
@@ -117,12 +117,21 @@ export async function applyOrderTradeEffects(
         userId: input.intent.actor.userId,
         venue,
         status,
-        action: "BUY",
+        action: input.intent.action,
+        outcomeSide:
+          input.intent.outcome === "YES" || input.intent.outcome === "NO"
+            ? input.intent.outcome
+            : null,
         size: input.submitResult.size,
         price: input.submitResult.price,
         orderId: input.submitResult.venueOrderId,
         tokenId,
         walletAddress,
+        marketId: input.intent.target.marketId,
+        source:
+          input.intent.actor.kind === "telegram_bot" ? "telegram_bot" : null,
+        sourceIntentId:
+          input.intent.actor.kind === "telegram_bot" ? input.intent.id : null,
       }),
       ctx.logger as never,
     );
