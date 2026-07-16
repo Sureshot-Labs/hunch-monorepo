@@ -2719,6 +2719,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       let insertCount = 0;
       let marketOrderable = true;
+      let marketVenue = "polymarket";
       let readinessMode: "auto" | "disabled" = "disabled";
       const db = {
         query: async (sql: string) => {
@@ -2787,7 +2788,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   id: "market-1",
-                  venue: "polymarket",
+                  venue: marketVenue,
                   venue_market_id: "venue-market-1",
                   event_id: "event-1",
                   event_title: "Event",
@@ -2909,6 +2910,43 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.match(closedMessage.text, /not open for new bot trades/i);
+
+      marketOrderable = true;
+      marketVenue = "limitless";
+      const appFallbackMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramUserId: 999,
+        trading: {
+          getReadiness: async () =>
+            buildTestPolymarketReadiness({
+              code: "unsupported_capability",
+              message: "Direct bot trading is disabled for this venue.",
+            }),
+        } as never,
+      });
+      assert.doesNotMatch(
+        appFallbackMessage.text,
+        /venue is disabled by runtime policy/i,
+      );
+      assert.match(
+        appFallbackMessage.text,
+        /Direct bot trading is not enabled for Limitless/i,
+      );
+      const appFallbackButtons =
+        appFallbackMessage.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(
+        appFallbackButtons.some((button) => "callback_data" in button),
+        false,
+      );
+      assert.equal(appFallbackButtons[0]?.text, "Trade in Hunch");
+      const appFallbackUrl = appFallbackButtons
+        .map((button) => ("url" in button ? button.url : null))
+        .find((url): url is string => Boolean(url));
+      assert.match(appFallbackUrl ?? "", /\/events\/event-1\?market=market-1/);
     },
   },
   {

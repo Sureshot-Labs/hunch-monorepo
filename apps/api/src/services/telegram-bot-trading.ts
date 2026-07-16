@@ -2890,18 +2890,28 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   } else if (unresolvedIntent) {
     lines.push("", EXISTING_TRADE_RESOLVING_MESSAGE);
   }
+  const canTradeInHunch = marketOrderable && buyAllowed;
+  const hunchFallbackCopy = canTradeInHunch
+    ? "You can still trade in Hunch."
+    : "Open the market in Hunch.";
   if (!policy.tradingEnabled) {
-    lines.push("", "Trading is disabled by runtime policy.");
+    lines.push("", `Direct bot trading is unavailable. ${hunchFallbackCopy}`);
   } else if (!status.linked) {
-    lines.push("", "Link Telegram to your Hunch account in Settings first.");
+    lines.push(
+      "",
+      `Link Telegram in Settings for direct bot trading. ${hunchFallbackCopy}`,
+    );
   } else if (!status.enabled) {
-    lines.push("", "Enable Telegram bot trading in Settings first.");
+    lines.push("", `Direct bot trading is disabled. ${hunchFallbackCopy}`);
   } else if (!policyVenueAllowed) {
-    lines.push("", "This venue is disabled by runtime policy.");
+    lines.push(
+      "",
+      `Direct bot trading is not enabled for ${formatTelegramVenueLabel(market.venue)}. ${hunchFallbackCopy}`,
+    );
   } else if (!authorizationVenueAllowed) {
     lines.push(
       "",
-      "Enable a compatible wallet for this venue in Settings first.",
+      `This Trading Wallet is not enabled for direct bot trading on this venue. ${hunchFallbackCopy}`,
     );
   } else if (!marketOrderable && !redeemPlan) {
     lines.push("", "This market is not open for new bot trades.");
@@ -3008,7 +3018,14 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       keyboard.push([{ text: "Redeem", url: openUrl }]);
     }
   }
-  keyboard.push([{ text: "Open market", url: openUrl }]);
+  const hasBotAction =
+    buyOptions.length > 0 || sellOptions.length > 0 || Boolean(redeemPlan);
+  keyboard.push([
+    {
+      text: !hasBotAction && canTradeInHunch ? "Trade in Hunch" : "Open market",
+      url: openUrl,
+    },
+  ]);
   if (input.context?.returnCallbackData) {
     keyboard.push([
       { callback_data: input.context.returnCallbackData, text: "◀ Back" },
