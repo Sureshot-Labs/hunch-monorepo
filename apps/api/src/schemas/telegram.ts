@@ -28,3 +28,16 @@ export const telegramContextErrorResponseSchema = z.object({
   reason: z.string().optional(),
   message: z.string().optional(),
 });
+
+export const telegramGroupMembershipStateSchema = z.enum([
+  "member",
+  "not_member",
+  "telegram_not_linked",
+  "unavailable",
+]);
+
+export const telegramGroupMembershipResponseSchema = z.object({
+  cached: z.boolean(),
+  checkedAt: z.string(),
+  state: telegramGroupMembershipStateSchema,
+});

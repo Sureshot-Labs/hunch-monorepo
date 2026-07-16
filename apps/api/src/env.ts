@@ -382,6 +382,10 @@ const authAccessState = parseEnum(
 const telegramMiniAppEnabled =
   parseOptionalBool(process.env.HUNCH_TELEGRAM_MINI_APP_ENABLED) ?? false;
 const telegramBotToken = process.env.HUNCH_TELEGRAM_BOT_TOKEN?.trim() || "";
+const telegramMembershipBotId =
+  process.env.HUNCH_TELEGRAM_MEMBERSHIP_BOT_ID?.trim() || "8822816999";
+const telegramMembershipChatId =
+  process.env.HUNCH_TELEGRAM_MEMBERSHIP_CHAT_ID?.trim() || "-1003910565409";
 const telegramInitDataMaxAgeSeconds = optionalPositiveInt(
   "HUNCH_TELEGRAM_INIT_DATA_MAX_AGE_SECONDS",
   300,
@@ -874,6 +878,8 @@ export const env = {
   authAccessState,
   telegramMiniAppEnabled,
   telegramBotToken,
+  telegramMembershipBotId,
+  telegramMembershipChatId,
   telegramInitDataMaxAgeSeconds,
   telegramNewUsersEnabled,
   embeddedSolanaSponsorshipEnabled,
