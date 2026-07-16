@@ -2054,7 +2054,7 @@ export async function bootstrapLimitless() {
   await pool.query("select 1");
   await ensureRedis();
 
-  const markets = await fetchAllActive(
+  const fetched = await fetchAllActive(
     env.bootstrapMaxPages,
     env.bootstrapPageSize,
     {
@@ -2068,13 +2068,18 @@ export async function bootstrapLimitless() {
       },
     },
   );
-  const { eventCount, marketCount } = await processFetchedMarkets(markets, {
-    logEach: false,
-    progressEvery: 25,
-    progressLabel: "Limitless full bootstrap progress",
-  });
+  const { eventCount, marketCount } = await processFetchedMarkets(
+    fetched.markets,
+    {
+      logEach: false,
+      progressEvery: 25,
+      progressLabel: "Limitless full bootstrap progress",
+    },
+  );
 
+  log.info("Limitless full bootstrap coverage", fetched.coverage);
   log.info(`Bootstrap complete: events=${eventCount} markets=${marketCount}`);
+  return { eventCount, marketCount, coverage: fetched.coverage };
 }
 
 export async function ensureStartupWsTargets(): Promise<WsTargets> {

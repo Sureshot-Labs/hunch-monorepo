@@ -275,7 +275,7 @@ async function periodicFullBootstrap() {
   const startedAt = Date.now();
   try {
     log.info("Limitless full bootstrap started");
-    await bootstrapLimitless();
+    const result = await bootstrapLimitless();
     resubscribeMarketWSSubscriptions();
     log.info("Limitless full bootstrap finished", {
       durationMs: Date.now() - startedAt,
@@ -284,6 +284,7 @@ async function periodicFullBootstrap() {
       hotRefresh: {
         fullBootstrapLastRunAt: new Date(startedAt).toISOString(),
         fullBootstrapDurationMs: Date.now() - startedAt,
+        fullBootstrapCoverage: result.coverage,
       },
       lastError: null,
     });

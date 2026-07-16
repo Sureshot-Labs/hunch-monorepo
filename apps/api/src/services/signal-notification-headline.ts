@@ -1,10 +1,19 @@
 import type { MarketSideCopy } from "./market-side-copy.js";
+import type { TelegramMarketPresentationV1 } from "./telegram-market-presentation.js";
+import {
+  DEFAULT_SIGNAL_POST_COPY_POLICY,
+  type SignalPostCopyPolicyV1,
+} from "./signal-post-copy-policy.js";
 
 export type SignalNotificationSubject = {
   preservedFields: Array<"deadline" | "outcome" | "predicate" | "threshold">;
-  source: "market_side_copy" | "natural_market_proposition" | "safe_full_title";
+  source:
+    | "canonical_market_presentation"
+    | "market_side_copy"
+    | "natural_market_proposition"
+    | "safe_full_title";
   text: string;
-  version: "signal_notification_subject_v2";
+  version: "signal_notification_subject_v3";
 };
 
 export type SignalNotificationStoryKind =
@@ -28,9 +37,6 @@ export type SignalNotificationHeadline = {
   text: string;
   visibleLength: number;
 };
-
-const MATERIAL_FLOW_USD = 10_000;
-const STRONG_PRICE_MOVE_CENTS = 5;
 
 function cleanText(value: string | null | undefined): string | null {
   const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
@@ -129,7 +135,32 @@ export function buildSignalNotificationSubject(input: {
   marketTitle?: string | null;
   side: "NO" | "YES";
   sideCopy: MarketSideCopy;
+  presentation?: TelegramMarketPresentationV1 | null;
 }): SignalNotificationSubject {
+  if (input.presentation) {
+    const position = input.presentation.positions[input.side];
+    const subject = cleanText(input.presentation.subject) ?? "this market";
+    const text =
+      input.presentation.source === "approved_override"
+        ? subject
+        : position.canonicalLabel !== input.side &&
+            !subject
+              .toLocaleLowerCase("en-US")
+              .includes(position.canonicalLabel.toLocaleLowerCase("en-US"))
+          ? `${position.canonicalLabel} in ${subject}`
+          : `${input.side} on ${input.presentation.predicate}`;
+    return {
+      preservedFields: [
+        "predicate",
+        "outcome",
+        ...(input.presentation.threshold ? (["threshold"] as const) : []),
+        ...(input.presentation.deadline ? (["deadline"] as const) : []),
+      ],
+      source: "canonical_market_presentation",
+      text,
+      version: "signal_notification_subject_v3",
+    };
+  }
   const eventTitle = cleanText(input.eventTitle);
   const marketTitle = cleanText(input.marketTitle);
   const natural = buildNaturalSubject({
@@ -157,7 +188,7 @@ export function buildSignalNotificationSubject(input: {
         ? "market_side_copy"
         : "safe_full_title",
     text,
-    version: "signal_notification_subject_v2",
+    version: "signal_notification_subject_v3",
   };
 }
 
@@ -220,7 +251,9 @@ export function buildSignalNotificationHeadline(input: {
   strongWallets?: number | null;
   subject: SignalNotificationSubject;
   trimmedWallets?: number;
+  policy?: SignalPostCopyPolicyV1;
 }): SignalNotificationHeadline {
+  const policy = input.policy ?? DEFAULT_SIGNAL_POST_COPY_POLICY;
   const currentPrice =
     input.currentPrice != null &&
     Number.isFinite(input.currentPrice) &&
@@ -246,9 +279,9 @@ export function buildSignalNotificationHeadline(input: {
   const positionLabel = cleanText(input.positionLabel) ?? input.subject.text;
   const contradictoryBreadth =
     exitedWallets > 0 || trimmedWallets > joinedWallets;
-  const materialPositiveFlow = netFlow >= MATERIAL_FLOW_USD;
+  const materialPositiveFlow = netFlow >= policy.materialNetFlowUsd;
   const strongPositiveMove =
-    priceMove != null && priceMove >= STRONG_PRICE_MOVE_CENTS;
+    priceMove != null && priceMove >= policy.strongPriceMoveCents;
 
   let storyKind: SignalNotificationStoryKind;
   let templateKey: string;
@@ -281,7 +314,7 @@ export function buildSignalNotificationHeadline(input: {
       }`;
     } else if (
       input.actorMode === "single_holder" &&
-      holderPositionUsd >= 1_000
+      holderPositionUsd >= policy.materialSingleWalletUsd
     ) {
       templateKey = "initial_position_size_v2";
       primaryMetric = formatCompactUsd(holderPositionUsd);
@@ -304,7 +337,11 @@ export function buildSignalNotificationHeadline(input: {
     templateKey = "cooling_v2";
     primaryMetric = netFlow !== 0 ? formatCompactUsd(netFlow) : null;
     text = `⚠️ ${input.subject.text} is losing wallet support`;
-  } else if (priceMove != null && priceMove <= -2 && netFlow > 0) {
+  } else if (
+    priceMove != null &&
+    priceMove <= -policy.minimumPriceMoveCents &&
+    netFlow > 0
+  ) {
     storyKind = "divergence";
     templateKey = "divergence_inflow_price_down_v2";
     primaryMetric = formatMove(priceMove);
@@ -330,7 +367,7 @@ export function buildSignalNotificationHeadline(input: {
     text = `💰 ${formatCompactUsd(netFlow)} net flow backs ${input.subject.text}`;
   } else if (
     priceMove != null &&
-    Math.abs(priceMove) >= 2 &&
+    Math.abs(priceMove) >= policy.minimumPriceMoveCents &&
     currentPrice != null
   ) {
     storyKind = "price_move";
@@ -361,12 +398,15 @@ export function buildSignalNotificationHeadline(input: {
     text = `👀 ${input.subject.text} is on the radar`;
   }
 
-  if (visibleLength(text) > 80 && textWithoutSupportingClause != null) {
+  if (
+    visibleLength(text) > policy.headlineMaxGraphemes &&
+    textWithoutSupportingClause != null
+  ) {
     text = textWithoutSupportingClause;
   }
   const length = visibleLength(text);
   return {
-    lintExceeded: length > 80,
+    lintExceeded: length > policy.headlineMaxGraphemes,
     primaryMetric,
     storyKind,
     subjectVersion: input.subject.version,

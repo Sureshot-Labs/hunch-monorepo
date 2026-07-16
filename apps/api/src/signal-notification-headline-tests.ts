@@ -5,6 +5,10 @@ import {
   buildSignalNotificationHeadline,
   buildSignalNotificationSubject,
 } from "./services/signal-notification-headline.js";
+import {
+  normalizeTelegramPresentationAliases,
+  resolveTelegramMarketPresentation,
+} from "./services/telegram-market-presentation.js";
 
 function subject(input: {
   eventTitle?: string;
@@ -28,6 +32,97 @@ function subject(input: {
 }
 
 const tests: Array<{ name: string; run: () => void }> = [
+  {
+    name: "approved presentation normalizes exact esports aliases",
+    run: () => {
+      const resolved = resolveTelegramMarketPresentation({
+        eventTitle: "League of Legends winner",
+        marketTitle: "Bilibili Gaming",
+        metadata: {
+          hunch: {
+            telegramPresentationV1: {
+              version: 1,
+              reviewStatus: "approved",
+              subject: "League of Legends winner",
+              predicate: "Bilibili Gaming wins",
+              threshold: null,
+              deadline: "December 31",
+              positions: {
+                YES: {
+                  canonicalLabel: "Bilibili Gaming",
+                  shortLabel: "Bilibili Gaming",
+                  aliases: ["BGL", "BLG"],
+                },
+                NO: {
+                  canonicalLabel: "NO on Bilibili Gaming",
+                  shortLabel: "NO",
+                  aliases: [],
+                },
+              },
+              provenance: {
+                reviewedBy: "00000000-0000-4000-8000-000000000001",
+                reviewedAt: "2026-01-01T00:00:00.000Z",
+              },
+            },
+          },
+        },
+      });
+      assert.equal(resolved.presentation.source, "approved_override");
+      assert.equal(
+        normalizeTelegramPresentationAliases(
+          "BLG added while BGL remains quoted.",
+          resolved.presentation,
+        ),
+        "Bilibili Gaming added while Bilibili Gaming remains quoted.",
+      );
+    },
+  },
+  {
+    name: "conflicting approved aliases fail closed to raw proposition",
+    run: () => {
+      const resolved = resolveTelegramMarketPresentation({
+        eventTitle: "World Cup winner",
+        marketTitle: "Spain",
+        metadata: {
+          hunch: {
+            telegramPresentationV1: {
+              version: 1,
+              reviewStatus: "approved",
+              subject: "World Cup winner",
+              predicate: "Spain wins",
+              threshold: null,
+              deadline: null,
+              positions: {
+                YES: {
+                  canonicalLabel: "Spain",
+                  shortLabel: "Spain",
+                  aliases: ["ESP"],
+                },
+                NO: {
+                  canonicalLabel: "Field",
+                  shortLabel: "Field",
+                  aliases: ["ESP"],
+                },
+              },
+              provenance: {
+                reviewedBy: "00000000-0000-4000-8000-000000000001",
+                reviewedAt: "2026-01-01T00:00:00.000Z",
+              },
+            },
+          },
+        },
+      });
+      assert.equal(resolved.presentation.source, "safe_fallback");
+      assert.deepEqual(resolved.diagnostics, [
+        "alias_conflict",
+        "safe_fallback",
+      ]);
+      assert.equal(
+        resolved.presentation.positions.NO.canonicalLabel,
+        "NO on Spain",
+      );
+    },
+  },
   {
     name: "generic NO subjects do not invent a complementary proposition",
     run: () => {

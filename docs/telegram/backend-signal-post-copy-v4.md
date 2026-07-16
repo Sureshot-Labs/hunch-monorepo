@@ -1,7 +1,7 @@
-# Backend Task: Complete and Roll Out Signal Post V4
+# Backend Task: Complete and Roll Out Signal Post V4.1
 
-Status: renderer implemented locally; backend data contract and live QA remain  
-Priority: P0 before the next public-channel copy rollout  
+Status: V4.1 contract implemented locally; automated verification and live QA remain
+Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
 ## Goal
@@ -15,7 +15,8 @@ to rebuild its formatting from scratch.
 
 The current worktree contains:
 
-- `signal_bot_copy_v4` and `signal_notification_subject_v2` copy audits;
+- `signal_bot_copy_v4_1`, `signal_notification_subject_v3`,
+  `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
 - notification-first headlines with money, momentum, confluence,
   participation, cooling/divergence, research, and resolution stories;
 - `💰` for material capital, `📈`/`📉` for price, `🎯` for strong-wallet
@@ -110,20 +111,21 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## Remaining Backend Work
+## V4.1 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
-Add a reviewed, versioned presentation contract to normalized market metadata:
+The reviewed presentation contract is stored in
+`unified_markets.metadata.hunch.telegramPresentationV1`:
 
 ```text
-telegramSubject
-telegramShortPosition
-canonicalOutcomeLabel
-displayAliases[]
+subject
 predicate
 threshold
 deadline
+positions.YES|NO.canonicalLabel
+positions.YES|NO.shortLabel
+positions.YES|NO.aliases[]
 provenance
 version
 reviewStatus
@@ -143,8 +145,8 @@ Acceptance:
 
 ### 2. Structured evidence instead of prose parsing
 
-Expose typed evidence rows rather than only `credentialBullets` and external
-summary prose:
+New notes persist typed evidence rows rather than relying on
+`credentialBullets` and external summary prose:
 
 ```text
 kind: track_record | pricing_edge | volume | conviction | capital | outside_odds
@@ -158,8 +160,10 @@ asOf
 quality
 ```
 
-The local formatter recognizes a small set of legacy credential sentences for
-backward compatibility. That parser is not the long-term data contract.
+The isolated `legacy-signal-evidence` adapter recognizes a small set of old
+credential sentences only when a stored note has no typed evidence contract.
+Versioned new notes, including an intentionally empty evidence array, never
+fall back to prose parsing.
 
 Acceptance:
 
@@ -173,10 +177,11 @@ Acceptance:
 
 ### 3. Versioned materiality policy
 
-Review the local starting thresholds (`$10K` material net flow and `5¢` strong
-price move) against production distributions. Move approved thresholds into a
-typed runtime policy by market segment if needed. Persist the effective policy
-version in the copy audit.
+The local starting thresholds (`$10K` material net flow, `$1K` single-wallet
+position, `2¢` minimum move, `5¢` strong move, and `80`-grapheme lint target)
+live in the full-snapshot `signal_post_copy` runtime policy. The effective
+revision is persisted in copy audit. Operator review against production
+distributions remains required before public rollout.
 
 Do not tune for click-through alone. Guardrails must track misleading-headline,
 cooling, divergence, and correction rates.
@@ -201,7 +206,8 @@ survive the preview.
 
 ### 5. Rollout telemetry
 
-Track by copy/policy version:
+V4.1 records the following by copy/policy version; production validation is
+still required:
 
 - story/template distribution;
 - subject source, fallback, conflict, and over-80 lint rates;
@@ -209,6 +215,10 @@ Track by copy/policy version:
 - Buy initiation and completion;
 - delivery failures and Markdown parse failures;
 - cooling/divergence frequency after positive initial alerts.
+
+Mini App market and Buy payloads may carry the opaque
+`signal_bot_messages.id` as `deliveryRef`. Frontend analytics expose it as
+`signal_delivery_ref`; chat IDs are never included.
 
 ## Acceptance Criteria
 

@@ -68,6 +68,11 @@ import {
 } from "../services/runtime-policies.js";
 import { clearSignalBotVenueLifecycleCache } from "../services/signal-bot-venue-lifecycle.js";
 import { clearTelegramNotificationsPolicyCache } from "../services/telegram-notification-policy.js";
+import {
+  buildSignalPostCopyPolicyRevision,
+  clearSignalPostCopyPolicyCache,
+  signalPostCopyPolicySchema,
+} from "../services/signal-post-copy-policy.js";
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
@@ -87,6 +92,9 @@ import {
   adminFeePolicySchema,
   adminIntelPolicyBodySchema,
   adminIntelPolicyParamsSchema,
+  adminMarketPresentationBodySchema,
+  adminMarketPresentationParamsSchema,
+  adminMarketPresentationSearchSchema,
   adminDebridgeConfigSchema,
   adminManualPointsParamsSchema,
   adminManualPointsQuerySchema,
@@ -121,6 +129,7 @@ import {
   adminUsersQuerySchema,
   adminUsersResponseSchema,
 } from "../schemas/admin.js";
+
 import {
   fetchAnalyticsForwardingTelemetry,
   listCollectedAnalyticsEvents,
@@ -157,6 +166,31 @@ import {
   fetchUnifiedOrders,
   mapUnifiedOrder,
 } from "../repos/unified-orders.js";
+import {
+  deleteAdminMarketPresentation,
+  getAdminMarketPresentation,
+  putAdminMarketPresentation,
+  searchAdminMarketPresentations,
+} from "../services/admin-market-presentations.js";
+
+function resolvedAdminIntelPolicyRevision(input: {
+  effective: unknown;
+  effectiveAt: Date | string | null;
+  invalidOverride: boolean;
+  key: IntelPolicyKey;
+  source: "db" | "default" | "env";
+}): string | null {
+  if (input.key === "venue_lifecycle") {
+    return resolvedVenueLifecyclePolicyRevision(input);
+  }
+  if (input.key === "signal_post_copy") {
+    const parsed = signalPostCopyPolicySchema.safeParse(input.effective);
+    return parsed.success
+      ? buildSignalPostCopyPolicyRevision(parsed.data)
+      : null;
+  }
+  return null;
+}
 
 const MAX_FEE_SCALE = 10_000;
 const MAX_FEE_BPS = 10_000;
@@ -5998,6 +6032,83 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   );
 
   z.get(
+    "/admin/intel/market-presentations/search",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:read",
+      }),
+      schema: { querystring: adminMarketPresentationSearchSchema },
+    },
+    async (request, reply) => {
+      const items = await searchAdminMarketPresentations(pool, request.query.q);
+      return reply.send({ ok: true, items });
+    },
+  );
+
+  z.get(
+    "/admin/intel/market-presentations/:marketId",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:read",
+      }),
+      schema: { params: adminMarketPresentationParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await getAdminMarketPresentation(
+        pool,
+        request.params.marketId,
+      );
+      if (!item) return reply.code(404).send({ error: "Market not found" });
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.put(
+    "/admin/intel/market-presentations/:marketId",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:write",
+      }),
+      schema: {
+        params: adminMarketPresentationParamsSchema,
+        body: adminMarketPresentationBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const reviewedBy = request.user?.id;
+      if (!reviewedBy) {
+        return reply.code(401).send({ error: "Admin identity is required" });
+      }
+      const item = await putAdminMarketPresentation({
+        db: pool,
+        marketId: request.params.marketId,
+        override: request.body,
+        reviewedBy,
+      });
+      if (!item) return reply.code(404).send({ error: "Market not found" });
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.delete(
+    "/admin/intel/market-presentations/:marketId",
+    {
+      preHandler: createAdminMiddleware({
+        requiredAdminPermission: "intel:write",
+      }),
+      schema: { params: adminMarketPresentationParamsSchema },
+    },
+    async (request, reply) => {
+      const item = await deleteAdminMarketPresentation(
+        pool,
+        request.params.marketId,
+      );
+      if (!item) return reply.code(404).send({ error: "Market not found" });
+      return reply.send({ ok: true, item });
+    },
+  );
+
+  z.get(
     "/admin/intel/policies",
     {
       preHandler: createAdminMiddleware({
@@ -6017,10 +6128,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           override: item.override,
           effective: item.effective,
           invalidOverride: item.invalidOverride,
-          revision:
-            key === "venue_lifecycle"
-              ? resolvedVenueLifecyclePolicyRevision(item)
-              : null,
+          revision: resolvedAdminIntelPolicyRevision(item),
         };
       });
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -6053,10 +6161,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         override: item.override,
         effective: item.effective,
         invalidOverride: item.invalidOverride,
-        revision:
-          key === "venue_lifecycle"
-            ? resolvedVenueLifecyclePolicyRevision(item)
-            : null,
+        revision: resolvedAdminIntelPolicyRevision(item),
       });
     },
   );
@@ -6106,6 +6211,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         if (key === "telegram_notifications") {
           clearTelegramNotificationsPolicyCache(pool);
         }
+        if (key === "signal_post_copy") {
+          clearSignalPostCopyPolicyCache(pool);
+        }
         const resolved = await resolveIntelPolicy(pool, key);
 
         reply.header("Content-Type", "application/json; charset=utf-8");
@@ -6127,10 +6235,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             override: resolved.override,
             effective: resolved.effective,
             invalidOverride: resolved.invalidOverride,
-            revision:
-              key === "venue_lifecycle"
-                ? resolvedVenueLifecyclePolicyRevision(resolved)
-                : null,
+            revision: resolvedAdminIntelPolicyRevision(resolved),
           },
         });
       } catch (error) {

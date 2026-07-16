@@ -7,12 +7,13 @@ import {
 } from "@hunch/shared";
 import type { PoolClient } from "pg";
 
-import type {
-  HolderResearchAgentOutputV1,
-  HolderResearchBucket,
-  HolderResearchExternalResearchV2,
-  HolderResearchFinalOutputV2,
-  HolderResearchStatus,
+import {
+  parseHolderResearchExternalResearchV2,
+  type HolderResearchAgentOutputV1,
+  type HolderResearchBucket,
+  type HolderResearchExternalResearchV2,
+  type HolderResearchFinalOutputV2,
+  type HolderResearchStatus,
 } from "../schemas/holder-research.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import {
@@ -30,6 +31,8 @@ import {
   buildMarketSideCopyPair,
   type MarketSideCopy,
 } from "./market-side-copy.js";
+import { resolveTelegramMarketPresentation } from "./telegram-market-presentation.js";
+import { buildHolderResearchSignalEvidence } from "./holder-research-signal-evidence.js";
 import {
   buildWalletIntelAcceptingOrdersSql,
   buildWalletIntelTrackableMarketSql,
@@ -169,6 +172,7 @@ export type HolderResearchMarketInput = {
   marketTitle: string;
   marketSlug: string | null;
   marketDescription: string | null;
+  metadata?: unknown;
   outcomes: string[] | null;
   eventTitle: string | null;
   eventSlug: string | null;
@@ -537,6 +541,7 @@ type HolderResearchMarketRow = {
   market_title: string | null;
   market_slug: string | null;
   market_description: string | null;
+  market_metadata: unknown;
   outcomes: string | null;
   event_title: string | null;
   event_slug: string | null;
@@ -3532,6 +3537,7 @@ function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
     marketTitle: row.market_title ?? row.market_id,
     marketSlug: safeText(row.market_slug),
     marketDescription: compactText(row.market_description, 1_200),
+    metadata: row.market_metadata,
     outcomes: parseMarketOutcomes(row.outcomes),
     eventTitle: row.event_title,
     eventSlug: safeText(row.event_slug),
@@ -3964,6 +3970,7 @@ async function loadHolderResearchCandidateMarketsFromPositionSource(
         um.title as market_title,
         um.slug as market_slug,
         um.description as market_description,
+        um.metadata as market_metadata,
         um.outcomes,
         ue.title as event_title,
         ue.slug as event_slug,
@@ -4790,6 +4797,9 @@ export function buildHolderResearchCandidatePromptJson(
   const quality = policy
     ? buildHolderResearchQualityAssessment(candidate, policy)
     : null;
+  const contracts = policy
+    ? buildHolderResearchPromptContracts({ candidate, policy })
+    : null;
   return {
     key: candidate.key,
     digest: candidate.inputDigest,
@@ -4810,6 +4820,8 @@ export function buildHolderResearchCandidatePromptJson(
         : buildHolderEntryContext(candidate),
     actor,
     quality,
+    presentation: contracts?.presentation.presentation ?? null,
+    evidenceMetrics: contracts?.evidenceMetrics ?? [],
     sides: {
       YES: compactPromptSide(candidate.market.sides.YES),
       NO: compactPromptSide(candidate.market.sides.NO),
@@ -4967,9 +4979,12 @@ export function buildHolderResearchTriageCandidatePromptJsonV2(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
 ): Record<string, unknown> {
+  const contracts = buildHolderResearchPromptContracts({ candidate, policy });
   return {
     key: candidate.key,
-    decisionFeatures: buildHolderResearchDecisionFeaturesV2(candidate, policy),
+    decisionFeatures: contracts.features,
+    presentation: contracts.presentation.presentation,
+    evidenceMetrics: contracts.evidenceMetrics,
   };
 }
 
@@ -4978,9 +4993,16 @@ export function buildHolderResearchCandidatePromptJsonV2(
   policy: HolderResearchPolicy,
   externalResearch: HolderResearchExternalResearchV2,
 ): Record<string, unknown> {
+  const contracts = buildHolderResearchPromptContracts({
+    candidate,
+    externalResearch,
+    policy,
+  });
   return {
     key: candidate.key,
-    decisionFeatures: buildHolderResearchDecisionFeaturesV2(candidate, policy),
+    decisionFeatures: contracts.features,
+    presentation: contracts.presentation.presentation,
+    evidenceMetrics: contracts.evidenceMetrics,
     holders: selectPromptHoldersV2(candidate, policy).map((holder) =>
       compactPromptHolderV2(holder, policy),
     ),
@@ -5069,6 +5091,49 @@ function buildHolderResearchSideCopies(market: HolderResearchMarketInput) {
     outcomes: market.outcomes,
     resolutionSource: market.resolutionSource,
   });
+}
+
+function buildHolderResearchPresentation(market: HolderResearchMarketInput) {
+  return resolveTelegramMarketPresentation({
+    eventDescription: market.eventDescription,
+    eventTitle: market.eventTitle,
+    marketDescription: market.marketDescription,
+    marketSegment: classifyHolderResearchMarketSegment(market),
+    marketSlug: market.marketSlug,
+    marketTitle: market.marketTitle,
+    outcomes: market.outcomes,
+    resolutionSource: market.resolutionSource,
+    closeTime: market.closeTime,
+    expirationTime: market.expirationTime,
+    metadata: market.metadata,
+  });
+}
+
+function buildHolderResearchPromptContracts(input: {
+  candidate: HolderResearchCandidate;
+  externalResearch?: HolderResearchExternalResearchV2 | null;
+  policy: HolderResearchPolicy;
+}) {
+  const features = buildHolderResearchDecisionFeaturesV2(
+    input.candidate,
+    input.policy,
+  );
+  const actor = buildHolderResearchActorSummary({
+    candidate: input.candidate,
+    evidenceIds: input.candidate.evidence.map((evidence) => evidence.id),
+    policy: input.policy,
+  });
+  return {
+    features,
+    presentation: buildHolderResearchPresentation(input.candidate.market),
+    evidenceMetrics: buildHolderResearchSignalEvidence({
+      actor,
+      candidate: input.candidate,
+      externalResearch: input.externalResearch,
+      externalSearchWindowHours: input.policy.externalSearchWindowHours,
+      features,
+    }),
+  };
 }
 
 function compactPromptMarket(
@@ -5223,6 +5288,7 @@ export function buildHolderResearchTriageCandidatePromptJson(
     candidate,
     policy,
   );
+  const contracts = buildHolderResearchPromptContracts({ candidate, policy });
   return {
     key: candidate.key,
     bucket: candidate.bucket,
@@ -5251,6 +5317,8 @@ export function buildHolderResearchTriageCandidatePromptJson(
       actorMode: actor.mode,
       marketSegment: quality.marketSegment,
     },
+    presentation: contracts.presentation.presentation,
+    evidenceMetrics: contracts.evidenceMetrics,
     sides: {
       YES: compactPromptSide(candidate.market.sides.YES),
       NO: compactPromptSide(candidate.market.sides.NO),
@@ -5897,6 +5965,21 @@ export async function persistHolderResearchNotes(
       evidenceIds: decision.output.evidence_ids,
       policy: params.policy,
     });
+    const decisionFeatures = buildHolderResearchDecisionFeaturesV2(
+      candidate,
+      params.policy,
+    );
+    const presentation = buildHolderResearchPresentation(candidate.market);
+    const externalResearch = parseHolderResearchExternalResearchV2(
+      decision.modelMeta.external_research,
+    );
+    const signalEvidence = buildHolderResearchSignalEvidence({
+      actor: actorSummary,
+      candidate,
+      externalResearch,
+      externalSearchWindowHours: params.policy.externalSearchWindowHours,
+      features: decisionFeatures,
+    });
 
     try {
       await client.query("begin");
@@ -6036,6 +6119,10 @@ export async function persistHolderResearchNotes(
             bucket: candidate.bucket,
             side: candidate.side,
             sideCopy: sideCopy ? compactHolderResearchSideCopy(sideCopy) : null,
+            telegramPresentation: presentation.presentation,
+            telegramPresentationDiagnostics: presentation.diagnostics,
+            signalEvidence,
+            signalEvidenceVersion: 1,
             quality: buildHolderResearchQualityAssessment(
               candidate,
               params.policy,

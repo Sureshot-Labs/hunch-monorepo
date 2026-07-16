@@ -48,6 +48,17 @@ type AggClusterMarketRow = {
   event_image: string | null;
   event_icon: string | null;
   event_category: string | null;
+  canonical_active: boolean;
+  canonical_orderable: boolean;
+};
+
+export type AggMarketAlternativesDiagnostics = {
+  aggNoMatch: number;
+  targetSearchEmpty: number;
+  externalMatchUnindexed: number;
+  canonicalMarketInactive: number;
+  outcomeMappingMissing: number;
+  priceUnavailable: number;
 };
 
 export type AggClusterSortBy = "spread" | "volume24h";
@@ -138,6 +149,7 @@ export type AggMarketAlternativesResponse = {
   markets: ClusterMarketSummary[];
   alternatives: ClusterMarketSummary[];
   matchDiagnostics: AggClusterSummary["matchDiagnostics"] | null;
+  diagnostics: AggMarketAlternativesDiagnostics;
 };
 
 export type AggMarketAlternativesCacheClient = {
@@ -190,6 +202,17 @@ type DbMatchedMarket = {
   matchMethod: "externalIdentifier" | "conditionId";
 };
 
+function createAggAlternativesDiagnostics(): AggMarketAlternativesDiagnostics {
+  return {
+    aggNoMatch: 0,
+    targetSearchEmpty: 0,
+    externalMatchUnindexed: 0,
+    canonicalMarketInactive: 0,
+    outcomeMappingMissing: 0,
+    priceUnavailable: 0,
+  };
+}
+
 type CacheEntry<T> = {
   expiresAt: number;
   value: T;
@@ -224,6 +247,7 @@ const DEFAULTS: AggClusterDefaults = {
 };
 
 const MAX_AGG_DB_SELECTED_SIDE_DEVIATION = 0.25;
+const AGG_ALTERNATIVE_REQUEST_HARD_CAP = 6;
 
 function normalizeCategory(value: string | null | undefined): string | null {
   const normalized = value?.trim();
@@ -509,6 +533,7 @@ function pairKey(
 async function loadMatchedMarketRows(
   db: DbQuery,
   groups: NormalizedAggGroup[],
+  diagnostics?: AggMarketAlternativesDiagnostics,
 ): Promise<Map<string, DbMatchedMarket>> {
   const markets = groups.flatMap((group) => group.markets);
   const venues = [...new Set(markets.map((market) => market.venue))];
@@ -561,7 +586,15 @@ async function loadMatchedMarketRows(
         e.slug as event_slug,
         e.image as event_image,
         e.icon as event_icon,
-        e.category as event_category
+        e.category as event_category,
+        (m.status = 'ACTIVE' and e.status = 'ACTIVE') as canonical_active,
+        (
+          m.status = 'ACTIVE'
+          and e.status = 'ACTIVE'
+          and ${buildBroadOrderableMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "now()", pmAlias: "pm" })}
+          and (m.close_time is null or m.close_time > now())
+          and (m.expiration_time is null or m.expiration_time > now())
+        ) as canonical_orderable
       from unified_markets m
       join unified_events e on e.id = m.event_id
       left join polymarket_markets pm
@@ -569,12 +602,7 @@ async function loadMatchedMarketRows(
        and m.venue = 'polymarket'
       left join unified_market_activity_metrics_24h mam
         on mam.market_id = m.id
-      where m.status = 'ACTIVE'
-        and e.status = 'ACTIVE'
-        and ${buildBroadOrderableMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "now()", pmAlias: "pm" })}
-        and (m.close_time is null or m.close_time > now())
-        and (m.expiration_time is null or m.expiration_time > now())
-        and m.venue = any($1::text[])
+      where m.venue = any($1::text[])
         and (
           m.venue_market_id = any($2::text[])
           or (
@@ -608,7 +636,17 @@ async function loadMatchedMarketRows(
       (exactKey ? byExact.get(exactKey) : null) ??
       (conditionKey ? byCondition.get(conditionKey) : null) ??
       null;
-    if (matched) byAggMarketId.set(market.aggMarketId, matched);
+    if (!matched) {
+      if (diagnostics && (market.externalIdentifier || market.conditionId)) {
+        diagnostics.externalMatchUnindexed += 1;
+      }
+      continue;
+    }
+    if (!matched.row.canonical_active || !matched.row.canonical_orderable) {
+      if (diagnostics) diagnostics.canonicalMarketInactive += 1;
+      continue;
+    }
+    byAggMarketId.set(market.aggMarketId, matched);
   }
 
   return byAggMarketId;
@@ -709,13 +747,7 @@ function scoreCluster(metrics: {
 }
 
 function buildAlternativeSearchTerms(seed: ClusterMarketSummary): string[] {
-  const values = [
-    seed.marketTitle,
-    seed.eventTitle,
-    seed.marketTitle && seed.eventTitle
-      ? `${seed.marketTitle} ${seed.eventTitle}`
-      : null,
-  ];
+  const values = [seed.eventTitle, seed.marketTitle];
   const seen = new Set<string>();
   const terms: string[] = [];
   for (const value of values) {
@@ -732,6 +764,7 @@ function buildAlternativeSearchTerms(seed: ClusterMarketSummary): string[] {
 function buildAlternativeVenueMarketAttempts(params: {
   seed: ClusterMarketSummary;
   seedRow: AggClusterMarketRow;
+  venues: AggSupportedVenue[];
 }): Array<{
   venue?: string;
   venueEventId?: string;
@@ -750,21 +783,31 @@ function buildAlternativeVenueMarketAttempts(params: {
     });
   }
 
-  for (const search of buildAlternativeSearchTerms(params.seed)) {
-    attempts.push({ search });
+  const searchTerms = buildAlternativeSearchTerms(params.seed);
+  const targetVenues = params.venues.filter(
+    (venue) => venue !== params.seed.venue,
+  );
+  for (const venue of targetVenues) {
+    for (const search of searchTerms.slice(0, 2)) {
+      attempts.push({ venue, search });
+    }
   }
-
   const seen = new Set<string>();
-  return attempts.filter((attempt) => {
-    const key = JSON.stringify({
-      venue: attempt.venue ?? null,
-      venueEventId: attempt.venueEventId ?? null,
-      search: attempt.search ?? null,
-    });
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return (
+    attempts
+      .filter((attempt) => {
+        const key = JSON.stringify({
+          venue: attempt.venue ?? null,
+          venueEventId: attempt.venueEventId ?? null,
+          search: attempt.search ?? null,
+        });
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      // Reserve one request for the unscoped top-volume fallback below.
+      .slice(0, AGG_ALTERNATIVE_REQUEST_HARD_CAP - 1)
+  );
 }
 
 function orderAlternativeMarkets(
@@ -843,6 +886,7 @@ function buildNotFoundAlternativesResponse(params: {
   generatedAt: string;
   marketId: string;
   eventId: string | null;
+  diagnostics?: AggMarketAlternativesDiagnostics;
 }): AggMarketAlternativesResponse {
   return {
     generatedAt: params.generatedAt,
@@ -857,6 +901,7 @@ function buildNotFoundAlternativesResponse(params: {
     markets: [],
     alternatives: [],
     matchDiagnostics: null,
+    diagnostics: params.diagnostics ?? createAggAlternativesDiagnostics(),
   };
 }
 
@@ -867,6 +912,7 @@ function buildMatchedAlternativesResponseFromCluster(params: {
   venues: AggSupportedVenue[];
   outputLimit: number;
   nowMs: number;
+  diagnostics?: AggMarketAlternativesDiagnostics;
 }): AggMarketAlternativesResponse | null {
   const venueSet = new Set(params.venues);
   const clusterMarkets = params.cluster.markets.filter(
@@ -912,6 +958,7 @@ function buildMatchedAlternativesResponseFromCluster(params: {
       params.cluster.matchDiagnostics,
       markets,
     ),
+    diagnostics: params.diagnostics ?? createAggAlternativesDiagnostics(),
   };
 }
 
@@ -1187,6 +1234,7 @@ async function buildAggClustersFromVenueMarkets(params: {
   db: DbQuery;
   generatedAt: string;
   nowMs: number;
+  diagnostics?: AggMarketAlternativesDiagnostics;
 }): Promise<AggClusterSummary[]> {
   const candidateMarkets = dedupeAggMarkets(
     params.venueMarkets.flatMap((market) => [
@@ -1210,13 +1258,26 @@ async function buildAggClustersFromVenueMarkets(params: {
     midpointsByMarketId,
     venues: new Set(params.venues),
   });
-  const matchedRowsByAggId = await loadMatchedMarketRows(params.db, groups);
-  return buildAggClusterSummaries({
+  const matchedRowsByAggId = await loadMatchedMarketRows(
+    params.db,
+    groups,
+    params.diagnostics,
+  );
+  const clusters = buildAggClusterSummaries({
     groups,
     matchedRowsByAggId,
     generatedAt: params.generatedAt,
     nowMs: params.nowMs,
   });
+  if (
+    params.diagnostics &&
+    groups.length > 0 &&
+    matchedRowsByAggId.size > 0 &&
+    clusters.length === 0
+  ) {
+    params.diagnostics.outcomeMappingMissing += 1;
+  }
+  return clusters;
 }
 
 export async function buildAggClusterListResponse(params: {
@@ -1279,11 +1340,13 @@ export async function buildAggMarketAlternativesResponse(params: {
   if (!seedRow) return null;
 
   const seed = buildMarketSummary(seedRow);
+  const diagnostics = createAggAlternativesDiagnostics();
   if (isClusterMarketExpired(seed, nowMs)) {
     return buildNotFoundAlternativesResponse({
       generatedAt,
       marketId: seed.marketId,
       eventId: seed.eventId,
+      diagnostics,
     });
   }
   if (!venues.includes(seed.venue as AggSupportedVenue)) {
@@ -1291,10 +1354,15 @@ export async function buildAggMarketAlternativesResponse(params: {
       generatedAt,
       marketId: seed.marketId,
       eventId: seed.eventId,
+      diagnostics,
     });
   }
 
-  const attempts = buildAlternativeVenueMarketAttempts({ seed, seedRow });
+  const attempts = buildAlternativeVenueMarketAttempts({
+    seed,
+    seedRow,
+    venues,
+  });
 
   for (const attempt of attempts) {
     const venueMarkets = await params.client.getVenueMarkets({
@@ -1307,7 +1375,10 @@ export async function buildAggMarketAlternativesResponse(params: {
       sortBy: "volume",
       sortDir: "desc",
     });
-    if (!venueMarkets.length) continue;
+    if (!venueMarkets.length) {
+      if (attempt.venue && attempt.search) diagnostics.targetSearchEmpty += 1;
+      continue;
+    }
 
     const clusters = await buildAggClustersFromVenueMarkets({
       venueMarkets,
@@ -1316,6 +1387,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       db: params.db,
       generatedAt,
       nowMs,
+      diagnostics,
     });
     const cluster = findClusterForMarket(clusters, seed.marketId);
     if (!cluster) continue;
@@ -1327,6 +1399,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       venues,
       outputLimit,
       nowMs,
+      diagnostics,
     });
     if (response) return response;
   }
@@ -1343,6 +1416,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       venues,
       outputLimit,
       nowMs,
+      diagnostics,
     });
     if (response) return response;
   }
@@ -1362,6 +1436,7 @@ export async function buildAggMarketAlternativesResponse(params: {
       db: params.db,
       generatedAt,
       nowMs,
+      diagnostics,
     });
     const cluster = findClusterForMarket(clusters, seed.marketId);
     if (cluster) {
@@ -1372,15 +1447,18 @@ export async function buildAggMarketAlternativesResponse(params: {
         venues,
         outputLimit,
         nowMs,
+        diagnostics,
       });
       if (response) return response;
     }
   }
 
+  diagnostics.aggNoMatch += 1;
   return buildNotFoundAlternativesResponse({
     generatedAt,
     marketId: seed.marketId,
     eventId: seed.eventId,
+    diagnostics,
   });
 }
 

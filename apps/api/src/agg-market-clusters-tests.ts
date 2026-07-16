@@ -134,6 +134,8 @@ function dbRow(args: {
   lastPrice?: number | null;
   closeTime?: string | null;
   expirationTime?: string | null;
+  canonicalActive?: boolean;
+  canonicalOrderable?: boolean;
 }) {
   return {
     id: args.id,
@@ -170,6 +172,8 @@ function dbRow(args: {
     event_image: null,
     event_icon: null,
     event_category: args.eventCategory ?? "sports",
+    canonical_active: args.canonicalActive ?? true,
+    canonical_orderable: args.canonicalOrderable ?? true,
   };
 }
 
@@ -421,7 +425,7 @@ await test("builds AGG clusters from labeled Yes midpoints and DB rows", async (
   );
 });
 
-await test("drops opposite participant AGG clusters", async () => {
+await test("keeps opposite participants with explicit side inversion", async () => {
   const limitlessSenegal = market({
     id: "agg-limitless-senegal",
     venue: "limitless",
@@ -468,7 +472,8 @@ await test("drops opposite participant AGG clusters", async () => {
     now: new Date("2026-05-11T12:00:00.000Z"),
   });
 
-  assert.equal(response.items.length, 0);
+  assert.equal(response.items.length, 1);
+  assert.equal(response.items[0]?.markets.length, 2);
 });
 
 await test("builds market alternatives from an AGG matched group", async () => {
@@ -551,7 +556,7 @@ await test("builds market alternatives from an AGG matched group", async () => {
   );
   assert.equal(
     (venueMarketParams[0] as { search?: string } | undefined)?.search,
-    "PSG",
+    "Champions League Winner",
   );
 });
 
@@ -630,13 +635,13 @@ await test("returns not_found for expired seed market alternatives", async () =>
     externalIdentifier: "101",
     question: "PSG",
   });
-  const kalshi = market({
-    id: "agg-kalshi",
-    venue: "kalshi",
-    externalIdentifier: "KXUCL-26-PSG",
+  const limitless = market({
+    id: "agg-limitless",
+    venue: "limitless",
+    externalIdentifier: "26242",
     question: "PSG",
   });
-  poly.matchedVenueMarkets = [kalshi];
+  poly.matchedVenueMarkets = [limitless];
 
   const response = await buildAggMarketAlternativesResponse({
     marketId: "polymarket:101",
@@ -754,7 +759,7 @@ await test("returns alternatives symmetrically for each seed in a three-venue gr
   }
 });
 
-await test("drops opposite participant market alternatives", async () => {
+await test("maps opposite participant market alternatives to the inverse side", async () => {
   const limitlessSenegal = market({
     id: "agg-limitless-senegal",
     venue: "limitless",
@@ -803,9 +808,11 @@ await test("drops opposite participant market alternatives", async () => {
   });
 
   assert.ok(response);
-  assert.equal(response.status, "not_found");
-  assert.equal(response.markets.length, 0);
-  assert.equal(response.alternatives.length, 0);
+  assert.equal(response.status, "matched");
+  assert.equal(response.markets.length, 2);
+  assert.equal(response.alternatives.length, 1);
+  assert.equal(response.alternatives[0]?.outcomeMapping?.sourceYesTo, "NO");
+  assert.equal(response.alternatives[0]?.outcomeMapping?.confidence, 0.98);
 });
 
 await test("keeps same participant market alternatives", async () => {
@@ -1037,7 +1044,7 @@ await test("rejects unsupported market alternatives venues before AGG calls", as
   assert.equal(calls.midpoints, 0);
 });
 
-await test("uses bounded broad AGG fallback after targeted misses", async () => {
+await test("bounded broad fallback still fails closed without outcome mapping", async () => {
   clearAggClustersCacheForTests();
   const poly = market({
     id: "agg-poly-aliens",
@@ -1056,7 +1063,11 @@ await test("uses bounded broad AGG fallback after targeted misses", async () => 
   const venueMarketParams: unknown[] = [];
   const response = await buildAggMarketAlternativesResponse({
     marketId: "polymarket:703257",
-    query: { limit: 5, sourceLimit: 50 },
+    query: {
+      limit: 5,
+      sourceLimit: 50,
+      venues: "polymarket,limitless,kalshi",
+    },
     client: {
       async getVenueMarkets(params) {
         venueMarketParams.push(params);
@@ -1079,6 +1090,7 @@ await test("uses bounded broad AGG fallback after targeted misses", async () => 
         venueMarketId: "703257",
         title: "December 31",
         eventTitle: "Will the US confirm that aliens exist by...?",
+        venueEventId: "aliens-event",
         bestBid: 0.14,
         bestAsk: 0.15,
       }),
@@ -1095,12 +1107,10 @@ await test("uses bounded broad AGG fallback after targeted misses", async () => 
   });
 
   assert.ok(response);
-  assert.equal(response.status, "matched");
-  assert.deepEqual(
-    response.markets.map((row) => row.marketId),
-    ["polymarket:703257", "kalshi:KXALIENS-27"],
-  );
+  assert.equal(response.status, "not_found");
+  assert.equal(response.diagnostics.outcomeMappingMissing > 0, true);
   assert.ok(venueMarketParams.length > 0);
+  assert.equal(venueMarketParams.length, 6);
   assert.equal(
     venueMarketParams.some((params) => {
       const query = params as {
@@ -1122,13 +1132,13 @@ await test("uses cached AGG cluster list as alternatives fallback", async () => 
     externalIdentifier: "101",
     question: "PSG",
   });
-  const kalshi = market({
-    id: "agg-kalshi",
-    venue: "kalshi",
-    externalIdentifier: "KXUCL-26-PSG",
+  const limitless = market({
+    id: "agg-limitless",
+    venue: "limitless",
+    externalIdentifier: "26242",
     question: "PSG",
   });
-  poly.matchedVenueMarkets = [kalshi];
+  poly.matchedVenueMarkets = [limitless];
 
   let warmCache = true;
   const venueMarketParams: unknown[] = [];
@@ -1139,9 +1149,10 @@ await test("uses cached AGG cluster list as alternatives fallback", async () => 
     },
     async getMidpoints(ids) {
       const wanted = new Set(ids);
-      return [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)].filter(
-        (row) => wanted.has(row.venueMarketId),
-      );
+      return [
+        midpoint("agg-poly", 0.57),
+        midpoint("agg-limitless", 0.55),
+      ].filter((row) => wanted.has(row.venueMarketId));
     },
   };
   const db = fakeDb([
@@ -1153,9 +1164,9 @@ await test("uses cached AGG cluster list as alternatives fallback", async () => 
       eventTitle: "Champions League Winner",
     }),
     dbRow({
-      id: "kalshi:KXUCL-26-PSG",
-      venue: "kalshi",
-      venueMarketId: "KXUCL-26-PSG",
+      id: "limitless:26242",
+      venue: "limitless",
+      venueMarketId: "26242",
       title: "PSG",
       eventTitle: "Champions League Winner",
     }),
@@ -1181,7 +1192,7 @@ await test("uses cached AGG cluster list as alternatives fallback", async () => 
   assert.equal(response.status, "matched");
   assert.deepEqual(
     response.markets.map((row) => row.marketId),
-    ["polymarket:101", "kalshi:KXUCL-26-PSG"],
+    ["polymarket:101", "limitless:26242"],
   );
   assert.equal(
     venueMarketParams.some((params) => {
@@ -1524,11 +1535,13 @@ await test("matches by condition id when external id does not match", async () =
         venue: "polymarket",
         venueMarketId: "real-market",
         conditionId: "condition-1",
+        title: "Candidate",
       }),
       dbRow({
         id: "limitless:26242",
         venue: "limitless",
         venueMarketId: "26242",
+        title: "Candidate",
       }),
     ]),
   });
@@ -1573,16 +1586,19 @@ await test("drops AGG markets whose selected-side midpoint conflicts with DB mid
         id: "polymarket:101",
         venue: "polymarket",
         venueMarketId: "101",
+        title: "Candidate",
       }),
       dbRow({
         id: "kalshi:KXTEST",
         venue: "kalshi",
         venueMarketId: "KXTEST",
+        title: "Candidate",
       }),
       dbRow({
         id: "limitless:26242",
         venue: "limitless",
         venueMarketId: "26242",
+        title: "Candidate",
       }),
     ]),
   });

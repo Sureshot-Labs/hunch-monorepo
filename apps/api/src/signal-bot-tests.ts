@@ -648,7 +648,9 @@ class FakeDb {
         fields: [],
         oid: 0,
         rowCount: 1,
-        rows: [],
+        rows: (sql.includes("returning id")
+          ? [{ id: "00000000-0000-4000-8000-000000000099" }]
+          : []) as unknown as T[],
       };
     }
     if (sql.includes("from unified_market_tokens")) {
@@ -999,7 +1001,9 @@ class FakeFollowthroughDb {
         fields: [],
         oid: 0,
         rowCount: 1,
-        rows: [],
+        rows: (sql.includes("returning id")
+          ? [{ id: "00000000-0000-4000-8000-000000000099" }]
+          : []) as unknown as T[],
       };
     }
     return {
@@ -1010,6 +1014,26 @@ class FakeFollowthroughDb {
       rows: [],
     };
   }
+}
+
+function readSignalBotMessageInsert(query: { params: unknown[]; sql: string }) {
+  const hasExplicitId = /insert into signal_bot_messages\s*\(\s*id,/i.test(
+    query.sql,
+  );
+  const offset = hasExplicitId ? 1 : 0;
+  return {
+    id: hasExplicitId ? query.params[0] : null,
+    chatId: query.params[offset],
+    noteId: query.params[offset + 1],
+    threadRootNoteId: query.params[offset + 2],
+    messageKind: query.params[offset + 3],
+    messageId: query.params[offset + 4],
+    replyToMessageId: query.params[offset + 5],
+    metrics: JSON.parse(String(query.params[offset + 8])) as Record<
+      string,
+      unknown
+    >,
+  };
 }
 
 function followthroughCandidateRow(overrides: Record<string, unknown> = {}) {
@@ -8626,7 +8650,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /Why this wallet matters|Why this cluster matters/,
       );
       assert.match(message.text, /▸ Track record.*2\\.5K.*30d/);
-      assert.match(message.text, /▸ Win rate.*65%.*recent trades/);
+      assert.doesNotMatch(message.text, /▸ Win rate|65%.*recent trades/);
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
       assert.doesNotMatch(message.text, /📰/);
       assert.doesNotMatch(message.text, /confidence/i);
@@ -8697,10 +8721,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       assert.match(message.text, /Morocco is still around 3¢/);
-      assert.match(
-        message.text,
-        /▸ Still holding while the market barely prices it/,
-      );
+      assert.match(message.text, /▸ Track record.*1.*3M.*30d/);
+      assert.doesNotMatch(message.text, /Still holding while the market/);
+      assert.doesNotMatch(message.text, /Pricing edge/);
       assert.doesNotMatch(message.text, /YES 2¢ \/ NO 98¢/);
     },
   },
@@ -9140,7 +9163,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(message.text, /\$12\\.3K still on/);
       assert.doesNotMatch(message.text, /Why this cluster matters:/);
-      assert.match(message.text, /▸ Track record.*14\\.0K.*30d/);
+      assert.match(message.text, /▸ Track record.*14K.*30d/);
+      assert.match(message.text, /▸ Conviction.*2 strong wallets/);
     },
   },
   {
@@ -9978,12 +10002,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[0], "-100");
-      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000001");
-      assert.equal(delivery.params[2], "00000000-0000-4000-8000-000000000001");
-      assert.equal(delivery.params[3], "initial");
-      assert.equal(delivery.params[4], 101);
-      assert.equal(delivery.params[5], null);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.match(String(recorded.id), /^[0-9a-f-]{36}$/i);
+      assert.equal(recorded.chatId, "-100");
+      assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000001");
+      assert.equal(
+        recorded.threadRootNoteId,
+        "00000000-0000-4000-8000-000000000001",
+      );
+      assert.equal(recorded.messageKind, "initial");
+      assert.equal(recorded.messageId, 101);
+      assert.equal(recorded.replyToMessageId, null);
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorCreatedAt, "2026-01-01T00:00:00.000Z");
       assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000001");
@@ -10041,11 +10070,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000002");
-      assert.equal(delivery.params[2], "00000000-0000-4000-8000-000000000001");
-      assert.equal(delivery.params[3], "research_update");
-      assert.equal(delivery.params[4], 101);
-      assert.equal(delivery.params[5], 77);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000002");
+      assert.equal(
+        recorded.threadRootNoteId,
+        "00000000-0000-4000-8000-000000000001",
+      );
+      assert.equal(recorded.messageKind, "research_update");
+      assert.equal(recorded.messageId, 101);
+      assert.equal(recorded.replyToMessageId, 77);
     },
   },
   {
@@ -10096,9 +10129,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[4], 333);
-      assert.equal(delivery.params[5], null);
-      const metrics = JSON.parse(String(delivery.params[8])) as {
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageId, 333);
+      assert.equal(recorded.replyToMessageId, null);
+      const metrics = recorded.metrics as {
         copy?: {
           copyVersion?: string;
           notification?: {
@@ -10117,7 +10151,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v4");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v4_1");
       assert.equal(metrics.copy?.notification?.headline?.storyKind, "initial");
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
@@ -10125,11 +10159,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
-        "signal_notification_subject_v2",
+        "signal_notification_subject_v3",
       );
       assert.equal(
         metrics.copy?.notification?.subject?.version,
-        "signal_notification_subject_v2",
+        "signal_notification_subject_v3",
       );
       assert.ok(metrics.copy?.notification?.subject?.source);
       assert.equal(
@@ -10176,7 +10210,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(deliveries.length, 2);
       assert.deepEqual(
-        deliveries.map((delivery) => [delivery.params[0], delivery.params[4]]),
+        deliveries.map((delivery) => {
+          const recorded = readSignalBotMessageInsert(delivery);
+          return [recorded.chatId, recorded.messageId];
+        }),
         [
           ["-100", 101],
           ["-200", 102],
@@ -10342,10 +10379,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
       const startParam = readStartAppParam(keyboard?.[0]?.[0]?.url);
       assert.match(startParam, /^m_/);
-      assert.equal(
-        Buffer.from(startParam.slice(2), "base64url").toString("utf8"),
-        "l:event-2|market-2|N",
-      );
+      const startPayload = Buffer.from(startParam.slice(2), "base64url")
+        .toString("utf8")
+        .split("|");
+      assert.deepEqual(startPayload.slice(0, 3), [
+        "l:event-2",
+        "market-2",
+        "N",
+      ]);
+      assert.equal(startPayload[3], "00000000-0000-4000-8000-000000000099");
       const candidateQuery = db.queries.find((query) =>
         query.sql.includes("from signal_bot_messages root"),
       );
@@ -10356,16 +10398,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[0], "-100");
-      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000101");
-      assert.equal(delivery.params[3], "followthrough_stats");
-      assert.equal(delivery.params[5], 77);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.chatId, "-100");
+      assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000101");
+      assert.equal(recorded.messageKind, "followthrough_stats");
+      assert.equal(recorded.replyToMessageId, 77);
+      const metrics = recorded.metrics;
       assert.equal(metrics.joinedOrAddedWallets, 2);
       assert.equal(metrics.netSignalSideFlowUsd, 9500);
       assert.equal(metrics.fallbackStandalone, false);
+      const deliveryMetrics = metrics.delivery as
+        | { view?: { target?: { marketId?: string } } }
+        | undefined;
       assert.equal(
-        metrics.delivery?.view?.target?.marketId,
+        deliveryMetrics?.view?.target?.marketId,
         "limitless:market-2",
       );
       const flowQuery = db.queries.find((query) =>
@@ -10415,7 +10461,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(keyboard?.[0]?.[0]?.url, undefined);
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
-        "p:event-1|market-1|Y",
+        "p:event-1|market-1|Y|00000000-0000-4000-8000-000000000099",
       );
     },
   },
@@ -10657,8 +10703,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[3], "followthrough_stats");
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageKind, "followthrough_stats");
+      const metrics = recorded.metrics;
       assert.equal(metrics.status, "skipped");
       assert.equal(typeof metrics.nextEvaluateAt, "string");
     },
@@ -10784,7 +10831,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const metrics = readSignalBotMessageInsert(delivery).metrics;
       assert.equal(metrics.joinedWallets, 0);
       assert.equal(metrics.joinedOrAddedWallets, 0);
       assert.equal(metrics.missingBaselineSnapshots, 1);
@@ -10837,7 +10884,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const metrics = readSignalBotMessageInsert(delivery).metrics;
       assert.equal(metrics.estimatedOpenPnlUsd, 1.5);
     },
   },
@@ -10886,10 +10933,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const metrics = readSignalBotMessageInsert(delivery).metrics;
       assert.equal(metrics.stillHoldingWallets, 0);
       assert.equal(metrics.estimatedOpenPnlUsd, null);
-      assert.ok(metrics.dataQualityTags.includes("stale_latest_snapshots"));
+      assert.ok(
+        (metrics.dataQualityTags as string[]).includes(
+          "stale_latest_snapshots",
+        ),
+      );
     },
   },
   {
@@ -10931,7 +10982,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[3], "resolved_loss");
+      assert.equal(
+        readSignalBotMessageInsert(delivery).messageKind,
+        "resolved_loss",
+      );
     },
   },
   {
@@ -10973,7 +11027,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[3], "resolved_win");
+      assert.equal(
+        readSignalBotMessageInsert(delivery).messageKind,
+        "resolved_win",
+      );
     },
   },
   {

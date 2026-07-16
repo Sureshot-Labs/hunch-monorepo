@@ -294,6 +294,32 @@ function mergedMarketStatusSql(incomingAlias: string): string {
   `;
 }
 
+function indexerMarketMetadataSql(incomingMetadataSql: string): string {
+  return `
+    CASE
+      WHEN ${incomingMetadataSql} IS NULL THEN NULL
+      ELSE ${incomingMetadataSql} - 'hunch'
+    END
+  `;
+}
+
+function mergedMarketMetadataSql(incomingAlias: string): string {
+  return `
+    CASE
+      WHEN ${incomingAlias}.metadata IS NULL
+        AND NOT (coalesce(unified_markets.metadata, '{}'::jsonb) ? 'hunch')
+      THEN NULL
+      ELSE
+        coalesce(${indexerMarketMetadataSql(`${incomingAlias}.metadata`)}, '{}'::jsonb)
+        || CASE
+          WHEN coalesce(unified_markets.metadata, '{}'::jsonb) ? 'hunch'
+          THEN jsonb_build_object('hunch', unified_markets.metadata->'hunch')
+          ELSE '{}'::jsonb
+        END
+    END
+  `;
+}
+
 export interface UnifiedMarketRow {
   id: string; // venue:venue_market_id
   venue: string;
@@ -568,7 +594,7 @@ export async function upsertUnifiedMarket(
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
       resolved_outcome_pct, slug, image, icon, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, ${indexerMarketMetadataSql("$21::jsonb")}, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
     )
     ON CONFLICT (venue, venue_market_id) 
     DO UPDATE SET
@@ -607,7 +633,7 @@ export async function upsertUnifiedMarket(
       volume_24h = EXCLUDED.volume_24h,
       open_interest = EXCLUDED.open_interest,
       liquidity = EXCLUDED.liquidity,
-      metadata = EXCLUDED.metadata,
+      metadata = ${mergedMarketMetadataSql("EXCLUDED")},
       outcomes = EXCLUDED.outcomes,
       token_yes = CASE
         WHEN unified_markets.venue = 'kalshi'
@@ -773,7 +799,7 @@ export async function upsertUnifiedMarkets(
     select
       id, venue, venue_market_id, event_id, title, description, category, status,
       market_type, duration_minutes, open_time, close_time, expiration_time, best_bid, best_ask,
-      last_price, volume_total, volume_24h, open_interest, liquidity, metadata, outcomes,
+      last_price, volume_total, volume_24h, open_interest, liquidity, ${indexerMarketMetadataSql("metadata")}, outcomes,
       token_yes, token_no, clob_token_ids, condition_id, market_ledger,
       settlement_mint, is_initialized, redemption_status, resolved_outcome,
       resolved_outcome_pct, slug, image, icon, created_at, updated_at
@@ -816,7 +842,7 @@ export async function upsertUnifiedMarkets(
       volume_24h = excluded.volume_24h,
       open_interest = excluded.open_interest,
       liquidity = excluded.liquidity,
-      metadata = excluded.metadata,
+      metadata = ${mergedMarketMetadataSql("excluded")},
       outcomes = excluded.outcomes,
       token_yes = CASE
         WHEN unified_markets.venue = 'kalshi'
@@ -867,7 +893,7 @@ export async function upsertUnifiedMarkets(
        excluded.open_time, excluded.close_time, excluded.expiration_time,
        excluded.best_bid, excluded.best_ask, excluded.last_price,
        excluded.volume_total, excluded.volume_24h, excluded.open_interest,
-       excluded.liquidity, excluded.metadata, excluded.outcomes, excluded.token_yes,
+       excluded.liquidity, ${mergedMarketMetadataSql("excluded")}, excluded.outcomes, excluded.token_yes,
        excluded.token_no, excluded.clob_token_ids, excluded.condition_id,
        excluded.market_ledger, excluded.settlement_mint,
        excluded.is_initialized, excluded.redemption_status,
@@ -956,7 +982,7 @@ export async function upsertUnifiedMarkets(
       volume_24h = input.volume_24h,
       open_interest = input.open_interest,
       liquidity = input.liquidity,
-      metadata = input.metadata,
+      metadata = ${mergedMarketMetadataSql("input")},
       outcomes = input.outcomes,
       token_yes = CASE
         WHEN unified_markets.venue = 'kalshi'
@@ -1032,7 +1058,7 @@ export async function upsertUnifiedMarkets(
           ELSE input.last_price
         END,
         input.volume_total, input.volume_24h, input.open_interest,
-        input.liquidity, input.metadata, input.outcomes,
+        input.liquidity, ${mergedMarketMetadataSql("input")}, input.outcomes,
         CASE
           WHEN unified_markets.venue = 'kalshi'
             AND unified_markets.token_yes like 'sol:%'
@@ -1259,7 +1285,7 @@ async function filterChangedUnifiedMarketRows(
             ELSE input.last_price
           END,
           input.volume_total, input.volume_24h, input.open_interest,
-          input.liquidity, input.metadata, input.outcomes,
+          input.liquidity, ${mergedMarketMetadataSql("input")}, input.outcomes,
           CASE
             WHEN unified_markets.venue = 'kalshi'
               AND unified_markets.token_yes like 'sol:%'

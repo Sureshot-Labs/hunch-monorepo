@@ -87,6 +87,7 @@ import {
   type HolderResearchSignalPerformance,
 } from "./services/holder-research-performance.js";
 import { classifyMarketTaxonomy } from "./services/market-type-classifier.js";
+import { buildHolderResearchSignalEvidence } from "./services/holder-research-signal-evidence.js";
 import {
   loadWalletMarketTaxonomyMetricsMaps,
   selectWalletTaxonomyExactPairs,
@@ -330,6 +331,60 @@ function sharpMinorityCandidate(
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
+  {
+    name: "typed signal evidence keeps representative, cluster, and external scopes separate",
+    run: () => {
+      const p = policy();
+      const candidate = sharpMinorityCandidate(p);
+      if (!candidate.side) throw new Error("fixture side missing");
+      const now = new Date("2026-01-01T12:00:00.000Z");
+      const features = buildHolderResearchDecisionFeaturesV2(candidate, p, now);
+      const actor = buildHolderResearchActorSummary({
+        candidate,
+        evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+        policy: p,
+      });
+      const rows = buildHolderResearchSignalEvidence({
+        actor: { ...actor, mode: "sharp_cluster" },
+        candidate,
+        externalResearch: {
+          status: "ok",
+          verdict: "supports_holder_side",
+          timing: "after_holder",
+          summary: "Comparable market odds support the selected side.",
+          citations: [],
+          comparableOdds: {
+            side: candidate.side,
+            probabilityMin: 0.56,
+            probabilityMax: 0.6,
+            asOf: now.toISOString(),
+            sources: [{ title: "Example book", url: "https://example.com" }],
+          },
+        },
+        externalSearchWindowHours: 24,
+        features,
+        now,
+      });
+
+      const edge = rows.find((row) => row.kind === "pricing_edge");
+      const capital = rows.find((row) => row.kind === "capital");
+      const odds = rows.find((row) => row.kind === "outside_odds");
+      assert.equal(edge?.scope, "representative_wallet");
+      assert.equal(edge?.context?.zScore, 2.1);
+      assert.equal(edge?.context?.stakeUsd, 6_000);
+      assert.equal(capital?.scope, "wallet_cluster");
+      assert.equal(capital?.measurement.kind, "scalar");
+      assert.equal(odds?.scope, "external_market");
+      assert.equal(
+        rows.some((row) => row.id.includes("00000000")),
+        false,
+      );
+      assert.equal(
+        rows.some((row) => row.source.label.includes("0x")),
+        false,
+      );
+    },
+  },
   {
     name: "V2 decision features keep side facts symmetric and nullable",
     run: () => {

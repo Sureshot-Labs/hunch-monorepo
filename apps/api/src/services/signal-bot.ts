@@ -16,6 +16,7 @@ import { createAggMarketClient } from "./agg-market-client.js";
 import {
   getAggMarketAlternativesResponseCachedWithMetadata,
   type AggMarketAlternativesCacheClient,
+  type AggMarketAlternativesDiagnostics,
 } from "./agg-market-clusters.js";
 import type { ClusterMarketSummary } from "./clusters.js";
 import {
@@ -41,6 +42,17 @@ import {
   type SignalNotificationHeadline,
   type SignalNotificationSubject,
 } from "./signal-notification-headline.js";
+import {
+  resolveSignalPostCopyPolicy,
+  type ResolvedSignalPostCopyPolicy,
+} from "./signal-post-copy-policy.js";
+import {
+  normalizeTelegramPresentationAliases,
+  resolvePersistedOrCurrentTelegramMarketPresentation,
+} from "./telegram-market-presentation.js";
+import type { SignalEvidenceMetricV1 } from "./holder-research-signal-evidence.js";
+import { resolvePersistedSignalEvidence } from "./legacy-signal-evidence.js";
+import { createSignalDeliveryRef } from "./signal-delivery-attribution.js";
 import {
   defaultSignalBotFollowthroughPolicy,
   resolveSignalBotFollowthroughPolicy,
@@ -352,6 +364,7 @@ export type SignalBotNote = {
   direction: "down" | "mixed" | "up" | null;
   confidence: number | null;
   modelMeta: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
   createdAt: string;
   revisionKind: "initial" | "research_update";
   thesisKey: string;
@@ -363,6 +376,7 @@ export type SignalBotNote = {
   marketTitle: string | null;
   marketSlug: string | null;
   marketDescription: string | null;
+  marketMetadata?: unknown;
   eventTitle: string | null;
   eventDescription: string | null;
   outcomes: string[] | null;
@@ -458,6 +472,7 @@ type SignalBotNoteRow = {
   direction: "down" | "mixed" | "up" | null;
   confidence: string | number | null;
   model_meta: unknown;
+  metrics: unknown;
   created_at: Date | string;
   revision_kind: string | null;
   thesis_key: string | null;
@@ -469,6 +484,7 @@ type SignalBotNoteRow = {
   market_title: string | null;
   market_slug: string | null;
   market_description: string | null;
+  market_metadata: unknown;
   event_title: string | null;
   event_description: string | null;
   category: string | null;
@@ -550,7 +566,7 @@ const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v4";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v4_1";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -1269,8 +1285,10 @@ export function buildSignalBotMessage(input: {
   chatType?: string | null;
   cheaperAlternative?: SignalBotCheaperAlternative | null;
   deliveryTarget?: SignalBotCheaperAlternative | null;
+  deliveryRef?: string | null;
   messageKind?: "initial" | "research_update";
   note: SignalBotNote;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
   telegramMiniAppLinkBase?: string | null;
 }): {
   keyboard: TelegramInlineKeyboard | undefined;
@@ -1279,7 +1297,9 @@ export function buildSignalBotMessage(input: {
   const note = input.note;
   const buySide = resolveSignalBotBuySide(note);
   const price = buySide ? resolveSignalBotBuyPrice(note, buySide) : null;
-  const credentialBullets = formatSignalBotWhyItMattersBullets(note);
+  const evidenceRows = resolvePersistedSignalEvidence(note);
+  const presentation =
+    resolvePersistedOrCurrentTelegramMarketPresentation(note);
   const buySideCopy = buySide ? buildSignalBotSideCopy(note, buySide) : null;
   const winConditionLine = buySideCopy?.winCondition
     ? `This wins if there are ${buySideCopy.winCondition}.`
@@ -1314,6 +1334,7 @@ export function buildSignalBotMessage(input: {
   });
   const marketStartParam = note.eventId
     ? buildSignalBotMarketStartParam({
+        deliveryRef: input.deliveryRef,
         eventId: note.eventId,
         marketId: note.marketId,
         side: buySide,
@@ -1330,36 +1351,41 @@ export function buildSignalBotMessage(input: {
     [
       buySideCopy?.rawOutcomeLabel ?? null,
       buySideCopy?.sideLabel ?? null,
+      buySide ? presentation.positions[buySide].canonicalLabel : null,
       note.marketTitle,
       note.eventTitle,
     ].filter((value): value is string => Boolean(value)),
   );
-  const summary = bodyRenderer.render(note.description);
+  const canonicalDescription = normalizeTelegramPresentationAliases(
+    note.description,
+    presentation,
+  );
+  const summary = bodyRenderer.render(canonicalDescription);
   const renderedWhyInterestingLine = whyInterestingLine
-    ? bodyRenderer.render(whyInterestingLine)
+    ? bodyRenderer.render(
+        normalizeTelegramPresentationAliases(whyInterestingLine, presentation),
+      )
     : null;
   const contextLine = formatSignalContextLine(note);
   const renderedContextLine =
     contextLine &&
     shouldIncludeSignalBotContextLine({
       contextLine,
-      description: note.description,
+      description: canonicalDescription,
     })
-      ? bodyRenderer.render(contextLine)
+      ? bodyRenderer.render(
+          normalizeTelegramPresentationAliases(contextLine, presentation),
+        )
       : null;
   const notificationCopy = buildSignalBotInitialNotificationCopy({
+    copyPolicy: input.copyPolicy,
     messageKind: input.messageKind ?? "initial",
     note,
     side: buySide,
   });
   const titleLine = formatTelegramBold(notificationCopy.headline.text);
   const credentialBlock =
-    credentialBullets.length > 0
-      ? formatSignalBotCredentialBlock({
-          actorMode: note.holderActorMode,
-          bullets: credentialBullets,
-        })
-      : null;
+    evidenceRows.length > 0 ? formatSignalBotEvidenceBlock(evidenceRows) : null;
   const lines = [
     titleLine,
     "",
@@ -1404,7 +1430,7 @@ export function buildSignalBotMessage(input: {
     };
     const tradeSideLabel =
       tradeTarget.side === buySide
-        ? formatSignalBotOutcomeDisplayLabel(note, buySide, "button")
+        ? presentation.positions[buySide].shortLabel
         : tradeTarget.side;
     const baseTradeUrl = buildSignalBotTradeUrl({
       amountUsd: input.buyAmountUsd,
@@ -1421,6 +1447,7 @@ export function buildSignalBotMessage(input: {
         miniAppLinkBase: input.telegramMiniAppLinkBase,
         startParam: buildSignalBotBuyStartParam({
           amountUsd: input.buyAmountUsd,
+          deliveryRef: input.deliveryRef,
           eventId: tradeTarget.eventId,
           marketId: tradeTarget.marketId,
           side: tradeTarget.side,
@@ -1454,17 +1481,14 @@ export function buildSignalBotMessage(input: {
           miniAppLinkBase: input.telegramMiniAppLinkBase,
           startParam: buildSignalBotBuyStartParam({
             amountUsd: input.buyAmountUsd,
+            deliveryRef: input.deliveryRef,
             eventId: input.cheaperAlternative.eventId,
             marketId: input.cheaperAlternative.marketId,
             side: input.cheaperAlternative.side,
           }),
           text: formatSignalBotCheaperButtonText({
             alternative: input.cheaperAlternative,
-            sideLabel: formatSignalBotOutcomeDisplayLabel(
-              note,
-              buySide,
-              "button",
-            ),
+            sideLabel: presentation.positions[buySide].shortLabel,
           }),
           webUrl: cheaperTradeWebUrl,
         }),
@@ -1577,6 +1601,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
   buyAmountUsd: number;
   candidate: SignalBotFollowthroughCandidateRow;
   chatType?: string | null;
+  deliveryRef?: string | null;
   kind: Extract<
     SignalBotMessageKind,
     "followthrough_stats" | "resolved_loss" | "resolved_win"
@@ -1624,6 +1649,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
           miniAppLinkBase: input.telegramMiniAppLinkBase,
           startParam: buildSignalBotBuyStartParam({
             amountUsd: input.buyAmountUsd,
+            deliveryRef: input.deliveryRef,
             eventId,
             marketId,
             side,
@@ -1658,6 +1684,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
         chatType: input.chatType,
         miniAppLinkBase: input.telegramMiniAppLinkBase,
         startParam: buildSignalBotMarketStartParam({
+          deliveryRef: input.deliveryRef,
           eventId,
           marketId,
           side,
@@ -3860,6 +3887,11 @@ export type SignalBotCheaperAlternativeDiagnostics = {
   aggMatchedNotCheaper: number;
   aggNoResponse: number;
   aggNotFound: number;
+  aggExternalMatchUnindexed: number;
+  aggCanonicalMarketInactive: number;
+  aggOutcomeMappingMissing: number;
+  aggPriceUnavailable: number;
+  aggTargetSearchEmpty: number;
   deliveryAmbiguousMapping: number;
   deliveryDestinationDisabled: number;
   deliveryNoExecutableTarget: number;
@@ -3935,6 +3967,11 @@ function createSignalBotCheaperAlternativeDiagnostics(): SignalBotCheaperAlterna
     aggMatchedNotCheaper: 0,
     aggNoResponse: 0,
     aggNotFound: 0,
+    aggExternalMatchUnindexed: 0,
+    aggCanonicalMarketInactive: 0,
+    aggOutcomeMappingMissing: 0,
+    aggPriceUnavailable: 0,
+    aggTargetSearchEmpty: 0,
     deliveryAmbiguousMapping: 0,
     deliveryDestinationDisabled: 0,
     deliveryNoExecutableTarget: 0,
@@ -3953,10 +3990,26 @@ function addSignalBotCheaperAlternativeDiagnostics(
   target.aggMatchedNotCheaper += source.aggMatchedNotCheaper;
   target.aggNoResponse += source.aggNoResponse;
   target.aggNotFound += source.aggNotFound;
+  target.aggExternalMatchUnindexed += source.aggExternalMatchUnindexed;
+  target.aggCanonicalMarketInactive += source.aggCanonicalMarketInactive;
+  target.aggOutcomeMappingMissing += source.aggOutcomeMappingMissing;
+  target.aggPriceUnavailable += source.aggPriceUnavailable;
+  target.aggTargetSearchEmpty += source.aggTargetSearchEmpty;
   target.deliveryAmbiguousMapping += source.deliveryAmbiguousMapping;
   target.deliveryDestinationDisabled += source.deliveryDestinationDisabled;
   target.deliveryNoExecutableTarget += source.deliveryNoExecutableTarget;
   target.deliveryStalePrice += source.deliveryStalePrice;
+}
+
+function addAggAlternativesDiagnostics(
+  target: SignalBotCheaperAlternativeDiagnostics,
+  source: AggMarketAlternativesDiagnostics,
+): void {
+  target.aggExternalMatchUnindexed += source.externalMatchUnindexed;
+  target.aggCanonicalMarketInactive += source.canonicalMarketInactive;
+  target.aggOutcomeMappingMissing += source.outcomeMappingMissing;
+  target.aggPriceUnavailable += source.priceUnavailable;
+  target.aggTargetSearchEmpty += source.targetSearchEmpty;
 }
 
 function addSignalDeliveryFailureDiagnostic(
@@ -4192,6 +4245,7 @@ export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
   note: SignalBotNote;
   response: {
     alternatives: ClusterMarketSummary[];
+    diagnostics?: AggMarketAlternativesDiagnostics;
     status: string;
   } | null;
 }): SignalBotCheaperAlternativeResult {
@@ -4199,6 +4253,9 @@ export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
   if (!input.response) {
     diagnostics.aggNoResponse += 1;
     return { alternative: null, diagnostics };
+  }
+  if (input.response.diagnostics) {
+    addAggAlternativesDiagnostics(diagnostics, input.response.diagnostics);
   }
   if (input.response.status === "not_found") {
     diagnostics.aggNotFound += 1;
@@ -4398,6 +4455,7 @@ async function resolveDefaultSignalBotDeliveryTarget(input: {
       if (!response) {
         diagnostics.aggNoResponse += 1;
       } else if (response.status === "matched") {
+        addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
         diagnostics.aggMatched += 1;
         for (const market of response.markets) {
           const mapping = market.outcomeMapping;
@@ -4422,6 +4480,13 @@ async function resolveDefaultSignalBotDeliveryTarget(input: {
             priceGuard.blockers.length > 0 ||
             priceGuard.buyPrice == null
           ) {
+            if (
+              priceGuard.buyPrice == null ||
+              priceGuard.blockers.includes("missing_side_price") ||
+              priceGuard.blockers.includes("no_book")
+            ) {
+              diagnostics.aggPriceUnavailable += 1;
+            }
             continue;
           }
           const candidate = signalDeliveryCandidateFromAgg({
@@ -4433,6 +4498,7 @@ async function resolveDefaultSignalBotDeliveryTarget(input: {
           if (candidate) candidates.push(candidate);
         }
       } else {
+        addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
         diagnostics.aggNotFound += 1;
       }
     } catch {
@@ -4610,6 +4676,7 @@ async function recordSignalBotMessage(input: {
   baselineAt: string;
   chatId: string;
   db: DbQuery;
+  insertId: string;
   messageId: number | null;
   messageKind: SignalBotMessageKind;
   metrics?: unknown;
@@ -4622,6 +4689,7 @@ async function recordSignalBotMessage(input: {
     await input.db.query(
       `
         insert into signal_bot_messages (
+          id,
           chat_id,
           note_id,
           thread_root_note_id,
@@ -4632,7 +4700,7 @@ async function recordSignalBotMessage(input: {
           sent_at,
           metrics
         )
-        values ($1, $2::uuid, $3::uuid, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::jsonb)
+        values ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::jsonb)
         on conflict (chat_id, note_id, message_kind)
         do update set
           telegram_message_id = excluded.telegram_message_id,
@@ -4642,6 +4710,7 @@ async function recordSignalBotMessage(input: {
           metrics = excluded.metrics
       `,
       [
+        input.insertId,
         input.chatId,
         input.noteId,
         input.threadRootNoteId,
@@ -4678,9 +4747,9 @@ async function reserveSignalBotFollowthroughMessage(input: {
   replyToMessageId: number | null;
   sentAt: Date;
   threadRootNoteId: string;
-}): Promise<boolean> {
+}): Promise<string | null> {
   try {
-    const result = await input.db.query(
+    const result = await input.db.query<{ id: string }>(
       `
         insert into signal_bot_messages (
           chat_id,
@@ -4703,6 +4772,7 @@ async function reserveSignalBotFollowthroughMessage(input: {
           metrics = excluded.metrics
         where coalesce(signal_bot_messages.metrics->>'status', 'sent') <> 'sent'
           and signal_bot_messages.sent_at <= $9::timestamptz
+        returning id
       `,
       [
         input.chatId,
@@ -4718,16 +4788,16 @@ async function reserveSignalBotFollowthroughMessage(input: {
         ).toISOString(),
       ],
     );
-    return (result.rowCount ?? 0) > 0;
+    return result.rows[0]?.id ?? null;
   } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return false;
+    if (isMissingSignalBotMessagesTable(error)) return null;
     console.warn("[signal-bot] failed to reserve followthrough delivery", {
       chatId: input.chatId,
       error: error instanceof Error ? error.message : String(error),
       messageKind: input.messageKind,
       noteId: input.noteId,
     });
-    return false;
+    return null;
   }
 }
 
@@ -4936,8 +5006,10 @@ function buildNeutralSignalDeliveryView(input: {
   note: SignalBotNote;
   sourceSide: "NO" | "YES" | null;
   target: SignalBotCheaperAlternative | null;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
 }): SignalDeliveryView {
   const notificationCopy = buildSignalBotInitialNotificationCopy({
+    copyPolicy: input.copyPolicy,
     messageKind: input.kind,
     note: input.note,
     side: input.sourceSide,
@@ -5013,6 +5085,7 @@ export async function publishSignalBotTick(input: {
     input.transports?.find((transport) => transport.kind === "telegram") ??
     createSignalBotTelegramTransport(input.telegram);
   const lifecycle = await resolveSignalBotVenueLifecycle(input.db);
+  const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   let sent = 0;
   let blockedChats = 0;
   let belowConfidenceNotes = 0;
@@ -5227,14 +5300,17 @@ export async function publishSignalBotTick(input: {
       if (deliveryTarget && deliveryTarget.marketId !== note.marketId) {
         cheaperAlternatives += 1;
       }
+      const deliveryRef = createSignalDeliveryRef();
       const { keyboard, text } = buildSignalBotMessage({
         appBaseUrl: input.config.appBaseUrl,
         buyAmountUsd: input.config.buyAmountUsd,
         chatType: state.chatType,
         cheaperAlternative,
         deliveryTarget,
+        deliveryRef,
         messageKind: thread.messageKind,
         note,
+        copyPolicy,
         telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
       });
       const deliveryView = buildNeutralSignalDeliveryView({
@@ -5244,6 +5320,7 @@ export async function publishSignalBotTick(input: {
         note,
         sourceSide: buySide,
         target: deliveryTarget,
+        copyPolicy,
       });
       const transportPayload: TransportPayload = {
         ...telegramTransport.render(deliveryView),
@@ -5269,6 +5346,7 @@ export async function publishSignalBotTick(input: {
           baselineAt: thread.baselineAt,
           chatId,
           db: input.db,
+          insertId: deliveryRef,
           messageId: result.messageId,
           messageKind: thread.messageKind,
           metrics: {
@@ -5276,6 +5354,7 @@ export async function publishSignalBotTick(input: {
               buySide,
               messageKind: thread.messageKind,
               note,
+              copyPolicy,
             }),
             delivery: {
               lifecycleRevision: lifecycle.revision,
@@ -6197,12 +6276,14 @@ function formatSignalBotFollowthroughStatBlock(input: {
 
 function buildSignalBotFollowthroughMessage(input: {
   candidate: SignalBotFollowthroughCandidateRow;
+  deliveryRef?: string | null;
   kind: Extract<
     SignalBotMessageKind,
     "followthrough_stats" | "resolved_loss" | "resolved_win"
   >;
   stats: SignalBotFollowthroughStats;
   telegramMiniAppLinkBase?: string | null;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
 }): string {
   const stats = input.stats;
   const side = stats.signalSide ?? "side";
@@ -6219,6 +6300,7 @@ function buildSignalBotFollowthroughMessage(input: {
   const header = notificationCopy.headline.text;
   const marketStartParam = input.candidate.event_id
     ? buildSignalBotMarketStartParam({
+        deliveryRef: input.deliveryRef,
         eventId: input.candidate.event_id,
         marketId: input.candidate.market_id,
         side: stats.signalSide,
@@ -6256,6 +6338,7 @@ function buildNeutralSignalFollowthroughView(input: {
   replyToMessageId: number | null;
   stats: SignalBotFollowthroughStats;
   target: SignalBotCheaperAlternative | null;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
 }): SignalDeliveryView {
   const notificationCopy = buildSignalBotFollowthroughNotificationCopy(input);
   const target = input.target
@@ -6348,6 +6431,7 @@ export async function publishSignalBotFollowthroughTick(input: {
     input.db,
     input.config.followthrough,
   );
+  const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   if (!policy.enabled) {
     return {
       candidates: 0,
@@ -6431,14 +6515,17 @@ export async function publishSignalBotFollowthroughTick(input: {
     }
     const text = buildSignalBotFollowthroughMessage({
       candidate,
+      deliveryRef: reserved,
       kind,
       stats,
       telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+      copyPolicy,
     });
     const copyAudit = buildSignalBotFollowthroughCopyAudit({
       candidate,
       kind,
       stats,
+      copyPolicy,
     });
     const target = resolveSignalBotFollowthroughDeliveryTarget(candidate);
     const buyPrice = await resolveSignalBotFollowthroughBuyCtaPrice({
@@ -6458,6 +6545,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       buyAmountUsd: input.config.buyAmountUsd,
       candidate,
       chatType: chatState?.chatType,
+      deliveryRef: reserved,
       kind,
       stats,
       target,
@@ -6471,6 +6559,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       replyToMessageId,
       stats,
       target,
+      copyPolicy,
     });
     const result = await sendSignalBotViaTransport({
       payload: {
@@ -6495,6 +6584,7 @@ export async function publishSignalBotFollowthroughTick(input: {
         baselineAt,
         chatId: candidate.chat_id,
         db: input.db,
+        insertId: createSignalDeliveryRef(),
         messageId: null,
         messageKind: kind,
         metrics: {
@@ -6516,6 +6606,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       baselineAt,
       chatId: candidate.chat_id,
       db: input.db,
+      insertId: createSignalDeliveryRef(),
       messageId: result.messageId,
       messageKind: kind,
       metrics: {
@@ -6760,6 +6851,7 @@ export async function loadSignalBotNotes(
         n.direction,
         n.confidence,
         n.model_meta,
+        n.metrics,
         n.created_at::text as created_at,
         coalesce(nullif(n.lineage->>'revision_kind', ''), 'initial')
           as revision_kind,
@@ -6780,6 +6872,7 @@ export async function loadSignalBotNotes(
         m.title as market_title,
         m.slug as market_slug,
         m.description as market_description,
+        m.metadata as market_metadata,
         e.title as event_title,
         e.description as event_description,
         m.category,
@@ -7331,6 +7424,7 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     direction: row.direction,
     confidence: toNumber(row.confidence),
     modelMeta: asObject(row.model_meta),
+    metrics: asObject(row.metrics),
     createdAt: toIso(row.created_at),
     revisionKind:
       row.revision_kind === "research_update" ? "research_update" : "initial",
@@ -7344,6 +7438,7 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     marketTitle: row.market_title,
     marketSlug: row.market_slug,
     marketDescription: row.market_description,
+    marketMetadata: row.market_metadata,
     eventTitle: row.event_title,
     eventDescription: row.event_description,
     outcomes: parseMarketOutcomes(row.outcomes),
@@ -7416,8 +7511,6 @@ function formatCents(value: number): string {
   return `${Math.max(0, Math.min(100, Math.round(value * 100)))}¢`;
 }
 
-type SignalBotOutcomeLabelMode = "button" | "price";
-
 type SignalBotMarketCopySource = {
   eventDescription?: string | null;
   eventTitle?: string | null;
@@ -7471,11 +7564,12 @@ function fallbackSignalNotificationSubject(
     preservedFields: ["predicate"],
     source: "safe_full_title",
     text: title.trim() || "This market",
-    version: "signal_notification_subject_v2",
+    version: "signal_notification_subject_v3",
   };
 }
 
 function buildSignalBotInitialNotificationCopy(input: {
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
   messageKind: "initial" | "research_update";
   note: SignalBotNote;
   side: "NO" | "YES" | null;
@@ -7486,6 +7580,9 @@ function buildSignalBotInitialNotificationCopy(input: {
   const sideCopy = input.side
     ? buildSignalBotSideCopy(input.note, input.side)
     : null;
+  const presentation = resolvePersistedOrCurrentTelegramMarketPresentation(
+    input.note,
+  );
   const subject =
     input.side && sideCopy
       ? buildSignalNotificationSubject({
@@ -7493,6 +7590,7 @@ function buildSignalBotInitialNotificationCopy(input: {
           marketTitle: input.note.marketTitle,
           side: input.side,
           sideCopy,
+          presentation,
         })
       : fallbackSignalNotificationSubject(
           input.note.marketTitle ?? input.note.eventTitle ?? "This market",
@@ -7511,6 +7609,7 @@ function buildSignalBotInitialNotificationCopy(input: {
           : subject.text,
       strongWallets: input.note.holderClusterSharpHolders,
       subject,
+      policy: input.copyPolicy?.policy,
     }),
     subject,
   };
@@ -7523,6 +7622,7 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
     "followthrough_stats" | "resolved_loss" | "resolved_win"
   >;
   stats: SignalBotFollowthroughStats;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
 }): {
   headline: SignalNotificationHeadline;
   subject: SignalNotificationSubject;
@@ -7533,6 +7633,16 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
         input.stats.signalSide,
       )
     : null;
+  const presentation = resolvePersistedOrCurrentTelegramMarketPresentation({
+    eventDescription: input.candidate.event_description,
+    eventTitle: input.candidate.event_title,
+    marketDescription: input.candidate.market_description,
+    marketSlug: input.candidate.market_slug,
+    marketTitle: input.candidate.market_title,
+    outcomes: input.candidate.outcomes,
+    resolutionSource: input.candidate.resolution_source,
+    metrics: asObject(input.candidate.root_metrics),
+  });
   const subject =
     input.stats.signalSide && sideCopy
       ? buildSignalNotificationSubject({
@@ -7540,6 +7650,7 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
           marketTitle: input.candidate.market_title,
           side: input.stats.signalSide,
           sideCopy,
+          presentation,
         })
       : fallbackSignalNotificationSubject(
           input.candidate.market_title ??
@@ -7557,18 +7668,10 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
       priceMoveCents: input.stats.priceMoveCents,
       subject,
       trimmedWallets: input.stats.trimmedWallets,
+      policy: input.copyPolicy?.policy,
     }),
     subject,
   };
-}
-
-function formatSignalBotOutcomeDisplayLabel(
-  note: SignalBotMarketCopySource,
-  side: "NO" | "YES",
-  mode: SignalBotOutcomeLabelMode,
-): string {
-  const copy = buildSignalBotSideCopy(note, side);
-  return mode === "button" ? copy.buttonLabel : copy.priceLabel;
 }
 
 function compactSignalBotCopyAudit(copy: MarketSideCopy | null) {
@@ -7589,6 +7692,7 @@ function compactSignalBotCopyAudit(copy: MarketSideCopy | null) {
 
 function buildSignalBotCopyAudit(input: {
   buySide: "NO" | "YES" | null;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
   messageKind: "initial" | "research_update";
   note: SignalBotNote;
 }) {
@@ -7597,6 +7701,7 @@ function buildSignalBotCopyAudit(input: {
   const activeCopy =
     input.buySide === "YES" ? yesCopy : input.buySide === "NO" ? noCopy : null;
   const notification = buildSignalBotInitialNotificationCopy({
+    copyPolicy: input.copyPolicy,
     messageKind: input.messageKind,
     note: input.note,
     side: input.buySide,
@@ -7604,6 +7709,15 @@ function buildSignalBotCopyAudit(input: {
   return {
     activeSide: input.buySide,
     copyVersion: SIGNAL_BOT_COPY_VERSION,
+    policyRevision: input.copyPolicy?.revision ?? null,
+    presentation: resolvePersistedOrCurrentTelegramMarketPresentation(
+      input.note,
+    ),
+    evidence: resolvePersistedSignalEvidence(input.note).map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      scope: row.scope,
+    })),
     marketSegment: input.note.marketSegment,
     notification,
     priceSnapshot: {
@@ -7626,6 +7740,7 @@ function buildSignalBotFollowthroughCopyAudit(input: {
     "followthrough_stats" | "resolved_loss" | "resolved_win"
   >;
   stats: SignalBotFollowthroughStats;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
 }) {
   const yesCopy = buildSignalBotFollowthroughSideCopy(input.candidate, "YES");
   const noCopy = buildSignalBotFollowthroughSideCopy(input.candidate, "NO");
@@ -7639,6 +7754,7 @@ function buildSignalBotFollowthroughCopyAudit(input: {
   return {
     activeSide: input.stats.signalSide,
     copyVersion: SIGNAL_BOT_COPY_VERSION,
+    policyRevision: input.copyPolicy?.revision ?? null,
     notification,
     priceSnapshot: {
       bestAsk: toNumber(input.candidate.best_ask),
@@ -7786,82 +7902,57 @@ function formatSignalBotWhyInterestingLine(input: {
   return `${actor} is still holding ${sideLabel}${positionContext}.`;
 }
 
-function formatSignalBotWhyItMattersBullets(note: SignalBotNote): string[] {
-  const seen = new Set<string>();
-  const bullets: string[] = [];
-  for (const rawBullet of note.holderCredentialBullets) {
-    const bullet = rawBullet.trim();
-    if (!bullet || seen.has(bullet)) continue;
-    seen.add(bullet);
-    bullets.push(bullet);
-    if (bullets.length >= 3) break;
+function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
+  const title =
+    row.kind === "track_record"
+      ? "Track record"
+      : row.kind === "pricing_edge"
+        ? "Pricing edge"
+        : row.kind === "volume"
+          ? "Volume"
+          : row.kind === "conviction"
+            ? "Conviction"
+            : row.kind === "capital"
+              ? "Cluster capital"
+              : "Outside odds";
+  let value: string;
+  if (row.measurement.kind === "range") {
+    value = `${Math.round(row.measurement.min * 100)}–${Math.round(
+      row.measurement.max * 100,
+    )}%`;
+  } else if (row.measurement.unit === "usd") {
+    value =
+      row.kind === "track_record"
+        ? formatSignedCompactUsd(row.measurement.value)
+        : formatCompactUsd(row.measurement.value);
+  } else if (row.measurement.unit === "probability") {
+    value = `${row.measurement.value >= 0 ? "+" : ""}${(
+      row.measurement.value * 100
+    ).toFixed(1)} pts`;
+  } else if (row.measurement.unit === "wallets") {
+    value = `${Math.trunc(row.measurement.value)} strong wallets`;
+  } else {
+    value = String(row.measurement.value);
   }
-  return bullets;
+  const qualifier =
+    row.sampleSize != null && row.kind === "pricing_edge"
+      ? ` · ${row.sampleSize} resolved`
+      : row.horizonDays != null
+        ? ` · ${row.horizonDays}d`
+        : "";
+  return `▸ ${escapeTelegramMarkdownV2(title)}  ${formatTelegramBold(
+    value,
+  )}${escapeTelegramMarkdownV2(qualifier)}`;
 }
 
-function formatSignalBotCredentialRow(bullet: string): string {
-  const money = "(\\$[0-9][0-9,.]*(?:[KMB])?)";
-  const trackRecord = bullet.match(
-    new RegExp(`^Up ${money}(?: combined)? over the last (\\d+) days?$`, "i"),
-  );
-  if (trackRecord?.[1] && trackRecord[2]) {
-    return `▸ ${escapeTelegramMarkdownV2("Track record")}  ${formatTelegramBold(
-      `+${trackRecord[1]}`,
-    )} · ${escapeTelegramMarkdownV2(`${trackRecord[2]}d`)}`;
-  }
-  const pricingEdge = bullet.match(
-    /^Beat market prices by ([0-9]+(?:\.[0-9]+)?) points? across ([0-9]+) resolved bets?$/i,
-  );
-  if (pricingEdge?.[1] && pricingEdge[2]) {
-    return `▸ ${escapeTelegramMarkdownV2("Pricing edge")}  ${formatTelegramBold(
-      `+${pricingEdge[1]} pts`,
-    )} · ${escapeTelegramMarkdownV2(`${pricingEdge[2]} resolved`)}`;
-  }
-  const volume = bullet.match(
-    new RegExp(`^Traded ${money} over the last (\\d+) days?$`, "i"),
-  );
-  if (volume?.[1] && volume[2]) {
-    return `▸ ${escapeTelegramMarkdownV2("Volume")}  ${formatTelegramBold(
-      volume[1],
-    )} · ${escapeTelegramMarkdownV2(`${volume[2]}d`)}`;
-  }
-  const conviction = bullet.match(
-    /^([0-9]+) strong wallets? on the same side$/i,
-  );
-  if (conviction?.[1]) {
-    return `▸ ${escapeTelegramMarkdownV2("Conviction")}  ${formatTelegramBold(
-      `${conviction[1]} strong wallets`,
-    )} · ${escapeTelegramMarkdownV2("same side")}`;
-  }
-  const capital = bullet.match(
-    new RegExp(`^${money} tracked by strong wallets$`, "i"),
-  );
-  if (capital?.[1]) {
-    return `▸ ${escapeTelegramMarkdownV2("Capital tracked")}  ${formatTelegramBold(
-      capital[1],
-    )}`;
-  }
-  const winRate = bullet.match(
-    /^Won ([0-9]+(?:\.[0-9]+)?)% of recent trades$/i,
-  );
-  if (winRate?.[1]) {
-    return `▸ ${escapeTelegramMarkdownV2("Win rate")}  ${formatTelegramBold(
-      `${winRate[1]}%`,
-    )} · ${escapeTelegramMarkdownV2("recent trades")}`;
-  }
-  return `▸ ${escapeTelegramMarkdownV2(bullet)}`;
-}
-
-function formatSignalBotCredentialBlock(input: {
-  actorMode: SignalBotNote["holderActorMode"];
-  bullets: string[];
-}): string {
+function formatSignalBotEvidenceBlock(rows: SignalEvidenceMetricV1[]): string {
+  const title = rows.some((row) => row.scope === "wallet_cluster")
+    ? "The edge"
+    : "Wallet edge";
   return formatTelegramBlockquote([
-    formatTelegramBold(
-      input.actorMode === "sharp_cluster" ? "The edge" : "Wallet edge",
-    ),
+    formatTelegramBold(title),
     "",
-    ...input.bullets.map(formatSignalBotCredentialRow),
+    ...rows.map(formatSignalBotEvidenceRow),
   ]);
 }
 

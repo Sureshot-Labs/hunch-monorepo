@@ -65,7 +65,7 @@
     "pretest": "pnpm -C ../../packages/infra run build",
     "pretest:fast": "pnpm run pretest",
     "test": "tsx src/test-runner.ts",
-    "test:fast": "tsx src/test-runner.ts --unit ai-response-tests cli-args-tests hot-token-selection-tests limitless-metadata-tests orders-repo-tests polymarket-max-spend-tests kalshi-dflow-transaction-safety-tests trading-ready-static-tests trading-service-tests polymarket-embedded-tests limitless-history-tests signal-bot-tests",
+    "test:fast": "tsx src/test-runner.ts --unit admin-market-presentations-tests ai-response-tests cli-args-tests hot-token-selection-tests limitless-metadata-tests orders-repo-tests polymarket-max-spend-tests kalshi-dflow-transaction-safety-tests trading-ready-static-tests trading-service-tests polymarket-embedded-tests limitless-history-tests signal-bot-tests signal-evidence-tests signal-notification-headline-tests signal-post-copy-policy-tests",
     "test:integration": "tsx src/test-runner.ts --integration",
     "test:unit": "tsx src/test-runner.ts --unit",
     "lint": "eslint .",
@@ -81,7 +81,8 @@
     "ai:holder-research:audit": "tsx src/ai-holder-research-audit.ts",
     "ai:holder-research:observations": "tsx src/ai-holder-research-observations.ts",
     "ai:holder-research:runner": "tsx src/ai-holder-research-runner.ts",
-    "signal:bot": "tsx src/signal-bot-runner.ts"
+    "signal:bot": "tsx src/signal-bot-runner.ts",
+    "signal:post-copy:audit": "tsx src/signal-post-copy-audit.ts"
   },
   "dependencies": {
     "@fastify/swagger": "^9.7.0",

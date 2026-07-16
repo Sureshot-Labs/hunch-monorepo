@@ -3,6 +3,7 @@ import {
   ADMIN_USERS_SORT_BY_VALUES,
   ADMIN_USERS_SORT_DIR_VALUES,
 } from "../services/admin-users-sort.js";
+import { telegramMarketPresentationDraftSchema } from "../services/telegram-market-presentation.js";
 
 const feePolicyVenueSchema = z.enum(["polymarket", "kalshi", "limitless"]);
 const adminCursorSchema = z.string().trim().min(1).max(2000);
@@ -672,6 +673,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "holder_research",
   "arbitrage_defaults",
   "signal_bot",
+  "signal_post_copy",
   "telegram_notifications",
   "venue_lifecycle",
 ]);
@@ -684,6 +686,17 @@ export const adminIntelPolicyBodySchema = z.object({
   effectiveAt: z.string().datetime().optional(),
   payload: z.record(z.string(), z.unknown()),
 });
+
+export const adminMarketPresentationSearchSchema = z.object({
+  q: z.string().trim().min(1).max(320),
+});
+
+export const adminMarketPresentationParamsSchema = z.object({
+  marketId: z.string().trim().min(1).max(240),
+});
+
+export const adminMarketPresentationBodySchema =
+  telegramMarketPresentationDraftSchema;
 
 export type AdminFeePolicyBody = z.infer<typeof adminFeePolicySchema>;
 export type AdminDebridgeConfigBody = z.infer<typeof adminDebridgeConfigSchema>;

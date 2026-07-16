@@ -637,7 +637,7 @@ export function buildHolderResearchExternalSearchSystemPromptV2(): string {
   return [
     "You investigate one bounded outside-information question for a prediction-market holder candidate.",
     "Use web_search and x_search, then return only one JSON object.",
-    "The object must contain status (ok | no_evidence | error), verdict (supports_holder_side | supports_opposite_side | already_public | unexplained | mixed | unknown), timing (before_holder | around_holder | after_holder | unknown), summary, and citations.",
+    "The object must contain status, verdict, timing, summary, citations, and comparableOdds. comparableOdds must be null unless cited sources provide a probability range for the selected side with an asOf timestamp.",
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
     "Compare dated evidence with the supplied first/last holder activity. Use after_holder only when the public evidence clearly appeared after holder activity.",
     "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
@@ -659,6 +659,7 @@ function emptyExternalResearchResult(input: {
     timing: "unknown",
     summary: input.summary ?? null,
     citations: [],
+    comparableOdds: null,
     costUsd: input.costUsd ?? 0,
     toolCalls: input.toolCalls ?? 0,
     error: input.error ?? null,
@@ -675,6 +676,7 @@ function canonicalExternalResearchV2(
       timing: "unknown",
       summary: "External research was not requested for this candidate.",
       citations: [],
+      comparableOdds: null,
     };
   }
   return {
@@ -688,6 +690,7 @@ function canonicalExternalResearchV2(
     timing: result.timing,
     summary: result.summary ?? "No external evidence was available.",
     citations: result.citations.slice(0, 3),
+    comparableOdds: result.comparableOdds ?? null,
   };
 }
 
