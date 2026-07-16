@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -23,6 +23,10 @@ import {
 
 export type TelegramRoutesDependencies = {
   authPreHandler?: ReturnType<typeof createAuthMiddleware>;
+  checkMembershipRateLimit?: (
+    request: FastifyRequest,
+    userId: string,
+  ) => Promise<boolean>;
   checkGroupMembership?: (
     userId: string,
   ) => Promise<TelegramGroupMembershipResult>;
@@ -34,6 +38,17 @@ async function registerTelegramRoutes(
 ): Promise<void> {
   const z = app.withTypeProvider<ZodTypeProvider>();
   const authPreHandler = dependencies.authPreHandler ?? createAuthMiddleware();
+  const checkMembershipRateLimit =
+    dependencies.checkMembershipRateLimit ??
+    (async (request: FastifyRequest, userId: string) => {
+      const result = await checkRateLimitForSecurityClientIp(request, {
+        keyPrefix: `telegram:membership:${userId}`,
+        maxRequests: 10,
+        windowMs: 60_000,
+        onError: "fail_closed",
+      });
+      return result.allowed;
+    });
   const checkGroupMembership =
     dependencies.checkGroupMembership ??
     (async (userId: string) =>
@@ -148,6 +163,7 @@ async function registerTelegramRoutes(
         response: {
           200: telegramGroupMembershipResponseSchema,
           401: authErrorResponseSchema,
+          429: authErrorResponseSchema,
         },
       },
     },
@@ -156,6 +172,22 @@ async function registerTelegramRoutes(
       if (!user) {
         reply.code(401);
         return reply.send({ error: "Unauthorized" });
+      }
+
+      reply.header("Cache-Control", "private, no-store");
+
+      let rateLimitAllowed = false;
+      try {
+        rateLimitAllowed = await checkMembershipRateLimit(request, user.id);
+      } catch (error) {
+        request.log.error(
+          { error },
+          "Telegram group membership rate limit check failed",
+        );
+      }
+      if (!rateLimitAllowed) {
+        reply.code(429);
+        return reply.send({ error: "Rate limit exceeded" });
       }
 
       let result: TelegramGroupMembershipResult;
@@ -180,7 +212,6 @@ async function registerTelegramRoutes(
         );
       }
 
-      reply.header("Cache-Control", "private, no-store");
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send({
         cached: result.cached,
