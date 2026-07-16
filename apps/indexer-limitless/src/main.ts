@@ -530,9 +530,11 @@ async function main() {
 
     log.info("Limitless startup: running initial full bootstrap");
     void periodicFullBootstrap();
+
+    // Start the recurring cadence after the initial hot refresh completes so
+    // the first interval cannot immediately duplicate the startup pass.
+    setInterval(periodicHotRefresh, env.refreshMinutes * 60 * 1000);
   })();
-  // Frequent hot refresh for live markets and stream-marked tokens.
-  setInterval(periodicHotRefresh, env.refreshMinutes * 60 * 1000);
   // Slower full sweep for completeness and new-market discovery.
   setInterval(periodicFullBootstrap, env.fullRefreshMinutes * 60 * 1000);
   // Refresh WS desired subscriptions independently from HTTP refresh cadence.

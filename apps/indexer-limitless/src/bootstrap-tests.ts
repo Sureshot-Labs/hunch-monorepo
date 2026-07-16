@@ -8,6 +8,7 @@ import {
   type HotLimitlessMarketRow,
   type WsMarketRefRow,
 } from "./hot-targets.js";
+import { resolveLimitlessProcessingCapabilities } from "./processing-mode.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -132,5 +133,35 @@ test("selectHotAmmQuoteCandidates skips incomplete AMM rows", () => {
   assert.deepEqual(
     candidates.map((row) => row.address),
     ["0x444"],
+  );
+});
+
+test("discovery processing never fetches orderbooks or publishes live prices", () => {
+  assert.deepEqual(
+    resolveLimitlessProcessingCapabilities({
+      mode: "discovery",
+      refreshOrderbookTop: true,
+    }),
+    {
+      publishLiveUpdates: false,
+      refreshOrderbookTop: false,
+    },
+  );
+});
+
+test("hot processing preserves default and explicit orderbook behavior", () => {
+  assert.deepEqual(resolveLimitlessProcessingCapabilities({ mode: "hot" }), {
+    publishLiveUpdates: true,
+    refreshOrderbookTop: true,
+  });
+  assert.deepEqual(
+    resolveLimitlessProcessingCapabilities({
+      mode: "hot",
+      refreshOrderbookTop: false,
+    }),
+    {
+      publishLiveUpdates: true,
+      refreshOrderbookTop: false,
+    },
   );
 });

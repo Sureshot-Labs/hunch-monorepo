@@ -25,6 +25,10 @@ import {
   resolveLimitlessGroupId,
 } from "./grouping.js";
 import {
+  resolveLimitlessProcessingCapabilities,
+  type LimitlessProcessingMode,
+} from "./processing-mode.js";
+import {
   mapLimitlessEventRow,
   mapLimitlessMarketRow,
   mapToUnifiedEvent,
@@ -1749,11 +1753,16 @@ function resolveHotMarketRefs(
 async function processLimitlessMarket(
   mergedTop: TLimitlessMarket,
   options: {
+    mode?: LimitlessProcessingMode;
     publishMarketState?: boolean;
     refreshOrderbookTop?: boolean;
     groupParent?: TLimitlessMarket | null;
   } = {},
 ): Promise<{ eventId: string; marketCount: number }> {
+  const capabilities = resolveLimitlessProcessingCapabilities({
+    mode: options.mode ?? "hot",
+    refreshOrderbookTop: options.refreshOrderbookTop,
+  });
   let eventContext = resolveLimitlessEventContext(
     mergedTop,
     options.groupParent,
@@ -1804,7 +1813,7 @@ async function processLimitlessMarket(
       eventSource,
     );
     if (
-      (options.refreshOrderbookTop ?? true) &&
+      capabilities.refreshOrderbookTop &&
       mergedTop.tradeType?.toLowerCase() === "clob"
     ) {
       await applyOrderbookTop(mergedTop.slug, unifiedMarketRow);
@@ -1881,7 +1890,7 @@ async function processLimitlessMarket(
         mergedTop,
       );
       if (
-        (options.refreshOrderbookTop ?? true) &&
+        capabilities.refreshOrderbookTop &&
         mergedSub.tradeType?.toLowerCase() === "clob"
       ) {
         await applyOrderbookTop(mergedSub.slug, unifiedMarketRow);
@@ -1940,17 +1949,19 @@ async function processLimitlessMarket(
     embedItems[0] = { ...embedItems[0], top_markets: topMarkets };
   }
 
-  await publishLimitlessTerminalTops(eventMarkets);
-  if (options.publishMarketState) {
-    await publishLimitlessMarketStates(eventMarkets);
-  }
-  try {
-    await publishLimitlessMarketUpdates(eventMarkets, unifiedEventRow);
-  } catch (error) {
-    log.warn("Limitless market update publish failed", {
-      eventId: unifiedEventRow.id,
-      error,
-    });
+  if (capabilities.publishLiveUpdates) {
+    await publishLimitlessTerminalTops(eventMarkets);
+    if (options.publishMarketState) {
+      await publishLimitlessMarketStates(eventMarkets);
+    }
+    try {
+      await publishLimitlessMarketUpdates(eventMarkets, unifiedEventRow);
+    } catch (error) {
+      log.warn("Limitless market update publish failed", {
+        eventId: unifiedEventRow.id,
+        error,
+      });
+    }
   }
 
   if (embedItems.length) {
@@ -1968,6 +1979,7 @@ async function processFetchedMarkets(
   markets: TLimitlessMarket[],
   opts: {
     logEach: boolean;
+    mode?: LimitlessProcessingMode;
     progressEvery?: number;
     progressLabel?: string;
   },
@@ -1975,6 +1987,7 @@ async function processFetchedMarkets(
   let eventCount = 0;
   let marketCount = 0;
   let failedEvents = 0;
+  const mode = opts.mode ?? "hot";
   const progressEvery = Math.max(0, opts.progressEvery ?? 0);
 
   const groupParents = new Map<string, TLimitlessMarket>();
@@ -2008,6 +2021,7 @@ async function processFetchedMarkets(
       const { eventId, marketCount: processedMarkets } =
         await processLimitlessMarket(mergedTop, {
           groupParent: groupId ? groupParents.get(groupId) : undefined,
+          mode,
         });
       eventCount += 1;
       marketCount += processedMarkets;
@@ -2036,6 +2050,7 @@ async function processFetchedMarkets(
       ) {
         log.info(opts.progressLabel ?? "Limitless process progress", {
           completedEvents: eventCount + failedEvents,
+          mode,
           totalEvents: markets.length,
           processedMarkets: marketCount,
           failedEvents,
@@ -2068,10 +2083,15 @@ export async function bootstrapLimitless() {
       },
     },
   );
+  log.info("Limitless full bootstrap processing started", {
+    events: fetched.markets.length,
+    mode: "discovery",
+  });
   const { eventCount, marketCount } = await processFetchedMarkets(
     fetched.markets,
     {
       logEach: false,
+      mode: "discovery",
       progressEvery: 25,
       progressLabel: "Limitless full bootstrap progress",
     },
