@@ -291,6 +291,8 @@ export async function runSignalBotRunner(): Promise<void> {
                   .buildPositionMessage({
                     appBaseUrl: config.appBaseUrl,
                     positionId,
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                     telegramUserId,
                   })
                   .catch((error: unknown) => {
@@ -316,6 +318,8 @@ export async function runSignalBotRunner(): Promise<void> {
                     context: input.context,
                     marketRef: input.marketRef,
                     telegramMessageId: input.telegramMessageId,
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                     telegramUserId: input.telegramUserId,
                   })
                   .catch((error: unknown) => {
@@ -377,6 +381,8 @@ export async function runSignalBotRunner(): Promise<void> {
                     isAdminTest: input.isAdminTest,
                     marketRef: input.marketRef,
                     telegramMessageId: input.telegramMessageId,
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                     telegramUserId: input.telegramUserId,
                   })
                   .catch((error: unknown) => {

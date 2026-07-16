@@ -1084,7 +1084,7 @@ function readStartAppParam(url: string | undefined): string {
 }
 
 function readWebAppStartParam(
-  button: { web_app?: { url: string } } | undefined,
+  button: { text?: string; web_app?: { url: string } } | undefined,
 ): string {
   assert.ok(button?.web_app?.url);
   const url = new URL(button.web_app.url);
@@ -2919,6 +2919,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           getReadiness: async () =>
@@ -2942,11 +2943,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appFallbackButtons.some((button) => "callback_data" in button),
         false,
       );
-      assert.equal(appFallbackButtons[0]?.text, "Trade in Hunch");
-      const appFallbackUrl = appFallbackButtons
-        .map((button) => ("url" in button ? button.url : null))
-        .find((url): url is string => Boolean(url));
-      assert.match(appFallbackUrl ?? "", /\/events\/event-1\?market=market-1/);
+      assert.deepEqual(
+        appFallbackButtons.map((button) => button.text),
+        ["Buy YES · $10", "Buy NO · $10", "Trade in Hunch"],
+      );
+      assert.equal(
+        appFallbackButtons.some((button) => "url" in button),
+        false,
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[0])),
+        "event-1|market-1|Y|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[1])),
+        "event-1|market-1|N|10",
+      );
+      assert.equal(
+        decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[2])),
+        "event-1|market-1|",
+      );
     },
   },
   {

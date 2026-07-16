@@ -52,7 +52,9 @@ import {
   buildSignalBotHolderStartParam,
   buildSignalBotMiniAppUrl,
   buildSignalBotMarketStartParam,
+  buildSignalBotTelegramWebAppUrl,
   normalizeTelegramMiniAppLinkBase,
+  SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
 } from "./signal-bot-mini-app-links.js";
 import { parseTelegramBotTradingCallbackData } from "./telegram-bot-trading-client.js";
 import {
@@ -550,8 +552,6 @@ const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
 const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v4";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
-const TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
-const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
   "TRACKEDWALLET",
@@ -1250,20 +1250,6 @@ function isSignalBotPrivateChat(chatType: string | null | undefined): boolean {
   return chatType === "private";
 }
 
-function buildSignalBotTelegramWebAppUrl(input: {
-  appBaseUrl: string;
-  startParam: string | null | undefined;
-}): string | null {
-  if (!input.startParam) return null;
-  try {
-    const url = new URL(TELEGRAM_WEB_APP_ENTRY_PATH, input.appBaseUrl);
-    url.searchParams.set(TELEGRAM_WEB_APP_START_PARAM_QUERY, input.startParam);
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
 function buildSignalBotTelegramButton(input: {
   appBaseUrl: string;
   chatType?: string | null;
@@ -1886,7 +1872,10 @@ function buildSignalBotMainMiniAppButton(input: {
   return {
     text: "Open Hunch",
     web_app: {
-      url: new URL(TELEGRAM_WEB_APP_ENTRY_PATH, input.appBaseUrl).toString(),
+      url: new URL(
+        SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
+        input.appBaseUrl,
+      ).toString(),
     },
   };
 }
@@ -7218,7 +7207,7 @@ export async function configureSignalBotTelegramUi(input: {
               type: "web_app",
               web_app: {
                 url: new URL(
-                  TELEGRAM_WEB_APP_ENTRY_PATH,
+                  SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
                   input.config.appBaseUrl,
                 ).toString(),
               },

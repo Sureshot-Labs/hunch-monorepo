@@ -4,6 +4,7 @@ import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation
 export type TelegramBotTradingClientButton =
   | { text: string; callback_data: string }
   | { text: string; copy_text: { text: string } }
+  | { text: string; web_app: { url: string } }
   | { text: string; url: string };
 
 export type TelegramBotTradingClientReplyMarkup = {
@@ -64,6 +65,7 @@ export type TelegramBotTradingInternalApiClient = {
     isAdminTest?: boolean;
     marketRef: string;
     telegramMessageId?: number | null;
+    telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
   buildStatusMessage: (
@@ -76,6 +78,7 @@ export type TelegramBotTradingInternalApiClient = {
   buildPositionMessage: (input: {
     appBaseUrl: string;
     positionId: string;
+    telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
   buildDepositMessage: (input: {

@@ -1,4 +1,6 @@
 const TELEGRAM_STARTAPP_MAX_LENGTH = 512;
+export const SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
+const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const SIGNAL_BOT_ROUTE_ID_RE = /^[A-Za-z0-9:_-]{1,160}$/;
 const SIGNAL_BOT_SAFE_ROUTE_ID_RE = /^[A-Za-z0-9_-]{1,58}$/;
 const SIGNAL_BOT_WALLET_ADDRESS_RE = /^[A-Za-z0-9]{3,64}$/;
@@ -144,6 +146,23 @@ export function buildSignalBotMiniAppUrl(input: {
   try {
     const url = new URL(input.base);
     url.searchParams.set("startapp", input.startParam);
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function buildSignalBotTelegramWebAppUrl(input: {
+  appBaseUrl: string;
+  startParam: string | null | undefined;
+}): string | null {
+  if (!input.startParam) return null;
+  try {
+    const url = new URL(
+      SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
+      input.appBaseUrl,
+    );
+    url.searchParams.set(TELEGRAM_WEB_APP_START_PARAM_QUERY, input.startParam);
     return url.toString();
   } catch {
     return null;

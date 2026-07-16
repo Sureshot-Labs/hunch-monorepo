@@ -61,6 +61,7 @@ const internalMarketCardBodySchema = z
     isAdminTest: z.boolean().optional(),
     marketRef: z.string().trim().min(1),
     telegramMessageId: z.number().int().optional().nullable(),
+    telegramMiniAppEnabled: z.boolean().optional(),
     telegramUserId: z.union([z.string(), z.number()]),
     context: z
       .object({
@@ -85,6 +86,7 @@ const internalPositionCardBodySchema = z
   .object({
     appBaseUrl: z.string().trim().url(),
     positionId: z.string().uuid(),
+    telegramMiniAppEnabled: z.boolean().optional(),
     telegramUserId: z.union([z.string(), z.number()]),
   })
   .strict();
@@ -475,6 +477,7 @@ async function registerTelegramBotTradingRoutes(
         },
         db,
         marketRef: position.marketId,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId: request.body.telegramUserId,
         trading: createTradingForRequest(request),
       });
@@ -561,6 +564,7 @@ async function registerTelegramBotTradingRoutes(
             isAdminTest: request.body.isAdminTest,
             marketRef: request.body.marketRef,
             telegramMessageId: request.body.telegramMessageId,
+            telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
             telegramUserId: request.body.telegramUserId,
             trading: createTradingForRequest(request),
           })

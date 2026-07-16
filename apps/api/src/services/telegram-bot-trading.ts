@@ -67,6 +67,11 @@ import {
   buildTelegramMarketIdentity,
   formatTelegramVenueLabel,
 } from "./telegram-market-identity.js";
+import {
+  buildSignalBotBuyStartParam,
+  buildSignalBotMarketStartParam,
+  buildSignalBotTelegramWebAppUrl,
+} from "./signal-bot-mini-app-links.js";
 import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
 import { resolvePolymarketAvailablePositionRaw } from "./polymarket-trading-execution-service.js";
 import {
@@ -88,6 +93,7 @@ const UNKNOWN_TRADE_RESOLVING_MESSAGE =
 export type TelegramBotTradingButton =
   | { text: string; callback_data: string }
   | { text: string; copy_text: { text: string } }
+  | { text: string; web_app: { url: string } }
   | { text: string; url: string };
 
 export type TelegramBotTradingReplyMarkup = {
@@ -2685,6 +2691,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   marketRef: string;
   signerInspector?: TelegramBotTradingSignerInspector;
   telegramMessageId?: number | null;
+  telegramMiniAppEnabled?: boolean;
   telegramUserId: string | number;
   trading?: ApiBotTradingExecutor;
 }): Promise<TelegramBotTradingMessage> {
@@ -3007,24 +3014,75 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       },
     ]);
   }
+  const buildMiniAppButton = (buttonInput: {
+    startParam: string | null;
+    text: string;
+  }): TelegramBotTradingButton => {
+    const webAppUrl = input.telegramMiniAppEnabled
+      ? buildSignalBotTelegramWebAppUrl({
+          appBaseUrl: input.appBaseUrl,
+          startParam: buttonInput.startParam,
+        })
+      : null;
+    return webAppUrl
+      ? { text: buttonInput.text, web_app: { url: webAppUrl } }
+      : { text: buttonInput.text, url: openUrl };
+  };
+  const marketStartParam = market.event_id
+    ? buildSignalBotMarketStartParam({
+        eventId: market.event_id,
+        marketId: market.id,
+        side: focusedSide,
+      })
+    : null;
+  const hasBotAction =
+    buyOptions.length > 0 || sellOptions.length > 0 || Boolean(redeemPlan);
+  const canOfferMiniAppBuy =
+    !input.isAdminTest &&
+    !unresolvedIntent &&
+    !hasBotAction &&
+    input.telegramMiniAppEnabled === true &&
+    canTradeInHunch &&
+    market.event_id != null;
+  if (canOfferMiniAppBuy && market.event_id) {
+    for (const side of (["YES", "NO"] as const).filter(
+      (candidate) => !focusedSide || focusedSide === candidate,
+    )) {
+      const startParam = buildSignalBotBuyStartParam({
+        amountUsd: nominalPresetAmountUsd,
+        eventId: market.event_id,
+        marketId: market.id,
+        side,
+      });
+      if (!startParam) continue;
+      keyboard.push([
+        buildMiniAppButton({
+          startParam,
+          text: `Buy ${side}${nominalPresetAmountUsd != null ? ` · ${formatUsd(nominalPresetAmountUsd)}` : ""}`,
+        }),
+      ]);
+    }
+  }
   if (input.context?.origin === "position") {
     if (sellOptions.length === 0 && marketOrderable) {
-      keyboard.push([{ text: "Sell", url: openUrl }]);
+      keyboard.push([
+        buildMiniAppButton({ startParam: marketStartParam, text: "Sell" }),
+      ]);
     }
     if (
       !redeemPlan &&
       input.context.positionRedemptionStatus === "redeemable"
     ) {
-      keyboard.push([{ text: "Redeem", url: openUrl }]);
+      keyboard.push([
+        buildMiniAppButton({ startParam: marketStartParam, text: "Redeem" }),
+      ]);
     }
   }
-  const hasBotAction =
-    buyOptions.length > 0 || sellOptions.length > 0 || Boolean(redeemPlan);
   keyboard.push([
-    {
+    buildMiniAppButton({
+      startParam: marketStartParam,
       text: !hasBotAction && canTradeInHunch ? "Trade in Hunch" : "Open market",
-      url: openUrl,
-    },
+    }),
   ]);
   if (input.context?.returnCallbackData) {
     keyboard.push([
