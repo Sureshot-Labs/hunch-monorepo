@@ -106,6 +106,11 @@ import {
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import { resolveSignalDeliveryTarget } from "./services/signal-delivery-target.js";
 import {
+  isSignalBotQuoteFresh,
+  SIGNAL_BOT_QUOTE_MAX_AGE_MS,
+} from "./services/signal-bot-delivery-policy.js";
+import { hasHolderResearchPublicationDecisionV1 } from "./services/signal-publication-contract.js";
+import {
   createDiscordSignalTransport,
   createTelegramSignalTransport,
   createXSignalTransport,
@@ -615,13 +620,13 @@ class FakeDb {
       best_ask: "0.41",
       best_bid: "0.4",
       token_id: "yes-token",
-      ts: "2999-01-01T00:00:00.000Z",
+      ts: new Date().toISOString(),
     },
     {
       best_ask: "0.61",
       best_bid: "0.6",
       token_id: "no-token",
-      ts: "2999-01-01T00:00:00.000Z",
+      ts: new Date().toISOString(),
     },
   ];
   readonly queries: Array<{ params: unknown[]; sql: string }> = [];
@@ -633,6 +638,50 @@ class FakeDb {
     const sql = String(args[0] ?? "");
     const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
     this.queries.push({ params, sql });
+    if (sql.includes("yes_top.best_ask as yes_ask")) {
+      const marketIds = new Set(
+        Array.isArray(params[0]) ? (params[0] as string[]) : [],
+      );
+      const rows = this.marketRows
+        .filter((row) => marketIds.has(String((row as { id?: unknown }).id)))
+        .map((row) => {
+          const record = row as {
+            id?: unknown;
+            token_no?: unknown;
+            token_yes?: unknown;
+            venue?: unknown;
+          };
+          const yesTop = this.tokenTopRows.find(
+            (top) =>
+              String((top as { token_id?: unknown }).token_id) ===
+              String(record.token_yes),
+          ) as Record<string, unknown> | undefined;
+          const noTop = this.tokenTopRows.find(
+            (top) =>
+              String((top as { token_id?: unknown }).token_id) ===
+              String(record.token_no),
+          ) as Record<string, unknown> | undefined;
+          return {
+            active: true,
+            market_id: record.id,
+            no_ask: noTop?.best_ask ?? null,
+            no_bid: noTop?.best_bid ?? null,
+            no_ts: noTop?.ts ?? null,
+            orderable: true,
+            venue: record.venue,
+            yes_ask: yesTop?.best_ask ?? null,
+            yes_bid: yesTop?.best_bid ?? null,
+            yes_ts: yesTop?.ts ?? null,
+          };
+        });
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: rows.length,
+        rows: rows as unknown as T[],
+      };
+    }
     if (sql.includes("from signal_bot_messages prior")) {
       return {
         command: "SELECT",
@@ -648,7 +697,9 @@ class FakeDb {
         fields: [],
         oid: 0,
         rowCount: 1,
-        rows: [],
+        rows: (sql.includes("returning id")
+          ? [{ id: "00000000-0000-4000-8000-000000000099" }]
+          : []) as unknown as T[],
       };
     }
     if (sql.includes("from unified_market_tokens")) {
@@ -740,22 +791,21 @@ class FakeDb {
         rows: rows as T[],
       };
     }
-    const minConfidence = Number(params[0] ?? 0);
-    const directionEligibleRows = this.rows.filter((row) => {
+    const publicationRows = this.rows.filter((row) =>
+      hasHolderResearchPublicationDecisionV1(
+        (row as { metrics?: unknown }).metrics,
+      ),
+    );
+    const directionEligibleRows = publicationRows.filter((row) => {
       const direction = String(
         (row as { direction?: unknown }).direction ?? "",
       );
       return direction === "up" || direction === "down";
     });
-    const rows = directionEligibleRows.filter((row) => {
-      const confidence = Number(
-        (row as { confidence?: unknown }).confidence ?? 0,
-      );
-      return !Number.isFinite(minConfidence) || confidence >= minConfidence;
-    });
-    if (sql.includes("below_min_confidence")) {
-      const below = directionEligibleRows.length - rows.length;
-      const nonDirectional = this.rows.length - directionEligibleRows.length;
+    const rows = directionEligibleRows;
+    if (sql.includes("publish_notes_seen")) {
+      const nonDirectional =
+        publicationRows.length - directionEligibleRows.length;
       return {
         command: "SELECT",
         fields: [],
@@ -763,15 +813,14 @@ class FakeDb {
         rowCount: 1,
         rows: [
           {
-            below_min_confidence: below,
-            eligible: rows.length,
+            publish_notes_seen: rows.length,
             non_directional: nonDirectional,
-            total: this.rows.length,
+            total: publicationRows.length,
           },
         ] as unknown as T[],
       };
     }
-    const limit = Number(params[3] ?? rows.length);
+    const limit = Number(params[2] ?? rows.length);
     const selected = rows.slice(
       0,
       Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : rows.length,
@@ -850,6 +899,13 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     producer_run_id: "run-1",
     direction: "up",
     confidence: "0.82",
+    metrics: {
+      publicationDecisionV1: {
+        authority: "holder_research_quality_gate",
+        status: "PUBLISH",
+        version: 1,
+      },
+    },
     model_meta: {
       external_research: {
         summary:
@@ -999,7 +1055,9 @@ class FakeFollowthroughDb {
         fields: [],
         oid: 0,
         rowCount: 1,
-        rows: [],
+        rows: (sql.includes("returning id")
+          ? [{ id: "00000000-0000-4000-8000-000000000099" }]
+          : []) as unknown as T[],
       };
     }
     return {
@@ -1010,6 +1068,26 @@ class FakeFollowthroughDb {
       rows: [],
     };
   }
+}
+
+function readSignalBotMessageInsert(query: { params: unknown[]; sql: string }) {
+  const hasExplicitId = /insert into signal_bot_messages\s*\(\s*id,/i.test(
+    query.sql,
+  );
+  const offset = hasExplicitId ? 1 : 0;
+  return {
+    id: hasExplicitId ? query.params[0] : null,
+    chatId: query.params[offset],
+    noteId: query.params[offset + 1],
+    threadRootNoteId: query.params[offset + 2],
+    messageKind: query.params[offset + 3],
+    messageId: query.params[offset + 4],
+    replyToMessageId: query.params[offset + 5],
+    metrics: JSON.parse(String(query.params[offset + 8])) as Record<
+      string,
+      unknown
+    >,
+  };
 }
 
 function followthroughCandidateRow(overrides: Record<string, unknown> = {}) {
@@ -1184,13 +1262,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123, 456, nope",
         HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD: "",
         HUNCH_SIGNAL_BOT_ENABLED: "true",
-        HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.8",
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
       assert.equal(config.enabled, true);
       assert.deepEqual([...config.adminUserIds], [123, 456]);
       assert.equal(config.buyAmountUsd, 10);
-      assert.equal(config.minConfidence, 0.8);
+      assert.equal("minConfidence" in config, false);
       assert.equal(config.priceGuardMaxDefers, 5);
       assert.equal(config.priceGuardDeferTtlSec, 1_800);
       assert.deepEqual(config.followthrough, {
@@ -1206,6 +1283,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         terminalInitialCutoff: null,
       });
       assert.equal(config.telegramMiniAppLinkBase, null);
+    },
+  },
+  {
+    name: "signal delivery owns the inclusive ten minute quote cutoff",
+    run: () => {
+      const now = Date.parse("2026-01-01T00:10:00.000Z");
+      assert.equal(SIGNAL_BOT_QUOTE_MAX_AGE_MS, 600_000);
+      assert.equal(isSignalBotQuoteFresh(now - 599_000, now), true);
+      assert.equal(isSignalBotQuoteFresh(now - 600_000, now), true);
+      assert.equal(isSignalBotQuoteFresh(now - 601_000, now), false);
+      const source = readFileSync(
+        join(apiSrcDir, "services", "signal-bot.ts"),
+        "utf8",
+      );
+      assert.doesNotMatch(source, /CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS/);
+      assert.match(source, /SIGNAL_BOT_QUOTE_MAX_AGE_MS/);
     },
   },
   {
@@ -2086,9 +2179,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           alternatives: [
             {
               eventId: "kalshi:event-1",
+              executionOffers: {
+                no: null,
+                yes: {
+                  ask: 0.32,
+                  asOf: "2026-01-01T00:00:00.000Z",
+                  fresh: true,
+                  nativeOutcome: "YES",
+                },
+              },
               marketId: "kalshi:market-1",
+              outcomeMapping: {
+                confidence: 1,
+                method: "exact_title",
+                sourceYesTo: "YES",
+              },
               venue: "kalshi",
-              yesAsk: 0.32,
             },
           ] as never,
           status: "matched",
@@ -2105,9 +2211,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           alternatives: [
             {
               eventId: "kalshi:event-1",
+              executionOffers: {
+                no: null,
+                yes: {
+                  ask: 0.29,
+                  asOf: "2026-01-01T00:00:00.000Z",
+                  fresh: true,
+                  nativeOutcome: "YES",
+                },
+              },
               marketId: "kalshi:market-1",
+              outcomeMapping: {
+                confidence: 1,
+                method: "exact_title",
+                sourceYesTo: "YES",
+              },
               venue: "kalshi",
-              yesAsk: 0.29,
             },
           ] as never,
           status: "matched",
@@ -2116,6 +2235,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(cheaper.alternative?.marketId, "kalshi:market-1");
       assert.equal(cheaper.diagnostics.aggMatched, 1);
       assert.equal(cheaper.diagnostics.aggCheaperFound, 1);
+
+      const inverted = resolveSignalBotCheaperAlternativeFromAggResponse({
+        buySide: "YES",
+        note: note({ bestAsk: 0.32 }),
+        response: {
+          alternatives: [
+            {
+              eventId: "limitless:event-1",
+              executionOffers: {
+                no: null,
+                yes: {
+                  ask: 0.28,
+                  asOf: "2026-01-01T00:00:00.000Z",
+                  fresh: true,
+                  nativeOutcome: "NO",
+                },
+              },
+              marketId: "limitless:market-1",
+              outcomeMapping: {
+                confidence: 0.98,
+                method: "selected_participant",
+                sourceYesTo: "NO",
+              },
+              venue: "limitless",
+            },
+          ] as never,
+          status: "matched",
+        },
+      });
+      assert.equal(inverted.alternative?.side, "NO");
+      assert.equal(inverted.alternative?.price, 0.28);
     },
   },
   {
@@ -8469,14 +8619,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "status reports enabled state and minimum confidence",
+    name: "status reports enabled state without an independent confidence gate",
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
       const handled = await handleSignalBotCommand({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
-          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.8",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         message: {
@@ -8493,7 +8642,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.text ?? "",
         /Signals are disabled here/,
       );
-      assert.match(telegram.messages[0]?.text ?? "", /Min confidence: 80%/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Min confidence/i);
     },
   },
   {
@@ -8626,7 +8775,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /Why this wallet matters|Why this cluster matters/,
       );
       assert.match(message.text, /▸ Track record.*2\\.5K.*30d/);
-      assert.match(message.text, /▸ Win rate.*65%.*recent trades/);
+      assert.doesNotMatch(message.text, /▸ Win rate|65%.*recent trades/);
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
       assert.doesNotMatch(message.text, /📰/);
       assert.doesNotMatch(message.text, /confidence/i);
@@ -8697,10 +8846,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       assert.match(message.text, /Morocco is still around 3¢/);
-      assert.match(
-        message.text,
-        /▸ Still holding while the market barely prices it/,
-      );
+      assert.match(message.text, /▸ Track record.*1.*3M.*30d/);
+      assert.doesNotMatch(message.text, /Still holding while the market/);
+      assert.doesNotMatch(message.text, /Pricing edge/);
       assert.doesNotMatch(message.text, /YES 2¢ \/ NO 98¢/);
     },
   },
@@ -9140,7 +9288,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(message.text, /\$12\\.3K still on/);
       assert.doesNotMatch(message.text, /Why this cluster matters:/);
-      assert.match(message.text, /▸ Track record.*14\\.0K.*30d/);
+      assert.match(message.text, /▸ Track record.*14K.*30d/);
+      assert.match(message.text, /▸ Conviction.*2 strong wallets/);
     },
   },
   {
@@ -9545,7 +9694,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "-1",
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD: "10",
-          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.7",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -9565,11 +9713,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.text ?? "",
         /evaluated|missingEntry|entryQuality|note_id/i,
       );
-      assert.match(queries[0]?.sql ?? "", /n\.confidence >=/);
+      assert.doesNotMatch(queries[0]?.sql ?? "", /n\.confidence >=/);
       assert.doesNotMatch(queries[0]?.sql ?? "", /n\.status = 'active'/);
       assert.match(queries[0]?.sql ?? "", /sbm\.message_kind = 'initial'/);
       assert.match(queries[0]?.sql ?? "", /n\.direction in \('up', 'down'\)/);
-      assert.equal(queries[0]?.params.includes(0.7), true);
+      assert.equal(queries[0]?.params.includes(0.7), false);
     },
   },
   {
@@ -9592,13 +9740,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         afterCreatedAt: "1970-01-01T00:00:00.000Z",
         afterId: "00000000-0000-0000-0000-000000000000",
         limit: 1,
-        minConfidence: 0.7,
       });
       assert.equal(notes[0]?.holderDisplayName, "TB14");
       assert.equal(notes[0]?.holderIdentityDisplayName, "@TB14");
       const sql = db.queries[0]?.sql ?? "";
       assert.match(sql, /join wallets w on w\.id = t\.target_id::uuid/);
       assert.match(sql, /m\.venue as market_venue/);
+      assert.match(sql, /publicationDecisionV1/);
+      assert.doesNotMatch(sql, /coalesce\(n\.confidence|and n\.confidence/);
       assert.doesNotMatch(sql, /w\.id::text = t\.target_id/);
     },
   },
@@ -9670,13 +9819,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "yes-token",
           best_bid: "0.99",
           best_ask: "1.00",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token",
           best_bid: "0",
           best_ask: "0.01",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
       ];
       const telegram = new FakeTelegram();
@@ -9725,13 +9874,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "yes-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
       ];
       const telegram = new FakeTelegram();
@@ -9798,25 +9947,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token_id: "yes-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token",
           best_bid: null,
           best_ask: null,
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "yes-token-2",
           best_bid: "0.30",
           best_ask: "0.32",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
         {
           token_id: "no-token-2",
           best_bid: "0.68",
           best_ask: "0.70",
-          ts: "2999-01-01T00:00:00.000Z",
+          ts: new Date().toISOString(),
         },
       ];
       const telegram = new FakeTelegram();
@@ -9865,7 +10014,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publish sends only notes meeting minimum confidence",
+    name: "publish marker authorizes a note below the former confidence threshold",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -9877,33 +10026,74 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const db = new FakeDb();
       db.rows = [
         noteRow({
-          confidence: "0.69",
+          confidence: "0.67",
           id: "00000000-0000-4000-8000-000000000001",
-          title: "Below threshold",
-        }),
-        noteRow({
-          confidence: "0.78",
-          id: "00000000-0000-4000-8000-000000000002",
-          title: "Above threshold",
+          title: "Final publish decision",
         }),
       ];
       const telegram = new FakeTelegram();
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
-          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.7",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
         redis,
         telegram,
       });
-      assert.equal(result.belowConfidenceNotes, 1);
-      assert.equal(result.eligibleNotes, 1);
+      assert.equal(result.publishNotesSeen, 1);
       assert.equal(result.nonDirectionalNotes, 0);
       assert.equal(result.sent, 1);
       assert.match(telegram.messages[0]?.text ?? "", /backs/);
-      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Below threshold/);
+    },
+  },
+  {
+    name: "publish ignores unversioned, context, and skip decisions",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({ confidence: "0.99", metrics: {} }),
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000002",
+          metrics: {
+            publicationDecisionV1: {
+              authority: "holder_research_quality_gate",
+              status: "CONTEXT",
+              version: 1,
+            },
+          },
+        }),
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000003",
+          metrics: {
+            publicationDecisionV1: {
+              authority: "holder_research_quality_gate",
+              status: "SKIP",
+              version: 1,
+            },
+          },
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.publishNotesSeen, 0);
+      assert.equal(result.sent, 0);
+      assert.equal(telegram.messages.length, 0);
     },
   },
   {
@@ -9940,7 +10130,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
       assert.equal(result.nonDirectionalNotes, 1);
-      assert.equal(result.eligibleNotes, 1);
+      assert.equal(result.publishNotesSeen, 1);
       assert.equal(result.sent, 1);
       assert.match(telegram.messages[0]?.text ?? "", /backs/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);
@@ -9978,12 +10168,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[0], "-100");
-      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000001");
-      assert.equal(delivery.params[2], "00000000-0000-4000-8000-000000000001");
-      assert.equal(delivery.params[3], "initial");
-      assert.equal(delivery.params[4], 101);
-      assert.equal(delivery.params[5], null);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.match(String(recorded.id), /^[0-9a-f-]{36}$/i);
+      assert.equal(recorded.chatId, "-100");
+      assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000001");
+      assert.equal(
+        recorded.threadRootNoteId,
+        "00000000-0000-4000-8000-000000000001",
+      );
+      assert.equal(recorded.messageKind, "initial");
+      assert.equal(recorded.messageId, 101);
+      assert.equal(recorded.replyToMessageId, null);
       const state = await getSignalBotChatState(redis, "-100");
       assert.equal(state?.cursorCreatedAt, "2026-01-01T00:00:00.000Z");
       assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000001");
@@ -10041,11 +10236,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000002");
-      assert.equal(delivery.params[2], "00000000-0000-4000-8000-000000000001");
-      assert.equal(delivery.params[3], "research_update");
-      assert.equal(delivery.params[4], 101);
-      assert.equal(delivery.params[5], 77);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000002");
+      assert.equal(
+        recorded.threadRootNoteId,
+        "00000000-0000-4000-8000-000000000001",
+      );
+      assert.equal(recorded.messageKind, "research_update");
+      assert.equal(recorded.messageId, 101);
+      assert.equal(recorded.replyToMessageId, 77);
     },
   },
   {
@@ -10096,9 +10295,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[4], 333);
-      assert.equal(delivery.params[5], null);
-      const metrics = JSON.parse(String(delivery.params[8])) as {
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageId, 333);
+      assert.equal(recorded.replyToMessageId, null);
+      const metrics = recorded.metrics as {
         copy?: {
           copyVersion?: string;
           notification?: {
@@ -10117,7 +10317,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v4");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v4_1");
       assert.equal(metrics.copy?.notification?.headline?.storyKind, "initial");
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
@@ -10125,11 +10325,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
-        "signal_notification_subject_v2",
+        "signal_notification_subject_v3",
       );
       assert.equal(
         metrics.copy?.notification?.subject?.version,
-        "signal_notification_subject_v2",
+        "signal_notification_subject_v3",
       );
       assert.ok(metrics.copy?.notification?.subject?.source);
       assert.equal(
@@ -10176,7 +10376,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(deliveries.length, 2);
       assert.deepEqual(
-        deliveries.map((delivery) => [delivery.params[0], delivery.params[4]]),
+        deliveries.map((delivery) => {
+          const recorded = readSignalBotMessageInsert(delivery);
+          return [recorded.chatId, recorded.messageId];
+        }),
         [
           ["-100", 101],
           ["-200", 102],
@@ -10342,10 +10545,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(keyboard?.[0]?.[0]?.url ?? "", /^https:\/\/t\.me\//);
       const startParam = readStartAppParam(keyboard?.[0]?.[0]?.url);
       assert.match(startParam, /^m_/);
-      assert.equal(
-        Buffer.from(startParam.slice(2), "base64url").toString("utf8"),
-        "l:event-2|market-2|N",
-      );
+      const startPayload = Buffer.from(startParam.slice(2), "base64url")
+        .toString("utf8")
+        .split("|");
+      assert.deepEqual(startPayload.slice(0, 3), [
+        "l:event-2",
+        "market-2",
+        "N",
+      ]);
+      assert.equal(startPayload[3], "00000000-0000-4000-8000-000000000099");
       const candidateQuery = db.queries.find((query) =>
         query.sql.includes("from signal_bot_messages root"),
       );
@@ -10356,16 +10564,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[0], "-100");
-      assert.equal(delivery.params[1], "00000000-0000-4000-8000-000000000101");
-      assert.equal(delivery.params[3], "followthrough_stats");
-      assert.equal(delivery.params[5], 77);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.chatId, "-100");
+      assert.equal(recorded.noteId, "00000000-0000-4000-8000-000000000101");
+      assert.equal(recorded.messageKind, "followthrough_stats");
+      assert.equal(recorded.replyToMessageId, 77);
+      const metrics = recorded.metrics;
       assert.equal(metrics.joinedOrAddedWallets, 2);
       assert.equal(metrics.netSignalSideFlowUsd, 9500);
       assert.equal(metrics.fallbackStandalone, false);
+      const deliveryMetrics = metrics.delivery as
+        | { view?: { target?: { marketId?: string } } }
+        | undefined;
       assert.equal(
-        metrics.delivery?.view?.target?.marketId,
+        deliveryMetrics?.view?.target?.marketId,
         "limitless:market-2",
       );
       const flowQuery = db.queries.find((query) =>
@@ -10415,7 +10627,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(keyboard?.[0]?.[0]?.url, undefined);
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
-        "p:event-1|market-1|Y",
+        "p:event-1|market-1|Y|00000000-0000-4000-8000-000000000099",
       );
     },
   },
@@ -10657,8 +10869,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[3], "followthrough_stats");
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageKind, "followthrough_stats");
+      const metrics = recorded.metrics;
       assert.equal(metrics.status, "skipped");
       assert.equal(typeof metrics.nextEvaluateAt, "string");
     },
@@ -10784,7 +10997,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const metrics = readSignalBotMessageInsert(delivery).metrics;
       assert.equal(metrics.joinedWallets, 0);
       assert.equal(metrics.joinedOrAddedWallets, 0);
       assert.equal(metrics.missingBaselineSnapshots, 1);
@@ -10837,7 +11050,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const metrics = readSignalBotMessageInsert(delivery).metrics;
       assert.equal(metrics.estimatedOpenPnlUsd, 1.5);
     },
   },
@@ -10886,10 +11099,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      const metrics = JSON.parse(String(delivery.params[8]));
+      const metrics = readSignalBotMessageInsert(delivery).metrics;
       assert.equal(metrics.stillHoldingWallets, 0);
       assert.equal(metrics.estimatedOpenPnlUsd, null);
-      assert.ok(metrics.dataQualityTags.includes("stale_latest_snapshots"));
+      assert.ok(
+        (metrics.dataQualityTags as string[]).includes(
+          "stale_latest_snapshots",
+        ),
+      );
     },
   },
   {
@@ -10931,7 +11148,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[3], "resolved_loss");
+      assert.equal(
+        readSignalBotMessageInsert(delivery).messageKind,
+        "resolved_loss",
+      );
     },
   },
   {
@@ -10973,7 +11193,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )
         .at(-1);
       assert.ok(delivery);
-      assert.equal(delivery.params[3], "resolved_win");
+      assert.equal(
+        readSignalBotMessageInsert(delivery).messageKind,
+        "resolved_win",
+      );
     },
   },
   {

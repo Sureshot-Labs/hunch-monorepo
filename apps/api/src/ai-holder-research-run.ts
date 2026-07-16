@@ -28,6 +28,7 @@ import {
   buildHolderResearchTriageUserPromptV2,
   buildHolderResearchUserPrompt,
   buildHolderResearchUserPromptV2,
+  normalizeHolderResearchExternalResearchV2,
   parseHolderResearchAgentOutputV1,
   parseHolderResearchExternalResearchV2,
   parseHolderResearchFinalOutputV2,
@@ -303,7 +304,8 @@ type HolderResearchRunReport = {
   resolvedEvaluation: Awaited<
     ReturnType<typeof evaluateResolvedHolderResearchNotes>
   > | null;
-  performanceAudit: HolderResearchRunPerformanceAuditReport;
+  persistedNotePerformance: HolderResearchRunPerformanceAuditReport;
+  deliveredInitialPerformance: HolderResearchRunPerformanceAuditReport;
 };
 
 type HolderResearchDecisionCacheStats =
@@ -637,7 +639,7 @@ export function buildHolderResearchExternalSearchSystemPromptV2(): string {
   return [
     "You investigate one bounded outside-information question for a prediction-market holder candidate.",
     "Use web_search and x_search, then return only one JSON object.",
-    "The object must contain status (ok | no_evidence | error), verdict (supports_holder_side | supports_opposite_side | already_public | unexplained | mixed | unknown), timing (before_holder | around_holder | after_holder | unknown), summary, and citations.",
+    "The object must contain status, verdict, timing, summary, citations, and comparableOdds. comparableOdds must be null unless cited sources provide a probability range for the selected side with an asOf timestamp.",
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
     "Compare dated evidence with the supplied first/last holder activity. Use after_holder only when the public evidence clearly appeared after holder activity.",
     "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
@@ -659,6 +661,7 @@ function emptyExternalResearchResult(input: {
     timing: "unknown",
     summary: input.summary ?? null,
     citations: [],
+    comparableOdds: null,
     costUsd: input.costUsd ?? 0,
     toolCalls: input.toolCalls ?? 0,
     error: input.error ?? null,
@@ -675,9 +678,10 @@ function canonicalExternalResearchV2(
       timing: "unknown",
       summary: "External research was not requested for this candidate.",
       citations: [],
+      comparableOdds: null,
     };
   }
-  return {
+  return normalizeHolderResearchExternalResearchV2({
     status:
       result.status === "ok" ||
       result.status === "no_evidence" ||
@@ -688,6 +692,29 @@ function canonicalExternalResearchV2(
     timing: result.timing,
     summary: result.summary ?? "No external evidence was available.",
     citations: result.citations.slice(0, 3),
+    comparableOdds: result.comparableOdds ?? null,
+  });
+}
+
+function normalizeExternalResearchResult(
+  result: ExternalResearchResult,
+): ExternalResearchResult {
+  const normalized = normalizeHolderResearchExternalResearchV2({
+    status:
+      result.status === "ok" ||
+      result.status === "no_evidence" ||
+      result.status === "error"
+        ? result.status
+        : "no_evidence",
+    verdict: result.verdict,
+    timing: result.timing,
+    summary: result.summary ?? "No external evidence was available.",
+    citations: result.citations,
+    comparableOdds: result.comparableOdds ?? null,
+  });
+  return {
+    ...result,
+    ...normalized,
   };
 }
 
@@ -1940,10 +1967,11 @@ export async function runHolderResearch(
           name: "candidate_observations_v2",
           count: observationWrite.written,
           status: "ok",
-          detail: `mode=${policy.pipelineV2Mode} median7d=${supplyHealth.medianCandidatesPerDay} zeroDays=${supplyHealth.consecutiveZeroDays} healthy=${supplyHealth.healthy} pruned=${pruned.deleted}`,
+          detail: `mode=${policy.pipelineV2Mode} status=${supplyHealth.status} coverageDays=${supplyHealth.coverageDays} median7d=${supplyHealth.medianCandidatesPerDay} zeroDays=${supplyHealth.consecutiveZeroDays} pruned=${pruned.deleted}`,
         });
-        if (!supplyHealth.healthy) {
+        if (supplyHealth.status === "degraded") {
           console.warn("[holder-research] candidate supply health degraded", {
+            coverageDays: supplyHealth.coverageDays,
             medianCandidatesPerDay: supplyHealth.medianCandidatesPerDay,
             consecutiveZeroDays: supplyHealth.consecutiveZeroDays,
             days: supplyHealth.days,
@@ -2346,13 +2374,15 @@ export async function runHolderResearch(
         externalSearchCalls < policy.maxExternalSearchCallsPerRun &&
         (policy.forceExternalSearchForInvestigations || researchNeed !== "none")
       ) {
-        externalResearch = await runExternalResearch({
-          candidate,
-          policy,
-          dryRun: policy.dryRun,
-          researchNeed,
-          useV2: useV2Research,
-        });
+        externalResearch = normalizeExternalResearchResult(
+          await runExternalResearch({
+            candidate,
+            policy,
+            dryRun: policy.dryRun,
+            researchNeed,
+            useV2: useV2Research,
+          }),
+        );
         if (
           externalResearch.status !== "skipped" ||
           externalResearch.costUsd > 0
@@ -2371,6 +2401,7 @@ export async function runHolderResearch(
       });
       const gatedOutput = applyHolderResearchPublishQualityGate({
         candidate,
+        externalResearch: canonicalExternalResearchV2(externalResearch),
         output: rawDecision.output,
         policy,
         publishedRunDecisions: decisions
@@ -2576,30 +2607,63 @@ export async function runHolderResearch(
         : "dry-run, persistNotes=false, callModel=false, or policy disabled",
     });
 
-    let performanceAudit: HolderResearchRunReport["performanceAudit"] = null;
+    let persistedNotePerformance: HolderResearchRunReport["persistedNotePerformance"] =
+      null;
+    let deliveredInitialPerformance: HolderResearchRunReport["deliveredInitialPerformance"] =
+      null;
     const shouldAuditPerformance =
       policy.performanceAuditEnabled && shouldPersist;
     if (shouldAuditPerformance) {
-      const auditResult = await auditHolderResearchSignalPerformance(client, {
-        lookbackHours: policy.performanceAuditLookbackHours,
-        limit: policy.performanceAuditMaxNotesPerRun,
-        persist: true,
-        includeOpen: policy.performanceAuditIncludeOpen,
-        includeResolved: true,
-        approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
-        approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
-      });
-      performanceAudit = compactPerformanceAuditReport(
-        auditResult,
+      const persistedAudit = await auditHolderResearchSignalPerformance(
+        client,
+        {
+          lookbackHours: policy.performanceAuditLookbackHours,
+          limit: policy.performanceAuditMaxNotesPerRun,
+          persist: true,
+          includeOpen: policy.performanceAuditIncludeOpen,
+          includeResolved: true,
+          approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
+          approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
+        },
+      );
+      persistedNotePerformance = compactPerformanceAuditReport(
+        persistedAudit,
+        args.includePerformanceReport,
+      );
+      const deliveredAudit = await auditHolderResearchSignalPerformance(
+        client,
+        {
+          activeOnly: false,
+          deliveredInitialOnly: true,
+          directionalOnly: true,
+          lookbackHours: policy.performanceAuditLookbackHours,
+          limit: policy.performanceAuditMaxNotesPerRun,
+          persist: false,
+          includeOpen: policy.performanceAuditIncludeOpen,
+          includeResolved: true,
+          approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
+          approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
+        },
+      );
+      deliveredInitialPerformance = compactPerformanceAuditReport(
+        deliveredAudit,
         args.includePerformanceReport,
       );
     }
     toolCalls.push({
-      name: "signal_performance_audit",
-      count: performanceAudit?.evaluated ?? 0,
+      name: "persisted_note_performance",
+      count: persistedNotePerformance?.evaluated ?? 0,
       status: shouldAuditPerformance ? "ok" : "skipped",
       detail: shouldAuditPerformance
-        ? `considered=${performanceAudit?.considered ?? 0} written=${performanceAudit?.written ?? 0} open=${performanceAudit?.open ?? 0} resolved=${performanceAudit?.resolved ?? 0} correct=${performanceAudit?.correct ?? 0} wrong=${performanceAudit?.wrong ?? 0} missingEntry=${performanceAudit?.missingEntry ?? 0}`
+        ? `considered=${persistedNotePerformance?.considered ?? 0} written=${persistedNotePerformance?.written ?? 0} open=${persistedNotePerformance?.open ?? 0} resolved=${persistedNotePerformance?.resolved ?? 0} correct=${persistedNotePerformance?.correct ?? 0} wrong=${persistedNotePerformance?.wrong ?? 0} missingEntry=${persistedNotePerformance?.missingEntry ?? 0}`
+        : "dry-run, persistNotes=false, callModel=false, or policy disabled",
+    });
+    toolCalls.push({
+      name: "delivered_initial_performance",
+      count: deliveredInitialPerformance?.evaluated ?? 0,
+      status: shouldAuditPerformance ? "ok" : "skipped",
+      detail: shouldAuditPerformance
+        ? `considered=${deliveredInitialPerformance?.considered ?? 0} open=${deliveredInitialPerformance?.open ?? 0} resolved=${deliveredInitialPerformance?.resolved ?? 0} correct=${deliveredInitialPerformance?.correct ?? 0} wrong=${deliveredInitialPerformance?.wrong ?? 0} missingEntry=${deliveredInitialPerformance?.missingEntry ?? 0}`
         : "dry-run, persistNotes=false, callModel=false, or policy disabled",
     });
 
@@ -2727,7 +2791,8 @@ export async function runHolderResearch(
       })),
       persistence,
       resolvedEvaluation,
-      performanceAudit,
+      persistedNotePerformance,
+      deliveredInitialPerformance,
     };
 
     if (args.outPath) {

@@ -165,6 +165,30 @@ export const holderResearchExternalResearchV2Schema = z
           .strict(),
       )
       .max(3),
+    comparableOdds: z
+      .object({
+        side: z.enum(["YES", "NO"]),
+        probabilityMin: z.number().min(0).max(1),
+        probabilityMax: z.number().min(0).max(1),
+        asOf: z.string().datetime(),
+        sources: z
+          .array(
+            z
+              .object({
+                title: z.string().trim().min(1).max(200),
+                url: z.string().url().max(2_000),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(3),
+      })
+      .strict()
+      .refine((odds) => odds.probabilityMin <= odds.probabilityMax, {
+        message: "Minimum probability must not exceed maximum probability.",
+      })
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -400,6 +424,34 @@ export function parseHolderResearchExternalResearchV2(
     timing: "unknown",
     summary: "External research response could not be validated.",
     citations: [],
+    comparableOdds: null,
+  };
+}
+
+const uncitedExternalClaimPattern =
+  /\b(?:article|bookmaker|coverage|forecast|headline|news|odds?|poll|preview|report|source|sportsbook)\b/i;
+
+export function containsHolderResearchExternalClaim(value: string): boolean {
+  return uncitedExternalClaimPattern.test(value);
+}
+
+export function normalizeHolderResearchExternalResearchV2(
+  value: HolderResearchExternalResearchV2,
+): HolderResearchExternalResearchV2 {
+  const hasUnsupportedClaim =
+    value.citations.length === 0 &&
+    (value.status === "ok" ||
+      value.verdict !== "unknown" ||
+      value.comparableOdds != null ||
+      containsHolderResearchExternalClaim(value.summary));
+  if (!hasUnsupportedClaim) return value;
+  return {
+    status: "no_evidence",
+    verdict: "unknown",
+    timing: "unknown",
+    summary: "No cited external evidence was available.",
+    citations: [],
+    comparableOdds: null,
   };
 }
 

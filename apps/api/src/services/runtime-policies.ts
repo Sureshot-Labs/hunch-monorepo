@@ -31,6 +31,11 @@ import {
   telegramNotificationsPolicySchema,
   type TelegramNotificationsPolicyV1,
 } from "./telegram-notification-policy.js";
+import {
+  DEFAULT_SIGNAL_POST_COPY_POLICY,
+  signalPostCopyPolicySchema,
+  type SignalPostCopyPolicyV1,
+} from "./signal-post-copy-policy.js";
 
 export type {
   SignalBotPolicy,
@@ -52,6 +57,7 @@ export const INTEL_POLICY_KEYS = [
   "holder_research",
   "arbitrage_defaults",
   "signal_bot",
+  "signal_post_copy",
   "telegram_notifications",
   "venue_lifecycle",
 ] as const;
@@ -59,6 +65,7 @@ export const INTEL_POLICY_KEYS = [
 export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 
 type PolicySource<K extends IntelPolicyKey> = K extends
+  | "signal_post_copy"
   | "telegram_notifications"
   | "venue_lifecycle"
   ? "default" | "db"
@@ -613,6 +620,7 @@ type IntelPolicyMap = {
   holder_research: HolderResearchPolicy;
   arbitrage_defaults: ArbitrageDefaultsPolicy;
   signal_bot: SignalBotPolicy;
+  signal_post_copy: SignalPostCopyPolicyV1;
   telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
 };
@@ -1289,6 +1297,7 @@ const policySchemas = {
   holder_research: holderResearchSchema,
   arbitrage_defaults: arbitrageDefaultsSchema,
   signal_bot: signalBotSchema,
+  signal_post_copy: signalPostCopyPolicySchema,
   telegram_notifications: telegramNotificationsPolicySchema,
   venue_lifecycle: venueLifecyclePolicySchema,
 } as const;
@@ -1885,6 +1894,7 @@ function getDefaults(): IntelPolicyMap {
       minQualityScore: 0.6,
     },
     signal_bot: getDefaultSignalBotPolicy(),
+    signal_post_copy: DEFAULT_SIGNAL_POST_COPY_POLICY,
     telegram_notifications: DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
   };
@@ -3148,6 +3158,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeSignalBotPolicy(
         merged as SignalBotPolicy,
       ) as IntelPolicyMap[K];
+    case "signal_post_copy":
+      return signalPostCopyPolicySchema.parse(merged) as IntelPolicyMap[K];
     case "telegram_notifications":
       return telegramNotificationsPolicySchema.parse(
         merged,
@@ -3223,6 +3235,9 @@ function sanitizeOverridePayload(
     case "signal_bot": {
       return sanitizeSignalBotPolicyOverride(record);
     }
+    case "signal_post_copy": {
+      return record;
+    }
     case "telegram_notifications": {
       return record;
     }
@@ -3262,7 +3277,9 @@ function resolveFromRow<K extends IntelPolicyKey>(
   if (!row) {
     return {
       key,
-      source: (key === "venue_lifecycle" || key === "telegram_notifications"
+      source: (key === "venue_lifecycle" ||
+      key === "telegram_notifications" ||
+      key === "signal_post_copy"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt: null,
@@ -3289,7 +3306,9 @@ function resolveFromRow<K extends IntelPolicyKey>(
     }
     return {
       key,
-      source: (key === "venue_lifecycle" || key === "telegram_notifications"
+      source: (key === "venue_lifecycle" ||
+      key === "telegram_notifications" ||
+      key === "signal_post_copy"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt,
@@ -3373,6 +3392,10 @@ export async function resolveAllIntelPolicies(
       byKey.get("arbitrage_defaults") ?? null,
     ),
     signal_bot: resolveFromRow("signal_bot", byKey.get("signal_bot") ?? null),
+    signal_post_copy: resolveFromRow(
+      "signal_post_copy",
+      byKey.get("signal_post_copy") ?? null,
+    ),
     telegram_notifications: resolveFromRow(
       "telegram_notifications",
       byKey.get("telegram_notifications") ?? null,

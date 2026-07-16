@@ -34,8 +34,10 @@ export type HolderResearchObservationStageUpdate = {
 
 export type HolderResearchSupplyHealth = {
   days: Array<{ day: string; candidates: number }>;
+  coverageDays: number;
   medianCandidatesPerDay: number;
   consecutiveZeroDays: number;
+  status: "warming_up" | "healthy" | "degraded";
   healthy: boolean;
 };
 
@@ -300,11 +302,16 @@ export function buildHolderResearchObservationCalibrationReport(
 }
 
 export function summarizeHolderResearchSupply(
-  days: Array<{ candidates: number; day: string }>,
+  days: Array<{ candidates: number; day: string; observed?: boolean }>,
 ): HolderResearchSupplyHealth {
   const normalized = [...days].sort((left, right) =>
     left.day.localeCompare(right.day),
   );
+  const firstObservedIndex = normalized.findIndex(
+    (entry) => entry.observed === true || entry.candidates > 0,
+  );
+  const coverageDays =
+    firstObservedIndex < 0 ? 0 : normalized.length - firstObservedIndex;
   let consecutiveZeroDays = 0;
   for (let index = normalized.length - 1; index >= 0; index -= 1) {
     if ((normalized[index]?.candidates ?? 0) > 0) break;
@@ -313,11 +320,21 @@ export function summarizeHolderResearchSupply(
   const medianCandidatesPerDay = median(
     normalized.map((entry) => entry.candidates),
   );
+  const meetsSupplyCriteria =
+    medianCandidatesPerDay >= 3 && consecutiveZeroDays <= 2;
+  const status =
+    coverageDays < 7
+      ? "warming_up"
+      : meetsSupplyCriteria
+        ? "healthy"
+        : "degraded";
   return {
-    days: normalized,
+    days: normalized.map(({ candidates, day }) => ({ candidates, day })),
+    coverageDays,
     medianCandidatesPerDay,
     consecutiveZeroDays,
-    healthy: medianCandidatesPerDay >= 3 && consecutiveZeroDays <= 2,
+    status,
+    healthy: status === "healthy",
   };
 }
 
@@ -511,29 +528,41 @@ export async function loadHolderResearchSupplyHealth(
   db: Queryable,
   now: Date = new Date(),
 ): Promise<HolderResearchSupplyHealth> {
-  const { rows } = await db.query<{ candidates: string; day: string }>(
+  const { rows } = await db.query<{
+    candidates: string;
+    day: string;
+    observed: boolean;
+  }>(
     `
-      with days as (
+      with bounds as (
+        select timezone('UTC', $1::timestamptz)::date as utc_today
+      ), days as (
         select generate_series(
-          date_trunc('day', $1::timestamptz) - interval '6 days',
-          date_trunc('day', $1::timestamptz),
+          bounds.utc_today - 7,
+          bounds.utc_today - 1,
           interval '1 day'
-        ) as day
-      ), eligible as (
+        )::date as day
+        from bounds
+      ), daily as (
         select
-          date_trunc('day', observed_at) as day,
-          count(distinct thesis_key)::text as candidates
-        from holder_research_candidate_observations
-        where observed_at >= date_trunc('day', $1::timestamptz) - interval '6 days'
-          and coalesce((decision_features #>> '{gates,publishEligible}')::boolean, false)
-          and nullif(decision_features #>> '{market,priceCheckedAt}', '') is not null
+          timezone('UTC', observation.observed_at)::date as day,
+          count(distinct observation.thesis_key) filter (
+            where coalesce((observation.decision_features #>> '{gates,publishEligible}')::boolean, false)
+              and nullif(observation.decision_features #>> '{market,priceCheckedAt}', '') is not null
+          )::text as candidates,
+          true as observed
+        from holder_research_candidate_observations observation
+        cross join bounds
+        where observation.observed_at >= ((bounds.utc_today - 7)::timestamp at time zone 'UTC')
+          and observation.observed_at < (bounds.utc_today::timestamp at time zone 'UTC')
         group by 1
       )
       select
-        to_char(days.day at time zone 'UTC', 'YYYY-MM-DD') as day,
-        coalesce(eligible.candidates, '0') as candidates
+        to_char(days.day, 'YYYY-MM-DD') as day,
+        coalesce(daily.candidates, '0') as candidates,
+        coalesce(daily.observed, false) as observed
       from days
-      left join eligible using (day)
+      left join daily using (day)
       order by days.day
     `,
     [now.toISOString()],
@@ -542,6 +571,7 @@ export async function loadHolderResearchSupplyHealth(
     rows.map((row) => ({
       day: row.day,
       candidates: Number(row.candidates),
+      observed: row.observed,
     })),
   );
 }

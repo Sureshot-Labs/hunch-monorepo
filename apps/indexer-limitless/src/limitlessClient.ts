@@ -144,13 +144,35 @@ export async function fetchActivePage(
     );
   }
 
-  return parsed.response;
+  return {
+    ...parsed.response,
+    invalidMarkets: parsed.invalidMarkets,
+  };
 }
+
+export type LimitlessFullCoverage = {
+  reportedMarkets: number | null;
+  reportedPages: number | null;
+  pagesFetched: number;
+  uniqueMarkets: number;
+  duplicates: number;
+  malformedMarkets: number;
+  failedPages: number[];
+  capReached: boolean;
+  complete: boolean;
+};
+
+export type LimitlessFullFetchResult = {
+  markets: TLimitlessMarket[];
+  coverage: LimitlessFullCoverage;
+};
 
 export async function fetchAllActive(
   maxPages: number,
   pageSize: number,
   options?: {
+    fetchPage?: typeof fetchActivePage;
+    pageDelayMs?: number;
     onPage?: (info: {
       page: number;
       totalPages: number | null;
@@ -158,29 +180,90 @@ export async function fetchAllActive(
       fetchedMarkets: number;
     }) => void;
   },
-) {
-  const out: TLimitlessMarket[] = [];
+): Promise<LimitlessFullFetchResult> {
+  const byId = new Map<TLimitlessMarket["id"], TLimitlessMarket>();
+  const fetchPage = options?.fetchPage ?? fetchActivePage;
+  let reportedMarkets: number | null = null;
+  let reportedPages: number | null = null;
+  let pagesFetched = 0;
+  let duplicates = 0;
+  let malformedMarkets = 0;
+  const failedPages: number[] = [];
+
   for (let p = 1; p <= maxPages; p++) {
-    const res = await fetchActivePage(p, pageSize, "newest");
+    let res: Awaited<ReturnType<typeof fetchActivePage>>;
+    try {
+      res = await fetchPage(p, pageSize, "newest");
+    } catch (error) {
+      failedPages.push(p);
+      log.warn("Limitless full bootstrap page failed", {
+        page: p,
+        pagesFetched,
+        uniqueMarkets: byId.size,
+        error: String(error),
+      });
+      break;
+    }
+    malformedMarkets += res.invalidMarkets.length;
     if (!res.data.length) break;
-    out.push(...res.data);
+    pagesFetched = p;
+    for (const market of res.data) {
+      if (byId.has(market.id)) duplicates += 1;
+      byId.set(market.id, market);
+    }
     const totalCount = res.totalMarketsCount;
     const totalPages =
       res.totalPages ??
       (typeof totalCount === "number" && Number.isFinite(totalCount)
         ? Math.ceil(totalCount / pageSize)
         : undefined);
+    if (typeof totalCount === "number" && Number.isFinite(totalCount)) {
+      reportedMarkets = Math.max(reportedMarkets ?? 0, totalCount);
+    }
+    if (typeof totalPages === "number" && Number.isFinite(totalPages)) {
+      reportedPages = Math.max(reportedPages ?? 0, totalPages);
+    }
     options?.onPage?.({
       page: p,
       totalPages: totalPages ?? null,
       pageMarkets: res.data.length,
-      fetchedMarkets: out.length,
+      fetchedMarkets: byId.size,
     });
     // cheap throttling
-    await sleep(150);
+    const pageDelayMs = options?.pageDelayMs ?? 150;
+    if (pageDelayMs > 0) await sleep(pageDelayMs);
     if (totalPages && p >= totalPages) break;
   }
-  return out;
+
+  const capReached =
+    maxPages > 0 &&
+    pagesFetched >= maxPages &&
+    ((reportedPages != null && pagesFetched < reportedPages) ||
+      (reportedMarkets != null && byId.size < reportedMarkets));
+  const coveredReportedPages =
+    reportedPages == null || pagesFetched >= reportedPages;
+  const coveredReportedMarkets =
+    reportedMarkets == null || byId.size + malformedMarkets >= reportedMarkets;
+
+  return {
+    markets: [...byId.values()],
+    coverage: {
+      reportedMarkets,
+      reportedPages,
+      pagesFetched,
+      uniqueMarkets: byId.size,
+      duplicates,
+      malformedMarkets,
+      failedPages,
+      capReached,
+      complete:
+        !capReached &&
+        malformedMarkets === 0 &&
+        failedPages.length === 0 &&
+        coveredReportedPages &&
+        coveredReportedMarkets,
+    },
+  };
 }
 
 export async function fetchMarket(slugOrAddress: string) {

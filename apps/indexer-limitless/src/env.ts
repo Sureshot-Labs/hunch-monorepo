@@ -99,10 +99,10 @@ const bootstrapPageSize = Math.min(
   Math.max(1, Number.isFinite(pageSizeRaw) ? pageSizeRaw : 25),
 );
 
-const maxPagesRaw = Number(process.env.LIMITLESS_MAX_PAGES ?? "10");
+const maxPagesRaw = Number(process.env.LIMITLESS_MAX_PAGES ?? "40");
 const bootstrapMaxPages = Math.max(
   0,
-  Number.isFinite(maxPagesRaw) ? maxPagesRaw : 10,
+  Number.isFinite(maxPagesRaw) ? maxPagesRaw : 40,
 );
 
 const refreshMinutesRaw = Number(process.env.LIMITLESS_REFRESH_MIN ?? "1");

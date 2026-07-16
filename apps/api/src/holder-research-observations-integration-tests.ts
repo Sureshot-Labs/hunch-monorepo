@@ -20,7 +20,8 @@ try {
   const freshThesis = "holder_research:v2:integration-fresh:YES";
   const staleThesis = "holder_research:v2:integration-stale:NO";
   const uncheckedThesis = "holder_research:v2:integration-unchecked:YES";
-  const supplyNow = new Date("2099-01-07T12:00:00.000Z");
+  const observationAt = new Date("2099-01-07T12:00:00.000Z");
+  const supplyNow = new Date("2099-01-08T12:00:00.000Z");
 
   await client.query(
     `insert into holder_research_candidate_observations (
@@ -48,7 +49,13 @@ try {
         'unchecked', 2,
         '{"version":2,"market":{"priceCheckedAt":null},"gates":{"publishEligible":true}}'::jsonb,
         3, 0.3, 3)`,
-    [runId, freshThesis, staleThesis, supplyNow.toISOString(), uncheckedThesis],
+    [
+      runId,
+      freshThesis,
+      staleThesis,
+      observationAt.toISOString(),
+      uncheckedThesis,
+    ],
   );
 
   const stages = await updateHolderResearchObservationStages(db, {

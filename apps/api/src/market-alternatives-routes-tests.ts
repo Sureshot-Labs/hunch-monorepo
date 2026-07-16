@@ -114,7 +114,7 @@ function dbRow(args: {
     market_type: "binary",
     best_bid: args.bestBid ?? 0.4,
     best_ask: args.bestAsk ?? 0.6,
-    last_price: 0.5,
+    last_price: ((args.bestBid ?? 0.4) + (args.bestAsk ?? 0.6)) / 2,
     volume_24h: 10,
     activity_volume_last_24h: null,
     activity_volume_valid: false,
@@ -131,6 +131,8 @@ function dbRow(args: {
     event_image: null,
     event_icon: null,
     event_category: "sports",
+    canonical_active: true,
+    canonical_orderable: true,
   };
 }
 
@@ -150,7 +152,7 @@ function fakeClient(args: {
   return {
     async getVenueMarkets() {
       args.calls.venueMarkets += 1;
-      return args.markets;
+      return { items: args.markets, nextCursor: null };
     },
     async getMidpoints(ids) {
       args.calls.midpoints += 1;
@@ -211,10 +213,10 @@ async function buildTestApp(args: {
 
 await test("GET /markets/:marketId/alternatives returns midpoint alternatives", async () => {
   clearAggClustersCacheForTests();
-  const kalshi = market({
-    id: "agg-kalshi",
-    venue: "kalshi",
-    externalIdentifier: "KXUCL-26-PSG",
+  const limitless = market({
+    id: "agg-limitless",
+    venue: "limitless",
+    externalIdentifier: "limitless-psg",
     question: "PSG",
   });
   const poly = market({
@@ -222,7 +224,7 @@ await test("GET /markets/:marketId/alternatives returns midpoint alternatives", 
     venue: "polymarket",
     externalIdentifier: "101",
     question: "PSG",
-    matchedVenueMarkets: [kalshi],
+    matchedVenueMarkets: [limitless],
   });
   const calls = { venueMarkets: 0, midpoints: 0 };
   const app = await buildTestApp({
@@ -237,9 +239,9 @@ await test("GET /markets/:marketId/alternatives returns midpoint alternatives", 
         bestAsk: 0.58,
       }),
       dbRow({
-        id: "kalshi:KXUCL-26-PSG",
-        venue: "kalshi",
-        venueMarketId: "KXUCL-26-PSG",
+        id: "limitless:limitless-psg",
+        venue: "limitless",
+        venueMarketId: "limitless-psg",
         title: "PSG",
         eventTitle: "Champions League Winner",
         bestBid: 0.54,
@@ -248,7 +250,7 @@ await test("GET /markets/:marketId/alternatives returns midpoint alternatives", 
     ]),
     client: fakeClient({
       markets: [poly],
-      midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)],
+      midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-limitless", 0.55)],
       calls,
     }),
   });
@@ -263,7 +265,7 @@ await test("GET /markets/:marketId/alternatives returns midpoint alternatives", 
   const body = response.json();
   assert.equal(body.status, "matched");
   assert.equal(body.marketId, "polymarket:101");
-  assert.equal(body.lowestYesMid.marketId, "kalshi:KXUCL-26-PSG");
+  assert.equal(body.lowestYesMid.marketId, "limitless:limitless-psg");
   assert.equal(body.lowestNoMid.marketId, "polymarket:101");
   assert.equal(body.bestYesBuy, undefined);
   assert.equal(body.bestNoBuy, undefined);
@@ -272,7 +274,7 @@ await test("GET /markets/:marketId/alternatives returns midpoint alternatives", 
   assert.equal(calls.midpoints, 1);
 });
 
-await test("GET /markets/:marketId/alternatives hides opposite participant alternatives", async () => {
+await test("GET /markets/:marketId/alternatives maps opposite participants", async () => {
   clearAggClustersCacheForTests();
   const polyFrance = market({
     id: "agg-poly-france",
@@ -327,9 +329,11 @@ await test("GET /markets/:marketId/alternatives hides opposite participant alter
 
   assert.equal(response.statusCode, 200);
   const body = response.json();
-  assert.equal(body.status, "not_found");
-  assert.equal(body.markets.length, 0);
-  assert.equal(body.alternatives.length, 0);
+  assert.equal(body.status, "matched");
+  assert.equal(body.markets.length, 2);
+  assert.equal(body.alternatives.length, 1);
+  assert.equal(body.alternatives[0]?.marketId, "polymarket:1897082");
+  assert.equal(body.alternatives[0]?.outcomeMapping?.sourceYesTo, "NO");
 });
 
 await test("GET /markets/:marketId/alternatives caches not_found responses in Redis", async () => {
@@ -427,10 +431,10 @@ await test("GET /markets/:marketId/alternatives can disable not_found Redis cach
 
 await test("GET /markets/:marketId/alternatives caches matched responses in Redis", async () => {
   clearAggClustersCacheForTests();
-  const kalshi = market({
-    id: "agg-kalshi",
-    venue: "kalshi",
-    externalIdentifier: "KXUCL-26-PSG",
+  const limitless = market({
+    id: "agg-limitless",
+    venue: "limitless",
+    externalIdentifier: "202",
     question: "PSG",
   });
   const poly = market({
@@ -438,7 +442,7 @@ await test("GET /markets/:marketId/alternatives caches matched responses in Redi
     venue: "polymarket",
     externalIdentifier: "101",
     question: "PSG",
-    matchedVenueMarkets: [kalshi],
+    matchedVenueMarkets: [limitless],
   });
   const redis = new FakeAlternativesCache();
   const calls = { venueMarkets: 0, midpoints: 0 };
@@ -454,9 +458,9 @@ await test("GET /markets/:marketId/alternatives caches matched responses in Redi
         bestAsk: 0.58,
       }),
       dbRow({
-        id: "kalshi:KXUCL-26-PSG",
-        venue: "kalshi",
-        venueMarketId: "KXUCL-26-PSG",
+        id: "limitless:202",
+        venue: "limitless",
+        venueMarketId: "202",
         title: "PSG",
         eventTitle: "Champions League Winner",
         bestBid: 0.54,
@@ -465,7 +469,10 @@ await test("GET /markets/:marketId/alternatives caches matched responses in Redi
     ]),
     client: fakeClient({
       markets: [poly],
-      midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-kalshi", 0.55)],
+      midpoints: [
+        midpoint("agg-poly", 0.57),
+        midpoint("agg-limitless", 0.55),
+      ],
       calls,
     }),
     redis,

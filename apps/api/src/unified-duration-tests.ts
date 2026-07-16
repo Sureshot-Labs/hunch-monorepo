@@ -340,6 +340,101 @@ async function assertKalshiActiveReopenPolicy() {
   }
 }
 
+async function assertMarketUpsertPreservesHunchMetadata() {
+  const eventId = makeId("polymarket:event");
+  const venueEventId = makeId("metadata-event");
+  const marketId = makeId("polymarket:market");
+  const venueMarketId = makeId("metadata-market");
+  const closeTime = new Date(Date.now() + 60 * 60 * 1000);
+  const row = {
+    id: marketId,
+    venue: "polymarket" as const,
+    venue_market_id: venueMarketId,
+    event_id: eventId,
+    title: "Metadata preservation market",
+    category: "metadata-preservation-test",
+    status: "ACTIVE" as const,
+    market_type: "binary",
+    open_time: new Date(Date.now() - 60_000),
+    close_time: closeTime,
+    expiration_time: closeTime,
+    best_bid: 0.45,
+    best_ask: 0.55,
+    last_price: 0.5,
+    volume_total: 100,
+    volume_24h: 10,
+    liquidity: 100,
+    open_interest: 50,
+    outcomes: JSON.stringify(["YES", "NO"]),
+    slug: makeId("metadata-slug"),
+  };
+
+  try {
+    await upsertTestEvent({
+      category: "metadata-preservation-test",
+      id: eventId,
+      title: "Metadata preservation event",
+      venue: "polymarket",
+      venueEventId,
+    });
+    await upsertUnifiedMarkets(pool, [
+      {
+        ...row,
+        metadata: {
+          sourceVersion: 1,
+          hunch: { telegramPresentationV1: { subject: "untrusted" } },
+        },
+      },
+    ]);
+    const inserted = await pool.query<{ metadata: Record<string, unknown> }>(
+      "select metadata from unified_markets where id = $1",
+      [marketId],
+    );
+    assert.deepEqual(inserted.rows[0]?.metadata, { sourceVersion: 1 });
+
+    const approved = {
+      telegramPresentationV1: {
+        version: 1,
+        reviewStatus: "approved",
+        subject: "Canonical subject",
+      },
+    };
+    await pool.query(
+      `update unified_markets
+       set metadata = coalesce(metadata, '{}'::jsonb)
+         || jsonb_build_object('hunch', $2::jsonb)
+       where id = $1`,
+      [marketId, JSON.stringify(approved)],
+    );
+
+    const repeated = await upsertUnifiedMarkets(
+      pool,
+      [
+        {
+          ...row,
+          metadata: {
+            sourceVersion: 1,
+            hunch: { telegramPresentationV1: { subject: "overwrite" } },
+          },
+        },
+      ],
+      { filterUnchanged: true },
+    );
+    assert.equal(repeated.changedRows, 0);
+    const updated = await pool.query<{ metadata: Record<string, unknown> }>(
+      "select metadata from unified_markets where id = $1",
+      [marketId],
+    );
+    assert.deepEqual(updated.rows[0]?.metadata, {
+      sourceVersion: 1,
+      hunch: approved,
+    });
+  } finally {
+    await pool.query("delete from unified_markets where id = $1", [marketId]);
+    await pool.query("delete from unified_events where id = $1", [eventId]);
+  }
+}
+
 async function main() {
   assert.equal(derivePolymarketDurationMinutes("btc-up-or-down-5m"), 5);
   assert.equal(derivePolymarketDurationMinutes("eth-up-or-down-15m"), 15);
@@ -412,6 +507,7 @@ async function main() {
     assert.deepEqual(params, [[5, 15]]);
   }
   await assertKalshiActiveReopenPolicy();
+  await assertMarketUpsertPreservesHunchMetadata();
 
   const app = await buildApp();
   const previousFeedTtl = env.feedTtlSec;

@@ -1,3 +1,5 @@
+import { isSignalDeliveryRef } from "./signal-delivery-attribution.js";
+
 const TELEGRAM_STARTAPP_MAX_LENGTH = 512;
 export const SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
 const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
@@ -48,6 +50,7 @@ export function buildSignalBotEventStartParam(eventId: string): string | null {
 
 export function buildSignalBotBuyStartParam(input: {
   amountUsd?: number | null;
+  deliveryRef?: string | null;
   eventId: string;
   marketId: string;
   side: "NO" | "YES";
@@ -68,7 +71,7 @@ export function buildSignalBotBuyStartParam(input: {
     eventParts && marketParts && eventParts.venue === marketParts.venue
       ? SIGNAL_BOT_MINI_APP_VENUE_CODES[eventParts.venue]
       : null;
-  const payload =
+  const payload: string[] =
     compactVenueCode && eventParts && marketParts
       ? [
           `${compactVenueCode}:${eventParts.body}`,
@@ -77,12 +80,16 @@ export function buildSignalBotBuyStartParam(input: {
           amount,
         ]
       : [eventId, marketId, side, amount];
+  if (isSignalDeliveryRef(input.deliveryRef)) {
+    payload.push(input.deliveryRef ?? "");
+  }
   return fitSignalBotStartParam(
     `b_${encodeSignalBotStartAppPayload(payload.join("|"))}`,
   );
 }
 
 export function buildSignalBotMarketStartParam(input: {
+  deliveryRef?: string | null;
   eventId: string;
   marketId?: string | null;
   side?: "NO" | "YES" | null;
@@ -99,10 +106,13 @@ export function buildSignalBotMarketStartParam(input: {
     eventParts && marketParts && eventParts.venue === marketParts.venue
       ? SIGNAL_BOT_MINI_APP_VENUE_CODES[eventParts.venue]
       : null;
-  const payload =
+  const payload: string[] =
     compactVenueCode && eventParts && marketParts
       ? [`${compactVenueCode}:${eventParts.body}`, marketParts.body, side]
       : [eventId, marketId, side];
+  if (isSignalDeliveryRef(input.deliveryRef)) {
+    payload.push(input.deliveryRef ?? "");
+  }
   return fitSignalBotStartParam(
     `m_${encodeSignalBotStartAppPayload(payload.join("|"))}`,
   );
@@ -170,6 +180,7 @@ export function buildSignalBotTelegramWebAppUrl(input: {
 }
 
 export function buildSignalBotMiniAppEventUrl(input: {
+  deliveryRef?: string | null | undefined;
   eventId: string | null | undefined;
   marketId?: string | null | undefined;
   miniAppLinkBase: string | null | undefined;
@@ -179,6 +190,7 @@ export function buildSignalBotMiniAppEventUrl(input: {
   return buildSignalBotMiniAppUrl({
     base: input.miniAppLinkBase,
     startParam: buildSignalBotMarketStartParam({
+      deliveryRef: input.deliveryRef,
       eventId: input.eventId,
       marketId: input.marketId,
       side: input.side,
@@ -188,6 +200,7 @@ export function buildSignalBotMiniAppEventUrl(input: {
 
 export function buildSignalBotMiniAppTradeUrl(input: {
   amountUsd?: number | null;
+  deliveryRef?: string | null;
   eventId: string;
   marketId: string;
   miniAppLinkBase: string | null | undefined;

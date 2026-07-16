@@ -60,8 +60,13 @@ export type AggVenueMarketsParams = {
   sortDir?: "asc" | "desc";
 };
 
+export type AggVenueMarketsPage = {
+  items: AggVenueMarket[];
+  nextCursor: string | null;
+};
+
 export type AggMarketClient = {
-  getVenueMarkets(params: AggVenueMarketsParams): Promise<AggVenueMarket[]>;
+  getVenueMarkets(params: AggVenueMarketsParams): Promise<AggVenueMarketsPage>;
   getMidpoints(venueMarketIds: string[]): Promise<AggMidpoint[]>;
 };
 
@@ -196,6 +201,21 @@ function normalizeMidpoint(value: unknown): AggMidpoint | null {
   };
 }
 
+function readNextCursor(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const direct =
+    getString(payload, "nextCursor") ?? getString(payload, "next_cursor");
+  if (direct) return direct;
+  for (const key of ["pagination", "pageInfo", "meta"] as const) {
+    const nested = payload[key];
+    if (!isRecord(nested)) continue;
+    const cursor =
+      getString(nested, "nextCursor") ?? getString(nested, "next_cursor");
+    if (cursor) return cursor;
+  }
+  return null;
+}
+
 function appendParam(
   params: URLSearchParams,
   key: string,
@@ -312,9 +332,12 @@ export function createAggMarketClient(
           : Array.isArray(payload)
             ? payload
             : [];
-      return data
-        .map(normalizeVenueMarket)
-        .filter((row): row is AggVenueMarket => row != null);
+      return {
+        items: data
+          .map(normalizeVenueMarket)
+          .filter((row): row is AggVenueMarket => row != null),
+        nextCursor: readNextCursor(payload),
+      };
     },
 
     async getMidpoints(venueMarketIds) {
