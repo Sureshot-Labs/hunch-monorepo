@@ -20,11 +20,12 @@ import {
 } from "./agg-market-clusters.js";
 import type { ClusterMarketSummary } from "./clusters.js";
 import {
-  CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS,
   resolveNativeOutcomeForCanonicalSide,
   resolveStrictClusterNativeOffer,
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
+import { SIGNAL_BOT_QUOTE_MAX_AGE_MS } from "./signal-bot-delivery-policy.js";
+import { HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON } from "./signal-publication-contract.js";
 import {
   auditHolderResearchSignalPerformance,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
@@ -124,7 +125,6 @@ export type SignalBotConfig = {
   appBaseUrl: string;
   publishIntervalSec: number;
   pollTimeoutSec: number;
-  minConfidence: number;
   maxSignalsPerTick: number;
   buyAmountUsd: number;
   priceGuardDeferTtlSec: number;
@@ -511,9 +511,8 @@ type SignalBotNoteRow = {
 };
 
 type SignalBotEligibilityCountRow = {
-  below_min_confidence: string | number | null;
-  eligible: string | number | null;
   non_directional: string | number | null;
+  publish_notes_seen: string | number | null;
   total: string | number | null;
 };
 
@@ -563,7 +562,10 @@ const CHAT_SET_KEY = "tg:signal_bot:v1:enabled_chats";
 const UPDATE_OFFSET_KEY = "tg:signal_bot:v1:update_offset";
 const LOCK_KEY = "tg:signal_bot:v1:lock";
 const PRICE_GUARD_DEFER_KEY_PREFIX = "tg:signal_bot:v1:price_guard_defer";
-const PRICE_GUARD_MAX_FRESH_AGE_MS = CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS;
+const PRICE_GUARD_MAX_FRESH_AGE_MS = SIGNAL_BOT_QUOTE_MAX_AGE_MS;
+const HOLDER_RESEARCH_PUBLICATION_DECISION_SQL = `
+  n.metrics @> '${HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON}'::jsonb
+`;
 const LOCK_TTL_MS = 120_000;
 const SIGNAL_CONTEXT_MAX_CHARS = 260;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
@@ -650,7 +652,6 @@ export function parseSignalBotConfig(
       60,
     ),
     pollTimeoutSec: parsePositiveInt(env.HUNCH_SIGNAL_BOT_POLL_TIMEOUT_SEC, 25),
-    minConfidence: parseRatio(env.HUNCH_SIGNAL_BOT_MIN_CONFIDENCE, 0.7),
     maxSignalsPerTick: parsePositiveInt(
       env.HUNCH_SIGNAL_BOT_MAX_SIGNALS_PER_TICK,
       5,
@@ -3453,7 +3454,6 @@ export async function handleSignalBotCommand(input: {
             : targetChatId
               ? `Signals are disabled for ${targetChatId}.`
               : "Signals are disabled here.",
-          `Min confidence: ${formatPercent(input.config.minConfidence)}.`,
           `Destinations: ${destinations.join(", ") || "none"}.`,
         ].join("\n"),
       ),
@@ -5172,12 +5172,11 @@ export async function publishSignalBotTick(input: {
   transports?: readonly SignalTransport[];
 }): Promise<
   {
-    belowConfidenceNotes: number;
     blockedChats: number;
     chats: number;
     cheaperAlternatives: number;
-    eligibleNotes: number;
     nonDirectionalNotes: number;
+    publishNotesSeen: number;
     sent: number;
   } & SignalBotCheaperAlternativeDiagnostics &
     SignalBotPriceGuardDiagnostics
@@ -5190,10 +5189,9 @@ export async function publishSignalBotTick(input: {
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   let sent = 0;
   let blockedChats = 0;
-  let belowConfidenceNotes = 0;
   let cheaperAlternatives = 0;
-  let eligibleNotes = 0;
   let nonDirectionalNotes = 0;
+  let publishNotesSeen = 0;
   const alternativeDiagnostics = createSignalBotCheaperAlternativeDiagnostics();
   const priceGuardDiagnostics = createSignalBotPriceGuardDiagnostics();
   for (const chatId of chatIds) {
@@ -5205,16 +5203,13 @@ export async function publishSignalBotTick(input: {
     const counts = await loadSignalBotEligibilityCounts(input.db, {
       afterCreatedAt: state.cursorCreatedAt,
       afterId: state.cursorId,
-      minConfidence: input.config.minConfidence,
     });
-    belowConfidenceNotes += counts.belowConfidence;
-    eligibleNotes += counts.eligible;
     nonDirectionalNotes += counts.nonDirectional;
+    publishNotesSeen += counts.publishNotesSeen;
     const notes = await loadSignalBotNotes(input.db, {
       afterCreatedAt: state.cursorCreatedAt,
       afterId: state.cursorId,
       limit: input.config.maxSignalsPerTick,
-      minConfidence: input.config.minConfidence,
     });
     for (const note of notes) {
       const sourceVenue = normalizeHunchVenue(note.marketVenue);
@@ -5494,12 +5489,11 @@ export async function publishSignalBotTick(input: {
   return {
     ...alternativeDiagnostics,
     ...priceGuardDiagnostics,
-    belowConfidenceNotes,
     blockedChats,
     chats: chatIds.length,
     cheaperAlternatives,
-    eligibleNotes,
     nonDirectionalNotes,
+    publishNotesSeen,
     sent,
   };
 }
@@ -5520,7 +5514,6 @@ export async function sendLatestSignalBotTestSignal(input: {
     afterId: LATEST_CURSOR_ID,
     descending: true,
     limit: 1,
-    minConfidence: input.config.minConfidence,
   });
   const note = notes[0];
   if (!note) return false;
@@ -6914,7 +6907,6 @@ export async function sendSignalBotStatsReport(input: {
     includeResolved: true,
     limit: SIGNAL_BOT_STATS_AUDIT_LIMIT,
     lookbackHours: signalBotStatsPeriodHours(input.period),
-    minConfidence: input.config.minConfidence,
     persist: false,
   });
   const message = buildSignalBotStatsReport({
@@ -6936,7 +6928,6 @@ export async function loadSignalBotNotes(
     afterId: string;
     descending?: boolean;
     limit: number;
-    minConfidence: number;
   },
 ): Promise<SignalBotNote[]> {
   const order = input.descending ? "desc" : "asc";
@@ -7025,19 +7016,19 @@ export async function loadSignalBotNotes(
         and n.status = 'active'
         and n.producer_type = 'holder_research'
         and n.direction in ('up', 'down')
-        and coalesce(n.confidence, 0) >= $1
+        and ${HOLDER_RESEARCH_PUBLICATION_DECISION_SQL}
         and ${buildWalletIntelAcceptingOrdersSql({
           eventAlias: "e",
           marketAlias: "m",
         })}
         and (
-          n.created_at ${comparison} $2::timestamptz
-          or (n.created_at = $2::timestamptz and n.id ${comparison} $3::uuid)
+          n.created_at ${comparison} $1::timestamptz
+          or (n.created_at = $1::timestamptz and n.id ${comparison} $2::uuid)
         )
       order by n.created_at ${order}, n.id ${order}
-      limit $4
+      limit $3
     `,
-    [input.minConfidence, input.afterCreatedAt, input.afterId, input.limit],
+    [input.afterCreatedAt, input.afterId, input.limit],
   );
   return rows.map(rowToSignalBotNote);
 }
@@ -7047,12 +7038,10 @@ async function loadSignalBotEligibilityCounts(
   input: {
     afterCreatedAt: string;
     afterId: string;
-    minConfidence: number;
   },
 ): Promise<{
-  belowConfidence: number;
-  eligible: number;
   nonDirectional: number;
+  publishNotesSeen: number;
   total: number;
 }> {
   const { rows } = await db.query<SignalBotEligibilityCountRow>(
@@ -7060,12 +7049,7 @@ async function loadSignalBotEligibilityCounts(
       select
         count(*) filter (
           where n.direction in ('up', 'down')
-            and coalesce(n.confidence, 0) >= $1
-        )::int as eligible,
-        count(*) filter (
-          where n.direction in ('up', 'down')
-            and coalesce(n.confidence, 0) < $1
-        )::int as below_min_confidence,
+        )::int as publish_notes_seen,
         count(*) filter (
           where n.direction is null
              or n.direction not in ('up', 'down')
@@ -7081,27 +7065,27 @@ async function loadSignalBotEligibilityCounts(
       where n.note_type = 'signal'
         and n.status = 'active'
         and n.producer_type = 'holder_research'
+        and ${HOLDER_RESEARCH_PUBLICATION_DECISION_SQL}
         and ${buildWalletIntelAcceptingOrdersSql({
           eventAlias: "e",
           marketAlias: "m",
         })}
         and (
-          n.created_at > $2::timestamptz
-          or (n.created_at = $2::timestamptz and n.id > $3::uuid)
+          n.created_at > $1::timestamptz
+          or (n.created_at = $1::timestamptz and n.id > $2::uuid)
         )
     `,
-    [input.minConfidence, input.afterCreatedAt, input.afterId],
+    [input.afterCreatedAt, input.afterId],
   );
   const row = rows[0];
   return {
-    belowConfidence: Math.max(
-      0,
-      Math.trunc(toNumber(row?.below_min_confidence) ?? 0),
-    ),
-    eligible: Math.max(0, Math.trunc(toNumber(row?.eligible) ?? 0)),
     nonDirectional: Math.max(
       0,
       Math.trunc(toNumber(row?.non_directional) ?? 0),
+    ),
+    publishNotesSeen: Math.max(
+      0,
+      Math.trunc(toNumber(row?.publish_notes_seen) ?? 0),
     ),
     total: Math.max(0, Math.trunc(toNumber(row?.total) ?? 0)),
   };
@@ -7432,13 +7416,6 @@ function parseNonNegativeInt(
   if (!Number.isFinite(parsed)) return fallback;
   const asInt = Math.trunc(parsed);
   return asInt >= 0 ? asInt : fallback;
-}
-
-function parseRatio(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return fallback;
-  return parsed;
 }
 
 function parseIntegerList(value: string | undefined): number[] {

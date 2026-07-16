@@ -192,7 +192,6 @@ export async function runSignalBotRunner(): Promise<void> {
     aggCredentialSource: aggConfig?.credentialSource ?? "none",
     buyAmountUsd: config.buyAmountUsd,
     maxSignalsPerTick: config.maxSignalsPerTick,
-    minConfidence: config.minConfidence,
     publishIntervalSec: config.publishIntervalSec,
   });
 

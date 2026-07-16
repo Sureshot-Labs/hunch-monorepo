@@ -428,6 +428,33 @@ export function parseHolderResearchExternalResearchV2(
   };
 }
 
+const uncitedExternalClaimPattern =
+  /\b(?:article|bookmaker|coverage|forecast|headline|news|odds?|poll|preview|report|source|sportsbook)\b/i;
+
+export function containsHolderResearchExternalClaim(value: string): boolean {
+  return uncitedExternalClaimPattern.test(value);
+}
+
+export function normalizeHolderResearchExternalResearchV2(
+  value: HolderResearchExternalResearchV2,
+): HolderResearchExternalResearchV2 {
+  const hasUnsupportedClaim =
+    value.citations.length === 0 &&
+    (value.status === "ok" ||
+      value.verdict !== "unknown" ||
+      value.comparableOdds != null ||
+      containsHolderResearchExternalClaim(value.summary));
+  if (!hasUnsupportedClaim) return value;
+  return {
+    status: "no_evidence",
+    verdict: "unknown",
+    timing: "unknown",
+    summary: "No cited external evidence was available.",
+    citations: [],
+    comparableOdds: null,
+  };
+}
+
 export function parseHolderResearchFinalOutputV2(
   value: unknown,
 ): HolderResearchFinalOutputV2 {

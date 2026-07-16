@@ -106,6 +106,11 @@ import {
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import { resolveSignalDeliveryTarget } from "./services/signal-delivery-target.js";
 import {
+  isSignalBotQuoteFresh,
+  SIGNAL_BOT_QUOTE_MAX_AGE_MS,
+} from "./services/signal-bot-delivery-policy.js";
+import { hasHolderResearchPublicationDecisionV1 } from "./services/signal-publication-contract.js";
+import {
   createDiscordSignalTransport,
   createTelegramSignalTransport,
   createXSignalTransport,
@@ -786,22 +791,21 @@ class FakeDb {
         rows: rows as T[],
       };
     }
-    const minConfidence = Number(params[0] ?? 0);
-    const directionEligibleRows = this.rows.filter((row) => {
+    const publicationRows = this.rows.filter((row) =>
+      hasHolderResearchPublicationDecisionV1(
+        (row as { metrics?: unknown }).metrics,
+      ),
+    );
+    const directionEligibleRows = publicationRows.filter((row) => {
       const direction = String(
         (row as { direction?: unknown }).direction ?? "",
       );
       return direction === "up" || direction === "down";
     });
-    const rows = directionEligibleRows.filter((row) => {
-      const confidence = Number(
-        (row as { confidence?: unknown }).confidence ?? 0,
-      );
-      return !Number.isFinite(minConfidence) || confidence >= minConfidence;
-    });
-    if (sql.includes("below_min_confidence")) {
-      const below = directionEligibleRows.length - rows.length;
-      const nonDirectional = this.rows.length - directionEligibleRows.length;
+    const rows = directionEligibleRows;
+    if (sql.includes("publish_notes_seen")) {
+      const nonDirectional =
+        publicationRows.length - directionEligibleRows.length;
       return {
         command: "SELECT",
         fields: [],
@@ -809,15 +813,14 @@ class FakeDb {
         rowCount: 1,
         rows: [
           {
-            below_min_confidence: below,
-            eligible: rows.length,
+            publish_notes_seen: rows.length,
             non_directional: nonDirectional,
-            total: this.rows.length,
+            total: publicationRows.length,
           },
         ] as unknown as T[],
       };
     }
-    const limit = Number(params[3] ?? rows.length);
+    const limit = Number(params[2] ?? rows.length);
     const selected = rows.slice(
       0,
       Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : rows.length,
@@ -896,6 +899,13 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     producer_run_id: "run-1",
     direction: "up",
     confidence: "0.82",
+    metrics: {
+      publicationDecisionV1: {
+        authority: "holder_research_quality_gate",
+        status: "PUBLISH",
+        version: 1,
+      },
+    },
     model_meta: {
       external_research: {
         summary:
@@ -1252,13 +1262,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123, 456, nope",
         HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD: "",
         HUNCH_SIGNAL_BOT_ENABLED: "true",
-        HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.8",
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
       assert.equal(config.enabled, true);
       assert.deepEqual([...config.adminUserIds], [123, 456]);
       assert.equal(config.buyAmountUsd, 10);
-      assert.equal(config.minConfidence, 0.8);
+      assert.equal("minConfidence" in config, false);
       assert.equal(config.priceGuardMaxDefers, 5);
       assert.equal(config.priceGuardDeferTtlSec, 1_800);
       assert.deepEqual(config.followthrough, {
@@ -1274,6 +1283,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         terminalInitialCutoff: null,
       });
       assert.equal(config.telegramMiniAppLinkBase, null);
+    },
+  },
+  {
+    name: "signal delivery owns the inclusive ten minute quote cutoff",
+    run: () => {
+      const now = Date.parse("2026-01-01T00:10:00.000Z");
+      assert.equal(SIGNAL_BOT_QUOTE_MAX_AGE_MS, 600_000);
+      assert.equal(isSignalBotQuoteFresh(now - 599_000, now), true);
+      assert.equal(isSignalBotQuoteFresh(now - 600_000, now), true);
+      assert.equal(isSignalBotQuoteFresh(now - 601_000, now), false);
+      const source = readFileSync(
+        join(apiSrcDir, "services", "signal-bot.ts"),
+        "utf8",
+      );
+      assert.doesNotMatch(source, /CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS/);
+      assert.match(source, /SIGNAL_BOT_QUOTE_MAX_AGE_MS/);
     },
   },
   {
@@ -8594,14 +8619,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "status reports enabled state and minimum confidence",
+    name: "status reports enabled state without an independent confidence gate",
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
       const handled = await handleSignalBotCommand({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
-          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.8",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         message: {
@@ -8618,7 +8642,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.text ?? "",
         /Signals are disabled here/,
       );
-      assert.match(telegram.messages[0]?.text ?? "", /Min confidence: 80%/);
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Min confidence/i);
     },
   },
   {
@@ -9670,7 +9694,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: "-1",
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_BUY_AMOUNT_USD: "10",
-          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.7",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -9690,11 +9713,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.text ?? "",
         /evaluated|missingEntry|entryQuality|note_id/i,
       );
-      assert.match(queries[0]?.sql ?? "", /n\.confidence >=/);
+      assert.doesNotMatch(queries[0]?.sql ?? "", /n\.confidence >=/);
       assert.doesNotMatch(queries[0]?.sql ?? "", /n\.status = 'active'/);
       assert.match(queries[0]?.sql ?? "", /sbm\.message_kind = 'initial'/);
       assert.match(queries[0]?.sql ?? "", /n\.direction in \('up', 'down'\)/);
-      assert.equal(queries[0]?.params.includes(0.7), true);
+      assert.equal(queries[0]?.params.includes(0.7), false);
     },
   },
   {
@@ -9717,13 +9740,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         afterCreatedAt: "1970-01-01T00:00:00.000Z",
         afterId: "00000000-0000-0000-0000-000000000000",
         limit: 1,
-        minConfidence: 0.7,
       });
       assert.equal(notes[0]?.holderDisplayName, "TB14");
       assert.equal(notes[0]?.holderIdentityDisplayName, "@TB14");
       const sql = db.queries[0]?.sql ?? "";
       assert.match(sql, /join wallets w on w\.id = t\.target_id::uuid/);
       assert.match(sql, /m\.venue as market_venue/);
+      assert.match(sql, /publicationDecisionV1/);
+      assert.doesNotMatch(sql, /coalesce\(n\.confidence|and n\.confidence/);
       assert.doesNotMatch(sql, /w\.id::text = t\.target_id/);
     },
   },
@@ -9990,7 +10014,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publish sends only notes meeting minimum confidence",
+    name: "publish marker authorizes a note below the former confidence threshold",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -10002,33 +10026,74 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const db = new FakeDb();
       db.rows = [
         noteRow({
-          confidence: "0.69",
+          confidence: "0.67",
           id: "00000000-0000-4000-8000-000000000001",
-          title: "Below threshold",
-        }),
-        noteRow({
-          confidence: "0.78",
-          id: "00000000-0000-4000-8000-000000000002",
-          title: "Above threshold",
+          title: "Final publish decision",
         }),
       ];
       const telegram = new FakeTelegram();
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
-          HUNCH_SIGNAL_BOT_MIN_CONFIDENCE: "0.7",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
         redis,
         telegram,
       });
-      assert.equal(result.belowConfidenceNotes, 1);
-      assert.equal(result.eligibleNotes, 1);
+      assert.equal(result.publishNotesSeen, 1);
       assert.equal(result.nonDirectionalNotes, 0);
       assert.equal(result.sent, 1);
       assert.match(telegram.messages[0]?.text ?? "", /backs/);
-      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Below threshold/);
+    },
+  },
+  {
+    name: "publish ignores unversioned, context, and skip decisions",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({ confidence: "0.99", metrics: {} }),
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000002",
+          metrics: {
+            publicationDecisionV1: {
+              authority: "holder_research_quality_gate",
+              status: "CONTEXT",
+              version: 1,
+            },
+          },
+        }),
+        noteRow({
+          id: "00000000-0000-4000-8000-000000000003",
+          metrics: {
+            publicationDecisionV1: {
+              authority: "holder_research_quality_gate",
+              status: "SKIP",
+              version: 1,
+            },
+          },
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      assert.equal(result.publishNotesSeen, 0);
+      assert.equal(result.sent, 0);
+      assert.equal(telegram.messages.length, 0);
     },
   },
   {
@@ -10065,7 +10130,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
       assert.equal(result.nonDirectionalNotes, 1);
-      assert.equal(result.eligibleNotes, 1);
+      assert.equal(result.publishNotesSeen, 1);
       assert.equal(result.sent, 1);
       assert.match(telegram.messages[0]?.text ?? "", /backs/);
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Mixed context/);

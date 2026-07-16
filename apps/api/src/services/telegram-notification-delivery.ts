@@ -453,7 +453,7 @@ function positionSignalRelationship(input: {
 export async function enqueueTelegramPositionSignals(input: {
   config: Pick<
     SignalBotConfig,
-    "appBaseUrl" | "buyAmountUsd" | "minConfidence" | "telegramMiniAppLinkBase"
+    "appBaseUrl" | "buyAmountUsd" | "telegramMiniAppLinkBase"
   >;
   limit?: number;
   pool: Pool;
@@ -487,7 +487,6 @@ export async function enqueueTelegramPositionSignals(input: {
       afterCreatedAt: cursor.cursor_created_at,
       afterId: cursor.cursor_id,
       limit: Math.min(100, Math.max(1, input.limit ?? 25)),
-      minConfidence: input.config.minConfidence,
     });
 
     for (const note of notes) {

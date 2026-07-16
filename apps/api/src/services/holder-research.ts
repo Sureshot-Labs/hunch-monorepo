@@ -8,6 +8,8 @@ import {
 import type { PoolClient } from "pg";
 
 import {
+  containsHolderResearchExternalClaim,
+  normalizeHolderResearchExternalResearchV2,
   parseHolderResearchExternalResearchV2,
   type HolderResearchAgentOutputV1,
   type HolderResearchBucket,
@@ -33,6 +35,7 @@ import {
 } from "./market-side-copy.js";
 import { resolveTelegramMarketPresentation } from "./telegram-market-presentation.js";
 import { buildHolderResearchSignalEvidence } from "./holder-research-signal-evidence.js";
+import { HOLDER_RESEARCH_PUBLICATION_DECISION_V1 } from "./signal-publication-contract.js";
 import {
   buildWalletIntelAcceptingOrdersSql,
   buildWalletIntelTrackableMarketSql,
@@ -5644,7 +5647,10 @@ export function adaptHolderResearchFinalOutputV2(input: {
     output: HolderResearchAgentOutputV1;
   }>;
 }): HolderResearchAgentOutputV1 {
-  const { candidate, externalResearch, policy } = input;
+  const { candidate, policy } = input;
+  const externalResearch = normalizeHolderResearchExternalResearchV2(
+    input.externalResearch,
+  );
   const features = buildHolderResearchDecisionFeaturesV2(candidate, policy);
   const evidenceAliases = new Map(
     buildHolderResearchPromptEvidenceRecordsV2(candidate, policy).map(
@@ -5762,6 +5768,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
   };
   return applyHolderResearchPublishQualityGate({
     candidate,
+    externalResearch,
     output: adapted,
     policy,
     publishedRunDecisions: input.publishedRunDecisions,
@@ -5770,6 +5777,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
 
 export function applyHolderResearchPublishQualityGate(input: {
   candidate: HolderResearchCandidate;
+  externalResearch?: HolderResearchExternalResearchV2 | null;
   output: HolderResearchAgentOutputV1;
   policy: HolderResearchPolicy;
   publishedRunDecisions?: Array<{
@@ -5777,8 +5785,36 @@ export function applyHolderResearchPublishQualityGate(input: {
     output: HolderResearchAgentOutputV1;
   }>;
 }): HolderResearchAgentOutputV1 {
-  const { candidate, output } = input;
+  const { candidate } = input;
+  let { output } = input;
   if (output.status !== "PUBLISH") return output;
+
+  if ((input.externalResearch?.citations.length ?? 0) === 0) {
+    const hasUncitedClaim = [
+      output.headline,
+      output.summary,
+      output.rationale,
+      ...output.caveats,
+    ].some(containsHolderResearchExternalClaim);
+    if (hasUncitedClaim) {
+      output = {
+        ...output,
+        caveats: output.caveats.filter(
+          (text) => !containsHolderResearchExternalClaim(text),
+        ),
+        headline: containsHolderResearchExternalClaim(output.headline)
+          ? `${candidate.market.marketTitle} holder signal`
+          : output.headline,
+        public_context_risk: "unknown",
+        rationale: containsHolderResearchExternalClaim(output.rationale)
+          ? "Holder activity is the primary evidence for this signal."
+          : output.rationale,
+        summary: containsHolderResearchExternalClaim(output.summary)
+          ? "Holder activity is the primary evidence for this signal."
+          : output.summary,
+      };
+    }
+  }
 
   const deterministicBlocker = evaluateHolderResearchPublishRiskGates({
     candidate,
@@ -5970,8 +6006,10 @@ export async function persistHolderResearchNotes(
       params.policy,
     );
     const presentation = buildHolderResearchPresentation(candidate.market);
-    const externalResearch = parseHolderResearchExternalResearchV2(
-      decision.modelMeta.external_research,
+    const externalResearch = normalizeHolderResearchExternalResearchV2(
+      parseHolderResearchExternalResearchV2(
+        decision.modelMeta.external_research,
+      ),
     );
     const signalEvidence = buildHolderResearchSignalEvidence({
       actor: actorSummary,
@@ -6123,6 +6161,7 @@ export async function persistHolderResearchNotes(
             telegramPresentationDiagnostics: presentation.diagnostics,
             signalEvidence,
             signalEvidenceVersion: 1,
+            publicationDecisionV1: HOLDER_RESEARCH_PUBLICATION_DECISION_V1,
             quality: buildHolderResearchQualityAssessment(
               candidate,
               params.policy,

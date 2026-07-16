@@ -11,6 +11,7 @@ import {
   buildHolderResearchUserPrompt,
   buildHolderResearchUserPromptV2,
   holderResearchAgentOutputV1Schema,
+  normalizeHolderResearchExternalResearchV2,
   parseHolderResearchAgentOutputV1,
   parseHolderResearchExternalResearchV2,
   parseHolderResearchFinalOutputV2,
@@ -88,6 +89,7 @@ import {
 } from "./services/holder-research-performance.js";
 import { classifyMarketTaxonomy } from "./services/market-type-classifier.js";
 import { buildHolderResearchSignalEvidence } from "./services/holder-research-signal-evidence.js";
+import { hasHolderResearchPublicationDecisionV1 } from "./services/signal-publication-contract.js";
 import {
   loadWalletMarketTaxonomyMetricsMaps,
   selectWalletTaxonomyExactPairs,
@@ -779,6 +781,56 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "uncited external claims fail closed while cited evidence is preserved",
+    run: () => {
+      const uncited = normalizeHolderResearchExternalResearchV2(
+        parseHolderResearchExternalResearchV2({
+          status: "ok",
+          verdict: "supports_holder_side",
+          timing: "before_holder",
+          summary: "Outside odds and news support the holder side.",
+          citations: [],
+          comparableOdds: {
+            side: "YES",
+            probabilityMin: 0.6,
+            probabilityMax: 0.65,
+            asOf: "2026-01-02T00:00:00.000Z",
+            sources: [
+              {
+                title: "Uncited model source",
+                url: "https://example.com/odds",
+              },
+            ],
+          },
+        }),
+      );
+      assert.deepEqual(uncited, {
+        status: "no_evidence",
+        verdict: "unknown",
+        timing: "unknown",
+        summary: "No cited external evidence was available.",
+        citations: [],
+        comparableOdds: null,
+      });
+
+      const cited = parseHolderResearchExternalResearchV2({
+        status: "ok",
+        verdict: "supports_holder_side",
+        timing: "after_holder",
+        summary: "A dated report supports the holder side.",
+        citations: [
+          {
+            title: "Dated report",
+            url: "https://example.com/report",
+            publishedAt: "2026-01-02T00:00:00.000Z",
+          },
+        ],
+        comparableOdds: null,
+      });
+      assert.deepEqual(normalizeHolderResearchExternalResearchV2(cited), cited);
+    },
+  },
+  {
     name: "V2 triage filters deterministic order instead of model ranking",
     run: () => {
       const p = policy();
@@ -924,6 +976,34 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy: p,
       });
       assert.equal(publishable.status, "PUBLISH");
+
+      const uncitedClaimOutput = parseHolderResearchFinalOutputV2({
+        ...output,
+        copy: {
+          headline: "Outside news supports the tracked holder position",
+          why_now: "Bookmaker odds now support the selected holder side.",
+          caveats: [],
+        },
+      });
+      const holderOnly = adaptHolderResearchFinalOutputV2({
+        candidate: freshCandidate,
+        output: uncitedClaimOutput,
+        externalResearch: {
+          status: "ok",
+          verdict: "supports_holder_side",
+          timing: "after_holder",
+          summary: "Outside odds support the selected side.",
+          citations: [],
+        },
+        policy: p,
+      });
+      assert.equal(holderOnly.status, "PUBLISH");
+      assert.doesNotMatch(
+        [holderOnly.headline, holderOnly.summary, holderOnly.rationale].join(
+          " ",
+        ),
+        /news|bookmaker|odds/i,
+      );
 
       const contradicted = adaptHolderResearchFinalOutputV2({
         candidate,
@@ -1089,6 +1169,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       ]);
       assert.equal(healthy.medianCandidatesPerDay, 3);
       assert.equal(healthy.consecutiveZeroDays, 2);
+      assert.equal(healthy.coverageDays, 7);
+      assert.equal(healthy.status, "healthy");
       assert.equal(healthy.healthy, true);
       const unhealthy = summarizeHolderResearchSupply([
         { day: "2026-01-01", candidates: 4 },
@@ -1100,7 +1182,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         { day: "2026-01-07", candidates: 0 },
       ]);
       assert.equal(unhealthy.consecutiveZeroDays, 3);
+      assert.equal(unhealthy.coverageDays, 7);
+      assert.equal(unhealthy.status, "degraded");
       assert.equal(unhealthy.healthy, false);
+
+      const warmingUp = summarizeHolderResearchSupply([
+        { day: "2026-01-01", candidates: 5 },
+        { day: "2026-01-02", candidates: 4 },
+        { day: "2026-01-03", candidates: 3 },
+      ]);
+      assert.equal(warmingUp.coverageDays, 3);
+      assert.equal(warmingUp.status, "warming_up");
+      assert.equal(warmingUp.healthy, false);
     },
   },
   {
@@ -1129,6 +1222,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         supplyQuery,
         /decision_features #>> '\{market,priceCheckedAt\}'[^\n]+is not null/i,
       );
+      assert.match(supplyQuery, /timezone\('UTC'/i);
+      assert.match(supplyQuery, /utc_today - 1/i);
       assert.match(
         calibrationQuery,
         /decision_features #>> '\{market,priceCheckedAt\}'[\s\S]+is not null/i,
@@ -4733,6 +4828,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(output.status, "PUBLISH");
 
       const trackingSubjectParams: unknown[][] = [];
+      let insertedMetrics: unknown = null;
       const originalAutoTracked = env.walletIntelAutoTrackedWalletEnabled;
       env.walletIntelAutoTrackedWalletEnabled = true;
       const client = {
@@ -4741,6 +4837,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             return { rows: [], rowCount: 0 };
           }
           if (sql.includes("insert into ai_notes")) {
+            insertedMetrics = JSON.parse(String(params[15] ?? "null"));
             return {
               rows: [{ id: "00000000-0000-4000-8000-000000000321" }],
               rowCount: 1,
@@ -4769,6 +4866,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         });
 
         assert.equal(stats.persisted, 1);
+        assert.equal(
+          hasHolderResearchPublicationDecisionV1(insertedMetrics),
+          true,
+        );
         assert.equal(trackingSubjectParams.length > 0, true);
         assert.equal(trackingSubjectParams[0]?.[1], "polymarket");
         assert.equal(trackingSubjectParams[0]?.[2], "signal_candidate");
