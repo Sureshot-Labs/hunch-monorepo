@@ -89,7 +89,12 @@ import {
 } from "./services/holder-research-performance.js";
 import { classifyMarketTaxonomy } from "./services/market-type-classifier.js";
 import { buildHolderResearchSignalEvidence } from "./services/holder-research-signal-evidence.js";
-import { hasHolderResearchPublicationDecisionV1 } from "./services/signal-publication-contract.js";
+import {
+  buildHolderResearchUpdateV1,
+  buildSignalPriceSnapshotV1,
+  buildTelegramMarketIdentityV1,
+  hasHolderResearchPublicationDecisionV1,
+} from "./services/signal-publication-contract.js";
 import {
   loadWalletMarketTaxonomyMetricsMaps,
   selectWalletTaxonomyExactPairs,
@@ -333,6 +338,240 @@ function sharpMinorityCandidate(
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
+  {
+    name: "telegram market identity keeps parent context for compact child labels",
+    run: () => {
+      const presentation = {
+        positions: {
+          YES: { canonicalLabel: "YES", shortLabel: "YES" },
+          NO: { canonicalLabel: "NO", shortLabel: "NO" },
+        },
+        predicate: "Bitcoin reaches $70K in July",
+        source: "derived",
+        subject: "Bitcoin",
+      };
+      const identity = buildTelegramMarketIdentityV1({
+        asOf: new Date("2026-07-17T00:00:00.000Z"),
+        eventId: "polymarket:btc-july",
+        eventTitle: "What price will Bitcoin hit in July?",
+        marketId: "polymarket:btc-70k",
+        marketTitle: "↑ 70,000",
+        presentation,
+        selectedSide: "NO",
+        venue: "polymarket",
+      });
+      assert.ok(identity);
+      assert.equal(identity.subject, "What price will Bitcoin hit in July?");
+      assert.equal(
+        identity.predicate,
+        "What price will Bitcoin hit in July?: ↑ 70,000",
+      );
+      assert.equal(identity.selectedSide, "NO");
+      assert.equal(
+        buildTelegramMarketIdentityV1({
+          asOf: new Date("2026-07-17T00:00:00.000Z"),
+          eventId: null,
+          eventTitle: null,
+          marketId: "polymarket:btc-70k",
+          marketTitle: "↑ 70,000",
+          presentation,
+          selectedSide: "NO",
+          venue: "polymarket",
+        }),
+        null,
+      );
+    },
+  },
+  {
+    name: "signal price snapshot is strict, side-oriented, and bounded by freshness",
+    run: () => {
+      const now = new Date("2026-07-17T00:10:00.000Z");
+      const tops = {
+        YES: {
+          ask: 0.18,
+          asOf: "2026-07-17T00:09:59.000Z",
+          bid: 0.16,
+          tokenId: "yes-token",
+        },
+        NO: {
+          ask: 0.84,
+          asOf: "2026-07-17T00:09:58.000Z",
+          bid: 0.82,
+          tokenId: "no-token",
+        },
+      };
+      const built = buildSignalPriceSnapshotV1({
+        marketId: "polymarket:btc-70k",
+        maxAgeMs: 10 * 60_000,
+        now,
+        selectedSide: "NO",
+        tops,
+        venue: "polymarket",
+      });
+      assert.equal(built.ok, true);
+      if (!built.ok) return;
+      assert.equal(built.value.displaySide, "NO");
+      assert.equal(built.value.displayPrice, 0.83);
+      assert.equal(built.value.NO.ask, 0.84);
+      assert.equal(built.value.asOf, "2026-07-17T00:09:58.000Z");
+
+      const stale = buildSignalPriceSnapshotV1({
+        marketId: "polymarket:btc-70k",
+        maxAgeMs: 10 * 60_000,
+        now,
+        selectedSide: "NO",
+        tops: {
+          ...tops,
+          NO: { ...tops.NO, asOf: "2026-07-16T23:59:59.000Z" },
+        },
+        venue: "polymarket",
+      });
+      assert.deepEqual(stale, { ok: false, reason: "stale_price_snapshot" });
+
+      const crossed = buildSignalPriceSnapshotV1({
+        marketId: "polymarket:btc-70k",
+        maxAgeMs: 10 * 60_000,
+        now,
+        selectedSide: "NO",
+        tops: { ...tops, NO: { ...tops.NO, ask: 0.8, bid: 0.82 } },
+        venue: "polymarket",
+      });
+      assert.deepEqual(crossed, {
+        ok: false,
+        reason: "price_side_mismatch",
+      });
+    },
+  },
+  {
+    name: "research update contract uses selected-side deltas and deterministic priority",
+    run: () => {
+      const currentPriceResult = buildSignalPriceSnapshotV1({
+        marketId: "polymarket:btc-70k",
+        maxAgeMs: 10 * 60_000,
+        now: new Date("2026-07-17T00:10:00.000Z"),
+        selectedSide: "NO",
+        tops: {
+          YES: {
+            ask: 0.18,
+            asOf: "2026-07-17T00:09:58.000Z",
+            bid: 0.16,
+            tokenId: "yes-token",
+          },
+          NO: {
+            ask: 0.84,
+            asOf: "2026-07-17T00:09:58.000Z",
+            bid: 0.82,
+            tokenId: "no-token",
+          },
+        },
+        venue: "polymarket",
+      });
+      assert.equal(currentPriceResult.ok, true);
+      if (!currentPriceResult.ok) return;
+      const previous = {
+        evidenceHolders: [
+          { positionUsd: 12_000, side: "NO" as const, walletId: "wallet-1" },
+        ],
+        sides: {
+          YES: { sharpHolders: 1, usd: 2_000, wallets: 1 },
+          NO: { sharpHolders: 1, usd: 12_000, wallets: 1 },
+        },
+        yesProbability: 0.25,
+      };
+      const current = {
+        evidenceHolders: [
+          { positionUsd: 20_000, side: "NO" as const, walletId: "wallet-1" },
+        ],
+        sides: {
+          YES: { sharpHolders: 1, usd: 2_000, wallets: 1 },
+          NO: { sharpHolders: 2, usd: 20_000, wallets: 2 },
+        },
+        yesProbability: 0.17,
+      };
+      const materiality = {
+        minMeaningfulHolderPctDelta: 0.1,
+        minMeaningfulHolderUsdDelta: 1_000,
+        minMeaningfulOddsDelta: 0.02,
+        minMeaningfulSidePctDelta: 0.1,
+        minMeaningfulSideUsdDelta: 1_000,
+        strongPriceMoveCents: 5,
+      };
+      const input = {
+        baselineAsOf: "2026-07-16T23:00:00.000Z",
+        baselineNoteId: "00000000-0000-4000-8000-000000000001",
+        current,
+        currentPrice: currentPriceResult.value,
+        holderWalletId: "wallet-1",
+        materiality,
+        previous,
+        selectedSide: "NO" as const,
+        thesisKey: "holder_research:v2:polymarket:btc-70k:NO",
+      };
+      const first = buildHolderResearchUpdateV1(input);
+      const second = buildHolderResearchUpdateV1(input);
+      assert.equal(first.ok, true);
+      assert.deepEqual(second, first);
+      if (!first.ok) return;
+      assert.equal(first.value.primaryReason.kind, "price_moved_with_thesis");
+      assert.equal(first.value.primaryReason.delta, 0.08);
+      assert.equal(first.value.ctaIntent, "buy");
+      assert.equal(first.value.reasons.length, 3);
+      assert.equal(first.value.fingerprint.length, 64);
+    },
+  },
+  {
+    name: "research update contract fails closed for unsupported-only deltas",
+    run: () => {
+      const currentPriceResult = buildSignalPriceSnapshotV1({
+        marketId: "polymarket:test",
+        maxAgeMs: 10 * 60_000,
+        now: new Date("2026-07-17T00:10:00.000Z"),
+        selectedSide: "YES",
+        tops: {
+          YES: {
+            ask: 0.51,
+            asOf: "2026-07-17T00:09:59.000Z",
+            bid: 0.49,
+            tokenId: "yes-token",
+          },
+          NO: null,
+        },
+        venue: "polymarket",
+      });
+      assert.equal(currentPriceResult.ok, true);
+      if (!currentPriceResult.ok) return;
+      const snapshot = {
+        evidenceHolders: [],
+        sides: {
+          YES: { sharpHolders: 1, usd: 10_000, wallets: 1 },
+          NO: { sharpHolders: 0, usd: 0, wallets: 0 },
+        },
+        yesProbability: 0.5,
+      };
+      const result = buildHolderResearchUpdateV1({
+        baselineAsOf: "2026-07-16T23:00:00.000Z",
+        baselineNoteId: "00000000-0000-4000-8000-000000000001",
+        candidateMeaningfulReasons: ["fresh_flow"],
+        current: snapshot,
+        currentPrice: currentPriceResult.value,
+        materiality: {
+          minMeaningfulHolderPctDelta: 0.1,
+          minMeaningfulHolderUsdDelta: 1_000,
+          minMeaningfulOddsDelta: 0.02,
+          minMeaningfulSidePctDelta: 0.1,
+          minMeaningfulSideUsdDelta: 1_000,
+          strongPriceMoveCents: 5,
+        },
+        previous: snapshot,
+        selectedSide: "YES",
+        thesisKey: "holder_research:v2:polymarket:test:YES",
+      });
+      assert.deepEqual(result, {
+        ok: false,
+        reason: "unsupported_update_reason",
+      });
+    },
+  },
   {
     name: "typed signal evidence keeps representative, cluster, and external scopes separate",
     run: () => {
@@ -4825,7 +5064,30 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     run: async () => {
       const p = policy();
       const candidate = buildHolderResearchCandidatesFromMarket(
-        market(),
+        market({
+          livePriceCheck: {
+            blockersBySide: { YES: [], NO: [] },
+            checkedAt: new Date().toISOString(),
+            fresh: true,
+            sideBuyPrices: { YES: 0.55, NO: 0.45 },
+            tokenIds: ["yes-token", "no-token"],
+            tops: {
+              YES: {
+                ask: 0.56,
+                asOf: new Date().toISOString(),
+                bid: 0.54,
+                tokenId: "yes-token",
+              },
+              NO: {
+                ask: 0.46,
+                asOf: new Date().toISOString(),
+                bid: 0.44,
+                tokenId: "no-token",
+              },
+            },
+            yesProbability: 0.55,
+          },
+        }),
         p,
       ).find((item) => item.bucket === "sharp_minority");
       assert.ok(candidate);
@@ -4871,8 +5133,19 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         });
 
         assert.equal(stats.persisted, 1);
+        assert.equal(stats.rejected, 0);
         assert.equal(
           hasHolderResearchPublicationDecisionV1(insertedMetrics),
+          true,
+        );
+        assert.equal(
+          (insertedMetrics as Record<string, unknown>)
+            .telegramMarketIdentityV1 != null,
+          true,
+        );
+        assert.equal(
+          (insertedMetrics as Record<string, unknown>).signalPriceSnapshotV1 !=
+            null,
           true,
         );
         assert.equal(trackingSubjectParams.length > 0, true);
@@ -4887,6 +5160,117 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       } finally {
         env.walletIntelAutoTrackedWalletEnabled = originalAutoTracked;
       }
+    },
+  },
+  {
+    name: "holder research persistence rejects missing strict snapshot before inserting a marker",
+    run: async () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+      const output = buildDeterministicHolderResearchDecision(candidate, p);
+      let insertAttempted = false;
+      const client = {
+        query: async (sql: string) => {
+          if (sql.includes("insert into ai_notes")) insertAttempted = true;
+          return { rows: [], rowCount: 0 };
+        },
+      };
+
+      const stats = await persistHolderResearchNotes(client as never, {
+        decisions: [{ candidate, modelMeta: {}, output }],
+        policy: p,
+        runnerRunId: "holder-research-missing-price",
+      });
+
+      assert.equal(stats.persisted, 0);
+      assert.equal(stats.rejected, 1);
+      assert.equal(stats.rejectedByReason.missing_price_snapshot, 1);
+      assert.equal(insertAttempted, false);
+    },
+  },
+  {
+    name: "holder research persistence rejects duplicate typed delta under the thesis lock",
+    run: async () => {
+      const p = policy({ noteCooldownHours: 1 });
+      const asOf = new Date().toISOString();
+      const baseCandidate = buildHolderResearchCandidatesFromMarket(
+        market({
+          livePriceCheck: {
+            blockersBySide: { YES: [], NO: [] },
+            checkedAt: asOf,
+            fresh: true,
+            sideBuyPrices: { YES: 0.55, NO: 0.45 },
+            tokenIds: ["yes-token", "no-token"],
+            tops: {
+              YES: {
+                ask: 0.56,
+                asOf,
+                bid: 0.54,
+                tokenId: "yes-token",
+              },
+              NO: {
+                ask: 0.46,
+                asOf,
+                bid: 0.44,
+                tokenId: "no-token",
+              },
+            },
+            yesProbability: 0.55,
+          },
+        }),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(baseCandidate);
+      const candidate = {
+        ...baseCandidate,
+        meaningfulDeltaReasons: ["odds_move"],
+      };
+      const previousSnapshot = buildHolderResearchDecisionSnapshot({
+        ...candidate,
+        market: { ...candidate.market, yesProbability: 0.65 },
+      });
+      const output = buildDeterministicHolderResearchDecision(candidate, p);
+      assert.equal(output.status, "PUBLISH");
+      let insertAttempted = false;
+      const client = {
+        query: async (sql: string) => {
+          if (sql.includes("select true as exists")) {
+            return { rows: [{ exists: true }], rowCount: 1 };
+          }
+          if (/select\s+n\.id[\s\S]*from ai_notes n/.test(sql)) {
+            return {
+              rows: [
+                {
+                  created_at: new Date("2000-01-01T00:00:00.000Z"),
+                  decision_snapshot: previousSnapshot,
+                  id: "00000000-0000-4000-8000-000000000111",
+                  revision_number: 0,
+                  root_note_id: "00000000-0000-4000-8000-000000000111",
+                  status: "active",
+                },
+              ],
+              rowCount: 1,
+            };
+          }
+          if (sql.includes("insert into ai_notes")) insertAttempted = true;
+          return { rows: [], rowCount: 0 };
+        },
+      };
+
+      const stats = await persistHolderResearchNotes(client as never, {
+        decisions: [{ candidate, modelMeta: {}, output }],
+        policy: p,
+        runnerRunId: "holder-research-duplicate-delta",
+      });
+
+      assert.equal(stats.persisted, 0);
+      assert.equal(stats.rejected, 1);
+      assert.equal(stats.rejectedByReason.duplicate_delta, 1);
+      assert.equal(insertAttempted, false);
     },
   },
   {

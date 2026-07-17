@@ -1,6 +1,6 @@
 # Backend Task: Complete and Roll Out Signal Post V5
 
-Status: V5 renderer implemented locally; upstream contracts and live QA remain
+Status: V5 renderer and producer/delivery contracts implemented locally; live QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
@@ -32,8 +32,8 @@ The current worktree contains:
   a blank quote line below the section label and highlighted values;
 - message-family-specific endings: proof card for initial signals, `Read:` for
   follow-through, and `Result` for resolution;
-- research updates derived from comparable snapshot deltas, with fail-closed
-  suppression when no supported change can be proved;
+- research updates rendered from producer-owned `holderResearchUpdateV1`, with
+  fail-closed suppression when no supported change can be proved;
 - research updates omit stable wallet credentials and use a plain `Wallet now`
   or `Cluster now` line only as current context;
 - context-aware follow-through conclusions that acknowledge mixed breadth,
@@ -178,6 +178,13 @@ versus `BLG`, abbreviated team names, event-specific outcomes, and complex NO
 contracts. Runtime title similarity or free-form LLM text must not silently
 become canonical copy.
 
+At Holder Research persistence, the reviewed presentation (when complete) or
+a self-contained canonical market identity is frozen as
+`metrics.telegramMarketIdentityV1`. Compact child labels require parent event
+context. Delivery validates this frozen identity against the exact source
+market and selected side; it does not reconstruct a parent using similarity or
+an LLM.
+
 Acceptance:
 
 - one reviewed label is used in headline, thesis, evidence, button, and audit;
@@ -230,16 +237,21 @@ cooling, divergence, and correction rates.
 
 ### 4. Typed research-update delta
 
-The local renderer temporarily reconstructs price, selected-side position, and
-selected-side strong-wallet-count changes from current/previous decision
-snapshots and `meaningful_delta_reasons`. Backend must replace that with one
-versioned typed delta carrying baseline, before/after values, side, unit,
-`as_of`, and materiality-policy revision.
+New Holder Research notes now persist one versioned typed delta carrying the
+baseline, before/after values, selected side, unit, `as_of`, fingerprint, CTA
+intent, and deterministic materiality-policy revision. The renderer consumes
+that contract and no longer reconstructs business materiality from two
+decision snapshots.
 
-Until then the renderer fails closed for legacy snapshots, `force_recheck`,
+Legacy updates without the contract, `force_recheck`,
 `related_position_changed`, holder-set rotation, market-wide `fresh_flow`, and
-external-evidence-only changes. See
+external-evidence-only changes fail closed. See
 `backend-holder-research-update-contract.md`.
+
+`/test_signal [channel_id] [latest|initial|update|note_uuid]` uses the same
+delivery preparation as the public publisher, returns a concrete diagnostic
+reason when rejected, and does not move Redis cursors, write
+`signal_bot_messages`, or set a send cooldown.
 
 ### 5. Live device and channel QA
 

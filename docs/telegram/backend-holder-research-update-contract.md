@@ -1,6 +1,6 @@
 # Backend Task: Make Holder Research Updates Meaningful and Market-Complete
 
-Status: ready for assignment  
+Status: implemented locally on `telegram-bot`; device preview and rollout pending
 Priority: P0 before enabling research updates in public channels  
 Owner: backend / holder research / market ingestion
 
@@ -27,7 +27,7 @@ canonical market question: Will Bitcoin reach $70,000 in July?
 group item title: ↑ 70,000
 ```
 
-The local V5 renderer now defensively:
+Before the producer-owned contract, the local V5 renderer defensively:
 
 - compares the persisted current and previous `decision_snapshot`;
 - accepts only side-matched `odds_move`, `holder_position_move`,
@@ -43,9 +43,14 @@ The local V5 renderer now defensively:
 
 `recentActivityUsd` is market-wide in the current snapshot. V5 deliberately
 does not turn `fresh_flow` into a directional headline or Buy CTA because it
-cannot prove which side the flow backed. These safeguards stop misleading
-delivery, but they cannot recover missing canonical identity, typed external
-evidence, holder entry/exit semantics, or side-attributed flow.
+cannot prove which side the flow backed.
+
+The current branch replaces the temporary snapshot reconstruction for new
+notes with `telegramMarketIdentityV1`, `signalPriceSnapshotV1`, and
+`holderResearchUpdateV1` in `ai_notes.metrics`. Old unversioned research
+updates fail closed and are not replayed. No migration is part of this
+implementation. Holder entry/exit, persistence, external-evidence updates,
+and side-attributed flow remain reserved until source events prove them.
 
 ## Goal
 
@@ -107,16 +112,15 @@ suggested shape is:
 }
 ```
 
-Allowed initial reason kinds:
+Produced reason kinds in the first contract revision:
 
 - `position_increased` or `position_reduced`;
-- `holder_entered` or `holder_exited`;
 - `price_moved_with_thesis` or `price_moved_against_thesis`;
-- `holder_persisted_after_material_move`;
 - `wallet_confluence_changed`;
-- `side_flow_increased` or `side_flow_reversed`, with an explicit side and
-  signed before/after values;
-- `new_external_evidence`.
+
+The following remain reserved and fail closed in v1: holder entry/exit,
+holder persistence, external-evidence updates, and directional flow. A change
+in the selected evidence set is not proof that a holder entered or exited.
 
 Each reason must carry typed before/after values where applicable. Free-form
 model copy such as `repeat read`, `still interesting`, or `after the drop` is
@@ -160,10 +164,10 @@ no_ask
 no_mark
 display_side
 display_price
-display_price_source: bid | ask | midpoint | last
+display_price_source: midpoint
 ```
 
-Generated prose must not independently round or reinterpret price. If the
+Generated prose must not independently select or reinterpret price. If the
 headline shows `NO at 83¢`, body copy should either use the same NO value or
 explicitly say `YES trades around 17¢` from the same snapshot.
 
@@ -193,6 +197,25 @@ Add counters and an audit query for:
 Backfill complete identity for undelivered notes when the venue mapping is
 unambiguous. Do not replay already delivered updates automatically.
 
+## Local Implementation Result
+
+- Producer identity, strict price snapshot, typed update, materiality revision,
+  fingerprint, and accepted audit are stored atomically before the publish
+  marker is added.
+- Previous-note lookup is by exact `lineage->>'thesis_key'` under the existing
+  advisory transaction and partial thesis index; Signal Bot no longer performs
+  a previous-note lateral lookup.
+- Duplicate fingerprints and unsupported-only deltas are rejected under the
+  thesis lock with structured rejection reasons.
+- Public publisher, private signal renderer, and `/test_signal` use
+  `prepareSignalBotDelivery`; preview does not move cursors or write delivery
+  history.
+- Strict tops come from `unified_token_top_latest`, with canonical YES/NO token
+  orientation preferred from `unified_market_tokens.outcome_side`.
+- Local contract, Holder Research, Signal Bot, headline, and price-refresh
+  suites cover implemented v1 behavior. Telegram device/channel QA is pending
+  a newly produced contract-ready note.
+
 ## Acceptance Criteria
 
 - The incident fixture renders the complete Bitcoin, `$70K`, July, and NO
@@ -206,9 +229,10 @@ unambiguous. Do not replay already delivered updates automatically.
   or Buy CTA; directional flow requires a signed side-attributed contract.
 - Price percentages and cents in headline/body are side-consistent and share
   one `as_of` timestamp.
-- Integration tests cover missing event joins, stale baselines, duplicate
-  deltas, persistence after a material move, new external evidence, and the
-  Bitcoin `$70K in July` incident fixture.
+- Tests cover missing parent identity, stale/crossed quotes, missing baselines,
+  duplicate fingerprints, supported typed deltas, unsupported-only reasons,
+  and the Bitcoin `$70K in July` incident fixture. Reserved reason kinds need
+  their own source-event contracts before they can be accepted.
 
 ## Dependencies
 

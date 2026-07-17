@@ -35,7 +35,17 @@ import {
 } from "./market-side-copy.js";
 import { resolveTelegramMarketPresentation } from "./telegram-market-presentation.js";
 import { buildHolderResearchSignalEvidence } from "./holder-research-signal-evidence.js";
-import { HOLDER_RESEARCH_PUBLICATION_DECISION_V1 } from "./signal-publication-contract.js";
+import {
+  buildHolderResearchUpdateV1,
+  buildSignalPriceSnapshotV1,
+  buildTelegramMarketIdentityV1,
+  HOLDER_RESEARCH_PUBLICATION_DECISION_V1,
+  type HolderResearchPublicationAuditV1,
+  type HolderResearchPublicationRejectionReason,
+  type HolderResearchUpdateV1,
+  type SignalPriceSnapshotV1,
+  type TelegramMarketIdentityV1,
+} from "./signal-publication-contract.js";
 import {
   buildWalletIntelAcceptingOrdersSql,
   buildWalletIntelTrackableMarketSql,
@@ -112,6 +122,15 @@ export type HolderResearchLivePriceCheck = {
   checkedAt: string;
   fresh: boolean;
   sideBuyPrices: Record<HolderResearchSideKey, number | null>;
+  tops?: Record<
+    HolderResearchSideKey,
+    {
+      ask: number | null;
+      asOf: string;
+      bid: number | null;
+      tokenId: string;
+    } | null
+  >;
   tokenIds: string[];
   yesProbability: number | null;
 };
@@ -443,6 +462,10 @@ export type HolderResearchPersistDecision = {
 export type HolderResearchPersistStats = {
   considered: number;
   persisted: number;
+  rejected: number;
+  rejectedByReason: Partial<
+    Record<HolderResearchPublicationRejectionReason, number>
+  >;
   skippedExisting: number;
   superseded: number;
   errors: number;
@@ -4742,6 +4765,7 @@ export function applyHolderResearchLivePriceChecks(
       {
         fresh: boolean;
         priceState: MarketPriceState;
+        tops?: NonNullable<HolderResearchLivePriceCheck["tops"]>;
         tokenIds: string[];
       }
     >;
@@ -4767,6 +4791,7 @@ export function applyHolderResearchLivePriceChecks(
         YES: yes.buyPrice,
         NO: no.buyPrice,
       },
+      tops: state.tops ?? { YES: null, NO: null },
       tokenIds: state.tokenIds,
       yesProbability: state.priceState.yesProbability,
     };
@@ -5976,6 +6001,24 @@ function normalizeText(value: string | null | undefined, max: number): string {
   return (value ?? "").trim().replace(/\s+/g, " ").slice(0, max);
 }
 
+const HOLDER_RESEARCH_SIGNAL_PRICE_MAX_AGE_MS = 10 * 60_000;
+
+function recordHolderResearchPublicationRejection(
+  stats: HolderResearchPersistStats,
+  reason: HolderResearchPublicationRejectionReason,
+  candidate: HolderResearchCandidate,
+): void {
+  stats.rejected += 1;
+  stats.rejectedByReason[reason] = (stats.rejectedByReason[reason] ?? 0) + 1;
+  console.info("[holder-research] publication rejected", {
+    candidateKey: candidate.key,
+    marketId: candidate.market.marketId,
+    reason,
+    side: candidate.side,
+    thesisKey: candidate.thesisKey,
+  });
+}
+
 export async function persistHolderResearchNotes(
   client: PoolClient,
   params: {
@@ -5987,6 +6030,8 @@ export async function persistHolderResearchNotes(
   const stats: HolderResearchPersistStats = {
     considered: params.decisions.length,
     persisted: 0,
+    rejected: 0,
+    rejectedByReason: {},
     skippedExisting: 0,
     superseded: 0,
     errors: 0,
@@ -6025,7 +6070,55 @@ export async function persistHolderResearchNotes(
         `select pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
         [candidate.thesisKey],
       );
+      const publicationNow = new Date();
+      const currentDecisionSnapshot =
+        buildHolderResearchDecisionSnapshot(candidate);
+      const telegramMarketIdentity: TelegramMarketIdentityV1 | null =
+        candidate.side
+          ? buildTelegramMarketIdentityV1({
+              asOf: publicationNow,
+              eventId: candidate.market.eventId,
+              eventTitle: candidate.market.eventTitle,
+              marketId: candidate.market.marketId,
+              marketTitle: candidate.market.marketTitle,
+              presentation: presentation.presentation,
+              selectedSide: candidate.side,
+              venue: candidate.market.venue,
+            })
+          : null;
+      if (!telegramMarketIdentity) {
+        recordHolderResearchPublicationRejection(
+          stats,
+          "missing_market_identity",
+          candidate,
+        );
+        await client.query("rollback");
+        continue;
+      }
+      const priceSnapshotResult = buildSignalPriceSnapshotV1({
+        marketId: candidate.market.marketId,
+        maxAgeMs: HOLDER_RESEARCH_SIGNAL_PRICE_MAX_AGE_MS,
+        now: publicationNow,
+        selectedSide: telegramMarketIdentity.selectedSide,
+        tops: candidate.market.livePriceCheck?.tops ?? {
+          YES: null,
+          NO: null,
+        },
+        venue: candidate.market.venue,
+      });
+      if (!priceSnapshotResult.ok) {
+        recordHolderResearchPublicationRejection(
+          stats,
+          priceSnapshotResult.reason,
+          candidate,
+        );
+        await client.query("rollback");
+        continue;
+      }
+      const signalPriceSnapshot: SignalPriceSnapshotV1 =
+        priceSnapshotResult.value;
       const previous = await client.query<{
+        decision_snapshot: unknown;
         id: string;
         created_at: Date | string;
         revision_number: number;
@@ -6042,33 +6135,18 @@ export async function persistHolderResearchNotes(
               else 0
             end as revision_number,
             coalesce(n.lineage->>'thesis_root_note_id', n.id::text) as root_note_id,
+            n.lineage->'decision_snapshot' as decision_snapshot,
             n.status
           from ai_notes n
-          left join lateral (
-            select target.target_meta
-            from ai_note_targets target
-            where target.note_id = n.id
-              and target.target_kind = 'market'
-            order by
-              target.is_primary desc,
-              target.target_rank asc,
-              target.target_id asc
-            limit 1
-          ) legacy_target on true
           where n.note_type = 'signal'
             and n.producer_type = 'holder_research'
-            and n.source_kind = 'market'
-            and n.source_id = $1
-            and upper(coalesce(
-              nullif(n.lineage->>'side', ''),
-              nullif(legacy_target.target_meta->>'side', ''),
-              ''
-            )) = $2
+            and n.lineage ? 'thesis_key'
+            and n.lineage->>'thesis_key' = $1
             and n.status in ('active', 'superseded')
           order by n.created_at desc, n.id desc
           limit 1
         `,
-        [candidate.market.marketId, candidate.side],
+        [candidate.thesisKey],
       );
       const previousNote = previous.rows[0] ?? null;
       const previousCreatedAtMs = previousNote
@@ -6087,6 +6165,85 @@ export async function persistHolderResearchNotes(
       }
       const revisionKind = previousNote ? "research_update" : "initial";
       const revisionNumber = (previousNote?.revision_number ?? -1) + 1;
+      let holderResearchUpdate: HolderResearchUpdateV1 | null = null;
+      if (revisionKind === "research_update") {
+        const previousDecisionSnapshot = parseDecisionSnapshot(
+          previousNote?.decision_snapshot,
+        );
+        if (!previousNote || !previousDecisionSnapshot) {
+          recordHolderResearchPublicationRejection(
+            stats,
+            "missing_baseline",
+            candidate,
+          );
+          await client.query("rollback");
+          continue;
+        }
+        const updateResult = buildHolderResearchUpdateV1({
+          baselineAsOf:
+            previousNote.created_at instanceof Date
+              ? previousNote.created_at.toISOString()
+              : new Date(previousNote.created_at).toISOString(),
+          baselineNoteId: previousNote.id,
+          candidateMeaningfulReasons: candidate.meaningfulDeltaReasons,
+          current: currentDecisionSnapshot,
+          currentPrice: signalPriceSnapshot,
+          holderWalletId: actorSummary.primaryHolder?.walletId ?? null,
+          materiality: {
+            minMeaningfulHolderPctDelta:
+              params.policy.minMeaningfulHolderPctDelta,
+            minMeaningfulHolderUsdDelta:
+              params.policy.minMeaningfulHolderUsdDelta,
+            minMeaningfulOddsDelta: params.policy.minMeaningfulOddsDelta,
+            minMeaningfulSidePctDelta: params.policy.minMeaningfulSidePctDelta,
+            minMeaningfulSideUsdDelta: params.policy.minMeaningfulSideUsdDelta,
+            strongPriceMoveCents: 5,
+          },
+          previous: previousDecisionSnapshot,
+          selectedSide: telegramMarketIdentity.selectedSide,
+          thesisKey: candidate.thesisKey,
+        });
+        if (!updateResult.ok) {
+          recordHolderResearchPublicationRejection(
+            stats,
+            updateResult.reason,
+            candidate,
+          );
+          await client.query("rollback");
+          continue;
+        }
+        const duplicate = await client.query<{ exists: boolean }>(
+          `
+            select true as exists
+            from ai_notes n
+            where n.note_type = 'signal'
+              and n.producer_type = 'holder_research'
+              and n.lineage ? 'thesis_key'
+              and n.lineage->>'thesis_key' = $1
+              and n.metrics #>> '{holderResearchUpdateV1,fingerprint}' = $2
+            limit 1
+          `,
+          [candidate.thesisKey, updateResult.value.fingerprint],
+        );
+        if (duplicate.rows[0]?.exists) {
+          recordHolderResearchPublicationRejection(
+            stats,
+            "duplicate_delta",
+            candidate,
+          );
+          await client.query("rollback");
+          continue;
+        }
+        holderResearchUpdate = updateResult.value;
+      }
+      const holderResearchPublicationAudit: HolderResearchPublicationAuditV1 = {
+        baselineNoteId: holderResearchUpdate?.baselineNoteId ?? null,
+        primaryReason: holderResearchUpdate?.primaryReason.kind ?? "initial",
+        priceSnapshotAsOf: signalPriceSnapshot.asOf,
+        status: "accepted",
+        updateFingerprint: holderResearchUpdate?.fingerprint ?? null,
+        version: 1,
+      };
       const signalSnapshot =
         revisionKind === "initial"
           ? await buildHolderResearchSignalSnapshot(client, {
@@ -6142,7 +6299,7 @@ export async function persistHolderResearchNotes(
             revision_kind: revisionKind,
             revision_number: revisionNumber,
             meaningful_delta_reasons: candidate.meaningfulDeltaReasons,
-            decision_snapshot: buildHolderResearchDecisionSnapshot(candidate),
+            decision_snapshot: currentDecisionSnapshot,
             input_digest: candidate.inputDigest,
             bucket: candidate.bucket,
             side: candidate.side,
@@ -6159,6 +6316,10 @@ export async function persistHolderResearchNotes(
             sideCopy: sideCopy ? compactHolderResearchSideCopy(sideCopy) : null,
             telegramPresentation: presentation.presentation,
             telegramPresentationDiagnostics: presentation.diagnostics,
+            telegramMarketIdentityV1: telegramMarketIdentity,
+            signalPriceSnapshotV1: signalPriceSnapshot,
+            holderResearchUpdateV1: holderResearchUpdate,
+            holderResearchPublicationAuditV1: holderResearchPublicationAudit,
             signalEvidence,
             signalEvidenceVersion: 1,
             publicationDecisionV1: HOLDER_RESEARCH_PUBLICATION_DECISION_V1,

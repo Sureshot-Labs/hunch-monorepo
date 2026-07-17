@@ -251,12 +251,13 @@ export async function runSignalBotRunner(): Promise<void> {
               redis,
               telegram,
             }),
-          sendTestSignal: (chatId) =>
+          sendTestSignal: (chatId, selector) =>
             sendLatestSignalBotTestSignal({
               chatId,
               config,
               db,
               redis,
+              selector,
               telegram,
             }),
           loadPositions: (telegramUserId) =>

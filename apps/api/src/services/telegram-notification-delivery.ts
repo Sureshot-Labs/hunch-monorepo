@@ -2,9 +2,9 @@ import type { Pool } from "@hunch/infra";
 
 import type { DbQuery } from "../db.js";
 import {
-  buildSignalBotMessage,
   escapeTelegramMarkdownV2,
   loadSignalBotNotes,
+  prepareSignalBotDelivery,
   resolveSignalBotBuySide,
   type SignalBotConfig,
   type SignalBotTelegramClient,
@@ -551,15 +551,17 @@ export async function enqueueTelegramPositionSignals(input: {
               note.revisionKind,
             ],
           );
-        const rendered = buildSignalBotMessage({
+        const preparation = await prepareSignalBotDelivery({
           appBaseUrl: input.config.appBaseUrl,
           buyAmountUsd: input.config.buyAmountUsd,
           chatType: "private",
+          db: client,
+          forceOpenMarket: true,
           messageKind: note.revisionKind,
           note,
           telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
         });
-        if (!rendered.publishable) {
+        if (preparation.status !== "ready") {
           await client.query(
             `
               update telegram_notification_cursors
@@ -622,7 +624,7 @@ export async function enqueueTelegramPositionSignals(input: {
                     ? Number(recipient.root_telegram_message_id)
                     : null,
                 text: addPositionSignalContext(
-                  rendered.text,
+                  preparation.text,
                   relationshipContext,
                 ),
                 holdingEvidence: "cached_position",

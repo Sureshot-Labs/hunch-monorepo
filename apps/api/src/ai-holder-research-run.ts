@@ -161,7 +161,7 @@ export type HolderResearchRunOptions = {
 };
 
 const CLI_REDIS_CONNECT_TIMEOUT_MS = 5_000;
-const HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS = 15 * 60 * 1_000;
+const HOLDER_RESEARCH_LIVE_PRICE_MAX_FRESH_AGE_MS = 10 * 60 * 1_000;
 
 type ExternalResearchResult = Omit<
   HolderResearchExternalResearchV2,

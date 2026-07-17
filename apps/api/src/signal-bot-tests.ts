@@ -35,6 +35,7 @@ import {
   parseSignalBotStatsRequest,
   parseSignalBotStatsPeriod,
   pollSignalBotCommands,
+  prepareSignalBotDelivery,
   publishSignalBotFollowthroughTick,
   publishSignalBotTick,
   readSignalBotUpdateOffset,
@@ -109,7 +110,10 @@ import {
   isSignalBotQuoteFresh,
   SIGNAL_BOT_QUOTE_MAX_AGE_MS,
 } from "./services/signal-bot-delivery-policy.js";
-import { hasHolderResearchPublicationDecisionV1 } from "./services/signal-publication-contract.js";
+import {
+  hasHolderResearchPublicationDecisionV1,
+  type HolderResearchUpdateReason,
+} from "./services/signal-publication-contract.js";
 import {
   createDiscordSignalTransport,
   createTelegramSignalTransport,
@@ -835,8 +839,42 @@ class FakeDb {
   }
 }
 
-function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
+const TEST_SIGNAL_PRICE_AS_OF = new Date().toISOString();
+
+function testSignalIdentity(side: "NO" | "YES" = "YES") {
   return {
+    asOf: TEST_SIGNAL_PRICE_AS_OF,
+    eventId: "polymarket:event-1",
+    eventTitle: "Test event",
+    marketGroupItemTitle: "Will test resolve Yes?",
+    marketId: "polymarket:market-1",
+    marketQuestion: "Will test resolve Yes?",
+    predicate: "Will test resolve Yes?",
+    selectedSide: side,
+    selectedSideLabel: side,
+    source: "canonical_market" as const,
+    subject: "Test event",
+    venue: "polymarket",
+    version: 1 as const,
+  };
+}
+
+function testSignalPriceSnapshot(side: "NO" | "YES" = "YES") {
+  return {
+    asOf: TEST_SIGNAL_PRICE_AS_OF,
+    displayPrice: side === "YES" ? 0.31 : 0.69,
+    displayPriceSource: "midpoint" as const,
+    displaySide: side,
+    marketId: "polymarket:market-1",
+    NO: { ask: 0.7, bid: 0.68, mark: 0.69 },
+    venue: "polymarket",
+    version: 1 as const,
+    YES: { ask: 0.32, bid: 0.3, mark: 0.31 },
+  };
+}
+
+function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
+  const result: SignalBotNote = {
     id: "00000000-0000-4000-8000-000000000001",
     noteKey: "holder_research:v1:test",
     title: "Sharp YES interest",
@@ -891,10 +929,141 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     holderClusterSharpUsd: null,
     ...overrides,
   };
+  const side: "NO" | "YES" = result.direction === "down" ? "NO" : "YES";
+  if (!("telegramMarketIdentityV1" in overrides)) {
+    result.telegramMarketIdentityV1 = {
+      ...testSignalIdentity(side),
+      eventId: result.eventId,
+      eventTitle: result.eventTitle,
+      marketGroupItemTitle: result.marketTitle,
+      marketId: result.marketId ?? "polymarket:market-1",
+      marketQuestion: result.marketTitle ?? "Test market",
+      predicate: result.marketTitle ?? "Test market",
+      subject: result.eventTitle ?? result.marketTitle ?? "Test market",
+      venue: result.marketVenue ?? "polymarket",
+    };
+  }
+  if (!("signalPriceSnapshotV1" in overrides)) {
+    const yesBid = result.bestBid ?? 0.3;
+    const yesAsk = result.bestAsk ?? 0.32;
+    const yesMark = (yesBid + yesAsk) / 2;
+    const noBid = 1 - yesAsk;
+    const noAsk = 1 - yesBid;
+    const noMark = (noBid + noAsk) / 2;
+    result.signalPriceSnapshotV1 = {
+      asOf: TEST_SIGNAL_PRICE_AS_OF,
+      displayPrice: side === "YES" ? yesMark : noMark,
+      displayPriceSource: "midpoint",
+      displaySide: side,
+      marketId: result.marketId ?? "polymarket:market-1",
+      NO: { ask: noAsk, bid: noBid, mark: noMark },
+      venue: result.marketVenue ?? "polymarket",
+      version: 1,
+      YES: { ask: yesAsk, bid: yesBid, mark: yesMark },
+    };
+  }
+  const meaningfulDeltaReasons = result.meaningfulDeltaReasons ?? [];
+  const priceSnapshot = result.signalPriceSnapshotV1;
+  if (
+    result.revisionKind === "research_update" &&
+    !("holderResearchUpdateV1" in overrides) &&
+    meaningfulDeltaReasons.length > 0 &&
+    priceSnapshot
+  ) {
+    const currentSnapshot = result.decisionSnapshot as ReturnType<
+      typeof researchSnapshot
+    > | null;
+    const previousSnapshot = result.previousDecisionSnapshot as ReturnType<
+      typeof researchSnapshot
+    > | null;
+    const selectedPrice = (snapshot: ReturnType<typeof researchSnapshot>) =>
+      side === "YES" ? snapshot.yesProbability : 1 - snapshot.yesProbability;
+    const positionMove = meaningfulDeltaReasons.some((value) =>
+      value.startsWith("holder_position_move:"),
+    );
+    const walletMove = meaningfulDeltaReasons.some((value) =>
+      value.startsWith("sharp_holder_count_changed"),
+    );
+    const supportedPriceMove = meaningfulDeltaReasons.includes("odds_move");
+    if (!positionMove && !walletMove && !supportedPriceMove) return result;
+    const beforePrice =
+      previousSnapshot != null
+        ? selectedPrice(previousSnapshot)
+        : priceSnapshot.displayPrice - 0.04;
+    const afterPrice =
+      currentSnapshot != null
+        ? selectedPrice(currentSnapshot)
+        : priceSnapshot.displayPrice;
+    if (supportedPriceMove) {
+      result.signalPriceSnapshotV1 = {
+        ...priceSnapshot,
+        displayPrice: afterPrice,
+        [side]: {
+          ...priceSnapshot[side],
+          mark: afterPrice,
+        },
+      };
+    }
+    const previousHolder = previousSnapshot?.evidenceHolders[0];
+    const currentHolder = currentSnapshot?.evidenceHolders[0];
+    const beforeWallets = previousSnapshot?.sides[side].sharpHolders ?? 1;
+    const afterWallets = currentSnapshot?.sides[side].sharpHolders ?? 2;
+    const reason: HolderResearchUpdateReason = positionMove
+      ? {
+          after: currentHolder?.positionUsd ?? 20_000,
+          asOf: TEST_SIGNAL_PRICE_AS_OF,
+          before: previousHolder?.positionUsd ?? 12_000,
+          delta:
+            (currentHolder?.positionUsd ?? 20_000) -
+            (previousHolder?.positionUsd ?? 12_000),
+          kind: "position_increased" as const,
+          scope: "representative_wallet" as const,
+          side,
+          unit: "usd" as const,
+          walletId: result.holderWalletId ?? "wallet-1",
+        }
+      : walletMove
+        ? {
+            after: afterWallets,
+            asOf: TEST_SIGNAL_PRICE_AS_OF,
+            before: beforeWallets,
+            delta: afterWallets - beforeWallets,
+            direction: "increased" as const,
+            kind: "wallet_confluence_changed" as const,
+            side,
+            unit: "wallets" as const,
+          }
+        : {
+            after: afterPrice,
+            asOf: TEST_SIGNAL_PRICE_AS_OF,
+            before: beforePrice,
+            delta: afterPrice - beforePrice,
+            kind: "price_moved_with_thesis" as const,
+            side,
+            unit: "probability" as const,
+          };
+    result.holderResearchUpdateV1 = {
+      baselineAsOf: "2026-01-01T00:00:00.000Z",
+      baselineNoteId: result.thesisRootNoteId,
+      changedAt: TEST_SIGNAL_PRICE_AS_OF,
+      ctaIntent: "open_market",
+      fingerprint: `test-${result.id}`,
+      materialityPolicy: {
+        revision: "test-v1",
+        thresholds: { minMeaningfulOddsDelta: 0.02 },
+        version: 1,
+      },
+      primaryReason: reason,
+      reasons: [reason],
+      selectedSide: side,
+      version: 1,
+    };
+  }
+  return result;
 }
 
 function noteRow(overrides: Record<string, unknown> = {}) {
-  return {
+  const row: Record<string, unknown> = {
     id: "00000000-0000-4000-8000-000000000001",
     note_key: "holder_research:v1:test",
     title: "Sharp YES interest",
@@ -903,13 +1072,7 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     producer_run_id: "run-1",
     direction: "up",
     confidence: "0.82",
-    metrics: {
-      publicationDecisionV1: {
-        authority: "holder_research_quality_gate",
-        status: "PUBLISH",
-        version: 1,
-      },
-    },
+    metrics: {},
     model_meta: {
       external_research: {
         summary:
@@ -959,6 +1122,97 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   };
+  if (!("metrics" in overrides)) {
+    const side = row.direction === "down" ? "NO" : "YES";
+    const identity = {
+      ...testSignalIdentity(side),
+      eventId: String(row.event_id),
+      eventTitle: String(row.event_title),
+      marketGroupItemTitle: String(row.market_title),
+      marketId: String(row.market_id),
+      marketQuestion: String(row.market_title),
+      predicate: String(row.market_title),
+      venue: String(row.market_venue),
+    };
+    const priceSnapshot = {
+      ...testSignalPriceSnapshot(side),
+      marketId: String(row.market_id),
+      venue: String(row.market_venue),
+    };
+    const meaningfulReasons = Array.isArray(row.meaningful_delta_reasons)
+      ? row.meaningful_delta_reasons.map(String)
+      : [];
+    const positionMove = meaningfulReasons.some(
+      (reason) =>
+        reason.startsWith("holder_position_move") ||
+        reason.startsWith("side_exposure_move"),
+    );
+    const walletMove = meaningfulReasons.some((reason) =>
+      reason.startsWith("sharp_holder_count_changed"),
+    );
+    const priceMove = meaningfulReasons.includes("odds_move");
+    const primaryReason = positionMove
+      ? {
+          after: 20_000,
+          asOf: TEST_SIGNAL_PRICE_AS_OF,
+          before: 12_000,
+          delta: 8_000,
+          kind: "position_increased",
+          scope: "representative_wallet",
+          side,
+          unit: "usd",
+          walletId: "wallet-1",
+        }
+      : walletMove
+        ? {
+            after: 3,
+            asOf: TEST_SIGNAL_PRICE_AS_OF,
+            before: 1,
+            delta: 2,
+            direction: "increased",
+            kind: "wallet_confluence_changed",
+            side,
+            unit: "wallets",
+          }
+        : {
+            after: priceSnapshot.displayPrice,
+            asOf: TEST_SIGNAL_PRICE_AS_OF,
+            before: priceSnapshot.displayPrice - (priceMove ? 0.04 : 0.05),
+            delta: priceMove ? 0.04 : 0.05,
+            kind: "price_moved_with_thesis",
+            side,
+            unit: "probability",
+          };
+    row.metrics = {
+      publicationDecisionV1: {
+        authority: "holder_research_quality_gate",
+        status: "PUBLISH",
+        version: 1,
+      },
+      telegramMarketIdentityV1: identity,
+      signalPriceSnapshotV1: priceSnapshot,
+      holderResearchUpdateV1:
+        row.revision_kind === "research_update"
+          ? {
+              baselineAsOf: "2026-01-01T00:00:00.000Z",
+              baselineNoteId: "00000000-0000-4000-8000-000000000001",
+              changedAt: TEST_SIGNAL_PRICE_AS_OF,
+              ctaIntent: positionMove || walletMove ? "buy" : "open_market",
+              fingerprint: `test-${String(row.id)}`,
+              materialityPolicy: {
+                revision: "test-v1",
+                thresholds: { minMeaningfulOddsDelta: 0.02 },
+                version: 1,
+              },
+              primaryReason,
+              reasons: [primaryReason],
+              selectedSide: side,
+              version: 1,
+            }
+          : null,
+    };
+  }
+  return row;
 }
 
 function researchSnapshot(input: {
@@ -8816,7 +9070,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /Wallet|Open market/,
       );
       assert.match(message.text, /^\*💰 \$12\\\.3K backs YES on /);
-      assert.match(message.text.split("\n")[0] ?? "", /at 32¢\*$/);
+      assert.match(message.text.split("\n")[0] ?? "", /at 31¢\*$/);
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /📍/);
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
@@ -9229,7 +9483,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*💰 \$12\\\.3K backs Beta Team at 70¢\*$/,
+        /^\*💰 \$12\\\.3K backs Beta Team at 69¢\*$/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
@@ -9542,7 +9796,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 1);
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*🎯 2 strong wallets back YES on .* at 32¢\*$/,
+        /^\*🎯 2 strong wallets back YES on .* at 31¢\*$/,
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.match(message.text, />\*The edge\*\n>/);
@@ -9585,7 +9839,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text,
-        /^\*💰 \$12\\\.3K backs YES on Same market title at 32¢\*/,
+        /^\*💰 \$12\\\.3K backs YES on Same market title at 31¢\*/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(
@@ -10013,11 +10267,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(sql, /m\.venue as market_venue/);
       assert.match(sql, /publicationDecisionV1/);
       assert.doesNotMatch(sql, /coalesce\(n\.confidence|and n\.confidence/);
+      assert.doesNotMatch(sql, /previous_note|previous_decision_snapshot/);
+      assert.doesNotMatch(sql, /accepting_orders/);
       assert.doesNotMatch(sql, /w\.id::text = t\.target_id/);
     },
   },
   {
-    name: "publish routes the primary CTA to the resolved destination",
+    name: "publish keeps the primary CTA on the contract source market",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -10036,27 +10292,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         db,
         redis,
-        resolveCheaperAlternative: async () => ({
-          eventId: "limitless:event-1",
-          marketId: "limitless:market-1",
-          price: 0.29,
-          side: "YES",
-          venue: "limitless",
-        }),
         telegram,
       });
-      assert.equal(result.cheaperAlternatives, 1);
+      assert.equal(result.cheaperAlternatives, 0);
       assert.equal(result.aggCheaperFound, 0);
       assert.equal(result.aggMatched, 0);
       assert.equal(result.sent, 1);
       assert.equal(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
-        "🟠 Buy YES · Limitless 29¢",
+        "🟠 Buy YES · Poly 32¢",
       );
     },
   },
   {
-    name: "publish skips terminal-price notes before sending",
+    name: "publish removes Buy from terminal-price notes and keeps Open market",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -10104,10 +10353,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
 
-      assert.equal(result.sent, 0);
-      assert.equal(result.priceGuardSkipped, 1);
+      assert.equal(result.sent, 1);
+      assert.equal(result.priceGuardSkipped, 0);
       assert.equal(result.priceGuardTerminalPrice, 1);
-      assert.equal(telegram.messages.length, 0);
+      assert.equal(telegram.messages.length, 1);
+      assert.equal(
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
+        "↗️ Open market",
+      );
     },
   },
   {
@@ -11669,6 +11922,27 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "shared delivery preparation is deterministic for preview and publisher inputs",
+    run: async () => {
+      const db = new FakeDb();
+      const input = {
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "group",
+        db,
+        deliveryRef: "preview-parity-ref",
+        messageKind: "initial" as const,
+        note: note(),
+        now: new Date(TEST_SIGNAL_PRICE_AS_OF),
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      };
+      const publisher = await prepareSignalBotDelivery(input);
+      const preview = await prepareSignalBotDelivery(input);
+      assert.deepEqual(preview, publisher);
+      assert.equal(publisher.status, "ready");
+    },
+  },
+  {
     name: "test signal sends latest signal without touching chat cursor",
     run: async () => {
       const redis = new FakeRedis();
@@ -11689,10 +11963,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
+        redis,
         telegram,
       });
-      assert.equal(sent, true);
+      assert.deepEqual(sent, { reason: null, sent: true });
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
+      assert.equal(
+        db.queries.some((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        ),
+        false,
+      );
     },
   },
   {
@@ -11720,13 +12001,42 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         redis,
         telegram,
       });
-      assert.equal(sent, true);
+      assert.deepEqual(sent, { reason: null, sent: true });
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.[0]?.[0]?.url, undefined);
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
         "p:event-1|market-1|Y|10",
       );
+    },
+  },
+  {
+    name: "test signal rejects an unversioned research update with a diagnostic reason",
+    run: async () => {
+      const row = noteRow({
+        revision_kind: "research_update",
+      });
+      const metrics = row.metrics as Record<string, unknown>;
+      delete metrics.holderResearchUpdateV1;
+      const db = new FakeDb();
+      db.rows = [row];
+      const telegram = new FakeTelegram();
+      const outcome = await sendLatestSignalBotTestSignal({
+        chatId: "-100",
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        selector: "update",
+        telegram,
+      });
+      assert.deepEqual(outcome, {
+        reason: "missing_update_contract",
+        sent: false,
+      });
+      assert.equal(telegram.messages.length, 0);
+      assert.equal(db.queries[0]?.params[4], "research_update");
     },
   },
   {

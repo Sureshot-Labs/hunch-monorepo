@@ -37,8 +37,16 @@ export type FreshMarketPriceMarketState = {
   fresh: boolean;
   marketId: string;
   priceState: MarketPriceState;
+  tops: Record<MarketPriceSide, FreshMarketPriceTop | null>;
   tokenIds: string[];
   venue: string | null;
+};
+
+export type FreshMarketPriceTop = {
+  ask: number | null;
+  asOf: string;
+  bid: number | null;
+  tokenId: string;
 };
 
 export type FreshMarketPriceResult = {
@@ -134,6 +142,27 @@ function tokenTopIsFresh(
   return hasUsableTopOfBook(row.best_bid, row.best_ask);
 }
 
+function finitePrice(value: string | number | null): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null;
+}
+
+function normalizedTop(
+  tokenId: string | null,
+  row: TokenTopRow | null | undefined,
+): FreshMarketPriceTop | null {
+  if (!tokenId || !row?.ts) return null;
+  const timestamp =
+    row.ts instanceof Date ? row.ts : new Date(Date.parse(row.ts));
+  if (!Number.isFinite(timestamp.getTime())) return null;
+  return {
+    ask: finitePrice(row.best_ask),
+    asOf: timestamp.toISOString(),
+    bid: finitePrice(row.best_bid),
+    tokenId,
+  };
+}
+
 function resolveMinFreshAt(input: {
   maxFreshAgeMs?: number;
   minFreshAt?: Date;
@@ -227,6 +256,17 @@ function buildTokenRefs(
 ): FreshMarketPriceTokenRef[] {
   const refs: FreshMarketPriceTokenRef[] = [];
   for (const ref of inputRefs) addTokenRef(refs, ref);
+  // Canonical outcome orientation wins over legacy market columns. This also
+  // ensures a two-token cap keeps the explicit YES/NO mappings used by strict
+  // signal snapshots.
+  for (const row of marketTokenRows) {
+    addTokenRef(refs, {
+      marketId: row.market_id,
+      side: normalizeSide(row.outcome_side),
+      tokenId: row.token_id,
+      venue: row.venue,
+    });
+  }
   for (const row of marketRows) {
     const clob =
       row.venue === "polymarket"
@@ -245,15 +285,6 @@ function buildTokenRefs(
       venue: row.venue,
     });
   }
-  for (const row of marketTokenRows) {
-    addTokenRef(refs, {
-      marketId: row.market_id,
-      side: normalizeSide(row.outcome_side),
-      tokenId: row.token_id,
-      venue: row.venue,
-    });
-  }
-
   const seen = new Set<string>();
   return refs.filter((ref) => {
     const tokenId = normalizeId(ref.tokenId);
@@ -363,6 +394,10 @@ function buildMarketStates(input: {
             }
           : null,
       }),
+      tops: {
+        YES: normalizedTop(yesToken, yesTop),
+        NO: normalizedTop(noToken, noTop),
+      },
       tokenIds,
       venue: market.venue,
     });

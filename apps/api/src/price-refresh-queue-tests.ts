@@ -132,6 +132,7 @@ class FakeRedis implements PriceRefreshRedis {
 
 class SingleClientFreshPriceDb {
   readonly queryOrder: string[] = [];
+  marketTokenRows: Array<Record<string, unknown>> = [];
   tokenTopRows: Array<Record<string, unknown>> = [
     {
       best_ask: "0.41",
@@ -159,7 +160,7 @@ class SingleClientFreshPriceDb {
     try {
       if (sql.includes("from unified_market_tokens")) {
         this.queryOrder.push("market_tokens");
-        return { rows: [] };
+        return { rows: this.marketTokenRows as T[] };
       }
       if (sql.includes("from unified_token_top_latest")) {
         this.queryOrder.push("token_tops");
@@ -512,6 +513,62 @@ await test("requestFreshMarketPrices is safe for single-client DB callers", asyn
   assert.deepEqual(result.requestedTokenIds, ["yes-token", "no-token"]);
   assert.equal(result.timedOut, false);
   assert.equal(result.marketStates.get("polymarket:test")?.fresh, true);
+});
+
+await test("requestFreshMarketPrices prefers explicit outcome token mappings", async () => {
+  const db = new SingleClientFreshPriceDb();
+  db.marketTokenRows = [
+    {
+      market_id: "polymarket:test",
+      outcome_side: "YES",
+      token_id: "canonical-yes",
+      venue: "polymarket",
+    },
+    {
+      market_id: "polymarket:test",
+      outcome_side: "NO",
+      token_id: "canonical-no",
+      venue: "polymarket",
+    },
+  ];
+  db.tokenTopRows = [
+    {
+      best_ask: "0.31",
+      best_bid: "0.29",
+      token_id: "canonical-yes",
+      ts: "2026-01-01T00:00:01.000Z",
+    },
+    {
+      best_ask: "0.71",
+      best_bid: "0.69",
+      token_id: "canonical-no",
+      ts: "2026-01-01T00:00:01.000Z",
+    },
+  ];
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+  });
+
+  assert.deepEqual(result.requestedTokenIds, ["canonical-yes", "canonical-no"]);
+  assert.deepEqual(result.marketStates.get("polymarket:test")?.tops, {
+    YES: {
+      ask: 0.31,
+      asOf: "2026-01-01T00:00:01.000Z",
+      bid: 0.29,
+      tokenId: "canonical-yes",
+    },
+    NO: {
+      ask: 0.71,
+      asOf: "2026-01-01T00:00:01.000Z",
+      bid: 0.69,
+      tokenId: "canonical-no",
+    },
+  });
 });
 
 await test("requestFreshMarketPrices does not enqueue already-fresh tokens", async () => {

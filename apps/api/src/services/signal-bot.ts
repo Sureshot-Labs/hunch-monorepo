@@ -11,12 +11,7 @@ import {
 import type { DbQuery } from "../db.js";
 import { findTradeMarketById, isOrderable } from "./api-trading-market-repo.js";
 import { resolveAggMarketCredential } from "../lib/agg-market-credentials.js";
-import { createAggMarketClient } from "./agg-market-client.js";
-import {
-  getAggMarketAlternativesResponseCachedWithMetadata,
-  type AggMarketAlternativesCacheClient,
-  type AggMarketAlternativesDiagnostics,
-} from "./agg-market-clusters.js";
+import { type AggMarketAlternativesDiagnostics } from "./agg-market-clusters.js";
 import type { ClusterMarketSummary } from "./clusters.js";
 import {
   resolveNativeOutcomeForCanonicalSide,
@@ -24,7 +19,15 @@ import {
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
 import { SIGNAL_BOT_QUOTE_MAX_AGE_MS } from "./signal-bot-delivery-policy.js";
-import { HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON } from "./signal-publication-contract.js";
+import {
+  HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON,
+  parseHolderResearchUpdateV1,
+  parseSignalPriceSnapshotV1,
+  parseTelegramMarketIdentityV1,
+  type HolderResearchUpdateV1,
+  type SignalPriceSnapshotV1,
+  type TelegramMarketIdentityV1,
+} from "./signal-publication-contract.js";
 import {
   auditHolderResearchSignalPerformance,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
@@ -83,11 +86,7 @@ import {
 } from "./telegram-notification-preferences.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
-import {
-  resolveSignalDeliveryTarget,
-  type SignalDeliveryCandidate,
-  type SignalDestinationPolicy,
-} from "./signal-delivery-target.js";
+import type { SignalDestinationPolicy } from "./signal-delivery-target.js";
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
 import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
 import {
@@ -205,11 +204,6 @@ export type SignalBotCheaperAlternative = {
   side: "NO" | "YES";
   venue: string;
 };
-
-export type SignalBotCheaperAlternativeResolver = (input: {
-  buySide: "NO" | "YES";
-  note: SignalBotNote;
-}) => Promise<SignalBotCheaperAlternative | null>;
 
 export type SignalBotStatsPeriod = "24h" | "30d" | "7d";
 
@@ -370,6 +364,9 @@ export type SignalBotNote = {
   confidence: number | null;
   modelMeta: Record<string, unknown>;
   metrics?: Record<string, unknown>;
+  holderResearchUpdateV1?: HolderResearchUpdateV1 | null;
+  signalPriceSnapshotV1?: SignalPriceSnapshotV1 | null;
+  telegramMarketIdentityV1?: TelegramMarketIdentityV1 | null;
   createdAt: string;
   revisionKind: "initial" | "research_update";
   meaningfulDeltaReasons?: string[];
@@ -484,9 +481,9 @@ type SignalBotNoteRow = {
   metrics: unknown;
   created_at: Date | string;
   revision_kind: string | null;
-  meaningful_delta_reasons: unknown;
-  decision_snapshot: unknown;
-  previous_decision_snapshot: unknown;
+  meaningful_delta_reasons?: unknown;
+  decision_snapshot?: unknown;
+  previous_decision_snapshot?: unknown;
   thesis_key: string | null;
   thesis_root_note_id: string | null;
   primary_target_meta: unknown;
@@ -515,23 +512,6 @@ type SignalBotNoteRow = {
   holder_chain: string | null;
   holder_wallet_id: string | null;
   holder_target_meta: unknown;
-};
-
-type SignalBotDecisionSnapshot = {
-  yesProbability: number | null;
-  sides: Record<
-    "NO" | "YES",
-    {
-      sharpHolders: number;
-      usd: number;
-      wallets: number;
-    }
-  >;
-  evidenceHolders: Array<{
-    positionUsd: number;
-    side: "NO" | "YES";
-    walletId: string;
-  }>;
 };
 
 type SignalBotResearchDelta =
@@ -612,6 +592,8 @@ const LOCK_TTL_MS = 120_000;
 const DEFAULT_CURSOR_ID = "00000000-0000-0000-0000-000000000000";
 const LATEST_CURSOR_CREATED_AT = "9999-12-31T23:59:59.999Z";
 const LATEST_CURSOR_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
@@ -835,6 +817,23 @@ function parseSignalBotCommandTargetChatId(
   if (!text) return null;
   const [, rawTarget] = text.trim().split(/\s+/, 2);
   return normalizeSignalBotCommandTargetChatId(rawTarget);
+}
+
+function parseSignalBotTestSignalRequest(text: string | null | undefined): {
+  selector: SignalBotTestSignalSelector;
+  targetChatId: string | null;
+} {
+  const parts = text?.trim().split(/\s+/).slice(1) ?? [];
+  const targetChatId = normalizeSignalBotCommandTargetChatId(parts[0]);
+  const rawSelector = targetChatId ? parts[1] : parts[0];
+  const selector =
+    rawSelector === "initial" ||
+    rawSelector === "update" ||
+    rawSelector === "latest" ||
+    (rawSelector != null && UUID_RE.test(rawSelector))
+      ? rawSelector
+      : "latest";
+  return { selector, targetChatId };
 }
 
 function parseSignalBotCommandFirstArg(
@@ -1331,6 +1330,7 @@ export function buildSignalBotMessage(input: {
   cheaperAlternative?: SignalBotCheaperAlternative | null;
   deliveryTarget?: SignalBotCheaperAlternative | null;
   deliveryRef?: string | null;
+  forceOpenMarket?: boolean;
   messageKind?: "initial" | "research_update";
   note: SignalBotNote;
   copyPolicy?: ResolvedSignalPostCopyPolicy;
@@ -1344,6 +1344,9 @@ export function buildSignalBotMessage(input: {
   const note = input.note;
   const buySide = resolveSignalBotBuySide(note);
   const price = buySide ? resolveSignalBotBuyPrice(note, buySide) : null;
+  const displayPrice = buySide
+    ? resolveSignalBotDisplayPrice(note, buySide)
+    : null;
   const evidenceRows = resolvePersistedSignalEvidence(note);
   const presentation =
     resolvePersistedOrCurrentTelegramMarketPresentation(note);
@@ -1422,7 +1425,11 @@ export function buildSignalBotMessage(input: {
     : null;
   const researchPosition =
     messageKind === "research_update" && buySide
-      ? formatSignalBotResearchPosition({ note, price, side: buySide })
+      ? formatSignalBotResearchPosition({
+          note,
+          price: displayPrice,
+          side: buySide,
+        })
       : null;
   const renderedResearchPosition = researchPosition
     ? bodyRenderer.render(
@@ -2697,6 +2704,16 @@ type SignalBotMenuLoaders = {
   }) => Promise<SignalBotMarketSearchResult[]>;
 };
 
+type SignalBotTestSignalHandlerResult = boolean | SignalBotTestSignalOutcome;
+
+function normalizeSignalBotTestSignalOutcome(
+  value: SignalBotTestSignalHandlerResult,
+): SignalBotTestSignalOutcome {
+  return typeof value === "boolean"
+    ? { reason: value ? null : "no_eligible_note", sent: value }
+    : value;
+}
+
 export async function handleSignalBotMenuCallback(
   input: SignalBotMenuLoaders & {
     callbackQuery: TelegramBotCallbackQuery;
@@ -2708,7 +2725,10 @@ export async function handleSignalBotMenuCallback(
       period: SignalBotStatsPeriod,
       detail: boolean,
     ) => Promise<boolean>;
-    sendTestSignal: (chatId: string) => Promise<boolean>;
+    sendTestSignal: (
+      chatId: string,
+      selector?: SignalBotTestSignalSelector,
+    ) => Promise<SignalBotTestSignalHandlerResult>;
     sendTradeStatus?: (
       chatId: string,
       telegramUserId: number,
@@ -2996,20 +3016,25 @@ export async function handleSignalBotMenuCallback(
     return true;
   }
   if (route.kind === "admin_preview") {
-    let sent = false;
+    let outcome: SignalBotTestSignalOutcome = {
+      reason: "no_eligible_note",
+      sent: false,
+    };
     try {
-      sent = await input.sendTestSignal(chatId);
+      outcome = normalizeSignalBotTestSignalOutcome(
+        await input.sendTestSignal(chatId),
+      );
     } catch {
-      sent = false;
+      outcome = { reason: "no_eligible_note", sent: false };
     }
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
       isAdmin,
       messageId,
-      notice: sent
+      notice: outcome.sent
         ? "Latest eligible signal preview was sent below."
-        : "No eligible signal was found.",
+        : `Signal preview rejected: ${outcome.reason ?? "unknown"}.`,
       screen: "admin",
       transport: input.telegram,
     });
@@ -3238,7 +3263,10 @@ export async function handleSignalBotCommand(input: {
     chatId: string,
     kind: SignalBotFollowthroughPreviewKind,
   ) => Promise<boolean>;
-  sendTestSignal: (chatId: string) => Promise<boolean>;
+  sendTestSignal: (
+    chatId: string,
+    selector?: SignalBotTestSignalSelector,
+  ) => Promise<SignalBotTestSignalHandlerResult>;
   sendTradeMarket?: (input: {
     chatId: string;
     isAdminTest?: boolean;
@@ -3638,11 +3666,19 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
   if (command === "test_signal") {
-    const sent = await input.sendTestSignal(targetChatId ?? chatId);
+    const request = parseSignalBotTestSignalRequest(input.message.text);
+    const outcome = normalizeSignalBotTestSignalOutcome(
+      await input.sendTestSignal(
+        request.targetChatId ?? chatId,
+        request.selector,
+      ),
+    );
     await input.sendMessage(
       buildPlainReply(
         chatId,
-        sent ? "Sent latest eligible signal." : "No eligible signal found.",
+        outcome.sent
+          ? "Sent latest eligible signal."
+          : `Signal preview rejected: ${outcome.reason ?? "unknown"}.`,
       ),
     );
     return true;
@@ -3718,7 +3754,10 @@ export async function pollSignalBotCommands(
       chatId: string,
       kind: SignalBotFollowthroughPreviewKind,
     ) => Promise<boolean>;
-    sendTestSignal: (chatId: string) => Promise<boolean>;
+    sendTestSignal: (
+      chatId: string,
+      selector?: SignalBotTestSignalSelector,
+    ) => Promise<SignalBotTestSignalHandlerResult>;
     sendTradeMarket?: (input: {
       chatId: string;
       isAdminTest?: boolean;
@@ -3897,7 +3936,6 @@ export async function pollSignalBotCommands(
   return handled;
 }
 
-const SIGNAL_BOT_ALTERNATIVES_QUERY = { limit: 8, sourceLimit: 50 };
 const SIGNAL_BOT_STATS_AUDIT_LIMIT = 500;
 const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
 
@@ -4011,28 +4049,6 @@ function createSignalBotCheaperAlternativeDiagnostics(): SignalBotCheaperAlterna
   };
 }
 
-function addSignalBotCheaperAlternativeDiagnostics(
-  target: SignalBotCheaperAlternativeDiagnostics,
-  source: SignalBotCheaperAlternativeDiagnostics,
-): void {
-  target.aggCheaperFound += source.aggCheaperFound;
-  target.aggDisabled += source.aggDisabled;
-  target.aggErrors += source.aggErrors;
-  target.aggMatched += source.aggMatched;
-  target.aggMatchedNotCheaper += source.aggMatchedNotCheaper;
-  target.aggNoResponse += source.aggNoResponse;
-  target.aggNotFound += source.aggNotFound;
-  target.aggExternalMatchUnindexed += source.aggExternalMatchUnindexed;
-  target.aggCanonicalMarketInactive += source.aggCanonicalMarketInactive;
-  target.aggOutcomeMappingMissing += source.aggOutcomeMappingMissing;
-  target.aggPriceUnavailable += source.aggPriceUnavailable;
-  target.aggTargetSearchEmpty += source.aggTargetSearchEmpty;
-  target.deliveryAmbiguousMapping += source.deliveryAmbiguousMapping;
-  target.deliveryDestinationDisabled += source.deliveryDestinationDisabled;
-  target.deliveryNoExecutableTarget += source.deliveryNoExecutableTarget;
-  target.deliveryStalePrice += source.deliveryStalePrice;
-}
-
 function addAggAlternativesDiagnostics(
   target: SignalBotCheaperAlternativeDiagnostics,
   source: AggMarketAlternativesDiagnostics,
@@ -4042,28 +4058,6 @@ function addAggAlternativesDiagnostics(
   target.aggOutcomeMappingMissing += source.outcomeMappingMissing;
   target.aggPriceUnavailable += source.priceUnavailable;
   target.aggTargetSearchEmpty += source.targetSearchEmpty;
-}
-
-function addSignalDeliveryFailureDiagnostic(
-  diagnostics: SignalBotCheaperAlternativeDiagnostics,
-  reason: ReturnType<typeof resolveSignalDeliveryTarget>["reason"],
-): void {
-  switch (reason) {
-    case "ambiguous_mapping":
-      diagnostics.deliveryAmbiguousMapping += 1;
-      break;
-    case "destination_disabled":
-      diagnostics.deliveryDestinationDisabled += 1;
-      break;
-    case "no_executable_target":
-      diagnostics.deliveryNoExecutableTarget += 1;
-      break;
-    case "stale_price":
-      diagnostics.deliveryStalePrice += 1;
-      break;
-    case null:
-      break;
-  }
 }
 
 function createSignalBotPriceGuardDiagnostics(): SignalBotPriceGuardDiagnostics {
@@ -4214,6 +4208,262 @@ async function loadSignalBotPriceGuardBlockers(input: {
   }
 }
 
+export type SignalBotDeliveryPreparationReason =
+  | "identity_mismatch"
+  | "missing_market_identity"
+  | "missing_price_snapshot"
+  | "missing_update_contract"
+  | "non_directional"
+  | "quote_refresh"
+  | "stale_price_snapshot"
+  | "unpublishable_copy";
+
+export type SignalBotDeliveryPreparation =
+  | {
+      audit: Record<string, unknown>;
+      blockers: MarketPriceBlocker[];
+      buySide: "NO" | "YES";
+      deliveryTarget: SignalBotCheaperAlternative | null;
+      keyboard: TelegramInlineKeyboard | undefined;
+      status: "ready";
+      text: string;
+    }
+  | {
+      audit: Record<string, unknown>;
+      blockers: MarketPriceBlocker[];
+      reason: SignalBotDeliveryPreparationReason;
+      status: "deferred";
+    }
+  | {
+      audit: Record<string, unknown>;
+      blockers: MarketPriceBlocker[];
+      reason: SignalBotDeliveryPreparationReason;
+      status: "skipped";
+    };
+
+async function loadSignalBotSourceReadinessWithoutRedis(input: {
+  buySide: "NO" | "YES";
+  db: DbQuery;
+  note: SignalBotNote;
+}): Promise<SignalBotPriceGuardResult> {
+  if (!input.note.marketId) {
+    return {
+      blockers: [],
+      buyPrice: null,
+      defer: false,
+      orderable: false,
+      timedOut: false,
+    };
+  }
+  const market = await findTradeMarketById(input.db, input.note.marketId);
+  return {
+    blockers: [],
+    buyPrice: input.note.signalPriceSnapshotV1?.[input.buySide].ask ?? null,
+    defer: false,
+    orderable: Boolean(market && isOrderable(market)),
+    timedOut: false,
+  };
+}
+
+export async function prepareSignalBotDelivery(input: {
+  appBaseUrl: string;
+  buyAmountUsd: number;
+  chatType?: string | null;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
+  db: DbQuery;
+  deliveryRef?: string | null;
+  forceOpenMarket?: boolean;
+  messageKind: "initial" | "research_update";
+  note: SignalBotNote;
+  now?: Date;
+  redis?: SignalBotRedisLike;
+  telegramMiniAppLinkBase?: string | null;
+}): Promise<SignalBotDeliveryPreparation> {
+  const now = input.now ?? new Date();
+  const buySide = resolveSignalBotBuySide(input.note);
+  const identity = input.note.telegramMarketIdentityV1;
+  const priceSnapshot = input.note.signalPriceSnapshotV1;
+  const baseAudit = {
+    contractVersion: 1,
+    messageKind: input.messageKind,
+    noteId: input.note.id,
+  };
+  if (!buySide) {
+    return {
+      audit: baseAudit,
+      blockers: [],
+      reason: "non_directional",
+      status: "skipped",
+    };
+  }
+  if (!identity) {
+    return {
+      audit: baseAudit,
+      blockers: [],
+      reason: "missing_market_identity",
+      status: "skipped",
+    };
+  }
+  if (
+    identity.selectedSide !== buySide ||
+    identity.marketId !== input.note.marketId ||
+    identity.venue !== input.note.marketVenue
+  ) {
+    return {
+      audit: { ...baseAudit, identitySource: identity.source },
+      blockers: [],
+      reason: "identity_mismatch",
+      status: "skipped",
+    };
+  }
+  if (
+    input.messageKind === "research_update" &&
+    !input.note.holderResearchUpdateV1
+  ) {
+    return {
+      audit: { ...baseAudit, identitySource: identity.source },
+      blockers: [],
+      reason: "missing_update_contract",
+      status: "skipped",
+    };
+  }
+  if (!priceSnapshot) {
+    return {
+      audit: { ...baseAudit, identitySource: identity.source },
+      blockers: [],
+      reason: "missing_price_snapshot",
+      status: "skipped",
+    };
+  }
+  const priceAsOfMs = Date.parse(priceSnapshot.asOf);
+  if (
+    priceSnapshot.displaySide !== buySide ||
+    priceSnapshot.marketId !== input.note.marketId ||
+    priceSnapshot.venue !== input.note.marketVenue
+  ) {
+    return {
+      audit: {
+        ...baseAudit,
+        identitySource: identity.source,
+        priceSnapshotAsOf: priceSnapshot.asOf,
+      },
+      blockers: [],
+      reason: "identity_mismatch",
+      status: "skipped",
+    };
+  }
+  if (
+    !Number.isFinite(priceAsOfMs) ||
+    priceAsOfMs > now.getTime() ||
+    now.getTime() - priceAsOfMs > SIGNAL_BOT_QUOTE_MAX_AGE_MS
+  ) {
+    return {
+      audit: {
+        ...baseAudit,
+        identitySource: identity.source,
+        priceSnapshotAsOf: priceSnapshot.asOf,
+      },
+      blockers: ["live_price_stale"],
+      reason: "stale_price_snapshot",
+      status: "skipped",
+    };
+  }
+
+  const update = input.note.holderResearchUpdateV1;
+  const requestedBuy =
+    !input.forceOpenMarket &&
+    (input.messageKind === "initial" || update?.ctaIntent === "buy");
+  let allowBuyCta = false;
+  let priceGuard: SignalBotPriceGuardResult = {
+    blockers: [],
+    buyPrice: null,
+    defer: false,
+    orderable: false,
+    timedOut: false,
+  };
+  if (requestedBuy) {
+    priceGuard = input.redis
+      ? await loadSignalBotPriceGuardBlockers({
+          buySide,
+          db: input.db,
+          note: input.note,
+          redis: input.redis,
+        })
+      : await loadSignalBotSourceReadinessWithoutRedis({
+          buySide,
+          db: input.db,
+          note: input.note,
+        });
+    if (priceGuard.defer) {
+      return {
+        audit: {
+          ...baseAudit,
+          identitySource: identity.source,
+          priceSnapshotAsOf: priceSnapshot.asOf,
+          updateFingerprint: update?.fingerprint ?? null,
+        },
+        blockers: priceGuard.blockers,
+        reason: "quote_refresh",
+        status: "deferred",
+      };
+    }
+    allowBuyCta =
+      priceGuard.orderable &&
+      priceGuard.blockers.length === 0 &&
+      priceSnapshot[buySide].ask != null;
+  }
+  const deliveryTarget =
+    allowBuyCta && input.note.eventId && input.note.marketId
+      ? {
+          eventId: input.note.eventId,
+          marketId: input.note.marketId,
+          price: priceSnapshot[buySide].ask as number,
+          side: buySide,
+          venue: input.note.marketVenue ?? "unknown",
+        }
+      : null;
+  const rendered = buildSignalBotMessage({
+    allowBuyCta,
+    appBaseUrl: input.appBaseUrl,
+    buyAmountUsd: input.buyAmountUsd,
+    chatType: input.chatType,
+    deliveryRef: input.deliveryRef,
+    deliveryTarget,
+    messageKind: input.messageKind,
+    note: input.note,
+    copyPolicy: input.copyPolicy,
+    telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
+  });
+  if (!rendered.publishable) {
+    return {
+      audit: {
+        ...baseAudit,
+        identitySource: identity.source,
+        priceSnapshotAsOf: priceSnapshot.asOf,
+        updateFingerprint: update?.fingerprint ?? null,
+      },
+      blockers: priceGuard.blockers,
+      reason: "unpublishable_copy",
+      status: "skipped",
+    };
+  }
+  return {
+    audit: {
+      ...baseAudit,
+      ctaIntent: allowBuyCta ? "buy" : "open_market",
+      identitySource: identity.source,
+      priceSnapshotAsOf: priceSnapshot.asOf,
+      updateFingerprint: update?.fingerprint ?? null,
+    },
+    blockers: priceGuard.blockers,
+    buySide,
+    deliveryTarget,
+    keyboard: rendered.keyboard,
+    status: "ready",
+    text: rendered.text,
+  };
+}
+
 async function recordSignalBotPriceGuardDeferral(input: {
   chatId: string;
   noteId: string;
@@ -4305,62 +4555,6 @@ function pickCheaperSignalBotAlternative(input: {
   );
 }
 
-async function pickStrictCheaperSignalBotAlternative(input: {
-  buySide: "NO" | "YES";
-  db: DbQuery;
-  note: SignalBotNote;
-  response: {
-    alternatives: ClusterMarketSummary[];
-    status: string;
-  };
-}): Promise<SignalBotCheaperAlternative | null> {
-  if (input.response.status !== "matched" || !input.note.marketId) {
-    return null;
-  }
-  const quotes = await loadClusterMarketNativeQuotes(input.db, [
-    input.note.marketId,
-    ...input.response.alternatives.map((market) => market.marketId),
-  ]);
-  const nowMs = Date.now();
-  const strictOffer = (marketId: string, side: "NO" | "YES") => {
-    const native = quotes.get(marketId);
-    const top = side === "YES" ? native?.yes : native?.no;
-    if (!top || !native?.active || !native.orderable) return null;
-    const offer = resolveStrictClusterNativeOffer({
-      maxAgeMs: PRICE_GUARD_MAX_FRESH_AGE_MS,
-      nativeOutcome: side,
-      nowMs,
-      top,
-    });
-    return offer?.fresh ? offer : null;
-  };
-  const primaryOffer = strictOffer(input.note.marketId, input.buySide);
-  if (!primaryOffer) return null;
-  const offerKey = input.buySide === "YES" ? "yes" : "no";
-  const alternatives = input.response.alternatives.map((market) => {
-    if (!market.outcomeMapping) return market;
-    const nativeSide = resolveNativeOutcomeForCanonicalSide(
-      market.outcomeMapping.sourceYesTo,
-      input.buySide,
-    );
-    const offer = strictOffer(market.marketId, nativeSide);
-    return {
-      ...market,
-      executionOffers: {
-        no: market.executionOffers?.no ?? null,
-        yes: market.executionOffers?.yes ?? null,
-        [offerKey]: offer,
-      },
-    };
-  });
-  return pickCheaperSignalBotAlternative({
-    buySide: input.buySide,
-    primaryPrice: primaryOffer.ask,
-    note: input.note,
-    response: { alternatives, status: input.response.status },
-  });
-}
-
 export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
   buySide: "NO" | "YES";
   note: SignalBotNote;
@@ -4399,255 +4593,6 @@ export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
     diagnostics.aggMatchedNotCheaper += 1;
   }
   return { alternative, diagnostics };
-}
-
-async function resolveDefaultSignalBotCheaperAlternative(input: {
-  buySide: "NO" | "YES";
-  db: DbQuery;
-  note: SignalBotNote;
-  redis: SignalBotRedisLike;
-}): Promise<SignalBotCheaperAlternativeResult> {
-  const diagnostics = createSignalBotCheaperAlternativeDiagnostics();
-  const aggConfig = parseSignalBotAggMarketConfig();
-  if (!aggConfig) {
-    diagnostics.aggDisabled += 1;
-    return { alternative: null, diagnostics };
-  }
-  if (!input.note.marketId) {
-    diagnostics.aggNoResponse += 1;
-    return { alternative: null, diagnostics };
-  }
-  try {
-    const client = createAggMarketClient({
-      apiKey: aggConfig.apiKey,
-      appId: aggConfig.appId,
-      baseUrl: aggConfig.baseUrl,
-      timeoutMs: aggConfig.timeoutMs,
-    });
-    const { response } =
-      await getAggMarketAlternativesResponseCachedWithMetadata({
-        cacheClient: input.redis as AggMarketAlternativesCacheClient,
-        client,
-        db: input.db,
-        marketId: input.note.marketId,
-        matchedTtlSec: aggConfig.matchedTtlSec,
-        notFoundTtlSec: aggConfig.notFoundTtlSec,
-        query: SIGNAL_BOT_ALTERNATIVES_QUERY,
-      });
-    if (!response) {
-      diagnostics.aggNoResponse += 1;
-      return { alternative: null, diagnostics };
-    }
-    addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
-    if (response.status !== "matched") {
-      diagnostics.aggNotFound += 1;
-      return { alternative: null, diagnostics };
-    }
-    diagnostics.aggMatched += 1;
-    const alternative = await pickStrictCheaperSignalBotAlternative({
-      buySide: input.buySide,
-      db: input.db,
-      note: input.note,
-      response,
-    });
-    if (alternative) diagnostics.aggCheaperFound += 1;
-    else diagnostics.aggMatchedNotCheaper += 1;
-    return { alternative, diagnostics };
-  } catch {
-    diagnostics.aggErrors += 1;
-    return { alternative: null, diagnostics };
-  }
-}
-
-function signalDeliveryCandidateFromSource(input: {
-  buySide: "NO" | "YES";
-  executablePrice: number | null;
-  note: SignalBotNote;
-  priceAsOf: string;
-}): SignalDeliveryCandidate | null {
-  const venue = normalizeHunchVenue(input.note.marketVenue);
-  if (
-    !venue ||
-    !input.note.eventId ||
-    !input.note.marketId ||
-    input.executablePrice == null
-  ) {
-    return null;
-  }
-  return {
-    active: true,
-    eventId: input.note.eventId,
-    executablePrice: input.executablePrice,
-    matchMethod: "source_identity",
-    marketId: input.note.marketId,
-    mappedSide: input.buySide,
-    mappingConfidence: 1,
-    mappingMethod: "source_identity",
-    orderable: true,
-    priceAsOf: input.priceAsOf,
-    sourceSide: input.buySide,
-    venue,
-  };
-}
-
-function signalDeliveryCandidateFromAgg(input: {
-  buySide: "NO" | "YES";
-  executablePrice: number | null;
-  market: ClusterMarketSummary;
-  priceAsOf: string;
-}): SignalDeliveryCandidate | null {
-  const mapping = input.market.outcomeMapping;
-  const mappedSide = mapping
-    ? resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, input.buySide)
-    : null;
-  if (
-    !mapping ||
-    !mappedSide ||
-    input.executablePrice == null ||
-    !input.market.eventId ||
-    !input.market.marketId ||
-    !input.market.matchMethod
-  ) {
-    return null;
-  }
-  return {
-    active: input.market.active === true,
-    eventId: input.market.eventId,
-    executablePrice: input.executablePrice,
-    matchMethod: input.market.matchMethod,
-    marketId: input.market.marketId,
-    mappedSide,
-    mappingConfidence: mapping.confidence,
-    mappingMethod: mapping.method,
-    orderable: input.market.orderable === true,
-    priceAsOf: input.priceAsOf,
-    sourceSide: input.buySide,
-    venue: input.market.venue,
-  };
-}
-
-async function resolveDefaultSignalBotDeliveryTarget(input: {
-  buySide: "NO" | "YES";
-  db: DbQuery;
-  destinationPolicy: SignalDestinationPolicy;
-  lifecycle: Awaited<
-    ReturnType<typeof resolveSignalBotVenueLifecycle>
-  >["policy"];
-  note: SignalBotNote;
-  now: Date;
-  redis: SignalBotRedisLike;
-  sourceBuyPrice: number | null;
-}): Promise<{
-  diagnostics: SignalBotCheaperAlternativeDiagnostics;
-  resolution: ReturnType<typeof resolveSignalDeliveryTarget>;
-}> {
-  const diagnostics = createSignalBotCheaperAlternativeDiagnostics();
-  const candidates: SignalDeliveryCandidate[] = [];
-  const source = signalDeliveryCandidateFromSource({
-    buySide: input.buySide,
-    executablePrice: input.sourceBuyPrice,
-    note: input.note,
-    priceAsOf: input.now.toISOString(),
-  });
-  if (source) candidates.push(source);
-
-  const aggConfig = parseSignalBotAggMarketConfig();
-  if (!aggConfig || !input.note.marketId) {
-    diagnostics.aggDisabled += 1;
-  } else {
-    try {
-      const sourceVenue = normalizeHunchVenue(input.note.marketVenue);
-      const queryVenues = [
-        ...new Set([
-          ...input.destinationPolicy.targetVenues,
-          ...(sourceVenue ? [sourceVenue] : []),
-        ]),
-      ];
-      const client = createAggMarketClient({
-        apiKey: aggConfig.apiKey,
-        appId: aggConfig.appId,
-        baseUrl: aggConfig.baseUrl,
-        timeoutMs: aggConfig.timeoutMs,
-      });
-      const { response } =
-        await getAggMarketAlternativesResponseCachedWithMetadata({
-          cacheClient: input.redis as AggMarketAlternativesCacheClient,
-          client,
-          db: input.db,
-          marketId: input.note.marketId,
-          matchedTtlSec: aggConfig.matchedTtlSec,
-          notFoundTtlSec: aggConfig.notFoundTtlSec,
-          query: {
-            ...SIGNAL_BOT_ALTERNATIVES_QUERY,
-            venues: queryVenues.join(","),
-          },
-        });
-      if (!response) {
-        diagnostics.aggNoResponse += 1;
-      } else if (response.status === "matched") {
-        addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
-        diagnostics.aggMatched += 1;
-        for (const market of response.markets) {
-          const mapping = market.outcomeMapping;
-          const mappedSide = mapping
-            ? resolveNativeOutcomeForCanonicalSide(
-                mapping.sourceYesTo,
-                input.buySide,
-              )
-            : null;
-          if (!mappedSide) continue;
-          const priceGuard = await loadSignalBotPriceGuardBlockers({
-            buySide: mappedSide,
-            db: input.db,
-            note: { marketId: market.marketId },
-            redis: input.redis,
-          });
-          if (
-            priceGuard.defer ||
-            !priceGuard.orderable ||
-            priceGuard.blockers.length > 0 ||
-            priceGuard.buyPrice == null
-          ) {
-            if (
-              priceGuard.buyPrice == null ||
-              priceGuard.blockers.includes("missing_side_price") ||
-              priceGuard.blockers.includes("no_book")
-            ) {
-              diagnostics.aggPriceUnavailable += 1;
-            }
-            continue;
-          }
-          const candidate = signalDeliveryCandidateFromAgg({
-            buySide: input.buySide,
-            executablePrice: priceGuard.buyPrice,
-            market,
-            priceAsOf: input.now.toISOString(),
-          });
-          if (candidate) candidates.push(candidate);
-        }
-      } else {
-        addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
-        diagnostics.aggNotFound += 1;
-      }
-    } catch {
-      diagnostics.aggErrors += 1;
-    }
-  }
-
-  const resolution = resolveSignalDeliveryTarget({
-    candidates,
-    destinationPolicy: input.destinationPolicy,
-    lifecycle: input.lifecycle,
-    nowMs: input.now.getTime(),
-    sourceSide: input.buySide,
-  });
-  addSignalDeliveryFailureDiagnostic(diagnostics, resolution.reason);
-  if (resolution.target && resolution.target.marketId !== input.note.marketId) {
-    diagnostics.aggCheaperFound += 1;
-  } else if (diagnostics.aggMatched > 0) {
-    diagnostics.aggMatchedNotCheaper += 1;
-  }
-  return { diagnostics, resolution };
 }
 
 function isMissingSignalBotMessagesTable(error: unknown): boolean {
@@ -5192,7 +5137,6 @@ function buildNeutralSignalDeliveryView(input: {
 export async function publishSignalBotTick(input: {
   config: SignalBotConfig;
   db: DbQuery;
-  resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
   transports?: readonly SignalTransport[];
@@ -5215,7 +5159,7 @@ export async function publishSignalBotTick(input: {
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   let sent = 0;
   let blockedChats = 0;
-  let cheaperAlternatives = 0;
+  const cheaperAlternatives = 0;
   let nonDirectionalNotes = 0;
   let publishNotesSeen = 0;
   const alternativeDiagnostics = createSignalBotCheaperAlternativeDiagnostics();
@@ -5263,80 +5207,6 @@ export async function publishSignalBotTick(input: {
         db: input.db,
         note,
       });
-      const isResearchUpdate = thread.messageKind === "research_update";
-      const buySide = resolveSignalBotBuySide(note);
-      const researchDelta = isResearchUpdate
-        ? resolveSignalBotResearchDelta(note, buySide)
-        : null;
-      if (isResearchUpdate && !researchDelta) {
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
-        continue;
-      }
-      const allowBuyCta =
-        !isResearchUpdate || researchDelta?.supportsBuy === true;
-      let verifiedSourceBuyPrice: number | null = null;
-      if (buySide && allowBuyCta) {
-        const priceGuard = await loadSignalBotPriceGuardBlockers({
-          buySide,
-          db: input.db,
-          note,
-          redis: input.redis,
-        });
-        if (priceGuard.defer) {
-          const deferCount = await recordSignalBotPriceGuardDeferral({
-            chatId,
-            noteId: note.id,
-            redis: input.redis,
-            ttlSec: input.config.priceGuardDeferTtlSec,
-          });
-          addSignalBotPriceGuardBlockers(
-            priceGuardDiagnostics,
-            priceGuard.blockers,
-          );
-          if (deferCount > input.config.priceGuardMaxDefers) {
-            priceGuardDiagnostics.priceGuardStaleExpired += 1;
-            await updateSignalBotChatCursor({
-              chatId,
-              createdAt: note.createdAt,
-              id: note.id,
-              redis: input.redis,
-            });
-            continue;
-          }
-          priceGuardDiagnostics.priceGuardDeferred += 1;
-          break;
-        }
-        if (!priceGuard.orderable) {
-          priceGuardDiagnostics.priceGuardSkipped += 1;
-          await updateSignalBotChatCursor({
-            chatId,
-            createdAt: note.createdAt,
-            id: note.id,
-            redis: input.redis,
-          });
-          continue;
-        }
-        const priceBlockers = priceGuard.blockers;
-        if (priceBlockers.length > 0) {
-          priceGuardDiagnostics.priceGuardSkipped += 1;
-          addSignalBotPriceGuardBlockers(priceGuardDiagnostics, priceBlockers);
-          await updateSignalBotChatCursor({
-            chatId,
-            createdAt: note.createdAt,
-            id: note.id,
-            redis: input.redis,
-          });
-          continue;
-        }
-        verifiedSourceBuyPrice = priceGuard.buyPrice;
-      }
-      let cheaperAlternative: SignalBotCheaperAlternative | null = null;
-      let deliveryTarget: SignalBotCheaperAlternative | null = null;
       const destinationPolicy: SignalDestinationPolicy =
         state.destinationPolicy ?? {
           fallback: "skip",
@@ -5346,85 +5216,32 @@ export async function publishSignalBotTick(input: {
             "signalDelivery",
           ),
         };
-      if (buySide && allowBuyCta) {
-        if (input.resolveCheaperAlternative) {
-          cheaperAlternative = await input.resolveCheaperAlternative({
-            buySide,
-            note,
-          });
-          const nowIso = new Date().toISOString();
-          const candidates = [
-            signalDeliveryCandidateFromSource({
-              buySide,
-              executablePrice: verifiedSourceBuyPrice,
-              note,
-              priceAsOf: nowIso,
-            }),
-            cheaperAlternative
-              ? {
-                  active: true,
-                  eventId: cheaperAlternative.eventId,
-                  executablePrice: cheaperAlternative.price,
-                  matchMethod: "injected_resolver",
-                  marketId: cheaperAlternative.marketId,
-                  mappedSide: cheaperAlternative.side,
-                  mappingConfidence: 1,
-                  mappingMethod: "injected_resolver",
-                  orderable: true,
-                  priceAsOf: nowIso,
-                  sourceSide: buySide,
-                  venue: cheaperAlternative.venue,
-                }
-              : null,
-          ].filter(
-            (candidate): candidate is SignalDeliveryCandidate =>
-              candidate != null,
-          );
-          const resolution = resolveSignalDeliveryTarget({
-            candidates,
-            destinationPolicy,
-            lifecycle: lifecycle.policy,
-            sourceSide: buySide,
-          });
-          addSignalDeliveryFailureDiagnostic(
-            alternativeDiagnostics,
-            resolution.reason,
-          );
-          if (resolution.target) {
-            deliveryTarget = {
-              eventId: resolution.target.eventId,
-              marketId: resolution.target.marketId,
-              price: resolution.target.executablePrice,
-              side: resolution.target.mappedSide,
-              venue: resolution.target.venue,
-            };
-          }
-        } else {
-          const resolved = await resolveDefaultSignalBotDeliveryTarget({
-            buySide,
-            db: input.db,
-            destinationPolicy,
-            lifecycle: lifecycle.policy,
-            note,
-            now: new Date(),
-            redis: input.redis,
-            sourceBuyPrice: verifiedSourceBuyPrice,
-          });
-          addSignalBotCheaperAlternativeDiagnostics(
-            alternativeDiagnostics,
-            resolved.diagnostics,
-          );
-          if (resolved.resolution.target) {
-            deliveryTarget = {
-              eventId: resolved.resolution.target.eventId,
-              marketId: resolved.resolution.target.marketId,
-              price: resolved.resolution.target.executablePrice,
-              side: resolved.resolution.target.mappedSide,
-              venue: resolved.resolution.target.venue,
-            };
-          }
-        }
-        if (!deliveryTarget) {
+      const deliveryRef = createSignalDeliveryRef();
+      const preparation = await prepareSignalBotDelivery({
+        appBaseUrl: input.config.appBaseUrl,
+        buyAmountUsd: input.config.buyAmountUsd,
+        chatType: state.chatType,
+        copyPolicy,
+        db: input.db,
+        deliveryRef,
+        messageKind: thread.messageKind,
+        note,
+        redis: input.redis,
+        telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+      });
+      if (preparation.status === "deferred") {
+        const deferCount = await recordSignalBotPriceGuardDeferral({
+          chatId,
+          noteId: note.id,
+          redis: input.redis,
+          ttlSec: input.config.priceGuardDeferTtlSec,
+        });
+        addSignalBotPriceGuardBlockers(
+          priceGuardDiagnostics,
+          preparation.blockers,
+        );
+        if (deferCount > input.config.priceGuardMaxDefers) {
+          priceGuardDiagnostics.priceGuardStaleExpired += 1;
           await updateSignalBotChatCursor({
             chatId,
             createdAt: note.createdAt,
@@ -5433,25 +5250,17 @@ export async function publishSignalBotTick(input: {
           });
           continue;
         }
+        priceGuardDiagnostics.priceGuardDeferred += 1;
+        break;
       }
-      if (deliveryTarget && deliveryTarget.marketId !== note.marketId) {
-        cheaperAlternatives += 1;
-      }
-      const deliveryRef = createSignalDeliveryRef();
-      const { keyboard, publishable, text } = buildSignalBotMessage({
-        allowBuyCta,
-        appBaseUrl: input.config.appBaseUrl,
-        buyAmountUsd: input.config.buyAmountUsd,
-        chatType: state.chatType,
-        cheaperAlternative,
-        deliveryTarget,
-        deliveryRef,
-        messageKind: thread.messageKind,
-        note,
-        copyPolicy,
-        telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
-      });
-      if (!publishable) {
+      if (preparation.status === "skipped") {
+        if (preparation.blockers.length > 0) {
+          priceGuardDiagnostics.priceGuardSkipped += 1;
+          addSignalBotPriceGuardBlockers(
+            priceGuardDiagnostics,
+            preparation.blockers,
+          );
+        }
         await updateSignalBotChatCursor({
           chatId,
           createdAt: note.createdAt,
@@ -5460,6 +5269,13 @@ export async function publishSignalBotTick(input: {
         });
         continue;
       }
+      if (preparation.blockers.length > 0) {
+        addSignalBotPriceGuardBlockers(
+          priceGuardDiagnostics,
+          preparation.blockers,
+        );
+      }
+      const { buySide, deliveryTarget, keyboard, text } = preparation;
       const deliveryView = buildNeutralSignalDeliveryView({
         appBaseUrl: input.config.appBaseUrl,
         buyAmountUsd: input.config.buyAmountUsd,
@@ -5505,6 +5321,7 @@ export async function publishSignalBotTick(input: {
             }),
             delivery: {
               lifecycleRevision: lifecycle.revision,
+              preparation: preparation.audit,
               policy: destinationPolicy,
               view: deliveryView,
             },
@@ -5548,14 +5365,33 @@ export async function publishSignalBotTick(input: {
   };
 }
 
+export type SignalBotTestSignalOutcome = {
+  reason: SignalBotDeliveryPreparationReason | "no_eligible_note" | null;
+  sent: boolean;
+};
+
+export type SignalBotTestSignalSelector =
+  | "initial"
+  | "latest"
+  | "update"
+  | string;
+
 export async function sendLatestSignalBotTestSignal(input: {
   chatId: string;
   config: SignalBotConfig;
   db: DbQuery;
   redis?: SignalBotRedisLike;
-  resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
+  selector?: SignalBotTestSignalSelector;
   telegram: SignalBotTelegramClient;
-}): Promise<boolean> {
+}): Promise<SignalBotTestSignalOutcome> {
+  const selector = input.selector ?? "latest";
+  const noteId = UUID_RE.test(selector) ? selector : null;
+  const revisionKind =
+    selector === "initial"
+      ? "initial"
+      : selector === "update"
+        ? "research_update"
+        : null;
   const chatState = input.redis
     ? await getSignalBotChatState(input.redis, input.chatId)
     : null;
@@ -5564,54 +5400,38 @@ export async function sendLatestSignalBotTestSignal(input: {
     afterId: LATEST_CURSOR_ID,
     descending: true,
     limit: 1,
+    noteId,
+    revisionKind,
   });
   const note = notes[0];
-  if (!note) return false;
-  const buySide = resolveSignalBotBuySide(note);
-  const messageKind = note.revisionKind;
-  const researchDelta =
-    messageKind === "research_update"
-      ? resolveSignalBotResearchDelta(note, buySide)
-      : null;
-  if (messageKind === "research_update" && !researchDelta) return false;
-  const allowBuyCta =
-    messageKind === "initial" || researchDelta?.supportsBuy === true;
-  const cheaperAlternative =
-    buySide && allowBuyCta
-      ? await (
-          input.resolveCheaperAlternative ??
-          (input.redis
-            ? async (resolverInput) =>
-                (
-                  await resolveDefaultSignalBotCheaperAlternative({
-                    buySide: resolverInput.buySide,
-                    db: input.db,
-                    note: resolverInput.note,
-                    redis: input.redis as SignalBotRedisLike,
-                  })
-                ).alternative
-            : async () => null)
-        )({ buySide, note })
-      : null;
-  const { keyboard, publishable, text } = buildSignalBotMessage({
-    allowBuyCta,
+  if (!note) return { reason: "no_eligible_note", sent: false };
+  const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
+  const preparation = await prepareSignalBotDelivery({
     appBaseUrl: input.config.appBaseUrl,
     buyAmountUsd: input.config.buyAmountUsd,
     chatType: chatState?.chatType,
-    cheaperAlternative,
-    messageKind,
+    copyPolicy,
+    db: input.db,
+    deliveryRef: createSignalDeliveryRef(),
+    messageKind: note.revisionKind,
     note,
+    redis: input.redis,
     telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
   });
-  if (!publishable) return false;
+  if (preparation.status !== "ready") {
+    return { reason: preparation.reason, sent: false };
+  }
   const result = await input.telegram.sendMessage({
     chat_id: input.chatId,
     disable_web_page_preview: false,
     parse_mode: "MarkdownV2",
-    reply_markup: keyboard,
-    text,
+    reply_markup: preparation.keyboard,
+    text: preparation.text,
   });
-  return result.ok;
+  return {
+    reason: result.ok ? null : "unpublishable_copy",
+    sent: result.ok,
+  };
 }
 
 function signalBotFollowthroughPolicyType(
@@ -7030,6 +6850,8 @@ export async function loadSignalBotNotes(
     afterId: string;
     descending?: boolean;
     limit: number;
+    noteId?: string | null;
+    revisionKind?: "initial" | "research_update" | null;
   },
 ): Promise<SignalBotNote[]> {
   const order = input.descending ? "desc" : "asc";
@@ -7050,9 +6872,6 @@ export async function loadSignalBotNotes(
         n.created_at::text as created_at,
         coalesce(nullif(n.lineage->>'revision_kind', ''), 'initial')
           as revision_kind,
-        n.lineage->'meaningful_delta_reasons' as meaningful_delta_reasons,
-        n.lineage->'decision_snapshot' as decision_snapshot,
-        previous_note.decision_snapshot as previous_decision_snapshot,
         coalesce(
           nullif(n.lineage->>'thesis_key', ''),
           'holder_research:v2:' || n.source_id || ':' || upper(coalesce(
@@ -7107,17 +6926,6 @@ export async function loadSignalBotNotes(
       join unified_markets m on m.id = pt.target_id
       left join unified_events e on e.id = m.event_id
       left join lateral (
-        select prior.lineage->'decision_snapshot' as decision_snapshot
-        from ai_notes prior
-        where prior.id <> n.id
-          and prior.producer_type = 'holder_research'
-          and prior.note_type = 'signal'
-          and prior.lineage->>'thesis_key' = n.lineage->>'thesis_key'
-          and (prior.created_at, prior.id) < (n.created_at, n.id)
-        order by prior.created_at desc, prior.id desc
-        limit 1
-      ) previous_note on true
-      left join lateral (
         select
           t.target_id::text as wallet_id,
           w.address,
@@ -7135,10 +6943,11 @@ export async function loadSignalBotNotes(
         and n.producer_type = 'holder_research'
         and n.direction in ('up', 'down')
         and ${HOLDER_RESEARCH_PUBLICATION_DECISION_SQL}
-        and ${buildWalletIntelAcceptingOrdersSql({
-          eventAlias: "e",
-          marketAlias: "m",
-        })}
+        and ($4::uuid is null or n.id = $4::uuid)
+        and (
+          $5::text is null
+          or coalesce(nullif(n.lineage->>'revision_kind', ''), 'initial') = $5
+        )
         and (
           n.created_at ${comparison} $1::timestamptz
           or (n.created_at = $1::timestamptz and n.id ${comparison} $2::uuid)
@@ -7146,7 +6955,13 @@ export async function loadSignalBotNotes(
       order by n.created_at ${order}, n.id ${order}
       limit $3
     `,
-    [input.afterCreatedAt, input.afterId, input.limit],
+    [
+      input.afterCreatedAt,
+      input.afterId,
+      input.limit,
+      input.noteId ?? null,
+      input.revisionKind ?? null,
+    ],
   );
   return rows.map(rowToSignalBotNote);
 }
@@ -7178,16 +6993,10 @@ async function loadSignalBotEligibilityCounts(
         on pt.note_id = n.id
        and pt.is_primary = true
        and pt.target_kind = 'market'
-      join unified_markets m on m.id = pt.target_id
-      left join unified_events e on e.id = m.event_id
       where n.note_type = 'signal'
         and n.status = 'active'
         and n.producer_type = 'holder_research'
         and ${HOLDER_RESEARCH_PUBLICATION_DECISION_SQL}
-        and ${buildWalletIntelAcceptingOrdersSql({
-          eventAlias: "e",
-          marketAlias: "m",
-        })}
         and (
           n.created_at > $1::timestamptz
           or (n.created_at = $1::timestamptz and n.id > $2::uuid)
@@ -7592,154 +7401,46 @@ function asStringArray(value: unknown, maxItems: number): string[] {
     .slice(0, maxItems);
 }
 
-function parseSignalBotSnapshotSide(value: unknown): {
-  sharpHolders: number;
-  usd: number;
-  wallets: number;
-} | null {
-  const row = asObject(value);
-  const sharpHolders = toNumber(row.sharpHolders);
-  const usd = toNumber(row.usd);
-  const wallets = toNumber(row.wallets);
-  if (sharpHolders == null || usd == null || wallets == null) return null;
-  return {
-    sharpHolders: Math.max(0, Math.trunc(sharpHolders)),
-    usd,
-    wallets: Math.max(0, Math.trunc(wallets)),
-  };
-}
-
-function parseSignalBotDecisionSnapshot(
-  value: unknown,
-): SignalBotDecisionSnapshot | null {
-  const row = asObject(value);
-  if (row.version !== 1) return null;
-  const sides = asObject(row.sides);
-  const yes = parseSignalBotSnapshotSide(sides.YES);
-  const no = parseSignalBotSnapshotSide(sides.NO);
-  if (!yes || !no) return null;
-  const evidenceHolders = Array.isArray(row.evidenceHolders)
-    ? row.evidenceHolders.flatMap((value) => {
-        const holder = asObject(value);
-        const side = String(holder.side ?? "").toUpperCase();
-        const normalizedSide =
-          side === "YES" || side === "NO" ? (side as "NO" | "YES") : null;
-        const positionUsd = toNumber(holder.positionUsd);
-        const walletId = asTrimmedString(holder.walletId);
-        return normalizedSide && positionUsd != null && walletId
-          ? [{ positionUsd, side: normalizedSide, walletId }]
-          : [];
-      })
-    : [];
-  return {
-    yesProbability: toNumber(row.yesProbability),
-    sides: { NO: no, YES: yes },
-    evidenceHolders,
-  };
-}
-
-function hasSignalBotResearchReasonForSide(
-  reasons: Set<string>,
-  prefix: string,
-  side: "NO" | "YES",
-): boolean {
-  return reasons.has(`${prefix}:${side}`);
-}
-
-function signalBotSnapshotSidePrice(
-  snapshot: SignalBotDecisionSnapshot,
-  side: "NO" | "YES",
-): number | null {
-  const yes = snapshot.yesProbability;
-  if (yes == null || yes < 0 || yes > 1) return null;
-  return side === "YES" ? yes : 1 - yes;
-}
-
 function resolveSignalBotResearchDelta(
   note: SignalBotNote,
   side: "NO" | "YES" | null,
 ): SignalBotResearchDelta | null {
-  if (note.revisionKind !== "research_update" || !side) return null;
-  const reasons = new Set(note.meaningfulDeltaReasons ?? []);
-  const current = parseSignalBotDecisionSnapshot(note.decisionSnapshot);
-  const previous = parseSignalBotDecisionSnapshot(
-    note.previousDecisionSnapshot,
-  );
-  if (reasons.size === 0 || !current || !previous) return null;
-
-  const currentSide = current.sides[side];
-  const previousSide = previous.sides[side];
-  const sideExposureDelta = currentSide.usd - previousSide.usd;
-  const sharpWalletDelta = currentSide.sharpHolders - previousSide.sharpHolders;
-  const holderWalletId = note.holderWalletId?.trim() || null;
-  const currentHolder = holderWalletId
-    ? current.evidenceHolders.find(
-        (holder) => holder.walletId === holderWalletId && holder.side === side,
-      )
-    : null;
-  const previousHolder = holderWalletId
-    ? previous.evidenceHolders.find(
-        (holder) => holder.walletId === holderWalletId && holder.side === side,
-      )
-    : null;
-  const holderDelta =
-    currentHolder && previousHolder
-      ? currentHolder.positionUsd - previousHolder.positionUsd
-      : null;
-  const positionDelta =
-    holderDelta != null && Math.abs(holderDelta) > 0
-      ? holderDelta
-      : sideExposureDelta;
-  const hasSelectedPositionMove =
-    hasSignalBotResearchReasonForSide(reasons, "holder_position_move", side) ||
-    hasSignalBotResearchReasonForSide(reasons, "side_exposure_move", side);
-  const hasSelectedWalletCountMove = hasSignalBotResearchReasonForSide(
-    reasons,
-    "sharp_holder_count_changed",
-    side,
-  );
-  const hasPositiveWalletDelta =
-    (hasSelectedPositionMove && positionDelta > 0) ||
-    (hasSelectedWalletCountMove && sharpWalletDelta > 0);
-
-  const currentPrice = signalBotSnapshotSidePrice(current, side);
-  const previousPrice = signalBotSnapshotSidePrice(previous, side);
-  const priceMoveCents =
-    currentPrice != null && previousPrice != null
-      ? (currentPrice - previousPrice) * 100
-      : null;
-  const hasPriceMove =
-    reasons.has("odds_move") &&
-    priceMoveCents != null &&
-    Math.abs(priceMoveCents) >= 0.5;
-  if (hasPriceMove && Math.abs(priceMoveCents) >= 5 && currentPrice != null) {
+  const contract = note.holderResearchUpdateV1;
+  if (
+    note.revisionKind !== "research_update" ||
+    !side ||
+    !contract ||
+    contract.selectedSide !== side
+  ) {
+    return null;
+  }
+  const reason = contract.primaryReason;
+  if (
+    reason.kind === "price_moved_with_thesis" ||
+    reason.kind === "price_moved_against_thesis"
+  ) {
     return {
-      currentPrice,
+      currentPrice: reason.after,
       kind: "price_move",
-      priceMoveCents,
-      supportsBuy: priceMoveCents >= 0 && hasPositiveWalletDelta,
+      priceMoveCents: reason.delta * 100,
+      supportsBuy: contract.ctaIntent === "buy",
     };
   }
-  if (hasSelectedPositionMove && Math.abs(positionDelta) >= 1) {
+  if (
+    reason.kind === "position_increased" ||
+    reason.kind === "position_reduced"
+  ) {
     return {
       kind: "position_change",
-      positionChangeUsd: positionDelta,
-      supportsBuy: positionDelta > 0,
+      positionChangeUsd: reason.delta,
+      supportsBuy: contract.ctaIntent === "buy",
     };
   }
-  if (hasPriceMove && currentPrice != null) {
-    return {
-      currentPrice,
-      kind: "price_move",
-      priceMoveCents,
-      supportsBuy: priceMoveCents >= 0 && hasPositiveWalletDelta,
-    };
-  }
-  if (hasSelectedWalletCountMove && sharpWalletDelta !== 0) {
+  if (reason.kind === "wallet_confluence_changed") {
     return {
       kind: "wallet_count_change",
-      supportsBuy: sharpWalletDelta > 0,
-      walletChange: sharpWalletDelta,
+      supportsBuy: contract.ctaIntent === "buy",
+      walletChange: reason.delta,
     };
   }
   return null;
@@ -7751,6 +7452,7 @@ function toIso(value: Date | string): string {
 
 function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
   const holderMeta = asObject(row.holder_target_meta);
+  const metrics = asObject(row.metrics);
   const holderSide = String(holderMeta.side ?? "").toUpperCase();
   const holderActorMode = String(holderMeta.actorMode ?? "");
   const marketSegment =
@@ -7774,7 +7476,16 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
     direction: row.direction,
     confidence: toNumber(row.confidence),
     modelMeta: asObject(row.model_meta),
-    metrics: asObject(row.metrics),
+    metrics,
+    holderResearchUpdateV1: parseHolderResearchUpdateV1(
+      metrics.holderResearchUpdateV1,
+    ),
+    signalPriceSnapshotV1: parseSignalPriceSnapshotV1(
+      metrics.signalPriceSnapshotV1,
+    ),
+    telegramMarketIdentityV1: parseTelegramMarketIdentityV1(
+      metrics.telegramMarketIdentityV1,
+    ),
     createdAt: toIso(row.created_at),
     revisionKind:
       row.revision_kind === "research_update" ? "research_update" : "initial",
@@ -7830,9 +7541,14 @@ function normalizeProbability(value: number | null | undefined): number | null {
 }
 
 function resolveSignalBotBuyPrice(
-  note: Pick<SignalBotNote, "bestAsk" | "bestBid" | "lastPrice">,
+  note: Pick<
+    SignalBotNote,
+    "bestAsk" | "bestBid" | "lastPrice" | "signalPriceSnapshotV1"
+  >,
   side: "NO" | "YES",
 ): number | null {
+  const strict = note.signalPriceSnapshotV1;
+  if (strict?.displaySide === side) return strict[side].ask;
   const bid = normalizeProbability(note.bestBid);
   const ask = normalizeProbability(note.bestAsk);
   const last = normalizeProbability(note.lastPrice);
@@ -7844,6 +7560,22 @@ function resolveSignalBotBuyPrice(
       : midpoint == null
         ? null
         : 1 - midpoint;
+}
+
+function resolveSignalBotDisplayPrice(
+  note: Pick<
+    SignalBotNote,
+    "bestAsk" | "bestBid" | "lastPrice" | "signalPriceSnapshotV1"
+  >,
+  side: "NO" | "YES",
+): number | null {
+  const strict = note.signalPriceSnapshotV1;
+  if (strict?.displaySide === side) return strict.displayPrice;
+  const bid = normalizeProbability(note.bestBid);
+  const ask = normalizeProbability(note.bestAsk);
+  const last = normalizeProbability(note.lastPrice);
+  const yesMark = bid != null && ask != null ? (bid + ask) / 2 : last;
+  return side === "YES" ? yesMark : yesMark == null ? null : 1 - yesMark;
 }
 
 function formatCents(value: number): string {
@@ -7907,6 +7639,22 @@ function fallbackSignalNotificationSubject(
   };
 }
 
+function persistedSignalNotificationSubject(
+  note: SignalBotNote,
+  side: "NO" | "YES",
+): SignalNotificationSubject | null {
+  const identity = note.telegramMarketIdentityV1;
+  if (!identity || identity.selectedSide !== side) return null;
+  const selectedLabel = identity.selectedSideLabel.trim();
+  if (selectedLabel.toUpperCase() === side) return null;
+  return {
+    preservedFields: ["predicate", "outcome", "threshold", "deadline"],
+    source: "canonical_market_presentation",
+    text: selectedLabel,
+    version: "signal_notification_subject_v3",
+  };
+}
+
 function buildSignalBotInitialNotificationCopy(input: {
   copyPolicy?: ResolvedSignalPostCopyPolicy;
   messageKind: "initial" | "research_update";
@@ -7926,13 +7674,14 @@ function buildSignalBotInitialNotificationCopy(input: {
   );
   const subject =
     input.side && sideCopy
-      ? buildSignalNotificationSubject({
+      ? (persistedSignalNotificationSubject(input.note, input.side) ??
+        buildSignalNotificationSubject({
           eventTitle: input.note.eventTitle,
           marketTitle: input.note.marketTitle,
           side: input.side,
           sideCopy,
           presentation,
-        })
+        }))
       : fallbackSignalNotificationSubject(
           input.note.marketTitle ?? input.note.eventTitle ?? "This market",
         );
@@ -7944,7 +7693,7 @@ function buildSignalBotInitialNotificationCopy(input: {
     headline: buildSignalNotificationHeadline({
       actorMode: input.note.holderActorMode,
       currentPrice: input.side
-        ? resolveSignalBotBuyPrice(input.note, input.side)
+        ? resolveSignalBotDisplayPrice(input.note, input.side)
         : null,
       holderPositionUsd: input.note.holderPositionUsd,
       kind: input.messageKind,
@@ -8068,11 +7817,13 @@ function buildSignalBotCopyAudit(input: {
     })),
     marketSegment: input.note.marketSegment,
     notification,
-    priceSnapshot: {
+    priceSnapshot: input.note.signalPriceSnapshotV1 ?? {
       bestAsk: input.note.bestAsk,
       bestBid: input.note.bestBid,
       lastPrice: input.note.lastPrice,
     },
+    marketIdentity: input.note.telegramMarketIdentityV1 ?? null,
+    researchUpdate: input.note.holderResearchUpdateV1 ?? null,
     sideCopy: compactSignalBotCopyAudit(activeCopy),
     sides: {
       YES: compactSignalBotCopyAudit(yesCopy),
@@ -8439,7 +8190,7 @@ function helpText(input: {
     "/market <market_id or URL> - open a private trading card",
     "/disable_trading - disable Telegram bot trading",
     "/test_followthrough [stats|win|loss] [channel_id] - preview a follow-up",
-    "/test_signal [channel_id] - send latest eligible signal",
+    "/test_signal [channel_id] [latest|initial|update|note_uuid] - exact delivery preview",
     "/test_trade <market_id or URL> - preview a private trade card",
   ].join("\n");
 }
