@@ -17,7 +17,7 @@ type SearchRedis = {
   set(key: string, value: string, options?: { EX?: number }): Promise<unknown>;
 };
 
-export type SignalBotMarketSearchResult = {
+export type SignalBotMarketSearchVenueOption = {
   eventId: string;
   eventTitle: string | null;
   lastPrice: number | null;
@@ -26,6 +26,10 @@ export type SignalBotMarketSearchResult = {
   noAsk: number | null;
   venue: string;
   yesAsk: number | null;
+};
+
+export type SignalBotMarketSearchResult = SignalBotMarketSearchVenueOption & {
+  venueOptions?: SignalBotMarketSearchVenueOption[];
 };
 
 export type SignalBotMarketSearchSession = {
@@ -105,6 +109,14 @@ function bold(value: string): string {
   return `*${escapeTelegramMarkdownV2(value)}*`;
 }
 
+function venueOptions(
+  result: SignalBotMarketSearchResult,
+): SignalBotMarketSearchVenueOption[] {
+  return result.venueOptions && result.venueOptions.length > 0
+    ? result.venueOptions
+    : [result];
+}
+
 export function buildSignalBotMarketSearchScreen(input: {
   callbackPrefix: string;
   query: string | null;
@@ -129,6 +141,13 @@ export function buildSignalBotMarketSearchScreen(input: {
         eventTitle: result.eventTitle,
         marketTitle: result.marketTitle,
       });
+      const options = venueOptions(result);
+      const venueLine =
+        options.length > 1
+          ? `${options.length} venues · ${options
+              .map((option) => formatTelegramVenueLabel(option.venue))
+              .join(", ")}`
+          : `${formatTelegramVenueLabel(result.venue)} · YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`;
       const block = [
         bold(`${index + 1}. ${compactTelegramText(identity.lines[0], 160)}`),
         ...(identity.lines[1]
@@ -138,9 +157,7 @@ export function buildSignalBotMarketSearchScreen(input: {
               ),
             ]
           : []),
-        escapeTelegramMarkdownV2(
-          `${formatTelegramVenueLabel(result.venue)} · YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`,
-        ),
+        escapeTelegramMarkdownV2(compactTelegramText(venueLine, 180)),
         "",
       ].join("\n");
       if (
@@ -176,7 +193,7 @@ export function buildSignalBotMarketSearchScreen(input: {
                   eventTitle: result.eventTitle,
                   marketTitle: result.marketTitle,
                 }).buttonLabel
-              }`,
+              }${venueOptions(result).length > 1 ? ` · ${venueOptions(result).length} venues` : ""}`,
               TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
             ),
           },
@@ -194,6 +211,65 @@ export function buildSignalBotMarketSearchScreen(input: {
       ],
     },
     text: lines.join("\n"),
+  };
+}
+
+export function buildSignalBotMarketVenuePickerScreen(input: {
+  callbackPrefix: string;
+  result: SignalBotMarketSearchResult;
+  resultIndex: number;
+  sessionId: string;
+}): SignalBotMarketSearchMessage {
+  const identity = buildTelegramMarketIdentity({
+    eventTitle: input.result.eventTitle,
+    marketTitle: input.result.marketTitle,
+  });
+  const options = venueOptions(input.result);
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        ...options.map((option, optionIndex) => [
+          {
+            callback_data: `${input.callbackPrefix}search_venue:${input.sessionId}:${input.resultIndex}:${optionIndex}`,
+            text: compactTelegramText(
+              `${formatTelegramVenueLabel(option.venue)} · YES ${price(option.yesAsk)}`,
+              TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
+            ),
+          },
+        ]),
+        [
+          {
+            callback_data: `${input.callbackPrefix}search_back:${input.sessionId}`,
+            text: "Back to results",
+          },
+          {
+            callback_data: `${input.callbackPrefix}home`,
+            text: "🏠 Home",
+          },
+        ],
+      ],
+    },
+    text: [
+      bold("Choose a venue"),
+      "",
+      bold(compactTelegramText(identity.lines[0], 180)),
+      ...(identity.lines[1]
+        ? [
+            escapeTelegramMarkdownV2(
+              compactTelegramText(identity.lines[1], 180),
+            ),
+          ]
+        : []),
+      "",
+      escapeTelegramMarkdownV2(
+        `This market is available on ${options.length} venues. Choose where to trade.`,
+      ),
+      ...options.map((option) =>
+        escapeTelegramMarkdownV2(
+          `${formatTelegramVenueLabel(option.venue)} · YES ${price(option.yesAsk)} · NO ${price(option.noAsk)}`,
+        ),
+      ),
+    ].join("\n"),
   };
 }
 

@@ -23,6 +23,18 @@ export type {
   PriceTopInput,
 } from "./price-state.js";
 export {
+  buildCanonicalMarketTop,
+  buildObservedCanonicalMarketTop,
+  DEFAULT_CANONICAL_MARKET_TOP_MAX_AGE_MS,
+} from "./canonical-market-top.js";
+export type {
+  CanonicalMarketSide,
+  CanonicalMarketTop,
+  CanonicalMarketTopBlocker,
+  CanonicalMarketTopInput,
+  CanonicalSideTopInput,
+} from "./canonical-market-top.js";
+export {
   buildVenueLifecyclePolicyRevision,
   DEFAULT_VENUE_LIFECYCLE_POLICY,
   filterVenuesByLifecycleCapability,

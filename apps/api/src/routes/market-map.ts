@@ -1,5 +1,9 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import {
+  buildCanonicalMarketTop,
+  buildObservedCanonicalMarketTop,
+} from "@hunch/shared";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -356,6 +360,7 @@ type MarketMapLiveMarketData = {
   yesAsk: number | null;
   noBid: number | null;
   noAsk: number | null;
+  topAsOf: { YES: string | null; NO: string | null };
   acceptingOrders: boolean | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
@@ -1110,42 +1115,66 @@ function normalizeSignalTargetMarket(params: {
   bestAskYes: unknown;
   bestBidNo: unknown;
   bestAskNo: unknown;
+  topTsYes: unknown;
+  topTsNo: unknown;
   lastPrice: unknown;
   resolvedOutcome: string | null;
   resolvedOutcomePct: unknown;
 }): MarketMapSignalTargetMarket {
-  const yesBid = toNumber(params.bestBidYes) ?? toNumber(params.bestBid);
-  const yesAsk = toNumber(params.bestAskYes) ?? toNumber(params.bestAsk);
-  const noBid =
-    toNumber(params.bestBidNo) ??
-    (yesBid == null ? null : Math.max(0, Math.min(1, 1 - yesBid)));
-  const noAsk =
-    toNumber(params.bestAskNo) ??
-    (yesAsk == null ? null : Math.max(0, Math.min(1, 1 - yesAsk)));
+  const acceptingOrders = computeAcceptingOrders({
+    venue: params.venue,
+    status: params.marketStatus,
+    closeTime: params.closeTime,
+    expirationTime: params.expirationTime,
+    eventEndTime: params.eventEndTime,
+    pmAcceptingOrders: params.pmAcceptingOrders,
+    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+      params.marketMetadata,
+    ),
+  });
+  const strictTop = acceptingOrders
+    ? buildCanonicalMarketTop({
+        yesTop: {
+          bestBid: params.bestBidYes,
+          bestAsk: params.bestAskYes,
+          ts: params.topTsYes as Date | string | number | null,
+        },
+        noTop: {
+          bestBid: params.bestBidNo,
+          bestAsk: params.bestAskNo,
+          ts: params.topTsNo as Date | string | number | null,
+        },
+      })
+    : buildCanonicalMarketTop({ yesTop: null, noTop: null });
+  const observedTop = acceptingOrders
+    ? buildObservedCanonicalMarketTop({
+        yesTop: {
+          bestBid: params.bestBidYes,
+          bestAsk: params.bestAskYes,
+          ts: params.topTsYes as Date | string | number | null,
+        },
+        noTop: {
+          bestBid: params.bestBidNo,
+          bestAsk: params.bestAskNo,
+          ts: params.topTsNo as Date | string | number | null,
+        },
+      })
+    : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
 
   return {
     marketId: params.marketId,
     marketStatus: params.marketStatus,
-    marketBestBid: toNumber(params.bestBid),
-    marketBestAsk: toNumber(params.bestAsk),
+    marketBestBid: strictTop.yesBid,
+    marketBestAsk: strictTop.yesAsk,
     lastPrice: toNumber(params.lastPrice),
     tokenYes: params.tokenYes,
     tokenNo: params.tokenNo,
-    yesBid,
-    yesAsk,
-    noBid,
-    noAsk,
-    acceptingOrders: computeAcceptingOrders({
-      venue: params.venue,
-      status: params.marketStatus,
-      closeTime: params.closeTime,
-      expirationTime: params.expirationTime,
-      eventEndTime: params.eventEndTime,
-      pmAcceptingOrders: params.pmAcceptingOrders,
-      dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
-        params.marketMetadata,
-      ),
-    }),
+    yesBid: observedTop.yesBid,
+    yesAsk: observedTop.yesAsk,
+    noBid: observedTop.noBid,
+    noAsk: observedTop.noAsk,
+    topAsOf: observedTop.topAsOf,
+    acceptingOrders,
     resolvedOutcome: params.resolvedOutcome,
     resolvedOutcomePct: toNumber(params.resolvedOutcomePct),
   };
@@ -1193,6 +1222,8 @@ async function enrichSignalSummaryTargetMarkets(
         bestAskYes: row.best_ask_yes,
         bestBidNo: row.best_bid_no,
         bestAskNo: row.best_ask_no,
+        topTsYes: row.top_ts_yes,
+        topTsNo: row.top_ts_no,
         lastPrice: row.last_price,
         resolvedOutcome: row.resolved_outcome ?? null,
         resolvedOutcomePct: row.resolved_outcome_pct,
@@ -1229,6 +1260,7 @@ function normalizeLiveRow(
     yesAsk: row.yesAsk,
     noBid: row.noBid,
     noAsk: row.noAsk,
+    topAsOf: row.topAsOf,
     acceptingOrders: row.acceptingOrders,
     resolvedOutcome: row.resolvedOutcome,
     resolvedOutcomePct: row.resolvedOutcomePct,
@@ -1272,6 +1304,7 @@ function normalizePreviewMarketRow(
     yesAsk: row.yesAsk,
     noBid: row.noBid,
     noAsk: row.noAsk,
+    topAsOf: row.topAsOf,
     acceptingOrders: row.acceptingOrders,
     resolvedOutcome: row.resolvedOutcome,
     resolvedOutcomePct: row.resolvedOutcomePct,
@@ -2005,6 +2038,7 @@ function applyLiveMarketDataToEvents(
       yesAsk: live.yesAsk,
       noBid: live.noBid,
       noAsk: live.noAsk,
+      topAsOf: live.topAsOf,
       marketBestBid: live.marketBestBid,
       marketBestAsk: live.marketBestAsk,
       lastPrice: live.lastPrice,
@@ -2139,7 +2173,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         };
       }
       const cacheKey = [
-        "market-map:v4",
+        "market-map:v6-observed-top",
         runId,
         lifecycle.revision,
         policyCacheVersion,
@@ -2862,7 +2896,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(sparklineOptions.bucketHours ?? "auto"),
       ].join(":");
       const cacheKey = [
-        "market-map:sidebars:v4",
+        "market-map:sidebars:v6-observed-top",
         lifecycle.revision,
         policyCacheVersion,
         venues.slice().sort().join(","),
@@ -3123,7 +3157,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         policy.effective.venuesEnabled.join(","),
       ].join(":");
       const cacheKey = [
-        "market-map:node-events:v4",
+        "market-map:node-events:v6-observed-top",
         runId,
         lifecycle.revision,
         policyCacheVersion,

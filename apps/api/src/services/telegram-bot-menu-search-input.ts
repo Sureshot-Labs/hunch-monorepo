@@ -70,9 +70,10 @@ export async function handleSignalBotMarketSearchInput(input: {
   text: string;
 }): Promise<boolean> {
   const state = await readSignalBotMenuInput(input);
-  if (!state) return false;
   const query = input.text.trim();
-  if (!query || query.startsWith("/")) {
+  if (!query) return false;
+  if (query.startsWith("/")) {
+    if (!state) return false;
     await clearSignalBotMenuInput(input);
     await input.renderCancelled(state.menuMessageId);
     return true;
@@ -81,7 +82,9 @@ export async function handleSignalBotMarketSearchInput(input: {
   const responseMessageId =
     (await input
       .beginResponse?.(buildSignalBotMarketSearchProgressScreen())
-      .catch(() => null)) ?? state.menuMessageId;
+      .catch(() => null)) ??
+    state?.menuMessageId ??
+    null;
   await writeSignalBotMenuInput({
     chatId: input.chatId,
     menuMessageId: responseMessageId,
@@ -90,21 +93,6 @@ export async function handleSignalBotMarketSearchInput(input: {
   });
 
   const looksDirect = isDirectMarketReference(query);
-  if (!looksDirect && Array.from(query).length < 2) {
-    await writeSignalBotMenuInput({
-      chatId: input.chatId,
-      menuMessageId: responseMessageId,
-      redis: input.redis,
-      telegramUserId: input.telegramUserId,
-    });
-    await input.render(
-      buildSignalBotMarketSearchQueryPrompt({
-        callbackPrefix: input.callbackPrefix,
-      }),
-      responseMessageId,
-    );
-    return true;
-  }
   if (looksDirect && input.loadMarketCard) {
     try {
       const message = await input.loadMarketCard({

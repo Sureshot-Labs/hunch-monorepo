@@ -6,6 +6,7 @@ import type { Pool } from "@hunch/infra";
 import {
   claimOrderPositionDeltaApplication,
   clearOrderPositionDeltaApplicationClaim,
+  expireStaleLimitlessFokOrders,
   findLimitlessHistoryMatch,
   markOrderPositionDeltaApplied,
   storeOrder,
@@ -206,6 +207,27 @@ await test("updateOrderFromHistory preserves position marker when wrapping paylo
   assert.match(capturedSql, /jsonb_build_object\('submitted'/);
   assert.match(capturedSql, /'_hunchPositionDeltaAppliedAt'/);
   assert.match(capturedSql, /order_payload->'submitted'->'payload'/);
+});
+
+await test("stale FOK expiry excludes stored matched terminal executions", async () => {
+  let capturedSql = "";
+  const pool = {
+    query: async (sql: string) => {
+      capturedSql = sql;
+      return { rowCount: 0, rows: [] };
+    },
+  } as unknown as Pool;
+
+  await expireStaleLimitlessFokOrders(pool, {
+    userId: "1844db1a-b1a0-4f93-b12c-5c5ea960687e",
+    walletAddress: "0x0000000000000000000000000000000000000001",
+    marketSlug: "sol-up-or-down-daily-1784304000",
+    activeVenueOrderIds: [],
+  });
+
+  assert.match(capturedSql, /'_hunchUpstream'->'execution'->>'matched'/);
+  assert.match(capturedSql, /'settlementStatus'/);
+  assert.match(capturedSql, /'MINED', 'CONFIRMED'/);
 });
 
 await test("storeOrder reads nested position delta markers on existing orders", async () => {

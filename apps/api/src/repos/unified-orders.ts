@@ -16,6 +16,7 @@ export type UnifiedOrderRow = {
   status: string | null;
   filled_size: string | null;
   average_fill_price: string | null;
+  error_message: string | null;
   expires_at: Date | null;
   created_at: Date | null;
   updated_at: Date | null;
@@ -248,6 +249,7 @@ export const mapUnifiedOrder = (row: UnifiedOrderRow) => ({
   price: toNumber(row.price),
   size: toNumber(row.size),
   status: row.status,
+  statusReason: row.error_message,
   filledSize: toNumber(row.filled_size),
   averageFillPrice: toNumber(row.average_fill_price),
   expiresAt: row.expires_at,
@@ -297,6 +299,7 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.status,
     o.filled_size::text as filled_size,
     o.average_fill_price::text as average_fill_price,
+    o.error_message,
     o.expires_at,
     o.posted_at as created_at,
     o.last_update as updated_at,
@@ -348,6 +351,7 @@ const buildExecutionsSelect = (whereClause: string): string => `
     e.status,
     null::text as filled_size,
     null::text as average_fill_price,
+    null::text as error_message,
     null::timestamptz as expires_at,
     e.created_at,
     e.updated_at,

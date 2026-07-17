@@ -14,6 +14,7 @@ import {
   limitlessClobDirectTopTracker,
   recordLimitlessClobDerivedSiblingTopSkippedRecentDirect,
   recordLimitlessClobDerivedSiblingTopUpdated,
+  resolveLimitlessClobSiblingToken,
   type LimitlessClobTokenPair,
 } from "./clobComplement.js";
 import {
@@ -136,6 +137,7 @@ const missingTokenRetryAt = new Map<string, number>();
 const MISSING_TOKEN_RETRY_MS = 10_000;
 
 const topTickGate = createTopTickGate({
+  allowEmpty: true,
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
     const book = clobBooks.get(tokenId);
     const snapshot = book
@@ -340,9 +342,11 @@ async function publishTokenTop(
   bestAsk: number | null,
   ts: Date,
   snapshot?: unknown,
+  authoritativeEmpty = false,
 ): Promise<boolean> {
-  if (bestBid == null && bestAsk == null) return false;
-  if (!isLimitlessTopUsable(bestBid, bestAsk)) return false;
+  const empty = bestBid == null && bestAsk == null;
+  if (empty && !authoritativeEmpty) return false;
+  if (!empty && !isLimitlessTopUsable(bestBid, bestAsk)) return false;
 
   const tsMs = ts.getTime();
   if (!topTickGate.shouldPublish({ tokenId, bestBid, bestAsk, tsMs })) {
@@ -360,7 +364,6 @@ async function publishTokenTopNow(
   tsMs: number,
   snapshot?: unknown,
 ): Promise<void> {
-  if (bestBid == null && bestAsk == null) return;
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
@@ -383,7 +386,9 @@ async function publishTokenTopNow(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs), {
+      touchLatestWhenUnchanged: true,
+    }),
     multi.exec(),
   ]);
 }
@@ -427,9 +432,12 @@ async function publishClobTopWithSibling(input: {
   ts: Date;
   snapshot?: unknown;
   pair: LimitlessClobTokenPair | null;
+  authoritativeEmpty?: boolean;
 }): Promise<void> {
   const tsMs = input.ts.getTime();
-  if (!isLimitlessTopUsable(input.bestBid, input.bestAsk)) return;
+  const empty = input.bestBid == null && input.bestAsk == null;
+  if (empty && !input.authoritativeEmpty) return;
+  if (!empty && !isLimitlessTopUsable(input.bestBid, input.bestAsk)) return;
   limitlessClobDirectTopTracker.markDirectTop(input.directTokenId, tsMs);
   await publishTokenTop(
     input.directTokenId,
@@ -437,16 +445,26 @@ async function publishClobTopWithSibling(input: {
     input.bestAsk,
     input.ts,
     input.snapshot,
+    input.authoritativeEmpty,
   );
 
   if (!input.pair) return;
-  const sibling = deriveLimitlessClobSiblingTop({
-    directTokenId: input.directTokenId,
-    pair: input.pair,
-    bestBid: input.bestBid,
-    bestAsk: input.bestAsk,
-  });
-  if (!sibling) return;
+  const sibling = empty
+    ? {
+        tokenId: resolveLimitlessClobSiblingToken(
+          input.directTokenId,
+          input.pair,
+        ),
+        bestBid: null,
+        bestAsk: null,
+      }
+    : deriveLimitlessClobSiblingTop({
+        directTokenId: input.directTokenId,
+        pair: input.pair,
+        bestBid: input.bestBid,
+        bestAsk: input.bestAsk,
+      });
+  if (!sibling?.tokenId) return;
 
   if (
     limitlessClobDirectTopTracker.shouldSkipDerivedTop(sibling.tokenId, tsMs)
@@ -460,6 +478,8 @@ async function publishClobTopWithSibling(input: {
     sibling.bestBid,
     sibling.bestAsk,
     input.ts,
+    undefined,
+    empty,
   );
   if (published) recordLimitlessClobDerivedSiblingTopUpdated();
 }
@@ -1077,13 +1097,18 @@ function createSocket(kind: WsSocketKind): Socket {
 
           const bids = orderbook?.bids ?? [];
           const asks = orderbook?.asks ?? [];
+          if (
+            !Array.isArray(orderbook?.bids) &&
+            !Array.isArray(orderbook?.asks)
+          ) {
+            return;
+          }
           const book = getClobBook(tokenId);
           const { bestBid, bestAsk } = applyClobBookUpdate(book, {
             bids,
             asks,
           });
 
-          if (bestBid == null && bestAsk == null) return;
           // For top-of-book freshness, use observation time. Limitless can
           // replay CLOB frames with older source timestamps on subscription.
           const ts = new Date();
@@ -1097,6 +1122,7 @@ function createSocket(kind: WsSocketKind): Socket {
             ts,
             snapshot: buildClobBookSnapshot(tokenId, book, timestamp),
             pair,
+            authoritativeEmpty: bestBid == null && bestAsk == null,
           });
         })
         .catch((err) => log.warn("WS orderbook handler error", { kind, err }));

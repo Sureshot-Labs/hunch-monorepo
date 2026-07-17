@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   resolveTelegramBuyFundingPreview,
@@ -46,6 +47,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(preview.availableUsd, 0.75);
       assert.ok(Math.abs(preview.shortfallUsd - 0.31) < 1e-9);
       assert.equal(preview.state, "deposit");
+    },
+  },
+  {
+    name: "convert and shortfall messages reuse the canonical deposit presentation",
+    run: () => {
+      const source = readFileSync(
+        new URL("./services/telegram-bot-trading.ts", import.meta.url),
+        "utf8",
+      );
+      const start = source.indexOf("const depositPresentation =");
+      const end = source.indexOf("const previewRecorded =", start);
+      assert.ok(start >= 0 && end > start);
+      const fundingBlock = source.slice(start, end);
+      assert.match(
+        fundingBlock,
+        /buildTelegramDepositAddressPresentation\(\{[\s\S]*?venue: "polymarket"/,
+      );
+      assert.equal(
+        fundingBlock.match(/depositPresentation\?\.buttonRows/g)?.length,
+        2,
+      );
+      assert.match(
+        fundingBlock,
+        /"Deposit instead", \.\.\.depositPresentation\.lines/,
+      );
+      assert.match(
+        fundingBlock,
+        /\.\.\.\(depositPresentation\?\.lines \?\? \[depositUnavailableLine\]\)/,
+      );
     },
   },
 ];

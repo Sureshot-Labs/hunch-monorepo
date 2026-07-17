@@ -168,3 +168,24 @@ export const limitlessAmmQuoteQuerySchema = z.object({
   amountUsdRaw: z.string().regex(/^\d+$/).optional(),
   amountSharesRaw: z.string().regex(/^\d+$/).optional(),
 });
+
+export const limitlessClobQuoteQuerySchema = z
+  .object({
+    slug: zLimitlessSlug,
+    tokenId: zRequiredString("tokenId is required"),
+    side: z.preprocess(
+      (value) =>
+        typeof value === "string" ? value.trim().toUpperCase() : value,
+      z.enum(["BUY", "SELL"]),
+    ),
+    amountUsd: z.coerce.number().positive().optional(),
+    amountShares: z.coerce.number().positive().optional(),
+  })
+  .superRefine((value, context) => {
+    if ((value.amountUsd == null) === (value.amountShares == null)) {
+      context.addIssue({
+        code: "custom",
+        message: "Provide exactly one of amountUsd or amountShares",
+      });
+    }
+  });

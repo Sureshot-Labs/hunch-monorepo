@@ -35,6 +35,7 @@ import {
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
+import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
   console.log(
@@ -265,6 +266,8 @@ export async function runSignalBotRunner(): Promise<void> {
               ? tradingInternalApi
                   .buildPositionsMessage({
                     appBaseUrl: config.appBaseUrl,
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                     telegramUserId,
                   })
                   .catch((error: unknown) => {
@@ -277,6 +280,8 @@ export async function runSignalBotRunner(): Promise<void> {
               ? tradingInternalApi
                   .buildDepositMessage({
                     appBaseUrl: config.appBaseUrl,
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                     telegramUserId,
                     venue,
                   })
@@ -317,6 +322,7 @@ export async function runSignalBotRunner(): Promise<void> {
                     chatId: input.chatId,
                     context: input.context,
                     marketRef: input.marketRef,
+                    publicBrowseOnly: input.publicBrowseOnly,
                     telegramMessageId: input.telegramMessageId,
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
@@ -373,6 +379,18 @@ export async function runSignalBotRunner(): Promise<void> {
                   })
               : "unavailable",
           sendTradeMarket: async (input) => {
+            const fallbackButton = buildHunchMiniAppWebButton({
+              appBaseUrl: config.appBaseUrl,
+              enabled: config.telegramMiniAppLinkBase != null,
+              text: "Open in Hunch",
+            });
+            const fallbackMessage = {
+              parse_mode: "MarkdownV2" as const,
+              ...(fallbackButton
+                ? { reply_markup: { inline_keyboard: [[fallbackButton]] } }
+                : {}),
+              text: "Trading is unavailable\\. Open Hunch to trade\\.",
+            };
             const message = tradingInternalApi
               ? await tradingInternalApi
                   .buildMarketMessage({
@@ -380,6 +398,7 @@ export async function runSignalBotRunner(): Promise<void> {
                     chatId: input.chatId,
                     isAdminTest: input.isAdminTest,
                     marketRef: input.marketRef,
+                    publicBrowseOnly: input.publicBrowseOnly,
                     telegramMessageId: input.telegramMessageId,
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
@@ -387,25 +406,9 @@ export async function runSignalBotRunner(): Promise<void> {
                   })
                   .catch((error: unknown) => {
                     logTradingInternalApiFailure("market-card", error);
-                    return {
-                      parse_mode: "MarkdownV2" as const,
-                      reply_markup: {
-                        inline_keyboard: [
-                          [{ text: "Open in Hunch", url: config.appBaseUrl }],
-                        ],
-                      },
-                      text: "Trading is unavailable\\. Open Hunch to trade\\.",
-                    };
+                    return fallbackMessage;
                   })
-              : {
-                  parse_mode: "MarkdownV2" as const,
-                  reply_markup: {
-                    inline_keyboard: [
-                      [{ text: "Open in Hunch", url: config.appBaseUrl }],
-                    ],
-                  },
-                  text: "Trading is unavailable\\. Open Hunch to trade\\.",
-                };
+              : fallbackMessage;
             const result = await telegram.sendMessage({
               chat_id: input.chatId,
               disable_web_page_preview: true,
@@ -435,6 +438,8 @@ export async function runSignalBotRunner(): Promise<void> {
                         disable_web_page_preview: true,
                         parse_mode: message.parse_mode ?? "MarkdownV2",
                       }),
+                    telegramMiniAppEnabled:
+                      config.telegramMiniAppLinkBase != null,
                   })
                   .catch(async (error: unknown) => {
                     logTradingInternalApiFailure("callback", error);

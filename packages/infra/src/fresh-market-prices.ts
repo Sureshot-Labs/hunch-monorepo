@@ -63,13 +63,7 @@ export type FreshMarketPriceOptions = {
 };
 
 type MarketRow = {
-  best_ask: string | number | null;
-  best_bid: string | number | null;
-  clob_token_ids: string | null;
   id: string;
-  last_price: string | number | null;
-  token_no: string | null;
-  token_yes: string | null;
   venue: string | null;
 };
 
@@ -109,22 +103,6 @@ function normalizeVenue(
   return null;
 }
 
-function parsePolymarketClobTokenIds(value: string | null): {
-  no: string | null;
-  yes: string | null;
-} {
-  if (!value) return { yes: null, no: null };
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) return { yes: null, no: null };
-    const yes = typeof parsed[0] === "string" ? normalizeId(parsed[0]) : null;
-    const no = typeof parsed[1] === "string" ? normalizeId(parsed[1]) : null;
-    return { yes, no };
-  } catch {
-    return { yes: null, no: null };
-  }
-}
-
 function venueForToken(
   tokenId: string,
   venue: string | null | undefined,
@@ -138,7 +116,13 @@ function tokenTopIsFresh(
 ): boolean {
   if (!row?.ts) return false;
   const tsMs = row.ts instanceof Date ? row.ts.getTime() : Date.parse(row.ts);
-  if (!Number.isFinite(tsMs) || tsMs < minFreshAt.getTime()) return false;
+  if (
+    !Number.isFinite(tsMs) ||
+    tsMs < minFreshAt.getTime() ||
+    tsMs > Date.now()
+  ) {
+    return false;
+  }
   return hasUsableTopOfBook(row.best_bid, row.best_ask);
 }
 
@@ -186,13 +170,7 @@ async function loadMarketRows(
     `
       select
         id,
-        venue,
-        token_yes,
-        token_no,
-        clob_token_ids,
-        best_bid,
-        best_ask,
-        last_price
+        venue
       from unified_markets
       where id = any($1::text[])
     `,
@@ -251,7 +229,6 @@ function addTokenRef(
 
 function buildTokenRefs(
   inputRefs: FreshMarketPriceTokenRef[],
-  marketRows: MarketRow[],
   marketTokenRows: MarketTokenRow[],
 ): FreshMarketPriceTokenRef[] {
   const refs: FreshMarketPriceTokenRef[] = [];
@@ -264,24 +241,6 @@ function buildTokenRefs(
       marketId: row.market_id,
       side: normalizeSide(row.outcome_side),
       tokenId: row.token_id,
-      venue: row.venue,
-    });
-  }
-  for (const row of marketRows) {
-    const clob =
-      row.venue === "polymarket"
-        ? parsePolymarketClobTokenIds(row.clob_token_ids)
-        : null;
-    addTokenRef(refs, {
-      marketId: row.id,
-      side: "YES",
-      tokenId: clob?.yes ?? row.token_yes,
-      venue: row.venue,
-    });
-    addTokenRef(refs, {
-      marketId: row.id,
-      side: "NO",
-      tokenId: clob?.no ?? row.token_no,
       venue: row.venue,
     });
   }
@@ -365,8 +324,11 @@ function buildMarketStates(input: {
     const tokenIds = Array.from(
       new Set([yesToken, noToken].filter(Boolean) as string[]),
     );
-    const yesTop = yesToken ? input.tokenTops.get(yesToken) : null;
-    const noTop = noToken ? input.tokenTops.get(noToken) : null;
+    const yesTopRaw = yesToken ? input.tokenTops.get(yesToken) : null;
+    const noTopRaw = noToken ? input.tokenTops.get(noToken) : null;
+    const yesTop =
+      yesToken && input.freshTokenIds.has(yesToken) ? yesTopRaw : null;
+    const noTop = noToken && input.freshTokenIds.has(noToken) ? noTopRaw : null;
     const fresh =
       tokenIds.length > 0 &&
       tokenIds.every((tokenId) => input.freshTokenIds.has(tokenId));
@@ -374,9 +336,6 @@ function buildMarketStates(input: {
       fresh,
       marketId: market.id,
       priceState: buildMarketPriceState({
-        marketBestAsk: market.best_ask,
-        marketBestBid: market.best_bid,
-        lastPrice: market.last_price,
         maxBuyPrice: input.priceOptions?.maxBuyPrice,
         noTop: noTop
           ? {
@@ -463,7 +422,7 @@ export async function requestFreshMarketPrices(input: {
   const marketRows = await loadMarketRows(input.db, marketIds);
   const marketTokenRows = await loadMarketTokenRows(input.db, marketIds);
   const tokenRefs = capTokenRefs(
-    buildTokenRefs(input.tokenRefs ?? [], marketRows, marketTokenRows),
+    buildTokenRefs(input.tokenRefs ?? [], marketTokenRows),
     input.maxTokens,
   );
   const tokenIds = Array.from(

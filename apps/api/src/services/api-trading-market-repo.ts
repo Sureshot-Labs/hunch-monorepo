@@ -12,6 +12,7 @@ import type {
   VenueTradingCapabilities,
 } from "./trading-types.js";
 import { readNumber, tradingError } from "./api-trading-utils.js";
+import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 
 export type ApiTradeMarket = {
   accepting_orders: boolean | null;
@@ -55,16 +56,8 @@ const TRADE_MARKET_SELECT_SQL = `SELECT
        m.outcomes,
        m.metadata,
        m.is_initialized,
-       CASE
-         WHEN m.venue = 'polymarket' AND m.clob_token_ids IS NOT NULL AND m.clob_token_ids <> ''
-           THEN m.clob_token_ids::jsonb->>0
-         ELSE m.token_yes
-       END AS token_yes,
-       CASE
-         WHEN m.venue = 'polymarket' AND m.clob_token_ids IS NOT NULL AND m.clob_token_ids <> ''
-           THEN m.clob_token_ids::jsonb->>1
-         ELSE m.token_no
-       END AS token_no,
+       ${canonicalMarketTokenIdSql("m", "YES")} AS token_yes,
+       ${canonicalMarketTokenIdSql("m", "NO")} AS token_no,
        m.clob_token_ids,
        coalesce(m.condition_id, pm.condition_id) AS condition_id,
        pm.neg_risk AS neg_risk,
@@ -335,9 +328,22 @@ export async function bestAskForToken(
   pool: Pool,
   tokenId: string,
 ): Promise<number | null> {
-  const { rows } = await pool.query<{ best_ask: string | null }>(
-    `SELECT best_ask FROM unified_token_top_latest WHERE token_id = $1 LIMIT 1`,
+  const { rows } = await pool.query<{
+    best_ask: string | null;
+    best_bid: string | null;
+  }>(
+    `
+      select best_bid, best_ask
+      from unified_token_top_latest
+      where token_id = $1
+        and ts >= now() - interval '10 minutes'
+        and best_ask > 0
+        and best_ask < 1
+      limit 1
+    `,
     [tokenId],
   );
-  return readNumber(rows[0]?.best_ask ?? null);
+  const ask = readNumber(rows[0]?.best_ask ?? null);
+  const bid = readNumber(rows[0]?.best_bid ?? null);
+  return ask != null && (bid == null || bid <= ask) ? ask : null;
 }

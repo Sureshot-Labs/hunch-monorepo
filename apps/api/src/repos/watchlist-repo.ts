@@ -1,5 +1,6 @@
 import type { Pool } from "@hunch/infra";
 import { buildOrderableMarketSql } from "../lib/market-availability.js";
+import { canonicalMarketTokenIdSql } from "./canonical-market-token-sql.js";
 
 export type WatchlistRow = {
   watchlist_id: string;
@@ -27,6 +28,12 @@ export type WatchlistRow = {
   liquidity: unknown;
   best_bid: unknown;
   best_ask: unknown;
+  best_bid_yes: unknown;
+  best_ask_yes: unknown;
+  top_ts_yes: unknown;
+  best_bid_no: unknown;
+  best_ask_no: unknown;
+  top_ts_no: unknown;
   token_yes: unknown;
   token_no: unknown;
   clob_token_ids: unknown;
@@ -86,9 +93,15 @@ export async function fetchWatchlistPage(
       m.liquidity,
       m.best_bid,
       m.best_ask,
+      yes_top.best_bid as best_bid_yes,
+      yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
+      no_top.best_bid as best_bid_no,
+      no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       m.last_price,
-      m.token_yes,
-      m.token_no,
+      mt.token_yes,
+      mt.token_no,
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
@@ -104,6 +117,15 @@ export async function fetchWatchlistPage(
     FROM user_watchlist w
     JOIN unified_markets m ON m.id = w.market_id
     JOIN unified_events e ON e.id = m.event_id
+    LEFT JOIN LATERAL (
+      select
+        ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+        ${canonicalMarketTokenIdSql("m", "NO")} as token_no
+    ) mt on true
+    LEFT JOIN unified_token_top_latest yes_top
+      ON yes_top.token_id = mt.token_yes
+    LEFT JOIN unified_token_top_latest no_top
+      ON no_top.token_id = mt.token_no
     LEFT JOIN polymarket_markets pm
       ON pm.id = m.venue_market_id AND m.venue = 'polymarket'
     WHERE w.user_id = $1

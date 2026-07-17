@@ -524,7 +524,9 @@ async function publishTokenTopNow(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs), {
+      touchLatestWhenUnchanged: true,
+    }),
     multi.exec(),
   ]);
 }

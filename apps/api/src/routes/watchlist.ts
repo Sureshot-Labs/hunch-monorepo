@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import {
@@ -150,25 +151,37 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
             };
           }
 
-          let tokens: TokenPair = { yes: null, no: null };
-          if (r.venue === "polymarket" && r.clob_token_ids) {
-            try {
-              const tokenIds = JSON.parse(String(r.clob_token_ids)) as unknown;
-              if (Array.isArray(tokenIds)) {
-                tokens = {
-                  yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
-                  no: tokenIds[1] != null ? String(tokenIds[1]) : null,
-                };
-              }
-            } catch {
-              // ignore bad token id encodings
-            }
-          } else if (r.venue === "limitless" || r.venue === "kalshi") {
-            tokens = {
-              yes: r.token_yes != null ? String(r.token_yes) : null,
-              no: r.token_no != null ? String(r.token_no) : null,
-            };
-          }
+          const tokens: TokenPair = {
+            yes: r.token_yes != null ? String(r.token_yes) : null,
+            no: r.token_no != null ? String(r.token_no) : null,
+          };
+
+          const acceptingOrders = computeAcceptingOrders({
+            venue: typeof r.venue === "string" ? r.venue : null,
+            status:
+              typeof r.market_status === "string" ? r.market_status : null,
+            closeTime: r.close_time,
+            expirationTime: r.expiration_time,
+            eventEndTime: r.end_date,
+            pmAcceptingOrders: r.pm_accepting_orders,
+            dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+              r.market_metadata,
+            ),
+          });
+          const observedTop = acceptingOrders
+            ? buildObservedCanonicalMarketTop({
+                yesTop: {
+                  bestBid: r.best_bid_yes,
+                  bestAsk: r.best_ask_yes,
+                  ts: r.top_ts_yes as Date | string | number | null,
+                },
+                noTop: {
+                  bestBid: r.best_bid_no,
+                  bestAsk: r.best_ask_no,
+                  ts: r.top_ts_no as Date | string | number | null,
+                },
+              })
+            : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
 
           eventMap[eid].markets.push({
             marketId: String(r.market_uuid),
@@ -180,18 +193,7 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
             volumeTotal: r.volume_total != null ? Number(r.volume_total) : 0,
             openInterest: r.open_interest != null ? Number(r.open_interest) : 0,
             liquidity: r.liquidity != null ? Number(r.liquidity) : 0,
-            acceptingOrders: computeAcceptingOrders({
-              venue: typeof r.venue === "string" ? r.venue : null,
-              status:
-                typeof r.market_status === "string" ? r.market_status : null,
-              closeTime: r.close_time,
-              expirationTime: r.expiration_time,
-              eventEndTime: r.end_date,
-              pmAcceptingOrders: r.pm_accepting_orders,
-              dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
-                r.market_metadata,
-              ),
-            }),
+            acceptingOrders,
             tokens,
             conditionId: (r.condition_id as string | null) || null,
             category: r.market_category ?? null,
@@ -199,11 +201,12 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
             icon: r.market_icon ?? null,
             status: String(r.market_status),
             top: {
-              yesBid: r.best_bid != null ? Number(r.best_bid) : null,
-              yesAsk: r.best_ask != null ? Number(r.best_ask) : null,
-              noBid: r.best_bid != null ? Number(1 - Number(r.best_bid)) : null,
-              noAsk: r.best_ask != null ? Number(1 - Number(r.best_ask)) : null,
+              yesBid: observedTop.yesBid,
+              yesAsk: observedTop.yesAsk,
+              noBid: observedTop.noBid,
+              noAsk: observedTop.noAsk,
             },
+            topAsOf: observedTop.topAsOf,
             lastUpdate: r.last_update,
             watchlistId: String(r.watchlist_id),
             watchlistCreatedAt: r.watchlist_created_at,

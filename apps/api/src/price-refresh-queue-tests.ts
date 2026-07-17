@@ -132,7 +132,20 @@ class FakeRedis implements PriceRefreshRedis {
 
 class SingleClientFreshPriceDb {
   readonly queryOrder: string[] = [];
-  marketTokenRows: Array<Record<string, unknown>> = [];
+  marketTokenRows: Array<Record<string, unknown>> = [
+    {
+      market_id: "polymarket:test",
+      outcome_side: "YES",
+      token_id: "yes-token",
+      venue: "polymarket",
+    },
+    {
+      market_id: "polymarket:test",
+      outcome_side: "NO",
+      token_id: "no-token",
+      venue: "polymarket",
+    },
+  ];
   tokenTopRows: Array<Record<string, unknown>> = [
     {
       best_ask: "0.41",
@@ -571,6 +584,23 @@ await test("requestFreshMarketPrices prefers explicit outcome token mappings", a
   });
 });
 
+await test("requestFreshMarketPrices fails closed without explicit outcome mappings", async () => {
+  const db = new SingleClientFreshPriceDb();
+  db.marketTokenRows = [];
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    maxTokens: 2,
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+  });
+
+  assert.deepEqual(db.queryOrder, ["markets", "market_tokens"]);
+  assert.deepEqual(result.requestedTokenIds, []);
+  assert.equal(result.marketStates.get("polymarket:test")?.fresh, false);
+});
+
 await test("requestFreshMarketPrices does not enqueue already-fresh tokens", async () => {
   const db = new SingleClientFreshPriceDb();
   const redis = new FakeRedis();
@@ -678,7 +708,22 @@ await test("requestFreshMarketPrices does not treat unpriced tops as fresh", asy
   const db = {
     async query<T = Record<string, unknown>>(sql: string) {
       if (sql.includes("from unified_market_tokens")) {
-        return { rows: [] as T[] };
+        return {
+          rows: [
+            {
+              market_id: "polymarket:test",
+              outcome_side: "YES",
+              token_id: "yes-token",
+              venue: "polymarket",
+            },
+            {
+              market_id: "polymarket:test",
+              outcome_side: "NO",
+              token_id: "no-token",
+              venue: "polymarket",
+            },
+          ] as T[],
+        };
       }
       if (sql.includes("from unified_token_top_latest")) {
         return {
@@ -733,7 +778,22 @@ await test("requestFreshMarketPrices does not treat crossed tops as fresh", asyn
   const db = {
     async query<T = Record<string, unknown>>(sql: string) {
       if (sql.includes("from unified_market_tokens")) {
-        return { rows: [] as T[] };
+        return {
+          rows: [
+            {
+              market_id: "polymarket:test",
+              outcome_side: "YES",
+              token_id: "yes-token",
+              venue: "polymarket",
+            },
+            {
+              market_id: "polymarket:test",
+              outcome_side: "NO",
+              token_id: "no-token",
+              venue: "polymarket",
+            },
+          ] as T[],
+        };
       }
       if (sql.includes("from unified_token_top_latest")) {
         return {

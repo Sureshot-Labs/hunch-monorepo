@@ -5,12 +5,15 @@ import { z } from "zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
+import { getRedis } from "../redis.js";
 import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
 import { PrivyService, type PrivyWalletProfile } from "../privy-service.js";
 import {
   createApiTradingApplicationService,
   type ApiBotTradingExecutor,
 } from "../services/api-trading-service.js";
+import { createAggMarketClient } from "../services/agg-market-client.js";
+import { getAggMarketAlternativesResponseCachedWithMetadata } from "../services/agg-market-clusters.js";
 import {
   hasConfiguredPrivyBotPolicyForActions,
   inspectServerEvmWalletAuthorization,
@@ -38,6 +41,7 @@ import {
 import type { KalshiTradeEligibility } from "../services/trading-types.js";
 import { searchTelegramMarkets } from "../services/telegram-market-search.js";
 import { buildTelegramDepositMessage } from "../services/telegram-bot-deposit.js";
+import { buildHunchMiniAppWebButton } from "../services/telegram-mini-app-buttons.js";
 import {
   buildTelegramPositionsMessage,
   loadTelegramPositions,
@@ -60,6 +64,7 @@ const internalMarketCardBodySchema = z
     chatId: z.union([z.string(), z.number()]),
     isAdminTest: z.boolean().optional(),
     marketRef: z.string().trim().min(1),
+    publicBrowseOnly: z.boolean().optional(),
     telegramMessageId: z.number().int().optional().nullable(),
     telegramMiniAppEnabled: z.boolean().optional(),
     telegramUserId: z.union([z.string(), z.number()]),
@@ -94,6 +99,7 @@ const internalPositionCardBodySchema = z
 const internalDepositBodySchema = z
   .object({
     appBaseUrl: z.string().trim().url(),
+    telegramMiniAppEnabled: z.boolean().optional(),
     telegramUserId: z.union([z.string(), z.number()]),
     venue: z.string().trim().max(32).optional().nullable(),
   })
@@ -107,6 +113,7 @@ const internalStatusBodySchema = z
 
 const internalPositionsBodySchema = internalStatusBodySchema.extend({
   appBaseUrl: z.string().trim().url(),
+  telegramMiniAppEnabled: z.boolean().optional(),
 });
 
 const internalDisableBodySchema = z
@@ -118,6 +125,7 @@ const internalDisableBodySchema = z
 const internalCallbackBodySchema = z
   .object({
     appBaseUrl: z.string().trim().min(1),
+    telegramMiniAppEnabled: z.boolean().optional(),
     callbackQuery: z
       .object({
         data: z.string().optional(),
@@ -337,6 +345,7 @@ async function registerTelegramBotTradingRoutes(
       buildPositionsMessage({
         appBaseUrl: request.body.appBaseUrl,
         pool: routePool,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId: request.body.telegramUserId,
       }),
   );
@@ -347,7 +356,77 @@ async function registerTelegramBotTradingRoutes(
       preHandler: requireInternal,
       schema: { body: internalMarketSearchBodySchema },
     },
-    (request) => searchMarkets({ pool: routePool, query: request.body.query }),
+    async (request) => {
+      const aggClient = env.aggMarketAppId
+        ? createAggMarketClient({
+            apiKey: env.aggMarketApiKey,
+            appId: env.aggMarketAppId,
+            baseUrl: env.aggMarketBaseUrl,
+            timeoutMs: env.aggMarketTimeoutMs,
+          })
+        : null;
+      const cacheClientPromise = aggClient
+        ? getRedis().catch(() => null)
+        : Promise.resolve(null);
+      let loggedAggFallback = false;
+      return searchMarkets({
+        pool: routePool,
+        query: request.body.query,
+        resolveCrossVenueAlternatives: aggClient
+          ? async ({ marketId, venues }) => {
+              try {
+                const { response } =
+                  await getAggMarketAlternativesResponseCachedWithMetadata({
+                    cacheClient: await cacheClientPromise,
+                    client: aggClient,
+                    db: routePool,
+                    marketId,
+                    matchedTtlSec: env.aggClustersCacheTtlSec,
+                    notFoundTtlSec:
+                      env.aggMarketAlternativesNotFoundCacheTtlSec,
+                    onCacheError: (operation, error) => {
+                      request.log.warn(
+                        { error, operation },
+                        "Telegram market search AGG cache failed",
+                      );
+                    },
+                    query: {
+                      limit: 10,
+                      sourceLimit: 50,
+                      venues: venues.join(","),
+                    },
+                  });
+                if (!response || response.status !== "matched") return [];
+                return response.alternatives
+                  .filter(
+                    (market) =>
+                      market.active !== false && market.orderable !== false,
+                  )
+                  .map((market) => ({
+                    eventId: market.eventId,
+                    eventTitle: market.eventTitle,
+                    lastPrice: market.yesMid,
+                    marketId: market.marketId,
+                    marketTitle:
+                      market.marketTitle?.trim() || "Prediction market",
+                    noAsk: market.noMid,
+                    venue: market.venue,
+                    yesAsk: market.yesAsk ?? market.yesMid,
+                  }));
+              } catch (error) {
+                if (!loggedAggFallback) {
+                  loggedAggFallback = true;
+                  request.log.warn(
+                    { error },
+                    "Telegram market search AGG enrichment skipped",
+                  );
+                }
+                return [];
+              }
+            }
+          : undefined,
+      });
+    },
   );
 
   api.post(
@@ -388,6 +467,7 @@ async function registerTelegramBotTradingRoutes(
         appBaseUrl: request.body.appBaseUrl,
         internalWallets,
         pool: db,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId: request.body.telegramUserId,
         venue: request.body.venue,
       });
@@ -554,29 +634,35 @@ async function registerTelegramBotTradingRoutes(
       preHandler: requireInternal,
       schema: { body: internalMarketCardBodySchema },
     },
-    async (request) =>
-      reconciliationEnabled
-        ? buildTelegramBotTradingMarketMessage({
-            appBaseUrl: request.body.appBaseUrl,
-            chatId: request.body.chatId,
-            context: request.body.context,
-            db,
-            isAdminTest: request.body.isAdminTest,
-            marketRef: request.body.marketRef,
-            telegramMessageId: request.body.telegramMessageId,
-            telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
-            telegramUserId: request.body.telegramUserId,
-            trading: createTradingForRequest(request),
-          })
-        : {
-            parse_mode: "MarkdownV2" as const,
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "Open in Hunch", url: request.body.appBaseUrl }],
-              ],
-            },
-            text: "Trading is temporarily unavailable\\. Open Hunch to trade\\.",
-          },
+    async (request) => {
+      if (reconciliationEnabled) {
+        return buildTelegramBotTradingMarketMessage({
+          appBaseUrl: request.body.appBaseUrl,
+          chatId: request.body.chatId,
+          context: request.body.context,
+          db,
+          isAdminTest: request.body.isAdminTest,
+          marketRef: request.body.marketRef,
+          publicBrowseOnly: request.body.publicBrowseOnly,
+          telegramMessageId: request.body.telegramMessageId,
+          telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+          telegramUserId: request.body.telegramUserId,
+          trading: createTradingForRequest(request),
+        });
+      }
+      const openButton = buildHunchMiniAppWebButton({
+        appBaseUrl: request.body.appBaseUrl,
+        enabled: request.body.telegramMiniAppEnabled === true,
+        text: "Open in Hunch",
+      });
+      return {
+        parse_mode: "MarkdownV2" as const,
+        ...(openButton
+          ? { reply_markup: { inline_keyboard: [[openButton]] } }
+          : {}),
+        text: "Trading is temporarily unavailable\\. Open Hunch to trade\\.",
+      };
+    },
   );
 
   const handleInternalCallback = async (
@@ -618,6 +704,7 @@ async function registerTelegramBotTradingRoutes(
       expectedType: expectedType ?? null,
       log: app.log,
       signerInspector,
+      telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
     });
   };
@@ -632,6 +719,7 @@ async function registerTelegramBotTradingRoutes(
       expectedType: null,
       log: app.log,
       signerInspector,
+      telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
       trading: createTradingForRequest(request as FastifyRequest),
     });
 

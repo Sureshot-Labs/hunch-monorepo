@@ -1,5 +1,9 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import {
+  buildCanonicalMarketTop,
+  buildObservedCanonicalMarketTop,
+} from "@hunch/shared";
 import crypto from "node:crypto";
 import { RESP_TYPES } from "redis";
 import { createAuthMiddleware } from "../auth.js";
@@ -38,6 +42,8 @@ const FOR_YOU_KNN_PAD = 50;
 const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
+const STRICT_PROBABILITY_SCAN_MULTIPLIER = 5;
+const STRICT_PROBABILITY_SCAN_CAP = 500;
 
 function applyFeedCacheHeaders(input: {
   reply: FastifyReply;
@@ -136,6 +142,49 @@ function filterCachedFeedBodyForVenues(
   }
 }
 
+function marketMatchesStrictProbability(input: {
+  market: FeedEvent["markets"][number];
+  minProb?: number;
+  maxProb?: number;
+}): boolean {
+  if (input.minProb == null && input.maxProb == null) return true;
+  if (!input.market.acceptingOrders) return false;
+  const probability = buildCanonicalMarketTop({
+    yesTop: {
+      bestBid: input.market.top.yesBid,
+      bestAsk: input.market.top.yesAsk,
+      ts: input.market.topAsOf?.YES ?? null,
+    },
+    noTop: {
+      bestBid: input.market.top.noBid,
+      bestAsk: input.market.top.noAsk,
+      ts: input.market.topAsOf?.NO ?? null,
+    },
+  }).probability;
+  if (probability == null) return false;
+  if (input.minProb != null && probability < input.minProb) return false;
+  if (input.maxProb != null && probability > input.maxProb) return false;
+  return true;
+}
+
+function filterFeedByStrictProbability(input: {
+  data: FeedEvent[];
+  minProb?: number;
+  maxProb?: number;
+}): FeedEvent[] {
+  if (input.minProb == null && input.maxProb == null) return input.data;
+  return input.data.flatMap((event) => {
+    const markets = event.markets.filter((market) =>
+      marketMatchesStrictProbability({
+        market,
+        minProb: input.minProb,
+        maxProb: input.maxProb,
+      }),
+    );
+    return markets.length ? [{ ...event, markets }] : [];
+  });
+}
+
 function parseTimestampMs(value: unknown): number | null {
   if (value == null) return null;
   if (value instanceof Date) {
@@ -185,26 +234,10 @@ function vectorToBuffer(vec: Float32Array): Buffer {
 }
 
 function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
-  // Parse token IDs based on venue
-  let tokens: TokenPair = { yes: null, no: null };
-  if (rRow.venue === "polymarket" && rRow.clob_token_ids) {
-    try {
-      const tokenIds = JSON.parse(String(rRow.clob_token_ids)) as unknown;
-      if (Array.isArray(tokenIds)) {
-        tokens = {
-          yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
-          no: tokenIds[1] != null ? String(tokenIds[1]) : null,
-        };
-      }
-    } catch {
-      // Invalid JSON, keep tokens as null
-    }
-  } else if (rRow.venue === "limitless" || rRow.venue === "kalshi") {
-    tokens = {
-      yes: rRow.token_yes != null ? String(rRow.token_yes) : null,
-      no: rRow.token_no != null ? String(rRow.token_no) : null,
-    };
-  }
+  const tokens: TokenPair = {
+    yes: rRow.token_yes != null ? String(rRow.token_yes) : null,
+    no: rRow.token_no != null ? String(rRow.token_no) : null,
+  };
 
   let outcomes: unknown = null;
   if (rRow.outcomes) {
@@ -237,6 +270,20 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
       rRow.market_metadata,
     ),
   });
+  const observedTop = acceptingOrders
+    ? buildObservedCanonicalMarketTop({
+        yesTop: {
+          bestBid: rRow.best_bid_yes,
+          bestAsk: rRow.best_ask_yes,
+          ts: rRow.top_ts_yes as Date | string | number | null,
+        },
+        noTop: {
+          bestBid: rRow.best_bid_no,
+          bestAsk: rRow.best_ask_no,
+          ts: rRow.top_ts_no as Date | string | number | null,
+        },
+      })
+    : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
 
   return {
     venue: String(rRow.venue),
@@ -272,35 +319,12 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
         ? Number(rRow.resolved_outcome_pct)
         : null,
     top: {
-      yesBid:
-        rRow.best_bid_yes != null
-          ? Number(rRow.best_bid_yes)
-          : rRow.best_bid != null
-            ? Number(rRow.best_bid)
-            : null,
-      yesAsk:
-        rRow.best_ask_yes != null
-          ? Number(rRow.best_ask_yes)
-          : rRow.best_ask != null
-            ? Number(rRow.best_ask)
-            : null,
-      noBid:
-        rRow.best_bid_no != null
-          ? Number(rRow.best_bid_no)
-          : rRow.best_bid_yes != null
-            ? Number(1 - Number(rRow.best_bid_yes))
-            : rRow.best_bid != null
-              ? Number(1 - Number(rRow.best_bid))
-              : null,
-      noAsk:
-        rRow.best_ask_no != null
-          ? Number(rRow.best_ask_no)
-          : rRow.best_ask_yes != null
-            ? Number(1 - Number(rRow.best_ask_yes))
-            : rRow.best_ask != null
-              ? Number(1 - Number(rRow.best_ask))
-              : null,
+      yesBid: observedTop.yesBid,
+      yesAsk: observedTop.yesAsk,
+      noBid: observedTop.noBid,
+      noAsk: observedTop.noAsk,
     },
+    topAsOf: observedTop.topAsOf,
     change24h: rRow.change_24h != null ? Number(rRow.change_24h) : null,
     createdAt: rRow.market_created_at ?? null,
     startAt: rRow.market_open_time ?? null,
@@ -410,7 +434,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v29:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v32:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -499,17 +523,31 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         sevenDaysAgo,
         sevenDaysFromNow,
       };
+      const hasProbabilityFilter = minProb != null || maxProb != null;
+      const databaseInputs = hasProbabilityFilter
+        ? {
+            ...inputs,
+            limit: Math.min(
+              STRICT_PROBABILITY_SCAN_CAP,
+              Math.max(limit + offset, limit) *
+                STRICT_PROBABILITY_SCAN_MULTIPLIER,
+            ),
+            offset: 0,
+            minProb: undefined,
+            maxProb: undefined,
+          }
+        : inputs;
 
       let rows: FeedMarketRow[] = [];
       let eventIds: string[] = [];
       try {
         if (view === "markets") {
-          rows = await fetchFeedMarketsDirect(pool, inputs);
+          rows = await fetchFeedMarketsDirect(pool, databaseInputs);
         } else {
-          const eventRows = await fetchFeedEventIds(pool, inputs);
+          const eventRows = await fetchFeedEventIds(pool, databaseInputs);
           eventIds = eventRows.map((row) => row.id);
           if (eventIds.length) {
-            rows = await fetchFeedMarkets(pool, inputs, eventIds);
+            rows = await fetchFeedMarkets(pool, databaseInputs, eventIds);
           }
         }
       } catch (error) {
@@ -627,6 +665,11 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const event = eventMap[eid];
           return event ? [event] : [];
         });
+      }
+
+      data = filterFeedByStrictProbability({ data, minProb, maxProb });
+      if (hasProbabilityFilter) {
+        data = data.slice(offset, offset + limit);
       }
 
       const payload = {
@@ -788,6 +831,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         sevenDaysAgo,
         sevenDaysFromNow,
       };
+      const hasProbabilityFilter = minProb != null || maxProb != null;
+      const strictProbabilityInputs = hasProbabilityFilter
+        ? { ...baseInputs, minProb: undefined, maxProb: undefined }
+        : baseInputs;
 
       let data: FeedEvent[] = [];
       let responseCount = 0;
@@ -795,16 +842,16 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       let totalMarkets = 0;
       if (view === "markets") {
         const summary = await fetchFavoriteFeedEventPage(pool, {
-          ...baseInputs,
+          ...strictProbabilityInputs,
           limit: 1,
           offset: 0,
         });
         totalEvents = summary.totalEvents;
         totalMarkets = summary.totalMarkets;
         const rows = await fetchFeedMarketsDirect(pool, {
-          ...baseInputs,
-          limit,
-          offset,
+          ...strictProbabilityInputs,
+          limit: hasProbabilityFilter ? favoriteMarketIds.length : limit,
+          offset: hasProbabilityFilter ? 0 : offset,
         });
         if (!rows.length) {
           return reply.send({
@@ -819,14 +866,20 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const market = buildFeedMarket(rRow);
           return { ...buildFeedEvent(rRow), markets: [market] };
         });
+        data = filterFeedByStrictProbability({ data, minProb, maxProb });
+        if (hasProbabilityFilter) {
+          totalMarkets = data.length;
+          totalEvents = new Set(data.map((event) => event.eventId)).size;
+          data = data.slice(offset, offset + limit);
+        }
         responseCount = totalMarkets;
       } else {
         // event_scope in favorites mode is favorites-relative:
         // grouped/single is evaluated on favorited markets that match filters.
         const summary = await fetchFavoriteFeedEventPage(pool, {
-          ...baseInputs,
-          limit,
-          offset,
+          ...strictProbabilityInputs,
+          limit: hasProbabilityFilter ? favoriteMarketIds.length : limit,
+          offset: hasProbabilityFilter ? 0 : offset,
         });
         totalEvents = summary.totalEvents;
         totalMarkets = summary.totalMarkets;
@@ -844,9 +897,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         const allRows = await fetchFeedMarkets(
           pool,
           {
-            ...baseInputs,
-            limit,
-            offset,
+            ...strictProbabilityInputs,
+            limit: hasProbabilityFilter ? favoriteMarketIds.length : limit,
+            offset: hasProbabilityFilter ? 0 : offset,
           },
           summary.eventIds,
         );
@@ -861,6 +914,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         data = summary.eventIds
           .map((eventId) => eventMap[eventId])
           .filter((event): event is FeedEvent => Boolean(event));
+        data = filterFeedByStrictProbability({ data, minProb, maxProb });
+        if (hasProbabilityFilter) {
+          totalEvents = data.length;
+          totalMarkets = data.reduce(
+            (count, event) => count + event.markets.length,
+            0,
+          );
+          data = data.slice(offset, offset + limit);
+        }
         responseCount = totalEvents;
       }
 
@@ -1318,8 +1380,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         filter: undefined,
         sort: undefined,
         sortDir: "desc" as const,
-        minProb,
-        maxProb,
+        minProb: undefined,
+        maxProb: undefined,
         maxSpread,
         durationMinutes,
         endWithin,
@@ -1349,9 +1411,13 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         eventMap[eid].markets.push(buildFeedMarket(rRow));
       }
 
-      const orderedEvents: FeedEvent[] = candidateEventIds.flatMap((eid) => {
-        const event = eventMap[eid];
-        return event ? [event] : [];
+      const orderedEvents = filterFeedByStrictProbability({
+        data: candidateEventIds.flatMap((eid) => {
+          const event = eventMap[eid];
+          return event ? [event] : [];
+        }),
+        minProb,
+        maxProb,
       });
 
       const pickRepresentative = (event: FeedEvent) => {

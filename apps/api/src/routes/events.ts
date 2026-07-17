@@ -1,5 +1,9 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import {
+  buildCanonicalMarketTop,
+  buildObservedCanonicalMarketTop,
+} from "@hunch/shared";
 import { createHash } from "crypto";
 import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
@@ -39,6 +43,7 @@ import {
   fetchEventDetails,
   type EventDetailsRow,
 } from "../repos/unified-read.js";
+import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 import {
   dflowRequest,
   extractDflowErrorMessage,
@@ -102,6 +107,9 @@ type SimilarEventMarketSummary = {
   marketTitle: string | null;
   bestBid: number | null;
   bestAsk: number | null;
+  bestBidNo: number | null;
+  bestAskNo: number | null;
+  topAsOf: { YES: string | null; NO: string | null };
   lastPrice: number | null;
 };
 
@@ -133,34 +141,10 @@ function isExpiredAt(value: unknown, nowSec: number): boolean {
 }
 
 function resolveTokenPair(row: EventDetailsRow): TokenPair {
-  const tokens: TokenPair = {
+  return {
     yes: row.token_yes != null ? String(row.token_yes) : null,
     no: row.token_no != null ? String(row.token_no) : null,
   };
-
-  if ((!tokens.yes || !tokens.no) && row.clob_token_ids) {
-    const raw = row.clob_token_ids;
-    let parsed: unknown;
-    if (Array.isArray(raw)) {
-      parsed = raw;
-    } else {
-      try {
-        parsed = JSON.parse(String(raw));
-      } catch {
-        parsed = null;
-      }
-    }
-    if (Array.isArray(parsed)) {
-      if (!tokens.yes && parsed[0] != null) {
-        tokens.yes = String(parsed[0]);
-      }
-      if (!tokens.no && parsed[1] != null) {
-        tokens.no = String(parsed[1]);
-      }
-    }
-  }
-
-  return tokens;
 }
 
 function isAcceptingOrders(row: EventDetailsRow): boolean {
@@ -231,6 +215,10 @@ async function fetchSimilarMarketSummaries(
     market_title: string | null;
     best_bid: unknown;
     best_ask: unknown;
+    best_bid_no: unknown;
+    best_ask_no: unknown;
+    top_ts_yes: unknown;
+    top_ts_no: unknown;
     last_price: unknown;
     close_time: unknown;
     expiration_time: unknown;
@@ -243,14 +231,22 @@ async function fetchSimilarMarketSummaries(
         m.venue,
         e.title as event_title,
         m.title as market_title,
-        m.best_bid,
-        m.best_ask,
+        yes_top.best_bid,
+        yes_top.best_ask,
+        no_top.best_bid as best_bid_no,
+        no_top.best_ask as best_ask_no,
+        yes_top.ts as top_ts_yes,
+        no_top.ts as top_ts_no,
         m.last_price,
         m.close_time,
         m.expiration_time,
         e.end_date
       from unified_markets m
       join unified_events e on e.id = m.event_id
+      left join unified_token_top_latest yes_top
+        on yes_top.token_id = ${canonicalMarketTokenIdSql("m", "YES")}
+      left join unified_token_top_latest no_top
+        on no_top.token_id = ${canonicalMarketTokenIdSql("m", "NO")}
       where m.id = any($1::text[])
       ${activeOnly ? "and m.status = 'ACTIVE' and e.status = 'ACTIVE'" : ""}
     `,
@@ -266,59 +262,55 @@ async function fetchSimilarMarketSummaries(
       )
     : rows;
 
-  return filteredRows.map((row) => ({
-    marketId: row.market_id,
-    eventId: row.event_id,
-    venue: row.venue ?? null,
-    eventTitle: row.event_title ?? null,
-    marketTitle: row.market_title ?? null,
-    bestBid: toNumber(row.best_bid),
-    bestAsk: toNumber(row.best_ask),
-    lastPrice: toNumber(row.last_price),
-  }));
-}
-
-function clampProbability(value: number): number {
-  return Math.min(1, Math.max(0, value));
+  return filteredRows.map((row) => {
+    const top = buildObservedCanonicalMarketTop({
+      yesTop: {
+        bestBid: row.best_bid,
+        bestAsk: row.best_ask,
+        ts: row.top_ts_yes as Date | string | number | null,
+      },
+      noTop: {
+        bestBid: row.best_bid_no,
+        bestAsk: row.best_ask_no,
+        ts: row.top_ts_no as Date | string | number | null,
+      },
+    });
+    return {
+      marketId: row.market_id,
+      eventId: row.event_id,
+      venue: row.venue ?? null,
+      eventTitle: row.event_title ?? null,
+      marketTitle: row.market_title ?? null,
+      bestBid: top.yesBid,
+      bestAsk: top.yesAsk,
+      bestBidNo: top.noBid,
+      bestAskNo: top.noAsk,
+      topAsOf: top.topAsOf,
+      lastPrice: toNumber(row.last_price),
+    };
+  });
 }
 
 function resolveYesProbability(row: EventDetailsRow): {
   value: number | null;
   source: string | null;
 } {
-  const yesBid = toNumber(row.best_bid_yes);
-  const yesAsk = toNumber(row.best_ask_yes);
-  const lastPrice = toNumber(row.last_price);
-
-  if (yesBid != null && yesAsk != null) {
-    return { value: clampProbability((yesBid + yesAsk) / 2), source: "mid" };
-  }
-  if (yesBid != null) {
-    return { value: clampProbability(yesBid), source: "bid" };
-  }
-  if (yesAsk != null) {
-    return { value: clampProbability(yesAsk), source: "ask" };
-  }
-  if (lastPrice != null) {
-    return { value: clampProbability(lastPrice), source: "last" };
-  }
-
-  const noBid = toNumber(row.best_bid_no);
-  const noAsk = toNumber(row.best_ask_no);
-  if (noBid != null && noAsk != null) {
-    return {
-      value: clampProbability(1 - (noBid + noAsk) / 2),
-      source: "no-mid",
-    };
-  }
-  if (noBid != null) {
-    return { value: clampProbability(1 - noBid), source: "no-bid" };
-  }
-  if (noAsk != null) {
-    return { value: clampProbability(1 - noAsk), source: "no-ask" };
-  }
-
-  return { value: null, source: null };
+  const top = buildObservedCanonicalMarketTop({
+    yesTop: {
+      bestBid: row.best_bid_yes,
+      bestAsk: row.best_ask_yes,
+      ts: row.top_ts_yes as Date | string | number | null,
+    },
+    noTop: {
+      bestBid: row.best_bid_no,
+      bestAsk: row.best_ask_no,
+      ts: row.top_ts_no as Date | string | number | null,
+    },
+  });
+  return {
+    value: top.probability,
+    source: top.probability == null ? null : "observed-mid",
+  };
 }
 
 export const eventRoutes: FastifyPluginAsync = async (app) => {
@@ -353,7 +345,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Create cache key
-      const cacheKey = `event:v5:${eventId}:${selectedMarketId ?? "default"}`;
+      const cacheKey = `event:v7:${eventId}:${selectedMarketId ?? "default"}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for event data)
@@ -505,31 +497,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               ? (limitlessMeta?.marketAddress ?? null)
               : null;
 
-          // Parse token IDs based on venue
-          let tokens: TokenPair = { yes: null, no: null };
-          if (row.market_venue === "polymarket" && row.clob_token_ids) {
-            try {
-              const tokenIds = JSON.parse(
-                String(row.clob_token_ids),
-              ) as unknown;
-              if (Array.isArray(tokenIds)) {
-                tokens = {
-                  yes: tokenIds[0] != null ? String(tokenIds[0]) : null,
-                  no: tokenIds[1] != null ? String(tokenIds[1]) : null,
-                };
-              }
-            } catch {
-              // Invalid JSON, keep tokens as null
-            }
-          } else if (
-            row.market_venue === "limitless" ||
-            row.market_venue === "kalshi"
-          ) {
-            tokens = {
-              yes: row.token_yes != null ? String(row.token_yes) : null,
-              no: row.token_no != null ? String(row.token_no) : null,
-            };
-          }
+          const tokens: TokenPair = {
+            yes: row.token_yes != null ? String(row.token_yes) : null,
+            no: row.token_no != null ? String(row.token_no) : null,
+          };
           refreshTokenIds.push(...extractTokenIdsFromTokenPair(tokens));
 
           // Parse outcomes if available
@@ -555,30 +526,34 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               row.market_metadata,
             ),
           });
-          const liveYesBid =
-            acceptingOrders && row.best_bid_yes != null
-              ? Number(row.best_bid_yes)
-              : acceptingOrders && row.best_bid != null
-                ? Number(row.best_bid)
-                : null;
-          const liveYesAsk =
-            acceptingOrders && row.best_ask_yes != null
-              ? Number(row.best_ask_yes)
-              : acceptingOrders && row.best_ask != null
-                ? Number(row.best_ask)
-                : null;
-          const liveNoBid =
-            acceptingOrders && row.best_bid_no != null
-              ? Number(row.best_bid_no)
-              : liveYesBid != null
-                ? Number(1 - liveYesBid)
-                : null;
-          const liveNoAsk =
-            acceptingOrders && row.best_ask_no != null
-              ? Number(row.best_ask_no)
-              : liveYesAsk != null
-                ? Number(1 - liveYesAsk)
-                : null;
+          const strictTop = acceptingOrders
+            ? buildCanonicalMarketTop({
+                yesTop: {
+                  bestBid: row.best_bid_yes,
+                  bestAsk: row.best_ask_yes,
+                  ts: row.top_ts_yes as Date | string | number | null,
+                },
+                noTop: {
+                  bestBid: row.best_bid_no,
+                  bestAsk: row.best_ask_no,
+                  ts: row.top_ts_no as Date | string | number | null,
+                },
+              })
+            : buildCanonicalMarketTop({ yesTop: null, noTop: null });
+          const observedTop = acceptingOrders
+            ? buildObservedCanonicalMarketTop({
+                yesTop: {
+                  bestBid: row.best_bid_yes,
+                  bestAsk: row.best_ask_yes,
+                  ts: row.top_ts_yes as Date | string | number | null,
+                },
+                noTop: {
+                  bestBid: row.best_bid_no,
+                  bestAsk: row.best_ask_no,
+                  ts: row.top_ts_no as Date | string | number | null,
+                },
+              })
+            : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
 
           event.markets.push({
             marketId: row.market_id,
@@ -600,8 +575,8 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             openInterest:
               row.open_interest != null ? Number(row.open_interest) : 0,
             liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
-            bestBid: liveYesBid,
-            bestAsk: liveYesAsk,
+            bestBid: strictTop.yesBid,
+            bestAsk: strictTop.yesAsk,
             lastPrice:
               acceptingOrders && row.last_price != null
                 ? Number(row.last_price)
@@ -649,11 +624,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 : null,
             marketAddress,
             top: {
-              yesBid: liveYesBid,
-              yesAsk: liveYesAsk,
-              noBid: liveNoBid,
-              noAsk: liveNoAsk,
+              yesBid: observedTop.yesBid,
+              yesAsk: observedTop.yesAsk,
+              noBid: observedTop.noBid,
+              noAsk: observedTop.noAsk,
             },
+            topAsOf: observedTop.topAsOf,
             openTime: row.open_time,
             closeTime: row.close_time,
             expirationTime: row.expiration_time,
@@ -973,7 +949,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const cacheHash = createHash("sha256")
         .update(
           JSON.stringify({
-            selectorVersion: "v7",
+            selectorVersion: "v9-observed-top",
             textHash,
             embeddingVersion,
             limit: cappedLimit,

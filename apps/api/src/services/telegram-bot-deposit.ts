@@ -6,10 +6,14 @@ import { fetchEvmCall, fetchEvmCode } from "./polygon-rpc.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
 import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
-import { decodePolymarketDepositWalletOwnerFromRuntime } from "./wallet-onchain-state.js";
+import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
+import { recordTelegramDepositResolutionAnalytics } from "./telegram-lifecycle-analytics.js";
 
 const fundingRouter = new Interface([
   "function depositWalletOf(address owner) view returns (address)",
+]);
+const depositWallet = new Interface([
+  "function owner() view returns (address)",
 ]);
 
 export type TelegramDepositVenue = "limitless" | "polymarket";
@@ -34,10 +38,18 @@ export type TelegramDepositResolverDependencies = {
   polygonRpcUrl?: string;
 };
 
+export type TelegramDepositResolutionReason =
+  | "missing_code"
+  | "owner_mismatch"
+  | "router_mismatch"
+  | "rpc_unavailable"
+  | "setup_required";
+
 export type TelegramDepositResolution =
-  | { address: string; status: "ready" }
+  | { address: string; reason: null; status: "ready" }
   | {
       address: null;
+      reason: TelegramDepositResolutionReason;
       status:
         | "setup_required"
         | "temporarily_unavailable"
@@ -50,6 +62,13 @@ function normalizedAddress(value: string): string {
   return ethers.getAddress(value).toLowerCase();
 }
 
+function isContractVerificationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /execution reverted|invalid opcode|call exception|revert/i.test(
+    message,
+  );
+}
+
 export async function resolveCanonicalPolymarketDeposit(input: {
   db: DbQuery;
   dependencies?: TelegramDepositResolverDependencies;
@@ -60,32 +79,56 @@ export async function resolveCanonicalPolymarketDeposit(input: {
       ? input.dependencies.fundingRouterAddress
       : env.polymarketFundingRouterAddress;
   if (!fundingRouterAddress) {
-    return { address: null, status: "temporarily_unavailable" };
+    return {
+      address: null,
+      reason: "rpc_unavailable",
+      status: "temporarily_unavailable",
+    };
   }
   const call = input.dependencies?.fetchCall ?? fetchEvmCall;
   const code = input.dependencies?.fetchCode ?? fetchEvmCode;
   const rpcUrl = input.dependencies?.polygonRpcUrl ?? env.polygonRpcUrl;
   const timeoutMs =
     input.dependencies?.polygonRpcTimeoutMs ?? env.polygonRpcTimeoutMs;
-  const { rows } = await input.db.query<{
+  let rows: Array<{
     funder_address: string | null;
     wallet_address: string;
-  }>(
-    `select uvc.wallet_address, uvc.funder_address
-       from user_telegram_accounts uta
-       join user_venue_credentials uvc
-         on uvc.user_id = uta.user_id
-        and uvc.venue = 'polymarket'
-        and uvc.is_active = true
-      where uta.telegram_user_id = $1
-        and uvc.funder_address is not null
-      order by uvc.updated_at desc`,
-    [String(input.telegramUserId)],
-  );
+  }>;
+  try {
+    ({ rows } = await input.db.query<{
+      funder_address: string | null;
+      wallet_address: string;
+    }>(
+      `select uvc.wallet_address, uvc.funder_address
+         from user_telegram_accounts uta
+         join user_venue_credentials uvc
+           on uvc.user_id = uta.user_id
+          and uvc.venue = 'polymarket'
+          and uvc.is_active = true
+        where uta.telegram_user_id = $1
+          and uvc.funder_address is not null
+        order by uvc.updated_at desc`,
+      [String(input.telegramUserId)],
+    ));
+  } catch {
+    return {
+      address: null,
+      reason: "rpc_unavailable",
+      status: "temporarily_unavailable",
+    };
+  }
   if (rows.length === 0) {
-    return { address: null, status: "setup_required" };
+    return {
+      address: null,
+      reason: "setup_required",
+      status: "setup_required",
+    };
   }
   let rpcUnavailable = false;
+  let failureReason: Exclude<
+    TelegramDepositResolutionReason,
+    "rpc_unavailable" | "setup_required"
+  > = "owner_mismatch";
   for (const row of rows) {
     let owner: string;
     let stored: string;
@@ -93,6 +136,7 @@ export async function resolveCanonicalPolymarketDeposit(input: {
       owner = ethers.getAddress(row.wallet_address);
       stored = ethers.getAddress(row.funder_address ?? "");
     } catch {
+      failureReason = "owner_mismatch";
       continue;
     }
     const data = fundingRouter.encodeFunctionData("depositWalletOf", [owner]);
@@ -116,9 +160,13 @@ export async function resolveCanonicalPolymarketDeposit(input: {
       );
       derivedAddress = normalizedAddress(String(derived));
     } catch {
+      failureReason = "router_mismatch";
       continue;
     }
-    if (derivedAddress !== normalizedAddress(stored)) continue;
+    if (derivedAddress !== normalizedAddress(stored)) {
+      failureReason = "router_mismatch";
+      continue;
+    }
     let runtime: string;
     try {
       runtime = await code({
@@ -131,20 +179,46 @@ export async function resolveCanonicalPolymarketDeposit(input: {
       rpcUnavailable = true;
       continue;
     }
-    const runtimeOwner = decodePolymarketDepositWalletOwnerFromRuntime(runtime);
-    let normalizedRuntimeOwner: string | null = null;
-    try {
-      normalizedRuntimeOwner = runtimeOwner
-        ? normalizedAddress(runtimeOwner)
-        : null;
-    } catch {
-      // Malformed owner data is a verification failure, not an RPC outage.
+    if (runtime.trim().toLowerCase() === "0x" || runtime.trim() === "0x0") {
+      failureReason = "missing_code";
+      continue;
     }
-    if (normalizedRuntimeOwner !== normalizedAddress(owner)) continue;
-    return { address: stored, status: "ready" };
+    let ownerResult: string;
+    try {
+      ownerResult = await call({
+        data: depositWallet.encodeFunctionData("owner"),
+        rpcUrl,
+        timeoutMs,
+        to: stored,
+      });
+    } catch (error) {
+      if (isContractVerificationError(error)) {
+        failureReason = "owner_mismatch";
+      } else {
+        rpcUnavailable = true;
+      }
+      continue;
+    }
+    let contractOwner: string;
+    try {
+      const [decodedOwner] = depositWallet.decodeFunctionResult(
+        "owner",
+        ownerResult,
+      );
+      contractOwner = normalizedAddress(String(decodedOwner));
+    } catch {
+      failureReason = "owner_mismatch";
+      continue;
+    }
+    if (contractOwner !== normalizedAddress(owner)) {
+      failureReason = "owner_mismatch";
+      continue;
+    }
+    return { address: stored, reason: null, status: "ready" };
   }
   return {
     address: null,
+    reason: rpcUnavailable ? "rpc_unavailable" : failureReason,
     status: rpcUnavailable ? "temporarily_unavailable" : "verification_failed",
   };
 }
@@ -180,11 +254,19 @@ export async function resolveCanonicalLimitlessDeposit(input: {
   telegramUserId: string | number;
 }): Promise<TelegramDepositResolution> {
   if (input.internalWallets == null) {
-    return { address: null, status: "temporarily_unavailable" };
+    return {
+      address: null,
+      reason: "rpc_unavailable",
+      status: "temporarily_unavailable",
+    };
   }
   const internalWallets = normalizeInternalEvmWallets(input.internalWallets);
   if (internalWallets.size === 0) {
-    return { address: null, status: "setup_required" };
+    return {
+      address: null,
+      reason: "setup_required",
+      status: "setup_required",
+    };
   }
   let preferredAddress: string | null = null;
   try {
@@ -198,24 +280,29 @@ export async function resolveCanonicalLimitlessDeposit(input: {
     );
     preferredAddress = rows[0]?.wallet_address ?? null;
   } catch {
-    return { address: null, status: "temporarily_unavailable" };
+    return {
+      address: null,
+      reason: "rpc_unavailable",
+      status: "temporarily_unavailable",
+    };
   }
   if (preferredAddress) {
     try {
       const matched = internalWallets.get(
         ethers.getAddress(preferredAddress).toLowerCase(),
       );
-      if (matched) return { address: matched, status: "ready" };
+      if (matched) return { address: matched, reason: null, status: "ready" };
     } catch {
       // Fall through to the unambiguous internal-wallet rule.
     }
   }
   if (internalWallets.size === 1) {
     const [address] = internalWallets.values();
-    if (address) return { address, status: "ready" };
+    if (address) return { address, reason: null, status: "ready" };
   }
   return {
     address: null,
+    reason: preferredAddress ? "owner_mismatch" : "setup_required",
     status: preferredAddress ? "verification_failed" : "setup_required",
   };
 }
@@ -231,6 +318,41 @@ function buildDepositAppUrl(input: {
   if (input.venue) url.searchParams.set("venue", input.venue);
   if (input.address) url.searchParams.set("address", input.address);
   return url.toString();
+}
+
+export function buildTelegramDepositAddressPresentation(input: {
+  address: string;
+  copyButtonText?: string;
+  venue: TelegramDepositVenue;
+}): {
+  buttonRows: NonNullable<
+    TelegramDepositMessage["reply_markup"]
+  >["inline_keyboard"];
+  lines: string[];
+} {
+  const isPolymarket = input.venue === "polymarket";
+  return {
+    buttonRows: [
+      [
+        {
+          copy_text: { text: input.address },
+          text: input.copyButtonText ?? "Copy address",
+        },
+      ],
+      [
+        {
+          callback_data: `hm:v1:deposit_qr:${input.venue}`,
+          text: "Show QR",
+        },
+      ],
+    ],
+    lines: [
+      `Network: ${isPolymarket ? "Polygon" : "Base"}`,
+      `${isPolymarket ? "Assets" : "Asset"}: ${isPolymarket ? "pUSD or USDC.e" : "USDC"}`,
+      `Address: ${input.address}`,
+      `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
+    ],
+  };
 }
 
 async function resolveDepositVenues(input: {
@@ -288,6 +410,7 @@ function buildDepositVenueMenu(
 
 function buildDepositUnavailableMessage(input: {
   appBaseUrl: string;
+  miniAppEnabled: boolean;
   resolution: Exclude<TelegramDepositResolution, { status: "ready" }>;
   venue: TelegramDepositVenue;
 }): TelegramDepositMessage {
@@ -305,31 +428,34 @@ function buildDepositUnavailableMessage(input: {
       : input.resolution.status === "verification_failed"
         ? "The saved Telegram signer does not match an internal Hunch Trading Wallet. Open Hunch to choose the wallet."
         : "An unambiguous internal EVM Trading Wallet is not available. Open Hunch to choose the wallet.";
+  const openButton = buildHunchMiniAppWebButton({
+    appBaseUrl: input.appBaseUrl,
+    enabled: input.miniAppEnabled,
+    path: isPolymarket
+      ? "/settings/telegram-trading"
+      : buildDepositAppUrl({
+          appBaseUrl: input.appBaseUrl,
+          venue: input.venue,
+        }),
+    text:
+      isPolymarket && !temporarilyUnavailable ? "Finish setup" : "Open Hunch",
+  });
   return {
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        [
-          {
-            text:
-              isPolymarket && !temporarilyUnavailable
-                ? "Finish setup"
-                : "Open Hunch",
-            url: isPolymarket
-              ? new URL(
-                  "/settings/telegram-trading",
-                  input.appBaseUrl,
-                ).toString()
-              : buildDepositAppUrl({
-                  appBaseUrl: input.appBaseUrl,
-                  venue: input.venue,
-                }),
-          },
-        ],
+        ...(openButton ? [[openButton]] : []),
         [{ callback_data: "hm:v1:deposit", text: "Back to venues" }],
       ],
     },
-    text: ["*💳 Deposit*", "", escapeTelegramMarkdownV2(text)].join("\n"),
+    text: [
+      "*💳 Deposit*",
+      "",
+      escapeTelegramMarkdownV2(text),
+      ...(!openButton
+        ? ["", escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
+        : []),
+    ].join("\n"),
   };
 }
 
@@ -338,6 +464,7 @@ export async function buildTelegramDepositMessage(input: {
   dependencies?: TelegramDepositResolverDependencies;
   internalWallets?: readonly TelegramDepositInternalWallet[] | null;
   pool: DbQuery;
+  telegramMiniAppEnabled?: boolean;
   telegramUserId: string | number;
   venue?: string | null;
 }): Promise<TelegramDepositMessage> {
@@ -383,54 +510,56 @@ export async function buildTelegramDepositMessage(input: {
           internalWallets: input.internalWallets ?? null,
           telegramUserId: input.telegramUserId,
         });
+  await recordTelegramDepositResolutionAnalytics({
+    db: input.pool,
+    reason: resolution.reason,
+    source: "deposit_menu",
+    status: resolution.status,
+    telegramUserId: input.telegramUserId,
+    venue,
+  }).catch(() => undefined);
   if (resolution.status !== "ready") {
     return buildDepositUnavailableMessage({
       appBaseUrl: input.appBaseUrl,
+      miniAppEnabled: input.telegramMiniAppEnabled === true,
       resolution,
       venue,
     });
   }
   const address = resolution.address;
   const isPolymarket = venue === "polymarket";
+  const presentation = buildTelegramDepositAddressPresentation({
+    address,
+    venue,
+  });
+  const openButton = buildHunchMiniAppWebButton({
+    appBaseUrl: input.appBaseUrl,
+    enabled: input.telegramMiniAppEnabled === true,
+    path: buildDepositAppUrl({
+      address,
+      appBaseUrl: input.appBaseUrl,
+      venue,
+    }),
+    text: "Open Hunch",
+  });
   return {
     depositAddress: address,
     parse_mode: "MarkdownV2",
     qrText: address,
     reply_markup: {
       inline_keyboard: [
-        [{ copy_text: { text: address }, text: "Copy address" }],
-        [
-          {
-            callback_data: `hm:v1:deposit_qr:${venue}`,
-            text: "Show QR",
-          },
-        ],
-        [
-          {
-            text: "Open Hunch",
-            url: buildDepositAppUrl({
-              address,
-              appBaseUrl: input.appBaseUrl,
-              venue,
-            }),
-          },
-        ],
+        ...presentation.buttonRows,
+        ...(openButton ? [[openButton]] : []),
         [{ callback_data: "hm:v1:deposit", text: "Back to venues" }],
       ],
     },
     text: [
       `*💳 ${isPolymarket ? "Polymarket" : "Limitless"} Deposit*`,
       "",
-      escapeTelegramMarkdownV2(`Network: ${isPolymarket ? "Polygon" : "Base"}`),
-      escapeTelegramMarkdownV2(
-        `${isPolymarket ? "Assets" : "Asset"}: ${isPolymarket ? "pUSD or USDC.e" : "USDC"}`,
-      ),
-      "",
-      escapeTelegramMarkdownV2(address),
-      "",
-      escapeTelegramMarkdownV2(
-        `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
-      ),
+      ...presentation.lines.map((line) => escapeTelegramMarkdownV2(line)),
+      ...(!openButton
+        ? ["", escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
+        : []),
     ].join("\n"),
     venue,
   };

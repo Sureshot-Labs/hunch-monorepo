@@ -4,6 +4,8 @@ import { ethers } from "ethers";
 import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { getRedis } from "../redis.js";
+import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
+import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 import {
   isLimitlessPartnerHmacConfigured,
   type LimitlessRequestAuthInputs,
@@ -56,6 +58,7 @@ import {
   limitlessAmmQuoteQuerySchema,
   limitlessAmmOrderBodySchema,
   limitlessCancelBatchBodySchema,
+  limitlessClobQuoteQuerySchema,
   limitlessEmbeddedEnsureReadyBodySchema,
   limitlessEmbeddedEnsureReadyExecuteBodySchema,
   limitlessEmbeddedSignOrderExecuteBodySchema,
@@ -69,6 +72,7 @@ import {
   limitlessRedemptionQuerySchema,
   limitlessSlugParamsSchema,
 } from "../schemas/limitless-private.js";
+import { quoteLimitlessClobMarket } from "../services/limitless-clob-quote.js";
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -179,6 +183,60 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
     reply.code(503);
     return reply.send({ error: "Limitless is temporarily unavailable." });
   };
+
+  z.get(
+    "/clob/quote",
+    {
+      preHandler: createAuthMiddleware(),
+      schema: { querystring: limitlessClobQuoteQuerySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+
+      const query = request.query;
+      const { rows } = await pool.query<{
+        token_no: string | null;
+        token_yes: string | null;
+      }>(
+        `
+          select
+            ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+            ${canonicalMarketTokenIdSql("m", "NO")} as token_no
+          from unified_markets m
+          where m.venue = 'limitless'
+            and m.slug = $1
+          limit 1
+        `,
+        [query.slug],
+      );
+      const market = rows[0];
+      const requestedTokenId = normalizeLimitlessRawTokenId(query.tokenId);
+      const allowed = new Set(
+        [market?.token_yes, market?.token_no]
+          .filter((tokenId): tokenId is string => Boolean(tokenId))
+          .map(normalizeLimitlessRawTokenId)
+          .filter((tokenId): tokenId is string => tokenId != null),
+      );
+      if (!market || !requestedTokenId || !allowed.has(requestedTokenId)) {
+        reply.code(400);
+        return reply.send({ error: "tokenId does not belong to slug" });
+      }
+
+      return reply.send(
+        await quoteLimitlessClobMarket({
+          amountShares: query.amountShares,
+          amountUsd: query.amountUsd,
+          side: query.side,
+          slug: query.slug,
+          tokenId: requestedTokenId,
+        }),
+      );
+    },
+  );
 
   const requireLimitlessPartnerAuth = async (inputs: {
     reply: FastifyReply;

@@ -1612,7 +1612,17 @@ const tests: TestCase[] = [
             return { rows: [] };
           }
           if (/INSERT INTO user_telegram_accounts/i.test(sql)) {
-            return { rows: [{ user_id: "user-telegram" }] };
+            return {
+              rows: [
+                {
+                  id: "telegram-account-1",
+                  user_id: "user-telegram",
+                },
+              ],
+            };
+          }
+          if (/INSERT INTO analytics_server_events/i.test(sql)) {
+            return { rows: [] };
           }
           if (/SELECT id, privy_user_id, email/i.test(sql)) {
             return {
@@ -1656,6 +1666,16 @@ const tests: TestCase[] = [
         "123456789",
         "ada",
         "Ada",
+      ]);
+      const lifecycleInsert = calls.find((call) =>
+        /INSERT INTO analytics_server_events/i.test(call.sql),
+      );
+      assert.ok(lifecycleInsert);
+      assert.deepEqual(lifecycleInsert.params?.slice(0, 4), [
+        "user-telegram",
+        "hf_telegram_account_lifecycle",
+        "privy_identity_sync",
+        "linked",
       ]);
     },
   },
@@ -1823,6 +1843,16 @@ const tests: TestCase[] = [
           if (/UPDATE user_wallets SET is_primary = true/i.test(sql)) {
             return { rows: [] };
           }
+          if (
+            /SELECT id\s+FROM user_telegram_accounts\s+WHERE user_id = \$1/i.test(
+              sql,
+            )
+          ) {
+            return { rows: [{ id: "telegram-account-1" }] };
+          }
+          if (/INSERT INTO analytics_server_events/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/UPDATE telegram_notification_preferences/i.test(sql)) {
             return { rows: [] };
           }
@@ -1873,12 +1903,17 @@ const tests: TestCase[] = [
       const preferenceUpdateIndex = calls.findIndex((call) =>
         /UPDATE telegram_notification_preferences/i.test(call.sql),
       );
+      const lifecycleInsertIndex = calls.findIndex((call) =>
+        /INSERT INTO analytics_server_events/i.test(call.sql),
+      );
       const telegramDeleteIndex = calls.findIndex((call) =>
         /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(
           call.sql,
         ),
       );
       assert.ok(preferenceUpdateIndex >= 0);
+      assert.ok(lifecycleInsertIndex >= 0);
+      assert.ok(lifecycleInsertIndex < preferenceUpdateIndex);
       assert.ok(preferenceUpdateIndex < telegramDeleteIndex);
       assert.match(
         calls[preferenceUpdateIndex]?.sql ?? "",

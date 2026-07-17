@@ -29,6 +29,7 @@ import {
   type AdminPermission,
   type AdminRole,
 } from "./services/admin-auth.js";
+import { recordTelegramLifecycleAnalytics } from "./services/telegram-lifecycle-analytics.js";
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = env.jwtSecret;
@@ -862,10 +863,11 @@ export class AuthService {
     if (!telegramUserId) return;
 
     const existingByTelegram = await client.query<{
+      id: string;
       user_id: string;
       telegram_user_id: string;
     }>(
-      `SELECT user_id, telegram_user_id
+      `SELECT id, user_id, telegram_user_id
          FROM user_telegram_accounts
         WHERE telegram_user_id = $1
         LIMIT 1`,
@@ -915,7 +917,7 @@ export class AuthService {
       2_048,
     );
 
-    const upsertResult = await client.query<{ user_id: string }>(
+    const upsertResult = await client.query<{ id: string; user_id: string }>(
       `INSERT INTO user_telegram_accounts (
          user_id,
          privy_user_id,
@@ -938,7 +940,7 @@ export class AuthService {
          updated_at = now(),
          last_seen_at = now()
        WHERE user_telegram_accounts.user_id = EXCLUDED.user_id
-       RETURNING user_id`,
+       RETURNING id, user_id`,
       [
         params.userId,
         params.privyUserId,
@@ -955,6 +957,17 @@ export class AuthService {
         "Telegram account already linked to another account",
         { conflictTelegramUserId: telegramUserId },
       );
+    }
+    const accountId = upsertResult.rows[0]?.id;
+    if (!telegramOwner && accountId) {
+      await recordTelegramLifecycleAnalytics({
+        db: client,
+        dedupeKey: `telegram-account:${accountId}:linked`,
+        event: "hf_telegram_account_lifecycle",
+        source: "privy_identity_sync",
+        status: "linked",
+        userId: params.userId,
+      });
     }
   }
 
@@ -973,6 +986,25 @@ export class AuthService {
         telegramAccount: params.telegramAccount,
       });
       return;
+    }
+
+    const existing = await client.query<{ id: string }>(
+      `SELECT id
+         FROM user_telegram_accounts
+        WHERE user_id = $1
+        LIMIT 1`,
+      [params.userId],
+    );
+    const accountId = existing.rows[0]?.id;
+    if (accountId) {
+      await recordTelegramLifecycleAnalytics({
+        db: client,
+        dedupeKey: `telegram-account:${accountId}:unlinked`,
+        event: "hf_telegram_account_lifecycle",
+        source: "privy_identity_sync",
+        status: "unlinked",
+        userId: params.userId,
+      });
     }
 
     await client.query(

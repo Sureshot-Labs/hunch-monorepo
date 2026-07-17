@@ -12,6 +12,7 @@ import {
   deriveLimitlessClobSiblingTop,
   isLimitlessTopUsable,
   LimitlessClobDirectTopTracker,
+  resolveLimitlessClobSiblingToken,
 } from "./clobComplement.js";
 
 function test(name: string, fn: () => void) {
@@ -176,6 +177,19 @@ test("recent direct sibling top blocks derived overwrite", () => {
 
   assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 30_000), true);
   assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 61_000), false);
+});
+
+test("authoritative empty sibling clear resolves identity and honors direct race", () => {
+  const pair = { yesTokenId: "limitless:yes", noTokenId: "limitless:no" };
+  assert.equal(
+    resolveLimitlessClobSiblingToken("limitless:yes", pair),
+    "limitless:no",
+  );
+
+  const tracker = new LimitlessClobDirectTopTracker();
+  tracker.markDirectTop("limitless:no", 10_000);
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 20_000), true);
+  assert.equal(tracker.shouldSkipDerivedTop("limitless:no", 80_000), false);
 });
 
 test("derived sibling check does not mark direct top", () => {

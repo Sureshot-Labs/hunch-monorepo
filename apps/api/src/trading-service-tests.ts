@@ -2593,8 +2593,24 @@ const tests: TestCase[] = [
       );
       assert.match(limitlessRestSubmitBlock, /submitLimitlessClobOrderToVenue/);
       assert.match(limitlessRestSubmitBlock, /resolveLimitlessRouteAuth/);
+      assert.match(
+        limitlessRestSubmitBlock,
+        /if \(input\.body\.orderType === "FOK"\)/,
+      );
+      assert.doesNotMatch(
+        limitlessRestSubmitBlock,
+        /limitPrice:\s*coercedPrice/,
+      );
       assert.match(limitlessRestSyncServiceBlock, /resolveLimitlessRouteAuth/);
       assert.match(limitlessBotSubmitBlock, /submitLimitlessClobOrderToVenue/);
+      assert.match(
+        limitlessBotSubmitBlock,
+        /if \(payload\.orderType === "FOK"\)/,
+      );
+      assert.doesNotMatch(
+        limitlessBotSubmitBlock,
+        /limitPrice:\s*payload\.price/,
+      );
       assert.match(limitlessRestSubmitBlock, /extractLimitlessSubmittedOrder/);
       assert.match(limitlessBotSubmitBlock, /extractLimitlessSubmittedOrder/);
     },

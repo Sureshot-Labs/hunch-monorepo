@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import crypto from "node:crypto";
 import { env } from "../env.js";
 import { pool } from "../db.js";
@@ -432,34 +433,18 @@ async function refreshCachedFixturesIfDue(input: {
 }
 
 function buildTop(row: FifaSpecialRow) {
-  const yesBid =
-    row.best_bid_yes != null
-      ? Number(row.best_bid_yes)
-      : row.best_bid != null
-        ? Number(row.best_bid)
-        : null;
-  const yesAsk =
-    row.best_ask_yes != null
-      ? Number(row.best_ask_yes)
-      : row.best_ask != null
-        ? Number(row.best_ask)
-        : null;
-  return {
-    yesBid,
-    yesAsk,
-    noBid:
-      row.best_bid_no != null
-        ? Number(row.best_bid_no)
-        : yesBid != null
-          ? Number(1 - yesBid)
-          : null,
-    noAsk:
-      row.best_ask_no != null
-        ? Number(row.best_ask_no)
-        : yesAsk != null
-          ? Number(1 - yesAsk)
-          : null,
-  };
+  return buildObservedCanonicalMarketTop({
+    yesTop: {
+      bestBid: row.best_bid_yes,
+      bestAsk: row.best_ask_yes,
+      ts: row.top_ts_yes as Date | string | number | null,
+    },
+    noTop: {
+      bestBid: row.best_bid_no,
+      bestAsk: row.best_ask_no,
+      ts: row.top_ts_no as Date | string | number | null,
+    },
+  });
 }
 
 function buildMarket(row: FifaSpecialRow) {
@@ -475,6 +460,9 @@ function buildMarket(row: FifaSpecialRow) {
       row.market_metadata,
     ),
   });
+  const observedTop = acceptingOrders
+    ? buildTop(row)
+    : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
   const fifa = buildFifaMeta(row, { scope: "market" });
   return {
     venue: String(row.venue),
@@ -506,7 +494,13 @@ function buildMarket(row: FifaSpecialRow) {
     lastPrice: numberOrNull(row.last_price),
     resolvedOutcome: row.resolved_outcome ?? null,
     resolvedOutcomePct: numberOrNull(row.resolved_outcome_pct),
-    top: buildTop(row),
+    top: {
+      yesBid: observedTop.yesBid,
+      yesAsk: observedTop.yesAsk,
+      noBid: observedTop.noBid,
+      noAsk: observedTop.noAsk,
+    },
+    topAsOf: observedTop.topAsOf,
     change24h: numberOrNull(row.change_24h),
     createdAt: row.market_created_at ?? null,
     startAt: row.market_open_time ?? null,
@@ -747,7 +741,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         ? Math.min(env.feedTtlSec, FIFA_LIVE_CACHE_TTL_SEC)
         : 0;
     const cacheEnabled = cacheTtl > 0;
-    const cacheKey = `special:fifa-2026:live:v2:${lifecycle.revision}`;
+    const cacheKey = `special:fifa-2026:live:v4:${lifecycle.revision}`;
     const staleCacheKey = `${cacheKey}:stale`;
 
     if (cacheEnabled && r) {
@@ -935,7 +929,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       const teamGroupCodesKey = q.team_group_code?.join(",") ?? "";
       const cacheTtl = env.feedTtlSec;
       const cacheEnabled = cacheTtl > 0;
-      const cacheKey = `special:fifa-2026:v7:${lifecycle.revision}:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
+      const cacheKey = `special:fifa-2026:v9:${lifecycle.revision}:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
       const staleCacheKey = `${cacheKey}:stale`;
       const staleTtl = Math.max(cacheTtl * 60, 6 * 60 * 60);
       const redisContext = await (

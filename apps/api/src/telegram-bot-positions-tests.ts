@@ -101,6 +101,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const message = buildTelegramPositionsSnapshotMessage({
         appBaseUrl: "https://app.hunch.trade",
         snapshot: { partialFailure: false, positions: [result] },
+        telegramMiniAppEnabled: true,
       });
       assert.match(message.text, /Details unavailable/);
       assert.match(message.text, /Valuation coverage: 0\/1/);
@@ -120,6 +121,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const message = buildTelegramPositionsSnapshotMessage({
         appBaseUrl: "https://app.hunch.trade",
         snapshot: { partialFailure: false, positions },
+        telegramMiniAppEnabled: true,
       });
       assert.match(message.text, /Portfolio value/);
       assert.match(message.text, /PnL:/);

@@ -235,9 +235,7 @@ export function normalizeTelegramMiniAppLinkBase(
   try {
     const url = new URL(trimmed);
     if (url.protocol !== "https:") return null;
-    if (url.hostname !== "t.me" && url.hostname !== "telegram.me") {
-      return null;
-    }
+    if (url.hostname !== "t.me") return null;
     const pathParts = url.pathname.split("/").filter(Boolean);
     if (pathParts.length < 1 || pathParts.length > 2) return null;
     if (!pathParts.every((part) => /^[A-Za-z0-9_]{3,64}$/.test(part))) {

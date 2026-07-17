@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 
-import { handleSignalBotInteractiveMenuCallback } from "./services/telegram-bot-menu-actions.js";
+import {
+  handleSignalBotInteractiveMenuCallback,
+  parseSignalBotInteractiveMenuRoute,
+} from "./services/telegram-bot-menu-actions.js";
 import {
   buildSignalBotMarketSearchScreen,
   writeSignalBotMarketSearchSession,
@@ -11,6 +14,11 @@ import {
 } from "./services/telegram-bot-menu-search-input.js";
 import { writeSignalBotMenuInput } from "./services/telegram-bot-menu-state.js";
 import { TELEGRAM_MESSAGE_PAYLOAD_BUDGET } from "./services/telegram-bot-text-budget.js";
+import {
+  diversifyTelegramMarketSearchResults,
+  groupTelegramMarketSearchResults,
+  resolveTelegramSearchSecondaryVenues,
+} from "./services/telegram-market-search.js";
 
 function redisStore() {
   const values = new Map<string, string>();
@@ -77,6 +85,157 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sameTitleMessage.text.match(/Spain wins the World Cup/gi)?.length,
         1,
       );
+    },
+  },
+  {
+    name: "dominant-venue and excluded-venue searches are interleaved by rank",
+    run: () => {
+      const primary = Array.from({ length: 5 }, (_, index) => ({
+        ...sampleResult,
+        marketId: `limitless-${index}`,
+        venue: "limitless",
+      }));
+      const secondary = Array.from({ length: 2 }, (_, index) => ({
+        ...sampleResult,
+        marketId: `polymarket-${index}`,
+        venue: "polymarket",
+      }));
+      const results = diversifyTelegramMarketSearchResults({
+        limit: 5,
+        primary,
+        secondary,
+      });
+      assert.deepEqual(
+        results.map((result) => result.venue),
+        ["limitless", "polymarket", "limitless", "polymarket", "limitless"],
+      );
+      assert.deepEqual(
+        resolveTelegramSearchSecondaryVenues({
+          results: primary,
+          venues: ["polymarket", "limitless", "kalshi"],
+        }),
+        ["polymarket", "kalshi"],
+      );
+      assert.deepEqual(
+        resolveTelegramSearchSecondaryVenues({
+          results: [primary[0]!, secondary[0]!],
+          venues: ["polymarket", "limitless", "kalshi"],
+        }),
+        [],
+      );
+    },
+  },
+  {
+    name: "AGG-equivalent search hits collapse into one logical result",
+    run: () => {
+      const limitless = {
+        ...sampleResult,
+        marketId: "limitless-market",
+        venue: "limitless",
+      };
+      const polymarket = {
+        ...sampleResult,
+        marketId: "polymarket-market",
+        venue: "polymarket",
+      };
+      const other = {
+        ...sampleResult,
+        marketId: "other-limitless-market",
+        marketTitle: "A different market",
+        venue: "limitless",
+      };
+      const grouped = groupTelegramMarketSearchResults({
+        alternativesByMarketId: new Map([
+          [limitless.marketId, [polymarket]],
+          [polymarket.marketId, [limitless]],
+        ]),
+        results: [limitless, polymarket, other],
+      });
+      assert.equal(grouped.length, 2);
+      assert.equal(grouped[0]?.marketId, limitless.marketId);
+      assert.deepEqual(
+        grouped[0]?.venueOptions?.map((option) => option.venue),
+        ["limitless", "polymarket"],
+      );
+      assert.equal(grouped[1]?.marketId, other.marketId);
+    },
+  },
+  {
+    name: "cross-venue result opens a venue picker before the market card",
+    run: async () => {
+      const redis = redisStore();
+      const polymarket = {
+        ...sampleResult,
+        marketId: "polymarket-market",
+        venue: "polymarket",
+      };
+      const limitless = {
+        ...sampleResult,
+        marketId: "limitless-market",
+        venue: "limitless",
+      };
+      const groupedResult = {
+        ...limitless,
+        venueOptions: [limitless, polymarket],
+      };
+      const sessionId = await writeSignalBotMarketSearchSession({
+        chatId: "10",
+        query: "World Cup",
+        redis,
+        results: [groupedResult],
+        telegramUserId: 20,
+      });
+      let loadCalls = 0;
+      let rendered = "";
+      await handleSignalBotInteractiveMenuCallback({
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        loadMarketCard: async () => {
+          loadCalls += 1;
+          return { text: "Market card" };
+        },
+        messageId: 42,
+        redis,
+        render: async (message) => {
+          rendered = JSON.stringify(message);
+        },
+        renderExpiredSearch: async () => undefined,
+        route: { index: 0, kind: "market_search_result", sessionId },
+        telegramUserId: 20,
+      });
+      assert.equal(loadCalls, 0);
+      assert.match(rendered, /Choose a venue/);
+      assert.match(rendered, /Limitless/);
+      assert.match(rendered, /Polymarket/);
+
+      const route = parseSignalBotInteractiveMenuRoute(
+        `search_venue:${sessionId}:0:1`,
+      );
+      assert.deepEqual(route, {
+        index: 1,
+        kind: "market_search_venue",
+        resultIndex: 0,
+        sessionId,
+      });
+      let loadedMarketId = "";
+      let returnCallbackData = "";
+      await handleSignalBotInteractiveMenuCallback({
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        loadMarketCard: async (input) => {
+          loadedMarketId = input.marketRef;
+          returnCallbackData = input.context.returnCallbackData;
+          return { text: "Market card" };
+        },
+        messageId: 42,
+        redis,
+        render: async () => undefined,
+        renderExpiredSearch: async () => undefined,
+        route: route!,
+        telegramUserId: 20,
+      });
+      assert.equal(loadedMarketId, polymarket.marketId);
+      assert.equal(returnCallbackData, `hm:v1:search:${sessionId}:0`);
     },
   },
   {
@@ -197,7 +356,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "one-character text stays in input mode without searching",
+    name: "one-character text is still sent to market search",
     run: async () => {
       const redis = redisStore();
       await writeSignalBotMenuInput({
@@ -223,8 +382,30 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramUserId: 20,
         text: "S",
       });
+      assert.equal(searchCalls, 1);
+      assert.match(rendered, /No active markets found/);
+    },
+  },
+  {
+    name: "slash commands are never sent to market search",
+    run: async () => {
+      const redis = redisStore();
+      let searchCalls = 0;
+      const handled = await handleSignalBotMarketSearchInput({
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        redis,
+        render: async () => undefined,
+        renderCancelled: async () => undefined,
+        searchMarkets: async () => {
+          searchCalls += 1;
+          return [];
+        },
+        telegramUserId: 20,
+        text: "/menu",
+      });
+      assert.equal(handled, false);
       assert.equal(searchCalls, 0);
-      assert.match(rendered, /at least 2 characters/);
     },
   },
   {

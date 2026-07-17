@@ -806,6 +806,13 @@ export async function expireStaleLimitlessFokOrders(
         and venue = 'limitless'
         and order_type = 'FOK'
         and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
+        and not (
+          coalesce(order_payload->'_hunchUpstream'->'execution'->>'matched', 'false') = 'true'
+          and upper(coalesce(
+            order_payload->'_hunchUpstream'->'execution'->>'settlementStatus',
+            ''
+          )) in ('MINED', 'CONFIRMED')
+        )
         and (wallet_address is null or wallet_address = $2 or signer_address = $2)
         and coalesce(order_payload->>'marketSlug', '') = $3
         and (venue_order_id is null or venue_order_id <> all($4::text[]))

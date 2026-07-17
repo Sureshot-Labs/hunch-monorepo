@@ -2,6 +2,7 @@ import { generateTelegramDepositQr } from "./telegram-bot-deposit-qr.js";
 import {
   buildSignalBotMarketUnavailableResultScreen,
   buildSignalBotMarketSearchScreen,
+  buildSignalBotMarketVenuePickerScreen,
   readSignalBotMarketSearchSession,
 } from "./telegram-bot-menu-markets.js";
 import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
@@ -11,6 +12,12 @@ export type SignalBotInteractiveMenuRoute =
   | { kind: "deposit_menu" }
   | { index: number; kind: "market_search_result"; sessionId: string }
   | { kind: "market_search_back"; sessionId: string }
+  | {
+      index: number;
+      kind: "market_search_venue";
+      resultIndex: number;
+      sessionId: string;
+    }
   | { kind: "position"; positionId: string };
 
 export function parseSignalBotInteractiveMenuRoute(
@@ -29,6 +36,17 @@ export function parseSignalBotInteractiveMenuRoute(
     return {
       kind: "market_search_back",
       sessionId: searchBackMatch[1] ?? "",
+    };
+  }
+  const searchVenueMatch = route.match(
+    /^search_venue:([a-f0-9]{12}):(\d):(\d)$/i,
+  );
+  if (searchVenueMatch) {
+    return {
+      index: Number(searchVenueMatch[3]),
+      kind: "market_search_venue",
+      resultIndex: Number(searchVenueMatch[2]),
+      sessionId: searchVenueMatch[1] ?? "",
     };
   }
   const positionMatch = route.match(
@@ -78,6 +96,7 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
     chatId: string;
     context: { origin: "search"; returnCallbackData: string };
     marketRef: string;
+    publicBrowseOnly?: boolean;
     telegramMessageId: number | null;
     telegramUserId: number;
   }) => Promise<MenuMessage>;
@@ -103,7 +122,8 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
   const { route } = input;
   if (
     route.kind === "market_search_result" ||
-    route.kind === "market_search_back"
+    route.kind === "market_search_back" ||
+    route.kind === "market_search_venue"
   ) {
     const session = await readSignalBotMarketSearchSession({
       chatId: input.chatId,
@@ -126,8 +146,31 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
       );
       return true;
     }
-    const selected = session.results[route.index];
+    const resultIndex =
+      route.kind === "market_search_venue" ? route.resultIndex : route.index;
+    const selected = session.results[resultIndex];
     if (!selected || !input.loadMarketCard) {
+      await input.renderExpiredSearch();
+      return true;
+    }
+    const options =
+      selected.venueOptions && selected.venueOptions.length > 0
+        ? selected.venueOptions
+        : [selected];
+    if (route.kind === "market_search_result" && options.length > 1) {
+      await input.render(
+        buildSignalBotMarketVenuePickerScreen({
+          callbackPrefix: input.callbackPrefix,
+          result: selected,
+          resultIndex,
+          sessionId: route.sessionId,
+        }),
+      );
+      return true;
+    }
+    const selectedVenue =
+      route.kind === "market_search_venue" ? options[route.index] : selected;
+    if (!selectedVenue) {
       await input.renderExpiredSearch();
       return true;
     }
@@ -136,9 +179,12 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
         chatId: input.chatId,
         context: {
           origin: "search",
-          returnCallbackData: `${input.callbackPrefix}search_back:${route.sessionId}`,
+          returnCallbackData:
+            options.length > 1
+              ? `${input.callbackPrefix}search:${route.sessionId}:${resultIndex}`
+              : `${input.callbackPrefix}search_back:${route.sessionId}`,
         },
-        marketRef: selected.marketId,
+        marketRef: selectedVenue.marketId,
         telegramMessageId: input.messageId,
         telegramUserId: input.telegramUserId,
       });

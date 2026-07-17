@@ -36,6 +36,7 @@ import {
 } from "./mappers.js";
 import {
   writeResolvedTerminalTokenTops,
+  getUnifiedBookTopWriteStats,
   upsertUnifiedEvent,
   upsertUnifiedMarket,
   upsertUnifiedTokens,
@@ -86,12 +87,14 @@ import {
   limitlessClobDirectTopTracker,
   recordLimitlessClobDerivedSiblingTopSkippedRecentDirect,
   recordLimitlessClobDerivedSiblingTopUpdated,
+  resolveLimitlessClobSiblingToken,
   type LimitlessClobTokenPair,
 } from "./clobComplement.js";
 
 const detailCache = new Map<string, TLimitlessMarket>();
 const hotAmmQuoteRetryAt = new Map<string, number>();
 const topTickGate = createTopTickGate({
+  allowEmpty: true,
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
     void publishTokenTopNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
       log.warn("Deferred top tick publish failed", {
@@ -154,9 +157,11 @@ async function publishTokenTop(
   bestAsk: number | null,
   ts: Date,
   snapshot?: unknown,
+  authoritativeEmpty = false,
 ): Promise<boolean> {
-  if (bestBid == null && bestAsk == null) return false;
-  if (!isLimitlessTopUsable(bestBid, bestAsk)) return false;
+  const empty = bestBid == null && bestAsk == null;
+  if (empty && !authoritativeEmpty) return false;
+  if (!empty && !isLimitlessTopUsable(bestBid, bestAsk)) return false;
   const tsMs = ts.getTime();
   if (!topTickGate.shouldPublish({ tokenId, bestBid, bestAsk, tsMs })) {
     return false;
@@ -173,7 +178,6 @@ async function publishTokenTopNow(
   tsMs: number,
   snapshot?: unknown,
 ): Promise<void> {
-  if (bestBid == null && bestAsk == null) return;
   const tick = {
     token_id: tokenId,
     best_bid: bestBid,
@@ -196,7 +200,9 @@ async function publishTokenTopNow(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs)),
+    writeUnifiedBookTop(pool, tokenId, bestBid, bestAsk, new Date(tsMs), {
+      touchLatestWhenUnchanged: true,
+    }),
     multi.exec(),
   ]);
 }
@@ -243,9 +249,12 @@ async function publishClobTopWithSibling(input: {
   ts: Date;
   snapshot?: unknown;
   pair: LimitlessClobTokenPair | null;
+  authoritativeEmpty?: boolean;
 }): Promise<void> {
   const tsMs = input.ts.getTime();
-  if (!isLimitlessTopUsable(input.bestBid, input.bestAsk)) return;
+  const empty = input.bestBid == null && input.bestAsk == null;
+  if (empty && !input.authoritativeEmpty) return;
+  if (!empty && !isLimitlessTopUsable(input.bestBid, input.bestAsk)) return;
   limitlessClobDirectTopTracker.markDirectTop(input.directTokenId, tsMs);
   await publishTokenTop(
     input.directTokenId,
@@ -253,16 +262,26 @@ async function publishClobTopWithSibling(input: {
     input.bestAsk,
     input.ts,
     input.snapshot,
+    input.authoritativeEmpty,
   );
 
   if (!input.pair) return;
-  const sibling = deriveLimitlessClobSiblingTop({
-    directTokenId: input.directTokenId,
-    pair: input.pair,
-    bestBid: input.bestBid,
-    bestAsk: input.bestAsk,
-  });
-  if (!sibling) return;
+  const sibling = empty
+    ? {
+        tokenId: resolveLimitlessClobSiblingToken(
+          input.directTokenId,
+          input.pair,
+        ),
+        bestBid: null,
+        bestAsk: null,
+      }
+    : deriveLimitlessClobSiblingTop({
+        directTokenId: input.directTokenId,
+        pair: input.pair,
+        bestBid: input.bestBid,
+        bestAsk: input.bestAsk,
+      });
+  if (!sibling?.tokenId) return;
 
   if (
     limitlessClobDirectTopTracker.shouldSkipDerivedTop(sibling.tokenId, tsMs)
@@ -276,6 +295,8 @@ async function publishClobTopWithSibling(input: {
     sibling.bestBid,
     sibling.bestAsk,
     input.ts,
+    undefined,
+    empty,
   );
   if (published) recordLimitlessClobDerivedSiblingTopUpdated();
 }
@@ -475,7 +496,7 @@ async function applyOrderbookTop(
     if (bestBid != null) unifiedMarket.best_bid = bestBid;
     if (bestAsk != null) unifiedMarket.best_ask = bestAsk;
 
-    if (obTokenId && (bestBid != null || bestAsk != null)) {
+    if (obTokenId) {
       const ts = new Date();
       await publishClobTopWithSibling({
         directTokenId: obTokenId,
@@ -489,6 +510,7 @@ async function applyOrderbookTop(
           timestamp: ts.getTime().toString(),
         },
         pair: tokenPair,
+        authoritativeEmpty: bestBid == null && bestAsk == null,
       });
     }
   } catch (error) {
@@ -749,6 +771,7 @@ type LimitlessHttpFallbackReason =
   | "amm_no_quote"
   | "amm_quote"
   | "clob_missing_slug"
+  | "clob_empty_book"
   | "clob_no_book_top"
   | "clob_orderbook"
   | "error"
@@ -900,7 +923,7 @@ async function refreshLimitlessMarketTop(
   const bestAsk = ob.asks?.[0]?.price ?? null;
   const obTokenId =
     prefixLimitlessToken(ob.tokenId) ?? prefixLimitlessToken(row.token_yes);
-  if (!obTokenId || (bestBid == null && bestAsk == null)) {
+  if (!obTokenId) {
     return { updated: false, reason: "clob_no_book_top" };
   }
 
@@ -917,8 +940,13 @@ async function refreshLimitlessMarketTop(
       timestamp: ts.getTime().toString(),
     },
     pair: resolveLimitlessClobTokenPair(row.token_yes, row.token_no),
+    authoritativeEmpty: bestBid == null && bestAsk == null,
   });
-  return { updated: true, reason: "clob_orderbook" };
+  return {
+    updated: true,
+    reason:
+      bestBid == null && bestAsk == null ? "clob_empty_book" : "clob_orderbook",
+  };
 }
 
 function isPermanentLimitlessPriceRefreshError(error: unknown): boolean {
@@ -1122,6 +1150,7 @@ export async function processPriceRefreshQueue(
   const httpFallbackReasons: Record<string, number> = {};
   const httpFallbackNoTopSamples: LimitlessHttpFallbackSample[] = [];
   const complementStatsBefore = getLimitlessClobComplementStats();
+  const bookTopWriteStatsBefore = getUnifiedBookTopWriteStats();
   const failedTokenIds: string[] = [];
   try {
     const freshness = await filterStalePriceRefreshTokens(pool, tokenIds, {
@@ -1355,6 +1384,14 @@ export async function processPriceRefreshQueue(
   const complementStats = diffLimitlessClobComplementStats(
     complementStatsBefore,
   );
+  const bookTopWriteStatsAfter = getUnifiedBookTopWriteStats();
+  const bookTopWriteStats = Object.fromEntries(
+    Object.entries(bookTopWriteStatsAfter).map(([key, value]) => [
+      key,
+      value -
+        bookTopWriteStatsBefore[key as keyof typeof bookTopWriteStatsBefore],
+    ]),
+  );
   const wsDemandEvents = diffLimitlessWsDemandEventStats(
     wsDemandEventStatsBefore,
   );
@@ -1379,6 +1416,7 @@ export async function processPriceRefreshQueue(
       derivedSiblingTopUpdated: complementStats.derivedSiblingTopUpdated,
       derivedSiblingTopSkippedRecentDirect:
         complementStats.derivedSiblingTopSkippedRecentDirect,
+      bookTopWriteStats,
       wsDemandTargetsByTradeType,
       wsDemandTokensByTradeType,
       wsDemandFilledByTradeType,

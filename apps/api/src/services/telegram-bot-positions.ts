@@ -7,6 +7,7 @@ import { fetchPositionsForUserWallet } from "../repos/positions-repo.js";
 import { fetchMarketsByTokenIds } from "../repos/unified-read.js";
 import { mapMarketsByTokenRows } from "./markets-by-token-response.js";
 import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
 import {
   canAppendTelegramBlock,
@@ -472,6 +473,7 @@ export async function loadTelegramPositions(input: {
 export function buildTelegramPositionsSnapshotMessage(input: {
   appBaseUrl: string;
   snapshot: TelegramPositionsSnapshot;
+  telegramMiniAppEnabled?: boolean;
 }): TelegramBotTradingClientMessage {
   const positions = input.snapshot.positions;
   const valued = positions.filter(
@@ -580,6 +582,18 @@ export function buildTelegramPositionsSnapshotMessage(input: {
     lines.push("", "_Some balances may be delayed\\._");
   }
 
+  const portfolioButton = buildHunchMiniAppWebButton({
+    appBaseUrl: input.appBaseUrl,
+    enabled: input.telegramMiniAppEnabled === true,
+    path: "/portfolio",
+    text: "Open portfolio",
+  });
+  if (!portfolioButton) {
+    lines.push(
+      "",
+      escapeTelegramMarkdownV2("Mini App temporarily unavailable."),
+    );
+  }
   return {
     parse_mode: "MarkdownV2",
     reply_markup: {
@@ -601,12 +615,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
               ),
             },
           ]),
-        [
-          {
-            text: "Open portfolio",
-            url: new URL("/portfolio", input.appBaseUrl).toString(),
-          },
-        ],
+        ...(portfolioButton ? [[portfolioButton]] : []),
       ],
     },
     text: lines.join("\n"),
@@ -616,6 +625,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
 export async function buildTelegramPositionsMessage(input: {
   appBaseUrl: string;
   pool: Pool;
+  telegramMiniAppEnabled?: boolean;
   telegramUserId: string | number;
 }): Promise<TelegramBotTradingClientMessage> {
   const loaded = await loadTelegramPositions(input);
@@ -628,5 +638,6 @@ export async function buildTelegramPositionsMessage(input: {
   return buildTelegramPositionsSnapshotMessage({
     appBaseUrl: input.appBaseUrl,
     snapshot: loaded.snapshot,
+    telegramMiniAppEnabled: input.telegramMiniAppEnabled,
   });
 }

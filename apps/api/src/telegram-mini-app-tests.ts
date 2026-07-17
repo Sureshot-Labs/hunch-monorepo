@@ -12,6 +12,10 @@ import {
   normalizeTelegramStartParam,
   validateTelegramInitData,
 } from "./lib/telegram-mini-app.js";
+import {
+  buildHunchMiniAppDeepLinkButton,
+  buildHunchMiniAppWebButton,
+} from "./services/telegram-mini-app-buttons.js";
 
 type TestCase = {
   name: string;
@@ -191,6 +195,55 @@ const tests: TestCase[] = [
       assert.equal(normalizeTelegramStartParam("event_../admin"), null);
       assert.equal(normalizeTelegramStartParam(`e_${"x".repeat(511)}`), null);
       assert.equal(normalizeTelegramStartParam("unknown_value"), null);
+    },
+  },
+  {
+    name: "Hunch Telegram CTA builders never emit a raw website fallback",
+    run: () => {
+      assert.equal(
+        buildHunchMiniAppWebButton({
+          appBaseUrl: "https://app.hunch.trade",
+          enabled: false,
+          path: "/portfolio",
+          text: "Open portfolio",
+        }),
+        null,
+      );
+      assert.equal(
+        buildHunchMiniAppDeepLinkButton({
+          miniAppLinkBase: null,
+          startParam: "m_test",
+          text: "Open market",
+        }),
+        null,
+      );
+      assert.equal(
+        buildHunchMiniAppDeepLinkButton({
+          miniAppLinkBase: "https://app.hunch.trade/tg",
+          startParam: "m_test",
+          text: "Open market",
+        }),
+        null,
+      );
+      const privateButton = buildHunchMiniAppWebButton({
+        appBaseUrl: "https://app.hunch.trade",
+        enabled: true,
+        path: "/portfolio",
+        text: "Open portfolio",
+      });
+      assert.ok(privateButton && "web_app" in privateButton);
+      assert.equal(privateButton && "url" in privateButton, false);
+
+      const publicButton = buildHunchMiniAppDeepLinkButton({
+        miniAppLinkBase: "https://t.me/hunch_bot/hunch",
+        startParam: "m_test",
+        text: "Open market",
+      });
+      assert.ok(publicButton && "url" in publicButton);
+      assert.match(
+        publicButton && "url" in publicButton ? publicButton.url : "",
+        /^https:\/\/t\.me\//,
+      );
     },
   },
   {

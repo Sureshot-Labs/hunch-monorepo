@@ -12,6 +12,7 @@ import {
 } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
+import { canonicalMarketTokenIdSql } from "./canonical-market-token-sql.js";
 
 export type FeedInputs = {
   limit: number;
@@ -408,8 +409,9 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const yesMidExpr = `
     case
-      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
-      else coalesce(m.best_bid, m.best_ask)
+      when m.best_bid is not null and m.best_ask is not null
+        then (m.best_bid + m.best_ask) / 2
+      else null
     end
   `;
 
@@ -1673,11 +1675,12 @@ function buildFeedBookSnapshotCtes(args: {
       latest_book as materialized (
         select
           b.token_id,
+          b.ts,
           b.best_bid,
           b.best_ask
         from unified_token_top_latest b
         join token_set ts on ts.token_id = b.token_id
-        where b.ts > (${args.nowParam}::timestamptz - interval '7 days')
+        where b.ts >= (${args.nowParam}::timestamptz - interval '10 minutes')
       )
     `,
   ];
@@ -2221,8 +2224,10 @@ export type FeedMarketRow = {
   best_ask: unknown;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
+  top_ts_yes: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
+  top_ts_no: unknown;
   last_price: unknown;
   resolved_outcome: string | null;
   resolved_outcome_pct: unknown;
@@ -2301,8 +2306,9 @@ export async function fetchFeedMarkets(
     : null;
   const yesMidExpr = `
     case
-      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
-      else coalesce(m.best_bid, m.best_ask)
+      when m.best_bid is not null and m.best_ask is not null
+        then (m.best_bid + m.best_ask) / 2
+      else null
     end
   `;
   const marketWhere: string[] = [
@@ -2560,16 +2566,8 @@ export async function fetchFeedMarkets(
   const marketBaseSql = `
     select
       m.*,
-      case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null
-          then (m.clob_token_ids::jsonb->>0)
-        else m.token_yes
-      end as resolved_token_yes,
-      case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null
-          then (m.clob_token_ids::jsonb->>1)
-        else m.token_no
-      end as resolved_token_no
+      ${canonicalMarketTokenIdSql("m", "YES")} as resolved_token_yes,
+      ${canonicalMarketTokenIdSql("m", "NO")} as resolved_token_no
     from (${rankedMarketSql}) m
     where m.market_rank <= ${add(perEventMarketLimit)}
   `;
@@ -2680,8 +2678,10 @@ export async function fetchFeedMarkets(
       ${marketBestAskExpr} as best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       ${marketLastPriceExpr} as last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
@@ -3684,16 +3684,8 @@ export async function fetchFeedMarketsDirect(
       m.*,
       mc.ord as ord
       ${inputs.sort === "change24h" ? ", mc.change_24h as change_24h" : ""}
-      , case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null
-          then (m.clob_token_ids::jsonb->>0)
-        else m.token_yes
-      end as resolved_token_yes,
-      case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null
-          then (m.clob_token_ids::jsonb->>1)
-        else m.token_no
-      end as resolved_token_no
+      , ${canonicalMarketTokenIdSql("m", "YES")} as resolved_token_yes,
+      ${canonicalMarketTokenIdSql("m", "NO")} as resolved_token_no
     from unified_markets m
     join market_candidates mc on mc.id = m.id
   `;
@@ -3788,8 +3780,10 @@ export async function fetchFeedMarketsDirect(
       ${marketBestAskExpr} as best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       ${marketLastPriceExpr} as last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
@@ -3987,8 +3981,9 @@ export async function fetchFavoriteFeedEventPage(
   `;
   const yesMidExpr = `
     case
-      when m.best_bid is not null and m.best_ask is not null then (m.best_bid + m.best_ask) / 2
-      else coalesce(m.best_bid, m.best_ask)
+      when m.best_bid is not null and m.best_ask is not null
+        then (m.best_bid + m.best_ask) / 2
+      else null
     end
   `;
   const change24hCteParts: string[] = [];
@@ -4230,8 +4225,10 @@ export type MarketDetailsRow = {
   best_ask: unknown;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
+  top_ts_yes: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
+  top_ts_no: unknown;
   last_price: unknown;
   outcomes: string | null;
   token_yes: string | null;
@@ -4300,8 +4297,10 @@ export async function fetchMarketDetails(
       m.best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       m.last_price,
       m.outcomes,
       mt.token_yes,
@@ -4334,31 +4333,23 @@ export async function fetchMarketDetails(
     JOIN unified_markets m ON m.event_id = e.id
     cross join lateral (
       select
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>0)
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>1)
-          else m.token_no
-        end as token_no
+        ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+        ${canonicalMarketTokenIdSql("m", "NO")} as token_no
     ) mt
     left join lateral (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = mt.token_yes
         and m.status = 'ACTIVE'
-        and ts > now() - interval '7 days'
+        and ts >= now() - interval '10 minutes'
       limit 1
     ) yes_top on true
     left join lateral (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = mt.token_no
         and m.status = 'ACTIVE'
-        and ts > now() - interval '7 days'
+        and ts >= now() - interval '10 minutes'
       limit 1
     ) no_top on true
     LEFT JOIN polymarket_markets pm
@@ -4418,8 +4409,10 @@ export type EventDetailsRow = {
   best_ask: unknown;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
+  top_ts_yes: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
+  top_ts_no: unknown;
   last_price: unknown;
   outcomes: string | null;
   token_yes: unknown;
@@ -4451,8 +4444,10 @@ export type MarketSignalPricingRow = {
   token_no: string | null;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
+  top_ts_yes: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
+  top_ts_no: unknown;
   last_price: unknown;
   market_metadata: unknown;
   resolved_outcome: string | null;
@@ -4513,8 +4508,10 @@ export async function fetchEventDetails(
       m.best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       m.last_price,
       m.outcomes,
       mt.token_yes,
@@ -4547,25 +4544,17 @@ export async function fetchEventDetails(
       AND ${supportedLimitlessMarketExpr}
     LEFT JOIN LATERAL (
       select
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>0)
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>1)
-          else m.token_no
-        end as token_no
+        ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+        ${canonicalMarketTokenIdSql("m", "NO")} as token_no
     ) mt on true
     LEFT JOIN LATERAL (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = mt.token_yes
       limit 1
     ) yes_top on true
     LEFT JOIN LATERAL (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = mt.token_no
       limit 1
@@ -4609,8 +4598,10 @@ export async function fetchMarketSignalPricingByIds(
       mt.token_no,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       m.last_price,
       m.metadata as market_metadata,
       m.resolved_outcome,
@@ -4618,25 +4609,17 @@ export async function fetchMarketSignalPricingByIds(
     FROM unified_markets m
     LEFT JOIN LATERAL (
       select
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>0)
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null
-            then (m.clob_token_ids::jsonb->>1)
-          else m.token_no
-        end as token_no
+        ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+        ${canonicalMarketTokenIdSql("m", "NO")} as token_no
     ) mt on true
     LEFT JOIN LATERAL (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = mt.token_yes
       limit 1
     ) yes_top on true
     LEFT JOIN LATERAL (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = mt.token_no
       limit 1
@@ -4680,8 +4663,10 @@ export type MarketByTokenRow = {
   best_ask: unknown;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
+  top_ts_yes: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
+  top_ts_no: unknown;
   last_price: unknown;
   outcomes: string | null;
   token_yes: string | null;
@@ -4753,25 +4738,29 @@ export async function fetchMarketsByTokenIds(
   const topSelect = includeTop
     ? `yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
-      no_top.best_ask as best_ask_no,`
+      no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,`
     : `null::numeric as best_bid_yes,
       null::numeric as best_ask_yes,
+      null::timestamptz as top_ts_yes,
       null::numeric as best_bid_no,
-      null::numeric as best_ask_no,`;
+      null::numeric as best_ask_no,
+      null::timestamptz as top_ts_no,`;
   const topJoins = includeTop
     ? `left join lateral (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = token_yes.token_id
-        and ts > now() - interval '7 days'
+        and ts >= now() - interval '10 minutes'
       limit 1
     ) yes_top on true
     left join lateral (
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = token_no.token_id
-        and ts > now() - interval '7 days'
+        and ts >= now() - interval '10 minutes'
       limit 1
     ) no_top on true`
     : "";
@@ -4953,12 +4942,22 @@ export async function fetchMarketsByTokenIds(
       e.metadata as event_metadata
     from ranked_token_matches tm
     join unified_markets m on m.id = tm.market_id
-    left join unified_market_tokens token_yes
-      on token_yes.market_id = m.id
-     and token_yes.outcome_side = 'YES'
-    left join unified_market_tokens token_no
-      on token_no.market_id = m.id
-     and token_no.outcome_side = 'NO'
+    left join lateral (
+      select umt.token_id
+      from unified_market_tokens umt
+      where umt.market_id = m.id
+        and umt.outcome_side = 'YES'
+      order by umt.updated_at desc nulls last, umt.token_id asc
+      limit 1
+    ) token_yes on true
+    left join lateral (
+      select umt.token_id
+      from unified_market_tokens umt
+      where umt.market_id = m.id
+        and umt.outcome_side = 'NO'
+      order by umt.updated_at desc nulls last, umt.token_id asc
+      limit 1
+    ) token_no on true
     ${topJoins}
     left join polymarket_markets pm
       on pm.id = m.venue_market_id and m.venue = 'polymarket'

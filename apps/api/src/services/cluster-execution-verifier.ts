@@ -2,13 +2,17 @@ import crypto from "node:crypto";
 import type { Pool } from "@hunch/infra";
 
 import { isRecord } from "../lib/type-guards.js";
-import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
 import {
   applyClusterExecutionVerification,
   type ClusterExecutionSummary,
   type ClusterExecutionVerification,
   type ClusterNativeOutcome,
 } from "./cluster-execution.js";
+import {
+  limitlessClobLevelsForToken,
+  parseLimitlessClobBook,
+  type LimitlessClobBookLevel,
+} from "./limitless-clob-book.js";
 import { limitlessRequest } from "./limitless-client.js";
 import {
   calculatePolymarketQuote,
@@ -23,6 +27,7 @@ const VERIFICATION_MAX_LEG_COST_USD = 25;
 const VERIFICATION_CACHE_TTL_MS = 15_000;
 const VERIFICATION_CACHE_MAX_ENTRIES = 500;
 const LIMITLESS_PUBLIC_FEE_BPS = 300;
+const LIMITLESS_FOK_MIN_SHARES = 0.000001;
 
 type VerificationCluster = {
   execution: ClusterExecutionSummary;
@@ -250,64 +255,7 @@ async function preparePolymarketLeg(input: {
   };
 }
 
-export type LimitlessVerificationBookLevel = { price: number; size: number };
-type LimitlessBook = {
-  asks: LimitlessVerificationBookLevel[];
-  bids: LimitlessVerificationBookLevel[];
-  minSize: number;
-  tokenId: string;
-};
-
-function parseLimitlessLevels(
-  value: unknown,
-): LimitlessVerificationBookLevel[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((entry) => {
-      if (!isRecord(entry)) return null;
-      const price = positiveNumber(entry.price);
-      const size = positiveNumber(entry.size);
-      return price != null && price < 1 && size != null
-        ? { price, size }
-        : null;
-    })
-    .filter((entry): entry is LimitlessVerificationBookLevel => entry != null);
-}
-
-function parseLimitlessBook(payload: unknown): LimitlessBook | null {
-  const nested =
-    isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
-  if (!isRecord(nested)) return null;
-  const tokenId =
-    typeof nested.tokenId === "string"
-      ? nested.tokenId
-      : typeof nested.token_id === "string"
-        ? nested.token_id
-        : null;
-  const minSize = positiveNumber(nested.minSize ?? nested.min_size);
-  if (!tokenId || minSize == null) return null;
-  return {
-    asks: parseLimitlessLevels(nested.asks),
-    bids: parseLimitlessLevels(nested.bids),
-    minSize,
-    tokenId,
-  };
-}
-
-function limitlessAskLevels(input: {
-  book: LimitlessBook;
-  tokenId: string;
-}): LimitlessVerificationBookLevel[] {
-  const direct = normalizeLimitlessRawTokenId(input.book.tokenId);
-  const target = normalizeLimitlessRawTokenId(input.tokenId);
-  if (direct && target && direct === target) {
-    return input.book.asks.slice().sort((a, b) => a.price - b.price);
-  }
-  return input.book.bids
-    .map((level) => ({ price: 1 - level.price, size: level.size }))
-    .filter((level) => level.price > 0 && level.price < 1)
-    .sort((a, b) => a.price - b.price);
-}
+export type LimitlessVerificationBookLevel = LimitlessClobBookLevel;
 
 export function quoteLimitlessLevelsForVerification(
   levels: LimitlessVerificationBookLevel[],
@@ -345,12 +293,16 @@ async function prepareLimitlessLeg(input: {
     requestPath: `/markets/${encodeURIComponent(input.market.slug)}/orderbook`,
   });
   if (!response.ok) return null;
-  const book = parseLimitlessBook(response.payload);
+  const book = parseLimitlessClobBook(response.payload);
   if (!book) return null;
-  const levels = limitlessAskLevels({ book, tokenId });
-  if (levels.length === 0) return null;
+  const levels = limitlessClobLevelsForToken({
+    book,
+    side: "BUY",
+    tokenId,
+  });
+  if (!levels?.length) return null;
   return {
-    minShares: book.minSize,
+    minShares: LIMITLESS_FOK_MIN_SHARES,
     quote: async (shares) =>
       quoteLimitlessLevelsForVerification(levels, shares),
   };

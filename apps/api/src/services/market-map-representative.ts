@@ -1,6 +1,11 @@
 import type { Pool } from "pg";
+import {
+  buildCanonicalMarketTop,
+  buildObservedCanonicalMarketTop,
+} from "@hunch/shared";
 import { buildOrderableMarketSql } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
+import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 
 type SelectionRow = {
   event_id: string;
@@ -21,8 +26,10 @@ type SelectionRow = {
   token_no: string | null;
   yes_top_bid: unknown;
   yes_top_ask: unknown;
+  yes_top_ts: Date | string | null;
   no_top_bid: unknown;
   no_top_ask: unknown;
+  no_top_ts: Date | string | null;
   accepting_orders: boolean | null;
   resolved_outcome: string | null;
   resolved_outcome_pct: unknown;
@@ -73,6 +80,7 @@ export type RankedRepresentativeMarket = {
   yesAsk: number | null;
   noBid: number | null;
   noAsk: number | null;
+  topAsOf: { YES: string | null; NO: string | null };
   acceptingOrders: boolean | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
@@ -171,6 +179,30 @@ function normalizeInput(inputs: RepresentativeEventInput[]): Array<
 }
 
 function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
+  const observedTop = buildObservedCanonicalMarketTop({
+    yesTop: {
+      bestBid: row.yes_top_bid,
+      bestAsk: row.yes_top_ask,
+      ts: row.yes_top_ts,
+    },
+    noTop: {
+      bestBid: row.no_top_bid,
+      bestAsk: row.no_top_ask,
+      ts: row.no_top_ts,
+    },
+  });
+  const strictTop = buildCanonicalMarketTop({
+    yesTop: {
+      bestBid: row.yes_top_bid,
+      bestAsk: row.yes_top_ask,
+      ts: row.yes_top_ts,
+    },
+    noTop: {
+      bestBid: row.no_top_bid,
+      bestAsk: row.no_top_ask,
+      ts: row.no_top_ts,
+    },
+  });
   return {
     eventId: row.event_id,
     venue: row.event_venue,
@@ -185,20 +217,21 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
         ? null
         : new Date(row.market_close_time).toISOString(),
     marketStatus: row.market_status ?? null,
-    marketBestBid: toNumber(row.market_best_bid),
-    marketBestAsk: toNumber(row.market_best_ask),
+    marketBestBid: strictTop.yesBid,
+    marketBestAsk: strictTop.yesAsk,
     lastPrice: toNumber(row.last_price),
     change24h: toNumber(row.market_change_24h),
     tokenYes: row.token_yes ?? null,
     tokenNo: row.token_no ?? null,
-    yesBid: toNumber(row.yes_top_bid),
-    yesAsk: toNumber(row.yes_top_ask),
-    noBid: toNumber(row.no_top_bid),
-    noAsk: toNumber(row.no_top_ask),
+    yesBid: observedTop.yesBid,
+    yesAsk: observedTop.yesAsk,
+    noBid: observedTop.noBid,
+    noAsk: observedTop.noAsk,
+    topAsOf: observedTop.topAsOf,
     acceptingOrders: toBoolean(row.accepting_orders),
     resolvedOutcome: row.resolved_outcome ?? null,
     resolvedOutcomePct: toNumber(row.resolved_outcome_pct),
-    yesProbability: toNumber(row.yes_probability),
+    yesProbability: observedTop.probability,
     volume24h: toNumberOrZero(row.market_volume_24h),
     volumeTotal: toNumberOrZero(row.market_volume_total),
     liquidity: toNumberOrZero(row.market_liquidity),
@@ -288,16 +321,18 @@ export async function selectPreferredRepresentativeMarketsForEvents(
       m.metadata->>'address' as market_address,
       m.close_time as market_close_time,
       m.status::text as market_status,
-      coalesce(m.best_bid, km.yes_bid_dollars) as market_best_bid,
-      coalesce(m.best_ask, km.yes_ask_dollars) as market_best_ask,
+      yes_top.best_bid as market_best_bid,
+      yes_top.best_ask as market_best_ask,
       coalesce(m.last_price, km.last_price_dollars) as last_price,
       mc.change_24h as market_change_24h,
       mt.token_yes,
       mt.token_no,
-      coalesce(yes_top.best_bid, km.yes_bid_dollars) as yes_top_bid,
-      coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
-      coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
-      coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
+      yes_top.best_bid as yes_top_bid,
+      yes_top.best_ask as yes_top_ask,
+      yes_top.ts as yes_top_ts,
+      no_top.best_bid as no_top_bid,
+      no_top.best_ask as no_top_ask,
+      no_top.ts as no_top_ts,
       ${orderableMarketExpr} as accepting_orders,
       m.resolved_outcome,
       m.resolved_outcome_pct,
@@ -325,44 +360,22 @@ export async function selectPreferredRepresentativeMarketsForEvents(
      and e.venue = m.input_event_venue
     cross join lateral (
       select
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null then
-            coalesce(
-              (regexp_match(
-                m.clob_token_ids,
-                '^[[:space:]]*\\[[[:space:]]*"([^"]+)"[[:space:]]*,[[:space:]]*"([^"]+)"'
-              ))[1],
-              m.token_yes
-            )
-          else m.token_yes
-        end as token_yes,
-        case
-          when m.venue = 'polymarket' and m.clob_token_ids is not null then
-            coalesce(
-              (regexp_match(
-                m.clob_token_ids,
-                '^[[:space:]]*\\[[[:space:]]*"([^"]+)"[[:space:]]*,[[:space:]]*"([^"]+)"'
-              ))[2],
-              m.token_no
-            )
-          else m.token_no
-        end as token_no
-    ) mt
-    left join lateral (
-      select best_bid, best_ask
-      from unified_token_top_latest
-      where mt.token_yes is not null
-        and token_id = mt.token_yes
-        and ts > ($4::timestamptz - interval '7 days')
-      limit 1
-    ) yes_top on true
-    left join lateral (
-      select best_bid, best_ask
-      from unified_token_top_latest
-      where mt.token_no is not null
-        and token_id = mt.token_no
-        and ts > ($4::timestamptz - interval '7 days')
-      limit 1
+          ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+          ${canonicalMarketTokenIdSql("m", "NO")} as token_no
+      ) mt
+      left join lateral (
+        select ts, best_bid, best_ask
+        from unified_token_top_latest
+        where mt.token_yes is not null
+          and token_id = mt.token_yes
+        limit 1
+      ) yes_top on true
+      left join lateral (
+        select ts, best_bid, best_ask
+        from unified_token_top_latest
+        where mt.token_no is not null
+          and token_id = mt.token_no
+        limit 1
     ) no_top on true
     left join polymarket_markets pm
       on m.venue = 'polymarket' and pm.id = m.venue_market_id
@@ -551,16 +564,18 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.metadata->>'address' as market_address,
         m.close_time as market_close_time,
         m.status::text as market_status,
-        coalesce(m.best_bid, km.yes_bid_dollars) as market_best_bid,
-        coalesce(m.best_ask, km.yes_ask_dollars) as market_best_ask,
+        yes_top.best_bid as market_best_bid,
+        yes_top.best_ask as market_best_ask,
         coalesce(m.last_price, km.last_price_dollars) as last_price,
         mc.change_24h as market_change_24h,
         mt.token_yes,
         mt.token_no,
-        coalesce(yes_top.best_bid, km.yes_bid_dollars) as yes_top_bid,
-        coalesce(yes_top.best_ask, km.yes_ask_dollars) as yes_top_ask,
-        coalesce(no_top.best_bid, km.no_bid_dollars) as no_top_bid,
-        coalesce(no_top.best_ask, km.no_ask_dollars) as no_top_ask,
+        yes_top.best_bid as yes_top_bid,
+        yes_top.best_ask as yes_top_ask,
+        yes_top.ts as yes_top_ts,
+        no_top.best_bid as no_top_bid,
+        no_top.best_ask as no_top_ask,
+        no_top.ts as no_top_ts,
         ${orderableMarketExpr} as accepting_orders,
         m.resolved_outcome,
         m.resolved_outcome_pct,
@@ -712,43 +727,21 @@ export async function selectRankedRepresentativeMarketsForEvents(
        and e.venue = m.input_event_venue
       cross join lateral (
         select
-          case
-            when m.venue = 'polymarket' and m.clob_token_ids is not null then
-              coalesce(
-                (regexp_match(
-                  m.clob_token_ids,
-                  '^[[:space:]]*\\[[[:space:]]*"([^"]+)"[[:space:]]*,[[:space:]]*"([^"]+)"'
-                ))[1],
-                m.token_yes
-              )
-            else m.token_yes
-          end as token_yes,
-          case
-            when m.venue = 'polymarket' and m.clob_token_ids is not null then
-              coalesce(
-                (regexp_match(
-                  m.clob_token_ids,
-                  '^[[:space:]]*\\[[[:space:]]*"([^"]+)"[[:space:]]*,[[:space:]]*"([^"]+)"'
-                ))[2],
-                m.token_no
-              )
-            else m.token_no
-          end as token_no
+          ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+          ${canonicalMarketTokenIdSql("m", "NO")} as token_no
       ) mt
       left join lateral (
-        select best_bid, best_ask
+        select ts, best_bid, best_ask
         from unified_token_top_latest
         where mt.token_yes is not null
           and token_id = mt.token_yes
-          and ts > ($5::timestamptz - interval '7 days')
         limit 1
       ) yes_top on true
       left join lateral (
-        select best_bid, best_ask
+        select ts, best_bid, best_ask
         from unified_token_top_latest
         where mt.token_no is not null
           and token_id = mt.token_no
-          and ts > ($5::timestamptz - interval '7 days')
         limit 1
       ) no_top on true
       left join polymarket_markets pm
@@ -846,8 +839,10 @@ export async function selectRankedRepresentativeMarketsForEvents(
       token_no,
       yes_top_bid,
       yes_top_ask,
+      yes_top_ts,
       no_top_bid,
       no_top_ask,
+      no_top_ts,
       accepting_orders,
       resolved_outcome,
       resolved_outcome_pct,

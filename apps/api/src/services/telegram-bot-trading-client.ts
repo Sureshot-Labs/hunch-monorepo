@@ -41,6 +41,7 @@ export type TelegramBotTradingClientCallbackInput = {
       message_id?: number;
     };
   };
+  telegramMiniAppEnabled?: boolean;
   sendMessage: (input: {
     chat_id: string;
     parse_mode?: "MarkdownV2";
@@ -64,6 +65,7 @@ export type TelegramBotTradingInternalApiClient = {
     };
     isAdminTest?: boolean;
     marketRef: string;
+    publicBrowseOnly?: boolean;
     telegramMessageId?: number | null;
     telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
@@ -73,6 +75,7 @@ export type TelegramBotTradingInternalApiClient = {
   ) => Promise<TelegramBotTradingClientMessage>;
   buildPositionsMessage: (input: {
     appBaseUrl: string;
+    telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
   buildPositionMessage: (input: {
@@ -83,6 +86,7 @@ export type TelegramBotTradingInternalApiClient = {
   }) => Promise<TelegramBotTradingClientMessage>;
   buildDepositMessage: (input: {
     appBaseUrl: string;
+    telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
     venue?: string | null;
   }) => Promise<
@@ -129,7 +133,7 @@ type CapturedTelegramBotTradingCallbackResult = {
 
 export const TELEGRAM_BOT_TRADING_CALLBACK_PREFIX = "hbt";
 const DEFAULT_INTERNAL_API_TIMEOUT_MS = 10_000;
-const TELEGRAM_MARKET_SEARCH_TIMEOUT_MS = 5_000;
+const TELEGRAM_MARKET_SEARCH_TIMEOUT_MS = 12_000;
 const TELEGRAM_TRENDING_MARKETS_TIMEOUT_MS = 2_000;
 const DEFAULT_INTERNAL_API_EXECUTE_TIMEOUT_MS = 120_000;
 
@@ -289,6 +293,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
         `/internal/telegram-bot/positions/${body.positionId}/card`,
         {
           appBaseUrl: body.appBaseUrl,
+          telegramMiniAppEnabled: body.telegramMiniAppEnabled,
           telegramUserId: body.telegramUserId,
         },
       ),
@@ -310,6 +315,16 @@ export function createTelegramBotTradingInternalApiClient(input: {
           marketTitle: string;
           noAsk: number | null;
           venue: string;
+          venueOptions?: Array<{
+            eventId: string;
+            eventTitle: string | null;
+            lastPrice: number | null;
+            marketId: string;
+            marketTitle: string;
+            noAsk: number | null;
+            venue: string;
+            yesAsk: number | null;
+          }>;
           yesAsk: number | null;
         }>
       >("/internal/telegram-bot/trading/market-search", body, {
@@ -389,6 +404,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
           {
             appBaseUrl: callbackInput.appBaseUrl,
             callbackQuery: callbackInput.callbackQuery,
+            telegramMiniAppEnabled: callbackInput.telegramMiniAppEnabled,
           },
           parsed.type === "confirm" ? { timeoutMs: executeTimeoutMs } : {},
         );

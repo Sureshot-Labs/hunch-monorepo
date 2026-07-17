@@ -29,6 +29,7 @@ type DeferredPublishPayload = {
 };
 
 export type TopTickGateOptions = {
+  allowEmpty?: boolean;
   minIntervalMs?: number;
   heartbeatMs?: number;
   epsilon?: number;
@@ -86,6 +87,7 @@ function isEqualPrice(
 
 export function resolveTopTickGateOptionsFromEnv(): ResolvedTopTickGateOptions {
   return {
+    allowEmpty: false,
     minIntervalMs: parseNonNegativeInt(
       process.env.INDEXER_TOP_MIN_INTERVAL_MS,
       DEFAULT_MIN_INTERVAL_MS,
@@ -188,6 +190,7 @@ export function createTopTickGate(
       ? Math.max(1, Math.trunc(options.pruneBatch))
       : defaults.pruneBatch;
   const onDeferredPublish = options.onDeferredPublish;
+  const allowEmpty = options.allowEmpty ?? defaults.allowEmpty;
 
   const cache = new Map<string, GateEntry>();
   const clearTimer = (entry: GateEntry): void => {
@@ -231,8 +234,13 @@ export function createTopTickGate(
         current.hasPending = false;
         touchEntry(cache, tokenId, current);
 
-        if (current.publishedBid == null && current.publishedAsk == null)
+        if (
+          !allowEmpty &&
+          current.publishedBid == null &&
+          current.publishedAsk == null
+        ) {
           return;
+        }
         onDeferredPublish?.({
           tokenId,
           bestBid: current.publishedBid,
@@ -256,7 +264,7 @@ export function createTopTickGate(
       nowMs,
     }: TopTickGateInputs): boolean => {
       if (!tokenId) return false;
-      if (bestBid == null && bestAsk == null) return false;
+      if (!allowEmpty && bestBid == null && bestAsk == null) return false;
 
       const now =
         nowMs != null && Number.isFinite(nowMs)

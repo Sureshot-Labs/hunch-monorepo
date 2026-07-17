@@ -701,6 +701,7 @@ async function publishTopTickNow(
       bestBidValue,
       bestAskValue,
       new Date(tsMs),
+      { touchLatestWhenUnchanged: true },
     ),
     multi.exec(),
   ]);

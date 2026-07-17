@@ -17,6 +17,30 @@ type UnifiedBookTopWriteInput = {
   ts: Date;
 };
 
+export type UnifiedBookTopWriteStats = {
+  authoritativeClears: number;
+  changedWrites: number;
+  latestOnlyTouches: number;
+  rejectedCrossedBooks: number;
+  skippedOutOfOrderTicks: number;
+};
+
+type LatestTopTouchRow = {
+  best_ask: number | null;
+  best_bid: number | null;
+  mid: number | null;
+  spread: number | null;
+  token_id: string;
+  ts: string;
+  ts_ms: number;
+  venue: string;
+};
+
+type LatestTopTouchState = {
+  pending: Map<string, LatestTopTouchRow>;
+  timer: NodeJS.Timeout | null;
+};
+
 export type TerminalTokenPrices = {
   no: number;
   yes: number;
@@ -31,6 +55,7 @@ export type ResolvedTerminalTokenTop = {
 const BOOK_TOP_DEDUPE_EPSILON = 1e-9;
 const BOOK_TOP_CACHE_MAX = 200_000;
 const BOOK_TOP_CACHE_PRUNE_BATCH = 20_000;
+const BOOK_TOP_LATEST_TOUCH_INTERVAL_MS = 60_000;
 const BOOK_TOP_HEARTBEAT_MS = (() => {
   const raw = process.env.UNIFIED_BOOK_TOP_HEARTBEAT_MS;
   if (!raw) return 0;
@@ -40,6 +65,14 @@ const BOOK_TOP_HEARTBEAT_MS = (() => {
 })();
 const bookTopWriteCache = new Map<string, BookTopCacheEntry>();
 const bookTopWriteInFlight = new Map<string, Promise<void>>();
+const latestTopTouchStates = new WeakMap<Pool, LatestTopTouchState>();
+const bookTopWriteStats: UnifiedBookTopWriteStats = {
+  authoritativeClears: 0,
+  changedWrites: 0,
+  latestOnlyTouches: 0,
+  rejectedCrossedBooks: 0,
+  skippedOutOfOrderTicks: 0,
+};
 
 function isBookTopValueEqual(a: number | null, b: number | null): boolean {
   if (a == null && b == null) return true;
@@ -93,6 +126,134 @@ function shouldSkipBookTopWrite(
   }
 
   return true;
+}
+
+function isCrossedBook(
+  bestBid: number | null,
+  bestAsk: number | null,
+): boolean {
+  return bestBid != null && bestAsk != null && bestBid > bestAsk;
+}
+
+function latestTopTouchState(pool: Pool): LatestTopTouchState {
+  const existing = latestTopTouchStates.get(pool);
+  if (existing) return existing;
+  const state: LatestTopTouchState = { pending: new Map(), timer: null };
+  latestTopTouchStates.set(pool, state);
+  return state;
+}
+
+function scheduleLatestTopTouchFlush(pool: Pool): void {
+  const state = latestTopTouchState(pool);
+  if (state.timer || state.pending.size === 0) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    void flushUnifiedBookTopLatestTouches(pool).catch((error) => {
+      console.warn("[db] latest top touch flush failed", error);
+    });
+  }, BOOK_TOP_LATEST_TOUCH_INTERVAL_MS);
+  state.timer.unref?.();
+}
+
+function enqueueLatestTopTouch(pool: Pool, row: LatestTopTouchRow): void {
+  const state = latestTopTouchState(pool);
+  const existing = state.pending.get(row.token_id);
+  if (!existing || row.ts_ms >= existing.ts_ms) {
+    state.pending.set(row.token_id, row);
+  }
+  scheduleLatestTopTouchFlush(pool);
+}
+
+function clearPendingLatestTopTouch(pool: Pool, tokenId: string): void {
+  latestTopTouchState(pool).pending.delete(tokenId);
+}
+
+export async function flushUnifiedBookTopLatestTouches(
+  pool: Pool,
+): Promise<number> {
+  const state = latestTopTouchState(pool);
+  const rows = Array.from(state.pending.values());
+  if (rows.length === 0) return 0;
+  state.pending.clear();
+
+  try {
+    await pool.query(
+      `
+        insert into unified_token_top_latest (
+          token_id,
+          venue,
+          ts,
+          best_bid,
+          best_ask,
+          mid,
+          spread,
+          updated_at
+        )
+        select token_id, venue, ts, best_bid, best_ask, mid, spread, now()
+        from jsonb_to_recordset($1::jsonb) as x(
+          token_id text,
+          venue text,
+          ts timestamptz,
+          best_bid numeric,
+          best_ask numeric,
+          mid numeric,
+          spread numeric
+        )
+        on conflict (token_id) do update
+          set venue = excluded.venue,
+              ts = excluded.ts,
+              best_bid = excluded.best_bid,
+              best_ask = excluded.best_ask,
+              mid = excluded.mid,
+              spread = excluded.spread,
+              updated_at = now()
+        where excluded.ts >= unified_token_top_latest.ts
+      `,
+      [JSON.stringify(rows)],
+    );
+    for (const row of rows) {
+      const current = bookTopWriteCache.get(row.token_id);
+      if (!current || row.ts_ms >= current.lastWrittenAtMs) {
+        setBookTopCache(row.token_id, {
+          bestBid: row.best_bid,
+          bestAsk: row.best_ask,
+          lastWrittenAtMs: row.ts_ms,
+        });
+      }
+    }
+    bookTopWriteStats.latestOnlyTouches += rows.length;
+    return rows.length;
+  } catch (error) {
+    for (const row of rows) {
+      const pending = state.pending.get(row.token_id);
+      if (!pending || row.ts_ms > pending.ts_ms) {
+        state.pending.set(row.token_id, row);
+      }
+    }
+    throw error;
+  } finally {
+    scheduleLatestTopTouchFlush(pool);
+  }
+}
+
+export function getUnifiedBookTopWriteStats(): UnifiedBookTopWriteStats {
+  return { ...bookTopWriteStats };
+}
+
+export function resetUnifiedBookTopWriteStateForTests(pool?: Pool): void {
+  bookTopWriteCache.clear();
+  bookTopWriteInFlight.clear();
+  for (const key of Object.keys(bookTopWriteStats) as Array<
+    keyof UnifiedBookTopWriteStats
+  >) {
+    bookTopWriteStats[key] = 0;
+  }
+  if (!pool) return;
+  const state = latestTopTouchStates.get(pool);
+  if (!state) return;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = null;
+  state.pending.clear();
 }
 
 function normalizeResolvedOutcome(
@@ -1660,11 +1821,46 @@ export async function writeUnifiedBookTop(
   bestBid: number | null,
   bestAsk: number | null,
   ts: Date,
+  options: { touchLatestWhenUnchanged?: boolean } = {},
 ): Promise<void> {
   const normalizedBestBid = normalizePriceValue(bestBid);
   const normalizedBestAsk = normalizePriceValue(bestAsk);
   const runWrite = async (): Promise<void> => {
     const tsMs = ts.getTime();
+    if (isCrossedBook(normalizedBestBid, normalizedBestAsk)) {
+      bookTopWriteStats.rejectedCrossedBooks += 1;
+      return;
+    }
+    const previous = bookTopWriteCache.get(tokenId);
+    if (previous && tsMs < previous.lastWrittenAtMs) {
+      bookTopWriteStats.skippedOutOfOrderTicks += 1;
+      return;
+    }
+    const unchanged =
+      previous != null &&
+      isBookTopValueEqual(previous.bestBid, normalizedBestBid) &&
+      isBookTopValueEqual(previous.bestAsk, normalizedBestAsk);
+    if (unchanged && options.touchLatestWhenUnchanged) {
+      const mid =
+        normalizedBestBid != null && normalizedBestAsk != null
+          ? (normalizedBestBid + normalizedBestAsk) / 2
+          : null;
+      const spread =
+        normalizedBestBid != null && normalizedBestAsk != null
+          ? Math.max(0, normalizedBestAsk - normalizedBestBid)
+          : null;
+      enqueueLatestTopTouch(pool, {
+        token_id: tokenId,
+        venue: venueFromUnifiedTokenId(tokenId),
+        ts: ts.toISOString(),
+        best_bid: normalizedBestBid,
+        best_ask: normalizedBestAsk,
+        mid,
+        spread,
+        ts_ms: tsMs,
+      });
+      return;
+    }
     if (
       shouldSkipBookTopWrite(
         tokenId,
@@ -1675,6 +1871,8 @@ export async function writeUnifiedBookTop(
     ) {
       return;
     }
+
+    clearPendingLatestTopTouch(pool, tokenId);
 
     const mid =
       normalizedBestBid != null && normalizedBestAsk != null
@@ -1741,6 +1939,10 @@ export async function writeUnifiedBookTop(
       bestAsk: normalizedBestAsk,
       lastWrittenAtMs: tsMs,
     });
+    bookTopWriteStats.changedWrites += 1;
+    if (normalizedBestBid == null && normalizedBestAsk == null) {
+      bookTopWriteStats.authoritativeClears += 1;
+    }
   };
 
   const prev = bookTopWriteInFlight.get(tokenId);
@@ -1856,48 +2058,47 @@ export async function writeUnifiedBookTops(
 ): Promise<number> {
   if (inputs.length === 0) return 0;
 
-  const touchLatestPayload: Array<{
-    token_id: string;
-    venue: string;
-    ts: string;
-    best_bid: number | null;
-    best_ask: number | null;
-    mid: number | null;
-    spread: number | null;
-    ts_ms: number;
-  }> = [];
-
   const payload = inputs.flatMap((input) => {
     const tsMs = input.ts.getTime();
     const bestBid = normalizePriceValue(input.bestBid);
     const bestAsk = normalizePriceValue(input.bestAsk);
-    if (shouldSkipBookTopWrite(input.tokenId, bestBid, bestAsk, tsMs)) {
-      const previous = bookTopWriteCache.get(input.tokenId);
-      const unchanged =
-        previous != null &&
-        tsMs >= previous.lastWrittenAtMs &&
-        isBookTopValueEqual(previous.bestBid, bestBid) &&
-        isBookTopValueEqual(previous.bestAsk, bestAsk);
-      if (input.touchLatestWhenUnchanged && unchanged) {
-        const mid =
-          bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
-        const spread =
-          bestBid != null && bestAsk != null
-            ? Math.max(0, bestAsk - bestBid)
-            : null;
-        touchLatestPayload.push({
-          token_id: input.tokenId,
-          venue: venueFromUnifiedTokenId(input.tokenId),
-          ts: input.ts.toISOString(),
-          best_bid: bestBid,
-          best_ask: bestAsk,
-          mid,
-          spread,
-          ts_ms: tsMs,
-        });
-      }
+    if (isCrossedBook(bestBid, bestAsk)) {
+      bookTopWriteStats.rejectedCrossedBooks += 1;
       return [];
     }
+    const previous = bookTopWriteCache.get(input.tokenId);
+    if (previous && tsMs < previous.lastWrittenAtMs) {
+      bookTopWriteStats.skippedOutOfOrderTicks += 1;
+      return [];
+    }
+    const unchanged =
+      previous != null &&
+      isBookTopValueEqual(previous.bestBid, bestBid) &&
+      isBookTopValueEqual(previous.bestAsk, bestAsk);
+    if (input.touchLatestWhenUnchanged && unchanged) {
+      const mid =
+        bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+      const spread =
+        bestBid != null && bestAsk != null
+          ? Math.max(0, bestAsk - bestBid)
+          : null;
+      enqueueLatestTopTouch(pool, {
+        token_id: input.tokenId,
+        venue: venueFromUnifiedTokenId(input.tokenId),
+        ts: input.ts.toISOString(),
+        best_bid: bestBid,
+        best_ask: bestAsk,
+        mid,
+        spread,
+        ts_ms: tsMs,
+      });
+      return [];
+    }
+    if (shouldSkipBookTopWrite(input.tokenId, bestBid, bestAsk, tsMs)) {
+      return [];
+    }
+
+    clearPendingLatestTopTouch(pool, input.tokenId);
 
     const mid =
       bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
@@ -1920,10 +2121,10 @@ export async function writeUnifiedBookTops(
     ];
   });
 
-  if (payload.length === 0 && touchLatestPayload.length === 0) return 0;
+  if (payload.length === 0) return 0;
 
   const latestByToken = new Map<string, (typeof payload)[number]>();
-  for (const row of [...payload, ...touchLatestPayload]) {
+  for (const row of payload) {
     const existing = latestByToken.get(row.token_id);
     if (!existing || row.ts_ms >= existing.ts_ms) {
       latestByToken.set(row.token_id, row);
@@ -1992,6 +2193,11 @@ export async function writeUnifiedBookTops(
       lastWrittenAtMs: row.ts_ms,
     });
   }
+
+  bookTopWriteStats.changedWrites += latestByToken.size;
+  bookTopWriteStats.authoritativeClears += Array.from(
+    latestByToken.values(),
+  ).filter((row) => row.best_bid == null && row.best_ask == null).length;
 
   return payload.length;
 }

@@ -7,6 +7,7 @@ import {
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams, TokenPair } from "../server-types.js";
 import type { FifaSection } from "../schemas/special.js";
+import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 import { queryRowsWithLocalSettings } from "../repos/unified-read.js";
 import {
   buildMatchFixtureKey,
@@ -129,8 +130,10 @@ export type FifaSpecialRow = {
   best_ask: unknown;
   best_bid_yes: unknown;
   best_ask_yes: unknown;
+  top_ts_yes?: unknown;
   best_bid_no: unknown;
   best_ask_no: unknown;
+  top_ts_no?: unknown;
   last_price: unknown;
   resolved_outcome: string | null;
   resolved_outcome_pct: unknown;
@@ -1630,21 +1633,17 @@ function buildHydratedProjection(keySource: string): string {
       m.best_ask,
       yes_top.best_bid as best_bid_yes,
       yes_top.best_ask as best_ask_yes,
+      yes_top.ts as top_ts_yes,
       no_top.best_bid as best_bid_no,
       no_top.best_ask as best_ask_no,
+      no_top.ts as top_ts_no,
       m.last_price,
       m.resolved_outcome,
       m.resolved_outcome_pct,
       null::numeric as change_24h,
       m.outcomes,
-      case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null then (m.clob_token_ids::jsonb->>0)
-        else m.token_yes
-      end as token_yes,
-      case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null then (m.clob_token_ids::jsonb->>1)
-        else m.token_no
-      end as token_no,
+      mt.token_yes,
+      mt.token_no,
       m.clob_token_ids,
       m.condition_id,
       m.slug as market_slug,
@@ -1678,12 +1677,15 @@ function buildHydratedProjection(keySource: string): string {
     join unified_markets m on m.id = k.market_uuid
     join unified_events e on e.id = k.event_id
     left join polymarket_markets pm on pm.id = m.venue_market_id and m.venue = 'polymarket'
-    left join unified_token_top_latest yes_top on yes_top.token_id = (
-      case when m.venue = 'polymarket' and m.clob_token_ids is not null then (m.clob_token_ids::jsonb->>0) else m.token_yes end
-    )
-    left join unified_token_top_latest no_top on no_top.token_id = (
-      case when m.venue = 'polymarket' and m.clob_token_ids is not null then (m.clob_token_ids::jsonb->>1) else m.token_no end
-    )
+    left join lateral (
+      select
+        ${canonicalMarketTokenIdSql("m", "YES")} as token_yes,
+        ${canonicalMarketTokenIdSql("m", "NO")} as token_no
+    ) mt on true
+    left join unified_token_top_latest yes_top
+      on yes_top.token_id = mt.token_yes
+    left join unified_token_top_latest no_top
+      on no_top.token_id = mt.token_no
   `;
 }
 
@@ -2533,22 +2535,8 @@ export function buildFifaMeta(
 export function resolveTokenPair(
   row: Pick<FifaSpecialRow, "token_yes" | "token_no" | "clob_token_ids">,
 ): TokenPair {
-  const tokens: TokenPair = {
+  return {
     yes: row.token_yes != null ? String(row.token_yes) : null,
     no: row.token_no != null ? String(row.token_no) : null,
   };
-  if ((!tokens.yes || !tokens.no) && row.clob_token_ids) {
-    try {
-      const parsed = Array.isArray(row.clob_token_ids)
-        ? row.clob_token_ids
-        : JSON.parse(String(row.clob_token_ids));
-      if (Array.isArray(parsed)) {
-        if (!tokens.yes && parsed[0] != null) tokens.yes = String(parsed[0]);
-        if (!tokens.no && parsed[1] != null) tokens.no = String(parsed[1]);
-      }
-    } catch {
-      // Ignore malformed venue token metadata.
-    }
-  }
-  return tokens;
 }

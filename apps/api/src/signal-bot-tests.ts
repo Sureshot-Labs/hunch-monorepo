@@ -15,7 +15,7 @@ import {
   acquireSignalBotLock,
   buildSignalBotHolderUrl,
   buildSignalBotMenuScreen,
-  buildSignalBotMessage,
+  buildSignalBotMessage as buildSignalBotMessageImpl,
   buildSignalBotStatsReport,
   buildSignalBotTradeUrl,
   configureSignalBotTelegramUi,
@@ -123,6 +123,17 @@ import {
   renderXSignalDelivery,
   type SignalDeliveryView,
 } from "./services/signal-delivery.js";
+
+const TEST_TELEGRAM_MINI_APP_LINK_BASE = "https://t.me/hunch_signal_bot/hunch";
+
+function buildSignalBotMessage(
+  input: Parameters<typeof buildSignalBotMessageImpl>[0],
+) {
+  return buildSignalBotMessageImpl({
+    telegramMiniAppLinkBase: TEST_TELEGRAM_MINI_APP_LINK_BASE,
+    ...input,
+  });
+}
 
 const readyTelegramSignerStatus: PrivyServerSignerStatus = {
   attached: true,
@@ -710,11 +721,36 @@ class FakeDb {
       const marketIds = new Set(
         Array.isArray(params[0]) ? (params[0] as string[]) : [],
       );
+      const fallbackTokenRows = this.marketRows.flatMap((row) => {
+        const market = row as {
+          id?: unknown;
+          token_no?: unknown;
+          token_yes?: unknown;
+          venue?: unknown;
+        };
+        return [
+          { outcome_side: "YES", token_id: market.token_yes },
+          { outcome_side: "NO", token_id: market.token_no },
+        ]
+          .filter(
+            (token) =>
+              typeof token.token_id === "string" && token.token_id.length > 0,
+          )
+          .map((token) => ({
+            market_id: market.id,
+            venue: market.venue,
+            ...token,
+          }));
+      });
+      const tokenRows =
+        this.marketTokenRows.length > 0
+          ? this.marketTokenRows
+          : fallbackTokenRows;
       const rows = marketIds.size
-        ? this.marketTokenRows.filter((row) =>
+        ? tokenRows.filter((row) =>
             marketIds.has(String((row as { market_id?: unknown }).market_id)),
           )
-        : this.marketTokenRows;
+        : tokenRows;
       return {
         command: "SELECT",
         fields: [],
@@ -1622,6 +1658,27 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
       assert.equal(invalid.telegramMiniAppLinkBase, null);
+      assert.equal(
+        parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://telegram.me/hunch_signal_bot/hunch",
+        }).telegramMiniAppLinkBase,
+        null,
+      );
+    },
+  },
+  {
+    name: "production signal bot refuses to start without a Mini App deep link",
+    run: () => {
+      assert.throws(
+        () =>
+          parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_ENABLED: "true",
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+            NODE_ENV: "production",
+          }),
+        /HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE is required/,
+      );
     },
   },
   {
@@ -1801,6 +1858,56 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .flat()
           .some((button) => button.text === "Open Hunch"),
         true,
+      );
+    },
+  },
+  {
+    name: "guest and unavailable home screens remain distinct and Mini App-only",
+    run: () => {
+      const guest = buildSignalBotMenuScreen({
+        appBaseUrl: "https://app.hunch.trade",
+        audience: "guest",
+        isAdmin: false,
+        miniAppEnabled: true,
+        screen: "home",
+      });
+      const guestButtons = guest.keyboard.inline_keyboard.flat();
+      assert.match(guest.text, /Welcome to Hunch/);
+      assert.match(guest.text, /create an account or sign in/);
+      assert.equal(guestButtons.length, 1);
+      assert.equal(guestButtons[0]?.text, "Open Hunch · Create or sign in");
+      assert.equal(guestButtons[0] && "web_app" in guestButtons[0], true);
+      assert.equal(
+        guestButtons.some((button) => "callback_data" in button),
+        false,
+      );
+
+      const unavailable = buildSignalBotMenuScreen({
+        appBaseUrl: "https://app.hunch.trade",
+        audience: "unavailable",
+        isAdmin: false,
+        miniAppEnabled: true,
+        screen: "home",
+      });
+      assert.match(
+        unavailable.text,
+        /Account status is temporarily unavailable/,
+      );
+      assert.doesNotMatch(unavailable.text, /create an account or sign in/);
+      assert.equal(unavailable.keyboard.inline_keyboard.flat().length, 1);
+
+      const missingMiniApp = buildSignalBotMenuScreen({
+        appBaseUrl: "https://app.hunch.trade",
+        audience: "guest",
+        isAdmin: false,
+        miniAppEnabled: false,
+        screen: "home",
+      });
+      assert.equal(missingMiniApp.keyboard.inline_keyboard.flat().length, 0);
+      assert.match(missingMiniApp.text, /Mini App is temporarily unavailable/);
+      assert.doesNotMatch(
+        JSON.stringify(missingMiniApp.keyboard),
+        /https:\/\/app\.hunch\.trade/,
       );
     },
   },
@@ -2742,8 +2849,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const handled = await handleSignalBotCommand({
           config: parseSignalBotConfig({
             HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+            HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+              "https://t.me/hunch_bot/app",
             HUNCH_SIGNAL_BOT_TOKEN: "token",
           }),
+          db: {
+            query: async () => ({ rows: [{ linked: true }] }),
+          } as never,
           disableTrading: async () => testCase.result,
           message: {
             chat: { id: 999, first_name: "Kreedle", type: "private" },
@@ -2762,8 +2874,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             "Revoke access in Hunch",
           );
           assert.match(
-            telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.url ??
-              "",
+            telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.web_app
+              ?.url ?? "",
             /\/settings\/telegram-trading$/,
           );
         }
@@ -2787,6 +2899,42 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           token: "token",
         });
         await assert.rejects(() => client.buildStatusMessage(999), /timed out/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "internal trading client preserves Mini App mode for position cards",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requestBody: Record<string, unknown> | null = null;
+      globalThis.fetch = (async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        return new Response(JSON.stringify({ text: "Position" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }) as typeof fetch;
+      try {
+        const client = createTelegramBotTradingInternalApiClient({
+          baseUrl: "https://api.hunch.trade",
+          token: "token",
+        });
+        await client.buildPositionMessage({
+          appBaseUrl: "https://app.hunch.trade",
+          positionId: "00000000-0000-4000-8000-000000000001",
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+        });
+        assert.deepEqual(requestBody, {
+          appBaseUrl: "https://app.hunch.trade",
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+        });
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -2915,6 +3063,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         chatId: string;
         isAdminTest?: boolean;
         marketRef: string;
+        publicBrowseOnly?: boolean;
         telegramMessageId?: number | null;
         telegramUserId: number;
       } | null = null;
@@ -2923,6 +3072,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: {
+          query: async () => ({ rows: [{ linked: true }] }),
+        } as never,
         message: {
           chat: { id: 999, first_name: "Kreedle", type: "private" },
           from: { id: 123 },
@@ -2941,6 +3093,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(call, {
         chatId: "999",
         marketRef: "polymarket:market-1",
+        publicBrowseOnly: false,
         telegramMessageId: 12,
         telegramUserId: 123,
       });
@@ -3139,6 +3292,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         isAdminTest: true,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           getReadiness: async () => ({
@@ -3169,9 +3323,33 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        buttons.some((button) => "url" in button),
+        buttons.some((button) => "web_app" in button),
         true,
       );
+
+      const publicMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        publicBrowseOnly: true,
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+      });
+      assert.match(publicMessage.text, /create an account or sign in/);
+      assert.doesNotMatch(publicMessage.text, /Buttons valid/);
+      const publicButtons =
+        publicMessage.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.deepEqual(
+        publicButtons.map((button) => button.text),
+        ["Open Hunch · Create or sign in"],
+      );
+      assert.equal(
+        publicButtons.some((button) => "callback_data" in button),
+        false,
+      );
+      assert.equal(insertCount, 0);
     },
   },
   {
@@ -3282,6 +3460,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           quote: async ({ intent }: { intent: TradeIntent }) =>
@@ -3308,7 +3487,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        buttons.some((button) => "url" in button),
+        buttons.some((button) => "web_app" in button),
         true,
       );
 
@@ -3319,6 +3498,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           quote: async ({ intent }: { intent: TradeIntent }) =>
@@ -3349,6 +3529,42 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(repairableMessage.text, /approvals are missing/);
 
+      const unfundedMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          quote: async ({ intent }: { intent: TradeIntent }) =>
+            buildTestTelegramQuote(intent),
+          getReadiness: async () => ({
+            ...buildTestPolymarketReadiness({
+              code: "no_executable_funds",
+              message: "Deposit funds to continue.",
+            }),
+            maxExecutableBuyUsd: 0,
+            raw: {
+              controlledFundsRaw: "0",
+              kind: "polymarket_funds_v1",
+            },
+          }),
+        } as never,
+      });
+      const unfundedButtons =
+        unfundedMessage.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(
+        unfundedButtons.filter((button) => "callback_data" in button).length,
+        2,
+      );
+      assert.match(
+        unfundedButtons.find((button) => "callback_data" in button)?.text ?? "",
+        /Buy YES/,
+      );
+      assert.match(unfundedMessage.text, /Buttons valid/);
+
       marketOrderable = false;
       const closedMessage = await buildTelegramBotTradingMarketMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -3356,13 +3572,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           getReadiness: async () =>
             buildTestPolymarketReadiness({ executable: true }),
         } as never,
       });
-      assert.equal(insertCount, 2);
+      assert.equal(insertCount, 4);
       assert.equal(
         closedMessage.reply_markup?.inline_keyboard
           .flat()
@@ -3540,6 +3757,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           getReadiness: async () => ({
@@ -3673,6 +3891,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: db as never,
         marketRef: "market-1",
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         telegramUserId: 999,
         trading: {
           getReadiness: async () => ({
@@ -3704,7 +3923,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        buttons.some((button) => "url" in button),
+        buttons.some((button) => "web_app" in button),
         true,
       );
     },
@@ -3734,6 +3953,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: {
+          query: async () => ({ rows: [{ linked: true }] }),
+        } as never,
         handleCallback: async () => {
           tradingCallbackCalls += 1;
           return true;
@@ -3750,7 +3972,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "unknown private text recovers to the home menu",
+    name: "idle private text always enters market search",
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
@@ -3774,10 +3996,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
       assert.equal(handled, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Hunch/);
+      assert.match(telegram.messages[0]?.text ?? "", /Searching/);
       assert.match(
-        telegram.messages[0]?.text ?? "",
-        /Use the menu buttons to choose an action/,
+        telegram.edits[0]?.text ?? "",
+        /Search is temporarily unavailable/,
       );
     },
   },
@@ -3852,6 +4074,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: {
+          query: async () => ({ rows: [{ linked: true }] }),
+        } as never,
         handleCallback: async () => confirm,
         redis,
         sendTestSignal: async () => false,
@@ -3960,6 +4185,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: {
+          query: async () => ({ rows: [{ linked: true }] }),
+        } as never,
         redis,
         sendTestSignal: async () => false,
         sendTradeStatus: async () => {
@@ -5889,6 +6117,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       let connectCount = 0;
       let enabled = false;
+      let lifecycleParams: unknown[] | undefined;
+      const lifecycleOrder: string[] = [];
       const authorizationRow = () => ({
         id: "authorization-1",
         user_id: "user-1",
@@ -5905,7 +6135,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         disabled_at: enabled ? null : new Date(),
         last_verified_at: new Date(),
       });
-      const rootQuery = async (sql: string) => {
+      const rootQuery = async (sql: string, params?: unknown[]) => {
+        if (/insert into analytics_server_events/i.test(sql)) {
+          lifecycleOrder.push("analytics");
+          lifecycleParams = params;
+          return { rowCount: 1, rows: [] };
+        }
         if (/FROM users u/i.test(sql)) {
           return {
             rowCount: 1,
@@ -5953,9 +6188,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           throw new Error("Client has already been connected");
         },
         query: async (sql: string) => {
+          if (sql === "COMMIT") lifecycleOrder.push("commit");
           if (sql.includes("INSERT INTO telegram_bot_trading_authorizations")) {
             enabled = true;
-            return { rowCount: 1, rows: [] };
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  enabled_venues: ["polymarket"],
+                  id: "authorization-1",
+                  updated_at: new Date("2026-07-17T00:00:00.000Z"),
+                  wallet_chain: "ethereum",
+                },
+              ],
+            };
           }
           return { rowCount: 0, rows: [] };
         },
@@ -5985,6 +6231,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(connectCount, 1);
       assert.equal(status.enabled, true);
+      assert.deepEqual(lifecycleOrder, ["commit", "analytics"]);
+      assert.deepEqual(lifecycleParams?.slice(0, 4), [
+        "user-1",
+        "hf_telegram_trading_lifecycle",
+        "telegram_trading_settings",
+        "enabled",
+      ]);
+      assert.equal(lifecycleParams?.[4], "polymarket");
+      assert.equal(JSON.parse(String(lifecycleParams?.[6])).chain, "polygon");
     },
   },
   {
@@ -7228,6 +7483,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         db: createPolymarketConfirmDb(updates) as never,
         sendMessage: (message) => telegram.sendMessage(message as never),
         signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
         trading: {
           ensureReadiness: async () => {
             ensureCalls += 1;
@@ -7272,10 +7528,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         finalReasonCode: "polymarket_approvals_missing",
         sideEffects: ["approval"],
       });
-      assert.match(
-        JSON.stringify(telegram.messages[0]?.reply_markup ?? {}),
-        /Open in Hunch/,
-      );
+      const button =
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0];
+      assert.equal(button && "web_app" in button, true);
     },
   },
   {
@@ -8133,7 +8388,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "private start and menu commands render minimal button screens",
+    name: "guest start and menu commands render only the onboarding Mini App CTA",
     run: async () => {
       for (const command of ["/start", "/menu"]) {
         const redis = new FakeRedis();
@@ -8145,6 +8400,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               "https://t.me/hunch_bot/hunch",
             HUNCH_SIGNAL_BOT_TOKEN: "token",
           }),
+          db: {
+            query: async () => ({ rows: [] }),
+          } as never,
           message: {
             chat: { id: 999, first_name: "Public user", type: "private" },
             from: { id: 999 },
@@ -8157,12 +8415,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(handled, true);
         const message = telegram.messages[0];
         assert.ok(message?.reply_markup);
-        assert.equal(
-          message.reply_markup.inline_keyboard
-            .flat()
-            .some((button) => "callback_data" in button),
-          true,
-        );
+        assert.match(message.text, /Welcome to Hunch/);
+        assert.match(message.text, /enable Telegram Trading in Hunch/);
+        const buttons = message.reply_markup.inline_keyboard.flat();
+        assert.equal(buttons.length, 1);
+        assert.equal(buttons[0]?.text, "Open Hunch · Create or sign in");
+        assert.equal(buttons[0] && "web_app" in buttons[0], true);
         assert.doesNotMatch(
           message.text,
           /\/(?:menu|market|trade_status|settings|help)/,
@@ -8192,6 +8450,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
         },
         config,
+        db: {
+          query: async () => ({ rows: [{ linked: true }] }),
+        } as never,
         redis,
         sendTestSignal: async () => false,
         telegram,
@@ -8225,6 +8486,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let orderFilled = true;
       const db = {
         query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("select exists")) {
+            return { rows: [{ linked: true }] };
+          }
           if (sql.includes("update telegram_notification_preferences")) {
             orderFilled = params[1] === true;
           }
@@ -8336,6 +8600,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             },
           },
           config,
+          db: {
+            query: async () => ({ rows: [{ linked: true }] }),
+          } as never,
           redis,
           sendTestSignal: async () => false,
           telegram,
@@ -8350,6 +8617,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(labels.includes("🔎 Markets"), true);
         assert.equal(labels.includes("🛠 Admin"), false);
       }
+
+      const guestTelegram = new FakeTelegram();
+      await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v0:home",
+          from: { id: 998 },
+          id: "guest-stale-menu-callback",
+          message: {
+            chat: { id: 998, type: "private" },
+            message_id: 52,
+          },
+        },
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db: {
+          query: async () => ({ rows: [] }),
+        } as never,
+        redis: new FakeRedis(),
+        sendTestSignal: async () => false,
+        telegram: guestTelegram,
+      });
+      const guestHome = guestTelegram.edits[0];
+      assert.match(guestHome?.text ?? "", /Welcome to Hunch/);
+      assert.deepEqual(
+        guestHome?.reply_markup?.inline_keyboard.flat().map(({ text }) => text),
+        ["Open Hunch · Create or sign in"],
+      );
     },
   },
   {
@@ -8361,6 +8659,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
         HUNCH_SIGNAL_BOT_TOKEN: "token",
       });
+      const db = {
+        query: async () => ({ rows: [{ linked: true }] }),
+      } as never;
       const callbackQuery: TelegramBotCallbackQuery = {
         data: "hm:v1:trading:market_input",
         from: { id: 999 },
@@ -8374,6 +8675,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         await handleSignalBotMenuCallback({
           callbackQuery,
           config,
+          db,
           redis,
           sendTestSignal: async () => false,
           telegram,
@@ -8385,12 +8687,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         | {
             chatId: string;
             marketRef: string;
+            publicBrowseOnly?: boolean;
             telegramMessageId?: number | null;
             telegramUserId: number;
           }
         | undefined;
       const handledInput = await handleSignalBotMenuInput({
         config,
+        db,
         message: {
           chat: { id: 999, type: "private" },
           from: { id: 999 },
@@ -8408,11 +8712,37 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(marketRequest, {
         chatId: "999",
         marketRef: "https://polymarket.com/event/test-market",
+        publicBrowseOnly: false,
         telegramMessageId: 101,
         telegramUserId: 999,
       });
       assert.match(telegram.messages.at(-1)?.text ?? "", /Searching/);
       assert.match(telegram.edits.at(-1)?.text ?? "", /Test market card/);
+
+      marketRequest = undefined;
+      await handleSignalBotMenuInput({
+        config,
+        db: {
+          query: async () => ({ rows: [] }),
+        } as never,
+        message: {
+          chat: { id: 998, type: "private" },
+          from: { id: 998 },
+          text: "12345",
+        },
+        redis,
+        loadMarketCard: async (request) => {
+          marketRequest = request;
+          return { text: "Public market card" };
+        },
+        telegram,
+      });
+      assert.equal(
+        (marketRequest as { publicBrowseOnly?: boolean } | undefined)
+          ?.publicBrowseOnly,
+        true,
+      );
+
       assert.equal(
         await handleSignalBotMenuInput({
           config,
@@ -8424,12 +8754,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           redis,
           telegram,
         }),
-        false,
+        true,
       );
 
       await handleSignalBotMenuCallback({
         callbackQuery,
         config,
+        db,
         redis,
         sendTestSignal: async () => false,
         telegram,
@@ -8441,6 +8772,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           id: "market-input-cancel",
         },
         config,
+        db,
         redis,
         sendTestSignal: async () => false,
         telegram,
@@ -8457,7 +8789,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           redis,
           telegram,
         }),
-        false,
+        true,
       );
     },
   },
@@ -8556,16 +8888,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "public users can use personal trading intents without admin access",
+    name: "linked users can use personal trading intents without admin access",
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
+      const linkedDb = {
+        query: async () => ({ rows: [{ linked: true }] }),
+      } as never;
       let marketCalls = 0;
+      let publicBrowseOnly: boolean | undefined;
       const marketHandled = await handleSignalBotCommand({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: linkedDb,
         message: {
           chat: { id: 999, first_name: "Public user", type: "private" },
           from: { id: 999 },
@@ -8575,13 +8912,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         redis,
         sendMessage: (message) => telegram.sendMessage(message),
         sendTestSignal: async () => false,
-        sendTradeMarket: async () => {
+        sendTradeMarket: async (input) => {
           marketCalls += 1;
+          publicBrowseOnly = input.publicBrowseOnly;
           return true;
         },
       });
       assert.equal(marketHandled, true);
       assert.equal(marketCalls, 1);
+      assert.equal(publicBrowseOnly, false);
       assert.equal(telegram.messages.length, 0);
 
       let statusCalls = 0;
@@ -8590,6 +8929,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: linkedDb,
         message: {
           chat: { id: 999, first_name: "Public user", type: "private" },
           from: { id: 999 },
@@ -8608,6 +8948,72 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "guest personal commands cannot bypass onboarding or expose trading actions",
+    run: async () => {
+      const redis = new FakeRedis();
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+        HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+          TEST_TELEGRAM_MINI_APP_LINK_BASE,
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      const guestDb = {
+        query: async () => ({ rows: [{ linked: false }] }),
+      } as never;
+      let publicBrowseOnly: boolean | undefined;
+      await handleSignalBotCommand({
+        config,
+        db: guestDb,
+        message: {
+          chat: { id: 999, first_name: "Guest", type: "private" },
+          from: { id: 999 },
+          text: "/market polymarket:market-1",
+        },
+        redis,
+        sendMessage: async () => {
+          throw new Error("guest market should render through the market hook");
+        },
+        sendTestSignal: async () => false,
+        sendTradeMarket: async (input) => {
+          publicBrowseOnly = input.publicBrowseOnly;
+          return true;
+        },
+      });
+      assert.equal(publicBrowseOnly, true);
+
+      for (const command of ["/trade_status", "/disable_trading"]) {
+        const telegram = new FakeTelegram();
+        let personalActionCalls = 0;
+        await handleSignalBotCommand({
+          config,
+          db: guestDb,
+          disableTrading: async () => {
+            personalActionCalls += 1;
+            return "disabled";
+          },
+          message: {
+            chat: { id: 999, first_name: "Guest", type: "private" },
+            from: { id: 999 },
+            text: command,
+          },
+          redis,
+          sendMessage: (message) => telegram.sendMessage(message),
+          sendTestSignal: async () => false,
+          sendTradeStatus: async () => {
+            personalActionCalls += 1;
+            return true;
+          },
+        });
+        assert.equal(personalActionCalls, 0);
+        assert.match(telegram.messages[0]?.text ?? "", /Welcome to Hunch/);
+        assert.equal(
+          telegram.messages[0]?.reply_markup?.inline_keyboard.flat().length,
+          1,
+        );
+      }
+    },
+  },
+  {
     name: "admin help includes public help and admin controls",
     run: async () => {
       const redis = new FakeRedis();
@@ -8615,6 +9021,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await handleSignalBotCommand({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         message: {
@@ -8636,7 +9044,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(text, /disable\\_trading/);
       assert.match(text, /test\\_followthrough/);
       assert.match(text, /test\\_signal/);
-      assert.match(text, /Signal buttons open Hunch web links/);
+      assert.match(text, /open the Hunch Mini App/);
     },
   },
   {
@@ -9058,8 +9466,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
       assert.equal(
-        new URL(rows[0]?.[0]?.url ?? "").searchParams.get("amountUsd"),
-        "10",
+        decodeStartAppPayload(readStartAppParam(rows[0]?.[0]?.url)),
+        "p:event-1|market-1|Y|10",
       );
       assert.equal(rows.length, 1);
       assert.doesNotMatch(
@@ -9168,17 +9576,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message keeps web links when Mini App base is unset",
+    name: "message omits CTAs when Mini App base is unset",
     run: () => {
-      const message = buildSignalBotMessage({
+      const message = buildSignalBotMessageImpl({
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows.length, 1);
-      assert.match(rows[0]?.[0]?.url ?? "", /^https:\/\/app\.hunch\.trade\//);
+      assert.equal(rows.length, 0);
       assert.doesNotMatch(message.text, /https:\/\/app\.hunch\.trade/);
+      assert.match(message.text, /Mini App temporarily unavailable/);
     },
   },
   {
@@ -9306,11 +9714,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
       assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi YES 29¢");
-      const url = new URL(rows[1]?.[0]?.url ?? "");
-      assert.equal(url.pathname, "/events/kalshi%3Aevent-1");
-      assert.equal(url.searchParams.get("market"), "kalshi:market-1");
-      assert.equal(url.searchParams.get("side"), "YES");
-      assert.equal(url.searchParams.get("amountUsd"), "10");
+      assert.equal(
+        decodeStartAppPayload(readStartAppParam(rows[1]?.[0]?.url)),
+        "k:event-1|market-1|Y|10",
+      );
       assert.equal(rows.length, 2);
     },
   },
@@ -9470,6 +9877,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             marketTitle:
               displayName === "France" ? "France" : "Will test resolve Yes?",
           }),
+          telegramMiniAppLinkBase: null,
         });
         assert.doesNotMatch(
           message.text,
@@ -10339,6 +10747,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -10397,6 +10807,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -10791,6 +11203,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -10867,6 +11281,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -11361,6 +11777,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotFollowthroughTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -11654,6 +12072,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = await publishSignalBotFollowthroughTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -11669,7 +12089,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /YES at 55¢ moved with the read, but tracked wallet follow\\-through is thin so far/,
+        /moved with the read, but tracked wallet follow\\-through is thin so far/,
       );
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -12629,12 +13049,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         {
           query: async (sql: string, params: unknown[] = []) => {
             queries.push({ params, sql });
+            if (sql.includes("UPDATE telegram_bot_trading_authorizations")) {
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    enabled_venues: ["polymarket"],
+                    id: "authorization-1",
+                    updated_at: new Date("2026-07-17T00:00:00.000Z"),
+                    user_id: "user-1",
+                    wallet_chain: "ethereum",
+                  },
+                ],
+              };
+            }
             return {
-              rowCount: sql.includes(
-                "UPDATE telegram_bot_trading_authorizations",
-              )
-                ? 1
-                : 3,
+              rowCount: 3,
               rows: [],
             };
           },
@@ -12642,7 +13072,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "user-1",
       );
       assert.equal(disabled, 1);
-      assert.equal(queries.length, 2);
+      assert.equal(queries.length, 3);
       assert.deepEqual(queries[1]?.params[1], [
         "draft",
         "previewed",
@@ -12651,6 +13081,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(queries[1]?.sql ?? "", /executing|submitted/);
       assert.match(queries[1]?.sql ?? "", /authorization_disabled/);
       assert.match(queries[1]?.sql ?? "", /FROM user_telegram_accounts/);
+      assert.match(queries[2]?.sql ?? "", /analytics_server_events/);
+      assert.deepEqual(queries[2]?.params.slice(0, 4), [
+        "user-1",
+        "hf_telegram_trading_lifecycle",
+        "telegram_trading_settings",
+        "disabled",
+      ]);
+      assert.equal(queries[2]?.params[4], "polymarket");
+      assert.equal(JSON.parse(String(queries[2]?.params[6])).chain, "polygon");
     },
   },
 ];

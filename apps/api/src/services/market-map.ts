@@ -53,6 +53,7 @@ export type MarketMapSignalTargetMarket = {
   yesAsk: number | null;
   noBid: number | null;
   noAsk: number | null;
+  topAsOf?: { YES: string | null; NO: string | null };
   acceptingOrders: boolean | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
@@ -179,6 +180,7 @@ export type MarketMapEventMarketPreview = MarketMapActivityMetricFields & {
   yesAsk: number | null;
   noBid: number | null;
   noAsk: number | null;
+  topAsOf?: { YES: string | null; NO: string | null };
   acceptingOrders: boolean | null;
   resolvedOutcome: string | null;
   resolvedOutcomePct: number | null;
@@ -204,6 +206,7 @@ export type MarketMapEventSummary = MarketMapActivityMetricFields & {
   yesAsk?: number | null;
   noBid?: number | null;
   noAsk?: number | null;
+  topAsOf?: { YES: string | null; NO: string | null };
   marketBestBid?: number | null;
   marketBestAsk?: number | null;
   lastPrice?: number | null;

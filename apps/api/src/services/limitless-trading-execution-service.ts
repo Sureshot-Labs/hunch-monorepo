@@ -13,6 +13,7 @@ import {
   fetchStoredOrderWalletContext,
   normalizeLimitlessFokOrderSizesForMarket,
   storeOrder,
+  updateOrderFromHistory,
 } from "../repos/orders-repo.js";
 import {
   buildOrderNotification,
@@ -94,6 +95,12 @@ import {
   isLimitlessPartnerHmacConfigured,
   limitlessRequest,
 } from "./limitless-client.js";
+import { quoteLimitlessClobMarket } from "./limitless-clob-quote.js";
+import {
+  extractLimitlessExecutionFill,
+  isLimitlessFokUnmatchedMessage,
+  parseLimitlessOrderResult,
+} from "./limitless-order-result.js";
 import {
   deriveLimitlessSignedOrderSize,
   normalizeLimitlessMaybeRawAmount,
@@ -336,10 +343,6 @@ function mapLimitlessUpstreamStatus(status: number): number {
   if (status === 401 || status === 403) return 400;
   if (status >= 400 && status < 500) return status;
   return 502;
-}
-
-function isLimitlessFokUnmatchedMessage(message: string | null): boolean {
-  return message?.toLowerCase().includes("market order unmatched") ?? false;
 }
 
 function buildLimitlessOnBehalfHeaders(
@@ -995,6 +998,13 @@ function extractLimitlessImmediateFill(
   side: "BUY" | "SELL",
   fallback: { price: number | null; size: number | null },
 ): { notionalUsd: number; shares: number } | null {
+  const executionFill = extractLimitlessExecutionFill(payload);
+  if (executionFill) {
+    return {
+      notionalUsd: executionFill.notionalUsd,
+      shares: executionFill.shares,
+    };
+  }
   const record = isRecord(payload)
     ? isRecord(payload.order)
       ? payload.order
@@ -2911,12 +2921,79 @@ function extractLimitlessSubmittedOrder(payload: unknown): {
   status: string | null;
   venueOrderId: string | null;
 } {
-  const order =
-    isRecord(payload) && isRecord(payload.order) ? payload.order : payload;
+  const parsed = parseLimitlessOrderResult(payload);
   return {
-    order,
-    status: isRecord(order) ? readString(order.status) : null,
-    venueOrderId: isRecord(order) ? readString(order.id) : null,
+    order: parsed.order,
+    status: parsed.status,
+    venueOrderId: parsed.venueOrderId,
+  };
+}
+
+async function recordLimitlessFokNoFill(input: {
+  orderPayload: unknown;
+  pool: ApiTradingApplicationServiceInput["pool"];
+  price: number | null;
+  rawPayload: unknown;
+  side: "BUY" | "SELL";
+  signer: string;
+  size: number | null;
+  tokenId: string | null;
+  userId: string;
+  venueOrderId: string | null;
+}): Promise<
+  Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]
+> {
+  if (input.venueOrderId) {
+    const now = new Date();
+    const rawError = stringifyLimitlessRawError(input.rawPayload);
+    await storeOrder(input.pool, {
+      userId: input.userId,
+      walletAddress: input.signer,
+      signerAddress: input.signer,
+      venue: "limitless",
+      venueOrderId: input.venueOrderId,
+      tokenId: input.tokenId,
+      side: input.side,
+      orderType: "FOK",
+      price: input.price,
+      size: input.size,
+      status: "expired",
+      errorMessage: LIMITLESS_FOK_UNMATCHED_MESSAGE,
+      rawError,
+      orderPayload: input.orderPayload,
+      lastUpdate: now,
+    });
+    await input.pool.query(
+      `
+        update orders
+        set status = 'expired',
+            error_message = $4,
+            raw_error = coalesce($5, raw_error),
+            last_update = $6
+        where user_id = $1
+          and (wallet_address = $2 or signer_address = $2)
+          and venue = 'limitless'
+          and venue_order_id = $3
+      `,
+      [
+        input.userId,
+        input.signer,
+        input.venueOrderId,
+        LIMITLESS_FOK_UNMATCHED_MESSAGE,
+        rawError,
+        now,
+      ],
+    );
+  }
+
+  return {
+    ok: false,
+    reason: LIMITLESS_FOK_UNMATCHED_REASON,
+    message: LIMITLESS_FOK_UNMATCHED_MESSAGE,
+    status: "expired",
+    executionStatus: "UNMATCHED",
+    orderId: input.venueOrderId ?? undefined,
+    payload: input.rawPayload,
   };
 }
 
@@ -3255,6 +3332,31 @@ export async function submitLimitlessClientSignedOrder(input: {
     clientOrderId,
   };
 
+  if (input.body.orderType === "FOK") {
+    const amount = normalizeLimitlessRawAmount(makerAmount);
+    const depthQuote = await quoteLimitlessClobMarket({
+      ...(side === "BUY" ? { amountUsd: amount } : { amountShares: amount }),
+      side,
+      slug: input.body.marketSlug,
+      tokenId: requestedRawTokenId,
+    });
+    if (depthQuote.status !== "ready") {
+      return {
+        ok: true,
+        payload: {
+          ok: false,
+          reason: depthQuote.status,
+          message:
+            depthQuote.status === "insufficient_depth"
+              ? "Not enough liquidity to fill this order."
+              : "No liquidity is available for this order.",
+          executionStatus: "UNMATCHED",
+          payload: null,
+        },
+      };
+    }
+  }
+
   const upstream = await submitLimitlessClobOrderToVenue({
     body: orderPayload,
     requestAuth,
@@ -3267,60 +3369,20 @@ export async function submitLimitlessClientSignedOrder(input: {
       isLimitlessFokUnmatchedMessage(upstreamMessage)
     ) {
       const venueOrderId = extractLimitlessOrderIdFromMessage(upstreamMessage);
-      if (venueOrderId) {
-        const now = new Date();
-        const rawError = stringifyLimitlessRawError(upstream.payload);
-        await storeOrder(input.pool, {
-          userId: input.userId,
-          walletAddress: signer,
-          signerAddress: signer,
-          venue: "limitless",
-          venueOrderId,
-          tokenId: tokenId ?? null,
-          side,
-          orderType: input.body.orderType,
-          price,
-          size,
-          status: "expired",
-          errorMessage: LIMITLESS_FOK_UNMATCHED_MESSAGE,
-          rawError,
-          orderPayload,
-          lastUpdate: now,
-        });
-        await input.pool.query(
-          `
-            update orders
-            set status = 'expired',
-                error_message = $4,
-                raw_error = coalesce($5, raw_error),
-                last_update = $6
-            where user_id = $1
-              and (wallet_address = $2 or signer_address = $2)
-              and venue = 'limitless'
-              and venue_order_id = $3
-          `,
-          [
-            input.userId,
-            signer,
-            venueOrderId,
-            LIMITLESS_FOK_UNMATCHED_MESSAGE,
-            rawError,
-            now,
-          ],
-        );
-      }
-
       return {
         ok: true,
-        payload: {
-          ok: false,
-          reason: LIMITLESS_FOK_UNMATCHED_REASON,
-          message: LIMITLESS_FOK_UNMATCHED_MESSAGE,
-          status: "expired",
-          executionStatus: "UNMATCHED",
-          orderId: venueOrderId ?? undefined,
-          payload: upstream.payload,
-        },
+        payload: await recordLimitlessFokNoFill({
+          orderPayload,
+          pool: input.pool,
+          price,
+          rawPayload: upstream.payload,
+          side,
+          signer,
+          size,
+          tokenId,
+          userId: input.userId,
+          venueOrderId,
+        }),
       };
     }
     return {
@@ -3337,6 +3399,25 @@ export async function submitLimitlessClientSignedOrder(input: {
 
   const submittedOrder = extractLimitlessSubmittedOrder(upstream.payload);
   const venueOrderId = submittedOrder.venueOrderId;
+  const parsedResult = parseLimitlessOrderResult(upstream.payload);
+
+  if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
+    return {
+      ok: true,
+      payload: await recordLimitlessFokNoFill({
+        orderPayload,
+        pool: input.pool,
+        price,
+        rawPayload: upstream.payload,
+        side,
+        signer,
+        size,
+        tokenId,
+        userId: input.userId,
+        venueOrderId,
+      }),
+    };
+  }
 
   if (!venueOrderId) {
     return {
@@ -3389,9 +3470,22 @@ export async function submitLimitlessClientSignedOrder(input: {
     errorMessage: null,
     rawError: null,
     orderPayload: storedOrderPayload,
+    orderHash: parsedResult.txHash,
     lastUpdate: confirmedFillAt,
     filledAt: confirmedFillAt,
   });
+
+  if (confirmedFillAt && confirmedImmediateFill) {
+    await updateOrderFromHistory(input.pool, {
+      id: stored.order.id,
+      status: "filled",
+      price: storedPrice,
+      size: storedSize,
+      filledAt: confirmedFillAt,
+      lastUpdate: confirmedFillAt,
+      orderHash: parsedResult.txHash,
+    });
+  }
 
   if (confirmedFillAt) {
     try {
@@ -3401,7 +3495,7 @@ export async function submitLimitlessClientSignedOrder(input: {
         walletAddress: signer,
         signerAddress: signer,
         venueOrderId,
-        orderHash: null,
+        orderHash: parsedResult.txHash,
         tokenId: tokenId ?? null,
         side,
         filledAt: confirmedFillAt,
@@ -4366,11 +4460,7 @@ async function quote(
     });
   }
   const ask = await bestAskForToken(ctx.pool, tokenId);
-  const metadataPrice =
-    isRecord(market.metadata) && typeof market.metadata.price === "number"
-      ? market.metadata.price
-      : null;
-  const price = ask ?? metadataPrice;
+  const price = ask;
   if (!price || price <= 0 || price >= 1) {
     throw tradingError({
       code: "quote_unavailable",
@@ -4874,6 +4964,57 @@ async function submitPreparedTrade(
       prepared,
     });
   }
+  if (payload.orderType === "FOK") {
+    const orderSide = normalizeOrderSide(payload.orderPayload.side);
+    const rawMakerAmount = parseNumberish(payload.orderPayload.makerAmount);
+    const preflightAmount = normalizeLimitlessRawAmount(rawMakerAmount);
+    const preflightTokenId = normalizeRawLimitlessTokenIdFromUnknown(
+      payload.tokenId ?? payload.orderPayload.tokenId,
+    );
+    if (!orderSide || !preflightAmount || !preflightTokenId) {
+      return {
+        venue: "limitless",
+        status: "no_fill",
+        venueOrderId: null,
+        orderHash: null,
+        txSignature: null,
+        price: payload.price,
+        size: payload.size,
+        raw: {
+          reason: "unavailable",
+          message: "Limitless depth quote is unavailable.",
+          prepared: payload,
+        },
+      };
+    }
+    const depthQuote = await quoteLimitlessClobMarket({
+      ...(orderSide === "BUY"
+        ? { amountUsd: preflightAmount }
+        : { amountShares: preflightAmount }),
+      side: orderSide,
+      slug: payload.marketSlug,
+      tokenId: preflightTokenId,
+    });
+    if (depthQuote.status !== "ready") {
+      return {
+        venue: "limitless",
+        status: "no_fill",
+        venueOrderId: null,
+        orderHash: null,
+        txSignature: null,
+        price: payload.price,
+        size: payload.size,
+        raw: {
+          reason: depthQuote.status,
+          message:
+            depthQuote.status === "insufficient_depth"
+              ? "Not enough liquidity to fill this order."
+              : "No liquidity is available for this order.",
+          prepared: payload,
+        },
+      };
+    }
+  }
   await input.onBeforeBroadcast?.();
   const upstream = await submitLimitlessClobOrderToVenue({
     requestAuth: payload.requestAuth,
@@ -4888,7 +5029,7 @@ async function submitPreparedTrade(
   });
   if (!upstream.ok) {
     const message = extractLimitlessMessage(upstream.payload);
-    if (message?.toLowerCase().includes("unmatched")) {
+    if (isLimitlessFokUnmatchedMessage(message)) {
       return {
         venue: "limitless",
         status: "no_fill",
@@ -4914,7 +5055,25 @@ async function submitPreparedTrade(
   }
 
   const submittedOrder = extractLimitlessSubmittedOrder(upstream.payload);
+  const parsedResult = parseLimitlessOrderResult(upstream.payload);
   const venueOrderId = submittedOrder.venueOrderId;
+  if (parsedResult.explicitNoFill) {
+    return {
+      venue: "limitless",
+      status: "no_fill",
+      venueOrderId,
+      orderHash: null,
+      txSignature: null,
+      price: payload.price,
+      size: payload.size,
+      raw: {
+        reason: LIMITLESS_FOK_UNMATCHED_REASON,
+        message: LIMITLESS_FOK_UNMATCHED_MESSAGE,
+        payload: upstream.payload,
+        prepared: payload,
+      },
+    };
+  }
   if (!venueOrderId) {
     throw tradingError({
       code: "trade_submission_failed",
@@ -4923,26 +5082,28 @@ async function submitPreparedTrade(
       venue: "limitless",
     });
   }
-  const status = submittedOrder.status;
+  const executionFill = extractLimitlessExecutionFill(upstream.payload);
+  const submitStatus = parsedResult.terminalFill ? "filled" : "submitted";
+  const submitPrice = executionFill?.averagePrice ?? payload.price;
+  const submitSize = executionFill?.shares ?? payload.size;
   await input.onBroadcastSubmitted?.({
     venue: "limitless",
-    status: "submitted",
+    status: submitStatus,
     venueOrderId,
-    orderHash: null,
-    txSignature: null,
-    price: payload.price,
-    size: payload.size,
+    orderHash: parsedResult.txHash,
+    txSignature: parsedResult.txHash,
+    price: submitPrice,
+    size: submitSize,
     raw: { payload: upstream.payload, prepared: payload },
   });
   return {
     venue: "limitless",
-    status:
-      status && ["filled", "matched"].includes(status) ? "filled" : "submitted",
+    status: submitStatus,
     venueOrderId,
-    orderHash: null,
-    txSignature: null,
-    price: payload.price,
-    size: payload.size,
+    orderHash: parsedResult.txHash,
+    txSignature: parsedResult.txHash,
+    price: submitPrice,
+    size: submitSize,
     raw: { payload: upstream.payload, prepared: payload },
   };
 }
@@ -5030,8 +5191,8 @@ async function persistTrade(
     tokenId: payload.tokenId,
     side: "BUY",
     orderType: "FOK",
-    price: payload.price,
-    size: payload.size,
+    price: input.submitResult.price ?? payload.price,
+    size: input.submitResult.size ?? payload.size,
     status:
       input.submitResult.status === "filled"
         ? "filled"
@@ -5048,14 +5209,27 @@ async function persistTrade(
       ...buildTelegramTradeSourceMetadata(input),
       _hunchUpstream: upstreamPayload,
     },
+    orderHash: input.submitResult.orderHash,
     filledAt,
   });
+  if (filledAt) {
+    await updateOrderFromHistory(ctx.pool, {
+      id: stored.order.id,
+      status: "filled",
+      price: input.submitResult.price ?? payload.price,
+      size: input.submitResult.size ?? payload.size,
+      filledAt,
+      lastUpdate: filledAt,
+      orderHash: input.submitResult.orderHash,
+    });
+  }
   return {
     venue: "limitless",
     orderId: stored.order.id,
     executionId: null,
     venueOrderId: stored.order.venue_order_id,
-    status: stored.order.status,
+    status:
+      input.submitResult.status === "filled" ? "filled" : stored.order.status,
     raw: {
       stored,
       upstreamPayload,

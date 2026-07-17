@@ -99,6 +99,7 @@ export type FeedMarket = {
     noBid: number | null;
     noAsk: number | null;
   };
+  topAsOf: { YES: string | null; NO: string | null };
   change24h?: number | null;
   createdAt?: unknown;
   startAt?: unknown;
@@ -147,6 +148,7 @@ export type WatchlistMarket = {
     noBid: number | null;
     noAsk: number | null;
   };
+  topAsOf: { YES: string | null; NO: string | null };
   lastUpdate: unknown;
   watchlistId: string;
   watchlistCreatedAt: unknown;

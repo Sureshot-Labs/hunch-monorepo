@@ -1,3 +1,8 @@
+import {
+  buildCanonicalMarketTop,
+  DEFAULT_CANONICAL_MARKET_TOP_MAX_AGE_MS,
+} from "./canonical-market-top.js";
+
 export type MarketPriceSide = "YES" | "NO";
 
 export type MarketPriceBlocker =
@@ -22,6 +27,8 @@ export type MarketPriceStateInput = {
   noTop?: PriceTopInput | null;
   maxBuyPrice?: number;
   terminalPp?: number;
+  maxAgeMs?: number;
+  now?: Date | number;
 };
 
 export type MarketSidePriceState = {
@@ -67,24 +74,6 @@ function normalizeThreshold(value: unknown, fallback: number): number {
   return clampProbability(value);
 }
 
-function inverted(value: number | null): number | null {
-  return value == null ? null : clampProbability(1 - value);
-}
-
-function mid(bid: number | null, ask: number | null): number | null {
-  return bid != null && ask != null ? clampProbability((bid + ask) / 2) : null;
-}
-
-function fallbackProbability(
-  bid: number | null,
-  ask: number | null,
-): number | null {
-  if (bid != null && ask != null) return mid(bid, ask);
-  if (bid != null) return bid;
-  if (ask != null) return ask;
-  return null;
-}
-
 function hasInvalidSpread(bid: number | null, ask: number | null): boolean {
   return bid != null && ask != null && bid > ask;
 }
@@ -94,29 +83,22 @@ export function buildMarketPriceState(
 ): MarketPriceState {
   const maxBuyPrice = normalizeThreshold(input.maxBuyPrice, 0.95);
   const terminalPp = normalizeThreshold(input.terminalPp, 0.01);
-  const marketBid = normalizePriceValue(input.marketBestBid);
-  const marketAsk = normalizePriceValue(input.marketBestAsk);
-  const lastPrice = normalizePriceValue(input.lastPrice);
-
-  const yesBid = normalizePriceValue(input.yesTop?.bestBid) ?? marketBid;
-  const yesAsk = normalizePriceValue(input.yesTop?.bestAsk) ?? marketAsk;
-  const noBid =
-    normalizePriceValue(input.noTop?.bestBid) ?? inverted(marketAsk);
-  const noAsk =
-    normalizePriceValue(input.noTop?.bestAsk) ?? inverted(marketBid);
+  const canonical = buildCanonicalMarketTop({
+    yesTop: input.yesTop,
+    noTop: input.noTop,
+    now: input.now,
+    maxAgeMs: input.maxAgeMs ?? DEFAULT_CANONICAL_MARKET_TOP_MAX_AGE_MS,
+  });
+  const yesBid = canonical.yesBid;
+  const yesAsk = canonical.yesAsk;
+  const noBid = canonical.noBid;
+  const noAsk = canonical.noAsk;
 
   const invalidSpread =
     hasInvalidSpread(yesBid, yesAsk) || hasInvalidSpread(noBid, noAsk);
   const hasBook =
     yesBid != null || yesAsk != null || noBid != null || noAsk != null;
-  const yesProbability =
-    mid(yesBid, yesAsk) ??
-    (mid(noBid, noAsk) != null ? inverted(mid(noBid, noAsk)) : null) ??
-    fallbackProbability(yesBid, yesAsk) ??
-    (fallbackProbability(noBid, noAsk) != null
-      ? inverted(fallbackProbability(noBid, noAsk))
-      : null) ??
-    lastPrice;
+  const yesProbability = canonical.probability;
   const terminalLike =
     yesProbability != null &&
     (yesProbability <= terminalPp || yesProbability >= 1 - terminalPp);
@@ -125,6 +107,9 @@ export function buildMarketPriceState(
     const blockers: MarketPriceBlocker[] = [];
     if (!hasBook) blockers.push("no_book");
     if (invalidSpread) blockers.push("invalid_spread");
+    if (canonical.blockers.includes("stale")) {
+      blockers.push("live_price_stale");
+    }
     if (terminalLike) blockers.push("terminal_price");
     if (buyPrice == null) blockers.push("missing_side_price");
     if (buyPrice != null && buyPrice >= maxBuyPrice) {

@@ -100,7 +100,15 @@ import {
   parseSignalBotInteractiveMenuRoute,
   type SignalBotInteractiveMenuRoute,
 } from "./telegram-bot-menu-actions.js";
+import {
+  resolveTelegramBotMenuAudience,
+  type TelegramBotMenuAudience,
+} from "./telegram-bot-menu-audience.js";
 import { handleSignalBotMarketSearchInput } from "./telegram-bot-menu-search-input.js";
+import {
+  buildHunchMiniAppDeepLinkButton,
+  buildHunchMiniAppWebButton,
+} from "./telegram-mini-app-buttons.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   clearSignalBotMenuInput,
@@ -661,7 +669,7 @@ function signalBotSendCooldownKey(chatId: string, noteId: string): string {
 export function parseSignalBotConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotConfig {
-  return {
+  const config: SignalBotConfig = {
     enabled: parseBool(env.HUNCH_SIGNAL_BOT_ENABLED, false),
     token: env.HUNCH_SIGNAL_BOT_TOKEN?.trim() ?? "",
     adminUserIds: new Set(
@@ -700,6 +708,16 @@ export function parseSignalBotConfig(
     tradingInternalApiToken:
       env.HUNCH_SIGNAL_BOT_INTERNAL_API_TOKEN?.trim() || null,
   };
+  if (
+    config.enabled &&
+    env.NODE_ENV?.trim().toLowerCase() === "production" &&
+    !config.telegramMiniAppLinkBase
+  ) {
+    throw new Error(
+      "HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE is required when the production signal bot is enabled",
+    );
+  }
+  return config;
 }
 
 export function parseSignalBotCommand(
@@ -1298,33 +1316,24 @@ function buildSignalBotTelegramButton(input: {
   miniAppLinkBase?: string | null;
   startParam: string | null | undefined;
   text: string;
-  webUrl: string;
 }): TelegramInlineKeyboardButton | null {
-  const miniAppUrl = buildSignalBotMiniAppUrl({
-    base: input.miniAppLinkBase,
-    startParam: input.startParam ?? null,
-  });
-  const webAppUrl = buildSignalBotTelegramWebAppUrl({
-    appBaseUrl: input.appBaseUrl,
-    startParam: input.startParam,
-  });
   if (
     input.miniAppLinkBase &&
     isSignalBotPrivateChat(input.chatType) &&
-    webAppUrl
+    input.startParam
   ) {
-    return {
+    return buildHunchMiniAppWebButton({
+      appBaseUrl: input.appBaseUrl,
+      enabled: true,
+      startParam: input.startParam,
       text: input.text,
-      web_app: { url: webAppUrl },
-    };
+    });
   }
-  if (input.miniAppLinkBase) {
-    return miniAppUrl ? { text: input.text, url: miniAppUrl } : null;
-  }
-  return {
+  return buildHunchMiniAppDeepLinkButton({
+    miniAppLinkBase: input.miniAppLinkBase,
+    startParam: input.startParam,
     text: input.text,
-    url: input.webUrl,
-  };
+  });
 }
 
 function pushSignalBotButtonRow(
@@ -1380,14 +1389,6 @@ export function buildSignalBotMessage(input: {
   if (!publishable) {
     return { keyboard: undefined, publishable: false, text: "" };
   }
-  const marketUrl = note.eventId
-    ? buildSignalBotOpenMarketUrl({
-        appBaseUrl: input.appBaseUrl,
-        eventId: note.eventId,
-        marketId: note.marketId,
-        side: buySide,
-      })
-    : null;
   const holderStartParam =
     !buySide || !note.holderSide || note.holderSide === buySide
       ? buildSignalBotHolderStartParam({
@@ -1467,6 +1468,9 @@ export function buildSignalBotMessage(input: {
         ]
       : []),
     credentialBlock,
+    ...(!input.telegramMiniAppLinkBase
+      ? [escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
+      : []),
   ];
 
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
@@ -1484,13 +1488,6 @@ export function buildSignalBotMessage(input: {
       tradeTarget.side === buySide
         ? presentation.positions[buySide].shortLabel
         : tradeTarget.side;
-    const baseTradeUrl = buildSignalBotTradeUrl({
-      amountUsd: input.buyAmountUsd,
-      appBaseUrl: input.appBaseUrl,
-      eventId: tradeTarget.eventId,
-      marketId: tradeTarget.marketId,
-      side: tradeTarget.side,
-    });
     addedBuyButton = pushSignalBotButtonRow(
       keyboardRows,
       buildSignalBotTelegramButton({
@@ -1510,7 +1507,6 @@ export function buildSignalBotMessage(input: {
           sideLabel: tradeSideLabel,
           venue: tradeTarget.venue,
         }),
-        webUrl: baseTradeUrl,
       }),
     );
     if (
@@ -1518,13 +1514,6 @@ export function buildSignalBotMessage(input: {
       input.cheaperAlternative &&
       input.cheaperAlternative.side === buySide
     ) {
-      const cheaperTradeWebUrl = buildSignalBotTradeUrl({
-        amountUsd: input.buyAmountUsd,
-        appBaseUrl: input.appBaseUrl,
-        eventId: input.cheaperAlternative.eventId,
-        marketId: input.cheaperAlternative.marketId,
-        side: input.cheaperAlternative.side,
-      });
       const addedCheaperButton = pushSignalBotButtonRow(
         keyboardRows,
         buildSignalBotTelegramButton({
@@ -1542,21 +1531,12 @@ export function buildSignalBotMessage(input: {
             alternative: input.cheaperAlternative,
             sideLabel: presentation.positions[buySide].shortLabel,
           }),
-          webUrl: cheaperTradeWebUrl,
         }),
       );
       addedBuyButton = addedBuyButton || addedCheaperButton;
     }
   }
   if (!addedBuyButton && note.eventId) {
-    const openMarketUrl =
-      marketUrl ??
-      buildSignalBotOpenMarketUrl({
-        appBaseUrl: input.appBaseUrl,
-        eventId: note.eventId,
-        marketId: note.marketId,
-        side: buySide,
-      });
     pushSignalBotButtonRow(
       keyboardRows,
       buildSignalBotTelegramButton({
@@ -1565,7 +1545,6 @@ export function buildSignalBotMessage(input: {
         miniAppLinkBase: input.telegramMiniAppLinkBase,
         startParam: marketStartParam,
         text: "↗️ Open market",
-        webUrl: openMarketUrl,
       }),
     );
   }
@@ -1687,13 +1666,6 @@ function buildSignalBotFollowthroughKeyboard(input: {
         stats: input.stats,
       })
     ) {
-      const webTradeUrl = buildSignalBotTradeUrl({
-        amountUsd: input.buyAmountUsd,
-        appBaseUrl: input.appBaseUrl,
-        eventId,
-        marketId,
-        side,
-      });
       addedBuyButton = pushSignalBotButtonRow(
         rows,
         buildSignalBotTelegramButton({
@@ -1717,19 +1689,12 @@ function buildSignalBotFollowthroughKeyboard(input: {
                 : side,
             venue: target.venue,
           }),
-          webUrl: webTradeUrl,
         }),
       );
     }
   }
 
   if (!addedBuyButton) {
-    const webMarketUrl = buildSignalBotOpenMarketUrl({
-      appBaseUrl: input.appBaseUrl,
-      eventId,
-      marketId,
-      side,
-    });
     pushSignalBotButtonRow(
       rows,
       buildSignalBotTelegramButton({
@@ -1743,7 +1708,6 @@ function buildSignalBotFollowthroughKeyboard(input: {
           side,
         }),
         text: "↗️ Open market",
-        webUrl: webMarketUrl,
       }),
     );
   }
@@ -1906,19 +1870,14 @@ type SignalBotMenuTransport = {
 function buildSignalBotMainMiniAppButton(input: {
   appBaseUrl: string;
   miniAppEnabled: boolean;
-}): TelegramInlineKeyboardButton {
-  if (!input.miniAppEnabled) {
-    return { text: "Open Hunch", url: input.appBaseUrl };
-  }
-  return {
-    text: "Open Hunch",
-    web_app: {
-      url: new URL(
-        SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
-        input.appBaseUrl,
-      ).toString(),
-    },
-  };
+  text?: string;
+}): TelegramInlineKeyboardButton | null {
+  return buildHunchMiniAppWebButton({
+    appBaseUrl: input.appBaseUrl,
+    enabled: input.miniAppEnabled,
+    path: SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
+    text: input.text ?? "Open Hunch",
+  });
 }
 
 function buildSignalBotSettingsMiniAppButton(input: {
@@ -1926,11 +1885,19 @@ function buildSignalBotSettingsMiniAppButton(input: {
   miniAppEnabled: boolean;
   path: string;
   text: string;
-}): TelegramInlineKeyboardButton {
-  const url = new URL(input.path, input.appBaseUrl).toString();
-  return input.miniAppEnabled
-    ? { text: input.text, web_app: { url } }
-    : { text: input.text, url };
+}): TelegramInlineKeyboardButton | null {
+  return buildHunchMiniAppWebButton({
+    appBaseUrl: input.appBaseUrl,
+    enabled: input.miniAppEnabled,
+    path: input.path,
+    text: input.text,
+  });
+}
+
+function buildSignalBotOptionalButtonRows(
+  button: TelegramInlineKeyboardButton | null,
+): TelegramInlineKeyboardButton[][] {
+  return button ? [[button]] : [];
 }
 
 function buildSignalBotMenuNavRow(input: {
@@ -1954,6 +1921,7 @@ function buildSignalBotMenuNavRow(input: {
 
 export function buildSignalBotMenuScreen(input: {
   appBaseUrl: string;
+  audience?: TelegramBotMenuAudience;
   isAdmin: boolean;
   miniAppEnabled: boolean;
   notice?: string | null;
@@ -1978,6 +1946,57 @@ export function buildSignalBotMenuScreen(input: {
   const toggleRoute = (route: string, enabled: boolean) =>
     `${route}:${enabled ? "off" : "on"}`;
   if (input.screen === "home") {
+    if (input.audience === "guest") {
+      const guestButton = buildSignalBotMainMiniAppButton({
+        appBaseUrl: input.appBaseUrl,
+        miniAppEnabled: input.miniAppEnabled,
+        text: "Open Hunch · Create or sign in",
+      });
+      return {
+        keyboard: {
+          inline_keyboard: buildSignalBotOptionalButtonRows(guestButton),
+        },
+        text: [
+          formatTelegramBold("👋 Welcome to Hunch"),
+          "",
+          escapeTelegramMarkdownV2(
+            "Open Hunch to create an account or sign in. After signing in, enable Telegram Trading in Hunch if you want to trade from Telegram.",
+          ),
+          ...(!guestButton
+            ? [
+                "",
+                escapeTelegramMarkdownV2(
+                  "The Hunch Mini App is temporarily unavailable.",
+                ),
+              ]
+            : []),
+          ...noticeLines,
+        ].join("\n"),
+      };
+    }
+    if (input.audience === "unavailable") {
+      return {
+        keyboard: {
+          inline_keyboard: buildSignalBotOptionalButtonRows(miniAppButton),
+        },
+        text: [
+          formatTelegramBold("🔮 Hunch"),
+          "",
+          escapeTelegramMarkdownV2(
+            "Account status is temporarily unavailable. Try again or open Hunch.",
+          ),
+          ...(!miniAppButton
+            ? [
+                "",
+                escapeTelegramMarkdownV2(
+                  "The Hunch Mini App is temporarily unavailable.",
+                ),
+              ]
+            : []),
+          ...noticeLines,
+        ].join("\n"),
+      };
+    }
     const rows: TelegramInlineKeyboard["inline_keyboard"] = [
       [callback("trading:market_input", "🔎 Markets")],
       [callback("positions", "💼 My positions")],
@@ -2020,7 +2039,7 @@ export function buildSignalBotMenuScreen(input: {
       keyboard: {
         inline_keyboard: [
           [callback("trading:status", "↻ Refresh trading status")],
-          [miniAppButton],
+          ...buildSignalBotOptionalButtonRows(miniAppButton),
           buildSignalBotMenuNavRow({ parent: "home" }),
         ],
       },
@@ -2071,7 +2090,7 @@ export function buildSignalBotMenuScreen(input: {
           [callback("settings:notifications", "🔔 Notifications")],
           [callback("settings:signals", "📡 Signals")],
           [callback("settings:account", "👤 Account")],
-          [telegramTradingButton],
+          ...buildSignalBotOptionalButtonRows(telegramTradingButton),
           buildSignalBotMenuNavRow({ parent: "home" }),
         ],
       },
@@ -2091,7 +2110,7 @@ export function buildSignalBotMenuScreen(input: {
       return {
         keyboard: {
           inline_keyboard: [
-            [miniAppButton],
+            ...buildSignalBotOptionalButtonRows(miniAppButton),
             buildSignalBotMenuNavRow({
               includeHome: true,
               parent: "settings",
@@ -2153,7 +2172,7 @@ export function buildSignalBotMenuScreen(input: {
       return {
         keyboard: {
           inline_keyboard: [
-            [miniAppButton],
+            ...buildSignalBotOptionalButtonRows(miniAppButton),
             buildSignalBotMenuNavRow({
               includeHome: true,
               parent: "notifications",
@@ -2215,7 +2234,7 @@ export function buildSignalBotMenuScreen(input: {
       return {
         keyboard: {
           inline_keyboard: [
-            [miniAppButton],
+            ...buildSignalBotOptionalButtonRows(miniAppButton),
             buildSignalBotMenuNavRow({
               includeHome: true,
               parent: "notifications",
@@ -2277,7 +2296,7 @@ export function buildSignalBotMenuScreen(input: {
       return {
         keyboard: {
           inline_keyboard: [
-            [miniAppButton],
+            ...buildSignalBotOptionalButtonRows(miniAppButton),
             buildSignalBotMenuNavRow({
               includeHome: true,
               parent: "settings",
@@ -2343,8 +2362,8 @@ export function buildSignalBotMenuScreen(input: {
     return {
       keyboard: {
         inline_keyboard: [
-          [accountButton],
-          [walletsButton],
+          ...buildSignalBotOptionalButtonRows(accountButton),
+          ...buildSignalBotOptionalButtonRows(walletsButton),
           buildSignalBotMenuNavRow({
             includeHome: true,
             parent: "settings",
@@ -2372,7 +2391,7 @@ export function buildSignalBotMenuScreen(input: {
       keyboard: {
         inline_keyboard: [
           [callback("trading:market_input", "💸 Trade a market")],
-          [miniAppButton],
+          ...buildSignalBotOptionalButtonRows(miniAppButton),
           buildSignalBotMenuNavRow({ parent: "home" }),
         ],
       },
@@ -2585,17 +2604,29 @@ function signalBotMenuRouteRequiresAdmin(
 }
 
 async function sendOrEditSignalBotMenuScreen(input: {
+  audience?: TelegramBotMenuAudience;
   chatId: string;
+  db?: DbQuery;
   isAdmin: boolean;
   messageId?: number | null;
   notice?: string | null;
   notificationPreferences?: TelegramNotificationPreferences | null;
   screen: SignalBotMenuScreenName;
+  telegramUserId?: string | number | null;
   config: SignalBotConfig;
   transport: SignalBotMenuTransport;
 }): Promise<TelegramSendResult> {
+  const audience =
+    input.audience ??
+    (input.screen === "home"
+      ? await resolveTelegramBotMenuAudience({
+          db: input.db,
+          telegramUserId: input.telegramUserId,
+        })
+      : "linked");
   const screen = buildSignalBotMenuScreen({
     appBaseUrl: input.config.appBaseUrl,
+    audience,
     isAdmin: input.isAdmin,
     miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
     notice: input.notice,
@@ -2663,14 +2694,18 @@ function buildSignalBotPrivateMenuEntry(input: {
 }): TelegramSendMessageInput {
   const targetUrl = input.botUsername
     ? "https://t.me/" + input.botUsername
-    : (input.config.telegramMiniAppLinkBase ?? input.config.appBaseUrl);
+    : input.config.telegramMiniAppLinkBase;
   return {
     chat_id: input.chatId,
     disable_web_page_preview: true,
     parse_mode: "MarkdownV2",
-    reply_markup: {
-      inline_keyboard: [[{ text: "Open bot menu", url: targetUrl }]],
-    },
+    ...(targetUrl
+      ? {
+          reply_markup: {
+            inline_keyboard: [[{ text: "Open bot menu", url: targetUrl }]],
+          },
+        }
+      : {}),
     text: [
       formatTelegramBold("🔮 Hunch Signal Bot"),
       "",
@@ -2703,6 +2738,7 @@ type SignalBotMenuLoaders = {
     chatId: string;
     context?: { origin: "search"; returnCallbackData: string };
     marketRef: string;
+    publicBrowseOnly?: boolean;
     telegramMessageId: number | null;
     telegramUserId: number;
   }) => Promise<SignalBotMenuMessage>;
@@ -2764,6 +2800,37 @@ export async function handleSignalBotMenuCallback(
   }
   const chatId = String(message.chat.id);
   const messageId = message.message_id ?? null;
+  const audience = await resolveTelegramBotMenuAudience({
+    db: input.db,
+    telegramUserId,
+  });
+  const guestSearchRoute =
+    route.kind === "market_search_result" ||
+    route.kind === "market_search_back" ||
+    (route.kind === "screen" && route.screen === "market_input");
+  if (audience !== "linked" && !guestSearchRoute) {
+    await input.telegram.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      ...(audience === "unavailable"
+        ? {
+            showAlert: true,
+            text: "Account status is temporarily unavailable.",
+          }
+        : {}),
+    });
+    await sendOrEditSignalBotMenuScreen({
+      audience,
+      chatId,
+      config: input.config,
+      db: input.db,
+      isAdmin,
+      messageId,
+      screen: "home",
+      telegramUserId,
+      transport: input.telegram,
+    });
+    return true;
+  }
   if (signalBotMenuRouteRequiresAdmin(route) && !isAdmin) {
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
@@ -2773,10 +2840,12 @@ export async function handleSignalBotMenuCallback(
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
+      db: input.db,
       isAdmin,
       messageId,
       notice: "The menu was refreshed.",
       screen: "home",
+      telegramUserId,
       transport: input.telegram,
     });
     return true;
@@ -2793,6 +2862,7 @@ export async function handleSignalBotMenuCallback(
   if (
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
+    route.kind === "market_search_venue" ||
     route.kind === "position" ||
     route.kind === "deposit" ||
     route.kind === "deposit_menu"
@@ -2801,7 +2871,13 @@ export async function handleSignalBotMenuCallback(
       callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
       chatId,
       loadDeposit: input.loadDeposit,
-      loadMarketCard: input.loadMarketCard,
+      loadMarketCard: input.loadMarketCard
+        ? (marketInput) =>
+            input.loadMarketCard!({
+              ...marketInput,
+              publicBrowseOnly: audience !== "linked",
+            })
+        : undefined,
       loadPositionCard: input.loadPositionCard,
       messageId,
       redis: input.redis,
@@ -2836,10 +2912,12 @@ export async function handleSignalBotMenuCallback(
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
+      db: input.db,
       isAdmin,
       messageId,
       notice: "This menu expired, so it was refreshed.",
       screen: "home",
+      telegramUserId,
       transport: input.telegram,
     });
     return true;
@@ -2853,10 +2931,12 @@ export async function handleSignalBotMenuCallback(
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
+      db: input.db,
       isAdmin,
       messageId,
       notice: "Market input cancelled.",
       screen: "home",
+      telegramUserId,
       transport: input.telegram,
     });
     return true;
@@ -2916,16 +2996,14 @@ export async function handleSignalBotMenuCallback(
         text: "*💼 My positions*\n\nPositions are unavailable right now\\.",
       };
     }
+    const positionsFallbackButton = buildSignalBotMainMiniAppButton({
+      appBaseUrl: input.config.appBaseUrl,
+      miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
+    });
     const keyboard: TelegramInlineKeyboard = {
       inline_keyboard: [
-        ...(positionsMessage.reply_markup?.inline_keyboard ?? [
-          [
-            buildSignalBotMainMiniAppButton({
-              appBaseUrl: input.config.appBaseUrl,
-              miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
-            }),
-          ],
-        ]),
+        ...(positionsMessage.reply_markup?.inline_keyboard ??
+          buildSignalBotOptionalButtonRows(positionsFallbackButton)),
         [
           {
             callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + "home",
@@ -3138,11 +3216,13 @@ export async function handleSignalBotMenuCallback(
 
 export async function handleSignalBotMenuInput(input: {
   config: SignalBotConfig;
+  db?: DbQuery;
   message: TelegramBotMessage;
   redis: SignalBotRedisLike;
   loadMarketCard?: (input: {
     chatId: string;
     marketRef: string;
+    publicBrowseOnly?: boolean;
     telegramMessageId: number | null;
     telegramUserId: number;
   }) => Promise<{
@@ -3164,6 +3244,10 @@ export async function handleSignalBotMenuInput(input: {
   ) {
     return false;
   }
+  const audience = await resolveTelegramBotMenuAudience({
+    db: input.db,
+    telegramUserId,
+  });
   return handleSignalBotMarketSearchInput({
     beginResponse: async (message) => {
       const sent = await input.telegram.sendMessage({
@@ -3185,7 +3269,13 @@ export async function handleSignalBotMenuInput(input: {
     },
     callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
     chatId,
-    loadMarketCard: input.loadMarketCard,
+    loadMarketCard: input.loadMarketCard
+      ? (marketInput) =>
+          input.loadMarketCard!({
+            ...marketInput,
+            publicBrowseOnly: audience !== "linked",
+          })
+      : undefined,
     redis: input.redis,
     render: (message, messageId) =>
       sendOrEditSignalBotMenuMessage({
@@ -3198,10 +3288,12 @@ export async function handleSignalBotMenuInput(input: {
       sendOrEditSignalBotMenuScreen({
         chatId,
         config: input.config,
+        db: input.db,
         isAdmin: isSignalBotAdmin(input.config, telegramUserId),
         messageId,
         notice: "Input cancelled because a command was received.",
         screen: "home",
+        telegramUserId,
         transport: input.telegram,
       }),
     searchMarkets: input.searchMarkets,
@@ -3284,6 +3376,7 @@ export async function handleSignalBotCommand(input: {
     chatId: string;
     isAdminTest?: boolean;
     marketRef: string;
+    publicBrowseOnly?: boolean;
     telegramMessageId?: number | null;
     telegramUserId: number;
   }) => Promise<boolean>;
@@ -3343,8 +3436,10 @@ export async function handleSignalBotCommand(input: {
     await sendOrEditSignalBotMenuScreen({
       chatId,
       config: input.config,
+      db: input.db,
       isAdmin,
       screen: "home",
+      telegramUserId: input.message.from?.id,
       transport: { sendMessage: input.sendMessage },
     });
     return true;
@@ -3360,11 +3455,18 @@ export async function handleSignalBotCommand(input: {
       );
       return true;
     }
+    const audience = await resolveTelegramBotMenuAudience({
+      db: input.db,
+      telegramUserId: input.message.from?.id,
+    });
     await sendOrEditSignalBotMenuScreen({
+      audience,
       chatId,
       config: input.config,
+      db: input.db,
       isAdmin,
-      screen: "settings",
+      screen: audience === "linked" ? "settings" : "home",
+      telegramUserId: input.message.from?.id,
       transport: { sendMessage: input.sendMessage },
     });
     return true;
@@ -3392,11 +3494,18 @@ export async function handleSignalBotCommand(input: {
       );
       return true;
     }
+    const audience = await resolveTelegramBotMenuAudience({
+      db: input.db,
+      telegramUserId: input.message.from?.id,
+    });
     await sendOrEditSignalBotMenuScreen({
+      audience,
       chatId,
       config: input.config,
+      db: input.db,
       isAdmin,
-      screen: "help",
+      screen: audience === "linked" ? "help" : "home",
+      telegramUserId: input.message.from?.id,
       transport: { sendMessage: input.sendMessage },
     });
     return true;
@@ -3559,6 +3668,23 @@ export async function handleSignalBotCommand(input: {
       );
       return true;
     }
+    const audience = await resolveTelegramBotMenuAudience({
+      db: input.db,
+      telegramUserId: input.message.from.id,
+    });
+    if (audience !== "linked") {
+      await sendOrEditSignalBotMenuScreen({
+        audience,
+        chatId,
+        config: input.config,
+        db: input.db,
+        isAdmin,
+        screen: "home",
+        telegramUserId: input.message.from.id,
+        transport: { sendMessage: input.sendMessage },
+      });
+      return true;
+    }
     const sent = await (input.sendTradeStatus?.(
       chatId,
       input.message.from.id,
@@ -3575,6 +3701,23 @@ export async function handleSignalBotCommand(input: {
       await input.sendMessage(
         buildPlainReply(chatId, "Open a private chat with the bot to trade."),
       );
+      return true;
+    }
+    const audience = await resolveTelegramBotMenuAudience({
+      db: input.db,
+      telegramUserId: input.message.from.id,
+    });
+    if (audience !== "linked") {
+      await sendOrEditSignalBotMenuScreen({
+        audience,
+        chatId,
+        config: input.config,
+        db: input.db,
+        isAdmin,
+        screen: "home",
+        telegramUserId: input.message.from.id,
+        transport: { sendMessage: input.sendMessage },
+      });
       return true;
     }
     const disableResult = await (input.disableTrading?.(
@@ -3599,21 +3742,17 @@ export async function handleSignalBotCommand(input: {
         "Open Hunch Settings to revoke bot access from your Trading Wallet.",
       ].join("\n"),
     );
+    const revokeButton = buildHunchMiniAppWebButton({
+      appBaseUrl: input.config.appBaseUrl,
+      enabled: input.config.telegramMiniAppLinkBase != null,
+      path: "/settings/telegram-trading",
+      text: "Revoke access in Hunch",
+    });
     await input.sendMessage({
       ...reply,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "Revoke access in Hunch",
-              url: new URL(
-                "/settings/telegram-trading",
-                input.config.appBaseUrl,
-              ).toString(),
-            },
-          ],
-        ],
-      },
+      ...(revokeButton
+        ? { reply_markup: { inline_keyboard: [[revokeButton]] } }
+        : {}),
     });
     return true;
   }
@@ -3631,9 +3770,14 @@ export async function handleSignalBotCommand(input: {
       );
       return true;
     }
+    const audience = await resolveTelegramBotMenuAudience({
+      db: input.db,
+      telegramUserId: input.message.from.id,
+    });
     const sent = await (input.sendTradeMarket?.({
       chatId,
       marketRef,
+      publicBrowseOnly: audience !== "linked",
       telegramMessageId: input.message.message_id ?? null,
       telegramUserId: input.message.from.id,
     }) ?? Promise.resolve(false));
@@ -3775,6 +3919,7 @@ export async function pollSignalBotCommands(
       chatId: string;
       isAdminTest?: boolean;
       marketRef: string;
+      publicBrowseOnly?: boolean;
       telegramMessageId?: number | null;
       telegramUserId: number;
     }) => Promise<boolean>;
@@ -3820,6 +3965,7 @@ export async function pollSignalBotCommands(
           if (!didHandle) {
             didHandle = await handleSignalBotMenuInput({
               config: input.config,
+              db: input.db,
               message: update.message,
               redis: input.redis,
               loadMarketCard: input.loadMarketCard,
@@ -3835,9 +3981,11 @@ export async function pollSignalBotCommands(
             await sendOrEditSignalBotMenuScreen({
               chatId: String(update.message.chat.id),
               config: input.config,
+              db: input.db,
               isAdmin: isSignalBotAdmin(input.config, update.message.from?.id),
               notice: "Use the menu buttons to choose an action.",
               screen: "home",
+              telegramUserId: update.message.from?.id,
               transport: input.telegram,
             });
             didHandle = true;
@@ -6370,6 +6518,9 @@ function buildSignalBotFollowthroughMessage(input: {
     formatTelegramBold(header),
     formatSignalBotFollowthroughStatBlock({ sideLabel, stats }),
     `${formatTelegramBold("Read")}: ${footerLine}`,
+    ...(!input.telegramMiniAppLinkBase
+      ? [escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
+      : []),
   ]);
 }
 
@@ -7327,19 +7478,20 @@ export async function configureSignalBotTelegramUi(input: {
       }),
     );
   }
+  const menuButton = buildHunchMiniAppWebButton({
+    appBaseUrl: input.config.appBaseUrl,
+    enabled: input.config.telegramMiniAppLinkBase != null,
+    path: SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
+    text: "Open Hunch",
+  });
   await attempt("menu-button:default", () =>
     input.telegram.setChatMenuButton({
       menu_button:
-        input.config.telegramMiniAppLinkBase != null
+        menuButton && "web_app" in menuButton
           ? {
-              text: "Open Hunch",
+              text: menuButton.text,
               type: "web_app",
-              web_app: {
-                url: new URL(
-                  SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
-                  input.config.appBaseUrl,
-                ).toString(),
-              },
+              web_app: menuButton.web_app,
             }
           : { type: "commands" },
     }),
@@ -8286,7 +8438,7 @@ function publicHelpText(input: { miniAppEnabled: boolean }): string {
     "Follow Hunch market signals and open the app to explore markets and trading opportunities.",
     input.miniAppEnabled
       ? "Use Get Hunch to open the Hunch Mini App."
-      : "Signal buttons open Hunch web links.",
+      : "The Hunch Mini App is temporarily unavailable.",
   ].join("\n");
 }
 
