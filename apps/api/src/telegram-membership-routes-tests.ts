@@ -13,6 +13,7 @@ const CHECKED_AT = "2026-07-17T12:00:00.000Z";
 
 async function buildTestApp(input: {
   authenticated: boolean;
+  rateLimitAllowed?: boolean;
   result?: TelegramGroupMembershipResult;
 }) {
   const app = Fastify({ logger: false });
@@ -23,6 +24,10 @@ async function buildTestApp(input: {
       authPreHandler: async (request) => {
         if (!input.authenticated) return;
         request.user = { id: "hunch-user-1" } as never;
+      },
+      checkMembershipRateLimit: async (_request, userId) => {
+        assert.equal(userId, "hunch-user-1");
+        return input.rateLimitAllowed ?? true;
       },
       checkGroupMembership: async (userId) => {
         assert.equal(userId, "hunch-user-1");
@@ -92,4 +97,33 @@ try {
   await anonymousApp.close();
 }
 
-console.log("[telegram-membership-routes-tests] passed 3/3");
+let membershipChecked = false;
+const rateLimitedApp = Fastify({ logger: false });
+rateLimitedApp.setValidatorCompiler(validatorCompiler);
+rateLimitedApp.setSerializerCompiler(serializerCompiler);
+await rateLimitedApp.register(
+  createTelegramRoutes({
+    authPreHandler: async (request) => {
+      request.user = { id: "hunch-user-1" } as never;
+    },
+    checkMembershipRateLimit: async () => false,
+    checkGroupMembership: async () => {
+      membershipChecked = true;
+      throw new Error("membership check must not run when rate limited");
+    },
+  }),
+);
+try {
+  const response = await rateLimitedApp.inject({
+    method: "GET",
+    url: "/telegram/membership",
+  });
+  assert.equal(response.statusCode, 429);
+  assert.deepEqual(response.json(), { error: "Rate limit exceeded" });
+  assert.equal(membershipChecked, false);
+  assert.match(response.headers["cache-control"] ?? "", /no-store/);
+} finally {
+  await rateLimitedApp.close();
+}
+
+console.log("[telegram-membership-routes-tests] passed 4/4");
