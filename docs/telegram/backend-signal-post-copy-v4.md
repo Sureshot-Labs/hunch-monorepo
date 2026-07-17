@@ -1,24 +1,24 @@
-# Backend Task: Complete and Roll Out Signal Post V5
+# Backend Task: Roll Out Signal Post V6
 
-Status: V5 renderer and producer/delivery contracts implemented locally; live QA remains
+Status: V6 renderer and producer/delivery contracts implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
-The filename is retained so existing handoff links do not break. V5 supersedes
-the V4.1 grammar documented in earlier revisions.
+The filename is retained so existing handoff links do not break. V6 supersedes
+the V5 grammar documented in earlier revisions.
 
 ## Goal
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V5 renderer is the baseline. This task is not a request
+The locally implemented V6 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v5`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v6`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
 - notification-first headlines with money, momentum, confluence,
   participation, cooling/divergence, research, and resolution stories;
@@ -29,7 +29,18 @@ The current worktree contains:
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
 - structured `Since the call`, `Wallet edge`, and `The edge` blockquotes with
-  a blank quote line below the section label and highlighted values;
+  a forced visual blank line below the section label and highlighted values;
+- a centralized `U+2800 BRAILLE PATTERN BLANK` separator because Telegram
+  clients collapse raw empty MarkdownV2 lines around blockquotes;
+- contextual named-outcome headlines such as `Spain over Argentina` and
+  `Beta Team over Alpha Team in Game 1`, instead of notification leads that
+  contain only the selected outcome;
+- deterministic removal of generated initial-copy sentences that merely repeat
+  the current price, holding state, or a generic `worth a look` recommendation;
+- follow-through materiality gates that suppress tiny contradictory updates
+  such as `+$345`, two adds, one trim, one exit, and an adverse one-cent move;
+- divergence-safe headline selection: adverse price or mixed wallet breadth
+  cannot produce `backs` / `builds behind` copy;
 - message-family-specific endings: proof card for initial signals, `Read:` for
   follow-through, and `Result` for resolution;
 - research updates rendered from producer-owned `holderResearchUpdateV1`, with
@@ -95,10 +106,10 @@ Follow-through:
 
 > Since the call
 >
-> Net flow  +$67.7K
+> Net tracked flow  +$67.7K
 > Wallets  5 added · 8 trimmed · 15 holding
 > NO price  87¢ → 89¢  +2¢
-> Est. PnL  +$1.6K
+> Est. open PnL  +$1.6K
 
 Read: NO at 89¢ moved with the call; net flow stays positive, but more wallets
 trimmed than added.
@@ -113,7 +124,7 @@ Initial signal:
 
 > The edge
 >
-> ▸ Track record  +$340K · 30d
+> ▸ PnL  +$340K · 30d
 > ▸ Conviction  4 strong wallets · same side
 > ▸ Capital tracked  $29.4K
 ```
@@ -153,7 +164,7 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V5 Backend Contract
+## V6 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -263,6 +274,8 @@ Cover:
 - long market subjects, Unicode, named outcomes, totals, and complex NO;
 - initial single wallet and wallet cluster;
 - mixed breadth, exits, negative flow, adverse price, and thin evidence;
+- the `U+2800` row before/inside/after a blockquote, including copying the
+  rendered post to confirm that no visible placeholder glyph appears;
 - research update and resolved win/loss;
 - Mini App configured, missing, and oversized payload;
 - Buy available and Open-market fallback.
@@ -273,7 +286,7 @@ survive the preview.
 
 ### 6. Rollout telemetry
 
-V5 records the following by copy/policy version; production validation is
+V6 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -302,7 +315,7 @@ Mini App market and Buy payloads may carry the opaque
 - Stable wallet credentials are not repeated in research-update replies.
 - Market-wide activity cannot masquerade as selected-side flow.
 - Open follow-through posts end in `Read:` and terminal posts end in `Result`.
-- Device fixtures pass and rollout telemetry distinguishes V5 from older copy.
+- Device fixtures pass and rollout telemetry distinguishes V6 from older copy.
 
 ## Out of Scope
 

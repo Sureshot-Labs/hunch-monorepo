@@ -592,7 +592,7 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V5 backend completion and rollout (legacy filename retained):
+- Signal Post V6 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
 - typed holder-research update delta and canonical identity:
   `backend-holder-research-update-contract.md`;
@@ -637,9 +637,12 @@ Common rules:
 4. Mini App links attach to meaningful nouns already present in the body.
 5. Exactly one CTA class is selected by message state and safety policy.
 
-Whitespace is structural. A blank line separates prose, labeled current-state
-rows, and blockquotes. Do not add blank filler at the end to work around
-Telegram quote rendering.
+Whitespace is structural. Telegram clients collapse ordinary empty MarkdownV2
+lines at blockquote boundaries, so the renderer owns one centralized visual
+separator: a line containing `U+2800 BRAILLE PATTERN BLANK`. The same character
+is used for the intentional empty row inside metric blockquotes. Do not paste
+zero-width or invisible characters into individual templates; use the typed
+renderer helper and verify the result on iOS, Android, and Desktop.
 
 ### Formatting vocabulary
 
@@ -733,17 +736,17 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V5 structure:
+Implemented V6 structure:
 
 ```text
 💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
 
 │ Since the call
 │
-│ Net flow  +$67.7K
+│ Net tracked flow  +$67.7K
 │ Wallets  5 added · 8 trimmed · 15 holding
 │ NO price  87¢ → 89¢  +2¢
-│ Est. PnL  +$1.6K
+│ Est. open PnL  +$1.6K
 
 Read: NO at 89¢ moved with the call; net flow stays positive, but more wallets
 trimmed than added.
@@ -755,13 +758,18 @@ italic spans inside the quote.
 
 Recommended emphasis inside the rendered block:
 
-- `Since the call` — bold label followed by a blank quoted line;
+- `Since the call` — bold label followed by a forced visually blank quoted
+  line from the shared renderer;
 - metric labels remain plain while important values are bold;
 - wallet adds, trims, exits, and holdings share one labeled row and wrap
   naturally on narrow screens;
 - the price delta and estimated PnL value are bold;
 - the conclusion explicitly reports mixed breadth, exits, adverse price, or
   thin evidence when present.
+- gross wallet additions are not sufficient to publish: a small flow update is
+  suppressed when trims/exits or adverse price contradict it. Material absolute
+  flow or price movement may still publish, but its headline must describe the
+  divergence instead of using `backs` or `builds behind`.
 
 The final interpretation begins with a bold `Read:` label. The sentence itself
 remains regular text so it is legible and does not look like a footnote. It
@@ -777,7 +785,7 @@ or thin evidence—rather than repeat every number above it.
 
 │ The edge
 │
-│ ▸ Track record  +$340K · 30d
+│ ▸ PnL  +$340K · 30d
 │ ▸ Conviction  4 strong wallets · same side
 │ ▸ Capital tracked  $29.4K
 ```
@@ -790,7 +798,8 @@ Rules:
 - If no safe identity or natural market phrase is available, omit that body
   link. Do not add a generic navigation footer.
 - Keep `The edge` / `Wallet edge` to at most three rows, preferably two.
-- Insert a blank quote line between the section label and its rows.
+- Insert the shared visual blank quote line between the section label and its
+  rows.
 - Use one repeated list marker (`▸`) and emphasize the key value, not every
   word.
 - Avoid repeating the side, price, position, and PnL in both prose and the data

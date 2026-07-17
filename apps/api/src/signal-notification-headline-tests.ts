@@ -284,7 +284,7 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
-    name: "large capital outranks a small price move when breadth is mixed",
+    name: "large capital stays explicit without hiding mixed breadth",
     run: () => {
       const result = buildSignalNotificationHeadline({
         currentPrice: 0.89,
@@ -299,11 +299,34 @@ const tests: Array<{ name: string; run: () => void }> = [
         }),
         trimmedWallets: 8,
       });
-      assert.equal(result.storyKind, "flow");
+      assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "💰 $67.7K net flow backs NO on BTC hitting $57.5K in July",
+        "⚠️ $67.7K enters NO on BTC hitting $57.5K in July, but wallet support is mixed",
       );
+    },
+  },
+  {
+    name: "even a small adverse move blocks positive-flow language",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.09,
+        exitedWallets: 1,
+        joinedWallets: 2,
+        kind: "stats",
+        netCopyFlowUsd: 345,
+        priceMoveCents: -1,
+        subject: subject({
+          marketTitle: "Will the Iranian regime fall before 2027?",
+        }),
+        trimmedWallets: 2,
+      });
+      assert.equal(result.storyKind, "divergence");
+      assert.equal(
+        result.text,
+        "⚠️ Will the Iranian regime fall before 2027? · YES slips 1¢ despite $345 inflow",
+      );
+      assert.doesNotMatch(result.text, /builds behind|backs/);
     },
   },
   {

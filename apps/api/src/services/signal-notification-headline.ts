@@ -307,6 +307,7 @@ export function buildSignalNotificationHeadline(input: {
   const positionLabel = cleanText(input.positionLabel) ?? input.subject.text;
   const contradictoryBreadth =
     exitedWallets > 0 || trimmedWallets > joinedWallets;
+  const adversePrice = priceMove != null && priceMove < 0;
   const materialPositiveFlow = netFlow >= policy.materialNetFlowUsd;
   const strongPositiveMove =
     priceMove != null && priceMove >= policy.strongPriceMoveCents;
@@ -397,17 +398,20 @@ export function buildSignalNotificationHeadline(input: {
             exitedWallets === 1 ? "wallet exits" : "wallets exit"
           } ${input.subject.text}`
         : `⚠️ ${input.subject.text} is losing wallet support`;
-  } else if (
-    priceMove != null &&
-    priceMove <= -policy.minimumPriceMoveCents &&
-    netFlow > 0
-  ) {
+  } else if (adversePrice && netFlow > 0) {
     storyKind = "divergence";
     templateKey = "divergence_inflow_price_down_v2";
-    primaryMetric = formatMove(priceMove);
+    primaryMetric = formatMove(priceMove ?? 0);
     supportingMetric = formatCompactUsd(netFlow);
-    text = `⚠️ ${input.subject.text} slips ${formatMove(priceMove)} despite ${formatCompactUsd(netFlow)} inflow`;
-    textWithoutSupportingClause = `⚠️ ${input.subject.text} slips ${formatMove(priceMove)}`;
+    text = `⚠️ ${input.subject.text} slips ${formatMove(priceMove ?? 0)} despite ${formatCompactUsd(netFlow)} inflow`;
+    textWithoutSupportingClause = `⚠️ ${input.subject.text} slips ${formatMove(priceMove ?? 0)}`;
+  } else if (contradictoryBreadth && netFlow >= policy.materialNetFlowUsd) {
+    storyKind = "divergence";
+    templateKey = "mixed_wallet_breadth_positive_flow_v1";
+    primaryMetric = formatCompactUsd(netFlow);
+    supportingMetric = null;
+    text = `⚠️ ${formatCompactUsd(netFlow)} enters ${input.subject.text}, but wallet support is mixed`;
+    textWithoutSupportingClause = `⚠️ Wallet support splits on ${input.subject.text}`;
   } else if (
     materialPositiveFlow &&
     strongPositiveMove &&
@@ -436,13 +440,20 @@ export function buildSignalNotificationHeadline(input: {
     supportingMetric = formatCents(currentPrice);
     text = `${priceMove > 0 ? "📈" : "📉"} ${input.subject.text} ${priceMoveVerb(priceMove)} ${formatMove(priceMove)} to ${formatCents(currentPrice)}`;
   } else if (netFlow !== 0) {
-    storyKind = "flow";
     primaryMetric = formatCompactUsd(netFlow);
     supportingMetric = currentPrice == null ? null : formatCents(currentPrice);
     if (netFlow > 0) {
-      templateKey = "early_net_flow_v2";
-      text = `👀 ${formatCompactUsd(netFlow)} net flow builds behind ${input.subject.text}`;
+      if (contradictoryBreadth) {
+        storyKind = "divergence";
+        templateKey = "mixed_wallet_breadth_positive_flow_v1";
+        text = `⚠️ Wallet support splits on ${input.subject.text}`;
+      } else {
+        storyKind = "flow";
+        templateKey = "early_net_flow_v2";
+        text = `👀 ${formatCompactUsd(netFlow)} net flow builds behind ${input.subject.text}`;
+      }
     } else {
+      storyKind = "flow";
       templateKey = "net_outflow_v2";
       text = `⚠️ ${formatCompactUsd(Math.abs(netFlow))} net outflow hits ${input.subject.text}`;
     }
