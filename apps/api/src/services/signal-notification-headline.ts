@@ -38,6 +38,21 @@ export type SignalNotificationHeadline = {
   visibleLength: number;
 };
 
+export type SignalNotificationResearchDelta =
+  | {
+      currentPrice: number;
+      kind: "price_move";
+      priceMoveCents: number;
+    }
+  | {
+      kind: "position_change";
+      positionChangeUsd: number;
+    }
+  | {
+      kind: "wallet_count_change";
+      walletChange: number;
+    };
+
 function cleanText(value: string | null | undefined): string | null {
   const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
   return cleaned.length > 0 ? cleaned : null;
@@ -137,6 +152,20 @@ export function buildSignalNotificationSubject(input: {
   sideCopy: MarketSideCopy;
   presentation?: TelegramMarketPresentationV1 | null;
 }): SignalNotificationSubject {
+  const eventTitle = cleanText(input.eventTitle);
+  const marketTitle = cleanText(input.marketTitle);
+  const priceTarget = buildPriceTargetProposition({ eventTitle, marketTitle });
+  if (
+    priceTarget &&
+    (!input.presentation || input.presentation.source !== "approved_override")
+  ) {
+    return {
+      preservedFields: ["predicate", "outcome", "threshold", "deadline"],
+      source: "natural_market_proposition",
+      text: `${input.side} on ${priceTarget}`,
+      version: "signal_notification_subject_v3",
+    };
+  }
   if (input.presentation) {
     const position = input.presentation.positions[input.side];
     const subject = cleanText(input.presentation.subject) ?? "this market";
@@ -161,8 +190,6 @@ export function buildSignalNotificationSubject(input: {
       version: "signal_notification_subject_v3",
     };
   }
-  const eventTitle = cleanText(input.eventTitle);
-  const marketTitle = cleanText(input.marketTitle);
   const natural = buildNaturalSubject({
     eventTitle,
     marketTitle,
@@ -248,6 +275,7 @@ export function buildSignalNotificationHeadline(input: {
   netCopyFlowUsd?: number;
   positionLabel?: string | null;
   priceMoveCents?: number | null;
+  researchDelta?: SignalNotificationResearchDelta | null;
   strongWallets?: number | null;
   subject: SignalNotificationSubject;
   trimmedWallets?: number;
@@ -298,12 +326,39 @@ export function buildSignalNotificationHeadline(input: {
   } else if (input.kind === "initial" || input.kind === "research_update") {
     storyKind = "initial";
     if (input.kind === "research_update") {
-      templateKey = "research_update_v2";
-      primaryMetric = currentPrice == null ? null : formatCents(currentPrice);
-      text =
-        currentPrice == null
-          ? `🔎 New research on ${input.subject.text}`
-          : `🔎 New research on ${input.subject.text} at ${formatCents(currentPrice)}`;
+      const delta = input.researchDelta;
+      if (delta?.kind === "price_move") {
+        storyKind = "price_move";
+        templateKey = "research_price_move_v5";
+        primaryMetric = formatMove(delta.priceMoveCents);
+        supportingMetric = formatCents(delta.currentPrice);
+        text = `${delta.priceMoveCents > 0 ? "📈" : "📉"} ${input.subject.text} ${priceMoveVerb(delta.priceMoveCents)} ${formatMove(delta.priceMoveCents)} to ${formatCents(delta.currentPrice)}`;
+      } else if (delta?.kind === "position_change") {
+        const added = delta.positionChangeUsd > 0;
+        storyKind = added ? "flow" : "cooling";
+        templateKey = added
+          ? "research_position_added_v5"
+          : "research_position_reduced_v5";
+        primaryMetric = formatCompactUsd(Math.abs(delta.positionChangeUsd));
+        text = `${added ? "💰" : "⚠️"} ${formatCompactUsd(
+          Math.abs(delta.positionChangeUsd),
+        )} ${added ? "added to" : "leaves"} ${input.subject.text}`;
+      } else if (delta?.kind === "wallet_count_change") {
+        const added = delta.walletChange > 0;
+        const wallets = Math.abs(delta.walletChange);
+        storyKind = added ? "participation" : "cooling";
+        templateKey = added
+          ? "research_wallets_added_v5"
+          : "research_wallets_left_v5";
+        primaryMetric = String(wallets);
+        text = `${added ? "🎯" : "⚠️"} ${wallets} strong ${
+          wallets === 1 ? "wallet" : "wallets"
+        } ${added ? "join" : "leave"} ${input.subject.text}`;
+      } else {
+        templateKey = "research_update_suppressed_v5";
+        primaryMetric = null;
+        text = `🔎 Update: ${input.subject.text}`;
+      }
     } else if (input.actorMode === "sharp_cluster" && strongWallets >= 2) {
       templateKey = "initial_strong_wallet_cluster_v2";
       primaryMetric = String(strongWallets);
@@ -334,9 +389,14 @@ export function buildSignalNotificationHeadline(input: {
     }
   } else if (input.cooling) {
     storyKind = "cooling";
-    templateKey = "cooling_v2";
+    templateKey = exitedWallets > 0 ? "cooling_exits_v5" : "cooling_v5";
     primaryMetric = netFlow !== 0 ? formatCompactUsd(netFlow) : null;
-    text = `⚠️ ${input.subject.text} is losing wallet support`;
+    text =
+      exitedWallets > 0
+        ? `⚠️ ${exitedWallets} ${
+            exitedWallets === 1 ? "wallet exits" : "wallets exit"
+          } ${input.subject.text}`
+        : `⚠️ ${input.subject.text} is losing wallet support`;
   } else if (
     priceMove != null &&
     priceMove <= -policy.minimumPriceMoveCents &&

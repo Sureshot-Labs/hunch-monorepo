@@ -1,21 +1,24 @@
-# Backend Task: Complete and Roll Out Signal Post V4.1
+# Backend Task: Complete and Roll Out Signal Post V5
 
-Status: V4.1 contract implemented locally; automated verification and live QA remain
+Status: V5 renderer implemented locally; upstream contracts and live QA remain
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
+
+The filename is retained so existing handoff links do not break. V5 supersedes
+the V4.1 grammar documented in earlier revisions.
 
 ## Goal
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V4 renderer is the baseline. This task is not a request
+The locally implemented V5 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v4_1`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v5`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
 - notification-first headlines with money, momentum, confluence,
   participation, cooling/divergence, research, and resolution stories;
@@ -27,12 +30,19 @@ The current worktree contains:
 - one standalone, non-linked headline with no duplicate `📍` market block;
 - structured `Since the call`, `Wallet edge`, and `The edge` blockquotes with
   a blank quote line below the section label and highlighted values;
+- message-family-specific endings: proof card for initial signals, `Read:` for
+  follow-through, and `Result` for resolution;
+- research updates derived from comparable snapshot deltas, with fail-closed
+  suppression when no supported change can be proved;
+- research updates omit stable wallet credentials and use a plain `Wallet now`
+  or `Cluster now` line only as current context;
 - context-aware follow-through conclusions that acknowledge mixed breadth,
-  exits, adverse moves, or thin evidence;
+  exact exits, adverse moves, or thin evidence;
 - contextual Mini App links on natural market/wallet mentions, with no generic
   `Market details` or `Wallet context` footer;
-- Buy-only CTA behavior when trading is available and Open-market fallback when
-  it is not;
+- Buy-only CTA behavior when trading is available; neutral/negative research
+  updates use Open market, and positive research updates still pass the normal
+  execution/price guard before Buy;
 - deterministic tests for the renderer and story priority.
 
 Primary files:
@@ -55,6 +65,7 @@ Priority and examples:
 🎯 4 strong wallets back Bilibili Gaming at 46¢
 🔥 $45K backs YES on <proposition> after a 7¢ move
 ⚠️ <proposition> is losing wallet support
+⚠️ 3 wallets exit <proposition>
 🏁 <proposition> wins
 ```
 
@@ -72,6 +83,8 @@ Rules:
 - do not link the headline;
 - keep 80 visible graphemes as a lint target, not a destructive truncation
   rule.
+- never use unchanged current state (`still holds`, position size, or stable
+  credentials) as the event in a research-update headline.
 
 ## Post Grammar
 
@@ -87,7 +100,7 @@ Follow-through:
 > NO price  87¢ → 89¢  +2¢
 > Est. PnL  +$1.6K
 
-NO at 89¢ moved with the call; net flow stays positive, but more wallets
+Read: NO at 89¢ moved with the call; net flow stays positive, but more wallets
 trimmed than added.
 ```
 
@@ -98,8 +111,6 @@ Initial signal:
 
 <one concise thesis; natural market/wallet phrases may be Mini App links>
 
-<one concise current-position sentence when it adds information>
-
 > The edge
 >
 > ▸ Track record  +$340K · 30d
@@ -107,11 +118,42 @@ Initial signal:
 > ▸ Capital tracked  $29.4K
 ```
 
+Research update:
+
+```text
+📈 NO on BTC hitting $70K in July rises 8¢ to 83¢
+
+<one concise explanation of what changed and why it matters>
+
+Wallet now: $7.5K on NO at 83¢ · Est. open PnL +$829
+```
+
+Do not repeat `Wallet edge` in a reply to the original signal: the wallet's
+track record is stable context, not the update. A research update without a
+supported comparable price, selected-side position, or selected-side strong
+wallet-count delta is not rendered. Market-wide `recentActivityUsd` is not a
+directional flow contract and cannot produce `backs YES/NO` copy or a Buy CTA.
+
+Resolution:
+
+```text
+🏁 NO on <proposition> wins
+
+> Result
+>
+> Entry  83¢
+> Resolution  NO $1.00
+> Move  +17¢
+```
+
+Do not append another sentence saying the call “closed green/red”; the result
+card already completes the story.
+
 The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V4.1 Backend Contract
+## V5 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -186,7 +228,20 @@ distributions remains required before public rollout.
 Do not tune for click-through alone. Guardrails must track misleading-headline,
 cooling, divergence, and correction rates.
 
-### 4. Live device and channel QA
+### 4. Typed research-update delta
+
+The local renderer temporarily reconstructs price, selected-side position, and
+selected-side strong-wallet-count changes from current/previous decision
+snapshots and `meaningful_delta_reasons`. Backend must replace that with one
+versioned typed delta carrying baseline, before/after values, side, unit,
+`as_of`, and materiality-policy revision.
+
+Until then the renderer fails closed for legacy snapshots, `force_recheck`,
+`related_position_changed`, holder-set rotation, market-wide `fresh_flow`, and
+external-evidence-only changes. See
+`backend-holder-research-update-contract.md`.
+
+### 5. Live device and channel QA
 
 Send fixtures to a private test channel and review iOS Lock Screen,
 Notification Center, banner, Android, and Telegram Desktop in light/dark mode.
@@ -204,9 +259,9 @@ Capture device, channel-name length, font size, Telegram preview setting, copy
 version, and screenshot. Record whether the proposition and primary fact
 survive the preview.
 
-### 5. Rollout telemetry
+### 6. Rollout telemetry
 
-V4.1 records the following by copy/policy version; production validation is
+V5 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -231,7 +286,11 @@ Mini App market and Buy payloads may carry the opaque
 - External evidence is structured, sourced, fresh, and rendered at most once.
 - Production posts and buttons contain Mini App links, not direct
   `app.hunch.trade` links.
-- Device fixtures pass and rollout telemetry distinguishes V4 from older copy.
+- Research updates with no supported meaningful delta produce no notification.
+- Stable wallet credentials are not repeated in research-update replies.
+- Market-wide activity cannot masquerade as selected-side flow.
+- Open follow-through posts end in `Read:` and terminal posts end in `Result`.
+- Device fixtures pass and rollout telemetry distinguishes V5 from older copy.
 
 ## Out of Scope
 

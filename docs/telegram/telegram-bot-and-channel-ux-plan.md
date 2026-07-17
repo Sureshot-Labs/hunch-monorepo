@@ -592,8 +592,10 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V4 backend completion and rollout:
+- Signal Post V5 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
+- typed holder-research update delta and canonical identity:
+  `backend-holder-research-update-contract.md`;
 - durable public-channel registry and cursor:
   `backend-signal-channel-registry.md`;
 - rollout and operations: `backend-telegram-notification-rollout.md`;
@@ -615,32 +617,45 @@ dependencies, migration ownership, and work that must not be reimplemented.
 
 ### Content grammar
 
-Every signal post should use the same vertical hierarchy:
+All posts share a notification-first headline and restrained formatting, but
+they must not share one rigid vertical template. The final block answers a
+different user question for each message family:
 
-1. **Editorial hook** — why this update matters now.
-2. **Market identity** — event/market and called side, not linked.
-3. **Evidence block** — the smallest set of values needed to support the hook.
-4. **Interpretation** — one short human sentence explaining the data.
-5. **Contextual links** — Mini App links attached to meaningful nouns or action
-   phrases.
-6. **CTA button** — exactly one CTA class according to the eligibility matrix.
+| Family          | What is new?                               | Supporting block             | Ending                        |
+| --------------- | ------------------------------------------ | ---------------------------- | ----------------------------- |
+| Initial signal  | Why this trade is interesting now          | `Wallet edge` / `The edge`   | Proof card is terminal        |
+| Research update | What materially changed since the signal   | `Wallet now` / `Cluster now` | Current state, no repeated CV |
+| Follow-through  | How price and tracked wallets have evolved | `Since the call`             | `Read:` interpretation        |
+| Resolution      | Whether the called side won or lost        | `Result`                     | Result card is terminal       |
 
-Whitespace is structural. Do not collapse steps 2–4 into one paragraph.
+Common rules:
+
+1. The standalone headline is the mobile notification lead and names the
+   recognizable proposition plus the verified event.
+2. The body explains the headline instead of restating it.
+3. Only the smallest relevant evidence component is included.
+4. Mini App links attach to meaningful nouns already present in the body.
+5. Exactly one CTA class is selected by message state and safety policy.
+
+Whitespace is structural. A blank line separates prose, labeled current-state
+rows, and blockquotes. Do not add blank filler at the end to work around
+Telegram quote rendering.
 
 ### Formatting vocabulary
 
 Use regular Telegram MarkdownV2 deliberately:
 
 - **Bold:** the editorial hook, section labels, and the one or two key values.
-- _Italic:_ secondary market metadata and the concluding interpretation.
+- _Italic:_ genuinely secondary metadata only; do not italicize an entire
+  current-position or conclusion line.
 - Blockquote: a compact metric/data card such as `Since the call`.
 - Inline link: only on a market/outcome phrase or real wallet identity that
   already belongs in the sentence. Omit the link if no natural phrase exists.
 - Monospace/code: only for literal IDs, hashes, or addresses that a user may
   copy. Do not use it for normal prices, PnL, or prose.
 - Spoiler: only for genuinely hidden content, never as decoration.
-- `────────`: optional separator between the story and a quiet source/context
-  footer. Do not insert ASCII `----------` between every section.
+- `────────`: reserved for a future source-rich editorial post type. Signal
+  posts do not append a detached source/context footer.
 
 Formatting must remain restrained. A post where every line is bold and begins
 with an emoji has no hierarchy.
@@ -718,7 +733,7 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V4 structure:
+Implemented V5 structure:
 
 ```text
 💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
@@ -730,7 +745,7 @@ Implemented V4 structure:
 │ NO price  87¢ → 89¢  +2¢
 │ Est. PnL  +$1.6K
 
-NO at 89¢ moved with the call; net flow stays positive, but more wallets
+Read: NO at 89¢ moved with the call; net flow stays positive, but more wallets
 trimmed than added.
 ```
 
@@ -748,8 +763,10 @@ Recommended emphasis inside the rendered block:
 - the conclusion explicitly reports mixed breadth, exits, adverse price, or
   thin evidence when present.
 
-The final interpretation should be italic or otherwise visually secondary. It
-must not merely repeat all the numbers above it.
+The final interpretation begins with a bold `Read:` label. The sentence itself
+remains regular text so it is legible and does not look like a footnote. It
+must synthesize the state—especially mixed breadth, exits, adverse movement,
+or thin evidence—rather than repeat every number above it.
 
 ### Initial-signal structure
 
@@ -757,8 +774,6 @@ must not merely repeat all the numbers above it.
 🎯 4 strong wallets back Bilibili Gaming at 46¢
 
 <one- or two-sentence thesis>
-
-<one concise current-position sentence when it adds information>
 
 │ The edge
 │
@@ -780,6 +795,9 @@ Rules:
   word.
 - Avoid repeating the side, price, position, and PnL in both prose and the data
   block.
+- Do not add a deterministic “still holding” sentence after a headline that
+  already leads with the position. The generated thesis must carry new
+  explanatory value.
 - Never describe a representative wallet position as aggregate cluster
   capital; scopes must remain explicit.
 
@@ -789,17 +807,37 @@ Resolved posts:
 
 - use `🏁 Call side won` or `🏁 Call side lost` as the standalone hook;
 - show entry, resolution, and result in a compact quote block;
-- explain the outcome in one sentence;
+- let the `Result` card end the post; do not append “closed green/red” prose
+  that merely translates the same values;
 - do not show Buy;
 - do not show Open market unless there is a real, useful post-resolution route.
 
 Research updates:
 
-- use a single `🔎 New research on ...` headline, without a second kicker;
-- clearly state what changed from the original signal;
+- are replies to the original signal, not standalone repetitions of it;
+- derive the headline from a supported material delta, for example
+  `📈 NO on BTC hitting $70K in July rises 8¢ to 83¢`,
+  `💰 $8K added to ...`, or `⚠️ 2 strong wallets leave ...`;
+- use `🔎` only when the actual delta is new sourced external evidence;
+- clearly explain the named change from the original signal;
+- show current state as `Wallet now: ...` or `Cluster now: ...` in regular
+  text, with the label bold;
+- do not repeat `Wallet edge`, `The edge`, track record, pricing edge, or
+  volume already established in the parent signal;
+- do not append `No cited external evidence was available` or a detached `📰`
+  line;
 - link a market phrase or `original signal` contextually in the body;
-- show Buy only if the normal execution and price-safety policy says it is
-  currently actionable.
+- show Buy only when the selected-side delta is positive and the normal
+  execution/price-safety policy says it is currently actionable;
+- otherwise show Open market for a useful open-market route;
+- produce no notification when no supported comparable delta exists.
+
+The current local compatibility layer supports side-matched price, position,
+and strong-wallet-count deltas. It intentionally suppresses market-wide
+`fresh_flow`, holder-set rotation, `force_recheck`, and legacy records without
+a prior snapshot because those inputs cannot support honest directional copy.
+Typed side flow, holder entry/exit, persistence after a material move, and new
+external evidence remain backend-contract work.
 
 ### Link policy
 
@@ -831,12 +869,14 @@ explicit, visibly marked web fallback for debugging.
 
 ### CTA decision matrix
 
-| State                                             | Inline keyboard                       |
-| ------------------------------------------------- | ------------------------------------- |
-| Executable Buy is available                       | Buy button(s) only                    |
-| Buy is unavailable, market is useful and openable | One `Open market` button              |
-| Resolved/closed and no useful route               | No buttons                            |
-| Wallet context exists                             | Body link only; never a Wallet button |
+| State                                             | Inline keyboard                        |
+| ------------------------------------------------- | -------------------------------------- |
+| Executable Buy is available                       | Buy button(s) only                     |
+| Positive actionable research delta                | Buy after normal price/execution guard |
+| Neutral or negative research delta                | One `Open market` button               |
+| Buy is unavailable, market is useful and openable | One `Open market` button               |
+| Resolved/closed and no useful route               | No buttons                             |
+| Wallet context exists                             | Body link only; never a Wallet button  |
 
 Additional rules:
 
@@ -961,7 +1001,8 @@ off and require opt-in. Cross-venue matching and per-market manual controls
 remain.
 
 - fan out initial and research-update signals for exact held markets;
-- explain whether the signal supports or challenges the held side;
+- keep the verified signal delta as the only headline, then explain whether it
+  supports or challenges the held side in one secondary line directly below;
 - add per-user/note/kind dedupe and rate limiting;
 - persist trusted cross-venue market and side mappings before expanding
   matching beyond exact unified market IDs;

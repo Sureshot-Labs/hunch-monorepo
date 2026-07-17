@@ -731,6 +731,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             p,
           ),
         });
+      assert.match(v2Final, /never use ambiguous phrases/i);
+      assert.match(v2Final, /never expose internal review language/i);
+      assert.match(v2Final, /do not turn a no_evidence or error/i);
+      assert.match(v2Final, /do not restate the current holding/i);
+      assert.match(v2Final, /meaningfulDeltaReasons/i);
       assert.ok(v2Final.length <= v1Final.length * 0.85);
     },
   },

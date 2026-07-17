@@ -28,8 +28,8 @@ The current worktree already contains:
 - fail-closed runtime gates and explicit `/start` reachability;
 - exact-market portfolio-signal recipient selection;
 - compact MarkdownV2 notification renderers and contextual Mini App actions;
-- Signal Post V4 headlines, evidence blocks, mixed-state interpretations, and
-  contextual-link policy;
+- Signal Post V5 family-specific grammar, meaningful-delta research updates,
+  evidence blocks, and contextual-link policy;
 - API and bot tests for the implemented behavior;
 - deposit classification under the frontend `Funds` preference.
 
@@ -48,21 +48,22 @@ delivery was not device-tested during this work.
 
 ## Tasks to Assign
 
-| Priority | Task                                                                         | Deliverable                                                                                          | Dependency                                                    |
-| -------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| P0       | [Production rollout](backend-telegram-notification-rollout.md)               | Safely migrate, deploy, observe, replay, and live-QA the implementation already in the worktree      | Current worktree                                              |
-| P0       | [Telegram preferences API](backend-telegram-notification-preferences-api.md) | Authenticated GET/PATCH contract so Mini App Settings and the bot share account-level Telegram state | Migration 0177 or a forward migration                         |
-| P0       | [Persistent signal channel registry](backend-signal-channel-registry.md)     | Makes public-channel destinations, policies, and cursors durable instead of Redis-only               | Postgres migration and current admin commands                 |
-| P0       | [Signal Post V4 completion](backend-signal-post-copy-v4.md)                  | Add canonical market/evidence contracts, approve thresholds, complete device QA, and roll out V4     | Current renderer and structured signal/follow-through metrics |
-| P1       | [Resolved-position accounting](backend-position-resolution-accounting.md)    | Verified payout and realized PnL snapshot with safe fallback copy                                    | Venue settlement semantics                                    |
-| P1       | [Trusted market mappings](backend-trusted-market-mappings.md)                | Reviewed persistent cross-venue equivalence and side orientation                                     | Market ingestion / AGG candidates                             |
-| P1       | [Signal subscription expansion](backend-telegram-signal-subscriptions.md)    | Tracked-wallet rules, per-market controls, noise policy, and trusted cross-venue fan-out             | Existing exact fan-out; trusted mappings only for cross-venue |
-| P2       | [Security event producers](backend-security-notification-events.md)          | Durable, deduped security events before exposing a Security Telegram toggle                          | Domain owners and approved event semantics                    |
+| Priority | Task                                                                          | Deliverable                                                                                          | Dependency                                                     |
+| -------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| P0       | [Production rollout](backend-telegram-notification-rollout.md)                | Safely migrate, deploy, observe, replay, and live-QA the implementation already in the worktree      | Current worktree                                               |
+| P0       | [Telegram preferences API](backend-telegram-notification-preferences-api.md)  | Authenticated GET/PATCH contract so Mini App Settings and the bot share account-level Telegram state | Migration 0177 or a forward migration                          |
+| P0       | [Persistent signal channel registry](backend-signal-channel-registry.md)      | Makes public-channel destinations, policies, and cursors durable instead of Redis-only               | Postgres migration and current admin commands                  |
+| P0       | [Signal Post V5 completion](backend-signal-post-copy-v4.md)                   | Add canonical market/evidence contracts, approve thresholds, complete device QA, and roll out V5     | Current renderer and structured signal/follow-through metrics  |
+| P0       | [Holder research update contract](backend-holder-research-update-contract.md) | Require complete market identity, a typed meaningful delta, and one price snapshot per update        | Holder research lineage, market ingestion, and V5 presentation |
+| P1       | [Resolved-position accounting](backend-position-resolution-accounting.md)     | Verified payout and realized PnL snapshot with safe fallback copy                                    | Venue settlement semantics                                     |
+| P1       | [Trusted market mappings](backend-trusted-market-mappings.md)                 | Reviewed persistent cross-venue equivalence and side orientation                                     | Market ingestion / AGG candidates                              |
+| P1       | [Signal subscription expansion](backend-telegram-signal-subscriptions.md)     | Tracked-wallet rules, per-market controls, noise policy, and trusted cross-venue fan-out             | Existing exact fan-out; trusted mappings only for cross-venue  |
+| P2       | [Security event producers](backend-security-notification-events.md)           | Durable, deduped security events before exposing a Security Telegram toggle                          | Domain owners and approved event semantics                     |
 
 Recommended order:
 
 1. Roll out and validate the existing private-notification delivery path.
-2. Complete V4 device QA, then persist the public-channel registry before the
+2. Complete V5 device QA, then persist the public-channel registry before the
    next public copy rollout.
 3. Add the authenticated preferences API; this can proceed in parallel once
    the migration shape is fixed.

@@ -83,6 +83,10 @@ function formatBold(value: string): string {
   return `*${escapeTelegramMarkdownV2(value)}*`;
 }
 
+function formatItalic(value: string): string {
+  return `_${escapeTelegramMarkdownV2(value)}_`;
+}
+
 function formatUsd(value: number): string {
   return new Intl.NumberFormat("en-US", {
     currency: "USD",
@@ -437,17 +441,30 @@ type PositionSignalRecipientRow = {
   user_id: string;
 };
 
-function positionSignalRelationship(input: {
+function positionSignalRelationshipContext(input: {
   heldSides: Array<"NO" | "YES">;
   signalSide: "NO" | "YES" | null;
 }): string {
   if (!input.signalSide || input.heldSides.length !== 1) {
-    return "🔔 New signal for a market you hold";
+    return "You hold a position in this market";
   }
   const heldSide = input.heldSides[0] as "NO" | "YES";
   return input.signalSide === heldSide
-    ? `📈 New signal supports your ${heldSide} position`
-    : `⚠️ New signal challenges your ${heldSide} position`;
+    ? `This supports your ${heldSide} position`
+    : `This challenges your ${heldSide} position`;
+}
+
+function addPositionSignalContext(text: string, context: string): string {
+  const lines = text.split("\n");
+  const headline = lines[0] ?? "";
+  const bodyStart = lines[1] === "" ? 2 : 1;
+  return [
+    headline,
+    "",
+    formatItalic(context),
+    "",
+    ...lines.slice(bodyStart),
+  ].join("\n");
 }
 
 export async function enqueueTelegramPositionSignals(input: {
@@ -542,20 +559,29 @@ export async function enqueueTelegramPositionSignals(input: {
           note,
           telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
         });
+        if (!rendered.publishable) {
+          await client.query(
+            `
+              update telegram_notification_cursors
+              set cursor_created_at = $2::timestamptz,
+                  cursor_id = $3::uuid,
+                  updated_at = now()
+              where consumer_key = $1
+            `,
+            [POSITION_SIGNAL_CURSOR_KEY, note.createdAt, note.id],
+          );
+          continue;
+        }
         const signalSide = resolveSignalBotBuySide(note);
 
         for (const recipient of recipients) {
           const heldSides = (recipient.held_sides ?? [])
             .map(normalizeSide)
             .filter((side): side is "NO" | "YES" => side != null);
-          const relationship = positionSignalRelationship({
+          const relationshipContext = positionSignalRelationshipContext({
             heldSides,
             signalSide,
           });
-          const relationshipTitle =
-            note.revisionKind === "research_update"
-              ? `🔎 Research update for a market you hold`
-              : relationship;
           const { rows: inserted } = await client.query<{ id: string }>(
             `
               insert into telegram_notification_outbox (
@@ -595,7 +621,10 @@ export async function enqueueTelegramPositionSignals(input: {
                   note.revisionKind === "research_update"
                     ? Number(recipient.root_telegram_message_id)
                     : null,
-                text: `${formatBold(relationshipTitle)}\n\n${rendered.text}`,
+                text: addPositionSignalContext(
+                  rendered.text,
+                  relationshipContext,
+                ),
                 holdingEvidence: "cached_position",
                 positionSnapshotAt: recipient.position_snapshot_at,
                 thesisKey: note.thesisKey,

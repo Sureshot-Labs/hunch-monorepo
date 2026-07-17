@@ -255,11 +255,32 @@ const tests: Array<{ name: string; run: () => void }> = [
       const update = buildSignalNotificationHeadline({
         currentPrice: 0.32,
         kind: "research_update",
+        researchDelta: {
+          currentPrice: 0.4,
+          kind: "price_move",
+          priceMoveCents: 8,
+        },
         subject: marketSubject,
       });
       assert.match(initial.text, /^👀 /);
-      assert.match(update.text, /^🔎 New research on .* at 32¢$/);
-      assert.equal(update.templateKey, "research_update_v2");
+      assert.equal(update.text, "📈 Will it happen? · YES rises 8¢ to 40¢");
+      assert.equal(update.primaryMetric, "8¢");
+      assert.equal(update.supportingMetric, "40¢");
+      assert.equal(update.templateKey, "research_price_move_v5");
+
+      const updateWithoutPosition = buildSignalNotificationHeadline({
+        currentPrice: 0.32,
+        kind: "research_update",
+        subject: marketSubject,
+      });
+      assert.equal(
+        updateWithoutPosition.text,
+        "🔎 Update: Will it happen? · YES",
+      );
+      assert.equal(
+        updateWithoutPosition.templateKey,
+        "research_update_suppressed_v5",
+      );
     },
   },
   {

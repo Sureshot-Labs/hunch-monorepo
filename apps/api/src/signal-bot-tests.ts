@@ -853,6 +853,9 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     },
     createdAt: "2026-01-01T00:00:00.000Z",
     revisionKind: "initial",
+    meaningfulDeltaReasons: [],
+    decisionSnapshot: null,
+    previousDecisionSnapshot: null,
     thesisKey: "holder_research:v2:polymarket:market-1:YES",
     thesisRootNoteId: "00000000-0000-4000-8000-000000000001",
     primaryTargetMeta: { bucket: "sharp_side", side: "YES" },
@@ -874,6 +877,7 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
     lastPrice: null,
     holderAddress: "0xa022ba0a68e11a78348382ff168601012d4d77f8",
     holderChain: "polygon",
+    holderWalletId: "wallet-1",
     holderOpenPnlUsd: -123,
     holderPositionUsd: 12_345,
     holderSide: "YES",
@@ -914,6 +918,9 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     },
     created_at: new Date("2026-01-01T00:00:00.000Z"),
     revision_kind: "initial",
+    meaningful_delta_reasons: [],
+    decision_snapshot: null,
+    previous_decision_snapshot: null,
     thesis_key: "holder_research:v2:polymarket:market-1:YES",
     thesis_root_note_id: "00000000-0000-4000-8000-000000000001",
     primary_target_meta: { bucket: "sharp_side", side: "YES" },
@@ -939,6 +946,7 @@ function noteRow(overrides: Record<string, unknown> = {}) {
     last_price: null,
     holder_address: "0xa022ba0a68e11a78348382ff168601012d4d77f8",
     holder_chain: "polygon",
+    holder_wallet_id: "wallet-1",
     holder_target_meta: {
       actorMode: "single_holder",
       credentialBullets: [
@@ -950,6 +958,46 @@ function noteRow(overrides: Record<string, unknown> = {}) {
       side: "YES",
     },
     ...overrides,
+  };
+}
+
+function researchSnapshot(input: {
+  holderPositionUsd?: number;
+  noSharpHolders?: number;
+  noUsd?: number;
+  recentActivityUsd?: number;
+  side?: "NO" | "YES";
+  yesProbability: number;
+  yesSharpHolders?: number;
+  yesUsd?: number;
+}) {
+  const side = input.side ?? "NO";
+  const yesUsd = input.yesUsd ?? (side === "YES" ? 7_500 : 2_500);
+  const noUsd = input.noUsd ?? (side === "NO" ? 7_500 : 2_500);
+  return {
+    version: 1,
+    yesProbability: input.yesProbability,
+    sides: {
+      YES: {
+        usd: yesUsd,
+        wallets: input.yesSharpHolders ?? 1,
+        sharpHolders: input.yesSharpHolders ?? 1,
+      },
+      NO: {
+        usd: noUsd,
+        wallets: input.noSharpHolders ?? 1,
+        sharpHolders: input.noSharpHolders ?? 1,
+      },
+    },
+    evidenceHolders: [
+      {
+        walletId: "wallet-1",
+        side,
+        positionUsd:
+          input.holderPositionUsd ?? (side === "NO" ? noUsd : yesUsd),
+      },
+    ],
+    recentActivityUsd: input.recentActivityUsd ?? 0,
   };
 }
 
@@ -1964,6 +2012,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(
         String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
         /supports your YES position/,
+      );
+      assert.match(
+        String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
+        /^\*💰 \$12\\\.3K backs YES on /,
+      );
+      assert.doesNotMatch(
+        String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
+        /New signal|Research update for a market/,
       );
       assert.equal(
         (insertedPayloads[0] as { actionText?: unknown })?.actionText,
@@ -8765,10 +8821,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /📍/);
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /🎯 82%/);
-      assert.match(
-        message.text,
-        /this wallet is still holding YES, with \$12\\.3K still on and \\-\$123 open PnL\\./,
-      );
+      assert.doesNotMatch(message.text, /this wallet is still holding/i);
       assert.match(message.text, />\*Wallet edge\*\n>/);
       assert.doesNotMatch(
         message.text,
@@ -8805,11 +8858,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.doesNotMatch(message.text, /@Valen9/);
       assert.match(message.text, /Valen9/);
-      assert.match(
-        message.text,
-        /Valen9 is still holding NO, with \$12\\.3K still on and \\-\$123 open PnL\\./,
-      );
-      assert.match(message.text, /Public news does not explain Valen9/);
+      assert.doesNotMatch(message.text, /is still holding NO/i);
+      assert.doesNotMatch(message.text, /Public news does not explain/);
     },
   },
   {
@@ -8845,7 +8895,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           title: "athelstan still has not sold Morocco",
         }),
       });
-      assert.match(message.text, /Morocco is still around 3¢/);
+      assert.match(message.text.split("\n")[0] ?? "", /Morocco at 3¢\*$/);
       assert.match(message.text, /▸ Track record.*1.*3M.*30d/);
       assert.doesNotMatch(message.text, /Still holding while the market/);
       assert.doesNotMatch(message.text, /Pricing edge/);
@@ -9018,7 +9068,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "⚪ Buy Under 2.5 total goals · Poly 70¢",
       );
       assert.equal(rows.length, 1);
-      assert.match(message.text, /This wins if there are 0\\-2 total goals\\./);
+      assert.doesNotMatch(message.text, /This wins if/);
       assert.doesNotMatch(message.text, /Over 2\\.5 total goals 31¢/);
       assert.equal(message.text.includes("NO O/U 2.5"), false);
     },
@@ -9207,7 +9257,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message strips markdown citations and incomplete URLs from public context",
+    name: "message does not append external research as a detached footer",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -9223,19 +9273,233 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
 
+      assert.doesNotMatch(message.text, /📰|Public previews|https?:/);
+      assert.match(message.text, />\*Wallet edge\*/);
+    },
+  },
+  {
+    name: "research update renders a compact position and omits missing-evidence boilerplate",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          bestAsk: 0.18,
+          bestBid: 0.17,
+          description:
+            "The market now gives Bitcoin hitting 70k about 18%, and gmtrader is still holding NO after the drop.",
+          direction: "down",
+          eventTitle: "What price will Bitcoin hit in July?",
+          holderCredentialBullets: [],
+          holderDisplayName: "gmtrader",
+          holderIdentityDisplayName: "gmtrader",
+          holderOpenPnlUsd: 829,
+          holderPositionUsd: 7_500,
+          holderSide: "NO",
+          marketTitle: "↑ 70,000",
+          meaningfulDeltaReasons: ["odds_move"],
+          decisionSnapshot: researchSnapshot({ yesProbability: 0.17 }),
+          previousDecisionSnapshot: researchSnapshot({
+            yesProbability: 0.25,
+          }),
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: "2026-07-17T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:pricing_edge:30d",
+                kind: "pricing_edge",
+                measurement: {
+                  kind: "scalar",
+                  unit: "probability",
+                  value: 0.16,
+                },
+                quality: "verified",
+                sampleSize: 38,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+              {
+                asOf: "2026-07-17T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:track_record:30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 118_000,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+              {
+                asOf: "2026-07-17T00:00:00.000Z",
+                context: null,
+                horizonDays: 30,
+                id: "representative_wallet:volume:30d",
+                kind: "volume",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 379_000,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source: {
+                  kind: "hunch_wallet_intel",
+                  label: "Representative wallet",
+                  url: null,
+                },
+              },
+            ],
+          },
+          modelMeta: {
+            external_research: {
+              summary: "No cited external evidence was available.",
+            },
+          },
+          revisionKind: "research_update",
+        }),
+        telegramMiniAppLinkBase: "https://t.me/your_hunch_bot",
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^\*📈 NO on BTC hitting \$70K in July rises 8¢ to 83¢\*$/,
+      );
       assert.ok(
         message.text.includes(
-          "📰 Public previews \\(Mexico \\-115 to win, predictions like 0\\-2 Mexico\\) preceded/coincided with sharp NO activity; positioning is contrarian to favorites\\.",
+          "*Wallet now*: $7\\.5K on NO at 83¢ · Est\\. open PnL \\+$829",
         ),
       );
-      const contextLine = message.text
-        .split("\n")
-        .find((line) => line.startsWith("📰"));
-      assert.ok(contextLine);
-      assert.doesNotMatch(contextLine, /https?:/);
-      assert.doesNotMatch(contextLine, /\[\[|\]\(/);
-      assert.doesNotMatch(contextLine, /usatoday|cbssports/i);
-      assert.doesNotMatch(contextLine, /\\.\\.\\./);
+      assert.equal(message.publishable, true);
+      assert.doesNotMatch(message.text, /Pricing edge|Wallet edge/);
+      assert.doesNotMatch(
+        message.text,
+        /New research|holding fading|after the drop|market now gives/i,
+      );
+      assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
+    },
+  },
+  {
+    name: "research update is suppressed without a supported comparable delta",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({ revisionKind: "research_update" }),
+      });
+      assert.equal(message.publishable, false);
+      assert.equal(message.text, "");
+      assert.equal(message.keyboard, undefined);
+    },
+  },
+  {
+    name: "weak initial watch copy stays available privately but is suppressed in public destinations",
+    run: () => {
+      const weakNote = note({
+        holderActorMode: null,
+        holderCredentialBullets: [],
+        holderPositionUsd: null,
+      });
+      const privateMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "private",
+        note: weakNote,
+      });
+      const publicMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "channel",
+        note: weakNote,
+      });
+      assert.equal(privateMessage.publishable, true);
+      assert.equal(publicMessage.publishable, false);
+      assert.equal(publicMessage.text, "");
+    },
+  },
+  {
+    name: "market-wide fresh flow and opposite-side movement do not become directional updates",
+    run: () => {
+      for (const meaningfulDeltaReasons of [
+        ["fresh_flow"],
+        ["side_exposure_move:NO"],
+      ]) {
+        const message = buildSignalBotMessage({
+          appBaseUrl: "https://app.hunch.trade",
+          buyAmountUsd: 10,
+          messageKind: "research_update",
+          note: note({
+            decisionSnapshot: researchSnapshot({
+              recentActivityUsd: 50_000,
+              side: "YES",
+              yesProbability: 0.32,
+              yesUsd: 12_000,
+            }),
+            meaningfulDeltaReasons,
+            previousDecisionSnapshot: researchSnapshot({
+              side: "YES",
+              yesProbability: 0.32,
+              yesUsd: 12_000,
+            }),
+            revisionKind: "research_update",
+          }),
+        });
+        assert.equal(message.publishable, false);
+      }
+    },
+  },
+  {
+    name: "positive research position delta can carry a Buy CTA without repeating credentials",
+    run: () => {
+      const message = buildSignalBotMessage({
+        allowBuyCta: true,
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          decisionSnapshot: researchSnapshot({
+            holderPositionUsd: 20_000,
+            side: "YES",
+            yesProbability: 0.32,
+            yesUsd: 20_000,
+          }),
+          meaningfulDeltaReasons: ["holder_position_move:YES"],
+          previousDecisionSnapshot: researchSnapshot({
+            holderPositionUsd: 12_000,
+            side: "YES",
+            yesProbability: 0.32,
+            yesUsd: 12_000,
+          }),
+          revisionKind: "research_update",
+        }),
+      });
+      assert.match(message.text.split("\n")[0] ?? "", /^\*💰 \$8K added to/);
+      assert.equal(
+        message.keyboard?.inline_keyboard[0]?.[0]?.text,
+        "🟠 Buy YES · Poly 32¢",
+      );
+      assert.doesNotMatch(
+        message.text,
+        /Wallet edge|Track record|Pricing edge/,
+      );
     },
   },
   {
@@ -9282,10 +9546,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.match(message.text, />\*The edge\*\n>/);
-      assert.match(
-        message.text,
-        /These wallets remain aligned on YES, with \$45K tracked across the cluster/,
-      );
+      assert.doesNotMatch(message.text, /remain aligned behind/);
       assert.doesNotMatch(message.text, /\$12\\.3K still on/);
       assert.doesNotMatch(message.text, /Why this cluster matters:/);
       assert.match(message.text, /▸ Track record.*14K.*30d/);
@@ -9334,7 +9595,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message uses generic external summary before internal rationale",
+    name: "message ignores detached external summary and internal rationale",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -9350,18 +9611,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           rationale: "Publishable because this is internal decision text.",
         }),
       });
-      assert.match(message.text, /📰 Public deal and early traffic spikes/);
+      assert.doesNotMatch(
+        message.text,
+        /Public deal and early traffic spikes|📰/,
+      );
       assert.doesNotMatch(message.text, /Publishable because/);
     },
   },
   {
-    name: "message keeps public context sentence from being clipped",
+    name: "message keeps integrated public context sentence from being clipped",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({
-          description: "The holder added after a quiet repricing.",
+          description:
+            "Public pickup reports (Al Arabiya/Reuters June 23: 36 transits, avg rising to 21-27 post-June 14 deal) coincide with holder activity and partially explain the move.",
           modelMeta: {
             external_research: {
               summary:
@@ -10197,7 +10462,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const db = new FakeDb();
       db.rows = [
         noteRow({
+          decision_snapshot: researchSnapshot({
+            side: "YES",
+            yesProbability: 0.32,
+          }),
           id: "00000000-0000-4000-8000-000000000002",
+          meaningful_delta_reasons: ["odds_move"],
+          previous_decision_snapshot: researchSnapshot({
+            side: "YES",
+            yesProbability: 0.28,
+          }),
+          revision_kind: "research_update",
           title: "Fresh update",
         }),
       ];
@@ -10248,6 +10523,66 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "publish positive selected-side research delta uses Buy after delivery guards",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "group" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({
+          decision_snapshot: researchSnapshot({
+            holderPositionUsd: 20_000,
+            side: "YES",
+            yesProbability: 0.32,
+            yesUsd: 20_000,
+          }),
+          id: "00000000-0000-4000-8000-000000000002",
+          meaningful_delta_reasons: ["holder_position_move:YES"],
+          previous_decision_snapshot: researchSnapshot({
+            holderPositionUsd: 12_000,
+            side: "YES",
+            yesProbability: 0.32,
+            yesUsd: 12_000,
+          }),
+          revision_kind: "research_update",
+        }),
+      ];
+      db.threadContextRows = [
+        {
+          baseline_at: "2026-01-01T00:00:00.000Z",
+          reply_to_message_id: "77",
+          thread_root_note_id: "00000000-0000-4000-8000-000000000001",
+        },
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+      const buttons =
+        telegram.messages[0]?.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(result.sent, 1);
+      assert.equal(
+        buttons.some((button) => /Buy/i.test(button.text)),
+        true,
+      );
+      assert.equal(
+        buttons.some((button) => button.text === "↗️ Open market"),
+        false,
+      );
+    },
+  },
+  {
     name: "publish reply failure falls back to standalone delivery",
     run: async () => {
       const redis = new FakeRedis();
@@ -10260,7 +10595,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const db = new FakeDb();
       db.rows = [
         noteRow({
+          decision_snapshot: researchSnapshot({
+            side: "YES",
+            yesProbability: 0.32,
+          }),
           id: "00000000-0000-4000-8000-000000000002",
+          meaningful_delta_reasons: ["odds_move"],
+          previous_decision_snapshot: researchSnapshot({
+            side: "YES",
+            yesProbability: 0.28,
+          }),
+          revision_kind: "research_update",
           title: "Fresh update",
         }),
       ];
@@ -10317,11 +10662,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v4_1");
-      assert.equal(metrics.copy?.notification?.headline?.storyKind, "initial");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v5");
+      assert.equal(
+        metrics.copy?.notification?.headline?.storyKind,
+        "price_move",
+      );
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
-        "research_update_v2",
+        "research_price_move_v5",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
@@ -10539,6 +10887,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram.messages[0]?.text ?? "",
         /backed by fresh wallet flow/,
       );
+      assert.match(telegram.messages[0]?.text ?? "", /\*Read\*:/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
       assert.equal(keyboard?.[0]?.[0]?.text, "↗️ Open market");
@@ -10956,9 +11305,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /^\*⚠️ YES on .* is losing wallet support\*/);
+      assert.match(text, /^\*⚠️ 1 wallet exits YES on /);
       assert.match(text, />Wallets {2}\*1\* exited/);
       assert.match(text, /tracked wallets are exiting/);
+      assert.match(text, /\*Read\*:/);
       assert.doesNotMatch(text, /0 trimmed/);
     },
   },
@@ -11141,6 +11491,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedLoss, 1);
       assert.match(telegram.messages[0]?.text ?? "", /^\*🏁 YES on .* loses\*/);
+      assert.match(telegram.messages[0]?.text ?? "", />\*Result\*/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /Since the call|\*Read\*:/,
+      );
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>
@@ -11186,6 +11541,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedWin, 1);
       assert.match(telegram.messages[0]?.text ?? "", /^\*🏁 YES on .* wins\*/);
+      assert.match(telegram.messages[0]?.text ?? "", />\*Result\*/);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /Since the call|\*Read\*:/,
+      );
       assert.equal(telegram.messages[0]?.reply_markup, undefined);
       const delivery = db.queries
         .filter((query) =>
