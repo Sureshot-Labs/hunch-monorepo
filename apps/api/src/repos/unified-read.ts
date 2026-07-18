@@ -92,6 +92,12 @@ const FEED_SEARCH_STOP_WORDS = new Set([
   "with",
 ]);
 
+function assertSafeSqlIdentifier(value: string, label: string): void {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) {
+    throw new Error(`Unsafe ${label}: ${value}`);
+  }
+}
+
 function buildLimitlessAmmFallbackAllowedExpr(
   nowParam: string,
   yesAlias: string,
@@ -193,6 +199,7 @@ export function buildEventDurationExistsSql(args: {
 }
 
 function buildBroadOrderableMarketCandidatesCte(args: {
+  candidateMarketIdsCte?: string | null;
   candidateMarketIdsParam?: string | null;
   cteName?: string;
   materialized?: boolean;
@@ -207,6 +214,13 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   const strictCandidatesCte = `${safeCtePrefix}_strict_candidates`;
   const pmRecentCandidatesCte = `${safeCtePrefix}_pm_recent_candidates`;
   const pmGraceCandidatesCte = `${safeCtePrefix}_pm_grace_candidates`;
+  const candidateMarketIdsCte = args.candidateMarketIdsCte ?? null;
+  if (candidateMarketIdsCte) {
+    assertSafeSqlIdentifier(candidateMarketIdsCte, "candidate market ids CTE");
+  }
+  const candidateMarketJoin = candidateMarketIdsCte
+    ? `join ${candidateMarketIdsCte} candidate_filter on candidate_filter.market_id = m.id`
+    : "";
   const candidateMarketSql = args.candidateMarketIdsParam
     ? `and m.id = ANY(${args.candidateMarketIdsParam}::text[])`
     : "";
@@ -220,6 +234,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.id as market_id,
         m.event_id
       from unified_markets m
+      ${candidateMarketJoin}
       where ${buildStrictIndexedMarketSql({
         marketAlias: "m",
         nowParam: args.nowParam,
@@ -244,6 +259,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.event_id,
         m.venue_market_id
       from unified_markets m
+      ${candidateMarketJoin}
       where m.status = 'ACTIVE'
         and m.venue = 'polymarket'
         and m.close_time is not null
@@ -256,6 +272,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.event_id,
         m.venue_market_id
       from unified_markets m
+      ${candidateMarketJoin}
       where m.status = 'ACTIVE'
         and m.venue = 'polymarket'
         and m.expiration_time is not null
@@ -269,6 +286,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.venue_market_id
       from unified_events e
       join unified_markets m on m.event_id = e.id
+      ${candidateMarketJoin}
       where e.status = 'ACTIVE'
         and e.end_date is not null
         and e.end_date <= ${args.nowParam}::timestamptz
@@ -487,6 +505,22 @@ function buildHistoricalCanonicalBookSql(args: {
     from ${args.tokenSetName} token
     join unified_token_change_24h cached on cached.token_id = token.token_id
     where cached.avg_mid_24h is not null
+  `;
+}
+
+function buildChange24hHistoryMarketCandidatesCte(args: {
+  cteName: string;
+}): string {
+  assertSafeSqlIdentifier(args.cteName, "change24h history CTE");
+  return `
+    ${args.cteName} as materialized (
+      select distinct mapping.market_id
+      from unified_token_change_24h cached
+      join unified_market_tokens mapping
+        on mapping.token_id = cached.token_id
+       and mapping.outcome_side in ('YES', 'NO')
+      where cached.avg_mid_24h is not null
+    )
   `;
 }
 
@@ -1495,11 +1529,89 @@ function isFeedEventFastPathSort(
   return inputs.filter === "newest" || inputs.filter === "endingsoon";
 }
 
+async function fetchFeedChange24hEventIdsFast(
+  pool: Pool,
+  inputs: FeedInputs,
+): Promise<Array<{ id: string }> | null> {
+  if (
+    inputs.sort !== "change24h" ||
+    inputs.marketIds?.length ||
+    inputs.eventScope ||
+    inputs.minProb != null ||
+    inputs.maxProb != null ||
+    inputs.maxSpread != null ||
+    inputs.minLiquidity > 0 ||
+    inputs.minVol > 1e-9 ||
+    inputs.durationMinutes?.length ||
+    buildFeedSearchPlan(inputs.q).hasSearch
+  ) {
+    return null;
+  }
+
+  const { params, add } = createParamBuilder();
+  const expressions = buildFeedSqlExpressions();
+  const nowParam = add(inputs.nowParam);
+  const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+  const limitParam = add(inputs.limit);
+  const offsetParam = add(inputs.offset);
+  const candidateCteName = "change24h_history_market_candidates";
+  const eventWhere = buildFeedEventWhere({
+    add,
+    inputs,
+    nowParam,
+    hasSearch: false,
+    includeOrderableExists: false,
+    includeDurationExists: false,
+  });
+  const orderableCandidates = buildBroadOrderableMarketCandidatesCte({
+    candidateMarketIdsCte: candidateCteName,
+    materialized: true,
+    nowParam,
+    extraMarketSql: buildFeedMarketCandidateExtraSql({
+      add,
+      inputs,
+      nowParam,
+      venueTarget: "event",
+      renderableMarketExpr: expressions.renderableMarketExpr,
+      supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
+    }),
+  });
+  const rows = await queryRowsWithLocalSettings<{ id: string }>(
+    pool,
+    `
+      with ${buildChange24hHistoryMarketCandidatesCte({ cteName: candidateCteName })},
+      ${orderableCandidates},
+      ${buildObservedCanonicalMarketChange24hCte({
+        cteName: "observed_market_change_24h",
+        sourceSql: "select market_id from orderable_market_candidates",
+        nowParam,
+      })}
+      select e.id
+      from unified_events e
+      join orderable_market_candidates omc on omc.event_id = e.id
+      join unified_markets m on m.id = omc.market_id
+      join observed_market_change_24h market_change
+        on market_change.market_id = m.id
+       and market_change.change_24h is not null
+      where ${eventWhere.join(" and ")}
+      group by e.id
+      order by avg(market_change.change_24h) ${sortDir} nulls last, e.id
+      limit ${limitParam} offset ${offsetParam}
+    `,
+    params,
+    { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+  );
+
+  return rows.length < inputs.limit ? null : rows;
+}
+
 async function fetchFeedEventIdsFast(
   pool: Pool,
   inputs: FeedInputs,
 ): Promise<Array<{ id: string }> | null> {
-  if (inputs.sort === "change24h") return null;
+  if (inputs.sort === "change24h") {
+    return fetchFeedChange24hEventIdsFast(pool, inputs);
+  }
   if (!isFeedEventFastPathSort(inputs)) return null;
   if (requiresFeedEventMarketJoin(inputs)) return null;
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
@@ -1667,6 +1779,7 @@ async function fetchFeedEventIdsFast(
 
 function buildFeedMarketViewContext(args: {
   add: PgParamAdder;
+  candidateMarketIdsCte?: string | null;
   inputs: FeedEventFilterInputs &
     Pick<
       FeedInputs,
@@ -1728,6 +1841,7 @@ function buildFeedMarketViewContext(args: {
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
   const orderableMarketCandidatesCte = buildBroadOrderableMarketCandidatesCte({
+    candidateMarketIdsCte: args.candidateMarketIdsCte,
     candidateMarketIdsParam: marketIdsParam,
     materialized: true,
     nowParam,
@@ -2977,6 +3091,64 @@ type FeedTrendingV2ScoreRow = {
   trend_score: string | number;
 };
 
+async function fetchFeedChange24hMarketIdsFast(
+  pool: Pool,
+  inputs: FeedInputs,
+): Promise<string[] | null> {
+  if (
+    inputs.sort !== "change24h" ||
+    inputs.marketIds?.length ||
+    inputs.eventScope ||
+    buildFeedSearchPlan(inputs.q).hasSearch
+  ) {
+    return null;
+  }
+
+  const { params, add } = createParamBuilder();
+  const expressions = buildFeedSqlExpressions();
+  const nowParam = add(inputs.nowParam);
+  const nowCloseParam = add(inputs.nowParam);
+  const candidateCteName = "change24h_history_market_candidates";
+  const marketContext = buildFeedMarketViewContext({
+    add,
+    candidateMarketIdsCte: candidateCteName,
+    inputs,
+    nowParam,
+    nowCloseParam,
+    expressions,
+    venueFilterTarget: "market",
+  });
+  const limitParam = add(inputs.limit);
+  const offsetParam = add(inputs.offset);
+  const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
+  const rows = await queryRowsWithLocalSettings<{ id: string }>(
+    pool,
+    `
+      with ${buildChange24hHistoryMarketCandidatesCte({ cteName: candidateCteName })},
+      ${marketContext.orderableMarketCandidatesCte},
+      ${buildObservedCanonicalMarketChange24hCte({
+        cteName: "observed_market_change_24h",
+        sourceSql: `select market_id from ${marketContext.orderableMarketCandidateSource}`,
+        nowParam,
+      })}
+      select m.id
+      from ${marketContext.orderableMarketCandidateSource} omc
+      join unified_markets m on m.id = omc.market_id
+      join unified_events e on e.id = omc.event_id
+      join observed_market_change_24h market_change
+        on market_change.market_id = m.id
+       and market_change.change_24h is not null
+      where ${marketContext.where.join(" and ")}
+      order by market_change.change_24h ${sortDir} nulls last, m.venue_market_id
+      limit ${limitParam} offset ${offsetParam}
+    `,
+    params,
+    { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
+  );
+
+  return rows.length < inputs.limit ? null : rows.map((row) => row.id);
+}
+
 async function fetchFeedMarketIdsFast(
   pool: Pool,
   inputs: FeedInputs,
@@ -2984,7 +3156,9 @@ async function fetchFeedMarketIdsFast(
 ): Promise<string[] | null> {
   if (inputs.marketIds?.length || inputs.eventScope) return null;
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
-  if (inputs.sort === "change24h") return null;
+  if (inputs.sort === "change24h") {
+    return fetchFeedChange24hMarketIdsFast(pool, inputs);
+  }
 
   const isMetricSort = inputs.sort === "trending_v2";
   const isLegacyTrending = inputs.sort == null || inputs.sort === "trending";

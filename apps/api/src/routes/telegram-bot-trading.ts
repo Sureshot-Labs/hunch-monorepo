@@ -76,6 +76,8 @@ const internalMarketCardBodySchema = z
         focusPositionId: z.string().uuid().optional(),
         focusPositionWalletAddress: z.string().optional().nullable(),
         focusSide: z.enum(["YES", "NO"]).optional(),
+        observedNoAsk: z.number().min(0).max(1).optional().nullable(),
+        observedYesAsk: z.number().min(0).max(1).optional().nullable(),
         origin: z.enum(["direct", "position", "search"]),
         positionLines: z.array(z.string().max(240)).max(8).optional(),
         positionRedemptionStatus: z.string().max(64).optional().nullable(),
@@ -1047,3 +1049,7 @@ export function createTelegramBotTradingRoutes(
 }
 
 export const telegramBotTradingRoutes = createTelegramBotTradingRoutes();
+
+export const telegramBotTradingRouteTestHooks = {
+  internalMarketCardBodySchema,
+};

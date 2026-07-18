@@ -534,6 +534,18 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   };
 
   const change24hSql = await captureFastMarketSql("change24h");
+  assert.match(
+    change24hSql[0],
+    /change24h_history_market_candidates as materialized/,
+  );
+  assert.match(
+    change24hSql[0],
+    /from unified_token_change_24h cached[\s\S]*join unified_market_tokens mapping/,
+  );
+  assert.match(
+    change24hSql[0],
+    /from unified_markets m\s+join change24h_history_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
+  );
   assert.match(change24hSql[0], /orderable_market_candidates as materialized/);
   assert.match(change24hSql[0], /observed_market_change_24h as materialized/);
   assert.match(change24hSql[0], /join unified_token_change_24h cached/);
@@ -546,7 +558,10 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   assert.match(change24hSql[0], /current_no_top/);
   assert.match(change24hSql[0], /historical_yes_top/);
   assert.match(change24hSql[0], /historical_no_top/);
-  assert.match(change24hSql[0], /order by change_24h desc nulls last/);
+  assert.match(
+    change24hSql[0],
+    /order by market_change\.change_24h desc nulls last/,
+  );
   assert.doesNotMatch(change24hSql[0], /unified_market_change_24h/);
 
   const trendingV2Sql = await captureFastMarketSql("trending_v2");
@@ -624,9 +639,13 @@ async function assertEventFeedSqlShape(): Promise<void> {
       { length: rowCount },
       (_, index) => `event-${index}`,
     );
+    const rows: Array<Record<string, unknown>> =
+      inputs.sort === "change24h"
+        ? ids.map((id) => ({ id }))
+        : [{ ids, candidate_count: rowCount }];
     const fakePool = createSqlCapturePool(
       capturedSql,
-      [{ ids, candidate_count: rowCount }],
+      rows,
       capturedParams,
     ) as unknown as Parameters<typeof fetchFeedEventIds>[0];
 
@@ -663,6 +682,15 @@ async function assertEventFeedSqlShape(): Promise<void> {
       baseInputs.limit,
     );
     const [sql] = capturedSql;
+    assert.match(sql, /change24h_history_market_candidates as materialized/);
+    assert.match(
+      sql,
+      /from unified_token_change_24h cached[\s\S]*join unified_market_tokens mapping/,
+    );
+    assert.match(
+      sql,
+      /from unified_markets m\s+join change24h_history_market_candidates candidate_filter on candidate_filter\.market_id = m\.id/s,
+    );
     assert.match(sql, /orderable_market_candidates as materialized/);
     assert.match(sql, /observed_market_change_24h as materialized/);
     assert.match(sql, /join unified_token_change_24h cached/);

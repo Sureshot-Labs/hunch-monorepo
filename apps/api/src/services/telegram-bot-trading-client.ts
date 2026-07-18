@@ -58,6 +58,8 @@ export type TelegramBotTradingInternalApiClient = {
       focusPositionId?: string;
       focusPositionWalletAddress?: string | null;
       focusSide?: "YES" | "NO";
+      observedNoAsk?: number | null;
+      observedYesAsk?: number | null;
       origin: "direct" | "position" | "search";
       positionLines?: string[];
       positionRedemptionStatus?: string | null;
