@@ -15,6 +15,7 @@ import {
 } from "./services/limitless-order-result.js";
 import {
   clearLimitlessClobQuoteCacheForTests,
+  isLimitlessClobDefinitiveNoFill,
   quoteLimitlessClobMarket,
 } from "./services/limitless-clob-quote.js";
 
@@ -27,6 +28,13 @@ function test(name: string, run: () => void): void {
     throw error;
   }
 }
+
+test("only liquidity outcomes are definitive no-fill results", () => {
+  assert.equal(isLimitlessClobDefinitiveNoFill("no_liquidity"), true);
+  assert.equal(isLimitlessClobDefinitiveNoFill("insufficient_depth"), true);
+  assert.equal(isLimitlessClobDefinitiveNoFill("unavailable"), false);
+  assert.equal(isLimitlessClobDefinitiveNoFill("ready"), false);
+});
 
 async function asyncTest(
   name: string,

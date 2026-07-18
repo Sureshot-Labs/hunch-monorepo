@@ -39,7 +39,10 @@ import {
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
 import type { KalshiTradeEligibility } from "../services/trading-types.js";
-import { searchTelegramMarkets } from "../services/telegram-market-search.js";
+import {
+  mapClusterMarketToTelegramSearchResult,
+  searchTelegramMarkets,
+} from "../services/telegram-market-search.js";
 import { buildTelegramDepositMessage } from "../services/telegram-bot-deposit.js";
 import { buildHunchMiniAppWebButton } from "../services/telegram-mini-app-buttons.js";
 import {
@@ -402,17 +405,7 @@ async function registerTelegramBotTradingRoutes(
                     (market) =>
                       market.active !== false && market.orderable !== false,
                   )
-                  .map((market) => ({
-                    eventId: market.eventId,
-                    eventTitle: market.eventTitle,
-                    lastPrice: market.yesMid,
-                    marketId: market.marketId,
-                    marketTitle:
-                      market.marketTitle?.trim() || "Prediction market",
-                    noAsk: market.noMid,
-                    venue: market.venue,
-                    yesAsk: market.yesAsk ?? market.yesMid,
-                  }));
+                  .map(mapClusterMarketToTelegramSearchResult);
               } catch (error) {
                 if (!loggedAggFallback) {
                   loggedAggFallback = true;

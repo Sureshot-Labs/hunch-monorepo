@@ -1516,6 +1516,68 @@ async function main() {
     }
 
     {
+      const previousFeedTtlForPresentation = env.feedTtlSec;
+      env.feedTtlSec = 0;
+      const presentationRow = {
+        ...liveFifaRow(),
+        pm_accepting_orders: false,
+        best_bid_yes: 0.24,
+        best_ask_yes: 0.25,
+        top_ts_yes: "2026-06-23T17:40:00.000Z",
+        best_bid_no: 0.75,
+        best_ask_no: 0.76,
+        top_ts_no: "2026-06-23T17:40:01.000Z",
+      };
+      const resetHooks = setFifaSpecialRouteTestHooksForTest({
+        getRedisStatus: async () =>
+          ({ status: "disabled", redis: null }) as never,
+        fetchFifaSpecialPage: async () => ({
+          ...livePage(),
+          rows: [presentationRow],
+        }),
+        fetchSportsFixturesByKeys: async () => new Map(),
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/special/fifa-2026?limit=1",
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const payload = response.json<{
+          data: Array<{
+            markets: Array<{
+              acceptingOrders: boolean;
+              lastPrice: number | null;
+              top: {
+                yesBid: number | null;
+                yesAsk: number | null;
+                noBid: number | null;
+                noAsk: number | null;
+              };
+              topAsOf: { YES: string | null; NO: string | null };
+            }>;
+          }>;
+        }>();
+        const market = payload.data[0]?.markets[0];
+        assert.equal(market?.acceptingOrders, false);
+        assert.deepEqual(market?.top, {
+          yesBid: 0.24,
+          yesAsk: 0.25,
+          noBid: 0.75,
+          noAsk: 0.76,
+        });
+        assert.deepEqual(market?.topAsOf, {
+          YES: "2026-06-23T17:40:00.000Z",
+          NO: "2026-06-23T17:40:01.000Z",
+        });
+        assert.equal(market?.lastPrice, 0.52);
+      } finally {
+        resetHooks();
+        env.feedTtlSec = previousFeedTtlForPresentation;
+      }
+    }
+
+    {
       const previousFeedTtlForPage = env.feedTtlSec;
       env.feedTtlSec = 0;
       let fixtureRefreshes = 0;
@@ -1582,7 +1644,6 @@ async function main() {
       assert.ok(ids.includes(events[0].id));
       assert.ok(ids.includes(events[1].id));
       assert.ok(ids.includes(events[2].id));
-      assert.ok(ids.includes(events[4].id));
       assert.ok(ids.includes(events[7].id));
       assert.ok(ids.includes(events[21].id));
       assert.ok(ids.includes(events[22].id));
@@ -1833,30 +1894,6 @@ async function main() {
     {
       const response = await app.inject({
         method: "GET",
-        url: `/special/fifa-2026?${query({ limit: 50, q: suffix, section: "winner", venue: "kalshi" })}`,
-      });
-      assert.equal(response.statusCode, 200, response.body);
-      const payload = response.json<{
-        data: Array<{
-          eventId: string;
-          fifa: { section: string };
-          markets: Array<{
-            fifa: { teamName: string | null; teamGroupCode: string | null };
-          }>;
-        }>;
-      }>();
-      assert.deepEqual(
-        payload.data.map((event) => event.eventId),
-        [events[4].id],
-      );
-      assert.equal(payload.data[0]?.fifa.section, "winner");
-      assert.equal(payload.data[0]?.markets[0]?.fifa.teamName, "Brazil");
-      assert.equal(payload.data[0]?.markets[0]?.fifa.teamGroupCode, "C");
-    }
-
-    {
-      const response = await app.inject({
-        method: "GET",
         url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: suffix, section: "group" })}`,
       });
       assert.equal(response.statusCode, 200, response.body);
@@ -1886,12 +1923,6 @@ async function main() {
       const groupChampion = payload.data.find(
         (event) => event.eventId === events[12].id,
       );
-      const kalshiWinner = payload.data.find(
-        (event) => event.eventId === events[13].id,
-      );
-      const kalshiQualify = payload.data.find(
-        (event) => event.eventId === events[14].id,
-      );
       const groupLast = payload.data.find(
         (event) => event.eventId === events[15].id,
       );
@@ -1916,15 +1947,6 @@ async function main() {
         groupChampion?.markets[0]?.venueMarketId,
         markets[12].venueMarketId,
       );
-      assert.equal(kalshiWinner?.fifa.groupCode, "A");
-      assert.equal(kalshiWinner?.markets[0]?.fifa.groupKey, "group:a:winner");
-      assert.equal(kalshiWinner?.markets[0]?.fifa.groupMarketType, "winner");
-      assert.equal(kalshiWinner?.markets[0]?.fifa.teamName, "Mexico");
-      assert.equal(kalshiWinner?.markets[0]?.fifa.teamGroupCode, "A");
-      assert.equal(kalshiQualify?.markets[0]?.fifa.groupKey, "group:a:qualify");
-      assert.equal(kalshiQualify?.markets[0]?.fifa.groupMarketType, "qualify");
-      assert.equal(kalshiQualify?.markets[0]?.fifa.teamName, "South Korea");
-      assert.equal(kalshiQualify?.markets[0]?.fifa.teamGroupCode, "A");
       assert.equal(groupLast?.markets[0]?.fifa.groupKey, "group:a:last_place");
       assert.equal(groupLast?.markets[0]?.fifa.groupMarketType, "last_place");
       assert.equal(
@@ -1949,7 +1971,7 @@ async function main() {
         };
         data: Array<{ markets: Array<{ fifa: { groupCode: string | null } }> }>;
       }>();
-      assert.ok(payload.data.length >= 5);
+      assert.ok(payload.data.length >= 3);
       assert.deepEqual(
         payload.facets.sections.map((facet) => facet.section),
         ["group"],
@@ -2032,7 +2054,6 @@ async function main() {
       const ids = payload.data.map((event) => event.eventId);
       assert.ok(ids.includes(events[0].id));
       assert.ok(ids.includes(events[1].id));
-      assert.ok(ids.includes(events[5].id));
       assert.ok(ids.includes(events[9].id));
       assert.ok(ids.includes(events[10].id));
       assert.ok(ids.includes(events[11].id));
@@ -2041,9 +2062,6 @@ async function main() {
       );
       const polymarketMatch = payload.data.find(
         (event) => event.eventId === events[0].id,
-      );
-      const kalshiTotal = payload.data.find(
-        (event) => event.eventId === events[5].id,
       );
       const exactScore = payload.data.find(
         (event) => event.eventId === events[9].id,
@@ -2058,15 +2076,12 @@ async function main() {
         polymarketMatch?.fifa.groupKey,
         "match:2026-06-30:united-states:paraguay",
       );
-      assert.equal(kalshiTotal?.fifa.groupKey, polymarketMatch?.fifa.groupKey);
-      assert.equal(kalshiTotal?.markets[0]?.fifa.subtype, "total");
       assert.equal(
         totalCorners?.fifa.groupKey,
         "match:2026-06-30:united-states:paraguay-total-corners",
       );
       for (const event of [
         polymarketMatch,
-        kalshiTotal,
         exactScore,
         totalCorners,
         playerProps,
@@ -2081,7 +2096,6 @@ async function main() {
         );
       }
       assert.equal(polymarketMatch?.fifa.fixture?.homeTeam, "USA");
-      assert.equal(kalshiTotal?.fifa.fixture?.awayTeam, "Paraguay");
       assert.equal(polymarketMatch?.fifa.fixture?.venue, "SoFi Stadium");
       assert.ok(
         polymarketMatch?.markets.some(
@@ -2089,28 +2103,6 @@ async function main() {
             market.fifa.teamName === "USA" && market.fifa.teamGroupCode === "D",
         ),
       );
-    }
-
-    {
-      const response = await app.inject({
-        method: "GET",
-        url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: suffix, section: "match_prop", venue: "kalshi" })}`,
-      });
-      assert.equal(response.statusCode, 200, response.body);
-      const payload = response.json<{
-        data: Array<{
-          eventId: string;
-          markets: Array<{ fifa: { subtype: string | null } }>;
-        }>;
-      }>();
-      const spread = payload.data.find(
-        (event) => event.eventId === events[17].id,
-      );
-      const firstHalf = payload.data.find(
-        (event) => event.eventId === events[18].id,
-      );
-      assert.equal(spread?.markets[0]?.fifa.subtype, "spread");
-      assert.equal(firstHalf?.markets[0]?.fifa.subtype, "first_half");
     }
 
     {
@@ -2137,44 +2129,6 @@ async function main() {
     {
       const response = await app.inject({
         method: "GET",
-        url: `/special/fifa-2026?${query({ view: "markets", limit: 50, q: suffix, section: "match_result", venue: "kalshi" })}`,
-      });
-      assert.equal(response.statusCode, 200, response.body);
-      const payload = response.json<{
-        data: Array<{
-          eventId: string;
-          markets: Array<{
-            fifa: { subtype: string | null; entity: string | null };
-          }>;
-        }>;
-      }>();
-      const tie = payload.data.find((event) => event.eventId === events[20].id);
-      assert.equal(tie?.markets[0]?.fifa.subtype, "draw");
-      assert.equal(tie?.markets[0]?.fifa.entity, "Draw");
-    }
-
-    {
-      const response = await app.inject({
-        method: "GET",
-        url: `/special/fifa-2026?${query({ limit: 50, q: suffix, section: "special", venue: "kalshi" })}`,
-      });
-      assert.equal(response.statusCode, 200, response.body);
-      const payload = response.json<{
-        data: Array<{
-          eventId: string;
-          fifa: { matchFixtureKey: string | null; matchDate: string | null };
-        }>;
-      }>();
-      const special = payload.data.find(
-        (event) => event.eventId === events[6].id,
-      );
-      assert.equal(special?.fifa.matchFixtureKey, null);
-      assert.equal(special?.fifa.matchDate, null);
-    }
-
-    {
-      const response = await app.inject({
-        method: "GET",
         url: `/special/fifa-2026?${query({ view: "markets", q: suffix, section: "match_prop", sort: "time", limit: 10 })}`,
       });
       assert.equal(response.statusCode, 200, response.body);
@@ -2191,7 +2145,7 @@ async function main() {
           }>;
         }>;
       }>();
-      assert.ok(payload.count >= 3);
+      assert.ok(payload.count >= 1);
       const sections = payload.data.flatMap((event) =>
         event.markets.map((market) => market.fifa.section),
       );

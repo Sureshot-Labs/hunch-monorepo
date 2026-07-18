@@ -69,6 +69,26 @@ test("observed top keeps an old coherent book for presentation only", () => {
   assert.equal(strict.yesAsk, null);
 });
 
+test("observed probability can invert a coherent NO book", () => {
+  const observed = buildObservedCanonicalMarketTop({
+    yesTop: null,
+    noTop: top(22 * 60 * 60, 0.19, 0.21),
+  });
+
+  assert.ok(Math.abs((observed.probability ?? 0) - 0.8) < 1e-9);
+  assert.equal(observed.yesAsk, null);
+  assert.equal(observed.noAsk, 0.21);
+});
+
+test("observed probability rejects a bid-only historical shape", () => {
+  const observed = buildObservedCanonicalMarketTop({
+    yesTop: top(22 * 60 * 60, 0.8, null),
+    noTop: null,
+  });
+
+  assert.equal(observed.probability, null);
+});
+
 test("incident one-sided books do not create 100/0 or executable asks", () => {
   const result = buildCanonicalMarketTop({
     now,

@@ -460,9 +460,7 @@ function buildMarket(row: FifaSpecialRow) {
       row.market_metadata,
     ),
   });
-  const observedTop = acceptingOrders
-    ? buildTop(row)
-    : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
+  const observedTop = buildTop(row);
   const fifa = buildFifaMeta(row, { scope: "market" });
   return {
     venue: String(row.venue),
@@ -741,7 +739,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
         ? Math.min(env.feedTtlSec, FIFA_LIVE_CACHE_TTL_SEC)
         : 0;
     const cacheEnabled = cacheTtl > 0;
-    const cacheKey = `special:fifa-2026:live:v4:${lifecycle.revision}`;
+    const cacheKey = `special:fifa-2026:live:v5:${lifecycle.revision}`;
     const staleCacheKey = `${cacheKey}:stale`;
 
     if (cacheEnabled && r) {
@@ -929,7 +927,7 @@ export const specialRoutes: FastifyPluginAsync = async (app) => {
       const teamGroupCodesKey = q.team_group_code?.join(",") ?? "";
       const cacheTtl = env.feedTtlSec;
       const cacheEnabled = cacheTtl > 0;
-      const cacheKey = `special:fifa-2026:v9:${lifecycle.revision}:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
+      const cacheKey = `special:fifa-2026:v10:${lifecycle.revision}:${view}:${q.limit}:${q.offset}:${searchQuery ?? ""}:${venuesKey}:${sectionsKey}:${groupCodesKey}:${teamGroupCodesKey}:${sort}:${sortDir}`;
       const staleCacheKey = `${cacheKey}:stale`;
       const staleTtl = Math.max(cacheTtl * 60, 6 * 60 * 60);
       const redisContext = await (

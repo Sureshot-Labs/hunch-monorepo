@@ -37,6 +37,12 @@ export type LimitlessClobQuoteInput = {
   tokenId: string;
 };
 
+export function isLimitlessClobDefinitiveNoFill(
+  status: LimitlessClobQuoteResult["status"],
+): status is "insufficient_depth" | "no_liquidity" {
+  return status === "insufficient_depth" || status === "no_liquidity";
+}
+
 type QuoteCacheEntry = {
   expiresAt: number;
   promise: Promise<LimitlessClobQuoteResult>;

@@ -1,5 +1,4 @@
 import {
-  buildSignalBotMarketSearchQueryPrompt,
   buildSignalBotMarketSearchProgressScreen,
   buildSignalBotMarketSearchScreen,
   buildSignalBotMarketSearchUnavailableScreen,

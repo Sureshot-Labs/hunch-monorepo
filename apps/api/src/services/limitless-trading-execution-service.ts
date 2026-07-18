@@ -10,7 +10,9 @@ import {
 } from "../lib/limitless-token.js";
 import {
   expireStaleLimitlessFokOrders,
+  fetchLimitlessFokExecutionRepairCandidates,
   fetchStoredOrderWalletContext,
+  markLimitlessFokFilledFromStoredExecution,
   normalizeLimitlessFokOrderSizesForMarket,
   storeOrder,
   updateOrderFromHistory,
@@ -95,7 +97,10 @@ import {
   isLimitlessPartnerHmacConfigured,
   limitlessRequest,
 } from "./limitless-client.js";
-import { quoteLimitlessClobMarket } from "./limitless-clob-quote.js";
+import {
+  isLimitlessClobDefinitiveNoFill,
+  quoteLimitlessClobMarket,
+} from "./limitless-clob-quote.js";
 import {
   extractLimitlessExecutionFill,
   isLimitlessFokUnmatchedMessage,
@@ -1248,6 +1253,48 @@ export function extractLimitlessCanceledIds(
   return ids.length ? ids : fallback;
 }
 
+export async function repairLimitlessFokOrdersFromStoredExecution(input: {
+  pool: ApiTradingApplicationServiceInput["pool"];
+  userId: string;
+  walletAddress: string;
+  marketSlug: string;
+  limit?: number;
+}): Promise<number> {
+  const candidates = await fetchLimitlessFokExecutionRepairCandidates(
+    input.pool,
+    {
+      userId: input.userId,
+      walletAddress: input.walletAddress,
+      marketSlug: input.marketSlug,
+      limit: input.limit ?? 100,
+    },
+  );
+  const repairedAt = new Date();
+  let repaired = 0;
+
+  for (const candidate of candidates) {
+    const parsed = parseLimitlessOrderResult(candidate.upstreamPayload);
+    if (!parsed.terminalFill) continue;
+    const executionFill = extractLimitlessExecutionFill(
+      candidate.upstreamPayload,
+    );
+    if (!executionFill) continue;
+    const updated = await markLimitlessFokFilledFromStoredExecution(
+      input.pool,
+      {
+        id: candidate.id,
+        price: executionFill.averagePrice,
+        size: executionFill.shares,
+        filledAt: repairedAt,
+        orderHash: parsed.txHash ?? candidate.orderHash,
+      },
+    );
+    if (updated) repaired += 1;
+  }
+
+  return repaired;
+}
+
 export async function syncLimitlessOpenOrdersRoute(input: {
   log?: LimitlessRouteLogger | null;
   pool: ApiTradingApplicationServiceInput["pool"];
@@ -1334,6 +1381,8 @@ export async function syncLimitlessOpenOrdersRoute(input: {
     ReturnType<typeof syncLimitlessHistoryForWallet>
   > | null = null;
   let historyError: string | null = null;
+  let repairedStoredFok = 0;
+  let repairError: string | null = null;
   let expiredStaleFok = 0;
   let metricsError: string | null = null;
 
@@ -1343,12 +1392,6 @@ export async function syncLimitlessOpenOrdersRoute(input: {
       walletAddress: input.signer,
       authContext: partnerAuth.authContext,
       limit: 100,
-    });
-    expiredStaleFok = await expireStaleLimitlessFokOrders(input.pool, {
-      userId: input.userId,
-      walletAddress: input.signer,
-      marketSlug: input.query.slug,
-      activeVenueOrderIds: orderIds,
     });
   } catch (error) {
     historyError =
@@ -1364,7 +1407,37 @@ export async function syncLimitlessOpenOrdersRoute(input: {
     );
   }
 
-  if (historyStats || expiredStaleFok > 0) {
+  try {
+    repairedStoredFok = await repairLimitlessFokOrdersFromStoredExecution({
+      pool: input.pool,
+      userId: input.userId,
+      walletAddress: input.signer,
+      marketSlug: input.query.slug,
+      limit: 100,
+    });
+    expiredStaleFok = await expireStaleLimitlessFokOrders(input.pool, {
+      userId: input.userId,
+      walletAddress: input.signer,
+      marketSlug: input.query.slug,
+      activeVenueOrderIds: orderIds,
+    });
+  } catch (error) {
+    repairError =
+      error instanceof Error
+        ? error.message
+        : "Limitless stored FOK repair failed.";
+    input.log?.warn?.(
+      {
+        error,
+        userId: input.userId,
+        walletAddress: input.signer,
+        marketSlug: input.query.slug,
+      },
+      "Limitless stored FOK repair failed during order sync",
+    );
+  }
+
+  if (historyStats || repairedStoredFok > 0 || expiredStaleFok > 0) {
     try {
       await recomputePositionMetricsForWallet(input.pool, {
         userId: input.userId,
@@ -1394,6 +1467,8 @@ export async function syncLimitlessOpenOrdersRoute(input: {
       alreadyKnown,
       skippedNoId,
       normalizedFokSizes,
+      repairedStoredFok,
+      repairError,
       expiredStaleFok,
       history: historyStats,
       historyError,
@@ -3340,7 +3415,17 @@ export async function submitLimitlessClientSignedOrder(input: {
       slug: input.body.marketSlug,
       tokenId: requestedRawTokenId,
     });
-    if (depthQuote.status !== "ready") {
+    if (depthQuote.status === "unavailable") {
+      return {
+        ok: false,
+        statusCode: 502,
+        payload: {
+          code: "quote_unavailable",
+          error: "Limitless depth quote is temporarily unavailable.",
+        },
+      };
+    }
+    if (isLimitlessClobDefinitiveNoFill(depthQuote.status)) {
       return {
         ok: true,
         payload: {
@@ -4972,20 +5057,12 @@ async function submitPreparedTrade(
       payload.tokenId ?? payload.orderPayload.tokenId,
     );
     if (!orderSide || !preflightAmount || !preflightTokenId) {
-      return {
+      throw tradingError({
+        code: "trade_submission_failed",
+        message: "Limitless prepared order is invalid.",
+        statusCode: 400,
         venue: "limitless",
-        status: "no_fill",
-        venueOrderId: null,
-        orderHash: null,
-        txSignature: null,
-        price: payload.price,
-        size: payload.size,
-        raw: {
-          reason: "unavailable",
-          message: "Limitless depth quote is unavailable.",
-          prepared: payload,
-        },
-      };
+      });
     }
     const depthQuote = await quoteLimitlessClobMarket({
       ...(orderSide === "BUY"
@@ -4995,7 +5072,15 @@ async function submitPreparedTrade(
       slug: payload.marketSlug,
       tokenId: preflightTokenId,
     });
-    if (depthQuote.status !== "ready") {
+    if (depthQuote.status === "unavailable") {
+      throw tradingError({
+        code: "quote_unavailable",
+        message: "Limitless depth quote is temporarily unavailable.",
+        statusCode: 502,
+        venue: "limitless",
+      });
+    }
+    if (isLimitlessClobDefinitiveNoFill(depthQuote.status)) {
       return {
         venue: "limitless",
         status: "no_fill",

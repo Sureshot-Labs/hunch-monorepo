@@ -1,9 +1,6 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import {
-  buildCanonicalMarketTop,
-  buildObservedCanonicalMarketTop,
-} from "@hunch/shared";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import crypto from "node:crypto";
 import { RESP_TYPES } from "redis";
 import { createAuthMiddleware } from "../auth.js";
@@ -31,6 +28,7 @@ import {
   fetchFeedEventIds,
   fetchFeedMarkets,
   fetchFeedMarketsDirect,
+  fetchObservedCanonicalProbabilityMarketIds,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
@@ -42,8 +40,6 @@ const FOR_YOU_KNN_PAD = 50;
 const FOR_YOU_KNN_MULTIPLIER = 8;
 const FOR_YOU_MAX_KNN = 300;
 const FOR_YOU_RECENT_CLOSE_HOURS = 24;
-const STRICT_PROBABILITY_SCAN_MULTIPLIER = 5;
-const STRICT_PROBABILITY_SCAN_CAP = 500;
 
 function applyFeedCacheHeaders(input: {
   reply: FastifyReply;
@@ -142,14 +138,13 @@ function filterCachedFeedBodyForVenues(
   }
 }
 
-function marketMatchesStrictProbability(input: {
+function marketMatchesObservedProbability(input: {
   market: FeedEvent["markets"][number];
   minProb?: number;
   maxProb?: number;
 }): boolean {
   if (input.minProb == null && input.maxProb == null) return true;
-  if (!input.market.acceptingOrders) return false;
-  const probability = buildCanonicalMarketTop({
+  const probability = buildObservedCanonicalMarketTop({
     yesTop: {
       bestBid: input.market.top.yesBid,
       bestAsk: input.market.top.yesAsk,
@@ -167,7 +162,7 @@ function marketMatchesStrictProbability(input: {
   return true;
 }
 
-function filterFeedByStrictProbability(input: {
+function filterFeedByObservedProbability(input: {
   data: FeedEvent[];
   minProb?: number;
   maxProb?: number;
@@ -175,7 +170,7 @@ function filterFeedByStrictProbability(input: {
   if (input.minProb == null && input.maxProb == null) return input.data;
   return input.data.flatMap((event) => {
     const markets = event.markets.filter((market) =>
-      marketMatchesStrictProbability({
+      marketMatchesObservedProbability({
         market,
         minProb: input.minProb,
         maxProb: input.maxProb,
@@ -270,20 +265,18 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
       rRow.market_metadata,
     ),
   });
-  const observedTop = acceptingOrders
-    ? buildObservedCanonicalMarketTop({
-        yesTop: {
-          bestBid: rRow.best_bid_yes,
-          bestAsk: rRow.best_ask_yes,
-          ts: rRow.top_ts_yes as Date | string | number | null,
-        },
-        noTop: {
-          bestBid: rRow.best_bid_no,
-          bestAsk: rRow.best_ask_no,
-          ts: rRow.top_ts_no as Date | string | number | null,
-        },
-      })
-    : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
+  const observedTop = buildObservedCanonicalMarketTop({
+    yesTop: {
+      bestBid: rRow.best_bid_yes,
+      bestAsk: rRow.best_ask_yes,
+      ts: rRow.top_ts_yes as Date | string | number | null,
+    },
+    noTop: {
+      bestBid: rRow.best_bid_no,
+      bestAsk: rRow.best_ask_no,
+      ts: rRow.top_ts_no as Date | string | number | null,
+    },
+  });
 
   return {
     venue: String(rRow.venue),
@@ -360,6 +353,30 @@ function buildFeedEvent(rRow: FeedMarketRow): FeedEvent {
   };
 }
 
+function buildFeedData(input: {
+  eventIds: string[];
+  rows: FeedMarketRow[];
+  view: "events" | "markets";
+}): FeedEvent[] {
+  if (input.view === "markets") {
+    return input.rows.map((row) => ({
+      ...buildFeedEvent(row),
+      markets: [buildFeedMarket(row)],
+    }));
+  }
+
+  const eventMap: Record<string, FeedEvent> = {};
+  for (const row of input.rows) {
+    const eventId = String(row.event_id);
+    if (!eventMap[eventId]) eventMap[eventId] = buildFeedEvent(row);
+    eventMap[eventId].markets.push(buildFeedMarket(row));
+  }
+  return input.eventIds.flatMap((eventId) => {
+    const event = eventMap[eventId];
+    return event ? [event] : [];
+  });
+}
+
 export const feedRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
 
@@ -411,7 +428,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const category = q.category;
       const categories = q.categories;
       const filter = q.filter;
-      const sort = q.sort;
+      // `filter=newest|endingsoon` is itself an ordering mode. If a stale UI
+      // URL also carries `sort`, the explicit filter wins instead of forcing
+      // an unrelated (and potentially expensive) secondary ordering path.
+      const sort = filter ? undefined : q.sort;
       const sortDir: "asc" | "desc" =
         q.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
       const minProb = q.min_prob;
@@ -434,7 +454,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v32:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v35:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -524,31 +544,33 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         sevenDaysFromNow,
       };
       const hasProbabilityFilter = minProb != null || maxProb != null;
-      const databaseInputs = hasProbabilityFilter
-        ? {
-            ...inputs,
-            limit: Math.min(
-              STRICT_PROBABILITY_SCAN_CAP,
-              Math.max(limit + offset, limit) *
-                STRICT_PROBABILITY_SCAN_MULTIPLIER,
-            ),
-            offset: 0,
-            minProb: undefined,
-            maxProb: undefined,
-          }
-        : inputs;
 
-      let rows: FeedMarketRow[] = [];
-      let eventIds: string[] = [];
+      let data: FeedEvent[] = [];
       try {
-        if (view === "markets") {
-          rows = await fetchFeedMarketsDirect(pool, databaseInputs);
+        const observedProbabilityMarketIds = hasProbabilityFilter
+          ? await fetchObservedCanonicalProbabilityMarketIds(pool, inputs)
+          : null;
+        const databaseInputs = hasProbabilityFilter
+          ? {
+              ...inputs,
+              marketIds: observedProbabilityMarketIds ?? [],
+              minProb: undefined,
+              maxProb: undefined,
+            }
+          : inputs;
+
+        if (observedProbabilityMarketIds?.length === 0) {
+          data = [];
+        } else if (view === "markets") {
+          const rows = await fetchFeedMarketsDirect(pool, databaseInputs);
+          data = buildFeedData({ rows, eventIds: [], view });
         } else {
           const eventRows = await fetchFeedEventIds(pool, databaseInputs);
-          eventIds = eventRows.map((row) => row.id);
-          if (eventIds.length) {
-            rows = await fetchFeedMarkets(pool, databaseInputs, eventIds);
-          }
+          const eventIds = eventRows.map((row) => row.id);
+          const rows = eventIds.length
+            ? await fetchFeedMarkets(pool, databaseInputs, eventIds)
+            : [];
+          data = buildFeedData({ rows, eventIds, view });
         }
       } catch (error) {
         if (isSearchStatementTimeout(error, search)) {
@@ -561,7 +583,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         throw error;
       }
 
-      if (!rows.length) {
+      if (!data.length) {
         const payload = {
           count: 0,
           limit,
@@ -581,95 +603,68 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         return reply.send(body);
       }
 
-      let data: FeedEvent[] = [];
-      if (view === "markets") {
-        data = rows.map((rRow) => {
-          const market = buildFeedMarket(rRow);
-          return { ...buildFeedEvent(rRow), markets: [market] };
-        });
-      } else {
-        const eventMap: Record<string, FeedEvent> = {};
-        for (const rRow of rows) {
-          const eid = String(rRow.event_id);
-          if (!eventMap[eid]) {
-            eventMap[eid] = buildFeedEvent(rRow);
+      if (
+        view === "events" &&
+        r &&
+        !search &&
+        (sort === "trending" || sort === "trending_v2")
+      ) {
+        const uniqueTokenIds: string[] = [];
+        const seen = new Set<string>();
+
+        for (const event of data) {
+          for (const market of event.markets) {
+            const tokenId = market.tokens?.yes;
+            if (!tokenId) continue;
+            if (seen.has(tokenId)) continue;
+            seen.add(tokenId);
+            uniqueTokenIds.push(tokenId);
           }
-          eventMap[eid].markets.push(buildFeedMarket(rRow));
         }
 
-        if (r && !search && (sort === "trending" || sort === "trending_v2")) {
-          const uniqueTokenIds: string[] = [];
-          const seen = new Set<string>();
-
-          for (const eid of eventIds) {
-            const event = eventMap[eid];
-            if (!event) continue;
-            for (const market of event.markets) {
-              const tokenId = market.tokens?.yes;
-              if (!tokenId) continue;
-              if (seen.has(tokenId)) continue;
-              seen.add(tokenId);
-              uniqueTokenIds.push(tokenId);
-            }
+        if (uniqueTokenIds.length) {
+          const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
+          const tops = await r.mGet(topKeys);
+          const hotTokenIds = new Set<string>();
+          for (let i = 0; i < uniqueTokenIds.length; i += 1) {
+            if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
           }
 
-          if (uniqueTokenIds.length) {
-            const topKeys = uniqueTokenIds.map((id) => `top:${id}`);
-            const tops = await r.mGet(topKeys);
-            const hotTokenIds = new Set<string>();
-            for (let i = 0; i < uniqueTokenIds.length; i += 1) {
-              if (tops[i] != null) hotTokenIds.add(uniqueTokenIds[i]);
-            }
+          if (hotTokenIds.size) {
+            for (const event of data) {
+              if (event.markets.length < 2) continue;
 
-            if (hotTokenIds.size) {
-              for (const eid of eventIds) {
-                const event = eventMap[eid];
-                if (!event) continue;
-                if (event.markets.length < 2) continue;
-
-                const hotMarkets: FeedEvent["markets"] = [];
-                const coldMarkets: FeedEvent["markets"] = [];
-                for (const market of event.markets) {
-                  const tokenId = market.tokens?.yes;
-                  if (tokenId && hotTokenIds.has(tokenId))
-                    hotMarkets.push(market);
-                  else coldMarkets.push(market);
-                }
-
-                if (hotMarkets.length && coldMarkets.length) {
-                  event.markets = [...hotMarkets, ...coldMarkets];
-                }
+              const hotMarkets: FeedEvent["markets"] = [];
+              const coldMarkets: FeedEvent["markets"] = [];
+              for (const market of event.markets) {
+                const tokenId = market.tokens?.yes;
+                if (tokenId && hotTokenIds.has(tokenId))
+                  hotMarkets.push(market);
+                else coldMarkets.push(market);
               }
 
-              const eventMeta = eventIds.map((eid, index) => {
-                const event = eventMap[eid];
-                const hotCount =
-                  event?.markets.reduce((acc, market) => {
-                    const tokenId = market.tokens?.yes;
-                    return acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0);
-                  }, 0) ?? 0;
-                return { eid, index, hotCount };
-              });
-
-              eventMeta.sort((a, b) => {
-                const byHot = b.hotCount - a.hotCount;
-                if (byHot) return byHot;
-                return a.index - b.index;
-              });
-              eventIds = eventMeta.map((m) => m.eid);
+              if (hotMarkets.length && coldMarkets.length) {
+                event.markets = [...hotMarkets, ...coldMarkets];
+              }
             }
+
+            const eventMeta = data.map((event, index) => {
+              const hotCount =
+                event.markets.reduce((acc, market) => {
+                  const tokenId = market.tokens?.yes;
+                  return acc + (tokenId && hotTokenIds.has(tokenId) ? 1 : 0);
+                }, 0) ?? 0;
+              return { event, index, hotCount };
+            });
+
+            eventMeta.sort((a, b) => {
+              const byHot = b.hotCount - a.hotCount;
+              if (byHot) return byHot;
+              return a.index - b.index;
+            });
+            data = eventMeta.map((meta) => meta.event);
           }
         }
-
-        data = eventIds.flatMap((eid) => {
-          const event = eventMap[eid];
-          return event ? [event] : [];
-        });
-      }
-
-      data = filterFeedByStrictProbability({ data, minProb, maxProb });
-      if (hasProbabilityFilter) {
-        data = data.slice(offset, offset + limit);
       }
 
       const payload = {
@@ -750,7 +745,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const category = q.category;
       const categories = q.categories;
       const filter = q.filter;
-      const sort = q.sort;
+      const sort = filter ? undefined : q.sort;
       const sortDir: "asc" | "desc" =
         q.sort_dir === "asc" ? "asc" : sort === "time" ? "asc" : "desc";
       const minProb = q.min_prob;
@@ -831,27 +826,22 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         sevenDaysAgo,
         sevenDaysFromNow,
       };
-      const hasProbabilityFilter = minProb != null || maxProb != null;
-      const strictProbabilityInputs = hasProbabilityFilter
-        ? { ...baseInputs, minProb: undefined, maxProb: undefined }
-        : baseInputs;
-
       let data: FeedEvent[] = [];
       let responseCount = 0;
       let totalEvents = 0;
       let totalMarkets = 0;
       if (view === "markets") {
         const summary = await fetchFavoriteFeedEventPage(pool, {
-          ...strictProbabilityInputs,
+          ...baseInputs,
           limit: 1,
           offset: 0,
         });
         totalEvents = summary.totalEvents;
         totalMarkets = summary.totalMarkets;
         const rows = await fetchFeedMarketsDirect(pool, {
-          ...strictProbabilityInputs,
-          limit: hasProbabilityFilter ? favoriteMarketIds.length : limit,
-          offset: hasProbabilityFilter ? 0 : offset,
+          ...baseInputs,
+          limit,
+          offset,
         });
         if (!rows.length) {
           return reply.send({
@@ -866,20 +856,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const market = buildFeedMarket(rRow);
           return { ...buildFeedEvent(rRow), markets: [market] };
         });
-        data = filterFeedByStrictProbability({ data, minProb, maxProb });
-        if (hasProbabilityFilter) {
-          totalMarkets = data.length;
-          totalEvents = new Set(data.map((event) => event.eventId)).size;
-          data = data.slice(offset, offset + limit);
-        }
         responseCount = totalMarkets;
       } else {
         // event_scope in favorites mode is favorites-relative:
         // grouped/single is evaluated on favorited markets that match filters.
         const summary = await fetchFavoriteFeedEventPage(pool, {
-          ...strictProbabilityInputs,
-          limit: hasProbabilityFilter ? favoriteMarketIds.length : limit,
-          offset: hasProbabilityFilter ? 0 : offset,
+          ...baseInputs,
+          limit,
+          offset,
         });
         totalEvents = summary.totalEvents;
         totalMarkets = summary.totalMarkets;
@@ -897,9 +881,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         const allRows = await fetchFeedMarkets(
           pool,
           {
-            ...strictProbabilityInputs,
-            limit: hasProbabilityFilter ? favoriteMarketIds.length : limit,
-            offset: hasProbabilityFilter ? 0 : offset,
+            ...baseInputs,
+            limit,
+            offset,
           },
           summary.eventIds,
         );
@@ -914,15 +898,6 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         data = summary.eventIds
           .map((eventId) => eventMap[eventId])
           .filter((event): event is FeedEvent => Boolean(event));
-        data = filterFeedByStrictProbability({ data, minProb, maxProb });
-        if (hasProbabilityFilter) {
-          totalEvents = data.length;
-          totalMarkets = data.reduce(
-            (count, event) => count + event.markets.length,
-            0,
-          );
-          data = data.slice(offset, offset + limit);
-        }
         responseCount = totalEvents;
       }
 
@@ -1411,7 +1386,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         eventMap[eid].markets.push(buildFeedMarket(rRow));
       }
 
-      const orderedEvents = filterFeedByStrictProbability({
+      const orderedEvents = filterFeedByObservedProbability({
         data: candidateEventIds.flatMap((eid) => {
           const event = eventMap[eid];
           return event ? [event] : [];

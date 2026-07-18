@@ -73,7 +73,6 @@ import {
   buildSignalBotHolderStartParam,
   buildSignalBotMiniAppUrl,
   buildSignalBotMarketStartParam,
-  buildSignalBotTelegramWebAppUrl,
   normalizeTelegramMiniAppLinkBase,
   SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
 } from "./signal-bot-mini-app-links.js";
@@ -2804,6 +2803,7 @@ export async function handleSignalBotMenuCallback(
     db: input.db,
     telegramUserId,
   });
+  const loadMarketCard = input.loadMarketCard;
   const guestSearchRoute =
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
@@ -2871,9 +2871,9 @@ export async function handleSignalBotMenuCallback(
       callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
       chatId,
       loadDeposit: input.loadDeposit,
-      loadMarketCard: input.loadMarketCard
+      loadMarketCard: loadMarketCard
         ? (marketInput) =>
-            input.loadMarketCard!({
+            loadMarketCard({
               ...marketInput,
               publicBrowseOnly: audience !== "linked",
             })
@@ -3248,6 +3248,7 @@ export async function handleSignalBotMenuInput(input: {
     db: input.db,
     telegramUserId,
   });
+  const loadMarketCard = input.loadMarketCard;
   return handleSignalBotMarketSearchInput({
     beginResponse: async (message) => {
       const sent = await input.telegram.sendMessage({
@@ -3269,9 +3270,9 @@ export async function handleSignalBotMenuInput(input: {
     },
     callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
     chatId,
-    loadMarketCard: input.loadMarketCard
+    loadMarketCard: loadMarketCard
       ? (marketInput) =>
-          input.loadMarketCard!({
+          loadMarketCard({
             ...marketInput,
             publicBrowseOnly: audience !== "linked",
           })

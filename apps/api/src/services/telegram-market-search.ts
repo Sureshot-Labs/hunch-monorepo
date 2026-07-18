@@ -5,6 +5,7 @@ import {
   fetchFeedMarketsDirect,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
+import type { ClusterMarketSummary } from "./clusters.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
 
 export type TelegramMarketSearchResult = {
@@ -47,6 +48,30 @@ function mapTelegramMarketSearchResult(
     noAsk: finiteNumber(row.best_ask_no),
     venue: row.venue,
     yesAsk: finiteNumber(row.best_ask_yes ?? row.best_ask),
+  };
+}
+
+export function mapClusterMarketToTelegramSearchResult(
+  market: Pick<
+    ClusterMarketSummary,
+    | "eventId"
+    | "eventTitle"
+    | "marketId"
+    | "marketTitle"
+    | "venue"
+    | "yesAsk"
+    | "yesMid"
+  >,
+): TelegramMarketSearchResult {
+  return {
+    eventId: market.eventId,
+    eventTitle: market.eventTitle,
+    lastPrice: finiteNumber(market.yesMid),
+    marketId: market.marketId,
+    marketTitle: market.marketTitle?.trim() || "Prediction market",
+    noAsk: null,
+    venue: market.venue,
+    yesAsk: finiteNumber(market.yesAsk),
   };
 }
 
@@ -211,10 +236,11 @@ async function enrichTelegramMarketSearchResults(input: {
   if (!input.resolveCrossVenueAlternatives || input.results.length === 0) {
     return input.results.slice(0, TELEGRAM_SEARCH_DISPLAY_LIMIT);
   }
+  const resolveCrossVenueAlternatives = input.resolveCrossVenueAlternatives;
   const seeds = input.results.slice(0, TELEGRAM_SEARCH_AGG_SEED_LIMIT);
   const settled = await Promise.allSettled(
     seeds.map(async (result) => ({
-      alternatives: await input.resolveCrossVenueAlternatives!({
+      alternatives: await resolveCrossVenueAlternatives({
         marketId: result.marketId,
         venues: input.venues,
       }),

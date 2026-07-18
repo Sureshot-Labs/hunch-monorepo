@@ -315,7 +315,6 @@ type FeedSqlExpressions = {
   eventVolumeSortExpr: string;
   supportedLimitlessMarketExpr: string;
   renderableMarketExpr: string;
-  yesMidExpr: string;
 };
 
 type FeedSearchContext = {
@@ -407,14 +406,6 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
   `;
   const supportedLimitlessMarketExpr = "true";
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
-  const yesMidExpr = `
-    case
-      when m.best_bid is not null and m.best_ask is not null
-        then (m.best_bid + m.best_ask) / 2
-      else null
-    end
-  `;
-
   return {
     safeEventLiquidityExpr,
     eventVolumeDisplayExpr,
@@ -425,8 +416,316 @@ function buildFeedSqlExpressions(): FeedSqlExpressions {
     eventVolumeSortExpr,
     supportedLimitlessMarketExpr,
     renderableMarketExpr,
-    yesMidExpr,
   };
+}
+
+const CANONICAL_PROBABILITY_CONSISTENCY_TOLERANCE = 0.02;
+
+export function buildObservedCanonicalProbabilityFromTopSql(args: {
+  yesAlias: string;
+  noAlias: string;
+}): string {
+  const sideMid = (alias: string) => {
+    return `
+      case
+        when ${alias}.best_bid between 0 and 1
+          and ${alias}.best_ask between 0 and 1
+          and ${alias}.best_bid <= ${alias}.best_ask
+          then (${alias}.best_bid + ${alias}.best_ask) / 2
+        else null
+      end
+    `;
+  };
+  const crossed = (alias: string) => `
+    coalesce(
+      ${alias}.best_bid between 0 and 1
+        and ${alias}.best_ask between 0 and 1
+        and ${alias}.best_bid > ${alias}.best_ask,
+      false
+    )
+  `;
+  const yesMid = sideMid(args.yesAlias);
+  const noMid = sideMid(args.noAlias);
+
+  return `
+    (
+      select case
+        when canonical_top.yes_crossed or canonical_top.no_crossed then null
+        when canonical_top.yes_mid is not null
+          and canonical_top.no_mid is not null
+          and abs(canonical_top.yes_mid - (1 - canonical_top.no_mid)) > ${CANONICAL_PROBABILITY_CONSISTENCY_TOLERANCE}
+          then null
+        else coalesce(canonical_top.yes_mid, 1 - canonical_top.no_mid)
+      end
+      from (
+        select
+          ${yesMid} as yes_mid,
+          ${noMid} as no_mid,
+          ${crossed(args.yesAlias)} as yes_crossed,
+          ${crossed(args.noAlias)} as no_crossed
+      ) canonical_top
+    )
+  `;
+}
+
+function buildHistoricalCanonicalBookSql(args: {
+  tokenSetName: string;
+  nowParam: string;
+}): string {
+  return `
+    select
+      token.token_id,
+      cached.avg_mid_24h as best_bid,
+      cached.avg_mid_24h as best_ask
+    from ${args.tokenSetName} token
+    join unified_token_change_24h cached on cached.token_id = token.token_id
+    where cached.avg_mid_24h is not null
+
+    union all
+
+    select
+      token.token_id,
+      history.avg_mid as best_bid,
+      history.avg_mid as best_ask
+    from ${args.tokenSetName} token
+    join lateral (
+      select book.avg_mid
+      from unified_book_top_1h book
+      where book.token_id = token.token_id
+        and book.bucket <= (${args.nowParam}::timestamptz - interval '24 hours')
+      order by book.bucket desc
+      limit 1
+    ) history on true
+    where not exists (
+      select 1
+      from unified_token_change_24h cached
+      where cached.token_id = token.token_id
+        and cached.avg_mid_24h is not null
+    )
+  `;
+}
+
+function buildObservedCanonicalMarketChange24hCte(args: {
+  cteName: string;
+  sourceSql: string;
+  nowParam: string;
+}): string {
+  const currentProbability = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "current_yes_top",
+    noAlias: "current_no_top",
+  });
+  const historicalProbability = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "historical_yes_top",
+    noAlias: "historical_no_top",
+  });
+
+  return `
+    ${args.cteName} as materialized (
+      with source_markets as materialized (
+        select distinct market_id
+        from (${args.sourceSql}) source
+        where market_id is not null
+      ),
+      mapped_markets as materialized (
+        select
+          source.market_id,
+          ${canonicalMarketTokenIdSql("market", "YES")} as token_yes,
+          ${canonicalMarketTokenIdSql("market", "NO")} as token_no
+        from source_markets source
+        join unified_markets market on market.id = source.market_id
+      ),
+      history_token_set as materialized (
+        select token_yes as token_id
+        from mapped_markets
+        where token_yes is not null
+        union
+        select token_no as token_id
+        from mapped_markets
+        where token_no is not null
+      ),
+      historical_book as materialized (
+        ${buildHistoricalCanonicalBookSql({
+          tokenSetName: "history_token_set",
+          nowParam: args.nowParam,
+        })}
+      ),
+      probabilities as materialized (
+        select
+          mapped.market_id,
+          ${currentProbability} as current_probability,
+          ${historicalProbability} as historical_probability
+        from mapped_markets mapped
+        left join unified_token_top_latest current_yes_top
+          on current_yes_top.token_id = mapped.token_yes
+        left join unified_token_top_latest current_no_top
+          on current_no_top.token_id = mapped.token_no
+        left join historical_book historical_yes_top
+          on historical_yes_top.token_id = mapped.token_yes
+        left join historical_book historical_no_top
+          on historical_no_top.token_id = mapped.token_no
+      )
+      select
+        market_id,
+        case
+          when current_probability is null
+            or historical_probability is null
+            or historical_probability = 0
+            then null
+          else
+            (current_probability - historical_probability)
+            / historical_probability
+        end as change_24h
+      from probabilities
+    )
+  `;
+}
+
+export function buildObservedCanonicalMarketProbabilitySql(args: {
+  marketAlias: string;
+}): string {
+  const yesAlias = "canonical_yes_top";
+  const noAlias = "canonical_no_top";
+  const probability = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias,
+    noAlias,
+  });
+
+  return `
+    (
+      select ${probability}
+      from (values (1)) canonical_seed(value)
+      left join unified_token_top_latest ${yesAlias}
+        on ${yesAlias}.token_id = ${canonicalMarketTokenIdSql(args.marketAlias, "YES")}
+      left join unified_token_top_latest ${noAlias}
+        on ${noAlias}.token_id = ${canonicalMarketTokenIdSql(args.marketAlias, "NO")}
+    )
+  `;
+}
+
+export function buildObservedCanonicalMarketProbabilityPredicateSql(args: {
+  marketAlias: string;
+  minProbParam?: string | null;
+  maxProbParam?: string | null;
+}): string | null {
+  const conditions: string[] = [];
+  if (args.minProbParam) {
+    conditions.push(
+      `canonical_probability.probability >= ${args.minProbParam}`,
+    );
+  }
+  if (args.maxProbParam) {
+    conditions.push(
+      `canonical_probability.probability <= ${args.maxProbParam}`,
+    );
+  }
+  if (!conditions.length) return null;
+  const probability = buildObservedCanonicalMarketProbabilitySql({
+    marketAlias: args.marketAlias,
+  });
+  return `
+    coalesce(
+      (
+        select ${conditions.join(" and ")}
+        from (
+          select ${probability} as probability
+          offset 0
+        ) canonical_probability
+      ),
+      false
+    )
+  `;
+}
+
+function addObservedCanonicalMarketProbabilityPredicate(args: {
+  add: PgParamAdder;
+  inputs: Pick<FeedInputs, "minProb" | "maxProb">;
+  marketAlias: string;
+}): string | null {
+  return buildObservedCanonicalMarketProbabilityPredicateSql({
+    marketAlias: args.marketAlias,
+    minProbParam:
+      args.inputs.minProb == null ? null : args.add(args.inputs.minProb),
+    maxProbParam:
+      args.inputs.maxProb == null ? null : args.add(args.inputs.maxProb),
+  });
+}
+
+export async function fetchObservedCanonicalProbabilityMarketIds(
+  pool: Pool,
+  inputs: Pick<FeedInputs, "minProb" | "maxProb">,
+): Promise<string[]> {
+  if (inputs.minProb == null && inputs.maxProb == null) return [];
+
+  const { params, add } = createParamBuilder();
+  const probability = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "canonical_yes_top",
+    noAlias: "canonical_no_top",
+  });
+  const probabilityWhere: string[] = ["probability is not null"];
+  if (inputs.minProb != null) {
+    probabilityWhere.push(`probability >= ${add(inputs.minProb)}`);
+  }
+  if (inputs.maxProb != null) {
+    probabilityWhere.push(`probability <= ${add(inputs.maxProb)}`);
+  }
+
+  const rows = await queryRowsWithLocalSettings<{ market_id: string }>(
+    pool,
+    `
+      with observed_top_candidate_markets as materialized (
+        select distinct mapping.market_id
+        from unified_events event
+        join unified_markets market
+          on market.event_id = event.id
+         and market.status = 'ACTIVE'
+        join unified_market_tokens mapping
+          on mapping.market_id = market.id
+         and mapping.outcome_side in ('YES', 'NO')
+        join unified_token_top_latest observed_top
+          on observed_top.token_id = mapping.token_id
+        where event.status = 'ACTIVE'
+          and (
+            event.end_date is null
+            or event.end_date > (now() - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
+          )
+          and observed_top.best_bid between 0 and 1
+          and observed_top.best_ask between 0 and 1
+          and observed_top.best_bid <= observed_top.best_ask
+      ),
+      canonical_probabilities as materialized (
+        select
+          candidate.market_id,
+          ${probability} as probability
+        from observed_top_candidate_markets candidate
+        left join lateral (
+          select mapping.token_id
+          from unified_market_tokens mapping
+          where mapping.market_id = candidate.market_id
+            and mapping.outcome_side = 'YES'
+          order by mapping.updated_at desc nulls last, mapping.token_id asc
+          limit 1
+        ) canonical_yes_token on true
+        left join lateral (
+          select mapping.token_id
+          from unified_market_tokens mapping
+          where mapping.market_id = candidate.market_id
+            and mapping.outcome_side = 'NO'
+          order by mapping.updated_at desc nulls last, mapping.token_id asc
+          limit 1
+        ) canonical_no_token on true
+        left join unified_token_top_latest canonical_yes_top
+          on canonical_yes_top.token_id = canonical_yes_token.token_id
+        left join unified_token_top_latest canonical_no_top
+          on canonical_no_top.token_id = canonical_no_token.token_id
+      )
+      select market_id
+      from canonical_probabilities
+      where ${probabilityWhere.join(" and ")}
+    `,
+    params,
+    { jitOff: true },
+  );
+  return rows.map((row) => row.market_id);
 }
 
 function buildFeedMarketCandidateExtraSql(args: {
@@ -1100,9 +1399,13 @@ function buildFeedEventWhere(args: {
 }
 
 function requiresFeedEventMarketJoin(
-  inputs: Pick<FeedInputs, "minProb" | "maxProb" | "maxSpread" | "eventScope">,
+  inputs: Pick<
+    FeedInputs,
+    "minProb" | "maxProb" | "maxSpread" | "eventScope" | "marketIds"
+  >,
 ): boolean {
   return (
+    Boolean(inputs.marketIds?.length) ||
     inputs.minProb != null ||
     inputs.maxProb != null ||
     inputs.maxSpread != null ||
@@ -1123,14 +1426,14 @@ function buildFeedEventJoinHaving(args: {
   >;
   eventVolumeSortExpr: string;
   marketLiquidityDisplayExpr: string;
-  yesMidExpr: string;
+  probabilityPredicate: string | null;
 }) {
   const {
     add,
     inputs,
     eventVolumeSortExpr,
     marketLiquidityDisplayExpr,
-    yesMidExpr,
+    probabilityPredicate,
   } = args;
   const marketQual: string[] = [];
 
@@ -1139,12 +1442,7 @@ function buildFeedEventJoinHaving(args: {
       `${marketLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
     );
   }
-  if (inputs.minProb != null) {
-    marketQual.push(`(${yesMidExpr}) >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    marketQual.push(`(${yesMidExpr}) <= ${add(inputs.maxProb)}`);
-  }
+  if (probabilityPredicate) marketQual.push(probabilityPredicate);
   if (inputs.maxSpread != null) {
     marketQual.push(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
@@ -1195,8 +1493,7 @@ function isFeedEventFastPathSort(
     inputs.sort === "totalvol" ||
     inputs.sort === "liquidity" ||
     inputs.sort === "openinterest" ||
-    inputs.sort === "time" ||
-    inputs.sort === "change24h"
+    inputs.sort === "time"
   ) {
     return true;
   }
@@ -1207,6 +1504,7 @@ async function fetchFeedEventIdsFast(
   pool: Pool,
   inputs: FeedInputs,
 ): Promise<Array<{ id: string }> | null> {
+  if (inputs.sort === "change24h") return null;
   if (!isFeedEventFastPathSort(inputs)) return null;
   if (requiresFeedEventMarketJoin(inputs)) return null;
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
@@ -1245,21 +1543,7 @@ async function fetchFeedEventIdsFast(
   const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
   let candidateSourceSql: string | null = null;
 
-  if (inputs.sort === "change24h") {
-    candidateSourceSql = `
-      select
-        e.id,
-        row_number() over (
-          order by ec.change_24h ${sortDir} nulls last, e.id
-        ) as full_ord
-      from unified_event_change_24h ec
-      join unified_events e on e.id = ec.event_id
-      where ${eventWhereSql}
-        and ec.change_24h is not null
-      order by ec.change_24h ${sortDir} nulls last, e.id
-      limit ${candidateLimitParam}
-    `;
-  } else if (inputs.sort === "trending_v2") {
+  if (inputs.sort === "trending_v2") {
     const limitlessTrendExpr = `(coalesce(${eventLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${eventVolumeDisplayExpr}, 0))`;
     candidateSourceSql = `
       select
@@ -1373,7 +1657,7 @@ async function fetchFeedEventIdsFast(
         }));
     }
     if (candidateCount < candidateLimit) {
-      if (inputs.sort === "change24h" || inputs.sort === "trending_v2") {
+      if (inputs.sort === "trending_v2") {
         return null;
       }
       return ids
@@ -1426,8 +1710,12 @@ function buildFeedMarketViewContext(args: {
     marketLiquidityDisplayExpr,
     supportedLimitlessMarketExpr,
     renderableMarketExpr,
-    yesMidExpr,
   } = expressions;
+  const probabilityPredicate = addObservedCanonicalMarketProbabilityPredicate({
+    add,
+    inputs,
+    marketAlias: "m",
+  });
   const marketIdsParam = inputs.marketIds?.length
     ? add(inputs.marketIds)
     : null;
@@ -1485,12 +1773,7 @@ function buildFeedMarketViewContext(args: {
   if (inputs.minVol > 1e-9) {
     where.push(`${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
   }
-  if (inputs.minProb != null) {
-    where.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    where.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
-  }
+  if (probabilityPredicate) where.push(probabilityPredicate);
   if (inputs.maxSpread != null) {
     where.push(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
@@ -1655,6 +1938,7 @@ function buildFeedBookSnapshotCtes(args: {
   yesTopJoin: string;
   noTopJoin: string;
   yes24hJoin: string;
+  no24hJoin: string;
 } {
   const sourceCteName = args.sourceCteName ?? "market_base";
   const tokenYesColumn = args.tokenYesColumn ?? "resolved_token_yes";
@@ -1680,19 +1964,16 @@ function buildFeedBookSnapshotCtes(args: {
           b.best_ask
         from unified_token_top_latest b
         join token_set ts on ts.token_id = b.token_id
-        where b.ts >= (${args.nowParam}::timestamptz - interval '10 minutes')
       )
     `,
   ];
   if (args.include24h) {
     ctes.push(`
       book_24h as materialized (
-        select
-          b.token_id,
-          b.avg_mid_24h as avg_mid
-        from unified_token_change_24h b
-        join token_set ts on ts.token_id = b.token_id
-        where b.avg_mid_24h is not null
+        ${buildHistoricalCanonicalBookSql({
+          tokenSetName: "token_set",
+          nowParam: args.nowParam,
+        })}
       )
     `);
   }
@@ -1702,6 +1983,9 @@ function buildFeedBookSnapshotCtes(args: {
     noTopJoin: `left join latest_book no_top on no_top.token_id = m.${tokenNoColumn}`,
     yes24hJoin: args.include24h
       ? `left join book_24h yes_24h on yes_24h.token_id = m.${tokenYesColumn}`
+      : "",
+    no24hJoin: args.include24h
+      ? `left join book_24h no_24h on no_24h.token_id = m.${tokenNoColumn}`
       : "",
   };
 }
@@ -1770,9 +2054,16 @@ export async function fetchFeedCategoryFacetRows(
     eventVolumeSortExpr,
     supportedLimitlessMarketExpr,
     renderableMarketExpr,
-    yesMidExpr,
   } = expressions;
   const nowParam = add(inputs.nowParam);
+  const marketIdsParam = inputs.marketIds?.length
+    ? add(inputs.marketIds)
+    : null;
+  const probabilityPredicate = addObservedCanonicalMarketProbabilityPredicate({
+    add,
+    inputs,
+    marketAlias: "m",
+  });
   const search = buildFeedSearchContext({
     add,
     q: inputs.q,
@@ -1819,6 +2110,7 @@ export async function fetchFeedCategoryFacetRows(
             venueTarget: "event",
             renderableMarketExpr,
             supportedLimitlessMarketExpr,
+            marketIdsParam,
             hasSearch: search.hasSearch,
             requireNamedCategory: true,
           }),
@@ -1862,7 +2154,7 @@ export async function fetchFeedCategoryFacetRows(
     inputs,
     eventVolumeSortExpr,
     marketLiquidityDisplayExpr,
-    yesMidExpr,
+    probabilityPredicate,
   });
   const withParts: string[] = [];
   if (search.searchCte) withParts.push(search.searchCte);
@@ -1878,6 +2170,7 @@ export async function fetchFeedCategoryFacetRows(
           venueTarget: "event",
           renderableMarketExpr,
           supportedLimitlessMarketExpr,
+          marketIdsParam,
           hasSearch: search.hasSearch,
           requireNamedCategory: true,
         }),
@@ -1941,10 +2234,17 @@ async function fetchFeedEventIdsExact(
     eventVolumeSortExpr,
     supportedLimitlessMarketExpr,
     renderableMarketExpr,
-    yesMidExpr,
   } = expressions;
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const nowParam = add(inputs.nowParam);
+  const marketIdsParam = inputs.marketIds?.length
+    ? add(inputs.marketIds)
+    : null;
+  const probabilityPredicate = addObservedCanonicalMarketProbabilityPredicate({
+    add,
+    inputs,
+    marketAlias: "m",
+  });
   const search = buildFeedSearchContext({
     add,
     q: inputs.q,
@@ -1957,7 +2257,9 @@ async function fetchFeedEventIdsExact(
   });
   const filterRequiresMarketJoin = requiresFeedEventMarketJoin(inputs);
   const requiresMarketJoin =
-    filterRequiresMarketJoin || inputs.sort === "trending_v2";
+    filterRequiresMarketJoin ||
+    inputs.sort === "change24h" ||
+    inputs.sort === "trending_v2";
   const eventWhere = buildFeedEventWhere({
     add,
     inputs,
@@ -1967,52 +2269,6 @@ async function fetchFeedEventIdsExact(
     includeDurationExists: !requiresMarketJoin,
     searchFilterExpr: search.searchFilterExpr,
   });
-
-  if (inputs.sort === "change24h" && !requiresMarketJoin) {
-    const eventChangeWhere = [...eventWhere];
-    if (inputs.minVol > 1e-9) {
-      eventChangeWhere.push(
-        `${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`,
-      );
-    }
-    if (inputs.minLiquidity > 0) {
-      eventChangeWhere.push(
-        `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
-      );
-    }
-
-    const change24hParts: string[] = [];
-    if (search.searchCte) change24hParts.push(search.searchCte);
-    change24hParts.push(`
-      filtered_events as (
-        select e.id
-        from unified_events e
-        ${search.searchEventJoin}
-        ${eventChangeWhere.length ? "where " + eventChangeWhere.join(" and ") : ""}
-      )
-    `);
-
-    const withClause = `with ${change24hParts.join(",\n")}`;
-    const eventChangeSql = `
-      ${withClause}
-      select e.id
-      from unified_events e
-      join filtered_events fe on fe.id = e.id
-      left join unified_event_change_24h ec on ec.event_id = e.id
-      order by ec.change_24h ${sortDir} nulls last, e.id
-      limit ${inputs.limit} offset ${inputs.offset}
-    `;
-
-    return await queryRowsWithSearchHint<{ id: string }>(
-      pool,
-      eventChangeSql,
-      params,
-      search.hasSearch,
-      search.hasSearch ? feedSearchWorkMem() : FEED_HEAVY_QUERY_WORK_MEM,
-      search.hasSearch ? feedSearchStatementTimeoutMs() : null,
-      true,
-    );
-  }
 
   if (!requiresMarketJoin) {
     const eventOnlyWhere = [...eventWhere];
@@ -2080,11 +2336,11 @@ async function fetchFeedEventIdsExact(
     inputs,
     eventVolumeSortExpr,
     marketLiquidityDisplayExpr,
-    yesMidExpr,
+    probabilityPredicate,
   });
   const eventChangeJoin =
     inputs.sort === "change24h"
-      ? "left join unified_event_change_24h ec on ec.event_id = e.id"
+      ? "left join observed_market_change_24h market_change on market_change.market_id = m.id"
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
@@ -2102,7 +2358,7 @@ async function fetchFeedEventIdsExact(
   else if (inputs.sort === "openinterest")
     eventOrder = `(${eventOpenInterestExpr}) ${sortDir} nulls last, e.id`;
   else if (inputs.sort === "change24h")
-    eventOrder = `max(ec.change_24h) ${sortDir} nulls last, e.id`;
+    eventOrder = `avg(market_change.change_24h) ${sortDir} nulls last, e.id`;
   else if (inputs.sort === "time")
     eventOrder = `${buildFutureEventEndSortSql("e", nowParam)} ${sortDir} nulls last, e.id`;
   else if (inputs.filter === "newest")
@@ -2143,11 +2399,21 @@ async function fetchFeedEventIdsExact(
           venueTarget: "event",
           renderableMarketExpr,
           supportedLimitlessMarketExpr,
+          marketIdsParam,
           hasSearch: search.hasSearch,
         }),
       ],
     }),
   );
+  if (inputs.sort === "change24h") {
+    withParts.push(
+      buildObservedCanonicalMarketChange24hCte({
+        cteName: "observed_market_change_24h",
+        sourceSql: "select market_id from orderable_market_candidates",
+        nowParam,
+      }),
+    );
+  }
   const withClause = withParts.length ? `with ${withParts.join(",\n")}` : "";
 
   const eventSql = `
@@ -2304,13 +2570,11 @@ export async function fetchFeedMarkets(
   const marketIdsParam = inputs.marketIds?.length
     ? add(inputs.marketIds)
     : null;
-  const yesMidExpr = `
-    case
-      when m.best_bid is not null and m.best_ask is not null
-        then (m.best_bid + m.best_ask) / 2
-      else null
-    end
-  `;
+  const probabilityPredicate = addObservedCanonicalMarketProbabilityPredicate({
+    add,
+    inputs,
+    marketAlias: "m",
+  });
   const marketWhere: string[] = [
     buildOrderableMarketSql({
       marketAlias: "m",
@@ -2336,12 +2600,7 @@ export async function fetchFeedMarkets(
     );
   }
 
-  if (inputs.minProb != null) {
-    marketWhere.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    marketWhere.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
-  }
+  if (probabilityPredicate) marketWhere.push(probabilityPredicate);
   if (inputs.maxSpread != null) {
     marketWhere.push(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
@@ -2571,42 +2830,23 @@ export async function fetchFeedMarkets(
     from (${rankedMarketSql}) m
     where m.market_rank <= ${add(perEventMarketLimit)}
   `;
-  const change24hCteParts: string[] = [];
-  if (inputs.sort === "change24h") {
-    change24hCteParts.push(`
-      market_change as (
-        select
-          m.id as market_id,
-          mc.change_24h
-        from unified_markets m
-        left join polymarket_markets pm_filter
-          on pm_filter.id = m.venue_market_id and m.venue = 'polymarket'
-        left join unified_market_change_24h mc on mc.market_id = m.id
-        where m.event_id = ANY(${eventIdsParam}::text[])
-          ${marketIdsParam ? `and m.id = ANY(${marketIdsParam}::text[])` : ""}
-          and ${buildOrderableMarketSql({
-            marketAlias: "m",
-            nowParam,
-            pmAlias: "pm_filter",
-          })}
-          and ${supportedLimitlessMarketExpr}
-      )
-    `);
-  }
-  const currentYesMidExpr = `
+  const currentYesMidExpr = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "yes_top",
+    noAlias: "no_top",
+  });
+  const historicalYesMidExpr = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "yes_24h",
+    noAlias: "no_24h",
+  });
+  const change24hExpr = `
     case
-      when yes_top.best_bid is not null and yes_top.best_ask is not null
-        then (yes_top.best_bid + yes_top.best_ask) / 2
-      else coalesce(yes_top.best_bid, yes_top.best_ask, m.best_bid, m.best_ask)
-    end
-  `;
-  const change24hExpr =
-    inputs.sort === "change24h"
-      ? "mc.change_24h"
-      : `
-    case
-      when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
-      else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
+      when ${currentYesMidExpr} is null
+        or ${historicalYesMidExpr} is null
+        or ${historicalYesMidExpr} = 0
+        then null
+      else
+        (${currentYesMidExpr} - ${historicalYesMidExpr})
+        / ${historicalYesMidExpr}
     end
   `;
 
@@ -2618,12 +2858,8 @@ export async function fetchFeedMarkets(
   `;
   const bookSnapshot = buildFeedBookSnapshotCtes({
     nowParam,
-    include24h: inputs.sort !== "change24h",
+    include24h: true,
   });
-  const marketChangeJoin =
-    inputs.sort === "change24h"
-      ? "left join market_change mc on mc.market_id = m.id"
-      : "";
   const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
     nowParam,
     "yes_top",
@@ -2633,7 +2869,6 @@ export async function fetchFeedMarkets(
   const marketBestAskExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.best_ask else null end`;
   const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
-  if (change24hCteParts.length) withParts.push(...change24hCteParts);
   if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   withParts.push(`event_order as (${eventOrderSql})`);
   withParts.push(`market_base as (${marketBaseSql})`);
@@ -2709,8 +2944,8 @@ export async function fetchFeedMarkets(
       on pm.id = m.venue_market_id and m.venue = 'polymarket'
     ${bookSnapshot.yesTopJoin}
     ${bookSnapshot.yes24hJoin}
-    ${marketChangeJoin}
     ${bookSnapshot.noTopJoin}
+    ${bookSnapshot.no24hJoin}
     ${marketOrder ? `order by ${marketOrder}` : ""}
   `;
 
@@ -2751,9 +2986,9 @@ async function fetchFeedMarketIdsFast(
 ): Promise<string[] | null> {
   if (inputs.marketIds?.length || inputs.eventScope) return null;
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
+  if (inputs.sort === "change24h") return null;
 
-  const isMetricSort =
-    inputs.sort === "change24h" || inputs.sort === "trending_v2";
+  const isMetricSort = inputs.sort === "trending_v2";
   const isLegacyTrending = inputs.sort == null || inputs.sort === "trending";
   if (!isMetricSort && !isLegacyTrending) return null;
   if (isMetricSort && inputs.sortDir === "asc") return null;
@@ -2834,7 +3069,6 @@ async function fetchFeedMarketIdsFast(
     marketLiquidityDisplayExpr,
     renderableMarketExpr,
     supportedLimitlessMarketExpr,
-    yesMidExpr,
   } = expressions;
   const nowParam = add(inputs.nowParam);
   const nowCloseParam = add(inputs.nowParam);
@@ -2854,12 +3088,12 @@ async function fetchFeedMarketIdsFast(
   if (inputs.minVol > 1e-9) {
     candidateWhere.push(`${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
   }
-  if (inputs.minProb != null) {
-    candidateWhere.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    candidateWhere.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
-  }
+  const probabilityPredicate = addObservedCanonicalMarketProbabilityPredicate({
+    add,
+    inputs,
+    marketAlias: "m",
+  });
+  if (probabilityPredicate) candidateWhere.push(probabilityPredicate);
   if (inputs.maxSpread != null) {
     candidateWhere.push(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
@@ -2876,37 +3110,6 @@ async function fetchFeedMarketIdsFast(
   const candidateWhereSql = candidateWhere.join(" and ");
   const limitParam = add(inputs.limit);
   const offsetParam = add(inputs.offset);
-
-  if (inputs.sort === "change24h") {
-    const rows = await queryRowsWithLocalSettings<{ id: string }>(
-      pool,
-      `
-        select candidate.id
-        from unified_market_change_24h metric
-        cross join lateral (
-          select m.id, m.venue_market_id
-          from unified_markets m
-          join unified_events e on e.id = m.event_id
-          left join polymarket_markets pm_filter
-            on pm_filter.id = m.venue_market_id
-           and m.venue = 'polymarket'
-          where m.id = metric.market_id
-            and ${candidateWhereSql}
-            and ${availabilitySql}
-          limit 1
-        ) candidate
-        where metric.change_24h is not null
-        order by metric.change_24h desc nulls last, candidate.venue_market_id
-        limit ${limitParam} offset ${offsetParam}
-      `,
-      params,
-      { workMem: FEED_HEAVY_QUERY_WORK_MEM, jitOff: true },
-    );
-    const ids = rows.map((row) => row.id);
-    return ids.length === inputs.limit || options?.acceptPartialMetricPage
-      ? ids
-      : null;
-  }
 
   if (inputs.sort === "trending_v2") {
     const streamTargetParam = add(pageTarget);
@@ -3473,7 +3676,7 @@ export async function fetchFeedMarketsDirect(
   const offsetParam = add(inputs.offset);
   const change24hCandidateJoin =
     inputs.sort === "change24h"
-      ? "left join unified_market_change_24h mc on mc.market_id = m.id"
+      ? "left join observed_market_change_24h mc on mc.market_id = m.id"
       : "";
   const tradeJoin =
     inputs.sort === "trending_v2"
@@ -3510,70 +3713,11 @@ export async function fetchFeedMarketsDirect(
   const metricFirstTargetParam =
     !preselectedMarketIdsParam &&
     sortDir === "desc" &&
-    (inputs.sort === "change24h" || inputs.sort === "trending_v2")
+    inputs.sort === "trending_v2"
       ? add(inputs.limit + inputs.offset)
       : null;
   let metricFirstMarketCandidateCtes: string[] | null = null;
-  if (metricFirstTargetParam && inputs.sort === "change24h") {
-    const metricStateCountExpr =
-      "(select candidate_count from metric_market_candidate_state)";
-    metricFirstMarketCandidateCtes = [
-      `
-        metric_market_candidates as materialized (
-          select
-            m.id,
-            m.event_id,
-            mc.change_24h,
-            row_number() over (
-              order by mc.change_24h ${sortDir} nulls last, m.venue_market_id
-            ) as full_ord
-          from unified_market_change_24h mc
-          join ${marketContext.orderableMarketCandidateSource} omc on omc.market_id = mc.market_id
-          join unified_markets m on m.id = omc.market_id
-          join unified_events e on e.id = omc.event_id
-          ${marketContext.searchEventJoin}
-          ${directMarketJoin}
-          where ${where.join(" and ")}
-            ${directMarketFilter}
-            and mc.change_24h is not null
-          order by mc.change_24h ${sortDir} nulls last, m.venue_market_id
-          limit ${metricFirstTargetParam}
-        )
-      `,
-      `
-        metric_market_candidate_state as materialized (
-          select count(*)::int as candidate_count
-          from metric_market_candidates
-        )
-      `,
-      `
-        metric_market_candidate_page as materialized (
-          select
-            page.id,
-            page.event_id,
-            page.change_24h,
-            row_number() over (order by page.full_ord) as ord
-          from metric_market_candidates page
-          where ${metricStateCountExpr} >= ${metricFirstTargetParam}
-            and page.full_ord > ${offsetParam}
-          order by page.full_ord
-          limit ${limitParam}
-        )
-      `,
-      `
-        exact_market_candidate_page as materialized (${buildExactMarketCandidatesSql(
-          [`${metricStateCountExpr} < ${metricFirstTargetParam}`],
-        )})
-      `,
-      `
-        market_candidates as (
-          select * from metric_market_candidate_page
-          union all
-          select * from exact_market_candidate_page
-        )
-      `,
-    ];
-  } else if (metricFirstTargetParam && inputs.sort === "trending_v2") {
+  if (metricFirstTargetParam && inputs.sort === "trending_v2") {
     const metricStateCountExpr =
       "(select candidate_count from metric_market_candidate_state)";
     const limitlessTrendExpr = `(coalesce(${marketLiquidityDisplayExpr}, 0) + 0.5 * coalesce(${marketVolumeDisplayExpr}, 0))`;
@@ -3661,14 +3805,14 @@ export async function fetchFeedMarketsDirect(
       select
         m.id,
         m.event_id
-        ${inputs.sort === "change24h" ? ", metric.change_24h" : ""},
+        ${inputs.sort === "change24h" ? ", observed_change.change_24h" : ""},
         selected.ord::bigint as ord
       from unnest(${preselectedMarketIdsParam}::text[])
         with ordinality selected(id, ord)
       join unified_markets m on m.id = selected.id
       ${
         inputs.sort === "change24h"
-          ? "left join unified_market_change_24h metric on metric.market_id = m.id"
+          ? "left join observed_market_change_24h observed_change on observed_change.market_id = m.id"
           : ""
       }
       where ${limitParam}::integer >= 0
@@ -3689,26 +3833,28 @@ export async function fetchFeedMarketsDirect(
     from unified_markets m
     join market_candidates mc on mc.id = m.id
   `;
-  const currentYesMidExpr = `
-    case
-      when yes_top.best_bid is not null and yes_top.best_ask is not null
-        then (yes_top.best_bid + yes_top.best_ask) / 2
-      else coalesce(yes_top.best_bid, yes_top.best_ask, m.best_bid, m.best_ask)
-    end
-  `;
+  const currentYesMidExpr = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "yes_top",
+    noAlias: "no_top",
+  });
+  const historicalYesMidExpr = buildObservedCanonicalProbabilityFromTopSql({
+    yesAlias: "yes_24h",
+    noAlias: "no_24h",
+  });
   const change24hExpr = `
-    ${
-      inputs.sort === "change24h"
-        ? "m.change_24h"
-        : `case
-      when ${currentYesMidExpr} is null or yes_24h.avg_mid is null or yes_24h.avg_mid = 0 then null
-      else (${currentYesMidExpr} - yes_24h.avg_mid) / yes_24h.avg_mid
-    end`
-    }
+    case
+      when ${currentYesMidExpr} is null
+        or ${historicalYesMidExpr} is null
+        or ${historicalYesMidExpr} = 0
+        then null
+      else
+        (${currentYesMidExpr} - ${historicalYesMidExpr})
+        / ${historicalYesMidExpr}
+    end
   `;
   const bookSnapshot = buildFeedBookSnapshotCtes({
     nowParam,
-    include24h: inputs.sort !== "change24h",
+    include24h: true,
   });
   const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
     nowParam,
@@ -3720,6 +3866,15 @@ export async function fetchFeedMarketsDirect(
   const marketLastPriceExpr = `case when ${limitlessAmmFallbackAllowedExpr} then m.last_price else null end`;
   const withParts: string[] = [];
   if (preselectedMarketCandidatesSql) {
+    if (inputs.sort === "change24h" && preselectedMarketIdsParam) {
+      withParts.push(
+        buildObservedCanonicalMarketChange24hCte({
+          cteName: "observed_market_change_24h",
+          sourceSql: `select id as market_id from unnest(${preselectedMarketIdsParam}::text[]) as selected(id)`,
+          nowParam,
+        }),
+      );
+    }
     withParts.push(
       `market_candidates as materialized (${preselectedMarketCandidatesSql})`,
     );
@@ -3731,6 +3886,15 @@ export async function fetchFeedMarketsDirect(
     }
     if (directMarketSearchCtes.length)
       withParts.push(...directMarketSearchCtes);
+    if (inputs.sort === "change24h") {
+      withParts.push(
+        buildObservedCanonicalMarketChange24hCte({
+          cteName: "observed_market_change_24h",
+          sourceSql: `select market_id from ${marketContext.orderableMarketCandidateSource}`,
+          nowParam,
+        }),
+      );
+    }
     if (metricFirstMarketCandidateCtes) {
       withParts.push(...metricFirstMarketCandidateCtes);
     } else {
@@ -3811,6 +3975,7 @@ export async function fetchFeedMarketsDirect(
     ${bookSnapshot.yesTopJoin}
     ${bookSnapshot.yes24hJoin}
     ${bookSnapshot.noTopJoin}
+    ${bookSnapshot.no24hJoin}
     order by m.ord, m.venue_market_id
   `;
 
@@ -3979,21 +4144,20 @@ export async function fetchFavoriteFeedEventPage(
   const marketLiquidityDisplayExpr = `
     coalesce(nullif(m.liquidity, 0), nullif(m.open_interest, 0))
   `;
-  const yesMidExpr = `
-    case
-      when m.best_bid is not null and m.best_ask is not null
-        then (m.best_bid + m.best_ask) / 2
-      else null
-    end
-  `;
+  const probabilityPredicate = addObservedCanonicalMarketProbabilityPredicate({
+    add,
+    inputs,
+    marketAlias: "m",
+  });
   const change24hCteParts: string[] = [];
   if (inputs.sort === "change24h") {
-    change24hCteParts.push(`
-      market_change as (
-        select market_id, change_24h
-        from unified_market_change_24h
-      )
-    `);
+    change24hCteParts.push(
+      buildObservedCanonicalMarketChange24hCte({
+        cteName: "market_change",
+        sourceSql: `select id as market_id from unnest(${marketIdsParam}::text[]) as selected(id)`,
+        nowParam,
+      }),
+    );
   }
   const where: string[] = [
     buildOrderableMarketSql({
@@ -4049,12 +4213,7 @@ export async function fetchFavoriteFeedEventPage(
   if (inputs.minVol > 1e-9) {
     where.push(`${marketVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
   }
-  if (inputs.minProb != null) {
-    where.push(`${yesMidExpr} >= ${add(inputs.minProb)}`);
-  }
-  if (inputs.maxProb != null) {
-    where.push(`${yesMidExpr} <= ${add(inputs.maxProb)}`);
-  }
+  if (probabilityPredicate) where.push(probabilityPredicate);
   if (inputs.maxSpread != null) {
     where.push(
       `m.best_bid is not null and m.best_ask is not null and (m.best_ask - m.best_bid) <= ${add(inputs.maxSpread)}`,
@@ -4341,7 +4500,6 @@ export async function fetchMarketDetails(
       from unified_token_top_latest
       where token_id = mt.token_yes
         and m.status = 'ACTIVE'
-        and ts >= now() - interval '10 minutes'
       limit 1
     ) yes_top on true
     left join lateral (
@@ -4349,7 +4507,6 @@ export async function fetchMarketDetails(
       from unified_token_top_latest
       where token_id = mt.token_no
         and m.status = 'ACTIVE'
-        and ts >= now() - interval '10 minutes'
       limit 1
     ) no_top on true
     LEFT JOIN polymarket_markets pm
@@ -4753,14 +4910,12 @@ export async function fetchMarketsByTokenIds(
       select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = token_yes.token_id
-        and ts >= now() - interval '10 minutes'
       limit 1
     ) yes_top on true
     left join lateral (
       select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = token_no.token_id
-        and ts >= now() - interval '10 minutes'
       limit 1
     ) no_top on true`
     : "";

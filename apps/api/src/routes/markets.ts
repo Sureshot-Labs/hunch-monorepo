@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { createHash } from "crypto";
 import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
@@ -239,7 +240,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       }
 
       // Create cache key
-      const cacheKey = `market:v5:${marketId}`;
+      const cacheKey = `market:v6:${marketId}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for market data)
@@ -347,6 +348,18 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           market.resolved_outcome_pct != null
             ? Number(market.resolved_outcome_pct)
             : null;
+        const observedTop = buildObservedCanonicalMarketTop({
+          yesTop: {
+            bestBid: market.best_bid_yes,
+            bestAsk: market.best_ask_yes,
+            ts: market.top_ts_yes as Date | string | number | null,
+          },
+          noTop: {
+            bestBid: market.best_bid_no,
+            bestAsk: market.best_ask_no,
+            ts: market.top_ts_no as Date | string | number | null,
+          },
+        });
 
         const response = {
           marketId: market.market_id,
@@ -370,26 +383,13 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
           expirationTime: market.expiration_time,
           volume24h: market.volume_24h != null ? Number(market.volume_24h) : 0,
           liquidity: market.liquidity != null ? Number(market.liquidity) : 0,
-          bestBid:
-            market.best_bid_yes != null
-              ? Number(market.best_bid_yes)
-              : market.best_bid != null
-                ? Number(market.best_bid)
-                : null,
-          bestAsk:
-            market.best_ask_yes != null
-              ? Number(market.best_ask_yes)
-              : market.best_ask != null
-                ? Number(market.best_ask)
-                : null,
-          bestBidYes:
-            market.best_bid_yes != null ? Number(market.best_bid_yes) : null,
-          bestAskYes:
-            market.best_ask_yes != null ? Number(market.best_ask_yes) : null,
-          bestBidNo:
-            market.best_bid_no != null ? Number(market.best_bid_no) : null,
-          bestAskNo:
-            market.best_ask_no != null ? Number(market.best_ask_no) : null,
+          bestBid: observedTop.yesBid,
+          bestAsk: observedTop.yesAsk,
+          bestBidYes: observedTop.yesBid,
+          bestAskYes: observedTop.yesAsk,
+          bestBidNo: observedTop.noBid,
+          bestAskNo: observedTop.noAsk,
+          topAsOf: observedTop.topAsOf,
           lastPrice:
             market.last_price != null ? Number(market.last_price) : null,
           outcomes,

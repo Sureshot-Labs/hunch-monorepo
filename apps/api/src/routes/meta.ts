@@ -10,7 +10,10 @@ import {
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isSearchStatementTimeout } from "../lib/postgres-errors.js";
-import { fetchFeedCategoryFacetRows } from "../repos/unified-read.js";
+import {
+  fetchFeedCategoryFacetRows,
+  fetchObservedCanonicalProbabilityMarketIds,
+} from "../repos/unified-read.js";
 import { getRedis } from "../redis.js";
 import {
   feedFacetQuerySchema,
@@ -157,7 +160,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       const ageWithinHours = q.age_within_hours;
 
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `meta:categories:facets:v5:${lifecycle.revision}:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
+      const cacheKey = `meta:categories:facets:v7:${lifecycle.revision}:${view}:${eventScope ?? ""}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}`;
       const staleCacheKey = `${cacheKey}:stale`;
       const refreshLockKey = `${cacheKey}:refresh`;
       const r = await getRedis();
@@ -188,25 +191,37 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
               ).toISOString()
             : undefined;
 
+        const hasProbabilityFilter = minProb != null || maxProb != null;
+        const observedProbabilityMarketIds = hasProbabilityFilter
+          ? await fetchObservedCanonicalProbabilityMarketIds(pool, {
+              minProb,
+              maxProb,
+            })
+          : null;
+        const facetInputs = {
+          minVol,
+          minLiquidity,
+          q: search,
+          view,
+          eventScope,
+          venues,
+          filter,
+          marketIds: observedProbabilityMarketIds ?? undefined,
+          minProb: hasProbabilityFilter ? undefined : minProb,
+          maxProb: hasProbabilityFilter ? undefined : maxProb,
+          maxSpread,
+          durationMinutes,
+          endWithin,
+          ageSince,
+          nowParam,
+          sevenDaysAgo,
+          sevenDaysFromNow,
+        };
+
         const [facetRowsResult, universeRowsResult] = await Promise.all([
-          fetchFeedCategoryFacetRows(pool, {
-            minVol,
-            minLiquidity,
-            q: search,
-            view,
-            eventScope,
-            venues,
-            filter,
-            minProb,
-            maxProb,
-            maxSpread,
-            durationMinutes,
-            endWithin,
-            ageSince,
-            nowParam,
-            sevenDaysAgo,
-            sevenDaysFromNow,
-          }),
+          observedProbabilityMarketIds?.length === 0
+            ? Promise.resolve([])
+            : fetchFeedCategoryFacetRows(pool, facetInputs),
           pool.query<{ category: string }>(
             `
               select distinct lower(category) as category

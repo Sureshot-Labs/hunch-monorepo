@@ -1,9 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import {
-  buildCanonicalMarketTop,
-  buildObservedCanonicalMarketTop,
-} from "@hunch/shared";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { createHash } from "crypto";
 import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
@@ -345,7 +342,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       // Create cache key
-      const cacheKey = `event:v7:${eventId}:${selectedMarketId ?? "default"}`;
+      const cacheKey = `event:v9:${eventId}:${selectedMarketId ?? "default"}`;
       const r = await getRedis();
 
       // Check cache first (30-second cache for event data)
@@ -526,34 +523,18 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
               row.market_metadata,
             ),
           });
-          const strictTop = acceptingOrders
-            ? buildCanonicalMarketTop({
-                yesTop: {
-                  bestBid: row.best_bid_yes,
-                  bestAsk: row.best_ask_yes,
-                  ts: row.top_ts_yes as Date | string | number | null,
-                },
-                noTop: {
-                  bestBid: row.best_bid_no,
-                  bestAsk: row.best_ask_no,
-                  ts: row.top_ts_no as Date | string | number | null,
-                },
-              })
-            : buildCanonicalMarketTop({ yesTop: null, noTop: null });
-          const observedTop = acceptingOrders
-            ? buildObservedCanonicalMarketTop({
-                yesTop: {
-                  bestBid: row.best_bid_yes,
-                  bestAsk: row.best_ask_yes,
-                  ts: row.top_ts_yes as Date | string | number | null,
-                },
-                noTop: {
-                  bestBid: row.best_bid_no,
-                  bestAsk: row.best_ask_no,
-                  ts: row.top_ts_no as Date | string | number | null,
-                },
-              })
-            : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
+          const observedTop = buildObservedCanonicalMarketTop({
+            yesTop: {
+              bestBid: row.best_bid_yes,
+              bestAsk: row.best_ask_yes,
+              ts: row.top_ts_yes as Date | string | number | null,
+            },
+            noTop: {
+              bestBid: row.best_bid_no,
+              bestAsk: row.best_ask_no,
+              ts: row.top_ts_no as Date | string | number | null,
+            },
+          });
 
           event.markets.push({
             marketId: row.market_id,
@@ -575,12 +556,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             openInterest:
               row.open_interest != null ? Number(row.open_interest) : 0,
             liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
-            bestBid: strictTop.yesBid,
-            bestAsk: strictTop.yesAsk,
+            bestBid: observedTop.yesBid,
+            bestAsk: observedTop.yesAsk,
             lastPrice:
-              acceptingOrders && row.last_price != null
-                ? Number(row.last_price)
-                : null,
+              row.last_price != null ? Number(row.last_price) : null,
             outcomes,
             tokens,
             conditionId: row.condition_id || null,

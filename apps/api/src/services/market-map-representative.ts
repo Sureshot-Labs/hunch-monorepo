@@ -1,8 +1,5 @@
 import type { Pool } from "pg";
-import {
-  buildCanonicalMarketTop,
-  buildObservedCanonicalMarketTop,
-} from "@hunch/shared";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { buildOrderableMarketSql } from "../lib/market-availability.js";
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
@@ -191,18 +188,6 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
       ts: row.no_top_ts,
     },
   });
-  const strictTop = buildCanonicalMarketTop({
-    yesTop: {
-      bestBid: row.yes_top_bid,
-      bestAsk: row.yes_top_ask,
-      ts: row.yes_top_ts,
-    },
-    noTop: {
-      bestBid: row.no_top_bid,
-      bestAsk: row.no_top_ask,
-      ts: row.no_top_ts,
-    },
-  });
   return {
     eventId: row.event_id,
     venue: row.event_venue,
@@ -217,8 +202,8 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
         ? null
         : new Date(row.market_close_time).toISOString(),
     marketStatus: row.market_status ?? null,
-    marketBestBid: strictTop.yesBid,
-    marketBestAsk: strictTop.yesAsk,
+    marketBestBid: observedTop.yesBid,
+    marketBestAsk: observedTop.yesAsk,
     lastPrice: toNumber(row.last_price),
     change24h: toNumber(row.market_change_24h),
     tokenYes: row.token_yes ?? null,

@@ -8,8 +8,6 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3001/feed}"
 LIMIT="${LIMIT:-25}"
-OFFSETS="${OFFSETS:-0}"
-SORTS="${SORTS:-trending trending_v2 change24h}"
 VIEWS="${VIEWS:-events markets}"
 SORT_DIR="${SORT_DIR:-desc}"
 
@@ -21,6 +19,9 @@ fi
 if [[ "$FULL" == "1" ]]; then
   OFFSETS="${OFFSETS:-0 25 50}"
   SORTS="${SORTS:-trending trending_v2 totalvol liquidity openinterest time change24h}"
+else
+  OFFSETS="${OFFSETS:-0}"
+  SORTS="${SORTS:-trending trending_v2 change24h}"
 fi
 
 case_labels=()
@@ -43,6 +44,10 @@ if [[ "$FULL" == "1" ]]; then
   add_case "cat:crypto" "categories=crypto"
   add_case "cat:politics" "categories=politics"
   add_case "prob:0.1-0.9" "min_prob=0.1&max_prob=0.9"
+  add_case "prob:70+" "min_prob=0.7"
+  add_case "prob:80+" "min_prob=0.8"
+  add_case "prob:95+" "min_prob=0.95"
+  add_case "prob:30-" "max_prob=0.3"
   add_case "spread:0.1" "max_spread=0.1"
   add_case "minliq:1000" "min_liquidity=1000"
   add_case "minvol:1000" "min_volume24hr=1000"

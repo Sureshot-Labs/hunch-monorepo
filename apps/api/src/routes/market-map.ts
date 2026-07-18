@@ -1,9 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import {
-  buildCanonicalMarketTop,
-  buildObservedCanonicalMarketTop,
-} from "@hunch/shared";
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
 import { env } from "../env.js";
@@ -1132,40 +1129,24 @@ function normalizeSignalTargetMarket(params: {
       params.marketMetadata,
     ),
   });
-  const strictTop = acceptingOrders
-    ? buildCanonicalMarketTop({
-        yesTop: {
-          bestBid: params.bestBidYes,
-          bestAsk: params.bestAskYes,
-          ts: params.topTsYes as Date | string | number | null,
-        },
-        noTop: {
-          bestBid: params.bestBidNo,
-          bestAsk: params.bestAskNo,
-          ts: params.topTsNo as Date | string | number | null,
-        },
-      })
-    : buildCanonicalMarketTop({ yesTop: null, noTop: null });
-  const observedTop = acceptingOrders
-    ? buildObservedCanonicalMarketTop({
-        yesTop: {
-          bestBid: params.bestBidYes,
-          bestAsk: params.bestAskYes,
-          ts: params.topTsYes as Date | string | number | null,
-        },
-        noTop: {
-          bestBid: params.bestBidNo,
-          bestAsk: params.bestAskNo,
-          ts: params.topTsNo as Date | string | number | null,
-        },
-      })
-    : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
+  const observedTop = buildObservedCanonicalMarketTop({
+    yesTop: {
+      bestBid: params.bestBidYes,
+      bestAsk: params.bestAskYes,
+      ts: params.topTsYes as Date | string | number | null,
+    },
+    noTop: {
+      bestBid: params.bestBidNo,
+      bestAsk: params.bestAskNo,
+      ts: params.topTsNo as Date | string | number | null,
+    },
+  });
 
   return {
     marketId: params.marketId,
     marketStatus: params.marketStatus,
-    marketBestBid: strictTop.yesBid,
-    marketBestAsk: strictTop.yesAsk,
+    marketBestBid: observedTop.yesBid,
+    marketBestAsk: observedTop.yesAsk,
     lastPrice: toNumber(params.lastPrice),
     tokenYes: params.tokenYes,
     tokenNo: params.tokenNo,
@@ -2173,7 +2154,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         };
       }
       const cacheKey = [
-        "market-map:v6-observed-top",
+        "market-map:v7-observed-top",
         runId,
         lifecycle.revision,
         policyCacheVersion,
@@ -2896,7 +2877,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         String(sparklineOptions.bucketHours ?? "auto"),
       ].join(":");
       const cacheKey = [
-        "market-map:sidebars:v6-observed-top",
+        "market-map:sidebars:v7-observed-top",
         lifecycle.revision,
         policyCacheVersion,
         venues.slice().sort().join(","),
@@ -3157,7 +3138,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         policy.effective.venuesEnabled.join(","),
       ].join(":");
       const cacheKey = [
-        "market-map:node-events:v6-observed-top",
+        "market-map:node-events:v7-observed-top",
         runId,
         lifecycle.revision,
         policyCacheVersion,

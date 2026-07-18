@@ -22,6 +22,42 @@ const LIMITLESS_HISTORY_FALLBACK_STATUSES = [
   "partially_filled",
 ];
 
+function limitlessStoredUpstreamPayloadSqlExpression(
+  payloadExpression = "order_payload",
+): string {
+  return `coalesce(
+    ${payloadExpression}->'_hunchUpstream',
+    ${payloadExpression}->'submitted'->'_hunchUpstream',
+    ${payloadExpression}->'payload'->'_hunchUpstream',
+    ${payloadExpression}->'submitted'->'payload'->'_hunchUpstream'
+  )`;
+}
+
+function limitlessStoredExecutionSqlExpression(
+  payloadExpression = "order_payload",
+): string {
+  const upstream =
+    limitlessStoredUpstreamPayloadSqlExpression(payloadExpression);
+  return `coalesce(
+    (${upstream})->'execution',
+    (${upstream})->'order'->'execution',
+    (${upstream})->'data'->'execution',
+    (${upstream})->'data'->'order'->'execution'
+  )`;
+}
+
+function limitlessStoredMarketSlugSqlExpression(
+  payloadExpression = "order_payload",
+): string {
+  return `coalesce(
+    nullif(${payloadExpression}->>'marketSlug', ''),
+    nullif(${payloadExpression}->'submitted'->>'marketSlug', ''),
+    nullif(${payloadExpression}->'payload'->>'marketSlug', ''),
+    nullif(${payloadExpression}->'submitted'->'payload'->>'marketSlug', ''),
+    ''
+  )`;
+}
+
 export function positionDeltaAppliedSqlExpression(
   payloadExpression = "order_payload",
 ): string {
@@ -797,6 +833,8 @@ export async function expireStaleLimitlessFokOrders(
   const olderThanMs = inputs.olderThanMs ?? 2 * 60 * 1000;
   const cutoff = new Date(Date.now() - olderThanMs);
   const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
+  const storedExecution = limitlessStoredExecutionSqlExpression();
+  const storedMarketSlug = limitlessStoredMarketSlugSqlExpression();
   const { rowCount } = await pool.query(
     `
       update orders
@@ -807,14 +845,14 @@ export async function expireStaleLimitlessFokOrders(
         and order_type = 'FOK'
         and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
         and not (
-          coalesce(order_payload->'_hunchUpstream'->'execution'->>'matched', 'false') = 'true'
+          coalesce(${storedExecution}->>'matched', 'false') = 'true'
           and upper(coalesce(
-            order_payload->'_hunchUpstream'->'execution'->>'settlementStatus',
+            ${storedExecution}->>'settlementStatus',
             ''
           )) in ('MINED', 'CONFIRMED')
         )
         and (wallet_address is null or wallet_address = $2 or signer_address = $2)
-        and coalesce(order_payload->>'marketSlug', '') = $3
+        and ${storedMarketSlug} = $3
         and (venue_order_id is null or venue_order_id <> all($4::text[]))
         and (venue_order_id is null or (
           venue_order_id not like 'amm:%'
@@ -832,6 +870,95 @@ export async function expireStaleLimitlessFokOrders(
   );
 
   return rowCount ?? 0;
+}
+
+export type LimitlessFokExecutionRepairCandidate = {
+  id: string;
+  orderHash: string | null;
+  upstreamPayload: unknown;
+};
+
+export async function fetchLimitlessFokExecutionRepairCandidates(
+  pool: Pool,
+  inputs: {
+    userId: string;
+    walletAddress: string;
+    marketSlug: string;
+    limit?: number;
+  },
+): Promise<LimitlessFokExecutionRepairCandidate[]> {
+  const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
+  const limit = Math.max(1, Math.min(inputs.limit ?? 100, 100));
+  const storedUpstream = limitlessStoredUpstreamPayloadSqlExpression();
+  const storedExecution = limitlessStoredExecutionSqlExpression();
+  const storedMarketSlug = limitlessStoredMarketSlugSqlExpression();
+  const { rows } = await pool.query<{
+    id: string;
+    order_hash: string | null;
+    upstream_payload: unknown;
+  }>(
+    `
+      select
+        id,
+        order_hash,
+        ${storedUpstream} as upstream_payload
+      from orders
+      where user_id = $1
+        and venue = 'limitless'
+        and order_type = 'FOK'
+        and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
+        and (wallet_address is null or wallet_address = $2 or signer_address = $2)
+        and ${storedMarketSlug} = $3
+        and coalesce(${storedExecution}->>'matched', 'false') = 'true'
+        and upper(coalesce(${storedExecution}->>'settlementStatus', ''))
+          in ('MINED', 'CONFIRMED')
+      order by posted_at asc nulls first, id
+      limit $4
+    `,
+    [inputs.userId, walletAddress, inputs.marketSlug, limit],
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    orderHash: row.order_hash,
+    upstreamPayload: row.upstream_payload,
+  }));
+}
+
+export async function markLimitlessFokFilledFromStoredExecution(
+  pool: Pool,
+  inputs: {
+    id: string;
+    price: number | null;
+    size: number | null;
+    filledAt: Date;
+    orderHash: string | null;
+  },
+): Promise<boolean> {
+  const storedExecution = limitlessStoredExecutionSqlExpression();
+  const result = await pool.query(
+    `
+      update orders
+      set status = 'filled',
+          price = coalesce($2, price),
+          size = coalesce($3, size),
+          filled_size = coalesce($3, filled_size, size),
+          average_fill_price = coalesce($2, average_fill_price, price),
+          filled_at = coalesce(filled_at, $4),
+          last_update = $4,
+          order_hash = coalesce($5, order_hash)
+      where id = $1
+        and venue = 'limitless'
+        and order_type = 'FOK'
+        and lower(coalesce(status, '')) in ('submitted', 'pending', 'open', 'live')
+        and coalesce(${storedExecution}->>'matched', 'false') = 'true'
+        and upper(coalesce(${storedExecution}->>'settlementStatus', ''))
+          in ('MINED', 'CONFIRMED')
+      returning id
+    `,
+    [inputs.id, inputs.price, inputs.size, inputs.filledAt, inputs.orderHash],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function normalizeLimitlessFokOrderSizesForMarket(

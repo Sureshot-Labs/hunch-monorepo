@@ -168,20 +168,18 @@ export const watchlistRoutes: FastifyPluginAsync = async (app) => {
               r.market_metadata,
             ),
           });
-          const observedTop = acceptingOrders
-            ? buildObservedCanonicalMarketTop({
-                yesTop: {
-                  bestBid: r.best_bid_yes,
-                  bestAsk: r.best_ask_yes,
-                  ts: r.top_ts_yes as Date | string | number | null,
-                },
-                noTop: {
-                  bestBid: r.best_bid_no,
-                  bestAsk: r.best_ask_no,
-                  ts: r.top_ts_no as Date | string | number | null,
-                },
-              })
-            : buildObservedCanonicalMarketTop({ yesTop: null, noTop: null });
+          const observedTop = buildObservedCanonicalMarketTop({
+            yesTop: {
+              bestBid: r.best_bid_yes,
+              bestAsk: r.best_ask_yes,
+              ts: r.top_ts_yes as Date | string | number | null,
+            },
+            noTop: {
+              bestBid: r.best_bid_no,
+              bestAsk: r.best_ask_no,
+              ts: r.top_ts_no as Date | string | number | null,
+            },
+          });
 
           eventMap[eid].markets.push({
             marketId: String(r.market_uuid),

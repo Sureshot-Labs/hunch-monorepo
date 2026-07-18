@@ -1,3 +1,4 @@
+import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import {
   type PolymarketOrderabilityMode,
   computeAcceptingOrders,
@@ -95,6 +96,18 @@ export function mapMarketsByTokenRows(
       row.resolved_outcome_pct != null
         ? Number(row.resolved_outcome_pct)
         : null;
+    const observedTop = buildObservedCanonicalMarketTop({
+      yesTop: {
+        bestBid: row.best_bid_yes,
+        bestAsk: row.best_ask_yes,
+        ts: row.top_ts_yes as Date | string | number | null,
+      },
+      noTop: {
+        bestBid: row.best_bid_no,
+        bestAsk: row.best_ask_no,
+        ts: row.top_ts_no as Date | string | number | null,
+      },
+    });
 
     return {
       tokenId: row.token_id,
@@ -120,22 +133,13 @@ export function mapMarketsByTokenRows(
         volumeTotal: row.volume_total != null ? Number(row.volume_total) : 0,
         openInterest: row.open_interest != null ? Number(row.open_interest) : 0,
         liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
-        bestBid:
-          row.best_bid_yes != null
-            ? Number(row.best_bid_yes)
-            : row.best_bid != null
-              ? Number(row.best_bid)
-              : null,
-        bestAsk:
-          row.best_ask_yes != null
-            ? Number(row.best_ask_yes)
-            : row.best_ask != null
-              ? Number(row.best_ask)
-              : null,
-        bestBidYes: row.best_bid_yes != null ? Number(row.best_bid_yes) : null,
-        bestAskYes: row.best_ask_yes != null ? Number(row.best_ask_yes) : null,
-        bestBidNo: row.best_bid_no != null ? Number(row.best_bid_no) : null,
-        bestAskNo: row.best_ask_no != null ? Number(row.best_ask_no) : null,
+        bestBid: observedTop.yesBid,
+        bestAsk: observedTop.yesAsk,
+        bestBidYes: observedTop.yesBid,
+        bestAskYes: observedTop.yesAsk,
+        bestBidNo: observedTop.noBid,
+        bestAskNo: observedTop.noAsk,
+        topAsOf: observedTop.topAsOf,
         lastPrice: row.last_price != null ? Number(row.last_price) : null,
         outcomes,
         tokens,

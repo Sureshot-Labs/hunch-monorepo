@@ -17,6 +17,7 @@ import { TELEGRAM_MESSAGE_PAYLOAD_BUDGET } from "./services/telegram-bot-text-bu
 import {
   diversifyTelegramMarketSearchResults,
   groupTelegramMarketSearchResults,
+  mapClusterMarketToTelegramSearchResult,
   resolveTelegramSearchSecondaryVenues,
 } from "./services/telegram-market-search.js";
 
@@ -45,6 +46,32 @@ const sampleResult = {
 };
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "AGG midpoint never becomes an executable ask",
+    run: () => {
+      assert.deepEqual(
+        mapClusterMarketToTelegramSearchResult({
+          eventId: "event-agg",
+          eventTitle: "World Cup Winner",
+          marketId: "market-agg",
+          marketTitle: "Spain",
+          venue: "limitless",
+          yesAsk: null,
+          yesMid: 0.42,
+        }),
+        {
+          eventId: "event-agg",
+          eventTitle: "World Cup Winner",
+          lastPrice: 0.42,
+          marketId: "market-agg",
+          marketTitle: "Spain",
+          noAsk: null,
+          venue: "limitless",
+          yesAsk: null,
+        },
+      );
+    },
+  },
   {
     name: "search results preserve event question, outcome and venue presentation",
     run: () => {
@@ -100,6 +127,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         marketId: `polymarket-${index}`,
         venue: "polymarket",
       }));
+      const firstPrimary = primary[0];
+      const firstSecondary = secondary[0];
+      assert.ok(firstPrimary);
+      assert.ok(firstSecondary);
       const results = diversifyTelegramMarketSearchResults({
         limit: 5,
         primary,
@@ -118,7 +149,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         resolveTelegramSearchSecondaryVenues({
-          results: [primary[0]!, secondary[0]!],
+          results: [firstPrimary, firstSecondary],
           venues: ["polymarket", "limitless", "kalshi"],
         }),
         [],
@@ -211,6 +242,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const route = parseSignalBotInteractiveMenuRoute(
         `search_venue:${sessionId}:0:1`,
       );
+      assert.ok(route);
       assert.deepEqual(route, {
         index: 1,
         kind: "market_search_venue",
@@ -231,7 +263,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         redis,
         render: async () => undefined,
         renderExpiredSearch: async () => undefined,
-        route: route!,
+        route,
         telegramUserId: 20,
       });
       assert.equal(loadedMarketId, polymarket.marketId);

@@ -164,6 +164,54 @@ async function insertMarket(market: SeededMarket): Promise<void> {
   );
 }
 
+async function insertCanonicalMarketTop(
+  market: SeededMarket,
+): Promise<string[]> {
+  const yesTokenId = `${market.id}:YES`;
+  const noTokenId = `${market.id}:NO`;
+  const yesBid = market.bestBid ?? 0.45;
+  const yesAsk = market.bestAsk ?? 0.55;
+  const noBid = 1 - yesAsk;
+  const noAsk = 1 - yesBid;
+
+  await pool.query(
+    `
+      insert into unified_market_tokens (
+        market_id,
+        token_id,
+        venue,
+        outcome_side
+      )
+      values
+        ($1, $2, $4, 'YES'),
+        ($1, $3, $4, 'NO')
+    `,
+    [market.id, yesTokenId, noTokenId, market.venue],
+  );
+  await pool.query(
+    `
+      insert into unified_token_top_latest (
+        token_id,
+        venue,
+        ts,
+        best_bid,
+        best_ask,
+        mid,
+        spread,
+        updated_at
+      )
+      values
+        ($1, $3, now(), $4::numeric, $5::numeric,
+          ($4::numeric + $5::numeric) / 2, $5::numeric - $4::numeric, now()),
+        ($2, $3, now(), $6::numeric, $7::numeric,
+          ($6::numeric + $7::numeric) / 2, $7::numeric - $6::numeric, now())
+    `,
+    [yesTokenId, noTokenId, market.venue, yesBid, yesAsk, noBid, noAsk],
+  );
+
+  return [yesTokenId, noTokenId];
+}
+
 async function insertMarketMetricRows(markets: SeededMarket[]): Promise<void> {
   for (const [index, market] of markets.entries()) {
     await pool.query(
@@ -486,17 +534,18 @@ async function assertDirectMarketSqlShape(): Promise<void> {
   };
 
   const change24hSql = await captureFastMarketSql("change24h");
-  assert.match(change24hSql[0], /from unified_market_change_24h metric/);
-  assert.match(change24hSql[0], /cross join lateral/);
-  assert.doesNotMatch(
+  assert.match(change24hSql[0], /orderable_market_candidates as materialized/);
+  assert.match(
     change24hSql[0],
-    /orderable_market_candidates as materialized/,
+    /observed_market_change_24h as materialized/,
   );
-  assert.match(change24hSql[1], /from unnest\(\$\d+::text\[\]\)/);
-  assert.doesNotMatch(
-    change24hSql[1],
-    /orderable_market_candidates as materialized/,
-  );
+  assert.match(change24hSql[0], /from unified_book_top_1h book/);
+  assert.match(change24hSql[0], /current_yes_top/);
+  assert.match(change24hSql[0], /current_no_top/);
+  assert.match(change24hSql[0], /historical_yes_top/);
+  assert.match(change24hSql[0], /historical_no_top/);
+  assert.match(change24hSql[0], /order by change_24h desc nulls last/);
+  assert.doesNotMatch(change24hSql[0], /unified_market_change_24h/);
 
   const trendingV2Sql = await captureFastMarketSql("trending_v2");
   assert.match(trendingV2Sql[0], /from unified_market_trade_24h metric/);
@@ -513,6 +562,37 @@ async function assertDirectMarketSqlShape(): Promise<void> {
     legacyTrendingSql[0],
     /orderable_market_candidates as materialized/,
   );
+
+  {
+    const capturedSql: string[] = [];
+    const fakePool = createSqlCapturePool(
+      capturedSql,
+      [{ ids: [], candidate_count: 0 }],
+    ) as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
+    await fetchFeedMarketsDirect(fakePool, {
+      limit: 1,
+      offset: 0,
+      minVol: 0,
+      minLiquidity: 0,
+      minProb: 0.8,
+      view: "markets",
+      sort: "trending",
+      sortDir: "desc",
+      nowParam: now.toISOString(),
+      sevenDaysAgo: new Date(
+        now.getTime() - 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      sevenDaysFromNow: new Date(
+        now.getTime() + 7 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+    });
+    assert.match(capturedSql[0], /unified_token_top_latest canonical_yes_top/);
+    assert.match(capturedSql[0], /unified_token_top_latest canonical_no_top/);
+    assert.doesNotMatch(
+      capturedSql[0],
+      /when m\.best_bid is not null and m\.best_ask is not null/,
+    );
+  }
 }
 
 async function assertEventFeedSqlShape(): Promise<void> {
@@ -582,13 +662,12 @@ async function assertEventFeedSqlShape(): Promise<void> {
       baseInputs.limit,
     );
     const [sql] = capturedSql;
-    assert.match(sql, /from unified_event_change_24h ec/s);
-    assert.match(sql, /join unified_events e on e\.id = ec\.event_id/s);
-    assert.match(sql, /valid_ranked_events as materialized/);
-    assert.match(
-      sql,
-      /e\.end_date is null or e\.end_date > \(\$\d+::timestamptz - interval '6 hours'\)/,
-    );
+    assert.match(sql, /orderable_market_candidates as materialized/);
+    assert.match(sql, /observed_market_change_24h as materialized/);
+    assert.match(sql, /from unified_book_top_1h book/);
+    assert.match(sql, /avg\(market_change\.change_24h\) desc nulls last/);
+    assert.doesNotMatch(sql, /unified_event_change_24h/);
+    assert.doesNotMatch(sql, /unified_market_change_24h/);
   }
 
   {
@@ -713,6 +792,7 @@ async function main() {
   const now = Date.now();
   const seededEventIds: string[] = [];
   const seededMarketIds: string[] = [];
+  const seededTokenIds: string[] = [];
 
   const events: SeededEvent[] = [
     {
@@ -992,6 +1072,17 @@ async function main() {
       await insertMarket(market);
       seededMarketIds.push(market.id);
     }
+    for (const market of markets.slice(8, 10)) {
+      seededTokenIds.push(...(await insertCanonicalMarketTop(market)));
+    }
+    await pool.query(
+      `
+        update unified_token_top_latest
+        set ts = now() - interval '22 hours'
+        where token_id = any($1::text[])
+      `,
+      [seededTokenIds.slice(-2)],
+    );
     await insertMarketMetricRows(markets);
     await insertEventTradeRows(events);
     await insertEventChangeRows(events);
@@ -1281,6 +1372,12 @@ async function main() {
     });
   } finally {
     env.feedTtlSec = previousFeedTtl;
+    if (seededTokenIds.length > 0) {
+      await pool.query(
+        "delete from unified_token_top_latest where token_id = any($1::text[])",
+        [seededTokenIds],
+      );
+    }
     if (seededMarketIds.length > 0) {
       await pool.query(
         "delete from unified_market_change_24h where market_id = any($1::text[])",

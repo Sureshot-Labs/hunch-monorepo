@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { buildCanonicalMarketTop } from "@hunch/shared";
 
 import type { User } from "../auth.js";
 import type { DbQuery } from "../db.js";
@@ -11,7 +12,7 @@ import type {
   TradingReadiness,
   VenueTradingCapabilities,
 } from "./trading-types.js";
-import { readNumber, tradingError } from "./api-trading-utils.js";
+import { tradingError } from "./api-trading-utils.js";
 import { canonicalMarketTokenIdSql } from "../repos/canonical-market-token-sql.js";
 
 export type ApiTradeMarket = {
@@ -331,19 +332,25 @@ export async function bestAskForToken(
   const { rows } = await pool.query<{
     best_ask: string | null;
     best_bid: string | null;
+    ts: Date | string | null;
   }>(
     `
-      select best_bid, best_ask
+      select ts, best_bid, best_ask
       from unified_token_top_latest
       where token_id = $1
-        and ts >= now() - interval '10 minutes'
-        and best_ask > 0
-        and best_ask < 1
       limit 1
     `,
     [tokenId],
   );
-  const ask = readNumber(rows[0]?.best_ask ?? null);
-  const bid = readNumber(rows[0]?.best_bid ?? null);
-  return ask != null && (bid == null || bid <= ask) ? ask : null;
+  const row = rows[0];
+  const ask = buildCanonicalMarketTop({
+    yesTop: row
+      ? {
+          bestAsk: row.best_ask,
+          bestBid: row.best_bid,
+          ts: row.ts,
+        }
+      : null,
+  }).yesAsk;
+  return ask != null && ask > 0 && ask < 1 ? ask : null;
 }

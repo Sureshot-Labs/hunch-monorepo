@@ -225,7 +225,8 @@ await test("stale FOK expiry excludes stored matched terminal executions", async
     activeVenueOrderIds: [],
   });
 
-  assert.match(capturedSql, /'_hunchUpstream'->'execution'->>'matched'/);
+  assert.match(capturedSql, /'submitted'->'_hunchUpstream'/);
+  assert.match(capturedSql, /->>'matched'/);
   assert.match(capturedSql, /'settlementStatus'/);
   assert.match(capturedSql, /'MINED', 'CONFIRMED'/);
 });
