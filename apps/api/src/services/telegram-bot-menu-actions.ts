@@ -94,7 +94,12 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
   }) => Promise<MenuMessage & { qrText?: string }>;
   loadMarketCard?: (input: {
     chatId: string;
-    context: { origin: "search"; returnCallbackData: string };
+    context: {
+      observedNoAsk?: number | null;
+      observedYesAsk?: number | null;
+      origin: "search";
+      returnCallbackData: string;
+    };
     marketRef: string;
     publicBrowseOnly?: boolean;
     telegramMessageId: number | null;
@@ -178,6 +183,8 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
       const marketMessage = await input.loadMarketCard({
         chatId: input.chatId,
         context: {
+          observedNoAsk: selectedVenue.noAsk,
+          observedYesAsk: selectedVenue.yesAsk,
           origin: "search",
           returnCallbackData:
             options.length > 1

@@ -193,6 +193,7 @@ export function buildEventDurationExistsSql(args: {
 }
 
 function buildBroadOrderableMarketCandidatesCte(args: {
+  candidateMarketIdsParam?: string | null;
   cteName?: string;
   materialized?: boolean;
   nowParam: string;
@@ -206,6 +207,9 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   const strictCandidatesCte = `${safeCtePrefix}_strict_candidates`;
   const pmRecentCandidatesCte = `${safeCtePrefix}_pm_recent_candidates`;
   const pmGraceCandidatesCte = `${safeCtePrefix}_pm_grace_candidates`;
+  const candidateMarketSql = args.candidateMarketIdsParam
+    ? `and m.id = ANY(${args.candidateMarketIdsParam}::text[])`
+    : "";
   const extraSql = (args.extraMarketSql ?? [])
     .filter(Boolean)
     .map((clause) => `and ${clause}`)
@@ -221,6 +225,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         nowParam: args.nowParam,
         nowCloseParam: args.nowCloseParam,
       })}
+        ${candidateMarketSql}
     ),
     ${strictCandidatesCte} as materialized (
       select
@@ -244,6 +249,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.close_time is not null
         and m.close_time <= ${args.nowParam}::timestamptz
         and m.close_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
+        ${candidateMarketSql}
       union all
       select
         m.id as market_id,
@@ -255,6 +261,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and m.expiration_time is not null
         and m.expiration_time <= ${args.nowParam}::timestamptz
         and m.expiration_time > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
+        ${candidateMarketSql}
       union all
       select
         m.id as market_id,
@@ -268,6 +275,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         and e.end_date > (${args.nowParam}::timestamptz - ${POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL})
         and m.status = 'ACTIVE'
         and m.venue = 'polymarket'
+        ${candidateMarketSql}
     ),
     ${pmGraceCandidatesCte} as materialized (
       select distinct
@@ -470,7 +478,6 @@ export function buildObservedCanonicalProbabilityFromTopSql(args: {
 
 function buildHistoricalCanonicalBookSql(args: {
   tokenSetName: string;
-  nowParam: string;
 }): string {
   return `
     select
@@ -480,28 +487,6 @@ function buildHistoricalCanonicalBookSql(args: {
     from ${args.tokenSetName} token
     join unified_token_change_24h cached on cached.token_id = token.token_id
     where cached.avg_mid_24h is not null
-
-    union all
-
-    select
-      token.token_id,
-      history.avg_mid as best_bid,
-      history.avg_mid as best_ask
-    from ${args.tokenSetName} token
-    join lateral (
-      select book.avg_mid
-      from unified_book_top_1h book
-      where book.token_id = token.token_id
-        and book.bucket <= (${args.nowParam}::timestamptz - interval '24 hours')
-      order by book.bucket desc
-      limit 1
-    ) history on true
-    where not exists (
-      select 1
-      from unified_token_change_24h cached
-      where cached.token_id = token.token_id
-        and cached.avg_mid_24h is not null
-    )
   `;
 }
 
@@ -534,35 +519,45 @@ function buildObservedCanonicalMarketChange24hCte(args: {
         from source_markets source
         join unified_markets market on market.id = source.market_id
       ),
-      history_token_set as materialized (
-        select token_yes as token_id
-        from mapped_markets
-        where token_yes is not null
-        union
-        select token_no as token_id
-        from mapped_markets
-        where token_no is not null
-      ),
-      historical_book as materialized (
-        ${buildHistoricalCanonicalBookSql({
-          tokenSetName: "history_token_set",
-          nowParam: args.nowParam,
-        })}
-      ),
-      probabilities as materialized (
+      current_probabilities as materialized (
         select
           mapped.market_id,
-          ${currentProbability} as current_probability,
-          ${historicalProbability} as historical_probability
+          mapped.token_yes,
+          mapped.token_no,
+          ${currentProbability} as current_probability
         from mapped_markets mapped
         left join unified_token_top_latest current_yes_top
           on current_yes_top.token_id = mapped.token_yes
         left join unified_token_top_latest current_no_top
           on current_no_top.token_id = mapped.token_no
+      ),
+      history_token_set as materialized (
+        select token_yes as token_id
+        from current_probabilities
+        where current_probability is not null
+          and token_yes is not null
+        union
+        select token_no as token_id
+        from current_probabilities
+        where current_probability is not null
+          and token_no is not null
+      ),
+      historical_book as materialized (
+        ${buildHistoricalCanonicalBookSql({
+          tokenSetName: "history_token_set",
+        })}
+      ),
+      probabilities as materialized (
+        select
+          current.market_id,
+          current.current_probability,
+          ${historicalProbability} as historical_probability
+        from current_probabilities current
         left join historical_book historical_yes_top
-          on historical_yes_top.token_id = mapped.token_yes
+          on historical_yes_top.token_id = current.token_yes
         left join historical_book historical_no_top
-          on historical_no_top.token_id = mapped.token_no
+          on historical_no_top.token_id = current.token_no
+        where current.current_probability is not null
       )
       select
         market_id,
@@ -1733,6 +1728,7 @@ function buildFeedMarketViewContext(args: {
   const needsMarketCount =
     inputs.eventScope === "grouped" || inputs.eventScope === "single";
   const orderableMarketCandidatesCte = buildBroadOrderableMarketCandidatesCte({
+    candidateMarketIdsParam: marketIdsParam,
     materialized: true,
     nowParam,
     nowCloseParam,
@@ -1972,7 +1968,6 @@ function buildFeedBookSnapshotCtes(args: {
       book_24h as materialized (
         ${buildHistoricalCanonicalBookSql({
           tokenSetName: "token_set",
-          nowParam: args.nowParam,
         })}
       )
     `);
@@ -2100,6 +2095,7 @@ export async function fetchFeedCategoryFacetRows(
     if (search.searchCte) withParts.push(search.searchCte);
     withParts.push(
       buildBroadOrderableMarketCandidatesCte({
+        candidateMarketIdsParam: marketIdsParam,
         materialized: true,
         nowParam,
         extraMarketSql: [
@@ -2160,6 +2156,7 @@ export async function fetchFeedCategoryFacetRows(
   if (search.searchCte) withParts.push(search.searchCte);
   withParts.push(
     buildBroadOrderableMarketCandidatesCte({
+      candidateMarketIdsParam: marketIdsParam,
       materialized: true,
       nowParam,
       extraMarketSql: [
@@ -2389,6 +2386,7 @@ async function fetchFeedEventIdsExact(
   if (search.searchCte) withParts.push(search.searchCte);
   withParts.push(
     buildBroadOrderableMarketCandidatesCte({
+      candidateMarketIdsParam: marketIdsParam,
       materialized: true,
       nowParam,
       extraMarketSql: [

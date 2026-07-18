@@ -535,11 +535,13 @@ async function assertDirectMarketSqlShape(): Promise<void> {
 
   const change24hSql = await captureFastMarketSql("change24h");
   assert.match(change24hSql[0], /orderable_market_candidates as materialized/);
+  assert.match(change24hSql[0], /observed_market_change_24h as materialized/);
+  assert.match(change24hSql[0], /join unified_token_change_24h cached/);
+  assert.doesNotMatch(change24hSql[0], /from unified_book_top_1h book/);
   assert.match(
     change24hSql[0],
-    /observed_market_change_24h as materialized/,
+    /history_token_set as materialized[\s\S]*?from current_probabilities[\s\S]*?current_probability is not null/,
   );
-  assert.match(change24hSql[0], /from unified_book_top_1h book/);
   assert.match(change24hSql[0], /current_yes_top/);
   assert.match(change24hSql[0], /current_no_top/);
   assert.match(change24hSql[0], /historical_yes_top/);
@@ -565,10 +567,9 @@ async function assertDirectMarketSqlShape(): Promise<void> {
 
   {
     const capturedSql: string[] = [];
-    const fakePool = createSqlCapturePool(
-      capturedSql,
-      [{ ids: [], candidate_count: 0 }],
-    ) as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
+    const fakePool = createSqlCapturePool(capturedSql, [
+      { ids: [], candidate_count: 0 },
+    ]) as unknown as Parameters<typeof fetchFeedMarketsDirect>[0];
     await fetchFeedMarketsDirect(fakePool, {
       limit: 1,
       offset: 0,
@@ -664,7 +665,12 @@ async function assertEventFeedSqlShape(): Promise<void> {
     const [sql] = capturedSql;
     assert.match(sql, /orderable_market_candidates as materialized/);
     assert.match(sql, /observed_market_change_24h as materialized/);
-    assert.match(sql, /from unified_book_top_1h book/);
+    assert.match(sql, /join unified_token_change_24h cached/);
+    assert.doesNotMatch(sql, /from unified_book_top_1h book/);
+    assert.match(
+      sql,
+      /history_token_set as materialized[\s\S]*?from current_probabilities[\s\S]*?current_probability is not null/,
+    );
     assert.match(sql, /avg\(market_change\.change_24h\) desc nulls last/);
     assert.doesNotMatch(sql, /unified_event_change_24h/);
     assert.doesNotMatch(sql, /unified_market_change_24h/);

@@ -119,6 +119,8 @@ export type TelegramMarketCardContext = {
   focusPositionId?: string;
   focusPositionWalletAddress?: string | null;
   focusSide?: TelegramBotTradingSide;
+  observedNoAsk?: number | null;
+  observedYesAsk?: number | null;
   origin: "direct" | "position" | "search";
   positionLines?: string[];
   positionRedemptionStatus?: string | null;
@@ -809,7 +811,7 @@ function formatPrice(value: string | null): string | null {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return null;
   const cents = Math.round(parsed * 100);
-  return `${cents}c`;
+  return `${cents}¢`;
 }
 
 function parseNumber(value: string | null): number | null {
@@ -990,6 +992,22 @@ export function resolveTelegramBuyFundingPreview(input: {
     shortfallUsd: Math.max(0, input.requiredUsd - availableUsd),
     state: resolveTelegramBuyFundingState(input),
   };
+}
+
+function hasInsufficientFundsReason(
+  readiness: TradingReadiness | null | undefined,
+): boolean {
+  const reason = readiness?.reasonCode?.toLowerCase() ?? "";
+  return (
+    reason.includes("no_executable_funds") ||
+    reason.includes("insufficient_funds")
+  );
+}
+
+function observedAsk(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 && value <= 1
+    ? value
+    : null;
 }
 
 function venueStatusFromReadiness(input: {
@@ -1526,7 +1544,7 @@ function marketPriceLine(market: TelegramBotMarketRow): string {
   const last = formatPrice(market.last_price);
   const bid = formatPrice(market.best_bid);
   const ask = formatPrice(market.best_ask);
-  if (last) return `Last: ${last}`;
+  if (last) return `Last traded: ${last}`;
   if (bid && ask) return `Bid/ask: ${bid} / ${ask}`;
   if (bid) return `Bid: ${bid}`;
   if (ask) return `Ask: ${ask}`;
@@ -2849,6 +2867,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   const tradeReadiness = await resolveTelegramTradingReadiness({
     authorization,
     market,
+    status,
     trading: input.trading,
     venue: market.venue,
   });
@@ -2967,6 +2986,34 @@ export async function buildTelegramBotTradingMarketMessage(input: {
           market,
         }).catch(() => null)
       : null;
+  const observedYesAsk = observedAsk(input.context?.observedYesAsk);
+  const observedNoAsk = observedAsk(input.context?.observedNoAsk);
+  const hasBotAction =
+    buyOptions.length > 0 || sellOptions.length > 0 || Boolean(redeemPlan);
+  const canTradeInHunch = marketOrderable && buyAllowed;
+  const knownExecutableFundsUsd =
+    tradeReadiness.maxExecutableBuyUsd != null &&
+    Number.isFinite(tradeReadiness.maxExecutableBuyUsd) &&
+    tradeReadiness.maxExecutableBuyUsd >= 0
+      ? tradeReadiness.maxExecutableBuyUsd
+      : hasInsufficientFundsReason(tradeReadiness)
+        ? 0
+        : null;
+  const depositNeeded =
+    !input.publicBrowseOnly &&
+    status.linked &&
+    marketOrderable &&
+    (market.venue === "polymarket" || market.venue === "limitless") &&
+    nominalPresetAmountUsd != null &&
+    (hasInsufficientFundsReason(tradeReadiness) ||
+      (knownExecutableFundsUsd != null &&
+        knownExecutableFundsUsd + 0.000_001 < nominalPresetAmountUsd));
+  const depositShortfallUsd =
+    depositNeeded &&
+    knownExecutableFundsUsd != null &&
+    nominalPresetAmountUsd != null
+      ? Math.max(0, nominalPresetAmountUsd - knownExecutableFundsUsd)
+      : null;
   const marketIdentity = buildTelegramMarketIdentity({
     eventTitle: market.event_title,
     marketTitle: market.title,
@@ -2984,6 +3031,13 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     `${formatTelegramVenueLabel(market.venue)} · ${market.status}`,
     marketPriceLine(market),
   );
+  const observedOdds = [
+    observedYesAsk != null ? `YES ${formatLivePrice(observedYesAsk)}` : null,
+    observedNoAsk != null ? `NO ${formatLivePrice(observedNoAsk)}` : null,
+  ].filter((value): value is string => value != null);
+  if (observedOdds.length > 0) {
+    lines.push(`Current buy odds: ${observedOdds.join(" · ")}`);
+  }
   const buyPriceSummary = buyOptions
     .map(
       (option) =>
@@ -3004,7 +3058,6 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   } else if (unresolvedIntent) {
     lines.push("", EXISTING_TRADE_RESOLVING_MESSAGE);
   }
-  const canTradeInHunch = marketOrderable && buyAllowed;
   const hunchFallbackCopy = canTradeInHunch
     ? "You can still trade in Hunch."
     : "Open the market in Hunch.";
@@ -3021,7 +3074,14 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       `Link Telegram in Settings for direct bot trading. ${hunchFallbackCopy}`,
     );
   } else if (!status.enabled) {
-    lines.push("", `Direct bot trading is disabled. ${hunchFallbackCopy}`);
+    lines.push(
+      "",
+      policy.tradingEnabled && policyVenueAllowed
+        ? "Trade in Hunch now, or enable Telegram Trading for direct trades here."
+        : policy.tradingEnabled
+          ? "Trade this market in Hunch. You can also enable Telegram Trading for supported venues."
+          : `Direct bot trading is disabled. ${hunchFallbackCopy}`,
+    );
   } else if (!policyVenueAllowed) {
     lines.push(
       "",
@@ -3030,7 +3090,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   } else if (!authorizationVenueAllowed) {
     lines.push(
       "",
-      `This Trading Wallet is not enabled for direct bot trading on this venue. ${hunchFallbackCopy}`,
+      policy.tradingEnabled && policyVenueAllowed
+        ? "Trade in Hunch now, or enable this venue in Telegram Trading."
+        : `This Trading Wallet is not enabled for direct bot trading on this venue. ${hunchFallbackCopy}`,
     );
   } else if (!marketOrderable && !redeemPlan) {
     lines.push("", "This market is not open for new bot trades.");
@@ -3057,6 +3119,19 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     lines.push(
       "",
       `No executable buy fits your ${formatUsd(maxAmountUsd)} maximum total spend.`,
+    );
+  }
+  if (depositNeeded) {
+    const venueLabel = formatTelegramVenueLabel(market.venue);
+    lines.push(
+      "",
+      knownExecutableFundsUsd != null
+        ? `${venueLabel} balance: ${formatUsd(knownExecutableFundsUsd)} available. ${
+            depositShortfallUsd != null && depositShortfallUsd > 0
+              ? `Deposit at least ${formatUsd(depositShortfallUsd)} before buying.`
+              : "Deposit before buying."
+          }`
+        : `${venueLabel} balance is too low. Deposit before buying.`,
     );
   }
   if (buyOptions.length > 0 || sellOptions.length > 0 || redeemPlan) {
@@ -3155,8 +3230,6 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         side: focusedSide,
       })
     : null;
-  const hasBotAction =
-    buyOptions.length > 0 || sellOptions.length > 0 || Boolean(redeemPlan);
   const canOfferMiniAppBuy =
     !input.isAdminTest &&
     !input.publicBrowseOnly &&
@@ -3166,6 +3239,12 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     canTradeInHunch &&
     market.event_id != null;
   if (canOfferMiniAppBuy && market.event_id) {
+    if (nominalPresetAmountUsd != null) {
+      lines.push(
+        "",
+        `Trade amount in Hunch: ${formatUsd(nominalPresetAmountUsd)}`,
+      );
+    }
     for (const side of (["YES", "NO"] as const).filter(
       (candidate) => !focusedSide || focusedSide === candidate,
     )) {
@@ -3176,11 +3255,36 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         side,
       });
       if (!startParam) continue;
+      const price = side === "YES" ? observedYesAsk : observedNoAsk;
       pushMiniAppButton({
         startParam,
-        text: `Buy ${side}${nominalPresetAmountUsd != null ? ` · ${formatUsd(nominalPresetAmountUsd)}` : ""}`,
+        text: `Buy ${side}${price != null ? ` · ${formatLivePrice(price)}` : ""}`,
       });
     }
+  }
+  if (depositNeeded) {
+    keyboard.push([
+      {
+        callback_data: `hm:v1:deposit:${market.venue}`,
+        text: `Deposit to ${formatTelegramVenueLabel(market.venue)}`,
+      },
+    ]);
+  }
+  const canOfferTelegramTradingSetup =
+    !input.isAdminTest &&
+    !input.publicBrowseOnly &&
+    input.telegramMiniAppEnabled === true &&
+    status.linked &&
+    policy.tradingEnabled &&
+    (!status.enabled || (policyVenueAllowed && !authorizationVenueAllowed));
+  if (canOfferTelegramTradingSetup) {
+    const enableTradingButton = buildHunchMiniAppWebButton({
+      appBaseUrl: input.appBaseUrl,
+      enabled: true,
+      path: "/settings/telegram-trading",
+      text: "Enable Telegram Trading",
+    });
+    if (enableTradingButton) keyboard.push([enableTradingButton]);
   }
   if (input.context?.origin === "position") {
     if (sellOptions.length === 0 && marketOrderable) {

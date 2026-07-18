@@ -250,12 +250,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sessionId,
       });
       let loadedMarketId = "";
+      let observedNoAsk: number | null | undefined;
+      let observedYesAsk: number | null | undefined;
       let returnCallbackData = "";
       await handleSignalBotInteractiveMenuCallback({
         callbackPrefix: "hm:v1:",
         chatId: "10",
         loadMarketCard: async (input) => {
           loadedMarketId = input.marketRef;
+          observedNoAsk = input.context.observedNoAsk;
+          observedYesAsk = input.context.observedYesAsk;
           returnCallbackData = input.context.returnCallbackData;
           return { text: "Market card" };
         },
@@ -267,6 +271,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramUserId: 20,
       });
       assert.equal(loadedMarketId, polymarket.marketId);
+      assert.equal(observedNoAsk, polymarket.noAsk);
+      assert.equal(observedYesAsk, polymarket.yesAsk);
       assert.equal(returnCallbackData, `hm:v1:search:${sessionId}:0`);
     },
   },

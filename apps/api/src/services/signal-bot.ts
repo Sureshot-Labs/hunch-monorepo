@@ -1976,13 +1976,16 @@ export function buildSignalBotMenuScreen(input: {
     if (input.audience === "unavailable") {
       return {
         keyboard: {
-          inline_keyboard: buildSignalBotOptionalButtonRows(miniAppButton),
+          inline_keyboard: [
+            [callback("trading:market_input", "🔎 Markets")],
+            ...buildSignalBotOptionalButtonRows(miniAppButton),
+          ],
         },
         text: [
           formatTelegramBold("🔮 Hunch"),
           "",
           escapeTelegramMarkdownV2(
-            "Account status is temporarily unavailable. Try again or open Hunch.",
+            "Account details could not refresh. You can still browse markets or open Hunch.",
           ),
           ...(!miniAppButton
             ? [
@@ -2735,7 +2738,12 @@ type SignalBotMenuLoaders = {
   >;
   loadMarketCard?: (input: {
     chatId: string;
-    context?: { origin: "search"; returnCallbackData: string };
+    context?: {
+      observedNoAsk?: number | null;
+      observedYesAsk?: number | null;
+      origin: "search";
+      returnCallbackData: string;
+    };
     marketRef: string;
     publicBrowseOnly?: boolean;
     telegramMessageId: number | null;
@@ -3204,6 +3212,7 @@ export async function handleSignalBotMenuCallback(
     });
   }
   await sendOrEditSignalBotMenuScreen({
+    audience,
     chatId,
     config: input.config,
     isAdmin,

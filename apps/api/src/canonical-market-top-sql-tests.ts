@@ -112,4 +112,14 @@ assert.deepEqual(
   [],
 );
 assert.match(eventSql, /m\.id = ANY\(\$\d+::text\[\]\)/i);
-console.log("ok - event pagination pushes preselected market ids into SQL");
+assert.match(
+  eventSql,
+  /orderable_market_candidates_strict_market_base as materialized[\s\S]*?where[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)/i,
+);
+assert.match(
+  eventSql,
+  /orderable_market_candidates_pm_recent_candidates as materialized[\s\S]*?m\.close_time[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)[\s\S]*?union all[\s\S]*?m\.expiration_time[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)[\s\S]*?union all[\s\S]*?e\.end_date[\s\S]*?m\.id = ANY\(\$\d+::text\[\]\)/i,
+);
+console.log(
+  "ok - event pagination drives every orderable branch from preselected market ids",
+);
