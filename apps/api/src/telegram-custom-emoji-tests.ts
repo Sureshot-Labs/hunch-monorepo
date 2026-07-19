@@ -17,7 +17,7 @@ import {
 
 const tests: Array<{ name: string; run: () => void }> = [
   {
-    name: "published Hunch emoji IDs stay pinned to their semantic names",
+    name: "published Hunch emoji IDs and fallbacks stay pinned to semantics",
     run: () => {
       assert.deepEqual(
         Object.fromEntries(
@@ -27,15 +27,34 @@ const tests: Array<{ name: string; run: () => void }> = [
           ]),
         ),
         {
-          base: "5398023908177780475",
+          base: "5398022443593935276",
           hunch: "5397843223198607684",
-          hyperliquid: "5398028456548149441",
-          kalshi: "5398048814693133057",
-          limitless: "5397603233311008494",
-          polygon: "5397682080320627397",
-          polymarket: "5397868305807613791",
-          solana: "5397929071004918446",
-          usdc: "5400178203643911271",
+          hyperliquid: "5399869069077813370",
+          kalshi: "5398021142218842700",
+          limitless: "5399931384758312849",
+          polygon: "5397636596616964415",
+          polymarket: "5397742643654470005",
+          solana: "5397588853760501094",
+          usdc: "5397914592670165457",
+        },
+      );
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(TELEGRAM_CUSTOM_EMOJI).map(([name, emoji]) => [
+            name,
+            emoji.fallback,
+          ]),
+        ),
+        {
+          base: "🟦",
+          hunch: "🟠",
+          hyperliquid: "♾️",
+          kalshi: "♻️",
+          limitless: "↔️",
+          polygon: "🟣",
+          polymarket: "🔵",
+          solana: "🪙",
+          usdc: "💲",
         },
       );
     },
