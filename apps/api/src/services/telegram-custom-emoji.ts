@@ -1,7 +1,7 @@
 export const TELEGRAM_CUSTOM_EMOJI = {
   base: {
     fallback: "🟦",
-    id: "5398023908177780475",
+    id: "5398022443593935276",
   },
   hunch: {
     fallback: "🟠",
@@ -9,31 +9,31 @@ export const TELEGRAM_CUSTOM_EMOJI = {
   },
   hyperliquid: {
     fallback: "♾️",
-    id: "5398028456548149441",
+    id: "5399869069077813370",
   },
   kalshi: {
-    fallback: "🆔",
-    id: "5398048814693133057",
+    fallback: "♻️",
+    id: "5398021142218842700",
   },
   limitless: {
     fallback: "↔️",
-    id: "5397603233311008494",
+    id: "5399931384758312849",
   },
   polygon: {
     fallback: "🟣",
-    id: "5397682080320627397",
+    id: "5397636596616964415",
   },
   polymarket: {
     fallback: "🔵",
-    id: "5397868305807613791",
+    id: "5397742643654470005",
   },
   solana: {
     fallback: "🪙",
-    id: "5397929071004918446",
+    id: "5397588853760501094",
   },
   usdc: {
-    fallback: "💸",
-    id: "5400178203643911271",
+    fallback: "💲",
+    id: "5397914592670165457",
   },
 } as const;
 
