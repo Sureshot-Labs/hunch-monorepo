@@ -77,6 +77,11 @@ import {
   type WalletIntelRefreshPolicy,
 } from "./services/runtime-policies.js";
 import {
+  resolveLiveIntelVenueScope,
+  type LiveIntelVenue,
+  type LiveIntelVenueScope,
+} from "./services/venue-lifecycle.js";
+import {
   buildInternalHunchFillActivityEvents,
   shouldSuppressInternalHunchSnapshotDelta,
   type InternalHunchFillActivityInput,
@@ -88,7 +93,7 @@ import {
 } from "./services/wallet-tracking-subjects.js";
 
 type Chain = "polygon" | "base" | "solana";
-type Venue = "polymarket" | "limitless" | "kalshi";
+type Venue = LiveIntelVenue;
 type WalletIntelMarketRefreshVenue = "polymarket" | "dflow" | "limitless";
 type WalletIntelRefreshTelemetry = {
   holdersPolymarket: WalletIntelRetryTelemetry;
@@ -2390,6 +2395,7 @@ function buildAutoTrackedPreviousOpenMarketKeys(
 export async function loadAutoTrackedWalletRows(
   client: Queryable,
   inputs: {
+    liveVenues: readonly Venue[];
     asOf: Date;
     attemptBackoffMinutes: number;
     limit: number;
@@ -2397,7 +2403,7 @@ export async function loadAutoTrackedWalletRows(
     subjectTtlDays: number;
   },
 ): Promise<AutoTrackedWalletRow[]> {
-  if (inputs.limit <= 0) return [];
+  if (inputs.limit <= 0 || inputs.liveVenues.length === 0) return [];
   const { rows } = await client.query<{
     wallet_id: string;
     address: string;
@@ -2418,7 +2424,7 @@ export async function loadAutoTrackedWalletRows(
       join wallets w on w.id = wts.wallet_id
       where wts.status = 'active'
         and wts.source in ('whale', 'recent_top_holder', 'signal_candidate')
-        and wts.venue in ('polymarket', 'limitless', 'kalshi')
+        and wts.venue = any($6::text[])
         and (
           $5::int <= 0 or
           (
@@ -2453,6 +2459,7 @@ export async function loadAutoTrackedWalletRows(
       Math.max(1, inputs.refreshHours),
       Math.max(1, inputs.attemptBackoffMinutes),
       Math.max(0, inputs.subjectTtlDays),
+      inputs.liveVenues,
     ],
   );
 
@@ -3968,8 +3975,10 @@ async function snapshotFollowedWalletPositions(
 async function loadInternalHunchWalletRows(
   client: Queryable,
   snapshotAt: Date,
+  liveVenues: readonly Venue[],
 ): Promise<InternalHunchWalletRow[]> {
   if (
+    liveVenues.length === 0 ||
     !walletIntelRefreshPolicy.internalHunchEnabled ||
     walletIntelRefreshPolicy.internalHunchWalletLimit <= 0
   ) {
@@ -4000,7 +4009,7 @@ async function loadInternalHunchWalletRows(
           max(coalesce(p.updated_at, p.last_updated_at, p.created_at)) as last_activity_at
         from positions p
         where p.position_scope = 'own'
-          and p.venue in ('polymarket', 'limitless', 'kalshi')
+          and p.venue = any($5::text[])
           and p.wallet_address is not null
           and btrim(p.wallet_address) <> ''
           and (p.is_hidden is null or p.is_hidden = false)
@@ -4025,7 +4034,7 @@ async function loadInternalHunchWalletRows(
         from order_fills f
         join orders o on o.id = f.order_id
         where $4::boolean
-          and o.venue in ('polymarket', 'limitless', 'kalshi')
+          and o.venue = any($5::text[])
           and coalesce(nullif(o.wallet_address, ''), nullif(o.signer_address, '')) is not null
           and f.fill_size > 0
           and f.filled_at >= $2
@@ -4071,6 +4080,7 @@ async function loadInternalHunchWalletRows(
       fillSince,
       snapshotAt,
       fillCandidatesEnabled,
+      liveVenues,
     ],
   );
 
@@ -4432,6 +4442,7 @@ async function backfillInternalHunchOrderFillActivity(
 async function collectInternalHunchWalletIntel(
   client: Queryable,
   inputs: {
+    liveVenues: readonly Venue[];
     snapshotAt: Date;
     touchedWalletIds: Set<string>;
   },
@@ -4441,7 +4452,11 @@ async function collectInternalHunchWalletIntel(
   activityRows: number;
   marketIds: string[];
 }> {
-  const wallets = await loadInternalHunchWalletRows(client, inputs.snapshotAt);
+  const wallets = await loadInternalHunchWalletRows(
+    client,
+    inputs.snapshotAt,
+    inputs.liveVenues,
+  );
   if (!wallets.length) {
     return { processed: 0, snapshotRows: 0, activityRows: 0, marketIds: [] };
   }
@@ -6643,10 +6658,13 @@ async function upsertWalletOnchainState(
 
 async function refreshWalletOnchainState(
   client: Queryable,
+  liveVenues: readonly Venue[],
 ): Promise<WalletOnchainStateRefreshResult> {
   const refreshStartedAtMs = Date.now();
   const limit = walletIntelRefreshPolicy.onchainStateLimit;
-  if (limit <= 0) return emptyWalletOnchainStateRefreshResult();
+  if (limit <= 0 || liveVenues.length === 0) {
+    return emptyWalletOnchainStateRefreshResult();
+  }
 
   const staleBefore = new Date(
     Date.now() -
@@ -6692,6 +6710,7 @@ async function refreshWalletOnchainState(
             or (w.chain = 'base' and wv.venue = 'limitless')
             or (w.chain = 'solana' and wv.venue = 'kalshi')
           )
+          and wv.venue = any($7::text[])
           and (
             wos.balance_as_of is null
             or wos.balance_as_of < $1::timestamptz
@@ -6771,6 +6790,7 @@ async function refreshWalletOnchainState(
       quotas.polymarket,
       quotas.limitless,
       quotas.kalshi,
+      liveVenues,
     ],
   );
   const errorStaleBeforeDate = new Date(errorStaleBefore);
@@ -7248,13 +7268,15 @@ async function selectMarketsPerVenue(
   limitKalshi: number,
   limitLimitless: number,
   asOf: Date,
+  liveVenues: readonly Venue[],
 ): Promise<MarketPickRow[]> {
   const rows: MarketPickRow[] = [];
+  const liveVenueSet = new Set(liveVenues);
   const polyMode = walletIntelRefreshPolicy.selectionModePoly;
   const kalshiMode = walletIntelRefreshPolicy.selectionModeKalshi;
   const limitlessMode = walletIntelRefreshPolicy.selectionModeLimitless;
 
-  if (limitPoly > 0) {
+  if (liveVenueSet.has("polymarket") && limitPoly > 0) {
     if (polyMode === "trade_1h") {
       rows.push(
         ...(await selectPolymarketByTrade(
@@ -7302,7 +7324,7 @@ async function selectMarketsPerVenue(
     }
   }
 
-  if (limitKalshi > 0) {
+  if (liveVenueSet.has("kalshi") && limitKalshi > 0) {
     if (kalshiMode === "trade_1h") {
       rows.push(
         ...(await selectKalshiByTrade(
@@ -7350,7 +7372,7 @@ async function selectMarketsPerVenue(
     }
   }
 
-  if (limitLimitless > 0) {
+  if (liveVenueSet.has("limitless") && limitLimitless > 0) {
     if (
       limitlessMode === "liquidity" ||
       limitlessMode === "updated" ||
@@ -7380,12 +7402,19 @@ async function selectMarketsPerVenue(
   return rows;
 }
 
-async function runSnapshot(snapshotAt: Date) {
+async function runSnapshot(
+  snapshotAt: Date,
+  liveIntelScope: LiveIntelVenueScope,
+) {
   const runStartedAt = new Date();
   const holderLimit = walletIntelRefreshPolicy.holderLimit;
   const marketLimit = walletIntelRefreshPolicy.marketLimit;
   const marketLimitPerVenue = walletIntelRefreshPolicy.marketLimitPerVenue;
   const marketLimitKalshi = walletIntelRefreshPolicy.marketLimitKalshi;
+  const liveVenues = liveIntelScope.venues;
+  const liveChains = liveVenues
+    .map((venue) => VENUE_CHAIN[venue])
+    .filter((chain): chain is Chain => chain != null);
   const telemetry = createRefreshTelemetry();
   const marketFetchConcurrency =
     walletIntelRefreshPolicy.marketFetchConcurrency;
@@ -7400,7 +7429,7 @@ async function runSnapshot(snapshotAt: Date) {
   );
 
   console.log(
-    `[wallets:intel:refresh] start startedAt=${runStartedAt.toISOString()} markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()} marketFetchConcurrency=${marketFetchConcurrency} followedFetchConcurrency=${followedFetchConcurrency} autoTrackedWalletFetchConcurrency=${autoTrackedWalletFetchConcurrency} autoTrackedFreshPriceCheckEnabled=${walletIntelRefreshPolicy.autoTrackedFreshPriceCheckEnabled} freshPriceMaxAgeMs=${walletIntelRefreshPolicy.freshPriceMaxAgeMs} freshPriceTimeoutMs=${walletIntelRefreshPolicy.freshPriceTimeoutMs}`,
+    `[wallets:intel:refresh] start startedAt=${runStartedAt.toISOString()} markets=${marketLimit} holders=${holderLimit} snapshot=${snapshotAt.toISOString()} liveVenues=${liveVenues.join(",") || "none"} lifecycleRevision=${liveIntelScope.revision} marketFetchConcurrency=${marketFetchConcurrency} followedFetchConcurrency=${followedFetchConcurrency} autoTrackedWalletFetchConcurrency=${autoTrackedWalletFetchConcurrency} autoTrackedFreshPriceCheckEnabled=${walletIntelRefreshPolicy.autoTrackedFreshPriceCheckEnabled} freshPriceMaxAgeMs=${walletIntelRefreshPolicy.freshPriceMaxAgeMs} freshPriceTimeoutMs=${walletIntelRefreshPolicy.freshPriceTimeoutMs}`,
   );
 
   const client = await pool.connect();
@@ -7422,13 +7451,18 @@ async function runSnapshot(snapshotAt: Date) {
           eventAlias: "e",
           asOfSql: "$3::timestamptz",
         })}
-          and m.venue in ('polymarket', 'limitless', 'kalshi')
+          and m.venue = any($4::text[])
           and (m.venue != 'kalshi' or m.is_initialized is true)
           and coalesce(m.volume_24h, 0) >= $1
         order by m.volume_24h desc nulls last
         limit $2
       `,
-      [walletIntelRefreshPolicy.minVolume24h, marketLimit, snapshotAt],
+      [
+        walletIntelRefreshPolicy.minVolume24h,
+        marketLimit,
+        snapshotAt,
+        liveVenues,
+      ],
     );
 
     const marketsPerVenueRows =
@@ -7439,6 +7473,7 @@ async function runSnapshot(snapshotAt: Date) {
             marketLimitKalshi,
             marketLimitPerVenue,
             snapshotAt,
+            liveVenues,
           )
         : [];
 
@@ -7460,13 +7495,13 @@ async function runSnapshot(snapshotAt: Date) {
             eventAlias: "ue",
             asOfSql: "$2::timestamptz",
           })}
-            and um.venue in ('polymarket', 'limitless', 'kalshi')
+            and um.venue = any($3::text[])
             and (um.venue != 'kalshi' or um.is_initialized is true)
         ) selected
         order by volume_24h desc nulls last
         limit $1
       `,
-      [walletIntelRefreshPolicy.watchlistMarketLimit, snapshotAt],
+      [walletIntelRefreshPolicy.watchlistMarketLimit, snapshotAt, liveVenues],
     );
 
     const whaleMarkets =
@@ -7500,12 +7535,12 @@ async function runSnapshot(snapshotAt: Date) {
                 eventAlias: "ue",
                 asOfSql: "$2::timestamptz",
               })}
-                and um.venue in ('polymarket', 'limitless', 'kalshi')
+                and um.venue = any($3::text[])
                 and (um.venue != 'kalshi' or um.is_initialized is true)
               order by um.volume_24h desc nulls last
               limit $1
             `,
-            [walletIntelRefreshPolicy.whaleMarketLimit, snapshotAt],
+            [walletIntelRefreshPolicy.whaleMarketLimit, snapshotAt, liveVenues],
           )
         : { rows: [] };
 
@@ -7595,6 +7630,7 @@ async function runSnapshot(snapshotAt: Date) {
       await fetchMarketHolderDataBatch({
         markets: marketRows,
         limit: holderLimit,
+        liveVenues,
         client,
         marketFetchConcurrency,
         telemetry: {
@@ -7804,6 +7840,7 @@ async function runSnapshot(snapshotAt: Date) {
 
     const autoTrackedWallets = walletIntelRefreshPolicy.autoTrackedWalletEnabled
       ? await loadAutoTrackedWalletRows(client, {
+          liveVenues,
           asOf: snapshotAt,
           attemptBackoffMinutes:
             walletIntelRefreshPolicy.autoTrackedWalletAttemptBackoffMinutes,
@@ -7867,10 +7904,11 @@ async function runSnapshot(snapshotAt: Date) {
         select wf.user_id, w.id as wallet_id, w.address, w.chain
         from wallet_follows wf
         join wallets w on w.id = wf.wallet_id
+        where w.chain = any($2::text[])
         order by wf.created_at desc
         limit $1
       `,
-      [walletIntelRefreshPolicy.followedWalletLimit],
+      [walletIntelRefreshPolicy.followedWalletLimit, liveChains],
     );
 
     const followedCollection = await collectFollowedWalletSnapshotRows(client, {
@@ -7914,6 +7952,7 @@ async function runSnapshot(snapshotAt: Date) {
     });
 
     const internalCollection = await collectInternalHunchWalletIntel(client, {
+      liveVenues,
       snapshotAt,
       touchedWalletIds,
     });
@@ -7943,7 +7982,10 @@ async function runSnapshot(snapshotAt: Date) {
     const whaleOwnersLinked = await linkSafeOwnersForWhales(client);
     const polymarketProxyOwnersLinked =
       await linkPolymarketProxyOwnersForKnownWallets(client);
-    const onchainStateRefresh = await refreshWalletOnchainState(client);
+    const onchainStateRefresh = await refreshWalletOnchainState(
+      client,
+      liveVenues,
+    );
     logRefreshTelemetry(telemetry);
 
     const runFinishedAt = new Date();
@@ -7967,13 +8009,14 @@ async function main() {
       return;
     }
 
-    const [refreshPolicy, whalePolicy] = await Promise.all([
+    const [refreshPolicy, whalePolicy, liveIntelScope] = await Promise.all([
       cliArgs.ignoreRuntimePolicy
         ? Promise.resolve({
             effective: getIntelPolicyDefaults("wallet_intel_refresh"),
           })
         : resolveWalletIntelRefreshPolicy(pool),
       resolveAiWhaleProfilesPolicy(pool),
+      resolveLiveIntelVenueScope(pool),
     ]);
     walletIntelRefreshPolicy = applyWalletIntelRefreshCliArgs(
       refreshPolicy.effective,
@@ -7981,6 +8024,12 @@ async function main() {
     );
     aiWhaleProfilesPolicy = whalePolicy.effective;
     hiddenOwnPositionSnapshotSuppressionCache.clear();
+    console.log("[wallets:intel:refresh] live venue scope", {
+      invalidOverride: liveIntelScope.invalidOverride,
+      revision: liveIntelScope.revision,
+      source: liveIntelScope.source,
+      venues: liveIntelScope.venues,
+    });
     if (cliArgs.printEffectivePolicy) {
       console.log("[wallets:intel:refresh] effective wallet intel policy", {
         ignoreRuntimePolicy: cliArgs.ignoreRuntimePolicy,
@@ -8033,7 +8082,7 @@ async function main() {
     }
 
     for (const snapshotAt of snapshots) {
-      await runSnapshot(snapshotAt);
+      await runSnapshot(snapshotAt, liveIntelScope);
     }
 
     if (aiWhaleProfilesPolicy.autoRun) {

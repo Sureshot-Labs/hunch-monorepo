@@ -11,6 +11,7 @@ import {
   filterVenuesForLifecycleCapability,
   lifecycleCapabilityForTradingAction,
   resolveCollateralPairTradingAction,
+  resolveLiveIntelVenueScope,
   venueLifecycleAllows,
   venueLifecycleAllowsTradingAction,
 } from "./services/venue-lifecycle.js";
@@ -106,6 +107,9 @@ try {
   );
   assert.deepEqual(filtered.venues, ["kalshi"]);
   assert.equal(filtered.revision, resolved.revision);
+  const liveIntelScope = await resolveLiveIntelVenueScope(db);
+  assert.deepEqual(liveIntelScope.venues, ["polymarket", "kalshi"]);
+  assert.equal(liveIntelScope.revision, resolved.revision);
 
   await client.query(
     `insert into runtime_policies (
@@ -137,8 +141,11 @@ try {
   assert.equal(invalid.revision, "defaults-v1");
   assert.equal(invalid.effective.venues.kalshi.lifecycle, "exit-only");
   assert.equal(invalid.effective.venues.kalshi.indexerMode, "maintenance");
+  const invalidLiveIntelScope = await resolveLiveIntelVenueScope(db);
+  assert.deepEqual(invalidLiveIntelScope.venues, ["polymarket", "limitless"]);
+  assert.equal(invalidLiveIntelScope.invalidOverride, true);
 
-  console.log("[venue-lifecycle-integration-tests] passed 21/21");
+  console.log("[venue-lifecycle-integration-tests] passed 25/25");
 } finally {
   clearVenueLifecyclePolicyCache();
   await client.query("rollback");

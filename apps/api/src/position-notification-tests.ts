@@ -176,6 +176,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           },
         },
         config,
+        db: {
+          query: async (sql: string, params: unknown[] = []) => {
+            assert.match(sql, /from user_telegram_accounts/);
+            assert.deepEqual(params, ["99"]);
+            return { rows: [{ linked: true }] };
+          },
+        } as never,
         loadPositions: async () => {
           loads += 1;
           return {

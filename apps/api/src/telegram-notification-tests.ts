@@ -130,7 +130,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const preferenceWrites: unknown[][] = [];
       const db = {
-        query: async (_sql: string, params: unknown[] = []) => {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("select exists (")) {
+            assert.deepEqual(params, ["99"]);
+            return { rows: [{ linked: true }] };
+          }
           preferenceWrites.push(params);
           return {
             rows: [

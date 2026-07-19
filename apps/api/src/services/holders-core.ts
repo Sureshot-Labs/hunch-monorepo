@@ -1,4 +1,9 @@
-import { isAbortError, isRpcRateLimit } from "@hunch/shared";
+import {
+  isAbortError,
+  isRpcRateLimit,
+  normalizeHunchVenue,
+  type HunchVenue,
+} from "@hunch/shared";
 import { ethers } from "ethers";
 import type { PoolClient } from "pg";
 
@@ -70,6 +75,14 @@ type MarketHolderTelemetry = {
 export const POLYMARKET_HOLDER_LIMIT_MAX = 250;
 const HOLDERS_TIMEOUT_MS = 10_000;
 const LIMITLESS_BALANCE_BATCH_MAX_PAIRS = 200;
+
+function liveHolderCollectionAllowed(
+  venue: unknown,
+  liveVenues: readonly HunchVenue[],
+): boolean {
+  const normalized = normalizeHunchVenue(venue);
+  return normalized != null && liveVenues.includes(normalized);
+}
 
 function parseOutcomes(outcomes: string | null): string[] {
   if (!outcomes) return [];
@@ -669,6 +682,7 @@ function resolveLimitlessVerifiedHoldersFromBalances(inputs: {
 export async function fetchMarketHolderData(inputs: {
   marketId: string;
   limit: number;
+  liveVenues: readonly HunchVenue[];
   client?: PoolClient;
   telemetry?: MarketHolderTelemetry;
 }): Promise<MarketHolderData> {
@@ -793,8 +807,16 @@ export async function fetchMarketHolderData(inputs: {
 
   const holderEntries: HolderEntry[] = [];
   let source = "unavailable";
+  const liveCollectionAllowed = liveHolderCollectionAllowed(
+    market.venue,
+    inputs.liveVenues,
+  );
 
-  if (market.venue === "polymarket" && market.condition_id) {
+  if (
+    liveCollectionAllowed &&
+    market.venue === "polymarket" &&
+    market.condition_id
+  ) {
     source = "polymarket";
     try {
       const holders = await fetchPolymarketHolders({
@@ -818,7 +840,7 @@ export async function fetchMarketHolderData(inputs: {
     }
   }
 
-  if (holderEntries.length === 0) {
+  if (liveCollectionAllowed && holderEntries.length === 0) {
     const useAlchemy =
       market.venue === "polymarket" || market.venue === "limitless";
     if (useAlchemy) {
@@ -903,7 +925,11 @@ export async function fetchMarketHolderData(inputs: {
     }
   }
 
-  if (holderEntries.length === 0 && market.venue === "kalshi") {
+  if (
+    liveCollectionAllowed &&
+    holderEntries.length === 0 &&
+    market.venue === "kalshi"
+  ) {
     const yesMint = normalizeSolanaMint(yesToken);
     const noMint = normalizeSolanaMint(noToken);
     source = "solana";
@@ -979,6 +1005,7 @@ export async function fetchMarketHolderData(inputs: {
 export async function fetchMarketHolderDataBatch(inputs: {
   markets: Array<{ id: string; venue: string }>;
   limit: number;
+  liveVenues: readonly HunchVenue[];
   client?: PoolClient;
   marketFetchConcurrency?: number;
   telemetry?: MarketHolderTelemetry;
@@ -1001,13 +1028,28 @@ export async function fetchMarketHolderDataBatch(inputs: {
     }
   }
 
-  const polymarketContexts = Array.from(contexts.values()).filter(
+  const liveContexts = Array.from(contexts.values()).filter((context) =>
+    liveHolderCollectionAllowed(context.market.venue, inputs.liveVenues),
+  );
+  const blockedContexts = Array.from(contexts.values()).filter(
+    (context) =>
+      !liveHolderCollectionAllowed(context.market.venue, inputs.liveVenues),
+  );
+  for (const context of blockedContexts) {
+    results.set(context.market.id, {
+      market: context.market,
+      data: buildMarketHolderData(context, [], "unavailable", inputs.limit),
+      error: null,
+    });
+  }
+
+  const polymarketContexts = liveContexts.filter(
     (context) => context.market.venue === "polymarket",
   );
-  const limitlessContexts = Array.from(contexts.values()).filter(
+  const limitlessContexts = liveContexts.filter(
     (context) => context.market.venue === "limitless",
   );
-  const kalshiContexts = Array.from(contexts.values()).filter(
+  const kalshiContexts = liveContexts.filter(
     (context) => context.market.venue === "kalshi",
   );
 
@@ -1016,6 +1058,7 @@ export async function fetchMarketHolderDataBatch(inputs: {
       const data = await fetchMarketHolderData({
         marketId: context.market.id,
         limit: inputs.limit,
+        liveVenues: inputs.liveVenues,
         client: inputs.client,
         telemetry: inputs.telemetry,
       });

@@ -1,4 +1,5 @@
 import {
+  filterVenuesByIndexerMode,
   filterVenuesByLifecycleCapability,
   getVenuesWithLifecycleCapability,
   venueHasLifecycleCapability,
@@ -8,6 +9,37 @@ import {
 
 import type { DbQuery } from "../db.js";
 import { resolveVenueLifecyclePolicy } from "./runtime-policies.js";
+
+export const LIVE_INTEL_VENUES = [
+  "polymarket",
+  "limitless",
+  "kalshi",
+] as const satisfies readonly HunchVenue[];
+
+export type LiveIntelVenue = (typeof LIVE_INTEL_VENUES)[number];
+
+export type LiveIntelVenueScope = {
+  invalidOverride: boolean;
+  revision: string;
+  source: "db" | "default";
+  venues: LiveIntelVenue[];
+};
+
+export async function resolveLiveIntelVenueScope(
+  db: DbQuery,
+): Promise<LiveIntelVenueScope> {
+  const resolved = await resolveVenueLifecyclePolicy(db);
+  return {
+    invalidOverride: resolved.invalidOverride,
+    revision: resolved.revision,
+    source: resolved.source,
+    venues: filterVenuesByIndexerMode(
+      resolved.effective,
+      LIVE_INTEL_VENUES,
+      "full",
+    ) as LiveIntelVenue[],
+  };
+}
 
 export async function filterVenuesForLifecycleCapability(
   db: DbQuery,

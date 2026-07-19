@@ -146,6 +146,37 @@ export function venueHasLifecycleCapability(
   return getVenueLifecycleCapabilities(policy, venue)?.[capability] === true;
 }
 
+export function venueHasIndexerMode(
+  policy: VenueLifecyclePolicy,
+  venue: unknown,
+  mode: VenueIndexerMode,
+): boolean {
+  const normalized = normalizeHunchVenue(venue);
+  return normalized != null && policy.venues[normalized].indexerMode === mode;
+}
+
+export function filterVenuesByIndexerMode(
+  policy: VenueLifecyclePolicy,
+  venues: readonly unknown[],
+  mode: VenueIndexerMode,
+): HunchVenue[] {
+  const seen = new Set<HunchVenue>();
+  const filtered: HunchVenue[] = [];
+  for (const value of venues) {
+    const venue = normalizeHunchVenue(value);
+    if (
+      !venue ||
+      seen.has(venue) ||
+      !venueHasIndexerMode(policy, venue, mode)
+    ) {
+      continue;
+    }
+    seen.add(venue);
+    filtered.push(venue);
+  }
+  return filtered;
+}
+
 export function filterVenuesByLifecycleCapability(
   policy: VenueLifecyclePolicy,
   venues: readonly unknown[],

@@ -1,9 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { pool } from "../db.js";
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 import { holdersQuerySchema } from "../schemas/holders.js";
 import { fetchMarketHolderData } from "../services/holders-core.js";
+import { resolveLiveIntelVenueScope } from "../services/venue-lifecycle.js";
 
 type HolderRow = {
   rank: number;
@@ -55,9 +57,23 @@ export const holdersRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
+      let liveVenues: Awaited<
+        ReturnType<typeof resolveLiveIntelVenueScope>
+      >["venues"] = [];
+      let lifecycleResolved = false;
+      try {
+        liveVenues = (await resolveLiveIntelVenueScope(pool)).venues;
+        lifecycleResolved = true;
+      } catch (error) {
+        request.log.error(
+          { error },
+          "holders live collection disabled because venue lifecycle policy could not be resolved",
+        );
+      }
+
       let data: Awaited<ReturnType<typeof fetchMarketHolderData>>;
       try {
-        data = await fetchMarketHolderData({ marketId, limit });
+        data = await fetchMarketHolderData({ marketId, limit, liveVenues });
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
         if (message.toLowerCase().includes("market not found")) {
@@ -91,7 +107,7 @@ export const holdersRoutes: FastifyPluginAsync = async (app) => {
       };
 
       const responseBody = JSON.stringify(response);
-      if (r) {
+      if (r && lifecycleResolved) {
         await r.set(cacheKey, responseBody, { EX: cacheTtl });
         reply.header("x-cache", "miss");
       }

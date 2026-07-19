@@ -4334,6 +4334,7 @@ const tests: TestCase[] = [
       const asOf = new Date("2026-01-02T00:00:00.000Z");
 
       await loadAutoTrackedWalletRows(client as never, {
+        liveVenues: ["polymarket", "limitless"],
         asOf,
         attemptBackoffMinutes: 30,
         limit: 150,
@@ -4343,7 +4344,36 @@ const tests: TestCase[] = [
 
       assert.match(queries[0]?.sql ?? "", /last_refresh_attempted_at/);
       assert.match(queries[0]?.sql ?? "", /last_selected_at/);
-      assert.deepEqual(queries[0]?.params, [150, asOf, 6, 30, 14]);
+      assert.match(queries[0]?.sql ?? "", /wts\.venue = any\(\$6::text\[\]\)/);
+      assert.deepEqual(queries[0]?.params, [
+        150,
+        asOf,
+        6,
+        30,
+        14,
+        ["polymarket", "limitless"],
+      ]);
+    },
+  },
+  {
+    name: "auto-tracked wallet selection skips disabled venue scopes",
+    run: async () => {
+      const client = {
+        query: async () => {
+          throw new Error("disabled scope must not query tracked wallets");
+        },
+      };
+
+      const rows = await loadAutoTrackedWalletRows(client as never, {
+        liveVenues: [],
+        asOf: new Date("2026-01-02T00:00:00.000Z"),
+        attemptBackoffMinutes: 30,
+        limit: 150,
+        refreshHours: 6,
+        subjectTtlDays: 14,
+      });
+
+      assert.deepEqual(rows, []);
     },
   },
   {
@@ -5167,6 +5197,7 @@ const tests: TestCase[] = [
         const result = await fetchMarketHolderData({
           marketId: "polymarket:market-1",
           limit: 50,
+          liveVenues: ["polymarket"],
           client: client as never,
         });
         assert.equal(requestedLimit, "50");
@@ -5244,6 +5275,7 @@ const tests: TestCase[] = [
         await fetchMarketHolderData({
           marketId: "polymarket:market-1",
           limit: 999,
+          liveVenues: ["polymarket"],
           client: client as never,
         });
         assert.equal(requestedLimit, String(POLYMARKET_HOLDER_LIMIT_MAX));
@@ -5317,6 +5349,7 @@ const tests: TestCase[] = [
         const result = await fetchMarketHolderData({
           marketId: "limitless:market-1",
           limit: 10,
+          liveVenues: ["limitless"],
           client: client as never,
         });
 
@@ -5412,6 +5445,7 @@ const tests: TestCase[] = [
         const result = await fetchMarketHolderData({
           marketId: "limitless:market-1",
           limit: 10,
+          liveVenues: ["limitless"],
           client: client as never,
         });
 
@@ -5565,6 +5599,7 @@ const tests: TestCase[] = [
         const result = await fetchMarketHolderData({
           marketId: "limitless:market-1",
           limit: 10,
+          liveVenues: ["limitless"],
           client: client as never,
         });
 
@@ -5780,6 +5815,7 @@ const tests: TestCase[] = [
             { id: "limitless:market-2", venue: "limitless" },
           ],
           limit: 10,
+          liveVenues: ["limitless"],
           client: client as never,
           marketFetchConcurrency: 2,
         });
@@ -5802,6 +5838,154 @@ const tests: TestCase[] = [
         env.limitlessConditionalTokensAddress = originalLimitlessContract;
         env.baseRpcUrl = originalBaseRpcUrl;
         env.baseRpcTimeoutMs = originalBaseRpcTimeoutMs;
+      }
+    },
+  },
+  {
+    name: "market holder fetch blocks Kalshi Solana RPC outside full indexer scope",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        throw new Error("Solana RPC must not be called");
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "kalshi:blocked-market",
+                  venue: "kalshi",
+                  title: "Blocked test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "mint-yes",
+                  token_no: "mint-no",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                { token_id: "mint-yes", side: "YES" },
+                { token_id: "mint-no", side: "NO" },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return {
+              rows: [
+                { token_id: "mint-yes", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "mint-no", best_bid: "0.45", best_ask: "0.55" },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const result = await fetchMarketHolderData({
+          marketId: "kalshi:blocked-market",
+          limit: 10,
+          liveVenues: ["polymarket", "limitless"],
+          client: client as never,
+        });
+
+        assert.equal(fetchCalls, 0);
+        assert.equal(result.source, "unavailable");
+        assert.deepEqual(result.holders, []);
+        assert.equal(result.priceBySide.YES, 0.5);
+        assert.equal(result.priceBySide.NO, 0.5);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "market holder batch blocks Kalshi Solana RPC outside full indexer scope",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        throw new Error("Solana RPC must not be called");
+      };
+
+      let queryCount = 0;
+      const client = {
+        query: async () => {
+          queryCount += 1;
+          if (queryCount === 1) {
+            return {
+              rows: [
+                {
+                  id: "kalshi:blocked-market",
+                  venue: "kalshi",
+                  title: "Blocked test market",
+                  outcomes: JSON.stringify(["YES", "NO"]),
+                  condition_id: null,
+                  token_yes: "mint-yes",
+                  token_no: "mint-no",
+                  clob_token_ids: null,
+                  best_bid: "0.45",
+                  best_ask: "0.55",
+                  last_price: "0.5",
+                },
+              ],
+            };
+          }
+          if (queryCount === 2) {
+            return {
+              rows: [
+                {
+                  market_id: "kalshi:blocked-market",
+                  token_id: "mint-yes",
+                  side: "YES",
+                },
+                {
+                  market_id: "kalshi:blocked-market",
+                  token_id: "mint-no",
+                  side: "NO",
+                },
+              ],
+            };
+          }
+          if (queryCount === 3) {
+            return {
+              rows: [
+                { token_id: "mint-yes", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "mint-no", best_bid: "0.45", best_ask: "0.55" },
+              ],
+            };
+          }
+          throw new Error(`unexpected query count: ${queryCount}`);
+        },
+      };
+
+      try {
+        const [result] = await fetchMarketHolderDataBatch({
+          markets: [{ id: "kalshi:blocked-market", venue: "kalshi" }],
+          limit: 10,
+          liveVenues: ["polymarket", "limitless"],
+          client: client as never,
+        });
+
+        assert.equal(fetchCalls, 0);
+        assert.equal(result?.data?.source, "unavailable");
+        assert.deepEqual(result?.data?.holders, []);
+      } finally {
+        globalThis.fetch = originalFetch;
       }
     },
   },
@@ -5921,6 +6105,7 @@ const tests: TestCase[] = [
         const result = await fetchMarketHolderData({
           marketId: "kalshi:market-1",
           limit: 10,
+          liveVenues: ["kalshi"],
           client: client as never,
         });
 
@@ -6088,6 +6273,7 @@ const tests: TestCase[] = [
             { id: "kalshi:market-2", venue: "kalshi" },
           ],
           limit: 10,
+          liveVenues: ["kalshi"],
           client: client as never,
           marketFetchConcurrency: 2,
         });

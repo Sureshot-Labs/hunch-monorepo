@@ -37,12 +37,14 @@ export type {
 export {
   buildVenueLifecyclePolicyRevision,
   DEFAULT_VENUE_LIFECYCLE_POLICY,
+  filterVenuesByIndexerMode,
   filterVenuesByLifecycleCapability,
   getVenueLifecycleCapabilities,
   getVenuesWithLifecycleCapability,
   HUNCH_VENUES,
   normalizeHunchVenue,
   parseVenueLifecyclePolicy,
+  venueHasIndexerMode,
   venueHasLifecycleCapability,
   venueLifecyclePolicySchema,
 } from "./venue-lifecycle.js";
