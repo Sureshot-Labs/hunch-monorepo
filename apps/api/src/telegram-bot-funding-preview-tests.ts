@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs";
 import {
   resolveTelegramBuyFundingPreview,
   resolveTelegramBuyFundingState,
+  telegramBotTradingTestHooks,
 } from "./services/telegram-bot-trading.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
@@ -70,12 +72,39 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         fundingBlock,
-        /"Deposit instead", \.\.\.depositPresentation\.lines/,
+        /escapeMarkdown\("Deposit instead"\),[\s\S]*?\.\.\.depositPresentation\.markdownV2Lines/,
       );
       assert.match(
         fundingBlock,
-        /\.\.\.\(depositPresentation\?\.lines \?\? \[depositUnavailableLine\]\)/,
+        /\.\.\.\(depositPresentation\?\.markdownV2Lines \?\? \[/,
       );
+      assert.equal(
+        fundingBlock.match(/formatTelegramVenueMarketLineMarkdownV2\(/g)
+          ?.length,
+        2,
+      );
+    },
+  },
+  {
+    name: "trade lifecycle and pUSD lines use semantic custom emoji",
+    run: () => {
+      const lifecycle =
+        telegramBotTradingTestHooks.formatTelegramTradeLifecycleMessageMarkdownV2(
+          {
+            heading: "Trade submitted.",
+            lines: ["BUY YES · $10.00"],
+            marketTitle: "Will it happen?",
+            venue: "polymarket",
+          },
+        );
+      assert.match(lifecycle, new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id));
+      assert.match(lifecycle, /\) Polymarket/);
+      const payout =
+        telegramBotTradingTestHooks.formatTelegramUsdcLineMarkdownV2(
+          "Received: $10.00 pUSD",
+        );
+      assert.match(payout, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
+      assert.match(payout, /\) Received/);
     },
   },
 ];

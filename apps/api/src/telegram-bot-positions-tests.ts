@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import type { Position } from "./order-types.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
   buildTelegramPositionDetail,
   buildTelegramPositionsSnapshotMessage,
@@ -93,7 +94,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = buildTelegramPositionDetail(source, undefined, "NO");
       assert.equal(result.marketId, null);
       assert.equal(result.eventId, null);
-      assert.equal(result.marketTitle, "Polymarket position");
+      assert.equal(result.marketTitle, "Position");
       assert.equal(result.side, "NO");
       assert.equal(result.position.id, source.id);
       assert.equal(result.redemptionStatus, "metadata_unavailable");
@@ -105,6 +106,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(message.text, /Details unavailable/);
       assert.match(message.text, /Valuation coverage: 0\/1/);
+      assert.match(message.text, /tg:\/\/emoji\?id=/);
+      assert.match(message.text, /Polymarket/);
       assert.equal(message.reply_markup?.inline_keyboard.length, 1);
     },
   },
@@ -137,6 +140,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           );
         }
       }
+      const positionButton = message.reply_markup?.inline_keyboard.find(
+        (row) =>
+          row[0] != null &&
+          "callback_data" in row[0] &&
+          row[0].callback_data.startsWith("hm:v1:pos:"),
+      )?.[0];
+      assert.equal(
+        positionButton?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
     },
   },
   {

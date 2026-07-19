@@ -109,6 +109,13 @@ import {
   buildHunchMiniAppDeepLinkButton,
   buildHunchMiniAppWebButton,
 } from "./telegram-mini-app-buttons.js";
+import {
+  stripTelegramCustomEmojiButtonIcons,
+  stripTelegramCustomEmojiMarkdownV2,
+  telegramCustomEmojiId,
+  telegramCustomEmojiIdForVenue,
+  telegramCustomEmojiMarkdownV2,
+} from "./telegram-custom-emoji.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   clearSignalBotMenuInput,
@@ -283,7 +290,7 @@ export type TelegramBotMenuButton =
       web_app: { url: string };
     };
 
-export type TelegramInlineKeyboardButton =
+export type TelegramInlineKeyboardButton = (
   | {
       copy_text: { text: string };
       text: string;
@@ -305,7 +312,8 @@ export type TelegramInlineKeyboardButton =
       text: string;
       url?: never;
       web_app?: never;
-    };
+    }
+) & { icon_custom_emoji_id?: string };
 
 export type TelegramInlineKeyboard = {
   inline_keyboard: Array<Array<TelegramInlineKeyboardButton>>;
@@ -360,6 +368,42 @@ export type SignalBotTelegramClient = {
   }): Promise<TelegramSendResult>;
   sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
 };
+
+function telegramPayloadHasCustomEmoji(input: {
+  reply_markup?: TelegramInlineKeyboard;
+  text: string;
+}): boolean {
+  return (
+    stripTelegramCustomEmojiMarkdownV2(input.text) !== input.text ||
+    input.reply_markup?.inline_keyboard.some((row) =>
+      row.some((button) => Boolean(button.icon_custom_emoji_id)),
+    ) === true
+  );
+}
+
+function isTelegramCustomEmojiRejection(
+  status: number,
+  description: string | null | undefined,
+): boolean {
+  return (
+    status === 400 &&
+    /custom[ _-]?emoji|button_type_invalid/i.test(description ?? "")
+  );
+}
+
+function stripTelegramCustomEmojiFromPayload<
+  T extends { reply_markup?: TelegramInlineKeyboard; text: string },
+>(input: T): T {
+  return {
+    ...input,
+    ...(input.reply_markup
+      ? {
+          reply_markup: stripTelegramCustomEmojiButtonIcons(input.reply_markup),
+        }
+      : {}),
+    text: stripTelegramCustomEmojiMarkdownV2(input.text),
+  };
+}
 
 export type SignalBotNote = {
   id: string;
@@ -939,6 +983,10 @@ function formatTelegramBold(value: string): string {
   return `*${escapeTelegramMarkdownV2(value)}*`;
 }
 
+function formatHunchTelegramTitle(value: string): string {
+  return `${telegramCustomEmojiMarkdownV2("hunch")} ${formatTelegramBold(value)}`;
+}
+
 function formatTelegramItalic(value: string): string {
   return `_${escapeTelegramMarkdownV2(value)}_`;
 }
@@ -1328,6 +1376,7 @@ function isSignalBotPrivateChat(chatType: string | null | undefined): boolean {
 function buildSignalBotTelegramButton(input: {
   appBaseUrl: string;
   chatType?: string | null;
+  iconCustomEmojiId?: string;
   miniAppLinkBase?: string | null;
   startParam: string | null | undefined;
   text: string;
@@ -1339,12 +1388,16 @@ function buildSignalBotTelegramButton(input: {
   ) {
     return buildHunchMiniAppWebButton({
       appBaseUrl: input.appBaseUrl,
+      customEmojiEnabled: input.chatType !== "channel",
       enabled: true,
+      iconCustomEmojiId: input.iconCustomEmojiId,
       startParam: input.startParam,
       text: input.text,
     });
   }
   return buildHunchMiniAppDeepLinkButton({
+    customEmojiEnabled: input.chatType !== "channel",
+    iconCustomEmojiId: input.iconCustomEmojiId,
     miniAppLinkBase: input.miniAppLinkBase,
     startParam: input.startParam,
     text: input.text,
@@ -1513,6 +1566,7 @@ export function buildSignalBotMessage(input: {
       side: buySide,
       venue: note.marketVenue ?? "unknown",
     };
+    const tradeTargetIcon = telegramCustomEmojiIdForVenue(tradeTarget.venue);
     const tradeSideLabel =
       tradeTarget.side === buySide
         ? presentation.positions[buySide].shortLabel
@@ -1522,6 +1576,7 @@ export function buildSignalBotMessage(input: {
       buildSignalBotTelegramButton({
         appBaseUrl: input.appBaseUrl,
         chatType: input.chatType,
+        iconCustomEmojiId: tradeTargetIcon,
         miniAppLinkBase: input.telegramMiniAppLinkBase,
         startParam: buildSignalBotBuyStartParam({
           amountUsd: input.buyAmountUsd,
@@ -1534,6 +1589,8 @@ export function buildSignalBotMessage(input: {
           price: input.deliveryTarget ? tradeTarget.price : price,
           side: tradeTarget.side,
           sideLabel: tradeSideLabel,
+          useNativeMarker:
+            input.chatType === "channel" || tradeTargetIcon == null,
           venue: tradeTarget.venue,
         }),
       }),
@@ -1543,11 +1600,15 @@ export function buildSignalBotMessage(input: {
       input.cheaperAlternative &&
       input.cheaperAlternative.side === buySide
     ) {
+      const cheaperIcon = telegramCustomEmojiIdForVenue(
+        input.cheaperAlternative.venue,
+      );
       const addedCheaperButton = pushSignalBotButtonRow(
         keyboardRows,
         buildSignalBotTelegramButton({
           appBaseUrl: input.appBaseUrl,
           chatType: input.chatType,
+          iconCustomEmojiId: cheaperIcon,
           miniAppLinkBase: input.telegramMiniAppLinkBase,
           startParam: buildSignalBotBuyStartParam({
             amountUsd: input.buyAmountUsd,
@@ -1559,6 +1620,8 @@ export function buildSignalBotMessage(input: {
           text: formatSignalBotCheaperButtonText({
             alternative: input.cheaperAlternative,
             sideLabel: presentation.positions[buySide].shortLabel,
+            useNativeMarker:
+              input.chatType === "channel" || cheaperIcon == null,
           }),
         }),
       );
@@ -1695,11 +1758,13 @@ function buildSignalBotFollowthroughKeyboard(input: {
         stats: input.stats,
       })
     ) {
+      const targetIcon = telegramCustomEmojiIdForVenue(target.venue);
       addedBuyButton = pushSignalBotButtonRow(
         rows,
         buildSignalBotTelegramButton({
           appBaseUrl: input.appBaseUrl,
           chatType: input.chatType,
+          iconCustomEmojiId: targetIcon,
           miniAppLinkBase: input.telegramMiniAppLinkBase,
           startParam: buildSignalBotBuyStartParam({
             amountUsd: input.buyAmountUsd,
@@ -1716,6 +1781,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
                 ? buildSignalBotFollowthroughSideCopy(input.candidate, side)
                     .buttonLabel
                 : side,
+            useNativeMarker: input.chatType === "channel" || targetIcon == null,
             venue: target.venue,
           }),
         }),
@@ -1964,8 +2030,10 @@ export function buildSignalBotMenuScreen(input: {
   const callback = (
     route: string,
     text: string,
+    iconCustomEmojiId?: string,
   ): TelegramInlineKeyboardButton => ({
     callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + route,
+    ...(iconCustomEmojiId ? { icon_custom_emoji_id: iconCustomEmojiId } : {}),
     text,
   });
   const countEnabled = (values: boolean[]) =>
@@ -1986,7 +2054,7 @@ export function buildSignalBotMenuScreen(input: {
           inline_keyboard: buildSignalBotOptionalButtonRows(guestButton),
         },
         text: [
-          formatTelegramBold("👋 Welcome to Hunch"),
+          formatHunchTelegramTitle("Welcome to Hunch"),
           "",
           escapeTelegramMarkdownV2(
             "Open Hunch to create an account or sign in. After signing in, enable Telegram Trading in Hunch if you want to trade from Telegram.",
@@ -2012,7 +2080,7 @@ export function buildSignalBotMenuScreen(input: {
           ],
         },
         text: [
-          formatTelegramBold("🔮 Hunch"),
+          formatHunchTelegramTitle("Hunch"),
           "",
           escapeTelegramMarkdownV2(
             "Account details could not refresh. You can still browse markets or open Hunch.",
@@ -2033,7 +2101,7 @@ export function buildSignalBotMenuScreen(input: {
       [callback("trading:market_input", "🔎 Markets")],
       [callback("positions", "💼 My positions")],
       [callback("trading:status", "👤 My trading")],
-      [callback("deposit", "💳 Deposit")],
+      [callback("deposit", "Deposit", telegramCustomEmojiId("usdc"))],
       [callback("settings:notifications", "🔔 Notifications")],
       [callback("settings", "⚙️ Settings"), callback("help", "❓ Help")],
     ];
@@ -2043,7 +2111,7 @@ export function buildSignalBotMenuScreen(input: {
     return {
       keyboard: { inline_keyboard: rows },
       text: [
-        formatTelegramBold("🔮 Hunch"),
+        formatHunchTelegramTitle("Hunch"),
         "",
         escapeTelegramMarkdownV2(
           "Market signals and trading without leaving Telegram.",
@@ -2722,6 +2790,7 @@ async function sendOrEditSignalBotMenuMessage(input: {
 function buildSignalBotPrivateMenuEntry(input: {
   botUsername?: string | null;
   chatId: string;
+  chatType?: string | null;
   config: SignalBotConfig;
 }): TelegramSendMessageInput {
   const targetUrl = input.botUsername
@@ -2734,12 +2803,26 @@ function buildSignalBotPrivateMenuEntry(input: {
     ...(targetUrl
       ? {
           reply_markup: {
-            inline_keyboard: [[{ text: "Open bot menu", url: targetUrl }]],
+            inline_keyboard: [
+              [
+                {
+                  ...(input.chatType === "channel"
+                    ? {}
+                    : {
+                        icon_custom_emoji_id: telegramCustomEmojiId("hunch"),
+                      }),
+                  text: "Open bot menu",
+                  url: targetUrl,
+                },
+              ],
+            ],
           },
         }
       : {}),
     text: [
-      formatTelegramBold("🔮 Hunch Signal Bot"),
+      input.chatType === "channel"
+        ? formatTelegramBold("Hunch Signal Bot")
+        : formatHunchTelegramTitle("Hunch Signal Bot"),
       "",
       escapeTelegramMarkdownV2(
         "Open a private chat with the bot to use trading, account controls, and the Hunch Mini App.",
@@ -3461,6 +3544,7 @@ export async function handleSignalBotCommand(input: {
         buildSignalBotPrivateMenuEntry({
           botUsername: input.botUsername,
           chatId,
+          chatType: input.message.chat.type,
           config: input.config,
         }),
       );
@@ -3490,6 +3574,7 @@ export async function handleSignalBotCommand(input: {
         buildSignalBotPrivateMenuEntry({
           botUsername: input.botUsername,
           chatId,
+          chatType: input.message.chat.type,
           config: input.config,
         }),
       );
@@ -3515,13 +3600,14 @@ export async function handleSignalBotCommand(input: {
     if (input.message.chat.type !== "private") {
       if (isAdmin) {
         await input.sendMessage(
-          buildPlainReply(
+          buildHelpReply({
             chatId,
-            helpText({
+            customEmojiEnabled: input.message.chat.type !== "channel",
+            text: helpText({
               isAdmin,
               miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
             }),
-          ),
+          }),
         );
         return true;
       }
@@ -3529,6 +3615,7 @@ export async function handleSignalBotCommand(input: {
         buildSignalBotPrivateMenuEntry({
           botUsername: input.botUsername,
           chatId,
+          chatType: input.message.chat.type,
           config: input.config,
         }),
       );
@@ -7411,16 +7498,28 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     reply_markup?: TelegramInlineKeyboard;
     text: string;
   }): Promise<TelegramSendResult> {
-    const response = await fetch(`${this.baseUrl}/editMessageText`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
-    const payload = (await response.json().catch(() => null)) as {
-      description?: string;
-      ok?: boolean;
-      result?: { message_id?: number };
-    } | null;
+    const request = async (body: typeof input) => {
+      const response = await fetch(`${this.baseUrl}/editMessageText`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        description?: string;
+        ok?: boolean;
+        result?: { message_id?: number };
+      } | null;
+      return { payload, response };
+    };
+    let requestInput = input;
+    let { payload, response } = await request(requestInput);
+    if (
+      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
+      telegramPayloadHasCustomEmoji(requestInput)
+    ) {
+      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
+      ({ payload, response } = await request(requestInput));
+    }
     if (response.ok && payload?.ok) {
       const messageId = payload.result?.message_id;
       return {
@@ -7457,17 +7556,29 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
   async sendMessage(
     input: TelegramSendMessageInput,
   ): Promise<TelegramSendResult> {
-    const response = await fetch(`${this.baseUrl}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
-    const payload = (await response.json().catch(() => null)) as {
-      description?: string;
-      ok?: boolean;
-      parameters?: { retry_after?: number };
-      result?: { message_id?: number };
-    } | null;
+    const request = async (body: TelegramSendMessageInput) => {
+      const response = await fetch(`${this.baseUrl}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        description?: string;
+        ok?: boolean;
+        parameters?: { retry_after?: number };
+        result?: { message_id?: number };
+      } | null;
+      return { payload, response };
+    };
+    let requestInput = input;
+    let { payload, response } = await request(requestInput);
+    if (
+      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
+      telegramPayloadHasCustomEmoji(requestInput)
+    ) {
+      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
+      ({ payload, response } = await request(requestInput));
+    }
     if (response.ok && payload?.ok) {
       const messageId = payload.result?.message_id;
       return {
@@ -8317,6 +8428,7 @@ function formatSignalBotBuyButtonText(input: {
   price: number | null;
   side: "NO" | "YES";
   sideLabel: string;
+  useNativeMarker: boolean;
   venue: string | null;
 }): string {
   const marker = input.side === "YES" ? "🟠" : "⚪";
@@ -8324,16 +8436,17 @@ function formatSignalBotBuyButtonText(input: {
   const price = input.price == null ? null : formatCents(input.price);
   const marketLabel =
     venue && price ? `${venue} ${price}` : (venue ?? price ?? null);
-  return `${marker} Buy ${input.sideLabel}${marketLabel ? ` · ${marketLabel}` : ""}`;
+  return `${input.useNativeMarker ? `${marker} ` : ""}Buy ${input.sideLabel}${marketLabel ? ` · ${marketLabel}` : ""}`;
 }
 
 function formatSignalBotCheaperButtonText(input: {
   alternative: SignalBotCheaperAlternative;
   sideLabel: string;
+  useNativeMarker: boolean;
 }): string {
   const venue =
     formatVenueLabel(input.alternative.venue) ?? input.alternative.venue;
-  return `💸 Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
+  return `${input.useNativeMarker ? "💸 " : ""}Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
 }
 
 function formatPercent(value: number): string {
@@ -8673,6 +8786,25 @@ function buildPlainReply(
     disable_web_page_preview: true,
     parse_mode: "MarkdownV2",
     text: escapeTelegramMarkdownV2(text),
+  };
+}
+
+function buildHelpReply(input: {
+  chatId: string;
+  customEmojiEnabled: boolean;
+  text: string;
+}): TelegramSendMessageInput {
+  const [title, ...lines] = input.text.split("\n");
+  return {
+    chat_id: input.chatId,
+    disable_web_page_preview: true,
+    parse_mode: "MarkdownV2",
+    text: [
+      input.customEmojiEnabled && title === "Hunch Signal Bot"
+        ? formatHunchTelegramTitle(title)
+        : escapeTelegramMarkdownV2(title ?? "Hunch Signal Bot"),
+      ...lines.map(escapeTelegramMarkdownV2),
+    ].join("\n"),
   };
 }
 

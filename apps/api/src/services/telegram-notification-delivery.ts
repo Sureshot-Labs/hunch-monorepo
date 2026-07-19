@@ -12,6 +12,15 @@ import {
 } from "./signal-bot.js";
 import { buildSignalBotMiniAppEventUrl } from "./signal-bot-mini-app-links.js";
 import {
+  telegramCustomEmojiId,
+  telegramCustomEmojiIdForVenue,
+  telegramCustomEmojiMarkdownV2,
+  telegramCustomEmojiMarkdownV2ForAsset,
+  telegramCustomEmojiMarkdownV2ForNetwork,
+  telegramNetworkCustomEmojiName,
+} from "./telegram-custom-emoji.js";
+import { formatTelegramVenueLabelMarkdownV2 } from "./telegram-market-identity.js";
+import {
   markTelegramNotificationsUnreachable,
   type TelegramNotificationTopic,
 } from "./telegram-notification-preferences.js";
@@ -124,6 +133,7 @@ function notificationButton(input: {
   marketId: string | null;
   miniAppLinkBase: string | null;
   text: string;
+  venue?: string | null;
 }): TelegramInlineKeyboard | undefined {
   if (!input.eventId) return undefined;
   const url = buildSignalBotMiniAppEventUrl({
@@ -131,7 +141,55 @@ function notificationButton(input: {
     marketId: input.marketId,
     miniAppLinkBase: input.miniAppLinkBase,
   });
-  return url ? { inline_keyboard: [[{ text: input.text, url }]] } : undefined;
+  return url
+    ? {
+        inline_keyboard: [
+          [
+            {
+              icon_custom_emoji_id:
+                telegramCustomEmojiIdForVenue(input.venue) ??
+                telegramCustomEmojiId("hunch"),
+              text: input.text,
+              url,
+            },
+          ],
+        ],
+      }
+    : undefined;
+}
+
+function formatNotificationAssetLine(amountLabel: string): string {
+  const asset = amountLabel.trim().split(/\s+/).at(-1) ?? null;
+  const emoji = telegramCustomEmojiMarkdownV2ForAsset(asset);
+  return emoji
+    ? `${emoji} ${escapeTelegramMarkdownV2(amountLabel)}`
+    : escapeTelegramMarkdownV2(amountLabel);
+}
+
+function formatNotificationNetworkLine(network: string): string {
+  const emoji = telegramCustomEmojiMarkdownV2ForNetwork(network);
+  const semanticName = telegramNetworkCustomEmojiName(network);
+  const label = semanticName
+    ? `${semanticName[0]?.toUpperCase()}${semanticName.slice(1)}`
+    : network;
+  return emoji
+    ? `${emoji} ${escapeTelegramMarkdownV2(label)}`
+    : escapeTelegramMarkdownV2(label);
+}
+
+function formatNotificationKnownNetworksInText(value: string): string {
+  const matches = Array.from(value.matchAll(/\b(Base|Polygon|Solana)\b/g));
+  if (matches.length === 0) return escapeTelegramMarkdownV2(value);
+  const rendered: string[] = [];
+  let offset = 0;
+  for (const match of matches) {
+    const index = match.index ?? 0;
+    rendered.push(escapeTelegramMarkdownV2(value.slice(offset, index)));
+    rendered.push(formatNotificationNetworkLine(match[0] ?? ""));
+    offset = index + (match[0]?.length ?? 0);
+  }
+  rendered.push(escapeTelegramMarkdownV2(value.slice(offset)));
+  return rendered.join("");
 }
 
 export function buildTelegramActivityNotificationMessage(input: {
@@ -154,6 +212,10 @@ export function buildTelegramActivityNotificationMessage(input: {
     normalizeAction(readString(data, "side"));
   const size = readNumber(data, "size");
   const price = readNumber(data, "price");
+  const venue = readString(data, "venue");
+  const network = readString(data, "network");
+  const amountLabel = readString(data, "amountLabel");
+  const amountUsd = readNumber(data, "amountUsd");
   const lines: string[] = [];
   let actionText: string | null = null;
 
@@ -196,11 +258,54 @@ export function buildTelegramActivityNotificationMessage(input: {
     return null;
   }
 
-  if (marketTitle) {
-    lines.push("", formatBold(marketTitle));
+  if (marketTitle || venue) {
+    lines.push("");
+    if (marketTitle) lines.push(formatBold(marketTitle));
+    if (venue) lines.push(formatTelegramVenueLabelMarkdownV2(venue));
   }
 
-  if (type === "position_resolved") {
+  if (type === "deposit_received") {
+    const details: string[] = [];
+    if (amountLabel) details.push(formatNotificationAssetLine(amountLabel));
+    if (network) details.push(formatNotificationNetworkLine(network));
+    if (details.length > 0) lines.push("", ...details);
+    else if (body) lines.push("", escapeTelegramMarkdownV2(body));
+  } else if (
+    type === "bridge_completed" ||
+    type === "bridge_refunded" ||
+    type === "bridge_failed"
+  ) {
+    if (body) lines.push("", formatNotificationKnownNetworksInText(body));
+  } else if (type === "redemption_completed") {
+    if (amountUsd != null && amountUsd >= 0) {
+      lines.push(
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(
+          `Payout: ${formatUsd(amountUsd)}`,
+        )}`,
+      );
+    } else if (body && !venue) {
+      lines.push(escapeTelegramMarkdownV2(body));
+    }
+  } else if (
+    type === "reward_claim_confirmed" ||
+    type === "reward_claim_failed"
+  ) {
+    if (body) {
+      lines.push(
+        "",
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatNotificationKnownNetworksInText(
+          body,
+        )}`,
+      );
+    } else if (amountUsd != null && amountUsd >= 0) {
+      lines.push(
+        "",
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(
+          formatUsd(amountUsd),
+        )}`,
+      );
+    }
+  } else if (type === "position_resolved") {
     const resolvedOutcome = normalizeSide(readString(data, "resolvedOutcome"));
     if (resolvedOutcome) {
       lines.push(
@@ -221,7 +326,7 @@ export function buildTelegramActivityNotificationMessage(input: {
     }
     if (details.length > 0) {
       lines.push(escapeTelegramMarkdownV2(details.join(" · ")));
-    } else if (body) {
+    } else if (body && !venue) {
       lines.push(escapeTelegramMarkdownV2(body));
     }
     if (type === "order_filled" && size && price && size > 0 && price > 0) {
@@ -244,6 +349,7 @@ export function buildTelegramActivityNotificationMessage(input: {
           marketId: input.market?.marketId ?? null,
           miniAppLinkBase: input.miniAppLinkBase,
           text: actionText,
+          venue,
         })
       : undefined,
     text: lines.join("\n"),
@@ -614,6 +720,7 @@ export async function enqueueTelegramPositionSignals(input: {
                 eventId: note.eventId,
                 kind: "position_signal",
                 marketId: note.marketId,
+                venue: note.marketVenue,
                 messageKind: note.revisionKind,
                 actionText:
                   note.revisionKind === "research_update"
@@ -835,6 +942,7 @@ function buildPositionSignalMessage(input: {
       marketId: readString(input.payload, "marketId"),
       miniAppLinkBase: input.miniAppLinkBase,
       text: actionText ?? "Open market",
+      venue: readString(input.payload, "venue"),
     }),
     replyToMessageId:
       replyToMessageId != null &&

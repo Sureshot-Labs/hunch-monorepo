@@ -12,6 +12,7 @@ import {
   resolveCanonicalPolymarketDepositAddress,
   type TelegramDepositResolverDependencies,
 } from "./services/telegram-bot-deposit.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const DEPOSIT_PREFIX =
   "0x363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc545af4";
@@ -142,7 +143,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(menu.text, /Polymarket.*Polygon/);
       assert.match(menu.text, /Limitless.*Base/);
+      assert.match(menu.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
       assert.match(JSON.stringify(menu.reply_markup), /deposit:limitless/);
+      const venueButtons = menu.reply_markup?.inline_keyboard.flat() ?? [];
+      assert.equal(
+        venueButtons.find((button) => button.text === "Polymarket")
+          ?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
+      assert.equal(
+        venueButtons.find((button) => button.text === "Limitless")
+          ?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.limitless.id,
+      );
       assert.doesNotMatch(menu.text, /Kalshi/);
 
       const limitless = await buildTelegramDepositMessage({
@@ -158,6 +171,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(limitless.venue, "limitless");
       assert.match(limitless.text, /Network: Base/);
       assert.match(limitless.text, /Asset: USDC/);
+      assert.match(limitless.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id));
+      assert.match(limitless.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
       const markup = JSON.stringify(limitless.reply_markup);
       assert.match(markup, /deposit_qr:limitless/);
       assert.match(markup, /venue=limitless/);
@@ -503,6 +518,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(renderCalls, 0);
       assert.equal(photoCalls, 1);
       assert.match(photoCaption, /Base/);
+      assert.match(
+        photoCaption,
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.limitless.id),
+      );
+      assert.match(photoCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id));
+      assert.match(photoCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
       assert.match(photoFilename, /limitless/);
     },
   },

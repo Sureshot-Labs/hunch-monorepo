@@ -1,3 +1,8 @@
+import {
+  stripTelegramCustomEmojiButtonIcons,
+  stripTelegramCustomEmojiMarkdownV2,
+} from "./telegram-custom-emoji.js";
+
 export type TelegramPhotoSendResult =
   | { messageId: number | null; ok: true }
   | {
@@ -16,28 +21,56 @@ export async function sendTelegramPhotoRequest(input: {
   photo: Uint8Array;
   replyMarkup?: unknown;
 }): Promise<TelegramPhotoSendResult> {
-  const form = new FormData();
-  form.set("chat_id", input.chatId);
-  form.set(
-    "photo",
-    new Blob([input.photo as BlobPart], { type: "image/png" }),
-    input.filename,
-  );
-  if (input.caption) form.set("caption", input.caption);
-  if (input.parseMode) form.set("parse_mode", input.parseMode);
-  if (input.replyMarkup) {
-    form.set("reply_markup", JSON.stringify(input.replyMarkup));
-  }
-  const response = await fetch(`${input.baseUrl}/sendPhoto`, {
-    body: form,
-    method: "POST",
+  const request = async (requestInput: {
+    caption?: string;
+    replyMarkup?: unknown;
+  }) => {
+    const form = new FormData();
+    form.set("chat_id", input.chatId);
+    form.set(
+      "photo",
+      new Blob([input.photo as BlobPart], { type: "image/png" }),
+      input.filename,
+    );
+    if (requestInput.caption) form.set("caption", requestInput.caption);
+    if (input.parseMode) form.set("parse_mode", input.parseMode);
+    if (requestInput.replyMarkup) {
+      form.set("reply_markup", JSON.stringify(requestInput.replyMarkup));
+    }
+    const response = await fetch(`${input.baseUrl}/sendPhoto`, {
+      body: form,
+      method: "POST",
+    });
+    const payload = (await response.json().catch(() => null)) as {
+      description?: string;
+      ok?: boolean;
+      parameters?: { retry_after?: number };
+      result?: { message_id?: number };
+    } | null;
+    return { payload, response };
+  };
+  const hasCustomEmoji =
+    (input.caption != null &&
+      stripTelegramCustomEmojiMarkdownV2(input.caption) !== input.caption) ||
+    JSON.stringify(input.replyMarkup ?? {}).includes('"icon_custom_emoji_id"');
+  let { payload, response } = await request({
+    caption: input.caption,
+    replyMarkup: input.replyMarkup,
   });
-  const payload = (await response.json().catch(() => null)) as {
-    description?: string;
-    ok?: boolean;
-    parameters?: { retry_after?: number };
-    result?: { message_id?: number };
-  } | null;
+  if (
+    response.status === 400 &&
+    /custom[ _-]?emoji|button_type_invalid/i.test(payload?.description ?? "") &&
+    hasCustomEmoji
+  ) {
+    ({ payload, response } = await request({
+      caption: input.caption
+        ? stripTelegramCustomEmojiMarkdownV2(input.caption)
+        : undefined,
+      replyMarkup: input.replyMarkup
+        ? stripTelegramCustomEmojiButtonIcons(input.replyMarkup)
+        : undefined,
+    }));
+  }
   if (response.ok && payload?.ok) {
     return {
       messageId:

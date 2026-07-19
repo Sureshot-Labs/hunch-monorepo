@@ -1,3 +1,9 @@
+import {
+  telegramCustomEmojiIdForVenue,
+  telegramCustomEmojiMarkdownV2ForVenue,
+} from "./telegram-custom-emoji.js";
+import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+
 function cleanTitle(value: string | null | undefined): string | null {
   const cleaned = value?.trim().replace(/\s+/g, " ");
   return cleaned ? cleaned : null;
@@ -13,6 +19,7 @@ export type TelegramMarketIdentity = {
 };
 
 const TELEGRAM_VENUE_LABELS: Readonly<Record<string, string>> = {
+  hyperliquid: "Hyperliquid",
   kalshi: "Kalshi",
   limitless: "Limitless",
   polymarket: "Polymarket",
@@ -23,6 +30,20 @@ export function formatTelegramVenueLabel(
 ): string {
   const normalized = venue?.trim().toLocaleLowerCase("en-US") ?? "";
   return TELEGRAM_VENUE_LABELS[normalized] ?? "Market";
+}
+
+export function formatTelegramVenueLabelMarkdownV2(
+  venue: string | null | undefined,
+): string {
+  const label = escapeTelegramMarkdownV2(formatTelegramVenueLabel(venue));
+  const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
+  return emoji ? `${emoji} ${label}` : label;
+}
+
+export function formatTelegramVenueButtonIcon(
+  venue: string | null | undefined,
+): string | undefined {
+  return telegramCustomEmojiIdForVenue(venue);
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   deliverTelegramNotificationOutbox,
   enqueueTelegramActivityNotifications,
 } from "./services/telegram-notification-delivery.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
   clearTelegramNotificationsPolicyCache,
   DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
@@ -369,7 +370,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         market,
         miniAppLinkBase: "https://t.me/hunch_bot/hunch",
         payload: {
-          data: { action: "SELL", outcomeSide: "YES", price: 0.4, size: 2 },
+          data: {
+            action: "SELL",
+            outcomeSide: "YES",
+            price: 0.4,
+            size: 2,
+            venue: "polymarket",
+          },
           title: "Order filled",
           type: "order_filled",
         },
@@ -377,6 +384,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(sell?.text ?? "", /SELL · YES/);
       assert.ok((sell?.text ?? "").includes("Estimated proceeds: $0\\.80"));
       assert.doesNotMatch(sell?.text ?? "", /cost/i);
+      assert.match(
+        sell?.text ?? "",
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
+      );
+      assert.equal(
+        sell?.keyboard?.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
 
       const legacy = buildTelegramActivityNotificationMessage({
         market,
@@ -396,7 +411,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         miniAppLinkBase: "https://t.me/hunch_bot/hunch",
         payload: {
           body: "Claim available",
-          data: { result: "won" },
+          data: { result: "won", venue: "kalshi" },
           title: "Position resolved",
           type: "position_resolved",
         },
@@ -405,16 +420,49 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         resolved?.keyboard?.inline_keyboard[0]?.[0]?.text,
         "View position",
       );
+      assert.equal(
+        resolved?.keyboard?.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.kalshi.id,
+      );
 
       const deposit = buildTelegramActivityNotificationMessage({
         market: null,
         miniAppLinkBase: "https://t.me/hunch_bot/hunch",
         payload: {
+          body: "250 USDC deposit received on Polygon",
+          data: { amountLabel: "250 USDC", network: "Polygon" },
           title: "Deposit received",
           type: "deposit_received",
         },
       });
       assert.equal(deposit?.keyboard, undefined);
+      assert.match(
+        deposit?.text ?? "",
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id),
+      );
+      assert.match(
+        deposit?.text ?? "",
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.polygon.id),
+      );
+
+      const reward = buildTelegramActivityNotificationMessage({
+        market: null,
+        miniAppLinkBase: null,
+        payload: {
+          body: "$12.00 on Base",
+          data: { amountUsd: 12, chainId: "eip155:8453" },
+          title: "Cashback paid out",
+          type: "reward_claim_confirmed",
+        },
+      });
+      assert.match(
+        reward?.text ?? "",
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id),
+      );
+      assert.match(
+        reward?.text ?? "",
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id),
+      );
     },
   },
   {

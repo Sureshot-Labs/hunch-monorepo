@@ -6,6 +6,11 @@ import {
   readSignalBotMarketSearchSession,
 } from "./telegram-bot-menu-markets.js";
 import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  telegramCustomEmojiMarkdownV2,
+  telegramCustomEmojiMarkdownV2ForNetwork,
+  telegramCustomEmojiMarkdownV2ForVenue,
+} from "./telegram-custom-emoji.js";
 
 export type SignalBotInteractiveMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
@@ -274,17 +279,18 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
     try {
       const qr = await generateTelegramDepositQr(depositMessage.qrText);
       const isLimitless = depositMessage.venue === "limitless";
+      const venue = isLimitless ? "limitless" : "polymarket";
+      const network = isLimitless ? "Base" : "Polygon";
+      const asset = isLimitless ? "USDC" : "pUSD or USDC.e";
       await input.sendPhoto({
         caption: [
-          `*${escapeTelegramMarkdownV2(
+          `${telegramCustomEmojiMarkdownV2ForVenue(venue)} *${escapeTelegramMarkdownV2(
             `Hunch ${isLimitless ? "Limitless" : "Polymarket"} deposit address`,
           )}*`,
           "",
           escapeTelegramMarkdownV2(depositMessage.qrText),
           "",
-          escapeTelegramMarkdownV2(
-            isLimitless ? "Base · USDC" : "Polygon · pUSD or USDC.e",
-          ),
+          `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${escapeTelegramMarkdownV2(network)} · ${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(asset)}`,
         ].join("\n"),
         chat_id: input.chatId,
         filename: `hunch-${isLimitless ? "limitless" : "polymarket"}-deposit.png`,

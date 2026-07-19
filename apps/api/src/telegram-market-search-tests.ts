@@ -6,6 +6,7 @@ import {
 } from "./services/telegram-bot-menu-actions.js";
 import {
   buildSignalBotMarketSearchScreen,
+  buildSignalBotMarketVenuePickerScreen,
   writeSignalBotMarketSearchSession,
 } from "./services/telegram-bot-menu-markets.js";
 import {
@@ -20,6 +21,7 @@ import {
   mapClusterMarketToTelegramSearchResult,
   resolveTelegramSearchSecondaryVenues,
 } from "./services/telegram-market-search.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 function redisStore() {
   const values = new Map<string, string>();
@@ -90,6 +92,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /3rd richest person on December 31/);
       assert.match(message.text, /Elon Musk/);
       assert.match(message.text, /Polymarket/);
+      assert.match(
+        message.text,
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
+      );
       assert.doesNotMatch(message.text, /polymarket ·/);
       assert.match(
         message.reply_markup.inline_keyboard[0]?.[0]?.text ?? "",
@@ -111,6 +117,27 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(
         sameTitleMessage.text.match(/Spain wins the World Cup/gi)?.length,
         1,
+      );
+
+      const picker = buildSignalBotMarketVenuePickerScreen({
+        callbackPrefix: "hm:v1:",
+        result: {
+          ...sampleResult,
+          venueOptions: [
+            sampleResult,
+            { ...sampleResult, marketId: "limitless-1", venue: "limitless" },
+          ],
+        },
+        resultIndex: 0,
+        sessionId: "123456789abc",
+      });
+      assert.equal(
+        picker.reply_markup.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
+      assert.equal(
+        picker.reply_markup.inline_keyboard[1]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.limitless.id,
       );
     },
   },

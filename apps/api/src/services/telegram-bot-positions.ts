@@ -8,6 +8,10 @@ import { fetchMarketsByTokenIds } from "../repos/unified-read.js";
 import { mapMarketsByTokenRows } from "./markets-by-token-response.js";
 import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
+import {
+  formatTelegramVenueButtonIcon,
+  formatTelegramVenueLabelMarkdownV2,
+} from "./telegram-market-identity.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
 import {
   canAppendTelegramBlock,
@@ -225,17 +229,13 @@ export function buildTelegramPositionDetail(
   const currentValue = mark != null ? position.size * mark : null;
   const pnl = cost != null && currentValue != null ? currentValue - cost : null;
   if (!marketEntry) {
-    const venue = position.venue.trim().toLowerCase();
-    const venueLabel = venue
-      ? `${venue[0]?.toUpperCase()}${venue.slice(1)}`
-      : "Market";
     return {
       averagePrice,
       currentValueUsd: null,
       eventId: null,
       marketId: null,
       marketOrderable: false,
-      marketTitle: `${venueLabel} position`,
+      marketTitle: "Position",
       markPrice: null,
       pnlPercent: null,
       pnlUsd: null,
@@ -300,7 +300,7 @@ function renderPosition(detail: TelegramPositionDetail): string {
             ? "Resolved"
             : "Waiting for settlement";
   return [
-    `*${escapeTelegramMarkdownV2(
+    `${formatTelegramVenueLabelMarkdownV2(detail.position.venue)} *${escapeTelegramMarkdownV2(
       `${compactTelegramText(detail.marketTitle, 120)} · ${detail.side ?? "POSITION"}`,
     )}*`,
     escapeTelegramMarkdownV2(holding),
@@ -605,6 +605,9 @@ export function buildTelegramPositionsSnapshotMessage(input: {
           .map((position) => [
             {
               callback_data: `hm:v1:pos:${position.position.id}`,
+              icon_custom_emoji_id: formatTelegramVenueButtonIcon(
+                position.position.venue,
+              ),
               text: compactTelegramText(
                 `${position.marketTitle} · ${position.side ?? "Position"}${
                   position.pnlUsd != null

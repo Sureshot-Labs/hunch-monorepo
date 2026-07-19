@@ -1,11 +1,12 @@
 import { buildTelegramTradeProgressMessage } from "./telegram-bot-trading-presentation.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 
-export type TelegramBotTradingClientButton =
+export type TelegramBotTradingClientButton = (
   | { text: string; callback_data: string }
   | { text: string; copy_text: { text: string } }
   | { text: string; web_app: { url: string } }
-  | { text: string; url: string };
+  | { text: string; url: string }
+) & { icon_custom_emoji_id?: string };
 
 export type TelegramBotTradingClientReplyMarkup = {
   inline_keyboard: TelegramBotTradingClientButton[][];

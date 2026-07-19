@@ -8,6 +8,12 @@ import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import { recordTelegramDepositResolutionAnalytics } from "./telegram-lifecycle-analytics.js";
+import {
+  telegramCustomEmojiIdForVenue,
+  telegramCustomEmojiMarkdownV2,
+  telegramCustomEmojiMarkdownV2ForNetwork,
+  telegramCustomEmojiMarkdownV2ForVenue,
+} from "./telegram-custom-emoji.js";
 
 const fundingRouter = new Interface([
   "function depositWalletOf(address owner) view returns (address)",
@@ -320,6 +326,44 @@ function buildDepositAppUrl(input: {
   return url.toString();
 }
 
+function depositVenueLabel(venue: TelegramDepositVenue): string {
+  return venue === "polymarket" ? "Polymarket" : "Limitless";
+}
+
+function depositNetwork(venue: TelegramDepositVenue): "Base" | "Polygon" {
+  return venue === "polymarket" ? "Polygon" : "Base";
+}
+
+function depositAssetLabel(venue: TelegramDepositVenue): string {
+  return venue === "polymarket" ? "pUSD / USDC.e" : "USDC";
+}
+
+function buildDepositTitleMarkdownV2(venue?: TelegramDepositVenue): string {
+  const emoji = venue
+    ? telegramCustomEmojiMarkdownV2ForVenue(venue)
+    : telegramCustomEmojiMarkdownV2("usdc");
+  const label = venue ? `${depositVenueLabel(venue)} Deposit` : "Deposit";
+  return `${emoji ?? telegramCustomEmojiMarkdownV2("usdc")} *${escapeTelegramMarkdownV2(label)}*`;
+}
+
+function buildDepositVenueSummaryMarkdownV2(
+  venue: TelegramDepositVenue,
+): string {
+  const network = depositNetwork(venue);
+  return [
+    telegramCustomEmojiMarkdownV2ForVenue(venue),
+    escapeTelegramMarkdownV2(depositVenueLabel(venue)),
+    "·",
+    telegramCustomEmojiMarkdownV2ForNetwork(network),
+    escapeTelegramMarkdownV2(network),
+    "·",
+    telegramCustomEmojiMarkdownV2("usdc"),
+    escapeTelegramMarkdownV2(depositAssetLabel(venue)),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ");
+}
+
 export function buildTelegramDepositAddressPresentation(input: {
   address: string;
   copyButtonText?: string;
@@ -329,8 +373,17 @@ export function buildTelegramDepositAddressPresentation(input: {
     TelegramDepositMessage["reply_markup"]
   >["inline_keyboard"];
   lines: string[];
+  markdownV2Lines: string[];
 } {
   const isPolymarket = input.venue === "polymarket";
+  const network = depositNetwork(input.venue);
+  const assetLabel = isPolymarket ? "pUSD or USDC.e" : "USDC";
+  const lines = [
+    `Network: ${network}`,
+    `${isPolymarket ? "Assets" : "Asset"}: ${assetLabel}`,
+    `Address: ${input.address}`,
+    `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
+  ];
   return {
     buttonRows: [
       [
@@ -346,11 +399,12 @@ export function buildTelegramDepositAddressPresentation(input: {
         },
       ],
     ],
-    lines: [
-      `Network: ${isPolymarket ? "Polygon" : "Base"}`,
-      `${isPolymarket ? "Assets" : "Asset"}: ${isPolymarket ? "pUSD or USDC.e" : "USDC"}`,
-      `Address: ${input.address}`,
-      `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
+    lines,
+    markdownV2Lines: [
+      `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${escapeTelegramMarkdownV2(lines[0] ?? "")}`,
+      `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(lines[1] ?? "")}`,
+      escapeTelegramMarkdownV2(lines[2] ?? ""),
+      `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(lines[3] ?? "")}`,
     ],
   };
 }
@@ -382,20 +436,21 @@ function buildDepositVenueMenu(
       inline_keyboard: venues.map((venue) => [
         {
           callback_data: `hm:v1:deposit:${venue}`,
-          text: venue === "polymarket" ? "Polymarket" : "Limitless",
+          icon_custom_emoji_id: telegramCustomEmojiIdForVenue(venue),
+          text: depositVenueLabel(venue),
         },
       ]),
     },
     text: [
-      "*💳 Deposit*",
+      buildDepositTitleMarkdownV2(),
       "",
       escapeTelegramMarkdownV2("Choose a trading venue."),
       "",
       ...(venues.includes("polymarket")
-        ? [escapeTelegramMarkdownV2("Polymarket · Polygon · pUSD / USDC.e")]
+        ? [buildDepositVenueSummaryMarkdownV2("polymarket")]
         : []),
       ...(venues.includes("limitless")
-        ? [escapeTelegramMarkdownV2("Limitless · Base · USDC")]
+        ? [buildDepositVenueSummaryMarkdownV2("limitless")]
         : []),
       ...(venues.length === 0
         ? [
@@ -449,7 +504,7 @@ function buildDepositUnavailableMessage(input: {
       ],
     },
     text: [
-      "*💳 Deposit*",
+      buildDepositTitleMarkdownV2(input.venue),
       "",
       escapeTelegramMarkdownV2(text),
       ...(!openButton
@@ -490,7 +545,7 @@ export async function buildTelegramDepositMessage(input: {
         ],
       },
       text: [
-        "*💳 Deposit*",
+        buildDepositTitleMarkdownV2(),
         "",
         escapeTelegramMarkdownV2(
           "Deposits for this venue are not available right now.",
@@ -527,7 +582,6 @@ export async function buildTelegramDepositMessage(input: {
     });
   }
   const address = resolution.address;
-  const isPolymarket = venue === "polymarket";
   const presentation = buildTelegramDepositAddressPresentation({
     address,
     venue,
@@ -554,9 +608,9 @@ export async function buildTelegramDepositMessage(input: {
       ],
     },
     text: [
-      `*💳 ${isPolymarket ? "Polymarket" : "Limitless"} Deposit*`,
+      buildDepositTitleMarkdownV2(venue),
       "",
-      ...presentation.lines.map((line) => escapeTelegramMarkdownV2(line)),
+      ...presentation.markdownV2Lines,
       ...(!openButton
         ? ["", escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
         : []),

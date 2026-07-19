@@ -16,6 +16,7 @@ import {
   buildHunchMiniAppDeepLinkButton,
   buildHunchMiniAppWebButton,
 } from "./services/telegram-mini-app-buttons.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 type TestCase = {
   name: string;
@@ -233,6 +234,10 @@ const tests: TestCase[] = [
       });
       assert.ok(privateButton && "web_app" in privateButton);
       assert.equal(privateButton && "url" in privateButton, false);
+      assert.equal(
+        privateButton?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
 
       const publicButton = buildHunchMiniAppDeepLinkButton({
         miniAppLinkBase: "https://t.me/hunch_bot/hunch",
@@ -240,6 +245,10 @@ const tests: TestCase[] = [
         text: "Open market",
       });
       assert.ok(publicButton && "url" in publicButton);
+      assert.equal(
+        publicButton?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
       assert.match(
         publicButton && "url" in publicButton ? publicButton.url : "",
         /^https:\/\/t\.me\//,

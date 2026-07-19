@@ -6,7 +6,9 @@ import {
 } from "./telegram-bot-text-budget.js";
 import {
   buildTelegramMarketIdentity,
+  formatTelegramVenueButtonIcon,
   formatTelegramVenueLabel,
+  formatTelegramVenueLabelMarkdownV2,
 } from "./telegram-market-identity.js";
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
@@ -41,7 +43,13 @@ export type SignalBotMarketSearchSession = {
 
 export type SignalBotMarketSearchMessage = {
   reply_markup: {
-    inline_keyboard: Array<Array<{ callback_data: string; text: string }>>;
+    inline_keyboard: Array<
+      Array<{
+        callback_data: string;
+        icon_custom_emoji_id?: string;
+        text: string;
+      }>
+    >;
   };
   text: string;
 };
@@ -142,12 +150,12 @@ export function buildSignalBotMarketSearchScreen(input: {
         marketTitle: result.marketTitle,
       });
       const options = venueOptions(result);
-      const venueLine =
+      const venueLineMarkdownV2 =
         options.length > 1
-          ? `${options.length} venues · ${options
-              .map((option) => formatTelegramVenueLabel(option.venue))
+          ? `${escapeTelegramMarkdownV2(`${options.length} venues ·`)} ${options
+              .map((option) => formatTelegramVenueLabelMarkdownV2(option.venue))
               .join(", ")}`
-          : `${formatTelegramVenueLabel(result.venue)} · YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`;
+          : `${formatTelegramVenueLabelMarkdownV2(result.venue)} ${escapeTelegramMarkdownV2(`· YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`)}`;
       const block = [
         bold(`${index + 1}. ${compactTelegramText(identity.lines[0], 160)}`),
         ...(identity.lines[1]
@@ -157,7 +165,7 @@ export function buildSignalBotMarketSearchScreen(input: {
               ),
             ]
           : []),
-        escapeTelegramMarkdownV2(compactTelegramText(venueLine, 180)),
+        venueLineMarkdownV2,
         "",
       ].join("\n");
       if (
@@ -231,6 +239,7 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
         ...options.map((option, optionIndex) => [
           {
             callback_data: `${input.callbackPrefix}search_venue:${input.sessionId}:${input.resultIndex}:${optionIndex}`,
+            icon_custom_emoji_id: formatTelegramVenueButtonIcon(option.venue),
             text: compactTelegramText(
               `${formatTelegramVenueLabel(option.venue)} · YES ${price(option.yesAsk)}`,
               TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
@@ -264,10 +273,9 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
       escapeTelegramMarkdownV2(
         `This market is available on ${options.length} venues. Choose where to trade.`,
       ),
-      ...options.map((option) =>
-        escapeTelegramMarkdownV2(
-          `${formatTelegramVenueLabel(option.venue)} · YES ${price(option.yesAsk)} · NO ${price(option.noAsk)}`,
-        ),
+      ...options.map(
+        (option) =>
+          `${formatTelegramVenueLabelMarkdownV2(option.venue)} ${escapeTelegramMarkdownV2(`· YES ${price(option.yesAsk)} · NO ${price(option.noAsk)}`)}`,
       ),
     ].join("\n"),
   };

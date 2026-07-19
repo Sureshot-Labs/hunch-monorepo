@@ -123,6 +123,7 @@ import {
   renderXSignalDelivery,
   type SignalDeliveryView,
 } from "./services/signal-delivery.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const TEST_TELEGRAM_MINI_APP_LINK_BASE = "https://t.me/hunch_signal_bot/hunch";
 
@@ -1693,6 +1694,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const regularButtons = regular.keyboard.inline_keyboard.flat();
       const regularLabels = regularButtons.map((button) => button.text);
       assert.match(regular.text, /Hunch/);
+      assert.match(regular.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.hunch.id));
       assert.doesNotMatch(regular.text, /\/(?:menu|market|trade|help)/);
       assert.equal(
         regularButtons.some((button) => button.text === "🔎 Markets"),
@@ -1706,11 +1708,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "🔎 Markets",
         "💼 My positions",
         "👤 My trading",
-        "💳 Deposit",
+        "Deposit",
         "🔔 Notifications",
         "⚙️ Settings",
         "❓ Help",
       ]);
+      assert.equal(
+        regularButtons.find((button) => button.text === "Deposit")
+          ?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.usdc.id,
+      );
       assert.equal(
         regularButtons.some((button) => button.text === "📊 Performance"),
         false,
@@ -2016,6 +2023,62 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "Telegram client retries 400 responses without custom emoji",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const bodies: Array<Record<string, unknown>> = [];
+      try {
+        const responses = [
+          new Response(
+            JSON.stringify({
+              description: "Bad Request: custom emoji is not allowed",
+              ok: false,
+            }),
+            { status: 400 },
+          ),
+          new Response(
+            JSON.stringify({ ok: true, result: { message_id: 457 } }),
+            { status: 200 },
+          ),
+        ];
+        globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+          bodies.push(
+            JSON.parse(String(args[1]?.body ?? "{}")) as Record<
+              string,
+              unknown
+            >,
+          );
+          return responses.shift() ?? new Response("{}", { status: 500 });
+        }) as typeof fetch;
+
+        const client = new TelegramBotApiClient("token");
+        const sent = await client.sendMessage({
+          chat_id: "-100",
+          disable_web_page_preview: true,
+          parse_mode: "MarkdownV2",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+                  text: "Open market",
+                  url: "https://t.me/hunch_bot/hunch",
+                },
+              ],
+            ],
+          },
+          text: `![🔵](tg://emoji?id=${TELEGRAM_CUSTOM_EMOJI.polymarket.id}) Polymarket`,
+        });
+        assert.deepEqual(sent, { messageId: 457, ok: true });
+        assert.equal(bodies.length, 2);
+        assert.equal(bodies[1]?.text, "🔵 Polymarket");
+        assert.doesNotMatch(JSON.stringify(bodies[1]), /icon_custom_emoji_id/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
     name: "Telegram activity notifications render market context and Mini App action",
     run: () => {
       const order = buildTelegramActivityNotificationMessage({
@@ -2084,7 +2147,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.ok(deposit);
       assert.match(deposit.text, /Deposit received/);
-      assert.match(deposit.text, /250 USDC deposit received on Polygon/);
+      assert.match(deposit.text, /250 USDC/);
+      assert.match(deposit.text, /Polygon/);
+      assert.match(deposit.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
+      assert.match(deposit.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.polygon.id));
       assert.equal(deposit.keyboard, undefined);
 
       const bridge = buildTelegramActivityNotificationMessage({
@@ -2099,7 +2165,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.ok(bridge);
       assert.match(bridge.text, /Bridge refunded/);
-      assert.match(bridge.text, /Base → Polygon/);
+      assert.match(bridge.text, /Base/);
+      assert.match(bridge.text, /Polygon/);
+      assert.match(bridge.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id));
+      assert.match(bridge.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.polygon.id));
 
       const reward = buildTelegramActivityNotificationMessage({
         market: null,
@@ -2113,7 +2182,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.ok(reward);
       assert.match(reward.text, /Cashback paid out/);
-      assert.match(reward.text, /\$12\\\.00 on Base/);
+      assert.match(reward.text, /\$12\\\.00 on/);
+      assert.match(reward.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
+      assert.match(reward.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id));
     },
   },
   {
@@ -5078,7 +5149,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /Existing trade is still resolving/,
+        /Trade is still resolving/,
+      );
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
       );
     },
   },
@@ -9543,7 +9618,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy YES · Poly 32¢");
       assert.equal(
         decodeStartAppPayload(readStartAppParam(rows[0]?.[0]?.url)),
         "p:event-1|market-1|Y|10",
@@ -9888,13 +9963,47 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note(),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
-      assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi YES 29¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy YES · Poly 32¢");
+      assert.equal(
+        rows[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      );
+      assert.equal(rows[1]?.[0]?.text, "Cheaper: Kalshi YES 29¢");
+      assert.equal(
+        rows[1]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.kalshi.id,
+      );
       assert.equal(
         decodeStartAppPayload(readStartAppParam(rows[1]?.[0]?.url)),
         "k:event-1|market-1|Y|10",
       );
       assert.equal(rows.length, 2);
+    },
+  },
+  {
+    name: "channel signal buttons omit custom emoji fields",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "channel",
+        cheaperAlternative: {
+          eventId: "kalshi:event-1",
+          marketId: "kalshi:market-1",
+          price: 0.29,
+          side: "YES",
+          venue: "kalshi",
+        },
+        note: note(),
+      });
+      const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
+      assert.ok(buttons.length > 0);
+      assert.equal(buttons[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(buttons[1]?.text, "💸 Cheaper: Kalshi YES 29¢");
+      assert.equal(
+        buttons.some((button) => button.icon_custom_emoji_id != null),
+        false,
+      );
     },
   },
   {
@@ -9914,7 +10023,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows.length, 1);
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy YES · Poly 32¢");
     },
   },
   {
@@ -9929,7 +10038,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy YES · Poly 32¢");
       assert.equal(rows.length, 1);
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
     },
@@ -9951,10 +10060,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(
-        rows[0]?.[0]?.text,
-        "⚪ Buy Under 2.5 total goals · Poly 70¢",
-      );
+      assert.equal(rows[0]?.[0]?.text, "Buy Under 2.5 total goals · Poly 70¢");
       assert.equal(rows.length, 1);
       assert.doesNotMatch(message.text, /This wins if/);
       assert.doesNotMatch(message.text, /Over 2\\.5 total goals 31¢/);
@@ -9975,7 +10081,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy NO · Poly 70¢");
       assert.equal(rows.length, 1);
       assert.doesNotMatch(rows[0]?.[0]?.text ?? "", /NO France/);
       assert.doesNotMatch(rows[0]?.[0]?.text ?? "", /not to win/);
@@ -9990,7 +10096,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         note: note({ direction: "down" }),
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy NO · Poly 70¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy NO · Poly 70¢");
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
     },
   },
@@ -10122,8 +10228,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy Beta Team · Poly 70¢");
-      assert.equal(rows[1]?.[0]?.text, "💸 Cheaper: Kalshi Beta Team 48¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy Beta Team · Poly 70¢");
+      assert.equal(rows[1]?.[0]?.text, "Cheaper: Kalshi Beta Team 48¢");
       assert.equal(rows.length, 2);
     },
   },
@@ -10141,7 +10247,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.doesNotMatch(message.text, /VLA 31¢ \/ VLB 69¢/);
-      assert.equal(rows[0]?.[0]?.text, "⚪ Buy VLB · Poly 70¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy VLB · Poly 70¢");
       assert.equal(rows.length, 1);
     },
   },
@@ -10614,7 +10720,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(
         message.keyboard?.inline_keyboard[0]?.[0]?.text,
-        "🟠 Buy YES · Poly 32¢",
+        "Buy YES · Poly 32¢",
       );
       assert.doesNotMatch(
         message.text,
@@ -10638,7 +10744,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows.length, 1);
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy YES · Poly 32¢");
     },
   },
   {
@@ -10834,7 +10940,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.equal(rows.length, 1);
-      assert.equal(rows[0]?.[0]?.text, "🟠 Buy YES · Poly 32¢");
+      assert.equal(rows[0]?.[0]?.text, "Buy YES · Poly 32¢");
     },
   },
   {
@@ -11168,7 +11274,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
-        "🟠 Buy YES · Poly 32¢",
+        "Buy YES · Poly 32¢",
       );
     },
   },
