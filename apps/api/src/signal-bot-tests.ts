@@ -2376,7 +2376,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
-        /^\*💰 \$12\\\.3K backs YES on /,
+        /^💰 \*\$12\\\.3K backs YES on /,
       );
       assert.doesNotMatch(
         String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
@@ -9556,14 +9556,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .join(" "),
         /Wallet|Open market/,
       );
-      assert.match(message.text, /^\*💰 \$12\\\.3K backs YES on /);
-      assert.match(message.text.split("\n")[0] ?? "", /at 31¢\*$/);
+      assert.match(message.text, /^💰 \*\$12\\\.3K backs YES on /);
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /One tracked wallet holds this position at 31¢/,
+      );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /📍/);
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.doesNotMatch(message.text, /🎯 82%/);
       assert.doesNotMatch(message.text, /this wallet is still holding/i);
-      assert.match(message.text, />\*Wallet edge\*\n>/);
+      assert.match(message.text, />\*Why it matters\*\n>/);
       assert.doesNotMatch(
         message.text,
         /Why this wallet matters|Why this cluster matters/,
@@ -9642,16 +9645,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*💰 \$23\\\.3K backs Spain over Argentina at 59¢\*$/,
+        /^💰 \*\$23\\\.3K on Spain over Argentina\\\.\* One tracked wallet holds this position at 59¢\\\.$/,
       );
       assert.doesNotMatch(
         message.text,
         /trades near 59|holding the Spain side/i,
       );
       assert.doesNotMatch(message.text, /worth a look/i);
-      assert.match(message.text, /\n\u2800\n>\*Wallet edge\*\n>\u2800\n/);
+      assert.match(message.text, /\n\u2800\n>\*Why it matters\*\n>\u2800\n/);
       assert.match(message.text, /▸ PnL.*1\\\.4M.*30d/);
-      assert.match(message.text, /▸ Volume.*3\\\.2M.*30d/);
+      assert.match(message.text, /▸ Traded.*3\\\.2M.*30d/);
     },
   },
   {
@@ -9666,6 +9669,97 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 0);
       assert.doesNotMatch(message.text, /https:\/\/app\.hunch\.trade/);
       assert.match(message.text, /Mini App temporarily unavailable/);
+    },
+  },
+  {
+    name: "verified wallet profit leads the hook without repeating in proof",
+    run: () => {
+      const asOf = "2026-01-01T00:00:00.000Z";
+      const source = {
+        kind: "hunch_wallet_intel",
+        label: "Representative wallet",
+        url: null,
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          eventTitle: "Spain vs Argentina",
+          holderPositionUsd: 20_500,
+          marketTitle: "Spain",
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf,
+                context: { stakeUsd: 100_000, zScore: 3 },
+                horizonDays: 30,
+                id: "pricing",
+                kind: "pricing_edge",
+                measurement: {
+                  kind: "scalar",
+                  unit: "probability",
+                  value: 0.184,
+                },
+                quality: "verified",
+                sampleSize: 24,
+                scope: "representative_wallet",
+                source,
+              },
+              {
+                asOf,
+                context: null,
+                horizonDays: 30,
+                id: "pnl",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 542_000,
+                },
+                quality: "verified",
+                sampleSize: 41,
+                scope: "representative_wallet",
+                source,
+              },
+              {
+                asOf,
+                context: null,
+                horizonDays: 30,
+                id: "volume",
+                kind: "volume",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 2_900_000,
+                },
+                quality: "verified",
+                sampleSize: 41,
+                scope: "representative_wallet",
+                source,
+              },
+            ],
+          },
+          outcomes: ["Spain", "Argentina"],
+          telegramMarketIdentityV1: {
+            ...testSignalIdentity("YES"),
+            eventTitle: "Spain vs Argentina",
+            marketGroupItemTitle: "Spain",
+            marketQuestion: "Spain",
+            predicate: "Spain wins against Argentina",
+            selectedSideLabel: "Spain",
+            subject: "Spain vs Argentina",
+          },
+        }),
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^👀 \*\\\+\$542K in 30 days\\\.\* That wallet now holds \$20\\\.5K on Spain over Argentina\\\.$/,
+      );
+      assert.doesNotMatch(message.text, /▸ PnL/);
+      assert.match(message.text, /▸ Ahead of market.*18\\\.4 pts/);
+      assert.match(message.text, /▸ Traded.*2\\\.9M/);
     },
   },
   {
@@ -9687,7 +9781,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           title: "athelstan still has not sold Morocco",
         }),
       });
-      assert.match(message.text.split("\n")[0] ?? "", /Morocco at 3¢\*$/);
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /Morocco.*holds this position at 3¢/,
+      );
       assert.match(message.text, /▸ PnL.*1.*3M.*30d/);
       assert.doesNotMatch(message.text, /Still holding while the market/);
       assert.doesNotMatch(message.text, /Beat resolved prices/);
@@ -10021,7 +10118,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const rows = message.keyboard?.inline_keyboard ?? [];
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*💰 \$12\\\.3K backs Beta Team over Alpha Team in Game 1 at 69¢\*$/,
+        /^💰 \*\$12\\\.3K on Beta Team over Alpha Team in Game 1\\\.\* One tracked wallet holds this position at 69¢\\\.$/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(message.text, /Alpha Team 31¢ \/ Beta Team 69¢/);
@@ -10066,7 +10163,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
 
       assert.doesNotMatch(message.text, /📰|Public previews|https?:/);
-      assert.match(message.text, />\*Wallet edge\*/);
+      assert.match(message.text, />\*Why it matters\*/);
     },
   },
   {
@@ -10172,11 +10269,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*📈 NO on BTC hitting \$70K in July rises 8¢ to 83¢\*$/,
+        /^📈 \*\\\+8¢ to 83¢\\\.\* NO on BTC hitting \$70K in July moved with the call\\\.$/,
       );
       assert.ok(
         message.text.includes(
-          "*Wallet now*: $7\\.5K on NO at 83¢ · Est\\. open PnL \\+$829",
+          "*Position now*: $7\\.5K on NO at 83¢ · Est\\. open PnL \\+$829",
         ),
       );
       assert.equal(message.publishable, true);
@@ -10283,7 +10380,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           revisionKind: "research_update",
         }),
       });
-      assert.match(message.text.split("\n")[0] ?? "", /^\*💰 \$8K added to/);
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^💰 \*\\\+\$8K added\\\.\*/,
+      );
       assert.equal(
         message.keyboard?.inline_keyboard[0]?.[0]?.text,
         "🟠 Buy YES · Poly 32¢",
@@ -10334,15 +10434,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 1);
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^\*🎯 2 strong wallets back YES on .* at 31¢\*$/,
+        /^🔥 \*\$45K backs YES on .*\* 2 tracked wallets are on the same side at 31¢\\\.$/,
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
-      assert.match(message.text, />\*The edge\*\n>/);
+      assert.match(message.text, />\*Why it matters\*\n>/);
       assert.doesNotMatch(message.text, /remain aligned behind/);
       assert.doesNotMatch(message.text, /\$12\\.3K still on/);
       assert.doesNotMatch(message.text, /Why this cluster matters:/);
       assert.match(message.text, /▸ PnL.*14K.*30d/);
-      assert.match(message.text, /▸ Conviction.*2 strong wallets/);
+      assert.match(message.text, /▸ Wallets.*2 on the same side/);
     },
   },
   {
@@ -10377,7 +10477,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(
         message.text,
-        /^\*💰 \$12\\\.3K backs YES on Same market title at 31¢\*/,
+        /^💰 \*\$12\\\.3K backs YES on Same market title\\\.\* One tracked wallet holds this position at 31¢/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(
@@ -11461,14 +11561,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v6");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v7");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.templateKey,
-        "research_price_move_v5",
+        "research_price_move_v7",
       );
       assert.equal(
         metrics.copy?.notification?.headline?.subjectVersion,
@@ -11674,7 +11774,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^\*📈 YES on .* jumps 15¢ to 55¢\*/,
+        /^📈 \*\\\+15¢ to 55¢\\\.\* YES on .* moved with the call/,
       );
       assert.match(telegram.messages[0]?.text ?? "", />Wallets {2}\*2\* added/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
@@ -11785,6 +11885,197 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         decodeStartAppPayload(readWebAppStartParam(keyboard?.[0]?.[0])),
         "p:event-1|market-1|Y|00000000-0000-4000-8000-000000000099",
       );
+    },
+  },
+  {
+    name: "flat mixed followthrough keeps canonical subject and omits zero metrics",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 1_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          best_ask: "0.61",
+          best_bid: "0.59",
+          event_title: "Spain vs Argentina",
+          market_title: "Team to Advance",
+          metrics: {
+            market: { yesProbability: 0.59 },
+            signalSnapshot: {
+              quote: { buyPrice: 0.59 },
+              side: "YES",
+            },
+          },
+          root_metrics: {
+            copy: {
+              marketIdentity: {
+                ...testSignalIdentity("YES"),
+                eventTitle: "Spain vs Argentina",
+                marketGroupItemTitle: "Team to Advance",
+                marketQuestion: "Team to Advance",
+                predicate: "Spain advances",
+                selectedSideLabel: "Spain",
+                subject: "Spain vs Argentina",
+              },
+            },
+          },
+        }),
+      ];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "0",
+          latest_shares: "500000",
+          latest_size_usd: "300000",
+          net_shares: "500000",
+          net_usd: "300000",
+          positive_usd: "300000",
+          wallet_id: "joined",
+        }),
+        followthroughFlowRow({
+          baseline_shares: "100000",
+          latest_shares: "50000",
+          latest_size_usd: "29500",
+          negative_usd: "10000",
+          net_shares: "-50000",
+          net_usd: "-10000",
+          positive_usd: "0",
+          wallet_id: "trimmed",
+        }),
+        followthroughFlowRow({
+          baseline_shares: "10000",
+          latest_shares: "0",
+          latest_size_usd: "0",
+          negative_usd: "7000",
+          net_shares: "-10000",
+          net_usd: "-7000",
+          positive_usd: "0",
+          wallet_id: "exited",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(
+        text,
+        /^⚠️ \*\\\+\$283K in\\\. 2 wallets cut exposure\\\.\* Wallet support for Spain over Argentina is still split/,
+      );
+      assert.match(text, />Spain price {2}\*59¢\* unchanged/);
+      assert.match(
+        text,
+        /Net tracked dollars rose, but 2 wallets cut exposure; \[Spain at 59¢\]/,
+      );
+      assert.doesNotMatch(
+        text,
+        /Team to Advance|\\\+0¢|Est\\\. open PnL {2}\*\$0\*/,
+      );
+    },
+  },
+  {
+    name: "adverse followthrough links the market occurrence without clipping prose",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 1_000,
+        signalBotFollowthroughMinPriceMoveCents: 1,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          best_ask: "0.21",
+          best_bid: "0.19",
+          event_title: "Spain vs Argentina",
+          market_title: "Spain (-1.5)",
+          metrics: {
+            market: { yesProbability: 0.21 },
+            signalSnapshot: {
+              quote: { buyPrice: 0.21 },
+              side: "YES",
+            },
+          },
+          root_metrics: {
+            copy: {
+              marketIdentity: {
+                ...testSignalIdentity("YES"),
+                eventTitle: "Spain vs Argentina",
+                marketGroupItemTitle: "Spain (-1.5)",
+                marketQuestion: "Spain (-1.5)",
+                predicate: "Spain wins by 2 or more",
+                selectedSideLabel: "Spain",
+                subject: "Spain vs Argentina",
+              },
+            },
+          },
+        }),
+      ];
+      db.flowRows = [
+        followthroughFlowRow({
+          baseline_shares: "0",
+          latest_shares: "150000",
+          latest_size_usd: "30000",
+          net_shares: "150000",
+          net_usd: "30000",
+          positive_usd: "30000",
+          wallet_id: "joined",
+        }),
+        followthroughFlowRow({
+          baseline_shares: "50000",
+          latest_shares: "0",
+          latest_size_usd: "0",
+          negative_usd: "10200",
+          net_shares: "-50000",
+          net_usd: "-10200",
+          positive_usd: "0",
+          wallet_id: "exited",
+        }),
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(text, /^📉 \*\\\+\$19\\\.8K bought\\\. −2¢ anyway\\\.\*/);
+      assert.ok(text.includes(">Spain \\(\\-1\\.5\\) price"));
+      assert.ok(
+        text.includes(
+          "Positive tracked flow has not offset 1 exit; [Spain \\(\\-1\\.5\\) at 19¢]",
+        ),
+      );
+      assert.doesNotMatch(text, /19¢cked|at 19¢cked/);
     },
   },
   {
@@ -11928,7 +12219,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /^\*📈 Under 2\\\.5 total goals in Portugal vs Spain edges up 3¢ to 43¢\*/,
+        /^📈 \*\\\+3¢ to 43¢\\\.\* Under 2\\\.5 total goals in Portugal vs Spain moved with the call/,
       );
       assert.doesNotMatch(text, /📍/);
       assert.match(text, />\*Since the call\*/);
@@ -12164,7 +12455,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^\*📈 YES on .* jumps 15¢ to 55¢\*/,
+        /^📈 \*\\\+15¢ to 55¢\\\.\* YES on .* moved with the call/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
@@ -12214,7 +12505,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /^\*⚠️ 1 wallet exits YES on /);
+      assert.match(text, /^⚠️ \*1 exit\\\. \$3K sold\\\.\*/);
       assert.match(text, />Wallets {2}\*1\* exited/);
       assert.match(text, /tracked wallets are exiting/);
       assert.match(text, /\*Read\*:/);
@@ -12399,7 +12690,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedLoss, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /^\*🏁 YES on .* loses\*/);
+      assert.match(telegram.messages[0]?.text ?? "", /^🏁 \*YES on .* lost/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Result\*/);
       assert.doesNotMatch(
         telegram.messages[0]?.text ?? "",
@@ -12449,7 +12740,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(result.sentResolvedWin, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /^\*🏁 YES on .* wins\*/);
+      assert.match(telegram.messages[0]?.text ?? "", /^🏁 \*YES on .* won/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Result\*/);
       assert.doesNotMatch(
         telegram.messages[0]?.text ?? "",

@@ -1,34 +1,36 @@
-# Backend Task: Roll Out Signal Post V6
+# Backend Task: Roll Out Signal Post V7
 
-Status: V6 renderer and producer/delivery contracts implemented locally; live device QA remains
+Status: V7 renderer and producer/delivery contracts implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
-The filename is retained so existing handoff links do not break. V6 supersedes
-the V5 grammar documented in earlier revisions.
+The filename is retained so existing handoff links do not break. V7 supersedes
+the V6 grammar documented in earlier revisions.
 
 ## Goal
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V6 renderer is the baseline. This task is not a request
+The locally implemented V7 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v6`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v7`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
-- notification-first headlines with money, momentum, confluence,
-  participation, cooling/divergence, research, and resolution stories;
-- `💰` for material capital, `📈`/`📉` for price, `🎯` for strong-wallet
-  alignment, `👀` for early evidence, `⚠️` for deterioration, and `🔥` only
-  when strong price and capital evidence agree without contrary breadth;
+- a typed two-part first line: `emoji + bold numeric hook + regular market
+explanation`; the LLM does not control emoji, Markdown, or hook order;
+- numeric-first hooks for money, price, wallet-count, cooling/divergence,
+  research, and resolution stories;
+- `📈`/`📉` only for actual price direction, `💰` for clean buying/capital,
+  `⚠️` for exits/selling/mixed support, `👀` for attention/research, `🔥` for
+  clean capital-plus-price confluence, and `🏁` for resolution;
 - natural Bitcoin price-target and total-market subjects plus safe generic
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
-- structured `Since the call`, `Wallet edge`, and `The edge` blockquotes with
+- structured `Since the call` and `Why it matters` blockquotes with
   a forced visual blank line below the section label and highlighted values;
 - a centralized `U+2800 BRAILLE PATTERN BLANK` separator because Telegram
   clients collapse raw empty MarkdownV2 lines around blockquotes;
@@ -45,8 +47,14 @@ The current worktree contains:
   follow-through, and `Result` for resolution;
 - research updates rendered from producer-owned `holderResearchUpdateV1`, with
   fail-closed suppression when no supported change can be proved;
-- research updates omit stable wallet credentials and use a plain `Wallet now`
-  or `Cluster now` line only as current context;
+- research updates omit stable wallet credentials and use one plain `Position
+now` line only as current context;
+- a verified positive 30-day wallet PnL may lead an initial single-wallet hook;
+  the same evidence row is then removed from `Why it matters` to avoid repeat;
+- zero price deltas and rounded-zero estimated PnL are omitted instead of being
+  rendered as `+0¢` / `$0` evidence;
+- follow-through reuses the initial message's persisted canonical market
+  identity, including named outcomes and spread labels;
 - context-aware follow-through conclusions that acknowledge mixed breadth,
   exact exits, adverse moves, or thin evidence;
 - contextual Mini App links on natural market/wallet mentions, with no generic
@@ -63,27 +71,44 @@ Primary files:
 - `apps/api/src/signal-notification-headline-tests.ts`;
 - `apps/api/src/signal-bot-tests.ts`.
 
+V7 itself requires no database migration. `emoji`, `hook`, `continuation`,
+`primaryEvidenceId`, story/template, and copy version are persisted inside the
+existing JSON copy audit. Existing notification/preferences migrations are a
+separate rollout concern.
+
 ## Headline Contract
 
-The first source line is the Telegram/iOS notification lead. Select the
-strongest verified story, not the most dramatic word.
+The first source line is the Telegram/iOS notification lead. It is structured,
+not one generated bold string:
+
+```text
+<semantic emoji> **<numeric thumbnail hook>.** <plain market explanation>.
+```
+
+Select the strongest verified story. FOMO comes from a true number, a short
+time window, or a real contradiction—not from invented urgency.
 
 Priority and examples:
 
 ```text
-💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
-📈 NO on BTC hitting $70K in July rises 6¢ to 81¢
-🎯 4 strong wallets back Bilibili Gaming at 46¢
-🔥 $45K backs YES on <proposition> after a 7¢ move
-⚠️ <proposition> is losing wallet support
-⚠️ 3 wallets exit <proposition>
-🏁 <proposition> wins
+👀 **+$542K in 30 days.** That wallet now holds $20.5K on Spain.
+📉 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
+🔥 **+$45K bought. +7¢.** Spain is moving with tracked wallets.
+⚠️ **3 exits. $31K sold.** Tracked support for Spain is weakening.
+📈 **+8¢ to 67¢.** Spain is moving with the call.
+🏁 **Spain won.**
 ```
 
 Rules:
 
-- lead with capital when net flow is material and the price move is small;
-- lead with price when the price move is strong and flow is small;
+- put the strongest meaningful number immediately after the emoji whenever a
+  verified number exists; do not prefix it with the words Another, Wallet, or
+  The market;
+- keep only the hook bold; the continuation stays regular weight;
+- lead a strong single-wallet initial signal with verified recent performance
+  when it is more attention-worthy than the current position size;
+- lead with capital when net flow is material and price is secondary;
+- lead with price when price movement is the actual story;
 - use `🔥` only for two independent strong confirmations and no contrary
   wallet breadth;
 - keep the side, predicate, threshold/outcome, and deadline needed to identify
@@ -93,16 +118,19 @@ Rules:
 - do not headline estimated open PnL;
 - do not link the headline;
 - keep 80 visible graphemes as a lint target, not a destructive truncation
-  rule.
+  rule;
 - never use unchanged current state (`still holds`, position size, or stable
   credentials) as the event in a research-update headline.
+- never use `📈` to mean buying or `📉` to mean selling. That collides with the
+  price meaning and can produce a visually false `📈 … −1¢` headline.
 
 ## Post Grammar
 
 Follow-through:
 
 ```text
-💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
+⚠️ **+$67.7K in. 8 wallets cut exposure.** Wallet support for NO on BTC
+hitting $57.5K in July is still split.
 
 > Since the call
 >
@@ -111,23 +139,24 @@ Follow-through:
 > NO price  87¢ → 89¢  +2¢
 > Est. open PnL  +$1.6K
 
-Read: NO at 89¢ moved with the call; net flow stays positive, but more wallets
-trimmed than added.
+Read: Net tracked dollars rose, but 8 wallets cut exposure; NO at 89¢ moved
+only 2¢ with the call.
 ```
 
 Initial signal:
 
 ```text
-🎯 4 strong wallets back Bilibili Gaming at 46¢
+👀 **+$542K in 30 days.** That wallet now holds $20.5K on Spain.
 
 <one concise thesis; natural market/wallet phrases may be Mini App links>
 
-> The edge
+> Why it matters
 >
-> ▸ PnL  +$340K · 30d
-> ▸ Conviction  4 strong wallets · same side
-> ▸ Capital tracked  $29.4K
+> ▸ Ahead of market  +18.4 pts · 24 resolved bets
+> ▸ Traded  $2.9M · 30d
 ```
+
+The PnL row is intentionally absent because it already supplied the hook.
 
 Research update:
 
@@ -136,10 +165,10 @@ Research update:
 
 <one concise explanation of what changed and why it matters>
 
-Wallet now: $7.5K on NO at 83¢ · Est. open PnL +$829
+Position now: $7.5K on NO at 83¢ · Est. open PnL +$829
 ```
 
-Do not repeat `Wallet edge` in a reply to the original signal: the wallet's
+Do not repeat `Why it matters` in a reply to the original signal: the wallet's
 track record is stable context, not the update. A research update without a
 supported comparable price, selected-side position, or selected-side strong
 wallet-count delta is not rendered. Market-wide `recentActivityUsd` is not a
@@ -164,7 +193,7 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V6 Backend Contract
+## V7 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -286,7 +315,7 @@ survive the preview.
 
 ### 6. Rollout telemetry
 
-V6 records the following by copy/policy version; production validation is
+V7 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -315,7 +344,7 @@ Mini App market and Buy payloads may carry the opaque
 - Stable wallet credentials are not repeated in research-update replies.
 - Market-wide activity cannot masquerade as selected-side flow.
 - Open follow-through posts end in `Read:` and terminal posts end in `Result`.
-- Device fixtures pass and rollout telemetry distinguishes V6 from older copy.
+- Device fixtures pass and rollout telemetry distinguishes V7 from older copy.
 
 ## Out of Scope
 

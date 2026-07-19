@@ -604,7 +604,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v6";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v7";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -938,6 +938,15 @@ function formatTelegramItalic(value: string): string {
 
 function formatTelegramLink(label: string, url: string): string {
   return `[${escapeTelegramMarkdownV2(label)}](${escapeTelegramMarkdownV2Url(url)})`;
+}
+
+function formatSignalNotificationHeadlineMarkdown(
+  headline: SignalNotificationHeadline,
+): string {
+  const continuation = headline.continuation
+    ? ` ${escapeTelegramMarkdownV2(headline.continuation)}`
+    : "";
+  return `${headline.emoji} ${formatTelegramBold(headline.hook)}${continuation}`;
 }
 
 // Telegram clients collapse ordinary empty lines at blockquote boundaries.
@@ -1383,7 +1392,7 @@ export function buildSignalBotMessage(input: {
     messageKind === "initial" &&
     input.chatType != null &&
     !isSignalBotPrivateChat(input.chatType) &&
-    notificationCopy.headline.templateKey === "initial_watch_v2";
+    notificationCopy.headline.templateKey === "initial_watch_v7";
   const publishable = notificationCopy.publishable && !weakPublicInitial;
   if (!publishable) {
     return { keyboard: undefined, publishable: false, text: "" };
@@ -1443,6 +1452,10 @@ export function buildSignalBotMessage(input: {
           note,
           price: displayPrice,
           side: buySide,
+          sideLabel:
+            presentation.positions[buySide].canonicalLabel === buySide
+              ? (buySideCopy?.priceLabel ?? buySide)
+              : presentation.positions[buySide].canonicalLabel,
         })
       : null;
   const renderedResearchPosition = researchPosition
@@ -1453,10 +1466,15 @@ export function buildSignalBotMessage(input: {
         ),
       )
     : null;
-  const titleLine = formatTelegramBold(notificationCopy.headline.text);
+  const titleLine = formatSignalNotificationHeadlineMarkdown(
+    notificationCopy.headline,
+  );
+  const supportingEvidenceRows = evidenceRows.filter(
+    (row) => row.id !== notificationCopy.headline.primaryEvidenceId,
+  );
   const credentialBlock =
-    messageKind === "initial" && evidenceRows.length > 0
-      ? formatSignalBotEvidenceBlock(evidenceRows)
+    messageKind === "initial" && supportingEvidenceRows.length > 0
+      ? formatSignalBotEvidenceBlock(supportingEvidenceRows)
       : null;
   const blocks = [
     titleLine,
@@ -6247,7 +6265,6 @@ function formatSignalBotFollowthroughRead(input: {
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): string {
-  const side = input.sideCopy?.plainPosition ?? input.sideLabel;
   const marketLabel =
     input.stats.markPrice == null
       ? input.sideLabel
@@ -6302,11 +6319,25 @@ function formatSignalBotFollowthroughRead(input: {
     }
     return `${marketLabel} is ${move} below the call while tracked flow cools.`;
   }
-  return `${marketLabel} ${
-    input.stats.netSignalSideFlowUsd > 0
-      ? "has not moved much yet, but copy flow still leans with the call."
-      : `${side} has not drawn meaningful follow-through yet.`
-  }`;
+  if (input.stats.netSignalSideFlowUsd > 0) {
+    if (
+      input.stats.trimmedWallets > input.stats.joinedOrAddedWallets ||
+      input.stats.exitedWallets > 0
+    ) {
+      const reducedWallets = Math.max(
+        input.stats.trimmedWallets,
+        input.stats.exitedWallets,
+      );
+      return `Net tracked dollars rose, but ${reducedWallets} ${
+        reducedWallets === 1 ? "wallet cut" : "wallets cut"
+      } exposure; ${marketLabel} stayed flat.`;
+    }
+    return `${marketLabel} stayed flat while tracked flow remained positive.`;
+  }
+  if (input.stats.netSignalSideFlowUsd < 0) {
+    return `${marketLabel} stayed flat while tracked wallet support cooled.`;
+  }
+  return `${marketLabel} has not drawn meaningful follow-through yet.`;
 }
 
 function formatSignalBotFollowthroughReadMarkdown(input: {
@@ -6325,11 +6356,16 @@ function formatSignalBotFollowthroughReadMarkdown(input: {
       ? input.sideLabel
       : `${input.sideLabel} at ${formatCents(input.stats.markPrice)}`;
   const plain = formatSignalBotFollowthroughRead(input);
-  const remainder = plain.slice(marketLabel.length);
+  const marketLabelIndex = plain.indexOf(marketLabel);
+  if (marketLabelIndex < 0) return escapeTelegramMarkdownV2(plain);
   const linkedMarket = input.marketUrl
     ? formatTelegramLink(marketLabel, input.marketUrl)
     : escapeTelegramMarkdownV2(marketLabel);
-  return `${linkedMarket}${escapeTelegramMarkdownV2(remainder)}`;
+  return `${escapeTelegramMarkdownV2(
+    plain.slice(0, marketLabelIndex),
+  )}${linkedMarket}${escapeTelegramMarkdownV2(
+    plain.slice(marketLabelIndex + marketLabel.length),
+  )}`;
 }
 
 function isSignalBotFollowthroughCooling(
@@ -6363,7 +6399,8 @@ function formatSignalBotFollowthroughStatLines(input: {
   stats: SignalBotFollowthroughStats;
 }): string[] {
   const pnlLine =
-    input.stats.estimatedOpenPnlUsd != null
+    input.stats.estimatedOpenPnlUsd != null &&
+    Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
       ? `Est. open PnL: ${formatSignedCompactUsd(
           input.stats.estimatedOpenPnlUsd,
         )}`
@@ -6412,13 +6449,24 @@ function formatSignalBotFollowthroughStatBlock(input: {
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): string {
+  const displayedPriceMoveCents =
+    input.stats.entryPrice != null && input.stats.markPrice != null
+      ? Math.round(input.stats.markPrice * 100) -
+        Math.round(input.stats.entryPrice * 100)
+      : null;
   const priceLine =
     input.stats.entryPrice != null && input.stats.markPrice != null
-      ? [
-          escapeTelegramMarkdownV2(`${input.sideLabel} price`),
-          `${formatCents(input.stats.entryPrice)} → ${formatCents(input.stats.markPrice)}`,
-          formatTelegramBold(formatSignedCentsMove(input.stats.priceMoveCents)),
-        ].join("  ")
+      ? displayedPriceMoveCents === 0
+        ? `${escapeTelegramMarkdownV2(
+            `${input.sideLabel} price`,
+          )}  ${formatTelegramBold(
+            formatCents(input.stats.markPrice),
+          )} ${escapeTelegramMarkdownV2("unchanged")}`
+        : [
+            escapeTelegramMarkdownV2(`${input.sideLabel} price`),
+            `${formatCents(input.stats.entryPrice)} → ${formatCents(input.stats.markPrice)}`,
+            formatTelegramBold(formatSignedCentsMove(displayedPriceMoveCents)),
+          ].join("  ")
       : `${formatTelegramBold(input.sideLabel)} ${escapeTelegramMarkdownV2(
           "price move unavailable",
         )}`;
@@ -6431,7 +6479,10 @@ function formatSignalBotFollowthroughStatBlock(input: {
     ...formatSignalBotFollowthroughActivityMarkdownLines(input.stats),
     priceLine,
   ];
-  if (input.stats.estimatedOpenPnlUsd != null) {
+  if (
+    input.stats.estimatedOpenPnlUsd != null &&
+    Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
+  ) {
     lines.push(
       `${escapeTelegramMarkdownV2("Est. open PnL")}  ${formatTelegramBold(
         formatSignedCompactUsd(input.stats.estimatedOpenPnlUsd),
@@ -6486,18 +6537,23 @@ function buildSignalBotFollowthroughMessage(input: {
   copyPolicy?: ResolvedSignalPostCopyPolicy;
 }): string {
   const stats = input.stats;
-  const side = stats.signalSide ?? "side";
   const sideCopy = stats.signalSide
     ? buildSignalBotFollowthroughSideCopy(input.candidate, stats.signalSide)
     : null;
-  const sideLabel = sideCopy?.priceLabel ?? side;
+  const sideLabel = resolveSignalBotFollowthroughSideLabel(
+    input.candidate,
+    stats.signalSide,
+    sideCopy,
+  );
   const hasWalletEvidence =
     stats.joinedOrAddedWallets > 0 ||
     stats.netSignalSideFlowUsd !== 0 ||
     stats.trimmedWallets > 0 ||
     stats.exitedWallets > 0;
   const notificationCopy = buildSignalBotFollowthroughNotificationCopy(input);
-  const header = notificationCopy.headline.text;
+  const header = formatSignalNotificationHeadlineMarkdown(
+    notificationCopy.headline,
+  );
   const marketStartParam = input.candidate.event_id
     ? buildSignalBotMarketStartParam({
         deliveryRef: input.deliveryRef,
@@ -6520,12 +6576,12 @@ function buildSignalBotFollowthroughMessage(input: {
   });
   if (input.kind === "resolved_win" || input.kind === "resolved_loss") {
     return joinTelegramMessageBlocks([
-      formatTelegramBold(header),
+      header,
       formatSignalBotResolutionBlock({ sideLabel, stats }),
     ]);
   }
   return joinTelegramMessageBlocks([
-    formatTelegramBold(header),
+    header,
     formatSignalBotFollowthroughStatBlock({ sideLabel, stats }),
     `${formatTelegramBold("Read")}: ${footerLine}`,
     ...(!input.telegramMiniAppLinkBase
@@ -7819,6 +7875,43 @@ function buildSignalBotFollowthroughSideCopy(
   );
 }
 
+function resolveSignalBotFollowthroughIdentity(
+  candidate: SignalBotFollowthroughCandidateRow,
+): TelegramMarketIdentityV1 | null {
+  const rootMetrics = asObject(candidate.root_metrics);
+  const rootCopy = asObject(rootMetrics.copy);
+  return (
+    parseTelegramMarketIdentityV1(rootCopy.marketIdentity) ??
+    parseTelegramMarketIdentityV1(rootMetrics.telegramMarketIdentityV1)
+  );
+}
+
+function resolveSignalBotFollowthroughSideLabel(
+  candidate: SignalBotFollowthroughCandidateRow,
+  side: "NO" | "YES" | null,
+  sideCopy: MarketSideCopy | null,
+): string {
+  if (!side) return "side";
+  const identity = resolveSignalBotFollowthroughIdentity(candidate);
+  if (identity?.selectedSide === side) {
+    const lineLabel = identity.marketGroupItemTitle?.trim() ?? "";
+    if (
+      lineLabel.length > 0 &&
+      lineLabel.length <= 48 &&
+      /(?:\([+-]?\d+(?:\.\d+)?\)|\b[+-]\d+(?:\.\d+)?\b|\bO\/U\b)/i.test(
+        lineLabel,
+      )
+    ) {
+      return lineLabel;
+    }
+    const selectedLabel = identity.selectedSideLabel.trim();
+    if (selectedLabel && selectedLabel.toUpperCase() !== side) {
+      return selectedLabel;
+    }
+  }
+  return sideCopy?.priceLabel ?? side;
+}
+
 function fallbackSignalNotificationSubject(
   title: string,
 ): SignalNotificationSubject {
@@ -7897,7 +7990,16 @@ function persistedSignalNotificationSubject(
   note: SignalBotNote,
   side: "NO" | "YES",
 ): SignalNotificationSubject | null {
-  const identity = note.telegramMarketIdentityV1;
+  return signalNotificationSubjectFromIdentity(
+    note.telegramMarketIdentityV1 ?? null,
+    side,
+  );
+}
+
+function signalNotificationSubjectFromIdentity(
+  identity: TelegramMarketIdentityV1 | null,
+  side: "NO" | "YES",
+): SignalNotificationSubject | null {
   if (!identity || identity.selectedSide !== side) return null;
   const selectedLabel = identity.selectedSideLabel.trim();
   if (selectedLabel.toUpperCase() === side) return null;
@@ -7943,13 +8045,33 @@ function buildSignalBotInitialNotificationCopy(input: {
     input.messageKind === "research_update"
       ? resolveSignalBotResearchDelta(input.note, input.side)
       : null;
+  const headlineTrackRecord = resolvePersistedSignalEvidence(input.note).find(
+    (row) =>
+      row.kind === "track_record" &&
+      row.quality === "verified" &&
+      row.measurement.kind === "scalar" &&
+      row.measurement.unit === "usd" &&
+      row.measurement.value > 0 &&
+      row.horizonDays != null &&
+      row.horizonDays > 0,
+  );
+  const headlineTrackRecordValue =
+    headlineTrackRecord?.measurement.kind === "scalar"
+      ? headlineTrackRecord.measurement.value
+      : null;
   return {
     headline: buildSignalNotificationHeadline({
+      actorPnlEvidenceId: headlineTrackRecord?.id ?? null,
+      actorPnlHorizonDays: headlineTrackRecord?.horizonDays ?? null,
+      actorPnlUsd: headlineTrackRecordValue,
       actorMode: input.note.holderActorMode,
       currentPrice: input.side
         ? resolveSignalBotDisplayPrice(input.note, input.side)
         : null,
-      holderPositionUsd: input.note.holderPositionUsd,
+      holderPositionUsd:
+        input.note.holderActorMode === "sharp_cluster"
+          ? input.note.holderClusterSharpUsd
+          : input.note.holderPositionUsd,
       kind: input.messageKind,
       positionLabel:
         sideCopy?.copyKind === "named_outcome" &&
@@ -8001,15 +8123,22 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
     resolutionSource: input.candidate.resolution_source,
     metrics: asObject(input.candidate.root_metrics),
   });
+  const persistedIdentity = resolveSignalBotFollowthroughIdentity(
+    input.candidate,
+  );
   const subject =
     input.stats.signalSide && sideCopy
-      ? buildSignalNotificationSubject({
+      ? (signalNotificationSubjectFromIdentity(
+          persistedIdentity,
+          input.stats.signalSide,
+        ) ??
+        buildSignalNotificationSubject({
           eventTitle: input.candidate.event_title,
           marketTitle: input.candidate.market_title,
           side: input.stats.signalSide,
           sideCopy,
           presentation,
-        })
+        }))
       : fallbackSignalNotificationSubject(
           input.candidate.market_title ??
             input.candidate.event_title ??
@@ -8116,6 +8245,7 @@ function buildSignalBotFollowthroughCopyAudit(input: {
     copyVersion: SIGNAL_BOT_COPY_VERSION,
     policyRevision: input.copyPolicy?.revision ?? null,
     notification,
+    marketIdentity: resolveSignalBotFollowthroughIdentity(input.candidate),
     priceSnapshot: {
       bestAsk: toNumber(input.candidate.best_ask),
       bestBid: toNumber(input.candidate.best_bid),
@@ -8216,7 +8346,11 @@ function sanitizeSignalBotInitialDescription(value: string): string | null {
       /\b(?:worth\s+(?:a\s+)?(?:look|watch)|makes?\s+this\s+(?:worth|interesting)|one\s+to\s+watch)\b/i.test(
         sentence,
       );
-    return !duplicatePosition && !genericRecommendation;
+    const genericEvidenceFallback =
+      /holder activity is the primary evidence for this signal/i.test(sentence);
+    return (
+      !duplicatePosition && !genericRecommendation && !genericEvidenceFallback
+    );
   });
   const sanitized = kept.join(" ").replace(/\s+/g, " ").trim();
   return /[\p{L}\p{N}]/u.test(sanitized) ? sanitized : null;
@@ -8228,6 +8362,10 @@ function sanitizeSignalBotResearchDescription(
   side: "NO" | "YES" | null,
 ): string | null {
   let sanitized = value
+    .replace(
+      /holder activity is the primary evidence for this signal\.?/gi,
+      " ",
+    )
     .replace(
       /^the\s+market\s+now\s+(?:gives|prices)\b[^.!?]*%[^.!?]*[.!?]?\s*/i,
       "",
@@ -8277,13 +8415,14 @@ function formatSignalBotResearchPosition(input: {
   note: SignalBotNote;
   price: number | null;
   side: "NO" | "YES";
+  sideLabel: string;
 }): { label: string; text: string } | null {
   if (input.note.holderActorMode === "sharp_cluster") {
     const capital = input.note.holderClusterSharpUsd;
     if (capital == null || capital <= 0) return null;
     return {
-      label: "Cluster now",
-      text: `${formatCompactUsd(capital)} tracked on ${input.side}${
+      label: "Position now",
+      text: `${formatCompactUsd(capital)} tracked on ${input.sideLabel}${
         input.price == null ? "" : ` at ${formatCents(input.price)}`
       }`,
     };
@@ -8294,17 +8433,17 @@ function formatSignalBotResearchPosition(input: {
   const details: string[] = [];
   if (position != null && position > 0) {
     details.push(
-      `${formatCompactUsd(position)} on ${input.side}${
+      `${formatCompactUsd(position)} on ${input.sideLabel}${
         input.price == null ? "" : ` at ${formatCents(input.price)}`
       }`,
     );
   } else {
-    details.push(input.side);
+    details.push(input.sideLabel);
   }
-  if (openPnl != null) {
+  if (openPnl != null && Math.abs(openPnl) >= 1) {
     details.push(`Est. open PnL ${formatSignedCompactUsd(openPnl)}`);
   }
-  return { label: "Wallet now", text: details.join(" · ") };
+  return { label: "Position now", text: details.join(" · ") };
 }
 
 function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
@@ -8312,13 +8451,13 @@ function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
     row.kind === "track_record"
       ? "PnL"
       : row.kind === "pricing_edge"
-        ? "Beat resolved prices"
+        ? "Ahead of market"
         : row.kind === "volume"
-          ? "Volume"
+          ? "Traded"
           : row.kind === "conviction"
-            ? "Conviction"
+            ? "Wallets"
             : row.kind === "capital"
-              ? "Cluster capital"
+              ? "Tracked position"
               : "Outside odds";
   let value: string;
   if (row.measurement.kind === "range") {
@@ -8337,7 +8476,7 @@ function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
       .toFixed(1)
       .replace(/\.0$/, "")} pts`;
   } else if (row.measurement.unit === "wallets") {
-    value = `${Math.trunc(row.measurement.value)} strong wallets`;
+    value = `${Math.trunc(row.measurement.value)} on the same side`;
   } else {
     value = String(row.measurement.value);
   }
@@ -8353,11 +8492,8 @@ function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
 }
 
 function formatSignalBotEvidenceBlock(rows: SignalEvidenceMetricV1[]): string {
-  const title = rows.some((row) => row.scope === "wallet_cluster")
-    ? "The edge"
-    : "Wallet edge";
   return formatTelegramBlockquote([
-    formatTelegramBold(title),
+    formatTelegramBold("Why it matters"),
     "",
     ...rows.map(formatSignalBotEvidenceRow),
   ]);

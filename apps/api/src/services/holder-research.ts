@@ -5832,10 +5832,10 @@ export function applyHolderResearchPublishQualityGate(input: {
           : output.headline,
         public_context_risk: "unknown",
         rationale: containsHolderResearchExternalClaim(output.rationale)
-          ? "Holder activity is the primary evidence for this signal."
+          ? "Uncited external claims were removed; verified holder evidence remains."
           : output.rationale,
         summary: containsHolderResearchExternalClaim(output.summary)
-          ? "Holder activity is the primary evidence for this signal."
+          ? ""
           : output.summary,
       };
     }

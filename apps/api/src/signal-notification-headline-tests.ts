@@ -163,7 +163,9 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: subject({ marketTitle: "Will it happen?" }),
       });
       assert.equal(result.storyKind, "resolved_win");
-      assert.match(result.text, /^🏁 .* wins$/);
+      assert.equal(result.emoji, "🏁");
+      assert.match(result.hook, / won\.$/);
+      assert.equal(result.continuation, null);
     },
   },
   {
@@ -178,7 +180,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: subject({ marketTitle: "Will it happen?" }),
       });
       assert.equal(result.storyKind, "cooling");
-      assert.match(result.text, /^⚠️ .* is losing wallet support$/);
+      assert.match(result.text, /^⚠️ \$3K sold\./);
       assert.equal(result.primaryMetric, "-$3K");
     },
   },
@@ -193,29 +195,28 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: subject({ marketTitle: "Will it happen?" }),
       });
       assert.equal(result.storyKind, "divergence");
-      assert.match(result.text, /slips 3¢ despite \$2\.5K inflow$/);
+      assert.equal(result.emoji, "📉");
+      assert.equal(result.hook, "+$2.5K bought. −3¢ anyway.");
+      assert.match(result.continuation ?? "", /moved against tracked flow/);
     },
   },
   {
-    name: "price bands use jumps rises and edges with whole-cent display",
+    name: "price moves put signed whole cents before the market explanation",
     run: () => {
-      const cases = [
-        { move: 10, verb: "jumps" },
-        { move: 5, verb: "rises" },
-        { move: 2, verb: "edges up" },
-        { move: -10, verb: "drops" },
-        { move: -5, verb: "falls" },
-        { move: -2, verb: "edges down" },
-      ];
+      const cases = [10, 5, 2, -10, -5, -2];
       for (const testCase of cases) {
         const result = buildSignalNotificationHeadline({
           currentPrice: 0.51,
           kind: "stats",
-          priceMoveCents: testCase.move,
+          priceMoveCents: testCase,
           subject: subject({ marketTitle: "Will it happen?" }),
         });
         assert.equal(result.storyKind, "price_move");
-        assert.match(result.text, new RegExp(`${testCase.verb} .* to 51¢$`));
+        assert.equal(
+          result.hook,
+          `${testCase > 0 ? "+" : "−"}${Math.abs(testCase)}¢ to 51¢.`,
+        );
+        assert.equal(result.emoji, testCase > 0 ? "📈" : "📉");
       }
     },
   },
@@ -263,10 +264,13 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: marketSubject,
       });
       assert.match(initial.text, /^👀 /);
-      assert.equal(update.text, "📈 Will it happen? · YES rises 8¢ to 40¢");
-      assert.equal(update.primaryMetric, "8¢");
+      assert.equal(
+        update.text,
+        "📈 +8¢ to 40¢. Will it happen? · YES moved with the call.",
+      );
+      assert.equal(update.primaryMetric, "+8¢");
       assert.equal(update.supportingMetric, "40¢");
-      assert.equal(update.templateKey, "research_price_move_v5");
+      assert.equal(update.templateKey, "research_price_move_v7");
 
       const updateWithoutPosition = buildSignalNotificationHeadline({
         currentPrice: 0.32,
@@ -275,11 +279,11 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         updateWithoutPosition.text,
-        "🔎 Update: Will it happen? · YES",
+        "🔎 New research. Will it happen? · YES",
       );
       assert.equal(
         updateWithoutPosition.templateKey,
-        "research_update_suppressed_v5",
+        "research_update_suppressed_v7",
       );
     },
   },
@@ -302,7 +306,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "⚠️ $67.7K enters NO on BTC hitting $57.5K in July, but wallet support is mixed",
+        "⚠️ +$67.7K in. 8 wallets cut exposure. Wallet support for NO on BTC hitting $57.5K in July is still split.",
       );
     },
   },
@@ -324,7 +328,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "⚠️ Will the Iranian regime fall before 2027? · YES slips 1¢ despite $345 inflow",
+        "📉 +$345 bought. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against tracked flow.",
       );
       assert.doesNotMatch(result.text, /builds behind|backs/);
     },
@@ -348,7 +352,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "price_move");
       assert.equal(
         result.text,
-        "📈 NO on BTC hitting $70K in July rises 6¢ to 81¢",
+        "📈 +6¢ to 81¢. NO on BTC hitting $70K in July moved with the call.",
       );
     },
   },
@@ -365,7 +369,8 @@ const tests: Array<{ name: string; run: () => void }> = [
         trimmedWallets: 2,
       });
       assert.equal(result.storyKind, "confluence");
-      assert.match(result.text, /^🔥 \$45K backs .* after a 7¢ move$/);
+      assert.equal(result.hook, "+$45K bought. +7¢.");
+      assert.match(result.continuation ?? "", /moving with tracked wallets/);
     },
   },
   {
@@ -385,7 +390,7 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
-    name: "long divergence copy drops only its supporting clause",
+    name: "long divergence copy preserves both verified metrics and subject",
     run: () => {
       const longTitle =
         "Will the international coalition complete every listed treaty obligation before December 31, 2028?";
@@ -399,8 +404,8 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(result.storyKind, "divergence");
       assert.match(result.text, /December 31, 2028/);
-      assert.match(result.text, /slips 3¢$/);
-      assert.doesNotMatch(result.text, /despite/);
+      assert.match(result.hook, /\+\$12K bought\. −3¢ anyway\./);
+      assert.equal(result.lintExceeded, true);
     },
   },
   {

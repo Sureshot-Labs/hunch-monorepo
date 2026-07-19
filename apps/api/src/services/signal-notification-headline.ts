@@ -28,7 +28,11 @@ export type SignalNotificationStoryKind =
   | "resolved_loss";
 
 export type SignalNotificationHeadline = {
+  continuation: string | null;
+  emoji: string;
+  hook: string;
   lintExceeded: boolean;
+  primaryEvidenceId: string | null;
   primaryMetric: string | null;
   storyKind: SignalNotificationStoryKind;
   subjectVersion: SignalNotificationSubject["version"];
@@ -223,19 +227,36 @@ function formatCents(probability: number): string {
   return `${Math.round(probability * 100)}¢`;
 }
 
-function formatMove(cents: number): string {
-  return `${Math.max(1, Math.round(Math.abs(cents)))}¢`;
-}
-
 function formatCompactUsd(value: number): string {
   const absolute = Math.abs(value);
+  const compact = (amount: number, suffix: "K" | "M") => {
+    const fractionDigits = amount >= 100 ? 0 : 1;
+    return `$${amount.toFixed(fractionDigits).replace(/\.0$/, "")}${suffix}`;
+  };
   const formatted =
     absolute >= 1_000_000
-      ? `$${(absolute / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`
+      ? compact(absolute / 1_000_000, "M")
       : absolute >= 1_000
-        ? `$${(absolute / 1_000).toFixed(1).replace(/\.0$/, "")}K`
+        ? compact(absolute / 1_000, "K")
         : `$${Math.round(absolute)}`;
   return value < 0 ? `-${formatted}` : formatted;
+}
+
+function formatSignedMove(cents: number): string {
+  const rounded = Math.max(1, Math.round(Math.abs(cents)));
+  return `${cents >= 0 ? "+" : "−"}${rounded}¢`;
+}
+
+function formatCapitalPosition(capital: string, positionLabel: string): string {
+  return /^(?:YES|NO)\s+on\b/i.test(positionLabel)
+    ? `${capital} backs ${positionLabel}`
+    : `${capital} on ${positionLabel}`;
+}
+
+function formatWalletHolding(capital: string, positionLabel: string): string {
+  return /^(?:YES|NO)\s+on\b/i.test(positionLabel)
+    ? `That wallet now has ${capital} backing ${positionLabel}.`
+    : `That wallet now holds ${capital} on ${positionLabel}.`;
 }
 
 function visibleLength(value: string): number {
@@ -260,6 +281,9 @@ function priceMoveVerb(cents: number): string {
 }
 
 export function buildSignalNotificationHeadline(input: {
+  actorPnlEvidenceId?: string | null;
+  actorPnlHorizonDays?: number | null;
+  actorPnlUsd?: number | null;
   actorMode?: "none" | "sharp_cluster" | "single_holder" | null;
   cooling?: boolean;
   currentPrice: number | null;
@@ -314,170 +338,289 @@ export function buildSignalNotificationHeadline(input: {
 
   let storyKind: SignalNotificationStoryKind;
   let templateKey: string;
+  let emoji: string;
+  let hook: string;
+  let continuation: string | null;
+  let primaryEvidenceId: string | null = null;
   let primaryMetric: string | null = null;
   let supportingMetric: string | null = null;
-  let textWithoutSupportingClause: string | null = null;
-  let text: string;
+  const actorPnlUsd =
+    input.actorPnlUsd != null &&
+    Number.isFinite(input.actorPnlUsd) &&
+    input.actorPnlUsd > 0
+      ? input.actorPnlUsd
+      : null;
+  const actorPnlHorizonDays =
+    input.actorPnlHorizonDays != null &&
+    Number.isFinite(input.actorPnlHorizonDays) &&
+    input.actorPnlHorizonDays > 0
+      ? Math.round(input.actorPnlHorizonDays)
+      : null;
 
   if (input.kind === "resolved_win" || input.kind === "resolved_loss") {
     const won = input.kind === "resolved_win";
     storyKind = won ? "resolved_win" : "resolved_loss";
-    templateKey = won ? "resolution_win_v2" : "resolution_loss_v2";
-    text = `🏁 ${input.subject.text} ${won ? "wins" : "loses"}`;
+    templateKey = won ? "resolution_win_v3" : "resolution_loss_v3";
+    emoji = "🏁";
+    hook = `${input.subject.text} ${won ? "won" : "lost"}.`;
+    continuation = null;
   } else if (input.kind === "initial" || input.kind === "research_update") {
     storyKind = "initial";
     if (input.kind === "research_update") {
       const delta = input.researchDelta;
       if (delta?.kind === "price_move") {
         storyKind = "price_move";
-        templateKey = "research_price_move_v5";
-        primaryMetric = formatMove(delta.priceMoveCents);
+        templateKey = "research_price_move_v7";
+        emoji = delta.priceMoveCents > 0 ? "📈" : "📉";
+        primaryMetric = formatSignedMove(delta.priceMoveCents);
         supportingMetric = formatCents(delta.currentPrice);
-        text = `${delta.priceMoveCents > 0 ? "📈" : "📉"} ${input.subject.text} ${priceMoveVerb(delta.priceMoveCents)} ${formatMove(delta.priceMoveCents)} to ${formatCents(delta.currentPrice)}`;
+        hook = `${formatSignedMove(delta.priceMoveCents)} to ${formatCents(
+          delta.currentPrice,
+        )}.`;
+        continuation = `${input.subject.text} moved ${
+          delta.priceMoveCents > 0 ? "with" : "against"
+        } the call.`;
       } else if (delta?.kind === "position_change") {
         const added = delta.positionChangeUsd > 0;
         storyKind = added ? "flow" : "cooling";
         templateKey = added
-          ? "research_position_added_v5"
-          : "research_position_reduced_v5";
-        primaryMetric = formatCompactUsd(Math.abs(delta.positionChangeUsd));
-        text = `${added ? "💰" : "⚠️"} ${formatCompactUsd(
+          ? "research_position_added_v7"
+          : "research_position_reduced_v7";
+        emoji = added ? "💰" : "⚠️";
+        primaryMetric = `${added ? "+" : "−"}${formatCompactUsd(
           Math.abs(delta.positionChangeUsd),
-        )} ${added ? "added to" : "leaves"} ${input.subject.text}`;
+        )}`;
+        hook = `${added ? "+" : "−"}${formatCompactUsd(
+          Math.abs(delta.positionChangeUsd),
+        )} ${added ? "added" : "cut"}.`;
+        continuation = `Tracked holders ${
+          added ? "increased" : "reduced"
+        } their exposure to ${positionLabel}.`;
       } else if (delta?.kind === "wallet_count_change") {
         const added = delta.walletChange > 0;
         const wallets = Math.abs(delta.walletChange);
         storyKind = added ? "participation" : "cooling";
         templateKey = added
-          ? "research_wallets_added_v5"
-          : "research_wallets_left_v5";
-        primaryMetric = String(wallets);
-        text = `${added ? "🎯" : "⚠️"} ${wallets} strong ${
+          ? "research_wallets_added_v7"
+          : "research_wallets_left_v7";
+        emoji = added ? "👀" : "⚠️";
+        primaryMetric = `${added ? "+" : "−"}${wallets}`;
+        hook = `${added ? "+" : "−"}${wallets} ${
           wallets === 1 ? "wallet" : "wallets"
-        } ${added ? "join" : "leave"} ${input.subject.text}`;
+        }.`;
+        continuation = `Tracked support for ${input.subject.text} is ${
+          added ? "growing" : "weakening"
+        }.`;
       } else {
-        templateKey = "research_update_suppressed_v5";
+        templateKey = "research_update_suppressed_v7";
+        emoji = "🔎";
         primaryMetric = null;
-        text = `🔎 Update: ${input.subject.text}`;
+        hook = "New research.";
+        continuation = input.subject.text;
       }
-    } else if (input.actorMode === "sharp_cluster" && strongWallets >= 2) {
-      templateKey = "initial_strong_wallet_cluster_v2";
-      primaryMetric = String(strongWallets);
+    } else if (
+      input.actorMode === "single_holder" &&
+      actorPnlUsd != null &&
+      actorPnlHorizonDays != null
+    ) {
+      templateKey = "initial_track_record_v7";
+      emoji = "👀";
+      primaryMetric = `+${formatCompactUsd(actorPnlUsd)}`;
+      primaryEvidenceId = input.actorPnlEvidenceId ?? null;
       supportingMetric =
-        currentPrice == null ? null : formatCents(currentPrice);
-      text = `🎯 ${strongWallets} strong wallets back ${positionLabel}${
+        holderPositionUsd > 0
+          ? formatCompactUsd(holderPositionUsd)
+          : currentPrice == null
+            ? null
+            : formatCents(currentPrice);
+      hook = `+${formatCompactUsd(actorPnlUsd)} in ${actorPnlHorizonDays} days.`;
+      continuation =
+        holderPositionUsd > 0
+          ? formatWalletHolding(
+              formatCompactUsd(holderPositionUsd),
+              positionLabel,
+            )
+          : `That wallet now backs ${positionLabel}${
+              currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
+            }.`;
+    } else if (input.actorMode === "sharp_cluster" && strongWallets >= 2) {
+      templateKey = "initial_wallet_cluster_v7";
+      emoji = "🔥";
+      primaryMetric =
+        holderPositionUsd > 0
+          ? formatCompactUsd(holderPositionUsd)
+          : String(strongWallets);
+      supportingMetric = String(strongWallets);
+      hook =
+        holderPositionUsd > 0
+          ? `${formatCapitalPosition(
+              formatCompactUsd(holderPositionUsd),
+              positionLabel,
+            )}.`
+          : `${strongWallets} wallets aligned.`;
+      continuation = `${strongWallets} tracked ${
+        strongWallets === 1 ? "wallet is" : "wallets are"
+      } on the same side${
         currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
-      }`;
+      }.`;
     } else if (
       input.actorMode === "single_holder" &&
       holderPositionUsd >= policy.materialSingleWalletUsd
     ) {
-      templateKey = "initial_position_size_v2";
+      templateKey = "initial_position_size_v7";
+      emoji = "💰";
       primaryMetric = formatCompactUsd(holderPositionUsd);
       supportingMetric =
         currentPrice == null ? null : formatCents(currentPrice);
-      text = `💰 ${formatCompactUsd(holderPositionUsd)} backs ${positionLabel}${
+      hook = `${formatCapitalPosition(
+        formatCompactUsd(holderPositionUsd),
+        positionLabel,
+      )}.`;
+      continuation = `One tracked wallet holds this position${
         currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
-      }`;
+      }.`;
     } else {
-      templateKey = "initial_watch_v2";
+      templateKey = "initial_watch_v7";
+      emoji = "👀";
       primaryMetric = currentPrice == null ? null : formatCents(currentPrice);
-      text = `👀 ${input.subject.text}${
+      hook =
         currentPrice == null
-          ? " is on the radar"
-          : ` trades at ${formatCents(currentPrice)}`
-      }`;
+          ? "On the radar."
+          : `${formatCents(currentPrice)} now.`;
+      continuation = input.subject.text;
     }
   } else if (input.cooling) {
     storyKind = "cooling";
-    templateKey = exitedWallets > 0 ? "cooling_exits_v5" : "cooling_v5";
+    templateKey = exitedWallets > 0 ? "cooling_exits_v7" : "cooling_v7";
+    emoji = "⚠️";
     primaryMetric = netFlow !== 0 ? formatCompactUsd(netFlow) : null;
-    text =
+    hook =
       exitedWallets > 0
-        ? `⚠️ ${exitedWallets} ${
-            exitedWallets === 1 ? "wallet exits" : "wallets exit"
-          } ${input.subject.text}`
-        : `⚠️ ${input.subject.text} is losing wallet support`;
+        ? `${exitedWallets} ${exitedWallets === 1 ? "exit" : "exits"}.${
+            netFlow < 0 ? ` ${formatCompactUsd(Math.abs(netFlow))} sold.` : ""
+          }`
+        : netFlow < 0
+          ? `${formatCompactUsd(Math.abs(netFlow))} sold.`
+          : "Wallet support is fading.";
+    continuation = `Tracked support for ${input.subject.text} is weakening.`;
   } else if (adversePrice && netFlow > 0) {
     storyKind = "divergence";
-    templateKey = "divergence_inflow_price_down_v2";
-    primaryMetric = formatMove(priceMove ?? 0);
-    supportingMetric = formatCompactUsd(netFlow);
-    text = `⚠️ ${input.subject.text} slips ${formatMove(priceMove ?? 0)} despite ${formatCompactUsd(netFlow)} inflow`;
-    textWithoutSupportingClause = `⚠️ ${input.subject.text} slips ${formatMove(priceMove ?? 0)}`;
+    templateKey = "divergence_inflow_price_down_v7";
+    emoji = "📉";
+    primaryMetric = `+${formatCompactUsd(netFlow)}`;
+    supportingMetric = formatSignedMove(priceMove ?? 0);
+    hook = `+${formatCompactUsd(netFlow)} bought. ${formatSignedMove(
+      priceMove ?? 0,
+    )} anyway.`;
+    continuation = `${input.subject.text} moved against tracked flow.`;
   } else if (contradictoryBreadth && netFlow >= policy.materialNetFlowUsd) {
     storyKind = "divergence";
-    templateKey = "mixed_wallet_breadth_positive_flow_v1";
-    primaryMetric = formatCompactUsd(netFlow);
+    templateKey = "mixed_wallet_breadth_positive_flow_v7";
+    emoji = "⚠️";
+    primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = null;
-    text = `⚠️ ${formatCompactUsd(netFlow)} enters ${input.subject.text}, but wallet support is mixed`;
-    textWithoutSupportingClause = `⚠️ Wallet support splits on ${input.subject.text}`;
+    const reducedWallets = Math.max(trimmedWallets, exitedWallets);
+    hook = `+${formatCompactUsd(netFlow)} in.${
+      reducedWallets > 0
+        ? ` ${reducedWallets} ${
+            reducedWallets === 1 ? "wallet cut" : "wallets cut"
+          } exposure.`
+        : ""
+    }`;
+    continuation = `Wallet support for ${input.subject.text} is still split.`;
   } else if (
     materialPositiveFlow &&
     strongPositiveMove &&
     !contradictoryBreadth
   ) {
     storyKind = "confluence";
-    templateKey = "capital_price_confluence_v2";
-    primaryMetric = formatCompactUsd(netFlow);
-    supportingMetric = formatMove(priceMove ?? 0);
-    text = `🔥 ${formatCompactUsd(netFlow)} backs ${input.subject.text} after a ${formatMove(priceMove ?? 0)} move`;
-    textWithoutSupportingClause = `🔥 ${formatCompactUsd(netFlow)} backs ${input.subject.text}`;
+    templateKey = "capital_price_confluence_v7";
+    emoji = "🔥";
+    primaryMetric = `+${formatCompactUsd(netFlow)}`;
+    supportingMetric = formatSignedMove(priceMove ?? 0);
+    hook = `+${formatCompactUsd(netFlow)} bought. ${formatSignedMove(
+      priceMove ?? 0,
+    )}.`;
+    continuation = `${input.subject.text} is moving with tracked wallets.`;
   } else if (materialPositiveFlow) {
     storyKind = "flow";
-    templateKey = "material_net_flow_v2";
-    primaryMetric = formatCompactUsd(netFlow);
+    templateKey = "material_net_flow_v7";
+    emoji = "💰";
+    primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = currentPrice == null ? null : formatCents(currentPrice);
-    text = `💰 ${formatCompactUsd(netFlow)} net flow backs ${input.subject.text}`;
+    hook = `+${formatCompactUsd(netFlow)} bought.`;
+    continuation = `Tracked money is building behind ${input.subject.text}${
+      currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
+    }.`;
   } else if (
     priceMove != null &&
     Math.abs(priceMove) >= policy.minimumPriceMoveCents &&
     currentPrice != null
   ) {
     storyKind = "price_move";
-    templateKey = `price_move_${priceMoveVerb(priceMove).replace(/\s+/g, "_")}_v2`;
-    primaryMetric = formatMove(priceMove);
+    templateKey = `price_move_${priceMoveVerb(priceMove).replace(/\s+/g, "_")}_v7`;
+    emoji = priceMove > 0 ? "📈" : "📉";
+    primaryMetric = formatSignedMove(priceMove);
     supportingMetric = formatCents(currentPrice);
-    text = `${priceMove > 0 ? "📈" : "📉"} ${input.subject.text} ${priceMoveVerb(priceMove)} ${formatMove(priceMove)} to ${formatCents(currentPrice)}`;
+    hook = `${formatSignedMove(priceMove)} to ${formatCents(currentPrice)}.`;
+    continuation = `${input.subject.text} moved ${
+      priceMove > 0 ? "with" : "against"
+    } the call.`;
   } else if (netFlow !== 0) {
-    primaryMetric = formatCompactUsd(netFlow);
+    primaryMetric = `${netFlow > 0 ? "+" : "−"}${formatCompactUsd(
+      Math.abs(netFlow),
+    )}`;
     supportingMetric = currentPrice == null ? null : formatCents(currentPrice);
     if (netFlow > 0) {
       if (contradictoryBreadth) {
         storyKind = "divergence";
-        templateKey = "mixed_wallet_breadth_positive_flow_v1";
-        text = `⚠️ Wallet support splits on ${input.subject.text}`;
+        templateKey = "mixed_wallet_breadth_positive_flow_v7";
+        emoji = "⚠️";
+        hook = `+${formatCompactUsd(netFlow)} in.`;
+        continuation = `Wallet support for ${input.subject.text} is split.`;
       } else {
         storyKind = "flow";
-        templateKey = "early_net_flow_v2";
-        text = `👀 ${formatCompactUsd(netFlow)} net flow builds behind ${input.subject.text}`;
+        templateKey = "early_net_flow_v7";
+        emoji = "👀";
+        hook = `+${formatCompactUsd(netFlow)} bought.`;
+        continuation = `Tracked money is building behind ${input.subject.text}.`;
       }
     } else {
       storyKind = "flow";
-      templateKey = "net_outflow_v2";
-      text = `⚠️ ${formatCompactUsd(Math.abs(netFlow))} net outflow hits ${input.subject.text}`;
+      templateKey = "net_outflow_v7";
+      emoji = "⚠️";
+      hook = `${formatCompactUsd(Math.abs(netFlow))} sold.`;
+      continuation = `Tracked support for ${input.subject.text} is weakening.`;
     }
   } else if (joinedWallets > 0) {
     storyKind = "participation";
-    templateKey = "participation_v2";
+    templateKey = "participation_v7";
+    emoji = "👀";
     primaryMetric = String(joinedWallets);
-    text = `👀 ${joinedWallets} wallets build positions in ${input.subject.text}`;
+    hook = `${joinedWallets} ${
+      joinedWallets === 1 ? "wallet joined" : "wallets joined"
+    }.`;
+    continuation = `Tracked support is building behind ${input.subject.text}.`;
   } else {
     storyKind = "initial";
-    templateKey = "watch_v2";
+    templateKey = "watch_v7";
+    emoji = "👀";
     primaryMetric = currentPrice == null ? null : formatCents(currentPrice);
-    text = `👀 ${input.subject.text} is on the radar`;
+    hook =
+      currentPrice == null
+        ? "On the radar."
+        : `${formatCents(currentPrice)} now.`;
+    continuation = input.subject.text;
   }
 
-  if (
-    visibleLength(text) > policy.headlineMaxGraphemes &&
-    textWithoutSupportingClause != null
-  ) {
-    text = textWithoutSupportingClause;
-  }
+  const text = `${emoji} ${hook}${continuation ? ` ${continuation}` : ""}`;
   const length = visibleLength(text);
   return {
+    continuation,
+    emoji,
+    hook,
     lintExceeded: length > policy.headlineMaxGraphemes,
+    primaryEvidenceId,
     primaryMetric,
     storyKind,
     subjectVersion: input.subject.version,

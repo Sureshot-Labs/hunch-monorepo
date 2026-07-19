@@ -592,7 +592,7 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V6 backend completion and rollout (legacy filename retained):
+- Signal Post V7 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
 - typed holder-research update delta and canonical identity:
   `backend-holder-research-update-contract.md`;
@@ -621,12 +621,12 @@ All posts share a notification-first headline and restrained formatting, but
 they must not share one rigid vertical template. The final block answers a
 different user question for each message family:
 
-| Family          | What is new?                               | Supporting block             | Ending                        |
-| --------------- | ------------------------------------------ | ---------------------------- | ----------------------------- |
-| Initial signal  | Why this trade is interesting now          | `Wallet edge` / `The edge`   | Proof card is terminal        |
-| Research update | What materially changed since the signal   | `Wallet now` / `Cluster now` | Current state, no repeated CV |
-| Follow-through  | How price and tracked wallets have evolved | `Since the call`             | `Read:` interpretation        |
-| Resolution      | Whether the called side won or lost        | `Result`                     | Result card is terminal       |
+| Family          | What is new?                               | Supporting block | Ending                        |
+| --------------- | ------------------------------------------ | ---------------- | ----------------------------- |
+| Initial signal  | Why this trade is interesting now          | `Why it matters` | Proof card is terminal        |
+| Research update | What materially changed since the signal   | `Position now`   | Current state, no repeated CV |
+| Follow-through  | How price and tracked wallets have evolved | `Since the call` | `Read:` interpretation        |
+| Resolution      | Whether the called side won or lost        | `Result`         | Result card is terminal       |
 
 Common rules:
 
@@ -648,7 +648,8 @@ renderer helper and verify the result on iOS, Android, and Desktop.
 
 Use regular Telegram MarkdownV2 deliberately:
 
-- **Bold:** the editorial hook, section labels, and the one or two key values.
+- **Bold:** only the numeric “thumbnail” hook, section labels, and the one or
+  two key values. The explanatory continuation of the first line is regular.
 - _Italic:_ genuinely secondary metadata only; do not italicize an entire
   current-position or conclusion line.
 - Blockquote: a compact metric/data card such as `Since the call`.
@@ -668,12 +669,12 @@ with an emoji has no hierarchy.
 Keep a small semantic vocabulary:
 
 - `💰` — material net flow or a material tracked position;
-- `🔥` — independently strong capital and price evidence with no contrary
-  wallet breadth;
-- `🎯` — several credentialed wallets aligned on the same position;
+- `🔥` — unusually strong capital/alignment or capital-plus-price confluence
+  with no contrary wallet breadth;
 - `👀` — early/quiet accumulation or an undernoticed divergence;
 - `⚠️` — cooling, thin follow-through, deterioration, or risk;
-- `📈` / `📉` — price move when price is the actual story;
+- `📈` / `📉` — actual selected-side price direction only, never a synonym for
+  buy/sell activity;
 - `🏁` — resolved result;
 
 Use one leading status marker in the hook. Do not add a second `📍` market block
@@ -682,12 +683,16 @@ each receive a random emoji.
 
 ### Headline rules
 
-- The headline is bold, standalone, and never a hyperlink.
+- The headline is standalone and never a hyperlink. Only its short hook is
+  bold; the market explanation remains regular weight.
 - Use sentence case.
 - Treat the first line as the mobile push-notification preview, not only as the
   heading of an opened post.
-- Write it as a news lead: recognizable market proposition, what changed, and
-  the verified result.
+- Build it like a YouTube thumbnail plus title on one line: the bold hook is a
+  truthful, numeric attention trigger; the plain continuation explains the
+  market and why the number matters.
+- Put the strongest meaningful number immediately after the emoji whenever
+  possible. Do not lead with `Another`, `Wallet`, or `The market` before it.
 - Prefer `July Fed “no change” jumps 11¢ to 91¢` over internal syntax such as
   `YES +11¢ on Fed: No change`.
 - Use 80 visible grapheme clusters as an initial lint target, then establish a
@@ -695,8 +700,9 @@ each receive a random emoji.
   proposition semantically; never truncate it into an ambiguous entity name.
 - Select copy semantically from the underlying state. Do not rotate equivalent
   positive hooks by hash only for variety.
-- Do not use estimated aggregate PnL as the primary v4 headline. In the evidence
-  block it must say `Est.` and `tracked wallets`.
+- A verified positive recent wallet PnL may lead a single-wallet initial signal
+  because it establishes why the actor deserves attention. Estimated open PnL
+  never leads and must remain labeled `Est.` in supporting context.
 
 Bad:
 
@@ -707,13 +713,14 @@ Bad:
 Good when material flow is the strongest fact:
 
 ```text
-💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
+💰 **+$67.7K bought.** Tracked money is building behind NO on BTC hitting
+$57.5K in July.
 ```
 
 Good when price is the strongest fact:
 
 ```text
-📈 NO on BTC hitting $70K in July rises 6¢ to 81¢
+📈 **+6¢ to 81¢.** NO on BTC hitting $70K in July moved with the call.
 ```
 
 Reserve `🔥` for genuine confluence; a positive tick or initial call alone is
@@ -736,10 +743,11 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V6 structure:
+Implemented V7 structure:
 
 ```text
-💰 $67.7K net flow backs NO on BTC hitting $57.5K in July
+⚠️ **+$67.7K in. 8 wallets cut exposure.** Wallet support for NO on BTC
+hitting $57.5K in July is still split.
 
 │ Since the call
 │
@@ -748,8 +756,8 @@ Implemented V6 structure:
 │ NO price  87¢ → 89¢  +2¢
 │ Est. open PnL  +$1.6K
 
-Read: NO at 89¢ moved with the call; net flow stays positive, but more wallets
-trimmed than added.
+Read: Net tracked dollars rose, but 8 wallets cut exposure; NO at 89¢ moved
+only 2¢ with the call.
 ```
 
 The `│` representation above documents the rendered Telegram blockquote. The
@@ -779,15 +787,14 @@ or thin evidence—rather than repeat every number above it.
 ### Initial-signal structure
 
 ```text
-🎯 4 strong wallets back Bilibili Gaming at 46¢
+👀 **+$542K in 30 days.** That wallet now holds $20.5K on Spain.
 
 <one- or two-sentence thesis>
 
-│ The edge
+│ Why it matters
 │
-│ ▸ PnL  +$340K · 30d
-│ ▸ Conviction  4 strong wallets · same side
-│ ▸ Capital tracked  $29.4K
+│ ▸ Ahead of market  +18.4 pts · 24 resolved bets
+│ ▸ Traded  $2.9M · 30d
 ```
 
 Rules:
@@ -797,13 +804,15 @@ Rules:
   first meaningful mention instead of adding a generic Wallet button.
 - If no safe identity or natural market phrase is available, omit that body
   link. Do not add a generic navigation footer.
-- Keep `The edge` / `Wallet edge` to at most three rows, preferably two.
+- Keep `Why it matters` to at most three rows, preferably two.
 - Insert the shared visual blank quote line between the section label and its
   rows.
 - Use one repeated list marker (`▸`) and emphasize the key value, not every
   word.
 - Avoid repeating the side, price, position, and PnL in both prose and the data
   block.
+- When verified recent PnL supplies the headline hook, remove its PnL row from
+  `Why it matters`; do not make the user read the same claim twice.
 - Do not add a deterministic “still holding” sentence after a headline that
   already leads with the position. The generated thesis must carry new
   explanatory value.
@@ -825,13 +834,14 @@ Research updates:
 
 - are replies to the original signal, not standalone repetitions of it;
 - derive the headline from a supported material delta, for example
-  `📈 NO on BTC hitting $70K in July rises 8¢ to 83¢`,
-  `💰 $8K added to ...`, or `⚠️ 2 strong wallets leave ...`;
+  `📈 **+8¢ to 83¢.** NO on BTC hitting $70K in July moved with the call`,
+  `💰 **+$8K added.** Tracked holders increased exposure to ...`, or
+  `⚠️ **−2 wallets.** Tracked support for ... is weakening`;
 - use `🔎` only when the actual delta is new sourced external evidence;
 - clearly explain the named change from the original signal;
-- show current state as `Wallet now: ...` or `Cluster now: ...` in regular
+- show current state as `Position now: ...` in regular
   text, with the label bold;
-- do not repeat `Wallet edge`, `The edge`, track record, pricing edge, or
+- do not repeat `Why it matters`, track record, pricing edge, or
   volume already established in the parent signal;
 - do not append `No cited external evidence was available` or a detached `📰`
   line;
