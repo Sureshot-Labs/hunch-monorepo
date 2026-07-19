@@ -78,6 +78,27 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
+    name: "total aliases are idempotent and public titles drop service suffixes",
+    run: () => {
+      const resolved = resolveTelegramMarketPresentation({
+        eventTitle: "Spain vs. Argentina - More Markets",
+        marketTitle: "O/U 2.5 total goals",
+        outcomes: ["Over", "Under"],
+      });
+      const once = normalizeTelegramPresentationAliases(
+        "Under 2.5 total goals trades near 59c.",
+        resolved.presentation,
+      );
+      const twice = normalizeTelegramPresentationAliases(
+        once,
+        resolved.presentation,
+      );
+      assert.equal(once, "Under 2.5 total goals trades near 59c.");
+      assert.equal(twice, once);
+      assert.equal(resolved.presentation.subject, "Spain vs. Argentina");
+    },
+  },
+  {
     name: "conflicting approved aliases fail closed to raw proposition",
     run: () => {
       const resolved = resolveTelegramMarketPresentation({
@@ -135,6 +156,18 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.source, "natural_market_proposition");
       assert.doesNotMatch(result.text, /Field|not France/i);
       assert.doesNotMatch(result.text, / · /);
+    },
+  },
+  {
+    name: "team YES subjects describe the actual outcome instead of internal YES",
+    run: () => {
+      const result = subject({
+        eventTitle: "World Cup Winner",
+        marketTitle: "Spain",
+        side: "YES",
+      });
+      assert.equal(result.text, "Spain to win the World Cup");
+      assert.doesNotMatch(result.text, /\bYES\b/);
     },
   },
   {
@@ -306,7 +339,56 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "⚠️ +$67.7K in. 8 wallets cut exposure. Wallet support for NO on BTC hitting $57.5K in July is still split.",
+        "⚠️ +$67.7K bought. 8 wallets cut. Tracked wallets remain split on NO on BTC hitting $57.5K in July.",
+      );
+    },
+  },
+  {
+    name: "research deltas preserve actor scope and current wallet count",
+    run: () => {
+      const marketSubject = subject({
+        eventTitle: "World Cup Winner",
+        marketTitle: "Spain",
+        side: "YES",
+      });
+      const walletChange = buildSignalNotificationHeadline({
+        currentPrice: 0.59,
+        kind: "research_update",
+        researchDelta: {
+          afterWallets: 5,
+          beforeWallets: 7,
+          kind: "wallet_count_change",
+          walletChange: -2,
+        },
+        subject: marketSubject,
+      });
+      assert.equal(
+        walletChange.text,
+        "⚠️ 2 fewer strong wallets. 5 remain. Strong-wallet support for Spain to win the World Cup has thinned.",
+      );
+
+      const positionChange = buildSignalNotificationHeadline({
+        currentPrice: 0.59,
+        kind: "research_update",
+        positionLabel: "Under 2.5 total goals in Spain vs. Argentina",
+        researchDelta: {
+          afterUsd: 78_400,
+          beforeUsd: 29_000,
+          kind: "position_change",
+          positionChangeUsd: 49_400,
+          scope: "representative_wallet",
+          walletId: "wallet-1",
+        },
+        subject: subject({
+          eventTitle: "Spain vs. Argentina - More Markets",
+          marketTitle: "O/U 2.5 total goals",
+          outcomes: ["Over", "Under"],
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        positionChange.text,
+        "💰 +$49.4K added. One tracked wallet increased its Under 2.5 total goals in Spain vs. Argentina position.",
       );
     },
   },

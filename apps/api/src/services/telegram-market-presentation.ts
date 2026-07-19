@@ -2,12 +2,12 @@ import { z } from "zod";
 
 import {
   buildMarketSideCopyPair,
+  cleanPublicMarketText,
   type MarketSideCopyInput,
 } from "./market-side-copy.js";
 
 const cleanText = (value: string | null | undefined): string | null => {
-  const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
-  return cleaned.length > 0 ? cleaned : null;
+  return cleanPublicMarketText(value);
 };
 
 const presentationPositionSchema = z
@@ -292,6 +292,29 @@ export function normalizeTelegramPresentationAliases(
   presentation: TelegramMarketPresentationV1,
 ): string {
   let normalized = text;
+  const protectedLabels = uniqueLabels(
+    (["YES", "NO"] as const).map(
+      (side) => presentation.positions[side].canonicalLabel,
+    ),
+  );
+  const placeholders: Array<{ label: string; token: string }> = [];
+  let nextPlaceholderCodePoint = 0xe000;
+  for (const label of protectedLabels) {
+    normalized = normalized.replace(
+      new RegExp(
+        `(?<![\\p{L}\\p{N}])${escapeRegExp(label)}(?![\\p{L}\\p{N}])`,
+        "giu",
+      ),
+      (matched) => {
+        let token = String.fromCodePoint(nextPlaceholderCodePoint++);
+        while (text.includes(token) || normalized.includes(token)) {
+          token = String.fromCodePoint(nextPlaceholderCodePoint++);
+        }
+        placeholders.push({ label: matched, token });
+        return token;
+      },
+    );
+  }
   for (const side of ["YES", "NO"] as const) {
     const position = presentation.positions[side];
     const aliases = uniqueLabels(position.aliases)
@@ -309,6 +332,9 @@ export function normalizeTelegramPresentationAliases(
         position.canonicalLabel,
       );
     }
+  }
+  for (const { label, token } of placeholders) {
+    normalized = normalized.split(token).join(label);
   }
   return normalized;
 }

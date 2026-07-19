@@ -43,6 +43,7 @@ import {
 } from "./market-type-classifier.js";
 import {
   buildMarketSideCopy,
+  cleanPublicMarketText,
   type MarketSideCopy,
 } from "./market-side-copy.js";
 import {
@@ -529,11 +530,17 @@ type SignalBotResearchDelta =
       supportsBuy: boolean;
     }
   | {
+      afterUsd: number;
+      beforeUsd: number;
       kind: "position_change";
       positionChangeUsd: number;
+      scope: "representative_wallet" | "selected_side_cluster";
       supportsBuy: boolean;
+      walletId: string | null;
     }
   | {
+      afterWallets: number;
+      beforeWallets: number;
       kind: "wallet_count_change";
       supportsBuy: boolean;
       walletChange: number;
@@ -604,7 +611,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v7";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v8";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -1443,19 +1450,24 @@ export function buildSignalBotMessage(input: {
   const canonicalDescription = sanitizedDescription
     ? normalizeTelegramPresentationAliases(sanitizedDescription, presentation)
     : null;
-  const summary = canonicalDescription
-    ? bodyRenderer.render(canonicalDescription)
-    : null;
+  const description =
+    canonicalDescription ??
+    (messageKind === "initial" && buySideCopy
+      ? formatSignalBotDescriptionFallback(buySideCopy)
+      : null);
+  const summary = description ? bodyRenderer.render(description) : null;
   const researchPosition =
     messageKind === "research_update" && buySide
       ? formatSignalBotResearchPosition({
           note,
           price: displayPrice,
+          researchDelta: notificationCopy.researchDelta,
           side: buySide,
-          sideLabel:
-            presentation.positions[buySide].canonicalLabel === buySide
-              ? (buySideCopy?.priceLabel ?? buySide)
-              : presentation.positions[buySide].canonicalLabel,
+          sideLabel: resolveSignalBotCurrentSideLabel({
+            presentation,
+            side: buySide,
+            sideCopy: buySideCopy,
+          }),
         })
       : null;
   const renderedResearchPosition = researchPosition
@@ -6265,6 +6277,11 @@ function formatSignalBotFollowthroughRead(input: {
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): string {
+  const priceMoveCents =
+    input.stats.priceMoveCents != null &&
+    Math.abs(input.stats.priceMoveCents) < 0.5
+      ? 0
+      : input.stats.priceMoveCents;
   const marketLabel =
     input.stats.markPrice == null
       ? input.sideLabel
@@ -6278,7 +6295,7 @@ function formatSignalBotFollowthroughRead(input: {
   if (!input.hasWalletEvidence) {
     return `${marketLabel} moved with the read, but tracked wallet follow-through is thin so far.`;
   }
-  if (input.stats.priceMoveCents != null && input.stats.priceMoveCents > 0) {
+  if (priceMoveCents != null && priceMoveCents > 0) {
     if (
       input.stats.exitedWallets > 0 ||
       input.stats.trimmedWallets > input.stats.joinedOrAddedWallets
@@ -6286,7 +6303,7 @@ function formatSignalBotFollowthroughRead(input: {
       const read =
         input.stats.exitedWallets > 0 && input.stats.netSignalSideFlowUsd <= 0
           ? "is up, but tracked wallets are exiting and flow has turned negative."
-          : input.stats.priceMoveCents >= 5
+          : priceMoveCents >= 5
             ? "moved sharply, but wallet follow-through is mixed."
             : input.stats.netSignalSideFlowUsd > 0
               ? "moved with the call; net flow stays positive, but more wallets trimmed than added."
@@ -6301,11 +6318,8 @@ function formatSignalBotFollowthroughRead(input: {
     }
     return `${marketLabel} moved with the call, while tracked positions remain open.`;
   }
-  if (input.stats.priceMoveCents != null && input.stats.priceMoveCents < 0) {
-    const move = `${Math.max(
-      1,
-      Math.round(Math.abs(input.stats.priceMoveCents)),
-    )}¢`;
+  if (priceMoveCents != null && priceMoveCents < 0) {
+    const move = `${Math.max(1, Math.round(Math.abs(priceMoveCents)))}¢`;
     if (input.stats.netSignalSideFlowUsd > 0) {
       const support =
         input.stats.exitedWallets > 0
@@ -6324,15 +6338,9 @@ function formatSignalBotFollowthroughRead(input: {
       input.stats.trimmedWallets > input.stats.joinedOrAddedWallets ||
       input.stats.exitedWallets > 0
     ) {
-      const reducedWallets = Math.max(
-        input.stats.trimmedWallets,
-        input.stats.exitedWallets,
-      );
-      return `Net tracked dollars rose, but ${reducedWallets} ${
-        reducedWallets === 1 ? "wallet cut" : "wallets cut"
-      } exposure; ${marketLabel} stayed flat.`;
+      return `More money went into ${marketLabel}, but wallet support thinned and the price did not move.`;
     }
-    return `${marketLabel} stayed flat while tracked flow remained positive.`;
+    return `${marketLabel} stayed flat even as more money came in.`;
   }
   if (input.stats.netSignalSideFlowUsd < 0) {
     return `${marketLabel} stayed flat while tracked wallet support cooled.`;
@@ -7678,13 +7686,19 @@ function resolveSignalBotResearchDelta(
     reason.kind === "position_reduced"
   ) {
     return {
+      afterUsd: reason.after,
+      beforeUsd: reason.before,
       kind: "position_change",
       positionChangeUsd: reason.delta,
+      scope: reason.scope,
       supportsBuy: contract.ctaIntent === "buy",
+      walletId: reason.walletId,
     };
   }
   if (reason.kind === "wallet_confluence_changed") {
     return {
+      afterWallets: reason.after,
+      beforeWallets: reason.before,
       kind: "wallet_count_change",
       supportsBuy: contract.ctaIntent === "buy",
       walletChange: reason.delta,
@@ -7857,6 +7871,27 @@ function buildSignalBotSideCopy(
   });
 }
 
+function resolveSignalBotCurrentSideLabel(input: {
+  presentation: ReturnType<
+    typeof resolvePersistedOrCurrentTelegramMarketPresentation
+  >;
+  side: "NO" | "YES";
+  sideCopy: MarketSideCopy | null;
+}): string {
+  if (input.sideCopy?.copyKind === "team_yes_no") {
+    const semantic = input.sideCopy.plainPosition
+      .replace(/^backing\s+/i, "")
+      .replace(/^fading\s+/i, "against ")
+      .trim();
+    if (semantic && !/^(?:against\s+)?[↑↓]/.test(semantic)) return semantic;
+  }
+  const canonical = cleanPublicMarketText(
+    input.presentation.positions[input.side].canonicalLabel,
+  );
+  if (canonical && canonical.toUpperCase() !== input.side) return canonical;
+  return input.sideCopy?.priceLabel ?? input.side;
+}
+
 function buildSignalBotFollowthroughSideCopy(
   candidate: SignalBotFollowthroughCandidateRow,
   side: "NO" | "YES",
@@ -7898,13 +7933,11 @@ function resolveSignalBotFollowthroughSideLabel(
     if (
       lineLabel.length > 0 &&
       lineLabel.length <= 48 &&
-      /(?:\([+-]?\d+(?:\.\d+)?\)|\b[+-]\d+(?:\.\d+)?\b|\bO\/U\b)/i.test(
-        lineLabel,
-      )
+      /(?:\([+-]?\d+(?:\.\d+)?\)|\b[+-]\d+(?:\.\d+)?\b)/i.test(lineLabel)
     ) {
-      return lineLabel;
+      return cleanPublicMarketText(lineLabel) ?? lineLabel;
     }
-    const selectedLabel = identity.selectedSideLabel.trim();
+    const selectedLabel = cleanPublicMarketText(identity.selectedSideLabel);
     if (selectedLabel && selectedLabel.toUpperCase() !== side) {
       return selectedLabel;
     }
@@ -7918,7 +7951,7 @@ function fallbackSignalNotificationSubject(
   return {
     preservedFields: ["predicate"],
     source: "safe_full_title",
-    text: title.trim() || "This market",
+    text: cleanPublicMarketText(title) ?? "This market",
     version: "signal_notification_subject_v3",
   };
 }
@@ -7969,21 +8002,28 @@ function matchupOutcomeSubject(
 function persistedNamedOutcomeSubject(
   identity: TelegramMarketIdentityV1,
 ): string {
-  const selectedLabel = identity.selectedSideLabel.trim();
+  const selectedLabel =
+    cleanPublicMarketText(identity.selectedSideLabel) ??
+    identity.selectedSideLabel.trim();
+  const eventTitle = cleanPublicMarketText(identity.eventTitle);
+  const subject = cleanPublicMarketText(identity.subject) ?? identity.subject;
+  const predicate =
+    cleanPublicMarketText(identity.predicate) ?? identity.predicate;
+  const groupItemTitle = cleanPublicMarketText(identity.marketGroupItemTitle);
   const matchup = matchupOutcomeSubject(
     selectedLabel,
-    identity.eventTitle ?? identity.subject,
-    identity.marketGroupItemTitle,
+    eventTitle ?? subject,
+    groupItemTitle,
   );
   if (matchup) return matchup;
-  const subjectKey = identity.subject.toLocaleLowerCase("en-US");
+  const subjectKey = subject.toLocaleLowerCase("en-US");
   const labelKey = selectedLabel.toLocaleLowerCase("en-US");
-  if (subjectKey === labelKey && identity.predicate !== identity.subject) {
-    return identity.predicate;
+  if (subjectKey === labelKey && predicate !== subject) {
+    return predicate;
   }
   return subjectKey.includes(labelKey)
-    ? identity.subject
-    : `${selectedLabel} in ${identity.subject}`;
+    ? subject
+    : `${selectedLabel} in ${subject}`;
 }
 
 function persistedSignalNotificationSubject(
@@ -8332,10 +8372,9 @@ function formatCompactAmount(value: number): string {
 }
 
 function sanitizeSignalBotInitialDescription(value: string): string | null {
-  const normalized = value
-    .replace(/\b(\d{1,3}(?:\.\d+)?)c\b/gi, "$1¢")
-    .replace(/\s+/g, " ")
-    .trim();
+  const normalized =
+    cleanPublicMarketText(value.replace(/\b(\d{1,3}(?:\.\d+)?)c\b/gi, "$1¢")) ??
+    "";
   const sentences = normalized.split(/(?<=[.!?])\s+/);
   const kept = sentences.filter((sentence) => {
     const duplicatePosition =
@@ -8348,8 +8387,12 @@ function sanitizeSignalBotInitialDescription(value: string): string | null {
       );
     const genericEvidenceFallback =
       /holder activity is the primary evidence for this signal/i.test(sentence);
+    const missingSummaryPlaceholder = /^no summary\.?$/i.test(sentence.trim());
     return (
-      !duplicatePosition && !genericRecommendation && !genericEvidenceFallback
+      !duplicatePosition &&
+      !genericRecommendation &&
+      !genericEvidenceFallback &&
+      !missingSummaryPlaceholder
     );
   });
   const sanitized = kept.join(" ").replace(/\s+/g, " ").trim();
@@ -8361,7 +8404,11 @@ function sanitizeSignalBotResearchDescription(
   note: SignalBotNote,
   side: "NO" | "YES" | null,
 ): string | null {
-  let sanitized = value
+  let sanitized = (
+    cleanPublicMarketText(value.replace(/\b(\d{1,3}(?:\.\d+)?)c\b/gi, "$1¢")) ??
+    ""
+  )
+    .replace(/^no summary\.?$/i, "")
     .replace(
       /holder activity is the primary evidence for this signal\.?/gi,
       " ",
@@ -8379,7 +8426,19 @@ function sanitizeSignalBotResearchDescription(
       " ",
     )
     .replace(/\s+after\s+the\s+(?:drop|jump|move|repricing)\b/gi, "")
-    .replace(/\s+through\s+the\s+(?:drop|jump|move|repricing)\b/gi, "");
+    .replace(/\s+through\s+the\s+(?:drop|jump|move|repricing)\b/gi, "")
+    .replace(
+      /\s*,?\s*with\s+(?:a\s+)?strong\s+recent\b[^.!?]*(?:results|record)\b[^.!?]*[.!?]?/gi,
+      ".",
+    )
+    .replace(
+      /(?:^|\s)(?:this|the)\s+wallet\s+(?:has|had)\s+recently\s+(?:beaten|won)\b[^.!?]*[.!?]?/gi,
+      " ",
+    )
+    .replace(
+      /(?:^|\s)the\s+wallets?\s+with\s+(?:the\s+)?strongest\s+recent\s+(?:records|results)\b[^.!?]*[.!?]?/gi,
+      " ",
+    );
   if (side) {
     const holderSubjects = [
       note.holderIdentityDisplayName,
@@ -8396,7 +8455,7 @@ function sanitizeSignalBotResearchDescription(
         new RegExp(
           `(?:,?\\s+(?:and|but)\\s+)?${escapeRegExpLiteral(
             subject,
-          )}\\s+(?:is|are)\\s+still\\s+(?:holding|backing)\\s+${side}\\b[^.!?]*[.!?]?`,
+          )}\\s+(?:is|are)\\s+(?:still\\s+)?(?:holding|backing)\\b[^.!?]*[.!?]?`,
           "gi",
         ),
         ".",
@@ -8411,39 +8470,77 @@ function sanitizeSignalBotResearchDescription(
   return /[\p{L}\p{N}]/u.test(sanitized) ? sanitized : null;
 }
 
+function formatSignalBotDescriptionFallback(
+  sideCopy: MarketSideCopy,
+): string | null {
+  if (sideCopy.copyKind !== "total" || !sideCopy.winCondition) return null;
+  const condition = sideCopy.winCondition
+    .replace(/\b0-(\d+)\b/g, "0–$1")
+    .replace(/\btotal goals\b/gi, "goals")
+    .replace(/\bfirst-half goals\b/gi, "goals");
+  const period = /first-half/i.test(sideCopy.winCondition)
+    ? "the first half"
+    : /goals/i.test(sideCopy.winCondition)
+      ? "the match"
+      : "the market";
+  return `${sideCopy.sideLabel} cashes if ${period} finishes with ${condition}.`;
+}
+
 function formatSignalBotResearchPosition(input: {
   note: SignalBotNote;
   price: number | null;
+  researchDelta: SignalBotResearchDelta | null;
   side: "NO" | "YES";
   sideLabel: string;
 }): { label: string; text: string } | null {
-  if (input.note.holderActorMode === "sharp_cluster") {
-    const capital = input.note.holderClusterSharpUsd;
+  const clusterScope =
+    input.note.holderActorMode === "sharp_cluster" ||
+    input.researchDelta?.kind === "wallet_count_change" ||
+    (input.researchDelta?.kind === "position_change" &&
+      input.researchDelta.scope === "selected_side_cluster");
+  if (clusterScope) {
+    const capital =
+      input.researchDelta?.kind === "position_change" &&
+      input.researchDelta.scope === "selected_side_cluster"
+        ? input.researchDelta.afterUsd
+        : input.note.holderClusterSharpUsd;
     if (capital == null || capital <= 0) return null;
+    const strongWallets =
+      input.researchDelta?.kind === "wallet_count_change"
+        ? input.researchDelta.afterWallets
+        : input.note.holderClusterSharpHolders;
+    const details = [`${formatCompactUsd(capital)} on ${input.sideLabel}`];
+    if (strongWallets != null && strongWallets > 0) {
+      details.push(
+        `${Math.trunc(strongWallets)} strong ${
+          Math.trunc(strongWallets) === 1 ? "wallet" : "wallets"
+        }`,
+      );
+    }
+    if (input.price != null) details.push(`${formatCents(input.price)} now`);
     return {
-      label: "Position now",
-      text: `${formatCompactUsd(capital)} tracked on ${input.sideLabel}${
-        input.price == null ? "" : ` at ${formatCents(input.price)}`
-      }`,
+      label: "Strong-wallet support",
+      text: details.join(" · "),
     };
   }
-  const position = input.note.holderPositionUsd;
+  const position =
+    input.researchDelta?.kind === "position_change" &&
+    input.researchDelta.scope === "representative_wallet"
+      ? input.researchDelta.afterUsd
+      : input.note.holderPositionUsd;
   const openPnl = input.note.holderOpenPnlUsd;
   if ((position == null || position <= 0) && openPnl == null) return null;
   const details: string[] = [];
   if (position != null && position > 0) {
-    details.push(
-      `${formatCompactUsd(position)} on ${input.sideLabel}${
-        input.price == null ? "" : ` at ${formatCents(input.price)}`
-      }`,
-    );
+    details.push(`${formatCompactUsd(position)} on ${input.sideLabel}`);
   } else {
     details.push(input.sideLabel);
   }
+  if (input.price != null) details.push(`${formatCents(input.price)} now`);
   if (openPnl != null && Math.abs(openPnl) >= 1) {
     details.push(`Est. open PnL ${formatSignedCompactUsd(openPnl)}`);
   }
-  return { label: "Position now", text: details.join(" · ") };
+  return { label: "Wallet position", text: details.join(" · ") };
 }
 
 function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
@@ -8451,7 +8548,7 @@ function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
     row.kind === "track_record"
       ? "PnL"
       : row.kind === "pricing_edge"
-        ? "Ahead of market"
+        ? "Recent results"
         : row.kind === "volume"
           ? "Traded"
           : row.kind === "conviction"
@@ -8474,7 +8571,9 @@ function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
       row.measurement.value * 100
     )
       .toFixed(1)
-      .replace(/\.0$/, "")} pts`;
+      .replace(/\.0$/, "")} pts${
+      row.kind === "pricing_edge" ? " vs market" : ""
+    }`;
   } else if (row.measurement.unit === "wallets") {
     value = `${Math.trunc(row.measurement.value)} on the same side`;
   } else {

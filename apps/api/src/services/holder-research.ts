@@ -6286,7 +6286,7 @@ export async function persistHolderResearchNotes(
           "signal",
           "active",
           normalizeText(decision.output.headline, 320) || "Holder signal",
-          normalizeText(decision.output.summary, 1_000) || "No summary.",
+          normalizeText(decision.output.summary, 1_000),
           normalizeText(decision.output.rationale, 1_000) || null,
           "market",
           candidate.market.marketId,

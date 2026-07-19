@@ -1,4 +1,7 @@
-import type { MarketSideCopy } from "./market-side-copy.js";
+import {
+  cleanPublicMarketText,
+  type MarketSideCopy,
+} from "./market-side-copy.js";
 import type { TelegramMarketPresentationV1 } from "./telegram-market-presentation.js";
 import {
   DEFAULT_SIGNAL_POST_COPY_POLICY,
@@ -49,17 +52,22 @@ export type SignalNotificationResearchDelta =
       priceMoveCents: number;
     }
   | {
+      afterUsd: number;
+      beforeUsd: number;
       kind: "position_change";
       positionChangeUsd: number;
+      scope: "representative_wallet" | "selected_side_cluster";
+      walletId: string | null;
     }
   | {
+      afterWallets: number;
+      beforeWallets: number;
       kind: "wallet_count_change";
       walletChange: number;
     };
 
 function cleanText(value: string | null | undefined): string | null {
-  const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
-  return cleaned.length > 0 ? cleaned : null;
+  return cleanPublicMarketText(value);
 }
 
 function fullMarketTitle(input: {
@@ -133,15 +141,23 @@ function buildNaturalSubject(input: {
       .trim();
     const eventWinner = eventTitle?.match(/^(.+?)\s+winner$/i)?.[1]?.trim();
     if (team && eventWinner) {
-      return `${input.side} on ${team} winning ${eventWinner}`;
+      if (input.side === "YES") {
+        const competition = /\bworld cup\b/i.test(eventWinner)
+          ? `the ${eventWinner}`
+          : eventWinner;
+        return `${team} to win ${competition}`;
+      }
+      return `NO on ${team} winning ${eventWinner}`;
     }
     if (team && /^will\s+/i.test(marketTitle)) {
-      return `${input.side} on ${team} winning`;
+      return input.side === "YES" ? `${team} to win` : `NO on ${team} winning`;
     }
     if (eventTitle && eventTitle.toLowerCase() !== marketTitle.toLowerCase()) {
-      return `${input.side} on ${team} in ${eventTitle}`;
+      return input.side === "YES"
+        ? `${team} in ${eventTitle}`
+        : `NO on ${team} in ${eventTitle}`;
     }
-    return `${input.side} on ${team}`;
+    return input.side === "YES" ? team : `NO on ${team}`;
   }
   if (eventTitle && marketTitle && eventTitle !== marketTitle) {
     return `${input.side} on ${marketTitle} in ${eventTitle}`;
@@ -170,6 +186,36 @@ export function buildSignalNotificationSubject(input: {
       version: "signal_notification_subject_v3",
     };
   }
+  const natural = buildNaturalSubject({
+    eventTitle,
+    marketTitle,
+    side: input.side,
+    sideCopy: input.sideCopy,
+  });
+  if (
+    natural &&
+    (input.sideCopy.copyKind === "total" ||
+      (input.sideCopy.copyKind === "team_yes_no" &&
+        /\b(?:to win|winning)\b/i.test(natural))) &&
+    (!input.presentation || input.presentation.source !== "approved_override")
+  ) {
+    const preservedFields: SignalNotificationSubject["preservedFields"] = [
+      "predicate",
+      "outcome",
+    ];
+    if (/\b\d+(?:\.\d+)?\b/.test(natural)) {
+      preservedFields.push("threshold");
+    }
+    if (/\b(?:by|before|on|in)\s+[A-Z][a-z]{2,}|\b20\d{2}\b/.test(natural)) {
+      preservedFields.push("deadline");
+    }
+    return {
+      preservedFields,
+      source: "natural_market_proposition",
+      text: natural,
+      version: "signal_notification_subject_v3",
+    };
+  }
   if (input.presentation) {
     const position = input.presentation.positions[input.side];
     const subject = cleanText(input.presentation.subject) ?? "this market";
@@ -194,12 +240,6 @@ export function buildSignalNotificationSubject(input: {
       version: "signal_notification_subject_v3",
     };
   }
-  const natural = buildNaturalSubject({
-    eventTitle,
-    marketTitle,
-    side: input.side,
-    sideCopy: input.sideCopy,
-  });
   const marketLine = cleanText(input.sideCopy.marketLine);
   const genericFallback = `${input.side} on ${fullMarketTitle(input)}`;
   const text = natural ?? marketLine ?? genericFallback;
@@ -313,10 +353,12 @@ export function buildSignalNotificationHeadline(input: {
     input.currentPrice <= 1
       ? input.currentPrice
       : null;
-  const priceMove =
+  const rawPriceMove =
     input.priceMoveCents != null && Number.isFinite(input.priceMoveCents)
       ? input.priceMoveCents
       : null;
+  const priceMove =
+    rawPriceMove != null && Math.abs(rawPriceMove) < 0.5 ? 0 : rawPriceMove;
   const netFlow = Number.isFinite(input.netCopyFlowUsd)
     ? (input.netCopyFlowUsd ?? 0)
     : 0;
@@ -393,9 +435,14 @@ export function buildSignalNotificationHeadline(input: {
         hook = `${added ? "+" : "−"}${formatCompactUsd(
           Math.abs(delta.positionChangeUsd),
         )} ${added ? "added" : "cut"}.`;
-        continuation = `Tracked holders ${
-          added ? "increased" : "reduced"
-        } their exposure to ${positionLabel}.`;
+        continuation =
+          delta.scope === "representative_wallet"
+            ? `One tracked wallet ${
+                added ? "increased" : "cut"
+              } its ${positionLabel} position.`
+            : `Strong-wallet backing for ${positionLabel} ${
+                added ? "grew" : "fell"
+              }.`;
       } else if (delta?.kind === "wallet_count_change") {
         const added = delta.walletChange > 0;
         const wallets = Math.abs(delta.walletChange);
@@ -405,11 +452,19 @@ export function buildSignalNotificationHeadline(input: {
           : "research_wallets_left_v7";
         emoji = added ? "👀" : "⚠️";
         primaryMetric = `${added ? "+" : "−"}${wallets}`;
-        hook = `${added ? "+" : "−"}${wallets} ${
-          wallets === 1 ? "wallet" : "wallets"
-        }.`;
-        continuation = `Tracked support for ${input.subject.text} is ${
-          added ? "growing" : "weakening"
+        hook = `${wallets} ${
+          added ? "more" : "fewer"
+        } strong ${wallets === 1 ? "wallet" : "wallets"}.${
+          delta.afterWallets > 0
+            ? added
+              ? ` ${delta.afterWallets} now aligned.`
+              : ` ${delta.afterWallets} ${
+                  delta.afterWallets === 1 ? "remains" : "remain"
+                }.`
+            : ""
+        }`;
+        continuation = `Strong-wallet support for ${input.subject.text} has ${
+          added ? "grown" : "thinned"
         }.`;
       } else {
         templateKey = "research_update_suppressed_v7";
@@ -433,7 +488,9 @@ export function buildSignalNotificationHeadline(input: {
           : currentPrice == null
             ? null
             : formatCents(currentPrice);
-      hook = `+${formatCompactUsd(actorPnlUsd)} in ${actorPnlHorizonDays} days.`;
+      hook = `+${formatCompactUsd(
+        actorPnlUsd,
+      )} PnL in ${actorPnlHorizonDays} days.`;
       continuation =
         holderPositionUsd > 0
           ? formatWalletHolding(
@@ -520,14 +577,19 @@ export function buildSignalNotificationHeadline(input: {
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = null;
     const reducedWallets = Math.max(trimmedWallets, exitedWallets);
-    hook = `+${formatCompactUsd(netFlow)} in.${
+    hook = `+${formatCompactUsd(netFlow)} bought.${
       reducedWallets > 0
         ? ` ${reducedWallets} ${
             reducedWallets === 1 ? "wallet cut" : "wallets cut"
-          } exposure.`
+          }.`
         : ""
     }`;
-    continuation = `Wallet support for ${input.subject.text} is still split.`;
+    continuation =
+      priceMove === 0 && currentPrice != null
+        ? `${input.subject.text} is still stuck at ${formatCents(
+            currentPrice,
+          )} while wallet support stays split.`
+        : `Tracked wallets remain split on ${input.subject.text}.`;
   } else if (
     materialPositiveFlow &&
     strongPositiveMove &&
@@ -576,8 +638,8 @@ export function buildSignalNotificationHeadline(input: {
         storyKind = "divergence";
         templateKey = "mixed_wallet_breadth_positive_flow_v7";
         emoji = "⚠️";
-        hook = `+${formatCompactUsd(netFlow)} in.`;
-        continuation = `Wallet support for ${input.subject.text} is split.`;
+        hook = `+${formatCompactUsd(netFlow)} bought.`;
+        continuation = `Tracked wallets remain split on ${input.subject.text}.`;
       } else {
         storyKind = "flow";
         templateKey = "early_net_flow_v7";

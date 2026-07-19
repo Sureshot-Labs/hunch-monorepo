@@ -9755,10 +9755,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$542K in 30 days\\\.\* That wallet now holds \$20\\\.5K on Spain over Argentina\\\.$/,
+        /^👀 \*\\\+\$542K PnL in 30 days\\\.\* That wallet now holds \$20\\\.5K on Spain over Argentina\\\.$/,
       );
       assert.doesNotMatch(message.text, /▸ PnL/);
-      assert.match(message.text, /▸ Ahead of market.*18\\\.4 pts/);
+      assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
       assert.match(message.text, /▸ Traded.*2\\\.9M/);
     },
   },
@@ -10273,8 +10273,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.ok(
         message.text.includes(
-          "*Position now*: $7\\.5K on NO at 83¢ · Est\\. open PnL \\+$829",
+          "*Wallet position*: $7\\.5K on NO · 83¢ now · Est\\. open PnL \\+$829",
         ),
+        message.text,
       );
       assert.equal(message.publishable, true);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
@@ -10283,6 +10284,233 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /New research|holding fading|after the drop|market now gives/i,
       );
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
+    },
+  },
+  {
+    name: "wallet-count research update says support thinned without inventing exits",
+    run: () => {
+      const reason: HolderResearchUpdateReason = {
+        after: 5,
+        asOf: TEST_SIGNAL_PRICE_AS_OF,
+        before: 7,
+        delta: -2,
+        direction: "decreased",
+        kind: "wallet_confluence_changed",
+        side: "YES",
+        unit: "wallets",
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          bestAsk: 0.6,
+          bestBid: 0.58,
+          description:
+            "Spain to win the World Cup trades near 59c, while more tracked money is against Spain.",
+          eventTitle: "World Cup Winner",
+          holderActorMode: "sharp_cluster",
+          holderClusterSharpHolders: 5,
+          holderClusterSharpUsd: 2_800_000,
+          holderOpenPnlUsd: null,
+          holderPositionUsd: null,
+          holderResearchUpdateV1: {
+            baselineAsOf: "2026-07-18T00:00:00.000Z",
+            baselineNoteId: "00000000-0000-4000-8000-000000000001",
+            changedAt: TEST_SIGNAL_PRICE_AS_OF,
+            ctaIntent: "open_market",
+            fingerprint: "wallet-count-decrease",
+            materialityPolicy: {
+              revision: "test-v1",
+              thresholds: {},
+              version: 1,
+            },
+            primaryReason: reason,
+            reasons: [reason],
+            selectedSide: "YES",
+            version: 1,
+          },
+          marketTitle: "Spain",
+          meaningfulDeltaReasons: ["sharp_holder_count_changed"],
+          revisionKind: "research_update",
+        }),
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^⚠️ \*2 fewer strong wallets\\\. 5 remain\\\.\* Strong\\-wallet support for Spain to win the World Cup has thinned\\\.$/,
+      );
+      assert.match(
+        message.text,
+        /\*Strong\\-wallet support\*: \$2\\\.8M on Spain · 5 strong wallets · 59¢ now/,
+      );
+      assert.doesNotMatch(
+        message.text,
+        /left|exited|tracked on YES|Position now/i,
+      );
+    },
+  },
+  {
+    name: "missing total summary gets a factual fallback and a labelled PnL hook",
+    run: () => {
+      const source = {
+        kind: "hunch_wallet_intel" as const,
+        label: "Representative wallet",
+        url: null,
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          description: "No summary.",
+          direction: "down",
+          eventTitle: "Spain vs. Argentina - More Markets",
+          holderCredentialBullets: [],
+          holderPositionUsd: 16_000,
+          holderSide: "NO",
+          marketDescription: "Under if the teams score four or fewer goals.",
+          marketTitle: "O/U 4.5 total goals",
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: 30,
+                id: "pnl-30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 35_200,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source,
+              },
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: 30,
+                id: "pricing-30d",
+                kind: "pricing_edge",
+                measurement: {
+                  kind: "scalar",
+                  unit: "probability",
+                  value: 0.179,
+                },
+                quality: "verified",
+                sampleSize: 20,
+                scope: "representative_wallet",
+                source,
+              },
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: 30,
+                id: "volume-30d",
+                kind: "volume",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 88_500,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "representative_wallet",
+                source,
+              },
+            ],
+          },
+          outcomes: ["Over", "Under"],
+        }),
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^👀 \*\\\+\$35\\\.2K PnL in 30 days\\\.\*/,
+      );
+      assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
+      assert.match(
+        message.text,
+        /cashes if the match finishes with 0–4 goals\\\./,
+      );
+      assert.match(message.text, /▸ Recent results.*17\\\.9 pts vs market/);
+      assert.doesNotMatch(
+        message.text,
+        /No summary|More Markets|total goals 4\.5 total goals/i,
+      );
+    },
+  },
+  {
+    name: "single-wallet total update stays canonical and strips stable credentials",
+    run: () => {
+      const reason: HolderResearchUpdateReason = {
+        after: 78_400,
+        asOf: TEST_SIGNAL_PRICE_AS_OF,
+        before: 29_000,
+        delta: 49_400,
+        kind: "position_increased",
+        scope: "representative_wallet",
+        side: "NO",
+        unit: "usd",
+        walletId: "wallet-1",
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          bestAsk: 0.42,
+          bestBid: 0.4,
+          description:
+            "Under 2.5 total goals trades near 59c, meaning 0-2 goals cashes. hot2trot is holding the low-scoring side close to kickoff, with strong recent sports results behind the position.",
+          direction: "down",
+          eventTitle: "Spain vs. Argentina - More Markets",
+          holderDisplayName: "hot2trot",
+          holderIdentityDisplayName: "hot2trot",
+          holderOpenPnlUsd: 663,
+          holderPositionUsd: 78_400,
+          holderResearchUpdateV1: {
+            baselineAsOf: "2026-07-18T00:00:00.000Z",
+            baselineNoteId: "00000000-0000-4000-8000-000000000001",
+            changedAt: TEST_SIGNAL_PRICE_AS_OF,
+            ctaIntent: "buy",
+            fingerprint: "single-wallet-total-increase",
+            materialityPolicy: {
+              revision: "test-v1",
+              thresholds: {},
+              version: 1,
+            },
+            primaryReason: reason,
+            reasons: [reason],
+            selectedSide: "NO",
+            version: 1,
+          },
+          holderSide: "NO",
+          marketDescription: "Under if the teams score two or fewer goals.",
+          marketTitle: "O/U 2.5 total goals",
+          meaningfulDeltaReasons: ["holder_position_move:wallet-1"],
+          outcomes: ["Over", "Under"],
+          revisionKind: "research_update",
+        }),
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^💰 \*\\\+\$49\\\.4K added\\\.\* One tracked wallet increased its Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
+      );
+      assert.ok(
+        message.text.includes(
+          "*Wallet position*: $78\\.4K on Under 2\\.5 total goals · 59¢ now · Est\\. open PnL \\+$663",
+        ),
+        message.text,
+      );
+      assert.doesNotMatch(
+        message.text,
+        /More Markets|total goals 2\.5 total goals|hot2trot|strong recent sports results| at 59¢/i,
+      );
     },
   },
   {
@@ -11561,7 +11789,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v7");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v8");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
@@ -11888,7 +12116,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "flat mixed followthrough keeps canonical subject and omits zero metrics",
+    name: "flat mixed total followthrough keeps public side and strips service suffix",
     run: async () => {
       const redis = new FakeRedis();
       await enableFollowthroughTestChat(redis);
@@ -11902,30 +12130,34 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       db.candidateRows = [
         followthroughCandidateRow({
-          best_ask: "0.61",
-          best_bid: "0.59",
-          event_title: "Spain vs Argentina",
-          market_title: "Team to Advance",
+          best_ask: "0.41",
+          best_bid: "0.39",
+          direction: "down",
+          event_title: "Spain vs. Argentina - More Markets",
+          market_description: "Under if the teams score two or fewer goals.",
+          market_title: "O/U 2.5 total goals",
           metrics: {
-            market: { yesProbability: 0.59 },
+            market: { yesProbability: 0.41 },
             signalSnapshot: {
               quote: { buyPrice: 0.59 },
-              side: "YES",
+              side: "NO",
             },
           },
+          outcomes: JSON.stringify(["Over", "Under"]),
           root_metrics: {
             copy: {
               marketIdentity: {
-                ...testSignalIdentity("YES"),
-                eventTitle: "Spain vs Argentina",
-                marketGroupItemTitle: "Team to Advance",
-                marketQuestion: "Team to Advance",
-                predicate: "Spain advances",
-                selectedSideLabel: "Spain",
-                subject: "Spain vs Argentina",
+                ...testSignalIdentity("NO"),
+                eventTitle: "Spain vs. Argentina - More Markets",
+                marketGroupItemTitle: "O/U 2.5 total goals",
+                marketQuestion: "O/U 2.5 total goals",
+                predicate: "Under 2.5 total goals",
+                selectedSideLabel: "Under 2.5 total goals",
+                subject: "Spain vs. Argentina - More Markets",
               },
             },
           },
+          target_meta: { side: "NO" },
         }),
       ];
       db.flowRows = [
@@ -11936,6 +12168,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           net_shares: "500000",
           net_usd: "300000",
           positive_usd: "300000",
+          outcome_side: "NO",
           wallet_id: "joined",
         }),
         followthroughFlowRow({
@@ -11946,6 +12179,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           net_shares: "-50000",
           net_usd: "-10000",
           positive_usd: "0",
+          outcome_side: "NO",
           wallet_id: "trimmed",
         }),
         followthroughFlowRow({
@@ -11956,6 +12190,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           net_shares: "-10000",
           net_usd: "-7000",
           positive_usd: "0",
+          outcome_side: "NO",
           wallet_id: "exited",
         }),
       ];
@@ -11977,16 +12212,19 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text,
-        /^⚠️ \*\\\+\$283K in\\\. 2 wallets cut exposure\\\.\* Wallet support for Spain over Argentina is still split/,
+        /^⚠️ \*\\\+\$283K bought\\\. 2 wallets cut\\\.\* Under 2\\\.5 total goals in Spain vs\\\. Argentina is still stuck at 59¢ while wallet support stays split/,
       );
-      assert.match(text, />Spain price {2}\*59¢\* unchanged/);
       assert.match(
         text,
-        /Net tracked dollars rose, but 2 wallets cut exposure; \[Spain at 59¢\]/,
+        />Under 2\\\.5 total goals price {2}\*59¢\* unchanged/,
+      );
+      assert.match(
+        text,
+        /More money went into \[Under 2\\\.5 total goals at 59¢\].*wallet support thinned and the price did not move/,
       );
       assert.doesNotMatch(
         text,
-        /Team to Advance|\\\+0¢|Est\\\. open PnL {2}\*\$0\*/,
+        /More Markets|O\/U|total goals 2\.5 total goals|\\\+0¢|Est\\\. open PnL {2}\*\$0\*/,
       );
     },
   },

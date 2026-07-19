@@ -43,9 +43,19 @@ const BUTTON_LABEL_MAX_CHARS = 14;
 const OUTCOME_LABEL_MAX_CHARS = 3;
 const OUTCOME_LABEL_VOWELS = /[AEIOUY]/g;
 
-function cleanText(value: string | null | undefined): string | null {
-  const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
+export function cleanPublicMarketText(
+  value: string | null | undefined,
+): string | null {
+  const cleaned =
+    value
+      ?.replace(/\s+[-–—]\s+More Markets(?=\s*(?:[.!?,;:])?(?:\s|$))/gi, "")
+      .trim()
+      .replace(/\s+/g, " ") ?? "";
   return cleaned.length > 0 ? cleaned : null;
+}
+
+function cleanText(value: string | null | undefined): string | null {
+  return cleanPublicMarketText(value);
 }
 
 function normalizeAlnumUpper(value: string): string {

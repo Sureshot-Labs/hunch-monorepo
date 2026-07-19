@@ -592,7 +592,7 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V7 backend completion and rollout (legacy filename retained):
+- Signal Post V8 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
 - typed holder-research update delta and canonical identity:
   `backend-holder-research-update-contract.md`;
@@ -621,12 +621,12 @@ All posts share a notification-first headline and restrained formatting, but
 they must not share one rigid vertical template. The final block answers a
 different user question for each message family:
 
-| Family          | What is new?                               | Supporting block | Ending                        |
-| --------------- | ------------------------------------------ | ---------------- | ----------------------------- |
-| Initial signal  | Why this trade is interesting now          | `Why it matters` | Proof card is terminal        |
-| Research update | What materially changed since the signal   | `Position now`   | Current state, no repeated CV |
-| Follow-through  | How price and tracked wallets have evolved | `Since the call` | `Read:` interpretation        |
-| Resolution      | Whether the called side won or lost        | `Result`         | Result card is terminal       |
+| Family          | What is new?                               | Supporting block                             | Ending                               |
+| --------------- | ------------------------------------------ | -------------------------------------------- | ------------------------------------ |
+| Initial signal  | Why this trade is interesting now          | `Why it matters`                             | Proof card is terminal               |
+| Research update | What materially changed since the signal   | `Wallet position` or `Strong-wallet support` | Scoped current state, no repeated CV |
+| Follow-through  | How price and tracked wallets have evolved | `Since the call`                             | `Read:` interpretation               |
+| Resolution      | Whether the called side won or lost        | `Result`                                     | Result card is terminal              |
 
 Common rules:
 
@@ -743,11 +743,11 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V7 structure:
+Implemented V8 structure:
 
 ```text
-⚠️ **+$67.7K in. 8 wallets cut exposure.** Wallet support for NO on BTC
-hitting $57.5K in July is still split.
+⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
+BTC hitting $57.5K in July.
 
 │ Since the call
 │
@@ -756,8 +756,8 @@ hitting $57.5K in July is still split.
 │ NO price  87¢ → 89¢  +2¢
 │ Est. open PnL  +$1.6K
 
-Read: Net tracked dollars rose, but 8 wallets cut exposure; NO at 89¢ moved
-only 2¢ with the call.
+Read: More money went into NO at 89¢, but wallet support thinned and the price
+barely moved.
 ```
 
 The `│` representation above documents the rendered Telegram blockquote. The
@@ -787,13 +787,13 @@ or thin evidence—rather than repeat every number above it.
 ### Initial-signal structure
 
 ```text
-👀 **+$542K in 30 days.** That wallet now holds $20.5K on Spain.
+👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
 
 <one- or two-sentence thesis>
 
 │ Why it matters
 │
-│ ▸ Ahead of market  +18.4 pts · 24 resolved bets
+│ ▸ Recent results  +18.4 pts vs market · 24 resolved bets
 │ ▸ Traded  $2.9M · 30d
 ```
 
@@ -835,12 +835,18 @@ Research updates:
 - are replies to the original signal, not standalone repetitions of it;
 - derive the headline from a supported material delta, for example
   `📈 **+8¢ to 83¢.** NO on BTC hitting $70K in July moved with the call`,
-  `💰 **+$8K added.** Tracked holders increased exposure to ...`, or
-  `⚠️ **−2 wallets.** Tracked support for ... is weakening`;
+  `💰 **+$8K added.** One tracked wallet increased its ... position`, or
+  `⚠️ **2 fewer strong wallets. 5 remain.** Strong-wallet support for ... has
+thinned`;
 - use `🔎` only when the actual delta is new sourced external evidence;
 - clearly explain the named change from the original signal;
-- show current state as `Position now: ...` in regular
-  text, with the label bold;
+- show a single wallet as `Wallet position: $78.4K on Under 2.5 · 59¢ now`;
+- show aggregate evidence as `Strong-wallet support: $2.8M on Spain · 5
+strong wallets · 59¢ now`; never collapse both scopes into `Position now`;
+- remove internal sports collection suffixes such as `- More Markets` before
+  rendering, and keep total alias normalization idempotent;
+- suppress literal `No summary.`; for totals, use a deterministic
+  win-condition sentence when generated prose is unavailable;
 - do not repeat `Why it matters`, track record, pricing edge, or
   volume already established in the parent signal;
 - do not append `No cited external evidence was available` or a detached `📰`

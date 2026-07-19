@@ -1,24 +1,24 @@
-# Backend Task: Roll Out Signal Post V7
+# Backend Task: Roll Out Signal Post V8
 
-Status: V7 renderer and producer/delivery contracts implemented locally; live device QA remains
+Status: V8 correctness pass and producer/delivery contracts implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
-The filename is retained so existing handoff links do not break. V7 supersedes
-the V6 grammar documented in earlier revisions.
+The filename is retained so existing handoff links do not break. V8 keeps the
+V7 attention-first grammar and fixes semantic errors found in real sports posts.
 
 ## Goal
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V7 renderer is the baseline. This task is not a request
+The locally implemented V8 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v7`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v8`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
 - a typed two-part first line: `emoji + bold numeric hook + regular market
 explanation`; the LLM does not control emoji, Markdown, or hook order;
@@ -47,8 +47,19 @@ explanation`; the LLM does not control emoji, Markdown, or hook order;
   follow-through, and `Result` for resolution;
 - research updates rendered from producer-owned `holderResearchUpdateV1`, with
   fail-closed suppression when no supported change can be proved;
-- research updates omit stable wallet credentials and use one plain `Position
-now` line only as current context;
+- research updates omit stable wallet credentials and distinguish a single
+  `Wallet position` from aggregate `Strong-wallet support`;
+- research delta rendering preserves producer-owned `before`, `after`, and
+  `scope`, so a lower strong-wallet count is never described as a proved sale
+  or exit;
+- totals are normalized idempotently: an already canonical `Under 2.5 total
+goals` cannot become `Under 2.5 total goals 2.5 total goals`;
+- internal sports collection suffixes such as `- More Markets` are removed from
+  all public title and body paths;
+- public team subjects prefer the actual proposition (`Spain to win the World
+Cup`) over the internal contract side (`YES on Spain`);
+- literal `No summary.` is never persisted or rendered; totals receive a safe
+  deterministic win-condition sentence when generated prose is unavailable;
 - a verified positive 30-day wallet PnL may lead an initial single-wallet hook;
   the same evidence row is then removed from `Why it matters` to avoid repeat;
 - zero price deltas and rounded-zero estimated PnL are omitted instead of being
@@ -71,7 +82,7 @@ Primary files:
 - `apps/api/src/signal-notification-headline-tests.ts`;
 - `apps/api/src/signal-bot-tests.ts`.
 
-V7 itself requires no database migration. `emoji`, `hook`, `continuation`,
+V8 itself requires no database migration. `emoji`, `hook`, `continuation`,
 `primaryEvidenceId`, story/template, and copy version are persisted inside the
 existing JSON copy audit. Existing notification/preferences migrations are a
 separate rollout concern.
@@ -91,7 +102,7 @@ time window, or a real contradiction—not from invented urgency.
 Priority and examples:
 
 ```text
-👀 **+$542K in 30 days.** That wallet now holds $20.5K on Spain.
+👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
 📉 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
 🔥 **+$45K bought. +7¢.** Spain is moving with tracked wallets.
 ⚠️ **3 exits. $31K sold.** Tracked support for Spain is weakening.
@@ -129,8 +140,8 @@ Rules:
 Follow-through:
 
 ```text
-⚠️ **+$67.7K in. 8 wallets cut exposure.** Wallet support for NO on BTC
-hitting $57.5K in July is still split.
+⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
+BTC hitting $57.5K in July.
 
 > Since the call
 >
@@ -139,20 +150,20 @@ hitting $57.5K in July is still split.
 > NO price  87¢ → 89¢  +2¢
 > Est. open PnL  +$1.6K
 
-Read: Net tracked dollars rose, but 8 wallets cut exposure; NO at 89¢ moved
-only 2¢ with the call.
+Read: More money went into NO at 89¢, but wallet support thinned and the price
+barely moved.
 ```
 
 Initial signal:
 
 ```text
-👀 **+$542K in 30 days.** That wallet now holds $20.5K on Spain.
+👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
 
 <one concise thesis; natural market/wallet phrases may be Mini App links>
 
 > Why it matters
 >
-> ▸ Ahead of market  +18.4 pts · 24 resolved bets
+> ▸ Recent results  +18.4 pts vs market · 24 resolved bets
 > ▸ Traded  $2.9M · 30d
 ```
 
@@ -165,7 +176,7 @@ Research update:
 
 <one concise explanation of what changed and why it matters>
 
-Position now: $7.5K on NO at 83¢ · Est. open PnL +$829
+Wallet position: $7.5K on NO · 83¢ now · Est. open PnL +$829
 ```
 
 Do not repeat `Why it matters` in a reply to the original signal: the wallet's
@@ -193,7 +204,7 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V7 Backend Contract
+## V8 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -315,7 +326,7 @@ survive the preview.
 
 ### 6. Rollout telemetry
 
-V7 records the following by copy/policy version; production validation is
+V8 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -342,9 +353,15 @@ Mini App market and Buy payloads may carry the opaque
   `app.hunch.trade` links.
 - Research updates with no supported meaningful delta produce no notification.
 - Stable wallet credentials are not repeated in research-update replies.
+- Public posts never expose `- More Markets`, literal `No summary.`, or a
+  duplicated total label.
+- A wallet-count change reports only the count change and remaining support;
+  it does not invent a sale or exit event.
+- Aggregate cluster support and one-wallet position state have different
+  labels and keep their producer-owned scope.
 - Market-wide activity cannot masquerade as selected-side flow.
 - Open follow-through posts end in `Read:` and terminal posts end in `Result`.
-- Device fixtures pass and rollout telemetry distinguishes V7 from older copy.
+- Device fixtures pass and rollout telemetry distinguishes V8 from older copy.
 
 ## Out of Scope
 
