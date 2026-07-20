@@ -1,33 +1,36 @@
-# Backend Task: Roll Out Signal Post V9
+# Backend Task: Roll Out Signal Post V10
 
-Status: V9 correctness pass and producer/delivery contracts implemented locally; live device QA remains
+Status: V10 editorial-headline pass and producer/delivery contracts implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
-The filename is retained so existing handoff links do not break. V9 keeps the
-attention-first grammar and fixes story-priority, market-completeness, evidence
-duplication, and PnL-basis errors found in live Golden Boot and Bitcoin posts.
+The filename is retained so existing handoff links do not break. V10 turns the
+first line into editorial “cover copy”: it chooses the strongest verified human
+tension instead of forcing every signal through the same metric-first card.
 
 ## Goal
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V9 renderer is the baseline. This task is not a request
+The locally implemented V10 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v9`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v10`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
-- a typed two-part first line: `emoji + bold numeric hook + regular market
-explanation`; the LLM does not control emoji, Markdown, or hook order;
-- numeric-first hooks for money, price, wallet-count, cooling/divergence,
-  research, and resolution stories;
-- `📈`/`📉` only for actual price direction, `💰` for clean buying/capital,
-  `⚠️` for exits/selling/mixed support, `👀` for performance/research, `🔥` for
-  ordinary clean capital-plus-price confluence, and `🏁` for resolution;
+- a typed two-part first line: `emoji + bold cover hook + regular payoff`; the
+  LLM does not control emoji, Markdown, or story priority;
+- an editorial angle selector for low-probability bets, crowd-versus-wallet
+  disagreement, favourite-versus-contrarian matchups, unusually large
+  positions, losing positions that credible wallets have not left, late-stage
+  cash-outs, and adverse price-target moves;
+- `📈`/`📉` only for actual price direction; initial stories may use `🏆`,
+  `⚽`, `🪙`, `🌐`, or `🗳️` for recognisable winner, matchup, price-target,
+  geopolitical, or election context; `🔥` marks a strong fade/against angle,
+  and `🏁` marks resolution;
 - natural Bitcoin price-target and total-market subjects plus safe generic
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
@@ -61,16 +64,18 @@ goals` cannot become `Under 2.5 total goals 2.5 total goals`;
 Cup`) over the internal contract side (`YES on Spain`);
 - literal `No summary.` is never persisted or rendered; totals receive a safe
   deterministic win-condition sentence when generated prose is unavailable;
-- a verified positive recent PnL may lead an initial single-wallet or
-  sharp-cluster hook; consumed PnL, capital, and wallet-count evidence is then
-  removed from `Why it matters` to avoid repeating the headline as a card;
+- a verified positive recent PnL may lead or qualify an initial single-wallet
+  or sharp-cluster hook; the exact value remains available in `Why it matters`
+  because the rounded headline is the promise and the body is the proof;
 - cluster NO headlines state the complete proposition and qualify the displayed
   price as `NO at 92¢`, rather than attaching `92¢` ambiguously to the event;
 - incomplete entity-only subjects such as `NO on Argentina` fail closed until
   winner/event context can produce a complete proposition;
-- exceptional price-plus-capital confirmation (for example `+50¢` and `+$1M`)
-  outranks mixed breadth in the headline, while the body still discloses trims
-  and exits;
+- near-resolution moves can lead with early-holder behaviour instead of a raw
+  confluence card: `Mbappé reached 99¢ ... 22 early wallets are already cashing
+out`; “early” counts only wallets that had a baseline position at the call;
+- cluster “down but still holding” headlines use a cluster-scoped open-PnL
+  aggregate, not the open PnL of all wallets on the side;
 - follow-through estimated PnL is labeled `Est. PnL since call`; research state
   uses `Wallet open PnL` and explains that wallet entry and signal publication
   are different starting prices when the two measures point in opposite
@@ -95,10 +100,12 @@ Primary files:
 - `apps/api/src/signal-notification-headline-tests.ts`;
 - `apps/api/src/signal-bot-tests.ts`.
 
-V9 itself requires no database migration. `emoji`, `hook`, `continuation`,
+V10 itself requires no database migration. `emoji`, `hook`, `continuation`,
 `primaryEvidenceId`, `evidenceKindsUsed`, story/template, and copy version are
 persisted inside the existing JSON copy audit. Existing
-notification/preferences migrations are a separate rollout concern.
+notification/preferences migrations are a separate rollout concern. New
+Holder Research notes also persist `clusterOpenPnlUsd` inside existing target
+metadata JSON; older notes safely fall back to another headline angle.
 
 ## Headline Contract
 
@@ -106,22 +113,27 @@ The first source line is the Telegram/iOS notification lead. It is structured,
 not one generated bold string:
 
 ```text
-<semantic emoji> **<numeric thumbnail hook>.** <plain market explanation>.
+<semantic emoji> **<clickbait cover hook>.** <plain payoff>.
 ```
 
-Select the strongest verified story. FOMO comes from a true number, a short
-time window, or a real contradiction—not from invented urgency.
+Select the strongest verified story. FOMO comes from a recognisable market,
+credible money, a low probability, disagreement, persistence, or a real exit —
+not from invented urgency. The title is allowed to compress scope editorially;
+the body must immediately provide the exact actor, value, timeframe, and side.
 
 Priority and examples:
 
 ```text
-👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
-👀 **+$122K combined PnL in 30 days.** 2 strong wallets have $38K against
-Lionel Messi winning the Golden Boot at the World Cup, with NO at 92¢.
+⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina with $20.5K.
+🏆 **Argentina has just a 17% chance of winning the World Cup.** Four wallets
+up nearly $1M are still backing Argentina.
+🔥 **Messi has only an 8% chance of winning the Golden Boot.** Two profitable
+wallets are betting against Messi.
+⚠️ **Mbappé reached 99¢ to win the Golden Boot.** 22 early wallets are already
+cashing out.
+📉 **Bitcoin is moving closer to $67.5K.** This wallet still refuses to flip.
 📉 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
 🔥 **+$45K bought. +7¢.** Spain is moving with tracked wallets.
-📈 **+50¢ to 99¢.** $1M flowed into Kylian Mbappe to win the Golden Boot at
-the World Cup after the call.
 ⚠️ **3 exits. $31K sold.** Tracked support for Spain is weakening.
 📈 **+8¢ to 67¢.** Spain is moving with the call.
 🏁 **Spain won.**
@@ -129,16 +141,21 @@ the World Cup after the call.
 
 Rules:
 
-- put the strongest meaningful number immediately after the emoji whenever a
-  verified number exists; do not prefix it with the words Another, Wallet, or
-  The market;
+- treat the bold hook like YouTube thumbnail copy: maximise the desire to open
+  the post, while staying faithful to structured facts;
+- prefer a strong number at the front when it is the best hook, but do not let
+  that mechanical rule suppress a stronger human event such as early wallets
+  cashing out or a wallet refusing to flip;
 - keep only the hook bold; the continuation stays regular weight;
 - lead a strong single-wallet or verified sharp-cluster initial signal with
   recent performance when it is more attention-worthy than position size;
+- abbreviate cover metrics for impact (`$967.8K` → `nearly $1M`) and repeat the
+  exact value and combined/single-wallet scope in the body;
 - lead with capital when net flow is material and price is secondary;
 - lead with price when price movement is the actual story;
-- use `🔥` only for two independent strong confirmations and no contrary
-  wallet breadth;
+- vary semantic emoji by story and market; never use one emoji as a literal
+  synonym for “attention” across every post;
+- reserve `📈`/`📉` for actual price movement, not buys/sells;
 - keep the side, predicate, threshold/outcome, and deadline needed to identify
   the contract;
 - never infer a complementary NO proposition without a verified mapping;
@@ -176,22 +193,26 @@ barely moved.
 Initial signal:
 
 ```text
-👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
+⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina with
+$20.5K.
 
 <one concise thesis; natural market/wallet phrases may be Mini App links>
 
 > Why it matters
 >
 > ▸ Recent results  +18.4 pts vs market · 24 resolved bets
+> ▸ PnL  +$542K · 30d
 > ▸ Traded  $2.9M · 30d
 ```
 
-The PnL row is intentionally absent because it already supplied the hook.
+The body intentionally repeats the exact PnL. The rounded headline earns the
+open; the proof card establishes precise scope and prevents a phrase such as
+“four wallets up nearly $1M” from being read as $1M per wallet.
 
 Research update:
 
 ```text
-📉 **−11¢ to 61¢.** NO on BTC hitting $67.5K in July moved against the call.
+📉 **Bitcoin is moving closer to $67.5K.** This wallet still refuses to flip.
 
 <one concise explanation of what changed and why it matters>
 
@@ -226,7 +247,7 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V9 Backend Contract
+## V10 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -332,7 +353,7 @@ Send fixtures to a private test channel and review iOS Lock Screen,
 Notification Center, banner, Android, and Telegram Desktop in light/dark mode.
 Cover:
 
-- the three examples above;
+- the editorial headline examples above;
 - long market subjects, Unicode, named outcomes, totals, and complex NO;
 - initial single wallet and wallet cluster;
 - mixed breadth, exits, negative flow, adverse price, and thin evidence;
@@ -348,7 +369,7 @@ survive the preview.
 
 ### 6. Rollout telemetry
 
-V9 records the following by copy/policy version; production validation is
+V10 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -383,7 +404,7 @@ Mini App market and Buy payloads may carry the opaque
   labels and keep their producer-owned scope.
 - Market-wide activity cannot masquerade as selected-side flow.
 - Open follow-through posts end in `Read:` and terminal posts end in `Result`.
-- Device fixtures pass and rollout telemetry distinguishes V9 from older copy.
+- Device fixtures pass and rollout telemetry distinguishes V10 from older copy.
 
 ## Out of Scope
 

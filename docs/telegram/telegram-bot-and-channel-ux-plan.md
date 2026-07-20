@@ -592,7 +592,7 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V9 backend completion and rollout (legacy filename retained):
+- Signal Post V10 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
 - typed holder-research update delta and canonical identity:
   `backend-holder-research-update-contract.md`;
@@ -648,7 +648,7 @@ renderer helper and verify the result on iOS, Android, and Desktop.
 
 Use regular Telegram MarkdownV2 deliberately:
 
-- **Bold:** only the numeric “thumbnail” hook, section labels, and the one or
+- **Bold:** only the editorial “thumbnail” hook, section labels, and the one or
   two key values. The explanatory continuation of the first line is regular.
 - _Italic:_ genuinely secondary metadata only; do not italicize an entire
   current-position or conclusion line.
@@ -669,9 +669,10 @@ with an emoji has no hierarchy.
 Keep a small semantic vocabulary:
 
 - `💰` — material net flow or a material tracked position;
-- `🔥` — unusually strong capital/alignment or capital-plus-price confluence
-  with no contrary wallet breadth;
-- `👀` — early/quiet accumulation or an undernoticed divergence;
+- `🔥` — a strong fade/against angle or unusually strong confluence;
+- `👀` — a performance-led or undernoticed angle when no more specific market
+  icon fits;
+- `🏆` / `⚽` / `🪙` — winner, matchup, and price-target stories;
 - `⚠️` — cooling, thin follow-through, deterioration, or risk;
 - `📈` / `📉` — actual selected-side price direction only, never a synonym for
   buy/sell activity;
@@ -688,11 +689,16 @@ each receive a random emoji.
 - Use sentence case.
 - Treat the first line as the mobile push-notification preview, not only as the
   heading of an opened post.
-- Build it like a YouTube thumbnail plus title on one line: the bold hook is a
-  truthful, numeric attention trigger; the plain continuation explains the
-  market and why the number matters.
-- Put the strongest meaningful number immediately after the emoji whenever
-  possible. Do not lead with `Another`, `Wallet`, or `The market` before it.
+- Build it like a YouTube thumbnail plus title on one line: the bold hook is
+  truthful cover copy; the plain continuation delivers the payoff.
+- Put a strong meaningful number first when it is the best hook, but compare it
+  against human tension first. `22 early wallets are cashing out` can be more
+  powerful than `+50¢ / +$1M`, while `+$542K in 30 days` can be stronger than
+  `$20.5K backs Spain`.
+- Do not use one rigid title schema. Select among low probability, profitable
+  minority versus crowd, favourite versus contrarian, unusually large stake,
+  credible wallets staying through a loss, late-stage exits, and market
+  movement against a holder.
 - Prefer `July Fed “no change” jumps 11¢ to 91¢` over internal syntax such as
   `YES +11¢ on Fed: No change`.
 - Use 80 visible grapheme clusters as an initial lint target, then establish a
@@ -743,7 +749,7 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V9 structure:
+Implemented V10 structure:
 
 ```text
 ⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
@@ -787,13 +793,15 @@ or thin evidence—rather than repeat every number above it.
 ### Initial-signal structure
 
 ```text
-👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
+⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina with
+$20.5K.
 
 <one- or two-sentence thesis>
 
 │ Why it matters
 │
 │ ▸ Recent results  +18.4 pts vs market · 24 resolved bets
+│ ▸ PnL  +$542K · 30d
 │ ▸ Traded  $2.9M · 30d
 ```
 
@@ -809,13 +817,11 @@ Rules:
   rows.
 - Use one repeated list marker (`▸`) and emphasize the key value, not every
   word.
-- Avoid repeating the side, price, position, and PnL in both prose and the data
-  block.
-- When verified recent PnL supplies the headline hook, remove its PnL row from
-  `Why it matters`; do not make the user read the same claim twice.
-- Apply the same rule to sharp clusters: when combined recent PnL, position
-  capital, and wallet count are already used in the headline, do not repeat any
-  of those three facts as proof rows.
+- Avoid mechanically restating the whole title in prose, but allow the proof
+  block to repeat the exact scoped metric behind rounded cover copy.
+- If the title says `four wallets up nearly $1M`, the body must say that this is
+  combined 30-day PnL and show the exact value. Attention in the headline and
+  precision in the body are complementary, not competing rules.
 - A cluster-side price must be scoped explicitly (`with NO at 92¢`), not left
   dangling after the event proposition.
 - Do not add a deterministic “still holding” sentence after a headline that

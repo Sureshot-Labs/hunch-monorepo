@@ -464,6 +464,7 @@ export type SignalBotNote = {
   holderSide: "NO" | "YES" | null;
   holderActorMode: "none" | "sharp_cluster" | "single_holder" | null;
   holderCredentialBullets: string[];
+  holderClusterOpenPnlUsd: number | null;
   holderClusterPnl30dUsd: number | null;
   holderClusterSharpHolders: number | null;
   holderClusterSharpUsd: number | null;
@@ -518,6 +519,7 @@ type SignalBotFollowthroughStats = {
   joinedWallets: number;
   addedWallets: number;
   joinedOrAddedWallets: number;
+  earlyWalletsCut: number;
   trimmedWallets: number;
   exitedWallets: number;
   stillHoldingWallets: number;
@@ -665,7 +667,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v9";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v10";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -6229,6 +6231,7 @@ async function buildSignalBotFollowthroughStats(input: {
   });
   let joinedWallets = 0;
   let addedWallets = 0;
+  let earlyWalletsCut = 0;
   let trimmedWallets = 0;
   let exitedWallets = 0;
   let stillHoldingWallets = 0;
@@ -6281,6 +6284,7 @@ async function buildSignalBotFollowthroughStats(input: {
       } else if (hadBaseline && positiveUsd > 0 && netUsd > 0) {
         addedWallets += 1;
       }
+      if (hadBaseline && negativeUsd > 0 && netUsd < 0) earlyWalletsCut += 1;
       if (negativeUsd > 0) trimmedWallets += 1;
       if (
         (hadBaseline || positiveUsd > 0) &&
@@ -6351,6 +6355,7 @@ async function buildSignalBotFollowthroughStats(input: {
     joinedWallets,
     addedWallets,
     joinedOrAddedWallets: joinedWallets + addedWallets,
+    earlyWalletsCut,
     trimmedWallets,
     exitedWallets,
     stillHoldingWallets,
@@ -6422,6 +6427,7 @@ function formatSignalBotFollowthroughRead(input: {
   sideCopy: MarketSideCopy | null;
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
+  lateStageCashout?: boolean;
 }): string {
   const priceMoveCents =
     input.stats.priceMoveCents != null &&
@@ -6440,6 +6446,9 @@ function formatSignalBotFollowthroughRead(input: {
   }
   if (!input.hasWalletEvidence) {
     return `${marketLabel} moved with the read, but tracked wallet follow-through is thin so far.`;
+  }
+  if (input.lateStageCashout) {
+    return "The trade has largely played out. Some early holders are no longer waiting for the final cent.";
   }
   if (priceMoveCents != null && priceMoveCents > 0) {
     if (input.dominantConfluence) {
@@ -6519,6 +6528,7 @@ function formatSignalBotFollowthroughReadMarkdown(input: {
   sideCopy: MarketSideCopy | null;
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
+  lateStageCashout?: boolean;
 }): string {
   const marketLabel =
     input.stats.markPrice == null
@@ -6745,6 +6755,9 @@ function buildSignalBotFollowthroughMessage(input: {
     sideCopy,
     sideLabel,
     stats,
+    lateStageCashout:
+      notificationCopy.headline.templateKey ===
+      "late_stage_early_wallet_cashout_v10",
   });
   if (input.kind === "resolved_win" || input.kind === "resolved_loss") {
     return joinTelegramMessageBlocks([
@@ -6839,6 +6852,9 @@ function buildNeutralSignalFollowthroughView(input: {
               input.stats.signalSide,
             ).priceLabel,
       stats: input.stats,
+      lateStageCashout:
+        notificationCopy.headline.templateKey ===
+        "late_stage_early_wallet_cashout_v10",
     }),
     target,
     thread:
@@ -7833,6 +7849,27 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function resolveSignalBotTrackedMoneyContext(
+  note: Pick<SignalBotNote, "decisionSnapshot">,
+  side: "NO" | "YES",
+): {
+  trackedMoneyOpposes: boolean;
+} {
+  const snapshot = asObject(note.decisionSnapshot);
+  const sides = asObject(snapshot.sides);
+  const selected = asObject(sides[side]);
+  const opposite = asObject(sides[side === "YES" ? "NO" : "YES"]);
+  const selectedUsd = toNumber(selected.usd);
+  const oppositeUsd = toNumber(opposite.usd);
+  const materialOpposition =
+    selectedUsd != null &&
+    oppositeUsd != null &&
+    oppositeUsd - selectedUsd >= Math.max(10_000, selectedUsd * 0.15);
+  return {
+    trackedMoneyOpposes: materialOpposition,
+  };
+}
+
 function asTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
@@ -7980,6 +8017,7 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
           ? "none"
           : null,
     holderCredentialBullets: asStringArray(holderMeta.credentialBullets, 3),
+    holderClusterOpenPnlUsd: toNumber(holderMeta.clusterOpenPnlUsd),
     holderClusterPnl30dUsd: toNumber(holderMeta.clusterPnl30dUsd),
     holderClusterSharpHolders: toNumber(holderMeta.clusterSharpHolders),
     holderClusterSharpUsd: toNumber(holderMeta.clusterSharpUsd),
@@ -8285,7 +8323,8 @@ function buildSignalBotInitialNotificationCopy(input: {
     input.messageKind === "research_update"
       ? resolveSignalBotResearchDelta(input.note, input.side)
       : null;
-  const headlineTrackRecord = resolvePersistedSignalEvidence(input.note).find(
+  const evidenceRows = resolvePersistedSignalEvidence(input.note);
+  const headlineTrackRecord = evidenceRows.find(
     (row) =>
       row.kind === "track_record" &&
       row.quality === "verified" &&
@@ -8295,27 +8334,88 @@ function buildSignalBotInitialNotificationCopy(input: {
       row.horizonDays != null &&
       row.horizonDays > 0,
   );
-  const headlineTrackRecordValue =
+  const evidenceTrackRecordValue =
     headlineTrackRecord?.measurement.kind === "scalar"
       ? headlineTrackRecord.measurement.value
       : null;
+  const clusterTrackRecordValue =
+    input.note.holderActorMode === "sharp_cluster" &&
+    input.note.holderClusterPnl30dUsd != null &&
+    Number.isFinite(input.note.holderClusterPnl30dUsd) &&
+    input.note.holderClusterPnl30dUsd > 0
+      ? input.note.holderClusterPnl30dUsd
+      : null;
+  const actorPnlUsd = clusterTrackRecordValue ?? evidenceTrackRecordValue;
+  const actorPnlHorizonDays =
+    clusterTrackRecordValue != null
+      ? 30
+      : (headlineTrackRecord?.horizonDays ?? null);
+  const actorVolume = evidenceRows.find(
+    (row) =>
+      row.kind === "volume" &&
+      row.quality === "verified" &&
+      row.measurement.kind === "scalar" &&
+      row.measurement.unit === "usd" &&
+      row.measurement.value > 0,
+  );
+  const actorVolumeUsd =
+    actorVolume?.measurement.kind === "scalar"
+      ? actorVolume.measurement.value
+      : null;
+  const currentPrice = input.side
+    ? resolveSignalBotDisplayPrice(input.note, input.side)
+    : null;
+  const binaryYesNo =
+    sideCopy?.copyKind === "generic" || sideCopy?.copyKind === "team_yes_no";
+  const positionDirection =
+    input.side === "NO" && binaryYesNo ? "against" : "backing";
+  const affirmativeSideCopy =
+    input.side === "NO" && binaryYesNo
+      ? buildSignalBotSideCopy(input.note, "YES")
+      : null;
+  const editorialSubject =
+    input.side === "NO" && affirmativeSideCopy
+      ? buildSignalNotificationSubject({
+          eventTitle: input.note.eventTitle,
+          marketTitle: input.note.marketTitle,
+          side: "YES",
+          sideCopy: affirmativeSideCopy,
+          presentation,
+        }).text
+      : subject.text;
+  const editorialProbability =
+    currentPrice == null
+      ? null
+      : positionDirection === "against"
+        ? 1 - currentPrice
+        : currentPrice;
+  const trackedMoney = input.side
+    ? resolveSignalBotTrackedMoneyContext(input.note, input.side)
+    : { trackedMoneyOpposes: false };
+  const actorOpenPnlUsd =
+    input.note.holderActorMode === "sharp_cluster"
+      ? input.note.holderClusterOpenPnlUsd
+      : input.note.holderOpenPnlUsd;
   const subjectComplete = input.side
     ? isSignalNotificationSubjectComplete(subject.text, input.side)
     : false;
   return {
     headline: buildSignalNotificationHeadline({
+      actorOpenPnlUsd,
       actorPnlEvidenceId: headlineTrackRecord?.id ?? null,
-      actorPnlHorizonDays: headlineTrackRecord?.horizonDays ?? null,
-      actorPnlUsd: headlineTrackRecordValue,
+      actorPnlHorizonDays,
+      actorPnlUsd,
+      actorVolumeUsd,
       actorMode: input.note.holderActorMode,
-      currentPrice: input.side
-        ? resolveSignalBotDisplayPrice(input.note, input.side)
-        : null,
+      currentPrice,
+      editorialProbability,
+      editorialSubject,
       holderPositionUsd:
         input.note.holderActorMode === "sharp_cluster"
           ? input.note.holderClusterSharpUsd
           : input.note.holderPositionUsd,
       kind: input.messageKind,
+      positionDirection,
       positionLabel:
         sideCopy?.copyKind === "named_outcome" &&
         !subject.text
@@ -8330,6 +8430,7 @@ function buildSignalBotInitialNotificationCopy(input: {
       researchDelta,
       strongWallets: input.note.holderClusterSharpHolders,
       subject,
+      trackedMoneyOpposes: trackedMoney.trackedMoneyOpposes,
       policy: input.copyPolicy?.policy,
     }),
     publishable:
@@ -8389,14 +8490,42 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
             input.candidate.event_title ??
             "This market",
         );
+  const binaryYesNo =
+    sideCopy?.copyKind === "generic" || sideCopy?.copyKind === "team_yes_no";
+  const positionDirection =
+    input.stats.signalSide === "NO" && binaryYesNo ? "against" : "backing";
+  const affirmativeSideCopy =
+    input.stats.signalSide === "NO" && binaryYesNo
+      ? buildSignalBotFollowthroughSideCopy(input.candidate, "YES")
+      : null;
+  const editorialSubject =
+    input.stats.signalSide === "NO" && affirmativeSideCopy
+      ? buildSignalNotificationSubject({
+          eventTitle: input.candidate.event_title,
+          marketTitle: input.candidate.market_title,
+          side: "YES",
+          sideCopy: affirmativeSideCopy,
+          presentation,
+        }).text
+      : subject.text;
+  const editorialProbability =
+    input.stats.markPrice == null
+      ? null
+      : positionDirection === "against"
+        ? 1 - input.stats.markPrice
+        : input.stats.markPrice;
   return {
     headline: buildSignalNotificationHeadline({
       cooling: isSignalBotFollowthroughCooling(input.stats),
       currentPrice: input.stats.markPrice,
+      earlyWalletsCut: input.stats.earlyWalletsCut,
+      editorialProbability,
+      editorialSubject,
       exitedWallets: input.stats.exitedWallets,
       joinedWallets: input.stats.joinedOrAddedWallets,
       kind: input.kind === "followthrough_stats" ? "stats" : input.kind,
       netCopyFlowUsd: input.stats.netSignalSideFlowUsd,
+      positionDirection,
       priceMoveCents: input.stats.priceMoveCents,
       subject,
       trimmedWallets: input.stats.trimmedWallets,

@@ -268,6 +268,7 @@ export type HolderResearchActorSummary = {
   cluster: {
     sharpHolders: number;
     sharpUsd: number;
+    openPnlUsd: number | null;
     pnl30dUsd: number | null;
     availableSharpHolders: number;
   } | null;
@@ -1299,6 +1300,7 @@ function buildClusterCredentialBullets(input: {
 }): {
   availableSharpHolders: number;
   bullets: string[];
+  openPnlUsd: number | null;
   pnl30dUsd: number | null;
 } {
   const sideData = input.candidate.market.sides[input.side];
@@ -1316,6 +1318,16 @@ function buildClusterCredentialBullets(input: {
         0,
       )
     : null;
+  const hasCompleteOpenPnl =
+    availableSharpHolders.length >= sideData.sharpHolders &&
+    availableSharpHolders.length > 0 &&
+    availableSharpHolders.every((holder) => holder.openPnlUsd != null);
+  const openPnlUsd = hasCompleteOpenPnl
+    ? availableSharpHolders.reduce(
+        (sum, holder) => sum + (holder.openPnlUsd ?? 0),
+        0,
+      )
+    : null;
   const bullets: string[] = [];
   if (pnl30dUsd != null && pnl30dUsd >= 1_000) {
     bullets.push(`Up ${formatUsd(pnl30dUsd)} combined over the last 30 days`);
@@ -1327,6 +1339,7 @@ function buildClusterCredentialBullets(input: {
   return {
     availableSharpHolders: availableSharpHolders.length,
     bullets: bullets.slice(0, 3),
+    openPnlUsd,
     pnl30dUsd,
   };
 }
@@ -1389,6 +1402,7 @@ export function buildHolderResearchActorSummary(input: {
       cluster: {
         sharpHolders: sideData.sharpHolders,
         sharpUsd: sideData.sharpUsd,
+        openPnlUsd: cluster.openPnlUsd,
         pnl30dUsd: cluster.pnl30dUsd,
         availableSharpHolders: cluster.availableSharpHolders,
       },
@@ -5565,6 +5579,7 @@ export function buildHolderResearchWalletTargets(
       identityProfileUrl: holder.identityProfileUrl,
       clusterSharpHolders: actor?.cluster?.sharpHolders ?? null,
       clusterSharpUsd: actor?.cluster?.sharpUsd ?? null,
+      clusterOpenPnlUsd: actor?.cluster?.openPnlUsd ?? null,
       clusterPnl30dUsd: actor?.cluster?.pnl30dUsd ?? null,
       side: holder.side,
       positionUsd: holder.positionUsd,

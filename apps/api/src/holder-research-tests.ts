@@ -4428,11 +4428,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           holders: [
             holder("NO", {
               walletId: "00000000-0000-4000-8000-000000000051",
+              openPnlUsd: -2_400,
               positionUsd: 25_000,
               pnl30dUsd: 10_000,
             }),
             holder("NO", {
               walletId: "00000000-0000-4000-8000-000000000052",
+              openPnlUsd: -1_500,
               positionUsd: 20_000,
               pnl30dUsd: 4_000,
             }),
@@ -4449,11 +4451,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       });
       assert.equal(actor.mode, "sharp_cluster");
       assert.equal(actor.cluster?.sharpHolders, 2);
+      assert.equal(actor.cluster?.openPnlUsd, -3_900);
       assert.equal(actor.cluster?.pnl30dUsd, 14_000);
       assert.deepEqual(actor.credentialBullets.slice(0, 2), [
         "Up $14.0K combined over the last 30 days",
         "2 strong wallets on the same side",
       ]);
+      const targets = buildHolderResearchWalletTargets(
+        candidate,
+        candidate.evidence.map((evidence) => evidence.id),
+        p,
+      );
+      assert.equal(targets[0]?.meta.clusterOpenPnlUsd, -3_900);
     },
   },
   {
