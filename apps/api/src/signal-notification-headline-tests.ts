@@ -344,6 +344,232 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
+    name: "editorial initial headlines choose the strongest human tension",
+    run: () => {
+      const cases = [
+        {
+          expected:
+            "🪙 Ethereum has just a 16% chance of hitting $1K. A wallet up $67K is still betting on it.",
+          input: {
+            actorMode: "single_holder" as const,
+            actorOpenPnlUsd: -8_100,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 67_100,
+            actorVolumeUsd: 539_500,
+            currentPrice: 0.16,
+            editorialProbability: 0.16,
+            editorialSubject: "ETH hitting $1K before 2027",
+            holderPositionUsd: 53_200,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 0,
+            subject: subject({ marketTitle: "Will Ethereum hit $1,000?" }),
+          },
+        },
+        {
+          expected:
+            "🏆 Most tracked money is against England. Three profitable wallets are holding $277K on the other side.",
+          input: {
+            actorMode: "sharp_cluster" as const,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 644_100,
+            currentPrice: 0.22,
+            editorialProbability: 0.22,
+            editorialSubject: "England to win the World Cup",
+            holderPositionUsd: 277_000,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 3,
+            subject: subject({
+              eventTitle: "World Cup Winner",
+              marketTitle: "England",
+            }),
+            trackedMoneyOpposes: true,
+          },
+        },
+        {
+          expected:
+            "🏆 Argentina has just a 17% chance of winning the World Cup. Four wallets up nearly $1M are still backing Argentina.",
+          input: {
+            actorMode: "sharp_cluster" as const,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 967_800,
+            currentPrice: 0.17,
+            editorialProbability: 0.17,
+            editorialSubject: "Argentina to win the World Cup",
+            holderPositionUsd: 66_000,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 4,
+            subject: subject({
+              eventTitle: "World Cup Winner",
+              marketTitle: "Argentina",
+            }),
+            trackedMoneyOpposes: true,
+          },
+        },
+        {
+          expected:
+            "⚽ France is the favorite. Two wallets up $251K are taking Spain instead.",
+          input: {
+            actorMode: "sharp_cluster" as const,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 250_800,
+            currentPrice: 0.41,
+            editorialProbability: 0.41,
+            editorialSubject: "Spain over France",
+            holderPositionUsd: 20_200,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 2,
+            subject: subject({
+              eventTitle: "Spain vs France",
+              marketTitle: "Spain",
+            }),
+            trackedMoneyOpposes: true,
+          },
+        },
+        {
+          expected:
+            "🏆 A wallet up $168K has a $305K position on France. It is betting on France to win the World Cup.",
+          input: {
+            actorMode: "single_holder" as const,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 168_300,
+            actorVolumeUsd: 1_200_000,
+            currentPrice: 0.39,
+            editorialProbability: 0.39,
+            editorialSubject: "France to win the World Cup",
+            holderPositionUsd: 305_000,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 0,
+            subject: subject({
+              eventTitle: "World Cup Winner",
+              marketTitle: "France",
+            }),
+            trackedMoneyOpposes: true,
+          },
+        },
+        {
+          expected:
+            "🌐 A U.S. invasion of Iran is priced at 20%. A wallet up $44K is still betting on it.",
+          input: {
+            actorMode: "single_holder" as const,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 43_700,
+            currentPrice: 0.2,
+            editorialProbability: 0.2,
+            editorialSubject: "U.S. to invade Iran before 2027",
+            holderPositionUsd: 32_500,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 0,
+            subject: subject({
+              marketTitle: "Will the U.S. invade Iran before 2027?",
+            }),
+            trackedMoneyOpposes: true,
+          },
+        },
+        {
+          expected:
+            "⚽ Two wallets up $1.4M are down on France. Neither has backed away.",
+          input: {
+            actorMode: "sharp_cluster" as const,
+            actorOpenPnlUsd: -3_900,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 1_400_000,
+            currentPrice: 0.38,
+            editorialProbability: 0.38,
+            editorialSubject: "France over Spain",
+            holderPositionUsd: 56_400,
+            kind: "initial" as const,
+            positionDirection: "backing" as const,
+            strongWallets: 2,
+            subject: subject({
+              eventTitle: "France vs Spain",
+              marketTitle: "France",
+            }),
+          },
+        },
+        {
+          expected:
+            "🔥 Messi has only an 8% chance of winning the Golden Boot. Two profitable wallets are betting against Messi.",
+          input: {
+            actorMode: "sharp_cluster" as const,
+            actorPnlHorizonDays: 30,
+            actorPnlUsd: 122_000,
+            currentPrice: 0.92,
+            editorialProbability: 0.08,
+            editorialSubject: "Lionel Messi to win the Golden Boot",
+            holderPositionUsd: 38_000,
+            kind: "initial" as const,
+            positionDirection: "against" as const,
+            strongWallets: 2,
+            subject: subject({
+              eventTitle: "World Cup: Golden Boot Winner",
+              marketTitle: "Will Lionel Messi win?",
+              side: "NO",
+            }),
+          },
+        },
+      ];
+
+      for (const testCase of cases) {
+        assert.equal(
+          buildSignalNotificationHeadline(testCase.input).text,
+          testCase.expected,
+        );
+      }
+    },
+  },
+  {
+    name: "late-stage exits and adverse targets get editorial follow-up hooks",
+    run: () => {
+      const cashout = buildSignalNotificationHeadline({
+        currentPrice: 0.99,
+        earlyWalletsCut: 22,
+        editorialSubject:
+          "Kylian Mbappe to win the Golden Boot at the World Cup",
+        kind: "stats",
+        positionDirection: "backing",
+        priceMoveCents: 50,
+        subject: subject({
+          eventTitle: "World Cup: Golden Boot Winner",
+          marketTitle: "Will Kylian Mbappe win?",
+        }),
+      });
+      assert.equal(
+        cashout.text,
+        "⚠️ Mbappe reached 99¢ to win the Golden Boot. 22 early wallets are already cashing out.",
+      );
+      assert.equal(cashout.templateKey, "late_stage_early_wallet_cashout_v10");
+
+      const resistance = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        currentPrice: 0.61,
+        editorialSubject: "BTC hitting $67.5K in July",
+        holderPositionUsd: 5_800,
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          currentPrice: 0.61,
+          kind: "price_move",
+          priceMoveCents: -11,
+        },
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↑ 67,500",
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        resistance.text,
+        "📉 Bitcoin is moving closer to $67.5K. This wallet still refuses to flip.",
+      );
+    },
+  },
+  {
     name: "verified cluster performance outranks position size and consumes repeated proof",
     run: () => {
       const result = buildSignalNotificationHeadline({

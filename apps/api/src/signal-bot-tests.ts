@@ -981,6 +981,7 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
       "Up $2.5K over the last 30 days",
       "Won 65% of recent trades",
     ],
+    holderClusterOpenPnlUsd: null,
     holderClusterPnl30dUsd: null,
     holderClusterSharpHolders: null,
     holderClusterSharpUsd: null,
@@ -9848,7 +9849,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "verified wallet profit leads the hook without repeating in proof",
+    name: "verified wallet profit leads the hook and proof keeps the exact metric",
     run: () => {
       const asOf = "2026-01-01T00:00:00.000Z";
       const source = {
@@ -9931,9 +9932,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$542K PnL in 30 days\\\.\* That wallet now holds \$20\\\.5K on Spain over Argentina\\\.$/,
+        /^⚽ \*\\\+\$542K in 30 days\\\.\* This wallet is backing Spain over Argentina with \$20\\\.5K\\\.$/,
       );
-      assert.doesNotMatch(message.text, /▸ PnL/);
+      assert.match(message.text, /▸ PnL.*542K.*30d/);
       assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
       assert.match(message.text, /▸ Traded.*2\\\.9M/);
     },
@@ -10526,7 +10527,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📉 \*−11¢ to 61¢\\\.\* NO on BTC hitting \$67\\\.5K in July moved against the call\\\.$/,
+        /^📉 \*Bitcoin is moving closer to \$67\\\.5K\\\.\* This wallet still refuses to flip\\\.$/,
       );
       assert.match(
         message.text,
@@ -10684,7 +10685,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$35\\\.2K PnL in 30 days\\\.\*/,
+        /^👀 \*\\\+\$35K in 30 days\\\.\* This wallet is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina with \$16K\\\.$/,
       );
       assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
       assert.match(
@@ -10897,7 +10898,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "cluster without verified track record falls back to position size",
+    name: "structured cluster PnL can lead even without a duplicated evidence row",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -10917,7 +10918,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 1);
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^🔥 \*\$45K backs YES on “Will test resolve Yes”\\\.\* 2 strong wallets back YES on “Will test resolve Yes”, with YES at 31¢\\\.$/,
+        /^👀 \*\\\+\$14K combined in 30 days\\\.\* Two wallets are backing Will test resolve Yes\? with \$45K\\\.$/,
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.match(message.text, />\*Why it matters\*\n>/);
@@ -10925,7 +10926,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /\$12\\.3K still on/);
       assert.doesNotMatch(message.text, /Why this cluster matters:/);
       assert.match(message.text, /▸ PnL.*14K.*30d/);
-      assert.doesNotMatch(message.text, /▸ Wallets/);
+      assert.match(message.text, /▸ Wallets.*2 on the same side/);
     },
   },
   {
@@ -11029,13 +11030,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$122K combined PnL in 30 days\\\.\* 2 strong wallets have \$38K against Lionel Messi winning the Golden Boot at the World Cup, with NO at 92¢\\\.$/,
+        /^🔥 \*Messi has only an 8% chance of winning the Golden Boot\\\.\* Two profitable wallets are betting against Messi\\\.$/,
       );
       assert.match(message.text, /▸ Recent results.*17\\\.1 pts vs market/);
-      assert.doesNotMatch(
-        message.text,
-        /\$38K backs NO|▸ PnL|▸ Wallets|▸ Tracked position/,
-      );
+      assert.match(message.text, /▸ PnL.*122K.*30d/);
+      assert.match(message.text, /▸ Wallets.*2 on the same side/);
+      assert.doesNotMatch(message.text, /\$38K backs NO|▸ Tracked position/);
     },
   },
   {
@@ -12193,7 +12193,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v9");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v10");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
@@ -12730,18 +12730,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text.split("\n")[0] ?? "",
-        /^📈 \*\\\+50¢ to 99¢\\\.\* \$1M flowed into Kylian Mbappe to win the Golden Boot at the World Cup after the call\\\.$/,
+        /^⚠️ \*Mbappe reached 99¢ to win the Golden Boot\\\.\* 22 early wallets are already cashing out\\\.$/,
       );
       assert.match(
         text,
         />Wallets {2}\*17\* added · \*17\* trimmed · \*5\* exited · \*45\* holding/,
       );
       assert.match(text, />Est\\\. PnL since call {2}/);
-      assert.match(text, /At 99¢, the market has nearly fully priced the call/);
-      assert.match(text, /net flow remains strongly positive/);
+      assert.match(text, /The trade has largely played out/);
+      assert.match(text, /no longer waiting for the final cent/);
       assert.doesNotMatch(
         text,
-        /wallet follow-through is mixed|Est\\\. open PnL/,
+        /wallet follow-through is mixed|Est\\\. open PnL|net flow remains strongly positive/,
       );
     },
   },

@@ -99,15 +99,25 @@ function buildPriceTargetProposition(input: {
 }): string | null {
   if (!input.eventTitle || !input.marketTitle) return null;
   const eventMatch = input.eventTitle.match(
-    /^what price will\s+(bitcoin|btc)\s+hit\s+(in|by)\s+(.+?)[?]?$/i,
+    /^what price will\s+(bitcoin|btc|ethereum|eth)\s+hit\s+(in|by|before)\s+(.+?)[?]?$/i,
   );
   const targetMatch = input.marketTitle.match(
     /^[↑↓]\s*\$?([0-9][0-9,]*(?:\.[0-9]+)?)$/,
   );
-  if (!eventMatch?.[2] || !eventMatch[3] || !targetMatch?.[1]) return null;
+  if (
+    !eventMatch?.[1] ||
+    !eventMatch[2] ||
+    !eventMatch[3] ||
+    !targetMatch?.[1]
+  ) {
+    return null;
+  }
   const threshold = Number(targetMatch[1].replace(/,/g, ""));
   if (!Number.isFinite(threshold) || threshold <= 0) return null;
-  return `BTC hitting ${formatCompactThreshold(threshold)} ${eventMatch[2].toLowerCase()} ${eventMatch[3]}`;
+  const asset = /^(?:ethereum|eth)$/i.test(eventMatch[1]) ? "ETH" : "BTC";
+  return `${asset} hitting ${formatCompactThreshold(
+    threshold,
+  )} ${eventMatch[2].toLowerCase()} ${eventMatch[3]}`;
 }
 
 function buildNaturalSubject(input: {
@@ -417,6 +427,419 @@ function formatFlowIntoPosition(
   return `${capital} flowed into ${positionLabel}`;
 }
 
+type SignalEditorialPositionDirection = "against" | "backing";
+
+type SignalEditorialSubject =
+  | { entity: string; kind: "generic"; text: string }
+  | { entity: string; kind: "matchup"; opponent: string; text: string }
+  | { entity: string; kind: "price_target"; target: string; text: string }
+  | { entity: string; kind: "win"; object: string; text: string };
+
+type SignalInitialEditorialAngle = {
+  continuation: string;
+  emoji: string;
+  hook: string;
+  primaryMetric: string | null;
+  supportingMetric: string | null;
+  templateKey: string;
+};
+
+function capitalizeFirst(value: string): string {
+  const first = Array.from(value)[0];
+  return first
+    ? `${first.toLocaleUpperCase("en-US")}${value.slice(first.length)}`
+    : value;
+}
+
+function numberWord(value: number): string {
+  const words = [
+    "Zero",
+    "One",
+    "Two",
+    "Three",
+    "Four",
+    "Five",
+    "Six",
+    "Seven",
+    "Eight",
+    "Nine",
+    "Ten",
+  ];
+  return words[value] ?? String(value);
+}
+
+function clickbaitPnl(value: number): string {
+  if (value >= 900_000 && value < 1_000_000) return "nearly $1M";
+  if (value >= 10_000 && value < 1_000_000) {
+    return `$${Math.round(value / 1_000)}K`;
+  }
+  return formatCompactUsd(value);
+}
+
+function clickbaitPnlHook(value: number): string {
+  const formatted = clickbaitPnl(value);
+  return formatted.startsWith("nearly ")
+    ? capitalizeFirst(formatted)
+    : `+${formatted}`;
+}
+
+function percentArticle(value: number): "a" | "an" {
+  return /^(?:8|11|18)/.test(String(value)) ? "an" : "a";
+}
+
+function parseSignalEditorialSubject(value: string): SignalEditorialSubject {
+  const text = value
+    .replace(/^(?:YES|NO)\s+on\s+/i, "")
+    .replace(/^BTC\b/i, "Bitcoin")
+    .replace(/^ETH\b/i, "Ethereum")
+    .trim();
+  const win = text.match(/^(.+?)\s+to\s+win\s+(.+)$/i);
+  if (win?.[1] && win[2]) {
+    const rawEntity = win[1].trim();
+    const rawObject = win[2].trim();
+    const object = /golden boot/i.test(rawObject)
+      ? "the Golden Boot"
+      : rawObject;
+    const entity =
+      /golden boot/i.test(rawObject) && rawEntity.split(/\s+/).length === 2
+        ? (rawEntity.split(/\s+/).at(-1) ?? rawEntity)
+        : rawEntity;
+    return { entity, kind: "win", object, text };
+  }
+  const matchup = text.match(/^(.+?)\s+over\s+(.+?)(?:\s+in\s+.+)?$/i);
+  if (matchup?.[1] && matchup[2]) {
+    return {
+      entity: matchup[1].trim(),
+      kind: "matchup",
+      opponent: matchup[2].trim(),
+      text,
+    };
+  }
+  const priceTarget = text.match(/^(Bitcoin|Ethereum)\s+hitting\s+(.+)$/i);
+  if (priceTarget?.[1] && priceTarget[2]) {
+    return {
+      entity: capitalizeFirst(priceTarget[1].toLowerCase()),
+      kind: "price_target",
+      target: priceTarget[2].trim().replace(/\s+(?:before|by|in)\s+.+$/i, ""),
+      text,
+    };
+  }
+  const usInvasion = text.match(
+    /^(?:the\s+)?(?:u\.?s\.?|united states)\s+to\s+invade\s+(.+)$/i,
+  );
+  if (usInvasion?.[1]) {
+    const target = usInvasion[1]
+      .trim()
+      .replace(/\s+(?:before|by|in)\s+.+$/i, "");
+    const proposition = `a U.S. invasion of ${target}`;
+    return { entity: proposition, kind: "generic", text: proposition };
+  }
+  const entity =
+    text
+      .replace(/^will\s+/i, "")
+      .replace(/[?]+$/, "")
+      .split(/\s+(?:before|by|in|to)\s+/i)[0]
+      ?.trim() || text;
+  return { entity, kind: "generic", text };
+}
+
+function editorialProbabilityHook(input: {
+  direction: SignalEditorialPositionDirection;
+  probability: number;
+  subject: SignalEditorialSubject;
+}): string {
+  const percent = Math.round(input.probability * 100);
+  if (input.subject.kind === "win") {
+    if (input.direction === "against") {
+      return `${input.subject.entity} has only ${percentArticle(
+        percent,
+      )} ${percent}% chance of winning ${input.subject.object}.`;
+    }
+    return `${input.subject.entity} has just ${percentArticle(
+      percent,
+    )} ${percent}% chance of winning ${input.subject.object}.`;
+  }
+  if (input.subject.kind === "price_target") {
+    return `${input.subject.entity} has just ${percentArticle(
+      percent,
+    )} ${percent}% chance of hitting ${input.subject.target}.`;
+  }
+  return `${capitalizeFirst(input.subject.text)} is priced at ${percent}%.`;
+}
+
+function editorialActor(input: {
+  actorMode: "none" | "sharp_cluster" | "single_holder" | null | undefined;
+  actorPnlUsd: number;
+  includePnl: boolean;
+  strongWallets: number;
+}): string {
+  if (input.actorMode === "sharp_cluster") {
+    return input.includePnl
+      ? `${numberWord(input.strongWallets)} wallets up ${clickbaitPnl(
+          input.actorPnlUsd,
+        )}`
+      : `${numberWord(input.strongWallets)} profitable wallets`;
+  }
+  return `A wallet up ${clickbaitPnl(input.actorPnlUsd)}`;
+}
+
+function editorialPositionAction(input: {
+  actor: string;
+  direction: SignalEditorialPositionDirection;
+  subject: SignalEditorialSubject;
+}): string {
+  if (input.direction === "against") {
+    return `${input.actor} ${
+      input.actor.startsWith("A wallet") ? "is" : "are"
+    } betting against ${
+      input.subject.kind === "generic" ? "it" : input.subject.entity
+    }.`;
+  }
+  if (
+    input.subject.kind === "price_target" ||
+    input.subject.kind === "generic"
+  ) {
+    return `${input.actor} ${
+      input.actor.startsWith("A wallet") ? "is" : "are"
+    } still betting on it.`;
+  }
+  return `${input.actor} ${
+    input.actor.startsWith("A wallet") ? "is" : "are"
+  } still backing ${input.subject.entity}.`;
+}
+
+function editorialInitialEmoji(
+  subject: SignalEditorialSubject,
+  direction: SignalEditorialPositionDirection,
+): string {
+  if (subject.kind === "price_target") return "🪙";
+  if (subject.kind === "matchup") return "⚽";
+  if (subject.kind === "win") return direction === "against" ? "🔥" : "🏆";
+  if (/\b(?:election|president|vote|voting)\b/i.test(subject.text)) return "🗳️";
+  if (
+    /\b(?:invade|invasion|regime|sanction|war|ceasefire)\b/i.test(subject.text)
+  ) {
+    return "🌐";
+  }
+  return "👀";
+}
+
+function buildInitialEditorialAngle(input: {
+  actorMode: "none" | "sharp_cluster" | "single_holder" | null | undefined;
+  actorOpenPnlUsd: number | null;
+  actorPnlHorizonDays: number | null;
+  actorPnlUsd: number | null;
+  actorVolumeUsd: number | null;
+  direction: SignalEditorialPositionDirection;
+  holderPositionUsd: number;
+  probability: number | null;
+  strongWallets: number;
+  subjectText: string | null;
+  trackedMoneyOpposes: boolean;
+}): SignalInitialEditorialAngle | null {
+  if (
+    !input.subjectText ||
+    input.actorPnlUsd == null ||
+    input.actorPnlUsd <= 0 ||
+    (input.actorMode !== "single_holder" &&
+      !(input.actorMode === "sharp_cluster" && input.strongWallets >= 2))
+  ) {
+    return null;
+  }
+  const subject = parseSignalEditorialSubject(input.subjectText);
+  const emoji = editorialInitialEmoji(subject, input.direction);
+  const probability =
+    input.probability != null &&
+    Number.isFinite(input.probability) &&
+    input.probability >= 0 &&
+    input.probability <= 1
+      ? input.probability
+      : null;
+  const lowProbability =
+    probability != null &&
+    (input.direction === "against" ? probability <= 0.3 : probability <= 0.2);
+  if (lowProbability) {
+    const includePnl =
+      input.actorMode === "single_holder" ||
+      (input.direction === "backing" && input.actorPnlUsd >= 250_000);
+    const actor = editorialActor({
+      actorMode: input.actorMode,
+      actorPnlUsd: input.actorPnlUsd,
+      includePnl,
+      strongWallets: input.strongWallets,
+    });
+    return {
+      continuation: editorialPositionAction({
+        actor,
+        direction: input.direction,
+        subject,
+      }),
+      emoji,
+      hook: editorialProbabilityHook({
+        direction: input.direction,
+        probability,
+        subject,
+      }),
+      primaryMetric: `${Math.round(probability * 100)}%`,
+      supportingMetric: formatCompactUsd(input.actorPnlUsd),
+      templateKey: "initial_low_probability_tension_v10",
+    };
+  }
+
+  const materialOpenLoss =
+    input.actorOpenPnlUsd != null &&
+    input.actorOpenPnlUsd < 0 &&
+    Math.abs(input.actorOpenPnlUsd) >=
+      Math.max(1_000, input.holderPositionUsd * 0.02);
+  if (materialOpenLoss && input.actorOpenPnlUsd != null) {
+    const actor = editorialActor({
+      actorMode: input.actorMode,
+      actorPnlUsd: input.actorPnlUsd,
+      includePnl: true,
+      strongWallets: input.strongWallets,
+    });
+    const plural = input.actorMode === "sharp_cluster";
+    return {
+      continuation:
+        input.actorMode === "sharp_cluster" && input.strongWallets === 2
+          ? "Neither has backed away."
+          : `${plural ? "None have" : "It has not"} backed away.`,
+      emoji,
+      hook: `${actor} ${plural ? "are" : "is"} down on ${subject.entity}.`,
+      primaryMetric: formatCompactUsd(input.actorPnlUsd),
+      supportingMetric: formatCompactUsd(input.actorOpenPnlUsd),
+      templateKey: "initial_loss_persistence_v10",
+    };
+  }
+
+  const largeSinglePosition =
+    input.actorMode === "single_holder" &&
+    input.holderPositionUsd >= 100_000 &&
+    (input.actorVolumeUsd == null ||
+      input.holderPositionUsd >= input.actorVolumeUsd * 0.15);
+  if (largeSinglePosition) {
+    return {
+      continuation:
+        subject.kind === "win"
+          ? `It is betting on ${subject.text}.`
+          : `It is still backing ${subject.text}.`,
+      emoji,
+      hook: `A wallet up ${clickbaitPnl(
+        input.actorPnlUsd,
+      )} has a ${formatCompactUsd(input.holderPositionUsd)} position on ${
+        subject.entity
+      }.`,
+      primaryMetric: formatCompactUsd(input.holderPositionUsd),
+      supportingMetric: formatCompactUsd(input.actorPnlUsd),
+      templateKey: "initial_large_position_v10",
+    };
+  }
+
+  if (input.trackedMoneyOpposes) {
+    if (subject.kind === "matchup" && input.direction === "backing") {
+      const actor = editorialActor({
+        actorMode: input.actorMode,
+        actorPnlUsd: input.actorPnlUsd,
+        includePnl: true,
+        strongWallets: input.strongWallets,
+      });
+      return {
+        continuation: `${actor} ${
+          input.actorMode === "single_holder" ? "is" : "are"
+        } taking ${subject.entity} instead.`,
+        emoji,
+        hook: `${subject.opponent} is the favorite.`,
+        primaryMetric: formatCompactUsd(input.actorPnlUsd),
+        supportingMetric:
+          input.holderPositionUsd > 0
+            ? formatCompactUsd(input.holderPositionUsd)
+            : null,
+        templateKey: "initial_favorite_contrarian_v10",
+      };
+    }
+    const capital =
+      input.holderPositionUsd >= 100_000
+        ? formatCompactUsd(input.holderPositionUsd)
+        : null;
+    const actor = editorialActor({
+      actorMode: input.actorMode,
+      actorPnlUsd: input.actorPnlUsd,
+      includePnl: false,
+      strongWallets: input.strongWallets,
+    });
+    const againstCrowd = input.direction === "backing";
+    return {
+      continuation: capital
+        ? `${actor} ${
+            input.actorMode === "single_holder" ? "is" : "are"
+          } holding ${capital} on the other side.`
+        : `${actor} ${
+            input.actorMode === "single_holder" ? "is" : "are"
+          } ${againstCrowd ? "still backing" : "betting against"} ${
+            subject.entity
+          }.`,
+      emoji,
+      hook: `Most tracked money is ${
+        againstCrowd ? "against" : "backing"
+      } ${subject.entity}.`,
+      primaryMetric: capital,
+      supportingMetric: formatCompactUsd(input.actorPnlUsd),
+      templateKey: "initial_crowd_contrarian_v10",
+    };
+  }
+
+  const actorReference =
+    input.actorMode === "single_holder"
+      ? "This wallet"
+      : `${numberWord(input.strongWallets)} wallets`;
+  const action =
+    input.direction === "against"
+      ? `betting against ${subject.text}`
+      : `backing ${subject.text}`;
+  return {
+    continuation: `${actorReference} ${
+      input.actorMode === "single_holder" ? "is" : "are"
+    } ${action}${
+      input.holderPositionUsd > 0
+        ? ` with ${formatCompactUsd(input.holderPositionUsd)}`
+        : ""
+    }.`,
+    emoji,
+    hook: `${clickbaitPnlHook(input.actorPnlUsd)}${
+      input.actorMode === "sharp_cluster" ? " combined" : ""
+    }${
+      input.actorPnlHorizonDays != null
+        ? ` in ${input.actorPnlHorizonDays} days`
+        : ""
+    }.`,
+    primaryMetric: formatCompactUsd(input.actorPnlUsd),
+    supportingMetric:
+      input.holderPositionUsd > 0
+        ? formatCompactUsd(input.holderPositionUsd)
+        : null,
+    templateKey: "initial_actor_stakes_v10",
+  };
+}
+
+function formatEditorialMilestoneHook(
+  subjectText: string,
+  currentPrice: number,
+): string {
+  const subject = parseSignalEditorialSubject(subjectText);
+  if (subject.kind === "win") {
+    return `${subject.entity} reached ${formatCents(
+      currentPrice,
+    )} to win ${subject.object}.`;
+  }
+  return `${capitalizeFirst(subject.text)} reached ${formatCents(currentPrice)}.`;
+}
+
+function formatAdversePriceTargetHook(subjectText: string): string | null {
+  const subject = parseSignalEditorialSubject(subjectText);
+  if (subject.kind !== "price_target") return null;
+  return `${subject.entity} is moving closer to ${subject.target}.`;
+}
+
 function visibleLength(value: string): number {
   if (typeof Intl.Segmenter === "function") {
     return Array.from(
@@ -439,12 +862,17 @@ function priceMoveVerb(cents: number): string {
 }
 
 export function buildSignalNotificationHeadline(input: {
+  actorOpenPnlUsd?: number | null;
   actorPnlEvidenceId?: string | null;
   actorPnlHorizonDays?: number | null;
   actorPnlUsd?: number | null;
+  actorVolumeUsd?: number | null;
   actorMode?: "none" | "sharp_cluster" | "single_holder" | null;
   cooling?: boolean;
   currentPrice: number | null;
+  earlyWalletsCut?: number;
+  editorialProbability?: number | null;
+  editorialSubject?: string | null;
   exitedWallets?: number;
   holderPositionUsd?: number | null;
   joinedWallets?: number;
@@ -456,10 +884,12 @@ export function buildSignalNotificationHeadline(input: {
     | "resolved_loss";
   netCopyFlowUsd?: number;
   positionLabel?: string | null;
+  positionDirection?: SignalEditorialPositionDirection;
   priceMoveCents?: number | null;
   researchDelta?: SignalNotificationResearchDelta | null;
   strongWallets?: number | null;
   subject: SignalNotificationSubject;
+  trackedMoneyOpposes?: boolean;
   trimmedWallets?: number;
   policy?: SignalPostCopyPolicyV1;
 }): SignalNotificationHeadline {
@@ -517,6 +947,33 @@ export function buildSignalNotificationHeadline(input: {
     input.actorPnlHorizonDays > 0
       ? Math.round(input.actorPnlHorizonDays)
       : null;
+  const actorOpenPnlUsd =
+    input.actorOpenPnlUsd != null && Number.isFinite(input.actorOpenPnlUsd)
+      ? input.actorOpenPnlUsd
+      : null;
+  const actorVolumeUsd =
+    input.actorVolumeUsd != null &&
+    Number.isFinite(input.actorVolumeUsd) &&
+    input.actorVolumeUsd > 0
+      ? input.actorVolumeUsd
+      : null;
+  const earlyWalletsCut = Math.max(0, Math.trunc(input.earlyWalletsCut ?? 0));
+  const initialEditorialAngle =
+    input.kind === "initial"
+      ? buildInitialEditorialAngle({
+          actorMode: input.actorMode,
+          actorOpenPnlUsd,
+          actorPnlHorizonDays,
+          actorPnlUsd,
+          actorVolumeUsd,
+          direction: input.positionDirection ?? "backing",
+          holderPositionUsd,
+          probability: input.editorialProbability ?? null,
+          strongWallets,
+          subjectText: cleanText(input.editorialSubject),
+          trackedMoneyOpposes: input.trackedMoneyOpposes ?? false,
+        })
+      : null;
 
   if (input.kind === "resolved_win" || input.kind === "resolved_loss") {
     const won = input.kind === "resolved_win";
@@ -530,17 +987,32 @@ export function buildSignalNotificationHeadline(input: {
     if (input.kind === "research_update") {
       const delta = input.researchDelta;
       if (delta?.kind === "price_move") {
+        const adversePriceTargetHook =
+          delta.priceMoveCents < 0 &&
+          input.positionDirection === "against" &&
+          holderPositionUsd > 0 &&
+          input.editorialSubject
+            ? formatAdversePriceTargetHook(input.editorialSubject)
+            : null;
         storyKind = "price_move";
-        templateKey = "research_price_move_v7";
+        templateKey = adversePriceTargetHook
+          ? "research_price_target_resistance_v10"
+          : "research_price_move_v7";
         emoji = delta.priceMoveCents > 0 ? "📈" : "📉";
         primaryMetric = formatSignedMove(delta.priceMoveCents);
         supportingMetric = formatCents(delta.currentPrice);
-        hook = `${formatSignedMove(delta.priceMoveCents)} to ${formatCents(
-          delta.currentPrice,
-        )}.`;
-        continuation = `${input.subject.text} moved ${
-          delta.priceMoveCents > 0 ? "with" : "against"
-        } the call.`;
+        hook =
+          adversePriceTargetHook ??
+          `${formatSignedMove(delta.priceMoveCents)} to ${formatCents(
+            delta.currentPrice,
+          )}.`;
+        continuation = adversePriceTargetHook
+          ? input.actorMode === "sharp_cluster"
+            ? "These wallets still refuse to flip."
+            : "This wallet still refuses to flip."
+          : `${input.subject.text} moved ${
+              delta.priceMoveCents > 0 ? "with" : "against"
+            } the call.`;
       } else if (delta?.kind === "position_change") {
         const added = delta.positionChangeUsd > 0;
         storyKind = added ? "flow" : "cooling";
@@ -592,6 +1064,13 @@ export function buildSignalNotificationHeadline(input: {
         hook = "New research.";
         continuation = input.subject.text;
       }
+    } else if (initialEditorialAngle) {
+      templateKey = initialEditorialAngle.templateKey;
+      emoji = initialEditorialAngle.emoji;
+      hook = initialEditorialAngle.hook;
+      continuation = initialEditorialAngle.continuation;
+      primaryMetric = initialEditorialAngle.primaryMetric;
+      supportingMetric = initialEditorialAngle.supportingMetric;
     } else if (
       (input.actorMode === "single_holder" ||
         (input.actorMode === "sharp_cluster" && strongWallets >= 2)) &&
@@ -685,6 +1164,24 @@ export function buildSignalNotificationHeadline(input: {
           : `${formatCents(currentPrice)} now.`;
       continuation = input.subject.text;
     }
+  } else if (
+    currentPrice != null &&
+    currentPrice >= 0.95 &&
+    priceMove != null &&
+    priceMove >= 10 &&
+    earlyWalletsCut >= 2 &&
+    input.positionDirection === "backing" &&
+    input.editorialSubject
+  ) {
+    storyKind = "cooling";
+    templateKey = "late_stage_early_wallet_cashout_v10";
+    emoji = "⚠️";
+    primaryMetric = formatCents(currentPrice);
+    supportingMetric = String(earlyWalletsCut);
+    hook = formatEditorialMilestoneHook(input.editorialSubject, currentPrice);
+    continuation = `${earlyWalletsCut} early ${
+      earlyWalletsCut === 1 ? "wallet is" : "wallets are"
+    } already cashing out.`;
   } else if (input.cooling) {
     storyKind = "cooling";
     templateKey = exitedWallets > 0 ? "cooling_exits_v7" : "cooling_v7";
