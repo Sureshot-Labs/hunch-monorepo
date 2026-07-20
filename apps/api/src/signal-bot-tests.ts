@@ -32,6 +32,7 @@ import {
   parseSignalBotAggMarketConfig,
   parseSignalBotCommand,
   parseSignalBotFollowthroughPreviewRequest,
+  parseSignalBotRichPreviewRequest,
   parseSignalBotConfig,
   parseSignalBotStatsRequest,
   parseSignalBotStatsPeriod,
@@ -43,6 +44,7 @@ import {
   refreshSignalBotLock,
   releaseSignalBotLock,
   sendSignalBotFollowthroughPreview,
+  sendSignalBotRichLayoutPreview,
   resolveSignalBotBuySide,
   sendLatestSignalBotTestSignal,
   sendSignalBotStatsReport,
@@ -1657,6 +1659,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "signal bot service stays within the ten-thousand-line module limit",
+    run: () => {
+      const source = readFileSync(
+        join(apiSrcDir, "services", "signal-bot.ts"),
+        "utf8",
+      );
+      const lineCount = source.split(/\r?\n/).length;
+      assert.ok(
+        lineCount <= 10_000,
+        `signal-bot.ts has ${lineCount} lines; extract responsibilities before it exceeds 10,000`,
+      );
+    },
+  },
+  {
     name: "signal delivery owns the inclusive ten minute quote cutoff",
     run: () => {
       const now = Date.parse("2026-01-01T00:10:00.000Z");
@@ -2922,6 +2938,102 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         parseSignalBotFollowthroughPreviewRequest("/test_followthrough maybe"),
         null,
       );
+    },
+  },
+  {
+    name: "rich preview parser supports layout groups and target chat",
+    run: () => {
+      assert.equal(parseSignalBotCommand("/test_rich", null), "test_rich");
+      assert.deepEqual(parseSignalBotRichPreviewRequest("/test_rich"), {
+        kind: "all",
+        targetChatId: null,
+      });
+      assert.deepEqual(
+        parseSignalBotRichPreviewRequest(
+          "/test_rich production -1001234567890",
+        ),
+        { kind: "production", targetChatId: "-1001234567890" },
+      );
+      assert.deepEqual(
+        parseSignalBotRichPreviewRequest("/test_rich 1234567890 headings"),
+        { kind: "headings", targetChatId: "-1001234567890" },
+      );
+      assert.equal(
+        parseSignalBotRichPreviewRequest("/test_rich unsupported"),
+        null,
+      );
+    },
+  },
+  {
+    name: "rich preview gallery separates production and experimental layouts",
+    run: async () => {
+      const richMessages: TelegramSendRichMessageInput[] = [];
+      const telegram = Object.assign(new FakeTelegram(), {
+        sendRichMessage: async (
+          message: TelegramSendRichMessageInput,
+        ): Promise<TelegramSendResult> => {
+          richMessages.push(message);
+          return { messageId: richMessages.length, ok: true };
+        },
+      });
+
+      assert.equal(
+        await sendSignalBotRichLayoutPreview({
+          chatId: "-100",
+          kind: "production",
+          telegram,
+        }),
+        true,
+      );
+      assert.equal(richMessages.length, 13);
+      const productionJson = JSON.stringify(richMessages);
+      assert.match(productionJson, /Argentina is priced at 17%/);
+      assert.match(productionJson, /France is the favorite/);
+      assert.match(productionJson, /U\.S\. invasion of Iran/);
+      assert.match(productionJson, /Most tracked money is against Spain/);
+      const initial = richMessages[0]?.rich_message;
+      assert.deepEqual(
+        initial?.blocks.map((block) => block.type),
+        ["paragraph", "table"],
+      );
+      assert.match(JSON.stringify(initial), /marked/);
+      assert.match(JSON.stringify(initial), /\\n\\n/);
+      const initialTable = initial?.blocks[1];
+      assert.equal(initialTable?.type, "table");
+      if (initialTable?.type === "table") {
+        assert.equal(initialTable.caption, undefined);
+      }
+
+      richMessages.length = 0;
+      assert.equal(
+        await sendSignalBotRichLayoutPreview({
+          chatId: "-100",
+          kind: "headings",
+          telegram,
+        }),
+        true,
+      );
+      assert.equal(richMessages.length, 3);
+      assert.equal(richMessages[0]?.rich_message.blocks[0]?.type, "heading");
+      assert.equal(richMessages[1]?.rich_message.blocks[0]?.type, "heading");
+      assert.equal(richMessages[2]?.rich_message.blocks[0]?.type, "heading");
+
+      richMessages.length = 0;
+      assert.equal(
+        await sendSignalBotRichLayoutPreview({
+          chatId: "-100",
+          kind: "references",
+          telegram,
+        }),
+        true,
+      );
+      const referencesJson = JSON.stringify(
+        richMessages[0]?.rich_message ?? null,
+      );
+      assert.match(referencesJson, /reference_link/);
+      assert.match(referencesJson, /"type":"reference"/);
+      assert.match(referencesJson, /anchor_link/);
+      assert.match(referencesJson, /"type":"footer"/);
     },
   },
   {
@@ -9182,6 +9294,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "/status",
         "/stats",
         "/test_followthrough stats",
+        "/test_rich production",
         "/test_signal",
         "/test_trade polymarket:market-1",
       ];
@@ -9210,6 +9323,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             return true;
           },
           sendTestFollowthrough: async () => {
+            sideEffects += 1;
+            return true;
+          },
+          sendTestRich: async () => {
             sideEffects += 1;
             return true;
           },
@@ -9848,19 +9965,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /confidence/i);
       assert.deepEqual(
         message.richMessage.blocks.map((block) => block.type),
-        ["paragraph", "paragraph", "table"],
+        ["paragraph", "table"],
       );
-      const metrics = message.richMessage.blocks[2];
+      const lead = message.richMessage.blocks[0];
+      assert.equal(lead?.type, "paragraph");
+      if (lead?.type === "paragraph") {
+        assert.match(JSON.stringify(lead.text), /marked/);
+        assert.match(JSON.stringify(lead.text), /\\n\\n/);
+      }
+      const metrics = message.richMessage.blocks[1];
       assert.equal(metrics?.type, "table");
       if (metrics?.type === "table") {
         assert.equal(metrics.is_bordered, true);
         assert.equal(metrics.is_striped, true);
-        assert.deepEqual(metrics.caption, {
-          text: "Why it matters",
-          type: "bold",
-        });
+        assert.equal(metrics.caption, undefined);
         assert.ok(metrics.cells.length >= 1);
-        assert.equal(metrics.cells[0]?.[0]?.text, "PnL");
+        assert.equal(metrics.cells[0]?.[0]?.text, "Market");
+        assert.equal(metrics.cells[1]?.[0]?.text, "Position");
+        assert.equal(metrics.cells[2]?.[0]?.text, "YES price");
+        assert.equal(metrics.cells[3]?.[0]?.text, "Open PnL");
       }
       assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
     },
@@ -9894,7 +10017,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "initial named outcome keeps matchup context and removes duplicate prose",
+    name: "initial named outcome keeps matchup context and its narrative proof",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -9934,10 +10057,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text.split("\n")[0] ?? "",
         /^💰 \*\$23\\\.3K on Spain over Argentina\\\.\* One tracked wallet holds this position at 59¢\\\.$/,
       );
-      assert.doesNotMatch(
-        message.text,
-        /trades near 59|holding the Spain side/i,
-      );
+      assert.match(message.text, /trades near 59¢/i);
+      assert.match(message.text, /holding the Spain side/i);
       assert.doesNotMatch(message.text, /worth a look/i);
       assert.match(message.text, /\n\u2800\n>\*Why it matters\*\n>\u2800\n/);
       assert.match(message.text, /▸ PnL.*1\\\.4M.*30d/);
@@ -10042,11 +10163,28 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^⚽ \*\\\+\$542K in 30 days\\\.\* This wallet is backing Spain over Argentina with \$20\\\.5K\\\.$/,
+        /^⚽ \*\\\+\$542K in 30 days\\\.\* This wallet is backing Spain over Argentina\\\.$/,
       );
       assert.match(message.text, /▸ PnL.*542K.*30d/);
       assert.match(message.text, /▸ Recent results.*18\\\.4 pts vs market/);
       assert.match(message.text, /▸ Traded.*2\\\.9M/);
+      const table = message.richMessage.blocks[1];
+      assert.equal(table?.type, "table");
+      if (table?.type === "table") {
+        assert.deepEqual(
+          table.cells.map((row) => row[0]?.text),
+          [
+            "Market",
+            "Position",
+            "Spain price",
+            "Open PnL",
+            "Wallet 30d PnL",
+            "Wallet 30d volume",
+          ],
+        );
+        assert.match(JSON.stringify(table.cells[4]?.[1]?.text), /542K/);
+        assert.doesNotMatch(JSON.stringify(table), /Recent results|18\.4/i);
+      }
     },
   },
   {
@@ -10599,23 +10737,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.publishable, true);
       assert.doesNotMatch(message.text, /different starting prices/i);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
-      assert.doesNotMatch(
-        message.text,
-        /New research|holding fading|after the drop|market now gives/i,
-      );
+      assert.match(message.text, /market now gives/i);
+      assert.match(message.text, /gmtrader/i);
+      assert.match(message.text, /still holding NO after the drop/i);
+      assert.doesNotMatch(message.text, /New research|repeat read/i);
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
       const positionTable = message.richMessage.blocks.find(
         (block) => block.type === "table",
       );
       assert.equal(positionTable?.type, "table");
       if (positionTable?.type === "table") {
-        assert.deepEqual(positionTable.caption, {
-          text: "Wallet position",
-          type: "bold",
-        });
+        assert.equal(positionTable.caption, undefined);
         assert.deepEqual(
           positionTable.cells.map((row) => row[0]?.text),
-          ["Position", "Price now", "Open PnL"],
+          ["Market", "Position", "Price now", "Open PnL"],
         );
       }
       assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
@@ -10810,7 +10945,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$35K in 30 days\\\.\* This wallet is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina with \$16K\\\.$/,
+        /^👀 \*\\\+\$35K in 30 days\\\.\* This wallet is backing Under 4\\\.5 total goals in Spain vs\\\. Argentina\\\.$/,
       );
       assert.match(message.text, /\[Under 4\\\.5 total goals\]\(/);
       assert.match(
@@ -11043,7 +11178,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 1);
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^👀 \*\\\+\$14K combined in 30 days\\\.\* Two wallets are backing Will test resolve Yes\? with \$45K\\\.$/,
+        /^👀 \*\\\+\$14K combined in 30 days\\\.\* Two wallets are backing Will test resolve Yes\?\\\.$/,
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.match(message.text, />\*Why it matters\*\n>/);
@@ -13057,7 +13192,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(
         text.split("\n")[0] ?? "",
-        /^⚠️ \*Mbappe reached 99¢ to win the Golden Boot\\\.\* 22 early wallets are already cashing out\\\.$/,
+        /^⚠️ \*22 early wallets are cashing out\\\.\* Mbappe reached 99¢ to win the Golden Boot\\\.$/,
       );
       assert.match(
         text,
@@ -13150,7 +13285,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, /^📉 \*\\\+\$19\\\.8K bought\\\. −2¢ anyway\\\.\*/);
+      assert.match(text, /^📈 \*\\\+\$19\\\.8K bought\\\. −2¢ anyway\\\.\*/);
       assert.ok(text.includes(">Spain \\(\\-1\\.5\\) price"));
       assert.ok(
         text.includes(

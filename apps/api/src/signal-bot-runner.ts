@@ -22,6 +22,7 @@ import {
   refreshSignalBotLock,
   releaseSignalBotLock,
   sendSignalBotFollowthroughPreview,
+  sendSignalBotRichLayoutPreview,
   sendSignalBotStatsReport,
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
@@ -253,6 +254,8 @@ export async function runSignalBotRunner(): Promise<void> {
               redis,
               telegram,
             }),
+          sendTestRich: (chatId, kind) =>
+            sendSignalBotRichLayoutPreview({ chatId, kind, telegram }),
           sendTestSignal: (chatId, selector) =>
             sendLatestSignalBotTestSignal({
               chatId,

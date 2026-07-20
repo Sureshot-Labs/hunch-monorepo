@@ -9,6 +9,21 @@ export type TelegramRichText =
       text: TelegramRichText;
       type: "url";
       url: string;
+    }
+  | {
+      name: string;
+      text: TelegramRichText;
+      type: "reference";
+    }
+  | {
+      reference_name: string;
+      text: TelegramRichText;
+      type: "reference_link";
+    }
+  | {
+      anchor_name: string;
+      text: TelegramRichText;
+      type: "anchor_link";
     };
 
 export type TelegramRichTableCell = {
@@ -30,6 +45,10 @@ export type TelegramInputRichBlock =
     }
   | {
       type: "divider";
+    }
+  | {
+      name: string;
+      type: "anchor";
     }
   | {
       caption?: TelegramRichText;
@@ -66,6 +85,27 @@ export function telegramRichUrl(
   return { text, type: "url", url };
 }
 
+export function telegramRichReference(
+  name: string,
+  text: TelegramRichText,
+): TelegramRichText {
+  return { name, text, type: "reference" };
+}
+
+export function telegramRichReferenceLink(
+  referenceName: string,
+  text: TelegramRichText,
+): TelegramRichText {
+  return { reference_name: referenceName, text, type: "reference_link" };
+}
+
+export function telegramRichAnchorLink(
+  anchorName: string,
+  text: TelegramRichText,
+): TelegramRichText {
+  return { anchor_name: anchorName, text, type: "anchor_link" };
+}
+
 export function telegramRichText(
   ...parts: Array<TelegramRichText | null | undefined | false>
 ): TelegramRichText {
@@ -92,6 +132,16 @@ export function telegramRichDivider(): TelegramInputRichBlock {
   return { type: "divider" };
 }
 
+export function telegramRichFooter(
+  text: TelegramRichText,
+): TelegramInputRichBlock {
+  return { text, type: "footer" };
+}
+
+export function telegramRichAnchor(name: string): TelegramInputRichBlock {
+  return { name, type: "anchor" };
+}
+
 export function telegramRichTableCell(
   text: TelegramRichText,
   input: {
@@ -109,14 +159,14 @@ export function telegramRichTableCell(
 }
 
 export function telegramRichMetricsTable(input: {
-  caption: TelegramRichText;
+  caption?: TelegramRichText;
   rows: Array<{
     label: TelegramRichText;
     value: TelegramRichText;
   }>;
 }): TelegramInputRichBlock {
   return {
-    caption: input.caption,
+    ...(input.caption ? { caption: input.caption } : {}),
     cells: input.rows.map((row) => [
       telegramRichTableCell(row.label),
       telegramRichTableCell(row.value, { align: "right" }),

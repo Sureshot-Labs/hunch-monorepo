@@ -723,12 +723,10 @@ function buildInitialEditorialAngle(input: {
         subject.kind === "win"
           ? `It is betting on ${subject.text}.`
           : `It is still backing ${subject.text}.`,
-      emoji,
+      emoji: "🐋",
       hook: `A wallet up ${clickbaitPnl(
         input.actorPnlUsd,
-      )} has a ${formatCompactUsd(input.holderPositionUsd)} position on ${
-        subject.entity
-      }.`,
+      )} has built a ${formatCompactUsd(input.holderPositionUsd)} position.`,
       primaryMetric: formatCompactUsd(input.holderPositionUsd),
       supportingMetric: formatCompactUsd(input.actorPnlUsd),
       templateKey: "initial_large_position_v10",
@@ -799,11 +797,7 @@ function buildInitialEditorialAngle(input: {
   return {
     continuation: `${actorReference} ${
       input.actorMode === "single_holder" ? "is" : "are"
-    } ${action}${
-      input.holderPositionUsd > 0
-        ? ` with ${formatCompactUsd(input.holderPositionUsd)}`
-        : ""
-    }.`,
+    } ${action}.`,
     emoji,
     hook: `${clickbaitPnlHook(input.actorPnlUsd)}${
       input.actorMode === "sharp_cluster" ? " combined" : ""
@@ -1178,10 +1172,13 @@ export function buildSignalNotificationHeadline(input: {
     emoji = "⚠️";
     primaryMetric = formatCents(currentPrice);
     supportingMetric = String(earlyWalletsCut);
-    hook = formatEditorialMilestoneHook(input.editorialSubject, currentPrice);
-    continuation = `${earlyWalletsCut} early ${
+    hook = `${earlyWalletsCut} early ${
       earlyWalletsCut === 1 ? "wallet is" : "wallets are"
-    } already cashing out.`;
+    } cashing out.`;
+    continuation = formatEditorialMilestoneHook(
+      input.editorialSubject,
+      currentPrice,
+    );
   } else if (input.cooling) {
     storyKind = "cooling";
     templateKey = exitedWallets > 0 ? "cooling_exits_v7" : "cooling_v7";
@@ -1199,7 +1196,7 @@ export function buildSignalNotificationHeadline(input: {
   } else if (adversePrice && netFlow > 0) {
     storyKind = "divergence";
     templateKey = "divergence_inflow_price_down_v7";
-    emoji = "📉";
+    emoji = "📈";
     primaryMetric = `+${formatCompactUsd(netFlow)}`;
     supportingMetric = formatSignedMove(priceMove ?? 0);
     hook = `+${formatCompactUsd(netFlow)} bought. ${formatSignedMove(

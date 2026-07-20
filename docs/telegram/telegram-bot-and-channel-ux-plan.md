@@ -622,12 +622,12 @@ All posts share a notification-first headline and restrained formatting, but
 they must not share one rigid vertical template. The final block answers a
 different user question for each message family:
 
-| Family          | What is new?                               | Supporting block                             | Ending                               |
-| --------------- | ------------------------------------------ | -------------------------------------------- | ------------------------------------ |
-| Initial signal  | Why this trade is interesting now          | `Why it matters`                             | Proof card is terminal               |
-| Research update | What materially changed since the signal   | `Wallet position` or `Strong-wallet support` | Scoped current state, no repeated CV |
-| Follow-through  | How price and tracked wallets have evolved | `Since the call`                             | `Read:` interpretation               |
-| Resolution      | Whether the called side won or lost        | `Result`                                     | Result card is terminal              |
+| Family          | What is new?                               | Supporting block                | Ending                          |
+| --------------- | ------------------------------------------ | ------------------------------- | ------------------------------- |
+| Initial signal  | Why this trade is interesting now          | Captionless position table      | Position table is terminal      |
+| Research update | What materially changed since the signal   | Captionless current-state table | Current-state table is terminal |
+| Follow-through  | How price and tracked wallets have evolved | Captionless since-call table    | Since-call table is terminal    |
+| Resolution      | Whether the called side won or lost        | Captionless result table        | Result table is terminal        |
 
 Common rules:
 
@@ -638,8 +638,9 @@ Common rules:
 4. Mini App links attach to meaningful nouns already present in the body.
 5. Exactly one CTA class is selected by message state and safety policy.
 
-Whitespace is structural. Rich signal posts express spacing through native
-block boundaries and a divider before a non-terminal interpretation. They do
+Whitespace is structural. Rich signal posts keep the headline and its one or
+two narrative steps in one paragraph block with explicit blank lines, then
+finish with a native table. They do
 not contain `U+2800`, zero-width characters, or decorative hyphen rules. The
 legacy `MarkdownV2` fallback still owns its centralized `U+2800` separator
 until client and rollout telemetry allow that fallback to be retired.
@@ -648,15 +649,19 @@ until client and rollout telemetry allow that fallback to be retired.
 
 Use Telegram Rich Message entities deliberately:
 
-- **Bold:** only the editorial “thumbnail” hook, section labels, and the one or
-  two key values. The explanatory continuation of the first line is regular.
+- **Marked text:** the editorial “thumbnail” hook. The explanatory
+  continuation of the first line remains regular.
+- **Bold:** decisive numeric facts in prose and table values, not whole
+  paragraphs or generic section labels.
 - _Italic:_ genuinely secondary metadata only; do not italicize an entire
   current-position or conclusion line.
-- Table: a compact two-column metric card such as `Since the call`, `Why it
-matters`, or `Result`. Use bordered and striped rendering; keep labels on the
-  left and values on the right.
-- Divider: separates a follow-through data table from its final `Read:`. Do not
-  add it after a terminal proof or result table.
+- Table: a compact, captionless two-column proof card. Use bordered and striped
+  rendering; keep human labels on the left and values on the right. The first
+  row identifies and contextually links the market when it was not linked in
+  the narrative.
+- Divider: not used in short production signal posts. It remains available for
+  future long-form sourced posts where two genuinely different sections need
+  separation.
 - Blockquote and pull quote: not used in signal posts. Both still communicate
   quotation semantics, while Hunch is presenting its own interpretation.
 - Inline link: only on a market/outcome phrase or real wallet identity that
@@ -680,8 +685,10 @@ Keep a small semantic vocabulary:
   icon fits;
 - `🏆` / `⚽` / `🪙` — winner, matchup, and price-target stories;
 - `⚠️` — cooling, thin follow-through, deterioration, or risk;
-- `📈` / `📉` — actual selected-side price direction only, never a synonym for
-  buy/sell activity;
+- `📈` — tracked buying or a positive market reaction; in a divergence title it
+  classifies the leading `bought` event even when the continuation says price
+  fell;
+- `📉` — selling/outflow or a price-only adverse move;
 - `🏁` — resolved result;
 
 Use one leading status marker in the hook. Do not add a second `📍` market block
@@ -691,11 +698,11 @@ each receive a random emoji.
 ### Headline rules
 
 - The headline is standalone and never a hyperlink. Only its short hook is
-  bold; the market explanation remains regular weight.
+  marked; the market explanation remains regular weight.
 - Use sentence case.
 - Treat the first line as the mobile push-notification preview, not only as the
   heading of an opened post.
-- Build it like a YouTube thumbnail plus title on one line: the bold hook is
+- Build it like a YouTube thumbnail plus title on one line: the marked hook is
   truthful cover copy; the plain continuation delivers the payoff.
 - Put a strong meaningful number first when it is the best hook, but compare it
   against human tension first. `22 early wallets are cashing out` can be more
@@ -755,36 +762,37 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V10 structure:
+Rich V10 structure:
 
 ```text
 ⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
 BTC hitting $57.5K in July.
 
-┌ Since the call ──────────────────┐
+More tracked money entered, but the wallets behind the call are no longer
+moving together.
+
+The price barely moved, so the disagreement remains unresolved.
+
+┌──────────────────────────────────┐
+│ Market          BTC hitting $57.5K│
 │ Net tracked flow        +$67.7K │
-│ Wallets added                  5 │
-│ Wallets trimmed                8 │
+│ Wallet activity  5 added · 8 cut │
 │ Still holding                 15 │
 │ NO price          87¢ → 89¢ +2¢ │
 │ Est. open PnL             +$1.6K │
 └──────────────────────────────────┘
-
-────────────────────────────────────
-
-Read: More money went into NO at 89¢, but wallet support thinned and the price
-barely moved.
 ```
 
-The box above documents a native bordered, striped Telegram table. The rule is
-a native Rich Message divider, not literal text.
+The box above documents a native bordered, striped Telegram table, not literal
+text characters.
 
 Recommended emphasis inside the rendered block:
 
-- `Since the call` — bold table caption;
+- no `Since the call` caption; the headline and narrative already establish
+  that this is an update;
 - metric labels remain plain while important values are bold;
-- wallet adds, trims, exits, and holdings use separate rows so the value column
-  remains scannable on narrow screens;
+- adds, trims, and exits share one compact `Wallet activity` row; `Still
+holding` remains separate;
 - the price delta and estimated PnL value are bold;
 - the conclusion explicitly reports mixed breadth, exits, adverse price, or
   thin evidence when present.
@@ -793,24 +801,25 @@ Recommended emphasis inside the rendered block:
   flow or price movement may still publish, but its headline must describe the
   divergence instead of using `backs` or `builds behind`.
 
-The final interpretation begins with a bold `Read:` label. The sentence itself
-remains regular text so it is legible and does not look like a footnote. It
-must synthesize the state—especially mixed breadth, exits, adverse movement,
-or thin evidence—rather than repeat every number above it.
+The interpretation belongs before the table and has no `Read:` label. It must
+synthesize the state—especially mixed breadth, exits, adverse movement, or thin
+evidence—while the terminal table verifies the exact figures.
 
 ### Initial-signal structure
 
 ```text
-⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina with
-$20.5K.
+⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina.
 
-<one- or two-sentence thesis>
+Most tracked money is on Argentina, but this wallet is holding $20.5K on Spain.
 
-│ Why it matters
-│
-│ ▸ Recent results  +18.4 pts vs market · 24 resolved bets
-│ ▸ PnL  +$542K · 30d
-│ ▸ Traded  $2.9M · 30d
+The market prefers Argentina. This wallet does not.
+
+┌──────────────────────────────────┐
+│ Market       Spain over Argentina│
+│ Position          $20.5K on Spain│
+│ Spain price                   21¢ │
+│ Wallet 30d PnL            +$542K │
+└──────────────────────────────────┘
 ```
 
 Rules:
@@ -820,13 +829,20 @@ Rules:
   first meaningful mention instead of adding a generic Wallet button.
 - If no safe identity or natural market phrase is available, omit that body
   link. Do not add a generic navigation footer.
-- Keep `Why it matters` to at most three rows, preferably two.
-- Insert the shared visual blank quote line between the section label and its
-  rows.
-- Use one repeated list marker (`▸`) and emphasize the key value, not every
-  word.
+- Do not add `Why it matters`, `Wallet edge`, or `Position` above the table.
+  The table is already the visual boundary.
+- Prefer human proof (`Position`, selected-side price, open PnL, aligned
+  profitable wallets, 30-day PnL) over internal scoring such as `pts vs
+market`.
+- Include volume when trading activity is one of the facts that makes the
+  wallet credible, or when unusual size/activity is itself the selected story;
+  omit it from unrelated probability and crowd-disagreement cards.
 - Avoid mechanically restating the whole title in prose, but allow the proof
   block to repeat the exact scoped metric behind rounded cover copy.
+- A decisive metric may appear in the marked hook, narrative, and table when
+  each appearance does a different job: attention, interpretation, and exact
+  proof. Do not remove `still holding` or `hasn't backed away` merely because
+  the position also appears in the table.
 - If the title says `four wallets up nearly $1M`, the body must say that this is
   combined 30-day PnL and show the exact value. Attention in the headline and
   precision in the body are complementary, not competing rules.

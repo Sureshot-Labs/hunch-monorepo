@@ -21,35 +21,36 @@ The current worktree contains:
 
 - `signal_bot_copy_v10`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
-- a typed two-part first line: `emoji + bold cover hook + regular payoff`; the
+- a typed two-part first line: `emoji + marked cover hook + regular payoff`; the
   LLM does not control emoji, Markdown, or story priority;
 - an editorial angle selector for low-probability bets, crowd-versus-wallet
   disagreement, favourite-versus-contrarian matchups, unusually large
   positions, losing positions that credible wallets have not left, late-stage
   cash-outs, and adverse price-target moves;
-- `📈`/`📉` only for actual price direction; initial stories may use `🏆`,
-  `⚽`, `🪙`, `🌐`, or `🗳️` for recognisable winner, matchup, price-target,
-  geopolitical, or election context; `🔥` marks a strong fade/against angle,
-  and `🏁` marks resolution;
+- `📈` may classify tracked buying or a positive market reaction; `📉` may
+  classify selling/outflow or a price-only adverse move. In a buy/price
+  divergence headline the arrow follows the leading wallet action and the
+  text explicitly reports the adverse price;
 - natural Bitcoin price-target and total-market subjects plus safe generic
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
-- native Rich Message delivery with a two-part headline paragraph, contextual
-  inline links, bordered striped `Since the call`, `Why it matters`, and
-  `Result` tables, plus a native divider before a follow-through `Read:`;
+- native Rich Message delivery with a marked two-part headline, contextual
+  inline links, and captionless bordered striped position, since-call, and
+  result tables;
 - no quote/pull-quote blocks and no invisible separators in the primary rich
   output; the existing MarkdownV2 renderer remains an automatic fallback;
 - contextual named-outcome headlines such as `Spain over Argentina` and
   `Beta Team over Alpha Team in Game 1`, instead of notification leads that
   contain only the selected outcome;
-- deterministic removal of generated initial-copy sentences that merely repeat
-  the current price, holding state, or a generic `worth a look` recommendation;
+- deterministic removal of placeholders and generic recommendations such as
+  `worth a look`, without deleting `still holding`, `hasn't backed away`, or
+  other persistence language when that behaviour is part of the story;
 - follow-through materiality gates that suppress tiny contradictory updates
   such as `+$345`, two adds, one trim, one exit, and an adverse one-cent move;
 - divergence-safe headline selection: adverse price or mixed wallet breadth
   cannot produce `backs` / `builds behind` copy;
-- message-family-specific endings: proof card for initial signals, `Read:` for
-  follow-through, and `Result` for resolution;
+- message-family-specific endings: interpretation precedes the proof table,
+  then the position/since-call/result table ends the post before its CTA;
 - research updates rendered from producer-owned `holderResearchUpdateV1`, with
   fail-closed suppression when no supported change can be proved;
 - research updates omit stable wallet credentials and distinguish a single
@@ -66,15 +67,15 @@ Cup`) over the internal contract side (`YES on Spain`);
 - literal `No summary.` is never persisted or rendered; totals receive a safe
   deterministic win-condition sentence when generated prose is unavailable;
 - a verified positive recent PnL may lead or qualify an initial single-wallet
-  or sharp-cluster hook; the exact value remains available in `Why it matters`
-  because the rounded headline is the promise and the body is the proof;
+  or sharp-cluster hook; the narrative and terminal table may repeat its exact
+  value because the rounded headline is the promise and the body is the proof;
 - cluster NO headlines state the complete proposition and qualify the displayed
   price as `NO at 92¢`, rather than attaching `92¢` ambiguously to the event;
 - incomplete entity-only subjects such as `NO on Argentina` fail closed until
   winner/event context can produce a complete proposition;
 - near-resolution moves can lead with early-holder behaviour instead of a raw
-  confluence card: `Mbappé reached 99¢ ... 22 early wallets are already cashing
-out`; “early” counts only wallets that had a baseline position at the call;
+  confluence card: `22 early wallets are cashing out. Mbappé reached 99¢`;
+  “early” counts only wallets that had a baseline position at the call;
 - cluster “down but still holding” headlines use a cluster-scoped open-PnL
   aggregate, not the open PnL of all wallets on the side;
 - follow-through estimated PnL is labeled `Est. PnL since call`; research state
@@ -125,15 +126,15 @@ the body must immediately provide the exact actor, value, timeframe, and side.
 Priority and examples:
 
 ```text
-⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina with $20.5K.
+⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina.
 🏆 **Argentina has just a 17% chance of winning the World Cup.** Four wallets
 up nearly $1M are still backing Argentina.
 🔥 **Messi has only an 8% chance of winning the Golden Boot.** Two profitable
 wallets are betting against Messi.
-⚠️ **Mbappé reached 99¢ to win the Golden Boot.** 22 early wallets are already
-cashing out.
+⚠️ **22 early wallets are cashing out.** Mbappé reached 99¢ to win the Golden
+Boot.
 📉 **Bitcoin is moving closer to $67.5K.** This wallet still refuses to flip.
-📉 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
+📈 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
 🔥 **+$45K bought. +7¢.** Spain is moving with tracked wallets.
 ⚠️ **3 exits. $31K sold.** Tracked support for Spain is weakening.
 📈 **+8¢ to 67¢.** Spain is moving with the call.
@@ -142,12 +143,12 @@ cashing out.
 
 Rules:
 
-- treat the bold hook like YouTube thumbnail copy: maximise the desire to open
+- treat the marked hook like YouTube thumbnail copy: maximise the desire to open
   the post, while staying faithful to structured facts;
 - prefer a strong number at the front when it is the best hook, but do not let
   that mechanical rule suppress a stronger human event such as early wallets
   cashing out or a wallet refusing to flip;
-- keep only the hook bold; the continuation stays regular weight;
+- mark only the hook; the continuation stays regular weight;
 - lead a strong single-wallet or verified sharp-cluster initial signal with
   recent performance when it is more attention-worthy than position size;
 - abbreviate cover metrics for impact (`$967.8K` → `nearly $1M`) and repeat the
@@ -156,7 +157,8 @@ Rules:
 - lead with price when price movement is the actual story;
 - vary semantic emoji by story and market; never use one emoji as a literal
   synonym for “attention” across every post;
-- reserve `📈`/`📉` for actual price movement, not buys/sells;
+- let `📈` classify a leading buy event and `📉` a leading sell event; when
+  price moves the other way, state that conflict in the same headline;
 - keep the side, predicate, threshold/outcome, and deadline needed to identify
   the contract;
 - never infer a complementary NO proposition without a verified mapping;
@@ -169,8 +171,8 @@ Rules:
   rule;
 - never use unchanged current state (`still holds`, position size, or stable
   credentials) as the event in a research-update headline.
-- never use `📈` to mean buying or `📉` to mean selling. That collides with the
-  price meaning and can produce a visually false `📈 … −1¢` headline.
+- never let the arrow conceal which metric moved; `📈 +$43K bought. −1¢
+anyway.` is acceptable because both directions are explicit.
 
 ## Post Grammar
 
@@ -180,47 +182,60 @@ Follow-through:
 ⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
 BTC hitting $57.5K in July.
 
-> Since the call
->
-> Net tracked flow  +$67.7K
-> Wallets  5 added · 8 trimmed · 15 holding
-> NO price  87¢ → 89¢  +2¢
-> Est. PnL since call  +$1.6K
+More tracked money entered, but the wallets behind the call are no longer
+moving together.
 
-Read: More money went into NO at 89¢, but wallet support thinned and the price
-barely moved.
+The price barely moved, so the disagreement remains unresolved.
+
+| Market           | BTC hitting $57.5K     |
+| ---------------- | ----------------------: |
+| Net tracked flow |                 +$67.7K |
+| Wallet activity  | 5 added · 8 trimmed     |
+| Still holding    |                      15 |
+| NO price         |        87¢ → 89¢ · +2¢ |
+| Est. open PnL    |                  +$1.6K |
 ```
 
 Initial signal:
 
 ```text
-⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina with
-$20.5K.
+⚽ **+$542K in 30 days.** This wallet is backing Spain over Argentina.
 
-<one concise thesis; natural market/wallet phrases may be Mini App links>
+Most tracked money is on Argentina, but this wallet is holding $20.5K on Spain.
 
-> Why it matters
->
-> ▸ Recent results  +18.4 pts vs market · 24 resolved bets
-> ▸ PnL  +$542K · 30d
-> ▸ Traded  $2.9M · 30d
+The market prefers Argentina. This wallet does not.
+
+| Market          | Spain over Argentina |
+| --------------- | -------------------: |
+| Position        |      $20.5K on Spain |
+| Spain price     |                  21¢ |
+| Wallet 30d PnL |              +$542K |
+| Wallet 30d volume |              $2.9M |
 ```
 
-The body intentionally repeats the exact PnL. The rounded headline earns the
-open; the proof card establishes precise scope and prevents a phrase such as
-“four wallets up nearly $1M” from being read as $1M per wallet.
+The same decisive fact may intentionally appear in all three layers: rounded
+cover copy earns the open, narrative explains why the fact matters, and the
+table proves its exact value and scope. That is useful repetition, not duplicate
+copy. It prevents a phrase such as “four wallets up nearly $1M” from being read
+as $1M per wallet.
 
 Research update:
 
 ```text
 📉 **Bitcoin is moving closer to $67.5K.** This wallet still refuses to flip.
 
-<one concise explanation of what changed and why it matters>
+The price of NO fell by 11¢ to 61¢, meaning the market has become more
+confident that Bitcoin could reach $67.5K before the end of July.
 
-The wallet entered before this signal, so its open PnL and the −11¢ move since
-the call use different starting prices.
+The wallet still holds $5.8K on NO and remains about $1.5K in profit, but the
+market has moved against its position since the signal.
 
-Wallet position: $5.8K on NO · 61¢ now · Wallet open PnL +$1.5K
+| Market          | Bitcoin to hit $67.5K in July |
+| --------------- | -----------------------------: |
+| Position        |                   $5.8K on NO |
+| NO price        |                            61¢ |
+| Move since call |                           −11¢ |
+| Est. open PnL   |                         +$1.5K |
 ```
 
 Do not repeat `Why it matters` in a reply to the original signal: the wallet's
@@ -351,6 +366,12 @@ an otherwise valid old signal with a stale price snapshot. That bypass is
 scoped to the test command and always removes `Buy` in favor of `Open market`;
 the public publisher still fails closed on the same stale snapshot.
 
+`/test_rich [all|production|headings|references] [channel_id]` sends a fixed
+device-QA gallery. `production` covers the manager's distinct story genres;
+`headings` compares H6, H5, and hook-only heading treatments on the same copy;
+`references` is a long-form footnote/anchor experiment and is not a production
+signal layout.
+
 ### 5. Live device and channel QA
 
 Send fixtures to a private test channel and review iOS Lock Screen,
@@ -361,7 +382,8 @@ Cover:
 - long market subjects, Unicode, named outcomes, totals, and complex NO;
 - initial single wallet and wallet cluster;
 - mixed breadth, exits, negative flow, adverse price, and thin evidence;
-- table captions, borders, striping, wrapping, alignment, and divider spacing;
+- marked-hook rendering, borders, striping, long-market wrapping, alignment,
+  and the absence of redundant table captions;
 - confirmation that the primary rich output contains no visible quotation
   glyph and no invisible placeholder row;
 - deliberate Rich Message rejection to confirm automatic MarkdownV2 fallback
@@ -410,7 +432,8 @@ Mini App market and Buy payloads may carry the opaque
 - Aggregate cluster support and one-wallet position state have different
   labels and keep their producer-owned scope.
 - Market-wide activity cannot masquerade as selected-side flow.
-- Open follow-through posts end in `Read:` and terminal posts end in `Result`.
+- Initial, research-update, follow-through, and resolution posts end in their
+  proof table; interpretation never trails it as an accidental footnote.
 - Device fixtures pass and rollout telemetry distinguishes V10 from older copy.
 
 ## Out of Scope

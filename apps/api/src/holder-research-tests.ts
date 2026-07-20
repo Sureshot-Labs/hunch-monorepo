@@ -973,7 +973,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(v2Final, /never use ambiguous phrases/i);
       assert.match(v2Final, /never expose internal review language/i);
       assert.match(v2Final, /do not turn a no_evidence or error/i);
-      assert.match(v2Final, /do not restate the current holding/i);
+      assert.match(v2Final, /do not dump the full current snapshot/i);
+      assert.match(
+        v2Final,
+        /repeat the one decisive holding, price, flow, or PnL/i,
+      );
       assert.match(v2Final, /meaningfulDeltaReasons/i);
       assert.ok(v2Final.length <= v1Final.length * 0.85);
     },
@@ -4554,7 +4558,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "holder research prompt keeps credential facts out of summary copy",
+    name: "holder research prompt writes one attention-first story with verified proof",
     run: () => {
       const prompt = buildHolderResearchSystemPrompt();
       assert.match(prompt, /do not repeat the bullets verbatim/i);
@@ -4581,11 +4585,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         prompt,
         /Use 'smart wallets' only when credentials are strong/i,
       );
-      assert.match(prompt, /flexible checklist, not a fixed template/i);
+      assert.match(prompt, /Choose exactly one story before writing/i);
+      assert.match(prompt, /Story first; numbers prove that story/i);
+      assert.match(prompt, /(?:2|two) short narrative sentences/i);
+      assert.match(prompt, /table then verifies it/i);
       assert.match(prompt, /Avoid overusing 'serious buyer\(s\)'/i);
       assert.match(prompt, /Do not reuse the same sentence shape/i);
       assert.match(prompt, /Avoid in headline\/summary/i);
-      assert.match(prompt, /Strong wallets are fading Norway/i);
       assert.match(prompt, /Market signal detected/i);
       assert.match(
         prompt,
@@ -4595,7 +4601,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         prompt,
         /Spain trades near 19c, and the wallet side has not backed off/i,
       );
-      assert.match(prompt, /Known odds and team news already lean France/i);
+      assert.match(prompt, /Mentionmarket has kept the full position/i);
+      assert.match(prompt, /The price of NO fell by 11¢ to 61¢/i);
       assert.doesNotMatch(prompt, /pick articles/i);
       assert.doesNotMatch(prompt, /\bpreviews\b/i);
       assert.doesNotMatch(prompt, /@/);

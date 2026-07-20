@@ -251,7 +251,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         subject: subject({ marketTitle: "Will it happen?" }),
       });
       assert.equal(result.storyKind, "divergence");
-      assert.equal(result.emoji, "📉");
+      assert.equal(result.emoji, "📈");
       assert.equal(result.hook, "+$2.5K bought. −3¢ anyway.");
       assert.match(result.continuation ?? "", /moved against tracked flow/);
     },
@@ -431,7 +431,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         },
         {
           expected:
-            "🏆 A wallet up $168K has a $305K position on France. It is betting on France to win the World Cup.",
+            "🐋 A wallet up $168K has built a $305K position. It is betting on France to win the World Cup.",
           input: {
             actorMode: "single_holder" as const,
             actorPnlHorizonDays: 30,
@@ -541,7 +541,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         cashout.text,
-        "⚠️ Mbappe reached 99¢ to win the Golden Boot. 22 early wallets are already cashing out.",
+        "⚠️ 22 early wallets are cashing out. Mbappe reached 99¢ to win the Golden Boot.",
       );
       assert.equal(cashout.templateKey, "late_stage_early_wallet_cashout_v10");
 
@@ -691,7 +691,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "📉 +$345 bought. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against tracked flow.",
+        "📈 +$345 bought. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against tracked flow.",
       );
       assert.doesNotMatch(result.text, /builds behind|backs/);
     },

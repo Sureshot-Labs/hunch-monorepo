@@ -80,6 +80,20 @@ import {
   type SignalBotFollowthroughPolicy,
 } from "./signal-bot-followthrough-policy.js";
 import {
+  parseSignalBotCommand,
+  parseSignalBotCommandFirstArg,
+  parseSignalBotCommandTargetChatId,
+  parseSignalBotDestinationPolicyRequest,
+  parseSignalBotFollowthroughPreviewRequest,
+  parseSignalBotRichPreviewRequest,
+  parseSignalBotStatsRequest,
+  parseSignalBotTestSignalRequest,
+  type SignalBotFollowthroughPreviewKind,
+  type SignalBotRichPreviewKind,
+  type SignalBotStatsPeriod,
+  type SignalBotTestSignalSelector,
+} from "./signal-bot-command-parsers.js";
+import {
   buildSignalBotBuyStartParam,
   buildSignalBotHolderStartParam,
   buildSignalBotMiniAppUrl,
@@ -103,7 +117,6 @@ import {
   type SignalDestinationPolicy,
 } from "./signal-delivery-target.js";
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
-import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
 import {
   buildSignalBotMarketSearchQueryPrompt,
   buildSignalBotMarketSearchScreen,
@@ -125,12 +138,11 @@ import {
   buildHunchMiniAppWebButton,
 } from "./telegram-mini-app-buttons.js";
 import {
-  stripTelegramCustomEmojiButtonIcons,
-  stripTelegramCustomEmojiMarkdownV2,
   telegramCustomEmojiId,
   telegramCustomEmojiIdForVenue,
   telegramCustomEmojiMarkdownV2,
 } from "./telegram-custom-emoji.js";
+import { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   formatTelegramBoldMarkdownV2,
@@ -153,8 +165,8 @@ import {
 } from "./signal-delivery.js";
 import {
   telegramRichBold,
-  telegramRichDivider,
   telegramRichItalic,
+  telegramRichMarked,
   telegramRichMetricsTable,
   telegramRichParagraph,
   telegramRichText,
@@ -164,6 +176,23 @@ import {
 } from "./telegram-rich-message.js";
 
 export { escapeTelegramMarkdownV2 } from "./signal-delivery.js";
+export { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
+export { sendSignalBotRichLayoutPreview } from "./signal-bot-rich-preview.js";
+export {
+  parseSignalBotCommand,
+  parseSignalBotDestinationPolicyRequest,
+  parseSignalBotFollowthroughPreviewRequest,
+  parseSignalBotRichPreviewRequest,
+  parseSignalBotStatsPeriod,
+  parseSignalBotStatsRequest,
+  type SignalBotCommand,
+  type SignalBotFollowthroughPreviewKind,
+  type SignalBotFollowthroughPreviewRequest,
+  type SignalBotRichPreviewKind,
+  type SignalBotStatsPeriod,
+  type SignalBotStatsRequest,
+  type SignalBotTestSignalSelector,
+} from "./signal-bot-command-parsers.js";
 
 export type SignalBotConfig = {
   enabled: boolean;
@@ -182,37 +211,10 @@ export type SignalBotConfig = {
   tradingInternalApiToken: string | null;
 };
 
-export type SignalBotCommand =
-  | "disable_signals"
-  | "enable_signals"
-  | "help"
-  | "market"
-  | "menu"
-  | "settings"
-  | "signal_venues"
-  | "start"
-  | "stats"
-  | "status"
-  | "trade_status"
-  | "disable_trading"
-  | "test_followthrough"
-  | "test_signal"
-  | "test_trade";
-
 export type SignalBotDisableTradingResult =
   | "already_disabled"
   | "disabled"
   | "unavailable";
-
-export type SignalBotFollowthroughPreviewKind =
-  | "resolved_loss"
-  | "resolved_win"
-  | "stats";
-
-export type SignalBotFollowthroughPreviewRequest = {
-  kind: SignalBotFollowthroughPreviewKind;
-  targetChatId: string | null;
-};
 
 export type SignalBotChatState = {
   chatId: string;
@@ -258,13 +260,6 @@ export type SignalBotCheaperAlternativeResolver = (input: {
   buySide: "NO" | "YES";
   note: SignalBotNote;
 }) => Promise<SignalBotCheaperAlternative | null>;
-
-export type SignalBotStatsPeriod = "24h" | "30d" | "7d";
-
-export type SignalBotStatsRequest = {
-  detail: boolean;
-  period: SignalBotStatsPeriod;
-};
 
 export type TelegramBotChat = {
   id: number | string;
@@ -420,42 +415,6 @@ export type SignalBotTelegramClient = {
   ): Promise<TelegramSendResult>;
   sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
 };
-
-function telegramPayloadHasCustomEmoji(input: {
-  reply_markup?: TelegramInlineKeyboard;
-  text: string;
-}): boolean {
-  return (
-    stripTelegramCustomEmojiMarkdownV2(input.text) !== input.text ||
-    input.reply_markup?.inline_keyboard.some((row) =>
-      row.some((button) => Boolean(button.icon_custom_emoji_id)),
-    ) === true
-  );
-}
-
-function isTelegramCustomEmojiRejection(
-  status: number,
-  description: string | null | undefined,
-): boolean {
-  return (
-    status === 400 &&
-    /custom[ _-]?emoji|button_type_invalid/i.test(description ?? "")
-  );
-}
-
-function stripTelegramCustomEmojiFromPayload<
-  T extends { reply_markup?: TelegramInlineKeyboard; text: string },
->(input: T): T {
-  return {
-    ...input,
-    ...(input.reply_markup
-      ? {
-          reply_markup: stripTelegramCustomEmojiButtonIcons(input.reply_markup),
-        }
-      : {}),
-    text: stripTelegramCustomEmojiMarkdownV2(input.text),
-  };
-}
 
 export type SignalBotNote = {
   id: string;
@@ -824,105 +783,6 @@ export function parseSignalBotConfig(
   return config;
 }
 
-export function parseSignalBotCommand(
-  text: string | null | undefined,
-  botUsername?: string | null,
-): SignalBotCommand | null {
-  if (!text) return null;
-  const firstToken = text.trim().split(/\s+/)[0];
-  if (!firstToken?.startsWith("/")) return null;
-  const raw = firstToken.slice(1);
-  const [command, mention] = raw.split("@");
-  if (!command) return null;
-  if (
-    mention &&
-    botUsername &&
-    mention.toLowerCase() !== botUsername.toLowerCase()
-  ) {
-    return null;
-  }
-  switch (command.toLowerCase()) {
-    case "disable_signals":
-      return "disable_signals";
-    case "enable_signals":
-      return "enable_signals";
-    case "help":
-      return "help";
-    case "market":
-      return "market";
-    case "menu":
-      return "menu";
-    case "settings":
-      return "settings";
-    case "signal_venues":
-      return "signal_venues";
-    case "start":
-      return "start";
-    case "stats":
-      return "stats";
-    case "status":
-      return "status";
-    case "trade_status":
-      return "trade_status";
-    case "disable_trading":
-      return "disable_trading";
-    case "test_followthrough":
-      return "test_followthrough";
-    case "test_signal":
-      return "test_signal";
-    case "test_trade":
-      return "test_trade";
-    default:
-      return null;
-  }
-}
-
-function parseSignalBotFollowthroughPreviewKind(
-  value: string | null | undefined,
-): SignalBotFollowthroughPreviewKind | null {
-  switch (value?.trim().toLowerCase()) {
-    case "stats":
-      return "stats";
-    case "resolved_win":
-    case "win":
-      return "resolved_win";
-    case "resolved_loss":
-    case "loss":
-      return "resolved_loss";
-    default:
-      return null;
-  }
-}
-
-export function parseSignalBotStatsPeriod(
-  text: string | null | undefined,
-): SignalBotStatsPeriod | null {
-  return parseSignalBotStatsRequest(text)?.period ?? null;
-}
-
-export function parseSignalBotStatsRequest(
-  text: string | null | undefined,
-): SignalBotStatsRequest | null {
-  if (!text) return { detail: false, period: "7d" };
-  const [, ...rawArgs] = text.trim().split(/\s+/);
-  let period: SignalBotStatsPeriod = "7d";
-  let detail = false;
-  for (const rawArg of rawArgs) {
-    const normalized = rawArg.trim().toLowerCase();
-    if (!normalized) continue;
-    if (normalized === "detail" || normalized === "details") {
-      detail = true;
-      continue;
-    }
-    if (normalized === "24h" || normalized === "7d" || normalized === "30d") {
-      period = normalized;
-      continue;
-    }
-    return null;
-  }
-  return { detail, period };
-}
-
 function signalBotStatsPeriodHours(period: SignalBotStatsPeriod): number {
   if (period === "24h") return 24;
   if (period === "30d") return 24 * 30;
@@ -931,95 +791,6 @@ function signalBotStatsPeriodHours(period: SignalBotStatsPeriod): number {
 
 function formatSignalBotStatsPeriodLabel(period: SignalBotStatsPeriod): string {
   return period.toUpperCase();
-}
-
-function parseSignalBotCommandTargetChatId(
-  text: string | null | undefined,
-): string | null {
-  if (!text) return null;
-  const [, rawTarget] = text.trim().split(/\s+/, 2);
-  return normalizeSignalBotCommandTargetChatId(rawTarget);
-}
-
-function parseSignalBotTestSignalRequest(text: string | null | undefined): {
-  selector: SignalBotTestSignalSelector;
-  targetChatId: string | null;
-} {
-  const parts = text?.trim().split(/\s+/).slice(1) ?? [];
-  const targetChatId = normalizeSignalBotCommandTargetChatId(parts[0]);
-  const rawSelector = targetChatId ? parts[1] : parts[0];
-  const selector =
-    rawSelector === "initial" ||
-    rawSelector === "update" ||
-    rawSelector === "latest" ||
-    (rawSelector != null && UUID_RE.test(rawSelector))
-      ? rawSelector
-      : "latest";
-  return { selector, targetChatId };
-}
-
-function parseSignalBotCommandFirstArg(
-  text: string | null | undefined,
-): string | null {
-  if (!text) return null;
-  const [, rawArg] = text.trim().split(/\s+/, 2);
-  const arg = rawArg?.trim();
-  return arg ? arg : null;
-}
-
-function normalizeSignalBotCommandTargetChatId(
-  rawTarget: string | null | undefined,
-): string | null {
-  if (!rawTarget) return null;
-  const target = rawTarget.trim();
-  if (/^-100\d{5,}$/.test(target)) return target;
-  if (/^-\d{5,}$/.test(target)) return target;
-  if (/^\d{5,}$/.test(target)) return `-100${target}`;
-  return null;
-}
-
-export function parseSignalBotDestinationPolicyRequest(
-  text: string | null | undefined,
-): { rawVenues: string[] | "all"; targetChatId: string | null } | null {
-  if (!text) return null;
-  const [, ...args] = text.trim().split(/\s+/);
-  if (args.length < 1 || args.length > 2) return null;
-  const targetChatId =
-    args.length === 2 ? normalizeSignalBotCommandTargetChatId(args[1]) : null;
-  if (args.length === 2 && !targetChatId) return null;
-  const raw = args[0]?.trim().toLowerCase();
-  if (!raw) return null;
-  if (raw === "all") return { rawVenues: "all", targetChatId };
-  const rawVenues = raw
-    .split(",")
-    .map((venue) => venue.trim())
-    .filter(Boolean);
-  return rawVenues.length > 0 ? { rawVenues, targetChatId } : null;
-}
-
-export function parseSignalBotFollowthroughPreviewRequest(
-  text: string | null | undefined,
-): SignalBotFollowthroughPreviewRequest | null {
-  if (!text) return { kind: "stats", targetChatId: null };
-  const [, ...args] = text.trim().split(/\s+/);
-  let kind: SignalBotFollowthroughPreviewKind = "stats";
-  let sawKind = false;
-  let targetChatId: string | null = null;
-  for (const rawArg of args) {
-    const parsedKind = parseSignalBotFollowthroughPreviewKind(rawArg);
-    if (parsedKind && !sawKind) {
-      kind = parsedKind;
-      sawKind = true;
-      continue;
-    }
-    const parsedTarget = normalizeSignalBotCommandTargetChatId(rawArg);
-    if (parsedTarget && !targetChatId) {
-      targetChatId = parsedTarget;
-      continue;
-    }
-    return null;
-  }
-  return { kind, targetChatId };
 }
 
 export function isSignalBotAdmin(
@@ -1067,9 +838,49 @@ function formatSignalNotificationHeadlineRichText(
 ): TelegramRichText {
   return telegramRichText(
     `${headline.emoji} `,
-    telegramRichBold(headline.hook),
+    telegramRichMarked(headline.hook),
     headline.continuation ? ` ${headline.continuation}` : null,
   );
+}
+
+function emphasizeSignalBotNarrativeString(value: string): TelegramRichText {
+  const metricPattern =
+    /([+−-]?\$\d[\d,.]*(?:\.\d+)?[KMB]?|\d+(?:\.\d+)?%|\d+(?:\.\d+)?¢)/g;
+  const parts = value.split(metricPattern);
+  return telegramRichText(
+    ...parts.map((part, index) =>
+      index % 2 === 1 ? telegramRichBold(part) : part,
+    ),
+  );
+}
+
+function emphasizeSignalBotNarrativeText(
+  value: TelegramRichText,
+): TelegramRichText {
+  if (typeof value === "string")
+    return emphasizeSignalBotNarrativeString(value);
+  if (Array.isArray(value)) {
+    return value.map(emphasizeSignalBotNarrativeText);
+  }
+  if ("text" in value) {
+    return { ...value, text: emphasizeSignalBotNarrativeText(value.text) };
+  }
+  return value;
+}
+
+function splitSignalBotNarrative(value: string): string[] {
+  const sentences =
+    typeof Intl.Segmenter === "function"
+      ? Array.from(
+          new Intl.Segmenter("en", { granularity: "sentence" }).segment(value),
+          (segment) => segment.segment.trim(),
+        ).filter(Boolean)
+      : value
+          .split(/(?<=[.!?])\s+/)
+          .map((sentence) => sentence.trim())
+          .filter(Boolean);
+  if (sentences.length <= 2) return sentences;
+  return [sentences[0] ?? value, sentences.slice(1).join(" ")];
 }
 
 function joinTelegramMessageBlocks(
@@ -1680,7 +1491,14 @@ export function buildSignalBotMessage(input: {
           )
         : null);
   const summary = description ? bodyRenderer.render(description) : null;
-  const richSummary = description ? richBodyRenderer.render(description) : null;
+  const richSummary = description
+    ? telegramRichText(
+        ...splitSignalBotNarrative(description).flatMap((paragraph, index) => [
+          ...(index > 0 ? (["\n\n"] as TelegramRichText[]) : []),
+          emphasizeSignalBotNarrativeText(richBodyRenderer.render(paragraph)),
+        ]),
+      )
+    : null;
   const researchPosition =
     messageKind === "research_update" && buySide
       ? formatSignalBotResearchPosition({
@@ -1704,14 +1522,22 @@ export function buildSignalBotMessage(input: {
       )
     : null;
   const renderedRichResearchPositionRows = researchPosition
-    ? researchPosition.rows.map((row) => ({
-        label: row.label,
-        value: telegramRichBold(
-          richBodyRenderer.render(
-            normalizeTelegramPresentationAliases(row.value, presentation),
+    ? [
+        {
+          label: "Market",
+          value: telegramRichBold(
+            richBodyRenderer.render(notificationCopy.marketLabel),
           ),
-        ),
-      }))
+        },
+        ...researchPosition.rows.map((row) => ({
+          label: row.label,
+          value: telegramRichBold(
+            richBodyRenderer.render(
+              normalizeTelegramPresentationAliases(row.value, presentation),
+            ),
+          ),
+        })),
+      ]
     : [];
   const titleLine = formatSignalNotificationHeadlineMarkdown(
     notificationCopy.headline,
@@ -1727,22 +1553,42 @@ export function buildSignalBotMessage(input: {
     messageKind === "initial" && supportingEvidenceRows.length > 0
       ? formatSignalBotEvidenceBlock(supportingEvidenceRows)
       : null;
+  const currentSideLabel = buySide
+    ? resolveSignalBotCurrentSideLabel({
+        presentation,
+        side: buySide,
+        sideCopy: buySideCopy,
+      })
+    : null;
+  const richInitialPositionTable =
+    messageKind === "initial" && buySide && currentSideLabel
+      ? formatSignalBotInitialPositionRichTable({
+          evidenceRows,
+          marketLabel: notificationCopy.marketLabel,
+          note,
+          price: displayPrice,
+          render: (value) => richBodyRenderer.render(value),
+          sideLabel: currentSideLabel,
+          templateKey: notificationCopy.headline.templateKey,
+        })
+      : null;
+  const richHeadline = formatSignalNotificationHeadlineRichText(
+    notificationCopy.headline,
+  );
   const richBlocks: TelegramInputRichMessage["blocks"] = [
     telegramRichParagraph(
-      formatSignalNotificationHeadlineRichText(notificationCopy.headline),
+      richSummary
+        ? telegramRichText(richHeadline, "\n\n", richSummary)
+        : richHeadline,
     ),
-    ...(richSummary ? [telegramRichParagraph(richSummary)] : []),
     ...(renderedRichResearchPositionRows.length > 0 && researchPosition
       ? [
           telegramRichMetricsTable({
-            caption: telegramRichBold(researchPosition.label),
             rows: renderedRichResearchPositionRows,
           }),
         ]
       : []),
-    ...(messageKind === "initial" && supportingEvidenceRows.length > 0
-      ? [formatSignalBotEvidenceRichTable(supportingEvidenceRows)]
-      : []),
+    ...(richInitialPositionTable ? [richInitialPositionTable] : []),
     ...(!input.telegramMiniAppLinkBase
       ? [
           telegramRichParagraph(
@@ -3739,6 +3585,10 @@ export async function handleSignalBotCommand(input: {
     chatId: string,
     kind: SignalBotFollowthroughPreviewKind,
   ) => Promise<boolean>;
+  sendTestRich?: (
+    chatId: string,
+    kind: SignalBotRichPreviewKind,
+  ) => Promise<boolean>;
   sendTestSignal: (
     chatId: string,
     selector?: SignalBotTestSignalSelector,
@@ -4197,6 +4047,36 @@ export async function handleSignalBotCommand(input: {
     );
     return true;
   }
+  if (command === "test_rich") {
+    const request = parseSignalBotRichPreviewRequest(input.message.text);
+    if (!request) {
+      await input.sendMessage(
+        buildPlainReply(
+          chatId,
+          "Usage: /test_rich [all|production|headings|references] [channel_id]",
+        ),
+      );
+      return true;
+    }
+    let sent = false;
+    try {
+      sent = await (input.sendTestRich?.(
+        request.targetChatId ?? chatId,
+        request.kind,
+      ) ?? Promise.resolve(false));
+    } catch {
+      sent = false;
+    }
+    await input.sendMessage(
+      buildPlainReply(
+        chatId,
+        sent
+          ? `Sent ${request.kind} Rich Message previews.`
+          : "Rich Message preview was rejected or is unavailable.",
+      ),
+    );
+    return true;
+  }
   if (command === "test_signal") {
     const request = parseSignalBotTestSignalRequest(input.message.text);
     const outcome = normalizeSignalBotTestSignalOutcome(
@@ -4286,6 +4166,10 @@ export async function pollSignalBotCommands(
       chatId: string,
       kind: SignalBotFollowthroughPreviewKind,
     ) => Promise<boolean>;
+    sendTestRich?: (
+      chatId: string,
+      kind: SignalBotRichPreviewKind,
+    ) => Promise<boolean>;
     sendTestSignal: (
       chatId: string,
       selector?: SignalBotTestSignalSelector,
@@ -4332,6 +4216,7 @@ export async function pollSignalBotCommands(
             sendMessage: (message) => input.telegram.sendMessage(message),
             sendStatsReport: input.sendStatsReport,
             sendTestFollowthrough: input.sendTestFollowthrough,
+            sendTestRich: input.sendTestRich,
             sendTestSignal: input.sendTestSignal,
             sendTradeMarket: input.sendTradeMarket,
             sendTradeStatus: input.sendTradeStatus,
@@ -6338,12 +6223,6 @@ export type SignalBotTestSignalOutcome = {
   sent: boolean;
 };
 
-export type SignalBotTestSignalSelector =
-  | "initial"
-  | "latest"
-  | "update"
-  | string;
-
 export async function sendLatestSignalBotTestSignal(input: {
   chatId: string;
   config: SignalBotConfig;
@@ -7090,7 +6969,35 @@ function formatSignalBotFollowthroughRead(input: {
     return `${marketLabel} moved with the read, but tracked wallet follow-through is thin so far.`;
   }
   if (input.lateStageCashout) {
-    return "The trade has largely played out. Some early holders are no longer waiting for the final cent.";
+    const trimmedOnly = Math.max(
+      0,
+      input.stats.trimmedWallets - input.stats.exitedWallets,
+    );
+    const reductions = [
+      trimmedOnly > 0
+        ? `${trimmedOnly} ${trimmedOnly === 1 ? "wallet has" : "wallets have"} trimmed`
+        : null,
+      input.stats.exitedWallets > 0
+        ? `${input.stats.exitedWallets} ${
+            input.stats.exitedWallets === 1 ? "has" : "have"
+          } exited`
+        : null,
+    ].filter((value): value is string => Boolean(value));
+    const flow =
+      input.stats.netSignalSideFlowUsd > 0
+        ? `${formatCompactUsd(
+            input.stats.netSignalSideFlowUsd,
+          )} still flowed into ${input.sideLabel}`
+        : null;
+    const behavior =
+      flow && reductions.length > 0
+        ? `${flow}, but ${reductions.join(" and ")}. `
+        : reductions.length > 0
+          ? `${reductions
+              .join(" and ")
+              .replace(/^./, (character) => character.toUpperCase())}. `
+          : "";
+    return `${behavior}The trade has largely played out, and some early holders are no longer waiting for the final cent.`;
   }
   if (priceMoveCents != null && priceMoveCents > 0) {
     if (input.dominantConfluence) {
@@ -7216,6 +7123,50 @@ function formatSignalBotFollowthroughReadRichText(input: {
   );
 }
 
+function formatSignalBotFollowthroughLead(input: {
+  lateStageCashout: boolean;
+  sideLabel: string;
+  stats: SignalBotFollowthroughStats;
+}): string {
+  const { stats } = input;
+  if (
+    input.lateStageCashout &&
+    stats.entryPrice != null &&
+    stats.markPrice != null
+  ) {
+    const profit =
+      stats.estimatedOpenPnlUsd != null && stats.estimatedOpenPnlUsd > 0
+        ? ` and tracked positions now show an estimated ${formatCompactUsd(
+            stats.estimatedOpenPnlUsd,
+          )} in open profit`
+        : "";
+    return `Tracked wallets entered when ${input.sideLabel} was ${formatCents(
+      stats.entryPrice,
+    )}; it now trades at ${formatCents(stats.markPrice)}${profit}.`;
+  }
+  if (
+    stats.priceMoveCents != null &&
+    stats.priceMoveCents < 0 &&
+    stats.netSignalSideFlowUsd > 0
+  ) {
+    return "Tracked money kept entering, but the market continued moving the other way.";
+  }
+  if (
+    stats.priceMoveCents != null &&
+    stats.priceMoveCents > 0 &&
+    stats.netSignalSideFlowUsd > 0
+  ) {
+    return "The original call now has both market movement and fresh tracked buying behind it.";
+  }
+  if (
+    stats.exitedWallets > 0 ||
+    stats.trimmedWallets > stats.joinedOrAddedWallets
+  ) {
+    return "The group behind the original call is getting smaller, even if some positions remain open.";
+  }
+  return "Tracked positioning has changed since the original call, but the setup is not resolved yet.";
+}
+
 function isSignalBotFollowthroughCooling(
   stats: SignalBotFollowthroughStats,
 ): boolean {
@@ -7294,6 +7245,8 @@ function formatSignalBotFollowthroughActivityMarkdownLines(
 }
 
 function formatSignalBotFollowthroughRichTable(input: {
+  marketLabel: string;
+  marketUrl: string | null;
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): TelegramInputRichMessage["blocks"][number] {
@@ -7320,6 +7273,14 @@ function formatSignalBotFollowthroughRichTable(input: {
       : telegramRichItalic("Price move unavailable");
   const rows: Array<{ label: TelegramRichText; value: TelegramRichText }> = [
     {
+      label: "Market",
+      value: telegramRichBold(
+        input.marketUrl
+          ? telegramRichUrl(input.marketLabel, input.marketUrl)
+          : input.marketLabel,
+      ),
+    },
+    {
       label: "Net tracked flow",
       value: telegramRichBold(
         formatSignedCompactUsd(input.stats.netSignalSideFlowUsd),
@@ -7330,17 +7291,27 @@ function formatSignalBotFollowthroughRichTable(input: {
     0,
     input.stats.trimmedWallets - input.stats.exitedWallets,
   );
-  const pushWalletRow = (label: string, count: number) => {
-    if (count <= 0) return;
+  const walletActivity = [
+    input.stats.joinedOrAddedWallets > 0
+      ? `${input.stats.joinedOrAddedWallets} added`
+      : null,
+    trimmedOnly > 0 ? `${trimmedOnly} trimmed` : null,
+    input.stats.exitedWallets > 0
+      ? `${input.stats.exitedWallets} exited`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  if (walletActivity.length > 0) {
     rows.push({
-      label,
-      value: telegramRichBold(String(count)),
+      label: "Wallet activity",
+      value: telegramRichBold(walletActivity.join(" · ")),
     });
-  };
-  pushWalletRow("Wallets added", input.stats.joinedOrAddedWallets);
-  pushWalletRow("Wallets trimmed", trimmedOnly);
-  pushWalletRow("Wallets exited", input.stats.exitedWallets);
-  pushWalletRow("Still holding", input.stats.stillHoldingWallets);
+  }
+  if (input.stats.stillHoldingWallets > 0) {
+    rows.push({
+      label: "Still holding",
+      value: telegramRichBold(String(input.stats.stillHoldingWallets)),
+    });
+  }
   if (rows.length === 1) {
     rows.push({ label: "Wallets", value: "No major change yet" });
   }
@@ -7357,7 +7328,6 @@ function formatSignalBotFollowthroughRichTable(input: {
     });
   }
   return telegramRichMetricsTable({
-    caption: telegramRichBold("Since the call"),
     rows,
   });
 }
@@ -7468,7 +7438,6 @@ function formatSignalBotResolutionRichTable(input: {
     });
   }
   return telegramRichMetricsTable({
-    caption: telegramRichBold("Result"),
     rows,
   });
 }
@@ -7582,9 +7551,36 @@ function buildSignalBotFollowthroughRichMessage(input: {
     base: input.telegramMiniAppLinkBase,
     startParam: marketStartParam,
   });
+  const lateStageCashout =
+    notificationCopy.headline.templateKey ===
+    "late_stage_early_wallet_cashout_v10";
+  const followthroughLead = formatSignalBotFollowthroughLead({
+    lateStageCashout,
+    sideLabel,
+    stats,
+  });
   const blocks: TelegramInputRichMessage["blocks"] = [
     telegramRichParagraph(
-      formatSignalNotificationHeadlineRichText(notificationCopy.headline),
+      input.kind === "resolved_win" || input.kind === "resolved_loss"
+        ? formatSignalNotificationHeadlineRichText(notificationCopy.headline)
+        : telegramRichText(
+            formatSignalNotificationHeadlineRichText(notificationCopy.headline),
+            "\n\n",
+            emphasizeSignalBotNarrativeText(followthroughLead),
+            "\n\n",
+            formatSignalBotFollowthroughReadRichText({
+              dominantConfluence:
+                notificationCopy.headline.templateKey ===
+                "dominant_price_capital_confluence_v9",
+              hasWalletEvidence,
+              kind: input.kind,
+              marketUrl: marketMiniAppUrl,
+              sideCopy,
+              sideLabel,
+              stats,
+              lateStageCashout,
+            }),
+          ),
     ),
   ];
   if (input.kind === "resolved_win" || input.kind === "resolved_loss") {
@@ -7592,27 +7588,12 @@ function buildSignalBotFollowthroughRichMessage(input: {
     return { blocks };
   }
   blocks.push(
-    formatSignalBotFollowthroughRichTable({ sideLabel, stats }),
-    telegramRichDivider(),
-    telegramRichParagraph(
-      telegramRichText(
-        telegramRichBold("Read: "),
-        formatSignalBotFollowthroughReadRichText({
-          dominantConfluence:
-            notificationCopy.headline.templateKey ===
-            "dominant_price_capital_confluence_v9",
-          hasWalletEvidence,
-          kind: input.kind,
-          marketUrl: marketMiniAppUrl,
-          sideCopy,
-          sideLabel,
-          stats,
-          lateStageCashout:
-            notificationCopy.headline.templateKey ===
-            "late_stage_early_wallet_cashout_v10",
-        }),
-      ),
-    ),
+    formatSignalBotFollowthroughRichTable({
+      marketLabel: notificationCopy.marketLabel,
+      marketUrl: marketMiniAppUrl,
+      sideLabel,
+      stats,
+    }),
   );
   if (!input.telegramMiniAppLinkBase) {
     blocks.push(
@@ -8314,312 +8295,6 @@ async function loadSignalBotEligibilityCounts(
   };
 }
 
-export class TelegramBotApiClient implements SignalBotTelegramClient {
-  private readonly baseUrl: string;
-
-  constructor(token: string) {
-    this.baseUrl = `https://api.telegram.org/bot${token}`;
-  }
-
-  private async callBooleanMethod(
-    method: string,
-    body: Record<string, unknown>,
-  ): Promise<void> {
-    const response = await fetch(this.baseUrl + "/" + method, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = (await response.json().catch(() => null)) as {
-      description?: string;
-      ok?: boolean;
-      result?: boolean;
-    } | null;
-    if (!response.ok || !payload?.ok || payload.result !== true) {
-      throw new Error(
-        "Telegram " +
-          method +
-          " failed: " +
-          response.status +
-          " " +
-          (payload?.description ?? ""),
-      );
-    }
-  }
-
-  async setMyCommands(input: {
-    commands: TelegramBotCommandDefinition[];
-    scope?: TelegramBotCommandScope;
-  }): Promise<void> {
-    await this.callBooleanMethod("setMyCommands", input);
-  }
-
-  async getMyCommands(
-    input: {
-      scope?: TelegramBotCommandScope;
-    } = {},
-  ): Promise<TelegramBotCommandDefinition[]> {
-    const response = await fetch(this.baseUrl + "/getMyCommands", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
-    const payload = (await response.json().catch(() => null)) as {
-      description?: string;
-      ok?: boolean;
-      result?: TelegramBotCommandDefinition[];
-    } | null;
-    if (!response.ok || !payload?.ok || !Array.isArray(payload.result)) {
-      throw new Error(
-        "Telegram getMyCommands failed: " +
-          response.status +
-          " " +
-          (payload?.description ?? ""),
-      );
-    }
-    return payload.result;
-  }
-
-  async setChatMenuButton(input: {
-    chat_id?: number | string;
-    menu_button: TelegramBotMenuButton;
-  }): Promise<void> {
-    await this.callBooleanMethod("setChatMenuButton", input);
-  }
-
-  async getMe(): Promise<TelegramBotUser> {
-    const response = await fetch(`${this.baseUrl}/getMe`);
-    const payload = (await response.json().catch(() => null)) as {
-      ok?: boolean;
-      result?: TelegramBotUser;
-      description?: string;
-    } | null;
-    if (!response.ok || !payload?.ok || !payload.result) {
-      throw new Error(
-        `Telegram getMe failed: ${response.status} ${payload?.description ?? ""}`.trim(),
-      );
-    }
-    return payload.result;
-  }
-
-  async getUpdates(input: {
-    offset: number | null;
-    timeoutSec: number;
-  }): Promise<TelegramBotUpdate[]> {
-    const url = new URL(`${this.baseUrl}/getUpdates`);
-    url.searchParams.set("timeout", String(input.timeoutSec));
-    url.searchParams.set(
-      "allowed_updates",
-      JSON.stringify(["message", "callback_query"]),
-    );
-    if (input.offset != null)
-      url.searchParams.set("offset", String(input.offset));
-    const response = await fetch(url);
-    const payload = (await response.json().catch(() => null)) as {
-      ok?: boolean;
-      result?: TelegramBotUpdate[];
-      description?: string;
-    } | null;
-    if (!response.ok || !payload?.ok || !Array.isArray(payload.result)) {
-      throw new Error(
-        `Telegram getUpdates failed: ${response.status} ${payload?.description ?? ""}`.trim(),
-      );
-    }
-    return payload.result;
-  }
-
-  async answerCallbackQuery(input: {
-    callbackQueryId: string;
-    showAlert?: boolean;
-    text?: string;
-  }): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}/answerCallbackQuery`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        callback_query_id: input.callbackQueryId,
-        show_alert: input.showAlert ?? false,
-        text: input.text,
-      }),
-    });
-    return response.json().catch(() => null);
-  }
-
-  async editMessageText(input: {
-    chat_id: string;
-    disable_web_page_preview: boolean;
-    message_id: number;
-    parse_mode: "MarkdownV2";
-    reply_markup?: TelegramInlineKeyboard;
-    text: string;
-  }): Promise<TelegramSendResult> {
-    const request = async (body: typeof input) => {
-      const response = await fetch(`${this.baseUrl}/editMessageText`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const payload = (await response.json().catch(() => null)) as {
-        description?: string;
-        ok?: boolean;
-        result?: { message_id?: number };
-      } | null;
-      return { payload, response };
-    };
-    let requestInput = input;
-    let { payload, response } = await request(requestInput);
-    if (
-      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
-      telegramPayloadHasCustomEmoji(requestInput)
-    ) {
-      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
-      ({ payload, response } = await request(requestInput));
-    }
-    if (response.ok && payload?.ok) {
-      const messageId = payload.result?.message_id;
-      return {
-        messageId: typeof messageId === "number" ? messageId : input.message_id,
-        ok: true,
-      };
-    }
-    return {
-      error: "other",
-      message: payload?.description ?? `HTTP ${response.status}`,
-      ok: false,
-    };
-  }
-
-  async sendPhoto(input: {
-    caption?: string;
-    chat_id: string;
-    filename: string;
-    parse_mode?: "MarkdownV2";
-    photo: Uint8Array;
-    reply_markup?: TelegramInlineKeyboard;
-  }): Promise<TelegramSendResult> {
-    return sendTelegramPhotoRequest({
-      baseUrl: this.baseUrl,
-      caption: input.caption,
-      chatId: input.chat_id,
-      filename: input.filename,
-      parseMode: input.parse_mode,
-      photo: input.photo,
-      replyMarkup: input.reply_markup,
-    });
-  }
-
-  async sendRichMessage(
-    input: TelegramSendRichMessageInput,
-  ): Promise<TelegramSendResult> {
-    const request = async (body: TelegramSendRichMessageInput) => {
-      const response = await fetch(`${this.baseUrl}/sendRichMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const payload = (await response.json().catch(() => null)) as {
-        description?: string;
-        ok?: boolean;
-        parameters?: { retry_after?: number };
-        result?: { message_id?: number };
-      } | null;
-      return { payload, response };
-    };
-    let requestInput = input;
-    let { payload, response } = await request(requestInput);
-    const hasButtonCustomEmoji =
-      requestInput.reply_markup?.inline_keyboard.some((row) =>
-        row.some((button) => Boolean(button.icon_custom_emoji_id)),
-      ) === true;
-    if (
-      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
-      hasButtonCustomEmoji &&
-      requestInput.reply_markup
-    ) {
-      requestInput = {
-        ...requestInput,
-        reply_markup: stripTelegramCustomEmojiButtonIcons(
-          requestInput.reply_markup,
-        ),
-      };
-      ({ payload, response } = await request(requestInput));
-    }
-    if (response.ok && payload?.ok) {
-      const messageId = payload.result?.message_id;
-      return {
-        messageId: typeof messageId === "number" ? messageId : null,
-        ok: true,
-      };
-    }
-    const message = payload?.description ?? `HTTP ${response.status}`;
-    if (
-      response.status === 403 ||
-      /chat not found|bot was blocked|user is deactivated/i.test(message)
-    ) {
-      return { error: "blocked_or_missing", message, ok: false };
-    }
-    const retryAfterSec = payload?.parameters?.retry_after;
-    return {
-      error: "other",
-      message,
-      ok: false,
-      ...(typeof retryAfterSec === "number" ? { retryAfterSec } : {}),
-    };
-  }
-
-  async sendMessage(
-    input: TelegramSendMessageInput,
-  ): Promise<TelegramSendResult> {
-    const request = async (body: TelegramSendMessageInput) => {
-      const response = await fetch(`${this.baseUrl}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const payload = (await response.json().catch(() => null)) as {
-        description?: string;
-        ok?: boolean;
-        parameters?: { retry_after?: number };
-        result?: { message_id?: number };
-      } | null;
-      return { payload, response };
-    };
-    let requestInput = input;
-    let { payload, response } = await request(requestInput);
-    if (
-      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
-      telegramPayloadHasCustomEmoji(requestInput)
-    ) {
-      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
-      ({ payload, response } = await request(requestInput));
-    }
-    if (response.ok && payload?.ok) {
-      const messageId = payload.result?.message_id;
-      return {
-        messageId: typeof messageId === "number" ? messageId : null,
-        ok: true,
-      };
-    }
-    const message = payload?.description ?? `HTTP ${response.status}`;
-    if (
-      response.status === 403 ||
-      /chat not found|bot was blocked|user is deactivated/i.test(message)
-    ) {
-      return { error: "blocked_or_missing", message, ok: false };
-    }
-    const retryAfterSec = payload?.parameters?.retry_after;
-    return {
-      error: "other",
-      message,
-      ok: false,
-      retryAfterSec:
-        typeof retryAfterSec === "number" && retryAfterSec > 0
-          ? Math.trunc(retryAfterSec)
-          : undefined,
-    };
-  }
-}
-
 export async function configureSignalBotTelegramUi(input: {
   config: SignalBotConfig;
   telegram: Pick<TelegramBotApiClient, "setChatMenuButton" | "setMyCommands">;
@@ -8640,6 +8315,7 @@ export async function configureSignalBotTelegramUi(input: {
     { command: "enable_signals", description: "Enable signal delivery" },
     { command: "disable_signals", description: "Disable signal delivery" },
     { command: "signal_venues", description: "Set destination venues" },
+    { command: "test_rich", description: "Preview Rich Message layouts" },
     { command: "test_signal", description: "Preview latest signal" },
     { command: "test_followthrough", description: "Preview follow-through" },
     { command: "test_trade", description: "Preview a trade card" },
@@ -9214,6 +8890,7 @@ function buildSignalBotInitialNotificationCopy(input: {
   side: "NO" | "YES" | null;
 }): {
   headline: SignalNotificationHeadline;
+  marketLabel: string;
   publishable: boolean;
   researchDelta: SignalBotResearchDelta | null;
   subject: SignalNotificationSubject;
@@ -9351,6 +9028,7 @@ function buildSignalBotInitialNotificationCopy(input: {
       trackedMoneyOpposes: trackedMoney.trackedMoneyOpposes,
       policy: input.copyPolicy?.policy,
     }),
+    marketLabel: editorialSubject,
     publishable:
       subjectComplete &&
       (input.messageKind === "initial" || researchDelta != null),
@@ -9369,6 +9047,7 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
   copyPolicy?: ResolvedSignalPostCopyPolicy;
 }): {
   headline: SignalNotificationHeadline;
+  marketLabel: string;
   subject: SignalNotificationSubject;
 } {
   const sideCopy = input.stats.signalSide
@@ -9449,6 +9128,7 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
       trimmedWallets: input.stats.trimmedWallets,
       policy: input.copyPolicy?.policy,
     }),
+    marketLabel: editorialSubject,
     subject,
   };
 }
@@ -9631,10 +9311,6 @@ function sanitizeSignalBotInitialDescription(value: string): string | null {
     "";
   const sentences = normalized.split(/(?<=[.!?])\s+/);
   const kept = sentences.filter((sentence) => {
-    const duplicatePosition =
-      /\b(?:this|the)\s+wallet\s+(?:is|remains)\s+(?:still\s+)?(?:holding|backing)\b/i.test(
-        sentence,
-      );
     const genericRecommendation =
       /\b(?:worth\s+(?:a\s+)?(?:look|watch)|makes?\s+this\s+(?:worth|interesting)|one\s+to\s+watch)\b/i.test(
         sentence,
@@ -9643,7 +9319,6 @@ function sanitizeSignalBotInitialDescription(value: string): string | null {
       /holder activity is the primary evidence for this signal/i.test(sentence);
     const missingSummaryPlaceholder = /^no summary\.?$/i.test(sentence.trim());
     return (
-      !duplicatePosition &&
       !genericRecommendation &&
       !genericEvidenceFallback &&
       !missingSummaryPlaceholder
@@ -9655,70 +9330,44 @@ function sanitizeSignalBotInitialDescription(value: string): string | null {
 
 function sanitizeSignalBotResearchDescription(
   value: string,
-  note: SignalBotNote,
-  side: "NO" | "YES" | null,
+  _note: SignalBotNote,
+  _side: "NO" | "YES" | null,
 ): string | null {
-  let sanitized = (
+  const normalized =
     cleanPublicMarketText(value.replace(/\b(\d{1,3}(?:\.\d+)?)c\b/gi, "$1¢")) ??
-    ""
-  )
-    .replace(/^no summary\.?$/i, "")
-    .replace(
-      /holder activity is the primary evidence for this signal\.?/gi,
-      " ",
-    )
-    .replace(
-      /^the\s+market\s+now\s+(?:gives|prices)\b[^.!?]*%[^.!?]*[.!?]?\s*/i,
-      "",
-    )
-    .replace(
-      /\s*(?:,?\s*(?:but|and)\s+)?(?:it|this)\s+(?:is|was)\s+(?:only\s+)?(?:a\s+)?repeat(?:ed)?\s+(?:read|thesis)\.?/gi,
-      ".",
-    )
-    .replace(
-      /(?:^|\s)(?:no\s+)?(?:cited\s+)?external\s+evidence\s+was\s+(?:not\s+)?available\.?/gi,
-      " ",
-    )
-    .replace(/\s+after\s+the\s+(?:drop|jump|move|repricing)\b/gi, "")
-    .replace(/\s+through\s+the\s+(?:drop|jump|move|repricing)\b/gi, "")
-    .replace(
-      /\s*,?\s*with\s+(?:a\s+)?strong\s+recent\b[^.!?]*(?:results|record)\b[^.!?]*[.!?]?/gi,
-      ".",
-    )
-    .replace(
-      /(?:^|\s)(?:this|the)\s+wallet\s+(?:has|had)\s+recently\s+(?:beaten|won)\b[^.!?]*[.!?]?/gi,
-      " ",
-    )
-    .replace(
-      /(?:^|\s)the\s+wallets?\s+with\s+(?:the\s+)?strongest\s+recent\s+(?:records|results)\b[^.!?]*[.!?]?/gi,
-      " ",
-    );
-  if (side) {
-    const holderSubjects = [
-      note.holderIdentityDisplayName,
-      note.holderDisplayName,
-      "this wallet",
-      "the wallet",
-      "these wallets",
-      "tracked wallets",
-    ]
-      .map((subject) => cleanSignalBotDisplayText(subject))
-      .filter((subject): subject is string => Boolean(subject));
-    for (const subject of new Set(holderSubjects)) {
-      sanitized = sanitized.replace(
-        new RegExp(
-          `(?:,?\\s+(?:and|but)\\s+)?${escapeRegExpLiteral(
-            subject,
-          )}\\s+(?:is|are)\\s+(?:still\\s+)?(?:holding|backing)\\b[^.!?]*[.!?]?`,
-          "gi",
-        ),
-        ".",
-      );
-    }
-  }
-  sanitized = sanitized
-    .replace(/\s+\./g, ".")
-    .replace(/\.{2,}/g, ".")
+    "";
+  const sanitized = normalized
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => {
+      const trimmed = sentence.trim();
+      if (!trimmed || /^no summary\.?$/i.test(trimmed)) return false;
+      if (/holder activity is the primary evidence/i.test(trimmed)) {
+        return false;
+      }
+      if (
+        /(?:no\s+)?(?:cited\s+)?external\s+evidence\s+was\s+(?:not\s+)?available/i.test(
+          trimmed,
+        )
+      ) {
+        return false;
+      }
+      if (/\brepeat(?:ed)?\s+(?:read|thesis)\b/i.test(trimmed)) return false;
+      if (
+        /\bwith\s+(?:a\s+)?strong\s+recent\b[^.!?]*(?:results|record)\b/i.test(
+          trimmed,
+        ) ||
+        /\b(?:this|the)\s+wallet\s+(?:has|had)\s+recently\s+(?:beaten|won)\b/i.test(
+          trimmed,
+        ) ||
+        /\bthe\s+wallets?\s+with\s+(?:the\s+)?strongest\s+recent\s+(?:records|results)\b/i.test(
+          trimmed,
+        )
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .join(" ")
     .replace(/\s+/g, " ")
     .trim();
   return /[\p{L}\p{N}]/u.test(sanitized) ? sanitized : null;
@@ -9848,6 +9497,127 @@ function formatSignalBotResearchPosition(input: {
   return { label: "Wallet position", rows, text: details.join(" · ") };
 }
 
+function scalarSignalEvidenceValue(
+  rows: SignalEvidenceMetricV1[],
+  kind: SignalEvidenceMetricV1["kind"],
+  unit: "usd" | "wallets",
+): SignalEvidenceMetricV1 | null {
+  return (
+    rows.find(
+      (row) =>
+        row.kind === kind &&
+        row.quality === "verified" &&
+        row.measurement.kind === "scalar" &&
+        row.measurement.unit === unit &&
+        Number.isFinite(row.measurement.value),
+    ) ?? null
+  );
+}
+
+function formatSignalBotInitialPositionRichTable(input: {
+  evidenceRows: SignalEvidenceMetricV1[];
+  marketLabel: string;
+  note: SignalBotNote;
+  price: number | null;
+  render: (value: string) => TelegramRichText;
+  sideLabel: string;
+  templateKey: string;
+}): TelegramInputRichMessage["blocks"][number] | null {
+  const cluster = input.note.holderActorMode === "sharp_cluster";
+  const evidenceCapital = scalarSignalEvidenceValue(
+    input.evidenceRows,
+    "capital",
+    "usd",
+  );
+  const evidenceWallets = scalarSignalEvidenceValue(
+    input.evidenceRows,
+    "conviction",
+    "wallets",
+  );
+  const positionUsd =
+    (cluster
+      ? input.note.holderClusterSharpUsd
+      : input.note.holderPositionUsd) ??
+    (evidenceCapital?.measurement.kind === "scalar"
+      ? evidenceCapital.measurement.value
+      : null);
+  const openPnlUsd = cluster
+    ? input.note.holderClusterOpenPnlUsd
+    : input.note.holderOpenPnlUsd;
+  const alignedWallets =
+    (cluster ? input.note.holderClusterSharpHolders : null) ??
+    (evidenceWallets?.measurement.kind === "scalar"
+      ? evidenceWallets.measurement.value
+      : null);
+  const trackRecord = scalarSignalEvidenceValue(
+    input.evidenceRows,
+    "track_record",
+    "usd",
+  );
+  const volume = scalarSignalEvidenceValue(input.evidenceRows, "volume", "usd");
+  const rows: Array<{ label: TelegramRichText; value: TelegramRichText }> = [
+    {
+      label: "Market",
+      value: telegramRichBold(input.render(input.marketLabel)),
+    },
+  ];
+  if (positionUsd != null && positionUsd > 0) {
+    rows.push({
+      label: cluster ? "Combined position" : "Position",
+      value: telegramRichBold(
+        input.render(`${formatCompactUsd(positionUsd)} on ${input.sideLabel}`),
+      ),
+    });
+  }
+  if (input.price != null) {
+    rows.push({
+      label: `${input.sideLabel} price`,
+      value: telegramRichBold(formatCents(input.price)),
+    });
+  }
+  if (openPnlUsd != null && Math.abs(openPnlUsd) >= 1) {
+    rows.push({
+      label: "Open PnL",
+      value: telegramRichBold(formatSignedCompactUsd(openPnlUsd)),
+    });
+  }
+  if (alignedWallets != null && alignedWallets >= 2) {
+    rows.push({
+      label:
+        trackRecord?.measurement.kind === "scalar" &&
+        trackRecord.measurement.value > 0
+          ? "Profitable wallets aligned"
+          : "Wallets aligned",
+      value: telegramRichBold(String(Math.trunc(alignedWallets))),
+    });
+  }
+  if (
+    trackRecord?.measurement.kind === "scalar" &&
+    trackRecord.measurement.value !== 0
+  ) {
+    rows.push({
+      label: `${cluster ? "Combined" : "Wallet"} ${
+        trackRecord.horizonDays ?? 30
+      }d PnL`,
+      value: telegramRichBold(
+        formatSignedCompactUsd(trackRecord.measurement.value),
+      ),
+    });
+  }
+  if (
+    (input.templateKey === "initial_large_position_v10" ||
+      input.templateKey === "initial_actor_stakes_v10") &&
+    volume?.measurement.kind === "scalar" &&
+    volume.measurement.value > 0
+  ) {
+    rows.push({
+      label: `Wallet ${volume.horizonDays ?? 30}d volume`,
+      value: telegramRichBold(formatCompactUsd(volume.measurement.value)),
+    });
+  }
+  return rows.length > 0 ? telegramRichMetricsTable({ rows }) : null;
+}
+
 function formatSignalBotEvidenceMetric(row: SignalEvidenceMetricV1): {
   qualifier: string;
   title: string;
@@ -9910,24 +9680,6 @@ function formatSignalBotEvidenceBlock(rows: SignalEvidenceMetricV1[]): string {
     "",
     ...rows.map(formatSignalBotEvidenceRow),
   ]);
-}
-
-function formatSignalBotEvidenceRichTable(
-  rows: SignalEvidenceMetricV1[],
-): TelegramInputRichMessage["blocks"][number] {
-  return telegramRichMetricsTable({
-    caption: telegramRichBold("Why it matters"),
-    rows: rows.map((row) => {
-      const metric = formatSignalBotEvidenceMetric(row);
-      return {
-        label: metric.title,
-        value: telegramRichText(
-          telegramRichBold(metric.value),
-          metric.qualifier,
-        ),
-      };
-    }),
-  });
 }
 
 function resolveChatTitle(chat: TelegramBotChat): string | null {
@@ -10097,6 +9849,7 @@ function helpText(input: {
     "/market <market_id or URL> - open a private trading card",
     "/disable_trading - disable Telegram bot trading",
     "/test_followthrough [stats|win|loss] [channel_id] - preview a follow-up",
+    "/test_rich [all|production|headings|references] [channel_id] - preview fixed Rich layouts",
     "/test_signal [channel_id] [latest|initial|update|note_uuid] - exact delivery preview",
     "/test_trade <market_id or URL> - preview a private trade card",
   ].join("\n");
