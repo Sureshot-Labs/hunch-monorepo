@@ -1,6 +1,7 @@
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramFieldWithMarkdownV2,
   formatTelegramItalicMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
@@ -343,11 +344,13 @@ export function buildSignalBotMarketSearchUnavailableScreen(input: {
     text: [
       `🔎 ${bold("Markets")}`,
       "",
-      `⚠️ ${bold("Search unavailable")}`,
-      "",
-      escapeTelegramMarkdownV2(
-        "Search is temporarily unavailable. Send another search to try again.",
-      ),
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: escapeTelegramMarkdownV2(
+          "Search is temporarily unavailable. Send another search to try again.",
+        ),
+        icon: "⚠️",
+        title: "Search unavailable",
+      }),
     ].join("\n"),
   };
 }
@@ -413,18 +416,16 @@ export function buildSignalBotMarketUnavailableResultScreen(input: {
         ],
       ],
     },
-    text: [
-      `⚠️ ${bold(
-        input.temporary
-          ? "Market temporarily unavailable"
-          : "Market unavailable",
-      )}`,
-      "",
-      escapeTelegramMarkdownV2(
+    text: formatTelegramCalloutMarkdownV2({
+      bodyMarkdownV2: escapeTelegramMarkdownV2(
         input.temporary
           ? "Market details could not be refreshed. Try again or return to the results."
           : "Market is no longer available.",
       ),
-    ].join("\n"),
+      icon: "⚠️",
+      title: input.temporary
+        ? "Market temporarily unavailable"
+        : "Market unavailable",
+    }),
   };
 }

@@ -119,6 +119,7 @@ import {
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
@@ -2091,11 +2092,13 @@ export function buildSignalBotMenuScreen(input: {
         text: [
           formatHunchTelegramTitle("Hunch"),
           "",
-          `⚠️ ${formatTelegramBold("Account details unavailable")}`,
-          "",
-          escapeTelegramMarkdownV2(
-            "Account details could not refresh. You can still browse markets or open Hunch.",
-          ),
+          formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: escapeTelegramMarkdownV2(
+              "Account details could not refresh. You can still browse markets or open Hunch.",
+            ),
+            icon: "⚠️",
+            title: "Account details unavailable",
+          }),
           ...(!miniAppButton
             ? [
                 "",
@@ -3129,12 +3132,28 @@ export async function handleSignalBotMenuCallback(
         ? await input.loadPositions(telegramUserId)
         : {
             parse_mode: "MarkdownV2",
-            text: "💼 *My positions*\n\n⚠️ *Positions unavailable*\n\nTry again shortly\\.",
+            text: [
+              "💼 *My positions*",
+              "",
+              formatTelegramCalloutMarkdownV2({
+                bodyMarkdownV2: "Try again shortly\\.",
+                icon: "⚠️",
+                title: "Positions unavailable",
+              }),
+            ].join("\n"),
           };
     } catch {
       positionsMessage = {
         parse_mode: "MarkdownV2",
-        text: "💼 *My positions*\n\n⚠️ *Positions unavailable*\n\nTry again shortly\\.",
+        text: [
+          "💼 *My positions*",
+          "",
+          formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: "Try again shortly\\.",
+            icon: "⚠️",
+            title: "Positions unavailable",
+          }),
+        ].join("\n"),
       };
     }
     const positionsFallbackButton = buildSignalBotMainMiniAppButton({
@@ -3194,12 +3213,20 @@ export async function handleSignalBotMenuCallback(
         ? await input.loadTradeStatus(telegramUserId)
         : {
             parse_mode: "MarkdownV2",
-            text: "⚠️ *Trading status unavailable*\n\nTry again shortly\\.",
+            text: formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: "Try again shortly\\.",
+              icon: "⚠️",
+              title: "Trading status unavailable",
+            }),
           };
     } catch {
       statusMessage = {
         parse_mode: "MarkdownV2",
-        text: "⚠️ *Trading status unavailable*\n\nTry again shortly\\.",
+        text: formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: "Try again shortly\\.",
+          icon: "⚠️",
+          title: "Trading status unavailable",
+        }),
       };
     }
     await sendOrEditSignalBotMenuMessage({

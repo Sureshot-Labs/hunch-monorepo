@@ -412,6 +412,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         text: "Spain",
       });
       assert.match(rendered, /temporarily unavailable/);
+      assert.match(rendered, />⚠️ \*Search unavailable\*/);
       assert.equal(
         Array.from(redis.values.keys()).some((key) =>
           key.includes("market_search"),
@@ -535,6 +536,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const lastMessage = rendered.at(-1);
       assert.ok(lastMessage);
       assert.match(lastMessage.text, /no longer available/);
+      assert.match(lastMessage.text, />⚠️ \*Market unavailable\*/);
       assert.match(JSON.stringify(lastMessage), /Back to results/);
     },
   },

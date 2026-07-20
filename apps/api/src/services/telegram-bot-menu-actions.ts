@@ -7,6 +7,7 @@ import {
 } from "./telegram-bot-menu-markets.js";
 import {
   formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
@@ -233,12 +234,20 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
           })
         : {
             parse_mode: "MarkdownV2",
-            text: "⚠️ *Position unavailable*\n\nTry again from My positions\\.",
+            text: formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: "Try again from My positions\\.",
+              icon: "⚠️",
+              title: "Position unavailable",
+            }),
           };
     } catch {
       positionMessage = {
         parse_mode: "MarkdownV2",
-        text: "⚠️ *Position unavailable*\n\nTry again from My positions\\.",
+        text: formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: "Try again from My positions\\.",
+          icon: "⚠️",
+          title: "Position unavailable",
+        }),
       };
     }
     await input.render(positionMessage);
@@ -255,12 +264,20 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
         })
       : {
           parse_mode: "MarkdownV2" as const,
-          text: "⚠️ *Deposit unavailable*\n\nTry again shortly\\.",
+          text: formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: "Try again shortly\\.",
+            icon: "⚠️",
+            title: "Deposit unavailable",
+          }),
         };
   } catch {
     depositMessage = {
       parse_mode: "MarkdownV2",
-      text: "⚠️ *Deposit unavailable*\n\nTry again shortly\\.",
+      text: formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: "Try again shortly\\.",
+        icon: "⚠️",
+        title: "Deposit unavailable",
+      }),
     };
   }
   if (!showQr) {
@@ -300,6 +317,22 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
             isLimitless ? "Asset" : "Assets",
             asset,
           )}`,
+          "",
+          formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: isLimitless
+              ? `Send only ${formatTelegramBoldMarkdownV2(
+                  "USDC",
+                )} on ${formatTelegramBoldMarkdownV2("Base")} to this address\\.`
+              : `Send only ${formatTelegramBoldMarkdownV2(
+                  "pUSD",
+                )} or ${formatTelegramBoldMarkdownV2(
+                  "USDC.e",
+                )} on ${formatTelegramBoldMarkdownV2(
+                  "Polygon",
+                )} to this address\\.`,
+            icon: "⚠️",
+            title: "Important",
+          }),
         ].join("\n"),
         chat_id: input.chatId,
         filename: `hunch-${isLimitless ? "limitless" : "polymarket"}-deposit.png`,

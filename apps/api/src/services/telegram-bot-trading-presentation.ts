@@ -46,6 +46,28 @@ export function formatTelegramFieldWithMarkdownV2(
   return `${formatTelegramBoldMarkdownV2(`${label}:`)} ${markdownValue}`;
 }
 
+export function formatTelegramBlockquoteMarkdownV2(
+  markdownLines: readonly string[],
+): string {
+  return markdownLines
+    .flatMap((line) => line.split("\n"))
+    .map((line) => `>${line}`)
+    .join("\n");
+}
+
+export function formatTelegramCalloutMarkdownV2(input: {
+  bodyMarkdownV2: string | readonly string[];
+  icon: string;
+  title: string;
+}): string {
+  return formatTelegramBlockquoteMarkdownV2([
+    `${input.icon} ${formatTelegramBoldMarkdownV2(input.title)}`,
+    ...(typeof input.bodyMarkdownV2 === "string"
+      ? [input.bodyMarkdownV2]
+      : input.bodyMarkdownV2),
+  ]);
+}
+
 export function formatTelegramLivePrice(
   value: number | null | undefined,
 ): string | null {

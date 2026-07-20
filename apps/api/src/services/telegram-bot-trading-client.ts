@@ -1,5 +1,6 @@
 import {
   buildTelegramTradeProgressMessage,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramTextWithCommandsMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
@@ -454,9 +455,13 @@ export function createTelegramBotTradingInternalApiClient(input: {
           if (chatId != null) {
             const failureMessage = withTelegramPrivateNavigation({
               parse_mode: "MarkdownV2",
-              text: `⚠️ *Trade status uncertain*\n\n${formatTelegramTextWithCommandsMarkdownV2(
-                "Use /trade_status or open Hunch before retrying.",
-              )}`,
+              text: formatTelegramCalloutMarkdownV2({
+                bodyMarkdownV2: formatTelegramTextWithCommandsMarkdownV2(
+                  "Use /trade_status or open Hunch before retrying.",
+                ),
+                icon: "⚠️",
+                title: "Trade status uncertain",
+              }),
             });
             await callbackInput.sendMessage({
               chat_id: String(chatId),

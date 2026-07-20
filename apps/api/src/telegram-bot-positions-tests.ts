@@ -108,6 +108,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /\*Valuation coverage:\* 0\/1/);
       assert.match(message.text, /tg:\/\/emoji\?id=/);
       assert.match(message.text, /Polymarket/);
+      assert.match(message.text, />ℹ️ \*Data may be incomplete\*/);
       assert.equal(message.reply_markup?.inline_keyboard.length, 1);
     },
   },

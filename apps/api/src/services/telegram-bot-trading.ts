@@ -57,7 +57,9 @@ import type {
 import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error.js";
 import {
   escapeTelegramMarkdownV2 as escapeMarkdown,
+  formatTelegramBlockquoteMarkdownV2,
   formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
   formatTelegramFieldWithMarkdownV2,
@@ -188,9 +190,11 @@ function formatTelegramMarketCardLineMarkdownV2(value: string): string {
     )}`;
   }
   if (value === EXISTING_TRADE_RESOLVING_MESSAGE) {
-    return `⏳ ${formatTelegramBoldMarkdownV2(
-      "Trade still resolving",
-    )}\n${formatTelegramTextWithCommandsMarkdownV2(value)}`;
+    return formatTelegramCalloutMarkdownV2({
+      bodyMarkdownV2: formatTelegramTextWithCommandsMarkdownV2(value),
+      icon: "⏳",
+      title: "Trade still resolving",
+    });
   }
   const icon =
     /unavailable|not open|not enabled|not ready|disabled|too low|no executable|no bot buy|must be|failed/i.test(
@@ -203,7 +207,9 @@ function formatTelegramMarketCardLineMarkdownV2(value: string): string {
         ? "ℹ️"
         : null;
   const rendered = formatTelegramKnownNetworksInTextMarkdownV2(value);
-  return icon ? `${icon} ${rendered}` : rendered;
+  return icon
+    ? formatTelegramBlockquoteMarkdownV2([`${icon} ${rendered}`])
+    : rendered;
 }
 
 function formatTelegramTradeLifecycleMessageMarkdownV2(input: {
@@ -2994,8 +3000,13 @@ export async function buildTelegramBotTradingStatusMessage(
   if (status.setupIssue) {
     lines.push(
       "",
-      `⚠️ ${formatTelegramBoldMarkdownV2("Setup needs attention")}`,
-      formatTelegramKnownNetworksInTextMarkdownV2(status.setupIssue),
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: formatTelegramKnownNetworksInTextMarkdownV2(
+          status.setupIssue,
+        ),
+        icon: "⚠️",
+        title: "Setup needs attention",
+      }),
     );
   }
   return {
@@ -4247,10 +4258,13 @@ async function handleTelegramRedeemCallback(input: {
           ? formatTelegramCodeMarkdownV2(credentials.funderAddress)
           : escapeMarkdown("Unavailable"),
         "",
-        `⚠️ ${formatTelegramBoldMarkdownV2("Real on-chain action")}`,
-        escapeMarkdown(
-          "This is a real on-chain redemption. Confirm only if you want the bot to submit it now.",
-        ),
+        formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: escapeMarkdown(
+            "This is a real on-chain redemption. Confirm only if you want the bot to submit it now.",
+          ),
+          icon: "⚠️",
+          title: "Real on-chain action",
+        }),
       ].join("\n"),
     });
     return true;
@@ -5043,10 +5057,15 @@ export async function handleTelegramBotTradingCallback(
                 `Ready now: ${formatUsd(executableFundsUsd)}`,
               ),
               "",
-              `ℹ️ ${formatTelegramBoldMarkdownV2("Why conversion is needed")}`,
-              escapeMarkdown(
-                "You have supported funds, but they need conversion in Hunch before this order can be confirmed.",
-              ),
+              formatTelegramCalloutMarkdownV2({
+                bodyMarkdownV2: `${escapeMarkdown(
+                  "You have supported funds, but they need ",
+                )}${formatTelegramBoldMarkdownV2(
+                  "conversion in Hunch",
+                )}${escapeMarkdown(" before this order can be confirmed.")}`,
+                icon: "ℹ️",
+                title: "Why conversion is needed",
+              }),
               ...(depositPresentation
                 ? [
                     "",
@@ -5099,7 +5118,11 @@ export async function handleTelegramBotTradingCallback(
             ),
             "",
             ...(depositPresentation?.markdownV2Lines ?? [
-              escapeMarkdown(depositUnavailableLine),
+              formatTelegramCalloutMarkdownV2({
+                bodyMarkdownV2: escapeMarkdown(depositUnavailableLine),
+                icon: "⚠️",
+                title: "Deposit address unavailable",
+              }),
             ]),
           ].join("\n"),
         });
@@ -5243,10 +5266,13 @@ export async function handleTelegramBotTradingCallback(
             )}`
           : null,
         "",
-        `⚠️ ${formatTelegramBoldMarkdownV2("Real trade")}`,
-        escapeMarkdown(
-          "This is a real trade. Confirm only if you want the bot to submit it now.",
-        ),
+        formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: escapeMarkdown(
+            "This is a real trade. Confirm only if you want the bot to submit it now.",
+          ),
+          icon: "⚠️",
+          title: "Real trade",
+        }),
       ]
         .filter((line): line is string => line != null)
         .join("\n"),

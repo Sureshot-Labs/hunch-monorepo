@@ -35,6 +35,7 @@ import {
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
+import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
@@ -351,13 +352,21 @@ export async function runSignalBotRunner(): Promise<void> {
                     return {
                       parse_mode: "MarkdownV2" as const,
                       reply_markup: undefined,
-                      text: "⚠️ *Trading unavailable*\n\nOpen Hunch to trade\\.",
+                      text: formatTelegramCalloutMarkdownV2({
+                        bodyMarkdownV2: "Open Hunch to trade\\.",
+                        icon: "⚠️",
+                        title: "Trading unavailable",
+                      }),
                     };
                   })
               : {
                   parse_mode: "MarkdownV2" as const,
                   reply_markup: undefined,
-                  text: "⚠️ *Trading unavailable*\n\nOpen Hunch to trade\\.",
+                  text: formatTelegramCalloutMarkdownV2({
+                    bodyMarkdownV2: "Open Hunch to trade\\.",
+                    icon: "⚠️",
+                    title: "Trading unavailable",
+                  }),
                 };
             const navigableMessage = withTelegramPrivateNavigation(message);
             const result = await telegram.sendMessage({
@@ -389,7 +398,11 @@ export async function runSignalBotRunner(): Promise<void> {
               ...(fallbackButton
                 ? { reply_markup: { inline_keyboard: [[fallbackButton]] } }
                 : {}),
-              text: "⚠️ *Trading unavailable*\n\nOpen Hunch to trade\\.",
+              text: formatTelegramCalloutMarkdownV2({
+                bodyMarkdownV2: "Open Hunch to trade\\.",
+                icon: "⚠️",
+                title: "Trading unavailable",
+              }),
             };
             const message = tradingInternalApi
               ? await tradingInternalApi

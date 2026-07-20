@@ -49,6 +49,7 @@ import {
   buildTelegramPositionsMessage,
   loadTelegramPositions,
 } from "../services/telegram-bot-positions.js";
+import { formatTelegramCalloutMarkdownV2 } from "../services/telegram-bot-trading-presentation.js";
 
 const enableBodySchema = z
   .object({
@@ -500,7 +501,11 @@ async function registerTelegramBotTradingRoutes(
               ],
             ],
           },
-          text: "⚠️ *Position details unavailable*\n\nThe holding remains visible in My positions\\.",
+          text: formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: "The holding remains visible in My positions\\.",
+            icon: "⚠️",
+            title: "Position details unavailable",
+          }),
         };
       }
       const average =
@@ -600,7 +605,12 @@ async function registerTelegramBotTradingRoutes(
         ? message
         : {
             ...message,
-            text: `${message.text}\n\n⚠️ *Trading confirmation unavailable*\n\nRequired API and finance reconciliation is disabled\\.`,
+            text: `${message.text}\n\n${formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2:
+                "Required API and finance reconciliation is disabled\\.",
+              icon: "⚠️",
+              title: "Trading confirmation unavailable",
+            })}`,
           };
     },
   );
@@ -655,7 +665,11 @@ async function registerTelegramBotTradingRoutes(
         ...(openButton
           ? { reply_markup: { inline_keyboard: [[openButton]] } }
           : {}),
-        text: "⚠️ *Trading temporarily unavailable*\n\nOpen Hunch to trade\\.",
+        text: formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: "Open Hunch to trade\\.",
+          icon: "⚠️",
+          title: "Trading temporarily unavailable",
+        }),
       };
     },
   );

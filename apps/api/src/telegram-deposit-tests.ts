@@ -249,7 +249,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /\*Assets:\* pUSD or USDC\\\.e/);
       assert.match(message.text, /📍 \*Deposit address\*/);
       assert.ok(message.text.includes(`\`${deposit}\``));
-      assert.match(message.text, /⚠️ \*Important\*/);
+      assert.match(message.text, />⚠️ \*Important\*/);
+      assert.match(
+        message.text,
+        />Send only \*pUSD\* or \*USDC\\\.e\* on \*Polygon\*/,
+      );
       assert.doesNotMatch(message.text, /setup|required|not configured/i);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
@@ -533,6 +537,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(photoCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id));
       assert.match(photoCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
+      assert.match(photoCaption, />⚠️ \*Important\*/);
+      assert.match(photoCaption, />Send only \*USDC\* on \*Base\*/);
       assert.match(photoFilename, /limitless/);
     },
   },

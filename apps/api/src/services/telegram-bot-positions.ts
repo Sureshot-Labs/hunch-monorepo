@@ -9,6 +9,7 @@ import { mapMarketsByTokenRows } from "./markets-by-token-response.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramFieldMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
@@ -526,6 +527,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
     })
     .filter((group) => group.positions.length > 0);
   const visible: TelegramPositionDetail[] = [];
+  const dataQualityNotes: string[] = [];
   const lines = [`💼 ${formatTelegramBoldMarkdownV2("My positions")}`, ""];
   if (positions.length === 0) {
     lines.push(
@@ -608,14 +610,27 @@ export function buildTelegramPositionsSnapshotMessage(input: {
       );
     }
     if (positions.some((position) => !position.marketId)) {
-      lines.push(
-        "",
-        "_Some holdings are shown without market details until metadata refreshes\\._",
+      dataQualityNotes.push(
+        escapeTelegramMarkdownV2(
+          "Some holdings are shown without market details until metadata refreshes.",
+        ),
       );
     }
   }
   if (input.snapshot.partialFailure) {
-    lines.push("", "_Some balances may be delayed\\._");
+    dataQualityNotes.push(
+      escapeTelegramMarkdownV2("Some balances may be delayed."),
+    );
+  }
+  if (dataQualityNotes.length > 0) {
+    lines.push(
+      "",
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: dataQualityNotes,
+        icon: "ℹ️",
+        title: "Data may be incomplete",
+      }),
+    );
   }
 
   const portfolioButton = buildHunchMiniAppWebButton({

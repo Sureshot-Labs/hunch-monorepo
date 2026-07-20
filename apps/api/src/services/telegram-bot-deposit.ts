@@ -7,6 +7,7 @@ import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-cli
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
@@ -371,6 +372,20 @@ function buildDepositVenueSummaryMarkdownV2(
   ].join("\n");
 }
 
+function formatDepositSafetyInstructionMarkdownV2(
+  venue: TelegramDepositVenue,
+): string {
+  return venue === "polymarket"
+    ? `Send only ${formatTelegramBoldMarkdownV2(
+        "pUSD",
+      )} or ${formatTelegramBoldMarkdownV2(
+        "USDC.e",
+      )} on ${formatTelegramBoldMarkdownV2("Polygon")} to this address\\.`
+    : `Send only ${formatTelegramBoldMarkdownV2(
+        "USDC",
+      )} on ${formatTelegramBoldMarkdownV2("Base")} to this address\\.`;
+}
+
 export function buildTelegramDepositAddressPresentation(input: {
   address: string;
   copyButtonText?: string;
@@ -417,10 +432,11 @@ export function buildTelegramDepositAddressPresentation(input: {
       `📍 ${formatTelegramBoldMarkdownV2("Deposit address")}`,
       formatTelegramCodeMarkdownV2(input.address),
       "",
-      `⚠️ ${formatTelegramBoldMarkdownV2("Important")}`,
-      escapeTelegramMarkdownV2(
-        `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
-      ),
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: formatDepositSafetyInstructionMarkdownV2(input.venue),
+        icon: "⚠️",
+        title: "Important",
+      }),
     ],
   };
 }
@@ -470,11 +486,13 @@ function buildDepositVenueMenu(
         : []),
       ...(venues.length === 0
         ? [
-            `⚠️ ${formatTelegramBoldMarkdownV2("Funding unavailable")}`,
-            "",
-            escapeTelegramMarkdownV2(
-              "No trading venue can be funded right now.",
-            ),
+            formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: escapeTelegramMarkdownV2(
+                "No trading venue can be funded right now.",
+              ),
+              icon: "⚠️",
+              title: "Funding unavailable",
+            }),
           ]
         : []),
     ].join("\n"),
@@ -524,9 +542,11 @@ function buildDepositUnavailableMessage(input: {
     text: [
       buildDepositTitleMarkdownV2(input.venue),
       "",
-      `⚠️ ${formatTelegramBoldMarkdownV2("Deposit address unavailable")}`,
-      "",
-      escapeTelegramMarkdownV2(text),
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: escapeTelegramMarkdownV2(text),
+        icon: "⚠️",
+        title: "Deposit address unavailable",
+      }),
       ...(!openButton
         ? [
             "",
@@ -572,11 +592,13 @@ export async function buildTelegramDepositMessage(input: {
       text: [
         buildDepositTitleMarkdownV2(),
         "",
-        `⚠️ ${formatTelegramBoldMarkdownV2("Venue unavailable")}`,
-        "",
-        escapeTelegramMarkdownV2(
-          "Deposits for this venue are not available right now.",
-        ),
+        formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: escapeTelegramMarkdownV2(
+            "Deposits for this venue are not available right now.",
+          ),
+          icon: "⚠️",
+          title: "Venue unavailable",
+        }),
       ].join("\n"),
     };
   }
