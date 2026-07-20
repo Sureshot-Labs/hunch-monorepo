@@ -8,6 +8,7 @@ export type SignalSourceView = {
 };
 
 export type SignalTargetView = {
+  action?: "buy" | "open_market";
   eventId: string;
   marketId: string;
   price: number;

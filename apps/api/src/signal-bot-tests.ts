@@ -38,18 +38,18 @@ import {
   pollSignalBotCommands,
   prepareSignalBotDelivery,
   publishSignalBotFollowthroughTick,
-  publishSignalBotTick,
+  publishSignalBotTick as publishSignalBotTickImpl,
   readSignalBotUpdateOffset,
   refreshSignalBotLock,
   releaseSignalBotLock,
   sendSignalBotFollowthroughPreview,
-  resolveSignalBotCheaperAlternativeFromAggResponse,
   resolveSignalBotBuySide,
   sendLatestSignalBotTestSignal,
   sendSignalBotStatsReport,
   signalBotLockKey,
   TelegramBotApiClient,
   resolveSignalBotLatestSnapshotMaxAgeMs,
+  updateSignalBotDestinationPolicy,
   type SignalBotNote,
   type SignalBotRedisLike,
   type TelegramBotCallbackQuery,
@@ -152,6 +152,15 @@ function buildSignalBotMessage(
 ) {
   return buildSignalBotMessageImpl({
     telegramMiniAppLinkBase: TEST_TELEGRAM_MINI_APP_LINK_BASE,
+    ...input,
+  });
+}
+
+function publishSignalBotTick(
+  input: Parameters<typeof publishSignalBotTickImpl>[0],
+) {
+  return publishSignalBotTickImpl({
+    resolveCheaperAlternative: async () => null,
     ...input,
   });
 }
@@ -2787,125 +2796,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(config?.apiKey, null);
       assert.equal(config?.appId, "fallback-id");
       assert.equal(config?.credentialSource, "AGG_APP_ID");
-    },
-  },
-  {
-    name: "agg alternatives diagnostics classify no response and not found",
-    run: () => {
-      const noResponse = resolveSignalBotCheaperAlternativeFromAggResponse({
-        buySide: "YES",
-        note: note(),
-        response: null,
-      });
-      assert.equal(noResponse.alternative, null);
-      assert.equal(noResponse.diagnostics.aggNoResponse, 1);
-
-      const notFound = resolveSignalBotCheaperAlternativeFromAggResponse({
-        buySide: "YES",
-        note: note(),
-        response: { alternatives: [], status: "not_found" },
-      });
-      assert.equal(notFound.alternative, null);
-      assert.equal(notFound.diagnostics.aggNotFound, 1);
-    },
-  },
-  {
-    name: "agg alternatives diagnostics classify matched prices",
-    run: () => {
-      const noCheaper = resolveSignalBotCheaperAlternativeFromAggResponse({
-        buySide: "YES",
-        note: note({ bestAsk: 0.32 }),
-        response: {
-          alternatives: [
-            {
-              eventId: "kalshi:event-1",
-              executionOffers: {
-                no: null,
-                yes: {
-                  ask: 0.32,
-                  asOf: "2026-01-01T00:00:00.000Z",
-                  fresh: true,
-                  nativeOutcome: "YES",
-                },
-              },
-              marketId: "kalshi:market-1",
-              outcomeMapping: {
-                confidence: 1,
-                method: "exact_title",
-                sourceYesTo: "YES",
-              },
-              venue: "kalshi",
-            },
-          ] as never,
-          status: "matched",
-        },
-      });
-      assert.equal(noCheaper.alternative, null);
-      assert.equal(noCheaper.diagnostics.aggMatched, 1);
-      assert.equal(noCheaper.diagnostics.aggMatchedNotCheaper, 1);
-
-      const cheaper = resolveSignalBotCheaperAlternativeFromAggResponse({
-        buySide: "YES",
-        note: note({ bestAsk: 0.32 }),
-        response: {
-          alternatives: [
-            {
-              eventId: "kalshi:event-1",
-              executionOffers: {
-                no: null,
-                yes: {
-                  ask: 0.29,
-                  asOf: "2026-01-01T00:00:00.000Z",
-                  fresh: true,
-                  nativeOutcome: "YES",
-                },
-              },
-              marketId: "kalshi:market-1",
-              outcomeMapping: {
-                confidence: 1,
-                method: "exact_title",
-                sourceYesTo: "YES",
-              },
-              venue: "kalshi",
-            },
-          ] as never,
-          status: "matched",
-        },
-      });
-      assert.equal(cheaper.alternative?.marketId, "kalshi:market-1");
-      assert.equal(cheaper.diagnostics.aggMatched, 1);
-      assert.equal(cheaper.diagnostics.aggCheaperFound, 1);
-
-      const inverted = resolveSignalBotCheaperAlternativeFromAggResponse({
-        buySide: "YES",
-        note: note({ bestAsk: 0.32 }),
-        response: {
-          alternatives: [
-            {
-              eventId: "limitless:event-1",
-              executionOffers: {
-                no: null,
-                yes: {
-                  ask: 0.28,
-                  asOf: "2026-01-01T00:00:00.000Z",
-                  fresh: true,
-                  nativeOutcome: "NO",
-                },
-              },
-              marketId: "limitless:market-1",
-              outcomeMapping: {
-                confidence: 0.98,
-                method: "selected_participant",
-                sourceYesTo: "NO",
-              },
-              venue: "limitless",
-            },
-          ] as never,
-          status: "matched",
-        },
-      });
-      assert.equal(inverted.alternative?.side, "NO");
-      assert.equal(inverted.alternative?.price, 0.28);
     },
   },
   {
@@ -11807,8 +11697,210 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.equal(
         telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
-        "Buy YES · Poly 32¢",
+        "Buy YES · Poly 41¢",
       );
+    },
+  },
+  {
+    name: "publish routes one source note to each channel's configured venue",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Polymarket", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      await enableSignalBotChat({
+        chat: { id: "-200", title: "Limitless", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      await updateSignalBotDestinationPolicy({
+        chatId: "-100",
+        policy: {
+          fallback: "skip",
+          selectionMode: "best-executable",
+          targetVenues: ["polymarket"],
+        },
+        redis,
+      });
+      await updateSignalBotDestinationPolicy({
+        chatId: "-200",
+        policy: {
+          fallback: "skip",
+          selectionMode: "best-executable",
+          targetVenues: ["limitless"],
+        },
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        resolveCheaperAlternative: async () => ({
+          eventId: "limitless:event-2",
+          marketId: "limitless:market-2",
+          price: 0.29,
+          side: "YES",
+          venue: "limitless",
+        }),
+        telegram,
+      });
+
+      assert.equal(result.sent, 2);
+      assert.equal(result.cheaperAlternatives, 1);
+      assert.equal(result.deliverySkipped, 0);
+      assert.match(
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
+        /Buy YES · Poly 41¢$/,
+      );
+      assert.match(
+        telegram.messages[1]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
+        /Buy YES · Limitless 29¢$/,
+      );
+      const views = db.queries
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
+        .map((query) => {
+          const recorded = readSignalBotMessageInsert(query);
+          const metrics = recorded.metrics as {
+            delivery?: {
+              policy?: { targetVenues?: string[] };
+              view?: { target?: { marketId?: string; venue?: string } };
+            };
+          };
+          return {
+            chatId: recorded.chatId,
+            marketId: metrics.delivery?.view?.target?.marketId,
+            policyVenue: metrics.delivery?.policy?.targetVenues?.[0],
+            venue: metrics.delivery?.view?.target?.venue,
+          };
+        });
+      assert.deepEqual(views, [
+        {
+          chatId: "-100",
+          marketId: "polymarket:market-1",
+          policyVenue: "polymarket",
+          venue: "polymarket",
+        },
+        {
+          chatId: "-200",
+          marketId: "limitless:market-2",
+          policyVenue: "limitless",
+          venue: "limitless",
+        },
+      ]);
+    },
+  },
+  {
+    name: "publish skips instead of leaking a source market outside venue policy",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Limitless", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      await updateSignalBotDestinationPolicy({
+        chatId: "-100",
+        policy: {
+          fallback: "skip",
+          selectionMode: "best-executable",
+          targetVenues: ["limitless"],
+        },
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow()];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        resolveCheaperAlternative: async () => null,
+        telegram,
+      });
+
+      assert.equal(result.sent, 0);
+      assert.equal(result.deliverySkipped, 1);
+      assert.equal(result.deliverySkipReasons.no_executable_target, 1);
+      assert.equal(telegram.messages.length, 0);
+      const delivery = db.queries.find((query) =>
+        query.sql.includes("insert into signal_bot_messages"),
+      );
+      assert.ok(delivery);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageId, null);
+      assert.equal(
+        (recorded.metrics as { reason?: string }).reason,
+        "no_executable_target",
+      );
+      const state = await getSignalBotChatState(redis, "-100");
+      assert.equal(state?.cursorId, "00000000-0000-4000-8000-000000000001");
+    },
+  },
+  {
+    name: "producer initial remains standalone when the channel has an old thesis thread",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [noteRow({ revision_kind: "initial" })];
+      db.threadContextRows = [
+        {
+          baseline_at: "2025-12-01T00:00:00.000Z",
+          reply_to_message_id: "77",
+          thread_root_note_id: "00000000-0000-4000-8000-000000000099",
+        },
+      ];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      assert.equal(telegram.messages[0]?.reply_parameters, undefined);
+      assert.equal(
+        db.queries.some((query) =>
+          query.sql.includes("from signal_bot_messages prior"),
+        ),
+        false,
+      );
+      const delivery = db.queries
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
+        .at(-1);
+      assert.ok(delivery);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageKind, "initial");
+      assert.equal(recorded.threadRootNoteId, recorded.noteId);
     },
   },
   {

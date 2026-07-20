@@ -11,7 +11,15 @@ import {
 import type { DbQuery } from "../db.js";
 import { findTradeMarketById, isOrderable } from "./api-trading-market-repo.js";
 import { resolveAggMarketCredential } from "../lib/agg-market-credentials.js";
-import { type AggMarketAlternativesDiagnostics } from "./agg-market-clusters.js";
+import {
+  AGG_SUPPORTED_VENUES,
+  createAggMarketClient,
+} from "./agg-market-client.js";
+import {
+  getAggMarketAlternativesResponseCachedWithMetadata,
+  type AggMarketAlternativesCacheClient,
+  type AggMarketAlternativesDiagnostics,
+} from "./agg-market-clusters.js";
 import type { ClusterMarketSummary } from "./clusters.js";
 import {
   resolveNativeOutcomeForCanonicalSide,
@@ -88,7 +96,12 @@ import {
 } from "./telegram-notification-preferences.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
-import type { SignalDestinationPolicy } from "./signal-delivery-target.js";
+import {
+  resolveSignalDeliveryTarget,
+  type SignalDeliveryCandidate,
+  type SignalDeliveryTargetResolution,
+  type SignalDestinationPolicy,
+} from "./signal-delivery-target.js";
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
 import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
 import {
@@ -240,6 +253,11 @@ export type SignalBotCheaperAlternative = {
   side: "NO" | "YES";
   venue: string;
 };
+
+export type SignalBotCheaperAlternativeResolver = (input: {
+  buySide: "NO" | "YES";
+  note: SignalBotNote;
+}) => Promise<SignalBotCheaperAlternative | null>;
 
 export type SignalBotStatsPeriod = "24h" | "30d" | "7d";
 
@@ -503,7 +521,6 @@ type SignalBotMessageKind =
 
 type SignalBotThreadContext = {
   baselineAt: string;
-  messageKind: Extract<SignalBotMessageKind, "initial" | "research_update">;
   replyToMessageId: number | null;
   threadRootNoteId: string;
 };
@@ -1609,6 +1626,14 @@ export function buildSignalBotMessage(input: {
         side: buySide,
       })
     : null;
+  const deliveryMarketStartParam = input.deliveryTarget
+    ? buildSignalBotMarketStartParam({
+        deliveryRef: input.deliveryRef,
+        eventId: input.deliveryTarget.eventId,
+        marketId: input.deliveryTarget.marketId,
+        side: input.deliveryTarget.side,
+      })
+    : marketStartParam;
   const marketMiniAppUrl = buildSignalBotMiniAppUrl({
     base: input.telegramMiniAppLinkBase,
     startParam: marketStartParam,
@@ -1820,7 +1845,7 @@ export function buildSignalBotMessage(input: {
         appBaseUrl: input.appBaseUrl,
         chatType: input.chatType,
         miniAppLinkBase: input.telegramMiniAppLinkBase,
-        startParam: marketStartParam,
+        startParam: deliveryMarketStartParam,
         text: "↗️ Open market",
       }),
     );
@@ -4447,8 +4472,9 @@ export async function pollSignalBotCommands(
   return handled;
 }
 
+const SIGNAL_BOT_ALTERNATIVES_QUERY = { limit: 8, sourceLimit: 50 };
+const SIGNAL_BOT_AGG_SUPPORTED_VENUES = new Set<string>(AGG_SUPPORTED_VENUES);
 const SIGNAL_BOT_STATS_AUDIT_LIMIT = 500;
-const MIN_CHEAPER_ALTERNATIVE_DELTA = 0.005;
 
 type SignalBotAggMarketConfig = {
   apiKey: string | null;
@@ -4497,11 +4523,6 @@ type SignalBotPriceGuardResult = {
   defer: boolean;
   orderable: boolean;
   timedOut: boolean;
-};
-
-type SignalBotCheaperAlternativeResult = {
-  alternative: SignalBotCheaperAlternative | null;
-  diagnostics: SignalBotCheaperAlternativeDiagnostics;
 };
 
 function normalizeServiceBaseUrl(value: string | undefined, fallback: string) {
@@ -4569,6 +4590,39 @@ function addAggAlternativesDiagnostics(
   target.aggOutcomeMappingMissing += source.outcomeMappingMissing;
   target.aggPriceUnavailable += source.priceUnavailable;
   target.aggTargetSearchEmpty += source.targetSearchEmpty;
+}
+
+function addSignalDeliveryFailureDiagnostic(
+  diagnostics: SignalBotCheaperAlternativeDiagnostics,
+  reason: SignalDeliveryTargetResolution["reason"],
+): void {
+  switch (reason) {
+    case "ambiguous_mapping":
+      diagnostics.deliveryAmbiguousMapping += 1;
+      break;
+    case "destination_disabled":
+      diagnostics.deliveryDestinationDisabled += 1;
+      break;
+    case "no_executable_target":
+      diagnostics.deliveryNoExecutableTarget += 1;
+      break;
+    case "stale_price":
+      diagnostics.deliveryStalePrice += 1;
+      break;
+    case null:
+      break;
+  }
+}
+
+function addSignalBotCheaperAlternativeDiagnostics(
+  target: SignalBotCheaperAlternativeDiagnostics,
+  source: SignalBotCheaperAlternativeDiagnostics,
+): void {
+  for (const key of Object.keys(target) as Array<
+    keyof SignalBotCheaperAlternativeDiagnostics
+  >) {
+    target[key] += source[key];
+  }
 }
 
 function createSignalBotPriceGuardDiagnostics(): SignalBotPriceGuardDiagnostics {
@@ -4729,6 +4783,12 @@ export type SignalBotDeliveryPreparationReason =
   | "stale_price_snapshot"
   | "unpublishable_copy";
 
+type SignalBotDeliverySkipReason =
+  | SignalBotDeliveryPreparationReason
+  | Exclude<SignalDeliveryTargetResolution["reason"], null>
+  | "quote_refresh_expired"
+  | "source_disabled";
+
 export type SignalBotDeliveryPreparation =
   | {
       audit: Record<string, unknown>;
@@ -4739,6 +4799,7 @@ export type SignalBotDeliveryPreparation =
       richMessage: TelegramInputRichMessage;
       status: "ready";
       text: string;
+      view: SignalDeliveryView;
     }
   | {
       audit: Record<string, unknown>;
@@ -4790,6 +4851,10 @@ export async function prepareSignalBotDelivery(input: {
   note: SignalBotNote;
   now?: Date;
   redis?: SignalBotRedisLike;
+  resolvedDelivery?: {
+    allowBuyCta: boolean;
+    target: SignalBotCheaperAlternative;
+  };
   telegramMiniAppLinkBase?: string | null;
 }): Promise<SignalBotDeliveryPreparation> {
   const now = input.now ?? new Date();
@@ -4901,7 +4966,16 @@ export async function prepareSignalBotDelivery(input: {
     orderable: false,
     timedOut: false,
   };
-  if (requestedBuy) {
+  if (input.resolvedDelivery) {
+    allowBuyCta = requestedBuy && input.resolvedDelivery.allowBuyCta;
+    priceGuard = {
+      blockers: [],
+      buyPrice: input.resolvedDelivery.target.price,
+      defer: false,
+      orderable: true,
+      timedOut: false,
+    };
+  } else if (requestedBuy) {
     priceGuard = input.redis
       ? await loadSignalBotPriceGuardBlockers({
           buySide,
@@ -4933,7 +5007,8 @@ export async function prepareSignalBotDelivery(input: {
       priceSnapshot[buySide].ask != null;
   }
   const deliveryTarget =
-    allowBuyCta && input.note.eventId && input.note.marketId
+    input.resolvedDelivery?.target ??
+    (allowBuyCta && input.note.eventId && input.note.marketId
       ? {
           eventId: input.note.eventId,
           marketId: input.note.marketId,
@@ -4941,7 +5016,7 @@ export async function prepareSignalBotDelivery(input: {
           side: buySide,
           venue: input.note.marketVenue ?? "unknown",
         }
-      : null;
+      : null);
   const rendered = buildSignalBotMessage({
     allowBuyCta,
     appBaseUrl: input.appBaseUrl,
@@ -4983,6 +5058,16 @@ export async function prepareSignalBotDelivery(input: {
     richMessage: rendered.richMessage,
     status: "ready",
     text: rendered.text,
+    view: buildNeutralSignalDeliveryView({
+      allowBuyCta,
+      appBaseUrl: input.appBaseUrl,
+      buyAmountUsd: input.buyAmountUsd,
+      kind: input.messageKind,
+      note: input.note,
+      sourceSide: buySide,
+      target: deliveryTarget,
+      copyPolicy: input.copyPolicy,
+    }),
   };
 }
 
@@ -5001,120 +5086,341 @@ async function recordSignalBotPriceGuardDeferral(input: {
   return next;
 }
 
-function isStrictlyCheaperDisplayedPrice(params: {
-  alternativePrice: number;
-  primaryPrice: number;
-}): boolean {
-  const primaryCents = Math.round(params.primaryPrice * 100);
-  const alternativeCents = Math.round(params.alternativePrice * 100);
-  return (
-    alternativeCents < primaryCents &&
-    params.primaryPrice - params.alternativePrice >=
-      MIN_CHEAPER_ALTERNATIVE_DELTA
-  );
-}
-
-function pickCheaperSignalBotAlternative(input: {
+function signalDeliveryCandidateFromSource(input: {
   buySide: "NO" | "YES";
+  executablePrice: number | null;
   note: SignalBotNote;
-  primaryPrice?: number | null;
-  response: {
-    alternatives: ClusterMarketSummary[];
-    status: string;
+  priceAsOf: string;
+}): SignalDeliveryCandidate | null {
+  const venue = normalizeHunchVenue(input.note.marketVenue);
+  if (
+    !venue ||
+    !input.note.eventId ||
+    !input.note.marketId ||
+    input.executablePrice == null
+  ) {
+    return null;
+  }
+  return {
+    active: true,
+    eventId: input.note.eventId,
+    executablePrice: input.executablePrice,
+    matchMethod: "source_identity",
+    marketId: input.note.marketId,
+    mappedSide: input.buySide,
+    mappingConfidence: 1,
+    mappingMethod: "source_identity",
+    orderable: true,
+    priceAsOf: input.priceAsOf,
+    sourceSide: input.buySide,
+    venue,
   };
-}): SignalBotCheaperAlternative | null {
-  if (input.response.status !== "matched") return null;
-  const primaryPrice =
-    normalizeProbability(input.primaryPrice) ??
-    (input.buySide === "YES" ? normalizeProbability(input.note.bestAsk) : null);
-  if (primaryPrice == null) return null;
-
-  const candidates = input.response.alternatives
-    .map((market): SignalBotCheaperAlternative | null => {
-      if (!market.outcomeMapping) return null;
-      const nativeSide = resolveNativeOutcomeForCanonicalSide(
-        market.outcomeMapping.sourceYesTo,
-        input.buySide,
-      );
-      const offer =
-        input.buySide === "YES"
-          ? market.executionOffers?.yes
-          : market.executionOffers?.no;
-      const price =
-        offer?.fresh && offer.nativeOutcome === nativeSide
-          ? normalizeProbability(offer.ask)
-          : null;
-      if (
-        price == null ||
-        !market.eventId ||
-        !market.marketId ||
-        market.marketId === input.note.marketId ||
-        !isStrictlyCheaperDisplayedPrice({
-          alternativePrice: price,
-          primaryPrice,
-        })
-      ) {
-        return null;
-      }
-      return {
-        eventId: market.eventId,
-        marketId: market.marketId,
-        price,
-        side: nativeSide,
-        venue: market.venue,
-      };
-    })
-    .filter(
-      (candidate): candidate is SignalBotCheaperAlternative =>
-        candidate != null,
-    );
-
-  return (
-    candidates.sort((left, right) => {
-      if (left.price !== right.price) return left.price - right.price;
-      return left.marketId.localeCompare(right.marketId);
-    })[0] ?? null
-  );
 }
 
-export function resolveSignalBotCheaperAlternativeFromAggResponse(input: {
+function signalDeliveryCandidateFromAgg(input: {
   buySide: "NO" | "YES";
+  executablePrice: number | null;
+  market: ClusterMarketSummary;
+  priceAsOf: string;
+}): SignalDeliveryCandidate | null {
+  const mapping = input.market.outcomeMapping;
+  const mappedSide = mapping
+    ? resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, input.buySide)
+    : null;
+  if (
+    !mapping ||
+    !mappedSide ||
+    input.executablePrice == null ||
+    !input.market.eventId ||
+    !input.market.marketId ||
+    !input.market.matchMethod
+  ) {
+    return null;
+  }
+  return {
+    active: input.market.active === true,
+    eventId: input.market.eventId,
+    executablePrice: input.executablePrice,
+    matchMethod: input.market.matchMethod,
+    marketId: input.market.marketId,
+    mappedSide,
+    mappingConfidence: mapping.confidence,
+    mappingMethod: mapping.method,
+    orderable: input.market.orderable === true,
+    priceAsOf: input.priceAsOf,
+    sourceSide: input.buySide,
+    venue: input.market.venue,
+  };
+}
+
+type SignalBotPolicyDeliveryResolution =
+  | {
+      allowBuyCta: boolean;
+      blockers: MarketPriceBlocker[];
+      diagnostics: SignalBotCheaperAlternativeDiagnostics;
+      status: "ready";
+      target: SignalBotCheaperAlternative;
+    }
+  | {
+      blockers: MarketPriceBlocker[];
+      diagnostics: SignalBotCheaperAlternativeDiagnostics;
+      reason: "quote_refresh";
+      status: "deferred";
+    }
+  | {
+      blockers: MarketPriceBlocker[];
+      diagnostics: SignalBotCheaperAlternativeDiagnostics;
+      reason: Exclude<SignalDeliveryTargetResolution["reason"], null>;
+      status: "skipped";
+    };
+
+async function resolveSignalBotDeliveryForPolicy(input: {
+  buySide: "NO" | "YES";
+  db: DbQuery;
+  destinationPolicy: SignalDestinationPolicy;
+  lifecycle: Awaited<
+    ReturnType<typeof resolveSignalBotVenueLifecycle>
+  >["policy"];
   note: SignalBotNote;
-  response: {
-    alternatives: ClusterMarketSummary[];
-    diagnostics?: AggMarketAlternativesDiagnostics;
-    status: string;
-  } | null;
-}): SignalBotCheaperAlternativeResult {
+  redis: SignalBotRedisLike;
+  requestedBuy: boolean;
+  resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
+}): Promise<SignalBotPolicyDeliveryResolution> {
+  const now = new Date();
+  const nowIso = now.toISOString();
   const diagnostics = createSignalBotCheaperAlternativeDiagnostics();
-  if (!input.response) {
-    diagnostics.aggNoResponse += 1;
-    return { alternative: null, diagnostics };
+  const candidates: SignalDeliveryCandidate[] = [];
+  const blockers = new Set<MarketPriceBlocker>();
+  let sawDeferredQuote = false;
+  let sourceDeferred = false;
+  let sourceNavigationTarget: SignalBotCheaperAlternative | null = null;
+
+  const sourceVenue = normalizeHunchVenue(input.note.marketVenue);
+  const sourceAllowed = Boolean(
+    sourceVenue &&
+    input.destinationPolicy.targetVenues.includes(sourceVenue) &&
+    getVenuesWithLifecycleCapability(
+      input.lifecycle,
+      "signalDelivery",
+    ).includes(sourceVenue) &&
+    getVenuesWithLifecycleCapability(
+      input.lifecycle,
+      "increaseExposure",
+    ).includes(sourceVenue),
+  );
+  const sourceReadiness = await loadSignalBotPriceGuardBlockers({
+    buySide: input.buySide,
+    db: input.db,
+    note: input.note,
+    redis: input.redis,
+  });
+  if (sourceAllowed) {
+    for (const blocker of sourceReadiness.blockers) blockers.add(blocker);
   }
-  if (input.response.diagnostics) {
-    addAggAlternativesDiagnostics(diagnostics, input.response.diagnostics);
+  if (sourceAllowed && sourceReadiness.defer) {
+    sawDeferredQuote = true;
+    sourceDeferred = true;
   }
-  if (input.response.status === "not_found") {
-    diagnostics.aggNotFound += 1;
-    return { alternative: null, diagnostics };
+  if (
+    sourceReadiness.orderable &&
+    !sourceReadiness.defer &&
+    sourceReadiness.blockers.length === 0
+  ) {
+    const source = signalDeliveryCandidateFromSource({
+      buySide: input.buySide,
+      executablePrice: sourceReadiness.buyPrice,
+      note: input.note,
+      priceAsOf: nowIso,
+    });
+    if (source) candidates.push(source);
   }
-  if (input.response.status !== "matched") {
-    diagnostics.aggNoResponse += 1;
-    return { alternative: null, diagnostics };
+  const sourceSnapshotPrice = normalizeProbability(
+    input.note.signalPriceSnapshotV1?.[input.buySide].ask,
+  );
+  if (
+    sourceAllowed &&
+    sourceReadiness.orderable &&
+    input.note.eventId &&
+    input.note.marketId &&
+    sourceVenue &&
+    sourceSnapshotPrice != null
+  ) {
+    sourceNavigationTarget = {
+      eventId: input.note.eventId,
+      marketId: input.note.marketId,
+      price: sourceSnapshotPrice,
+      side: input.buySide,
+      venue: sourceVenue,
+    };
   }
 
-  diagnostics.aggMatched += 1;
-  const alternative = pickCheaperSignalBotAlternative({
-    buySide: input.buySide,
-    note: input.note,
-    response: input.response,
-  });
-  if (alternative) {
-    diagnostics.aggCheaperFound += 1;
+  if (input.resolveCheaperAlternative) {
+    const alternative = await input.resolveCheaperAlternative({
+      buySide: input.buySide,
+      note: input.note,
+    });
+    if (alternative) {
+      candidates.push({
+        active: true,
+        eventId: alternative.eventId,
+        executablePrice: alternative.price,
+        matchMethod: "injected_resolver",
+        marketId: alternative.marketId,
+        mappedSide: alternative.side,
+        mappingConfidence: 1,
+        mappingMethod: "injected_resolver",
+        orderable: true,
+        priceAsOf: nowIso,
+        sourceSide: input.buySide,
+        venue: alternative.venue,
+      });
+    }
   } else {
-    diagnostics.aggMatchedNotCheaper += 1;
+    const alternativeVenues = input.destinationPolicy.targetVenues.filter(
+      (venue) =>
+        venue !== sourceVenue && SIGNAL_BOT_AGG_SUPPORTED_VENUES.has(venue),
+    );
+    const aggConfig = parseSignalBotAggMarketConfig();
+    if (alternativeVenues.length === 0) {
+      diagnostics.aggDisabled += 1;
+    } else if (
+      !aggConfig ||
+      !input.note.marketId ||
+      !sourceVenue ||
+      !SIGNAL_BOT_AGG_SUPPORTED_VENUES.has(sourceVenue)
+    ) {
+      diagnostics.aggDisabled += 1;
+    } else {
+      try {
+        const client = createAggMarketClient({
+          apiKey: aggConfig.apiKey,
+          appId: aggConfig.appId,
+          baseUrl: aggConfig.baseUrl,
+          timeoutMs: aggConfig.timeoutMs,
+        });
+        const { response } =
+          await getAggMarketAlternativesResponseCachedWithMetadata({
+            cacheClient: input.redis as AggMarketAlternativesCacheClient,
+            client,
+            db: input.db,
+            marketId: input.note.marketId,
+            matchedTtlSec: aggConfig.matchedTtlSec,
+            notFoundTtlSec: aggConfig.notFoundTtlSec,
+            query: {
+              ...SIGNAL_BOT_ALTERNATIVES_QUERY,
+              venues: [sourceVenue, ...alternativeVenues].join(","),
+            },
+          });
+        if (!response) {
+          diagnostics.aggNoResponse += 1;
+        } else if (response.status === "matched") {
+          addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
+          diagnostics.aggMatched += 1;
+          const targetVenueSet = new Set(input.destinationPolicy.targetVenues);
+          for (const market of response.markets) {
+            const venue = normalizeHunchVenue(market.venue);
+            if (!venue || !targetVenueSet.has(venue)) continue;
+            const mapping = market.outcomeMapping;
+            const mappedSide = mapping
+              ? resolveNativeOutcomeForCanonicalSide(
+                  mapping.sourceYesTo,
+                  input.buySide,
+                )
+              : null;
+            if (!mappedSide) continue;
+            const readiness = await loadSignalBotPriceGuardBlockers({
+              buySide: mappedSide,
+              db: input.db,
+              note: { marketId: market.marketId },
+              redis: input.redis,
+            });
+            if (readiness.defer) {
+              sawDeferredQuote = true;
+              continue;
+            }
+            if (
+              !readiness.orderable ||
+              readiness.blockers.length > 0 ||
+              readiness.buyPrice == null
+            ) {
+              if (
+                readiness.buyPrice == null ||
+                readiness.blockers.includes("missing_side_price") ||
+                readiness.blockers.includes("no_book")
+              ) {
+                diagnostics.aggPriceUnavailable += 1;
+              }
+              continue;
+            }
+            const candidate = signalDeliveryCandidateFromAgg({
+              buySide: input.buySide,
+              executablePrice: readiness.buyPrice,
+              market,
+              priceAsOf: nowIso,
+            });
+            if (candidate) candidates.push(candidate);
+          }
+        } else {
+          addAggAlternativesDiagnostics(diagnostics, response.diagnostics);
+          diagnostics.aggNotFound += 1;
+        }
+      } catch {
+        diagnostics.aggErrors += 1;
+      }
+    }
   }
-  return { alternative, diagnostics };
+
+  const resolution = resolveSignalDeliveryTarget({
+    candidates,
+    destinationPolicy: input.destinationPolicy,
+    lifecycle: input.lifecycle,
+    nowMs: now.getTime(),
+    sourceSide: input.buySide,
+  });
+  if (resolution.target) {
+    if (resolution.target.marketId !== input.note.marketId) {
+      diagnostics.aggCheaperFound += 1;
+    } else if (diagnostics.aggMatched > 0) {
+      diagnostics.aggMatchedNotCheaper += 1;
+    }
+    return {
+      allowBuyCta: input.requestedBuy,
+      blockers: [],
+      diagnostics,
+      status: "ready",
+      target: {
+        eventId: resolution.target.eventId,
+        marketId: resolution.target.marketId,
+        price: resolution.target.executablePrice,
+        side: resolution.target.mappedSide,
+        venue: resolution.target.venue,
+      },
+    };
+  }
+  if (sourceNavigationTarget && !sourceDeferred) {
+    return {
+      allowBuyCta: false,
+      blockers: [...blockers],
+      diagnostics,
+      status: "ready",
+      target: sourceNavigationTarget,
+    };
+  }
+  if (sawDeferredQuote) {
+    return {
+      blockers: [...blockers],
+      diagnostics,
+      reason: "quote_refresh",
+      status: "deferred",
+    };
+  }
+  addSignalDeliveryFailureDiagnostic(diagnostics, resolution.reason);
+  return {
+    blockers: [...blockers],
+    diagnostics,
+    reason: resolution.reason ?? "no_executable_target",
+    status: "skipped",
+  };
 }
 
 function isMissingSignalBotMessagesTable(error: unknown): boolean {
@@ -5181,11 +5487,12 @@ async function loadSignalBotThreadContext(input: {
 }): Promise<SignalBotThreadContext> {
   const initial: SignalBotThreadContext = {
     baselineAt: new Date().toISOString(),
-    messageKind: "initial",
     replyToMessageId: null,
     threadRootNoteId: input.note.id,
   };
-  if (!input.note.marketId) return initial;
+  if (input.note.revisionKind !== "research_update" || !input.note.marketId) {
+    return initial;
+  }
   try {
     const { rows } = await input.db.query<{
       baseline_at: Date | string | null;
@@ -5230,6 +5537,8 @@ async function loadSignalBotThreadContext(input: {
         where prior.chat_id = $1
           and prior.note_id <> $2::uuid
           and prior.message_kind in ('initial', 'research_update')
+          and prior.telegram_message_id is not null
+          and coalesce(prior.metrics->>'status', 'sent') = 'sent'
           and coalesce(
             prior_note.lineage->>'thesis_key',
             'holder_research:v2:' || prior_note.source_id || ':' || upper(coalesce(
@@ -5257,7 +5566,6 @@ async function loadSignalBotThreadContext(input: {
         row.baseline_at instanceof Date
           ? row.baseline_at.toISOString()
           : row.baseline_at || initial.baselineAt,
-      messageKind: "research_update",
       replyToMessageId: toInteger(row.reply_to_message_id),
       threadRootNoteId: row.thread_root_note_id,
     };
@@ -5328,6 +5636,40 @@ async function recordSignalBotMessage(input: {
     });
     return false;
   }
+}
+
+async function recordSignalBotSkippedDelivery(input: {
+  audit?: Record<string, unknown>;
+  baselineAt: string;
+  chatId: string;
+  db: DbQuery;
+  messageKind: Extract<SignalBotMessageKind, "initial" | "research_update">;
+  noteId: string;
+  policy: SignalDestinationPolicy;
+  reason: SignalBotDeliverySkipReason;
+  threadRootNoteId: string;
+}): Promise<void> {
+  await recordSignalBotMessage({
+    baselineAt: input.baselineAt,
+    chatId: input.chatId,
+    db: input.db,
+    insertId: createSignalDeliveryRef(),
+    messageId: null,
+    messageKind: input.messageKind,
+    metrics: {
+      delivery: {
+        policy: input.policy,
+        preparation: input.audit ?? null,
+        reason: input.reason,
+        status: "skipped",
+      },
+      reason: input.reason,
+      status: "skipped",
+    },
+    noteId: input.noteId,
+    replyToMessageId: null,
+    threadRootNoteId: input.threadRootNoteId,
+  });
 }
 
 async function reserveSignalBotFollowthroughMessage(input: {
@@ -5620,6 +5962,7 @@ async function sendSignalBotViaTransport(input: {
 }
 
 function buildNeutralSignalDeliveryView(input: {
+  allowBuyCta: boolean;
   appBaseUrl: string;
   buyAmountUsd: number;
   kind: "initial" | "research_update";
@@ -5634,25 +5977,30 @@ function buildNeutralSignalDeliveryView(input: {
     note: input.note,
     side: input.sourceSide,
   });
-  const target =
-    input.kind === "research_update"
-      ? null
-      : input.target
-        ? {
-            eventId: input.target.eventId,
-            marketId: input.target.marketId,
-            price: input.target.price,
-            side: input.target.side,
-            tradeUrl: buildSignalBotTradeUrl({
+  const target: SignalDeliveryView["target"] = input.target
+    ? {
+        action: input.allowBuyCta ? "buy" : "open_market",
+        eventId: input.target.eventId,
+        marketId: input.target.marketId,
+        price: input.target.price,
+        side: input.target.side,
+        tradeUrl: input.allowBuyCta
+          ? buildSignalBotTradeUrl({
               amountUsd: input.buyAmountUsd,
               appBaseUrl: input.appBaseUrl,
               eventId: input.target.eventId,
               marketId: input.target.marketId,
               side: input.target.side,
+            })
+          : buildSignalBotOpenMarketUrl({
+              appBaseUrl: input.appBaseUrl,
+              eventId: input.target.eventId,
+              marketId: input.target.marketId,
+              side: input.target.side,
             }),
-            venue: input.target.venue,
-          }
-        : null;
+        venue: input.target.venue,
+      }
+    : null;
   return {
     contextLines: input.note.rationale ? [input.note.rationale] : [],
     credentialLines: input.note.holderCredentialBullets,
@@ -5684,6 +6032,7 @@ function buildNeutralSignalDeliveryView(input: {
 export async function publishSignalBotTick(input: {
   config: SignalBotConfig;
   db: DbQuery;
+  resolveCheaperAlternative?: SignalBotCheaperAlternativeResolver;
   redis: SignalBotRedisLike;
   telegram: SignalBotTelegramClient;
   transports?: readonly SignalTransport[];
@@ -5692,6 +6041,8 @@ export async function publishSignalBotTick(input: {
     blockedChats: number;
     chats: number;
     cheaperAlternatives: number;
+    deliverySkipReasons: Partial<Record<SignalBotDeliverySkipReason, number>>;
+    deliverySkipped: number;
     nonDirectionalNotes: number;
     publishNotesSeen: number;
     sent: number;
@@ -5706,11 +6057,19 @@ export async function publishSignalBotTick(input: {
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   let sent = 0;
   let blockedChats = 0;
-  const cheaperAlternatives = 0;
+  let cheaperAlternatives = 0;
+  let deliverySkipped = 0;
+  const deliverySkipReasons: Partial<
+    Record<SignalBotDeliverySkipReason, number>
+  > = {};
   let nonDirectionalNotes = 0;
   let publishNotesSeen = 0;
   const alternativeDiagnostics = createSignalBotCheaperAlternativeDiagnostics();
   const priceGuardDiagnostics = createSignalBotPriceGuardDiagnostics();
+  const countDeliverySkip = (reason: SignalBotDeliverySkipReason) => {
+    deliverySkipped += 1;
+    deliverySkipReasons[reason] = (deliverySkipReasons[reason] ?? 0) + 1;
+  };
   for (const chatId of chatIds) {
     const state = await getSignalBotChatState(input.redis, chatId);
     if (!state) {
@@ -5729,31 +6088,7 @@ export async function publishSignalBotTick(input: {
       limit: input.config.maxSignalsPerTick,
     });
     for (const note of notes) {
-      const sourceVenue = normalizeHunchVenue(note.marketVenue);
-      if (
-        !sourceVenue ||
-        !getVenuesWithLifecycleCapability(
-          lifecycle.policy,
-          "signalSource",
-        ).includes(sourceVenue)
-      ) {
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
-        continue;
-      }
-      const sendCooldown = await input.redis.get(
-        signalBotSendCooldownKey(chatId, note.id),
-      );
-      if (sendCooldown) break;
-      const thread = await loadSignalBotThreadContext({
-        chatId,
-        db: input.db,
-        note,
-      });
+      const messageKind = note.revisionKind;
       const destinationPolicy: SignalDestinationPolicy =
         state.destinationPolicy ?? {
           fallback: "skip",
@@ -5763,6 +6098,103 @@ export async function publishSignalBotTick(input: {
             "signalDelivery",
           ),
         };
+      const sendCooldown = await input.redis.get(
+        signalBotSendCooldownKey(chatId, note.id),
+      );
+      if (sendCooldown) break;
+      const thread = await loadSignalBotThreadContext({
+        chatId,
+        db: input.db,
+        note,
+      });
+      const skipDelivery = async (
+        reason: SignalBotDeliverySkipReason,
+        audit?: Record<string, unknown>,
+      ) => {
+        countDeliverySkip(reason);
+        await recordSignalBotSkippedDelivery({
+          audit,
+          baselineAt: thread.baselineAt,
+          chatId,
+          db: input.db,
+          messageKind,
+          noteId: note.id,
+          policy: destinationPolicy,
+          reason,
+          threadRootNoteId: thread.threadRootNoteId,
+        });
+        await updateSignalBotChatCursor({
+          chatId,
+          createdAt: note.createdAt,
+          id: note.id,
+          redis: input.redis,
+        });
+      };
+      const sourceVenue = normalizeHunchVenue(note.marketVenue);
+      if (
+        !sourceVenue ||
+        !getVenuesWithLifecycleCapability(
+          lifecycle.policy,
+          "signalSource",
+        ).includes(sourceVenue)
+      ) {
+        await skipDelivery("source_disabled");
+        continue;
+      }
+      if (messageKind === "research_update" && !note.holderResearchUpdateV1) {
+        await skipDelivery("missing_update_contract", {
+          contractVersion: 1,
+          messageKind,
+          noteId: note.id,
+        });
+        continue;
+      }
+      const buySide = resolveSignalBotBuySide(note);
+      if (!buySide) {
+        await skipDelivery("non_directional");
+        continue;
+      }
+      const routing = await resolveSignalBotDeliveryForPolicy({
+        buySide,
+        db: input.db,
+        destinationPolicy,
+        lifecycle: lifecycle.policy,
+        note,
+        redis: input.redis,
+        requestedBuy:
+          messageKind === "initial" ||
+          note.holderResearchUpdateV1?.ctaIntent === "buy",
+        resolveCheaperAlternative: input.resolveCheaperAlternative,
+      });
+      addSignalBotCheaperAlternativeDiagnostics(
+        alternativeDiagnostics,
+        routing.diagnostics,
+      );
+      if (routing.blockers.length > 0) {
+        addSignalBotPriceGuardBlockers(priceGuardDiagnostics, routing.blockers);
+      }
+      if (routing.status === "deferred") {
+        const deferCount = await recordSignalBotPriceGuardDeferral({
+          chatId,
+          noteId: note.id,
+          redis: input.redis,
+          ttlSec: input.config.priceGuardDeferTtlSec,
+        });
+        if (deferCount > input.config.priceGuardMaxDefers) {
+          priceGuardDiagnostics.priceGuardStaleExpired += 1;
+          await skipDelivery("quote_refresh_expired");
+          continue;
+        }
+        priceGuardDiagnostics.priceGuardDeferred += 1;
+        break;
+      }
+      if (routing.status === "skipped") {
+        await skipDelivery(routing.reason);
+        continue;
+      }
+      if (routing.target.marketId !== note.marketId) {
+        cheaperAlternatives += 1;
+      }
       const deliveryRef = createSignalDeliveryRef();
       const preparation = await prepareSignalBotDelivery({
         appBaseUrl: input.config.appBaseUrl,
@@ -5771,9 +6203,13 @@ export async function publishSignalBotTick(input: {
         copyPolicy,
         db: input.db,
         deliveryRef,
-        messageKind: thread.messageKind,
+        messageKind,
         note,
         redis: input.redis,
+        resolvedDelivery: {
+          allowBuyCta: routing.allowBuyCta,
+          target: routing.target,
+        },
         telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
       });
       if (preparation.status === "deferred") {
@@ -5789,12 +6225,7 @@ export async function publishSignalBotTick(input: {
         );
         if (deferCount > input.config.priceGuardMaxDefers) {
           priceGuardDiagnostics.priceGuardStaleExpired += 1;
-          await updateSignalBotChatCursor({
-            chatId,
-            createdAt: note.createdAt,
-            id: note.id,
-            redis: input.redis,
-          });
+          await skipDelivery("quote_refresh_expired", preparation.audit);
           continue;
         }
         priceGuardDiagnostics.priceGuardDeferred += 1;
@@ -5808,12 +6239,7 @@ export async function publishSignalBotTick(input: {
             preparation.blockers,
           );
         }
-        await updateSignalBotChatCursor({
-          chatId,
-          createdAt: note.createdAt,
-          id: note.id,
-          redis: input.redis,
-        });
+        await skipDelivery(preparation.reason, preparation.audit);
         continue;
       }
       if (preparation.blockers.length > 0) {
@@ -5822,17 +6248,7 @@ export async function publishSignalBotTick(input: {
           preparation.blockers,
         );
       }
-      const { buySide, deliveryTarget, keyboard, richMessage, text } =
-        preparation;
-      const deliveryView = buildNeutralSignalDeliveryView({
-        appBaseUrl: input.config.appBaseUrl,
-        buyAmountUsd: input.config.buyAmountUsd,
-        kind: thread.messageKind,
-        note,
-        sourceSide: buySide,
-        target: deliveryTarget,
-        copyPolicy,
-      });
+      const { keyboard, richMessage, text, view: deliveryView } = preparation;
       const transportPayload: TransportPayload = {
         ...telegramTransport.render(deliveryView),
         destinationId: chatId,
@@ -5860,11 +6276,11 @@ export async function publishSignalBotTick(input: {
           db: input.db,
           insertId: deliveryRef,
           messageId: result.messageId,
-          messageKind: thread.messageKind,
+          messageKind,
           metrics: {
             copy: buildSignalBotCopyAudit({
-              buySide,
-              messageKind: thread.messageKind,
+              buySide: preparation.buySide,
+              messageKind,
               note,
               copyPolicy,
             }),
@@ -5876,7 +6292,7 @@ export async function publishSignalBotTick(input: {
             },
             fallbackToMarkdown: result.fallbackToMarkdown,
             fallbackStandalone: result.fallbackStandalone,
-            noteKind: thread.messageKind,
+            noteKind: messageKind,
           },
           noteId: note.id,
           replyToMessageId: result.replyToMessageId,
@@ -5909,6 +6325,8 @@ export async function publishSignalBotTick(input: {
     blockedChats,
     chats: chatIds.length,
     cheaperAlternatives,
+    deliverySkipReasons,
+    deliverySkipped,
     nonDirectionalNotes,
     publishNotesSeen,
     sent,
