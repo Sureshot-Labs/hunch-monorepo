@@ -6,11 +6,15 @@ import { getRedis } from "../redis.js";
 import { fetchPositionsForUserWallet } from "../repos/positions-repo.js";
 import { fetchMarketsByTokenIds } from "../repos/unified-read.js";
 import { mapMarketsByTokenRows } from "./markets-by-token-response.js";
-import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  escapeTelegramMarkdownV2,
+  formatTelegramBoldMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import {
   formatTelegramVenueButtonIcon,
-  formatTelegramVenueLabelMarkdownV2,
+  formatTelegramVenueFieldMarkdownV2,
 } from "./telegram-market-identity.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
 import {
@@ -20,6 +24,7 @@ import {
 } from "./telegram-bot-text-budget.js";
 import { syncPositionsForUserWallet } from "./positions-sync.js";
 import { venueLifecycleAllows } from "./venue-lifecycle.js";
+import { telegramCustomEmojiMarkdownV2 } from "./telegram-custom-emoji.js";
 
 type SupportedPositionVenue = "kalshi" | "limitless" | "polymarket";
 
@@ -269,43 +274,58 @@ function renderPosition(detail: TelegramPositionDetail): string {
     detail.averagePrice == null
       ? null
       : detail.position.size * detail.averagePrice;
-  const holding = [
-    `${formatNumber(detail.position.size)} shares`,
-    detail.averagePrice != null
-      ? `Avg ${formatNumber(detail.averagePrice * 100, 1)}¢`
-      : null,
-    cost != null ? `Cost ${formatUsd(cost)}` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const valueLine = [
-    detail.currentValueUsd != null
-      ? `Value ${formatUsd(detail.currentValueUsd)}`
-      : "Value unavailable",
-    detail.pnlUsd != null && detail.pnlPercent != null
-      ? `PnL ${formatSignedUsd(detail.pnlUsd)} (${formatSignedPercent(detail.pnlPercent)})`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const statusLine =
+  const status =
     detail.redemptionStatus === "metadata_unavailable"
-      ? "Market details unavailable"
+      ? { icon: "⚠️", label: "Market details unavailable" }
       : detail.redemptionStatus === "redeemable"
-        ? "Ready to redeem"
+        ? { icon: "✅", label: "Ready to redeem" }
         : detail.redemptionStatus === "market_open"
-          ? null
+          ? { icon: "🟢", label: "Market open" }
           : detail.redemptionStatus === "resolved_not_redeemable" ||
               detail.redemptionStatus === "redeemed"
-            ? "Resolved"
-            : "Waiting for settlement";
+            ? { icon: "🏁", label: "Resolved" }
+            : { icon: "⏳", label: "Waiting for settlement" };
+  const priceAndCost = [
+    detail.averagePrice != null
+      ? formatTelegramFieldMarkdownV2(
+          "Average price",
+          `${formatNumber(detail.averagePrice * 100, 1)}¢`,
+        )
+      : null,
+    cost != null
+      ? formatTelegramFieldMarkdownV2("Cost", formatUsd(cost))
+      : null,
+  ].filter((line): line is string => line != null);
   return [
-    `${formatTelegramVenueLabelMarkdownV2(detail.position.venue)} *${escapeTelegramMarkdownV2(
+    formatTelegramVenueFieldMarkdownV2(detail.position.venue),
+    `🎯 ${formatTelegramFieldMarkdownV2(
+      "Market",
       `${compactTelegramText(detail.marketTitle, 120)} · ${detail.side ?? "POSITION"}`,
-    )}*`,
-    escapeTelegramMarkdownV2(holding),
-    escapeTelegramMarkdownV2(valueLine),
-    statusLine ? escapeTelegramMarkdownV2(statusLine) : null,
+    )}`,
+    `📦 ${formatTelegramFieldMarkdownV2(
+      "Shares",
+      formatNumber(detail.position.size),
+    )}`,
+    ...(priceAndCost.length > 0
+      ? [`💳 ${priceAndCost.join(escapeTelegramMarkdownV2(" · "))}`]
+      : []),
+    `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+      "Value",
+      detail.currentValueUsd != null
+        ? formatUsd(detail.currentValueUsd)
+        : "unavailable",
+    )}`,
+    ...(detail.pnlUsd != null && detail.pnlPercent != null
+      ? [
+          `${detail.pnlUsd >= 0 ? "📈" : "📉"} ${formatTelegramFieldMarkdownV2(
+            "PnL",
+            `${formatSignedUsd(detail.pnlUsd)} (${formatSignedPercent(
+              detail.pnlPercent,
+            )})`,
+          )}`,
+        ]
+      : []),
+    `${status.icon} ${formatTelegramBoldMarkdownV2(status.label)}`,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");
@@ -330,14 +350,15 @@ export const telegramBotPositionsTestHooks = {
 };
 
 const POSITION_GROUPS: Array<{
+  icon: string;
   key: TelegramPositionGroup;
   label: string;
 }> = [
-  { key: "open", label: "Open" },
-  { key: "redeemable", label: "Ready to redeem" },
-  { key: "waiting", label: "Waiting for settlement" },
-  { key: "resolved", label: "Resolved" },
-  { key: "metadata_unavailable", label: "Details unavailable" },
+  { icon: "🟢", key: "open", label: "Open" },
+  { icon: "✅", key: "redeemable", label: "Ready to redeem" },
+  { icon: "⏳", key: "waiting", label: "Waiting for settlement" },
+  { icon: "🏁", key: "resolved", label: "Resolved" },
+  { icon: "⚠️", key: "metadata_unavailable", label: "Details unavailable" },
 ];
 
 export async function loadTelegramPositions(input: {
@@ -505,41 +526,53 @@ export function buildTelegramPositionsSnapshotMessage(input: {
     })
     .filter((group) => group.positions.length > 0);
   const visible: TelegramPositionDetail[] = [];
-  const lines = ["*💼 My positions*", ""];
+  const lines = [`💼 ${formatTelegramBoldMarkdownV2("My positions")}`, ""];
   if (positions.length === 0) {
-    lines.push("No open positions\\.");
+    lines.push(
+      `ℹ️ ${formatTelegramBoldMarkdownV2("No open positions")}`,
+      "",
+      "Markets you trade will appear here\\.",
+    );
   } else {
     if (valued.length > 0) {
       lines.push(
-        escapeTelegramMarkdownV2(`Portfolio value: ${formatUsd(value)}`),
-        escapeTelegramMarkdownV2(`Invested: ${formatUsd(invested)}`),
-        escapeTelegramMarkdownV2(
-          `PnL: ${formatSignedUsd(pnl)}${
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2("Portfolio value", formatUsd(value))}`,
+        `💳 ${formatTelegramFieldMarkdownV2("Invested", formatUsd(invested))}`,
+        `${pnl >= 0 ? "📈" : "📉"} ${formatTelegramFieldMarkdownV2(
+          "PnL",
+          `${formatSignedUsd(pnl)}${
             invested > 0
               ? ` (${formatSignedPercent((pnl / invested) * 100)})`
               : ""
           }`,
-        ),
+        )}`,
       );
       if (valued.length !== positions.length) {
         lines.push(
-          escapeTelegramMarkdownV2(
-            `Valuation coverage: ${valued.length}/${positions.length} positions`,
-          ),
+          `📊 ${formatTelegramFieldMarkdownV2(
+            "Valuation coverage",
+            `${valued.length}/${positions.length} positions`,
+          )}`,
         );
       }
       lines.push("");
     } else {
       lines.push(
-        escapeTelegramMarkdownV2("Portfolio value: unavailable"),
-        escapeTelegramMarkdownV2(
-          `Valuation coverage: 0/${positions.length} positions`,
-        ),
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+          "Portfolio value",
+          "unavailable",
+        )}`,
+        `📊 ${formatTelegramFieldMarkdownV2(
+          "Valuation coverage",
+          `0/${positions.length} positions`,
+        )}`,
         "",
       );
     }
     for (const group of candidateGroups) {
-      const groupLines = [`*${escapeTelegramMarkdownV2(group.label)}*`];
+      const groupLines = [
+        `${group.icon} ${formatTelegramBoldMarkdownV2(group.label)}`,
+      ];
       const accepted: TelegramPositionDetail[] = [];
       for (const position of group.positions) {
         const block = renderPosition(position);
@@ -560,15 +593,18 @@ export function buildTelegramPositionsSnapshotMessage(input: {
       lines.push(groupLines.join("\n\n"), "");
     }
     lines.push(
-      escapeTelegramMarkdownV2(
+      `📊 ${formatTelegramFieldMarkdownV2(
+        "Summary",
         grouped
-          .map((group) => `${group.label}: ${group.positions.length}`)
+          .map((group) => `${group.label} ${group.positions.length}`)
           .join(" · "),
-      ),
+      )}`,
     );
     if (positions.length > visible.length) {
       lines.push(
-        escapeTelegramMarkdownV2(`+ ${positions.length - visible.length} more`),
+        escapeTelegramMarkdownV2(
+          `+ ${positions.length - visible.length} more positions`,
+        ),
       );
     }
     if (positions.some((position) => !position.marketId)) {
@@ -591,7 +627,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
   if (!portfolioButton) {
     lines.push(
       "",
-      escapeTelegramMarkdownV2("Mini App temporarily unavailable."),
+      `⚠️ ${formatTelegramBoldMarkdownV2("Mini App temporarily unavailable")}`,
     );
   }
   return {
@@ -635,7 +671,11 @@ export async function buildTelegramPositionsMessage(input: {
   if (!loaded.linked) {
     return {
       parse_mode: "MarkdownV2",
-      text: "*💼 My positions*\n\nConnect this Telegram account to Hunch first\\.",
+      text: `💼 ${formatTelegramBoldMarkdownV2(
+        "My positions",
+      )}\n\n🔗 ${formatTelegramBoldMarkdownV2(
+        "Account not connected",
+      )}\n\nConnect this Telegram account to Hunch first\\.`,
     };
   }
   return buildTelegramPositionsSnapshotMessage({

@@ -17,9 +17,15 @@ import {
   telegramCustomEmojiMarkdownV2,
   telegramCustomEmojiMarkdownV2ForAsset,
   telegramCustomEmojiMarkdownV2ForNetwork,
+  telegramCustomEmojiMarkdownV2ForVenue,
   telegramNetworkCustomEmojiName,
 } from "./telegram-custom-emoji.js";
-import { formatTelegramVenueLabelMarkdownV2 } from "./telegram-market-identity.js";
+import { formatTelegramVenueLabel } from "./telegram-market-identity.js";
+import {
+  formatTelegramBoldMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+  formatTelegramFieldWithMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import {
   markTelegramNotificationsUnreachable,
   type TelegramNotificationTopic,
@@ -89,7 +95,7 @@ function readNumber(
 }
 
 function formatBold(value: string): string {
-  return `*${escapeTelegramMarkdownV2(value)}*`;
+  return formatTelegramBoldMarkdownV2(value);
 }
 
 function formatItalic(value: string): string {
@@ -162,11 +168,22 @@ function formatNotificationAssetLine(amountLabel: string): string {
   const asset = amountLabel.trim().split(/\s+/).at(-1) ?? null;
   const emoji = telegramCustomEmojiMarkdownV2ForAsset(asset);
   return emoji
-    ? `${emoji} ${escapeTelegramMarkdownV2(amountLabel)}`
-    : escapeTelegramMarkdownV2(amountLabel);
+    ? `${emoji} ${formatTelegramFieldMarkdownV2("Amount", amountLabel)}`
+    : `💰 ${formatTelegramFieldMarkdownV2("Amount", amountLabel)}`;
 }
 
 function formatNotificationNetworkLine(network: string): string {
+  const emoji = telegramCustomEmojiMarkdownV2ForNetwork(network);
+  const semanticName = telegramNetworkCustomEmojiName(network);
+  const label = semanticName
+    ? `${semanticName[0]?.toUpperCase()}${semanticName.slice(1)}`
+    : network;
+  return emoji
+    ? `${emoji} ${formatTelegramFieldMarkdownV2("Network", label)}`
+    : `🌐 ${formatTelegramFieldMarkdownV2("Network", label)}`;
+}
+
+function formatNotificationNetworkInline(network: string): string {
   const emoji = telegramCustomEmojiMarkdownV2ForNetwork(network);
   const semanticName = telegramNetworkCustomEmojiName(network);
   const label = semanticName
@@ -177,6 +194,14 @@ function formatNotificationNetworkLine(network: string): string {
     : escapeTelegramMarkdownV2(label);
 }
 
+function formatNotificationVenueLine(venue: string): string {
+  const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
+  return `${emoji ?? "🌐"} ${formatTelegramFieldMarkdownV2(
+    "Venue",
+    formatTelegramVenueLabel(venue),
+  )}`;
+}
+
 function formatNotificationKnownNetworksInText(value: string): string {
   const matches = Array.from(value.matchAll(/\b(Base|Polygon|Solana)\b/g));
   if (matches.length === 0) return escapeTelegramMarkdownV2(value);
@@ -185,7 +210,7 @@ function formatNotificationKnownNetworksInText(value: string): string {
   for (const match of matches) {
     const index = match.index ?? 0;
     rendered.push(escapeTelegramMarkdownV2(value.slice(offset, index)));
-    rendered.push(formatNotificationNetworkLine(match[0] ?? ""));
+    rendered.push(formatNotificationNetworkInline(match[0] ?? ""));
     offset = index + (match[0]?.length ?? 0);
   }
   rendered.push(escapeTelegramMarkdownV2(value.slice(offset)));
@@ -220,10 +245,10 @@ export function buildTelegramActivityNotificationMessage(input: {
   let actionText: string | null = null;
 
   if (type === "order_filled") {
-    lines.push(formatBold("✅ Order filled"));
+    lines.push(`✅ ${formatBold("Order filled")}`);
     actionText = "View position";
   } else if (type === "deposit_received") {
-    lines.push(formatBold("✅ Deposit received"));
+    lines.push(`✅ ${formatBold("Deposit received")}`);
   } else if (
     type === "bridge_completed" ||
     type === "bridge_refunded" ||
@@ -235,24 +260,26 @@ export function buildTelegramActivityNotificationMessage(input: {
         : type === "bridge_refunded"
           ? "↩️"
           : "⚠️";
-    lines.push(formatBold(`${icon} ${title}`));
+    lines.push(`${icon} ${formatBold(title)}`);
   } else if (type === "redemption_completed") {
-    lines.push(formatBold("✅ Redemption completed"));
+    lines.push(`✅ ${formatBold("Redemption completed")}`);
     actionText = "View position";
   } else if (type === "reward_claim_confirmed") {
-    lines.push(formatBold("🎁 Cashback paid out"));
+    lines.push(`🎁 ${formatBold("Cashback paid out")}`);
   } else if (type === "reward_claim_failed") {
-    lines.push(formatBold("⚠️ Cashback claim failed"));
+    lines.push(`⚠️ ${formatBold("Cashback claim failed")}`);
   } else if (type === "position_resolved") {
     const result = readString(data, "result");
     const resultTitle =
       result === "won" ? "won" : result === "lost" ? "lost" : "settled";
     lines.push(
-      formatBold(`🏁 Your${side ? ` ${side}` : ""} position ${resultTitle}`),
+      `🏁 ${formatBold(
+        `Your${side ? ` ${side}` : ""} position ${resultTitle}`,
+      )}`,
     );
     actionText = "View position";
   } else if (type === "order_cancelled" || type === "order_failed") {
-    lines.push(formatBold(`⚠️ ${title}`));
+    lines.push(`⚠️ ${formatBold(title)}`);
     actionText = "Review order";
   } else {
     return null;
@@ -260,8 +287,10 @@ export function buildTelegramActivityNotificationMessage(input: {
 
   if (marketTitle || venue) {
     lines.push("");
-    if (marketTitle) lines.push(formatBold(marketTitle));
-    if (venue) lines.push(formatTelegramVenueLabelMarkdownV2(venue));
+    if (marketTitle) {
+      lines.push(`🎯 ${formatTelegramFieldMarkdownV2("Market", marketTitle)}`);
+    }
+    if (venue) lines.push(formatNotificationVenueLine(venue));
   }
 
   if (type === "deposit_received") {
@@ -269,22 +298,34 @@ export function buildTelegramActivityNotificationMessage(input: {
     if (amountLabel) details.push(formatNotificationAssetLine(amountLabel));
     if (network) details.push(formatNotificationNetworkLine(network));
     if (details.length > 0) lines.push("", ...details);
-    else if (body) lines.push("", escapeTelegramMarkdownV2(body));
+    else if (body) {
+      lines.push("", `ℹ️ ${formatTelegramFieldMarkdownV2("Details", body)}`);
+    }
   } else if (
     type === "bridge_completed" ||
     type === "bridge_refunded" ||
     type === "bridge_failed"
   ) {
-    if (body) lines.push("", formatNotificationKnownNetworksInText(body));
+    if (body) {
+      lines.push(
+        "",
+        `🌉 ${formatTelegramFieldWithMarkdownV2(
+          "Route",
+          formatNotificationKnownNetworksInText(body),
+        )}`,
+      );
+    }
   } else if (type === "redemption_completed") {
     if (amountUsd != null && amountUsd >= 0) {
       lines.push(
-        `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(
-          `Payout: ${formatUsd(amountUsd)}`,
+        "",
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+          "Payout",
+          formatUsd(amountUsd),
         )}`,
       );
     } else if (body && !venue) {
-      lines.push(escapeTelegramMarkdownV2(body));
+      lines.push(`ℹ️ ${formatTelegramFieldMarkdownV2("Details", body)}`);
     }
   } else if (
     type === "reward_claim_confirmed" ||
@@ -293,14 +334,16 @@ export function buildTelegramActivityNotificationMessage(input: {
     if (body) {
       lines.push(
         "",
-        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatNotificationKnownNetworksInText(
-          body,
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldWithMarkdownV2(
+          "Details",
+          formatNotificationKnownNetworksInText(body),
         )}`,
       );
     } else if (amountUsd != null && amountUsd >= 0) {
       lines.push(
         "",
-        `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+          "Amount",
           formatUsd(amountUsd),
         )}`,
       );
@@ -309,25 +352,41 @@ export function buildTelegramActivityNotificationMessage(input: {
     const resolvedOutcome = normalizeSide(readString(data, "resolvedOutcome"));
     if (resolvedOutcome) {
       lines.push(
-        escapeTelegramMarkdownV2(`Resolved outcome: ${resolvedOutcome}`),
+        `🏁 ${formatTelegramFieldMarkdownV2(
+          "Resolved outcome",
+          resolvedOutcome,
+        )}`,
       );
     }
-    if (body) lines.push(escapeTelegramMarkdownV2(body));
-  } else {
-    const details: string[] = [];
-    if (action) details.push(action);
-    if (side) details.push(side);
-    if (size != null && size > 0 && price != null && price > 0) {
-      details.push(`${formatShares(size)} shares at ${formatPrice(price)}`);
-    } else {
-      if (size != null && size > 0)
-        details.push(`${formatShares(size)} shares`);
-      if (price != null && price > 0) details.push(`at ${formatPrice(price)}`);
+    if (body) {
+      lines.push(`ℹ️ ${formatTelegramFieldMarkdownV2("Details", body)}`);
     }
-    if (details.length > 0) {
-      lines.push(escapeTelegramMarkdownV2(details.join(" · ")));
-    } else if (body && !venue) {
-      lines.push(escapeTelegramMarkdownV2(body));
+  } else {
+    const orderDetails: string[] = [];
+    if (action) orderDetails.push(action);
+    if (side) orderDetails.push(side);
+    if (orderDetails.length > 0) {
+      lines.push(
+        `🛒 ${formatTelegramFieldMarkdownV2(
+          "Order",
+          orderDetails.join(" · "),
+        )}`,
+      );
+    }
+    let fillDetails: string | null = null;
+    if (size != null && size > 0 && price != null && price > 0) {
+      fillDetails = `${formatShares(size)} shares at ${formatPrice(price)}`;
+    } else {
+      if (size != null && size > 0) {
+        fillDetails = `${formatShares(size)} shares`;
+      } else if (price != null && price > 0) {
+        fillDetails = `at ${formatPrice(price)}`;
+      }
+    }
+    if (fillDetails) {
+      lines.push(`📦 ${formatTelegramFieldMarkdownV2("Fill", fillDetails)}`);
+    } else if (orderDetails.length === 0 && body && !venue) {
+      lines.push(`ℹ️ ${formatTelegramFieldMarkdownV2("Details", body)}`);
     }
     if (type === "order_filled" && size && price && size > 0 && price > 0) {
       const valueLabel =
@@ -337,7 +396,10 @@ export function buildTelegramActivityNotificationMessage(input: {
             ? "Estimated proceeds"
             : "Estimated filled value";
       lines.push(
-        escapeTelegramMarkdownV2(`${valueLabel}: ${formatUsd(size * price)}`),
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+          valueLabel,
+          formatUsd(size * price),
+        )}`,
       );
     }
   }

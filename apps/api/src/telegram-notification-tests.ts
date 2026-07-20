@@ -386,7 +386,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
       });
       assert.match(sell?.text ?? "", /SELL · YES/);
-      assert.ok((sell?.text ?? "").includes("Estimated proceeds: $0\\.80"));
+      assert.ok((sell?.text ?? "").includes("*Estimated proceeds:* $0\\.80"));
       assert.doesNotMatch(sell?.text ?? "", /cost/i);
       assert.match(
         sell?.text ?? "",
@@ -407,7 +407,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
       });
       assert.ok(
-        (legacy?.text ?? "").includes("Estimated filled value: $0\\.80"),
+        (legacy?.text ?? "").includes("*Estimated filled value:* $0\\.80"),
       );
 
       const resolved = buildTelegramActivityNotificationMessage({

@@ -2,6 +2,50 @@ export function escapeTelegramMarkdownV2(value: string): string {
   return value.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 }
 
+export function formatTelegramBoldMarkdownV2(value: string): string {
+  return `*${escapeTelegramMarkdownV2(value)}*`;
+}
+
+export function formatTelegramItalicMarkdownV2(value: string): string {
+  return `_${escapeTelegramMarkdownV2(value)}_`;
+}
+
+export function formatTelegramCodeMarkdownV2(value: string): string {
+  return `\`${value.replaceAll("\\", "\\\\").replaceAll("`", "\\`")}\``;
+}
+
+export function formatTelegramTextWithCommandsMarkdownV2(
+  value: string,
+): string {
+  const matches = Array.from(value.matchAll(/(?<![:/])\/[a-z][a-z0-9_]*/gi));
+  if (matches.length === 0) return escapeTelegramMarkdownV2(value);
+  const rendered: string[] = [];
+  let offset = 0;
+  for (const match of matches) {
+    const command = match[0] ?? "";
+    const index = match.index ?? 0;
+    rendered.push(escapeTelegramMarkdownV2(value.slice(offset, index)));
+    rendered.push(formatTelegramCodeMarkdownV2(command));
+    offset = index + command.length;
+  }
+  rendered.push(escapeTelegramMarkdownV2(value.slice(offset)));
+  return rendered.join("");
+}
+
+export function formatTelegramFieldMarkdownV2(
+  label: string,
+  value: string,
+): string {
+  return `${formatTelegramBoldMarkdownV2(`${label}:`)} ${escapeTelegramMarkdownV2(value)}`;
+}
+
+export function formatTelegramFieldWithMarkdownV2(
+  label: string,
+  markdownValue: string,
+): string {
+  return `${formatTelegramBoldMarkdownV2(`${label}:`)} ${markdownValue}`;
+}
+
 export function formatTelegramLivePrice(
   value: number | null | undefined,
 ): string | null {

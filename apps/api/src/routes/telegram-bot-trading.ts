@@ -495,12 +495,12 @@ async function registerTelegramBotTradingRoutes(
               [
                 {
                   callback_data: "hm:v1:positions",
-                  text: "Back to positions",
+                  text: "⬅️ Back to positions",
                 },
               ],
             ],
           },
-          text: "Position details are temporarily unavailable\\. The holding remains visible in My positions\\.",
+          text: "⚠️ *Position details unavailable*\n\nThe holding remains visible in My positions\\.",
         };
       }
       const average =
@@ -542,10 +542,10 @@ async function registerTelegramBotTradingRoutes(
           focusSide: position.side ?? undefined,
           origin: "position",
           positionLines: [
-            `${position.position.size.toFixed(4)} shares · Avg ${average}`,
-            `Live bid ${bid} · PnL ${pnl}`,
-            ...(settlementLine ? [settlementLine] : []),
-            ...(walletSuffix ? [`Wallet …${walletSuffix}`] : []),
+            `Position: ${position.position.size.toFixed(4)} shares · Avg ${average}`,
+            `Live bid: ${bid} · PnL ${pnl}`,
+            ...(settlementLine ? [`Status: ${settlementLine}`] : []),
+            ...(walletSuffix ? [`Wallet: …${walletSuffix}`] : []),
           ],
           positionRedemptionStatus: position.redemptionStatus,
           returnCallbackData: "hm:v1:positions",
@@ -600,7 +600,7 @@ async function registerTelegramBotTradingRoutes(
         ? message
         : {
             ...message,
-            text: `${message.text}\n\nRequired API and finance reconciliation: disabled\\. Trading confirmation is unavailable\\.`,
+            text: `${message.text}\n\n⚠️ *Trading confirmation unavailable*\n\nRequired API and finance reconciliation is disabled\\.`,
           };
     },
   );
@@ -655,7 +655,7 @@ async function registerTelegramBotTradingRoutes(
         ...(openButton
           ? { reply_markup: { inline_keyboard: [[openButton]] } }
           : {}),
-        text: "Trading is temporarily unavailable\\. Open Hunch to trade\\.",
+        text: "⚠️ *Trading temporarily unavailable*\n\nOpen Hunch to trade\\.",
       };
     },
   );

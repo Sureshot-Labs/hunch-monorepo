@@ -1755,7 +1755,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "📡 Signals",
           "👤 Account",
           "🤖 Telegram trading",
-          "◀ Back",
+          "⬅️ Back",
         ],
       );
 
@@ -1783,7 +1783,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         [
           "📈 Trading · 2/3 on",
           "💰 Funds & payouts · 2/3 on",
-          "◀ Back",
+          "⬅️ Back",
           "🏠 Home",
         ],
       );
@@ -1819,7 +1819,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "✅ Deposits received",
           "✅ Bridge results",
           "⬜ Payouts & rewards",
-          "◀ Back",
+          "⬅️ Back",
           "🏠 Home",
         ],
       );
@@ -1843,7 +1843,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         notificationPreferences,
         screen: "account",
       });
-      assert.match(account.text, /Hunch account: Linked/);
+      assert.match(account.text, /\*Hunch account:\* Linked/);
       assert.deepEqual(
         account.keyboard.inline_keyboard
           .flat()
@@ -2100,7 +2100,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(order.text, /Order filled/);
       assert.match(order.text, /Fed decision in July/);
       assert.match(order.text, /100 shares at 62¢/);
-      assert.match(order.text, /Estimated spend: \$62/);
+      assert.match(order.text, /\*Estimated spend:\* \$62/);
       const orderButton = order.keyboard?.inline_keyboard.flat()[0];
       assert.ok(orderButton && "url" in orderButton);
       assert.match(orderButton.url ?? "", /^https:\/\/t\.me\/hunch_bot\/hunch/);
@@ -2126,7 +2126,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.ok(resolved);
       assert.match(resolved.text, /Your YES position won/);
-      assert.match(resolved.text, /Resolved outcome: YES/);
+      assert.match(resolved.text, /\*Resolved outcome:\* YES/);
       assert.equal(
         resolved.keyboard?.inline_keyboard.flat()[0]?.text,
         "View position",
@@ -3117,7 +3117,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         });
         assert.equal(handled, true);
         assert.equal(answers[0]?.showAlert, undefined);
-        assert.equal(answers[0]?.text, "Processing trade…");
+        assert.equal(answers[0]?.text, "⏳ Processing trade…");
         assert.match(messages[0]?.text ?? "", /checking automatically/i);
         assert.match(messages[0]?.text ?? "", /do not retry this market/i);
       } finally {
@@ -3685,7 +3685,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /Buy YES/,
       );
       assert.match(unfundedMessage.text, /Buttons valid/);
-      assert.match(unfundedMessage.text, /Polymarket balance: \$0 available/);
+      assert.match(
+        unfundedMessage.text,
+        /\*Polymarket balance:\* \$0 available/,
+      );
       assert.equal(
         unfundedButtons.some(
           (button) => button.text === "Deposit to Polymarket",
@@ -3765,11 +3768,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "Buy NO · 85¢",
           "Deposit to Limitless",
           "Trade in Hunch",
-          "◀ Back",
+          "⬅️ Back",
         ],
       );
-      assert.match(appFallbackMessage.text, /Trade amount in Hunch: \$10/);
-      assert.match(appFallbackMessage.text, /Limitless balance: \$0 available/);
+      assert.match(appFallbackMessage.text, /\*Trade amount in Hunch:\* \$10/);
+      assert.match(
+        appFallbackMessage.text,
+        /\*Limitless balance:\* \$0 available/,
+      );
       assert.equal(
         appFallbackButtons.some((button) => "url" in button),
         false,
@@ -4306,7 +4312,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(telegram.callbackAnswers[0], {
         callbackQueryId: "callback-1",
         showAlert: true,
-        text: "Action failed. Try again.",
+        text: "⚠️ Action failed. Try again.",
       });
     },
   },
@@ -4399,7 +4405,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(telegram.callbackAnswers[0], {
         callbackQueryId: "callback-1",
         showAlert: true,
-        text: "Trade button expired or invalid. Send /market again.",
+        text: "⚠️ Trade button expired or invalid. Send /market again.",
       });
       assert.equal(telegram.messages.length, 0);
     },
@@ -7420,7 +7426,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ["executing", "executing", "executing", "executing", "failed"],
       );
       assert.equal(updateStatuses[4]?.errorCode, "no_fill");
-      assert.equal(telegram.callbackAnswers[0]?.text, "No fill.");
+      assert.equal(telegram.callbackAnswers[0]?.text, "⚠️ No fill.");
       assert.match(telegram.messages[0]?.text ?? "", /No fill/);
     },
   },
@@ -8621,7 +8627,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             (button) =>
               "callback_data" in button &&
               button.callback_data === "hm:v1:home" &&
-              button.text === "◀ Back",
+              button.text === "⬅️ Back",
           ),
         true,
       );
@@ -9192,12 +9198,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const text = telegram.messages[0]?.text ?? "";
       assert.match(text, /Hunch Signal Bot/);
       assert.match(text, /Admin controls/);
-      assert.match(text, /enable\\_signals/);
-      assert.match(text, /trade\\_status/);
+      assert.match(text, /enable_signals/);
+      assert.match(text, /trade_status/);
       assert.match(text, /\/market/);
-      assert.match(text, /disable\\_trading/);
-      assert.match(text, /test\\_followthrough/);
-      assert.match(text, /test\\_signal/);
+      assert.match(text, /disable_trading/);
+      assert.match(text, /test_followthrough/);
+      assert.match(text, /test_signal/);
       assert.match(text, /open the Hunch Mini App/);
     },
   },
@@ -9395,7 +9401,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sendTestSignal: async () => false,
       });
       assert.equal(handled, true);
-      assert.match(telegram.messages[0]?.text ?? "", /Usage: \/stats/);
+      assert.match(telegram.messages[0]?.text ?? "", /\*Usage\*[\s\S]*\/stats/);
     },
   },
   {
@@ -9452,7 +9458,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(state?.chatType, "channel");
       assert.equal(
         telegram.messages[0]?.text,
-        "Signals enabled for \\-1004249870297\\.",
+        "✅ *Signals enabled for \\-1004249870297*",
       );
     },
   },
@@ -9486,7 +9492,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(state, null);
       assert.equal(
         telegram.messages[0]?.text,
-        "Signals disabled for \\-1004249870297\\.",
+        "✅ *Signals disabled for \\-1004249870297*",
       );
     },
   },

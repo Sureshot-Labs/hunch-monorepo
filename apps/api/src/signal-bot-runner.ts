@@ -351,13 +351,13 @@ export async function runSignalBotRunner(): Promise<void> {
                     return {
                       parse_mode: "MarkdownV2" as const,
                       reply_markup: undefined,
-                      text: "Trading is unavailable right now\\. Open Hunch to trade\\.",
+                      text: "⚠️ *Trading unavailable*\n\nOpen Hunch to trade\\.",
                     };
                   })
               : {
                   parse_mode: "MarkdownV2" as const,
                   reply_markup: undefined,
-                  text: "Trading is unavailable right now\\. Open Hunch to trade\\.",
+                  text: "⚠️ *Trading unavailable*\n\nOpen Hunch to trade\\.",
                 };
             const navigableMessage = withTelegramPrivateNavigation(message);
             const result = await telegram.sendMessage({
@@ -389,7 +389,7 @@ export async function runSignalBotRunner(): Promise<void> {
               ...(fallbackButton
                 ? { reply_markup: { inline_keyboard: [[fallbackButton]] } }
                 : {}),
-              text: "Trading is unavailable\\. Open Hunch to trade\\.",
+              text: "⚠️ *Trading unavailable*\n\nOpen Hunch to trade\\.",
             };
             const message = tradingInternalApi
               ? await tradingInternalApi
@@ -446,7 +446,7 @@ export async function runSignalBotRunner(): Promise<void> {
                     await telegram.answerCallbackQuery({
                       callbackQueryId: callbackQuery.id,
                       showAlert: true,
-                      text: "Trading is unavailable. Open Hunch to trade.",
+                      text: "⚠️ Trading is unavailable. Open Hunch to trade.",
                     });
                     return true;
                   })
@@ -454,7 +454,7 @@ export async function runSignalBotRunner(): Promise<void> {
                   .answerCallbackQuery({
                     callbackQueryId: callbackQuery.id,
                     showAlert: true,
-                    text: "Trading is unavailable. Open Hunch to trade.",
+                    text: "⚠️ Trading is unavailable. Open Hunch to trade.",
                   })
                   .then(() => true),
           telegram,

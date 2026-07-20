@@ -4,7 +4,12 @@ import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 import { fetchEvmCall, fetchEvmCode } from "./polygon-rpc.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
-import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  escapeTelegramMarkdownV2,
+  formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import { recordTelegramDepositResolutionAnalytics } from "./telegram-lifecycle-analytics.js";
@@ -351,17 +356,19 @@ function buildDepositVenueSummaryMarkdownV2(
 ): string {
   const network = depositNetwork(venue);
   return [
-    telegramCustomEmojiMarkdownV2ForVenue(venue),
-    escapeTelegramMarkdownV2(depositVenueLabel(venue)),
-    "·",
-    telegramCustomEmojiMarkdownV2ForNetwork(network),
-    escapeTelegramMarkdownV2(network),
-    "·",
-    telegramCustomEmojiMarkdownV2("usdc"),
-    escapeTelegramMarkdownV2(depositAssetLabel(venue)),
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(" ");
+    `${telegramCustomEmojiMarkdownV2ForVenue(venue)} ${formatTelegramFieldMarkdownV2(
+      "Venue",
+      depositVenueLabel(venue),
+    )}`,
+    `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${formatTelegramFieldMarkdownV2(
+      "Network",
+      network,
+    )}`,
+    `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+      venue === "polymarket" ? "Assets" : "Asset",
+      depositAssetLabel(venue),
+    )}`,
+  ].join("\n");
 }
 
 export function buildTelegramDepositAddressPresentation(input: {
@@ -389,22 +396,31 @@ export function buildTelegramDepositAddressPresentation(input: {
       [
         {
           copy_text: { text: input.address },
-          text: input.copyButtonText ?? "Copy address",
+          text: input.copyButtonText ?? "📋 Copy address",
         },
       ],
       [
         {
           callback_data: `hm:v1:deposit_qr:${input.venue}`,
-          text: "Show QR",
+          text: "🔳 Show QR",
         },
       ],
     ],
     lines,
     markdownV2Lines: [
-      `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${escapeTelegramMarkdownV2(lines[0] ?? "")}`,
-      `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(lines[1] ?? "")}`,
-      escapeTelegramMarkdownV2(lines[2] ?? ""),
-      `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(lines[3] ?? "")}`,
+      `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${formatTelegramFieldMarkdownV2("Network", network)}`,
+      `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+        isPolymarket ? "Assets" : "Asset",
+        assetLabel,
+      )}`,
+      "",
+      `📍 ${formatTelegramBoldMarkdownV2("Deposit address")}`,
+      formatTelegramCodeMarkdownV2(input.address),
+      "",
+      `⚠️ ${formatTelegramBoldMarkdownV2("Important")}`,
+      escapeTelegramMarkdownV2(
+        `Send only ${isPolymarket ? "pUSD or USDC.e on Polygon" : "USDC on Base"} to this address.`,
+      ),
     ],
   };
 }
@@ -447,13 +463,15 @@ function buildDepositVenueMenu(
       escapeTelegramMarkdownV2("Choose a trading venue."),
       "",
       ...(venues.includes("polymarket")
-        ? [buildDepositVenueSummaryMarkdownV2("polymarket")]
+        ? [buildDepositVenueSummaryMarkdownV2("polymarket"), ""]
         : []),
       ...(venues.includes("limitless")
         ? [buildDepositVenueSummaryMarkdownV2("limitless")]
         : []),
       ...(venues.length === 0
         ? [
+            `⚠️ ${formatTelegramBoldMarkdownV2("Funding unavailable")}`,
+            "",
             escapeTelegramMarkdownV2(
               "No trading venue can be funded right now.",
             ),
@@ -500,15 +518,22 @@ function buildDepositUnavailableMessage(input: {
     reply_markup: {
       inline_keyboard: [
         ...(openButton ? [[openButton]] : []),
-        [{ callback_data: "hm:v1:deposit", text: "Back to venues" }],
+        [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
       ],
     },
     text: [
       buildDepositTitleMarkdownV2(input.venue),
       "",
+      `⚠️ ${formatTelegramBoldMarkdownV2("Deposit address unavailable")}`,
+      "",
       escapeTelegramMarkdownV2(text),
       ...(!openButton
-        ? ["", escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
+        ? [
+            "",
+            `⚠️ ${formatTelegramBoldMarkdownV2(
+              "Mini App temporarily unavailable",
+            )}`,
+          ]
         : []),
     ].join("\n"),
   };
@@ -541,11 +566,13 @@ export async function buildTelegramDepositMessage(input: {
       parse_mode: "MarkdownV2",
       reply_markup: {
         inline_keyboard: [
-          [{ callback_data: "hm:v1:deposit", text: "Back to venues" }],
+          [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
         ],
       },
       text: [
         buildDepositTitleMarkdownV2(),
+        "",
+        `⚠️ ${formatTelegramBoldMarkdownV2("Venue unavailable")}`,
         "",
         escapeTelegramMarkdownV2(
           "Deposits for this venue are not available right now.",
@@ -604,7 +631,7 @@ export async function buildTelegramDepositMessage(input: {
       inline_keyboard: [
         ...presentation.buttonRows,
         ...(openButton ? [[openButton]] : []),
-        [{ callback_data: "hm:v1:deposit", text: "Back to venues" }],
+        [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
       ],
     },
     text: [
@@ -612,7 +639,12 @@ export async function buildTelegramDepositMessage(input: {
       "",
       ...presentation.markdownV2Lines,
       ...(!openButton
-        ? ["", escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
+        ? [
+            "",
+            `⚠️ ${formatTelegramBoldMarkdownV2(
+              "Mini App temporarily unavailable",
+            )}`,
+          ]
         : []),
     ].join("\n"),
     venue,

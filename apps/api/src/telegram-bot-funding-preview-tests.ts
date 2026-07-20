@@ -72,15 +72,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         fundingBlock,
-        /escapeMarkdown\("Deposit instead"\),[\s\S]*?\.\.\.depositPresentation\.markdownV2Lines/,
+        /formatTelegramBoldMarkdownV2\("Deposit instead"\)[\s\S]*?\.\.\.depositPresentation\.markdownV2Lines/,
       );
       assert.match(
         fundingBlock,
         /\.\.\.\(depositPresentation\?\.markdownV2Lines \?\? \[/,
       );
       assert.equal(
-        fundingBlock.match(/formatTelegramVenueMarketLineMarkdownV2\(/g)
-          ?.length,
+        fundingBlock.match(/formatTelegramVenueFieldMarkdownV2\(/g)?.length,
         2,
       );
     },
@@ -92,19 +91,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramBotTradingTestHooks.formatTelegramTradeLifecycleMessageMarkdownV2(
           {
             heading: "Trade submitted.",
-            lines: ["BUY YES · $10.00"],
+            lines: ["BUY YES · $10.00", "Check /trade_status before retrying."],
             marketTitle: "Will it happen?",
             venue: "polymarket",
           },
         );
       assert.match(lifecycle, new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id));
-      assert.match(lifecycle, /\) Polymarket/);
+      assert.match(lifecycle, /\) \*Venue:\* Polymarket/);
+      assert.match(lifecycle, /Check `\/trade_status` before retrying\\\./);
       const payout =
         telegramBotTradingTestHooks.formatTelegramUsdcLineMarkdownV2(
           "Received: $10.00 pUSD",
         );
       assert.match(payout, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
-      assert.match(payout, /\) Received/);
+      assert.match(payout, /\) \*Received:\*/);
     },
   },
 ];

@@ -1,4 +1,7 @@
-import { buildTelegramTradeProgressMessage } from "./telegram-bot-trading-presentation.js";
+import {
+  buildTelegramTradeProgressMessage,
+  formatTelegramTextWithCommandsMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 
 export type TelegramBotTradingClientButton = (
@@ -367,7 +370,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
         await callbackInput.answerCallbackQuery({
           callbackQueryId: callbackInput.callbackQuery.id,
           showAlert: true,
-          text: "Trade button expired or invalid. Send /market again.",
+          text: "⚠️ Trade button expired or invalid. Send /market again.",
         });
         return true;
       }
@@ -384,7 +387,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
       if (confirmAcknowledged) {
         await callbackInput.answerCallbackQuery({
           callbackQueryId: callbackInput.callbackQuery.id,
-          text: "Processing trade…",
+          text: "⏳ Processing trade…",
         });
         const chatId = callbackInput.callbackQuery.message?.chat?.id;
         const messageId = callbackInput.callbackQuery.message?.message_id;
@@ -450,7 +453,10 @@ export function createTelegramBotTradingInternalApiClient(input: {
           const chatId = callbackInput.callbackQuery.message?.chat?.id;
           if (chatId != null) {
             const failureMessage = withTelegramPrivateNavigation({
-              text: "Trade execution failed or its status is unknown. Use /trade_status or open Hunch before retrying.",
+              parse_mode: "MarkdownV2",
+              text: `⚠️ *Trade status uncertain*\n\n${formatTelegramTextWithCommandsMarkdownV2(
+                "Use /trade_status or open Hunch before retrying.",
+              )}`,
             });
             await callbackInput.sendMessage({
               chat_id: String(chatId),

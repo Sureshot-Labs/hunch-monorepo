@@ -2,7 +2,10 @@ import {
   telegramCustomEmojiIdForVenue,
   telegramCustomEmojiMarkdownV2ForVenue,
 } from "./telegram-custom-emoji.js";
-import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  escapeTelegramMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 
 function cleanTitle(value: string | null | undefined): string | null {
   const cleaned = value?.trim().replace(/\s+/g, " ");
@@ -38,6 +41,14 @@ export function formatTelegramVenueLabelMarkdownV2(
   const label = escapeTelegramMarkdownV2(formatTelegramVenueLabel(venue));
   const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
   return emoji ? `${emoji} ${label}` : label;
+}
+
+export function formatTelegramVenueFieldMarkdownV2(
+  venue: string | null | undefined,
+): string {
+  const label = formatTelegramVenueLabel(venue);
+  const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
+  return `${emoji ?? "🌐"} ${formatTelegramFieldMarkdownV2("Venue", label)}`;
 }
 
 export function formatTelegramVenueButtonIcon(

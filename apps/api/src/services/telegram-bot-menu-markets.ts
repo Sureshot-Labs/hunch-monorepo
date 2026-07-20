@@ -1,4 +1,9 @@
-import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  escapeTelegramMarkdownV2,
+  formatTelegramBoldMarkdownV2,
+  formatTelegramFieldWithMarkdownV2,
+  formatTelegramItalicMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import {
   canAppendTelegramBlock,
   compactTelegramText,
@@ -7,6 +12,7 @@ import {
 import {
   buildTelegramMarketIdentity,
   formatTelegramVenueButtonIcon,
+  formatTelegramVenueFieldMarkdownV2,
   formatTelegramVenueLabel,
   formatTelegramVenueLabelMarkdownV2,
 } from "./telegram-market-identity.js";
@@ -114,7 +120,7 @@ function price(value: number | null): string {
 }
 
 function bold(value: string): string {
-  return `*${escapeTelegramMarkdownV2(value)}*`;
+  return formatTelegramBoldMarkdownV2(value);
 }
 
 function venueOptions(
@@ -134,10 +140,12 @@ export function buildSignalBotMarketSearchScreen(input: {
   const title = input.query
     ? `Results for “${compactTelegramText(input.query, 120)}”`
     : "Trending markets";
-  const lines = [bold(`🔎 ${title}`), ""];
+  const lines = [`🔎 ${bold(title)}`, ""];
   const visibleResults: SignalBotMarketSearchResult[] = [];
   if (input.results.length === 0) {
     lines.push(
+      `ℹ️ ${bold("Nothing found")}`,
+      "",
       escapeTelegramMarkdownV2(
         "No active markets found. Send another search or paste a market URL.",
       ),
@@ -152,17 +160,32 @@ export function buildSignalBotMarketSearchScreen(input: {
       const options = venueOptions(result);
       const venueLineMarkdownV2 =
         options.length > 1
-          ? `${escapeTelegramMarkdownV2(`${options.length} venues ·`)} ${options
-              .map((option) => formatTelegramVenueLabelMarkdownV2(option.venue))
-              .join(", ")}`
-          : `${formatTelegramVenueLabelMarkdownV2(result.venue)} ${escapeTelegramMarkdownV2(`· YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`)}`;
+          ? `🌐 ${formatTelegramFieldWithMarkdownV2(
+              "Venues",
+              options
+                .map((option) =>
+                  formatTelegramVenueLabelMarkdownV2(option.venue),
+                )
+                .join(escapeTelegramMarkdownV2(" · ")),
+            )}`
+          : `${formatTelegramVenueFieldMarkdownV2(result.venue)} ${escapeTelegramMarkdownV2(
+              "·",
+            )} ${formatTelegramFieldWithMarkdownV2(
+              "Odds",
+              escapeTelegramMarkdownV2(
+                `YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`,
+              ),
+            )}`;
       const block = [
         bold(`${index + 1}. ${compactTelegramText(identity.lines[0], 160)}`),
         ...(identity.lines[1]
           ? [
-              escapeTelegramMarkdownV2(
-                compactTelegramText(identity.lines[1], 160),
-              ),
+              `🎯 ${formatTelegramFieldWithMarkdownV2(
+                "Market",
+                escapeTelegramMarkdownV2(
+                  compactTelegramText(identity.lines[1], 160),
+                ),
+              )}`,
             ]
           : []),
         venueLineMarkdownV2,
@@ -195,8 +218,15 @@ export function buildSignalBotMarketSearchScreen(input: {
         ...visibleResults.map((result, index) => [
           {
             callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
+            ...(venueOptions(result).length === 1
+              ? {
+                  icon_custom_emoji_id: formatTelegramVenueButtonIcon(
+                    result.venue,
+                  ),
+                }
+              : {}),
             text: compactTelegramText(
-              `${index + 1}. ${
+              `${venueOptions(result).length > 1 ? "🌐 " : ""}${index + 1}. ${
                 buildTelegramMarketIdentity({
                   eventTitle: result.eventTitle,
                   marketTitle: result.marketTitle,
@@ -209,7 +239,7 @@ export function buildSignalBotMarketSearchScreen(input: {
         [
           {
             callback_data: `${input.callbackPrefix}trading:market_input`,
-            text: "New search",
+            text: "🔎 New search",
           },
           {
             callback_data: `${input.callbackPrefix}home`,
@@ -249,7 +279,7 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
         [
           {
             callback_data: `${input.callbackPrefix}search_back:${input.sessionId}`,
-            text: "Back to results",
+            text: "⬅️ Back to results",
           },
           {
             callback_data: `${input.callbackPrefix}home`,
@@ -259,23 +289,34 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
       ],
     },
     text: [
-      bold("Choose a venue"),
+      `🌐 ${bold("Choose a venue")}`,
       "",
       bold(compactTelegramText(identity.lines[0], 180)),
       ...(identity.lines[1]
         ? [
-            escapeTelegramMarkdownV2(
-              compactTelegramText(identity.lines[1], 180),
-            ),
+            `🎯 ${formatTelegramFieldWithMarkdownV2(
+              "Market",
+              escapeTelegramMarkdownV2(
+                compactTelegramText(identity.lines[1], 180),
+              ),
+            )}`,
           ]
         : []),
       "",
       escapeTelegramMarkdownV2(
         `This market is available on ${options.length} venues. Choose where to trade.`,
       ),
+      "",
       ...options.map(
         (option) =>
-          `${formatTelegramVenueLabelMarkdownV2(option.venue)} ${escapeTelegramMarkdownV2(`· YES ${price(option.yesAsk)} · NO ${price(option.noAsk)}`)}`,
+          `${formatTelegramVenueFieldMarkdownV2(option.venue)} ${escapeTelegramMarkdownV2(
+            "·",
+          )} ${formatTelegramFieldWithMarkdownV2(
+            "Odds",
+            escapeTelegramMarkdownV2(
+              `YES ${price(option.yesAsk)} · NO ${price(option.noAsk)}`,
+            ),
+          )}`,
       ),
     ].join("\n"),
   };
@@ -290,7 +331,7 @@ export function buildSignalBotMarketSearchUnavailableScreen(input: {
         [
           {
             callback_data: `${input.callbackPrefix}trading:market_input`,
-            text: "Try again",
+            text: "🔄 Try again",
           },
           {
             callback_data: `${input.callbackPrefix}home`,
@@ -300,7 +341,9 @@ export function buildSignalBotMarketSearchUnavailableScreen(input: {
       ],
     },
     text: [
-      bold("🔎 Markets"),
+      `🔎 ${bold("Markets")}`,
+      "",
+      `⚠️ ${bold("Search unavailable")}`,
       "",
       escapeTelegramMarkdownV2(
         "Search is temporarily unavailable. Send another search to try again.",
@@ -318,7 +361,7 @@ export function buildSignalBotMarketSearchQueryPrompt(input: {
         [
           {
             callback_data: `${input.callbackPrefix}trading:market_input`,
-            text: "New search",
+            text: "🔎 New search",
           },
           {
             callback_data: `${input.callbackPrefix}home`,
@@ -328,11 +371,13 @@ export function buildSignalBotMarketSearchQueryPrompt(input: {
       ],
     },
     text: [
-      bold("🔎 Markets"),
+      `🔎 ${bold("Markets")}`,
       "",
       escapeTelegramMarkdownV2(
-        "Send at least 2 characters, a market URL, or a market ID.",
+        "Send a market name, person, team, market URL, or market ID.",
       ),
+      "",
+      formatTelegramItalicMarkdownV2("Enter at least 2 characters."),
     ].join("\n"),
   };
 }
@@ -340,9 +385,11 @@ export function buildSignalBotMarketSearchQueryPrompt(input: {
 export function buildSignalBotMarketSearchProgressScreen(): SignalBotMarketSearchMessage {
   return {
     reply_markup: { inline_keyboard: [] },
-    text: [bold("🔎 Markets"), "", escapeTelegramMarkdownV2("Searching…")].join(
-      "\n",
-    ),
+    text: [
+      `🔎 ${bold("Markets")}`,
+      "",
+      escapeTelegramMarkdownV2("Searching…"),
+    ].join("\n"),
   };
 }
 
@@ -357,7 +404,7 @@ export function buildSignalBotMarketUnavailableResultScreen(input: {
         [
           {
             callback_data: `${input.callbackPrefix}search_back:${input.sessionId}`,
-            text: "Back to results",
+            text: "⬅️ Back to results",
           },
           {
             callback_data: `${input.callbackPrefix}home`,
@@ -367,11 +414,11 @@ export function buildSignalBotMarketUnavailableResultScreen(input: {
       ],
     },
     text: [
-      bold(
+      `⚠️ ${bold(
         input.temporary
           ? "Market temporarily unavailable"
           : "Market unavailable",
-      ),
+      )}`,
       "",
       escapeTelegramMarkdownV2(
         input.temporary

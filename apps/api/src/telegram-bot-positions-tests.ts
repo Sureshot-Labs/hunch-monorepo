@@ -105,7 +105,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramMiniAppEnabled: true,
       });
       assert.match(message.text, /Details unavailable/);
-      assert.match(message.text, /Valuation coverage: 0\/1/);
+      assert.match(message.text, /\*Valuation coverage:\* 0\/1/);
       assert.match(message.text, /tg:\/\/emoji\?id=/);
       assert.match(message.text, /Polymarket/);
       assert.equal(message.reply_markup?.inline_keyboard.length, 1);
@@ -127,7 +127,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramMiniAppEnabled: true,
       });
       assert.match(message.text, /Portfolio value/);
-      assert.match(message.text, /PnL:/);
+      assert.match(message.text, /\*PnL:\*/);
       assert.ok(
         telegramPayloadLength(message.text) <= TELEGRAM_MESSAGE_PAYLOAD_BUDGET,
       );

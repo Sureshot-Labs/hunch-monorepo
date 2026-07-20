@@ -57,6 +57,12 @@ import type {
 import { isDefinitiveSubmitRejection } from "./telegram-bot-trading-submit-error.js";
 import {
   escapeTelegramMarkdownV2 as escapeMarkdown,
+  formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+  formatTelegramFieldWithMarkdownV2,
+  formatTelegramItalicMarkdownV2,
+  formatTelegramTextWithCommandsMarkdownV2,
   formatTelegramLivePrice as formatLivePrice,
   formatTelegramQuotePrice,
   formatTelegramQuoteTtl as formatQuoteTtl,
@@ -82,6 +88,7 @@ import {
   telegramCustomEmojiId,
   telegramCustomEmojiMarkdownV2,
   telegramCustomEmojiMarkdownV2ForNetwork,
+  telegramCustomEmojiMarkdownV2ForVenue,
 } from "./telegram-custom-emoji.js";
 import {
   buildSignalBotBuyStartParam,
@@ -105,42 +112,98 @@ const EXISTING_TRADE_RESOLVING_MESSAGE =
 const UNKNOWN_TRADE_RESOLVING_MESSAGE =
   "Trade status is unknown. The bot is checking the venue automatically; no action is needed. Check /trade_status before retrying.";
 
-function formatTelegramVenueMarketLineMarkdownV2(
-  venue: string,
-  marketTitle: string,
-): string {
-  return `${formatTelegramVenueLabelMarkdownV2(venue)} ${escapeMarkdown(
-    `· ${marketTitle}`,
-  )}`;
-}
-
 function formatTelegramVenueFieldMarkdownV2(venue: string): string {
-  return `${escapeMarkdown("Venue:")} ${formatTelegramVenueLabelMarkdownV2(
-    venue,
+  const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
+  return `${emoji ?? "🌐"} ${formatTelegramFieldMarkdownV2(
+    "Venue",
+    formatTelegramVenueLabel(venue),
   )}`;
 }
 
 function formatTelegramUsdcLineMarkdownV2(value: string): string {
-  return `${telegramCustomEmojiMarkdownV2("usdc")} ${escapeMarkdown(value)}`;
+  const field = value.match(/^([^:\n]{1,48}):\s+(.+)$/);
+  return `${telegramCustomEmojiMarkdownV2("usdc")} ${
+    field
+      ? formatTelegramFieldMarkdownV2(field[1] ?? "Amount", field[2] ?? "")
+      : escapeMarkdown(value)
+  }`;
 }
 
 function formatTelegramKnownNetworksInTextMarkdownV2(value: string): string {
   const matches = Array.from(value.matchAll(/\b(Base|Polygon|Solana)\b/g));
-  if (matches.length === 0) return escapeMarkdown(value);
+  if (matches.length === 0)
+    return formatTelegramTextWithCommandsMarkdownV2(value);
   const rendered: string[] = [];
   let offset = 0;
   for (const match of matches) {
     const label = match[0] ?? "";
     const index = match.index ?? 0;
     const emoji = telegramCustomEmojiMarkdownV2ForNetwork(label);
-    rendered.push(escapeMarkdown(value.slice(offset, index)));
+    rendered.push(
+      formatTelegramTextWithCommandsMarkdownV2(value.slice(offset, index)),
+    );
     rendered.push(
       emoji ? `${emoji} ${escapeMarkdown(label)}` : escapeMarkdown(label),
     );
     offset = index + label.length;
   }
-  rendered.push(escapeMarkdown(value.slice(offset)));
+  rendered.push(formatTelegramTextWithCommandsMarkdownV2(value.slice(offset)));
   return rendered.join("");
+}
+
+const TELEGRAM_MARKET_FIELD_ICONS: Readonly<Record<string, string>> = {
+  "Add at least": telegramCustomEmojiMarkdownV2("usdc"),
+  Ask: "📈",
+  Available: telegramCustomEmojiMarkdownV2("usdc"),
+  "Bid/ask": "📊",
+  Bid: "📉",
+  Buy: "🟢",
+  "Current buy odds": "📊",
+  "Last traded": "📊",
+  "Live bid": "📉",
+  "Maximum spend": telegramCustomEmojiMarkdownV2("usdc"),
+  Order: "🛒",
+  PnL: "📈",
+  Position: "📦",
+  "Ready now": telegramCustomEmojiMarkdownV2("usdc"),
+  Sell: "🔴",
+  "Trade amount in Hunch": telegramCustomEmojiMarkdownV2("usdc"),
+  Wallet: "👛",
+};
+
+function formatTelegramMarketCardLineMarkdownV2(value: string): string {
+  if (!value) return "";
+  const field = value.match(/^([^:\n]{1,40}):\s+(.+)$/);
+  if (field) {
+    const label = field[1] ?? "Details";
+    const rawValue = field[2] ?? "";
+    const icon =
+      TELEGRAM_MARKET_FIELD_ICONS[label] ??
+      (label.endsWith(" balance")
+        ? telegramCustomEmojiMarkdownV2("usdc")
+        : "ℹ️");
+    return `${icon} ${formatTelegramFieldWithMarkdownV2(
+      label,
+      formatTelegramKnownNetworksInTextMarkdownV2(rawValue),
+    )}`;
+  }
+  if (value === EXISTING_TRADE_RESOLVING_MESSAGE) {
+    return `⏳ ${formatTelegramBoldMarkdownV2(
+      "Trade still resolving",
+    )}\n${formatTelegramTextWithCommandsMarkdownV2(value)}`;
+  }
+  const icon =
+    /unavailable|not open|not enabled|not ready|disabled|too low|no executable|no bot buy|must be|failed/i.test(
+      value,
+    )
+      ? "⚠️"
+      : /valid for|preview only|open hunch|link telegram|enable telegram|trade in hunch/i.test(
+            value,
+          )
+        ? "ℹ️"
+        : null;
+  const rendered = formatTelegramKnownNetworksInTextMarkdownV2(value);
+  return icon ? `${icon} ${rendered}` : rendered;
 }
 
 function formatTelegramTradeLifecycleMessageMarkdownV2(input: {
@@ -149,15 +212,49 @@ function formatTelegramTradeLifecycleMessageMarkdownV2(input: {
   marketTitle: string;
   venue: string;
 }): string {
-  return [
-    escapeMarkdown(input.heading),
-    formatTelegramVenueMarketLineMarkdownV2(input.venue, input.marketTitle),
-    ...(input.lines ?? []).map((line) =>
-      line == null ? null : escapeMarkdown(line),
-    ),
-  ]
+  const normalizedHeading = input.heading.replace(/[.!]+$/g, "");
+  const headingIcon = /filled|completed|submitted|ready|success/i.test(
+    normalizedHeading,
+  )
+    ? "✅"
+    : /processing|resolving|checking|loading|building/i.test(normalizedHeading)
+      ? "⏳"
+      : /failed|not |unavailable|expired|cancel|changed|attention|unknown/i.test(
+            normalizedHeading,
+          )
+        ? "⚠️"
+        : "ℹ️";
+  const detailLines = (input.lines ?? [])
     .filter((line): line is string => line != null)
-    .join("\n");
+    .map((line) => {
+      const order = line.match(/^(BUY|SELL)\s+(.+)$/);
+      if (order) {
+        return `🛒 ${formatTelegramFieldMarkdownV2(
+          "Order",
+          `${order[1]} ${order[2]}`,
+        )}`;
+      }
+      const field = line.match(/^([^:\n]{1,48}):\s+(.+)$/);
+      if (!field) return formatTelegramTextWithCommandsMarkdownV2(line);
+      const label = field[1] ?? "Details";
+      const value = field[2] ?? "";
+      const copyable = /^(Order|Transaction|Tx|Signature)$/i.test(label);
+      return `${copyable ? "🔗" : "ℹ️"} ${
+        copyable
+          ? formatTelegramFieldWithMarkdownV2(
+              label,
+              formatTelegramCodeMarkdownV2(value),
+            )
+          : formatTelegramFieldMarkdownV2(label, value)
+      }`;
+    });
+  return [
+    `${headingIcon} ${formatTelegramBoldMarkdownV2(normalizedHeading)}`,
+    "",
+    formatTelegramVenueFieldMarkdownV2(input.venue),
+    `🎯 ${formatTelegramFieldMarkdownV2("Market", input.marketTitle)}`,
+    ...(detailLines.length > 0 ? ["", ...detailLines] : []),
+  ].join("\n");
 }
 
 export type TelegramBotTradingButton = (
@@ -2827,55 +2924,83 @@ export async function buildTelegramBotTradingStatusMessage(
     status.enabledVenues.length > 0
       ? status.enabledVenues
       : policy.tradingVenues;
+  const actions = (["buy", "sell", "redeem"] as const)
+    .filter((action) => status.actionStatuses[action].enabled)
+    .map(
+      (action) =>
+        `${action.toUpperCase()} ${status.actionStatuses[action].ready ? "ready" : "not ready"}`,
+    )
+    .join(" · ");
+  const walletValue =
+    status.authorizations.length > 1
+      ? escapeMarkdown(`${status.authorizations.length} wallets enabled`)
+      : status.walletAddress
+        ? formatTelegramCodeMarkdownV2(status.walletAddress)
+        : escapeMarkdown("not selected");
+  const venuesValue =
+    enabledVenues.length > 0
+      ? enabledVenues
+          .map((venue) => formatTelegramVenueLabelMarkdownV2(venue))
+          .join(escapeMarkdown(" · "))
+      : escapeMarkdown("none enabled");
   const lines = [
-    "Telegram Trading Status",
+    `🤖 ${formatTelegramBoldMarkdownV2("Telegram Trading Status")}`,
     "",
-    `Runtime policy: ${policy.tradingEnabled ? "enabled" : "disabled"}`,
-    `Linked account: ${status.linked ? "yes" : "no"}`,
-    `Bot trading: ${status.enabled ? "enabled" : "disabled"}`,
-    `Wallet: ${
-      status.authorizations.length > 1
-        ? `${status.authorizations.length} wallets enabled`
-        : (status.walletAddress ?? "not selected")
-    }`,
-    null,
-    `Max buy: ${formatUsd(status.maxAmountUsd ?? policy.maxTradeAmountUsd)}`,
-    `Direct execution: ${status.directExecutionReady ? "ready" : "not ready"}`,
-    `Actions: ${
-      (["buy", "sell", "redeem"] as const)
-        .filter((action) => status.actionStatuses[action].enabled)
-        .map(
-          (action) =>
-            `${action.toUpperCase()} ${status.actionStatuses[action].ready ? "ready" : "not ready"}`,
-        )
-        .join(" · ") || "none enabled"
-    }`,
+    `⚙️ ${formatTelegramFieldMarkdownV2(
+      "Runtime policy",
+      policy.tradingEnabled ? "Enabled" : "Disabled",
+    )}`,
+    `🔗 ${formatTelegramFieldMarkdownV2(
+      "Linked account",
+      status.linked ? "Yes" : "No",
+    )}`,
+    `🤖 ${formatTelegramFieldMarkdownV2(
+      "Bot trading",
+      status.enabled ? "Enabled" : "Disabled",
+    )}`,
+    `👛 ${formatTelegramFieldWithMarkdownV2("Wallet", walletValue)}`,
+    `🌐 ${formatTelegramFieldWithMarkdownV2("Venues", venuesValue)}`,
+    "",
+    `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+      "Max buy",
+      formatUsd(status.maxAmountUsd ?? policy.maxTradeAmountUsd),
+    )}`,
+    `⚡ ${formatTelegramFieldMarkdownV2(
+      "Direct execution",
+      status.directExecutionReady ? "Ready" : "Not ready",
+    )}`,
+    `🧰 ${formatTelegramFieldMarkdownV2("Actions", actions || "None enabled")}`,
   ];
   if (unresolvedIntentCount > 0) {
     lines.push(
       "",
-      `Resolving trades: ${unresolvedIntentCount}`,
+      `⏳ ${formatTelegramFieldMarkdownV2(
+        "Resolving trades",
+        String(unresolvedIntentCount),
+      )}`,
       ...resolvingIntents.map(
         (intent) =>
-          `• ${intent.action.toUpperCase()} · ${intent.marketTitle} · ${intent.ageMinutes}m`,
+          `• ${escapeMarkdown(
+            `${intent.action.toUpperCase()} · ${intent.marketTitle} · ${intent.ageMinutes}m`,
+          )}`,
       ),
-      "User action required: no. The bot is checking automatically.",
+      "",
+      `🤖 ${formatTelegramFieldMarkdownV2("User action required", "No")}`,
+      formatTelegramItalicMarkdownV2(
+        "The bot is checking these trades automatically.",
+      ),
     );
   }
-  if (status.setupIssue) lines.push("", status.setupIssue);
-  const renderedLines = lines.map((line) =>
-    line == null ? "" : formatTelegramKnownNetworksInTextMarkdownV2(line),
-  );
-  renderedLines[6] = `${escapeMarkdown("Venues:")} ${
-    enabledVenues.length > 0
-      ? enabledVenues
-          .map((venue) => formatTelegramVenueLabelMarkdownV2(venue))
-          .join(escapeMarkdown(", "))
-      : escapeMarkdown("none enabled")
-  }`;
+  if (status.setupIssue) {
+    lines.push(
+      "",
+      `⚠️ ${formatTelegramBoldMarkdownV2("Setup needs attention")}`,
+      formatTelegramKnownNetworksInTextMarkdownV2(status.setupIssue),
+    );
+  }
   return {
     parse_mode: "MarkdownV2",
-    text: renderedLines.join("\n"),
+    text: lines.join("\n"),
   };
 }
 
@@ -3387,15 +3512,36 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   });
   if (input.context?.returnCallbackData) {
     keyboard.push([
-      { callback_data: input.context.returnCallbackData, text: "◀ Back" },
+      { callback_data: input.context.returnCallbackData, text: "⬅️ Back" },
     ]);
   }
 
-  const renderedLines = lines.map((line) =>
-    formatTelegramKnownNetworksInTextMarkdownV2(line),
-  );
+  const marketIdentityStartIndex = 2;
+  const renderedLines = lines.map((line, index) => {
+    if (index === 0) {
+      return `${input.isAdminTest ? "🧪" : "🎯"} ${formatTelegramBoldMarkdownV2(
+        line,
+      )}`;
+    }
+    if (
+      index >= marketIdentityStartIndex &&
+      index < marketIdentityStartIndex + marketIdentity.lines.length
+    ) {
+      const label =
+        marketIdentity.lines.length > 1 && index === marketIdentityStartIndex
+          ? "Event"
+          : "Market";
+      return `${label === "Event" ? "🏆" : "🎯"} ${formatTelegramFieldMarkdownV2(
+        label,
+        line,
+      )}`;
+    }
+    return formatTelegramMarketCardLineMarkdownV2(line);
+  });
   renderedLines[venueLineIndex] =
-    `${formatTelegramVenueLabelMarkdownV2(market.venue)} ${escapeMarkdown(`· ${market.status}`)}`;
+    `${formatTelegramVenueFieldMarkdownV2(market.venue)} ${escapeMarkdown(
+      "·",
+    )} ${formatTelegramFieldMarkdownV2("Status", market.status)}`;
 
   return {
     marketFound: true,
@@ -3945,25 +4091,25 @@ async function answerIntentAlreadyProcessed(
     text: (() => {
       switch (status) {
         case "executing":
-          return "Trade is already being processed.";
+          return "⏳ Trade is already being processed.";
         case "reconcile_required":
-          return UNKNOWN_TRADE_RESOLVING_MESSAGE;
+          return `⏳ ${UNKNOWN_TRADE_RESOLVING_MESSAGE}`;
         case "expired":
-          return "These buttons expired. Send /market again.";
+          return "⚠️ These buttons expired. Send /market again.";
         case "failed":
           return intent.submit_started_at
-            ? "The submitted trade did not fill. Check /trade_status."
-            : "Trade failed before submission. Nothing was sent. Send /market again.";
+            ? "⚠️ The submitted trade did not fill. Check /trade_status."
+            : "⚠️ Trade failed before submission. Nothing was sent. Send /market again.";
         case "cancelled":
           return intent.error_message?.trim()
-            ? `Trade cancelled: ${intent.error_message.trim()}`
-            : "Trade was cancelled. Nothing was submitted.";
+            ? `⚠️ Trade cancelled: ${intent.error_message.trim()}`
+            : "✅ Trade was cancelled. Nothing was submitted.";
         case "submitted":
-          return "Trade was submitted. Check /trade_status for the result.";
+          return "✅ Trade was submitted. Check /trade_status for the result.";
         case "filled":
-          return "Trade already filled. Check /trade_status for details.";
+          return "✅ Trade already filled. Check /trade_status for details.";
         default:
-          return "This trade action is no longer active. Send /market again.";
+          return "⚠️ This trade action is no longer active. Send /market again.";
       }
     })(),
   });
@@ -4004,7 +4150,7 @@ async function handleTelegramRedeemCallback(input: {
     await callback.answerCallbackQuery({
       callbackQueryId: callback.callbackQuery.id,
       showAlert: true,
-      text: "Redemption is not ready. Open Hunch Settings.",
+      text: "⚠️ Redemption is not ready. Open Hunch Settings.",
     });
     return true;
   }
@@ -4024,7 +4170,7 @@ async function handleTelegramRedeemCallback(input: {
     await callback.answerCallbackQuery({
       callbackQueryId: callback.callbackQuery.id,
       showAlert: true,
-      text: "Position is no longer redeemable.",
+      text: "⚠️ Position is no longer redeemable.",
     });
     return true;
   }
@@ -4059,7 +4205,7 @@ async function handleTelegramRedeemCallback(input: {
     );
     await callback.answerCallbackQuery({
       callbackQueryId: callback.callbackQuery.id,
-      text: "Review redemption…",
+      text: "👀 Review redemption…",
     });
     await callback.sendMessage({
       chat_id: chatId,
@@ -4074,29 +4220,34 @@ async function handleTelegramRedeemCallback(input: {
             },
             {
               callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
-              text: "Cancel",
+              text: "❌ Cancel",
             },
           ],
         ],
       },
       text: [
-        escapeMarkdown("Confirm real redemption"),
+        `♻️ ${formatTelegramBoldMarkdownV2("Confirm redemption")}`,
         "",
         formatTelegramVenueFieldMarkdownV2("polymarket"),
-        escapeMarkdown(`Market: ${market.title}`),
-        escapeMarkdown(
-          `YES balance: ${ethers.formatUnits(plan.yesBalanceRaw ?? "0", 6)} shares`,
-        ),
-        escapeMarkdown(
-          `NO balance: ${ethers.formatUnits(plan.noBalanceRaw ?? "0", 6)} shares`,
-        ),
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", market.title)}`,
+        `📈 ${formatTelegramFieldMarkdownV2(
+          "YES balance",
+          `${ethers.formatUnits(plan.yesBalanceRaw ?? "0", 6)} shares`,
+        )}`,
+        `📉 ${formatTelegramFieldMarkdownV2(
+          "NO balance",
+          `${ethers.formatUnits(plan.noBalanceRaw ?? "0", 6)} shares`,
+        )}`,
         formatTelegramUsdcLineMarkdownV2(
           `Expected payout: ${formatUsd(Number(plan.expectedPayoutRaw) / 1_000_000)} pUSD`,
         ),
-        escapeMarkdown(
-          `Canonical deposit wallet: ${credentials?.funderAddress ?? "unavailable"}`,
-        ),
         "",
+        `📍 ${formatTelegramBoldMarkdownV2("Canonical deposit wallet")}`,
+        credentials?.funderAddress
+          ? formatTelegramCodeMarkdownV2(credentials.funderAddress)
+          : escapeMarkdown("Unavailable"),
+        "",
+        `⚠️ ${formatTelegramBoldMarkdownV2("Real on-chain action")}`,
         escapeMarkdown(
           "This is a real on-chain redemption. Confirm only if you want the bot to submit it now.",
         ),
@@ -4275,12 +4426,19 @@ async function handleTelegramRedeemCallback(input: {
       chat_id: chatId,
       parse_mode: "MarkdownV2",
       text: [
-        escapeMarkdown("Redemption confirmed."),
-        formatTelegramVenueMarketLineMarkdownV2("polymarket", market.title),
+        `✅ ${formatTelegramBoldMarkdownV2("Redemption confirmed")}`,
+        "",
+        formatTelegramVenueFieldMarkdownV2("polymarket"),
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", market.title)}`,
         formatTelegramUsdcLineMarkdownV2(
           `Received: ${formatUsd(Number(actualPayoutRaw) / 1_000_000)} pUSD`,
         ),
-        txHash ? escapeMarkdown(`Transaction: ${txHash}`) : null,
+        txHash
+          ? `🔗 ${formatTelegramFieldWithMarkdownV2(
+              "Transaction",
+              formatTelegramCodeMarkdownV2(txHash),
+            )}`
+          : null,
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n"),
@@ -4342,7 +4500,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Trade action does not match this request.",
+      text: "⚠️ Trade action does not match this request.",
     });
     return true;
   }
@@ -4352,7 +4510,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Open a private chat with the bot first.",
+      text: "⚠️ Open a private chat with the bot first.",
     });
     return true;
   }
@@ -4362,7 +4520,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Trade intent was not found.",
+      text: "⚠️ Trade intent was not found.",
     });
     return true;
   }
@@ -4370,7 +4528,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "This trade button belongs to another Telegram user.",
+      text: "⚠️ This trade button belongs to another Telegram user.",
     });
     return true;
   }
@@ -4382,7 +4540,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Trade action does not match this button.",
+      text: "⚠️ Trade action does not match this button.",
     });
     return true;
   }
@@ -4396,7 +4554,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Open the original private bot chat to use this trade button.",
+      text: "⚠️ Open the original private bot chat to use this trade button.",
     });
     return true;
   }
@@ -4435,7 +4593,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Trade intent expired. Send /market again.",
+      text: "⚠️ Trade intent expired. Send /market again.",
     });
     return true;
   }
@@ -4453,7 +4611,7 @@ export async function handleTelegramBotTradingCallback(
     }
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
-      text: "Cancelled.",
+      text: "✅ Cancelled.",
     });
     await input.sendMessage({
       chat_id: chatId,
@@ -4497,7 +4655,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Market venue changed. Send /market again.",
+      text: "⚠️ Market venue changed. Send /market again.",
     });
     return true;
   }
@@ -4506,7 +4664,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Redemption action does not match this button.",
+        text: "⚠️ Redemption action does not match this button.",
       });
       return true;
     }
@@ -4582,7 +4740,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Bot trading is not ready. Check /trade_status.",
+      text: "⚠️ Bot trading is not ready. Check /trade_status.",
     });
     if (market) {
       const openButton = buildTelegramTradingMiniAppButton({
@@ -4620,7 +4778,7 @@ export async function handleTelegramBotTradingCallback(
       telegramUserId: intent.telegram_user_id,
     });
     if (unresolvedIntent) {
-      const text = EXISTING_TRADE_RESOLVING_MESSAGE;
+      const text = `⏳ ${EXISTING_TRADE_RESOLVING_MESSAGE}`;
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
@@ -4645,13 +4803,13 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Open Hunch to place this trade.",
+        text: "⚠️ Open Hunch to place this trade.",
       });
       return true;
     }
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
-      text: "Building a fresh quote…",
+      text: "⏳ Building a fresh quote…",
     });
     const previewIntent =
       action === "SELL" && sharesRaw != null
@@ -4864,29 +5022,35 @@ export async function handleTelegramBotTradingCallback(
                 [
                   {
                     callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,
-                    text: "Check balance & continue",
+                    text: "🔄 Check balance & continue",
                   },
                 ],
                 ...telegramTradingButtonRows(openMarketButton),
               ],
             },
             text: [
-              escapeMarkdown("Convert to continue"),
+              `🔄 ${formatTelegramBoldMarkdownV2("Convert to continue")}`,
               "",
-              formatTelegramVenueMarketLineMarkdownV2(
-                intent.venue,
+              formatTelegramVenueFieldMarkdownV2(intent.venue),
+              `🎯 ${formatTelegramFieldMarkdownV2(
+                "Market",
                 `${market.title} · ${sideLabel(market, side)}`,
+              )}`,
+              formatTelegramUsdcLineMarkdownV2(
+                `Maximum spend: ${formatUsd(previewMaxSpendUsd)}`,
               ),
-              escapeMarkdown(`Maximum spend: ${formatUsd(previewMaxSpendUsd)}`),
-              escapeMarkdown(`Ready now: ${formatUsd(executableFundsUsd)}`),
+              formatTelegramUsdcLineMarkdownV2(
+                `Ready now: ${formatUsd(executableFundsUsd)}`,
+              ),
               "",
+              `ℹ️ ${formatTelegramBoldMarkdownV2("Why conversion is needed")}`,
               escapeMarkdown(
                 "You have supported funds, but they need conversion in Hunch before this order can be confirmed.",
               ),
               ...(depositPresentation
                 ? [
                     "",
-                    escapeMarkdown("Deposit instead"),
+                    `📥 ${formatTelegramBoldMarkdownV2("Deposit instead")}`,
                     ...depositPresentation.markdownV2Lines,
                   ]
                 : []),
@@ -4903,26 +5067,34 @@ export async function handleTelegramBotTradingCallback(
               [
                 {
                   callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intent.id}`,
-                  text: "Check balance & continue",
+                  text: "🔄 Check balance & continue",
                 },
               ],
               ...telegramTradingButtonRows(openMarketButton),
             ],
           },
           text: [
-            escapeMarkdown("Deposit to continue"),
+            `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramBoldMarkdownV2(
+              "Deposit to continue",
+            )}`,
             "",
-            formatTelegramVenueMarketLineMarkdownV2(
-              intent.venue,
+            formatTelegramVenueFieldMarkdownV2(intent.venue),
+            `🎯 ${formatTelegramFieldMarkdownV2(
+              "Market",
               `${market.title} · ${sideLabel(market, side)}`,
+            )}`,
+            formatTelegramUsdcLineMarkdownV2(
+              `Order: ${formatUsd(amountUsd ?? 0)}`,
             ),
-            escapeMarkdown(`Order: ${formatUsd(amountUsd ?? 0)}`),
-            escapeMarkdown(`Maximum spend: ${formatUsd(previewMaxSpendUsd)}`),
+            formatTelegramUsdcLineMarkdownV2(
+              `Maximum spend: ${formatUsd(previewMaxSpendUsd)}`,
+            ),
             "",
-            escapeMarkdown(
+            `💰 ${formatTelegramBoldMarkdownV2("Funding required")}`,
+            formatTelegramUsdcLineMarkdownV2(
               `Available: ${formatUsd(fundingPreview.availableUsd)}`,
             ),
-            escapeMarkdown(
+            formatTelegramUsdcLineMarkdownV2(
               `Add at least: ${formatUsd(fundingPreview.shortfallUsd)}`,
             ),
             "",
@@ -5001,59 +5173,77 @@ export async function handleTelegramBotTradingCallback(
             },
             {
               callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
-              text: "Cancel",
+              text: "❌ Cancel",
             },
           ],
         ],
       },
       text: [
-        escapeMarkdown(
-          action === "BUY" ? "Confirm real buy" : "Confirm real sell",
-        ),
+        `${action === "BUY" ? "🟢" : "🔴"} ${formatTelegramBoldMarkdownV2(
+          action === "BUY" ? "Confirm buy" : "Confirm sell",
+        )}`,
         "",
         formatTelegramVenueFieldMarkdownV2(intent.venue),
-        escapeMarkdown(`Market: ${intent.market_title}`),
-        escapeMarkdown(`Side: ${side}`),
-        escapeMarkdown(`Internal wallet: ${authorization.wallet_address}`),
-        escapeMarkdown(
-          `${action === "BUY" ? "Current ask" : "Current bid"}: ${formatTelegramQuotePrice(previewQuote.currentPrice ?? null)}`,
-        ),
+        `🎯 ${formatTelegramFieldMarkdownV2("Market", intent.market_title)}`,
+        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+        "",
+        `👛 ${formatTelegramBoldMarkdownV2("Internal wallet")}`,
+        formatTelegramCodeMarkdownV2(authorization.wallet_address),
+        "",
+        `📊 ${formatTelegramFieldMarkdownV2(
+          action === "BUY" ? "Current ask" : "Current bid",
+          formatTelegramQuotePrice(previewQuote.currentPrice ?? null),
+        )}`,
         action === "BUY"
-          ? escapeMarkdown(
-              `Maximum execution price: ${formatTelegramQuotePrice(previewQuote.price)}`,
-            )
+          ? `📈 ${formatTelegramFieldMarkdownV2(
+              "Maximum execution price",
+              formatTelegramQuotePrice(previewQuote.price),
+            )}`
           : null,
-        escapeMarkdown(
-          action === "BUY"
-            ? `Nominal order: ${formatUsd(amountUsd ?? 0)}`
-            : `Exact quantity: ${tradeAmountLabel} (${sellPercent}%)`,
-        ),
+        action === "BUY"
+          ? formatTelegramUsdcLineMarkdownV2(
+              `Nominal order: ${formatUsd(amountUsd ?? 0)}`,
+            )
+          : `📦 ${formatTelegramFieldMarkdownV2(
+              "Exact quantity",
+              `${tradeAmountLabel} (${sellPercent}%)`,
+            )}`,
         action === "SELL"
           ? formatTelegramUsdcLineMarkdownV2(
               `Minimum pUSD receive: ${formatUsd(previewQuote.minimumReceiveUsd ?? 0)}`,
             )
           : previewQuote.minReceiveShares == null
             ? null
-            : escapeMarkdown(
-                `Minimum estimated shares: ${previewQuote.minReceiveShares.toFixed(2)}`,
-              ),
-        escapeMarkdown(
-          action === "BUY"
-            ? `Maximum total spend: ${formatUsd(previewMaxSpendUsd ?? 0)}`
-            : `Minimum execution price: ${formatTelegramQuotePrice(previewQuote.price)}`,
-        ),
-        escapeMarkdown(`Price tolerance: ${policy.maxSlippageBps / 100}%`),
-        escapeMarkdown(
-          tradeReadiness?.repair?.kind === "auto"
-            ? `Possible setup: ${tradeReadiness.repair.message}`
-            : "Possible setup: none",
-        ),
-        formatQuoteTtl(previewQuote.expiresAt)
-          ? escapeMarkdown(
-              `Quote valid for about ${formatQuoteTtl(previewQuote.expiresAt)}.`,
+            : `📦 ${formatTelegramFieldMarkdownV2(
+                "Minimum estimated shares",
+                previewQuote.minReceiveShares.toFixed(2),
+              )}`,
+        action === "BUY"
+          ? formatTelegramUsdcLineMarkdownV2(
+              `Maximum total spend: ${formatUsd(previewMaxSpendUsd ?? 0)}`,
             )
+          : `📉 ${formatTelegramFieldMarkdownV2(
+              "Minimum execution price",
+              formatTelegramQuotePrice(previewQuote.price),
+            )}`,
+        `🎚️ ${formatTelegramFieldMarkdownV2(
+          "Price tolerance",
+          `${policy.maxSlippageBps / 100}%`,
+        )}`,
+        `⚙️ ${formatTelegramFieldMarkdownV2(
+          "Possible setup",
+          tradeReadiness?.repair?.kind === "auto"
+            ? tradeReadiness.repair.message
+            : "None",
+        )}`,
+        formatQuoteTtl(previewQuote.expiresAt)
+          ? `⏱️ ${formatTelegramFieldMarkdownV2(
+              "Quote validity",
+              `About ${formatQuoteTtl(previewQuote.expiresAt)}`,
+            )}`
           : null,
         "",
+        `⚠️ ${formatTelegramBoldMarkdownV2("Real trade")}`,
         escapeMarkdown(
           "This is a real trade. Confirm only if you want the bot to submit it now.",
         ),
@@ -5092,7 +5282,7 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Open Hunch to place this trade.",
+      text: "⚠️ Open Hunch to place this trade.",
     });
     return true;
   }
@@ -5172,7 +5362,7 @@ export async function handleTelegramBotTradingCallback(
         await input.answerCallbackQuery({
           callbackQueryId: input.callbackQuery.id,
           showAlert: true,
-          text: "Trading setup needs attention. Open Hunch to continue.",
+          text: "⚠️ Trading setup needs attention. Open Hunch to continue.",
         });
         const openButton = buildTelegramTradingMiniAppButton({
           appBaseUrl: input.appBaseUrl,
@@ -5214,7 +5404,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Trading was disabled. Nothing was submitted.",
+        text: "⚠️ Trading was disabled. Nothing was submitted.",
       });
       return true;
     }
@@ -5241,7 +5431,7 @@ export async function handleTelegramBotTradingCallback(
         await input.answerCallbackQuery({
           callbackQueryId: input.callbackQuery.id,
           showAlert: true,
-          text: "Bot access is not ready. Open Hunch Settings.",
+          text: "⚠️ Bot access is not ready. Open Hunch Settings.",
         });
         return true;
       }
@@ -5285,7 +5475,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Price moved. Send /market again.",
+        text: "⚠️ Price moved. Send /market again.",
       });
       await input.sendMessage({
         chat_id: chatId,
@@ -5327,7 +5517,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Price moved. Review a new quote before trading.",
+        text: "⚠️ Price moved. Review a new quote before trading.",
       });
       await input.sendMessage({
         chat_id: chatId,
@@ -5398,7 +5588,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Trade intent is no longer active. Send /market again.",
+        text: "⚠️ Trade intent is no longer active. Send /market again.",
       });
       return true;
     }
@@ -5505,7 +5695,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Trade status changed while recording. Check /trade_status before retrying.",
+        text: "⚠️ Trade status changed while recording. Check /trade_status before retrying.",
       });
       await input.sendMessage({
         chat_id: chatId,
@@ -5542,8 +5732,14 @@ export async function handleTelegramBotTradingCallback(
       callbackQueryId: input.callbackQuery.id,
       showAlert: Boolean(postSubmitError),
       text: postSubmitError
-        ? `${resolution.callbackText} Recording needs review.`
-        : resolution.callbackText,
+        ? `⚠️ ${resolution.callbackText} Recording needs review.`
+        : `${
+            resolution.intentStatus === "filled"
+              ? "✅"
+              : resolution.intentStatus === "submitted"
+                ? "⏳"
+                : "⚠️"
+          } ${resolution.callbackText}`,
     });
     await input.sendMessage({
       chat_id: chatId,
@@ -5595,7 +5791,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: "Trade submitted. Recording needs review.",
+        text: "⚠️ Trade submitted. Recording needs review.",
       });
       await input.sendMessage({
         chat_id: chatId,
@@ -5639,7 +5835,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: unknownMessage,
+        text: `⏳ ${unknownMessage}`,
       });
       await input.sendMessage({
         chat_id: chatId,
@@ -5675,7 +5871,7 @@ export async function handleTelegramBotTradingCallback(
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
-        text: unknownMessage,
+        text: `⏳ ${unknownMessage}`,
       });
       await input.sendMessage({
         chat_id: chatId,
@@ -5707,10 +5903,10 @@ export async function handleTelegramBotTradingCallback(
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
       text: definitiveSubmitRejection
-        ? "Trade rejected. Nothing was submitted."
+        ? "⚠️ Trade rejected. Nothing was submitted."
         : normalized.code === "unsupported_capability"
-          ? "Open Hunch to place this trade."
-          : "Trade failed. Check the bot message.",
+          ? "⚠️ Open Hunch to place this trade."
+          : "⚠️ Trade failed. Check the bot message.",
     });
     const url = new URL(
       `/events/${encodeURIComponent(intent.event_id ?? "")}`,

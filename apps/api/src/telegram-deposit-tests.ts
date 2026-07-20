@@ -141,8 +141,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         pool: authorizationDb(null),
         telegramUserId: 20,
       });
-      assert.match(menu.text, /Polymarket.*Polygon/);
-      assert.match(menu.text, /Limitless.*Base/);
+      assert.match(menu.text, /Polymarket[\s\S]*Polygon/);
+      assert.match(menu.text, /Limitless[\s\S]*Base/);
       assert.match(menu.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
       assert.match(JSON.stringify(menu.reply_markup), /deposit:limitless/);
       const venueButtons = menu.reply_markup?.inline_keyboard.flat() ?? [];
@@ -169,8 +169,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(limitless.depositAddress, owner);
       assert.equal(limitless.qrText, owner);
       assert.equal(limitless.venue, "limitless");
-      assert.match(limitless.text, /Network: Base/);
-      assert.match(limitless.text, /Asset: USDC/);
+      assert.match(limitless.text, /\*Network:\* Base/);
+      assert.match(limitless.text, /\*Asset:\* USDC/);
       assert.match(limitless.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.base.id));
       assert.match(limitless.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id));
       const markup = JSON.stringify(limitless.reply_markup);
@@ -245,6 +245,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.depositAddress, deposit);
       assert.equal(message.qrText, deposit);
       assert.match(message.text, new RegExp(deposit));
+      assert.match(message.text, /\*Network:\* Polygon/);
+      assert.match(message.text, /\*Assets:\* pUSD or USDC\\\.e/);
+      assert.match(message.text, /📍 \*Deposit address\*/);
+      assert.ok(message.text.includes(`\`${deposit}\``));
+      assert.match(message.text, /⚠️ \*Important\*/);
       assert.doesNotMatch(message.text, /setup|required|not configured/i);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
@@ -253,6 +258,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             "copy_text" in button && button.copy_text.text === deposit,
         ),
         true,
+      );
+      assert.equal(
+        buttons.find((button) => "copy_text" in button)?.text,
+        "📋 Copy address",
       );
       assert.equal(
         buttons.some(
@@ -420,12 +429,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(presentation.lines.join("\n"), new RegExp(deposit));
       assert.deepEqual(presentation.buttonRows[0], [
-        { copy_text: { text: deposit }, text: "Copy address" },
+        { copy_text: { text: deposit }, text: "📋 Copy address" },
       ]);
       assert.deepEqual(presentation.buttonRows[1], [
         {
           callback_data: "hm:v1:deposit_qr:polymarket",
-          text: "Show QR",
+          text: "🔳 Show QR",
         },
       ]);
     },

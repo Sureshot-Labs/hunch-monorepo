@@ -5,7 +5,11 @@ import {
   buildSignalBotMarketVenuePickerScreen,
   readSignalBotMarketSearchSession,
 } from "./telegram-bot-menu-markets.js";
-import { escapeTelegramMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import {
   telegramCustomEmojiMarkdownV2,
   telegramCustomEmojiMarkdownV2ForNetwork,
@@ -229,12 +233,12 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
           })
         : {
             parse_mode: "MarkdownV2",
-            text: "Position is unavailable right now\\.",
+            text: "⚠️ *Position unavailable*\n\nTry again from My positions\\.",
           };
     } catch {
       positionMessage = {
         parse_mode: "MarkdownV2",
-        text: "Position is unavailable right now\\.",
+        text: "⚠️ *Position unavailable*\n\nTry again from My positions\\.",
       };
     }
     await input.render(positionMessage);
@@ -251,12 +255,12 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
         })
       : {
           parse_mode: "MarkdownV2" as const,
-          text: "Deposit is unavailable right now\\.",
+          text: "⚠️ *Deposit unavailable*\n\nTry again shortly\\.",
         };
   } catch {
     depositMessage = {
       parse_mode: "MarkdownV2",
-      text: "Deposit is unavailable right now\\.",
+      text: "⚠️ *Deposit unavailable*\n\nTry again shortly\\.",
     };
   }
   if (!showQr) {
@@ -284,13 +288,18 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
       const asset = isLimitless ? "USDC" : "pUSD or USDC.e";
       await input.sendPhoto({
         caption: [
-          `${telegramCustomEmojiMarkdownV2ForVenue(venue)} *${escapeTelegramMarkdownV2(
-            `Hunch ${isLimitless ? "Limitless" : "Polymarket"} deposit address`,
-          )}*`,
+          `${telegramCustomEmojiMarkdownV2ForVenue(venue)} ${formatTelegramBoldMarkdownV2(
+            `${isLimitless ? "Limitless" : "Polymarket"} Deposit QR`,
+          )}`,
           "",
-          escapeTelegramMarkdownV2(depositMessage.qrText),
+          `📍 ${formatTelegramBoldMarkdownV2("Deposit address")}`,
+          formatTelegramCodeMarkdownV2(depositMessage.qrText),
           "",
-          `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${escapeTelegramMarkdownV2(network)} · ${telegramCustomEmojiMarkdownV2("usdc")} ${escapeTelegramMarkdownV2(asset)}`,
+          `${telegramCustomEmojiMarkdownV2ForNetwork(network)} ${formatTelegramFieldMarkdownV2("Network", network)}`,
+          `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+            isLimitless ? "Asset" : "Assets",
+            asset,
+          )}`,
         ].join("\n"),
         chat_id: input.chatId,
         filename: `hunch-${isLimitless ? "limitless" : "polymarket"}-deposit.png`,
@@ -301,7 +310,7 @@ export async function handleSignalBotInteractiveMenuCallback(input: {
             [
               {
                 copy_text: { text: depositMessage.qrText },
-                text: "Copy address",
+                text: "📋 Copy address",
               },
             ],
           ],

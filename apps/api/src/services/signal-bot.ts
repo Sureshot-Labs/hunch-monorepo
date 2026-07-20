@@ -118,6 +118,11 @@ import {
 } from "./telegram-custom-emoji.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
+  formatTelegramBoldMarkdownV2,
+  formatTelegramCodeMarkdownV2,
+  formatTelegramFieldMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
+import {
   clearSignalBotMenuInput,
   writeSignalBotMenuInput,
 } from "./telegram-bot-menu-state.js";
@@ -985,6 +990,10 @@ function formatTelegramBold(value: string): string {
 
 function formatHunchTelegramTitle(value: string): string {
   return `${telegramCustomEmojiMarkdownV2("hunch")} ${formatTelegramBold(value)}`;
+}
+
+function formatTelegramNativeTitle(icon: string, value: string): string {
+  return `${icon} ${formatTelegramBold(value)}`;
 }
 
 function formatTelegramItalic(value: string): string {
@@ -2002,7 +2011,7 @@ function buildSignalBotMenuNavRow(input: {
   const row: TelegramInlineKeyboardButton[] = [
     {
       callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + input.parent,
-      text: "◀ Back",
+      text: "⬅️ Back",
     },
   ];
   if (input.includeHome) {
@@ -2025,7 +2034,7 @@ export function buildSignalBotMenuScreen(input: {
 }): { keyboard: TelegramInlineKeyboard; text: string } {
   const miniAppButton = buildSignalBotMainMiniAppButton(input);
   const noticeLines = input.notice
-    ? ["", formatTelegramItalic(input.notice)]
+    ? ["", `ℹ️ ${formatTelegramItalic(input.notice)}`]
     : [];
   const callback = (
     route: string,
@@ -2062,9 +2071,9 @@ export function buildSignalBotMenuScreen(input: {
           ...(!guestButton
             ? [
                 "",
-                escapeTelegramMarkdownV2(
-                  "The Hunch Mini App is temporarily unavailable.",
-                ),
+                `⚠️ ${formatTelegramBold(
+                  "Hunch Mini App is temporarily unavailable",
+                )}`,
               ]
             : []),
           ...noticeLines,
@@ -2082,15 +2091,17 @@ export function buildSignalBotMenuScreen(input: {
         text: [
           formatHunchTelegramTitle("Hunch"),
           "",
+          `⚠️ ${formatTelegramBold("Account details unavailable")}`,
+          "",
           escapeTelegramMarkdownV2(
             "Account details could not refresh. You can still browse markets or open Hunch.",
           ),
           ...(!miniAppButton
             ? [
                 "",
-                escapeTelegramMarkdownV2(
-                  "The Hunch Mini App is temporarily unavailable.",
-                ),
+                `⚠️ ${formatTelegramBold(
+                  "Hunch Mini App is temporarily unavailable",
+                )}`,
               ]
             : []),
           ...noticeLines,
@@ -2128,7 +2139,7 @@ export function buildSignalBotMenuScreen(input: {
         inline_keyboard: [buildSignalBotMenuNavRow({ parent: "home" })],
       },
       text: [
-        formatTelegramBold("💼 My positions"),
+        formatTelegramNativeTitle("💼", "My positions"),
         "",
         escapeTelegramMarkdownV2("Updating positions…"),
       ].join("\n"),
@@ -2138,13 +2149,13 @@ export function buildSignalBotMenuScreen(input: {
     return {
       keyboard: {
         inline_keyboard: [
-          [callback("trading:status", "↻ Refresh trading status")],
+          [callback("trading:status", "🔄 Refresh trading status")],
           ...buildSignalBotOptionalButtonRows(miniAppButton),
           buildSignalBotMenuNavRow({ parent: "home" }),
         ],
       },
       text: [
-        formatTelegramBold("👤 My trading"),
+        formatTelegramNativeTitle("👤", "My trading"),
         "",
         escapeTelegramMarkdownV2(
           "Your detailed trading status is sent as a separate card below this menu.",
@@ -2158,13 +2169,13 @@ export function buildSignalBotMenuScreen(input: {
       keyboard: {
         inline_keyboard: [
           [
-            callback("trading:cancel_input", "✕ Cancel"),
+            callback("trading:cancel_input", "❌ Cancel"),
             callback("home", "🏠 Home"),
           ],
         ],
       },
       text: [
-        formatTelegramBold("🔎 Markets"),
+        formatTelegramNativeTitle("🔎", "Markets"),
         "",
         escapeTelegramMarkdownV2(
           "Send a market name, person, team, Hunch URL, venue URL, or market ID.",
@@ -2195,7 +2206,7 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("⚙️ Settings"),
+        formatTelegramNativeTitle("⚙️", "Settings"),
         "",
         escapeTelegramMarkdownV2(
           "Choose what Hunch can send you and manage trading permissions.",
@@ -2218,7 +2229,7 @@ export function buildSignalBotMenuScreen(input: {
           ],
         },
         text: [
-          formatTelegramBold("🔔 Notifications"),
+          formatTelegramNativeTitle("🔔", "Notifications"),
           "",
           escapeTelegramMarkdownV2(
             "Connect this Telegram account to Hunch before enabling personal notifications.",
@@ -2257,7 +2268,7 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("🔔 Notifications"),
+        formatTelegramNativeTitle("🔔", "Notifications"),
         "",
         escapeTelegramMarkdownV2(
           "Choose a category. Each event can be controlled separately.",
@@ -2280,7 +2291,7 @@ export function buildSignalBotMenuScreen(input: {
           ],
         },
         text: [
-          formatTelegramBold("📈 Trading notifications"),
+          formatTelegramNativeTitle("📈", "Trading notifications"),
           "",
           escapeTelegramMarkdownV2(
             "Connect this Telegram account to Hunch before enabling personal notifications.",
@@ -2317,7 +2328,7 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("📈 Trading notifications"),
+        formatTelegramNativeTitle("📈", "Trading notifications"),
         "",
         escapeTelegramMarkdownV2(
           "Order execution, order problems, and resolved positions.",
@@ -2342,7 +2353,7 @@ export function buildSignalBotMenuScreen(input: {
           ],
         },
         text: [
-          formatTelegramBold("💰 Funds & payouts"),
+          formatTelegramNativeTitle("💰", "Funds & payouts"),
           "",
           escapeTelegramMarkdownV2(
             "Connect this Telegram account to Hunch before enabling personal notifications.",
@@ -2379,7 +2390,7 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("💰 Funds & payouts"),
+        formatTelegramNativeTitle("💰", "Funds & payouts"),
         "",
         escapeTelegramMarkdownV2(
           "Final deposit, bridge, redemption, and reward results.",
@@ -2404,7 +2415,7 @@ export function buildSignalBotMenuScreen(input: {
           ],
         },
         text: [
-          formatTelegramBold("📡 Signals"),
+          formatTelegramNativeTitle("📡", "Signals"),
           "",
           escapeTelegramMarkdownV2(
             "Connect this Telegram account to Hunch before enabling personal signals.",
@@ -2432,9 +2443,9 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("📡 Signals"),
+        formatTelegramNativeTitle("📡", "Signals"),
         "",
-        formatTelegramBold("Portfolio"),
+        `💼 ${formatTelegramBold("Portfolio")}`,
         escapeTelegramMarkdownV2(
           "New Hunch research for markets in your open positions.",
         ),
@@ -2471,13 +2482,14 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("👤 Account"),
+        formatTelegramNativeTitle("👤", "Account"),
         "",
-        escapeTelegramMarkdownV2(
+        `🔗 ${formatTelegramFieldMarkdownV2(
+          "Hunch account",
           input.notificationPreferences
-            ? "Hunch account: Linked to this Telegram profile."
-            : "Hunch account: Not linked to this Telegram profile.",
-        ),
+            ? "Linked to this Telegram profile"
+            : "Not linked to this Telegram profile",
+        )}`,
         "",
         escapeTelegramMarkdownV2(
           "Account, sign-in, and wallet changes are confirmed inside Hunch.",
@@ -2496,7 +2508,7 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("❓ How Hunch works"),
+        formatTelegramNativeTitle("❓", "How Hunch works"),
         "",
         formatTelegramBlockquote([
           formatTelegramBold("Signals"),
@@ -2522,16 +2534,16 @@ export function buildSignalBotMenuScreen(input: {
       keyboard: {
         inline_keyboard: [
           [
-            callback("performance:24h", "24h"),
-            callback("performance:7d", "7d"),
-            callback("performance:30d", "30d"),
+            callback("performance:24h", "🕐 24h"),
+            callback("performance:7d", "📅 7d"),
+            callback("performance:30d", "🗓️ 30d"),
           ],
           [callback("performance:7d:detail", "📋 Detailed 7d report")],
           buildSignalBotMenuNavRow({ parent: "home" }),
         ],
       },
       text: [
-        formatTelegramBold("📊 Signal performance"),
+        formatTelegramNativeTitle("📊", "Signal performance"),
         "",
         escapeTelegramMarkdownV2("Choose a period."),
         "",
@@ -2550,17 +2562,22 @@ export function buildSignalBotMenuScreen(input: {
         ],
       },
       text: [
-        formatTelegramBold("🛠 Admin command reference"),
+        formatTelegramNativeTitle("🛠", "Admin command reference"),
         "",
         formatTelegramBlockquote(
           [
-            "/enable_signals — enable a channel",
-            "/disable_signals — disable a channel",
-            "/signal_venues — select trading venues",
-            "/status — inspect channel delivery",
-            "/test_followthrough — preview a follow-up",
-            "/test_trade — preview a trade card",
-          ].map(escapeTelegramMarkdownV2),
+            ["/enable_signals", "enable a channel"],
+            ["/disable_signals", "disable a channel"],
+            ["/signal_venues", "select trading venues"],
+            ["/status", "inspect channel delivery"],
+            ["/test_followthrough", "preview a follow-up"],
+            ["/test_trade", "preview a trade card"],
+          ].map(
+            ([command, description]) =>
+              `${formatTelegramCodeMarkdownV2(
+                command ?? "",
+              )} ${escapeTelegramMarkdownV2(`— ${description ?? ""}`)}`,
+          ),
         ),
         "",
         formatTelegramItalic(
@@ -2579,7 +2596,7 @@ export function buildSignalBotMenuScreen(input: {
       ],
     },
     text: [
-      formatTelegramBold("🛠 Admin"),
+      formatTelegramNativeTitle("🛠", "Admin"),
       "",
       escapeTelegramMarkdownV2(
         "Preview content and open operational controls. Admin authorization is checked again for every action.",
@@ -2811,7 +2828,10 @@ function buildSignalBotPrivateMenuEntry(input: {
                     : {
                         icon_custom_emoji_id: telegramCustomEmojiId("hunch"),
                       }),
-                  text: "Open bot menu",
+                  text:
+                    input.chatType === "channel"
+                      ? "🟠 Open bot menu"
+                      : "Open bot menu",
                   url: targetUrl,
                 },
               ],
@@ -2821,7 +2841,7 @@ function buildSignalBotPrivateMenuEntry(input: {
       : {}),
     text: [
       input.chatType === "channel"
-        ? formatTelegramBold("Hunch Signal Bot")
+        ? `🟠 ${formatTelegramBold("Hunch Signal Bot")}`
         : formatHunchTelegramTitle("Hunch Signal Bot"),
       "",
       escapeTelegramMarkdownV2(
@@ -2914,7 +2934,7 @@ export async function handleSignalBotMenuCallback(
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "Open the bot menu in a private chat.",
+      text: "⚠️ Open the bot menu in a private chat.",
     });
     return true;
   }
@@ -2935,7 +2955,7 @@ export async function handleSignalBotMenuCallback(
       ...(audience === "unavailable"
         ? {
             showAlert: true,
-            text: "Account status is temporarily unavailable.",
+            text: "⚠️ Account status is temporarily unavailable.",
           }
         : {}),
     });
@@ -2956,7 +2976,7 @@ export async function handleSignalBotMenuCallback(
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "This menu is only available to Hunch admins.",
+      text: "⚠️ This menu is only available to Hunch admins.",
     });
     await sendOrEditSignalBotMenuScreen({
       chatId,
@@ -2977,7 +2997,7 @@ export async function handleSignalBotMenuCallback(
     route.kind === "trading_status" ||
     route.kind === "admin_preview" ||
     (route.kind === "screen" && route.screen === "positions")
-      ? { text: "Working…" }
+      ? { text: "⏳ Working…" }
       : {}),
   });
   if (
@@ -3109,12 +3129,12 @@ export async function handleSignalBotMenuCallback(
         ? await input.loadPositions(telegramUserId)
         : {
             parse_mode: "MarkdownV2",
-            text: "*💼 My positions*\n\nPositions are unavailable right now\\.",
+            text: "💼 *My positions*\n\n⚠️ *Positions unavailable*\n\nTry again shortly\\.",
           };
     } catch {
       positionsMessage = {
         parse_mode: "MarkdownV2",
-        text: "*💼 My positions*\n\nPositions are unavailable right now\\.",
+        text: "💼 *My positions*\n\n⚠️ *Positions unavailable*\n\nTry again shortly\\.",
       };
     }
     const positionsFallbackButton = buildSignalBotMainMiniAppButton({
@@ -3174,12 +3194,12 @@ export async function handleSignalBotMenuCallback(
         ? await input.loadTradeStatus(telegramUserId)
         : {
             parse_mode: "MarkdownV2",
-            text: "Trading status is unavailable right now\\.",
+            text: "⚠️ *Trading status unavailable*\n\nTry again shortly\\.",
           };
     } catch {
       statusMessage = {
         parse_mode: "MarkdownV2",
-        text: "Trading status is unavailable right now\\.",
+        text: "⚠️ *Trading status unavailable*\n\nTry again shortly\\.",
       };
     }
     await sendOrEditSignalBotMenuMessage({
@@ -4158,7 +4178,7 @@ export async function pollSignalBotCommands(
             .answerCallbackQuery({
               callbackQueryId: callbackQuery.id,
               showAlert: true,
-              text: "Menu action failed. The main menu is still available.",
+              text: "⚠️ Menu action failed. The main menu is still available.",
             })
             .catch(() => undefined);
           return true;
@@ -4178,7 +4198,7 @@ export async function pollSignalBotCommands(
               .answerCallbackQuery({
                 callbackQueryId: callbackQuery.id,
                 showAlert: true,
-                text: "Bot is busy. Retry confirmation shortly.",
+                text: "⏳ Bot is busy. Retry confirmation shortly.",
               })
               .catch(() => undefined);
             handled += 1;
@@ -4192,7 +4212,7 @@ export async function pollSignalBotCommands(
                 .answerCallbackQuery({
                   callbackQueryId: callbackQuery.id,
                   showAlert: true,
-                  text: "Action failed. Check /trade_status before retrying.",
+                  text: "⚠️ Action failed. Check /trade_status before retrying.",
                 })
                 .catch(() => undefined);
             }
@@ -4211,7 +4231,7 @@ export async function pollSignalBotCommands(
             .answerCallbackQuery({
               callbackQueryId: callbackQuery.id,
               showAlert: true,
-              text: "Action failed. Try again.",
+              text: "⚠️ Action failed. Try again.",
             })
             .catch(() => undefined);
         }
@@ -8781,11 +8801,35 @@ function buildPlainReply(
   chatId: string,
   text: string,
 ): TelegramSendMessageInput {
+  const [firstLine = "", ...remainingLines] = text.split("\n");
+  const usage = firstLine.match(/^Usage:\s*(.+)$/i);
+  const unavailable = /unavailable|failed|not authorized|not enabled/i.test(
+    firstLine,
+  );
+  const success = /\b(enabled|disabled|updated|sent)\b/i.test(firstLine);
+  const icon = unavailable ? "⚠️" : success ? "✅" : "ℹ️";
+  const headline = usage
+    ? `ℹ️ ${formatTelegramBoldMarkdownV2("Usage")}\n\n${formatTelegramCodeMarkdownV2(
+        usage[1] ?? "",
+      )}`
+    : `${icon} ${
+        firstLine.length <= 90
+          ? formatTelegramBoldMarkdownV2(firstLine.replace(/[.!]+$/g, ""))
+          : escapeTelegramMarkdownV2(firstLine)
+      }`;
+  const details = remainingLines.map((line) => {
+    const field = line.match(/^([^:]{1,40}):\s*(.+)$/);
+    return field
+      ? formatTelegramFieldMarkdownV2(field[1] ?? "Details", field[2] ?? "")
+      : escapeTelegramMarkdownV2(line);
+  });
   return {
     chat_id: chatId,
     disable_web_page_preview: true,
     parse_mode: "MarkdownV2",
-    text: escapeTelegramMarkdownV2(text),
+    text: [headline, ...(details.length > 0 ? ["", ...details] : [])].join(
+      "\n",
+    ),
   };
 }
 
@@ -8795,6 +8839,21 @@ function buildHelpReply(input: {
   text: string;
 }): TelegramSendMessageInput {
   const [title, ...lines] = input.text.split("\n");
+  const formattedLines = lines.map((line) => {
+    if (!line) return "";
+    if (line === "Admin controls") {
+      return `🛠 ${formatTelegramBoldMarkdownV2(line)}`;
+    }
+    if (line.startsWith("/")) {
+      const [command = line, description] = line.split(" - ", 2);
+      return description
+        ? `${formatTelegramCodeMarkdownV2(command)} ${escapeTelegramMarkdownV2(
+            `— ${description}`,
+          )}`
+        : formatTelegramCodeMarkdownV2(command);
+    }
+    return escapeTelegramMarkdownV2(line);
+  });
   return {
     chat_id: input.chatId,
     disable_web_page_preview: true,
@@ -8802,8 +8861,8 @@ function buildHelpReply(input: {
     text: [
       input.customEmojiEnabled && title === "Hunch Signal Bot"
         ? formatHunchTelegramTitle(title)
-        : escapeTelegramMarkdownV2(title ?? "Hunch Signal Bot"),
-      ...lines.map(escapeTelegramMarkdownV2),
+        : formatTelegramBoldMarkdownV2(title ?? "Hunch Signal Bot"),
+      ...formattedLines,
     ].join("\n"),
   };
 }
