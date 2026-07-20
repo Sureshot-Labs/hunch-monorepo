@@ -3718,6 +3718,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     .join(" · ");
   if (buyPriceSummary) lines.push(`Buy: ${buyPriceSummary}`);
   if (sellPriceSummary) lines.push(`Sell: ${sellPriceSummary}`);
+  if (buyOptions.length > 0) {
+    lines.push("Choose side and amount to spend:");
+  }
   if (input.isAdminTest) {
     lines.push("", "Preview only - trade buttons are not created.");
   } else if (unresolvedIntent) {
@@ -3824,11 +3827,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       });
       row.push({
         callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:buy:${intentId}`,
-        icon_custom_emoji_id: formatTelegramVenueButtonIcon(market.venue),
-        text:
-          input.context?.origin === "position"
-            ? `${sideLabel(market, option.side)} · Add ${formatUsd(option.amountUsd)}`
-            : `${sideLabel(market, option.side)} · Spend ${formatUsd(option.amountUsd)}`,
+        text: `${formatUsd(option.amountUsd)} · ${sideLabel(market, option.side)}`,
       });
     }
     if (row.length > 0) keyboard.push(row);
@@ -3936,7 +3935,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
           startParam,
           text:
             nominalPresetAmountsUsd.length > 1
-              ? `${side} · Spend ${formatUsd(amountUsd)}`
+              ? `${formatUsd(amountUsd)} · ${side}`
               : `Buy ${side}${price != null ? ` · ${formatLivePrice(price)}` : ""}`,
         });
         if (button) row.push(button);

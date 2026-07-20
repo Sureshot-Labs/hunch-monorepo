@@ -3699,7 +3699,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(
         repairableButtons.find((button) => "callback_data" in button)?.text ??
           "",
-        /YES · Spend \$1/,
+        /\$1 · YES/,
       );
       assert.doesNotMatch(repairableMessage.text, /approvals are missing/);
 
@@ -3729,14 +3729,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         multiPresetBuyButtons.map((button) => button.text),
-        [
-          "YES · Spend $1",
-          "YES · Spend $5",
-          "YES · Spend $10",
-          "NO · Spend $1",
-          "NO · Spend $5",
-          "NO · Spend $10",
-        ],
+        ["$1 · YES", "$5 · YES", "$10 · YES", "$1 · NO", "$5 · NO", "$10 · NO"],
       );
       const multiPresetBuyRows =
         multiPresetMessage.reply_markup?.inline_keyboard.filter((row) =>
@@ -3751,7 +3744,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         [3, 3],
       );
       assert.equal(insertCount, 8);
-      assert.doesNotMatch(multiPresetMessage.text, /Spend \$25/);
+      assert.match(multiPresetMessage.text, /Choose side and amount to spend/);
+      assert.doesNotMatch(multiPresetMessage.text, /\$25 ·/);
 
       const partiallyUnavailableMessage =
         await buildTelegramBotTradingMarketMessage({
@@ -3792,7 +3786,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(
         partiallyUnavailableBuyRows
           .flat()
-          .some((button) => button.text === "NO · Spend $10"),
+          .some((button) => button.text === "$10 · NO"),
         false,
       );
       assert.equal(insertCount, 13);
@@ -3831,7 +3825,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         unfundedButtons.find((button) => "callback_data" in button)?.text ?? "",
-        /YES · Spend/,
+        /\$1 · YES/,
       );
       assert.match(unfundedMessage.text, /Buttons valid/);
       assert.match(
