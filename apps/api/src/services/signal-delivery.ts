@@ -1,3 +1,5 @@
+import type { TelegramInputRichMessage } from "./telegram-rich-message.js";
+
 export type SignalSourceView = {
   eventId: string | null;
   marketId: string | null;
@@ -51,6 +53,7 @@ export type TransportPayload = {
     disableWebPagePreview: boolean;
     parseMode: "MarkdownV2";
     replyMarkup?: unknown;
+    richMessage?: TelegramInputRichMessage;
   };
   thread?: string[];
   replyToDeliveryId?: string;

@@ -27,7 +27,8 @@ The current worktree already contains:
   handling;
 - fail-closed runtime gates and explicit `/start` reachability;
 - exact-market portfolio-signal recipient selection;
-- compact MarkdownV2 notification renderers and contextual Mini App actions;
+- native Rich Message signal renderers with metric tables, dividers,
+  contextual Mini App links/actions, and automatic MarkdownV2 fallback;
 - Signal Post V10 editorial-headline grammar, meaningful-delta research updates,
   evidence blocks, and contextual-link policy;
 - producer-owned V5 market identity, strict single price snapshot, typed

@@ -34,10 +34,11 @@ The current worktree contains:
 - natural Bitcoin price-target and total-market subjects plus safe generic
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
-- structured `Since the call` and `Why it matters` blockquotes with
-  a forced visual blank line below the section label and highlighted values;
-- a centralized `U+2800 BRAILLE PATTERN BLANK` separator because Telegram
-  clients collapse raw empty MarkdownV2 lines around blockquotes;
+- native Rich Message delivery with a two-part headline paragraph, contextual
+  inline links, bordered striped `Since the call`, `Why it matters`, and
+  `Result` tables, plus a native divider before a follow-through `Read:`;
+- no quote/pull-quote blocks and no invisible separators in the primary rich
+  output; the existing MarkdownV2 renderer remains an automatic fallback;
 - contextual named-outcome headlines such as `Spain over Argentina` and
   `Beta Team over Alpha Team in Game 1`, instead of notification leads that
   contain only the selected outcome;
@@ -342,10 +343,13 @@ Legacy updates without the contract, `force_recheck`,
 external-evidence-only changes fail closed. See
 `backend-holder-research-update-contract.md`.
 
-`/test_signal [channel_id] [latest|initial|update|note_uuid]` uses the same
-delivery preparation as the public publisher, returns a concrete diagnostic
+`/test_signal [channel_id] [latest|initial|update|note_uuid]` uses the same copy
+contracts and renderer as the public publisher, returns a concrete diagnostic
 reason when rejected, and does not move Redis cursors, write
-`signal_bot_messages`, or set a send cooldown.
+`signal_bot_messages`, or set a send cooldown. For layout QA only, it may render
+an otherwise valid old signal with a stale price snapshot. That bypass is
+scoped to the test command and always removes `Buy` in favor of `Open market`;
+the public publisher still fails closed on the same stale snapshot.
 
 ### 5. Live device and channel QA
 
@@ -357,8 +361,11 @@ Cover:
 - long market subjects, Unicode, named outcomes, totals, and complex NO;
 - initial single wallet and wallet cluster;
 - mixed breadth, exits, negative flow, adverse price, and thin evidence;
-- the `U+2800` row before/inside/after a blockquote, including copying the
-  rendered post to confirm that no visible placeholder glyph appears;
+- table captions, borders, striping, wrapping, alignment, and divider spacing;
+- confirmation that the primary rich output contains no visible quotation
+  glyph and no invisible placeholder row;
+- deliberate Rich Message rejection to confirm automatic MarkdownV2 fallback
+  and `fallbackToMarkdown` delivery telemetry;
 - research update and resolved win/loss;
 - Mini App configured, missing, and oversized payload;
 - Buy available and Open-market fallback.

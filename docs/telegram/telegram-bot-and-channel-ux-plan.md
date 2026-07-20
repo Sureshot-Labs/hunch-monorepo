@@ -34,8 +34,9 @@ Success means that a user can:
 
 1. **One screen, one purpose.** A menu screen or channel post must have one
    primary job and one primary CTA.
-2. **Hierarchy before decoration.** Whitespace, line length, grouping,
-   blockquotes, and emphasis carry structure. Emoji are labels, not confetti.
+2. **Hierarchy before decoration.** Native blocks, whitespace, line length,
+   tables, dividers, and emphasis carry structure. Emoji are labels, not
+   confetti.
 3. **Headlines are content, not links.** A headline must remain high-contrast
    and readable. Links belong to contextual nouns or action phrases.
 4. **Buttons are for actions.** Background information such as a wallet or
@@ -60,12 +61,12 @@ bold, italic, inline links, spoilers, code, and blockquotes:
 - [Telegram Mini Apps launched from the menu button](https://core.telegram.org/bots/webapps#launching-mini-apps-from-the-menu-button)
 - [Practical button-first bot UX patterns](https://gramio.dev/guides/ux-patterns)
 
-Bot API 10.2 also introduced Rich Messages with headings, dividers, structured
-lists, tables, and richer block types on July 14, 2026. Phase 1 should not
-depend on this brand-new surface. The existing bot already uses regular
-`MarkdownV2`, which can deliver the required redesign across existing clients.
-Rich Messages should be evaluated as a later progressive enhancement after
-client compatibility and editing behavior have been tested.
+Bot API 10.2 introduced Rich Messages with headings, dividers, structured
+lists, tables, and richer block types on July 14, 2026. Signal posts now use
+`sendRichMessage` as their primary delivery path. The renderer emits native
+paragraphs, inline bold/link entities, bordered striped metric tables, and
+dividers. The previous `MarkdownV2` output remains a delivery fallback while
+the new surface is verified across Telegram clients.
 
 Public information-channel patterns reviewed for this plan:
 
@@ -637,22 +638,27 @@ Common rules:
 4. Mini App links attach to meaningful nouns already present in the body.
 5. Exactly one CTA class is selected by message state and safety policy.
 
-Whitespace is structural. Telegram clients collapse ordinary empty MarkdownV2
-lines at blockquote boundaries, so the renderer owns one centralized visual
-separator: a line containing `U+2800 BRAILLE PATTERN BLANK`. The same character
-is used for the intentional empty row inside metric blockquotes. Do not paste
-zero-width or invisible characters into individual templates; use the typed
-renderer helper and verify the result on iOS, Android, and Desktop.
+Whitespace is structural. Rich signal posts express spacing through native
+block boundaries and a divider before a non-terminal interpretation. They do
+not contain `U+2800`, zero-width characters, or decorative hyphen rules. The
+legacy `MarkdownV2` fallback still owns its centralized `U+2800` separator
+until client and rollout telemetry allow that fallback to be retired.
 
 ### Formatting vocabulary
 
-Use regular Telegram MarkdownV2 deliberately:
+Use Telegram Rich Message entities deliberately:
 
 - **Bold:** only the editorial “thumbnail” hook, section labels, and the one or
   two key values. The explanatory continuation of the first line is regular.
 - _Italic:_ genuinely secondary metadata only; do not italicize an entire
   current-position or conclusion line.
-- Blockquote: a compact metric/data card such as `Since the call`.
+- Table: a compact two-column metric card such as `Since the call`, `Why it
+matters`, or `Result`. Use bordered and striped rendering; keep labels on the
+  left and values on the right.
+- Divider: separates a follow-through data table from its final `Read:`. Do not
+  add it after a terminal proof or result table.
+- Blockquote and pull quote: not used in signal posts. Both still communicate
+  quotation semantics, while Hunch is presenting its own interpretation.
 - Inline link: only on a market/outcome phrase or real wallet identity that
   already belongs in the sentence. Omit the link if no natural phrase exists.
 - Monospace/code: only for literal IDs, hashes, or addresses that a user may
@@ -755,28 +761,30 @@ Implemented V10 structure:
 ⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
 BTC hitting $57.5K in July.
 
-│ Since the call
-│
-│ Net tracked flow  +$67.7K
-│ Wallets  5 added · 8 trimmed · 15 holding
-│ NO price  87¢ → 89¢  +2¢
-│ Est. PnL since call  +$1.6K
+┌ Since the call ──────────────────┐
+│ Net tracked flow        +$67.7K │
+│ Wallets added                  5 │
+│ Wallets trimmed                8 │
+│ Still holding                 15 │
+│ NO price          87¢ → 89¢ +2¢ │
+│ Est. open PnL             +$1.6K │
+└──────────────────────────────────┘
+
+────────────────────────────────────
 
 Read: More money went into NO at 89¢, but wallet support thinned and the price
 barely moved.
 ```
 
-The `│` representation above documents the rendered Telegram blockquote. The
-actual MarkdownV2 output should use `>` quote lines, with intentional bold and
-italic spans inside the quote.
+The box above documents a native bordered, striped Telegram table. The rule is
+a native Rich Message divider, not literal text.
 
 Recommended emphasis inside the rendered block:
 
-- `Since the call` — bold label followed by a forced visually blank quoted
-  line from the shared renderer;
+- `Since the call` — bold table caption;
 - metric labels remain plain while important values are bold;
-- wallet adds, trims, exits, and holdings share one labeled row and wrap
-  naturally on narrow screens;
+- wallet adds, trims, exits, and holdings use separate rows so the value column
+  remains scannable on narrow screens;
 - the price delta and estimated PnL value are bold;
 - the conclusion explicitly reports mixed breadth, exits, adverse price, or
   thin evidence when present.

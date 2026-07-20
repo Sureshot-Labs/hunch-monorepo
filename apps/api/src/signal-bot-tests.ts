@@ -19,6 +19,7 @@ import {
   buildSignalBotStatsReport,
   buildSignalBotTradeUrl,
   configureSignalBotTelegramUi,
+  createSignalBotTelegramTransport,
   disableSignalBotChat,
   drainSignalBotConfirmTasks,
   enableSignalBotChat,
@@ -54,6 +55,7 @@ import {
   type TelegramBotCallbackQuery,
   type TelegramBotUpdate,
   type TelegramSendMessageInput,
+  type TelegramSendRichMessageInput,
   type TelegramSendResult,
 } from "./services/signal-bot.js";
 import {
@@ -2062,6 +2064,114 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       } finally {
         globalThis.fetch = originalFetch;
       }
+    },
+  },
+  {
+    name: "Telegram client sends native rich message blocks",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      let requestUrl = "";
+      let requestBody: Record<string, unknown> = {};
+      try {
+        globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+          requestUrl = String(args[0]);
+          requestBody = JSON.parse(String(args[1]?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          return new Response(
+            JSON.stringify({ ok: true, result: { message_id: 458 } }),
+            { status: 200 },
+          );
+        }) as typeof fetch;
+
+        const client = new TelegramBotApiClient("token");
+        const sent = await client.sendRichMessage({
+          chat_id: "-100",
+          rich_message: {
+            blocks: [
+              { text: { text: "$1M moved", type: "bold" }, type: "paragraph" },
+              {
+                caption: { text: "Since the call", type: "bold" },
+                cells: [
+                  [
+                    {
+                      align: "left",
+                      text: "Net flow",
+                      valign: "middle",
+                    },
+                    {
+                      align: "right",
+                      text: { text: "+$1M", type: "bold" },
+                      valign: "middle",
+                    },
+                  ],
+                ],
+                is_bordered: true,
+                is_striped: true,
+                type: "table",
+              },
+            ],
+          },
+        });
+
+        assert.deepEqual(sent, { messageId: 458, ok: true });
+        assert.match(requestUrl, /\/sendRichMessage$/);
+        assert.equal(
+          (
+            requestBody.rich_message as TelegramSendRichMessageInput["rich_message"]
+          ).blocks[1]?.type,
+          "table",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "signal transport prefers rich messages and falls back to Markdown",
+    run: async () => {
+      const richMessages: TelegramSendRichMessageInput[] = [];
+      const markdownMessages: TelegramSendMessageInput[] = [];
+      let rejectRich = false;
+      const transport = createSignalBotTelegramTransport({
+        answerCallbackQuery: async () => ({}),
+        getUpdates: async () => [],
+        sendMessage: async (message) => {
+          markdownMessages.push(message);
+          return { messageId: 502, ok: true };
+        },
+        sendRichMessage: async (message) => {
+          richMessages.push(message);
+          return rejectRich
+            ? { error: "other", message: "unsupported block", ok: false }
+            : { messageId: 501, ok: true };
+        },
+      });
+      const payload = {
+        destinationId: "-100",
+        telegram: {
+          disableWebPagePreview: true,
+          parseMode: "MarkdownV2" as const,
+          richMessage: {
+            blocks: [{ text: "Rich", type: "paragraph" as const }],
+          },
+        },
+        text: "Markdown fallback",
+      };
+
+      const richResult = await transport.send(payload);
+      assert.equal(richResult.deliveryId, "501");
+      assert.equal(richResult.metadata?.fallbackToMarkdown, false);
+      assert.equal(richMessages.length, 1);
+      assert.equal(markdownMessages.length, 0);
+
+      rejectRich = true;
+      const fallbackResult = await transport.send(payload);
+      assert.equal(fallbackResult.deliveryId, "502");
+      assert.equal(fallbackResult.metadata?.fallbackToMarkdown, true);
+      assert.equal(richMessages.length, 2);
+      assert.equal(markdownMessages.length, 1);
     },
   },
   {
@@ -9846,6 +9956,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /sample count|resolved edge|n=/i);
       assert.doesNotMatch(message.text, /📰/);
       assert.doesNotMatch(message.text, /confidence/i);
+      assert.deepEqual(
+        message.richMessage.blocks.map((block) => block.type),
+        ["paragraph", "paragraph", "table"],
+      );
+      const metrics = message.richMessage.blocks[2];
+      assert.equal(metrics?.type, "table");
+      if (metrics?.type === "table") {
+        assert.equal(metrics.is_bordered, true);
+        assert.equal(metrics.is_striped, true);
+        assert.deepEqual(metrics.caption, {
+          text: "Why it matters",
+          type: "bold",
+        });
+        assert.ok(metrics.cells.length >= 1);
+        assert.equal(metrics.cells[0]?.[0]?.text, "PnL");
+      }
+      assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
     },
   },
   {
@@ -10587,6 +10714,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /New research|holding fading|after the drop|market now gives/i,
       );
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
+      const positionTable = message.richMessage.blocks.find(
+        (block) => block.type === "table",
+      );
+      assert.equal(positionTable?.type, "table");
+      if (positionTable?.type === "table") {
+        assert.deepEqual(positionTable.caption, {
+          text: "Wallet position",
+          type: "bold",
+        });
+        assert.deepEqual(
+          positionTable.cells.map((row) => row[0]?.text),
+          ["Position", "Price now", "Open PnL"],
+        );
+      }
+      assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
     },
   },
   {
@@ -13738,6 +13880,47 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "test-only preparation bypasses an old snapshot without exposing Buy",
+    run: async () => {
+      const db = new FakeDb();
+      const staleNote = note({
+        signalPriceSnapshotV1: {
+          ...testSignalPriceSnapshot("YES"),
+          asOf: "2026-01-01T00:00:00.000Z",
+        },
+      });
+      const input = {
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db,
+        messageKind: "initial" as const,
+        note: staleNote,
+        now: new Date("2026-07-20T12:00:00.000Z"),
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      };
+
+      const production = await prepareSignalBotDelivery(input);
+      assert.equal(production.status, "skipped");
+      if (production.status === "skipped") {
+        assert.equal(production.reason, "stale_price_snapshot");
+      }
+
+      const preview = await prepareSignalBotDelivery({
+        ...input,
+        allowStalePriceSnapshot: true,
+      });
+      assert.equal(preview.status, "ready");
+      if (preview.status === "ready") {
+        assert.equal(preview.audit.stalePriceSnapshotBypassed, true);
+        assert.equal(preview.deliveryTarget, null);
+        assert.deepEqual(
+          preview.keyboard?.inline_keyboard.flat().map((button) => button.text),
+          ["↗️ Open market"],
+        );
+      }
+    },
+  },
+  {
     name: "test signal sends latest signal without touching chat cursor",
     run: async () => {
       const redis = new FakeRedis();
@@ -13749,12 +13932,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const before = await getSignalBotChatState(redis, "-100");
       const db = new FakeDb();
-      db.rows = [noteRow({ id: "00000000-0000-4000-8000-000000000099" })];
+      const staleRow = noteRow({
+        id: "00000000-0000-4000-8000-000000000099",
+      });
+      const staleMetrics = staleRow.metrics as Record<string, unknown>;
+      (staleMetrics.signalPriceSnapshotV1 as Record<string, unknown>).asOf =
+        "2026-01-01T00:00:00.000Z";
+      db.rows = [staleRow];
       const telegram = new FakeTelegram();
       const sent = await sendLatestSignalBotTestSignal({
         chatId: "-100",
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            "https://t.me/hunch_bot/hunch",
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
         db,
@@ -13762,6 +13953,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegram,
       });
       assert.deepEqual(sent, { reason: null, sent: true });
+      assert.deepEqual(
+        telegram.messages[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .map((button) => button.text),
+        ["↗️ Open market"],
+      );
       assert.deepEqual(await getSignalBotChatState(redis, "-100"), before);
       assert.equal(
         db.queries.some((query) =>

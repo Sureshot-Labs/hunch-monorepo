@@ -138,6 +138,17 @@ import {
   type SignalTransport,
   type TransportPayload,
 } from "./signal-delivery.js";
+import {
+  telegramRichBold,
+  telegramRichDivider,
+  telegramRichItalic,
+  telegramRichMetricsTable,
+  telegramRichParagraph,
+  telegramRichText,
+  telegramRichUrl,
+  type TelegramInputRichMessage,
+  type TelegramRichText,
+} from "./telegram-rich-message.js";
 
 export { escapeTelegramMarkdownV2 } from "./signal-delivery.js";
 
@@ -341,6 +352,16 @@ export type TelegramSendMessageInput = {
   text: string;
 };
 
+export type TelegramSendRichMessageInput = {
+  chat_id: string;
+  reply_parameters?: {
+    allow_sending_without_reply?: boolean;
+    message_id: number;
+  };
+  reply_markup?: TelegramInlineKeyboard;
+  rich_message: TelegramInputRichMessage;
+};
+
 export type TelegramSendResult =
   | { messageId: number | null; ok: true }
   | {
@@ -376,6 +397,9 @@ export type SignalBotTelegramClient = {
     photo: Uint8Array;
     reply_markup?: TelegramInlineKeyboard;
   }): Promise<TelegramSendResult>;
+  sendRichMessage?(
+    input: TelegramSendRichMessageInput,
+  ): Promise<TelegramSendResult>;
   sendMessage(input: TelegramSendMessageInput): Promise<TelegramSendResult>;
 };
 
@@ -486,6 +510,7 @@ type SignalBotThreadContext = {
 
 type SignalBotDeliverySendResult =
   | {
+      fallbackToMarkdown: boolean;
       fallbackStandalone: boolean;
       messageId: number | null;
       ok: true;
@@ -1020,6 +1045,16 @@ function formatSignalNotificationHeadlineMarkdown(
   return `${headline.emoji} ${formatTelegramBold(headline.hook)}${continuation}`;
 }
 
+function formatSignalNotificationHeadlineRichText(
+  headline: SignalNotificationHeadline,
+): TelegramRichText {
+  return telegramRichText(
+    `${headline.emoji} `,
+    telegramRichBold(headline.hook),
+    headline.continuation ? ` ${headline.continuation}` : null,
+  );
+}
+
 function joinTelegramMessageBlocks(
   blocks: Array<string | null | undefined>,
 ): string {
@@ -1125,6 +1160,10 @@ type SignalBotBodyTextRenderer = {
   render(value: string): string;
 };
 
+type SignalBotRichBodyTextRenderer = {
+  render(value: string): TelegramRichText;
+};
+
 function createSignalBotBodyTextRenderer(
   note: SignalBotNote,
   holderUrl: string | null,
@@ -1193,6 +1232,78 @@ function createSignalBotBodyTextRenderer(
       }
       rendered.push(escapeTelegramMarkdownV2(sanitizedValue.slice(cursor)));
       return rendered.join("");
+    },
+  };
+}
+
+function createSignalBotRichBodyTextRenderer(
+  note: SignalBotNote,
+  holderUrl: string | null,
+  marketUrl: string | null,
+  marketCandidates: string[],
+): SignalBotRichBodyTextRenderer {
+  const holderCandidates = holderUrl
+    ? buildSignalBotHolderLinkCandidates(note)
+    : [];
+  const safeMarketCandidates = marketUrl
+    ? [
+        ...new Set(
+          marketCandidates
+            .map(cleanSignalBotDisplayText)
+            .filter(
+              (value): value is string =>
+                value != null &&
+                value.length >= 3 &&
+                !["YES", "NO"].includes(value.toUpperCase()),
+            ),
+        ),
+      ].sort((a, b) => b.length - a.length)
+    : [];
+  let didLinkHolder = false;
+  let didLinkMarket = false;
+  return {
+    render: (value: string) => {
+      const sanitizedValue = sanitizeSignalBotPublicHolderMentions(value, note);
+      const matches: Array<
+        SignalBotHolderLinkMatch & { kind: "holder" | "market"; url: string }
+      > = [];
+      if (holderUrl && !didLinkHolder && holderCandidates.length > 0) {
+        const match = findSignalBotHolderLinkMatch(
+          sanitizedValue,
+          holderCandidates,
+        );
+        if (match) matches.push({ ...match, kind: "holder", url: holderUrl });
+      }
+      if (marketUrl && !didLinkMarket && safeMarketCandidates.length > 0) {
+        const match = findSignalBotHolderLinkMatch(
+          sanitizedValue,
+          safeMarketCandidates,
+        );
+        if (match) matches.push({ ...match, kind: "market", url: marketUrl });
+      }
+      if (matches.length === 0) return sanitizedValue;
+      matches.sort(
+        (a, b) => a.index - b.index || b.label.length - a.label.length,
+      );
+      const rendered: TelegramRichText[] = [];
+      let cursor = 0;
+      for (const match of matches) {
+        if (match.index < cursor) continue;
+        const before = sanitizedValue.slice(cursor, match.index);
+        if (before) rendered.push(before);
+        rendered.push(
+          telegramRichUrl(
+            sanitizedValue.slice(match.index, match.index + match.label.length),
+            match.url,
+          ),
+        );
+        cursor = match.index + match.label.length;
+        if (match.kind === "holder") didLinkHolder = true;
+        if (match.kind === "market") didLinkMarket = true;
+      }
+      const tail = sanitizedValue.slice(cursor);
+      if (tail) rendered.push(tail);
+      return rendered;
     },
   };
 }
@@ -1441,6 +1552,7 @@ export function buildSignalBotMessage(input: {
 }): {
   keyboard: TelegramInlineKeyboard | undefined;
   publishable: boolean;
+  richMessage: TelegramInputRichMessage;
   text: string;
 } {
   const messageKind = input.messageKind ?? "initial";
@@ -1467,7 +1579,12 @@ export function buildSignalBotMessage(input: {
     notificationCopy.headline.templateKey === "initial_watch_v7";
   const publishable = notificationCopy.publishable && !weakPublicInitial;
   if (!publishable) {
-    return { keyboard: undefined, publishable: false, text: "" };
+    return {
+      keyboard: undefined,
+      publishable: false,
+      richMessage: { blocks: [] },
+      text: "",
+    };
   }
   const holderStartParam =
     !buySide || !note.holderSide || note.holderSide === buySide
@@ -1508,6 +1625,18 @@ export function buildSignalBotMessage(input: {
       note.eventTitle,
     ].filter((value): value is string => Boolean(value)),
   );
+  const richBodyRenderer = createSignalBotRichBodyTextRenderer(
+    note,
+    holderMiniAppUrl,
+    marketMiniAppUrl,
+    [
+      buySideCopy?.rawOutcomeLabel ?? null,
+      buySideCopy?.sideLabel ?? null,
+      buySide ? presentation.positions[buySide].canonicalLabel : null,
+      note.marketTitle,
+      note.eventTitle,
+    ].filter((value): value is string => Boolean(value)),
+  );
   const sanitizedDescription =
     messageKind === "research_update"
       ? sanitizeSignalBotResearchDescription(note.description, note, buySide)
@@ -1526,6 +1655,7 @@ export function buildSignalBotMessage(input: {
           )
         : null);
   const summary = description ? bodyRenderer.render(description) : null;
+  const richSummary = description ? richBodyRenderer.render(description) : null;
   const researchPosition =
     messageKind === "research_update" && buySide
       ? formatSignalBotResearchPosition({
@@ -1548,6 +1678,16 @@ export function buildSignalBotMessage(input: {
         ),
       )
     : null;
+  const renderedRichResearchPositionRows = researchPosition
+    ? researchPosition.rows.map((row) => ({
+        label: row.label,
+        value: telegramRichBold(
+          richBodyRenderer.render(
+            normalizeTelegramPresentationAliases(row.value, presentation),
+          ),
+        ),
+      }))
+    : [];
   const titleLine = formatSignalNotificationHeadlineMarkdown(
     notificationCopy.headline,
   );
@@ -1562,6 +1702,30 @@ export function buildSignalBotMessage(input: {
     messageKind === "initial" && supportingEvidenceRows.length > 0
       ? formatSignalBotEvidenceBlock(supportingEvidenceRows)
       : null;
+  const richBlocks: TelegramInputRichMessage["blocks"] = [
+    telegramRichParagraph(
+      formatSignalNotificationHeadlineRichText(notificationCopy.headline),
+    ),
+    ...(richSummary ? [telegramRichParagraph(richSummary)] : []),
+    ...(renderedRichResearchPositionRows.length > 0 && researchPosition
+      ? [
+          telegramRichMetricsTable({
+            caption: telegramRichBold(researchPosition.label),
+            rows: renderedRichResearchPositionRows,
+          }),
+        ]
+      : []),
+    ...(messageKind === "initial" && supportingEvidenceRows.length > 0
+      ? [formatSignalBotEvidenceRichTable(supportingEvidenceRows)]
+      : []),
+    ...(!input.telegramMiniAppLinkBase
+      ? [
+          telegramRichParagraph(
+            telegramRichItalic("Mini App temporarily unavailable."),
+          ),
+        ]
+      : []),
+  ];
   const blocks = [
     titleLine,
     summary,
@@ -1666,6 +1830,7 @@ export function buildSignalBotMessage(input: {
     keyboard:
       keyboardRows.length > 0 ? { inline_keyboard: keyboardRows } : undefined,
     publishable: true,
+    richMessage: { blocks: richBlocks },
     text: joinTelegramMessageBlocks(blocks),
   };
 }
@@ -4571,6 +4736,7 @@ export type SignalBotDeliveryPreparation =
       buySide: "NO" | "YES";
       deliveryTarget: SignalBotCheaperAlternative | null;
       keyboard: TelegramInlineKeyboard | undefined;
+      richMessage: TelegramInputRichMessage;
       status: "ready";
       text: string;
     }
@@ -4612,6 +4778,7 @@ async function loadSignalBotSourceReadinessWithoutRedis(input: {
 }
 
 export async function prepareSignalBotDelivery(input: {
+  allowStalePriceSnapshot?: boolean;
   appBaseUrl: string;
   buyAmountUsd: number;
   chatType?: string | null;
@@ -4698,10 +4865,14 @@ export async function prepareSignalBotDelivery(input: {
       status: "skipped",
     };
   }
+  const invalidPriceSnapshotTime =
+    !Number.isFinite(priceAsOfMs) || priceAsOfMs > now.getTime();
+  const stalePriceSnapshot =
+    !invalidPriceSnapshotTime &&
+    now.getTime() - priceAsOfMs > SIGNAL_BOT_QUOTE_MAX_AGE_MS;
   if (
-    !Number.isFinite(priceAsOfMs) ||
-    priceAsOfMs > now.getTime() ||
-    now.getTime() - priceAsOfMs > SIGNAL_BOT_QUOTE_MAX_AGE_MS
+    invalidPriceSnapshotTime ||
+    (stalePriceSnapshot && !input.allowStalePriceSnapshot)
   ) {
     return {
       audit: {
@@ -4716,8 +4887,11 @@ export async function prepareSignalBotDelivery(input: {
   }
 
   const update = input.note.holderResearchUpdateV1;
+  const stalePriceSnapshotBypassed =
+    stalePriceSnapshot && input.allowStalePriceSnapshot === true;
   const requestedBuy =
     !input.forceOpenMarket &&
+    !stalePriceSnapshotBypassed &&
     (input.messageKind === "initial" || update?.ctaIntent === "buy");
   let allowBuyCta = false;
   let priceGuard: SignalBotPriceGuardResult = {
@@ -4799,12 +4973,14 @@ export async function prepareSignalBotDelivery(input: {
       ctaIntent: allowBuyCta ? "buy" : "open_market",
       identitySource: identity.source,
       priceSnapshotAsOf: priceSnapshot.asOf,
+      stalePriceSnapshotBypassed,
       updateFingerprint: update?.fingerprint ?? null,
     },
     blockers: priceGuard.blockers,
     buySide,
     deliveryTarget,
     keyboard: rendered.keyboard,
+    richMessage: rendered.richMessage,
     status: "ready",
     text: rendered.text,
   };
@@ -5280,44 +5456,66 @@ async function recordSignalBotFollowthroughSkipped(input: {
 async function sendSignalBotMessageWithReplyFallback(input: {
   message: TelegramSendMessageInput;
   replyToMessageId: number | null;
+  richMessage?: TelegramInputRichMessage;
   telegram: SignalBotTelegramClient;
 }): Promise<SignalBotDeliverySendResult> {
-  if (input.replyToMessageId == null) {
-    const result = await input.telegram.sendMessage(input.message);
-    return result.ok
-      ? {
-          fallbackStandalone: false,
-          messageId: result.messageId,
-          ok: true,
-          replyToMessageId: null,
-        }
-      : result;
-  }
-  const replyMessage: TelegramSendMessageInput = {
-    ...input.message,
-    reply_parameters: {
-      message_id: input.replyToMessageId,
-    },
-  };
-  const result = await input.telegram.sendMessage(replyMessage);
-  if (result.ok) {
+  const send = async (
+    replyToMessageId: number | null,
+  ): Promise<{
+    fallbackToMarkdown: boolean;
+    result: TelegramSendResult;
+  }> => {
+    const replyParameters =
+      replyToMessageId == null ? undefined : { message_id: replyToMessageId };
+    if (input.richMessage && input.telegram.sendRichMessage) {
+      const richResult = await input.telegram.sendRichMessage({
+        chat_id: input.message.chat_id,
+        reply_markup: input.message.reply_markup,
+        reply_parameters: replyParameters,
+        rich_message: input.richMessage,
+      });
+      if (
+        richResult.ok ||
+        richResult.error === "blocked_or_missing" ||
+        richResult.retryAfterSec != null
+      ) {
+        return { fallbackToMarkdown: false, result: richResult };
+      }
+    }
     return {
+      fallbackToMarkdown: Boolean(
+        input.richMessage && input.telegram.sendRichMessage,
+      ),
+      result: await input.telegram.sendMessage({
+        ...input.message,
+        reply_parameters: replyParameters,
+      }),
+    };
+  };
+
+  const first = await send(input.replyToMessageId);
+  if (first.result.ok) {
+    return {
+      fallbackToMarkdown: first.fallbackToMarkdown,
       fallbackStandalone: false,
-      messageId: result.messageId,
+      messageId: first.result.messageId,
       ok: true,
       replyToMessageId: input.replyToMessageId,
     };
   }
-  if (result.error === "blocked_or_missing") return result;
-  const fallback = await input.telegram.sendMessage(input.message);
-  return fallback.ok
+  if (first.result.error === "blocked_or_missing") return first.result;
+  if (input.replyToMessageId == null) return first.result;
+
+  const standalone = await send(null);
+  return standalone.result.ok
     ? {
+        fallbackToMarkdown: standalone.fallbackToMarkdown,
         fallbackStandalone: true,
-        messageId: fallback.messageId,
+        messageId: standalone.result.messageId,
         ok: true,
         replyToMessageId: null,
       }
-    : fallback;
+    : standalone.result;
 }
 
 export function createSignalBotTelegramTransport(
@@ -5359,6 +5557,7 @@ export function createSignalBotTelegramTransport(
         text: payload.text,
       },
       replyToMessageId,
+      richMessage: payload.telegram.richMessage,
       telegram,
     });
     return result.ok
@@ -5366,6 +5565,7 @@ export function createSignalBotTelegramTransport(
           deliveryId:
             result.messageId == null ? null : String(result.messageId),
           metadata: {
+            fallbackToMarkdown: result.fallbackToMarkdown,
             fallbackStandalone: result.fallbackStandalone,
             replyToDeliveryId:
               result.replyToMessageId == null
@@ -5411,6 +5611,7 @@ async function sendSignalBotViaTransport(input: {
     throw new Error("Telegram transport returned an invalid delivery ID");
   }
   return {
+    fallbackToMarkdown: result.metadata?.fallbackToMarkdown === true,
     fallbackStandalone: result.metadata?.fallbackStandalone === true,
     messageId,
     ok: true,
@@ -5621,7 +5822,8 @@ export async function publishSignalBotTick(input: {
           preparation.blockers,
         );
       }
-      const { buySide, deliveryTarget, keyboard, text } = preparation;
+      const { buySide, deliveryTarget, keyboard, richMessage, text } =
+        preparation;
       const deliveryView = buildNeutralSignalDeliveryView({
         appBaseUrl: input.config.appBaseUrl,
         buyAmountUsd: input.config.buyAmountUsd,
@@ -5642,6 +5844,7 @@ export async function publishSignalBotTick(input: {
           disableWebPagePreview: false,
           parseMode: "MarkdownV2",
           replyMarkup: keyboard,
+          richMessage,
         },
         text,
       };
@@ -5671,6 +5874,7 @@ export async function publishSignalBotTick(input: {
               policy: destinationPolicy,
               view: deliveryView,
             },
+            fallbackToMarkdown: result.fallbackToMarkdown,
             fallbackStandalone: result.fallbackStandalone,
             noteKind: thread.messageKind,
           },
@@ -5753,6 +5957,7 @@ export async function sendLatestSignalBotTestSignal(input: {
   if (!note) return { reason: "no_eligible_note", sent: false };
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
   const preparation = await prepareSignalBotDelivery({
+    allowStalePriceSnapshot: true,
     appBaseUrl: input.config.appBaseUrl,
     buyAmountUsd: input.config.buyAmountUsd,
     chatType: chatState?.chatType,
@@ -5767,12 +5972,17 @@ export async function sendLatestSignalBotTestSignal(input: {
   if (preparation.status !== "ready") {
     return { reason: preparation.reason, sent: false };
   }
-  const result = await input.telegram.sendMessage({
-    chat_id: input.chatId,
-    disable_web_page_preview: false,
-    parse_mode: "MarkdownV2",
-    reply_markup: preparation.keyboard,
-    text: preparation.text,
+  const result = await sendSignalBotMessageWithReplyFallback({
+    message: {
+      chat_id: input.chatId,
+      disable_web_page_preview: false,
+      parse_mode: "MarkdownV2",
+      reply_markup: preparation.keyboard,
+      text: preparation.text,
+    },
+    replyToMessageId: null,
+    richMessage: preparation.richMessage,
+    telegram: input.telegram,
   });
   return {
     reason: result.ok ? null : "unpublishable_copy",
@@ -5846,6 +6056,12 @@ export async function sendSignalBotFollowthroughPreview(input: {
       stats,
       telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
     })}`;
+    const richMessage = buildSignalBotFollowthroughRichMessage({
+      candidate,
+      kind,
+      stats,
+      telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+    });
     const target = resolveSignalBotFollowthroughDeliveryTarget(candidate);
     const buyPrice =
       input.redis != null
@@ -5877,6 +6093,14 @@ export async function sendSignalBotFollowthroughPreview(input: {
         text,
       },
       replyToMessageId: toInteger(candidate.reply_to_message_id),
+      richMessage: {
+        blocks: [
+          telegramRichParagraph(
+            telegramRichItalic("Preview only — not recorded."),
+          ),
+          ...richMessage.blocks,
+        ],
+      },
       telegram: input.telegram,
     });
     return result.ok;
@@ -6547,6 +6771,33 @@ function formatSignalBotFollowthroughReadMarkdown(input: {
   )}`;
 }
 
+function formatSignalBotFollowthroughReadRichText(input: {
+  dominantConfluence?: boolean;
+  hasWalletEvidence: boolean;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  marketUrl: string | null;
+  sideCopy: MarketSideCopy | null;
+  sideLabel: string;
+  stats: SignalBotFollowthroughStats;
+  lateStageCashout?: boolean;
+}): TelegramRichText {
+  const marketLabel =
+    input.stats.markPrice == null
+      ? input.sideLabel
+      : `${input.sideLabel} at ${formatCents(input.stats.markPrice)}`;
+  const plain = formatSignalBotFollowthroughRead(input);
+  const marketLabelIndex = plain.indexOf(marketLabel);
+  if (marketLabelIndex < 0 || !input.marketUrl) return plain;
+  return telegramRichText(
+    plain.slice(0, marketLabelIndex),
+    telegramRichUrl(marketLabel, input.marketUrl),
+    plain.slice(marketLabelIndex + marketLabel.length),
+  );
+}
+
 function isSignalBotFollowthroughCooling(
   stats: SignalBotFollowthroughStats,
 ): boolean {
@@ -6622,6 +6873,75 @@ function formatSignalBotFollowthroughActivityMarkdownLines(
         : escapeTelegramMarkdownV2("No major change yet")
     }`,
   ];
+}
+
+function formatSignalBotFollowthroughRichTable(input: {
+  sideLabel: string;
+  stats: SignalBotFollowthroughStats;
+}): TelegramInputRichMessage["blocks"][number] {
+  const displayedPriceMoveCents =
+    input.stats.entryPrice != null && input.stats.markPrice != null
+      ? Math.round(input.stats.markPrice * 100) -
+        Math.round(input.stats.entryPrice * 100)
+      : null;
+  const priceValue: TelegramRichText =
+    input.stats.entryPrice != null && input.stats.markPrice != null
+      ? displayedPriceMoveCents === 0
+        ? telegramRichText(
+            telegramRichBold(formatCents(input.stats.markPrice)),
+            " unchanged",
+          )
+        : telegramRichText(
+            `${formatCents(input.stats.entryPrice)} → ${formatCents(
+              input.stats.markPrice,
+            )}  `,
+            telegramRichBold(
+              formatSignedCentsMove(displayedPriceMoveCents ?? 0),
+            ),
+          )
+      : telegramRichItalic("Price move unavailable");
+  const rows: Array<{ label: TelegramRichText; value: TelegramRichText }> = [
+    {
+      label: "Net tracked flow",
+      value: telegramRichBold(
+        formatSignedCompactUsd(input.stats.netSignalSideFlowUsd),
+      ),
+    },
+  ];
+  const trimmedOnly = Math.max(
+    0,
+    input.stats.trimmedWallets - input.stats.exitedWallets,
+  );
+  const pushWalletRow = (label: string, count: number) => {
+    if (count <= 0) return;
+    rows.push({
+      label,
+      value: telegramRichBold(String(count)),
+    });
+  };
+  pushWalletRow("Wallets added", input.stats.joinedOrAddedWallets);
+  pushWalletRow("Wallets trimmed", trimmedOnly);
+  pushWalletRow("Wallets exited", input.stats.exitedWallets);
+  pushWalletRow("Still holding", input.stats.stillHoldingWallets);
+  if (rows.length === 1) {
+    rows.push({ label: "Wallets", value: "No major change yet" });
+  }
+  rows.push({ label: `${input.sideLabel} price`, value: priceValue });
+  if (
+    input.stats.estimatedOpenPnlUsd != null &&
+    Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
+  ) {
+    rows.push({
+      label: "Est. open PnL",
+      value: telegramRichBold(
+        formatSignedCompactUsd(input.stats.estimatedOpenPnlUsd),
+      ),
+    });
+  }
+  return telegramRichMetricsTable({
+    caption: telegramRichBold("Since the call"),
+    rows,
+  });
 }
 
 function formatSignalBotFollowthroughStatBlock(input: {
@@ -6704,6 +7024,37 @@ function formatSignalBotResolutionBlock(input: {
   return formatTelegramBlockquote(lines);
 }
 
+function formatSignalBotResolutionRichTable(input: {
+  sideLabel: string;
+  stats: SignalBotFollowthroughStats;
+}): TelegramInputRichMessage["blocks"][number] {
+  const rows: Array<{ label: TelegramRichText; value: TelegramRichText }> = [];
+  if (input.stats.entryPrice != null) {
+    rows.push({
+      label: "Entry",
+      value: telegramRichBold(formatCents(input.stats.entryPrice)),
+    });
+  }
+  rows.push({
+    label: "Resolution",
+    value: telegramRichBold(
+      `${input.sideLabel} ${formatSignalBotResolutionPrice(input.stats.markPrice)}`,
+    ),
+  });
+  if (input.stats.priceMoveCents != null) {
+    rows.push({
+      label: "Move",
+      value: telegramRichBold(
+        formatSignedCentsMove(input.stats.priceMoveCents),
+      ),
+    });
+  }
+  return telegramRichMetricsTable({
+    caption: telegramRichBold("Result"),
+    rows,
+  });
+}
+
 function buildSignalBotFollowthroughMessage(input: {
   candidate: SignalBotFollowthroughCandidateRow;
   deliveryRef?: string | null;
@@ -6773,6 +7124,86 @@ function buildSignalBotFollowthroughMessage(input: {
       ? [escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
       : []),
   ]);
+}
+
+function buildSignalBotFollowthroughRichMessage(input: {
+  candidate: SignalBotFollowthroughCandidateRow;
+  deliveryRef?: string | null;
+  kind: Extract<
+    SignalBotMessageKind,
+    "followthrough_stats" | "resolved_loss" | "resolved_win"
+  >;
+  stats: SignalBotFollowthroughStats;
+  telegramMiniAppLinkBase?: string | null;
+  copyPolicy?: ResolvedSignalPostCopyPolicy;
+}): TelegramInputRichMessage {
+  const stats = input.stats;
+  const sideCopy = stats.signalSide
+    ? buildSignalBotFollowthroughSideCopy(input.candidate, stats.signalSide)
+    : null;
+  const sideLabel = resolveSignalBotFollowthroughSideLabel(
+    input.candidate,
+    stats.signalSide,
+    sideCopy,
+  );
+  const hasWalletEvidence =
+    stats.joinedOrAddedWallets > 0 ||
+    stats.netSignalSideFlowUsd !== 0 ||
+    stats.trimmedWallets > 0 ||
+    stats.exitedWallets > 0;
+  const notificationCopy = buildSignalBotFollowthroughNotificationCopy(input);
+  const marketStartParam = input.candidate.event_id
+    ? buildSignalBotMarketStartParam({
+        deliveryRef: input.deliveryRef,
+        eventId: input.candidate.event_id,
+        marketId: input.candidate.market_id,
+        side: stats.signalSide,
+      })
+    : null;
+  const marketMiniAppUrl = buildSignalBotMiniAppUrl({
+    base: input.telegramMiniAppLinkBase,
+    startParam: marketStartParam,
+  });
+  const blocks: TelegramInputRichMessage["blocks"] = [
+    telegramRichParagraph(
+      formatSignalNotificationHeadlineRichText(notificationCopy.headline),
+    ),
+  ];
+  if (input.kind === "resolved_win" || input.kind === "resolved_loss") {
+    blocks.push(formatSignalBotResolutionRichTable({ sideLabel, stats }));
+    return { blocks };
+  }
+  blocks.push(
+    formatSignalBotFollowthroughRichTable({ sideLabel, stats }),
+    telegramRichDivider(),
+    telegramRichParagraph(
+      telegramRichText(
+        telegramRichBold("Read: "),
+        formatSignalBotFollowthroughReadRichText({
+          dominantConfluence:
+            notificationCopy.headline.templateKey ===
+            "dominant_price_capital_confluence_v9",
+          hasWalletEvidence,
+          kind: input.kind,
+          marketUrl: marketMiniAppUrl,
+          sideCopy,
+          sideLabel,
+          stats,
+          lateStageCashout:
+            notificationCopy.headline.templateKey ===
+            "late_stage_early_wallet_cashout_v10",
+        }),
+      ),
+    ),
+  );
+  if (!input.telegramMiniAppLinkBase) {
+    blocks.push(
+      telegramRichParagraph(
+        telegramRichItalic("Mini App temporarily unavailable."),
+      ),
+    );
+  }
+  return { blocks };
 }
 
 function buildNeutralSignalFollowthroughView(input: {
@@ -6975,6 +7406,14 @@ export async function publishSignalBotFollowthroughTick(input: {
       telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
       copyPolicy,
     });
+    const richMessage = buildSignalBotFollowthroughRichMessage({
+      candidate,
+      deliveryRef: reserved,
+      kind,
+      stats,
+      telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
+      copyPolicy,
+    });
     const copyAudit = buildSignalBotFollowthroughCopyAudit({
       candidate,
       kind,
@@ -7025,6 +7464,7 @@ export async function publishSignalBotFollowthroughTick(input: {
           disableWebPagePreview: true,
           parseMode: "MarkdownV2",
           replyMarkup: keyboard,
+          richMessage,
         },
         text,
       },
@@ -7067,6 +7507,7 @@ export async function publishSignalBotFollowthroughTick(input: {
         ...stats,
         copy: copyAudit,
         delivery: { view: deliveryView },
+        fallbackToMarkdown: result.fallbackToMarkdown,
         fallbackStandalone: result.fallbackStandalone,
         status: "sent",
       },
@@ -7647,6 +8088,65 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
       photo: input.photo,
       replyMarkup: input.reply_markup,
     });
+  }
+
+  async sendRichMessage(
+    input: TelegramSendRichMessageInput,
+  ): Promise<TelegramSendResult> {
+    const request = async (body: TelegramSendRichMessageInput) => {
+      const response = await fetch(`${this.baseUrl}/sendRichMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        description?: string;
+        ok?: boolean;
+        parameters?: { retry_after?: number };
+        result?: { message_id?: number };
+      } | null;
+      return { payload, response };
+    };
+    let requestInput = input;
+    let { payload, response } = await request(requestInput);
+    const hasButtonCustomEmoji =
+      requestInput.reply_markup?.inline_keyboard.some((row) =>
+        row.some((button) => Boolean(button.icon_custom_emoji_id)),
+      ) === true;
+    if (
+      isTelegramCustomEmojiRejection(response.status, payload?.description) &&
+      hasButtonCustomEmoji &&
+      requestInput.reply_markup
+    ) {
+      requestInput = {
+        ...requestInput,
+        reply_markup: stripTelegramCustomEmojiButtonIcons(
+          requestInput.reply_markup,
+        ),
+      };
+      ({ payload, response } = await request(requestInput));
+    }
+    if (response.ok && payload?.ok) {
+      const messageId = payload.result?.message_id;
+      return {
+        messageId: typeof messageId === "number" ? messageId : null,
+        ok: true,
+      };
+    }
+    const message = payload?.description ?? `HTTP ${response.status}`;
+    if (
+      response.status === 403 ||
+      /chat not found|bot was blocked|user is deactivated/i.test(message)
+    ) {
+      return { error: "blocked_or_missing", message, ok: false };
+    }
+    const retryAfterSec = payload?.parameters?.retry_after;
+    return {
+      error: "other",
+      message,
+      ok: false,
+      ...(typeof retryAfterSec === "number" ? { retryAfterSec } : {}),
+    };
   }
 
   async sendMessage(
@@ -8845,7 +9345,11 @@ function formatSignalBotResearchPosition(input: {
   researchDelta: SignalBotResearchDelta | null;
   side: "NO" | "YES";
   sideLabel: string;
-}): { label: string; text: string } | null {
+}): {
+  label: string;
+  rows: Array<{ label: string; value: string }>;
+  text: string;
+} | null {
   const clusterScope =
     input.note.holderActorMode === "sharp_cluster" ||
     input.researchDelta?.kind === "wallet_count_change" ||
@@ -8863,16 +9367,30 @@ function formatSignalBotResearchPosition(input: {
         ? input.researchDelta.afterWallets
         : input.note.holderClusterSharpHolders;
     const details = [`${formatCompactUsd(capital)} on ${input.sideLabel}`];
+    const rows = [
+      {
+        label: "Tracked position",
+        value: `${formatCompactUsd(capital)} on ${input.sideLabel}`,
+      },
+    ];
     if (strongWallets != null && strongWallets > 0) {
       details.push(
         `${Math.trunc(strongWallets)} strong ${
           Math.trunc(strongWallets) === 1 ? "wallet" : "wallets"
         }`,
       );
+      rows.push({
+        label: "Strong wallets",
+        value: String(Math.trunc(strongWallets)),
+      });
     }
-    if (input.price != null) details.push(`${formatCents(input.price)} now`);
+    if (input.price != null) {
+      details.push(`${formatCents(input.price)} now`);
+      rows.push({ label: "Price now", value: formatCents(input.price) });
+    }
     return {
       label: "Strong-wallet support",
+      rows,
       text: details.join(" · "),
     };
   }
@@ -8889,14 +9407,34 @@ function formatSignalBotResearchPosition(input: {
   } else {
     details.push(input.sideLabel);
   }
-  if (input.price != null) details.push(`${formatCents(input.price)} now`);
+  const rows = [
+    {
+      label: position != null && position > 0 ? "Position" : "Side",
+      value:
+        position != null && position > 0
+          ? `${formatCompactUsd(position)} on ${input.sideLabel}`
+          : input.sideLabel,
+    },
+  ];
+  if (input.price != null) {
+    details.push(`${formatCents(input.price)} now`);
+    rows.push({ label: "Price now", value: formatCents(input.price) });
+  }
   if (openPnl != null && Math.abs(openPnl) >= 1) {
     details.push(`Wallet open PnL ${formatSignedCompactUsd(openPnl)}`);
+    rows.push({
+      label: "Open PnL",
+      value: formatSignedCompactUsd(openPnl),
+    });
   }
-  return { label: "Wallet position", text: details.join(" · ") };
+  return { label: "Wallet position", rows, text: details.join(" · ") };
 }
 
-function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
+function formatSignalBotEvidenceMetric(row: SignalEvidenceMetricV1): {
+  qualifier: string;
+  title: string;
+  value: string;
+} {
   const title =
     row.kind === "track_record"
       ? "PnL"
@@ -8938,6 +9476,11 @@ function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
       : row.horizonDays != null
         ? ` · ${row.horizonDays}d`
         : "";
+  return { qualifier, title, value };
+}
+
+function formatSignalBotEvidenceRow(row: SignalEvidenceMetricV1): string {
+  const { qualifier, title, value } = formatSignalBotEvidenceMetric(row);
   return `▸ ${escapeTelegramMarkdownV2(title)}  ${formatTelegramBold(
     value,
   )}${escapeTelegramMarkdownV2(qualifier)}`;
@@ -8949,6 +9492,24 @@ function formatSignalBotEvidenceBlock(rows: SignalEvidenceMetricV1[]): string {
     "",
     ...rows.map(formatSignalBotEvidenceRow),
   ]);
+}
+
+function formatSignalBotEvidenceRichTable(
+  rows: SignalEvidenceMetricV1[],
+): TelegramInputRichMessage["blocks"][number] {
+  return telegramRichMetricsTable({
+    caption: telegramRichBold("Why it matters"),
+    rows: rows.map((row) => {
+      const metric = formatSignalBotEvidenceMetric(row);
+      return {
+        label: metric.title,
+        value: telegramRichText(
+          telegramRichBold(metric.value),
+          metric.qualifier,
+        ),
+      };
+    }),
+  });
 }
 
 function resolveChatTitle(chat: TelegramBotChat): string | null {
