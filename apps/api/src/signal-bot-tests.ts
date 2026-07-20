@@ -2997,6 +2997,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ["paragraph", "table"],
       );
       assert.match(JSON.stringify(initial), /marked/);
+      assert.match(
+        JSON.stringify(initial),
+        /"text":\{"text":"\+\$542K last month\.","type":"bold"\},"type":"marked"/,
+      );
       assert.match(JSON.stringify(initial), /\\n\\n/);
       const initialTable = initial?.blocks[1];
       assert.equal(initialTable?.type, "table");
@@ -9971,6 +9975,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(lead?.type, "paragraph");
       if (lead?.type === "paragraph") {
         assert.match(JSON.stringify(lead.text), /marked/);
+        assert.match(
+          JSON.stringify(lead.text),
+          /"text":\{"text":"\$12\.3K backs YES on “Will test resolve Yes”\.\s*","type":"bold"\},"type":"marked"/,
+        );
         assert.match(JSON.stringify(lead.text), /\\n\\n/);
       }
       const metrics = message.richMessage.blocks[1];

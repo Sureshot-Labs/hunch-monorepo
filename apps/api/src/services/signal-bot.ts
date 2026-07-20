@@ -838,7 +838,7 @@ function formatSignalNotificationHeadlineRichText(
 ): TelegramRichText {
   return telegramRichText(
     `${headline.emoji} `,
-    telegramRichMarked(headline.hook),
+    telegramRichMarked(telegramRichBold(headline.hook)),
     headline.continuation ? ` ${headline.continuation}` : null,
   );
 }
