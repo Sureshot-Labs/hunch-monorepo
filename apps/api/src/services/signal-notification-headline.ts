@@ -32,6 +32,7 @@ export type SignalNotificationStoryKind =
 
 export type SignalNotificationHeadline = {
   continuation: string | null;
+  evidenceKindsUsed: Array<"capital" | "conviction" | "track_record">;
   emoji: string;
   hook: string;
   lintExceeded: boolean;
@@ -141,13 +142,11 @@ function buildNaturalSubject(input: {
       .trim();
     const eventWinner = eventTitle?.match(/^(.+?)\s+winner$/i)?.[1]?.trim();
     if (team && eventWinner) {
+      const winObject = formatWinMarketObject(eventWinner);
       if (input.side === "YES") {
-        const competition = /\bworld cup\b/i.test(eventWinner)
-          ? `the ${eventWinner}`
-          : eventWinner;
-        return `${team} to win ${competition}`;
+        return `${team} to win ${winObject}`;
       }
-      return `NO on ${team} winning ${eventWinner}`;
+      return `NO on ${team} winning ${winObject}`;
     }
     if (team && /^will\s+/i.test(marketTitle)) {
       return input.side === "YES" ? `${team} to win` : `NO on ${team} winning`;
@@ -163,6 +162,47 @@ function buildNaturalSubject(input: {
     return `${input.side} on ${marketTitle} in ${eventTitle}`;
   }
   return null;
+}
+
+function withDefiniteArticle(value: string): string {
+  const cleaned = value.trim();
+  if (/^(?:a|an|the)\b/i.test(cleaned)) return cleaned;
+  return `the ${cleaned}`;
+}
+
+export function formatWinMarketObject(value: string): string {
+  const cleaned = value.trim();
+  const scopedAward = cleaned.match(/^(.+?):\s*(.+)$/);
+  if (scopedAward?.[1] && scopedAward[2]) {
+    return `${withDefiniteArticle(scopedAward[2])} at ${withDefiniteArticle(
+      scopedAward[1],
+    )}`;
+  }
+  return /\b(?:world cup|golden boot|cup|championship|league)\b/i.test(cleaned)
+    ? withDefiniteArticle(cleaned)
+    : cleaned;
+}
+
+export function isSignalNotificationSubjectComplete(
+  value: string,
+  side: "NO" | "YES",
+): boolean {
+  const cleaned = cleanText(value);
+  if (!cleaned) return false;
+  const rawSideSubject = cleaned.match(/^(?:YES|NO)\s+on\s+(.+)$/i);
+  if (!rawSideSubject?.[1]) return true;
+  const proposition = rawSideSubject[1].replace(/[.!?]+$/, "").trim();
+  if (!proposition) return false;
+  if (
+    /\b(?:will|win(?:ning)?|lose|losing|hit(?:ting)?|reach(?:ing)?|fall|advance|qualif|attend|happen|resolve|before|after|by|over|under|above|below|more than|less than)\b/i.test(
+      proposition,
+    ) ||
+    /\b20\d{2}\b|\d|[?]/.test(proposition)
+  ) {
+    return true;
+  }
+  const wordCount = proposition.split(/\s+/).filter(Boolean).length;
+  return cleaned.toUpperCase().startsWith(`${side} ON `) && wordCount >= 4;
 }
 
 export function buildSignalNotificationSubject(input: {
@@ -287,16 +327,94 @@ function formatSignedMove(cents: number): string {
   return `${cents >= 0 ? "+" : "−"}${rounded}¢`;
 }
 
+function parseQuestionPosition(positionLabel: string): {
+  question: string;
+  side: "NO" | "YES";
+} | null {
+  const match = positionLabel.match(
+    /^(YES|NO)\s+on\s+((?:will|would|can|could|is|are|does|do|did|has|have)\b.+?)[?]?$/i,
+  );
+  if (!match?.[1] || !match[2]) return null;
+  return {
+    question: match[2].replace(/[?]+$/, "").trim(),
+    side: match[1].toUpperCase() as "NO" | "YES",
+  };
+}
+
 function formatCapitalPosition(capital: string, positionLabel: string): string {
-  return /^(?:YES|NO)\s+on\b/i.test(positionLabel)
-    ? `${capital} backs ${positionLabel}`
-    : `${capital} on ${positionLabel}`;
+  const question = parseQuestionPosition(positionLabel);
+  if (question) {
+    return `${capital} backs ${question.side} on “${question.question}”`;
+  }
+  const negative = positionLabel.match(/^NO\s+on\s+(.+)$/i);
+  if (negative?.[1]) return `${capital} against ${negative[1]}`;
+  const positive = positionLabel.match(/^YES\s+on\s+(.+)$/i);
+  if (positive?.[1]) return `${capital} backs ${positive[1]}`;
+  return `${capital} on ${positionLabel}`;
 }
 
 function formatWalletHolding(capital: string, positionLabel: string): string {
-  return /^(?:YES|NO)\s+on\b/i.test(positionLabel)
-    ? `That wallet now has ${capital} backing ${positionLabel}.`
-    : `That wallet now holds ${capital} on ${positionLabel}.`;
+  const question = parseQuestionPosition(positionLabel);
+  if (question) {
+    return `That wallet now has ${capital} on ${question.side} for “${question.question}”.`;
+  }
+  const negative = positionLabel.match(/^NO\s+on\s+(.+)$/i);
+  if (negative?.[1]) {
+    return `That wallet now has ${capital} against ${negative[1]}.`;
+  }
+  const positive = positionLabel.match(/^YES\s+on\s+(.+)$/i);
+  return `That wallet now holds ${capital} on ${positive?.[1] ?? positionLabel}.`;
+}
+
+function formatClusterHolding(input: {
+  capital: string | null;
+  currentPrice: number | null;
+  positionLabel: string;
+  wallets: number;
+}): string {
+  const actor = `${input.wallets} strong ${
+    input.wallets === 1 ? "wallet" : "wallets"
+  }`;
+  const negative = input.positionLabel.match(/^NO\s+on\s+(.+)$/i);
+  const positive = input.positionLabel.match(/^YES\s+on\s+(.+)$/i);
+  const question = parseQuestionPosition(input.positionLabel);
+  const price =
+    input.currentPrice == null
+      ? ""
+      : negative?.[1]
+        ? `, with NO at ${formatCents(input.currentPrice)}`
+        : positive?.[1]
+          ? `, with YES at ${formatCents(input.currentPrice)}`
+          : ` at ${formatCents(input.currentPrice)}`;
+  const holding = input.capital
+    ? question
+      ? `${actor} have ${input.capital} on ${question.side} for “${question.question}”`
+      : negative?.[1]
+        ? `${actor} have ${input.capital} against ${negative[1]}`
+        : positive?.[1]
+          ? `${actor} hold ${input.capital} on ${positive[1]}`
+          : `${actor} hold ${input.capital} on ${input.positionLabel}`
+    : question
+      ? `${actor} back ${question.side} on “${question.question}”`
+      : negative?.[1]
+        ? `${actor} are positioned against ${negative[1]}`
+        : `${actor} back ${positive?.[1] ?? input.positionLabel}`;
+  return `${holding}${price}.`;
+}
+
+function formatFlowIntoPosition(
+  capital: string,
+  positionLabel: string,
+): string {
+  const question = parseQuestionPosition(positionLabel);
+  if (question) {
+    return `${capital} flowed into ${question.side} on “${question.question}”`;
+  }
+  const negative = positionLabel.match(/^NO\s+on\s+(.+)$/i);
+  if (negative?.[1]) return `${capital} flowed against ${negative[1]}`;
+  const positive = positionLabel.match(/^YES\s+on\s+(.+)$/i);
+  if (positive?.[1]) return `${capital} flowed into ${positive[1]}`;
+  return `${capital} flowed into ${positionLabel}`;
 }
 
 function visibleLength(value: string): number {
@@ -384,6 +502,7 @@ export function buildSignalNotificationHeadline(input: {
   let hook: string;
   let continuation: string | null;
   let primaryEvidenceId: string | null = null;
+  const evidenceKindsUsed: SignalNotificationHeadline["evidenceKindsUsed"] = [];
   let primaryMetric: string | null = null;
   let supportingMetric: string | null = null;
   const actorPnlUsd =
@@ -474,35 +593,54 @@ export function buildSignalNotificationHeadline(input: {
         continuation = input.subject.text;
       }
     } else if (
-      input.actorMode === "single_holder" &&
+      (input.actorMode === "single_holder" ||
+        (input.actorMode === "sharp_cluster" && strongWallets >= 2)) &&
       actorPnlUsd != null &&
       actorPnlHorizonDays != null
     ) {
-      templateKey = "initial_track_record_v7";
+      const cluster = input.actorMode === "sharp_cluster";
+      templateKey = cluster
+        ? "initial_cluster_track_record_v9"
+        : "initial_track_record_v9";
       emoji = "👀";
       primaryMetric = `+${formatCompactUsd(actorPnlUsd)}`;
       primaryEvidenceId = input.actorPnlEvidenceId ?? null;
+      evidenceKindsUsed.push("track_record");
       supportingMetric =
         holderPositionUsd > 0
           ? formatCompactUsd(holderPositionUsd)
           : currentPrice == null
             ? null
             : formatCents(currentPrice);
-      hook = `+${formatCompactUsd(
-        actorPnlUsd,
-      )} PnL in ${actorPnlHorizonDays} days.`;
-      continuation =
-        holderPositionUsd > 0
-          ? formatWalletHolding(
-              formatCompactUsd(holderPositionUsd),
-              positionLabel,
-            )
-          : `That wallet now backs ${positionLabel}${
-              currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
-            }.`;
+      hook = `+${formatCompactUsd(actorPnlUsd)} ${
+        cluster ? "combined PnL" : "PnL"
+      } in ${actorPnlHorizonDays} days.`;
+      if (cluster) {
+        evidenceKindsUsed.push("conviction");
+        if (holderPositionUsd > 0) evidenceKindsUsed.push("capital");
+        continuation = formatClusterHolding({
+          capital:
+            holderPositionUsd > 0 ? formatCompactUsd(holderPositionUsd) : null,
+          currentPrice,
+          positionLabel,
+          wallets: strongWallets,
+        });
+      } else {
+        continuation =
+          holderPositionUsd > 0
+            ? formatWalletHolding(
+                formatCompactUsd(holderPositionUsd),
+                positionLabel,
+              )
+            : `That wallet now backs ${positionLabel}${
+                currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
+              }.`;
+      }
     } else if (input.actorMode === "sharp_cluster" && strongWallets >= 2) {
-      templateKey = "initial_wallet_cluster_v7";
+      templateKey = "initial_wallet_cluster_v9";
       emoji = "🔥";
+      evidenceKindsUsed.push("conviction");
+      if (holderPositionUsd > 0) evidenceKindsUsed.push("capital");
       primaryMetric =
         holderPositionUsd > 0
           ? formatCompactUsd(holderPositionUsd)
@@ -515,11 +653,12 @@ export function buildSignalNotificationHeadline(input: {
               positionLabel,
             )}.`
           : `${strongWallets} wallets aligned.`;
-      continuation = `${strongWallets} tracked ${
-        strongWallets === 1 ? "wallet is" : "wallets are"
-      } on the same side${
-        currentPrice == null ? "" : ` at ${formatCents(currentPrice)}`
-      }.`;
+      continuation = formatClusterHolding({
+        capital: null,
+        currentPrice,
+        positionLabel,
+        wallets: strongWallets,
+      });
     } else if (
       input.actorMode === "single_holder" &&
       holderPositionUsd >= policy.materialSingleWalletUsd
@@ -570,6 +709,24 @@ export function buildSignalNotificationHeadline(input: {
       priceMove ?? 0,
     )} anyway.`;
     continuation = `${input.subject.text} moved against tracked flow.`;
+  } else if (
+    materialPositiveFlow &&
+    strongPositiveMove &&
+    priceMove != null &&
+    priceMove >= policy.strongPriceMoveCents * 2 &&
+    netFlow >= policy.materialNetFlowUsd * 5 &&
+    currentPrice != null
+  ) {
+    storyKind = "confluence";
+    templateKey = "dominant_price_capital_confluence_v9";
+    emoji = "📈";
+    primaryMetric = formatSignedMove(priceMove);
+    supportingMetric = `+${formatCompactUsd(netFlow)}`;
+    hook = `${formatSignedMove(priceMove)} to ${formatCents(currentPrice)}.`;
+    continuation = `${formatFlowIntoPosition(
+      formatCompactUsd(netFlow),
+      input.subject.text,
+    )} after the call.`;
   } else if (contradictoryBreadth && netFlow >= policy.materialNetFlowUsd) {
     storyKind = "divergence";
     templateKey = "mixed_wallet_breadth_positive_flow_v7";
@@ -679,6 +836,7 @@ export function buildSignalNotificationHeadline(input: {
   const length = visibleLength(text);
   return {
     continuation,
+    evidenceKindsUsed,
     emoji,
     hook,
     lintExceeded: length > policy.headlineMaxGraphemes,

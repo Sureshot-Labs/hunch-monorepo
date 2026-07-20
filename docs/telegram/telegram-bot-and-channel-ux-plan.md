@@ -592,7 +592,7 @@ production migration, deployment ownership, observability, and device QA.
 
 Remaining backend work is intentionally maintained as bounded task documents:
 
-- Signal Post V8 backend completion and rollout (legacy filename retained):
+- Signal Post V9 backend completion and rollout (legacy filename retained):
   `backend-signal-post-copy-v4.md`;
 - typed holder-research update delta and canonical identity:
   `backend-holder-research-update-contract.md`;
@@ -700,9 +700,9 @@ each receive a random emoji.
   proposition semantically; never truncate it into an ambiguous entity name.
 - Select copy semantically from the underlying state. Do not rotate equivalent
   positive hooks by hash only for variety.
-- A verified positive recent wallet PnL may lead a single-wallet initial signal
-  because it establishes why the actor deserves attention. Estimated open PnL
-  never leads and must remain labeled `Est.` in supporting context.
+- A verified positive recent wallet PnL may lead a single-wallet or
+  sharp-cluster initial signal because it establishes why the actor deserves
+  attention. Estimated PnL never leads and its basis must be named explicitly.
 
 Bad:
 
@@ -743,7 +743,7 @@ Est. open PnL: +$208K
 The market moved with the call and tracked wallets have not fully faded it yet.
 ```
 
-Implemented V8 structure:
+Implemented V9 structure:
 
 ```text
 ⚠️ **+$67.7K bought. 8 wallets cut.** Tracked wallets remain split on NO on
@@ -754,7 +754,7 @@ BTC hitting $57.5K in July.
 │ Net tracked flow  +$67.7K
 │ Wallets  5 added · 8 trimmed · 15 holding
 │ NO price  87¢ → 89¢  +2¢
-│ Est. open PnL  +$1.6K
+│ Est. PnL since call  +$1.6K
 
 Read: More money went into NO at 89¢, but wallet support thinned and the price
 barely moved.
@@ -813,6 +813,11 @@ Rules:
   block.
 - When verified recent PnL supplies the headline hook, remove its PnL row from
   `Why it matters`; do not make the user read the same claim twice.
+- Apply the same rule to sharp clusters: when combined recent PnL, position
+  capital, and wallet count are already used in the headline, do not repeat any
+  of those three facts as proof rows.
+- A cluster-side price must be scoped explicitly (`with NO at 92¢`), not left
+  dangling after the event proposition.
 - Do not add a deterministic “still holding” sentence after a headline that
   already leads with the position. The generated thesis must carry new
   explanatory value.
@@ -841,6 +846,9 @@ thinned`;
 - use `🔎` only when the actual delta is new sourced external evidence;
 - clearly explain the named change from the original signal;
 - show a single wallet as `Wallet position: $78.4K on Under 2.5 · 59¢ now`;
+- label a single holder's mark-to-entry result `Wallet open PnL`; when a price
+  move since publication points in the opposite direction, state that the two
+  values use different starting prices;
 - show aggregate evidence as `Strong-wallet support: $2.8M on Spain · 5
 strong wallets · 59¢ now`; never collapse both scopes into `Position now`;
 - remove internal sports collection suffixes such as `- More Markets` before

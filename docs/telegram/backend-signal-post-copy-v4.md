@@ -1,32 +1,33 @@
-# Backend Task: Roll Out Signal Post V8
+# Backend Task: Roll Out Signal Post V9
 
-Status: V8 correctness pass and producer/delivery contracts implemented locally; live device QA remains
+Status: V9 correctness pass and producer/delivery contracts implemented locally; live device QA remains
 Priority: P0 before the next public-channel copy rollout
 Owner: backend / signal platform
 
-The filename is retained so existing handoff links do not break. V8 keeps the
-V7 attention-first grammar and fixes semantic errors found in real sports posts.
+The filename is retained so existing handoff links do not break. V9 keeps the
+attention-first grammar and fixes story-priority, market-completeness, evidence
+duplication, and PnL-basis errors found in live Golden Boot and Bitcoin posts.
 
 ## Goal
 
 Ship public Telegram signal posts that read as useful market alerts in the
 notification preview and remain internally consistent after opening the post.
-The locally implemented V8 renderer is the baseline. This task is not a request
+The locally implemented V9 renderer is the baseline. This task is not a request
 to rebuild its formatting from scratch.
 
 ## Implemented Baseline
 
 The current worktree contains:
 
-- `signal_bot_copy_v8`, `signal_notification_subject_v3`,
+- `signal_bot_copy_v9`, `signal_notification_subject_v3`,
   `telegram_market_presentation_v1`, and `signal_evidence_v1` copy audits;
 - a typed two-part first line: `emoji + bold numeric hook + regular market
 explanation`; the LLM does not control emoji, Markdown, or hook order;
 - numeric-first hooks for money, price, wallet-count, cooling/divergence,
   research, and resolution stories;
 - `📈`/`📉` only for actual price direction, `💰` for clean buying/capital,
-  `⚠️` for exits/selling/mixed support, `👀` for attention/research, `🔥` for
-  clean capital-plus-price confluence, and `🏁` for resolution;
+  `⚠️` for exits/selling/mixed support, `👀` for performance/research, `🔥` for
+  ordinary clean capital-plus-price confluence, and `🏁` for resolution;
 - natural Bitcoin price-target and total-market subjects plus safe generic
   fallbacks that do not invent the opposite of a NO contract;
 - one standalone, non-linked headline with no duplicate `📍` market block;
@@ -60,8 +61,20 @@ goals` cannot become `Under 2.5 total goals 2.5 total goals`;
 Cup`) over the internal contract side (`YES on Spain`);
 - literal `No summary.` is never persisted or rendered; totals receive a safe
   deterministic win-condition sentence when generated prose is unavailable;
-- a verified positive 30-day wallet PnL may lead an initial single-wallet hook;
-  the same evidence row is then removed from `Why it matters` to avoid repeat;
+- a verified positive recent PnL may lead an initial single-wallet or
+  sharp-cluster hook; consumed PnL, capital, and wallet-count evidence is then
+  removed from `Why it matters` to avoid repeating the headline as a card;
+- cluster NO headlines state the complete proposition and qualify the displayed
+  price as `NO at 92¢`, rather than attaching `92¢` ambiguously to the event;
+- incomplete entity-only subjects such as `NO on Argentina` fail closed until
+  winner/event context can produce a complete proposition;
+- exceptional price-plus-capital confirmation (for example `+50¢` and `+$1M`)
+  outranks mixed breadth in the headline, while the body still discloses trims
+  and exits;
+- follow-through estimated PnL is labeled `Est. PnL since call`; research state
+  uses `Wallet open PnL` and explains that wallet entry and signal publication
+  are different starting prices when the two measures point in opposite
+  directions;
 - zero price deltas and rounded-zero estimated PnL are omitted instead of being
   rendered as `+0¢` / `$0` evidence;
 - follow-through reuses the initial message's persisted canonical market
@@ -82,10 +95,10 @@ Primary files:
 - `apps/api/src/signal-notification-headline-tests.ts`;
 - `apps/api/src/signal-bot-tests.ts`.
 
-V8 itself requires no database migration. `emoji`, `hook`, `continuation`,
-`primaryEvidenceId`, story/template, and copy version are persisted inside the
-existing JSON copy audit. Existing notification/preferences migrations are a
-separate rollout concern.
+V9 itself requires no database migration. `emoji`, `hook`, `continuation`,
+`primaryEvidenceId`, `evidenceKindsUsed`, story/template, and copy version are
+persisted inside the existing JSON copy audit. Existing
+notification/preferences migrations are a separate rollout concern.
 
 ## Headline Contract
 
@@ -103,8 +116,12 @@ Priority and examples:
 
 ```text
 👀 **+$542K PnL in 30 days.** That wallet now holds $20.5K on Spain.
+👀 **+$122K combined PnL in 30 days.** 2 strong wallets have $38K against
+Lionel Messi winning the Golden Boot at the World Cup, with NO at 92¢.
 📉 **+$43K bought. −1¢ anyway.** Spain and tracked wallets still disagree.
 🔥 **+$45K bought. +7¢.** Spain is moving with tracked wallets.
+📈 **+50¢ to 99¢.** $1M flowed into Kylian Mbappe to win the Golden Boot at
+the World Cup after the call.
 ⚠️ **3 exits. $31K sold.** Tracked support for Spain is weakening.
 📈 **+8¢ to 67¢.** Spain is moving with the call.
 🏁 **Spain won.**
@@ -116,8 +133,8 @@ Rules:
   verified number exists; do not prefix it with the words Another, Wallet, or
   The market;
 - keep only the hook bold; the continuation stays regular weight;
-- lead a strong single-wallet initial signal with verified recent performance
-  when it is more attention-worthy than the current position size;
+- lead a strong single-wallet or verified sharp-cluster initial signal with
+  recent performance when it is more attention-worthy than position size;
 - lead with capital when net flow is material and price is secondary;
 - lead with price when price movement is the actual story;
 - use `🔥` only for two independent strong confirmations and no contrary
@@ -125,6 +142,8 @@ Rules:
 - keep the side, predicate, threshold/outcome, and deadline needed to identify
   the contract;
 - never infer a complementary NO proposition without a verified mapping;
+- never ship an entity-only side such as `NO on Argentina`; require enough
+  context to say what Argentina is not expected to do;
 - show whole cents consistently in headline and body;
 - do not headline estimated open PnL;
 - do not link the headline;
@@ -148,7 +167,7 @@ BTC hitting $57.5K in July.
 > Net tracked flow  +$67.7K
 > Wallets  5 added · 8 trimmed · 15 holding
 > NO price  87¢ → 89¢  +2¢
-> Est. open PnL  +$1.6K
+> Est. PnL since call  +$1.6K
 
 Read: More money went into NO at 89¢, but wallet support thinned and the price
 barely moved.
@@ -172,11 +191,14 @@ The PnL row is intentionally absent because it already supplied the hook.
 Research update:
 
 ```text
-📈 NO on BTC hitting $70K in July rises 8¢ to 83¢
+📉 **−11¢ to 61¢.** NO on BTC hitting $67.5K in July moved against the call.
 
 <one concise explanation of what changed and why it matters>
 
-Wallet position: $7.5K on NO · 83¢ now · Est. open PnL +$829
+The wallet entered before this signal, so its open PnL and the −11¢ move since
+the call use different starting prices.
+
+Wallet position: $5.8K on NO · 61¢ now · Wallet open PnL +$1.5K
 ```
 
 Do not repeat `Why it matters` in a reply to the original signal: the wallet's
@@ -204,7 +226,7 @@ The body must not reprint the market title immediately below the headline. It
 must not end with generic navigation chrome. If a market or wallet link has no
 natural body location, omit the body link; the CTA may still provide the route.
 
-## V8 Backend Contract
+## V9 Backend Contract
 
 ### 1. Canonical Telegram market identity
 
@@ -326,7 +348,7 @@ survive the preview.
 
 ### 6. Rollout telemetry
 
-V8 records the following by copy/policy version; production validation is
+V9 records the following by copy/policy version; production validation is
 still required:
 
 - story/template distribution;
@@ -361,7 +383,7 @@ Mini App market and Buy payloads may carry the opaque
   labels and keep their producer-owned scope.
 - Market-wide activity cannot masquerade as selected-side flow.
 - Open follow-through posts end in `Read:` and terminal posts end in `Result`.
-- Device fixtures pass and rollout telemetry distinguishes V8 from older copy.
+- Device fixtures pass and rollout telemetry distinguishes V9 from older copy.
 
 ## Out of Scope
 

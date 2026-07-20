@@ -28,7 +28,7 @@ The current worktree already contains:
 - fail-closed runtime gates and explicit `/start` reachability;
 - exact-market portfolio-signal recipient selection;
 - compact MarkdownV2 notification renderers and contextual Mini App actions;
-- Signal Post V8 numeric-hook grammar, meaningful-delta research updates,
+- Signal Post V9 numeric-hook grammar, meaningful-delta research updates,
   evidence blocks, and contextual-link policy;
 - producer-owned V5 market identity, strict single price snapshot, typed
   research-update delta, publication audit, and shared delivery/preview path;
@@ -55,7 +55,7 @@ delivery was not device-tested during this work.
 | P0       | [Production rollout](backend-telegram-notification-rollout.md)                | Safely migrate, deploy, observe, replay, and live-QA the implementation already in the worktree          | Current worktree                                              |
 | P0       | [Telegram preferences API](backend-telegram-notification-preferences-api.md)  | Authenticated GET/PATCH contract so Mini App Settings and the bot share account-level Telegram state     | Migration 0177 or a forward migration                         |
 | P0       | [Persistent signal channel registry](backend-signal-channel-registry.md)      | Makes public-channel destinations, policies, and cursors durable instead of Redis-only                   | Postgres migration and current admin commands                 |
-| P0       | [Signal Post V8 rollout](backend-signal-post-copy-v4.md)                      | Run test-channel/device QA for the locally complete contract path, then make a separate rollout decision | New contract-ready Holder Research note                       |
+| P0       | [Signal Post V9 rollout](backend-signal-post-copy-v4.md)                      | Run test-channel/device QA for the locally complete contract path, then make a separate rollout decision | New contract-ready Holder Research note                       |
 | P0       | [Holder research update contract](backend-holder-research-update-contract.md) | Locally implemented; validate the first newly produced initial/update through `/test_signal`             | Current `telegram-bot` worktree                               |
 | P1       | [Resolved-position accounting](backend-position-resolution-accounting.md)     | Verified payout and realized PnL snapshot with safe fallback copy                                        | Venue settlement semantics                                    |
 | P1       | [Trusted market mappings](backend-trusted-market-mappings.md)                 | Reviewed persistent cross-venue equivalence and side orientation                                         | Market ingestion / AGG candidates                             |
@@ -64,9 +64,9 @@ delivery was not device-tested during this work.
 
 Recommended order:
 
-1. Produce one new contract-ready Holder Research note and validate exact V8
+1. Produce one new contract-ready Holder Research note and validate exact V9
    text/keyboard through `/test_signal` in a test channel.
-2. Complete V8 device QA. Production rollout remains a separate explicit
+2. Complete V9 device QA. Production rollout remains a separate explicit
    decision; the Redis registry is sufficient for this bounded preview.
 3. Roll out and validate the existing private-notification delivery path.
 4. Persist the public-channel registry before relying on Redis destinations as
@@ -93,7 +93,7 @@ Recommended order:
   title similarity or an AI confidence score is insufficient.
 - Public signal headlines lead with the strongest verified movement and a
   recognizable market so the useful fact survives mobile notification preview.
-- Signal Post V8 is a renderer/prompt/test change and adds no migration; its
+- Signal Post V9 is a renderer/prompt/test change and adds no migration; its
   structured hook fields use the existing JSON copy audit.
 - Public channel configuration and cursors are durable Postgres state; Redis
   is not the sole source of truth.

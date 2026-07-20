@@ -2447,7 +2447,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
-        /^💰 \*\$12\\\.3K backs YES on /,
+        /^💰 \*\$12\\\.3K backs YES on “Will test resolve Yes”/,
       );
       assert.doesNotMatch(
         String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
@@ -9637,7 +9637,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .join(" "),
         /Wallet|Open market/,
       );
-      assert.match(message.text, /^💰 \*\$12\\\.3K backs YES on /);
+      assert.match(
+        message.text,
+        /^💰 \*\$12\\\.3K backs YES on “Will test resolve Yes”/,
+      );
       assert.match(
         message.text.split("\n")[0] ?? "",
         /One tracked wallet holds this position at 31¢/,
@@ -9853,6 +9856,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           bestAsk: 0.03,
           bestBid: 0.02,
           description: "Morocco is a long shot, but the wallet is still there.",
+          eventTitle: "World Cup Winner",
           holderCredentialBullets: [
             "Up $1.3M over the last 30 days",
             "Beat market prices by 27 points across 21 resolved bets",
@@ -10385,17 +10389,64 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.ok(
         message.text.includes(
-          "*Wallet position*: $7\\.5K on NO · 83¢ now · Est\\. open PnL \\+$829",
+          "*Wallet position*: $7\\.5K on NO · 83¢ now · Wallet open PnL \\+$829",
         ),
         message.text,
       );
       assert.equal(message.publishable, true);
+      assert.doesNotMatch(message.text, /different starting prices/i);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
       assert.doesNotMatch(
         message.text,
         /New research|holding fading|after the drop|market now gives/i,
       );
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
+    },
+  },
+  {
+    name: "research update explains opposite price and wallet PnL bases",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        messageKind: "research_update",
+        note: note({
+          bestAsk: 0.4,
+          bestBid: 0.38,
+          description: "No summary.",
+          direction: "down",
+          eventTitle: "What price will Bitcoin hit in July?",
+          holderCredentialBullets: [],
+          holderOpenPnlUsd: 1_500,
+          holderPositionUsd: 5_800,
+          holderSide: "NO",
+          marketTitle: "↓ 67,500",
+          meaningfulDeltaReasons: ["odds_move"],
+          decisionSnapshot: researchSnapshot({ yesProbability: 0.39 }),
+          previousDecisionSnapshot: researchSnapshot({
+            yesProbability: 0.28,
+          }),
+          revisionKind: "research_update",
+          telegramMarketIdentityV1: null,
+        }),
+        telegramMiniAppLinkBase: "https://t.me/your_hunch_bot",
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^📉 \*−11¢ to 61¢\\\.\* NO on BTC hitting \$67\\\.5K in July moved against the call\\\.$/,
+      );
+      assert.match(
+        message.text,
+        /wallet entered before this signal, so its open PnL and the −11¢ move since the call use different starting prices/i,
+      );
+      assert.ok(
+        message.text.includes(
+          "*Wallet position*: $5\\.8K on NO · 61¢ now · Wallet open PnL \\+$1\\.5K",
+        ),
+        message.text,
+      );
+      assert.doesNotMatch(message.text, /Est\\\. open PnL/);
     },
   },
   {
@@ -10615,7 +10666,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.ok(
         message.text.includes(
-          "*Wallet position*: $78\\.4K on Under 2\\.5 total goals · 59¢ now · Est\\. open PnL \\+$663",
+          "*Wallet position*: $78\\.4K on Under 2\\.5 total goals · 59¢ now · Wallet open PnL \\+$663",
         ),
         message.text,
       );
@@ -10754,7 +10805,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "message renders sharp cluster credentials with representative holder",
+    name: "cluster without verified track record falls back to position size",
     run: () => {
       const message = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -10774,7 +10825,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 1);
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^🔥 \*\$45K backs YES on .*\* 2 tracked wallets are on the same side at 31¢\\\.$/,
+        /^🔥 \*\$45K backs YES on “Will test resolve Yes”\\\.\* 2 strong wallets back YES on “Will test resolve Yes”, with YES at 31¢\\\.$/,
       );
       assert.doesNotMatch(message.text, /YES 31¢ \/ NO 69¢/);
       assert.match(message.text, />\*Why it matters\*\n>/);
@@ -10782,7 +10833,156 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /\$12\\.3K still on/);
       assert.doesNotMatch(message.text, /Why this cluster matters:/);
       assert.match(message.text, /▸ PnL.*14K.*30d/);
-      assert.match(message.text, /▸ Wallets.*2 on the same side/);
+      assert.doesNotMatch(message.text, /▸ Wallets/);
+    },
+  },
+  {
+    name: "profitable Golden Boot cluster leads with performance and states the full NO proposition",
+    run: () => {
+      const source = {
+        kind: "hunch_wallet_intel" as const,
+        label: "Sharp-wallet cluster",
+        url: null,
+      };
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          bestAsk: 0.09,
+          bestBid: 0.07,
+          description: "No summary.",
+          direction: "down",
+          eventTitle: "World Cup: Golden Boot Winner",
+          holderActorMode: "sharp_cluster",
+          holderClusterPnl30dUsd: 122_000,
+          holderClusterSharpHolders: 2,
+          holderClusterSharpUsd: 38_000,
+          holderCredentialBullets: [],
+          holderPositionUsd: null,
+          holderSide: "NO",
+          marketTitle: "Will Lionel Messi win?",
+          metrics: {
+            signalEvidenceVersion: 1,
+            signalEvidence: [
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: 30,
+                id: "cluster:pnl:30d",
+                kind: "track_record",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 122_000,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "wallet_cluster",
+                source,
+              },
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: 30,
+                id: "cluster:pricing:30d",
+                kind: "pricing_edge",
+                measurement: {
+                  kind: "scalar",
+                  unit: "probability",
+                  value: 0.171,
+                },
+                quality: "verified",
+                sampleSize: 41,
+                scope: "wallet_cluster",
+                source,
+              },
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: null,
+                id: "cluster:capital",
+                kind: "capital",
+                measurement: {
+                  kind: "scalar",
+                  unit: "usd",
+                  value: 38_000,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "wallet_cluster",
+                source,
+              },
+              {
+                asOf: TEST_SIGNAL_PRICE_AS_OF,
+                context: null,
+                horizonDays: null,
+                id: "cluster:conviction",
+                kind: "conviction",
+                measurement: {
+                  kind: "scalar",
+                  unit: "wallets",
+                  value: 2,
+                },
+                quality: "verified",
+                sampleSize: null,
+                scope: "wallet_cluster",
+                source,
+              },
+            ],
+          },
+          outcomes: ["Yes", "No"],
+          telegramMarketIdentityV1: null,
+        }),
+      });
+
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /^👀 \*\\\+\$122K combined PnL in 30 days\\\.\* 2 strong wallets have \$38K against Lionel Messi winning the Golden Boot at the World Cup, with NO at 92¢\\\.$/,
+      );
+      assert.match(message.text, /▸ Recent results.*17\\\.1 pts vs market/);
+      assert.doesNotMatch(
+        message.text,
+        /\$38K backs NO|▸ PnL|▸ Wallets|▸ Tracked position/,
+      );
+    },
+  },
+  {
+    name: "incomplete bare NO subject is suppressed until winner context is available",
+    run: () => {
+      const incomplete = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          direction: "down",
+          eventTitle: null,
+          holderSide: "NO",
+          marketTitle: "Argentina",
+          telegramMarketIdentityV1: null,
+        }),
+      });
+      assert.equal(incomplete.publishable, false);
+      assert.equal(incomplete.text, "");
+
+      const complete = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          direction: "down",
+          eventTitle: "World Cup Winner",
+          holderSide: "NO",
+          marketTitle: "Argentina",
+          telegramMarketIdentityV1: null,
+        }),
+      });
+      assert.equal(complete.publishable, true);
+      assert.match(
+        complete.text.split("\n")[0] ?? "",
+        /Argentina winning the World Cup/,
+      );
+      assert.doesNotMatch(
+        complete.text.split("\n")[0] ?? "",
+        /NO on Argentina\\\./,
+      );
     },
   },
   {
@@ -10811,18 +11011,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         appBaseUrl: "https://app.hunch.trade",
         buyAmountUsd: 10,
         note: note({
-          eventTitle: "Same market title",
-          marketTitle: " Same   market title ",
+          eventTitle: "Will same market resolve Yes?",
+          marketTitle: " Will same market resolve Yes? ",
         }),
       });
       assert.match(
         message.text,
-        /^💰 \*\$12\\\.3K backs YES on Same market title\\\.\* One tracked wallet holds this position at 31¢/,
+        /^💰 \*\$12\\\.3K backs YES on “Will same market resolve Yes”\\\.\* One tracked wallet holds this position at 31¢/,
       );
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.doesNotMatch(
         message.text,
-        /Same market title · Same market title/,
+        /Will same market resolve Yes\? · Will same market resolve Yes\?/,
       );
     },
   },
@@ -11901,7 +12101,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       };
       assert.equal(metrics.fallbackStandalone, true);
       assert.equal(metrics.noteKind, "research_update");
-      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v8");
+      assert.equal(metrics.copy?.copyVersion, "signal_bot_copy_v9");
       assert.equal(
         metrics.copy?.notification?.headline?.storyKind,
         "price_move",
@@ -12337,6 +12537,119 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(
         text,
         /More Markets|O\/U|total goals 2\.5 total goals|\\\+0¢|Est\\\. open PnL {2}\*\$0\*/,
+      );
+    },
+  },
+  {
+    name: "decisive price and million-dollar flow lead despite mixed wallet breadth",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughTypes: ["stats"],
+        signalBotFollowthroughMinJoinedOrAdded: 99,
+        signalBotFollowthroughMinNetFlowUsd: 1_000,
+        signalBotFollowthroughMinPriceMoveCents: 1,
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          bestAsk: "0.99",
+          bestBid: "0.99",
+          best_ask: "0.99",
+          best_bid: "0.99",
+          event_title: "World Cup: Golden Boot Winner",
+          market_title: "Will Kylian Mbappe win?",
+          metrics: {
+            market: { yesProbability: 0.49 },
+            signalSnapshot: {
+              quote: { buyPrice: 0.49 },
+              side: "YES",
+            },
+          },
+          target_meta: { side: "YES" },
+        }),
+      ];
+      const joined = Array.from({ length: 17 }, (_, index) =>
+        followthroughFlowRow({
+          baseline_shares: "0",
+          latest_shares: "60606.06",
+          latest_size_usd: "60000",
+          net_shares: "60606.06",
+          net_usd: "60000",
+          positive_usd: "60000",
+          wallet_id: `joined-${index}`,
+        }),
+      );
+      const trimmed = Array.from({ length: 17 }, (_, index) =>
+        followthroughFlowRow({
+          baseline_shares: "1000",
+          latest_shares: "900",
+          latest_size_usd: "891",
+          negative_usd: "800",
+          net_shares: "-100",
+          net_usd: "-800",
+          positive_usd: "0",
+          wallet_id: `trimmed-${index}`,
+        }),
+      );
+      const exited = Array.from({ length: 5 }, (_, index) =>
+        followthroughFlowRow({
+          baseline_shares: "1000",
+          latest_shares: "0",
+          latest_size_usd: "0",
+          negative_usd: "1280",
+          net_shares: "-1000",
+          net_usd: "-1280",
+          positive_usd: "0",
+          wallet_id: `exited-${index}`,
+        }),
+      );
+      const unchanged = Array.from({ length: 11 }, (_, index) =>
+        followthroughFlowRow({
+          baseline_shares: "1000",
+          event_count: "0",
+          latest_shares: "1000",
+          latest_size_usd: "990",
+          negative_usd: "0",
+          net_shares: "0",
+          net_usd: "0",
+          positive_usd: "0",
+          wallet_id: `holding-${index}`,
+        }),
+      );
+      db.flowRows = [...joined, ...trimmed, ...exited, ...unchanged];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotFollowthroughTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        now: new Date("2026-01-02T01:00:00.000Z"),
+        redis,
+        telegram,
+      });
+
+      const text = telegram.messages[0]?.text ?? "";
+      assert.equal(result.sent, 1);
+      assert.match(
+        text.split("\n")[0] ?? "",
+        /^📈 \*\\\+50¢ to 99¢\\\.\* \$1M flowed into Kylian Mbappe to win the Golden Boot at the World Cup after the call\\\.$/,
+      );
+      assert.match(
+        text,
+        />Wallets {2}\*17\* added · \*17\* trimmed · \*5\* exited · \*45\* holding/,
+      );
+      assert.match(text, />Est\\\. PnL since call {2}/);
+      assert.match(text, /At 99¢, the market has nearly fully priced the call/);
+      assert.match(text, /net flow remains strongly positive/);
+      assert.doesNotMatch(
+        text,
+        /wallet follow-through is mixed|Est\\\. open PnL/,
       );
     },
   },

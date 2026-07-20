@@ -49,6 +49,8 @@ import {
 import {
   buildSignalNotificationHeadline,
   buildSignalNotificationSubject,
+  formatWinMarketObject,
+  isSignalNotificationSubjectComplete,
   type SignalNotificationHeadline,
   type SignalNotificationSubject,
 } from "./signal-notification-headline.js";
@@ -661,7 +663,7 @@ const UUID_RE =
 const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
-const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v8";
+const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v9";
 const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
@@ -1517,7 +1519,12 @@ export function buildSignalBotMessage(input: {
     canonicalDescription ??
     (messageKind === "initial" && buySideCopy
       ? formatSignalBotDescriptionFallback(buySideCopy)
-      : null);
+      : messageKind === "research_update"
+        ? formatSignalBotResearchDescriptionFallback(
+            note,
+            notificationCopy.researchDelta,
+          )
+        : null);
   const summary = description ? bodyRenderer.render(description) : null;
   const researchPosition =
     messageKind === "research_update" && buySide
@@ -1545,7 +1552,11 @@ export function buildSignalBotMessage(input: {
     notificationCopy.headline,
   );
   const supportingEvidenceRows = evidenceRows.filter(
-    (row) => row.id !== notificationCopy.headline.primaryEvidenceId,
+    (row) =>
+      row.id !== notificationCopy.headline.primaryEvidenceId &&
+      !notificationCopy.headline.evidenceKindsUsed.some(
+        (kind) => kind === row.kind,
+      ),
   );
   const credentialBlock =
     messageKind === "initial" && supportingEvidenceRows.length > 0
@@ -6398,10 +6409,13 @@ function resolveSignalBotFollowthroughKind(input: {
 function formatSignedCentsMove(value: number | null): string {
   if (value == null) return "n/a";
   const rounded = Math.round(value);
-  return `${rounded >= 0 ? "+" : ""}${rounded}¢`;
+  if (rounded > 0) return `+${rounded}¢`;
+  if (rounded < 0) return `−${Math.abs(rounded)}¢`;
+  return "0¢";
 }
 
 function formatSignalBotFollowthroughRead(input: {
+  dominantConfluence?: boolean;
   hasWalletEvidence: boolean;
   kind: Extract<
     SignalBotMessageKind,
@@ -6430,6 +6444,20 @@ function formatSignalBotFollowthroughRead(input: {
     return `${marketLabel} moved with the read, but tracked wallet follow-through is thin so far.`;
   }
   if (priceMoveCents != null && priceMoveCents > 0) {
+    if (input.dominantConfluence) {
+      const outcome =
+        input.stats.markPrice != null && input.stats.markPrice >= 0.95
+          ? `At ${formatCents(input.stats.markPrice)}, the market has nearly fully priced the call.`
+          : `${marketLabel} moved decisively with the call.`;
+      const mixedBreadth =
+        input.stats.exitedWallets > 0 ||
+        input.stats.trimmedWallets > input.stats.joinedOrAddedWallets;
+      return `${outcome} ${
+        mixedBreadth
+          ? "Wallet participation is mixed, but net flow remains strongly positive."
+          : "Net flow and wallet participation remain positive."
+      }`;
+    }
     if (
       input.stats.exitedWallets > 0 ||
       input.stats.trimmedWallets > input.stats.joinedOrAddedWallets
@@ -6483,6 +6511,7 @@ function formatSignalBotFollowthroughRead(input: {
 }
 
 function formatSignalBotFollowthroughReadMarkdown(input: {
+  dominantConfluence?: boolean;
   hasWalletEvidence: boolean;
   kind: Extract<
     SignalBotMessageKind,
@@ -6543,7 +6572,7 @@ function formatSignalBotFollowthroughStatLines(input: {
   const pnlLine =
     input.stats.estimatedOpenPnlUsd != null &&
     Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
-      ? `Est. open PnL: ${formatSignedCompactUsd(
+      ? `Est. PnL since call: ${formatSignedCompactUsd(
           input.stats.estimatedOpenPnlUsd,
         )}`
       : null;
@@ -6626,7 +6655,7 @@ function formatSignalBotFollowthroughStatBlock(input: {
     Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
   ) {
     lines.push(
-      `${escapeTelegramMarkdownV2("Est. open PnL")}  ${formatTelegramBold(
+      `${escapeTelegramMarkdownV2("Est. PnL since call")}  ${formatTelegramBold(
         formatSignedCompactUsd(input.stats.estimatedOpenPnlUsd),
       )}`,
     );
@@ -6709,6 +6738,9 @@ function buildSignalBotFollowthroughMessage(input: {
     startParam: marketStartParam,
   });
   const footerLine = formatSignalBotFollowthroughReadMarkdown({
+    dominantConfluence:
+      notificationCopy.headline.templateKey ===
+      "dominant_price_capital_confluence_v9",
     hasWalletEvidence,
     kind: input.kind,
     marketUrl: marketMiniAppUrl,
@@ -6786,6 +6818,9 @@ function buildNeutralSignalFollowthroughView(input: {
       venue: input.candidate.venue,
     },
     summary: formatSignalBotFollowthroughRead({
+      dominantConfluence:
+        notificationCopy.headline.templateKey ===
+        "dominant_price_capital_confluence_v9",
       hasWalletEvidence:
         input.stats.joinedOrAddedWallets > 0 ||
         input.stats.netSignalSideFlowUsd !== 0 ||
@@ -8168,6 +8203,13 @@ function persistedNamedOutcomeSubject(
   const predicate =
     cleanPublicMarketText(identity.predicate) ?? identity.predicate;
   const groupItemTitle = cleanPublicMarketText(identity.marketGroupItemTitle);
+  const negativeEntity = selectedLabel.match(/^NO\s+on\s+(.+)$/i)?.[1];
+  const winnerContext = (eventTitle ?? subject).match(/^(.+?)\s+winner$/i)?.[1];
+  if (negativeEntity && winnerContext) {
+    return `NO on ${negativeEntity} winning ${formatWinMarketObject(
+      winnerContext,
+    )}`;
+  }
   const matchup = matchupOutcomeSubject(
     selectedLabel,
     eventTitle ?? subject,
@@ -8201,10 +8243,12 @@ function signalNotificationSubjectFromIdentity(
   if (!identity || identity.selectedSide !== side) return null;
   const selectedLabel = identity.selectedSideLabel.trim();
   if (selectedLabel.toUpperCase() === side) return null;
+  const text = persistedNamedOutcomeSubject(identity);
+  if (!isSignalNotificationSubjectComplete(text, side)) return null;
   return {
     preservedFields: ["predicate", "outcome", "threshold", "deadline"],
     source: "canonical_market_presentation",
-    text: persistedNamedOutcomeSubject(identity),
+    text,
     version: "signal_notification_subject_v3",
   };
 }
@@ -8257,6 +8301,9 @@ function buildSignalBotInitialNotificationCopy(input: {
     headlineTrackRecord?.measurement.kind === "scalar"
       ? headlineTrackRecord.measurement.value
       : null;
+  const subjectComplete = input.side
+    ? isSignalNotificationSubjectComplete(subject.text, input.side)
+    : false;
   return {
     headline: buildSignalNotificationHeadline({
       actorPnlEvidenceId: headlineTrackRecord?.id ?? null,
@@ -8287,7 +8334,9 @@ function buildSignalBotInitialNotificationCopy(input: {
       subject,
       policy: input.copyPolicy?.policy,
     }),
-    publishable: input.messageKind === "initial" || researchDelta != null,
+    publishable:
+      subjectComplete &&
+      (input.messageKind === "initial" || researchDelta != null),
     researchDelta,
     subject,
   };
@@ -8646,6 +8695,23 @@ function formatSignalBotDescriptionFallback(
   return `${sideCopy.sideLabel} cashes if ${period} finishes with ${condition}.`;
 }
 
+function formatSignalBotResearchDescriptionFallback(
+  note: SignalBotNote,
+  researchDelta: SignalBotResearchDelta | null,
+): string | null {
+  if (
+    researchDelta?.kind !== "price_move" ||
+    note.holderOpenPnlUsd == null ||
+    Math.abs(note.holderOpenPnlUsd) < 1 ||
+    researchDelta.priceMoveCents * note.holderOpenPnlUsd >= 0
+  ) {
+    return null;
+  }
+  return `The wallet entered before this signal, so its open PnL and the ${formatSignedCentsMove(
+    researchDelta.priceMoveCents,
+  )} move since the call use different starting prices.`;
+}
+
 function formatSignalBotResearchPosition(input: {
   note: SignalBotNote;
   price: number | null;
@@ -8698,7 +8764,7 @@ function formatSignalBotResearchPosition(input: {
   }
   if (input.price != null) details.push(`${formatCents(input.price)} now`);
   if (openPnl != null && Math.abs(openPnl) >= 1) {
-    details.push(`Est. open PnL ${formatSignedCompactUsd(openPnl)}`);
+    details.push(`Wallet open PnL ${formatSignedCompactUsd(openPnl)}`);
   }
   return { label: "Wallet position", text: details.join(" · ") };
 }

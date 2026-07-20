@@ -4,6 +4,7 @@ import { buildMarketSideCopy } from "./services/market-side-copy.js";
 import {
   buildSignalNotificationHeadline,
   buildSignalNotificationSubject,
+  isSignalNotificationSubjectComplete,
 } from "./services/signal-notification-headline.js";
 import {
   normalizeTelegramPresentationAliases,
@@ -152,7 +153,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         marketTitle: "France",
         side: "NO",
       });
-      assert.equal(result.text, "NO on France winning World Cup");
+      assert.equal(result.text, "NO on France winning the World Cup");
       assert.equal(result.source, "natural_market_proposition");
       assert.doesNotMatch(result.text, /Field|not France/i);
       assert.doesNotMatch(result.text, / · /);
@@ -168,6 +169,28 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(result.text, "Spain to win the World Cup");
       assert.doesNotMatch(result.text, /\bYES\b/);
+    },
+  },
+  {
+    name: "award markets read as human propositions and incomplete NO subjects fail",
+    run: () => {
+      const result = subject({
+        eventTitle: "World Cup: Golden Boot Winner",
+        marketTitle: "Will Lionel Messi win?",
+        side: "NO",
+      });
+      assert.equal(
+        result.text,
+        "NO on Lionel Messi winning the Golden Boot at the World Cup",
+      );
+      assert.equal(
+        isSignalNotificationSubjectComplete(result.text, "NO"),
+        true,
+      );
+      assert.equal(
+        isSignalNotificationSubjectComplete("NO on Argentina", "NO"),
+        false,
+      );
     },
   },
   {
@@ -321,6 +344,38 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
+    name: "verified cluster performance outranks position size and consumes repeated proof",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorPnlEvidenceId: "cluster-pnl",
+        actorPnlHorizonDays: 30,
+        actorPnlUsd: 122_000,
+        actorMode: "sharp_cluster",
+        currentPrice: 0.92,
+        holderPositionUsd: 38_000,
+        kind: "initial",
+        positionLabel:
+          "NO on Lionel Messi winning the Golden Boot at the World Cup",
+        strongWallets: 2,
+        subject: subject({
+          eventTitle: "World Cup: Golden Boot Winner",
+          marketTitle: "Will Lionel Messi win?",
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        result.text,
+        "👀 +$122K combined PnL in 30 days. 2 strong wallets have $38K against Lionel Messi winning the Golden Boot at the World Cup, with NO at 92¢.",
+      );
+      assert.deepEqual(result.evidenceKindsUsed, [
+        "track_record",
+        "conviction",
+        "capital",
+      ]);
+      assert.equal(result.primaryEvidenceId, "cluster-pnl");
+    },
+  },
+  {
     name: "large capital stays explicit without hiding mixed breadth",
     run: () => {
       const result = buildSignalNotificationHeadline({
@@ -453,6 +508,32 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "confluence");
       assert.equal(result.hook, "+$45K bought. +7¢.");
       assert.match(result.continuation ?? "", /moving with tracked wallets/);
+    },
+  },
+  {
+    name: "decisive price and capital confirmation outranks mixed participation",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.99,
+        exitedWallets: 5,
+        joinedWallets: 17,
+        kind: "stats",
+        netCopyFlowUsd: 1_000_000,
+        priceMoveCents: 50,
+        subject: subject({
+          eventTitle: "World Cup: Golden Boot Winner",
+          marketTitle: "Will Kylian Mbappe win?",
+          side: "YES",
+        }),
+        trimmedWallets: 22,
+      });
+      assert.equal(result.storyKind, "confluence");
+      assert.equal(result.emoji, "📈");
+      assert.equal(
+        result.text,
+        "📈 +50¢ to 99¢. $1M flowed into Kylian Mbappe to win the Golden Boot at the World Cup after the call.",
+      );
+      assert.equal(result.templateKey, "dominant_price_capital_confluence_v9");
     },
   },
   {
