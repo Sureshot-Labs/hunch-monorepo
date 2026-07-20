@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
@@ -26,18 +26,25 @@ import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
+  cleanupTelegramBotTradingForUnlink,
   disableTelegramBotTradingForUser,
   disableTelegramBotTradingForTelegramUser,
   enableTelegramBotTrading,
   getTelegramBotTradingStatus,
   reconcileStaleTelegramTradeIntents,
   resolveTelegramBotTradingWalletSetupIssues,
-  resolveTelegramBotTradingPolicy,
   TelegramBotTradingEnableError,
   type TelegramBotTradingInternalWalletCandidate,
   type TelegramBotTradingWalletSetupIssue,
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
+import { resolveSignalBotTradingPolicyStateFromDb } from "../services/signal-bot-trading-policy.js";
+import {
+  claimTelegramBotTradingAutoSetup,
+  failTelegramBotTradingSetupClaim,
+  loadTelegramBotTradingPreference,
+  resolveTelegramBotTradingManagedTarget,
+} from "../services/telegram-bot-trading-preferences.js";
 import type { KalshiTradeEligibility } from "../services/trading-types.js";
 import {
   mapClusterMarketToTelegramSearchResult,
@@ -59,6 +66,19 @@ const enableBodySchema = z
     privyWalletId: z.string().trim().min(1).max(256).optional().nullable(),
     walletAddress: z.string().trim().min(1).optional().nullable(),
     maxAmountUsd: z.number().int().positive().optional().nullable(),
+  })
+  .strict();
+
+const setupClaimBodySchema = z.object({ claimId: z.string().uuid() }).strict();
+
+const setupFinalizeBodySchema = enableBodySchema.extend({
+  claimId: z.string().uuid(),
+});
+
+const setupFailBodySchema = z
+  .object({
+    claimId: z.string().uuid(),
+    errorCode: z.string().trim().min(1).max(128),
   })
   .strict();
 
@@ -326,6 +346,91 @@ async function registerTelegramBotTradingRoutes(
     return createApiTradingApplicationService({
       logger: app.log,
       pool,
+    });
+  };
+
+  const activateManagedTrading = async (input: {
+    body: z.infer<typeof enableBodySchema>;
+    request: FastifyRequest;
+    setupClaimId?: string;
+    user: NonNullable<FastifyRequest["user"]>;
+  }) => {
+    const internalWallets = await resolveInternalWallets({
+      app,
+      privyUserId: input.user.privyUserId,
+    });
+    return enableTelegramBotTrading(
+      db,
+      {
+        buildKalshiEligibilityForWallet: (walletAddress) =>
+          buildKalshiEligibilityForRequest({
+            geoFenceConfig: kalshiGeoFenceConfig,
+            request: input.request,
+            user: input.user,
+            walletAddress,
+          }),
+        enabledVenues: input.body.enabledVenues as
+          | TelegramBotTradingVenue[]
+          | undefined,
+        internalWallets,
+        maxAmountUsd: input.body.maxAmountUsd ?? null,
+        preferredWalletAddress: input.body.walletAddress ?? null,
+        privyWalletId: input.body.privyWalletId ?? null,
+        setupClaimId: input.setupClaimId ?? null,
+        signerInspector,
+        userId: input.user.id,
+      },
+      createTradingForRequest(input.request),
+    );
+  };
+
+  const sendEnableFailure = (
+    reply: FastifyReply,
+    error: unknown,
+    input: { operation: string; userId: string },
+  ) => {
+    if (error instanceof TelegramBotTradingEnableError) {
+      reply.code(error.statusCode);
+      return reply.send({
+        error: error.code,
+        grants: error.grants,
+        message: error.message,
+        walletSetupIssues: error.walletSetupIssues,
+      });
+    }
+    const knownCode =
+      error instanceof Error &&
+      [
+        "telegram_bot_trading_claim_stale",
+        "telegram_bot_trading_opted_out",
+        "telegram_bot_trading_policy_changed",
+        "telegram_account_required",
+        "internal_trading_wallet_required",
+        "no_compatible_venues_for_wallet",
+      ].includes(error.message)
+        ? error.message
+        : null;
+    app.log.error(
+      { err: error, operation: input.operation, userId: input.userId },
+      "Telegram bot trading enable failed unexpectedly",
+    );
+    reply.code(knownCode?.startsWith("telegram_bot_trading_") ? 409 : 400);
+    return reply.send({
+      error: knownCode ?? "telegram_bot_trading_enable_failed",
+      message:
+        knownCode === "telegram_bot_trading_claim_stale"
+          ? "Auto-setup lease is stale. Refresh status and retry."
+          : knownCode === "telegram_bot_trading_opted_out"
+            ? "Telegram trading was disabled while setup was in progress."
+            : knownCode === "telegram_bot_trading_policy_changed"
+              ? "Telegram trading policy changed. Refresh status and retry."
+              : knownCode === "telegram_account_required"
+                ? "Telegram account is required before enabling bot trading."
+                : knownCode === "internal_trading_wallet_required"
+                  ? "Create an internal Hunch Trading Wallet before enabling Telegram bot trading."
+                  : knownCode === "no_compatible_venues_for_wallet"
+                    ? "No compatible bot trading venues are enabled."
+                    : "Unable to enable Telegram bot trading.",
     });
   };
 
@@ -820,8 +925,9 @@ async function registerTelegramBotTradingRoutes(
         [user.id],
       );
       const telegramUserId = telegramResult.rows[0]?.telegram_user_id ?? null;
-      const [policy, status] = await Promise.all([
-        resolveTelegramBotTradingPolicy(db),
+      const [policyState, preference, status] = await Promise.all([
+        resolveSignalBotTradingPolicyStateFromDb(db),
+        loadTelegramBotTradingPreference(db, user.id),
         telegramUserId
           ? getTelegramBotTradingStatus(
               db,
@@ -831,6 +937,8 @@ async function registerTelegramBotTradingRoutes(
             )
           : Promise.resolve(null),
       ]);
+      const policy = policyState.policy;
+      const targetConfig = resolveTelegramBotTradingManagedTarget(policyState);
       let walletSetupIssues =
         status?.linked && status.userId ? status.walletSetupIssues : [];
       let internalWallets: TelegramBotTradingInternalWalletCandidate[] = [];
@@ -861,8 +969,11 @@ async function registerTelegramBotTradingRoutes(
             walletSetupIssues,
           }
         : buildUnlinkedTelegramBotTradingStatus({
+            policy,
             privyUserId: user.privyUserId ?? null,
+            preference,
             setupIssue: "Telegram is not linked to this Hunch account.",
+            targetConfig,
             telegramUserId,
             userId: user.id,
           });
@@ -880,7 +991,7 @@ async function registerTelegramBotTradingRoutes(
         signerWallets.push({
           privyWalletId: wallet.privyWalletId,
           signerStatus: await signerInspector({
-            authorizationEnabled: false,
+            authorizationEnabled: preference?.desiredEnabled === true,
             requiredActions: policy.tradingActions.map((action) =>
               action === "redeem"
                 ? "REDEEM"
@@ -935,6 +1046,10 @@ async function registerTelegramBotTradingRoutes(
       );
       return reply.send({
         policy: {
+          autoEnableOnTelegramLink: policy.autoEnableOnTelegramLink,
+          autoManagedMaxAmountUsd: policy.autoManagedMaxAmountUsd,
+          autoManagedVenues: policy.autoManagedVenues,
+          policyRevision: policyState.policyRevision,
           tradingEnabled: policy.tradingEnabled && reconciliationEnabled,
           tradingActions: policy.tradingActions,
           tradingVenues: policy.tradingVenues.filter(
@@ -965,8 +1080,7 @@ async function registerTelegramBotTradingRoutes(
       }
       try {
         const body = request.body;
-        const disableAll = body.enabledVenues?.length === 0;
-        if (!disableAll && !reconciliationEnabled) {
+        if (!reconciliationEnabled) {
           reply.code(503);
           return reply.send({
             error: "telegram_venue_reconcile_required",
@@ -974,68 +1088,111 @@ async function registerTelegramBotTradingRoutes(
               "Telegram bot trading cannot be enabled until API and finance reconciliation are enabled.",
           });
         }
-        const internalWallets = disableAll
-          ? []
-          : await resolveInternalWallets({
-              app,
-              privyUserId: user.privyUserId,
-            });
-        const status = await enableTelegramBotTrading(
-          db,
-          {
-            buildKalshiEligibilityForWallet: (walletAddress) =>
-              buildKalshiEligibilityForRequest({
-                geoFenceConfig: kalshiGeoFenceConfig,
-                request,
-                user,
-                walletAddress,
-              }),
-            enabledVenues: body.enabledVenues as
-              | TelegramBotTradingVenue[]
-              | undefined,
-            internalWallets,
-            maxAmountUsd: body.maxAmountUsd ?? null,
-            preferredWalletAddress: body.walletAddress ?? null,
-            privyWalletId: body.privyWalletId ?? null,
-            signerInspector,
-            userId: user.id,
-          },
-          createTradingForRequest(request),
-        );
+        const status = await activateManagedTrading({ body, request, user });
         return reply.send({ ok: true, status });
       } catch (error) {
-        if (error instanceof TelegramBotTradingEnableError) {
-          reply.code(error.statusCode);
-          return reply.send({
-            error: error.code,
-            grants: error.grants,
-            message: error.message,
-            walletSetupIssues: error.walletSetupIssues,
-          });
-        }
-        app.log.error(
-          {
-            err: error,
-            operation: "telegram-bot-trading-enable",
-            userId: user.id,
-          },
-          "Telegram bot trading enable failed unexpectedly",
-        );
-        const message =
-          error instanceof Error &&
-          error.message === "telegram_account_required"
-            ? "Telegram account is required before enabling bot trading."
-            : error instanceof Error &&
-                error.message === "internal_trading_wallet_required"
-              ? "Create an internal Hunch Trading Wallet before enabling Telegram bot trading."
-              : error instanceof Error &&
-                  error.message === "no_compatible_venues_for_wallet"
-                ? "No compatible bot trading venues are enabled."
-                : "Unable to enable Telegram bot trading.";
-        reply.code(400);
+        return sendEnableFailure(reply, error, {
+          operation: "telegram-bot-trading-enable",
+          userId: user.id,
+        });
+      }
+    },
+  );
+
+  api.post(
+    "/telegram/bot-trading/auto-setup/claim",
+    {
+      preHandler: authPreHandler,
+      schema: { body: setupClaimBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      if (!reconciliationEnabled) {
+        reply.code(503);
+        return reply.send({ error: "telegram_venue_reconcile_required" });
+      }
+      try {
+        const claim = await claimTelegramBotTradingAutoSetup(db, {
+          claimId: request.body.claimId,
+          userId: user.id,
+        });
+        return reply.send({ claim, ok: true });
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "claim_failed";
+        const conflictCodes = new Set([
+          "telegram_bot_trading_claim_held",
+          "telegram_bot_trading_retry_wait",
+          "telegram_link_generation_blocked",
+        ]);
+        reply.code(conflictCodes.has(code) ? 409 : 400);
+        return reply.send({ error: code });
+      }
+    },
+  );
+
+  api.post(
+    "/telegram/bot-trading/auto-setup/finalize",
+    {
+      preHandler: authPreHandler,
+      schema: { body: setupFinalizeBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        const { claimId, ...body } = request.body;
+        const status = await activateManagedTrading({
+          body,
+          request,
+          setupClaimId: claimId,
+          user,
+        });
+        return reply.send({ ok: true, status });
+      } catch (error) {
+        return sendEnableFailure(reply, error, {
+          operation: "telegram-bot-trading-auto-setup-finalize",
+          userId: user.id,
+        });
+      }
+    },
+  );
+
+  api.post(
+    "/telegram/bot-trading/auto-setup/fail",
+    {
+      preHandler: authPreHandler,
+      schema: { body: setupFailBodySchema },
+    },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      try {
+        await failTelegramBotTradingSetupClaim(db, {
+          blocked:
+            request.body.errorCode ===
+            "privy_server_signer_unsafe_configuration",
+          claimId: request.body.claimId,
+          errorCode: request.body.errorCode,
+          userId: user.id,
+        });
+        return reply.send({ ok: true });
+      } catch (error) {
+        reply.code(409);
         return reply.send({
-          error: "telegram_bot_trading_enable_failed",
-          message,
+          error:
+            error instanceof Error
+              ? error.message
+              : "telegram_bot_trading_claim_stale",
         });
       }
     },
@@ -1051,6 +1208,20 @@ async function registerTelegramBotTradingRoutes(
         return reply.send({ error: "Unauthorized" });
       }
       await disableTelegramBotTradingForUser(db, user.id);
+      return reply.send({ ok: true });
+    },
+  );
+
+  api.post(
+    "/telegram/bot-trading/unlink-cleanup",
+    { preHandler: authPreHandler },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401);
+        return reply.send({ error: "Unauthorized" });
+      }
+      await cleanupTelegramBotTradingForUnlink(db, user.id);
       return reply.send({ ok: true });
     },
   );

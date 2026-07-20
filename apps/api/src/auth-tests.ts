@@ -1621,7 +1621,19 @@ const tests: TestCase[] = [
               ],
             };
           }
+          if (/INSERT INTO telegram_bot_trading_preferences/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/INSERT INTO analytics_server_events/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_bot_trading_preferences p/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_bot_trading_authorizations/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_trade_intents/i.test(sql)) {
             return { rows: [] };
           }
           if (/SELECT id, privy_user_id, email/i.test(sql)) {
@@ -1666,6 +1678,15 @@ const tests: TestCase[] = [
         "123456789",
         "ada",
         "Ada",
+      ]);
+      const tradingPreferenceInsert = calls.find((call) =>
+        /INSERT INTO telegram_bot_trading_preferences/i.test(call.sql),
+      );
+      assert.ok(tradingPreferenceInsert);
+      assert.deepEqual(tradingPreferenceInsert.params?.slice(0, 3), [
+        "user-telegram",
+        true,
+        "auto_link",
       ]);
       const lifecycleInsert = calls.find((call) =>
         /INSERT INTO analytics_server_events/i.test(call.sql),
@@ -1850,6 +1871,18 @@ const tests: TestCase[] = [
           ) {
             return { rows: [{ id: "telegram-account-1" }] };
           }
+          if (/INSERT INTO telegram_bot_trading_preferences/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_bot_trading_preferences p/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_bot_trading_authorizations/i.test(sql)) {
+            return { rows: [] };
+          }
+          if (/UPDATE telegram_trade_intents/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/INSERT INTO analytics_server_events/i.test(sql)) {
             return { rows: [] };
           }
@@ -1900,6 +1933,11 @@ const tests: TestCase[] = [
       );
       assert.ok(telegramDelete);
       assert.deepEqual(telegramDelete.params, ["user-existing"]);
+      const botPreferenceCleanup = calls.find((call) =>
+        /UPDATE telegram_bot_trading_preferences p/i.test(call.sql),
+      );
+      assert.ok(botPreferenceCleanup);
+      assert.doesNotMatch(botPreferenceCleanup.sql, /desired_enabled\s*=/i);
       const preferenceUpdateIndex = calls.findIndex((call) =>
         /UPDATE telegram_notification_preferences/i.test(call.sql),
       );

@@ -13,8 +13,21 @@ import {
 } from "./api-trading-market-repo.js";
 import {
   resolveSignalBotTradingPolicyFromDb,
+  resolveSignalBotTradingPolicyStateFromDb,
   type SignalBotPolicy,
 } from "./signal-bot-trading-policy.js";
+import {
+  assertTelegramBotTradingSetupClaim,
+  blockTelegramBotTradingLinkGeneration,
+  completeTelegramBotTradingSetupClaim,
+  ensureTelegramBotTradingPreferenceForLink,
+  resolveTelegramBotTradingEffectiveMaxAmountUsd,
+  resolveTelegramBotTradingManagedTarget,
+  setTelegramBotTradingDesiredEnabled,
+  TELEGRAM_BOT_TRADING_CAPABILITIES,
+  type TelegramBotTradingManagedTarget,
+  type TelegramBotTradingPreference,
+} from "./telegram-bot-trading-preferences.js";
 import {
   parseTelegramBotTradingCallbackData,
   TELEGRAM_BOT_TRADING_CALLBACK_PREFIX,
@@ -309,6 +322,23 @@ type TelegramBotTradingStatusRow = {
   max_amount_usd: string | null;
   disabled_at: Date | null;
   last_verified_at: Date | null;
+  preference_applied_policy_revision?: string | null;
+  preference_blocked_telegram_account_id?: string | null;
+  preference_claim_decision_version?: string | number | null;
+  preference_claim_expires_at?: Date | string | null;
+  preference_claim_id?: string | null;
+  preference_claim_policy_revision?: string | null;
+  preference_claim_telegram_account_id?: string | null;
+  preference_decision_source?:
+    | TelegramBotTradingPreference["decisionSource"]
+    | null;
+  preference_decision_version?: string | number | null;
+  preference_desired_enabled?: boolean | null;
+  preference_last_setup_error_code?: string | null;
+  preference_manual_disabled_at?: Date | string | null;
+  preference_retry_after?: Date | string | null;
+  preference_retry_attempt_count?: number | null;
+  preference_setup_blocked?: boolean | null;
 };
 
 type TelegramBotTradingAuthorizationRow = {
@@ -423,6 +453,20 @@ export type TelegramBotTradingStatus = {
   walletAddress: string | null;
   walletChain: "ethereum" | "solana" | null;
   walletSetupIssues: TelegramBotTradingWalletSetupIssue[];
+  preference: TelegramBotTradingPreference | null;
+  managedSetup: TelegramBotTradingManagedSetupStatus;
+  targetConfig: TelegramBotTradingManagedTarget;
+  actualConfig: {
+    maxAmountUsd: number | null;
+    venues: TelegramBotTradingVenue[];
+  };
+};
+
+export type TelegramBotTradingManagedSetupStatus = {
+  state: "blocked" | "complete" | "in_progress" | "pending" | "retry_wait";
+  reason: string | null;
+  leaseExpiresAt: string | null;
+  retryAfter: string | null;
 };
 
 export type TelegramBotTradingActionStatus = {
@@ -571,6 +615,7 @@ export type EnableTelegramBotTradingInput = {
   signerInspector?: TelegramBotTradingSignerInspector;
   userId: string;
   walletAddress?: string | null;
+  setupClaimId?: string | null;
 };
 
 export type TelegramBotTradingSignerInspector = (
@@ -1266,17 +1311,13 @@ export function isTelegramVenueMinimumBlocking(input: {
 function effectiveMaxTradeAmountUsd(
   policy: SignalBotPolicy,
   authorizationMaxAmountUsd?: string | number | null,
+  signerPolicyMaxAmountUsd = env.privyPolymarketBotBuyPolicyMaxUsd,
 ): number {
-  const authorizationMax =
-    typeof authorizationMaxAmountUsd === "number"
-      ? authorizationMaxAmountUsd
-      : typeof authorizationMaxAmountUsd === "string"
-        ? Number(authorizationMaxAmountUsd)
-        : null;
-  if (!Number.isFinite(authorizationMax) || authorizationMax == null) {
-    return policy.maxTradeAmountUsd;
-  }
-  return Math.min(policy.maxTradeAmountUsd, authorizationMax);
+  return resolveTelegramBotTradingEffectiveMaxAmountUsd({
+    authorizationMaxAmountUsd,
+    policy,
+    signerPolicyMaxAmountUsd,
+  });
 }
 
 function isVenueAllowed(
@@ -1284,7 +1325,11 @@ function isVenueAllowed(
   policy: SignalBotPolicy,
   enabledVenues: readonly TelegramBotTradingVenue[],
 ): boolean {
-  return policy.tradingVenues.includes(venue) && enabledVenues.includes(venue);
+  return (
+    TELEGRAM_BOT_TRADING_CAPABILITIES.includes(venue) &&
+    policy.tradingVenues.includes(venue) &&
+    enabledVenues.includes(venue)
+  );
 }
 
 function resolveSubmitIntentStatus(submitResult: SubmitResult): {
@@ -1738,12 +1783,181 @@ export async function resolveTelegramBotTradingPolicy(
   return resolveSignalBotTradingPolicyFromDb(db);
 }
 
+function buildTelegramBotTradingManagedSetupStatus(input: {
+  actualMaxAmountUsd: number | null;
+  actualVenues: TelegramBotTradingVenue[];
+  linked: boolean;
+  policy: SignalBotPolicy;
+  preference: TelegramBotTradingPreference | null;
+  target: TelegramBotTradingManagedTarget;
+}): TelegramBotTradingManagedSetupStatus {
+  const { preference } = input;
+  if (!preference) {
+    return {
+      state: "blocked",
+      reason: "preference_missing",
+      leaseExpiresAt: null,
+      retryAfter: null,
+    };
+  }
+  if (!preference.desiredEnabled) {
+    return {
+      state: "complete",
+      reason: "user_opted_out",
+      leaseExpiresAt: null,
+      retryAfter: null,
+    };
+  }
+  if (!input.linked) {
+    return {
+      state: "blocked",
+      reason: "telegram_not_linked",
+      leaseExpiresAt: null,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  if (!input.policy.autoEnableOnTelegramLink || !input.policy.tradingEnabled) {
+    return {
+      state: "blocked",
+      reason: "auto_setup_disabled_by_policy",
+      leaseExpiresAt: null,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  const unsupportedVenue = input.policy.autoManagedVenues.find(
+    (venue) => !TELEGRAM_BOT_TRADING_CAPABILITIES.includes(venue),
+  );
+  if (unsupportedVenue) {
+    return {
+      state: "blocked",
+      reason: `unsupported_managed_venue:${unsupportedVenue}`,
+      leaseExpiresAt: null,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  if (input.target.venues.length === 0) {
+    return {
+      state: "blocked",
+      reason: "no_managed_venues_available",
+      leaseExpiresAt: null,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  if (preference.setupBlocked) {
+    return {
+      state: "blocked",
+      reason: preference.lastSetupErrorCode ?? "setup_blocked",
+      leaseExpiresAt: null,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  if (
+    preference.claimId &&
+    preference.claimExpiresAt &&
+    new Date(preference.claimExpiresAt).getTime() > Date.now()
+  ) {
+    return {
+      state: "in_progress",
+      reason: null,
+      leaseExpiresAt: preference.claimExpiresAt,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  if (
+    preference.retryAfter &&
+    new Date(preference.retryAfter).getTime() > Date.now()
+  ) {
+    return {
+      state: "retry_wait",
+      reason: preference.lastSetupErrorCode,
+      leaseExpiresAt: null,
+      retryAfter: preference.retryAfter,
+    };
+  }
+  const actualVenues = [...input.actualVenues].sort();
+  const targetVenues = [...input.target.venues].sort();
+  const complete =
+    preference.appliedPolicyRevision === input.target.policyRevision &&
+    actualVenues.join(",") === targetVenues.join(",") &&
+    input.actualMaxAmountUsd === input.target.maxAmountUsd;
+  return {
+    state: complete ? "complete" : "pending",
+    reason: complete ? null : preference.lastSetupErrorCode,
+    leaseExpiresAt: null,
+    retryAfter: preference.retryAfter,
+  };
+}
+
+function preferenceDateIso(value: Date | string | null | undefined) {
+  return value == null ? null : new Date(value).toISOString();
+}
+
+function preferenceFromStatusRow(
+  row: TelegramBotTradingStatusRow,
+): TelegramBotTradingPreference | null {
+  // Unit fakes written before preferences omit the selected columns entirely.
+  // Real Postgres rows return null for a missing LEFT JOIN, which remains
+  // fail-closed.
+  if (row.preference_desired_enabled === undefined) {
+    return {
+      appliedPolicyRevision: null,
+      blockedTelegramAccountId: null,
+      claimDecisionVersion: null,
+      claimExpiresAt: null,
+      claimId: null,
+      claimPolicyRevision: null,
+      claimTelegramAccountId: null,
+      decisionSource: "legacy_enabled",
+      decisionVersion: 1,
+      desiredEnabled: row.enabled === true,
+      lastSetupErrorCode: null,
+      manualDisabledAt: null,
+      retryAfter: null,
+      retryAttemptCount: 0,
+      setupBlocked: false,
+      userId: row.user_id ?? "",
+    };
+  }
+  if (row.preference_desired_enabled === null || !row.user_id) return null;
+  return {
+    appliedPolicyRevision: row.preference_applied_policy_revision ?? null,
+    blockedTelegramAccountId:
+      row.preference_blocked_telegram_account_id ?? null,
+    claimDecisionVersion:
+      row.preference_claim_decision_version == null
+        ? null
+        : Number(row.preference_claim_decision_version),
+    claimExpiresAt: preferenceDateIso(row.preference_claim_expires_at),
+    claimId: row.preference_claim_id ?? null,
+    claimPolicyRevision: row.preference_claim_policy_revision ?? null,
+    claimTelegramAccountId: row.preference_claim_telegram_account_id ?? null,
+    decisionSource: row.preference_decision_source ?? "legacy_preserved",
+    decisionVersion: Number(row.preference_decision_version ?? 1),
+    desiredEnabled: row.preference_desired_enabled,
+    lastSetupErrorCode: row.preference_last_setup_error_code ?? null,
+    manualDisabledAt: preferenceDateIso(row.preference_manual_disabled_at),
+    retryAfter: preferenceDateIso(row.preference_retry_after),
+    retryAttemptCount: row.preference_retry_attempt_count ?? 0,
+    setupBlocked: row.preference_setup_blocked ?? false,
+    userId: row.user_id,
+  };
+}
+
 export function buildUnlinkedTelegramBotTradingStatus(input: {
   privyUserId?: string | null;
+  policy?: SignalBotPolicy;
+  preference?: TelegramBotTradingPreference | null;
   setupIssue?: string;
+  targetConfig?: TelegramBotTradingManagedTarget;
   telegramUserId?: string | null;
   userId?: string | null;
 }): TelegramBotTradingStatus {
+  const targetConfig = input.targetConfig ?? {
+    maxAmountUsd: 1,
+    policyRevision: "signal-bot-default-v2",
+    venues: ["polymarket"],
+  };
+  const preference = input.preference ?? null;
   return {
     actionStatuses: buildTelegramBotTradingActionStatuses({
       actions: ["buy"],
@@ -1770,6 +1984,31 @@ export function buildUnlinkedTelegramBotTradingStatus(input: {
     walletAddress: null,
     walletChain: null,
     walletSetupIssues: [],
+    preference,
+    targetConfig,
+    actualConfig: { maxAmountUsd: null, venues: [] },
+    managedSetup: buildTelegramBotTradingManagedSetupStatus({
+      actualMaxAmountUsd: null,
+      actualVenues: [],
+      linked: false,
+      policy:
+        input.policy ??
+        ({
+          autoEnableOnTelegramLink: false,
+          autoManagedMaxAmountUsd: 1,
+          autoManagedVenues: ["polymarket"],
+          tradingEnabled: false,
+          tradingActions: ["buy"],
+          tradingVenues: ["polymarket"],
+          buyAmountPresetsUsd: [1],
+          maxTradeAmountUsd: 1,
+          maxSlippageBps: 500,
+          intentTtlSec: 120,
+          requireConfirmation: true,
+        } satisfies SignalBotPolicy),
+      preference,
+      target: targetConfig,
+    }),
   };
 }
 
@@ -1780,7 +2019,9 @@ export async function getTelegramBotTradingStatus(
   signerInspector: TelegramBotTradingSignerInspector = inspectServerEvmWalletAuthorization,
 ): Promise<TelegramBotTradingStatus> {
   const normalizedTelegramUserId = normalizeTelegramUserId(telegramUserId);
-  const runtimePolicy = await resolveTelegramBotTradingPolicy(db);
+  const policyState = await resolveSignalBotTradingPolicyStateFromDb(db);
+  const runtimePolicy = policyState.policy;
+  const targetConfig = resolveTelegramBotTradingManagedTarget(policyState);
   const requiredActions = runtimePolicy.tradingActions.map((action) =>
     action === "redeem" ? "REDEEM" : (action.toUpperCase() as "BUY" | "SELL"),
   );
@@ -1799,9 +2040,25 @@ export async function getTelegramBotTradingStatus(
        a.limits,
        a.max_amount_usd,
        a.disabled_at,
-       a.last_verified_at
+       a.last_verified_at,
+       p.applied_policy_revision AS preference_applied_policy_revision,
+       p.blocked_telegram_account_id AS preference_blocked_telegram_account_id,
+       p.claim_decision_version AS preference_claim_decision_version,
+       p.claim_expires_at AS preference_claim_expires_at,
+       p.claim_id AS preference_claim_id,
+       p.claim_policy_revision AS preference_claim_policy_revision,
+       p.claim_telegram_account_id AS preference_claim_telegram_account_id,
+       p.decision_source AS preference_decision_source,
+       p.decision_version AS preference_decision_version,
+       p.desired_enabled AS preference_desired_enabled,
+       p.last_setup_error_code AS preference_last_setup_error_code,
+       p.manual_disabled_at AS preference_manual_disabled_at,
+       p.retry_after AS preference_retry_after,
+       p.retry_attempt_count AS preference_retry_attempt_count,
+       p.setup_blocked AS preference_setup_blocked
      FROM user_telegram_accounts uta
      JOIN users u ON u.id = uta.user_id
+     LEFT JOIN telegram_bot_trading_preferences p ON p.user_id = uta.user_id
      LEFT JOIN telegram_bot_trading_authorizations a
        ON a.telegram_user_id = uta.telegram_user_id
      WHERE uta.telegram_user_id = $1
@@ -1814,9 +2071,12 @@ export async function getTelegramBotTradingStatus(
   const row = result.rows[0];
   if (!row) {
     return buildUnlinkedTelegramBotTradingStatus({
+      policy: runtimePolicy,
+      targetConfig,
       telegramUserId: normalizedTelegramUserId,
     });
   }
+  const preference = preferenceFromStatusRow(row);
   const authorizations: TelegramBotTradingAuthorizationStatus[] = [];
   const authorizationActionReadiness = new Map<
     string,
@@ -1846,17 +2106,25 @@ export async function getTelegramBotTradingStatus(
       limits: authRow.limits,
       max_amount_usd: authRow.max_amount_usd,
     };
+    const effectiveAuthorizationMaxAmountUsd = effectiveMaxTradeAmountUsd(
+      runtimePolicy,
+      authorizationRow.max_amount_usd,
+    );
     const enabledVenues = filterVenuesForWalletChain(
       normalizeVenues(authorizationRow.enabled_venues),
       authorizationRow.wallet_chain,
     );
-    let enabled = authorizationRow.enabled && !safetyDisableApplied;
+    let enabled =
+      authorizationRow.enabled &&
+      preference?.desiredEnabled === true &&
+      !safetyDisableApplied;
     let signerStatus =
       authorizationRow.wallet_chain === "ethereum" &&
       authorizationRow.privy_wallet_id
         ? await signerInspector({
             authorizationEnabled:
-              enabled && enabledVenues.every((venue) => venue === "polymarket"),
+              preference?.desiredEnabled === true &&
+              enabledVenues.every((venue) => venue === "polymarket"),
             requiredActions,
             privyUserId: authorizationRow.privy_user_id,
             signer: authorizationRow.wallet_address,
@@ -1864,14 +2132,25 @@ export async function getTelegramBotTradingStatus(
           })
         : null;
     const botPolicySafe =
+      runtimePolicy.tradingEnabled &&
       enabledVenues.length > 0 &&
-      enabledVenues.every((venue) => venue === "polymarket") &&
+      enabledVenues.every(
+        (venue) =>
+          venue === "polymarket" && runtimePolicy.tradingVenues.includes(venue),
+      ) &&
       authorizationRow.wallet_chain === "ethereum" &&
       signerStatus?.state === "ready";
-    if (enabled && !botPolicySafe) {
-      await disableTelegramBotTradingLocal(db, {
-        telegramUserId: normalizedTelegramUserId,
-      });
+    if (
+      authorizationRow.enabled &&
+      (!botPolicySafe || !preference?.desiredEnabled)
+    ) {
+      await disableTelegramBotTradingLocal(
+        db,
+        {
+          telegramUserId: normalizedTelegramUserId,
+        },
+        { recordLifecycle: true, updatePreference: false },
+      );
       safetyDisableApplied = true;
       enabled = false;
       if (signerStatus?.attached && signerStatus.state === "ready") {
@@ -1997,7 +2276,7 @@ export async function getTelegramBotTradingStatus(
       directExecutionReady,
       enabled,
       enabledVenues,
-      maxAmountUsd: parseNumber(authorizationRow.max_amount_usd),
+      maxAmountUsd: effectiveAuthorizationMaxAmountUsd,
       privyWalletId: authorizationRow.privy_wallet_id,
       signerStatus,
       setupIssue: !enabled
@@ -2107,6 +2386,20 @@ export async function getTelegramBotTradingStatus(
     walletAddress: activeAuthorization?.walletAddress ?? null,
     walletChain: activeAuthorization?.walletChain ?? null,
     walletSetupIssues: [],
+    preference,
+    targetConfig,
+    actualConfig: {
+      maxAmountUsd: activeAuthorization?.maxAmountUsd ?? null,
+      venues: enabledVenues,
+    },
+    managedSetup: buildTelegramBotTradingManagedSetupStatus({
+      actualMaxAmountUsd: activeAuthorization?.maxAmountUsd ?? null,
+      actualVenues: enabledVenues,
+      linked: true,
+      policy: runtimePolicy,
+      preference,
+      target: targetConfig,
+    }),
   };
 }
 
@@ -2134,20 +2427,23 @@ export async function enableTelegramBotTrading(
   }
   const telegramUserId = account.telegram_user_id;
 
-  const policy = await resolveTelegramBotTradingPolicy(db);
+  const policyState = await resolveSignalBotTradingPolicyStateFromDb(db);
+  const policy = policyState.policy;
+  const managedTarget = resolveTelegramBotTradingManagedTarget(policyState);
+  const unsupportedManagedVenue = policy.autoManagedVenues.find(
+    (venue) => !TELEGRAM_BOT_TRADING_CAPABILITIES.includes(venue),
+  );
+  if (unsupportedManagedVenue) {
+    throw new TelegramBotTradingEnableError({
+      code: `unsupported_managed_venue:${unsupportedManagedVenue}`,
+      message: `Telegram bot trading setup is not available for ${unsupportedManagedVenue}.`,
+      statusCode: 409,
+    });
+  }
   const explicitlyRequestedVenues =
     input.enabledVenues === undefined
       ? null
       : normalizeVenues(input.enabledVenues);
-  if (explicitlyRequestedVenues?.length === 0) {
-    await disableTelegramBotTradingLocal(db, { telegramUserId });
-    return getTelegramBotTradingStatus(
-      db,
-      telegramUserId,
-      trading,
-      input.signerInspector,
-    );
-  }
   if (!policy.tradingEnabled) {
     throw new TelegramBotTradingEnableError({
       code: "trading_disabled_by_policy",
@@ -2155,10 +2451,28 @@ export async function enableTelegramBotTrading(
       statusCode: 409,
     });
   }
-  const requestedVenueSource =
-    input.enabledVenues === undefined
-      ? policy.tradingVenues.filter((venue) => venue === "polymarket")
-      : (explicitlyRequestedVenues ?? []);
+  const targetVenueKey = [...managedTarget.venues].sort().join(",");
+  if (
+    explicitlyRequestedVenues &&
+    [...explicitlyRequestedVenues].sort().join(",") !== targetVenueKey
+  ) {
+    throw new TelegramBotTradingEnableError({
+      code: "managed_configuration_mismatch",
+      message: "Telegram trading settings are managed by Hunch policy.",
+      statusCode: 409,
+    });
+  }
+  if (
+    input.maxAmountUsd != null &&
+    input.maxAmountUsd !== managedTarget.maxAmountUsd
+  ) {
+    throw new TelegramBotTradingEnableError({
+      code: "managed_configuration_mismatch",
+      message: "Telegram trading max amount is managed by Hunch policy.",
+      statusCode: 409,
+    });
+  }
+  const requestedVenueSource = managedTarget.venues;
   const unsupportedBotVenues = requestedVenueSource.filter(
     (venue) => venue !== "polymarket",
   );
@@ -2174,6 +2488,13 @@ export async function enableTelegramBotTrading(
   );
   if (enabledVenueSource.length === 0) {
     throw new Error("no_compatible_venues_for_wallet");
+  }
+  if (!input.setupClaimId) {
+    await setTelegramBotTradingDesiredEnabled(db, {
+      desiredEnabled: true,
+      source: "manual_enable",
+      userId: input.userId,
+    });
   }
 
   const requestedEvmVenues = filterVenuesForWalletChain(
@@ -2205,8 +2526,7 @@ export async function enableTelegramBotTrading(
     limits: string;
     selected: SelectedTelegramBotTradingInternalWallet;
   }> = [];
-  const requestedMaxAmountUsd =
-    input.maxAmountUsd == null ? policy.maxTradeAmountUsd : input.maxAmountUsd;
+  const requestedMaxAmountUsd = managedTarget.maxAmountUsd;
   if (
     !Number.isFinite(requestedMaxAmountUsd) ||
     !Number.isInteger(requestedMaxAmountUsd) ||
@@ -2311,11 +2631,33 @@ export async function enableTelegramBotTrading(
   const enabledAuthorizations = await withOptionalTransaction(
     db,
     async (client) => {
-      await disableTelegramBotTradingLocal(
-        client,
-        { telegramUserId },
-        { recordLifecycle: false },
-      );
+      const currentPolicyState =
+        await resolveSignalBotTradingPolicyStateFromDb(client);
+      if (currentPolicyState.policyRevision !== managedTarget.policyRevision) {
+        throw new Error(
+          input.setupClaimId
+            ? "telegram_bot_trading_claim_stale"
+            : "telegram_bot_trading_policy_changed",
+        );
+      }
+      if (input.setupClaimId) {
+        await assertTelegramBotTradingSetupClaim(client, {
+          claimId: input.setupClaimId,
+          policyRevision: managedTarget.policyRevision,
+          userId: input.userId,
+        });
+      } else {
+        const preference = await client.query<{ desired_enabled: boolean }>(
+          `SELECT desired_enabled
+             FROM telegram_bot_trading_preferences
+            WHERE user_id = $1
+            FOR UPDATE`,
+          [input.userId],
+        );
+        if (preference.rows[0]?.desired_enabled !== true) {
+          throw new Error("telegram_bot_trading_opted_out");
+        }
+      }
       const recorded: Array<{
         enabled_venues: TelegramBotTradingVenue[];
         id: string;
@@ -2373,6 +2715,37 @@ export async function enableTelegramBotTrading(
         );
         recorded.push(...result.rows);
       }
+      const recordedIds = recorded.map((authorization) => authorization.id);
+      await client.query(
+        `UPDATE telegram_bot_trading_authorizations
+            SET enabled = false,
+                disabled_at = coalesce(disabled_at, now()),
+                updated_at = now()
+          WHERE telegram_user_id = $1
+            AND enabled = true
+            AND NOT (id = ANY($2::uuid[]))`,
+        [telegramUserId, recordedIds],
+      );
+      if (input.setupClaimId) {
+        await completeTelegramBotTradingSetupClaim(client, {
+          claimId: input.setupClaimId,
+          policyRevision: managedTarget.policyRevision,
+          userId: input.userId,
+        });
+      } else {
+        await client.query(
+          `UPDATE telegram_bot_trading_preferences
+              SET applied_policy_revision = $2,
+                  retry_attempt_count = 0,
+                  retry_after = NULL,
+                  last_setup_error_code = NULL,
+                  setup_blocked = false,
+                  updated_at = now()
+            WHERE user_id = $1
+              AND desired_enabled = true`,
+          [input.userId, managedTarget.policyRevision],
+        );
+      }
       return recorded;
     },
   );
@@ -2413,7 +2786,11 @@ export async function disableTelegramBotTradingForUser(
   db: DbQuery,
   userId: string,
 ): Promise<number> {
-  return disableTelegramBotTradingLocal(db, { userId });
+  return disableTelegramBotTradingLocal(
+    db,
+    { userId },
+    { updatePreference: true },
+  );
 }
 
 export async function disableTelegramBotTradingForTelegramUser(
@@ -2421,20 +2798,68 @@ export async function disableTelegramBotTradingForTelegramUser(
   telegramUserId: string | number,
 ): Promise<boolean> {
   return (
-    (await disableTelegramBotTradingLocal(db, {
-      telegramUserId: normalizeTelegramUserId(telegramUserId),
-    })) > 0
+    (await disableTelegramBotTradingLocal(
+      db,
+      {
+        telegramUserId: normalizeTelegramUserId(telegramUserId),
+      },
+      { updatePreference: true },
+    )) > 0
+  );
+}
+
+export async function cleanupTelegramBotTradingForUnlink(
+  db: DbQuery,
+  userId: string,
+): Promise<number> {
+  return disableTelegramBotTradingLocal(
+    db,
+    { userId },
+    { blockLinkGeneration: true, updatePreference: false },
   );
 }
 
 async function disableTelegramBotTradingLocal(
   db: DbQuery,
   selector: { telegramUserId: string } | { userId: string },
-  options: { recordLifecycle?: boolean } = {},
+  options: {
+    blockLinkGeneration?: boolean;
+    recordLifecycle?: boolean;
+    updatePreference?: boolean;
+  } = {},
 ): Promise<number> {
   const disabled = await withOptionalTransaction(db, async (client) => {
     const byUser = "userId" in selector;
     const value = byUser ? selector.userId : selector.telegramUserId;
+    const needsUserId =
+      options.updatePreference === true || options.blockLinkGeneration === true;
+    const userId = byUser
+      ? selector.userId
+      : needsUserId
+        ? (
+            await client.query<{ user_id: string }>(
+              `SELECT user_id
+               FROM user_telegram_accounts
+              WHERE telegram_user_id = $1
+              LIMIT 1`,
+              [selector.telegramUserId],
+            )
+          ).rows[0]?.user_id
+        : undefined;
+    if (userId && options.updatePreference) {
+      await setTelegramBotTradingDesiredEnabled(client, {
+        desiredEnabled: false,
+        source: "manual_disable",
+        userId,
+      });
+    }
+    if (userId && options.blockLinkGeneration) {
+      await ensureTelegramBotTradingPreferenceForLink(client, {
+        isNewLink: false,
+        userId,
+      });
+      await blockTelegramBotTradingLinkGeneration(client, userId);
+    }
     const intentSelector = byUser
       ? `(user_id = $1 OR telegram_user_id IN (
            SELECT telegram_user_id
@@ -2465,7 +2890,10 @@ async function disableTelegramBotTradingLocal(
               error_message = 'Telegram bot trading was disabled before submission.',
               updated_at = now()
         WHERE ${intentSelector}
-          AND status = ANY($2::text[])`,
+          AND (
+            status = ANY($2::text[])
+            OR (status = 'executing' AND submit_started_at IS NULL)
+          )`,
       [value, PENDING_INTENT_STATUSES],
     );
     return {
@@ -3096,9 +3524,13 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     ).catch(() => null);
     return credentials?.funderAddress?.toLowerCase() === wallet.toLowerCase();
   })();
-  const nominalPresetAmountUsd = policy.buyAmountPresetsUsd
+  const configuredPresetAmountUsd = policy.buyAmountPresetsUsd
     .filter((amountUsd) => amountUsd > 0)
     .sort((left, right) => left - right)[0];
+  const nominalPresetAmountUsd = Math.min(
+    configuredPresetAmountUsd ?? maxAmountUsd,
+    maxAmountUsd,
+  );
   const unresolvedIntent = await loadUnresolvedTelegramTradeIntent(input.db, {
     marketId: market.id,
     telegramUserId,
@@ -3117,13 +3549,13 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     authorization?.enabled === true &&
     Boolean(authorization.privy_wallet_id) &&
     canPreviewBuyForReadiness(tradeReadiness) &&
-    nominalPresetAmountUsd != null &&
+    nominalPresetAmountUsd > 0 &&
     Boolean(input.trading);
   const buyOptions =
     canBuildBuyOptions &&
     authorization &&
     input.trading &&
-    nominalPresetAmountUsd != null
+    nominalPresetAmountUsd > 0
       ? (
           await Promise.all(
             (["YES", "NO"] as const)
@@ -3286,6 +3718,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       "",
       `Link Telegram in Settings for direct bot trading. ${hunchFallbackCopy}`,
     );
+  } else if (!marketOrderable && !redeemPlan) {
+    lines.push("", "This market is not open for new bot trades.");
   } else if (!status.enabled) {
     lines.push(
       "",
@@ -3307,8 +3741,6 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         ? "Trade in Hunch now, or enable this venue in Telegram Trading."
         : `This Trading Wallet is not enabled for direct bot trading on this venue. ${hunchFallbackCopy}`,
     );
-  } else if (!marketOrderable && !redeemPlan) {
-    lines.push("", "This market is not open for new bot trades.");
   } else if (
     policy.tradingActions.includes("buy") &&
     buyOptions.length === 0 &&
@@ -4028,6 +4460,9 @@ async function loadEnabledAuthorization(
        a.limits,
        a.max_amount_usd
      FROM telegram_bot_trading_authorizations a
+     JOIN telegram_bot_trading_preferences p
+       ON p.user_id = a.user_id
+      AND p.desired_enabled = true
      JOIN user_telegram_accounts uta
        ON uta.telegram_user_id = a.telegram_user_id
       AND uta.user_id = a.user_id
@@ -4302,6 +4737,17 @@ async function handleTelegramRedeemCallback(input: {
     ) {
       throw new Error("Polymarket relayer signing is not configured.");
     }
+    if (
+      !(await isTelegramBotTradingAuthorizationEnabled(
+        callback.db,
+        authorization,
+        "polymarket",
+      ))
+    ) {
+      throw new Error(
+        "Telegram bot trading was disabled before redemption signing.",
+      );
+    }
     await assertServerEvmWalletAuthorization({
       requiredActions: ["REDEEM"],
       privyUserId: authorization.privy_user_id,
@@ -4347,6 +4793,17 @@ async function handleTelegramRedeemCallback(input: {
       calls,
       signature,
     });
+    if (
+      !(await isTelegramBotTradingAuthorizationEnabled(
+        callback.db,
+        authorization,
+        "polymarket",
+      ))
+    ) {
+      throw new Error(
+        "Telegram bot trading was disabled before redemption submit.",
+      );
+    }
     const submitted = await submitPolymarketDepositWalletBatch({
       body: submitBody,
       credentials: {

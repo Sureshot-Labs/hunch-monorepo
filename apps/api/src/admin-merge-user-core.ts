@@ -498,6 +498,74 @@ export async function mergeUsers(
       );
     }
 
+    if (!options.keepSource) {
+      await client.query(
+        `INSERT INTO telegram_bot_trading_preferences (
+           user_id,
+           desired_enabled,
+           decision_source,
+           decision_version,
+           manual_disabled_at,
+           applied_policy_revision,
+           retry_attempt_count,
+           retry_after,
+           last_setup_error_code,
+           setup_blocked,
+           created_at,
+           updated_at
+         )
+         SELECT
+           $1,
+           desired_enabled,
+           'admin_merge',
+           decision_version + 1,
+           manual_disabled_at,
+           applied_policy_revision,
+           0,
+           NULL,
+           NULL,
+           false,
+           created_at,
+           now()
+         FROM telegram_bot_trading_preferences
+         WHERE user_id = $2
+         ON CONFLICT (user_id) DO UPDATE SET
+           desired_enabled = telegram_bot_trading_preferences.desired_enabled
+             AND EXCLUDED.desired_enabled,
+           decision_source = 'admin_merge',
+           decision_version = greatest(
+             telegram_bot_trading_preferences.decision_version,
+             EXCLUDED.decision_version
+           ) + 1,
+           manual_disabled_at = CASE
+             WHEN telegram_bot_trading_preferences.desired_enabled
+               AND EXCLUDED.desired_enabled THEN NULL
+             ELSE coalesce(
+               telegram_bot_trading_preferences.manual_disabled_at,
+               EXCLUDED.manual_disabled_at
+             )
+           END,
+           applied_policy_revision = CASE
+             WHEN telegram_bot_trading_preferences.applied_policy_revision
+               = EXCLUDED.applied_policy_revision
+             THEN EXCLUDED.applied_policy_revision
+             ELSE NULL
+           END,
+           retry_attempt_count = 0,
+           retry_after = NULL,
+           last_setup_error_code = NULL,
+           setup_blocked = false,
+           claim_id = NULL,
+           claim_telegram_account_id = NULL,
+           claim_decision_version = NULL,
+           claim_policy_revision = NULL,
+           claim_expires_at = NULL,
+           blocked_telegram_account_id = NULL,
+           updated_at = now()`,
+        [target.id, source.id],
+      );
+    }
+
     if (sourceTelegramAccount && !targetTelegramAccount) {
       if (options.keepSource) {
         summary.telegramAccountsConflictBlocked = 1;

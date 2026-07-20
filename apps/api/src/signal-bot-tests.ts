@@ -126,6 +126,24 @@ import {
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const TEST_TELEGRAM_MINI_APP_LINK_BASE = "https://t.me/hunch_signal_bot/hunch";
+const TEST_ENABLED_TELEGRAM_TRADING_PREFERENCE = {
+  applied_policy_revision: null,
+  blocked_telegram_account_id: null,
+  claim_decision_version: null,
+  claim_expires_at: null,
+  claim_id: null,
+  claim_policy_revision: null,
+  claim_telegram_account_id: null,
+  decision_source: "legacy_enabled",
+  decision_version: 1,
+  desired_enabled: true,
+  last_setup_error_code: null,
+  manual_disabled_at: null,
+  retry_after: null,
+  retry_attempt_count: 0,
+  setup_blocked: false,
+  user_id: "user-1",
+};
 
 function buildSignalBotMessage(
   input: Parameters<typeof buildSignalBotMessageImpl>[0],
@@ -510,6 +528,8 @@ function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
           rows: [
             {
               payload: {
+                autoManagedMaxAmountUsd: 10,
+                autoManagedVenues: ["polymarket"],
                 tradingEnabled: true,
                 tradingActions: ["buy"],
                 tradingVenues: ["polymarket"],
@@ -3268,6 +3288,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -3278,6 +3300,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   },
                 },
               ],
+            };
+          }
+          if (sql.includes("FROM telegram_bot_trading_preferences")) {
+            return {
+              rowCount: 1,
+              rows: [TEST_ENABLED_TELEGRAM_TRADING_PREFERENCE],
             };
           }
           if (sql.includes("FROM user_telegram_accounts uta")) {
@@ -3667,7 +3695,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(
         repairableButtons.find((button) => "callback_data" in button)?.text ??
           "",
-        /Buy YES · 50¢ · Spend \$10/,
+        /Buy YES · 50¢ · Spend \$1/,
       );
       assert.doesNotMatch(repairableMessage.text, /approvals are missing/);
 
@@ -3792,7 +3820,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "⬅️ Back",
         ],
       );
-      assert.match(appFallbackMessage.text, /\*Trade amount in Hunch:\* \$10/);
+      assert.match(appFallbackMessage.text, /\*Trade amount in Hunch:\* \$1/);
       assert.match(
         appFallbackMessage.text,
         /\*Limitless balance:\* \$0 available/,
@@ -3803,11 +3831,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[0])),
-        "event-1|market-1|Y|10",
+        "event-1|market-1|Y|1",
       );
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[1])),
-        "event-1|market-1|N|10",
+        "event-1|market-1|N|1",
       );
       assert.equal(
         decodeStartAppPayload(readWebAppStartParam(appFallbackButtons[3])),
@@ -5034,6 +5062,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -5454,6 +5484,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                 rows: [
                   {
                     payload: {
+                      autoEnableOnTelegramLink: true,
+                      autoManagedMaxAmountUsd: 10,
+                      autoManagedVenues: ["polymarket"],
                       tradingEnabled: true,
                       tradingActions: ["buy"],
                       tradingVenues: ["polymarket", "limitless", "kalshi"],
@@ -5464,6 +5497,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                     },
                   },
                 ],
+              };
+            }
+            if (
+              /SELECT desired_enabled/i.test(sql) &&
+              /FROM telegram_bot_trading_preferences/i.test(sql)
+            ) {
+              return {
+                rowCount: 1,
+                rows: [{ desired_enabled: true }],
               };
             }
             if (
@@ -5491,9 +5533,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               } else {
                 storedAuthorizations.push(next);
               }
-              return { rowCount: 1, rows: [] };
+              return {
+                rowCount: 1,
+                rows: [
+                  {
+                    enabled_venues: next.enabledVenues,
+                    id: `authorization-${walletChain}`,
+                    updated_at: new Date(),
+                    wallet_chain: walletChain,
+                  },
+                ],
+              };
             }
             if (sql.includes("UPDATE telegram_bot_trading_authorizations")) {
+              if (sql.includes("NOT (id = ANY")) {
+                return { rowCount: 0, rows: [] };
+              }
               const walletChains = sql.includes("wallet_chain = ANY")
                 ? new Set((params?.[1] as string[] | undefined) ?? [])
                 : null;
@@ -5606,7 +5661,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }),
           (error: unknown) =>
             (error as { code?: string }).code ===
-            "privy_policy_unsupported_for_venue",
+            "managed_configuration_mismatch",
         );
         assert.equal(storedAuthorizations.length, 0);
         assert.equal(kalshiEligibilityWalletAddress, null);
@@ -5651,7 +5706,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               userId: "user-1",
             }),
           (error: unknown) =>
-            (error as { code?: string }).code === "invalid_max_amount_usd",
+            (error as { code?: string }).code ===
+            "managed_configuration_mismatch",
         );
         await assert.rejects(
           () =>
@@ -5668,7 +5724,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               userId: "user-1",
             }),
           (error: unknown) =>
-            (error as { code?: string }).code === "invalid_max_amount_usd",
+            (error as { code?: string }).code ===
+            "managed_configuration_mismatch",
         );
         assert.deepEqual(stats.maxAmounts, [10]);
       }
@@ -5693,17 +5750,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ],
           verifiedWallets: [],
         });
-        const status = await enableTelegramBotTrading(db as never, {
-          enabledVenues: [],
-          internalWallets: [],
-          userId: "user-1",
-        });
+        await assert.rejects(
+          () =>
+            enableTelegramBotTrading(db as never, {
+              enabledVenues: [],
+              internalWallets: [],
+              userId: "user-1",
+            }),
+          (error: unknown) =>
+            (error as { code?: string }).code ===
+            "managed_configuration_mismatch",
+        );
         assert.equal(stats.upserts, 0);
-        assert.equal(stats.disabledRows, 2);
-        assert.equal(status.enabled, false);
+        assert.equal(stats.disabledRows, 0);
         assert.deepEqual(
           storedAuthorizations.map((authorization) => authorization.enabled),
-          [false, false],
+          [true, true],
         );
       }
 
@@ -5829,7 +5891,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }),
           (error: unknown) =>
             (error as { code?: string }).code ===
-            "privy_policy_unsupported_for_venue",
+            "managed_configuration_mismatch",
         );
         const solanaAuthorization = storedAuthorizations.find(
           (authorization) => authorization.walletChain === "solana",
@@ -5965,7 +6027,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             }),
           (error: unknown) =>
             (error as { code?: string }).code ===
-            "privy_policy_unsupported_for_venue",
+            "managed_configuration_mismatch",
         );
         assert.equal(stats.upserts, 0);
         assert.equal(stats.disabledRows, 0);
@@ -6194,6 +6256,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             rows: [
               {
                 payload: {
+                  autoEnableOnTelegramLink: true,
+                  autoManagedMaxAmountUsd: 2,
+                  autoManagedVenues: ["polymarket"],
                   tradingEnabled: true,
                   tradingActions: ["buy"],
                   tradingVenues: ["polymarket", "kalshi"],
@@ -6283,7 +6348,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           }),
         (error: unknown) =>
           (error as { code?: string }).code ===
-          "privy_policy_unsupported_for_venue",
+          "managed_configuration_mismatch",
       );
       assert.deepEqual(storedChains, []);
       assert.deepEqual(transactionStatements, []);
@@ -6330,6 +6395,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             rows: [
               {
                 payload: {
+                  autoEnableOnTelegramLink: true,
+                  autoManagedMaxAmountUsd: 2,
+                  autoManagedVenues: ["polymarket"],
                   tradingEnabled: true,
                   tradingActions: ["buy"],
                   tradingVenues: ["polymarket"],
@@ -6366,6 +6434,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         query: async (sql: string) => {
           if (sql === "COMMIT") lifecycleOrder.push("commit");
+          if (
+            /SELECT desired_enabled/i.test(sql) &&
+            /FROM telegram_bot_trading_preferences/i.test(sql)
+          ) {
+            return { rowCount: 1, rows: [{ desired_enabled: true }] };
+          }
           if (sql.includes("INSERT INTO telegram_bot_trading_authorizations")) {
             enabled = true;
             return {
@@ -6832,6 +6906,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -7074,6 +7150,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -7255,6 +7333,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -7468,6 +7548,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -7909,9 +7991,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "trading confirm leaves pre-broadcast Kalshi validation failure failed",
+    name: "managed trading rejects unsupported Kalshi before preparation",
     run: async () => {
       const telegram = new FakeTelegram();
+      let executeCalls = 0;
       const updateAttempts: Array<{
         errorCode: unknown;
         markSubmitStarted: unknown;
@@ -8034,6 +8117,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         signerInspector: readyTelegramSignerInspector,
         trading: {
           executePreparedTrade: async () => {
+            executeCalls += 1;
             throw new Error("Kalshi transaction could not be validated");
           },
           getReadiness: async () => ({
@@ -8091,29 +8175,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.deepEqual(updateAttempts, [
         {
-          status: "executing",
-          errorCode: null,
-          markSubmitStarted: false,
-          preparedSnapshot: false,
-        },
-        {
-          status: "executing",
-          errorCode: null,
-          markSubmitStarted: false,
-          preparedSnapshot: true,
-        },
-        {
           status: "failed",
-          errorCode: "trade_submission_failed",
+          errorCode: "not_ready",
           markSubmitStarted: false,
           preparedSnapshot: false,
         },
       ]);
-      assert.match(telegram.callbackAnswers[0]?.text ?? "", /trade failed/i);
-      assert.match(
-        telegram.messages[0]?.text ?? "",
-        /before a confirmed venue submission/i,
-      );
+      assert.equal(executeCalls, 0);
+      assert.match(telegram.callbackAnswers[0]?.text ?? "", /not ready/i);
     },
   },
   {
@@ -8134,6 +8203,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd: 10,
+                    autoManagedVenues: ["polymarket"],
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
@@ -14126,24 +14197,27 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "user-1",
       );
       assert.equal(disabled, 1);
-      assert.equal(queries.length, 3);
-      assert.deepEqual(queries[1]?.params[1], [
+      assert.equal(queries.length, 4);
+      assert.match(queries[0]?.sql ?? "", /telegram_bot_trading_preferences/);
+      assert.deepEqual(queries[2]?.params[1], [
         "draft",
         "previewed",
         "confirming",
       ]);
-      assert.doesNotMatch(queries[1]?.sql ?? "", /executing|submitted/);
-      assert.match(queries[1]?.sql ?? "", /authorization_disabled/);
-      assert.match(queries[1]?.sql ?? "", /FROM user_telegram_accounts/);
-      assert.match(queries[2]?.sql ?? "", /analytics_server_events/);
-      assert.deepEqual(queries[2]?.params.slice(0, 4), [
+      assert.match(queries[2]?.sql ?? "", /status = 'executing'/);
+      assert.match(queries[2]?.sql ?? "", /submit_started_at IS NULL/);
+      assert.doesNotMatch(queries[2]?.sql ?? "", /status = 'submitted'/);
+      assert.match(queries[2]?.sql ?? "", /authorization_disabled/);
+      assert.match(queries[2]?.sql ?? "", /FROM user_telegram_accounts/);
+      assert.match(queries[3]?.sql ?? "", /analytics_server_events/);
+      assert.deepEqual(queries[3]?.params.slice(0, 4), [
         "user-1",
         "hf_telegram_trading_lifecycle",
         "telegram_trading_settings",
         "disabled",
       ]);
-      assert.equal(queries[2]?.params[4], "polymarket");
-      assert.equal(JSON.parse(String(queries[2]?.params[6])).chain, "polygon");
+      assert.equal(queries[3]?.params[4], "polymarket");
+      assert.equal(JSON.parse(String(queries[3]?.params[6])).chain, "polygon");
     },
   },
 ];

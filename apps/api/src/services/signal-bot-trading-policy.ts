@@ -7,6 +7,9 @@ export type SignalBotTradingAction = "buy" | "sell" | "redeem";
 export type SignalBotTradingVenue = "polymarket" | "limitless" | "kalshi";
 
 export type SignalBotPolicy = {
+  autoEnableOnTelegramLink: boolean;
+  autoManagedMaxAmountUsd: number;
+  autoManagedVenues: SignalBotTradingVenue[];
   tradingEnabled: boolean;
   tradingActions: SignalBotTradingAction[];
   tradingVenues: SignalBotTradingVenue[];
@@ -38,6 +41,9 @@ const signalBotTradingVenueSchema = z.enum([
 
 export const signalBotSchema = z
   .object({
+    autoEnableOnTelegramLink: strictBoolean,
+    autoManagedMaxAmountUsd: positiveInt.max(100_000),
+    autoManagedVenues: z.array(signalBotTradingVenueSchema).max(8),
     tradingEnabled: strictBoolean,
     tradingActions: z.array(signalBotTradingActionSchema).max(8),
     tradingVenues: z.array(signalBotTradingVenueSchema).max(8),
@@ -78,6 +84,9 @@ function clamp(value: number, min: number, max: number): number {
 
 export function getDefaultSignalBotPolicy(): SignalBotPolicy {
   return {
+    autoEnableOnTelegramLink: false,
+    autoManagedMaxAmountUsd: 1,
+    autoManagedVenues: ["polymarket"],
     tradingEnabled: false,
     tradingActions: ["buy"],
     tradingVenues: ["polymarket", "limitless", "kalshi"],
@@ -99,7 +108,18 @@ export function sanitizeSignalBotPolicyOverride(payload: unknown): unknown {
 }
 
 export function normalizeSignalBotPolicy(
-  policy: SignalBotPolicy,
+  policy: Omit<
+    SignalBotPolicy,
+    "autoEnableOnTelegramLink" | "autoManagedMaxAmountUsd" | "autoManagedVenues"
+  > &
+    Partial<
+      Pick<
+        SignalBotPolicy,
+        | "autoEnableOnTelegramLink"
+        | "autoManagedMaxAmountUsd"
+        | "autoManagedVenues"
+      >
+    >,
 ): SignalBotPolicy {
   const requestedTradingActions = Array.from(
     new Set(
@@ -130,6 +150,19 @@ export function normalizeSignalBotPolicy(
   ).slice(0, 8);
 
   return {
+    autoEnableOnTelegramLink: Boolean(policy.autoEnableOnTelegramLink ?? false),
+    autoManagedMaxAmountUsd: clamp(
+      Math.trunc(policy.autoManagedMaxAmountUsd ?? 1),
+      1,
+      maxTradeAmountUsd,
+    ),
+    autoManagedVenues: Array.from(
+      new Set(
+        (policy.autoManagedVenues ?? ["polymarket"]).filter(
+          (venue) => signalBotTradingVenueSchema.safeParse(venue).success,
+        ),
+      ),
+    ),
     tradingEnabled: Boolean(policy.tradingEnabled),
     tradingActions,
     tradingVenues: venues,
@@ -152,4 +185,28 @@ export async function resolveSignalBotTradingPolicyFromDb(
   );
   if (!parsed.success) return defaults;
   return normalizeSignalBotPolicy(deepMerge(defaults, parsed.data));
+}
+
+export const DEFAULT_SIGNAL_BOT_POLICY_REVISION = "signal-bot-default-v2";
+
+export async function resolveSignalBotTradingPolicyStateFromDb(
+  pool: DbQuery,
+): Promise<{ policy: SignalBotPolicy; policyRevision: string }> {
+  const defaults = getDefaultSignalBotPolicy();
+  const row = await fetchActiveRuntimePolicy(pool, "signal_bot");
+  if (!row) {
+    return {
+      policy: defaults,
+      policyRevision: DEFAULT_SIGNAL_BOT_POLICY_REVISION,
+    };
+  }
+  const parsed = signalBotSchema.safeParse(
+    sanitizeSignalBotPolicyOverride(row.payload),
+  );
+  return {
+    policy: parsed.success
+      ? normalizeSignalBotPolicy(deepMerge(defaults, parsed.data))
+      : defaults,
+    policyRevision: row.id ?? DEFAULT_SIGNAL_BOT_POLICY_REVISION,
+  };
 }

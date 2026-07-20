@@ -189,6 +189,18 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
         1,
       );
       assert.equal(countCalls(fake.calls, /^update telegram_trade_intents/), 1);
+      const preferenceMerge = fake.calls.find((call) =>
+        compactSql(call.sql).startsWith(
+          "insert into telegram_bot_trading_preferences",
+        ),
+      );
+      assert.ok(preferenceMerge);
+      const preferenceSql = compactSql(preferenceMerge.sql);
+      assert.match(
+        preferenceSql,
+        /desired_enabled = telegram_bot_trading_preferences\.desired_enabled and excluded\.desired_enabled/,
+      );
+      assert.match(preferenceSql, /claim_id = null/);
     },
   },
   {

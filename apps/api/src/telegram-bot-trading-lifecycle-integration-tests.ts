@@ -62,6 +62,12 @@ try {
     [userId, walletAddress],
   );
   await client.query(
+    `insert into telegram_bot_trading_preferences (
+       user_id, desired_enabled, decision_source, decision_version
+     ) values ($1, true, 'auto_link', 1)`,
+    [userId],
+  );
+  await client.query(
     `insert into runtime_policies (
        policy_key,
        effective_at,
@@ -71,6 +77,9 @@ try {
      values ('signal_bot', now(), $1::jsonb, $2)`,
     [
       JSON.stringify({
+        autoEnableOnTelegramLink: true,
+        autoManagedMaxAmountUsd: 2,
+        autoManagedVenues: ["polymarket"],
         tradingEnabled: true,
         tradingActions: ["buy"],
         tradingVenues: ["polymarket"],
@@ -382,8 +391,19 @@ try {
   );
   assert.equal(
     intentStatuses.rows.find((row) => row.id === executingId)?.status,
-    "executing",
+    "cancelled",
   );
+  const preferenceAfterDisable = await client.query<{
+    decision_version: string;
+    desired_enabled: boolean;
+  }>(
+    `select desired_enabled, decision_version
+       from telegram_bot_trading_preferences
+      where user_id = $1`,
+    [userId],
+  );
+  assert.equal(preferenceAfterDisable.rows[0]?.desired_enabled, false);
+  assert.equal(Number(preferenceAfterDisable.rows[0]?.decision_version), 2);
 
   const revokeRequired = await app.inject({
     method: "GET",

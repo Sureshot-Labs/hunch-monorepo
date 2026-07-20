@@ -30,6 +30,10 @@ import {
   type AdminRole,
 } from "./services/admin-auth.js";
 import { recordTelegramLifecycleAnalytics } from "./services/telegram-lifecycle-analytics.js";
+import {
+  blockTelegramBotTradingLinkGeneration,
+  ensureTelegramBotTradingPreferenceForLink,
+} from "./services/telegram-bot-trading-preferences.js";
 
 // JWT secret - in production, this should be in environment variables
 const JWT_SECRET = env.jwtSecret;
@@ -959,6 +963,10 @@ export class AuthService {
       );
     }
     const accountId = upsertResult.rows[0]?.id;
+    await ensureTelegramBotTradingPreferenceForLink(client, {
+      isNewLink: !telegramOwner,
+      userId: params.userId,
+    });
     if (!telegramOwner && accountId) {
       await recordTelegramLifecycleAnalytics({
         db: client,
@@ -997,6 +1005,37 @@ export class AuthService {
     );
     const accountId = existing.rows[0]?.id;
     if (accountId) {
+      await ensureTelegramBotTradingPreferenceForLink(client, {
+        isNewLink: false,
+        userId: params.userId,
+      });
+      await blockTelegramBotTradingLinkGeneration(client, params.userId);
+      await client.query(
+        `UPDATE telegram_bot_trading_authorizations
+            SET enabled = false,
+                disabled_at = coalesce(disabled_at, now()),
+                updated_at = now()
+          WHERE user_id = $1
+            AND enabled = true`,
+        [params.userId],
+      );
+      await client.query(
+        `UPDATE telegram_trade_intents
+            SET status = 'cancelled',
+                error_code = 'telegram_unlinked',
+                error_message = 'Telegram was unlinked before submission.',
+                updated_at = now()
+          WHERE (user_id = $1 OR telegram_user_id IN (
+                   SELECT telegram_user_id
+                     FROM user_telegram_accounts
+                    WHERE user_id = $1
+                 ))
+            AND (
+              status = ANY($2::text[])
+              OR (status = 'executing' AND submit_started_at IS NULL)
+            )`,
+        [params.userId, ["draft", "previewed", "confirming"]],
+      );
       await recordTelegramLifecycleAnalytics({
         db: client,
         dedupeKey: `telegram-account:${accountId}:unlinked`,
