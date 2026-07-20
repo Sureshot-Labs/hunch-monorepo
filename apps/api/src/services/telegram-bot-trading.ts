@@ -1582,6 +1582,24 @@ type TelegramExecutableBuyOption = {
   side: TelegramBotTradingSide;
 };
 
+const MAX_TELEGRAM_BUY_PRESET_AMOUNTS = 3;
+
+function resolveTelegramBuyPresetAmountsUsd(
+  configuredAmountsUsd: readonly number[],
+  maxAmountUsd: number,
+): number[] {
+  if (!Number.isFinite(maxAmountUsd) || maxAmountUsd <= 0) return [];
+  return Array.from(
+    new Set(
+      configuredAmountsUsd
+        .filter((amountUsd) => Number.isFinite(amountUsd) && amountUsd > 0)
+        .map((amountUsd) => Math.min(amountUsd, maxAmountUsd)),
+    ),
+  )
+    .sort((left, right) => left - right)
+    .slice(0, MAX_TELEGRAM_BUY_PRESET_AMOUNTS);
+}
+
 type TelegramExecutableSellOption = {
   currentPrice: number;
   minimumReceiveUsd: number;
@@ -3524,13 +3542,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     ).catch(() => null);
     return credentials?.funderAddress?.toLowerCase() === wallet.toLowerCase();
   })();
-  const configuredPresetAmountUsd = policy.buyAmountPresetsUsd
-    .filter((amountUsd) => amountUsd > 0)
-    .sort((left, right) => left - right)[0];
-  const nominalPresetAmountUsd = Math.min(
-    configuredPresetAmountUsd ?? maxAmountUsd,
+  const nominalPresetAmountsUsd = resolveTelegramBuyPresetAmountsUsd(
+    policy.buyAmountPresetsUsd,
     maxAmountUsd,
   );
+  const minimumPresetAmountUsd = nominalPresetAmountsUsd[0] ?? null;
   const unresolvedIntent = await loadUnresolvedTelegramTradeIntent(input.db, {
     marketId: market.id,
     telegramUserId,
@@ -3549,28 +3565,30 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     authorization?.enabled === true &&
     Boolean(authorization.privy_wallet_id) &&
     canPreviewBuyForReadiness(tradeReadiness) &&
-    nominalPresetAmountUsd > 0 &&
+    nominalPresetAmountsUsd.length > 0 &&
     Boolean(input.trading);
   const buyOptions =
     canBuildBuyOptions &&
     authorization &&
     input.trading &&
-    nominalPresetAmountUsd > 0
+    nominalPresetAmountsUsd.length > 0
       ? (
           await Promise.all(
-            (["YES", "NO"] as const)
-              .filter((side) => !focusedSide || side === focusedSide)
-              .map((side) =>
-                resolveTelegramExecutableBuyOption({
-                  authorization,
-                  market,
-                  maxAmountUsd,
-                  maxSlippageBps: policy.maxSlippageBps,
-                  nominalAmountUsd: nominalPresetAmountUsd,
-                  side,
-                  trading: input.trading as ApiBotTradingExecutor,
-                }),
-              ),
+            nominalPresetAmountsUsd.flatMap((nominalAmountUsd) =>
+              (["YES", "NO"] as const)
+                .filter((side) => !focusedSide || side === focusedSide)
+                .map((side) =>
+                  resolveTelegramExecutableBuyOption({
+                    authorization,
+                    market,
+                    maxAmountUsd,
+                    maxSlippageBps: policy.maxSlippageBps,
+                    nominalAmountUsd,
+                    side,
+                    trading: input.trading as ApiBotTradingExecutor,
+                  }),
+                ),
+            ),
           )
         ).filter(
           (option): option is TelegramExecutableBuyOption => option != null,
@@ -3648,15 +3666,15 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     status.linked &&
     marketOrderable &&
     (market.venue === "polymarket" || market.venue === "limitless") &&
-    nominalPresetAmountUsd != null &&
+    minimumPresetAmountUsd != null &&
     (hasInsufficientFundsReason(tradeReadiness) ||
       (knownExecutableFundsUsd != null &&
-        knownExecutableFundsUsd + 0.000_001 < nominalPresetAmountUsd));
+        knownExecutableFundsUsd + 0.000_001 < minimumPresetAmountUsd));
   const depositShortfallUsd =
     depositNeeded &&
     knownExecutableFundsUsd != null &&
-    nominalPresetAmountUsd != null
-      ? Math.max(0, nominalPresetAmountUsd - knownExecutableFundsUsd)
+    minimumPresetAmountUsd != null
+      ? Math.max(0, minimumPresetAmountUsd - knownExecutableFundsUsd)
       : null;
   const marketIdentity = buildTelegramMarketIdentity({
     eventTitle: market.event_title,
@@ -3683,7 +3701,9 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (observedOdds.length > 0) {
     lines.push(`Current buy odds: ${observedOdds.join(" · ")}`);
   }
-  const buyPriceSummary = buyOptions
+  const buyPriceSummary = (["YES", "NO"] as const)
+    .map((side) => buyOptions.find((option) => option.side === side))
+    .filter((option): option is TelegramExecutableBuyOption => option != null)
     .map(
       (option) =>
         `${sideLabel(market, option.side)} ask ${formatLivePrice(option.currentPrice) ?? "unavailable"}`,
@@ -3787,27 +3807,31 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   }
 
   const keyboard: TelegramBotTradingButton[][] = [];
-  for (const option of buyOptions) {
-    const intentId = await insertBuyIntent({
-      amountUsd: option.amountUsd,
-      chatId: String(input.chatId),
-      db: input.db,
-      market,
-      policy,
-      side: option.side,
-      telegramMessageId: input.telegramMessageId,
-      telegramUserId: normalizeTelegramUserId(input.telegramUserId),
-    });
-    keyboard.push([
-      {
+  for (const side of ["YES", "NO"] as const) {
+    const row: TelegramBotTradingButton[] = [];
+    for (const option of buyOptions.filter(
+      (candidate) => candidate.side === side,
+    )) {
+      const intentId = await insertBuyIntent({
+        amountUsd: option.amountUsd,
+        chatId: String(input.chatId),
+        db: input.db,
+        market,
+        policy,
+        side: option.side,
+        telegramMessageId: input.telegramMessageId,
+        telegramUserId: normalizeTelegramUserId(input.telegramUserId),
+      });
+      row.push({
         callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:buy:${intentId}`,
         icon_custom_emoji_id: formatTelegramVenueButtonIcon(market.venue),
         text:
           input.context?.origin === "position"
-            ? `Buy more · ${sideLabel(market, option.side)} · ${formatLivePrice(option.currentPrice) ?? "live"}`
-            : `Buy ${sideLabel(market, option.side)} · ${formatLivePrice(option.currentPrice) ?? "live"} · Spend ${formatUsd(option.amountUsd)}`,
-      },
-    ]);
+            ? `${sideLabel(market, option.side)} · Add ${formatUsd(option.amountUsd)}`
+            : `${sideLabel(market, option.side)} · Spend ${formatUsd(option.amountUsd)}`,
+      });
+    }
+    if (row.length > 0) keyboard.push(row);
   }
   for (const option of sellOptions) {
     const intentId = await insertSellIntent({
@@ -3887,27 +3911,37 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     canTradeInHunch &&
     market.event_id != null;
   if (canOfferMiniAppBuy && market.event_id) {
-    if (nominalPresetAmountUsd != null) {
+    if (nominalPresetAmountsUsd.length > 0) {
       lines.push(
         "",
-        `Trade amount in Hunch: ${formatUsd(nominalPresetAmountUsd)}`,
+        nominalPresetAmountsUsd.length === 1
+          ? `Trade amount in Hunch: ${formatUsd(nominalPresetAmountsUsd[0])}`
+          : `Trade amounts in Hunch: ${nominalPresetAmountsUsd.map(formatUsd).join(" · ")}`,
       );
     }
     for (const side of (["YES", "NO"] as const).filter(
       (candidate) => !focusedSide || focusedSide === candidate,
     )) {
-      const startParam = buildSignalBotBuyStartParam({
-        amountUsd: nominalPresetAmountUsd,
-        eventId: market.event_id,
-        marketId: market.id,
-        side,
-      });
-      if (!startParam) continue;
-      const price = side === "YES" ? observedYesAsk : observedNoAsk;
-      pushMiniAppButton({
-        startParam,
-        text: `Buy ${side}${price != null ? ` · ${formatLivePrice(price)}` : ""}`,
-      });
+      const row: TelegramBotTradingButton[] = [];
+      for (const amountUsd of nominalPresetAmountsUsd) {
+        const startParam = buildSignalBotBuyStartParam({
+          amountUsd,
+          eventId: market.event_id,
+          marketId: market.id,
+          side,
+        });
+        if (!startParam) continue;
+        const price = side === "YES" ? observedYesAsk : observedNoAsk;
+        const button = buildMiniAppButton({
+          startParam,
+          text:
+            nominalPresetAmountsUsd.length > 1
+              ? `${side} · Spend ${formatUsd(amountUsd)}`
+              : `Buy ${side}${price != null ? ` · ${formatLivePrice(price)}` : ""}`,
+        });
+        if (button) row.push(button);
+      }
+      if (row.length > 0) keyboard.push(row);
     }
   }
   if (depositNeeded) {

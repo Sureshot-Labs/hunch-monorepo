@@ -3481,6 +3481,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let marketVenue = "polymarket";
       let readinessMode: "auto" | "disabled" = "disabled";
       let telegramTradingEnabled = true;
+      let autoManagedMaxAmountUsd = 1;
+      let buyAmountPresetsUsd = [10, 25];
       const db = {
         query: async (sql: string) => {
           if (/from runtime_policies/i.test(sql)) {
@@ -3489,10 +3491,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               rows: [
                 {
                   payload: {
+                    autoManagedMaxAmountUsd,
                     tradingEnabled: true,
                     tradingActions: ["buy"],
                     tradingVenues: ["polymarket"],
-                    buyAmountPresetsUsd: [10, 25],
+                    buyAmountPresetsUsd,
                     maxTradeAmountUsd: 50,
                     maxSlippageBps: 500,
                     intentTtlSec: 120,
@@ -3696,9 +3699,105 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(
         repairableButtons.find((button) => "callback_data" in button)?.text ??
           "",
-        /Buy YES · 50¢ · Spend \$1/,
+        /YES · Spend \$1/,
       );
       assert.doesNotMatch(repairableMessage.text, /approvals are missing/);
+
+      autoManagedMaxAmountUsd = 20;
+      buyAmountPresetsUsd = [10, 1, 25, 5];
+      const multiPresetMessage = await buildTelegramBotTradingMarketMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        chatId: "999",
+        db: db as never,
+        marketRef: "market-1",
+        signerInspector: readyTelegramSignerInspector,
+        telegramMiniAppEnabled: true,
+        telegramUserId: 999,
+        trading: {
+          quote: async ({ intent }: { intent: TradeIntent }) =>
+            buildTestTelegramQuote(intent),
+          getReadiness: async () =>
+            buildTestPolymarketReadiness({ executable: true }),
+        } as never,
+      });
+      const multiPresetBuyButtons = (
+        multiPresetMessage.reply_markup?.inline_keyboard.flat() ?? []
+      ).filter(
+        (button) =>
+          "callback_data" in button &&
+          button.callback_data?.startsWith("hbt:buy:"),
+      );
+      assert.deepEqual(
+        multiPresetBuyButtons.map((button) => button.text),
+        [
+          "YES · Spend $1",
+          "YES · Spend $5",
+          "YES · Spend $10",
+          "NO · Spend $1",
+          "NO · Spend $5",
+          "NO · Spend $10",
+        ],
+      );
+      const multiPresetBuyRows =
+        multiPresetMessage.reply_markup?.inline_keyboard.filter((row) =>
+          row.some(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data?.startsWith("hbt:buy:"),
+          ),
+        ) ?? [];
+      assert.deepEqual(
+        multiPresetBuyRows.map((row) => row.length),
+        [3, 3],
+      );
+      assert.equal(insertCount, 8);
+      assert.doesNotMatch(multiPresetMessage.text, /Spend \$25/);
+
+      const partiallyUnavailableMessage =
+        await buildTelegramBotTradingMarketMessage({
+          appBaseUrl: "https://app.hunch.trade",
+          chatId: "999",
+          db: db as never,
+          marketRef: "market-1",
+          signerInspector: readyTelegramSignerInspector,
+          telegramMiniAppEnabled: true,
+          telegramUserId: 999,
+          trading: {
+            quote: async ({ intent }: { intent: TradeIntent }) => {
+              if (
+                intent.target.outcome === "NO" &&
+                Number(intent.amount.value) === 10
+              ) {
+                throw new Error("NO $10 quote unavailable");
+              }
+              return buildTestTelegramQuote(intent);
+            },
+            getReadiness: async () =>
+              buildTestPolymarketReadiness({ executable: true }),
+          } as never,
+        });
+      const partiallyUnavailableBuyRows =
+        partiallyUnavailableMessage.reply_markup?.inline_keyboard.filter(
+          (row) =>
+            row.some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data?.startsWith("hbt:buy:"),
+            ),
+        ) ?? [];
+      assert.deepEqual(
+        partiallyUnavailableBuyRows.map((row) => row.length),
+        [3, 2],
+      );
+      assert.equal(
+        partiallyUnavailableBuyRows
+          .flat()
+          .some((button) => button.text === "NO · Spend $10"),
+        false,
+      );
+      assert.equal(insertCount, 13);
+      autoManagedMaxAmountUsd = 1;
+      buyAmountPresetsUsd = [10, 25];
 
       const unfundedMessage = await buildTelegramBotTradingMarketMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -3732,7 +3831,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         unfundedButtons.find((button) => "callback_data" in button)?.text ?? "",
-        /Buy YES/,
+        /YES · Spend/,
       );
       assert.match(unfundedMessage.text, /Buttons valid/);
       assert.match(
@@ -3760,7 +3859,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             buildTestPolymarketReadiness({ executable: true }),
         } as never,
       });
-      assert.equal(insertCount, 4);
+      assert.equal(insertCount, 15);
       assert.equal(
         closedMessage.reply_markup?.inline_keyboard
           .flat()
