@@ -65,6 +65,7 @@ import {
   formatTelegramFieldWithMarkdownV2,
   formatTelegramItalicMarkdownV2,
   formatTelegramTextWithCommandsMarkdownV2,
+  joinTelegramMarkdownV2Lines,
   formatTelegramLivePrice as formatLivePrice,
   formatTelegramQuotePrice,
   formatTelegramQuoteTtl as formatQuoteTtl,
@@ -3011,7 +3012,7 @@ export async function buildTelegramBotTradingStatusMessage(
   }
   return {
     parse_mode: "MarkdownV2",
-    text: lines.join("\n"),
+    text: joinTelegramMarkdownV2Lines(lines),
   };
 }
 
@@ -3558,7 +3559,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     marketFound: true,
     parse_mode: "MarkdownV2",
     reply_markup: { inline_keyboard: keyboard },
-    text: renderedLines.join("\n"),
+    text: joinTelegramMarkdownV2Lines(renderedLines),
   };
 }
 
@@ -4236,7 +4237,7 @@ async function handleTelegramRedeemCallback(input: {
           ],
         ],
       },
-      text: [
+      text: joinTelegramMarkdownV2Lines([
         `♻️ ${formatTelegramBoldMarkdownV2("Confirm redemption")}`,
         "",
         formatTelegramVenueFieldMarkdownV2("polymarket"),
@@ -4265,7 +4266,7 @@ async function handleTelegramRedeemCallback(input: {
           icon: "⚠️",
           title: "Real on-chain action",
         }),
-      ].join("\n"),
+      ]),
     });
     return true;
   }
@@ -5042,7 +5043,7 @@ export async function handleTelegramBotTradingCallback(
                 ...telegramTradingButtonRows(openMarketButton),
               ],
             },
-            text: [
+            text: joinTelegramMarkdownV2Lines([
               `🔄 ${formatTelegramBoldMarkdownV2("Convert to continue")}`,
               "",
               formatTelegramVenueFieldMarkdownV2(intent.venue),
@@ -5073,7 +5074,7 @@ export async function handleTelegramBotTradingCallback(
                     ...depositPresentation.markdownV2Lines,
                   ]
                 : []),
-            ].join("\n"),
+            ]),
           });
           return true;
         }
@@ -5092,7 +5093,7 @@ export async function handleTelegramBotTradingCallback(
               ...telegramTradingButtonRows(openMarketButton),
             ],
           },
-          text: [
+          text: joinTelegramMarkdownV2Lines([
             `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramBoldMarkdownV2(
               "Deposit to continue",
             )}`,
@@ -5124,7 +5125,7 @@ export async function handleTelegramBotTradingCallback(
                 title: "Deposit address unavailable",
               }),
             ]),
-          ].join("\n"),
+          ]),
         });
         return true;
       }
@@ -5201,81 +5202,81 @@ export async function handleTelegramBotTradingCallback(
           ],
         ],
       },
-      text: [
-        `${action === "BUY" ? "🟢" : "🔴"} ${formatTelegramBoldMarkdownV2(
-          action === "BUY" ? "Confirm buy" : "Confirm sell",
-        )}`,
-        "",
-        formatTelegramVenueFieldMarkdownV2(intent.venue),
-        `🎯 ${formatTelegramFieldMarkdownV2("Market", intent.market_title)}`,
-        `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
-        "",
-        `👛 ${formatTelegramBoldMarkdownV2("Internal wallet")}`,
-        formatTelegramCodeMarkdownV2(authorization.wallet_address),
-        "",
-        `📊 ${formatTelegramFieldMarkdownV2(
-          action === "BUY" ? "Current ask" : "Current bid",
-          formatTelegramQuotePrice(previewQuote.currentPrice ?? null),
-        )}`,
-        action === "BUY"
-          ? `📈 ${formatTelegramFieldMarkdownV2(
-              "Maximum execution price",
-              formatTelegramQuotePrice(previewQuote.price),
-            )}`
-          : null,
-        action === "BUY"
-          ? formatTelegramUsdcLineMarkdownV2(
-              `Nominal order: ${formatUsd(amountUsd ?? 0)}`,
-            )
-          : `📦 ${formatTelegramFieldMarkdownV2(
-              "Exact quantity",
-              `${tradeAmountLabel} (${sellPercent}%)`,
-            )}`,
-        action === "SELL"
-          ? formatTelegramUsdcLineMarkdownV2(
-              `Minimum pUSD receive: ${formatUsd(previewQuote.minimumReceiveUsd ?? 0)}`,
-            )
-          : previewQuote.minReceiveShares == null
-            ? null
+      text: joinTelegramMarkdownV2Lines(
+        [
+          `${action === "BUY" ? "🟢" : "🔴"} ${formatTelegramBoldMarkdownV2(
+            action === "BUY" ? "Confirm buy" : "Confirm sell",
+          )}`,
+          "",
+          formatTelegramVenueFieldMarkdownV2(intent.venue),
+          `🎯 ${formatTelegramFieldMarkdownV2("Market", intent.market_title)}`,
+          `↔️ ${formatTelegramFieldMarkdownV2("Side", side)}`,
+          "",
+          `👛 ${formatTelegramBoldMarkdownV2("Internal wallet")}`,
+          formatTelegramCodeMarkdownV2(authorization.wallet_address),
+          "",
+          `📊 ${formatTelegramFieldMarkdownV2(
+            action === "BUY" ? "Current ask" : "Current bid",
+            formatTelegramQuotePrice(previewQuote.currentPrice ?? null),
+          )}`,
+          action === "BUY"
+            ? `📈 ${formatTelegramFieldMarkdownV2(
+                "Maximum execution price",
+                formatTelegramQuotePrice(previewQuote.price),
+              )}`
+            : null,
+          action === "BUY"
+            ? formatTelegramUsdcLineMarkdownV2(
+                `Nominal order: ${formatUsd(amountUsd ?? 0)}`,
+              )
             : `📦 ${formatTelegramFieldMarkdownV2(
-                "Minimum estimated shares",
-                previewQuote.minReceiveShares.toFixed(2),
+                "Exact quantity",
+                `${tradeAmountLabel} (${sellPercent}%)`,
               )}`,
-        action === "BUY"
-          ? formatTelegramUsdcLineMarkdownV2(
-              `Maximum total spend: ${formatUsd(previewMaxSpendUsd ?? 0)}`,
-            )
-          : `📉 ${formatTelegramFieldMarkdownV2(
-              "Minimum execution price",
-              formatTelegramQuotePrice(previewQuote.price),
-            )}`,
-        `🎚️ ${formatTelegramFieldMarkdownV2(
-          "Price tolerance",
-          `${policy.maxSlippageBps / 100}%`,
-        )}`,
-        `⚙️ ${formatTelegramFieldMarkdownV2(
-          "Possible setup",
-          tradeReadiness?.repair?.kind === "auto"
-            ? tradeReadiness.repair.message
-            : "None",
-        )}`,
-        formatQuoteTtl(previewQuote.expiresAt)
-          ? `⏱️ ${formatTelegramFieldMarkdownV2(
-              "Quote validity",
-              `About ${formatQuoteTtl(previewQuote.expiresAt)}`,
-            )}`
-          : null,
-        "",
-        formatTelegramCalloutMarkdownV2({
-          bodyMarkdownV2: escapeMarkdown(
-            "This is a real trade. Confirm only if you want the bot to submit it now.",
-          ),
-          icon: "⚠️",
-          title: "Real trade",
-        }),
-      ]
-        .filter((line): line is string => line != null)
-        .join("\n"),
+          action === "SELL"
+            ? formatTelegramUsdcLineMarkdownV2(
+                `Minimum pUSD receive: ${formatUsd(previewQuote.minimumReceiveUsd ?? 0)}`,
+              )
+            : previewQuote.minReceiveShares == null
+              ? null
+              : `📦 ${formatTelegramFieldMarkdownV2(
+                  "Minimum estimated shares",
+                  previewQuote.minReceiveShares.toFixed(2),
+                )}`,
+          action === "BUY"
+            ? formatTelegramUsdcLineMarkdownV2(
+                `Maximum total spend: ${formatUsd(previewMaxSpendUsd ?? 0)}`,
+              )
+            : `📉 ${formatTelegramFieldMarkdownV2(
+                "Minimum execution price",
+                formatTelegramQuotePrice(previewQuote.price),
+              )}`,
+          `🎚️ ${formatTelegramFieldMarkdownV2(
+            "Price tolerance",
+            `${policy.maxSlippageBps / 100}%`,
+          )}`,
+          `⚙️ ${formatTelegramFieldMarkdownV2(
+            "Possible setup",
+            tradeReadiness?.repair?.kind === "auto"
+              ? tradeReadiness.repair.message
+              : "None",
+          )}`,
+          formatQuoteTtl(previewQuote.expiresAt)
+            ? `⏱️ ${formatTelegramFieldMarkdownV2(
+                "Quote validity",
+                `About ${formatQuoteTtl(previewQuote.expiresAt)}`,
+              )}`
+            : null,
+          "",
+          formatTelegramCalloutMarkdownV2({
+            bodyMarkdownV2: escapeMarkdown(
+              "This is a real trade. Confirm only if you want the bot to submit it now.",
+            ),
+            icon: "⚠️",
+            title: "Real trade",
+          }),
+        ].filter((line): line is string => line != null),
+      ),
     });
     return true;
   }

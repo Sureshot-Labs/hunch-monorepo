@@ -124,6 +124,8 @@ import {
   formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
+  joinTelegramMarkdownV2Lines,
+  TELEGRAM_VISUAL_BLANK_LINE,
 } from "./telegram-bot-trading-presentation.js";
 import {
   clearSignalBotMenuInput,
@@ -1015,10 +1017,6 @@ function formatSignalNotificationHeadlineMarkdown(
     : "";
   return `${headline.emoji} ${formatTelegramBold(headline.hook)}${continuation}`;
 }
-
-// Telegram clients collapse ordinary empty lines at blockquote boundaries.
-// U+2800 keeps one visually blank row without adding visible decoration.
-const TELEGRAM_VISUAL_BLANK_LINE = "\u2800";
 
 function joinTelegramMessageBlocks(
   blocks: Array<string | null | undefined>,
@@ -2100,7 +2098,7 @@ export function buildSignalBotMenuScreen(input: {
             ...buildSignalBotOptionalButtonRows(miniAppButton),
           ],
         },
-        text: [
+        text: joinTelegramMarkdownV2Lines([
           formatHunchTelegramTitle("Hunch"),
           "",
           formatTelegramCalloutMarkdownV2({
@@ -2119,7 +2117,7 @@ export function buildSignalBotMenuScreen(input: {
               ]
             : []),
           ...noticeLines,
-        ].join("\n"),
+        ]),
       };
     }
     const rows: TelegramInlineKeyboard["inline_keyboard"] = [
@@ -2521,7 +2519,7 @@ export function buildSignalBotMenuScreen(input: {
           buildSignalBotMenuNavRow({ parent: "home" }),
         ],
       },
-      text: [
+      text: joinTelegramMarkdownV2Lines([
         formatTelegramNativeTitle("❓", "How Hunch works"),
         "",
         formatTelegramBlockquote([
@@ -2540,7 +2538,7 @@ export function buildSignalBotMenuScreen(input: {
           "Use the buttons below. Slash commands remain optional shortcuts.",
         ),
         ...noticeLines,
-      ].join("\n"),
+      ]),
     };
   }
   if (input.screen === "performance") {
@@ -2575,7 +2573,7 @@ export function buildSignalBotMenuScreen(input: {
           buildSignalBotMenuNavRow({ includeHome: true, parent: "admin" }),
         ],
       },
-      text: [
+      text: joinTelegramMarkdownV2Lines([
         formatTelegramNativeTitle("🛠", "Admin command reference"),
         "",
         formatTelegramBlockquote(
@@ -2597,7 +2595,7 @@ export function buildSignalBotMenuScreen(input: {
         formatTelegramItalic(
           "These operational commands remain protected by the admin allowlist.",
         ),
-      ].join("\n"),
+      ]),
     };
   }
   return {

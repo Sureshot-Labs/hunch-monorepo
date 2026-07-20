@@ -11,6 +11,7 @@ import {
   formatTelegramBoldMarkdownV2,
   formatTelegramCalloutMarkdownV2,
   formatTelegramFieldMarkdownV2,
+  joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import {
@@ -672,7 +673,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
         ...(portfolioButton ? [[portfolioButton]] : []),
       ],
     },
-    text: lines.join("\n"),
+    text: joinTelegramMarkdownV2Lines(lines),
   };
 }
 

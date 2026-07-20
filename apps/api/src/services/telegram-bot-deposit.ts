@@ -10,6 +10,7 @@ import {
   formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
+  joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
@@ -473,7 +474,7 @@ function buildDepositVenueMenu(
         },
       ]),
     },
-    text: [
+    text: joinTelegramMarkdownV2Lines([
       buildDepositTitleMarkdownV2(),
       "",
       escapeTelegramMarkdownV2("Choose a trading venue."),
@@ -495,7 +496,7 @@ function buildDepositVenueMenu(
             }),
           ]
         : []),
-    ].join("\n"),
+    ]),
   };
 }
 
@@ -539,7 +540,7 @@ function buildDepositUnavailableMessage(input: {
         [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
       ],
     },
-    text: [
+    text: joinTelegramMarkdownV2Lines([
       buildDepositTitleMarkdownV2(input.venue),
       "",
       formatTelegramCalloutMarkdownV2({
@@ -555,7 +556,7 @@ function buildDepositUnavailableMessage(input: {
             )}`,
           ]
         : []),
-    ].join("\n"),
+    ]),
   };
 }
 
@@ -589,7 +590,7 @@ export async function buildTelegramDepositMessage(input: {
           [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
         ],
       },
-      text: [
+      text: joinTelegramMarkdownV2Lines([
         buildDepositTitleMarkdownV2(),
         "",
         formatTelegramCalloutMarkdownV2({
@@ -599,7 +600,7 @@ export async function buildTelegramDepositMessage(input: {
           icon: "⚠️",
           title: "Venue unavailable",
         }),
-      ].join("\n"),
+      ]),
     };
   }
   const resolution =
@@ -656,7 +657,7 @@ export async function buildTelegramDepositMessage(input: {
         [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
       ],
     },
-    text: [
+    text: joinTelegramMarkdownV2Lines([
       buildDepositTitleMarkdownV2(venue),
       "",
       ...presentation.markdownV2Lines,
@@ -668,7 +669,7 @@ export async function buildTelegramDepositMessage(input: {
             )}`,
           ]
         : []),
-    ].join("\n"),
+    ]),
     venue,
   };
 }

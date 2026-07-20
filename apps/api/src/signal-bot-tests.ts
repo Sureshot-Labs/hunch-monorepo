@@ -1726,6 +1726,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         regularButtons.some((button) => button.text === "🛠 Admin"),
         false,
       );
+      const help = buildSignalBotMenuScreen({
+        appBaseUrl: "https://app.hunch.trade",
+        isAdmin: false,
+        miniAppEnabled: true,
+        screen: "help",
+      });
+      assert.match(
+        help.text,
+        />Open a private market card[^\n]+\n\u2800\nUse the buttons below/,
+      );
       const admin = buildSignalBotMenuScreen({
         appBaseUrl: "https://app.hunch.trade",
         isAdmin: true,
@@ -1901,6 +1911,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(
         unavailable.keyboard.inline_keyboard.flat().map(({ text }) => text),
         ["🔎 Markets", "Open Hunch"],
+      );
+      const unavailableWithoutMiniApp = buildSignalBotMenuScreen({
+        appBaseUrl: "https://app.hunch.trade",
+        audience: "unavailable",
+        isAdmin: false,
+        miniAppEnabled: false,
+        screen: "home",
+      });
+      assert.match(
+        unavailableWithoutMiniApp.text,
+        />Account details could not refresh[^\n]+\n\u2800\n⚠️ \*Hunch Mini App/,
       );
 
       const missingMiniApp = buildSignalBotMenuScreen({

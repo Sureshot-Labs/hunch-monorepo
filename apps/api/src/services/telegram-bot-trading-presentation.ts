@@ -2,6 +2,10 @@ export function escapeTelegramMarkdownV2(value: string): string {
   return value.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 }
 
+// Telegram clients collapse ordinary empty lines at blockquote boundaries.
+// U+2800 keeps one visually blank row without adding visible decoration.
+export const TELEGRAM_VISUAL_BLANK_LINE = "\u2800";
+
 export function formatTelegramBoldMarkdownV2(value: string): string {
   return `*${escapeTelegramMarkdownV2(value)}*`;
 }
@@ -51,8 +55,33 @@ export function formatTelegramBlockquoteMarkdownV2(
 ): string {
   return markdownLines
     .flatMap((line) => line.split("\n"))
-    .map((line) => `>${line}`)
+    .map((line) => `>${line || TELEGRAM_VISUAL_BLANK_LINE}`)
     .join("\n");
+}
+
+export function joinTelegramMarkdownV2Lines(
+  markdownLines: readonly string[],
+): string {
+  const rendered: string[] = [];
+  for (let index = 0; index < markdownLines.length; index += 1) {
+    const line = markdownLines[index] ?? "";
+    rendered.push(line);
+    const finalPhysicalLine = line.split("\n").at(-1) ?? "";
+    if (!finalPhysicalLine.startsWith(">")) continue;
+
+    let nextIndex = index + 1;
+    while (
+      nextIndex < markdownLines.length &&
+      !(markdownLines[nextIndex] ?? "").trim()
+    ) {
+      nextIndex += 1;
+    }
+    if (nextIndex >= markdownLines.length) continue;
+
+    rendered.push(TELEGRAM_VISUAL_BLANK_LINE);
+    index = nextIndex - 1;
+  }
+  return rendered.join("\n");
 }
 
 export function formatTelegramCalloutMarkdownV2(input: {

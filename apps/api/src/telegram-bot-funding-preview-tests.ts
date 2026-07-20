@@ -6,9 +6,28 @@ import {
   resolveTelegramBuyFundingState,
   telegramBotTradingTestHooks,
 } from "./services/telegram-bot-trading.js";
+import {
+  formatTelegramBlockquoteMarkdownV2,
+  joinTelegramMarkdownV2Lines,
+  TELEGRAM_VISUAL_BLANK_LINE,
+} from "./services/telegram-bot-trading-presentation.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "menu text preserves a visual blank row after blockquotes",
+    run: () => {
+      const quote = formatTelegramBlockquoteMarkdownV2([
+        "⚠️ *Important*",
+        "Quoted explanation\\.",
+      ]);
+      assert.equal(
+        joinTelegramMarkdownV2Lines([quote, "", "Next section\\."]),
+        `${quote}\n${TELEGRAM_VISUAL_BLANK_LINE}\nNext section\\.`,
+      );
+      assert.equal(joinTelegramMarkdownV2Lines([quote]), quote);
+    },
+  },
   {
     name: "funding preview distinguishes router-ready, convert, and deposit",
     run: () => {

@@ -496,6 +496,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(message.text, /temporarily unavailable/);
       assert.match(message.text, /Mini App temporarily unavailable/);
+      assert.match(
+        message.text,
+        />Deposit verification[^\n]+\n\u2800\n⚠️ \*Mini App temporarily unavailable\*/,
+      );
       assert.doesNotMatch(message.text, /Finish Trading Wallet setup/);
     },
   },
