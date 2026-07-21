@@ -2997,7 +2997,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ["paragraph", "table"],
       );
       assert.match(JSON.stringify(initial), /marked/);
-      assert.match(
+      assert.doesNotMatch(
         JSON.stringify(initial),
         /"text":\{"text":"\+\$542K last month\.","type":"marked"\},"type":"bold"/,
       );
@@ -9975,7 +9975,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(lead?.type, "paragraph");
       if (lead?.type === "paragraph") {
         assert.match(JSON.stringify(lead.text), /marked/);
-        assert.match(
+        assert.doesNotMatch(
           JSON.stringify(lead.text),
           /"text":\{"text":"\$12\.3K backs YES on “Will test resolve Yes”\.\s*","type":"marked"\},"type":"bold"/,
         );
