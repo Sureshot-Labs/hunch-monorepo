@@ -56,7 +56,10 @@ import {
   buildTelegramPositionsMessage,
   loadTelegramPositions,
 } from "../services/telegram-bot-positions.js";
-import { formatTelegramCalloutMarkdownV2 } from "../services/telegram-bot-trading-presentation.js";
+import {
+  formatTelegramCalloutMarkdownV2,
+  formatTelegramRichCallout,
+} from "../services/telegram-bot-trading-presentation.js";
 
 const enableBodySchema = z
   .object({
@@ -710,6 +713,18 @@ async function registerTelegramBotTradingRoutes(
         ? message
         : {
             ...message,
+            richMessage: message.richMessage
+              ? {
+                  blocks: [
+                    ...message.richMessage.blocks,
+                    formatTelegramRichCallout({
+                      body: "Required API and finance reconciliation is disabled.",
+                      icon: "⚠️",
+                      title: "Trading confirmation unavailable",
+                    }),
+                  ],
+                }
+              : undefined,
             text: `${message.text}\n\n${formatTelegramCalloutMarkdownV2({
               bodyMarkdownV2:
                 "Required API and finance reconciliation is disabled\\.",

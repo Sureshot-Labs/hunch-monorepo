@@ -1,3 +1,8 @@
+import {
+  telegramRichCustomEmoji,
+  type TelegramRichText,
+} from "./telegram-rich-message.js";
+
 export const TELEGRAM_CUSTOM_EMOJI = {
   base: {
     fallback: "🟦",
@@ -51,6 +56,13 @@ export function telegramCustomEmojiMarkdownV2(
 ): string {
   const emoji = TELEGRAM_CUSTOM_EMOJI[name];
   return `![${emoji.fallback}](tg://emoji?id=${emoji.id})`;
+}
+
+export function telegramCustomEmojiRichText(
+  name: TelegramCustomEmojiName,
+): TelegramRichText {
+  const emoji = TELEGRAM_CUSTOM_EMOJI[name];
+  return telegramRichCustomEmoji(emoji.id, emoji.fallback);
 }
 
 export function stripTelegramCustomEmojiMarkdownV2(value: string): string {
@@ -149,4 +161,25 @@ export function telegramCustomEmojiMarkdownV2ForAsset(
 ): string | null {
   const name = telegramAssetCustomEmojiName(asset);
   return name ? telegramCustomEmojiMarkdownV2(name) : null;
+}
+
+export function telegramCustomEmojiRichTextForVenue(
+  venue: string | null | undefined,
+): TelegramRichText | null {
+  const name = telegramVenueCustomEmojiName(venue);
+  return name ? telegramCustomEmojiRichText(name) : null;
+}
+
+export function telegramCustomEmojiRichTextForNetwork(
+  network: string | null | undefined,
+): TelegramRichText | null {
+  const name = telegramNetworkCustomEmojiName(network);
+  return name ? telegramCustomEmojiRichText(name) : null;
+}
+
+export function telegramCustomEmojiRichTextForAsset(
+  asset: string | null | undefined,
+): TelegramRichText | null {
+  const name = telegramAssetCustomEmojiName(asset);
+  return name ? telegramCustomEmojiRichText(name) : null;
 }

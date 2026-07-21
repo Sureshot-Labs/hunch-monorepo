@@ -3,7 +3,19 @@ export type TelegramRichText =
   | TelegramRichText[]
   | {
       text: TelegramRichText;
-      type: "bold" | "italic" | "marked" | "underline";
+      type:
+        | "bold"
+        | "code"
+        | "italic"
+        | "marked"
+        | "spoiler"
+        | "strikethrough"
+        | "underline";
+    }
+  | {
+      alternative_text: string;
+      custom_emoji_id: string;
+      type: "custom_emoji";
     }
   | {
       text: TelegramRichText;
@@ -33,6 +45,14 @@ export type TelegramRichTableCell = {
   valign: "bottom" | "middle" | "top";
 };
 
+export type TelegramInputRichBlockListItem = {
+  blocks: TelegramInputRichBlock[];
+  has_checkbox?: true;
+  is_checked?: true;
+  type?: "1" | "A" | "I" | "a" | "i";
+  value?: number;
+};
+
 export type TelegramInputRichBlock =
   | {
       text: TelegramRichText;
@@ -45,6 +65,26 @@ export type TelegramInputRichBlock =
     }
   | {
       type: "divider";
+    }
+  | {
+      blocks: TelegramInputRichBlock[];
+      credit?: TelegramRichText;
+      type: "blockquote";
+    }
+  | {
+      blocks: TelegramInputRichBlock[];
+      is_open?: true;
+      summary: TelegramRichText;
+      type: "details";
+    }
+  | {
+      items: TelegramInputRichBlockListItem[];
+      type: "list";
+    }
+  | {
+      language?: string;
+      text: TelegramRichText;
+      type: "pre";
     }
   | {
       name: string;
@@ -66,12 +106,106 @@ export type TelegramInputRichMessage = {
   blocks: TelegramInputRichBlock[];
 };
 
+export function telegramRichMessageHasCustomEmoji(
+  message: TelegramInputRichMessage,
+): boolean {
+  return JSON.stringify(message).includes('"type":"custom_emoji"');
+}
+
+export function stripTelegramCustomEmojiRichText(
+  text: TelegramRichText,
+): TelegramRichText {
+  if (typeof text === "string") return text;
+  if (Array.isArray(text)) return text.map(stripTelegramCustomEmojiRichText);
+  if (text.type === "custom_emoji") return text.alternative_text;
+  return {
+    ...text,
+    text: stripTelegramCustomEmojiRichText(text.text),
+  };
+}
+
+export function stripTelegramCustomEmojiRichMessage(
+  message: TelegramInputRichMessage,
+): TelegramInputRichMessage {
+  const stripBlock = (
+    block: TelegramInputRichBlock,
+  ): TelegramInputRichBlock => {
+    if (
+      block.type === "paragraph" ||
+      block.type === "heading" ||
+      block.type === "footer" ||
+      block.type === "pre"
+    ) {
+      return {
+        ...block,
+        text: stripTelegramCustomEmojiRichText(block.text),
+      };
+    }
+    if (block.type === "table") {
+      return {
+        ...block,
+        ...(block.caption
+          ? { caption: stripTelegramCustomEmojiRichText(block.caption) }
+          : {}),
+        cells: block.cells.map((row) =>
+          row.map((cell) => ({
+            ...cell,
+            text: stripTelegramCustomEmojiRichText(cell.text),
+          })),
+        ),
+      };
+    }
+    if (block.type === "blockquote") {
+      return {
+        ...block,
+        blocks: block.blocks.map(stripBlock),
+        ...(block.credit
+          ? { credit: stripTelegramCustomEmojiRichText(block.credit) }
+          : {}),
+      };
+    }
+    if (block.type === "details") {
+      return {
+        ...block,
+        blocks: block.blocks.map(stripBlock),
+        summary: stripTelegramCustomEmojiRichText(block.summary),
+      };
+    }
+    if (block.type === "list") {
+      return {
+        ...block,
+        items: block.items.map((item) => ({
+          ...item,
+          blocks: item.blocks.map(stripBlock),
+        })),
+      };
+    }
+    return block;
+  };
+  return { blocks: message.blocks.map(stripBlock) };
+}
+
 export function telegramRichBold(text: TelegramRichText): TelegramRichText {
   return { text, type: "bold" };
 }
 
 export function telegramRichItalic(text: TelegramRichText): TelegramRichText {
   return { text, type: "italic" };
+}
+
+export function telegramRichCode(text: TelegramRichText): TelegramRichText {
+  return { text, type: "code" };
+}
+
+export function telegramRichCustomEmoji(
+  customEmojiId: string,
+  alternativeText: string,
+): TelegramRichText {
+  return {
+    alternative_text: alternativeText,
+    custom_emoji_id: customEmojiId,
+    type: "custom_emoji",
+  };
 }
 
 export function telegramRichMarked(text: TelegramRichText): TelegramRichText {
@@ -138,6 +272,50 @@ export function telegramRichDivider(): TelegramInputRichBlock {
   return { type: "divider" };
 }
 
+export function telegramRichBlockquote(
+  blocks: TelegramInputRichBlock[],
+  credit?: TelegramRichText,
+): TelegramInputRichBlock {
+  return {
+    blocks,
+    ...(credit ? { credit } : {}),
+    type: "blockquote",
+  };
+}
+
+export function telegramRichDetails(input: {
+  blocks: TelegramInputRichBlock[];
+  open?: boolean;
+  summary: TelegramRichText;
+}): TelegramInputRichBlock {
+  return {
+    blocks: input.blocks,
+    ...(input.open ? { is_open: true as const } : {}),
+    summary: input.summary,
+    type: "details",
+  };
+}
+
+export function telegramRichList(
+  items: Array<TelegramInputRichBlock[] | TelegramInputRichBlockListItem>,
+): TelegramInputRichBlock {
+  return {
+    items: items.map((item) => (Array.isArray(item) ? { blocks: item } : item)),
+    type: "list",
+  };
+}
+
+export function telegramRichPreformatted(
+  text: TelegramRichText,
+  language?: string,
+): TelegramInputRichBlock {
+  return {
+    ...(language ? { language } : {}),
+    text,
+    type: "pre",
+  };
+}
+
 export function telegramRichFooter(
   text: TelegramRichText,
 ): TelegramInputRichBlock {
@@ -164,6 +342,21 @@ export function telegramRichTableCell(
   };
 }
 
+export function telegramRichTable(input: {
+  caption?: TelegramRichText;
+  cells: TelegramRichTableCell[][];
+  bordered?: boolean;
+  striped?: boolean;
+}): TelegramInputRichBlock {
+  return {
+    ...(input.caption ? { caption: input.caption } : {}),
+    cells: input.cells,
+    ...(input.bordered === false ? {} : { is_bordered: true as const }),
+    ...(input.striped === false ? {} : { is_striped: true as const }),
+    type: "table",
+  };
+}
+
 export function telegramRichMetricsTable(input: {
   caption?: TelegramRichText;
   valueAlign?: TelegramRichTableCell["align"];
@@ -172,16 +365,13 @@ export function telegramRichMetricsTable(input: {
     value: TelegramRichText;
   }>;
 }): TelegramInputRichBlock {
-  return {
-    ...(input.caption ? { caption: input.caption } : {}),
+  return telegramRichTable({
+    caption: input.caption,
     cells: input.rows.map((row) => [
       telegramRichTableCell(row.label),
       telegramRichTableCell(row.value, {
         align: input.valueAlign ?? "left",
       }),
     ]),
-    is_bordered: true,
-    is_striped: true,
-    type: "table",
-  };
+  });
 }

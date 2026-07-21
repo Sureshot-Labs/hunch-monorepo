@@ -3,6 +3,10 @@ import {
   stripTelegramCustomEmojiMarkdownV2,
 } from "./telegram-custom-emoji.js";
 import { sendTelegramPhotoRequest } from "./telegram-api-photo.js";
+import {
+  stripTelegramCustomEmojiRichMessage,
+  telegramRichMessageHasCustomEmoji,
+} from "./telegram-rich-message.js";
 
 import type {
   SignalBotTelegramClient,
@@ -11,6 +15,7 @@ import type {
   TelegramBotMenuButton,
   TelegramBotUpdate,
   TelegramBotUser,
+  TelegramEditMessageInput,
   TelegramInlineKeyboard,
   TelegramSendMessageInput,
   TelegramSendResult,
@@ -50,6 +55,35 @@ function stripTelegramCustomEmojiFromPayload<
         }
       : {}),
     text: stripTelegramCustomEmojiMarkdownV2(input.text),
+  };
+}
+
+function telegramRichPayloadHasCustomEmoji(input: {
+  reply_markup?: TelegramInlineKeyboard;
+  rich_message: TelegramSendRichMessageInput["rich_message"];
+}): boolean {
+  return (
+    telegramRichMessageHasCustomEmoji(input.rich_message) ||
+    input.reply_markup?.inline_keyboard.some((row) =>
+      row.some((button) => Boolean(button.icon_custom_emoji_id)),
+    ) === true
+  );
+}
+
+function stripTelegramCustomEmojiFromRichPayload<
+  T extends {
+    reply_markup?: TelegramInlineKeyboard;
+    rich_message: TelegramSendRichMessageInput["rich_message"];
+  },
+>(input: T): T {
+  return {
+    ...input,
+    ...(input.reply_markup
+      ? {
+          reply_markup: stripTelegramCustomEmojiButtonIcons(input.reply_markup),
+        }
+      : {}),
+    rich_message: stripTelegramCustomEmojiRichMessage(input.rich_message),
   };
 }
 
@@ -184,15 +218,10 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     return response.json().catch(() => null);
   }
 
-  async editMessageText(input: {
-    chat_id: string;
-    disable_web_page_preview: boolean;
-    message_id: number;
-    parse_mode: "MarkdownV2";
-    reply_markup?: TelegramInlineKeyboard;
-    text: string;
-  }): Promise<TelegramSendResult> {
-    const request = async (body: typeof input) => {
+  async editMessageText(
+    input: TelegramEditMessageInput,
+  ): Promise<TelegramSendResult> {
+    const request = async (body: TelegramEditMessageInput) => {
       const response = await fetch(`${this.baseUrl}/editMessageText`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -209,9 +238,27 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     let { payload, response } = await request(requestInput);
     if (
       isTelegramCustomEmojiRejection(response.status, payload?.description) &&
-      telegramPayloadHasCustomEmoji(requestInput)
+      ("rich_message" in requestInput && requestInput.rich_message
+        ? telegramRichPayloadHasCustomEmoji({
+            reply_markup: requestInput.reply_markup,
+            rich_message: requestInput.rich_message,
+          })
+        : "text" in requestInput && typeof requestInput.text === "string"
+          ? telegramPayloadHasCustomEmoji({
+              reply_markup: requestInput.reply_markup,
+              text: requestInput.text,
+            })
+          : false)
     ) {
-      requestInput = stripTelegramCustomEmojiFromPayload(requestInput);
+      requestInput =
+        "rich_message" in requestInput && requestInput.rich_message
+          ? stripTelegramCustomEmojiFromRichPayload(requestInput)
+          : stripTelegramCustomEmojiFromPayload(
+              requestInput as Extract<
+                TelegramEditMessageInput,
+                { text: string }
+              >,
+            );
       ({ payload, response } = await request(requestInput));
     }
     if (response.ok && payload?.ok) {
@@ -266,21 +313,11 @@ export class TelegramBotApiClient implements SignalBotTelegramClient {
     };
     let requestInput = input;
     let { payload, response } = await request(requestInput);
-    const hasButtonCustomEmoji =
-      requestInput.reply_markup?.inline_keyboard.some((row) =>
-        row.some((button) => Boolean(button.icon_custom_emoji_id)),
-      ) === true;
     if (
       isTelegramCustomEmojiRejection(response.status, payload?.description) &&
-      hasButtonCustomEmoji &&
-      requestInput.reply_markup
+      telegramRichPayloadHasCustomEmoji(requestInput)
     ) {
-      requestInput = {
-        ...requestInput,
-        reply_markup: stripTelegramCustomEmojiButtonIcons(
-          requestInput.reply_markup,
-        ),
-      };
+      requestInput = stripTelegramCustomEmojiFromRichPayload(requestInput);
       ({ payload, response } = await request(requestInput));
     }
     if (response.ok && payload?.ok) {

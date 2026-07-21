@@ -16,6 +16,7 @@ import {
   telegramCustomEmojiMarkdownV2ForNetwork,
   telegramCustomEmojiMarkdownV2ForVenue,
 } from "./telegram-custom-emoji.js";
+import type { TelegramInputRichMessage } from "./telegram-rich-message.js";
 
 export type SignalBotInteractiveMenuRoute =
   | { kind: "deposit"; showQr: boolean; venue: string }
@@ -87,6 +88,7 @@ type MenuMessage = {
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: { inline_keyboard: MenuButton[][] };
+  richMessage?: TelegramInputRichMessage;
   text: string;
   venue?: string;
 };

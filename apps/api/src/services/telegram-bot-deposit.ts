@@ -10,6 +10,8 @@ import {
   formatTelegramCalloutMarkdownV2,
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
+  formatTelegramRichCallout,
+  formatTelegramRichTitle,
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
@@ -20,7 +22,18 @@ import {
   telegramCustomEmojiMarkdownV2,
   telegramCustomEmojiMarkdownV2ForNetwork,
   telegramCustomEmojiMarkdownV2ForVenue,
+  telegramCustomEmojiRichText,
+  telegramCustomEmojiRichTextForNetwork,
+  telegramCustomEmojiRichTextForVenue,
 } from "./telegram-custom-emoji.js";
+import {
+  telegramRichBold,
+  telegramRichCode,
+  telegramRichMetricsTable,
+  telegramRichParagraph,
+  telegramRichText,
+  type TelegramInputRichBlock,
+} from "./telegram-rich-message.js";
 
 const fundingRouter = new Interface([
   "function depositWalletOf(address owner) view returns (address)",
@@ -387,6 +400,26 @@ function formatDepositSafetyInstructionMarkdownV2(
       )} on ${formatTelegramBoldMarkdownV2("Base")} to this address\\.`;
 }
 
+function formatDepositSafetyInstructionRichText(venue: TelegramDepositVenue) {
+  return venue === "polymarket"
+    ? telegramRichText(
+        "Send only ",
+        telegramRichBold("pUSD"),
+        " or ",
+        telegramRichBold("USDC.e"),
+        " on ",
+        telegramRichBold("Polygon"),
+        " to this address.",
+      )
+    : telegramRichText(
+        "Send only ",
+        telegramRichBold("USDC"),
+        " on ",
+        telegramRichBold("Base"),
+        " to this address.",
+      );
+}
+
 export function buildTelegramDepositAddressPresentation(input: {
   address: string;
   copyButtonText?: string;
@@ -397,6 +430,7 @@ export function buildTelegramDepositAddressPresentation(input: {
   >["inline_keyboard"];
   lines: string[];
   markdownV2Lines: string[];
+  richBlocks: TelegramInputRichBlock[];
 } {
   const isPolymarket = input.venue === "polymarket";
   const network = depositNetwork(input.venue);
@@ -439,6 +473,42 @@ export function buildTelegramDepositAddressPresentation(input: {
         title: "Important",
       }),
     ],
+    richBlocks: [
+      telegramRichMetricsTable({
+        caption: telegramRichBold("Deposit details"),
+        rows: [
+          {
+            label: "Network",
+            value: telegramRichText(
+              telegramCustomEmojiRichTextForNetwork(network),
+              " ",
+              telegramRichBold(network),
+            ),
+          },
+          {
+            label: isPolymarket ? "Assets" : "Asset",
+            value: telegramRichText(
+              telegramCustomEmojiRichText("usdc"),
+              " ",
+              telegramRichBold(assetLabel),
+            ),
+          },
+        ],
+      }),
+      telegramRichParagraph(
+        telegramRichText(
+          "📍 ",
+          telegramRichBold("Deposit address"),
+          "\n",
+          telegramRichCode(input.address),
+        ),
+      ),
+      formatTelegramRichCallout({
+        body: formatDepositSafetyInstructionRichText(input.venue),
+        icon: "⚠️",
+        title: "Important",
+      }),
+    ],
   };
 }
 
@@ -473,6 +543,44 @@ function buildDepositVenueMenu(
           text: depositVenueLabel(venue),
         },
       ]),
+    },
+    richMessage: {
+      blocks: [
+        formatTelegramRichTitle(telegramCustomEmojiRichText("usdc"), "Deposit"),
+        telegramRichParagraph("Choose a trading venue."),
+        ...(venues.length > 0
+          ? [
+              telegramRichMetricsTable({
+                caption: telegramRichBold("Funding routes"),
+                rows: venues.map((venue) => {
+                  const network = depositNetwork(venue);
+                  return {
+                    label: telegramRichText(
+                      telegramCustomEmojiRichTextForVenue(venue),
+                      " ",
+                      telegramRichBold(depositVenueLabel(venue)),
+                    ),
+                    value: telegramRichText(
+                      telegramCustomEmojiRichText("usdc"),
+                      " ",
+                      depositAssetLabel(venue),
+                      " · ",
+                      telegramCustomEmojiRichTextForNetwork(network),
+                      " ",
+                      network,
+                    ),
+                  };
+                }),
+              }),
+            ]
+          : [
+              formatTelegramRichCallout({
+                body: "No trading venue can be funded right now.",
+                icon: "⚠️",
+                title: "Funding unavailable",
+              }),
+            ]),
+      ],
     },
     text: joinTelegramMarkdownV2Lines([
       buildDepositTitleMarkdownV2(),
@@ -540,6 +648,29 @@ function buildDepositUnavailableMessage(input: {
         [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
       ],
     },
+    richMessage: {
+      blocks: [
+        formatTelegramRichTitle(
+          telegramCustomEmojiRichTextForVenue(input.venue) ?? "💲",
+          `${depositVenueLabel(input.venue)} Deposit`,
+        ),
+        formatTelegramRichCallout({
+          body: text,
+          icon: "⚠️",
+          title: "Deposit address unavailable",
+        }),
+        ...(!openButton
+          ? [
+              formatTelegramRichCallout({
+                body: "Open Hunch again later.",
+                icon: "⚠️",
+                marked: false,
+                title: "Mini App temporarily unavailable",
+              }),
+            ]
+          : []),
+      ],
+    },
     text: joinTelegramMarkdownV2Lines([
       buildDepositTitleMarkdownV2(input.venue),
       "",
@@ -588,6 +719,19 @@ export async function buildTelegramDepositMessage(input: {
       reply_markup: {
         inline_keyboard: [
           [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
+        ],
+      },
+      richMessage: {
+        blocks: [
+          formatTelegramRichTitle(
+            telegramCustomEmojiRichText("usdc"),
+            "Deposit",
+          ),
+          formatTelegramRichCallout({
+            body: "Deposits for this venue are not available right now.",
+            icon: "⚠️",
+            title: "Venue unavailable",
+          }),
         ],
       },
       text: joinTelegramMarkdownV2Lines([
@@ -655,6 +799,25 @@ export async function buildTelegramDepositMessage(input: {
         ...presentation.buttonRows,
         ...(openButton ? [[openButton]] : []),
         [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to venues" }],
+      ],
+    },
+    richMessage: {
+      blocks: [
+        formatTelegramRichTitle(
+          telegramCustomEmojiRichTextForVenue(venue) ?? "💲",
+          `${depositVenueLabel(venue)} Deposit`,
+        ),
+        ...presentation.richBlocks,
+        ...(!openButton
+          ? [
+              formatTelegramRichCallout({
+                body: "Open Hunch again later.",
+                icon: "⚠️",
+                marked: false,
+                title: "Mini App temporarily unavailable",
+              }),
+            ]
+          : []),
       ],
     },
     text: joinTelegramMarkdownV2Lines([

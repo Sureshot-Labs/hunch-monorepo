@@ -254,6 +254,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         />Send only \*pUSD\* or \*USDC\\\.e\* on \*Polygon\*/,
       );
+      const richDeposit = JSON.stringify(message.richMessage ?? null);
+      assert.match(richDeposit, /"type":"table"/);
+      assert.match(richDeposit, /"type":"code"/);
+      assert.match(richDeposit, /"type":"marked"/);
+      assert.match(richDeposit, new RegExp(deposit));
+      assert.match(richDeposit, /pUSD/);
+      assert.match(richDeposit, /USDC\.e/);
+      assert.match(richDeposit, /Polygon/);
       assert.doesNotMatch(message.text, /setup|required|not configured/i);
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(

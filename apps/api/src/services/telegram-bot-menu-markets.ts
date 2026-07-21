@@ -4,6 +4,8 @@ import {
   formatTelegramCalloutMarkdownV2,
   formatTelegramFieldWithMarkdownV2,
   formatTelegramItalicMarkdownV2,
+  formatTelegramRichCallout,
+  formatTelegramRichTitle,
 } from "./telegram-bot-trading-presentation.js";
 import {
   canAppendTelegramBlock,
@@ -17,6 +19,16 @@ import {
   formatTelegramVenueLabel,
   formatTelegramVenueLabelMarkdownV2,
 } from "./telegram-market-identity.js";
+import { telegramCustomEmojiRichTextForVenue } from "./telegram-custom-emoji.js";
+import {
+  telegramRichBold,
+  telegramRichList,
+  telegramRichParagraph,
+  telegramRichTable,
+  telegramRichTableCell,
+  telegramRichText,
+  type TelegramInputRichMessage,
+} from "./telegram-rich-message.js";
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
@@ -58,6 +70,7 @@ export type SignalBotMarketSearchMessage = {
       }>
     >;
   };
+  richMessage?: TelegramInputRichMessage;
   text: string;
 };
 
@@ -249,6 +262,66 @@ export function buildSignalBotMarketSearchScreen(input: {
         ],
       ],
     },
+    richMessage: {
+      blocks: [
+        formatTelegramRichTitle("🔎", title),
+        ...(visibleResults.length === 0
+          ? [
+              formatTelegramRichCallout({
+                body: "No active markets found. Send another search or paste a market URL.",
+                icon: "ℹ️",
+                marked: false,
+                title: "Nothing found",
+              }),
+            ]
+          : [
+              telegramRichList(
+                visibleResults.map((result, index) => {
+                  const identity = buildTelegramMarketIdentity({
+                    eventTitle: result.eventTitle,
+                    marketTitle: result.marketTitle,
+                  });
+                  const options = venueOptions(result);
+                  const metadata =
+                    options.length > 1
+                      ? telegramRichText("🌐 ", `${options.length} venues`)
+                      : telegramRichText(
+                          telegramCustomEmojiRichTextForVenue(result.venue) ??
+                            "🌐",
+                          " ",
+                          formatTelegramVenueLabel(result.venue),
+                          " · YES ",
+                          telegramRichBold(price(result.yesAsk)),
+                          " · NO ",
+                          telegramRichBold(price(result.noAsk)),
+                        );
+                  return {
+                    blocks: [
+                      telegramRichParagraph(
+                        telegramRichBold(
+                          compactTelegramText(identity.lines[0], 160),
+                        ),
+                      ),
+                      ...(identity.lines[1]
+                        ? [
+                            telegramRichParagraph(
+                              telegramRichText(
+                                "🎯 ",
+                                compactTelegramText(identity.lines[1], 160),
+                              ),
+                            ),
+                          ]
+                        : []),
+                      telegramRichParagraph(metadata),
+                    ],
+                    type: "1" as const,
+                    value: index + 1,
+                  };
+                }),
+              ),
+            ]),
+      ],
+    },
     text: lines.join("\n"),
   };
 }
@@ -287,6 +360,53 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
             text: "🏠 Home",
           },
         ],
+      ],
+    },
+    richMessage: {
+      blocks: [
+        formatTelegramRichTitle("🌐", "Choose a venue"),
+        telegramRichParagraph(
+          telegramRichText(
+            telegramRichBold(compactTelegramText(identity.lines[0], 180)),
+            ...(identity.lines[1]
+              ? ["\n🎯 ", compactTelegramText(identity.lines[1], 180)]
+              : []),
+          ),
+        ),
+        telegramRichParagraph(
+          `This market is available on ${options.length} venues. Choose where to trade.`,
+        ),
+        telegramRichTable({
+          caption: telegramRichBold("Live odds"),
+          cells: [
+            [
+              telegramRichTableCell("Venue", { header: true }),
+              telegramRichTableCell("YES", {
+                align: "right",
+                header: true,
+              }),
+              telegramRichTableCell("NO", {
+                align: "right",
+                header: true,
+              }),
+            ],
+            ...options.map((option) => [
+              telegramRichTableCell(
+                telegramRichText(
+                  telegramCustomEmojiRichTextForVenue(option.venue) ?? "🌐",
+                  " ",
+                  formatTelegramVenueLabel(option.venue),
+                ),
+              ),
+              telegramRichTableCell(telegramRichBold(price(option.yesAsk)), {
+                align: "right",
+              }),
+              telegramRichTableCell(telegramRichBold(price(option.noAsk)), {
+                align: "right",
+              }),
+            ]),
+          ],
+        }),
       ],
     },
     text: [
@@ -339,6 +459,17 @@ export function buildSignalBotMarketSearchUnavailableScreen(input: {
             text: "🏠 Home",
           },
         ],
+      ],
+    },
+    richMessage: {
+      blocks: [
+        formatTelegramRichTitle("🔎", "Markets"),
+        formatTelegramRichCallout({
+          body: "Search is temporarily unavailable. Send another search to try again.",
+          icon: "⚠️",
+          marked: false,
+          title: "Search unavailable",
+        }),
       ],
     },
     text: [
@@ -414,6 +545,18 @@ export function buildSignalBotMarketUnavailableResultScreen(input: {
             text: "🏠 Home",
           },
         ],
+      ],
+    },
+    richMessage: {
+      blocks: [
+        formatTelegramRichCallout({
+          body: input.temporary
+            ? "Market details could not refresh. Go back and try again."
+            : "This market is no longer available. Go back and choose another result.",
+          icon: "⚠️",
+          marked: false,
+          title: input.temporary ? "Market unavailable" : "Market closed",
+        }),
       ],
     },
     text: formatTelegramCalloutMarkdownV2({

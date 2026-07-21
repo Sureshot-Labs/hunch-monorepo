@@ -77,6 +77,8 @@ import {
   formatTelegramFieldMarkdownV2,
   formatTelegramFieldWithMarkdownV2,
   formatTelegramItalicMarkdownV2,
+  formatTelegramRichCallout,
+  formatTelegramRichTitle,
   formatTelegramTextWithCommandsMarkdownV2,
   joinTelegramMarkdownV2Lines,
   formatTelegramLivePrice as formatLivePrice,
@@ -105,7 +107,23 @@ import {
   telegramCustomEmojiMarkdownV2,
   telegramCustomEmojiMarkdownV2ForNetwork,
   telegramCustomEmojiMarkdownV2ForVenue,
+  telegramCustomEmojiRichText,
+  telegramCustomEmojiRichTextForVenue,
 } from "./telegram-custom-emoji.js";
+import {
+  telegramRichBold,
+  telegramRichCode,
+  telegramRichDetails,
+  telegramRichFooter,
+  telegramRichMarked,
+  telegramRichMetricsTable,
+  telegramRichParagraph,
+  telegramRichTable,
+  telegramRichTableCell,
+  telegramRichText,
+  type TelegramInputRichMessage,
+  type TelegramRichText,
+} from "./telegram-rich-message.js";
 import {
   buildSignalBotBuyStartParam,
   buildSignalBotMarketStartParam,
@@ -134,6 +152,25 @@ function formatTelegramVenueFieldMarkdownV2(venue: string): string {
     "Venue",
     formatTelegramVenueLabel(venue),
   )}`;
+}
+
+function formatTelegramVenueRichText(venue: string): TelegramRichText {
+  return telegramRichText(
+    telegramCustomEmojiRichTextForVenue(venue) ?? "🌐",
+    " ",
+    formatTelegramVenueLabel(venue),
+  );
+}
+
+function formatTelegramVenueListRichText(
+  venues: readonly string[],
+): TelegramRichText {
+  return telegramRichText(
+    ...venues.flatMap((venue, index) => [
+      ...(index > 0 ? ([" · "] as TelegramRichText[]) : []),
+      formatTelegramVenueRichText(venue),
+    ]),
+  );
 }
 
 function formatTelegramUsdcLineMarkdownV2(value: string): string {
@@ -226,6 +263,105 @@ function formatTelegramMarketCardLineMarkdownV2(value: string): string {
     : rendered;
 }
 
+function buildTelegramMarketCardRichMessage(input: {
+  identityLines: string[];
+  lines: string[];
+  status: string;
+  titleIcon: string;
+  venue: string;
+  venueLineIndex: number;
+}): TelegramInputRichMessage {
+  const blocks: TelegramInputRichMessage["blocks"] = [
+    formatTelegramRichTitle(input.titleIcon, input.lines[0] ?? "Market"),
+    telegramRichParagraph(
+      telegramRichText(
+        ...input.identityLines.flatMap((line, index) => [
+          ...(index > 0 ? (["\n"] as TelegramRichText[]) : []),
+          input.identityLines.length > 1 && index === 0 ? "🏆 " : "🎯 ",
+          index === input.identityLines.length - 1
+            ? telegramRichBold(line)
+            : line,
+        ]),
+      ),
+    ),
+  ];
+  const startIndex = 2 + input.identityLines.length;
+  const sections: Array<Array<{ index: number; line: string }>> = [];
+  let current: Array<{ index: number; line: string }> = [];
+  for (let index = startIndex; index < input.lines.length; index += 1) {
+    const line = input.lines[index] ?? "";
+    if (!line.trim()) {
+      if (current.length > 0) sections.push(current);
+      current = [];
+      continue;
+    }
+    current.push({ index, line });
+  }
+  if (current.length > 0) sections.push(current);
+
+  for (const section of sections) {
+    const rows: Array<{ label: TelegramRichText; value: TelegramRichText }> =
+      [];
+    const notes: string[] = [];
+    let caption = "Details";
+    for (const entry of section) {
+      if (entry.index === input.venueLineIndex) {
+        caption = "Market data";
+        rows.push(
+          { label: "Venue", value: formatTelegramVenueRichText(input.venue) },
+          { label: "Status", value: telegramRichBold(input.status) },
+        );
+        continue;
+      }
+      const field = entry.line.match(/^([^:\n]{1,48}):\s+(.+)$/);
+      if (!field) {
+        notes.push(entry.line);
+        continue;
+      }
+      const label = field[1] ?? "Details";
+      const value = field[2] ?? "";
+      if (/^(Position|Live bid|Wallet)$/i.test(label)) {
+        caption = "Your position";
+      }
+      const valueText: TelegramRichText = /venue/i.test(label)
+        ? formatTelegramVenueRichText(value)
+        : /wallet|address/i.test(label)
+          ? telegramRichCode(value)
+          : /amount|available|balance|spend|receive/i.test(label)
+            ? telegramRichText(
+                telegramCustomEmojiRichText("usdc"),
+                " ",
+                telegramRichBold(value),
+              )
+            : telegramRichBold(value);
+      rows.push({ label, value: valueText });
+    }
+    if (rows.length > 0) {
+      blocks.push(
+        telegramRichMetricsTable({
+          caption: telegramRichBold(caption),
+          rows,
+          valueAlign: /Market data|Your position/.test(caption)
+            ? "left"
+            : "right",
+        }),
+      );
+    }
+    for (const note of notes) {
+      const important =
+        /deposit (?:at least|before buying)|balance is too low|do not retry|nothing was submitted|real trade/i.test(
+          note,
+        );
+      blocks.push(
+        telegramRichParagraph(
+          important ? telegramRichMarked(telegramRichText("⚠️ ", note)) : note,
+        ),
+      );
+    }
+  }
+  return { blocks };
+}
+
 function formatTelegramTradeLifecycleMessageMarkdownV2(input: {
   heading: string;
   lines?: Array<string | null>;
@@ -292,6 +428,7 @@ export type TelegramBotTradingMessage = {
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: TelegramBotTradingReplyMarkup;
+  richMessage?: TelegramInputRichMessage;
   text: string;
 };
 
@@ -650,6 +787,7 @@ export type TelegramBotTradingCallbackInput = {
     chat_id: string;
     parse_mode?: "MarkdownV2";
     reply_markup?: TelegramBotTradingReplyMarkup;
+    richMessage?: TelegramInputRichMessage;
     text: string;
   }) => Promise<unknown>;
   signerInspector?: TelegramBotTradingSignerInspector;
@@ -668,6 +806,7 @@ type CapturedTelegramBotTradingCallbackResult = {
     chat_id: string;
     parse_mode?: "MarkdownV2";
     reply_markup?: TelegramBotTradingReplyMarkup;
+    richMessage?: TelegramInputRichMessage;
     text: string;
   }>;
 };
@@ -3456,8 +3595,159 @@ export async function buildTelegramBotTradingStatusMessage(
       }),
     );
   }
+  const richWalletValue: TelegramRichText =
+    status.authorizations.length > 1
+      ? telegramRichBold(`${status.authorizations.length} wallets enabled`)
+      : status.walletAddress
+        ? telegramRichCode(status.walletAddress)
+        : "not selected";
+  const richVenuesValue =
+    enabledVenues.length > 0
+      ? formatTelegramVenueListRichText(enabledVenues)
+      : "none enabled";
+  const richBlocks: TelegramInputRichMessage["blocks"] = [
+    formatTelegramRichTitle("🤖", "Telegram Trading Status"),
+    telegramRichMetricsTable({
+      caption: telegramRichBold("Account & access"),
+      rows: [
+        {
+          label: "Runtime policy",
+          value: telegramRichBold(
+            policy.tradingEnabled ? "Enabled" : "Disabled",
+          ),
+        },
+        {
+          label: "Linked account",
+          value: telegramRichBold(status.linked ? "Yes" : "No"),
+        },
+        {
+          label: "Bot trading",
+          value: telegramRichBold(status.enabled ? "Enabled" : "Disabled"),
+        },
+        { label: "Wallet", value: richWalletValue },
+        { label: "Venues", value: richVenuesValue },
+        {
+          label: "Max buy",
+          value: telegramRichText(
+            telegramCustomEmojiRichText("usdc"),
+            " ",
+            telegramRichBold(
+              formatUsd(status.maxAmountUsd ?? policy.maxTradeAmountUsd),
+            ),
+          ),
+        },
+      ],
+    }),
+    telegramRichMetricsTable({
+      caption: telegramRichBold("Execution"),
+      rows: [
+        {
+          label: "Direct execution",
+          value: telegramRichBold(
+            status.directExecutionReady ? "Ready" : "Not ready",
+          ),
+        },
+        ...(["buy", "sell", "redeem"] as const)
+          .filter((action) => status.actionStatuses[action].enabled)
+          .map((action) => ({
+            label: action.toUpperCase(),
+            value: telegramRichBold(
+              status.actionStatuses[action].ready ? "Ready" : "Not ready",
+            ),
+          })),
+        ...((["buy", "sell", "redeem"] as const).some(
+          (action) => status.actionStatuses[action].enabled,
+        )
+          ? []
+          : [
+              {
+                label: "Actions",
+                value: telegramRichBold("None enabled"),
+              },
+            ]),
+      ],
+    }),
+  ];
+  if (status.authorizations.length > 1) {
+    richBlocks.push(
+      telegramRichDetails({
+        blocks: [
+          telegramRichMetricsTable({
+            rows: status.authorizations.map((authorization) => ({
+              label: telegramRichCode(authorization.walletAddress),
+              value: telegramRichText(
+                authorization.walletChain === "ethereum" ? "EVM" : "Solana",
+                authorization.enabledVenues.length > 0 ? " · " : "",
+                authorization.enabledVenues.length > 0
+                  ? formatTelegramVenueListRichText(authorization.enabledVenues)
+                  : null,
+                " · ",
+                telegramRichBold(
+                  authorization.directExecutionReady
+                    ? "Ready"
+                    : authorization.enabled
+                      ? "Not ready"
+                      : "Disabled",
+                ),
+              ),
+            })),
+          }),
+        ],
+        summary: telegramRichBold(
+          `${status.authorizations.length} trading wallets`,
+        ),
+      }),
+    );
+  }
+  if (unresolvedIntentCount > 0) {
+    richBlocks.push(
+      telegramRichTable({
+        caption: telegramRichText(
+          "⏳ ",
+          telegramRichBold(`Resolving trades (${unresolvedIntentCount})`),
+        ),
+        cells: [
+          [
+            telegramRichTableCell("Trade", { header: true }),
+            telegramRichTableCell("Age", {
+              align: "right",
+              header: true,
+            }),
+          ],
+          ...resolvingIntents.map((intent) => [
+            telegramRichTableCell(
+              telegramRichText(
+                telegramRichBold(intent.action.toUpperCase()),
+                " · ",
+                intent.marketTitle,
+              ),
+            ),
+            telegramRichTableCell(`${intent.ageMinutes}m`, {
+              align: "right",
+            }),
+          ]),
+        ],
+      }),
+      telegramRichFooter(
+        telegramRichText(
+          telegramRichBold("No action needed."),
+          " The bot is checking these trades automatically.",
+        ),
+      ),
+    );
+  }
+  if (status.setupIssue) {
+    richBlocks.push(
+      formatTelegramRichCallout({
+        body: status.setupIssue,
+        icon: "⚠️",
+        title: "Setup needs attention",
+      }),
+    );
+  }
   return {
     parse_mode: "MarkdownV2",
+    richMessage: { blocks: richBlocks },
     text: joinTelegramMarkdownV2Lines(lines),
   };
 }
@@ -4024,6 +4314,14 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     marketFound: true,
     parse_mode: "MarkdownV2",
     reply_markup: { inline_keyboard: keyboard },
+    richMessage: buildTelegramMarketCardRichMessage({
+      identityLines: marketIdentity.lines,
+      lines,
+      status: market.status,
+      titleIcon: input.isAdminTest ? "🧪" : "🎯",
+      venue: market.venue,
+      venueLineIndex,
+    }),
     text: joinTelegramMarkdownV2Lines(renderedLines),
   };
 }
@@ -4703,6 +5001,61 @@ async function handleTelegramRedeemCallback(input: {
               text: "❌ Cancel",
             },
           ],
+        ],
+      },
+      richMessage: {
+        blocks: [
+          formatTelegramRichTitle("♻️", "Confirm redemption"),
+          telegramRichMetricsTable({
+            caption: telegramRichBold("Redemption"),
+            valueAlign: "right",
+            rows: [
+              {
+                label: "Venue",
+                value: formatTelegramVenueRichText("polymarket"),
+              },
+              { label: "Market", value: telegramRichBold(market.title) },
+              {
+                label: "YES balance",
+                value: telegramRichBold(
+                  `${ethers.formatUnits(plan.yesBalanceRaw ?? "0", 6)} shares`,
+                ),
+              },
+              {
+                label: "NO balance",
+                value: telegramRichBold(
+                  `${ethers.formatUnits(plan.noBalanceRaw ?? "0", 6)} shares`,
+                ),
+              },
+              {
+                label: "Expected payout",
+                value: telegramRichText(
+                  telegramCustomEmojiRichText("usdc"),
+                  " ",
+                  telegramRichBold(
+                    `${formatUsd(
+                      Number(plan.expectedPayoutRaw) / 1_000_000,
+                    )} pUSD`,
+                  ),
+                ),
+              },
+            ],
+          }),
+          telegramRichParagraph(
+            telegramRichText(
+              "📍 ",
+              telegramRichBold("Canonical deposit wallet"),
+              "\n",
+              credentials?.funderAddress
+                ? telegramRichCode(credentials.funderAddress)
+                : "Unavailable",
+            ),
+          ),
+          formatTelegramRichCallout({
+            body: "This is a real on-chain redemption. Confirm only if you want the bot to submit it now.",
+            icon: "⚠️",
+            title: "Real on-chain action",
+          }),
         ],
       },
       text: joinTelegramMarkdownV2Lines([
@@ -5533,6 +5886,64 @@ export async function handleTelegramBotTradingCallback(
                 ...telegramTradingButtonRows(openMarketButton),
               ],
             },
+            richMessage: {
+              blocks: [
+                formatTelegramRichTitle("🔄", "Convert to continue"),
+                telegramRichMetricsTable({
+                  caption: telegramRichBold("Order"),
+                  valueAlign: "right",
+                  rows: [
+                    {
+                      label: "Venue",
+                      value: formatTelegramVenueRichText(intent.venue),
+                    },
+                    {
+                      label: "Market",
+                      value: telegramRichBold(
+                        `${market.title} · ${sideLabel(market, side)}`,
+                      ),
+                    },
+                    {
+                      label: "Maximum spend",
+                      value: telegramRichText(
+                        telegramCustomEmojiRichText("usdc"),
+                        " ",
+                        telegramRichBold(formatUsd(previewMaxSpendUsd)),
+                      ),
+                    },
+                    {
+                      label: "Ready now",
+                      value: telegramRichText(
+                        telegramCustomEmojiRichText("usdc"),
+                        " ",
+                        telegramRichBold(formatUsd(executableFundsUsd)),
+                      ),
+                    },
+                  ],
+                }),
+                formatTelegramRichCallout({
+                  body: telegramRichText(
+                    "You have supported funds, but they need ",
+                    telegramRichBold("conversion in Hunch"),
+                    " before this order can be confirmed.",
+                  ),
+                  icon: "ℹ️",
+                  marked: false,
+                  title: "Why conversion is needed",
+                }),
+                ...(depositPresentation
+                  ? [
+                      telegramRichParagraph(
+                        telegramRichText(
+                          "📥 ",
+                          telegramRichBold("Deposit instead"),
+                        ),
+                      ),
+                      ...depositPresentation.richBlocks,
+                    ]
+                  : []),
+              ],
+            },
             text: joinTelegramMarkdownV2Lines([
               `🔄 ${formatTelegramBoldMarkdownV2("Convert to continue")}`,
               "",
@@ -5581,6 +5992,69 @@ export async function handleTelegramBotTradingCallback(
                 },
               ],
               ...telegramTradingButtonRows(openMarketButton),
+            ],
+          },
+          richMessage: {
+            blocks: [
+              formatTelegramRichTitle(
+                telegramCustomEmojiRichText("usdc"),
+                "Deposit to continue",
+              ),
+              telegramRichMetricsTable({
+                caption: telegramRichBold("Order"),
+                valueAlign: "right",
+                rows: [
+                  {
+                    label: "Venue",
+                    value: formatTelegramVenueRichText(intent.venue),
+                  },
+                  {
+                    label: "Market",
+                    value: telegramRichBold(
+                      `${market.title} · ${sideLabel(market, side)}`,
+                    ),
+                  },
+                  {
+                    label: "Order",
+                    value: telegramRichBold(formatUsd(amountUsd ?? 0)),
+                  },
+                  {
+                    label: "Maximum spend",
+                    value: telegramRichBold(formatUsd(previewMaxSpendUsd)),
+                  },
+                ],
+              }),
+              telegramRichMetricsTable({
+                caption: telegramRichBold("Funding required"),
+                valueAlign: "right",
+                rows: [
+                  {
+                    label: "Available",
+                    value: telegramRichBold(
+                      formatUsd(fundingPreview.availableUsd),
+                    ),
+                  },
+                  {
+                    label: "Add at least",
+                    value: telegramRichMarked(
+                      telegramRichText(
+                        telegramCustomEmojiRichText("usdc"),
+                        " ",
+                        telegramRichBold(
+                          formatUsd(fundingPreview.shortfallUsd),
+                        ),
+                      ),
+                    ),
+                  },
+                ],
+              }),
+              ...(depositPresentation?.richBlocks ?? [
+                formatTelegramRichCallout({
+                  body: depositUnavailableLine,
+                  icon: "⚠️",
+                  title: "Deposit address unavailable",
+                }),
+              ]),
             ],
           },
           text: joinTelegramMarkdownV2Lines([
@@ -5690,6 +6164,136 @@ export async function handleTelegramBotTradingCallback(
               text: "❌ Cancel",
             },
           ],
+        ],
+      },
+      richMessage: {
+        blocks: [
+          formatTelegramRichTitle(
+            action === "BUY" ? "🟢" : "🔴",
+            action === "BUY" ? "Confirm buy" : "Confirm sell",
+          ),
+          telegramRichParagraph(
+            telegramRichText(
+              "👛 ",
+              telegramRichBold("Internal wallet"),
+              "\n",
+              telegramRichCode(authorization.wallet_address),
+            ),
+          ),
+          telegramRichMetricsTable({
+            caption: telegramRichBold("Order details"),
+            valueAlign: "right",
+            rows: [
+              {
+                label: "Venue",
+                value: formatTelegramVenueRichText(intent.venue),
+              },
+              {
+                label: "Market",
+                value: telegramRichBold(intent.market_title),
+              },
+              { label: "Side", value: telegramRichBold(side) },
+              {
+                label: action === "BUY" ? "Current ask" : "Current bid",
+                value: telegramRichBold(
+                  formatTelegramQuotePrice(previewQuote.currentPrice ?? null),
+                ),
+              },
+              ...(action === "BUY"
+                ? [
+                    {
+                      label: "Maximum execution price",
+                      value: telegramRichBold(
+                        formatTelegramQuotePrice(previewQuote.price),
+                      ),
+                    },
+                    {
+                      label: "Nominal order",
+                      value: telegramRichText(
+                        telegramCustomEmojiRichText("usdc"),
+                        " ",
+                        telegramRichBold(formatUsd(amountUsd ?? 0)),
+                      ),
+                    },
+                  ]
+                : [
+                    {
+                      label: "Exact quantity",
+                      value: telegramRichBold(
+                        `${tradeAmountLabel} (${sellPercent}%)`,
+                      ),
+                    },
+                  ]),
+              ...(action === "SELL"
+                ? [
+                    {
+                      label: "Minimum pUSD receive",
+                      value: telegramRichText(
+                        telegramCustomEmojiRichText("usdc"),
+                        " ",
+                        telegramRichBold(
+                          formatUsd(previewQuote.minimumReceiveUsd ?? 0),
+                        ),
+                      ),
+                    },
+                    {
+                      label: "Minimum execution price",
+                      value: telegramRichBold(
+                        formatTelegramQuotePrice(previewQuote.price),
+                      ),
+                    },
+                  ]
+                : previewQuote.minReceiveShares == null
+                  ? []
+                  : [
+                      {
+                        label: "Minimum estimated shares",
+                        value: telegramRichBold(
+                          previewQuote.minReceiveShares.toFixed(2),
+                        ),
+                      },
+                    ]),
+              ...(action === "BUY"
+                ? [
+                    {
+                      label: "Maximum total spend",
+                      value: telegramRichText(
+                        telegramCustomEmojiRichText("usdc"),
+                        " ",
+                        telegramRichBold(formatUsd(previewMaxSpendUsd ?? 0)),
+                      ),
+                    },
+                  ]
+                : []),
+              {
+                label: "Price tolerance",
+                value: telegramRichBold(`${policy.maxSlippageBps / 100}%`),
+              },
+              {
+                label: "Possible setup",
+                value: telegramRichBold(
+                  tradeReadiness?.repair?.kind === "auto"
+                    ? tradeReadiness.repair.message
+                    : "None",
+                ),
+              },
+              ...(formatQuoteTtl(previewQuote.expiresAt)
+                ? [
+                    {
+                      label: "Quote validity",
+                      value: telegramRichBold(
+                        `About ${formatQuoteTtl(previewQuote.expiresAt)}`,
+                      ),
+                    },
+                  ]
+                : []),
+            ],
+          }),
+          formatTelegramRichCallout({
+            body: "This is a real trade. Confirm only if you want the bot to submit it now.",
+            icon: "⚠️",
+            title: "Real trade",
+          }),
         ],
       },
       text: joinTelegramMarkdownV2Lines(

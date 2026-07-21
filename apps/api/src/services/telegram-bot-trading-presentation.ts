@@ -1,3 +1,12 @@
+import {
+  telegramRichBold,
+  telegramRichMarked,
+  telegramRichParagraph,
+  telegramRichText,
+  type TelegramInputRichBlock,
+  type TelegramRichText,
+} from "./telegram-rich-message.js";
+
 export function escapeTelegramMarkdownV2(value: string): string {
   return value.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 }
@@ -95,6 +104,33 @@ export function formatTelegramCalloutMarkdownV2(input: {
       ? [input.bodyMarkdownV2]
       : input.bodyMarkdownV2),
   ]);
+}
+
+export function formatTelegramRichTitle(
+  icon: TelegramRichText,
+  title: string,
+): TelegramInputRichBlock {
+  return telegramRichParagraph(
+    telegramRichText(icon, " ", telegramRichBold(title)),
+  );
+}
+
+export function formatTelegramRichCallout(input: {
+  body: TelegramRichText;
+  icon: TelegramRichText;
+  marked?: boolean;
+  title: string;
+}): TelegramInputRichBlock {
+  const content = telegramRichText(
+    input.icon,
+    " ",
+    telegramRichBold(input.title),
+    "\n",
+    input.body,
+  );
+  return telegramRichParagraph(
+    input.marked === false ? content : telegramRichMarked(content),
+  );
 }
 
 export function formatTelegramLivePrice(

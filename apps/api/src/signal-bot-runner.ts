@@ -34,7 +34,10 @@ import {
   enqueueTelegramPositionSignals,
 } from "./services/telegram-notification-delivery.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
-import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
+import {
+  createTelegramBotTradingInternalApiClient,
+  type TelegramBotTradingClientMessage,
+} from "./services/telegram-bot-trading-client.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
@@ -372,6 +375,21 @@ export async function runSignalBotRunner(): Promise<void> {
                   }),
                 };
             const navigableMessage = withTelegramPrivateNavigation(message);
+            const richResult = navigableMessage.richMessage
+              ? await telegram.sendRichMessage({
+                  chat_id: chatId,
+                  reply_markup: navigableMessage.reply_markup,
+                  rich_message: navigableMessage.richMessage,
+                })
+              : null;
+            if (
+              richResult &&
+              (richResult.ok ||
+                richResult.error === "blocked_or_missing" ||
+                richResult.retryAfterSec != null)
+            ) {
+              return richResult.ok;
+            }
             const result = await telegram.sendMessage({
               chat_id: chatId,
               disable_web_page_preview: true,
@@ -396,7 +414,7 @@ export async function runSignalBotRunner(): Promise<void> {
               enabled: config.telegramMiniAppLinkBase != null,
               text: "Open in Hunch",
             });
-            const fallbackMessage = {
+            const fallbackMessage: TelegramBotTradingClientMessage = {
               parse_mode: "MarkdownV2" as const,
               ...(fallbackButton
                 ? { reply_markup: { inline_keyboard: [[fallbackButton]] } }
@@ -425,6 +443,21 @@ export async function runSignalBotRunner(): Promise<void> {
                     return fallbackMessage;
                   })
               : fallbackMessage;
+            const richResult = message.richMessage
+              ? await telegram.sendRichMessage({
+                  chat_id: input.chatId,
+                  reply_markup: message.reply_markup,
+                  rich_message: message.richMessage,
+                })
+              : null;
+            if (
+              richResult &&
+              (richResult.ok ||
+                richResult.error === "blocked_or_missing" ||
+                richResult.retryAfterSec != null)
+            ) {
+              return richResult.ok;
+            }
             const result = await telegram.sendMessage({
               chat_id: input.chatId,
               disable_web_page_preview: true,
@@ -443,17 +476,29 @@ export async function runSignalBotRunner(): Promise<void> {
                     appBaseUrl: config.appBaseUrl,
                     callbackQuery,
                     editMessageText: (message) =>
-                      telegram.editMessageText({
-                        ...message,
-                        disable_web_page_preview: true,
-                        parse_mode: message.parse_mode ?? "MarkdownV2",
-                      }),
+                      message.rich_message
+                        ? telegram.editMessageText({
+                            chat_id: message.chat_id,
+                            message_id: message.message_id,
+                            reply_markup: message.reply_markup,
+                            rich_message: message.rich_message,
+                          })
+                        : telegram.editMessageText({
+                            chat_id: message.chat_id,
+                            disable_web_page_preview: true,
+                            message_id: message.message_id,
+                            parse_mode: message.parse_mode ?? "MarkdownV2",
+                            reply_markup: message.reply_markup,
+                            text: message.text ?? "",
+                          }),
                     sendMessage: (message) =>
                       telegram.sendMessage({
                         ...message,
                         disable_web_page_preview: true,
                         parse_mode: message.parse_mode ?? "MarkdownV2",
                       }),
+                    sendRichMessage: (message) =>
+                      telegram.sendRichMessage(message),
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
                   })

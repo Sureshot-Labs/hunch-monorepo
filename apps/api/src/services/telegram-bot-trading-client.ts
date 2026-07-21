@@ -4,6 +4,7 @@ import {
   formatTelegramTextWithCommandsMarkdownV2,
 } from "./telegram-bot-trading-presentation.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
+import type { TelegramInputRichMessage } from "./telegram-rich-message.js";
 
 export type TelegramBotTradingClientButton = (
   | { text: string; callback_data: string }
@@ -20,6 +21,7 @@ export type TelegramBotTradingClientMessage = {
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: TelegramBotTradingClientReplyMarkup;
+  richMessage?: TelegramInputRichMessage;
   text: string;
 };
 
@@ -35,7 +37,8 @@ export type TelegramBotTradingClientCallbackInput = {
     message_id: number;
     parse_mode?: "MarkdownV2";
     reply_markup?: TelegramBotTradingClientReplyMarkup;
-    text: string;
+    rich_message?: TelegramInputRichMessage;
+    text?: string;
   }) => Promise<unknown>;
   callbackQuery: {
     data?: string;
@@ -52,6 +55,11 @@ export type TelegramBotTradingClientCallbackInput = {
     parse_mode?: "MarkdownV2";
     reply_markup?: TelegramBotTradingClientReplyMarkup;
     text: string;
+  }) => Promise<unknown>;
+  sendRichMessage?: (input: {
+    chat_id: string;
+    reply_markup?: TelegramBotTradingClientReplyMarkup;
+    rich_message: TelegramInputRichMessage;
   }) => Promise<unknown>;
 };
 
@@ -134,6 +142,7 @@ type CapturedTelegramBotTradingCallbackResult = {
     chat_id: string;
     parse_mode?: "MarkdownV2";
     reply_markup?: TelegramBotTradingClientReplyMarkup;
+    richMessage?: TelegramInputRichMessage;
     text: string;
   }>;
 };
@@ -191,6 +200,61 @@ function readSuccessfulTelegramResult(value: unknown): {
         : null,
     ok: result.ok === true,
   };
+}
+
+async function editTelegramBotTradingClientMessage(input: {
+  callback: TelegramBotTradingClientCallbackInput;
+  chatId: string;
+  message: TelegramBotTradingClientMessage;
+  messageId: number;
+}): Promise<{ messageId: number | null; ok: boolean }> {
+  if (!input.callback.editMessageText) {
+    return { messageId: null, ok: false };
+  }
+  if (input.message.richMessage) {
+    const richResult = await input.callback
+      .editMessageText({
+        chat_id: input.chatId,
+        message_id: input.messageId,
+        reply_markup: input.message.reply_markup,
+        rich_message: input.message.richMessage,
+      })
+      .catch(() => null);
+    const richSuccess = readSuccessfulTelegramResult(richResult);
+    if (richSuccess.ok) return richSuccess;
+  }
+  const markdownResult = await input.callback
+    .editMessageText({
+      chat_id: input.chatId,
+      message_id: input.messageId,
+      parse_mode: input.message.parse_mode,
+      reply_markup: input.message.reply_markup,
+      text: input.message.text,
+    })
+    .catch(() => null);
+  return readSuccessfulTelegramResult(markdownResult);
+}
+
+async function sendTelegramBotTradingClientMessage(input: {
+  callback: TelegramBotTradingClientCallbackInput;
+  message: TelegramBotTradingClientMessage & { chat_id: string };
+}): Promise<unknown> {
+  if (input.message.richMessage && input.callback.sendRichMessage) {
+    const richResult = await input.callback
+      .sendRichMessage({
+        chat_id: input.message.chat_id,
+        reply_markup: input.message.reply_markup,
+        rich_message: input.message.richMessage,
+      })
+      .catch(() => null);
+    if (readSuccessfulTelegramResult(richResult).ok) return richResult;
+  }
+  return input.callback.sendMessage({
+    chat_id: input.message.chat_id,
+    parse_mode: input.message.parse_mode,
+    reply_markup: input.message.reply_markup,
+    text: input.message.text,
+  });
 }
 
 async function readInternalApiJson<T>(response: Response): Promise<T> {
@@ -495,28 +559,22 @@ export function createTelegramBotTradingInternalApiClient(input: {
       let receiptMessageId: number | null = null;
       let previewEdited = false;
       if (previewMessage && chatId != null && messageId != null) {
-        const editResult = await callbackInput
-          .editMessageText?.({
-            chat_id: String(chatId),
-            message_id: messageId,
-            parse_mode: previewMessage.parse_mode,
-            reply_markup: previewMessage.reply_markup,
-            text: previewMessage.text,
+        previewEdited = (
+          await editTelegramBotTradingClientMessage({
+            callback: callbackInput,
+            chatId: String(chatId),
+            message: previewMessage,
+            messageId,
           })
-          .catch(() => null);
-        previewEdited = readSuccessfulTelegramResult(editResult).ok;
+        ).ok;
       }
       if (terminalMessage && chatId != null && messageId != null) {
-        const editResult = await callbackInput
-          .editMessageText?.({
-            chat_id: String(chatId),
-            message_id: messageId,
-            parse_mode: terminalMessage.parse_mode,
-            reply_markup: terminalMessage.reply_markup,
-            text: terminalMessage.text,
-          })
-          .catch(() => null);
-        const successfulEdit = readSuccessfulTelegramResult(editResult);
+        const successfulEdit = await editTelegramBotTradingClientMessage({
+          callback: callbackInput,
+          chatId: String(chatId),
+          message: terminalMessage,
+          messageId,
+        });
         terminalEdited = successfulEdit.ok;
         if (terminalEdited) {
           receiptDelivery = "edit";
@@ -542,7 +600,10 @@ export function createTelegramBotTradingInternalApiClient(input: {
         ) {
           continue;
         }
-        const sendResult = await callbackInput.sendMessage(deliveredMessage);
+        const sendResult = await sendTelegramBotTradingClientMessage({
+          callback: callbackInput,
+          message: deliveredMessage,
+        });
         if (confirmAcknowledged && index === result.messages.length - 1) {
           const successfulSend = readSuccessfulTelegramResult(sendResult);
           if (successfulSend.ok) {
