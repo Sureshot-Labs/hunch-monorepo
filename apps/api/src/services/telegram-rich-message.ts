@@ -3,7 +3,7 @@ export type TelegramRichText =
   | TelegramRichText[]
   | {
       text: TelegramRichText;
-      type: "bold" | "italic" | "marked";
+      type: "bold" | "italic" | "marked" | "underline";
     }
   | {
       text: TelegramRichText;
@@ -78,11 +78,17 @@ export function telegramRichMarked(text: TelegramRichText): TelegramRichText {
   return { text, type: "marked" };
 }
 
+export function telegramRichUnderline(
+  text: TelegramRichText,
+): TelegramRichText {
+  return { text, type: "underline" };
+}
+
 export function telegramRichUrl(
   text: TelegramRichText,
   url: string,
 ): TelegramRichText {
-  return { text, type: "url", url };
+  return { text: telegramRichUnderline(text), type: "url", url };
 }
 
 export function telegramRichReference(
@@ -160,6 +166,7 @@ export function telegramRichTableCell(
 
 export function telegramRichMetricsTable(input: {
   caption?: TelegramRichText;
+  valueAlign?: TelegramRichTableCell["align"];
   rows: Array<{
     label: TelegramRichText;
     value: TelegramRichText;
@@ -169,7 +176,9 @@ export function telegramRichMetricsTable(input: {
     ...(input.caption ? { caption: input.caption } : {}),
     cells: input.rows.map((row) => [
       telegramRichTableCell(row.label),
-      telegramRichTableCell(row.value, { align: "right" }),
+      telegramRichTableCell(row.value, {
+        align: input.valueAlign ?? "left",
+      }),
     ]),
     is_bordered: true,
     is_striped: true,

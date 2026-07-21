@@ -41,7 +41,7 @@ function richPreviewHeadline(input: {
 }): TelegramRichText {
   return telegramRichText(
     `${input.emoji} `,
-    telegramRichMarked(telegramRichBold(input.hook)),
+    telegramRichBold(telegramRichMarked(input.hook)),
     ` ${input.continuation}`,
   );
 }
@@ -343,7 +343,7 @@ function buildSignalBotRichPreviewFixtures(
         telegramRichHeading(
           telegramRichText(
             `${headingCopy.emoji} `,
-            telegramRichMarked(telegramRichBold(headingCopy.hook)),
+            telegramRichBold(telegramRichMarked(headingCopy.hook)),
           ),
           5,
         ),

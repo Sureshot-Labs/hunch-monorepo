@@ -2999,7 +2999,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(JSON.stringify(initial), /marked/);
       assert.match(
         JSON.stringify(initial),
-        /"text":\{"text":"\+\$542K last month\.","type":"bold"\},"type":"marked"/,
+        /"text":\{"text":"\+\$542K last month\.","type":"marked"\},"type":"bold"/,
       );
       assert.match(JSON.stringify(initial), /\\n\\n/);
       const initialTable = initial?.blocks[1];
@@ -9977,7 +9977,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.match(JSON.stringify(lead.text), /marked/);
         assert.match(
           JSON.stringify(lead.text),
-          /"text":\{"text":"\$12\.3K backs YES on “Will test resolve Yes”\.\s*","type":"bold"\},"type":"marked"/,
+          /"text":\{"text":"\$12\.3K backs YES on “Will test resolve Yes”\.\s*","type":"marked"\},"type":"bold"/,
         );
         assert.match(JSON.stringify(lead.text), /\\n\\n/);
       }
@@ -9992,6 +9992,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(metrics.cells[1]?.[0]?.text, "Position");
         assert.equal(metrics.cells[2]?.[0]?.text, "YES price");
         assert.equal(metrics.cells[3]?.[0]?.text, "Open PnL");
+        assert.ok(
+          metrics.cells.every((row) =>
+            row.every((cell) => cell?.align === "left"),
+          ),
+        );
       }
       assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
     },
@@ -10500,7 +10505,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /\[24124\]%/);
       assert.match(
         message.text,
-        /then \[24124\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/,
+        /then __\[24124\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_[^)]+\)__/,
       );
       assert.equal((message.text.match(/\[24124\]\(/g) ?? []).length, 1);
     },
@@ -10758,9 +10763,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(positionTable.caption, undefined);
         assert.deepEqual(
           positionTable.cells.map((row) => row[0]?.text),
-          ["Market", "Position", "Price now", "Open PnL"],
+          ["Market", "Position", "NO price", "Open PnL"],
+        );
+        assert.ok(
+          positionTable.cells.every((row) =>
+            row.every((cell) => cell?.align === "left"),
+          ),
+        );
+        const marketValueJson = JSON.stringify(
+          positionTable.cells[0]?.[1]?.text,
+        );
+        assert.match(marketValueJson, /BTC hitting \$70K in July/);
+        assert.doesNotMatch(marketValueJson, /YES on|NO on/);
+        assert.match(marketValueJson, /"type":"bold"/);
+        assert.match(marketValueJson, /"type":"underline"/);
+        assert.match(marketValueJson, /"type":"url"/);
+        assert.match(
+          marketValueJson,
+          /https:\/\/t\.me\/your_hunch_bot\?startapp=m_/,
         );
       }
+      const richJson = JSON.stringify(message.richMessage);
+      assert.match(
+        richJson,
+        /"text":\{"text":\["gmtrader"\],"type":"underline"\},"type":"url"/,
+      );
+      assert.doesNotMatch(
+        richJson,
+        /"text":\{"text":\{"text":(?:"gmtrader"|\["gmtrader"\]),"type":"bold"\},"type":"underline"\},"type":"url"/,
+      );
       assert.doesNotMatch(JSON.stringify(message.richMessage), /blockquote/);
     },
   },
@@ -13094,7 +13125,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         text,
-        /More money went into \[Under 2\\\.5 total goals at 59¢\].*wallet support thinned and the price did not move/,
+        /More money went into __\[Under 2\\\.5 total goals at 59¢\]\([^)]+\)__.*wallet support thinned and the price did not move/,
       );
       assert.doesNotMatch(
         text,
@@ -13297,7 +13328,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(text.includes(">Spain \\(\\-1\\.5\\) price"));
       assert.ok(
         text.includes(
-          "Positive tracked flow has not offset 1 exit; [Spain \\(\\-1\\.5\\) at 19¢]",
+          "Positive tracked flow has not offset 1 exit; __[Spain \\(\\-1\\.5\\) at 19¢]",
         ),
       );
       assert.doesNotMatch(text, /19¢cked|at 19¢cked/);

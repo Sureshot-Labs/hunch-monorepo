@@ -821,7 +821,7 @@ function formatTelegramItalic(value: string): string {
 }
 
 function formatTelegramLink(label: string, url: string): string {
-  return `[${escapeTelegramMarkdownV2(label)}](${escapeTelegramMarkdownV2Url(url)})`;
+  return `__[${escapeTelegramMarkdownV2(label)}](${escapeTelegramMarkdownV2Url(url)})__`;
 }
 
 function formatSignalNotificationHeadlineMarkdown(
@@ -838,7 +838,7 @@ function formatSignalNotificationHeadlineRichText(
 ): TelegramRichText {
   return telegramRichText(
     `${headline.emoji} `,
-    telegramRichMarked(telegramRichBold(headline.hook)),
+    telegramRichBold(telegramRichMarked(headline.hook)),
     headline.continuation ? ` ${headline.continuation}` : null,
   );
 }
@@ -902,6 +902,25 @@ function cleanSignalBotDisplayText(
 ): string | null {
   const cleaned = value?.trim().replace(/\s+/g, " ") ?? "";
   return cleaned || null;
+}
+
+function neutralSignalBotMarketLabel(value: string): string {
+  return value.replace(/^(?:YES|NO)\s+on\s+/i, "").trim();
+}
+
+function signalBotPositionPriceLabel(input: {
+  side: "NO" | "YES";
+  sideLabel: string;
+}): string {
+  const sideLabel = input.sideLabel.trim();
+  if (
+    !sideLabel ||
+    sideLabel.toUpperCase() === input.side ||
+    /^(?:YES|NO)\s+on\b|^against\b/i.test(sideLabel)
+  ) {
+    return `${input.side} price`;
+  }
+  return `${sideLabel} price`;
 }
 
 export function resolveSignalBotBuySide(
@@ -1447,8 +1466,15 @@ export function buildSignalBotMessage(input: {
     : marketStartParam;
   const marketMiniAppUrl = buildSignalBotMiniAppUrl({
     base: input.telegramMiniAppLinkBase,
-    startParam: marketStartParam,
+    startParam: deliveryMarketStartParam,
   });
+  const tableMarketLabel = normalizeTelegramPresentationAliases(
+    neutralSignalBotMarketLabel(notificationCopy.marketLabel),
+    presentation,
+  );
+  const richTableMarketValue = marketMiniAppUrl
+    ? telegramRichUrl(telegramRichBold(tableMarketLabel), marketMiniAppUrl)
+    : telegramRichBold(tableMarketLabel);
   const bodyRenderer = createSignalBotBodyTextRenderer(
     note,
     holderMiniAppUrl,
@@ -1525,9 +1551,7 @@ export function buildSignalBotMessage(input: {
     ? [
         {
           label: "Market",
-          value: telegramRichBold(
-            richBodyRenderer.render(notificationCopy.marketLabel),
-          ),
+          value: richTableMarketValue,
         },
         ...researchPosition.rows.map((row) => ({
           label: row.label,
@@ -1564,10 +1588,11 @@ export function buildSignalBotMessage(input: {
     messageKind === "initial" && buySide && currentSideLabel
       ? formatSignalBotInitialPositionRichTable({
           evidenceRows,
-          marketLabel: notificationCopy.marketLabel,
+          marketValue: richTableMarketValue,
           note,
           price: displayPrice,
           render: (value) => richBodyRenderer.render(value),
+          side: buySide,
           sideLabel: currentSideLabel,
           templateKey: notificationCopy.headline.templateKey,
         })
@@ -9453,7 +9478,10 @@ function formatSignalBotResearchPosition(input: {
     }
     if (input.price != null) {
       details.push(`${formatCents(input.price)} now`);
-      rows.push({ label: "Price now", value: formatCents(input.price) });
+      rows.push({
+        label: signalBotPositionPriceLabel(input),
+        value: formatCents(input.price),
+      });
     }
     return {
       label: "Strong-wallet support",
@@ -9485,7 +9513,10 @@ function formatSignalBotResearchPosition(input: {
   ];
   if (input.price != null) {
     details.push(`${formatCents(input.price)} now`);
-    rows.push({ label: "Price now", value: formatCents(input.price) });
+    rows.push({
+      label: signalBotPositionPriceLabel(input),
+      value: formatCents(input.price),
+    });
   }
   if (openPnl != null && Math.abs(openPnl) >= 1) {
     details.push(`Wallet open PnL ${formatSignedCompactUsd(openPnl)}`);
@@ -9516,10 +9547,11 @@ function scalarSignalEvidenceValue(
 
 function formatSignalBotInitialPositionRichTable(input: {
   evidenceRows: SignalEvidenceMetricV1[];
-  marketLabel: string;
+  marketValue: TelegramRichText;
   note: SignalBotNote;
   price: number | null;
   render: (value: string) => TelegramRichText;
+  side: "NO" | "YES";
   sideLabel: string;
   templateKey: string;
 }): TelegramInputRichMessage["blocks"][number] | null {
@@ -9558,7 +9590,7 @@ function formatSignalBotInitialPositionRichTable(input: {
   const rows: Array<{ label: TelegramRichText; value: TelegramRichText }> = [
     {
       label: "Market",
-      value: telegramRichBold(input.render(input.marketLabel)),
+      value: input.marketValue,
     },
   ];
   if (positionUsd != null && positionUsd > 0) {
@@ -9571,7 +9603,7 @@ function formatSignalBotInitialPositionRichTable(input: {
   }
   if (input.price != null) {
     rows.push({
-      label: `${input.sideLabel} price`,
+      label: signalBotPositionPriceLabel(input),
       value: telegramRichBold(formatCents(input.price)),
     });
   }
