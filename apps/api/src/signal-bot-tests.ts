@@ -54,7 +54,6 @@ import {
   updateSignalBotDestinationPolicy,
   type SignalBotNote,
   type SignalBotRedisLike,
-  type TelegramEditMessageInput,
   type TelegramBotCallbackQuery,
   type TelegramBotUpdate,
   type TelegramSendMessageInput,
@@ -416,17 +415,13 @@ class FakeTelegram {
   readonly edits: Array<
     Omit<TelegramSendMessageInput, "reply_parameters"> & { message_id: number }
   > = [];
-  readonly richEdits: TelegramEditMessageInput[] = [];
   readonly messages: TelegramSendMessageInput[] = [];
-  readonly richMessages: TelegramSendRichMessageInput[] = [];
   readonly updateRequests: Array<{
     offset: number | null;
     timeoutSec: number;
   }> = [];
   nextResult: TelegramSendResult | null = null;
   nextResults: TelegramSendResult[] = [];
-  supportRichEdits = false;
-  supportRichSends = false;
   updates: TelegramBotUpdate[] = [];
   private nextMessageId = 100;
 
@@ -448,19 +443,10 @@ class FakeTelegram {
   }
 
   async editMessageText(
-    input: TelegramEditMessageInput,
+    input: Omit<TelegramSendMessageInput, "reply_parameters"> & {
+      message_id: number;
+    },
   ): Promise<TelegramSendResult> {
-    if ("rich_message" in input) {
-      if (!this.supportRichEdits) {
-        return {
-          error: "other",
-          message: "rich_message is not supported by this test transport",
-          ok: false,
-        };
-      }
-      this.richEdits.push(input);
-      return { messageId: input.message_id, ok: true };
-    }
     this.edits.push(input);
     return { messageId: input.message_id, ok: true };
   }
@@ -472,21 +458,6 @@ class FakeTelegram {
     const nextResult = this.nextResults.shift();
     if (nextResult) return nextResult;
     if (this.nextResult) return this.nextResult;
-    this.nextMessageId += 1;
-    return { messageId: this.nextMessageId, ok: true };
-  }
-
-  async sendRichMessage(
-    input: TelegramSendRichMessageInput,
-  ): Promise<TelegramSendResult> {
-    if (!this.supportRichSends) {
-      return {
-        error: "other",
-        message: "sendRichMessage is not supported by this test transport",
-        ok: false,
-      };
-    }
-    this.richMessages.push(input);
     this.nextMessageId += 1;
     return { messageId: this.nextMessageId, ok: true };
   }
@@ -2279,78 +2250,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(bodies.length, 2);
         assert.equal(bodies[1]?.text, "🔵 Polymarket");
         assert.doesNotMatch(JSON.stringify(bodies[1]), /icon_custom_emoji_id/);
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-    },
-  },
-  {
-    name: "Telegram client retries rich messages without custom emoji",
-    run: async () => {
-      const originalFetch = globalThis.fetch;
-      const bodies: Array<Record<string, unknown>> = [];
-      try {
-        const responses = [
-          new Response(
-            JSON.stringify({
-              description: "Bad Request: custom emoji is not allowed",
-              ok: false,
-            }),
-            { status: 400 },
-          ),
-          new Response(
-            JSON.stringify({ ok: true, result: { message_id: 459 } }),
-            { status: 200 },
-          ),
-        ];
-        globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
-          bodies.push(
-            JSON.parse(String(args[1]?.body ?? "{}")) as Record<
-              string,
-              unknown
-            >,
-          );
-          return responses.shift() ?? new Response("{}", { status: 500 });
-        }) as typeof fetch;
-
-        const client = new TelegramBotApiClient("token");
-        const sent = await client.sendRichMessage({
-          chat_id: "-100",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.polymarket.id,
-                  text: "Polymarket",
-                  url: "https://t.me/hunch_bot/hunch",
-                },
-              ],
-            ],
-          },
-          rich_message: {
-            blocks: [
-              {
-                text: {
-                  alternative_text: "🔵",
-                  custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.polymarket.id,
-                  type: "custom_emoji",
-                },
-                type: "paragraph",
-              },
-            ],
-          },
-        });
-        assert.deepEqual(sent, { messageId: 459, ok: true });
-        assert.equal(bodies.length, 2);
-        assert.equal(
-          (
-            bodies[1]
-              ?.rich_message as TelegramSendRichMessageInput["rich_message"]
-          ).blocks[0]?.type,
-          "paragraph",
-        );
-        assert.match(JSON.stringify(bodies[1]), /🔵/);
-        assert.doesNotMatch(JSON.stringify(bodies[1]), /custom_emoji/);
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -4429,14 +4328,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(insertCount, 0);
       assert.match(message.text, /No bot buy presets are configured/);
-      const richMarketCard = JSON.stringify(message.richMessage ?? null);
-      assert.match(richMarketCard, /"type":"table"/);
-      assert.match(richMarketCard, /Market data/);
-      assert.match(richMarketCard, /Polymarket/);
-      assert.match(
-        richMarketCard,
-        new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
-      );
       const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(
         buttons.some((button) => "callback_data" in button),
@@ -4496,7 +4387,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
-      telegram.supportRichEdits = true;
       telegram.updates = [
         {
           message: {
@@ -4518,13 +4408,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(handled, 1);
       assert.match(telegram.messages[0]?.text ?? "", /Searching/);
-      assert.equal(telegram.edits.length, 0);
-      assert.equal(telegram.richEdits.length, 1);
-      const richEdit = JSON.stringify(
-        telegram.richEdits[0]?.rich_message ?? null,
+      assert.match(
+        telegram.edits[0]?.text ?? "",
+        /Search is temporarily unavailable/,
       );
-      assert.match(richEdit, /Search is temporarily unavailable/);
-      assert.match(richEdit, /Search unavailable/);
     },
   },
   {
@@ -11845,7 +11732,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "stats command sends audit-backed report",
     run: async () => {
       const telegram = new FakeTelegram();
-      telegram.supportRichSends = true;
       const queries: Array<{ params: unknown[]; sql: string }> = [];
       const db = {
         query: async (sql: string, params?: unknown[]) => {
@@ -11904,18 +11790,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
 
       assert.equal(sent, true);
-      assert.equal(telegram.messages.length, 0);
-      assert.equal(telegram.richMessages.length, 1);
-      const richReport = JSON.stringify(
-        telegram.richMessages[0]?.rich_message ?? null,
+      assert.equal(telegram.messages.length, 1);
+      assert.match(telegram.messages[0]?.text ?? "", /Hunch signals/);
+      assert.match(telegram.messages[0]?.text ?? "", /\$10 each/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /Open signals use current market marks/,
       );
-      assert.match(richReport, /Hunch signals/);
-      assert.match(richReport, /\$10 each/);
-      assert.match(richReport, /Open signals use current market marks/);
-      assert.match(richReport, /"type":"table"/);
-      assert.match(richReport, /"type":"footer"/);
       assert.doesNotMatch(
-        richReport,
+        telegram.messages[0]?.text ?? "",
         /evaluated|missingEntry|entryQuality|note_id/i,
       );
       assert.doesNotMatch(queries[0]?.sql ?? "", /n\.confidence >=/);

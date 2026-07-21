@@ -11,13 +11,10 @@ import {
   formatTelegramBoldMarkdownV2,
   formatTelegramCalloutMarkdownV2,
   formatTelegramFieldMarkdownV2,
-  formatTelegramRichCallout,
-  formatTelegramRichTitle,
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import {
-  formatTelegramVenueLabel,
   formatTelegramVenueButtonIcon,
   formatTelegramVenueFieldMarkdownV2,
 } from "./telegram-market-identity.js";
@@ -29,21 +26,7 @@ import {
 } from "./telegram-bot-text-budget.js";
 import { syncPositionsForUserWallet } from "./positions-sync.js";
 import { venueLifecycleAllows } from "./venue-lifecycle.js";
-import {
-  telegramCustomEmojiMarkdownV2,
-  telegramCustomEmojiRichText,
-  telegramCustomEmojiRichTextForVenue,
-} from "./telegram-custom-emoji.js";
-import {
-  telegramRichBold,
-  telegramRichFooter,
-  telegramRichMetricsTable,
-  telegramRichParagraph,
-  telegramRichTable,
-  telegramRichTableCell,
-  telegramRichText,
-  type TelegramInputRichMessage,
-} from "./telegram-rich-message.js";
+import { telegramCustomEmojiMarkdownV2 } from "./telegram-custom-emoji.js";
 
 type SupportedPositionVenue = "kalshi" | "limitless" | "polymarket";
 
@@ -663,183 +646,6 @@ export function buildTelegramPositionsSnapshotMessage(input: {
       `⚠️ ${formatTelegramBoldMarkdownV2("Mini App temporarily unavailable")}`,
     );
   }
-  const richBlocks: TelegramInputRichMessage["blocks"] = [
-    formatTelegramRichTitle("💼", "My positions"),
-  ];
-  if (positions.length === 0) {
-    richBlocks.push(
-      formatTelegramRichCallout({
-        body: "Markets you trade will appear here.",
-        icon: "ℹ️",
-        marked: false,
-        title: "No open positions",
-      }),
-    );
-  } else {
-    richBlocks.push(
-      telegramRichMetricsTable({
-        caption: telegramRichBold("Portfolio summary"),
-        valueAlign: "right",
-        rows: [
-          {
-            label: "Portfolio value",
-            value: telegramRichText(
-              telegramCustomEmojiRichText("usdc"),
-              " ",
-              telegramRichBold(
-                valued.length > 0 ? formatUsd(value) : "unavailable",
-              ),
-            ),
-          },
-          ...(valued.length > 0
-            ? [
-                {
-                  label: "Invested",
-                  value: telegramRichBold(formatUsd(invested)),
-                },
-                {
-                  label: "PnL",
-                  value: telegramRichBold(
-                    `${formatSignedUsd(pnl)}${
-                      invested > 0
-                        ? ` (${formatSignedPercent((pnl / invested) * 100)})`
-                        : ""
-                    }`,
-                  ),
-                },
-              ]
-            : []),
-          ...(valued.length !== positions.length
-            ? [
-                {
-                  label: "Valuation coverage",
-                  value: telegramRichBold(
-                    `${valued.length}/${positions.length} positions`,
-                  ),
-                },
-              ]
-            : []),
-        ],
-      }),
-    );
-    const visibleIds = new Set(visible.map((position) => position.position.id));
-    for (const group of grouped) {
-      const groupPositions = group.positions.filter((position) =>
-        visibleIds.has(position.position.id),
-      );
-      if (groupPositions.length === 0) continue;
-      richBlocks.push(
-        telegramRichTable({
-          caption: telegramRichText(
-            `${group.icon} `,
-            telegramRichBold(group.label),
-          ),
-          cells: [
-            [
-              telegramRichTableCell("Market / position", { header: true }),
-              telegramRichTableCell("Value / PnL", {
-                align: "right",
-                header: true,
-              }),
-            ],
-            ...groupPositions.map((position) => {
-              const status =
-                position.redemptionStatus === "redeemable"
-                  ? "Ready to redeem"
-                  : position.redemptionStatus === "market_open"
-                    ? "Market open"
-                    : position.redemptionStatus === "resolved_not_redeemable" ||
-                        position.redemptionStatus === "redeemed"
-                      ? "Resolved"
-                      : position.redemptionStatus === "metadata_unavailable"
-                        ? "Details unavailable"
-                        : "Waiting for settlement";
-              return [
-                telegramRichTableCell(
-                  telegramRichText(
-                    telegramCustomEmojiRichTextForVenue(
-                      position.position.venue,
-                    ) ?? "🌐",
-                    " ",
-                    formatTelegramVenueLabel(position.position.venue),
-                    "\n",
-                    telegramRichBold(
-                      compactTelegramText(position.marketTitle, 120),
-                    ),
-                    "\n",
-                    `${position.side ?? "POSITION"} · ${formatNumber(
-                      position.position.size,
-                    )} shares`,
-                  ),
-                  { valign: "top" },
-                ),
-                telegramRichTableCell(
-                  telegramRichText(
-                    telegramRichBold(
-                      position.currentValueUsd != null
-                        ? formatUsd(position.currentValueUsd)
-                        : "unavailable",
-                    ),
-                    ...(position.pnlUsd != null && position.pnlPercent != null
-                      ? [
-                          "\n",
-                          telegramRichBold(
-                            `${formatSignedUsd(
-                              position.pnlUsd,
-                            )} (${formatSignedPercent(position.pnlPercent)})`,
-                          ),
-                        ]
-                      : []),
-                    "\n",
-                    status,
-                  ),
-                  { align: "right", valign: "top" },
-                ),
-              ];
-            }),
-          ],
-        }),
-      );
-    }
-    richBlocks.push(
-      telegramRichFooter(
-        grouped
-          .map((group) => `${group.label} ${group.positions.length}`)
-          .join(" · "),
-      ),
-    );
-    if (positions.length > visible.length) {
-      richBlocks.push(
-        telegramRichParagraph(
-          telegramRichBold(
-            `+ ${positions.length - visible.length} more positions`,
-          ),
-        ),
-      );
-    }
-  }
-  if (dataQualityNotes.length > 0) {
-    richBlocks.push(
-      formatTelegramRichCallout({
-        body: dataQualityNotes
-          .map((note) => note.replaceAll("\\", ""))
-          .join("\n"),
-        icon: "ℹ️",
-        marked: false,
-        title: "Data may be incomplete",
-      }),
-    );
-  }
-  if (!portfolioButton) {
-    richBlocks.push(
-      formatTelegramRichCallout({
-        body: "Open Hunch again later.",
-        icon: "⚠️",
-        marked: false,
-        title: "Mini App temporarily unavailable",
-      }),
-    );
-  }
   return {
     parse_mode: "MarkdownV2",
     reply_markup: {
@@ -867,7 +673,6 @@ export function buildTelegramPositionsSnapshotMessage(input: {
         ...(portfolioButton ? [[portfolioButton]] : []),
       ],
     },
-    richMessage: { blocks: richBlocks },
     text: joinTelegramMarkdownV2Lines(lines),
   };
 }

@@ -129,12 +129,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.match(message.text, /Portfolio value/);
       assert.match(message.text, /\*PnL:\*/);
-      const richPositions = JSON.stringify(message.richMessage ?? null);
-      assert.match(richPositions, /"type":"table"/);
-      assert.match(richPositions, /Portfolio summary/);
-      assert.match(richPositions, /Market \/ position/);
-      assert.match(richPositions, /Value \/ PnL/);
-      assert.match(richPositions, /"type":"footer"/);
       assert.ok(
         telegramPayloadLength(message.text) <= TELEGRAM_MESSAGE_PAYLOAD_BUDGET,
       );

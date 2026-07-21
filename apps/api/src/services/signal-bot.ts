@@ -42,10 +42,12 @@ import {
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
   resolveHolderResearchFinalYesProbability,
   resolveHolderResearchSignalQuote,
+  type HolderResearchPerformanceAuditResult,
 } from "./holder-research-performance.js";
 import {
   classifyMarketSegment,
   formatMarketSegmentLabel,
+  formatMarketTypeLabel,
 } from "./market-type-classifier.js";
 import {
   buildMarketSideCopy,
@@ -141,10 +143,6 @@ import {
   telegramCustomEmojiMarkdownV2,
 } from "./telegram-custom-emoji.js";
 import { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
-import {
-  buildSignalBotStatsReport,
-  buildSignalBotStatsRichReport,
-} from "./signal-bot-stats-presentation.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
 import {
   formatTelegramBoldMarkdownV2,
@@ -180,7 +178,6 @@ import {
 export { escapeTelegramMarkdownV2 } from "./signal-delivery.js";
 export { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 export { sendSignalBotRichLayoutPreview } from "./signal-bot-rich-preview.js";
-export { buildSignalBotStatsReport } from "./signal-bot-stats-presentation.js";
 export {
   parseSignalBotCommand,
   parseSignalBotDestinationPolicyRequest,
@@ -378,25 +375,6 @@ export type TelegramSendRichMessageInput = {
   rich_message: TelegramInputRichMessage;
 };
 
-export type TelegramEditMessageInput = {
-  chat_id: string;
-  message_id: number;
-  reply_markup?: TelegramInlineKeyboard;
-} & (
-  | {
-      disable_web_page_preview: boolean;
-      parse_mode: "MarkdownV2";
-      rich_message?: never;
-      text: string;
-    }
-  | {
-      disable_web_page_preview?: never;
-      parse_mode?: never;
-      rich_message: TelegramInputRichMessage;
-      text?: never;
-    }
-);
-
 export type TelegramSendResult =
   | { messageId: number | null; ok: true }
   | {
@@ -416,9 +394,14 @@ export type SignalBotTelegramClient = {
     offset: number | null;
     timeoutSec: number;
   }): Promise<TelegramBotUpdate[]>;
-  editMessageText?(
-    input: TelegramEditMessageInput,
-  ): Promise<TelegramSendResult>;
+  editMessageText?(input: {
+    chat_id: string;
+    disable_web_page_preview: boolean;
+    message_id: number;
+    parse_mode: "MarkdownV2";
+    reply_markup?: TelegramInlineKeyboard;
+    text: string;
+  }): Promise<TelegramSendResult>;
   sendPhoto?(input: {
     caption?: string;
     chat_id: string;
@@ -804,6 +787,10 @@ function signalBotStatsPeriodHours(period: SignalBotStatsPeriod): number {
   if (period === "24h") return 24;
   if (period === "30d") return 24 * 30;
   return 24 * 7;
+}
+
+function formatSignalBotStatsPeriodLabel(period: SignalBotStatsPeriod): string {
+  return period.toUpperCase();
 }
 
 export function isSignalBotAdmin(
@@ -2054,7 +2041,6 @@ type SignalBotMenuCallbackRoute =
 
 type SignalBotMenuTransport = {
   editMessageText?: SignalBotTelegramClient["editMessageText"];
-  sendRichMessage?: SignalBotTelegramClient["sendRichMessage"];
   sendMessage: SignalBotTelegramClient["sendMessage"];
 };
 
@@ -2866,34 +2852,13 @@ async function sendOrEditSignalBotMenuMessage(input: {
   message: {
     parse_mode?: "MarkdownV2";
     reply_markup?: TelegramInlineKeyboard;
-    richMessage?: TelegramInputRichMessage;
     text: string;
   };
   messageId?: number | null;
   transport: SignalBotMenuTransport;
 }): Promise<TelegramSendResult> {
   if (input.messageId != null && input.transport.editMessageText) {
-    if (input.message.richMessage) {
-      const richEdited = await input.transport.editMessageText({
-        chat_id: input.chatId,
-        message_id: input.messageId,
-        reply_markup: input.message.reply_markup,
-        rich_message: input.message.richMessage,
-      });
-      if (
-        richEdited.ok ||
-        /message is not modified/i.test(richEdited.message)
-      ) {
-        return richEdited;
-      }
-      if (
-        richEdited.error === "blocked_or_missing" ||
-        richEdited.retryAfterSec != null
-      ) {
-        return richEdited;
-      }
-    }
-    const markdownEdited = await input.transport.editMessageText({
+    const edited = await input.transport.editMessageText({
       chat_id: input.chatId,
       disable_web_page_preview: true,
       message_id: input.messageId,
@@ -2901,31 +2866,8 @@ async function sendOrEditSignalBotMenuMessage(input: {
       reply_markup: input.message.reply_markup,
       text: input.message.text,
     });
-    if (
-      markdownEdited.ok ||
-      /message is not modified/i.test(markdownEdited.message)
-    ) {
-      return markdownEdited;
-    }
-    if (
-      markdownEdited.error === "blocked_or_missing" ||
-      markdownEdited.retryAfterSec != null
-    ) {
-      return markdownEdited;
-    }
-  }
-  if (input.message.richMessage && input.transport.sendRichMessage) {
-    const richSent = await input.transport.sendRichMessage({
-      chat_id: input.chatId,
-      reply_markup: input.message.reply_markup,
-      rich_message: input.message.richMessage,
-    });
-    if (
-      richSent.ok ||
-      richSent.error === "blocked_or_missing" ||
-      richSent.retryAfterSec != null
-    ) {
-      return richSent;
+    if (edited.ok || /message is not modified/i.test(edited.message)) {
+      return edited;
     }
   }
   return input.transport.sendMessage({
@@ -2988,7 +2930,6 @@ type SignalBotMenuMessage = {
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
   reply_markup?: TelegramInlineKeyboard;
-  richMessage?: TelegramInputRichMessage;
   text: string;
 };
 
@@ -3256,7 +3197,6 @@ export async function handleSignalBotMenuCallback(
     let positionsMessage: {
       parse_mode?: "MarkdownV2";
       reply_markup?: TelegramInlineKeyboard;
-      richMessage?: TelegramInputRichMessage;
       text: string;
     };
     try {
@@ -3304,12 +3244,29 @@ export async function handleSignalBotMenuCallback(
         ],
       ],
     };
-    await sendOrEditSignalBotMenuMessage({
-      chatId,
-      message: { ...positionsMessage, reply_markup: keyboard },
-      messageId,
-      transport: input.telegram,
-    });
+    const editResult =
+      messageId != null
+        ? await input.telegram.editMessageText?.({
+            chat_id: chatId,
+            disable_web_page_preview: true,
+            message_id: messageId,
+            parse_mode: positionsMessage.parse_mode ?? "MarkdownV2",
+            reply_markup: keyboard,
+            text: positionsMessage.text,
+          })
+        : null;
+    if (
+      !editResult?.ok &&
+      !/message is not modified/i.test(editResult?.message ?? "")
+    ) {
+      await input.telegram.sendMessage({
+        chat_id: chatId,
+        disable_web_page_preview: true,
+        parse_mode: positionsMessage.parse_mode ?? "MarkdownV2",
+        reply_markup: keyboard,
+        text: positionsMessage.text,
+      });
+    }
     return true;
   }
   if (route.kind === "trading_status") {
@@ -3321,7 +3278,6 @@ export async function handleSignalBotMenuCallback(
     let statusMessage: {
       parse_mode?: "MarkdownV2";
       reply_markup?: TelegramInlineKeyboard;
-      richMessage?: TelegramInputRichMessage;
       text: string;
     };
     try {
@@ -8000,6 +7956,162 @@ export async function publishSignalBotFollowthroughTick(input: {
   };
 }
 
+export function buildSignalBotStatsReport(input: {
+  buyAmountUsd: number;
+  detail?: boolean;
+  period: SignalBotStatsPeriod;
+  result: HolderResearchPerformanceAuditResult;
+}): string {
+  const periodLabel = formatSignalBotStatsPeriodLabel(input.period);
+  const overall = input.result.aggregates.overall;
+  if (input.result.evaluated === 0 || overall.notes === 0) {
+    return `No bot-eligible signals for ${periodLabel} yet.`;
+  }
+
+  const measuredSignals = overall.withEntry;
+  const totalPnlUsd = overall.totalPnlPerDollar * input.buyAmountUsd;
+  const totalStakeUsd = measuredSignals * input.buyAmountUsd;
+  const roi = totalStakeUsd > 0 ? totalPnlUsd / totalStakeUsd : null;
+  const knownResolved = overall.correct + overall.wrong;
+  const resolvedLine =
+    knownResolved > 0
+      ? `🎯 Resolved: ${overall.correct}W / ${overall.wrong}L (${formatPercent(overall.correct / knownResolved)})`
+      : "🎯 Resolved: not enough yet";
+  const pnlLine =
+    measuredSignals > 0
+      ? `💰 $${input.buyAmountUsd} each: ${formatSignedUsd(totalPnlUsd)} (${formatSignedPercent(roi)})`
+      : `💰 $${input.buyAmountUsd} each: waiting for price data`;
+  const lines = [
+    `📊 Hunch signals · ${periodLabel}`,
+    "",
+    pnlLine,
+    resolvedLine,
+    `📈 Marked up: ${overall.positive} · down: ${overall.negative}`,
+    `⏳ Open: ${overall.open} · 🏁 Resolved: ${overall.resolved}`,
+  ];
+
+  if (input.detail) {
+    const detailLines = buildSignalBotStatsDetailLines(input.result, {
+      buyAmountUsd: input.buyAmountUsd,
+    });
+    if (detailLines.length > 0) {
+      lines.push("", ...detailLines);
+    }
+  }
+
+  lines.push("", "Open signals use current market marks.");
+  return lines.join("\n");
+}
+
+function buildSignalBotStatsDetailLines(
+  result: HolderResearchPerformanceAuditResult,
+  input: { buyAmountUsd: number },
+): string[] {
+  const lines: string[] = ["Details"];
+  const segmentLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatMarketSegmentLabel,
+    group: result.aggregates.byMarketSegment,
+    title: "By category",
+  });
+  if (segmentLines.length > 0) lines.push(...segmentLines);
+  const typeLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatMarketTypeLabel,
+    group: result.aggregates.byMarketType,
+    title: "By market type",
+  });
+  if (typeLines.length > 0) lines.push(...typeLines);
+  const bucketLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatStatsBucketLabel,
+    group: result.aggregates.byBucket,
+    title: "By setup",
+  });
+  if (bucketLines.length > 0) lines.push(...bucketLines);
+  const actorLines = formatStatsAggregateGroup({
+    amountUsd: input.buyAmountUsd,
+    formatter: formatStatsActorLabel,
+    group: result.aggregates.byActorMode,
+    title: "By wallet read",
+  });
+  if (actorLines.length > 0) lines.push(...actorLines);
+  return lines.length > 1 ? lines : [];
+}
+
+function formatStatsAggregateGroup(input: {
+  amountUsd: number;
+  formatter: (key: string) => string;
+  group: Record<
+    string,
+    HolderResearchPerformanceAuditResult["aggregates"]["overall"]
+  >;
+  title: string;
+}): string[] {
+  const rows = Object.entries(input.group)
+    .filter(([, aggregate]) => aggregate.notes > 0)
+    .sort((left, right) => {
+      const leftPnl = Math.abs(left[1].totalPnlPerDollar);
+      const rightPnl = Math.abs(right[1].totalPnlPerDollar);
+      if (leftPnl !== rightPnl) return rightPnl - leftPnl;
+      return right[1].notes - left[1].notes;
+    })
+    .slice(0, 4);
+  if (rows.length === 0) return [];
+  return [
+    input.title,
+    ...rows.map(([key, aggregate]) => {
+      const pnlUsd = aggregate.totalPnlPerDollar * input.amountUsd;
+      const knownResolved = aggregate.correct + aggregate.wrong;
+      const resolved =
+        knownResolved > 0
+          ? `${aggregate.correct}W / ${aggregate.wrong}L`
+          : "open only";
+      return `• ${input.formatter(key)}: ${formatSignedUsd(pnlUsd)} · ${resolved} · ${aggregate.notes} signals`;
+    }),
+  ];
+}
+
+function formatStatsBucketLabel(value: string): string {
+  switch (value) {
+    case "followup_existing":
+      return "Follow-ups";
+    case "sharp_side":
+      return "Strong same-side wallets";
+    case "sharp_minority":
+      return "Minority wallet reads";
+    case "sharp_split":
+      return "Split strong wallets";
+    case "clean_disagreement":
+      return "Clean disagreement";
+    case "recent_flow":
+      return "Recent flow";
+    case "event_bridge":
+      return "Event bridge";
+    case "concentration_risk":
+      return "Concentration risk";
+    case "unknown":
+      return "Unknown setup";
+    default:
+      return value.replace(/_/g, " ");
+  }
+}
+
+function formatStatsActorLabel(value: string): string {
+  switch (value) {
+    case "sharp_cluster":
+      return "Wallet clusters";
+    case "single_holder":
+      return "Single wallets";
+    case "none":
+      return "No clear wallet";
+    case "unknown":
+      return "Unknown read";
+    default:
+      return value.replace(/_/g, " ");
+  }
+}
+
 export async function sendSignalBotStatsReport(input: {
   chatId: string;
   config: SignalBotConfig;
@@ -8027,24 +8139,6 @@ export async function sendSignalBotStatsReport(input: {
     period: input.period,
     result,
   });
-  if (input.telegram.sendRichMessage) {
-    const richResult = await input.telegram.sendRichMessage({
-      chat_id: input.chatId,
-      rich_message: buildSignalBotStatsRichReport({
-        buyAmountUsd: input.config.buyAmountUsd,
-        detail: input.detail ?? false,
-        period: input.period,
-        result,
-      }),
-    });
-    if (
-      richResult.ok ||
-      richResult.error === "blocked_or_missing" ||
-      richResult.retryAfterSec != null
-    ) {
-      return richResult.ok;
-    }
-  }
   const sendResult = await input.telegram.sendMessage(
     buildPlainReply(input.chatId, message),
   );
@@ -9199,6 +9293,21 @@ function formatSignalBotCheaperButtonText(input: {
   const venue =
     formatVenueLabel(input.alternative.venue) ?? input.alternative.venue;
   return `${input.useNativeMarker ? "💸 " : ""}Cheaper: ${venue} ${input.sideLabel} ${formatCents(input.alternative.price)}`;
+}
+
+function formatPercent(value: number): string {
+  return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`;
+}
+
+function formatSignedPercent(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "n/a";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${(value * 100).toFixed(1)}%`;
+}
+
+function formatSignedUsd(value: number): string {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
 function formatCompactUsd(value: number): string {

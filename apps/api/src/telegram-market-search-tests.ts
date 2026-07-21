@@ -101,15 +101,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.reply_markup.inline_keyboard[0]?.[0]?.text ?? "",
         /Elon Musk · 3rd richest person/,
       );
-      const richResults = JSON.stringify(message.richMessage ?? null);
-      assert.match(richResults, /"type":"list"/);
-      assert.match(richResults, /"type":"1"/);
-      assert.match(richResults, /"value":1/);
-      assert.match(richResults, /3rd richest person on December 31/);
-      assert.match(
-        richResults,
-        new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
-      );
 
       const sameTitleMessage = buildSignalBotMarketSearchScreen({
         callbackPrefix: "hm:v1:",
@@ -148,13 +139,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         picker.reply_markup.inline_keyboard[1]?.[0]?.icon_custom_emoji_id,
         TELEGRAM_CUSTOM_EMOJI.limitless.id,
       );
-      const richPicker = JSON.stringify(picker.richMessage ?? null);
-      assert.match(richPicker, /"type":"table"/);
-      assert.match(richPicker, /Venue/);
-      assert.match(richPicker, /YES/);
-      assert.match(richPicker, /NO/);
-      assert.match(richPicker, /Polymarket/);
-      assert.match(richPicker, /Limitless/);
     },
   },
   {
