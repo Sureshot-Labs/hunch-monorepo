@@ -59,12 +59,13 @@ confirmed funding intent
 
 Normative decisions:
 
-1. The headline is total estimated USD value of unique, ownership-proven,
-   supported, freshly priced liquid assets and venue cash. It is not a promise
-   that the whole amount can fund the current order immediately.
-2. Open prediction positions remain in the existing portfolio projection and
-   are not added to this funding headline in the initial rollout. They may join
-   a future net-worth projection without changing funding contracts.
+1. The backend always returns liquid assets, prediction positions, and total
+   portfolio value as separate estimates. A configurable presentation mode
+   chooses whether the headline shows liquid assets only or liquid assets plus
+   positions. That display choice never changes funding or trading eligibility.
+2. Open prediction positions remain a separate portfolio component even when
+   included in the headline. They are never treated as cash, convertible value,
+   or immediately executable liquidity merely because the headline includes them.
 3. Intent Liquidity is computed for one market, side, amount, venue-account
    binding, and execution profile. It is the only value used to enable Buy.
 4. New capital and already placed capital use different placement rules:
@@ -72,8 +73,11 @@ Normative decisions:
    - a trade shortfall moves only the shortfall plus a bounded disclosed buffer;
    - a token conversion uses only the confirmed input or an exact-output max input;
    - no autonomous rebalance exists.
-5. Generic Add Funds targets the explicit/current/preferred venue directly. It
-   never parks capital on Base or another canonical holding network.
+5. Generic Add Funds resolves valid venue/network/collateral/Trading Wallet
+   destination combinations. With no active trade and more than one real
+   destination, the user chooses one and Hunch marks a configurable recommendation;
+   a recommendation is never implicit consent. Hunch never parks capital on Base
+   or another canonical holding network.
 6. Relay is the primary adapter for every new route that passes exact route,
    action, refund, economics, and policy validation.
 7. Relay Deposit Addresses are a first-class plan shape for supported exchange,
@@ -91,6 +95,11 @@ Normative decisions:
 12. Hyperliquid and other future venues add location, balance, readiness,
     destination, trade, and reconciliation adapters later. No Hyperliquid code
     is implemented by this plan.
+13. The internal Hunch Trading Wallet is the default managed binding unless a
+    position owner or an explicit current-intent user selection requires another
+    binding. A larger external balance is never enough to switch silently.
+14. Wallet preparation and position redemption are shared venue capabilities,
+    not private branches inside Deposit, Buy, or Telegram flows.
 
 ## 2. Product contract
 
@@ -103,7 +112,9 @@ A user can:
   unpriced assets, and freshness;
 - select a market and immediately learn how much is usable now;
 - learn whether additional value can be made usable inline or must be prepared;
-- add new capital without choosing a destination chain or collateral contract;
+- add new capital by choosing a human-readable trading destination only when
+  more than one real destination exists, without choosing raw chain IDs,
+  collateral contracts, or provider routes;
 - allow a supported token to be suggested as a source without authorizing an
   automatic sale;
 - recover or resume a funding operation from web or Telegram Activity;
@@ -113,13 +124,13 @@ A user can:
 Normal product copy never exposes Relay, Across, deBridge, provider chain IDs,
 raw calldata, venue deposit contracts, or internal settlement terminology.
 
-### 2.2 Three value projections
+### 2.2 Value projections and configurable headline
 
-The backend owns three related but non-interchangeable projections.
+The backend owns four related but non-interchangeable projections.
 
-#### Account Value
+#### Liquid Assets Estimate
 
-`totalEstimatedUsd` is a display estimate:
+`liquidAssetsEstimatedUsd` is a display estimate:
 
 ```text
 unique observed eligible cash
@@ -160,11 +171,50 @@ Intent Liquidity is computed from:
 Only `availableNow` can enable an immediate order. Convertible value is never
 presented as immediately available.
 
+#### Prediction Positions and Portfolio Value
+
+The backend separately returns:
+
+```text
+liquidAssetsEstimatedUsd
+positionsEstimatedUsd
+totalPortfolioEstimatedUsd = liquidAssetsEstimatedUsd + positionsEstimatedUsd
+```
+
+`positionsEstimatedUsd` is projected once on the backend from unique open
+position components returned by small venue position-value capabilities. Each
+component carries venue/binding/position identity, valuation method, `asOf`,
+confidence, and completeness. Polymarket and Limitless may reuse their existing
+position facts through thin adapters; frontend totals are not an input. A venue
+without fresh trustworthy position value returns partial/unpriced components
+rather than guessed value. Open orders are not positions, and their locked cash
+must not be counted again as position value.
+
+The headline presentation mode is:
+
+```typescript
+type HeadlineValueMode = "liquid_only" | "liquid_plus_positions";
+```
+
+`liquid_only` renders `Estimated assets`. `liquid_plus_positions` renders
+`Portfolio value` and exposes the liquid/positions split. In the initial rollout
+the mode is a typed runtime product setting, not a user-facing toggle. The team
+may test both modes without changing APIs or accounting. It changes only label
+and composition. Cash Availability, Intent Liquidity, order validation, route
+planning, reservations, and wallet selection must not read it.
+
+`Portfolio value` inherits partial/stale status from both liquid and position
+components. Switching the headline mode never makes a stale position estimate
+fresh and never changes the underlying component set.
+
 ### 2.3 Required fields and copy
 
 Account-level UI:
 
-- `Estimated assets` — headline `totalEstimatedUsd`;
+- `Estimated assets` or `Portfolio value` — configurable headline derived from
+  the separately returned projection fields;
+- `Positions` — always separately visible when present, whether or not included
+  in the headline;
 - `Cash` — stable venue/wallet cash before intent-specific compatibility;
 - `Tokens` — supported freshly priced liquid assets;
 - `In transit` — estimated owned value, never available now;
@@ -181,13 +231,14 @@ Trade-level UI:
 - required signatures or external transfer;
 - one primary CTA: `Buy`, `Convert and buy`, `Prepare funds`, or `Add funds`.
 
-The UI may show a source/venue/network breakdown after expansion. The default
-surface does not ask a user to understand Polymarket versus Limitless collateral
-networks.
+The UI may show a source/venue/network breakdown after expansion. A destination
+choice uses a venue and Trading Wallet label plus a short explanation; it never
+asks a user to choose an arbitrary network or collateral independently of a
+valid backend destination combination.
 
 ### 2.4 Asset eligibility for the headline
 
-An observed asset contributes to `totalEstimatedUsd` only when all are true:
+An observed asset contributes to `liquidAssetsEstimatedUsd` only when all are true:
 
 1. ownership is proven through existing user-wallet, Privy, or venue binding facts;
 2. network and asset identity are canonical exact identifiers;
@@ -230,9 +281,9 @@ Placement depends on capital context:
 
 | Intent | Amount Hunch may move | Default destination |
 | --- | --- | --- |
-| `add_funds` | full amount explicitly confirmed and actually received | explicit venue, current trade venue, preferred venue, then Polymarket |
+| `add_funds` | full amount explicitly confirmed and actually received | current trade destination; otherwise one valid destination or explicit user choice among valid combinations |
 | `trade_shortfall` | exact shortfall plus disclosed bounded buffer | current trade venue |
-| `convert_asset` | confirmed exact input or exact-output max input | current trade/preferred venue |
+| `convert_asset` | confirmed exact input or exact-output max input | current trade destination or explicit generic destination choice |
 | `withdrawal` | exact confirmed withdrawal amount | validated user destination |
 | `manual_rebalance` | exact confirmed amount | explicit destination; feature initially off |
 
@@ -244,19 +295,115 @@ If 100 USD already sits on Limitless and Polymarket is short by 5 USD, only the
 shortfall and a bounded route buffer may move. The planner never sweeps the
 whole Limitless balance.
 
-The destination priority is:
+The destination decision is:
 
-1. explicit venue selected for this Add Funds operation;
-2. venue of the current trade intent;
-3. preferred venue derived from successful recent Hunch trading;
-4. configured active fallback order, with Polymarket first initially.
+1. an active trade fixes its venue and compatible Trading Wallet binding;
+2. an explicit opaque destination choice is honored after revalidation;
+3. with no trade and exactly one valid destination, proceed directly;
+4. with no trade and several valid destinations, require the user to choose;
+5. mark a configured recommendation, initially Polymarket, without committing it.
+
+Each destination option is an inseparable backend-owned combination of venue,
+network, collateral, and venue-account binding. Product copy may say
+`Polymarket · Hunch Trading Wallet`; the client cannot mix that venue with an
+arbitrary chain, collateral, address, or wallet reference.
 
 Preference changes never move existing money. No background rebalance worker,
 target allocation, or automatic consolidation is implemented. A future
 recommendation engine may only produce a user-confirmed `manual_rebalance`
 intent using the same operation contracts.
 
-### 2.7 Route experience policy
+### 2.7 Trading Wallet selection scope
+
+Hunch distinguishes internal managed Trading Wallets from linked external
+wallets. The deterministic precedence is:
+
+1. the binding that owns an existing position for Sell or Redeem;
+2. an explicit valid selection for the current intent;
+3. the internal Hunch Trading Wallet;
+4. other executable or setup-capable external alternatives shown for choice.
+
+An external wallet is not selected because it has the largest observed balance.
+The initial selection scope is deliberately `current_intent`. The first rollout
+does not persist a session or per-venue Trading Wallet choice
+and does not expose `Remember my Trading Wallet`. Every new intent resolves
+again from position ownership, explicit current choice, and the internal-Hunch
+default. Session/per-venue memory may be added later as a separate product
+feature without changing opaque binding or committed-operation contracts. A
+committed funding, trade, or redemption operation always freezes its binding.
+
+### 2.8 Wallet readiness, setup, and owner-bound actions
+
+A discovered external address or estimated balance is not automatically a
+working Trading Wallet. Every binding is classified as one of:
+
+```typescript
+type TradingWalletReadinessClass =
+  | "internal_managed"
+  | "external_ready"
+  | "external_setup_available"
+  | "external_source_only"
+  | "external_view_only";
+```
+
+`external_ready` requires a connected signer/controller, a supported wallet or
+Safe threshold, a deployed and registered venue funding wallet where required,
+credentials/approvals, and an exact supported execution path. Setup-capable
+wallets may offer `Set up this external wallet`. Source-only wallets may fund
+the internal Hunch Trading Wallet through an explicit signed operation but
+cannot be presented as executable venue bindings.
+
+For a new Buy or Add Funds intent, `Use Hunch Trading Wallet` is the primary
+path. `Set up this external wallet` appears as a secondary alternative only
+after the user explicitly opens or selects that external wallet. Funding from
+the external source remains an explicit transfer/conversion and signature.
+Hunch never silently pulls external assets or moves internal funds into an
+external wallet. For Sell or Redeem, the position-owning binding is mandatory:
+switching to the Hunch wallet cannot act on a position owned by an external Safe.
+
+### 2.9 Approved initial UX decisions
+
+The initial product behavior is now closed:
+
+1. headline mode is runtime-controlled; no user toggle ships initially;
+2. Trading Wallet choice applies only to the current intent; no remembered-wallet
+   setting or preference persistence ships initially;
+3. each Add Funds destination is one combined `Venue · Trading Wallet` card;
+   network and collateral are secondary read-only details;
+4. one valid destination skips the destination step; several valid destinations
+   require an explicit card selection, with Polymarket visibly recommended;
+5. the internal Hunch Trading Wallet is the primary path; external setup is a
+   secondary path shown only after explicit external-wallet interest.
+
+Normative Add Funds decision flow:
+
+```mermaid
+flowchart TD
+  A["Open Add Funds"] --> B{"Active trade context?"}
+  B -->|Yes| C["Fix Venue + Trading Wallet destination"]
+  B -->|No| D["Load valid destination cards"]
+  D --> E{"How many valid destinations?"}
+  E -->|Zero| F["Typed unavailable or repair state"]
+  E -->|One| C
+  E -->|Several| G["Choose one Venue + Trading Wallet card"]
+  G --> C
+  C --> H["Load Pay with source options"]
+  H --> I{"How many real sources?"}
+  I -->|One| J["Review"]
+  I -->|Several| K["Recommended source + Change"]
+  K --> J
+  J --> L{"External destination needs setup?"}
+  L -->|No| M["Quote and confirm"]
+  L -->|Yes| N["Primary: Use Hunch Trading Wallet"]
+  L -->|Explicit alternative| O["Secondary: Set up external wallet"]
+  N --> H
+  O --> M
+  M --> P{"Measured route experience"}
+  P -->|Inline and safe| Q["Fund or convert, then fresh Buy"]
+  P -->|Slow or unproven| R["Prepare Funds, notify, then fresh Buy"]
+```
+
+### 2.10 Route experience policy
 
 The backend, not the UI, classifies a selected route:
 
@@ -271,7 +418,14 @@ The backend, not the UI, classifies a selected route:
 Prepare Funds reserves no market price and never auto-buys. When funds are ready,
 Hunch notifies the user and requires a fresh market quote and Buy confirmation.
 
-### 2.8 Cognitive-load journeys
+The 45-second value is an initial configurable upper bound for preserving a
+single Buy flow, not a claim about Relay or a permanent product constant. A
+route becomes inline only from route-key, amount-band, action-count, destination-
+ready measurements and market-quote safety. Relay may qualify for some routes
+and remain Prepare Funds for others. Rehearsal/production evidence may tighten
+the threshold; unknown speed always remains Prepare Funds.
+
+### 2.11 Cognitive-load journeys
 
 #### Solana token trader
 
@@ -334,6 +488,11 @@ asks for a fresh Buy confirmation.
 - Prepare Funds, notification, recovery, and fresh Buy confirmation;
 - Across/deBridge legacy operation compatibility;
 - exact-route fallback hooks disabled by default;
+- deterministic current-intent internal/external Trading Wallet selection
+  without persistence or balance-driven silent switching;
+- shared purpose-aware wallet preparation for funding, Buy, Sell, Redeem, and
+  Withdrawal readiness;
+- owner-bound Polymarket redemption parity through a focused position-action capability;
 - runtime policy, admin activation, fixtures, metrics, and rollback;
 - local and tiny-value route rehearsals before activation.
 
@@ -348,6 +507,10 @@ asks for a fresh Buy confirmation.
 - generic arbitrary destination calldata or external hooks;
 - a provider marketplace in the user UI;
 - combining collateral from several venue-account bindings for one order;
+- transferring position ownership between Trading Wallet bindings;
+- introducing a new universal trading/position-operation state machine in this
+  funding phase; existing Sell/Redemption intent, execution, marker, and history
+  paths are preserved behind focused capabilities;
 - automatic purchase after Prepare Funds;
 - recreating wallet linking, embedded-wallet provisioning, KYC, or card UI;
 - migrating active legacy operations in place to a different provider;
@@ -381,6 +544,57 @@ The implementation must reuse, not duplicate, current truths:
   one hook or service;
 - desktop/mobile Deposit and balance surfaces contain duplication that must be
   removed through shared controllers and projections, not copied into a third flow.
+
+### 4.1 Current flow shape
+
+The current system has useful working pieces, but ownership of decisions is
+split across surfaces and large hooks:
+
+```mermaid
+flowchart TD
+  A["Header / Wallet / Portfolio / Trade"] --> B["Separate balance helpers and local totals"]
+  C["Desktop and mobile Deposit"] --> D["Deposit and bridge hooks"]
+  D --> E["Scan wallet balances and suggest source"]
+  E --> F["Provider-specific bridge / Privy paths"]
+  G["Auth bootstrap"] --> H["Internal Polymarket wallet preparation"]
+  I["Polymarket trade hook"] --> J["External Safe / funder setup"]
+  K["Redemption hook"] --> L["Owner gate and redemption execution"]
+  B --> M["Surfaces interpret balance differently"]
+  F --> N["Progress and recovery split across frontend/backend"]
+```
+
+This does not mean every current component is discarded. Wallet discovery,
+Privy presentation, network execution, Polymarket preparation, venue trade
+guards, redemption validation, notifications, and legacy reconciliation are
+preserved behind thin capabilities. The duplicated decision/orchestration code
+is what exits.
+
+### 4.2 Target flow shape
+
+```mermaid
+flowchart TD
+  A["Existing ownership and wallet facts"] --> B["Asset and position collectors"]
+  B --> C["Account Value projectors"]
+  C --> D["One account API"]
+  D --> E["Header / Wallet / Portfolio / Trade / Telegram"]
+
+  F["Trade or Add Funds intent"] --> G["Destination + Binding resolver"]
+  G --> H["Combined Venue + Trading Wallet option"]
+  H --> I["Source options"]
+  I --> J["Relay-first planner"]
+  J --> K["Durable Funding Operation"]
+  K --> L["Shared wallet preparation"]
+  L --> M["Venue-ready balance"]
+  M --> N["Fresh trade quote and confirmation"]
+
+  O["Sell or Redeem"] --> P["Position-owner binding"]
+  P --> L
+  L --> Q["Focused trade / position-action executor"]
+  Q --> C
+```
+
+The target therefore has one owner for each decision while keeping venue,
+network, provider, and execution details behind small capability boundaries.
 
 ## 5. External documentation decisions
 
@@ -467,7 +681,8 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 10. Price data is display evidence; route net output is execution evidence.
 11. Every projection carries `asOf`, component freshness, errors, and completeness.
 12. Venue bindings remain separate for execution even when values are summed for display.
-13. Open positions remain outside the initial funding Account Value projection.
+13. Prediction positions remain a separate component; headline composition is
+    configurable and never changes cash availability or Intent Liquidity.
 
 ### 6.2 Execution
 
@@ -488,13 +703,21 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 12. Prepare Funds never submits a market order and always requires a later fresh quote.
 13. Token suggestion preference never authorizes conversion.
 14. Retry cannot duplicate a source transaction, approval, funding call, or order.
+15. A recommendation is presentation metadata, not a committed destination,
+    wallet selection, or source authorization.
+16. An external wallet action always requires its supported user-controlled
+    signature path; ownership or balance never grants managed execution.
+17. Sell and Redeem use the position-owning binding and cannot switch wallets to
+    bypass missing readiness.
+18. Preferences changed after commit cannot mutate an operation snapshot.
 
 ### 6.3 Placement
 
 1. Add Funds moves the full user-confirmed amount actually received.
 2. Trade Shortfall moves only the shortfall plus an explicit bounded buffer.
 3. Existing venue balances are never swept by preference or route optimization.
-4. Preferred venue selection is pure and occurs once before quote.
+4. Destination recommendation is pure; an ambiguous no-context destination is
+   selected by the user before quote and frozen at commit.
 5. A preference change never moves existing funds.
 6. No automatic rebalance or hidden minimum top-up amount exists.
 7. If a small shortfall is uneconomical, the planner returns Prepare Funds,
@@ -517,6 +740,9 @@ user-visible `recovery_action_required` state rather than an assumed refund.
    runtime-policy systems are wrapped thinly rather than copied.
 8. Venue adapters are capability-sized; no giant adapter with optional methods.
 9. Legacy bridge APIs receive no Relay, Tokens, Prepare Funds, or future-venue branches.
+10. Wallet preparation is one purpose-aware venue capability reused by auth,
+    funding, trading, redemption, and Telegram; it is not copied into each flow.
+11. Redemption is a position action, not a bridge, withdrawal, or Funding Operation.
 
 ### 6.5 Security
 
@@ -643,12 +869,22 @@ type VenueAccountBinding = {
   settlementLocation: AssetLocation;
   signingMode: "web_client" | "privy_delegated";
 };
+
+type VenueBindingOption = {
+  venueBindingOptionId: string;
+  safeLabel: string;
+  readinessClass: TradingWalletReadinessClass;
+  preparationPurpose: PreparationPurpose;
+  selectable: boolean;
+  reasonCodes: string[];
+};
 ```
 
 When several bindings are possible, the backend returns opaque
 `venueBindingOptionId` values with safe wallet labels. The client never sends a
 raw wallet or account reference as its authority. Commit resolves the option ID
-and freezes the binding snapshot.
+and freezes the binding snapshot. Discovery and valuation do not make a binding
+selectable; the appropriate preparation/readiness capability does.
 
 ### 7.4 Inventory and valuation types
 
@@ -674,9 +910,24 @@ type ValuedAssetComponent = {
   reasonCodes: string[];
 };
 
+type ValuedPositionComponent = {
+  componentId: string;
+  venueId: VenueId;
+  venueBindingId: VenueBindingId;
+  positionRef: string;
+  estimatedUsd: UsdEstimate | null;
+  valuationMethod: string;
+  valuationEligibility: "included" | "unpriced" | "stale" | "excluded";
+  reasonCodes: string[];
+};
+
 type AccountValueProjection = {
   accountId: AccountId;
-  totalEstimatedUsd: string;
+  liquidAssetsEstimatedUsd: string;
+  positionsEstimatedUsd: string;
+  totalPortfolioEstimatedUsd: string;
+  headlineMode: HeadlineValueMode;
+  positionValuationCompleteness: "complete" | "partial" | "stale";
   cashEstimatedUsd: string;
   tokenEstimatedUsd: string;
   inTransitEstimatedUsd: string;
@@ -684,6 +935,7 @@ type AccountValueProjection = {
   unpricedAssetCount: number;
   asOf: string;
   components: ValuedAssetComponent[];
+  positionComponents: ValuedPositionComponent[];
 };
 ```
 
@@ -703,11 +955,24 @@ type FundingIntent = {
   requestedDestinationAmount: Money | null;
   confirmedSourceAmount: Money | null;
   marketContextId: string | null;
-  targetVenueId: VenueId | null;
+  destinationOptionId: string | null;
   venueBindingOptionId: string | null;
   maxFeeUsd: string | null;
   maxSlippageBps: number | null;
   deadline: string | null;
+};
+
+type FundingDestinationOption = {
+  destinationOptionId: string;
+  venueId: VenueId;
+  venueBindingOptionId: string;
+  safeLabel: string;
+  requiredAsset: AssetRef;
+  networkLabel: string;
+  readinessClass: TradingWalletReadinessClass;
+  recommended: boolean;
+  selectable: boolean;
+  reasonCodes: string[];
 };
 
 type IntentLiquidityProjection = {
@@ -739,7 +1004,7 @@ type PlacementDecision = {
   targetVenueId: VenueId | null;
   targetLocation: AssetLocation;
   boundedBuffer: Money | null;
-  reason: "explicit" | "current_trade" | "preferred_venue" | "configured_fallback";
+  reason: "explicit" | "current_trade" | "single_valid_option";
   policyVersion: number;
 };
 ```
@@ -747,6 +1012,9 @@ type PlacementDecision = {
 `PlacementPolicy` is a pure function of the intent, observed balances, target
 requirement, preference evidence, and policy snapshot. It cannot execute,
 reserve, quote a provider, or mutate preference.
+
+`recommended` is not a Placement Decision reason. It is non-authoritative UI
+metadata on a destination option until the user chooses that option.
 
 ### 7.7 Plan shapes
 
@@ -791,6 +1059,10 @@ interface PriceAdapter {
   value(input: PriceRequest): Promise<UsdEstimate | null>;
 }
 
+interface PositionValueCollector {
+  collect(input: PositionValueInput): Promise<ValuedPositionComponent[]>;
+}
+
 interface BalanceCollector {
   collect(input: VenueBalanceInput): Promise<VenueBalanceFacts>;
 }
@@ -800,17 +1072,32 @@ interface VenueAccountResolver {
 }
 
 interface FundingDestination {
+  listOptions(input: DestinationOptionsInput): Promise<FundingDestinationOption[]>;
   resolve(input: DestinationInput): Promise<FundingRequirement>;
 }
 
-interface VenueReadinessAdapter {
-  inspect(input: ReadinessInput): Promise<ReadinessResult>;
+type PreparationPurpose = "fund" | "buy" | "sell" | "redeem" | "withdraw";
+
+type PreparationStatus =
+  | "ready"
+  | "setup_required"
+  | "user_action_required"
+  | "unavailable";
+
+interface WalletPreparationAdapter {
+  inspect(input: PreparationInspectionInput): Promise<PreparationResult>;
   prepare(input: PreparationInput): Promise<NormalizedAction[]>;
 }
 
 interface TradingExecutor {
   quote(input: TradeQuoteInput): Promise<TradeQuote>;
   submit(input: TradeSubmitInput): Promise<TradeResult>;
+}
+
+interface PositionActionExecutor {
+  inspect(input: PositionActionInspectionInput): Promise<PositionActionReadiness>;
+  prepare(input: PositionActionInput): Promise<NormalizedAction[]>;
+  reconcile(input: PositionActionReconcileInput): Promise<PositionActionResult>;
 }
 
 interface RoutingProviderAdapter {
@@ -832,6 +1119,7 @@ account-value/
   inventory-service.ts
   valuation-service.ts
   account-value-projector.ts
+  position-value-projector.ts
   cash-availability-projector.ts
   price-adapters/
 
@@ -876,7 +1164,11 @@ wallet-execution/
 
 venue-capabilities/
   polymarket/
+    position-value.ts
+    wallet-preparation.ts
+    position-actions.ts
   limitless/
+    position-value.ts
   registry.ts
 
 routes/
@@ -970,6 +1262,8 @@ PATCH /account/assets/:componentId/funding-preference
 `GET /account/assets` supports expanded inventory, pagination, filtering, and
 execution-eligibility hints. The preference endpoint accepts only opaque
 component IDs and the suggestion enum; it grants no transaction authority.
+The account response includes the effective headline mode and all three value
+fields so a presentation experiment never changes accounting data.
 
 ### 9.6 Freshness and caching
 
@@ -991,24 +1285,31 @@ relabels old data as fresh. Buy remains governed by fresh target and route facts
 POST /funding/liquidity
 ```
 
-The request contains market context or explicit venue/purpose, amount, optional
-opaque binding choice, and user limits. It never contains provider, destination
-address, refund address, intermediate network, or calldata.
+The request contains market context or an opaque destination option, purpose,
+amount, optional opaque binding choice, and user limits. It never contains a
+raw venue/network/collateral combination, provider, destination address, refund
+address, intermediate network, or calldata.
 
 ### 10.2 Algorithm
 
-1. Resolve active venue and one allowed binding.
-2. Resolve exact collateral requirement and venue readiness.
-3. Read immediately spendable target collateral after locks/reservations.
-4. Calculate the exact shortfall.
-5. If no shortfall, return `instant` without routing.
-6. Enumerate owned source components and configured ingress methods.
-7. Apply transferability, risk, wallet execution, native-gas, route, fee, and
+1. Resolve destination context. An active trade fixes the compatible venue and
+   binding; an opaque choice is revalidated; one valid no-context option may
+   proceed directly; several valid no-context options return
+   `destination_selection_required` with one recommendation.
+2. Resolve the selected binding using position ownership, explicit/stored
+   preference, then internal-Hunch default precedence.
+3. Resolve exact collateral requirement and purpose-aware wallet readiness.
+4. Read immediately spendable target collateral after locks/reservations.
+5. Calculate the exact shortfall.
+6. If no shortfall, return `instant` without routing.
+7. Enumerate owned source components and configured ingress methods separately
+   from the already selected destination.
+8. Apply transferability, risk, wallet execution, native-gas, route, fee, and
    user-consent eligibility.
-8. Apply Placement Policy to determine the permissible source/destination amount.
-9. Ask Relay first for exact eligible candidates.
-10. Classify route experience from measured route policy.
-11. Return normalized source options and one recommended option; never return a
+9. Apply Placement Policy to determine the permissible source/destination amount.
+10. Ask Relay first for exact eligible candidates.
+11. Classify route experience from measured route policy.
+12. Return normalized source options and one recommended source; never return a
     provider menu.
 
 ### 10.3 Source options
@@ -1034,12 +1335,30 @@ Ingress options are distinct from executable wallet sources:
 - Relay Deposit Address instruction;
 - existing venue cash eligible for explicit shortfall movement.
 
+The UI vocabulary is deliberately two-dimensional:
+
+- **Where to add** selects one backend-issued destination option;
+- **Pay with** selects one source option for that destination.
+
+When each side has one valid option, go directly to review. Show `Where to add`
+only for multiple real destinations. Show the recommended `Pay with` plus
+`Change` only for multiple real sources. Internal managed sources are preferred
+for simplicity, but an external source may be offered with an explicit wallet
+signature. A linked external balance is never auto-pulled.
+
 ### 10.4 Multiple venue bindings
 
-If the trade context already fixes a binding, use it. Otherwise backend returns
-opaque binding choices ordered by recent successful execution, immediately
-spendable amount, then stable ID. The UI shows only a user-recognizable wallet
-label when the choice materially changes funds or signatures.
+For Sell or Redeem, use the binding that owns the position. For Buy/Add Funds,
+use an explicit valid current-intent choice, otherwise the internal Hunch
+binding. Backend may return other `external_ready` or
+`external_setup_available` opaque choices, but never orders or selects them by
+largest balance. Source-only/view-only wallets do not appear as Trading Wallet
+choices.
+
+The UI shows a user-recognizable wallet label only when the choice materially
+changes ownership, signatures, setup, or execution. The first rollout persists
+no wallet preference beyond the current intent. The binding selected by commit
+is immutable.
 
 No order combines balances across bindings. Account Value may sum them for display.
 
@@ -1074,19 +1393,25 @@ Every registered destination has independent gates for:
 
 An indexed or publicly visible venue is not thereby fundable or tradable.
 
-### 11.2 Preferred venue
+### 11.2 Destination options and recommendation
 
-For generic Add Funds without an explicit/current venue, choose from active,
-fundable venues using the most recent 50 positively filled Hunch orders:
+`FundingDestination.listOptions` returns only valid inseparable combinations of
+venue, binding, network, collateral, and readiness. Examples include
+`Polymarket · Hunch Trading Wallet` on its configured Polygon collateral or
+`Limitless · Hunch Trading Wallet` on its configured Base collateral. These are
+labels over backend facts, not client-assembled choices.
 
-1. executed-order count;
-2. executed USD notional;
-3. configured fallback order;
-4. stable venue ID tie-break.
+For generic Add Funds without a trade:
 
-Polymarket is the initial first fallback while active. The evidence and selected
-destination are snapshotted in the quote and operation. This selection never
-moves existing balances.
+1. no valid option returns a typed unavailable/repair response;
+2. one valid option proceeds without a destination screen;
+3. more than one valid option requires an opaque user choice;
+4. policy marks one recommendation, initially Polymarket while active;
+5. recent trading may later inform recommendation ranking, but never auto-commits
+   a destination when a real choice exists.
+
+The chosen destination is snapshotted in the quote and operation. A recommendation
+change never moves existing balances and never mutates an active operation.
 
 ### 11.3 Buffer policy
 
@@ -1425,7 +1750,7 @@ Initial recommended scope:
 - open/variable amount when provider or exchange fees make exact receipt uncertain;
 - a fresh unique operation/order identity;
 - a verified user-owned embedded/linked refund location on the source network;
-- direct settlement to the current/preferred venue path;
+- direct settlement to the selected destination path;
 - no arbitrary destination call;
 - no reuse as a generic permanent deposit address in v1.
 
@@ -1579,6 +1904,10 @@ Every normalized action records:
 - policy ID;
 - action class and validation rule.
 
+External actions always resolve to `web_client` or another exact user-controlled
+signing mode. The resolver cannot promote them to managed execution because an
+address is linked, owns funds, or once completed venue setup.
+
 ### 14.4 EVM sponsorship and EIP-7702
 
 Privy-managed EIP-7702 may be used only inside the exact Privy sponsorship path
@@ -1613,8 +1942,8 @@ Polymarket registers independently:
 - balance and lock collector;
 - controller/funder binding resolver;
 - collateral destination;
-- wallet/credential/readiness adapter;
-- funding preparation;
+- one purpose-aware wallet-preparation adapter for Fund, Buy, Sell, Redeem, and Withdraw;
+- position-action executor for redemption;
 - trade executor;
 - reconciler;
 - web and delegated-policy capabilities.
@@ -1631,6 +1960,33 @@ Baseline funding path:
 Direct pUSD is disabled unless an exact Relay route passes pinned quote/action,
 settlement, ownership, and CLOB-visibility evidence. Relay destination calldata
 must not call the current router under an incompatible `msg.sender` assumption.
+
+The Polymarket preparation adapter becomes the single owner of the logic now
+spread across auth bootstrap, Deposit/Buy orchestration, Safe deployment,
+credential registration, approvals, and redemption readiness. It returns
+`ready | setup_required | user_action_required | unavailable` for an exact
+binding and purpose. Auth may proactively invoke it for internal managed wallets;
+Add Funds, Buy, Sell, Redeem, and Telegram inspect the same capability rather
+than reimplementing it.
+
+An external binding is `external_ready` only when its controller can sign, its
+Safe/deposit wallet shape and threshold are supported, required deployment and
+registration are complete, and purpose-specific credentials/approvals are valid.
+If setup is supported, the user may choose setup or switch a new Buy/Add Funds
+intent to the internal Hunch Trading Wallet. A linked address with no executable
+path remains source-only or view-only.
+
+Redemption is a separate owner-bound position action. It reuses binding
+resolution, wallet preparation, normalized action validation, EVM execution,
+observation, reconciliation, and Activity, but it does not create a
+`FundingOperation` and is not modeled as Withdrawal. A position owned by an
+external Safe must be redeemed through that binding; setup/repair may be offered,
+but switching to an internal wallet is not a valid redemption solution.
+
+This phase does not invent a second generic durable aggregate for redemption.
+The focused executor wraps the current web redemption marker/sync path and the
+existing durable Telegram trade-intent action where applicable. A broader
+trading-operation redesign requires its own parity and migration plan later.
 
 ### 15.2 Limitless
 
@@ -1651,9 +2007,9 @@ A future venue supplies:
 - ownership/controller binding;
 - valuation and spendability semantics;
 - locks/holds and freshness;
-- funding destination and preparation;
+- funding destination and purpose-aware wallet preparation;
 - wallet/signature/action policy;
-- trade/withdraw/reconcile capabilities;
+- trade/position-action/withdraw/reconcile capabilities as actually supported;
 - independent runtime gates.
 
 Hyperliquid is a stress-test example because spot USDC, perps equity,
@@ -1681,6 +2037,7 @@ PATCH /account/assets/:componentId/funding-preference
 ### 16.2 Funding APIs
 
 ```text
+GET  /funding/destinations
 POST /funding/liquidity
 POST /funding/quotes
 POST /funding/operations
@@ -1693,12 +2050,21 @@ POST /funding/operations/:id/cancel
 POST /funding/withdrawal-destinations
 ```
 
+`GET /funding/destinations` returns valid opaque destination combinations and
+one configurable recommendation for a no-trade Add Funds flow. It does not
+return independently composable raw network, collateral, address, or binding IDs.
+
 `POST /funding/quotes` returns one immutable normalized plan with source options,
 placement, destination/binding option, actions, economics, ETA, expiry, and
 consent summary. It never returns provider secrets or raw provider DTOs.
 
 `POST /funding/operations` commits a quote with idempotency key and explicit
 consent. Action endpoints never accept replacement recipient/calldata.
+
+Existing/new position-action endpoints for Sell/Redeem use the same binding and
+wallet-preparation contracts but remain outside `/funding/operations`. Their
+request identifies the owned position and opaque binding; the backend derives
+all contracts, actions, and owner requirements.
 
 ### 16.3 Webhooks
 
@@ -1739,6 +2105,7 @@ Frontend copy maps codes centrally. Components do not parse provider messages.
 ```text
 useAccountValue()
 useAccountAssets()
+useFundingDestinations()
 useIntentLiquidity(intent)
 useFundingQuote()
 useFundingOperation(operationId)
@@ -1754,9 +2121,11 @@ One reducer/controller handles:
 
 ```text
 idle
+-> choosing_destination_binding
 -> choosing_source
 -> quoting
 -> reviewing
+-> setting_up_wallet
 -> committing
 -> awaiting_user_action / awaiting_external_funds / in_progress
 -> ready / recovery / terminal
@@ -1776,13 +2145,28 @@ Thin presentation boundaries:
 
 Default Add Funds flow:
 
-1. amount and recommended source;
-2. review destination label, expected receipt, fee, ETA, and actions;
-3. confirm and follow progress.
+1. resolve valid destinations and sources;
+2. if several destinations exist, ask `Where to add` with one combined
+   `Venue · Trading Wallet` card per opaque option, visibly mark Polymarket as
+   recommended, and require an explicit card selection; if one exists, skip this step;
+3. show a recommended `Pay with` and `Change` only when several sources exist;
+4. review destination/Trading Wallet label, expected receipt, fee, ETA,
+   signatures/setup, and actions;
+5. confirm and follow progress.
 
 Advanced source/network details are expanded only for exchange/manual Receive or
-when several real choices differ materially. Destination venue can be changed
-explicitly, but chain/collateral remains backend-resolved.
+when several real choices differ materially. Destination venue/Trading Wallet
+can be changed through opaque valid options, but chain/collateral remains
+backend-resolved.
+
+The internal Hunch card is the primary path. External alternatives live under
+`Change` or the expanded destination list. If the user explicitly selects a
+setup-capable external Trading Wallet, show `Use Hunch Trading Wallet` as the
+primary repair and `Set up this external wallet` as the secondary action. The
+external wallet may still appear under `Pay with` and requires its explicit
+signature. Source-only/view-only wallets never appear as destinations. If an
+internal wallet already has spendable balance, suggest the Hunch path; never
+move that balance silently into the external wallet.
 
 Tokens are a section of the same source selector, not a separate orchestration
 product. Suggestion preference is editable from Tokens but conversion always
@@ -1799,7 +2183,17 @@ The trade panel renders only backend Intent Liquidity:
 
 The frontend never infers route speed from provider, source chain, or venue name.
 
-### 17.5 Recovery
+### 17.5 Balance and Trading Wallet presentation
+
+The value response always contains liquid assets, positions, and total portfolio.
+The effective headline mode controls label/composition only and is selected by
+runtime product policy. The first rollout exposes no user toggle.
+
+Trading Wallet alternatives expose only real selectable current-intent bindings.
+There is no remembered-wallet settings surface in the first rollout. A
+source-only/view-only external address never becomes a Trading Wallet.
+
+### 17.6 Recovery
 
 Operation ID is durable in backend history and optionally cached for navigation
 convenience. Browser storage is not the source of truth. On reload, web and
@@ -1827,6 +2221,11 @@ Bot flow:
 The bot never pulls a linked external wallet, invents a signer, treats a token
 suggestion as consent, or buys automatically after preparation. Per-operation
 and daily caps, policy revocation, idempotency, and audit remain mandatory.
+
+Internal managed bindings are the Telegram default. A stored external preference
+is used only when the bot's exact execution capability supports that binding;
+otherwise the bot offers the internal Hunch path or an authenticated web handoff.
+It never silently ignores ownership for Sell/Redeem.
 
 ## 19. End-to-end workflows
 
@@ -1917,6 +2316,41 @@ if it would delay the core Add Funds/trade-shortfall path.
 4. Backend operation progresses independently of the browser.
 5. Bot notifies `20 USD ready` and asks for fresh Buy confirmation.
 
+### 19.9 Generic Add Funds without a trade
+
+1. Backend returns active destination combinations for supported venues and bindings.
+2. If only one exists, the flow proceeds directly; otherwise the user chooses
+   one combined `Venue · Trading Wallet` card under `Where to add`, with
+   Polymarket initially marked recommended.
+3. Backend resolves sources for the selected destination and shows `Pay with`
+   only when several real choices exist.
+4. Review freezes the opaque destination and binding together with source,
+   amount, fees, ETA, signatures/setup, and minimum receipt.
+5. Commit, observation, and venue preparation follow the common operation path.
+
+### 19.10 External wallet alternative
+
+1. A linked external address is classified before it appears as a Trading Wallet.
+2. `external_ready` may be explicitly selected and requires the supported client signature.
+3. The internal Hunch binding is the primary path. After explicit external
+   selection, `external_setup_available` offers `Use Hunch Trading Wallet` as
+   primary repair and external setup as the secondary alternative.
+4. `external_source_only` may appear only under `Pay with`; funding the Hunch
+   wallet is an explicit signed transfer/conversion.
+5. `external_view_only` contributes eligible estimated value but is not actionable.
+6. No balance comparison silently changes the selected Trading Wallet.
+
+### 19.11 Polymarket redemption
+
+1. Resolve the exact position owner and its Polymarket binding.
+2. Inspect redemption-purpose wallet readiness through the shared preparation adapter.
+3. If setup/repair is possible, present it for the same owner binding; otherwise
+   return a typed unavailable/recovery state.
+4. Prepare and validate canonical redemption actions through the focused
+   position-action executor and existing network execution boundary.
+5. Reconcile redemption and refresh position/cash projections and Activity.
+6. Never switch to the internal Hunch wallet to redeem an externally owned position.
+
 ## 20. Failure and side-effect audit
 
 | Condition | Required behavior | Forbidden behavior |
@@ -1939,7 +2373,14 @@ if it would delay the core Add Funds/trade-shortfall path.
 | Slow route | Prepare Funds | hold old market quote or auto-buy |
 | Trade abandoned after preparation | release reservation as venue cash | bridge funds back automatically |
 | Existing Limitless balance covers source | move only shortfall | sweep whole balance |
-| Preference changes | affect future Add Funds only | rebalance existing money |
+| Headline includes positions | change display label/composition only | use positions as executable liquidity |
+| Multiple Add Funds destinations | require one combined Venue + Trading Wallet card choice and mark recommendation | separate arbitrary network/collateral choice or auto-commit |
+| One destination and one source | go directly to review | show redundant selection screens |
+| External wallet has larger balance | keep position/explicit/preference/internal precedence | silently switch Trading Wallet |
+| External source selected | require supported user signature | server-pull linked assets |
+| External wallet lacks venue setup | prefer Hunch wallet; show external setup after explicit interest | call it ready because address/balance exists |
+| External binding owns position | prepare/redeem through that owner binding | switch to Hunch wallet for redemption |
+| Preference changes | affect future intents only | mutate active operation or rebalance money |
 | Across/deBridge new fallback disabled | do not query/create | silently use legacy provider |
 | Legacy operation active | reconcile stored adapter version | migrate provider mid-flight |
 | deBridge cancellation needs gas | recovery action required | claim automatic refund |
@@ -1957,15 +2398,19 @@ The immutable effective funding policy owns:
 
 - master mode: `off`, `shadow`, `internal`, `cohort`, `on`;
 - account-value asset/network observation and valuation entries;
+- per-venue position-value capability and freshness policy;
+- headline presentation mode; user override is disabled in the initial policy;
 - exact location capability registry;
 - venue lifecycle and independent balance/funding/trading/withdraw/delegated gates;
-- preferred-venue fallback order;
+- generic Add Funds recommendation order;
+- Trading Wallet selection scope, fixed to `current_intent` in the initial policy;
 - placement buffers, fee/slippage/minimum/maximum limits;
 - route experience thresholds and exact overrides;
 - provider capability flags and exact route allowlists;
 - Relay deposit-address modes and refund requirements;
 - Privy configured funding-method/destination matrix;
 - wallet action, sponsorship, and delegated-policy IDs;
+- purpose-aware wallet preparation and position-action capability gates;
 - two-segment route allowlists and intermediate locations;
 - Telegram per-operation/daily caps;
 - collector, price, quote, polling, and reservation TTLs.
@@ -1977,6 +2422,8 @@ Policy contains canonical Hunch IDs, never provider DTOs or arbitrary code.
 Publication fails when any are true:
 
 - an asset can be valued without a registered exact identifier and price policy;
+- a venue position can enter portfolio value without identity, freshness,
+  valuation method, and deduplication policy;
 - a settlement/intermediate capability points to an unowned/unobservable location;
 - a route is active without pinned fixtures, adapter registration, action
   validator, reconciler, refund semantics, and destination observation;
@@ -1993,7 +2440,12 @@ Publication fails when any are true:
 - disabled Kalshi/DFlow or future Hyperliquid entries enter active registries;
 - a fallback names deprecated Across suggested-fees or deBridge cross-chain
   new-plan behavior;
-- a policy permits automatic rebalance.
+- a policy permits automatic rebalance;
+- headline presentation mode is referenced by executable-liquidity policy;
+- an external binding is selectable without exact purpose readiness and signer path;
+- a position action permits a binding other than its proved owner;
+- a no-trade multi-destination flow can commit without an opaque user selection;
+- the initial policy enables a user headline toggle or remembered Trading Wallet.
 
 ### 21.3 Admin UI
 
@@ -2064,6 +2516,7 @@ Account value:
 - collector freshness/error by collector and network;
 - projection latency and cache hit rate;
 - priced, unpriced, stale, spam-excluded, and deduplicated component counts;
+- included/unpriced/stale/deduplicated position component counts by venue;
 - value changes caused by observation, price, and in-transit transitions;
 - duplicate-component prevention failures.
 
@@ -2095,6 +2548,7 @@ Alert on:
 
 - the same observation allocated twice;
 - source plus in-transit/destination double-counting;
+- duplicate position components or open-order cash counted as position value;
 - stale values reported as complete;
 - destination fill without matching operation;
 - segment one action before intermediate observation;
@@ -2132,6 +2586,11 @@ audited, idempotent, and operation-specific.
 Inventory/value:
 
 - duplicate wallet/profile evidence counts once;
+- both headline modes read the same liquid/position components and neither
+  changes cash availability, Intent Liquidity, or Buy eligibility;
+- duplicate position representations count once and open-order locked cash is
+  not added again as position value;
+- stale/unpriced/partial position valuation propagates to Portfolio value;
 - exact network+asset identity defeats symbol spoofing;
 - unpriced/stale/spam assets never inflate total;
 - locks/reservations reduce availability but not Account Value;
@@ -2142,6 +2601,8 @@ Inventory/value:
 Intent/placement:
 
 - incompatible venue bindings are not summed for one order;
+- no-trade Add Funds with multiple destinations requires an opaque choice;
+- one valid destination skips selection and a recommendation never commits itself;
 - Add Funds 100 with trade 5 routes 100 received, not 5;
 - existing venue cash moves shortfall only;
 - buffer never exceeds policy and is separately disclosed;
@@ -2149,6 +2610,19 @@ Intent/placement:
 - no code path emits automatic rebalance;
 - suggested token still requires operation-specific consent;
 - unavailable route does not reduce Account Value.
+
+Wallet/binding/preparation:
+
+- Sell/Redeem always resolves the position-owning binding;
+- explicit valid binding beats internal default; internal default beats any
+  unselected external wallet regardless of balance;
+- `external_source_only` and `external_view_only` never become Trading Wallet options;
+- external execution always requires the exact client/user signature path;
+- preference changes after commit leave the frozen binding unchanged;
+- one Polymarket preparation contract produces purpose-specific readiness for
+  auth bootstrap, Add Funds, Buy, Sell, Redeem, and Telegram;
+- external Safe threshold/deployment/registration/credential/approval mutations fail closed;
+- redemption never creates a Funding Operation or routes through Withdrawal.
 
 State machine:
 
@@ -2253,6 +2727,14 @@ across route handlers.
 - Prepare Funds never starts Buy and always requotes;
 - reload resumes from backend operation;
 - multiple wallet bindings use opaque options and safe labels;
+- destination and source selectors appear only for real choices;
+- destination choice renders one opaque Venue + Trading Wallet card, never
+  independent venue/network/collateral/wallet combinators;
+- external setup versus internal-Hunch switch renders from typed readiness;
+- Hunch Trading Wallet is the primary new-intent path; external setup appears
+  only after explicit external-wallet interest;
+- headline mode changes label/composition but never trade CTA;
+- no initial user headline-toggle or remembered-wallet settings surface exists;
 - error codes map through one copy registry;
 - no responsive breakpoint class is relied on while repository breakpoints are disabled.
 
@@ -2266,6 +2748,8 @@ across route handlers.
 - ready notification never auto-buys;
 - fresh market quote and Buy confirmation required;
 - unsupported Limitless bot trading fails closed.
+- unsupported external binding uses web handoff/internal alternative, never silent fallback;
+- owner-bound redemption cannot switch to the bot's internal default.
 
 ### 23.7 Route matrix
 
@@ -2284,6 +2768,9 @@ At minimum:
 | existing other-venue cash | target venue | shortfall only | withdrawal/movement capability |
 | any enabled source | Limitless slow route | Prepare Funds | measured latency, fresh Buy |
 | eligible cash | validated user destination | withdrawal | destination ID, recovery |
+| external ready binding | active venue | explicit Trading Wallet | signer, setup, readiness |
+| external source-only wallet | internal Hunch destination | explicit funding | client signature, observation |
+| owned PM position | owner PM binding | redeem | owner proof, preparation, action validation |
 
 Every proposed active route runs through Relay first. Across/deBridge matrix
 rows exist only for legacy reconciliation or an explicit disabled-by-default
@@ -2347,8 +2834,13 @@ justifies it, but this is a conscious operation, not a permanent CI/deploy gate.
 | wallet/account ownership | `WalletOwnershipResolver` over existing truth |
 | inventory | `InventoryService` |
 | USD estimates | `ValuationService` + `AccountValueProjector` |
+| position estimates | venue `PositionValueCollector` + `PositionValueProjector` |
 | target spendability | `IntentLiquidityService` |
 | placement amount/destination reason | pure `PlacementPolicy` |
+| destination choices/recommendation | `FundingDestination` + runtime policy |
+| Trading Wallet selection | `VenueAccountResolver` + binding-selection policy |
+| wallet setup/readiness | purpose-aware `WalletPreparationAdapter` |
+| redemption | focused `PositionActionExecutor` using owner binding |
 | route/provider choice | backend `FundingPlanner` |
 | durable progress | `FundingOperation` + reconciler |
 | action security | normalized validator + network executor |
@@ -2365,6 +2857,8 @@ Allowed thin wrappers:
 - current Privy funding hook -> `PrivyFundingHandoff`;
 - existing auth/user-wallet data -> ownership resolver;
 - current PM/Limitless services -> focused readiness/trade/destination adapters;
+- current Polymarket auth bootstrap, Safe/deposit-wallet setup, approvals, and
+  redemption preparation -> one purpose-aware preparation adapter;
 - existing EVM/Solana execution -> network executors;
 - legacy bridge rows -> versioned legacy reconcilers;
 - notification system -> funding-ready/refund/recovery notifier.
@@ -2403,6 +2897,10 @@ Reject an implementation that:
 - adds Tokens, Prepare Funds, or future venues to legacy bridge hooks;
 - computes Account Value in React components;
 - names provider or chain to decide UI speed/CTA;
+- auto-selects an external wallet from its balance;
+- treats a discovered external address as a ready Trading Wallet;
+- copies Polymarket wallet setup into auth, funding, trade, redemption, and bot flows;
+- models redemption as a bridge, withdrawal, or Funding Operation;
 - lets provider catalogs define owned inventory;
 - merges Account Value and executable balance into one numeric field;
 - moves full existing venue balance for a shortfall;
@@ -2426,9 +2924,14 @@ Required work:
 - inventory every current balance, lock, wallet, Deposit, Convert, Bridge,
   Withdraw, PM/Limitless, Privy, Solana sponsorship, Telegram, admin policy,
   notification, retention, and recovery touchpoint;
+- inventory internal/external Trading Wallet selection, Safe/deposit-wallet
+  deployment/registration, auth bootstrap, approvals, position ownership,
+  Sell, and Redemption touchpoints;
 - record current branches and source/schema revisions without changing branches;
 - run deterministic duplication baseline;
 - freeze domain vocabulary and API examples from sections 2 and 7;
+- freeze destination-versus-source, current-intent binding precedence,
+  readiness classes, and purpose-aware preparation contracts;
 - pin official Relay Quote/Status/Deposit Address/OpenAPI evidence and sanitized fixtures;
 - pin actual configured Privy funding methods/destinations and action policies;
 - capture every active legacy Across/deBridge adapter version and non-terminal row shape;
@@ -2447,7 +2950,9 @@ Create three lightweight mandatory artifacts before implementation begins:
 2. **Live Rehearsal Harness** — a manual, guarded tiny-value runner for exact
    scenarios such as Relay wallet routing, Relay Deposit Address funding,
    Polymarket/Limitless settlement visibility, Privy-sponsored actions, and
-   withdrawal. It reads required keys only from local/secret environment,
+   withdrawal, plus external-wallet setup and owner-bound redemption where
+   those capabilities are proposed for activation. It reads required keys only
+   from local/secret environment,
    performs a read-only preflight by default, requires explicit live and
    maximum-spend confirmation, and writes a redacted run report. It is not
    invoked by ordinary deploys.
@@ -2472,6 +2977,8 @@ Required work:
 
 - implement provider/venue-neutral types, location capabilities, funding intent,
   projections, plan union, normalized actions, reason codes, and transition map;
+- implement opaque destination/binding options, readiness classifications,
+  current-intent Trading Wallet selection, preparation purposes, and position-action ports;
 - implement static registries and typed immutable runtime policy;
 - implement cross-field validation and production fixture-adapter exclusion;
 - add admin read/diff/confirm/publish surface and dedicated permissions;
@@ -2493,16 +3000,22 @@ Required work:
 - implement inventory collectors and canonical deduplication;
 - implement price adapter boundary, stable impairment policy, and freshness;
 - implement Account Value, cash availability, and in-transit projection;
+- return liquid assets, positions, and total portfolio separately with a
+  display-only effective headline mode;
+- implement thin Polymarket/Limitless position-value collectors, backend
+  deduplication, and partial/stale position completeness;
 - implement asset suggestion preferences;
 - replace frontend-local totals with the new read API behind master mode;
-- retain positions separately.
+- retain positions separately regardless of headline mode.
 
 Completion evidence:
 
 - all value/availability/deduplication property tests pass;
 - header/wallet/portfolio/trade no longer compute conflicting totals;
 - token value appears in estimated assets but never directly enables Buy;
-- partial/stale/unpriced states render truthfully.
+- partial/stale/unpriced states render truthfully;
+- toggling headline mode cannot change any liquidity, route, wallet, or CTA result;
+- no frontend or venue hook independently recomputes the positions headline total.
 
 ### Work package 3 — Durable operations, observations, reservations, reconciliation
 
@@ -2549,7 +3062,8 @@ Completion evidence:
 Required work:
 
 - implement PM/Limitless binding and destination adapters;
-- implement pure preferred-venue and Placement Policy;
+- implement valid destination-option enumeration, configurable recommendation,
+  deterministic Trading Wallet selection, and pure Placement Policy;
 - implement cash spendability, shortfall, source options, route economics, and experience classification;
 - implement Relay-first deterministic selection and bounded two-segment plans;
 - implement quote storage, plan hash, consent, and public APIs;
@@ -2560,15 +3074,21 @@ Completion evidence:
 - Add Funds 100 versus trade 5 and existing-cash shortfall cases pass exact tests;
 - no Base parking or automatic rebalance path exists;
 - UI input cannot choose provider/destination address;
+- no-context multi-destination Add Funds cannot quote until the user chooses;
+- external balance size never overrides position/explicit/preference/internal precedence;
 - unknown speed is Prepare Funds;
 - disabled/unfundable venue returns typed unavailable, never fallback destination.
 
-### Work package 6 — Venue preparation and active trading integration
+### Work package 6 — Wallet preparation, position actions, and active trading integration
 
 Required work:
 
 - integrate Polymarket Deposit Wallet receipt, Funding Router follow-up,
   readiness, reservation, and fresh trade;
+- extract current Polymarket internal bootstrap, external Safe/deposit-wallet
+  setup, credential/approval, and readiness logic behind one purpose-aware adapter;
+- integrate owner-bound Polymarket redemption through a focused position-action
+  executor without modeling it as funding or withdrawal;
 - integrate Limitless collateral/readiness without weakening trade guards;
 - implement supported token conversion through common operations;
 - integrate optional withdrawal behind an independent gate;
@@ -2579,13 +3099,22 @@ Completion evidence:
 - PM collateral is CLOB-visible before executable readiness;
 - Limitless slow route prepares and requotes;
 - token conversion uses actual outputs;
-- abandoned trade releases prepared cash without auto-return.
+- abandoned trade releases prepared cash without auto-return;
+- auth, Add Funds, Buy, Sell, Redeem, and Telegram consume one preparation contract;
+- external ready/setup/source-only/view-only classifications match signer,
+  deployment, registration, credentials, approvals, and exact execution capability;
+- an external position can only be redeemed by its owner binding.
 
 ### Work package 7 — One web UX
 
 Required work:
 
 - implement shared account-value, asset, liquidity, quote, and operation hooks;
+- implement conditional `Where to add`, `Pay with`, and Trading Wallet choice
+  from combined opaque Venue + Trading Wallet cards, including Hunch-primary
+  external setup/internal switch copy;
+- implement runtime-controlled headline presentation and current-intent Trading
+  Wallet selection without a preferences settings surface;
 - replace Deposit orchestration with one controller and thin desktop/mobile renderers;
 - implement Tokens source/preference UX;
 - implement direct Receive, Relay Deposit Address, and Privy handoff presentations;
@@ -2598,7 +3127,10 @@ Completion evidence:
 - desktop/mobile use one reducer and selectors;
 - cognitive journeys meet section 2 budgets;
 - modal/client success never completes funding;
-- reload resumes backend state.
+- reload resumes backend state;
+- one destination/source proceeds directly, while real alternatives remain discoverable;
+- external source requires an explicit signature and is never silently pulled;
+- the initial UI contains no headline toggle or remembered-wallet setting.
 
 ### Work package 8 — Telegram and Privy policy integration
 
@@ -2608,6 +3140,8 @@ Required work:
 - implement authenticated one-time web handoff and resume notification;
 - implement exact delegated wallet/action/sponsorship validation and caps;
 - preserve fresh market quote and final Buy confirmation;
+- honor an explicit current-intent external choice only through exact bot
+  capability or web handoff, while retaining owner binding for position actions;
 - leave unsupported Limitless delegated trading off.
 
 Completion evidence:
@@ -2615,7 +3149,8 @@ Completion evidence:
 - web and bot produce the same operation/placement/route semantics;
 - bot never pulls external wallets or auto-sells suggested tokens;
 - ready never auto-buys;
-- policy revocation and mutation tests fail closed.
+- policy revocation and mutation tests fail closed;
+- unsupported external execution never silently falls back to a different owner.
 
 ### Work package 9 — Full verification, migration, and handoff
 
@@ -2623,6 +3158,8 @@ Required work:
 
 - switch all new local callers to new APIs with master-active local policy;
 - prevent new legacy bridge-order creation in new mode while retaining read/reconcile;
+- verify the Functional Parity Matrix includes wallet setup, Trading Wallet
+  selection, Sell, Redemption, and Withdrawal as distinct journeys;
 - run the complete local backend, frontend, admin, bot, migration, fixture,
   security, chaos, duplication, type, lint, format, test, and build milestone
   verification once for handoff; do not attach it to the ordinary deploy path;
@@ -2662,6 +3199,11 @@ The order is intentional:
 8. Web precedes Telegram presentation, while both share already stable APIs.
 9. Compatibility removal comes last because active legacy operations outlive
    new-plan creation switches.
+
+Work package 5 may plan only against the frozen preparation contract, simulator,
+or a thin current-behavior wrapper. It must not duplicate Polymarket setup logic.
+No new venue route becomes active until work package 6 installs and verifies the
+single real preparation/position-action capabilities.
 
 Safe parallel work after contracts freeze:
 
@@ -2732,15 +3274,17 @@ drain switch stops new selection but preserves status polling/webhooks.
 
 ## 28. Normative implementation defaults
 
-1. Headline label is `Estimated assets`, not `Available balance`.
-2. Initial headline includes supported liquid wallet tokens and venue cash;
-   prediction positions remain in Portfolio.
+1. The backend always returns liquid assets, positions, and total portfolio as
+   separate estimates; the headline mode is configurable and never says
+   `Available balance`.
+2. Safe initial mode is `liquid_only` (`Estimated assets`). Product may switch to
+   `liquid_plus_positions` (`Portfolio value`) without changing execution logic.
 3. Account Value includes one conservative in-transit claim after source debit.
 4. `Available now` is always intent- and binding-specific.
 5. Generic Add Funds places the full confirmed/received amount.
 6. Existing placed capital moves shortfall only.
-7. Preferred destination uses explicit venue, current trade, recent successful
-   trading, then Polymarket-first active fallback.
+7. Active trade fixes destination; generic Add Funds requires a choice when
+   several valid destinations exist, with Polymarket initially recommended.
 8. No Base parking, automatic consolidation, or rebalance worker.
 9. Token preference defaults to `ask`; every conversion needs exact consent.
 10. Exact-contract canonical stable assets only; symbols never imply 1 USD.
@@ -2772,12 +3316,28 @@ drain switch stops new selection but preserves status polling/webhooks.
 28. Provider IDs appear only in admin/support diagnostics.
 29. Full durable action/provider evidence follows financial retention; logs are redacted.
 30. Hyperliquid is contract stress-test only; Kalshi/DFlow remains disabled.
+31. Trading Wallet precedence is position owner, explicit current-intent choice,
+    internal Hunch default, then user-visible external alternatives; never balance size.
+32. Trading Wallet selection is `current_intent` only; no session/per-venue
+    memory, user setting, or preferences persistence ships initially.
+33. External wallet execution is always user-signed; setup does not create
+    delegated authority.
+34. The 45-second inline cap is an initial route-policy value proven per route,
+    not a Relay guarantee; unknown/unproven routes use Prepare Funds.
+35. Add Funds destinations render as combined `Venue · Trading Wallet` cards;
+    network/collateral are secondary backend-resolved details.
+36. The internal Hunch Trading Wallet is the primary new-intent path. External
+    wallet setup is secondary and appears only after explicit external interest.
 
 ## 29. Definition of Done
 
 ### 29.1 Product and accounting
 
 - one truthful estimated headline includes eligible cash/tokens once;
+- liquid assets, positions, and total portfolio are independently returned and
+  headline configuration cannot affect executable balance;
+- position value has one backend projector with identity, freshness,
+  completeness, and no open-order/cash double count;
 - stale/unpriced/in-transit assets are visibly distinguished;
 - locks and reservations affect availability, not ownership value;
 - every active trade surface uses intent-specific executable liquidity;
@@ -2785,7 +3345,12 @@ drain switch stops new selection but preserves status polling/webhooks.
 - Tokens may be suggested but never sold without exact consent;
 - slow routes use Prepare Funds and fresh Buy;
 - user can resume/recover from web and Telegram Activity;
-- normal UX never requires provider or destination-chain knowledge.
+- normal UX never requires provider or destination-chain knowledge;
+- no-context Add Funds skips fake choices but requires an explicit destination
+  choice when several valid venue/Trading Wallet destinations exist;
+- destination uses combined Venue + Trading Wallet cards, with Hunch primary
+  and external setup secondary after explicit interest;
+- the initial product has no user headline toggle or remembered-wallet setting;
 
 ### 29.2 Architecture
 
@@ -2793,9 +3358,13 @@ drain switch stops new selection but preserves status polling/webhooks.
   policy, planner, operation aggregate, status mapping, and web controller;
 - provider DTOs do not cross adapter boundaries;
 - venue capabilities are small and independently gated;
+- one purpose-aware wallet preparation capability serves all Polymarket flows;
+- owner-bound redemption remains a focused position action outside funding/withdrawal;
 - no second account/wallet registry;
 - no automatic rebalance or canonical parking network;
 - future custom venue location passes contracts without core changes;
+- external balance cannot silently select a Trading Wallet and external
+  source-only/view-only addresses cannot become executable bindings;
 - legacy APIs contain no new feature branches.
 
 ### 29.3 Execution and security
@@ -2807,6 +3376,9 @@ drain switch stops new selection but preserves status polling/webhooks.
 - Relay Deposit Address correlation, child requests, wrong-asset, and refund are covered;
 - Privy and Solana sponsorship mutation suites pass;
 - no automatic provider substitution after commit;
+- no destination or binding substitution after commit; later asset preference
+  or runtime presentation changes affect future intents only;
+- external wallet actions always use the exact user-controlled signer path;
 - active legacy operations retain their exact reconciler.
 
 ### 29.4 KISS/DRY
@@ -2897,6 +3469,8 @@ Backend starting evidence:
 - `apps/api/src/services/polymarket-embedded.ts` — PM wallet/readiness behavior;
 - `apps/api/src/services/api-trading-wallet-signing.ts` — signing boundary;
 - `apps/api/src/services/polymarket-funding-router.ts` — PM follow-up;
+- `apps/api/src/services/polymarket-redemption-plan.ts` — canonical redemption
+  adapters and position validation to preserve behind the focused capability;
 - `apps/api/src/services/polymarket-trading-execution-service.ts` — PM execution;
 - `apps/api/src/services/limitless-trading-execution-service.ts` — Limitless guards;
 - `apps/api/src/services/telegram-bot-trading.ts` — existing bot workflow;
@@ -2910,7 +3484,21 @@ Backend starting evidence:
 Frontend starting evidence:
 
 - `src/providers/auth/AuthProvider.tsx` and `AuthPrivyProvider.tsx` — wallet provisioning;
+- `src/providers/auth/AuthPolymarketWalletBootstrap.tsx` and
+  `src/lib/auth/embedded-polymarket-bootstrap-rules.ts` — current proactive
+  internal-wallet preparation inputs;
 - `src/lib/auth/privy-wallets.ts` — wallet classification;
+- `src/hooks/trade/useTradeWalletGate.ts` — current internal-first trade gate;
+- `src/hooks/confirmation/useSafeCandidatesByWallet.ts` — current deployed Safe,
+  owner, and threshold eligibility;
+- `src/lib/trade/embedded-polymarket-deposit-wallet.ts` — shared deposit-wallet,
+  credentials, approvals, and redemption-adapter preparation behavior;
+- `src/hooks/trade/usePolymarketTrade.ts` — current mixed external
+  Safe/deposit-wallet setup that must move behind the preparation capability;
+- `src/hooks/trade/usePolymarketRedemption.ts` and
+  `src/hooks/trade/useRedemptionWalletGate.ts` — current owner-bound redemption paths;
+- `src/hooks/bridge/useBridgeFundingSuggestion.ts` — legacy balance-driven source
+  scanning to replace with separate destination/binding/source policy;
 - `src/hooks/deposit/useDepositFundWallet.ts` — Privy funding entry point;
 - `src/lib/wallets/wallet-venue-totals.ts` — current total logic;
 - `src/lib/api/wallets.ts` — current wallet balance contract;
@@ -2977,14 +3565,16 @@ time because provider contracts and enabled routes can change.
 
 | Requirement | Normative sections | Verification sections |
 | --- | --- | --- |
-| one estimated total including supported tokens | 2.2–2.5, 7.4, 9 | 23.1, 29.1 |
+| configurable headline over backend-projected liquid/position totals | 2.2–2.4, 7.4, 9, 15 | 23.1, WP2, 29.1 |
 | intent-specific executable balance | 2.2–2.3, 7.5, 10 | 23.1, 23.5 |
 | full new-deposit placement | 2.6, 11 | 23.1, 19.1 |
 | shortfall-only existing funds | 2.6, 11 | 19.2, 23.1 |
 | no automatic rebalance/Base parking | 2.6, 6.3 | 24.4, 29.2 |
 | supported Tokens and explicit consent | 2.5, 9, 10 | 19.3, 23.1 |
-| simple Deposit UX | 2.8, 17 | 23.5, 29.1 |
-| slow-route Prepare Funds | 2.7, 19.6 | 23.5, 29.1 |
+| simple conditional Deposit UX | 2.6–2.11, 17 | 19.9–19.10, 23.5, 29.1 |
+| slow-route Prepare Funds | 2.10, 19.6 | 23.5, 29.1 |
+| current-intent Trading Wallet selection | 2.7–2.9, 10.4 | 19.10, 23.1, 23.5 |
+| shared wallet preparation and owner redemption | 2.8, 15.1 | 19.11, 23.1, WP6 |
 | Relay-first normalized routing | 5.1, 13 | 23.2, 27.3 |
 | Relay Deposit Addresses | 13.3–13.4 | 19.4, 23.2 |
 | Privy funding/sponsorship | 5.2, 14 | 19.5, 23.3 |
