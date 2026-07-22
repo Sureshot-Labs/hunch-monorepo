@@ -253,7 +253,26 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(result.emoji, "📈");
       assert.equal(result.hook, "+$2.5K bought. −3¢ anyway.");
-      assert.match(result.continuation ?? "", /moved against tracked flow/);
+      assert.match(
+        result.continuation ?? "",
+        /moved against large-wallet buying/,
+      );
+    },
+  },
+  {
+    name: "rate-move divergence reads naturally in a notification",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.83,
+        kind: "stats",
+        netCopyFlowUsd: 352_000,
+        priceMoveCents: -10,
+        subject: subject({ marketTitle: "25 bps increase", side: "NO" }),
+      });
+      assert.equal(
+        result.text,
+        "📈 +$352K bought. −10¢ anyway. NO on a 25 bps increase moved against large-wallet buying.",
+      );
     },
   },
   {
@@ -691,7 +710,7 @@ const tests: Array<{ name: string; run: () => void }> = [
       assert.equal(result.storyKind, "divergence");
       assert.equal(
         result.text,
-        "📈 +$345 bought. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against tracked flow.",
+        "📈 +$345 bought. −1¢ anyway. Will the Iranian regime fall before 2027? · YES moved against large-wallet buying.",
       );
       assert.doesNotMatch(result.text, /builds behind|backs/);
     },

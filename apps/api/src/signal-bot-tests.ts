@@ -12913,7 +12913,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        />\*Since the call\*\n>\u2800\n>Net tracked flow/,
+        />\*Since the call\*\n>\u2800\n>Net buying/,
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
@@ -13308,7 +13308,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           wallet_id: "exited",
         }),
       ];
-      const telegram = new FakeTelegram();
+      const richMessages: TelegramSendRichMessageInput[] = [];
+      const telegram = Object.assign(new FakeTelegram(), {
+        sendRichMessage: async (
+          message: TelegramSendRichMessageInput,
+        ): Promise<TelegramSendResult> => {
+          richMessages.push(message);
+          return { error: "other" as const, message: "fallback", ok: false };
+        },
+      });
       const result = await publishSignalBotFollowthroughTick({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
@@ -13326,9 +13334,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.sent, 1);
       assert.match(text, /^📈 \*\\\+\$19\\\.8K bought\\\. −2¢ anyway\\\.\*/);
       assert.ok(text.includes(">Spain \\(\\-1\\.5\\) price"));
+      assert.match(
+        JSON.stringify(richMessages[0]?.rich_message),
+        /Large wallets put another/,
+      );
+      assert.match(
+        JSON.stringify(richMessages[0]?.rich_message),
+        /behind Spain \(-1\.5\), but the market continued moving the other way\./,
+      );
       assert.ok(
         text.includes(
-          "Positive tracked flow has not offset 1 exit; __[Spain \\(\\-1\\.5\\) at 19¢]",
+          "The buying was not enough to offset the selling pressure\\. Spain \\(\\-1\\.5\\) is now trading at 19¢, down 2¢ since the original signal, while one large wallet has already exited\\.",
         ),
       );
       assert.doesNotMatch(text, /19¢cked|at 19¢cked/);
@@ -13371,7 +13387,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
       assert.doesNotMatch(text, /📍/);
-      assert.match(text, />Net tracked flow {2}/);
+      assert.match(text, />Net buying {2}/);
       assert.match(text, />YES price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       assert.doesNotMatch(text, /net tracked YES flow/);
     },
@@ -13415,7 +13431,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const text = telegram.messages[0]?.text ?? "";
       assert.equal(result.sent, 1);
-      assert.match(text, />Net tracked flow/);
+      assert.match(text, />Net buying/);
       assert.match(text, />NYG price {2}40¢ → 55¢ {2}\*\\\+15¢\*/);
       const keyboard = telegram.messages[0]?.reply_markup?.inline_keyboard;
       assert.equal(keyboard?.length, 1);
@@ -13479,7 +13495,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(text, /📍/);
       assert.match(text, />\*Since the call\*/);
-      assert.match(text, />Net tracked flow/);
+      assert.match(text, />Net buying/);
       assert.match(text, />Wallets {2}\*1\* added · \*1\* holding/);
       assert.match(
         text,

@@ -6963,6 +6963,50 @@ function formatSignedCentsMove(value: number | null): string {
   return "0¢";
 }
 
+function formatSignalBotHumanCount(
+  value: number,
+  singular: string,
+  plural: string,
+): string {
+  const words = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+  ];
+  const count =
+    value >= 0 && value < words.length ? words[value] : String(value);
+  return `${count} ${value === 1 ? singular : plural}`;
+}
+
+function formatSignalBotFollowthroughFlowMetric(value: number): {
+  label: string;
+  value: string;
+} {
+  if (value < 0) {
+    return {
+      label: "Net selling",
+      value: formatCompactUsd(Math.abs(value)),
+    };
+  }
+  if (value === 0) {
+    return {
+      label: "Net change",
+      value: formatCompactUsd(0),
+    };
+  }
+  return {
+    label: "Net buying",
+    value: formatSignedCompactUsd(value),
+  };
+}
+
 function formatSignalBotFollowthroughRead(input: {
   dominantConfluence?: boolean;
   hasWalletEvidence: boolean;
@@ -7064,17 +7108,23 @@ function formatSignalBotFollowthroughRead(input: {
   if (priceMoveCents != null && priceMoveCents < 0) {
     const move = `${Math.max(1, Math.round(Math.abs(priceMoveCents)))}¢`;
     if (input.stats.netSignalSideFlowUsd > 0) {
-      const support =
+      const currentPrice =
+        input.stats.markPrice == null
+          ? `${input.sideLabel} is down ${move} since the original signal`
+          : `${input.sideLabel} is now trading at ${formatCents(
+              input.stats.markPrice,
+            )}, down ${move} since the original signal`;
+      const exits =
         input.stats.exitedWallets > 0
-          ? `Positive tracked flow has not offset ${input.stats.exitedWallets} ${
-              input.stats.exitedWallets === 1 ? "exit" : "exits"
-            }`
-          : input.stats.trimmedWallets >= input.stats.joinedOrAddedWallets
-            ? "Positive tracked flow has not offset mixed wallet behavior"
-            : "Positive tracked flow has not lifted the market";
-      return `${support}; ${marketLabel} is ${move} below the call.`;
+          ? `, while ${formatSignalBotHumanCount(
+              input.stats.exitedWallets,
+              "large wallet has",
+              "large wallets have",
+            )} already exited`
+          : "";
+      return `The buying was not enough to offset the selling pressure. ${currentPrice}${exits}.`;
     }
-    return `${marketLabel} is ${move} below the call while tracked flow cools.`;
+    return `${marketLabel} is down ${move} since the original signal as wallets reduce their positions.`;
   }
   if (input.stats.netSignalSideFlowUsd > 0) {
     if (
@@ -7174,7 +7224,8 @@ function formatSignalBotFollowthroughLead(input: {
     stats.priceMoveCents < 0 &&
     stats.netSignalSideFlowUsd > 0
   ) {
-    return "Tracked money kept entering, but the market continued moving the other way.";
+    const buying = formatCompactUsd(stats.netSignalSideFlowUsd);
+    return `Large wallets put another ${buying} behind ${input.sideLabel}, but the market continued moving the other way.`;
   }
   if (
     stats.priceMoveCents != null &&
@@ -7222,6 +7273,9 @@ function formatSignalBotFollowthroughStatLines(input: {
   priceLine: string;
   stats: SignalBotFollowthroughStats;
 }): string[] {
+  const flow = formatSignalBotFollowthroughFlowMetric(
+    input.stats.netSignalSideFlowUsd,
+  );
   const pnlLine =
     input.stats.estimatedOpenPnlUsd != null &&
     Math.abs(input.stats.estimatedOpenPnlUsd) >= 1
@@ -7230,9 +7284,7 @@ function formatSignalBotFollowthroughStatLines(input: {
         )}`
       : null;
   return [
-    `Net tracked flow: ${formatSignedCompactUsd(
-      input.stats.netSignalSideFlowUsd,
-    )}`,
+    `${flow.label}: ${flow.value}`,
     formatSignalBotFollowthroughActivityLine(input.stats),
     input.priceLine,
     ...(pnlLine ? [pnlLine] : []),
@@ -7275,6 +7327,9 @@ function formatSignalBotFollowthroughRichTable(input: {
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): TelegramInputRichMessage["blocks"][number] {
+  const flow = formatSignalBotFollowthroughFlowMetric(
+    input.stats.netSignalSideFlowUsd,
+  );
   const displayedPriceMoveCents =
     input.stats.entryPrice != null && input.stats.markPrice != null
       ? Math.round(input.stats.markPrice * 100) -
@@ -7306,10 +7361,8 @@ function formatSignalBotFollowthroughRichTable(input: {
       ),
     },
     {
-      label: "Net tracked flow",
-      value: telegramRichBold(
-        formatSignedCompactUsd(input.stats.netSignalSideFlowUsd),
-      ),
+      label: flow.label,
+      value: telegramRichBold(flow.value),
     },
   ];
   const trimmedOnly = Math.max(
@@ -7361,6 +7414,9 @@ function formatSignalBotFollowthroughStatBlock(input: {
   sideLabel: string;
   stats: SignalBotFollowthroughStats;
 }): string {
+  const flow = formatSignalBotFollowthroughFlowMetric(
+    input.stats.netSignalSideFlowUsd,
+  );
   const displayedPriceMoveCents =
     input.stats.entryPrice != null && input.stats.markPrice != null
       ? Math.round(input.stats.markPrice * 100) -
@@ -7385,8 +7441,8 @@ function formatSignalBotFollowthroughStatBlock(input: {
   const lines = [
     formatTelegramBold("Since the call"),
     "",
-    `${escapeTelegramMarkdownV2("Net tracked flow")}  ${formatTelegramBold(
-      formatSignedCompactUsd(input.stats.netSignalSideFlowUsd),
+    `${escapeTelegramMarkdownV2(flow.label)}  ${formatTelegramBold(
+      flow.value,
     )}`,
     ...formatSignalBotFollowthroughActivityMarkdownLines(input.stats),
     priceLine,

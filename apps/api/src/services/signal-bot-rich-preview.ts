@@ -289,18 +289,24 @@ function buildSignalBotRichPreviewFixtures(
       ],
     }),
     richPreviewStory({
-      continuation: "The price still fell.",
+      continuation:
+        "NO on a 25 bps Fed increase in July moved against large-wallet buying.",
       emoji: "📈",
-      hook: "+$43K bought.",
+      hook: "+$352K bought. −10¢ anyway.",
       paragraphs: [
-        "Three wallets increased their positions, but the market continued moving against them.",
-        "The wallets and the market still disagree. That is worth watching.",
+        "Large wallets put another $352K behind NO, but the market continued moving the other way.",
+        "The buying was not enough to offset the selling pressure. NO is now trading at 83¢, down 10¢ since the original signal, while three large wallets have already exited.",
       ],
       rows: [
-        { label: "Market", value: "Spain to win" },
-        { label: "Net tracked flow", value: "+$43K" },
-        { label: "Wallet activity", value: "3 added · 3 exited" },
-        { label: "YES price", value: "69¢ → 68¢" },
+        { label: "Market", value: "25 bps Fed increase in July" },
+        { label: "Net buying", value: "+$352K" },
+        {
+          label: "Wallet activity",
+          value: "6 added · 7 trimmed · 3 exited",
+        },
+        { label: "Still holding", value: "13" },
+        { label: "NO price", value: "93¢ → 83¢" },
+        { label: "Est. open PnL", value: "−$77.7K" },
       ],
     }),
   ];

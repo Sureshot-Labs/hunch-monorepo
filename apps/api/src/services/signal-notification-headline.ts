@@ -337,6 +337,13 @@ function formatSignedMove(cents: number): string {
   return `${cents >= 0 ? "+" : "−"}${rounded}¢`;
 }
 
+function naturalizeRateMoveSubject(value: string): string {
+  return value.replace(
+    /^(YES|NO) on (?=\d+(?:\.\d+)?\s+(?:bps?|basis points?)\s+(?:increase|decrease)\b)/i,
+    "$1 on a ",
+  );
+}
+
 function parseQuestionPosition(positionLabel: string): {
   question: string;
   side: "NO" | "YES";
@@ -1202,7 +1209,9 @@ export function buildSignalNotificationHeadline(input: {
     hook = `+${formatCompactUsd(netFlow)} bought. ${formatSignedMove(
       priceMove ?? 0,
     )} anyway.`;
-    continuation = `${input.subject.text} moved against tracked flow.`;
+    continuation = `${naturalizeRateMoveSubject(
+      input.subject.text,
+    )} moved against large-wallet buying.`;
   } else if (
     materialPositiveFlow &&
     strongPositiveMove &&
