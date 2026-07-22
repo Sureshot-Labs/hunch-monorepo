@@ -1,12 +1,14 @@
 # Hunch Unified Account Value and Relay-First Funding Plan
 
-Status: normative implementation plan, read-only research revision 2  
-Scope: current Hunch frontend and backend; Polymarket and Limitless active; Kalshi/DFlow disabled; future venues represented only through contracts  
+Status: normative implementation plan, reviewed correction revision 3
+Scope: current Hunch frontend and backend; Polymarket and Limitless active;
+Kalshi/DFlow new exposure disabled with legacy exit-only safety preserved; future
+venues represented only through contracts
 Primary new-route provider: Relay  
-Legacy compatibility: Across and deBridge reconciliation, with new fallback routes disabled by default  
-Supersession rule: this file does not modify or delete
-`docs/unified-balance-plan.md`; when the two documents disagree, this revision
-records the newer product and architecture decision
+Legacy compatibility: Bungee, Across, and deBridge reconciliation, with new fallback routes disabled by default
+Supersession rule: this standalone file is the only normative unified-account
+and funding plan. It fully supersedes earlier local or untracked unified-balance
+research drafts and does not depend on them being present in a clean checkout.
 
 ## 0. How to use this plan
 
@@ -83,15 +85,17 @@ Normative decisions:
 7. Relay Deposit Addresses are a first-class plan shape for supported exchange,
    on-ramp, and manual-transfer ingress. They are activation-gated, not omitted
    from the architecture.
-8. Across and deBridge do not define the new abstraction. Their old operations
-   remain reconcilable through narrow versioned compatibility code. Any new
-   fallback is exact-route, explicitly enabled, and off by default.
+8. Bungee, Across, and deBridge do not define the new abstraction. Their old
+   operations remain reconcilable through narrow versioned compatibility code.
+   Bungee is legacy-only; any other new fallback is exact-route, explicitly
+   enabled, and off by default.
 9. Privy remains the existing wallet, funding-presentation, delegated-action,
    and sponsorship capability. It is not a routing planner or settlement proof.
 10. Web and Telegram consume the same backend quote, operation, reconciliation,
     and venue-readiness contracts.
-11. Disabled Kalshi/DFlow contributes no balance, destination, routing,
-    readiness, or delegated execution capability.
+11. Kalshi/DFlow contributes no new-exposure destination, funding, routing, or
+    delegated automation capability. Existing exit-only account read, cancel,
+    reconciliation, redeem, and reduce-exposure paths remain intact.
 12. Hyperliquid and other future venues add location, balance, readiness,
     destination, trade, and reconciliation adapters later. No Hyperliquid code
     is implemented by this plan.
@@ -499,7 +503,7 @@ asks for a fresh Buy confirmation.
 ### 3.2 Explicitly out of scope
 
 - connecting or trading Hyperliquid now;
-- reactivating Kalshi/DFlow;
+- reactivating Kalshi/DFlow discovery, funding, new exposure, or automation;
 - native Bitcoin support;
 - a universal token router for arbitrary or unpriced assets;
 - automated portfolio allocation or background rebalancing;
@@ -516,6 +520,10 @@ asks for a fresh Buy confirmation.
 - migrating active legacy operations in place to a different provider;
 - using provider token catalogs as the account inventory;
 - direct production activation without fixtures and bounded rehearsal.
+- executable two-segment routes or an immutable up-front quote that pretends to
+  know the exact first-segment output; staged continuation is a future contract;
+- open/variable Relay Deposit Address execution in the initial rollout;
+- an app-controlled Relay refund wallet or other hidden recovery custody.
 
 ## 4. Audited current-state constraints
 
@@ -530,6 +538,8 @@ The implementation must reuse, not duplicate, current truths:
   lock-aware venue facts;
 - current bridge routes and frontend orchestration are provider-coupled and are
   compatibility inputs, not the new domain boundary;
+- legacy `bridge_orders` historically permits Bungee, deBridge, and Across, but
+  the original rows do not all carry an adapter-version field;
 - current Across code uses Swap API for some EVM paths and legacy suggested-fees
   behavior for non-EVM paths;
 - current deBridge code contains materially different same-chain and cross-chain behavior;
@@ -537,6 +547,11 @@ The implementation must reuse, not duplicate, current truths:
 - current Limitless trade execution retains its existing safety gates;
 - current Telegram trading already has durable intents and idempotency that
   should reference a separate Funding Operation rather than be replaced;
+- current `finance-worker` already owns durable scheduled financial work and is
+  the correct process boundary for funding reconciliation leases;
+- current venue lifecycle defaults Kalshi to `exit-only`, preserving account
+  read, cancel, reconciliation, redeem, and reduce exposure while disabling new
+  exposure/discovery/automation;
 - current Solana sponsorship and transaction inspection contain reusable
   venue-neutral behavior but are coupled to disabled Kalshi/DFlow code in places;
 - abandoned Hyperliquid prototypes prove that funding, bridge, class transfer,
@@ -626,6 +641,29 @@ eligibility, so each enabled asset/network/mode needs a pinned schema and live
 fixture. Deposit addresses cannot be assumed to execute arbitrary destination
 calldata; venue preparation remains a separate Hunch-owned step.
 
+As revalidated against the official pages on 2026-07-22:
+
+- Quote v2 amounts are smallest-unit integer strings and Hunch pins the exact
+  `tradeType` it uses rather than inferring exact-input/output semantics;
+- open Deposit Addresses may regenerate a quote and produce a new or child
+  `requestId` after overpayment, underpayment, or certain asset differences;
+  the primary correlation key is the deposit address and child requests are
+  retrieved explicitly;
+- strict mode has deterministic exact-amount behavior, but underpayment fails
+  and refunds, while overpayment executes the original amount and refunds excess;
+- strict mode requires a safe `refundTo`; refunding a centralized-exchange
+  sender can pay an exchange hot wallet rather than the Hunch user;
+- Status v3 prose, response enums, and webhook examples do not use a perfectly
+  consistent refund status spelling, so unknown raw statuses fail closed;
+- Relay webhooks are HMAC-SHA256 over `${timestamp}.${rawBody}`; Hunch verifies raw
+  bytes, a bounded timestamp/replay window, and the signature in constant time.
+
+Therefore the first activatable Deposit Address contract is strict/exact and
+only for a controlled source with a verified user-owned refund location. CEX,
+open/variable, and Privy-on-ramp-to-Relay routes remain disabled until Hunch has
+a separately approved dynamic requote/consent and non-custodial refund design.
+Direct Receive remains the default external ingress in those cases.
+
 ### 5.2 Privy
 
 Privy funding is modeled as configured ingress/presentation capabilities:
@@ -638,9 +676,18 @@ type PrivyFundingCapability =
 ```
 
 The current legacy hook may remain until a product need justifies migration.
-Modern fiat and bank methods are experimental/configuration-dependent and are
-not advertised from SDK availability alone. Privy crypto deposit addresses are
-not a dependency of this rollout.
+Fiat on-ramp methods are provider/configuration-dependent; bank deposits require
+Bridge credentials and KYC. Neither is advertised from SDK availability alone,
+and modal/provider completion is not settlement evidence. Privy's documented
+crypto deposit-address capability is not a dependency of this rollout.
+
+Linked, connected, embedded, and cross-app/global wallets are not interchangeable.
+Inventory may observe an address only after the applicable ownership/link proof.
+An external wallet uses its supported web-client signature path. A cross-app
+wallet may be read-only; where transactions are enabled Privy requires the
+provider-app/user confirmation flow. Telegram therefore uses only a durable,
+scoped `telegram_bot_trading_authorization`; otherwise it returns an authenticated
+web handoff and resumes from backend evidence.
 
 An exact Privy action policy applies to the wallet action API actually used.
 Privy-managed EIP-7702 sponsorship may be accepted only through its pinned,
@@ -650,7 +697,8 @@ action-validated execution profile. A provider-supplied Relay
 ### 5.3 Across
 
 Across `/suggested-fees` is legacy for new integrations. Existing stored
-adapter versions continue to reconcile unchanged. Any future new-plan Across
+adapter versions, and deterministically classified historical rows that predate
+an adapter-version column, continue to reconcile unchanged. Any future new-plan Across
 fallback must use the current Swap API for an exact route proven by fixtures.
 No new non-EVM route is created from the deprecated mode without a separately
 pinned supported contract.
@@ -692,11 +740,15 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 3. No provider, destination, wallet binding, or placement substitution occurs
    after approval, signature, external handoff start, or broadcast.
 4. Possible broadcast plus timeout becomes `reconcile_required`, not `failed`.
-5. Actual observed amounts, not quoted amounts, feed the next segment and projection.
-6. Segment two cannot start before exact intermediate output observation.
-7. A route contains one segment or exactly two ordered segments; no DAG or route search.
-8. The frontend cannot supply provider, recipient, venue contract, refund address,
-   arbitrary calldata, external call, hook, or intermediate location.
+5. Every executable initial route has at most one provider segment.
+6. Actual observed amounts update accounting and settlement; they never mutate a
+   committed route into an unapproved continuation.
+7. A future staged continuation requires a new quote over the observed output,
+   a new consent, and a linked operation; it is not segment two of an immutable quote.
+8. Except for raw input to the dedicated authenticated withdrawal-recipient
+   registration endpoint, the frontend cannot supply provider, recipient,
+   venue contract, refund address, arbitrary calldata, external call, or hook
+   to discovery, quote, commit, action, or retry endpoints.
 9. Every normalized action is validated against the committed plan before execution.
 10. Sponsorship is decided per exact action after transaction inspection.
 11. External client/modal success is never financial settlement.
@@ -710,6 +762,8 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 17. Sell and Redeem use the position-owning binding and cannot switch wallets to
     bypass missing readiness.
 18. Preferences changed after commit cannot mutate an operation snapshot.
+19. Quote ownership, operation ownership, step ownership, and opaque option
+    ownership are checked on every read and write; IDOR attempts return no data.
 
 ### 6.3 Placement
 
@@ -757,13 +811,19 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 9. Solana sponsorship validates fee payer, native transfers, token accounts,
    ATA creation/closure, rent destination, and sponsor caps.
 10. Privy/EIP-7702 paths accept only exact locally understood actions and policy domains.
+11. Authenticated routes derive `users.id` from the session, scope every query by
+    that ID, rate-limit quote/commit/action endpoints, and reject idempotency-key
+    reuse with a different canonical payload hash.
+12. Encrypted provider references and addresses have separate keyed-HMAC lookup
+    fingerprints; plaintext, ciphertext, and encryption keys are never search keys.
 
 ## 7. Domain model
 
 ### 7.1 Identifiers and money
 
 ```typescript
-type AccountId = string;
+type UserId = string;
+type AccountId = UserId; // domain alias only; persistence uses users.id/user_id
 type WalletId = string;
 type NetworkId = string;
 type AssetId = string;
@@ -796,6 +856,9 @@ type UsdEstimate = {
 
 Raw amounts are validated integer strings and use bigint arithmetic. Decimal
 formatting and JavaScript `number` never participate in accounting or execution.
+`AccountId` is not a second account system. Every authenticated API derives it
+from the server session and maps it to `users.id`; no client-supplied account or
+user identifier is accepted as authority.
 
 ### 7.2 Asset locations and capabilities
 
@@ -827,6 +890,32 @@ type AssetLocation =
       asset: AssetRef;
     };
 
+type ValidatedExternalRecipient = {
+  recipientId: string;
+  accountId: AccountId;
+  networkId: NetworkId;
+  asset: AssetRef;
+  address: string;
+  addressFingerprint: string;
+  validatedAt: string;
+  expiresAt: string;
+  validationPolicyVersion: number;
+};
+
+type FundingTarget =
+  | { kind: "owned_location"; location: AssetLocation }
+  | { kind: "external_recipient"; recipient: ValidatedExternalRecipient };
+
+type FundingSourceRef =
+  | { kind: "owned_location"; location: AssetLocation }
+  | {
+      kind: "external_ingress";
+      ingressKind: "controlled_wallet" | "exchange" | "privy" | "manual";
+      networkId: NetworkId | null;
+      asset: AssetRef | null;
+      controlledSender: boolean;
+    };
+
 type LocationCapability =
   | "observe"
   | "value"
@@ -846,6 +935,11 @@ type AssetLocationPolicy = {
 Capabilities belong to exact location patterns, not to a global assumption that
 a network is a source, destination, or intermediate network. A future protocol
 subaccount can be a venue settlement location without pretending to be an EVM wallet.
+`AssetLocation` always represents value Hunch can prove belongs to the user.
+An arbitrary withdrawal address is never converted into an `AssetLocation` and
+never enters Account Value. Raw network/address input is accepted only by the
+authenticated withdrawal-destination registration endpoint; all quote, commit,
+action, and retry APIs use the resulting opaque `recipientId`.
 
 ### 7.3 Ownership, execution, and venue bindings
 
@@ -895,7 +989,8 @@ type ObservedAsset = {
   amount: Money;
   ownershipEvidenceId: string;
   observedAt: string;
-  freshness: "fresh" | "stale" | "error";
+  observationFreshness: "fresh" | "stale" | "unknown";
+  observationError: { code: string; retryable: boolean } | null;
   metadataRisk: "verified" | "unverified" | "spam";
 };
 
@@ -905,6 +1000,9 @@ type ValuedAssetComponent = {
   amount: Money;
   category: "cash" | "token" | "in_transit";
   estimatedUsd: UsdEstimate | null;
+  observedAt: string;
+  observationFreshness: "fresh" | "stale" | "unknown";
+  observationError: { code: string; retryable: boolean } | null;
   valuationEligibility: "included" | "unpriced" | "stale" | "excluded";
   executionEligibility: "unknown" | "eligible" | "temporarily_unavailable" | "ineligible";
   reasonCodes: string[];
@@ -917,6 +1015,9 @@ type ValuedPositionComponent = {
   positionRef: string;
   estimatedUsd: UsdEstimate | null;
   valuationMethod: string;
+  observedAt: string;
+  observationFreshness: "fresh" | "stale" | "unknown";
+  observationError: { code: string; retryable: boolean } | null;
   valuationEligibility: "included" | "unpriced" | "stale" | "excluded";
   reasonCodes: string[];
 };
@@ -927,11 +1028,14 @@ type AccountValueProjection = {
   positionsEstimatedUsd: string;
   totalPortfolioEstimatedUsd: string;
   headlineMode: HeadlineValueMode;
-  positionValuationCompleteness: "complete" | "partial" | "stale";
+  positionValuationCompleteness: "complete" | "partial";
+  positionValuationFreshness: "fresh" | "stale";
   cashEstimatedUsd: string;
   tokenEstimatedUsd: string;
   inTransitEstimatedUsd: string;
-  valuationCompleteness: "complete" | "partial" | "stale";
+  valuationCompleteness: "complete" | "partial";
+  valuationFreshness: "fresh" | "stale";
+  collectorErrors: Array<{ collectorId: string; code: string; retryable: boolean }>;
   unpricedAssetCount: number;
   asOf: string;
   components: ValuedAssetComponent[];
@@ -950,16 +1054,38 @@ type FundingPurpose =
   | "manual_rebalance";
 
 type FundingIntent = {
-  accountId: AccountId;
   purpose: FundingPurpose;
   requestedDestinationAmount: Money | null;
   confirmedSourceAmount: Money | null;
   marketContextId: string | null;
   destinationOptionId: string | null;
+  withdrawalRecipientId: string | null;
   venueBindingOptionId: string | null;
   maxFeeUsd: string | null;
   maxSlippageBps: number | null;
   deadline: string | null;
+};
+
+type SourceOption = {
+  sourceOptionId: string;
+  kind:
+    | "wallet_asset"
+    | "venue_cash"
+    | "privy_funding_method"
+    | "manual_receive"
+    | "relay_deposit_address";
+  safeLabel: string;
+  source: FundingSourceRef;
+  amountMode: "exact_input" | "exact_output" | "variable_external";
+  maximumSourceRaw: RawAmount | null;
+  expectedDestination: Money | null;
+  minimumDestination: Money | null;
+  estimatedUsd: string | null;
+  requiredActions: ActionSummary[];
+  expiresAt: string;
+  recommended: boolean;
+  selectable: boolean;
+  reasonCodes: string[];
 };
 
 type FundingDestinationOption = {
@@ -976,8 +1102,16 @@ type FundingDestinationOption = {
 };
 
 type IntentLiquidityProjection = {
-  venueId: VenueId;
-  venueBindingOptionId: string;
+  liquidityProjectionId: string;
+  marketContextId: string | null;
+  venueId: VenueId | null;
+  venueBindingOptionId: string | null;
+  destinationOptionId: string | null;
+  collateralAsset: AssetRef;
+  requestedCollateralRaw: RawAmount;
+  availableNowRaw: RawAmount;
+  shortfallRaw: RawAmount;
+  convertibleRaw: RawAmount;
   requestedUsd: string;
   availableNowUsd: string;
   shortfallUsd: string;
@@ -985,9 +1119,44 @@ type IntentLiquidityProjection = {
   mode: "instant" | "inline_funding" | "prepare_first" | "unavailable";
   eta: { minSeconds: number; maxSeconds: number } | null;
   requiredActions: ActionSummary[];
+  sourceOptions: SourceOption[];
+  asOf: string;
+  expiresAt: string;
+  policyVersion: number;
+  completeness: "complete" | "partial";
+  freshness: "fresh" | "stale";
+  errors: Array<{ code: string; retryable: boolean }>;
   reasonCodes: string[];
 };
+
+type FundingQuoteRequest = {
+  liquidityProjectionId: string;
+  selectedSourceOptionId: string;
+  confirmedSourceAmount: Money | null;
+  requestedDestinationAmount: Money | null;
+};
+
+type FundingCommitRequest = {
+  quoteId: string;
+  consentToken: string;
+  idempotencyKey: string;
+};
 ```
+
+`marketContextId` is backend-issued and resolves a frozen market, side, venue,
+execution profile, market-price revision, and compatible binding set. The
+liquidity response is discovery, not an executable quote. Quote creation must
+name exactly one `selectedSourceOptionId`; commit must name only the resulting
+`quoteId`. Omitted source selection, stale projection, changed amount, or an
+idempotency key previously used with a different payload fails closed.
+
+`withdrawalRecipientId` is required only for Withdrawal and is mutually
+exclusive with a venue destination option. The backend revalidates its owner,
+expiry, network, asset, and policy at discovery, quote, commit, and action time.
+
+Only `availableNowRaw` for the exact `collateralAsset`, binding, and fresh market
+context may enable Buy. USD fields are display estimates and never authorize an
+order, reservation, or transfer.
 
 ### 7.6 Placement decision
 
@@ -1002,7 +1171,7 @@ type PlacementDecision = {
   sourceAmount: Money;
   destinationRequirement: Money;
   targetVenueId: VenueId | null;
-  targetLocation: AssetLocation;
+  target: FundingTarget;
   boundedBuffer: Money | null;
   reason: "explicit" | "current_trade" | "single_valid_option";
   policyVersion: number;
@@ -1010,8 +1179,9 @@ type PlacementDecision = {
 ```
 
 `PlacementPolicy` is a pure function of the intent, observed balances, target
-requirement, preference evidence, and policy snapshot. It cannot execute,
-reserve, quote a provider, or mutate preference.
+requirement, and policy snapshot. Token suggestion preference may rank source
+options before explicit selection but cannot change placement. The policy cannot
+execute, reserve, quote a provider, or mutate preference.
 
 `recommended` is not a Placement Decision reason. It is non-authoritative UI
 metadata on a destination option until the user chooses that option.
@@ -1022,7 +1192,7 @@ metadata on a destination option until the user chooses that option.
 type FundingExecutionPlan =
   | {
       kind: "wallet_route";
-      segments: [ProviderSegment] | [ProviderSegment, ProviderSegment];
+      segments: [ProviderSegment];
     }
   | {
       kind: "relay_deposit_address";
@@ -1130,8 +1300,10 @@ funding/
   destination-resolver.ts
   source-options-service.ts
   planner.ts
+  quote-service.ts
   operation-service.ts
   operation-reconciler.ts
+  reconciliation-job-repo.ts
   reservation-service.ts
   observation-service.ts
   history-projector.ts
@@ -1150,6 +1322,8 @@ funding-providers/
     fixtures/
   across/
     swap-api-adapter.ts
+    legacy-reconciler.ts
+  bungee/
     legacy-reconciler.ts
   debridge/
     same-chain-adapter.ts
@@ -1185,6 +1359,12 @@ Existing services are reused through thin ports. Legacy `bridge.ts`, bridge
 schemas, frontend deposit API, and bridge recovery remain behind a compatibility
 mode until no caller or non-terminal operation needs them. They do not import
 the new Relay adapter or grow new branches.
+
+`apps/finance-worker` owns scheduled lease claims and invokes the pure funding
+reconciler through a sidecar-safe entrypoint. `apps/api` owns authenticated
+discovery/quote/commit/action routes and idempotent job wake-up only. Shared
+repositories require `user_id` for user-facing reads; support/admin access is a
+separate audited permission path, not a bypass flag in ordinary repositories.
 
 ## 9. Account inventory and valuation
 
@@ -1296,8 +1476,8 @@ address, intermediate network, or calldata.
    binding; an opaque choice is revalidated; one valid no-context option may
    proceed directly; several valid no-context options return
    `destination_selection_required` with one recommendation.
-2. Resolve the selected binding using position ownership, explicit/stored
-   preference, then internal-Hunch default precedence.
+2. Resolve the selected binding using position ownership, an explicit valid
+   current-intent choice, then internal-Hunch default precedence.
 3. Resolve exact collateral requirement and purpose-aware wallet readiness.
 4. Read immediately spendable target collateral after locks/reservations.
 5. Calculate the exact shortfall.
@@ -1309,8 +1489,10 @@ address, intermediate network, or calldata.
 9. Apply Placement Policy to determine the permissible source/destination amount.
 10. Ask Relay first for exact eligible candidates.
 11. Classify route experience from measured route policy.
-12. Return normalized source options and one recommended source; never return a
-    provider menu.
+12. Persist an expiring discovery projection and return normalized source
+    options plus one recommended source; never return a provider menu.
+13. Require the next quote request to name exactly one opaque source option and
+    revalidate its ownership, amount mode, expiry, destination, and policy.
 
 ### 10.3 Source options
 
@@ -1326,6 +1508,10 @@ Each `SourceOption` includes:
 - signatures/external actions required;
 - gas/rent and sponsorship readiness;
 - expiry, warnings, and typed unavailability reasons.
+
+The selected source option, not just a source asset, is frozen into the quote.
+Discovery results and provider candidates are not executable and cannot be
+committed directly.
 
 Ingress options are distinct from executable wallet sources:
 
@@ -1441,8 +1627,9 @@ Default warnings and hard rejection use net destination value:
 ### 12.1 Aggregate ownership
 
 `FundingOperation` is the sole durable aggregate for new funding, conversion,
-shortfall, external ingress, preparation, and withdrawal movement. A parent
-trade intent references it; it does not duplicate its state machine.
+shortfall, external ingress, preparation, and withdrawal movement. It does not
+own the order state machine. A trade intent may reference the funding operation,
+and the eventual order/execution consumes its settled reservation explicitly.
 
 The aggregate owns:
 
@@ -1457,13 +1644,33 @@ The aggregate owns:
 
 ### 12.2 Tables
 
+#### `funding_quotes`
+
+Executable quotes are durable, user-scoped, single-use records. Minimum
+columns are `id`, `user_id references users(id) on delete restrict`, discovery
+projection ID, selected source-option snapshot, market/destination/binding
+snapshots, normalized plan snapshot, policy version, canonical request hash,
+plan hash, expiry, consumed timestamp, and audit timestamps. Unique
+`(user_id, id)` ownership is checked before commit. Reusing an idempotency key
+or consent token with a different canonical request hash is a conflict, never a
+replay of the first result.
+
+#### `funding_withdrawal_destinations`
+
+Stores `id`, `user_id references users(id) on delete restrict`, exact network and
+asset, encrypted normalized address, address lookup HMAC, validation evidence,
+lookup-key version, policy version, expiry/revocation, and audit timestamps. It grants no signing or
+transfer authority. Merge, wallet unlink, network-policy change, or expired
+validation revokes it until revalidated.
+
 #### `funding_operations`
 
 Minimum columns:
 
 ```text
 id uuid primary key
-account_id uuid not null
+user_id uuid not null references users(id) on delete restrict
+quote_id uuid not null references funding_quotes(id) on delete restrict
 purpose text not null
 status text not null
 progress_stage text not null
@@ -1472,9 +1679,12 @@ plan_kind text not null
 idempotency_key text not null
 plan_hash text not null
 policy_version bigint not null
-source_location_snapshot jsonb
-destination_location_snapshot jsonb not null
+source_snapshot jsonb
+destination_target_snapshot jsonb not null
+external_recipient_id uuid references funding_withdrawal_destinations(id) on delete restrict
 venue_id text
+market_id text references unified_markets(id) on delete restrict
+market_context_snapshot jsonb
 venue_binding_snapshot jsonb
 wallet_execution_snapshot jsonb
 placement_snapshot jsonb not null
@@ -1484,7 +1694,6 @@ actual_source_amount jsonb
 actual_destination_amount jsonb
 quote_snapshot jsonb not null
 consent_snapshot jsonb not null
-parent_trade_intent_id uuid
 error_code text
 support_metadata jsonb not null
 created_at timestamptz not null
@@ -1492,7 +1701,10 @@ updated_at timestamptz not null
 completed_at timestamptz
 ```
 
-Unique `(account_id, idempotency_key)` prevents duplicate commit. `plan_hash`
+Unique `(user_id, idempotency_key)` prevents duplicate commit. A composite
+foreign key `(user_id, quote_id) -> funding_quotes(user_id, id)` makes quote
+ownership a database invariant. Every API query also scopes by `user_id`;
+possession of an operation/step/quote UUID is never authorization. `plan_hash`
 binds ordered segments, amounts, locations, actions, execution profile, binding,
 limits, and policy.
 
@@ -1506,16 +1718,18 @@ provider_id text not null
 adapter_version integer not null
 segment_kind text not null
 status text not null
-source_location_snapshot jsonb not null
-destination_location_snapshot jsonb not null
+source_snapshot jsonb not null
+destination_target_snapshot jsonb not null
 quoted_input jsonb not null
 quoted_expected_output jsonb not null
 quoted_min_output jsonb not null
 actual_input jsonb
 actual_output jsonb
 provider_quote_ref_encrypted text
-provider_request_ref_encrypted text
+provider_quote_ref_lookup_hmac text
 deposit_address_encrypted text
+deposit_address_lookup_hmac text
+lookup_key_version integer not null
 refund_location_snapshot jsonb
 quote_expires_at timestamptz not null
 submitted_at timestamptz
@@ -1524,16 +1738,30 @@ raw_status text
 support_metadata jsonb not null
 ```
 
+Lookup HMAC values are produced with a separately rotated key and indexed only
+where reconciliation requires equality lookup. They reveal no plaintext and are
+never reused as encryption nonces or keys. Every lookup stores its key version;
+rotation uses bounded dual-read/reindex and removes the old key only after an
+audited zero-old-version check.
+
 Constraints:
 
-- ordinals are unique per operation and limited to 0 and 1;
+- ordinals are unique per operation and limited to 0 in the initial schema;
 - direct external handoff and already-available plans have zero segments;
 - Relay Deposit Address plans have exactly one Relay segment;
-- wallet route plans have one or two ordered segments;
-- segment one source equals the exact observed segment-zero intermediate output;
+- wallet route plans have exactly one segment;
 - active stored adapter versions always have a reconciler.
 
-#### `funding_operation_steps`
+#### `funding_provider_requests`
+
+Stores the one-to-many provider correlation set for a segment: initial or child
+kind, encrypted provider request ID, lookup HMAC, raw status, discovery source,
+lookup-key version, first/last seen timestamps, and support metadata. Unique `(segment_id,
+request_ref_lookup_hmac)` prevents duplicate child attachment. A Relay deposit
+address is the primary lookup key; returned child requests remain correlations
+of the same segment and never create unrelated user operations.
+
+#### `funding_operation_steps` and `funding_operation_step_attempts`
 
 Stores normalized approvals, transactions, signatures, external handoff
 instructions, server actions, and venue preparation. Each step has an immutable
@@ -1542,6 +1770,13 @@ transaction/signature reference, and action-validation result.
 
 No raw arbitrary provider action is executed from this table. Only a normalized
 action that passed the common validator may become actionable.
+
+Each attempt is append-only and records `step_id`, attempt number, canonical
+action fingerprint, executor, started/finished timestamps, outcome, encrypted
+transaction/signature/provider receipt references plus lookup HMAC where needed,
+and `actual_costs` JSON. Actual costs include network fee, provider fee, token
+fee, sponsorship charged, Solana rent deposited, rent refunded, and the asset/raw
+amount of each. Quote estimates remain separate and are never reported as actuals.
 
 #### `funding_observations`
 
@@ -1558,6 +1793,11 @@ from_address text
 to_address text not null
 raw_amount text not null
 observed_at timestamptz not null
+ledger_height text
+block_hash text
+finality_status text not null
+canonical boolean not null default true
+reorged_at timestamptz
 finalized_at timestamptz
 metadata jsonb not null
 ```
@@ -1572,10 +1812,15 @@ a reused owned wallet, correlate the finalized transfer and operation amount/tim
 window; ambiguous concurrent transfers require transaction selection or support,
 not arbitrary first-match allocation.
 
+An observation cannot settle a segment until its configured finality rule is
+met. A canonicality check may mark it reorged and reverse only the derived
+projection/state through the reducer; the immutable observation and audit trail
+remain. Reorg tests cover source debit, destination credit, and refund evidence.
+
 #### `balance_reservations`
 
 Reservations identify owner, source component/location, asset/raw amount, mode,
-expiry, and release/consume outcome. Required modes:
+expiry, `consumer_kind`, `consumer_ref`, and release/consume outcome. Required modes:
 
 - `subtract_available`;
 - `advisory_destination`;
@@ -1585,9 +1830,16 @@ Reservation creation is in the same database transaction as operation commit.
 Expiry does not release a source reservation until reconciliation proves no
 transaction may have been broadcast.
 
+Web Buy consumes the reservation in the same transaction that records the
+order/execution linkage. Telegram adds a nullable `funding_operation_id` column
+to `telegram_trade_intents`, referencing `funding_operations(id) ON DELETE
+RESTRICT`; its confirmed Buy follows the same consume-and-link rule.
+Failure before order submission releases an advisory destination reservation;
+ambiguous submission keeps it reserved until order reconciliation.
+
 #### `user_asset_funding_preferences`
 
-Stores account, canonical asset/location selector, suggestion preference,
+Stores `user_id`, canonical asset/location selector, suggestion preference,
 revision, and audit timestamps. It stores no approvals or permissions.
 
 #### `funding_route_observations`
@@ -1595,6 +1847,17 @@ revision, and audit timestamps. It stores no approvals or permissions.
 Stores redacted route key, provider/adapter version, amount band, timestamps,
 actual latency stages, outcome, refund/recovery, and policy revision. It powers
 experience classification and support, not accounting.
+
+#### `funding_reconciliation_jobs`
+
+This is the durable wake-up/lease table owned by `finance-worker`. It stores one
+row per operation with `due_at`, priority, lease owner/until, attempt count,
+last error, and timestamps. A unique operation key makes webhook and polling
+wake-ups idempotent. Workers claim due rows with `FOR UPDATE SKIP LOCKED`, renew
+bounded leases, and always re-read the operation before reducing state. Process
+restart, duplicate webhook, and expired lease tests prove recovery. The worker
+imports sidecar-safe optional funding configuration and must not transitively
+load API-wide required-secret modules.
 
 ### 12.3 Operation and progress states
 
@@ -1632,11 +1895,11 @@ and enforced by transition helpers and database integration tests.
 
 Terminality rules:
 
-- `ready` means funds are prepared for the parent trade and held by an advisory
+- `ready` means funds are prepared for the declared consumer and held by an advisory
   reservation; it is not an executed order;
 - Add Funds or Convert may move from destination readiness to `completed` once
   no parent consumer is pending;
-- a shortfall operation becomes `completed` when the parent trade consumes its
+- a shortfall operation becomes `completed` when the linked order/execution consumes its
   settled reservation, or remains ordinary available cash when released;
 - `recovery_required` is non-terminal;
 - `refunded`, `failed`, `cancelled`, and `completed` are terminal only after
@@ -1684,7 +1947,10 @@ For every action:
 
 The reconciler uses provider status, chain observations, venue readiness, and
 stored transaction references. Webhooks enqueue the same idempotent reconcile
-path used by polling.
+path used by polling. `finance-worker` is the sole production owner of durable
+job claims and reducer execution; API routes only commit/wake work and may return
+the current state. Webhook loss is recovered by scheduled polling, and runtime
+creation-mode off never strands a non-terminal operation.
 
 ### 12.6 Retention
 
@@ -1693,6 +1959,23 @@ must be added to market-retention protected-reference, derived/delete-report,
 cleanup, and hard-delete paths before retention deletion is enabled. Durable
 financial rows and validated action fingerprints follow existing financial
 retention. Logs contain only bounded redacted metadata.
+
+### 12.7 User data lifecycle matrix
+
+This matrix is a mandatory implementation artifact, not follow-up cleanup:
+
+| Event | Quotes and operations | Destinations and preferences | Evidence and authorization |
+|---|---|---|---|
+| user merge preflight | lock both user rows; invalidate unconsumed quotes; reject while either user has a non-terminal funding operation, ambiguous broadcast, or live reservation | enumerate conflicts; never pick a wallet, destination, or preference by balance | enumerate Telegram authorizations, linked ownership proofs, and terminal evidence before mutation |
+| user merge commit | atomically reassign terminal operations, observations, attempts, route history, and released/consumed reservations to the target user; preserve original subject fingerprints in audit metadata | revoke withdrawal destinations for revalidation; retain an identical token-suggestion preference, otherwise clear it and ask later | revoke/reissue scoped Telegram authorization when identity or wallet scope changes; retain immutable financial/action audit |
+| account deletion | block hard delete while financial retention requires `users.id`; deactivate and pseudonymize the user row, cancel unused quotes, and continue reconciliation of non-terminal value movement | revoke destinations, clear suggestion preferences, unlink non-required wallet metadata | retain minimum encrypted/pseudonymous settlement, consent, security, and support evidence for the declared financial retention period |
+| retention expiry | delete only after protected-reference and derived/delete reports are empty | delete expired destination validation and preferences according to policy | crypto-shred encrypted optional payloads where allowed; retain only evidence mandated by financial/security policy |
+
+`admin-merge-user-core.ts`, auth deletion/deactivation, duplicate-wallet merge,
+Telegram authorization management, funding tables, and market retention are one
+transactional lifecycle boundary. A partial reassignment is forbidden. Every
+table introduced by this plan appears in the matrix with an explicit merge,
+deletion, retention, and conflict rule before its migration is approved.
 
 ## 13. Routing provider architecture
 
@@ -1704,8 +1987,8 @@ type ProviderQuoteCandidate = {
   adapterVersion: number;
   capability: "same_network_swap" | "cross_network_transfer" | "cross_network_swap";
   amountMode: "exact_input" | "exact_output";
-  source: AssetLocation;
-  destination: AssetLocation;
+  source: FundingSourceRef;
+  destination: FundingTarget;
   expectedOutput: Money;
   minimumOutput: Money;
   fees: ProviderFee[];
@@ -1746,17 +2029,20 @@ refund location, limits, and request tracking pass activation evidence.
 
 Initial recommended scope:
 
-- exchange/manual/on-ramp ingress in a supported stable asset;
-- open/variable amount when provider or exchange fees make exact receipt uncertain;
+- controlled-wallet ingress in a supported stable asset;
+- strict/exact amount only;
 - a fresh unique operation/order identity;
 - a verified user-owned embedded/linked refund location on the source network;
 - direct settlement to the selected destination path;
 - no arbitrary destination call;
 - no reuse as a generic permanent deposit address in v1.
 
-Strict mode may be enabled later for exact known input. Underpayment, overpayment,
-wrong token, wrong chain, expiration, refund, and child requote behavior require
-fixtures and explicit UI/support handling.
+All Deposit Address routes remain off by default. Strict mode may be activated
+route by route only after underpayment, overpayment, wrong token, wrong chain,
+expiration, and refund fixtures plus tiny-value evidence pass. Open/variable
+mode, CEX senders, and app-controlled refund addresses are not executable in the
+initial plan. They require a future staged quote/consent contract and an approved
+non-custodial recovery design.
 
 Lifecycle:
 
@@ -1764,14 +2050,16 @@ Lifecycle:
 2. commit operation and persist request ID/address before showing it;
 3. show exact asset/network, amount semantics, expiry, and warning;
 4. observe source transfer to deposit address;
-5. query by request ID and deposit address, collecting child request IDs;
+5. query primarily by deposit address, including child requests, then reconcile
+   every returned request ID through Status v3;
 6. reconcile Relay settlement/refund;
 7. observe final owned destination;
 8. run separate venue preparation when required.
 
-A Privy on-ramp may target the deposit address only when its installed/configured
-API supports the exact address/asset/network and policy explicitly permits this
-composition. Privy UI completion still does not settle the Relay segment.
+A Privy on-ramp does not target a Relay deposit address in the initial plan.
+Future enablement requires installed/configured support for the exact address,
+asset, and network plus the same refund and staged-consent safety. Privy UI
+completion still would not settle the Relay segment.
 
 ### 13.4 Relay status and webhooks
 
@@ -1783,23 +2071,27 @@ unknown-status fail-closed behavior.
 Webhooks:
 
 - use a dedicated non-cookie route;
-- verify the exact documented authentication/signature over raw bytes;
+- verify `X-Signature-Timestamp` and `X-Signature-SHA256` as HMAC-SHA256 over
+  `${timestamp}.${rawBody}`, use constant-time comparison, and enforce a replay window;
 - persist provider event ID or deterministic fingerprint;
 - enqueue reconciliation;
 - never directly mutate terminal state from unverified payload data;
 - fall back to bounded polling until terminal chain/destination evidence exists.
 
-### 13.5 Across compatibility and fallback
+### 13.5 Across and Bungee compatibility; Across fallback
 
 Split current behavior into:
 
 - `AcrossLegacyReconciler`: all stored adapter versions, including historical
   suggested-fees/non-EVM modes;
+- `BungeeLegacyReconciler`: historical `bridge_orders.provider = 'bungee'`
+  rows only; it is never registered for a new Funding Operation;
 - `AcrossSwapApiAdapter`: possible new exact-route fallback using current Swap API.
 
 Defaults:
 
 - all new-plan Across route allowlists are empty;
+- all new-plan Bungee routes are permanently absent;
 - deprecated suggested-fees modes never create new operations;
 - a fallback route must pin approvals, transaction, fees, expected/min output,
   quote expiry, refund behavior, balance/allowance checks, and status latency;
@@ -1824,7 +2116,7 @@ Defaults:
 
 ### 13.7 Selection policy
 
-For each permitted one- or two-segment shape:
+For each permitted single-segment shape:
 
 1. evaluate hard Hunch eligibility;
 2. ask Relay within a configured deadline;
@@ -1840,17 +2132,23 @@ reconciliation, never substitution.
 
 ### 13.8 Two-segment routes
 
-A two-segment route is allowed only when:
+Two-segment routes are deliberately non-executable in the initial rollout. An
+immutable up-front plan cannot safely bind a second provider quote whose input
+is the first segment's not-yet-observed output and whose expiry may pass before
+settlement.
 
-- a single valid Relay route is unavailable;
-- policy names the complete route shape;
-- the intermediate is an exact allowlisted owned stable location;
-- the first actual output can be observed and reserved;
-- the second source equals that observation;
-- total economics and ETA pass user limits;
-- both adapters/actions pass their independent gates.
+A future staged design may link two separate Funding Operations only after:
 
-The planner supports at most two ordered segments. It does not build a graph.
+- the first operation reaches final, canonical destination observation;
+- the exact intermediate output is reserved at an allowlisted owned location;
+- a fresh discovery and quote are created for that raw output;
+- current fees, minimum output, deadline, policy, and destination are disclosed;
+- the user gives a second explicit consent, or a separately specified bounded
+  delegated mandate authorizes that exact continuation;
+- cancellation leaves the intermediate as ordinary owned value without an
+  unapproved automatic retry.
+
+No work package in this plan activates that future contract.
 
 ## 14. Privy, wallet execution, and sponsorship
 
@@ -2018,11 +2316,20 @@ does not register Hyperliquid networks, balances, routes, policies, or UI.
 
 ### 15.4 Disabled venues
 
-Kalshi/DFlow is omitted from active registries. Disabled historical collectors,
-wallets, assets, or credentials cannot contribute Account Value through a venue
-component, destination selection, funding, or delegated execution. A token in a
-user wallet may still appear as an ordinary supported wallet asset if it passes
-venue-independent inventory and valuation policy.
+Kalshi/DFlow is omitted from every new-exposure registry: discovery for new
+trades, Funding Destination, route planning, `increaseExposure`, and automation.
+The repository's default `exit-only` lifecycle remains authoritative and keeps
+`accountRead`, `cancel`, `reconciliation`, `redeem`, and `reduceExposure` working
+for existing users. This plan must not replace DFlow with the deprecated legacy
+Kalshi indexer or import Kalshi/DFlow services into the new funding boundary.
+Existing web/Telegram Kalshi intents and executions retain their current
+versioned reconciliation and permitted exit actions until terminal.
+
+Legacy Kalshi holdings are shown in a separate exit-only component with their
+reason/status but are excluded from the new headline and Intent Liquidity until
+a separate product decision specifies identity, valuation, deduplication, and
+freshness. A token in a user wallet may still appear as an ordinary supported
+wallet asset if it passes venue-independent inventory and valuation policy.
 
 ## 16. Public API
 
@@ -2054,12 +2361,21 @@ POST /funding/withdrawal-destinations
 one configurable recommendation for a no-trade Add Funds flow. It does not
 return independently composable raw network, collateral, address, or binding IDs.
 
-`POST /funding/quotes` returns one immutable normalized plan with source options,
-placement, destination/binding option, actions, economics, ETA, expiry, and
-consent summary. It never returns provider secrets or raw provider DTOs.
+`POST /funding/liquidity` returns expiring discovery plus owned opaque source
+options. `POST /funding/quotes` requires exactly one source-option ID and returns
+one immutable normalized plan with that source, placement, destination/binding,
+actions, economics, ETA, expiry, and consent summary. It never returns provider
+secrets or raw provider DTOs.
 
 `POST /funding/operations` commits a quote with idempotency key and explicit
 consent. Action endpoints never accept replacement recipient/calldata.
+
+All account and funding endpoints are authenticated, derive `user_id` from the
+session, scope reads and writes by that ID, and enforce per-endpoint rate limits.
+The sole raw recipient exception is `POST /funding/withdrawal-destinations`,
+which validates and stores an expiring recipient. Quote, commit, action, report,
+retry, history, and cancellation endpoints accept only opaque owned IDs. Client
+reports are hints/transaction references and never settlement evidence.
 
 Existing/new position-action endpoints for Sell/Redeem use the same binding and
 wallet-preparation contracts but remain outside `/funding/operations`. Their
@@ -2222,10 +2538,12 @@ The bot never pulls a linked external wallet, invents a signer, treats a token
 suggestion as consent, or buys automatically after preparation. Per-operation
 and daily caps, policy revocation, idempotency, and audit remain mandatory.
 
-Internal managed bindings are the Telegram default. A stored external preference
-is used only when the bot's exact execution capability supports that binding;
-otherwise the bot offers the internal Hunch path or an authenticated web handoff.
-It never silently ignores ownership for Sell/Redeem.
+Internal managed bindings are the Telegram default for a new Buy/Add Funds
+intent. An explicit choice exists only inside the current web handoff. Telegram
+may execute solely through a durable, exact-scope
+`telegram_bot_trading_authorization`; otherwise it offers the internal Hunch path
+or an authenticated web handoff. It never silently ignores ownership for
+Sell/Redeem.
 
 ## 19. End-to-end workflows
 
@@ -2263,25 +2581,29 @@ It never silently ignores ownership for Sell/Redeem.
    price, route, and destination.
 4. Quote binds exact input or exact-output max input and minimum receipt.
 5. User confirms; preference alone is insufficient.
-6. Execute one or at most two segments, using actual intermediate output.
+6. Execute the single committed provider segment.
 7. In-transit value replaces debited source value until final observation.
 8. Final cash becomes available at the selected venue.
 
 ### 19.4 Exchange or manual transfer
 
 1. User selects exchange/manual source, exact source asset/network, and amount semantics.
-2. Backend chooses direct owned Receive or Relay Deposit Address.
+2. Exchange ingress uses direct owned Receive in the initial rollout. A
+   controlled-wallet source may offer a separately gated strict/exact Relay
+   Deposit Address only with a verified user-owned refund location.
 3. For Relay, commit and persist request/address/refund facts before display.
 4. User sends only the instructed asset/network.
 5. Backend records exact transfer observation; client report is progress only.
-6. Relay tracks initial and child requests, final settlement, or refund.
+6. When Relay is used, Hunch queries by deposit address, tracks all returned
+   request IDs, and reconciles final settlement or refund.
 7. Venue preparation completes separately.
 8. Wrong asset/network remains a recovery/support case and is never coerced into success.
 
 ### 19.5 Privy card/on-ramp or bank deposit
 
 1. Eligibility proves the exact configured Privy method and destination.
-2. Backend commits a direct handoff or Relay Deposit Address plan.
+2. Backend commits a direct handoff to the exact owned destination; Privy to a
+   Relay Deposit Address is disabled in the initial rollout.
 3. Frontend opens Privy for the immutable destination.
 4. `submitted`, modal close, or bank instructions retain awaiting state.
 5. Provider progress may accelerate support but on-chain destination observation
@@ -2304,6 +2626,11 @@ It never silently ignores ownership for Sell/Redeem.
 3. Quote binds source, amount, fees, destination snapshot, and actions.
 4. Commit reserves source cash and executes through the same operation aggregate.
 5. Source debit, destination/refund, and recovery are observed exactly.
+
+After a final external-recipient debit, the amount leaves Account Value because
+the recipient is not an owned location. A pending refund remains an in-transit
+claim only while Hunch can prove the refund right and destination; successful
+refund observation restores the owned component.
 
 Withdrawal uses the same primitives but may remain rollout-gated independently
 if it would delay the core Add Funds/trade-shortfall path.
@@ -2361,11 +2688,14 @@ if it would delay the core Add Funds/trade-shortfall path.
 | Source debit observed, destination pending | replace source with one in-transit estimate | drop value or count both |
 | Ambiguous broadcast | reconcile required | retry/broadcast again |
 | Quote expires before signature | re-quote and re-confirm changed economics | submit stale action |
+| Quote omits source option or changes amount | reject and return fresh discovery | infer a source or mutate the quote |
+| Cross-user opaque ID | return no resource and audit/rate-limit | reveal ownership or operate on it |
 | Relay unknown status | preserve raw status and reconcile | map optimistically to success/failure |
 | Relay child requote | attach child request to same operation | create unrelated user operation |
 | Deposit wrong asset/network | recovery/support state | pretend committed route settled |
 | Deposit-address under/overpayment | apply pinned mode behavior and actual amount | assume requested amount arrived |
 | Unsafe refund address | route unavailable | refund to exchange hot wallet |
+| CEX or Privy source requests Relay deposit address | offer direct owned Receive/handoff | create initial-plan Relay instruction |
 | Privy modal closes | continue awaiting observation | mark funding complete |
 | Privy says submitted | record progress | credit destination cash |
 | Destination cash observed | run required venue preparation | mark venue executable prematurely |
@@ -2376,17 +2706,19 @@ if it would delay the core Add Funds/trade-shortfall path.
 | Headline includes positions | change display label/composition only | use positions as executable liquidity |
 | Multiple Add Funds destinations | require one combined Venue + Trading Wallet card choice and mark recommendation | separate arbitrary network/collateral choice or auto-commit |
 | One destination and one source | go directly to review | show redundant selection screens |
-| External wallet has larger balance | keep position/explicit/preference/internal precedence | silently switch Trading Wallet |
+| External wallet has larger balance | keep position/explicit-current-intent/internal precedence | silently switch Trading Wallet |
 | External source selected | require supported user signature | server-pull linked assets |
 | External wallet lacks venue setup | prefer Hunch wallet; show external setup after explicit interest | call it ready because address/balance exists |
 | External binding owns position | prepare/redeem through that owner binding | switch to Hunch wallet for redemption |
-| Preference changes | affect future intents only | mutate active operation or rebalance money |
+| Token suggestion preference changes | affect future source suggestions only | mutate active operation, wallet selection, or rebalance money |
 | Across/deBridge new fallback disabled | do not query/create | silently use legacy provider |
 | Legacy operation active | reconcile stored adapter version | migrate provider mid-flight |
 | deBridge cancellation needs gas | recovery action required | claim automatic refund |
 | Sponsorship policy revoked | fail closed with repair action | fall back to generic signer |
 | Unknown action/calldata | reject and alert | forward provider payload |
 | Duplicate webhook | idempotent reconcile | regress or duplicate operation |
+| Canonical observation reorgs | retain evidence and recompute derived state | leave settled value/order eligibility unchanged |
+| Creation mode turns off mid-operation | block new work; continue observation/reconcile/refund/recovery | stop worker or mark active work failed |
 | Browser/bot restarts | resume from backend operation | depend on local reducer state |
 | Disabled venue | omit exact venue capabilities | infer readiness from indexed data |
 
@@ -2396,7 +2728,9 @@ if it would delay the core Add Funds/trade-shortfall path.
 
 The immutable effective funding policy owns:
 
-- master mode: `off`, `shadow`, `internal`, `cohort`, `on`;
+- creation mode: `off`, `shadow`, `internal`, `cohort`, `on`;
+- independent gates for new quote, commit, starting an unsubmitted step,
+  reconciliation, webhook ingestion, polling, and worker drain;
 - account-value asset/network observation and valuation entries;
 - per-venue position-value capability and freshness policy;
 - headline presentation mode; user override is disabled in the initial policy;
@@ -2411,11 +2745,19 @@ The immutable effective funding policy owns:
 - Privy configured funding-method/destination matrix;
 - wallet action, sponsorship, and delegated-policy IDs;
 - purpose-aware wallet preparation and position-action capability gates;
-- two-segment route allowlists and intermediate locations;
+- staged-continuation capability fixed to disabled in this plan;
 - Telegram per-operation/daily caps;
 - collector, price, quote, polling, and reservation TTLs.
 
 Policy contains canonical Hunch IDs, never provider DTOs or arbitrary code.
+
+Creation mode is not a kill switch for financial truth. `off` and every rollback
+state block new executable quotes, commits, and unsubmitted value-moving steps,
+but keep authenticated operation reads, webhook verification, observation,
+polling, reconciliation, refunds, recovery actions, and worker drain active for
+all existing operations. A separate emergency broadcast pause may stop a new
+transaction before any possible submission; it cannot disable evidence intake
+or reinterpret a possibly submitted step as failed.
 
 ### 21.2 Cross-field validation
 
@@ -2429,12 +2771,14 @@ Publication fails when any are true:
   validator, reconciler, refund semantics, and destination observation;
 - a Relay Deposit Address route lacks a verified refund location rule, transfer
   observation, request/child-request tracking, or wrong-asset recovery policy;
+- the initial policy enables an open/variable, exchange-sender,
+  Privy-to-Relay, or app-controlled-refund Deposit Address route;
 - a Privy funding method is active without explicit local configuration and
   exact destination support;
 - a provider capability is inferred from another capability;
 - an inline route lacks sufficient measured route observations or an explicit
   temporary internal-only override;
-- a two-segment route lacks exact intermediate ownership and observation;
+- the initial policy enables staged/two-segment continuation;
 - a venue funding flag is on while its lifecycle/readiness destination is off;
 - delegated execution is on without exact Privy action policies and caps;
 - disabled Kalshi/DFlow or future Hyperliquid entries enter active registries;
@@ -2446,6 +2790,8 @@ Publication fails when any are true:
 - a position action permits a binding other than its proved owner;
 - a no-trade multi-destination flow can commit without an opaque user selection;
 - the initial policy enables a user headline toggle or remembered Trading Wallet.
+- creation mode can disable webhook ingestion, polling, reconciliation, refund,
+  recovery, or worker drain for a non-terminal operation.
 
 ### 21.3 Admin UI
 
@@ -2453,7 +2799,7 @@ Add a dedicated funding/account-value section that reuses existing typed
 runtime-policy draft/diff/confirm patterns. It shows:
 
 - effective revision and actor;
-- master mode;
+- creation mode and each independent execution/reconciliation gate;
 - asset/location capabilities;
 - active venues and destinations;
 - Relay capabilities/routes;
@@ -2606,7 +2952,7 @@ Intent/placement:
 - Add Funds 100 with trade 5 routes 100 received, not 5;
 - existing venue cash moves shortfall only;
 - buffer never exceeds policy and is separately disclosed;
-- preference affects only future destination selection;
+- token suggestion preference affects only future source suggestions;
 - no code path emits automatic rebalance;
 - suggested token still requires operation-specific consent;
 - unavailable route does not reduce Account Value.
@@ -2618,7 +2964,7 @@ Wallet/binding/preparation:
   unselected external wallet regardless of balance;
 - `external_source_only` and `external_view_only` never become Trading Wallet options;
 - external execution always requires the exact client/user signature path;
-- preference changes after commit leave the frozen binding unchanged;
+- token suggestion preference changes after commit leave the frozen source unchanged;
 - one Polymarket preparation contract produces purpose-specific readiness for
   auth bootstrap, Add Funds, Buy, Sell, Redeem, and Telegram;
 - external Safe threshold/deployment/registration/credential/approval mutations fail closed;
@@ -2630,7 +2976,9 @@ State machine:
 - every status/stage combination is declared;
 - duplicate/out-of-order webhook is idempotent;
 - possible broadcast never blind-retries;
-- segment two waits for exact intermediate output;
+- the initial transition map rejects a second provider segment;
+- a future staged continuation cannot reuse quote, consent, or idempotency from
+  the first operation;
 - terminal state cannot regress;
 - ready never implies market order.
 
@@ -2656,7 +3004,7 @@ Relay-specific fixtures:
 - every enabled chain/currency mapping;
 - rate limit, timeout, delayed, success, refund/refunded variation, failure,
   unknown status, and webhook replay;
-- deposit-address strict/open enabled mode;
+- deposit-address strict/exact enabled mode and open/variable rejection;
 - underpayment, overpayment, partial, expiry, wrong token/network, refund;
 - request ID, deposit-address lookup, and child requote/request tracking;
 - unsafe refund location rejection;
@@ -2666,6 +3014,7 @@ Relay-specific fixtures:
 Across:
 
 - all stored legacy adapter versions reconcile;
+- historical Bungee rows reconcile while no Bungee route can be created;
 - no new suggested-fees plan;
 - Swap API fallback stays off without exact route policy;
 - current approvals, fee, output, expiry, refund, and status fixtures.
@@ -2683,13 +3032,13 @@ deBridge:
 Reject mismatched:
 
 - chain, sender, signer, wallet ID, execution profile;
-- recipient, refund address, intermediate, venue contract;
+- recipient, refund address, venue contract;
 - asset, amount, allowance, spender, selector/program, instruction accounts;
 - deadline, quote/plan hash, policy revision;
 - native value, payer, sponsorship cap;
 - typed-data domain, EIP-7702 authorization source;
 - Solana fee payer, ATA authority/closure, rent recipient;
-- segment order and observed intermediate amount;
+- step order, operation/user ownership, and selected source-option ownership;
 - client-supplied arbitrary calldata, Relay external call, deBridge hook.
 
 Every positive fixture is exact; every single-field mutation fails.
@@ -2697,16 +3046,24 @@ Every positive fixture is exact; every single-field mutation fails.
 ### 23.4 Database integration tests
 
 - quote commit is idempotent;
+- quote, operation, step, and destination ownership resist cross-user/IDOR access;
+- idempotency-key reuse with a different payload hash is rejected;
 - reservation and operation commit are atomic;
 - segment-count/plan-kind invariants hold;
 - observation unique key prevents double allocation;
 - concurrent Receive operations do not first-match the same transfer;
 - child Relay request remains attached to parent segment;
-- actual outputs propagate to projections and next segment;
+- actual outputs propagate to projections and settlement without mutating the plan;
 - source reservation survives ambiguous expiry until reconciliation;
 - in-transit claim lifecycle counts once;
 - terminal/refund/recovery transitions are durable;
 - stored adapter version selects the correct reconciler;
+- historical rows without adapter version are deterministically classified,
+  including Bungee, Across, and deBridge shapes;
+- job leases survive duplicate wake-up, worker crash, and lease expiry;
+- canonical/finality and reorg transitions preserve immutable observations;
+- actual network/provider/sponsorship/rent costs remain distinct from estimates;
+- merge/deletion/retention lifecycle rules cover every new user-owned table;
 - retention selector protects all new market/user-visible references;
 - migrations succeed clean and from representative pre-feature schema.
 
@@ -2716,7 +3073,7 @@ across route handlers.
 
 ### 23.5 API and frontend tests
 
-- account value and asset breakdown render complete/partial/stale correctly;
+- account value and asset breakdown render completeness and freshness independently;
 - Tokens suggestion preference never changes balance or executes;
 - desktop/mobile/header/trade use shared projection and formatter;
 - one reducer drives Deposit on both layouts;
@@ -2763,8 +3120,9 @@ At minimum:
 | Solana USDC | Polymarket | Add Funds | Relay route/settlement |
 | Ethereum supported USDT/USDC | Polymarket | prepare/inline by evidence | exact mapping, refund, net output |
 | supported wallet token | active venue | conversion | consent, price, route, min output |
-| exchange stablecoin | active venue | Relay deposit address | observation, child request, refund |
-| Privy configured on-ramp | exact destination | external handoff/deposit address | method config, observation |
+| exchange stablecoin | owned receive location | direct Receive | exact asset/network, observation |
+| controlled wallet stablecoin | active venue | strict Relay deposit address, gated | exact amount, owned refund, request correlation |
+| Privy configured on-ramp | exact owned destination | external handoff | method config, KYC/config where required, observation |
 | existing other-venue cash | target venue | shortfall only | withdrawal/movement capability |
 | any enabled source | Limitless slow route | Prepare Funds | measured latency, fresh Buy |
 | eligible cash | validated user destination | withdrawal | destination ID, recovery |
@@ -2794,15 +3152,23 @@ fallback test.
 
 ### 23.9 Lightweight test execution policy
 
-Hunch is a small team and this plan does not introduce a mandatory test pipeline
-on every pull request or every deployment. The normal deployment path must stay
+Hunch is a small team and this plan does not put live-provider or full-matrix
+tests on every pull request or deployment. The normal deployment path must stay
 close to the current five-minute duration and must not wait for live provider,
 wallet, bridge, deposit, venue-settlement, or full end-to-end rehearsals.
 
+Changes to money arithmetic, projection/deduplication, state transitions,
+idempotency/reservations, action validation, authorization/ownership, provider
+normalization, or database invariants must run their deterministic focused tests
+before merge. These fast local tests are mandatory for the touched contract and
+must also run in the repository's ordinary verification path once implemented;
+they use no live provider and do not expand the deploy command into a rehearsal.
+
 Use three deliberate test modes:
 
-1. **Focused local checks** — the developer runs the relevant unit, type, lint,
-   fixture, or integration checks for the area being changed.
+1. **Focused deterministic checks** — the developer runs the mandatory unit,
+   fixture, security, and database contract tests for touched financial code,
+   plus relevant type/lint checks.
 2. **Milestone verification** — the full local suite and route matrix run when a
    work package is completed, before the first broader rollout, or after a
    material change to shared funding/execution contracts.
@@ -2842,7 +3208,7 @@ justifies it, but this is a conscious operation, not a permanent CI/deploy gate.
 | wallet setup/readiness | purpose-aware `WalletPreparationAdapter` |
 | redemption | focused `PositionActionExecutor` using owner binding |
 | route/provider choice | backend `FundingPlanner` |
-| durable progress | `FundingOperation` + reconciler |
+| durable progress | `FundingOperation` + `finance-worker` reconciler queue |
 | action security | normalized validator + network executor |
 | venue collateral/readiness | small venue capabilities |
 | UI orchestration | one funding controller |
@@ -2934,13 +3300,15 @@ Required work:
   readiness classes, and purpose-aware preparation contracts;
 - pin official Relay Quote/Status/Deposit Address/OpenAPI evidence and sanitized fixtures;
 - pin actual configured Privy funding methods/destinations and action policies;
-- capture every active legacy Across/deBridge adapter version and non-terminal row shape;
+- capture every active legacy Bungee/Across/deBridge row shape; where historical
+  rows have no adapter version, freeze a deterministic classifier and additive
+  version-tagging/backfill strategy without rewriting them as Funding Operations;
 - define canonical assets, location capabilities, settlement destinations,
-  intermediate allowlist, price policies, and route keys;
+  price policies, and route keys;
 - capture route latency/economics evidence where available;
 - map every requirement to a test/fixture/command owner.
 
-Create three lightweight mandatory artifacts before implementation begins:
+Create four lightweight mandatory artifacts before implementation begins:
 
 1. **Legacy Exit Matrix** — every old quote/create/UI/orchestration/provider
    component, whether it still has a live caller or stored operation, the exact
@@ -2948,7 +3316,8 @@ Create three lightweight mandatory artifacts before implementation begins:
    condition. Old operation reconcilers are marked live compatibility, not dead
    code; old creation/UI code must have a physical removal milestone.
 2. **Live Rehearsal Harness** — a manual, guarded tiny-value runner for exact
-   scenarios such as Relay wallet routing, Relay Deposit Address funding,
+   scenarios such as Relay wallet routing, strict Relay Deposit Address funding
+   from a controlled wallet,
    Polymarket/Limitless settlement visibility, Privy-sponsored actions, and
    withdrawal, plus external-wallet setup and owner-bound redemption where
    those capabilities are proposed for activation. It reads required keys only
@@ -2961,10 +3330,16 @@ Create three lightweight mandatory artifacts before implementation begins:
    which the corresponding legacy path may be removed. A route without proven
    replacement remains on its working legacy path or is subject to an explicit
    product decision; it does not disappear accidentally.
+4. **User Data Lifecycle Matrix** — every new and touched user-owned table, its
+   merge owner, non-terminal-operation behavior, conflict rule, deletion or
+   pseudonymization behavior, retention period, and crypto-shredding rule. It
+   explicitly covers withdrawal destinations, token suggestions, Telegram
+   authorizations, quotes, operations, reservations, attempts, observations,
+   route history, notifications, and market protected references.
 
 Completion evidence:
 
-- all three artifacts exist, have named owners, and contain current rather than
+- all four artifacts exist, have named owners, and contain current rather than
   placeholder rows;
 - no unknown active legacy adapter version;
 - no external schema claim lacks source/revision/date;
@@ -2977,6 +3352,8 @@ Required work:
 
 - implement provider/venue-neutral types, location capabilities, funding intent,
   projections, plan union, normalized actions, reason codes, and transition map;
+- freeze authenticated discovery -> selected-source quote -> commit request
+  schemas, including exact raw collateral fields and market-context binding;
 - implement opaque destination/binding options, readiness classifications,
   current-intent Trading Wallet selection, preparation purposes, and position-action ports;
 - implement static registries and typed immutable runtime policy;
@@ -2989,7 +3366,8 @@ Completion evidence:
 
 - core imports no provider DTO or venue implementation;
 - invalid combinations from section 21 fail publication;
-- master-off leaves current production behavior unchanged;
+- creation-mode off blocks new work while leaving existing-operation
+  reconciliation, webhook ingestion, polling, and recovery active;
 - future custom location type passes contract tests without core branch.
 
 ### Work package 2 — Ownership, inventory, valuation, and projections
@@ -3003,9 +3381,9 @@ Required work:
 - return liquid assets, positions, and total portfolio separately with a
   display-only effective headline mode;
 - implement thin Polymarket/Limitless position-value collectors, backend
-  deduplication, and partial/stale position completeness;
+  deduplication, partial completeness, and stale freshness;
 - implement asset suggestion preferences;
-- replace frontend-local totals with the new read API behind master mode;
+- replace frontend-local totals with the new read API behind creation mode;
 - retain positions separately regardless of headline mode.
 
 Completion evidence:
@@ -3021,13 +3399,19 @@ Completion evidence:
 
 Required work:
 
-- add operation/segment/step/observation/reservation/preference/route-observation schema;
+- add quote/withdrawal-destination/operation/segment/provider-request/step/
+  attempt/observation/reservation/preference/route-observation/reconciliation-job schema with real
+  `user_id` foreign keys and HMAC lookup columns;
 - implement idempotent commit and transition helpers;
 - implement exact transfer observation allocation and in-transit claims;
-- implement polling queue, webhook enqueue boundary, restart-safe reconciliation;
-- implement ready/consume/release relationship with parent trade intent;
+- implement the `finance-worker` polling queue, webhook enqueue boundary,
+  leases, restart-safe reconciliation, and sidecar-safe configuration;
+- implement ready/consume/release linkage to web order/execution and nullable
+  `telegram_trade_intents.funding_operation_id`;
+- implement finality/canonical/reorg handling and actual cost/rent receipts;
 - integrate retention protection and notifications;
-- implement legacy adapter-version dispatch interfaces before provider migration.
+- implement legacy Bungee/Across/deBridge dispatch and deterministic historical
+  row classification before provider migration.
 
 Completion evidence:
 
@@ -3042,9 +3426,12 @@ Required work:
 
 - implement pinned Relay client, schemas, mappings, quote, normalized actions,
   status, polling, webhook verification, and reconciliation;
-- implement Relay Deposit Address plan, observation, request/child-request, and refund handling;
+- implement the off-by-default strict/exact Relay Deposit Address plan,
+  deposit-address/child-request observation, and refund handling; explicitly
+  reject open/variable, CEX-refund, and Privy-to-Relay composition;
 - implement capability-specific rejection for gasless/subsidy/topup/authorization features;
 - split Across legacy reconciler from optional Swap API adapter;
+- retain a Bungee legacy-only reconciler with no creation adapter;
 - split deBridge DLN legacy reconciler from optional same-chain adapter;
 - run shared provider and action-validator suites;
 - keep all new fallback allowlists empty.
@@ -3065,7 +3452,8 @@ Required work:
 - implement valid destination-option enumeration, configurable recommendation,
   deterministic Trading Wallet selection, and pure Placement Policy;
 - implement cash spendability, shortfall, source options, route economics, and experience classification;
-- implement Relay-first deterministic selection and bounded two-segment plans;
+- implement Relay-first deterministic single-segment selection and reject a
+  second segment or staged continuation;
 - implement quote storage, plan hash, consent, and public APIs;
 - integrate actual route observations into policy classification.
 
@@ -3075,7 +3463,8 @@ Completion evidence:
 - no Base parking or automatic rebalance path exists;
 - UI input cannot choose provider/destination address;
 - no-context multi-destination Add Funds cannot quote until the user chooses;
-- external balance size never overrides position/explicit/preference/internal precedence;
+- no quote can commit without one selected source option and exact raw amounts;
+- external balance size never overrides position/explicit-current-intent/internal precedence;
 - unknown speed is Prepare Funds;
 - disabled/unfundable venue returns typed unavailable, never fallback destination.
 
@@ -3092,6 +3481,8 @@ Required work:
 - integrate Limitless collateral/readiness without weakening trade guards;
 - implement supported token conversion through common operations;
 - integrate optional withdrawal behind an independent gate;
+- consume/release funding reservations atomically with web and Telegram
+  order/execution linkage;
 - ensure destination-ready never auto-submits a trade.
 
 Completion evidence:
@@ -3119,7 +3510,7 @@ Required work:
 - implement Tokens source/preference UX;
 - implement direct Receive, Relay Deposit Address, and Privy handoff presentations;
 - implement common progress, Activity, recovery, and error copy;
-- keep legacy UI behind master-off compatibility only.
+- keep legacy UI behind creation-mode-off compatibility only.
 
 Completion evidence:
 
@@ -3142,6 +3533,8 @@ Required work:
 - preserve fresh market quote and final Buy confirmation;
 - honor an explicit current-intent external choice only through exact bot
   capability or web handoff, while retaining owner binding for position actions;
+- use only durable scoped `telegram_bot_trading_authorization` for delegated
+  execution; token preferences and web wallet choice grant no bot authority;
 - leave unsupported Limitless delegated trading off.
 
 Completion evidence:
@@ -3156,10 +3549,12 @@ Completion evidence:
 
 Required work:
 
-- switch all new local callers to new APIs with master-active local policy;
+- switch all new local callers to new APIs with creation-active local policy;
 - prevent new legacy bridge-order creation in new mode while retaining read/reconcile;
 - verify the Functional Parity Matrix includes wallet setup, Trading Wallet
   selection, Sell, Redemption, and Withdrawal as distinct journeys;
+- verify the User Data Lifecycle Matrix against merge, deletion, retention,
+  Telegram authorization, and market-retention implementations;
 - run the complete local backend, frontend, admin, bot, migration, fixture,
   security, chaos, duplication, type, lint, format, test, and build milestone
   verification once for handoff; do not attach it to the ordinary deploy path;
@@ -3174,7 +3569,7 @@ Completion evidence:
 
 - every Definition of Done item has evidence;
 - every active route has a passing fixture and rehearsal;
-- master-off preserves legacy behavior and active-operation reconciliation;
+- creation-mode off preserves legacy behavior and active-operation reconciliation;
 - the normal deploy path contains no live financial rehearsal or full-suite gate
   and remains within the existing approximate five-minute operating target;
 - no open implementation decision or placeholder remains.
@@ -3226,8 +3621,12 @@ Unsafe parallel work:
 
 - new tables are additive;
 - legacy bridge rows are not rewritten into new operations;
-- versioned compatibility readers/reconcilers remain until no non-terminal rows
-  and retention/support requirement remains;
+- add an adapter-version/tag column where safe and backfill it from the frozen
+  Bungee/Across/deBridge classifier; if a row is ambiguous, leave it untouched,
+  alert, and require support classification before mutation;
+- compatibility readers/reconcilers cover all historically permitted providers,
+  including Bungee, until no non-terminal rows and no retention/support
+  requirement remains;
 - new mode creates only Funding Operations;
 - read history may project both systems into one Activity view with explicit
   legacy source internally;
@@ -3235,14 +3634,18 @@ Unsafe parallel work:
 
 ### 27.2 Activation stages
 
-1. `off`: legacy production path; new reconciliation infrastructure may observe only local fixtures.
+1. `off`: legacy creation path; no new executable quote, commit, or unsubmitted
+   funding step, while existing Funding Operations continue webhook intake,
+   observation, polling, reconciliation, refund, recovery, and worker drain.
 2. `shadow`: Account Value comparison and non-executable Relay shadow quotes; no actions.
 3. `internal`: selected accounts and exact routes; full support monitoring.
 4. `cohort`: bounded users/amounts with route-specific caps.
 5. `on`: only routes individually proven; unproven capabilities remain off.
 
-Deposit addresses, Privy methods, two-segment plans, sponsorship actions,
-fallback routes, withdrawals, Telegram funding, and each venue are independently gated.
+Strict Deposit Addresses, Privy methods, sponsorship actions, fallback routes,
+withdrawals, Telegram funding, and each venue are independently gated. Open
+Deposit Addresses and staged/two-segment continuation have no activation gate
+because they are out of scope and rejected by the initial policy schema.
 
 ### 27.3 Route activation evidence
 
@@ -3268,7 +3671,7 @@ Rollback disables new quote/commit capabilities; it does not:
 - stop their versioned reconciliation;
 - hide owned destination/refund balances.
 
-Master-off frontend returns to legacy entry points for new work while Activity
+Creation-mode off returns the frontend to legacy entry points for new work while Activity
 and workers continue reading/reconciling active Funding Operations. A provider
 drain switch stops new selection but preserves status polling/webhooks.
 
@@ -3297,10 +3700,11 @@ drain switch stops new selection but preserves status polling/webhooks.
     seconds; total planner target is 3.5 seconds; no hedged winner race.
 17. Unknown route speed is Prepare Funds. Inline needs measured p95 <=45 seconds
     and configured success/economic thresholds.
-18. Across/deBridge new-plan fallback allowlists are empty.
-19. Across suggested-fees and deBridge cross-chain create no new operations.
+18. Across/deBridge new-plan fallback allowlists are empty; Bungee is legacy-only.
+19. Across suggested-fees, Bungee, and deBridge cross-chain create no new operations.
 20. Relay Deposit Addresses are architecturally implemented but every exact
-    route/mode is activation-gated; initial target is stablecoin external ingress.
+    route is off by default; the only initial activatable mode is strict/exact
+    controlled-wallet stablecoin ingress.
 21. Deposit addresses are operation-specific in v1, with verified user-owned refund location.
 22. Relay gasless, fee subsidy, gas top-up, and provider authorization-list
     capabilities are off until separately proven.
@@ -3315,7 +3719,9 @@ drain switch stops new selection but preserves status polling/webhooks.
     at destination and are released as cash after balance revalidation.
 28. Provider IDs appear only in admin/support diagnostics.
 29. Full durable action/provider evidence follows financial retention; logs are redacted.
-30. Hyperliquid is contract stress-test only; Kalshi/DFlow remains disabled.
+30. Hyperliquid is contract stress-test only. Kalshi/DFlow new exposure remains
+    disabled while existing exit-only account read, cancel, reconcile, redeem,
+    and reduce-exposure behavior is preserved.
 31. Trading Wallet precedence is position owner, explicit current-intent choice,
     internal Hunch default, then user-visible external alternatives; never balance size.
 32. Trading Wallet selection is `current_intent` only; no session/per-venue
@@ -3328,6 +3734,12 @@ drain switch stops new selection but preserves status polling/webhooks.
     network/collateral are secondary backend-resolved details.
 36. The internal Hunch Trading Wallet is the primary new-intent path. External
     wallet setup is secondary and appears only after explicit external interest.
+37. Initial executable routes contain at most one provider segment. Any future
+    continuation starts from a fresh quote and separate explicit consent.
+38. `users.id`/`user_id` is the only account identity; all account/funding APIs
+    derive it from authentication and enforce ownership on every opaque ID.
+39. Reconciliation/webhook/polling/recovery remain active when creation mode is off.
+40. Privy-to-Relay Deposit Address and CEX-to-Relay Deposit Address are disabled.
 
 ## 29. Definition of Done
 
@@ -3370,16 +3782,26 @@ drain switch stops new selection but preserves status polling/webhooks.
 ### 29.3 Execution and security
 
 - every action is normalized and exact-policy validated;
-- all recipients/refunds/intermediates are backend-derived;
+- all recipients and refunds are backend-derived from owned opaque IDs, except
+  raw withdrawal input at the dedicated validated-registration endpoint;
 - operation, reservation, observation, and broadcast are idempotent/restart-safe;
+- authenticated `user_id` ownership and anti-IDOR tests cover every quote,
+  destination, operation, step, report, cancellation, and history endpoint;
+- selected source option, exact raw collateral, market context, destination,
+  consent, and idempotency payload are frozen before commit;
 - unknown provider action/status fails closed;
-- Relay Deposit Address correlation, child requests, wrong-asset, and refund are covered;
+- strict Relay Deposit Address correlation, child requests, under/overpayment,
+  wrong-asset, and refund are covered; open/CEX/Privy composition fails closed;
 - Privy and Solana sponsorship mutation suites pass;
+- `finance-worker` leases, webhook/poll wake-up, crash recovery, finality, reorg,
+  and actual-cost/rent receipts are proven;
 - no automatic provider substitution after commit;
 - no destination or binding substitution after commit; later asset preference
   or runtime presentation changes affect future intents only;
 - external wallet actions always use the exact user-controlled signer path;
-- active legacy operations retain their exact reconciler.
+- active legacy operations retain their exact reconciler;
+- Bungee/Across/deBridge historical rows, including pre-version rows, have a
+  deterministic reconciler mapping and no provider migration in flight.
 
 ### 29.4 KISS/DRY
 
@@ -3397,6 +3819,9 @@ drain switch stops new selection but preserves status polling/webhooks.
   rehearsal, and support runbook;
 - partial outages preserve Account Value truth and active reconciliation;
 - retention and privacy checks include every new reference/payload;
+- merge, deactivation/deletion, Telegram authorization, destination revalidation,
+  pseudonymization, and market retention satisfy the User Data Lifecycle Matrix;
+- creation-mode off still drains and reconciles every existing operation;
 - no secret or raw authorization material appears in client/log/analytics.
 
 ## 30. Required verification commands
@@ -3474,10 +3899,18 @@ Backend starting evidence:
 - `apps/api/src/services/polymarket-trading-execution-service.ts` — PM execution;
 - `apps/api/src/services/limitless-trading-execution-service.ts` — Limitless guards;
 - `apps/api/src/services/telegram-bot-trading.ts` — existing bot workflow;
+- `apps/finance-worker/src/*` — durable scheduler/lease owner to extend with
+  sidecar-safe funding reconciliation;
+- `apps/api/src/admin-merge-user-core.ts` and `apps/api/src/auth.ts` — mandatory
+  merge/deactivation/deletion lifecycle integration;
+- `packages/shared/src/venue-lifecycle.ts` and
+  `apps/api/src/services/venue-lifecycle.ts` — preserve Kalshi exit-only behavior;
 - `apps/api/src/market-retention-selector.ts` — retention protection;
 - `packages/contracts/src/PolymarketFundingRouter.sol` — caller semantics;
-- `packages/db/migrations/0034_add_bridge_tables.sql` and
-  `0096_bridge_orders_add_across_provider.sql` — legacy persistence;
+- `packages/db/migrations/0034_add_bridge_tables.sql`,
+  `0035_add_bridge_swap_type.sql`, `0096_bridge_orders_add_across_provider.sql`,
+  and `0097_deposit_events.sql` — Bungee/deBridge/Across legacy persistence and
+  deposit-correlation evidence;
 - `packages/db/migrations/0166_telegram_bot_trading.sql` — bot intents;
 - runtime-policy migrations/services/admin routes — control-plane patterns.
 
@@ -3541,6 +3974,9 @@ Privy:
 - [Gas sponsorship overview](https://docs.privy.io/wallets/gas-and-asset-management/gas/overview)
 - [Gas sponsorship security](https://docs.privy.io/wallets/gas-and-asset-management/gas/security)
 - [Wallet actions](https://docs.privy.io/wallets/actions/overview)
+- [Wallet policies and controls](https://docs.privy.io/security/wallet-infrastructure/policy-and-controls)
+- [Connected and linked wallets](https://docs.privy.io/wallets/wallets/get-a-wallet/get-connected-wallet)
+- [Global wallet consent and execution](https://docs.privy.io/wallets/global-wallets/overview)
 
 Across:
 
@@ -3557,7 +3993,7 @@ deBridge:
 - [Order tracking](https://docs.debridge.com/dln-details/integration-guidelines/order-creation/order-tracking-api/tracking-orders)
 - [Swap behavior](https://docs.debridge.com/home/use-cases/swaps)
 
-Retrieval date for this research revision: 2026-07-21. Implementation must pin
+Retrieval date for this research revision: 2026-07-22. Implementation must pin
 the exact OpenAPI/schema revision and refreshed official evidence used at coding
 time because provider contracts and enabled routes can change.
 
@@ -3567,6 +4003,7 @@ time because provider contracts and enabled routes can change.
 | --- | --- | --- |
 | configurable headline over backend-projected liquid/position totals | 2.2–2.4, 7.4, 9, 15 | 23.1, WP2, 29.1 |
 | intent-specific executable balance | 2.2–2.3, 7.5, 10 | 23.1, 23.5 |
+| authenticated account and selected-source quote lifecycle | 7.1, 7.5, 12.2, 16.2 | 23.3–23.5, WP1, WP5 |
 | full new-deposit placement | 2.6, 11 | 23.1, 19.1 |
 | shortfall-only existing funds | 2.6, 11 | 19.2, 23.1 |
 | no automatic rebalance/Base parking | 2.6, 6.3 | 24.4, 29.2 |
@@ -3576,13 +4013,18 @@ time because provider contracts and enabled routes can change.
 | current-intent Trading Wallet selection | 2.7–2.9, 10.4 | 19.10, 23.1, 23.5 |
 | shared wallet preparation and owner redemption | 2.8, 15.1 | 19.11, 23.1, WP6 |
 | Relay-first normalized routing | 5.1, 13 | 23.2, 27.3 |
-| Relay Deposit Addresses | 13.3–13.4 | 19.4, 23.2 |
+| strict Relay Deposit Addresses and disabled open/CEX composition | 5.1, 13.3–13.4 | 19.4, 23.2 |
 | Privy funding/sponsorship | 5.2, 14 | 19.5, 23.3 |
-| Across/deBridge migration safety | 5.3–5.4, 13.5–13.6 | 23.2, 27.1 |
+| Bungee/Across/deBridge migration safety | 5.3–5.4, 13.5–13.6 | 23.2, 27.1 |
 | Polymarket/Limitless readiness | 15 | 19, 23.7 |
 | future venue/network flexibility | 7.2, 7.8, 15.3 | 25 WP1, 29.2 |
 | Telegram parity | 18 | 23.6, 29.1 |
 | exact operations/recovery | 12 | 20, 23.4, 23.8 |
+| finance-worker ownership, finality/reorg, and actual costs | 12.2, 12.5 | 23.4, 23.8, WP3 |
+| withdrawal recipients outside owned Account Value | 7.2, 12.2, 19.7 | 23.3–23.5, WP6 |
+| user merge/deletion/retention lifecycle | 12.6–12.7 | WP0 Lifecycle Matrix, WP3, WP9 |
+| Kalshi exit-only preservation without new exposure | 15.4 | 23.1, WP9 parity evidence |
+| single-segment initial execution and future staged consent | 6.2, 13.8 | 23.1–23.4, WP5 |
 | runtime activation/rollback | 21, 27 | 25 WP9, 29.5 |
 | KISS/DRY | 8, 24 | 23, 29.4 |
 | legacy code exits instead of becoming permanent growth | 24, 27.1 | WP0 Legacy Exit Matrix, WP9 |
