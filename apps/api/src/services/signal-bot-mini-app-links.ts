@@ -2,6 +2,8 @@ import { isSignalDeliveryRef } from "./signal-delivery-attribution.js";
 
 const TELEGRAM_STARTAPP_MAX_LENGTH = 512;
 export const SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH = "/tg";
+export const SIGNAL_BOT_TELEGRAM_WEB_APP_ONBOARDING_ENTRY_PATH =
+  "/tg?hunchTgOnboarding=1";
 const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const SIGNAL_BOT_ROUTE_ID_RE = /^[A-Za-z0-9:_-]{1,160}$/;
 const SIGNAL_BOT_SAFE_ROUTE_ID_RE = /^[A-Za-z0-9_-]{1,58}$/;

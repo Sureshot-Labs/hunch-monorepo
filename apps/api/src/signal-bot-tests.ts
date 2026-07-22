@@ -1741,7 +1741,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const regularButtons = regular.keyboard.inline_keyboard.flat();
       const regularLabels = regularButtons.map((button) => button.text);
-      assert.match(regular.text, /Hunch/);
+      assert.match(regular.text, /Welcome to Hunch/);
       assert.match(regular.text, new RegExp(TELEGRAM_CUSTOM_EMOJI.hunch.id));
       assert.doesNotMatch(regular.text, /\/(?:menu|market|trade|help)/);
       assert.equal(
@@ -1940,8 +1940,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(guest.text, /Welcome to Hunch/);
       assert.match(guest.text, /create an account or sign in/);
       assert.equal(guestButtons.length, 1);
-      assert.equal(guestButtons[0]?.text, "Open Hunch · Create or sign in");
-      assert.equal(guestButtons[0] && "web_app" in guestButtons[0], true);
+      const guestButton = guestButtons[0];
+      assert.ok(guestButton);
+      assert.equal(guestButton.text, "Sign in to Hunch");
+      if (!("web_app" in guestButton) || !guestButton.web_app) {
+        assert.fail("guest onboarding must use a Mini App button");
+      }
+      assert.equal(
+        guestButton.web_app.url,
+        "https://app.hunch.trade/tg?hunchTgOnboarding=1",
+      );
       assert.equal(
         guestButtons.some((button) => "callback_data" in button),
         false,
@@ -1958,8 +1966,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(unavailable.text, /create an account or sign in/);
       assert.deepEqual(
         unavailable.keyboard.inline_keyboard.flat().map(({ text }) => text),
-        ["🔎 Markets", "Open Hunch"],
+        ["Open Hunch"],
       );
+      const unavailableButton = unavailable.keyboard.inline_keyboard.flat()[0];
+      assert.ok(unavailableButton);
+      if (!("web_app" in unavailableButton) || !unavailableButton.web_app) {
+        assert.fail("unavailable account fallback must use a Mini App button");
+      }
+      assert.equal(unavailableButton.web_app.url, "https://app.hunch.trade/tg");
       const unavailableWithoutMiniApp = buildSignalBotMenuScreen({
         appBaseUrl: "https://app.hunch.trade",
         audience: "unavailable",
@@ -4383,7 +4397,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "idle private text always enters market search",
+    name: "idle private text from a guest returns to onboarding",
     run: async () => {
       const redis = new FakeRedis();
       const telegram = new FakeTelegram();
@@ -4400,18 +4414,26 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const handled = await pollSignalBotCommands({
         config: parseSignalBotConfig({
           HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+            TEST_TELEGRAM_MINI_APP_LINK_BASE,
           HUNCH_SIGNAL_BOT_TOKEN: "token",
         }),
+        db: {
+          query: async () => ({ rows: [{ linked: false }] }),
+        } as never,
         redis,
         sendTestSignal: async () => false,
         telegram,
       });
       assert.equal(handled, 1);
-      assert.match(telegram.messages[0]?.text ?? "", /Searching/);
-      assert.match(
-        telegram.edits[0]?.text ?? "",
-        /Search is temporarily unavailable/,
+      assert.match(telegram.messages[0]?.text ?? "", /Welcome to Hunch/);
+      assert.deepEqual(
+        telegram.messages[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .map(({ text }) => text),
+        ["Sign in to Hunch"],
       );
+      assert.equal(telegram.edits.length, 0);
     },
   },
   {
@@ -8877,8 +8899,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.match(message.text, /enable Telegram Trading in Hunch/);
         const buttons = message.reply_markup.inline_keyboard.flat();
         assert.equal(buttons.length, 1);
-        assert.equal(buttons[0]?.text, "Open Hunch · Create or sign in");
-        assert.equal(buttons[0] && "web_app" in buttons[0], true);
+        const button = buttons[0];
+        assert.ok(button);
+        assert.equal(button.text, "Sign in to Hunch");
+        if (!("web_app" in button) || !button.web_app) {
+          assert.fail("guest onboarding must use a Mini App button");
+        }
+        assert.match(button.web_app.url, /\/tg\?hunchTgOnboarding=1$/);
         assert.doesNotMatch(
           message.text,
           /\/(?:menu|market|trade_status|settings|help)/,
@@ -9108,7 +9135,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(guestHome?.text ?? "", /Welcome to Hunch/);
       assert.deepEqual(
         guestHome?.reply_markup?.inline_keyboard.flat().map(({ text }) => text),
-        ["Open Hunch · Create or sign in"],
+        ["Sign in to Hunch"],
       );
     },
   },
@@ -9199,10 +9226,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         },
         telegram,
       });
-      assert.equal(
-        (marketRequest as { publicBrowseOnly?: boolean } | undefined)
-          ?.publicBrowseOnly,
-        true,
+      assert.equal(marketRequest, undefined);
+      assert.match(telegram.messages.at(-1)?.text ?? "", /Welcome to Hunch/);
+      assert.deepEqual(
+        telegram.messages
+          .at(-1)
+          ?.reply_markup?.inline_keyboard.flat()
+          .map(({ text }) => text),
+        [],
       );
 
       assert.equal(
@@ -9427,7 +9458,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const guestDb = {
         query: async () => ({ rows: [{ linked: false }] }),
       } as never;
-      let publicBrowseOnly: boolean | undefined;
+      const telegram = new FakeTelegram();
+      let marketCalls = 0;
       await handleSignalBotCommand({
         config,
         db: guestDb,
@@ -9437,16 +9469,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           text: "/market polymarket:market-1",
         },
         redis,
-        sendMessage: async () => {
-          throw new Error("guest market should render through the market hook");
-        },
+        sendMessage: (message) => telegram.sendMessage(message),
         sendTestSignal: async () => false,
-        sendTradeMarket: async (input) => {
-          publicBrowseOnly = input.publicBrowseOnly;
+        sendTradeMarket: async () => {
+          marketCalls += 1;
           return true;
         },
       });
-      assert.equal(publicBrowseOnly, true);
+      assert.equal(marketCalls, 0);
+      assert.match(telegram.messages[0]?.text ?? "", /Welcome to Hunch/);
+      assert.deepEqual(
+        telegram.messages[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .map(({ text }) => text),
+        ["Sign in to Hunch"],
+      );
 
       for (const command of ["/trade_status", "/disable_trading"]) {
         const telegram = new FakeTelegram();

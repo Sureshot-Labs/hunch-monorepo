@@ -100,6 +100,7 @@ import {
   buildSignalBotMarketStartParam,
   normalizeTelegramMiniAppLinkBase,
   SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
+  SIGNAL_BOT_TELEGRAM_WEB_APP_ONBOARDING_ENTRY_PATH,
 } from "./signal-bot-mini-app-links.js";
 import { parseTelegramBotTradingCallbackData } from "./telegram-bot-trading-client.js";
 import {
@@ -2047,12 +2048,13 @@ type SignalBotMenuTransport = {
 function buildSignalBotMainMiniAppButton(input: {
   appBaseUrl: string;
   miniAppEnabled: boolean;
+  path?: string;
   text?: string;
 }): TelegramInlineKeyboardButton | null {
   return buildHunchMiniAppWebButton({
     appBaseUrl: input.appBaseUrl,
     enabled: input.miniAppEnabled,
-    path: SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
+    path: input.path ?? SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
     text: input.text ?? "Open Hunch",
   });
 }
@@ -2129,7 +2131,8 @@ export function buildSignalBotMenuScreen(input: {
       const guestButton = buildSignalBotMainMiniAppButton({
         appBaseUrl: input.appBaseUrl,
         miniAppEnabled: input.miniAppEnabled,
-        text: "Open Hunch · Create or sign in",
+        path: SIGNAL_BOT_TELEGRAM_WEB_APP_ONBOARDING_ENTRY_PATH,
+        text: "Sign in to Hunch",
       });
       return {
         keyboard: {
@@ -2156,17 +2159,14 @@ export function buildSignalBotMenuScreen(input: {
     if (input.audience === "unavailable") {
       return {
         keyboard: {
-          inline_keyboard: [
-            [callback("trading:market_input", "🔎 Markets")],
-            ...buildSignalBotOptionalButtonRows(miniAppButton),
-          ],
+          inline_keyboard: buildSignalBotOptionalButtonRows(miniAppButton),
         },
         text: joinTelegramMarkdownV2Lines([
           formatHunchTelegramTitle("Hunch"),
           "",
           formatTelegramCalloutMarkdownV2({
             bodyMarkdownV2: escapeTelegramMarkdownV2(
-              "Account details could not refresh. You can still browse markets or open Hunch.",
+              "Account details could not refresh. Open Hunch or try again in a moment.",
             ),
             icon: "⚠️",
             title: "Account details unavailable",
@@ -2197,7 +2197,7 @@ export function buildSignalBotMenuScreen(input: {
     return {
       keyboard: { inline_keyboard: rows },
       text: [
-        formatHunchTelegramTitle("Hunch"),
+        formatHunchTelegramTitle("Welcome to Hunch"),
         "",
         escapeTelegramMarkdownV2(
           "Market signals and trading without leaving Telegram.",
@@ -3020,11 +3020,7 @@ export async function handleSignalBotMenuCallback(
     telegramUserId,
   });
   const loadMarketCard = input.loadMarketCard;
-  const guestSearchRoute =
-    route.kind === "market_search_result" ||
-    route.kind === "market_search_back" ||
-    (route.kind === "screen" && route.screen === "market_input");
-  if (audience !== "linked" && !guestSearchRoute) {
+  if (audience !== "linked") {
     await input.telegram.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       ...(audience === "unavailable"
@@ -3489,6 +3485,25 @@ export async function handleSignalBotMenuInput(input: {
     db: input.db,
     telegramUserId,
   });
+  if (audience !== "linked") {
+    await clearSignalBotMenuInput({
+      chatId,
+      redis: input.redis,
+      telegramUserId,
+    });
+    await sendOrEditSignalBotMenuScreen({
+      audience,
+      chatId,
+      config: input.config,
+      db: input.db,
+      isAdmin: isSignalBotAdmin(input.config, telegramUserId),
+      messageId: null,
+      screen: "home",
+      telegramUserId,
+      transport: input.telegram,
+    });
+    return true;
+  }
   const loadMarketCard = input.loadMarketCard;
   return handleSignalBotMarketSearchInput({
     beginResponse: async (message) => {
@@ -4007,13 +4022,6 @@ export async function handleSignalBotCommand(input: {
     return true;
   }
   if (command === "market") {
-    const marketRef = parseSignalBotCommandFirstArg(input.message.text);
-    if (!marketRef) {
-      await input.sendMessage(
-        buildPlainReply(chatId, "Usage: /market <market_id or URL>"),
-      );
-      return true;
-    }
     if (input.message.chat.type !== "private" || !input.message.from?.id) {
       await input.sendMessage(
         buildPlainReply(chatId, "Open a private chat with the bot to trade."),
@@ -4024,10 +4032,31 @@ export async function handleSignalBotCommand(input: {
       db: input.db,
       telegramUserId: input.message.from.id,
     });
+    if (audience !== "linked") {
+      await sendOrEditSignalBotMenuScreen({
+        audience,
+        chatId,
+        config: input.config,
+        db: input.db,
+        isAdmin,
+        messageId: null,
+        screen: "home",
+        telegramUserId: input.message.from.id,
+        transport: { sendMessage: input.sendMessage },
+      });
+      return true;
+    }
+    const marketRef = parseSignalBotCommandFirstArg(input.message.text);
+    if (!marketRef) {
+      await input.sendMessage(
+        buildPlainReply(chatId, "Usage: /market <market_id or URL>"),
+      );
+      return true;
+    }
     const sent = await (input.sendTradeMarket?.({
       chatId,
       marketRef,
-      publicBrowseOnly: audience !== "linked",
+      publicBrowseOnly: false,
       telegramMessageId: input.message.message_id ?? null,
       telegramUserId: input.message.from.id,
     }) ?? Promise.resolve(false));

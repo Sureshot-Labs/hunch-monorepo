@@ -33,6 +33,10 @@ import {
   enqueueTelegramActivityNotifications,
   enqueueTelegramPositionSignals,
 } from "./services/telegram-notification-delivery.js";
+import {
+  cleanupTelegramBotActionOutbox,
+  deliverTelegramBotOnboardingActions,
+} from "./services/telegram-bot-onboarding-delivery.js";
 import { resolveTelegramNotificationsPolicy } from "./services/telegram-notification-policy.js";
 import { createTelegramBotTradingInternalApiClient } from "./services/telegram-bot-trading-client.js";
 import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-navigation.js";
@@ -481,10 +485,30 @@ export async function runSignalBotRunner(): Promise<void> {
 
         const now = Date.now();
         if (!heartbeatLost && now >= nextNotificationAt) {
+          try {
+            const onboardingDelivery =
+              await deliverTelegramBotOnboardingActions({
+                config,
+                db,
+                limit: 25,
+                telegram,
+              });
+            if (onboardingDelivery.claimed > 0) {
+              log("signal_bot_onboarding_delivery", onboardingDelivery);
+            }
+          } catch (error) {
+            log("signal_bot_onboarding_delivery_error", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           let cleaned = 0;
+          let onboardingCleaned = 0;
           if (now >= nextNotificationCleanupAt) {
             try {
-              cleaned = await cleanupTelegramNotificationOutbox({ db });
+              [cleaned, onboardingCleaned] = await Promise.all([
+                cleanupTelegramNotificationOutbox({ db }),
+                cleanupTelegramBotActionOutbox({ db }),
+              ]);
               nextNotificationCleanupAt = now + 60 * 60 * 1_000;
             } catch (error) {
               log("signal_bot_user_notifications_cleanup_error", {
@@ -544,11 +568,13 @@ export async function runSignalBotRunner(): Promise<void> {
               activityEnqueued > 0 ||
               positionSignals.enqueued > 0 ||
               delivery.claimed > 0 ||
-              cleaned > 0
+              cleaned > 0 ||
+              onboardingCleaned > 0
             ) {
               log("signal_bot_user_notifications", {
                 activityEnqueued,
                 cleaned,
+                onboardingCleaned,
                 positionSignalEnqueued: positionSignals.enqueued,
                 positionSignalNotes: positionSignals.notes,
                 ...delivery,
