@@ -5,9 +5,7 @@ import assert from "node:assert/strict";
 import type { MarketByTokenRow } from "./repos/unified-read.js";
 import { mapMarketsByTokenRows } from "./services/markets-by-token-response.js";
 
-function row(
-  overrides: Partial<MarketByTokenRow> = {},
-): MarketByTokenRow {
+function row(overrides: Partial<MarketByTokenRow> = {}): MarketByTokenRow {
   return {
     token_id: "yes-token",
     side: "YES",

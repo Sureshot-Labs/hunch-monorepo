@@ -469,10 +469,7 @@ await test("GET /markets/:marketId/alternatives caches matched responses in Redi
     ]),
     client: fakeClient({
       markets: [poly],
-      midpoints: [
-        midpoint("agg-poly", 0.57),
-        midpoint("agg-limitless", 0.55),
-      ],
+      midpoints: [midpoint("agg-poly", 0.57), midpoint("agg-limitless", 0.55)],
       calls,
     }),
     redis,
