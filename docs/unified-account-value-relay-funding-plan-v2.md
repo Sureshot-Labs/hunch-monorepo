@@ -3474,6 +3474,44 @@ Completion evidence:
 - toggling headline mode cannot change any liquidity, route, wallet, or CTA result;
 - no frontend or venue hook independently recomputes the positions headline total.
 
+#### WP2 implementation status — 2026-07-23
+
+WP2 is implemented as a code, schema, authenticated API, projection,
+frontend-integration, and test milestone. Exact ownership/location/asset
+identity, canonical deduplication, `bigint`-backed decimal arithmetic, stable
+impairment, price and freshness policy, separate Account Value and Cash
+Availability, movement representation suppression, Polymarket/Limitless
+position values, partial/unpriced propagation, and non-authoritative asset
+suggestion preferences now have focused property and route tests.
+
+Header, Wallet, Portfolio, and non-Polymarket trade balance surfaces consume the
+backend projection. The old frontend venue-total owner and independent header
+total functions were removed. Cached read errors fail transaction-facing cash
+selection closed, while non-transactional views label retained data stale.
+Polymarket Buy deliberately keeps its more specific
+signer/deposit-wallet/funder buying-power owner until WP5 Intent Liquidity.
+
+Migration `0183_user_asset_funding_preferences.sql` is additive and the existing
+user-merge path implements the frozen lifecycle rule: identical preferences
+survive, conflicts reset to `ask`, and no preference grants transaction
+authority. The migration was not applied during implementation.
+
+Runtime production pricing currently registers exact configured stables only.
+The generic adapter boundary is implemented and tested, but policy-added
+non-stable tokens remain unpriced until a reviewed production adapter exists.
+The in-transit projector and reservation/submitted-debit fields are implemented;
+their durable observations and feeds belong to WP3. Persisted wallet facts that
+lack current Privy profile source are treated conservatively and receive no
+delegated or sponsorship authority.
+
+All focused tests, the API fast suite, frontend tests, typechecks, lint,
+formatting, and the Next.js production build pass. No policy was published, no
+migration was applied, no route was activated, and no deployment or live
+transaction occurred. Detailed evidence and the full WP0–WP2 review:
+
+- `docs/funding/wp2/README.md`
+- `docs/funding/wp2/wp0-wp2-review.md`
+
 ### Work package 3 — Durable operations, observations, reservations, reconciliation
 
 Required work:

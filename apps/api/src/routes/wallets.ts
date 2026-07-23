@@ -38,7 +38,7 @@ import {
   walletVenueStatusQuerySchema,
 } from "../schemas/wallets.js";
 
-type WalletBalanceItem = {
+export type WalletBalanceItem = {
   chainId: string;
   address: string;
   symbol: string | null;
@@ -59,7 +59,7 @@ type TokenMeta = {
 };
 
 type WalletVenueStatus = Record<string, unknown>;
-type BalanceWalletResolution = {
+export type BalanceWalletResolution = {
   walletAddress: string;
   walletType: string | null | undefined;
   linkedWalletAddress: string;
@@ -490,7 +490,7 @@ function writeBalanceWalletLookupCache(
   });
 }
 
-async function loadBalanceWalletLookup(
+export async function loadBalanceWalletLookup(
   userId: string,
 ): Promise<Map<string, BalanceWalletResolution>> {
   const cached = readBalanceWalletLookupCache(userId);
@@ -991,7 +991,7 @@ function buildWalletBalancesInflightKey(inputs: {
   });
 }
 
-async function resolveWalletBalancesForWalletWithInflight(inputs: {
+export async function resolveWalletBalancesForWalletWithInflight(inputs: {
   walletAddress: string;
   walletType: string | null | undefined;
   tokens: string[];

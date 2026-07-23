@@ -52,7 +52,11 @@ export interface Position {
 
   side: "LONG" | "SHORT" | "FLAT";
   size: number;
+  /** Exact database numeric text for value arithmetic. */
+  sizeRaw?: string;
   averagePrice?: number;
+  /** Exact database numeric text for value arithmetic. */
+  averagePriceRaw?: string;
   unrealizedPnl: number;
   realizedPnl: number;
   estimatedPayout?: number;

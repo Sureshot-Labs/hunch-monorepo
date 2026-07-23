@@ -10,6 +10,8 @@ type QueryCall = {
 };
 
 type MergeDbFixture = {
+  assetPreferenceConflicts?: number;
+  assetPreferenceRows?: number;
   authRows?: number;
   intentRows?: number;
   sourceTelegramUserId?: string;
@@ -117,6 +119,17 @@ function createMergeDb(fixture: MergeDbFixture) {
           { count: String(fixture.intentRows ?? 0) },
         ] as unknown as T[]);
       }
+      if (
+        normalized.startsWith("select count(*)::text as count") &&
+        normalized.includes("from user_asset_funding_preferences source")
+      ) {
+        return result<T>([
+          { count: String(fixture.assetPreferenceConflicts ?? 0) },
+        ] as unknown as T[]);
+      }
+      if (normalized.startsWith("insert into user_asset_funding_preferences")) {
+        return result<T>([], fixture.assetPreferenceRows ?? 0);
+      }
       if (normalized.startsWith("update telegram_trade_intents")) {
         assert.equal(params?.[0], "target");
         assert.equal(params?.[1], "source");
@@ -157,6 +170,8 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
     name: "merge moves source Telegram account, bot authorizations, and intents",
     run: async () => {
       const fake = createMergeDb({
+        assetPreferenceConflicts: 1,
+        assetPreferenceRows: 2,
         authRows: 2,
         intentRows: 3,
         sourceTelegramUserId: "tg-source",
@@ -179,6 +194,8 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
         resultValue.summary.telegramBotTradingAuthorizationsDropped,
         0,
       );
+      assert.equal(resultValue.summary.assetFundingPrefsConflictsReset, 1);
+      assert.equal(resultValue.summary.assetFundingPrefsMerged, 2);
       assert.equal(resultValue.summary.telegramTradeIntentsMoved, 3);
       assert.equal(fake.state.committed, true);
       assert.equal(fake.state.rolledBack, false);
@@ -201,6 +218,21 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
         /desired_enabled = telegram_bot_trading_preferences\.desired_enabled and excluded\.desired_enabled/,
       );
       assert.match(preferenceSql, /claim_id = null/);
+      const assetPreferenceMerge = fake.calls.find((call) =>
+        compactSql(call.sql).startsWith(
+          "insert into user_asset_funding_preferences",
+        ),
+      );
+      assert.ok(assetPreferenceMerge);
+      const assetPreferenceSql = compactSql(assetPreferenceMerge.sql);
+      assert.match(assetPreferenceSql, /else 'ask' end, revision = greatest/);
+      assert.equal(
+        countCalls(
+          fake.calls,
+          /^delete from user_asset_funding_preferences where user_id = \$1/,
+        ),
+        1,
+      );
     },
   },
   {

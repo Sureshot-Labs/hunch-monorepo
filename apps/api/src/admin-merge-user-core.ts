@@ -29,6 +29,8 @@ export type MergeSummary = {
   watchlistMoved: number;
   tradingPrefsDropped: number;
   tradingPrefsMoved: number;
+  assetFundingPrefsConflictsReset: number;
+  assetFundingPrefsMerged: number;
   tradingStatsDropped: number;
   tradingStatsMoved: number;
   idempotencyDeduped: number;
@@ -156,6 +158,8 @@ export async function mergeUsers(
     watchlistMoved: 0,
     tradingPrefsDropped: 0,
     tradingPrefsMoved: 0,
+    assetFundingPrefsConflictsReset: 0,
+    assetFundingPrefsMerged: 0,
     tradingStatsDropped: 0,
     tradingStatsMoved: 0,
     idempotencyDeduped: 0,
@@ -308,6 +312,83 @@ export async function mergeUsers(
           [target.id, source.id],
         )
       ).rowCount ?? 0;
+
+    const assetFundingPreferenceConflicts = await client.query<{
+      count: string;
+    }>(
+      `
+        select count(*)::text as count
+        from user_asset_funding_preferences source
+        join user_asset_funding_preferences target
+          on target.user_id = $1
+         and target.component_id = source.component_id
+        where source.user_id = $2
+          and target.suggestion_preference <> source.suggestion_preference
+      `,
+      [target.id, source.id],
+    );
+    summary.assetFundingPrefsConflictsReset = Number(
+      assetFundingPreferenceConflicts.rows[0]?.count ?? 0,
+    );
+
+    summary.assetFundingPrefsMerged =
+      (
+        await client.query(
+          `
+            insert into user_asset_funding_preferences (
+              user_id,
+              component_id,
+              network_id,
+              asset_id,
+              location_id,
+              suggestion_preference,
+              revision,
+              created_at,
+              updated_at
+            )
+            select
+              $1,
+              component_id,
+              network_id,
+              asset_id,
+              location_id,
+              suggestion_preference,
+              revision,
+              created_at,
+              updated_at
+            from user_asset_funding_preferences
+            where user_id = $2
+            on conflict (user_id, component_id) do update set
+              network_id = excluded.network_id,
+              asset_id = excluded.asset_id,
+              location_id = excluded.location_id,
+              suggestion_preference = case
+                when user_asset_funding_preferences.suggestion_preference
+                  = excluded.suggestion_preference
+                then excluded.suggestion_preference
+                else 'ask'
+              end,
+              revision = greatest(
+                user_asset_funding_preferences.revision,
+                excluded.revision
+              ) + case
+                when user_asset_funding_preferences.suggestion_preference
+                  = excluded.suggestion_preference
+                then 0
+                else 1
+              end,
+              updated_at = now()
+          `,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    if (!options.keepSource) {
+      await client.query(
+        `delete from user_asset_funding_preferences where user_id = $1`,
+        [source.id],
+      );
+    }
 
     summary.tradingStatsDropped =
       (
