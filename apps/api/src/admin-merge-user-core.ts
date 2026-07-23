@@ -47,6 +47,13 @@ export type MergeSummary = {
   ordersMoved: number;
   orderLogsMoved: number;
   bridgeOrdersMoved: number;
+  fundingDestinationsMoved: number;
+  fundingDestinationsRevoked: number;
+  fundingOperationsMoved: number;
+  fundingQuotesInvalidated: number;
+  fundingQuotesMoved: number;
+  fundingReservationsMoved: number;
+  fundingRouteObservationsMoved: number;
   telegramAccountsMoved: number;
   telegramAccountsConflictBlocked: number;
   telegramBotTradingAuthorizationsDropped: number;
@@ -77,6 +84,174 @@ type MergeDb = Pick<Pool, "connect" | "query">;
 type TelegramAccountRow = {
   telegram_user_id: string;
 };
+
+export type FundingMergeConflictSummary = Readonly<{
+  activeFundingLeases: number;
+  activeFundingRoutes: number;
+  ambiguousFundingAttempts: number;
+  fundingConsentConflicts: number;
+  fundingIdempotencyConflicts: number;
+  liveFundingReservations: number;
+  nonTerminalFundingOperations: number;
+  nonTerminalLegacyBridgeOrders: number;
+  nonTerminalTelegramTradeIntents: number;
+}>;
+
+export class FundingMergeConflictError extends Error {
+  constructor(readonly conflicts: FundingMergeConflictSummary) {
+    super(
+      `Cannot merge users while financial movement is non-terminal or ambiguous: ${JSON.stringify(
+        conflicts,
+      )}`,
+    );
+    this.name = "FundingMergeConflictError";
+  }
+}
+
+async function lockMergeUsers(
+  client: Pick<PoolClient, "query">,
+  sourceId: string,
+  targetId: string,
+): Promise<void> {
+  const { rows } = await client.query<{ id: string }>(
+    `
+      select id
+      from users
+      where id = any($1::uuid[])
+      order by id
+      for update
+    `,
+    [[sourceId, targetId]],
+  );
+  if (rows.length !== 2) {
+    throw new Error("Source or target user disappeared before merge lock");
+  }
+}
+
+async function fetchFundingMergeConflicts(
+  client: Pick<PoolClient, "query">,
+  sourceId: string,
+  targetId: string,
+): Promise<FundingMergeConflictSummary> {
+  const { rows } = await client.query<{
+    active_funding_leases: string;
+    active_funding_routes: string;
+    ambiguous_funding_attempts: string;
+    funding_consent_conflicts: string;
+    funding_idempotency_conflicts: string;
+    live_funding_reservations: string;
+    non_terminal_funding_operations: string;
+    non_terminal_legacy_bridge_orders: string;
+    non_terminal_telegram_trade_intents: string;
+  }>(
+    `
+      select
+        (
+          select count(*)::text
+          from funding_operations operation
+          where operation.user_id = any($1::uuid[])
+            and operation.status not in (
+              'completed', 'refunded', 'failed', 'cancelled'
+            )
+        ) as non_terminal_funding_operations,
+        (
+          select count(*)::text
+          from balance_reservations reservation
+          where reservation.user_id = any($1::uuid[])
+            and reservation.state = 'active'
+        ) as live_funding_reservations,
+        (
+          select count(*)::text
+          from funding_operation_step_attempts attempt
+          join funding_operation_steps step on step.id = attempt.step_id
+          join funding_operations operation on operation.id = step.operation_id
+          where operation.user_id = any($1::uuid[])
+            and operation.status not in (
+              'completed', 'refunded', 'failed', 'cancelled'
+            )
+            and (
+              attempt.outcome = 'ambiguous'
+              or attempt.broadcast_may_have_occurred
+            )
+        ) as ambiguous_funding_attempts,
+        (
+          select count(*)::text
+          from funding_reconciliation_jobs job
+          join funding_operations operation on operation.id = job.operation_id
+          where operation.user_id = any($1::uuid[])
+            and job.status = 'leased'
+            and job.lease_until > now()
+        ) as active_funding_leases,
+        (
+          select count(*)::text
+          from funding_route_observations route
+          where route.user_id = any($1::uuid[])
+            and route.outcome = 'in_progress'
+        ) as active_funding_routes,
+        (
+          select count(*)::text
+          from bridge_orders bridge
+          where bridge.user_id = any($1::uuid[])
+            and lower(trim(bridge.status)) not in (
+              'fulfilled',
+              'filled',
+              'completed',
+              'success',
+              'confirmed',
+              'failed',
+              'reverted',
+              'error',
+              'expired',
+              'refunded',
+              'cancelled',
+              'canceled'
+            )
+        ) as non_terminal_legacy_bridge_orders,
+        (
+          select count(*)::text
+          from telegram_trade_intents intent
+          where intent.user_id = any($1::uuid[])
+            and intent.status in (
+              'executing', 'submitted', 'reconcile_required'
+            )
+        ) as non_terminal_telegram_trade_intents,
+        (
+          select count(*)::text
+          from funding_operations source
+          join funding_operations target
+            on target.user_id = $3
+           and target.idempotency_key = source.idempotency_key
+          where source.user_id = $2
+        ) as funding_idempotency_conflicts,
+        (
+          select count(*)::text
+          from funding_quotes source
+          join funding_quotes target
+            on target.user_id = $3
+           and target.consent_token_hash = source.consent_token_hash
+          where source.user_id = $2
+        ) as funding_consent_conflicts
+    `,
+    [[sourceId, targetId], sourceId, targetId],
+  );
+  const row = rows[0];
+  if (!row) throw new Error("Funding merge conflict query returned no row");
+  return {
+    activeFundingLeases: Number(row.active_funding_leases),
+    activeFundingRoutes: Number(row.active_funding_routes),
+    ambiguousFundingAttempts: Number(row.ambiguous_funding_attempts),
+    fundingConsentConflicts: Number(row.funding_consent_conflicts),
+    fundingIdempotencyConflicts: Number(row.funding_idempotency_conflicts),
+    liveFundingReservations: Number(row.live_funding_reservations),
+    nonTerminalFundingOperations: Number(row.non_terminal_funding_operations),
+    nonTerminalLegacyBridgeOrders: Number(
+      row.non_terminal_legacy_bridge_orders,
+    ),
+    nonTerminalTelegramTradeIntents: Number(
+      row.non_terminal_telegram_trade_intents,
+    ),
+  };
+}
 
 async function fetchTelegramAccountForMerge(
   client: Pick<PoolClient, "query">,
@@ -176,6 +351,13 @@ export async function mergeUsers(
     ordersMoved: 0,
     orderLogsMoved: 0,
     bridgeOrdersMoved: 0,
+    fundingDestinationsMoved: 0,
+    fundingDestinationsRevoked: 0,
+    fundingOperationsMoved: 0,
+    fundingQuotesInvalidated: 0,
+    fundingQuotesMoved: 0,
+    fundingReservationsMoved: 0,
+    fundingRouteObservationsMoved: 0,
     telegramAccountsMoved: 0,
     telegramAccountsConflictBlocked: 0,
     telegramBotTradingAuthorizationsDropped: 0,
@@ -201,6 +383,56 @@ export async function mergeUsers(
     await client.query("select pg_advisory_xact_lock(hashtext($1)::bigint)", [
       `user-merge:${source.id}:${target.id}`,
     ]);
+    await lockMergeUsers(client, source.id, target.id);
+    const fundingConflicts = await fetchFundingMergeConflicts(
+      client,
+      source.id,
+      target.id,
+    );
+    if (Object.values(fundingConflicts).some((count) => count > 0)) {
+      throw new FundingMergeConflictError(fundingConflicts);
+    }
+    await client.query(
+      `
+        select set_config('hunch.funding_user_merge', 'on', true);
+        set constraints
+          funding_operations_quote_ownership_fk,
+          funding_operations_recipient_ownership_fk,
+          balance_reservations_operation_ownership_fk,
+          funding_route_observations_operation_ownership_fk,
+          telegram_trade_intents_funding_operation_ownership_fk
+        deferred
+      `,
+    );
+
+    summary.fundingQuotesInvalidated =
+      (
+        await client.query(
+          `
+            update funding_quotes
+            set invalidated_at = now(),
+                invalidation_reason = 'user_merge'
+            where user_id = any($1::uuid[])
+              and consumed_at is null
+              and invalidated_at is null
+          `,
+          [[source.id, target.id]],
+        )
+      ).rowCount ?? 0;
+
+    summary.fundingDestinationsRevoked =
+      (
+        await client.query(
+          `
+            update funding_withdrawal_destinations
+            set revoked_at = now(),
+                revocation_reason = 'user_merge'
+            where user_id = any($1::uuid[])
+              and revoked_at is null
+          `,
+          [[source.id, target.id]],
+        )
+      ).rowCount ?? 0;
 
     summary.walletsInserted =
       (
@@ -555,6 +787,74 @@ export async function mergeUsers(
       (
         await client.query(
           `update bridge_orders set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.fundingQuotesMoved =
+      (
+        await client.query(
+          `update funding_quotes set user_id = $1 where user_id = $2`,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.fundingDestinationsMoved =
+      (
+        await client.query(
+          `
+            update funding_withdrawal_destinations
+            set user_id = $1
+            where user_id = $2
+          `,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.fundingOperationsMoved =
+      (
+        await client.query(
+          `
+            update funding_operations
+            set user_id = $1,
+                support_metadata = jsonb_set(
+                  support_metadata,
+                  '{userMergeAudit}',
+                  coalesce(support_metadata->'userMergeAudit', '[]'::jsonb)
+                    || jsonb_build_array(
+                      jsonb_build_object('recordedAt', now())
+                    ),
+                  true
+                ),
+                version = version + 1
+            where user_id = $2
+              and status in ('completed', 'refunded', 'failed', 'cancelled')
+          `,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.fundingReservationsMoved =
+      (
+        await client.query(
+          `
+            update balance_reservations
+            set user_id = $1
+            where user_id = $2
+              and state in ('consumed', 'released')
+          `,
+          [target.id, source.id],
+        )
+      ).rowCount ?? 0;
+
+    summary.fundingRouteObservationsMoved =
+      (
+        await client.query(
+          `
+            update funding_route_observations
+            set user_id = $1
+            where user_id = $2
+          `,
           [target.id, source.id],
         )
       ).rowCount ?? 0;

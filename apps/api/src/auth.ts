@@ -56,6 +56,13 @@ export interface User {
   lastLoginAt?: Date;
 }
 
+export type UserDeletionResult = Readonly<{
+  disposition: "hard_deleted" | "deactivated";
+  activeMovement: boolean;
+  privyDeletionAllowed: boolean;
+  protectedReasons: readonly string[];
+}>;
+
 type UserRow = {
   id: string;
   privy_user_id: string | null;
@@ -726,11 +733,19 @@ export class AuthService {
   ): Promise<ResolvedPrivyLoginMatch> {
     const { privyUserId, privyWallets, telegramAccount, email } = params;
 
-    const userByPrivyId = await client.query<{ id: string }>(
-      "SELECT id FROM users WHERE privy_user_id = $1 LIMIT 1",
-      [privyUserId],
-    );
-    const userByPrivyIdMatch = userByPrivyId.rows[0]?.id ?? null;
+    const userByPrivyId = await client.query<{
+      id: string;
+      is_active: boolean;
+    }>("SELECT id, is_active FROM users WHERE privy_user_id = $1 LIMIT 1", [
+      privyUserId,
+    ]);
+    const userByPrivyIdRow = userByPrivyId.rows[0];
+    if (userByPrivyIdRow?.is_active === false) {
+      throw new PrivyAccountRecoveryRequiredError(
+        "This Hunch account is deactivated while retained financial activity is being reconciled",
+      );
+    }
+    const userByPrivyIdMatch = userByPrivyIdRow?.id ?? null;
     if (userByPrivyIdMatch) {
       return { userId: userByPrivyIdMatch, consumeBindGrant: false };
     }
@@ -738,13 +753,22 @@ export class AuthService {
     const telegramUserId = telegramAccount?.telegramUserId.trim() ?? "";
     let userByTelegramIdMatch: string | null = null;
     if (telegramUserId) {
-      const userByTelegramId = await client.query<{ user_id: string }>(
-        `SELECT user_id
-           FROM user_telegram_accounts
+      const userByTelegramId = await client.query<{
+        is_active: boolean;
+        user_id: string;
+      }>(
+        `SELECT account.user_id, owner.is_active
+           FROM user_telegram_accounts account
+           JOIN users owner ON owner.id = account.user_id
           WHERE telegram_user_id = $1
           LIMIT 1`,
         [telegramUserId],
       );
+      if (userByTelegramId.rows[0]?.is_active === false) {
+        throw new PrivyAccountRecoveryRequiredError(
+          "This Hunch account is deactivated while retained financial activity is being reconciled",
+        );
+      }
       userByTelegramIdMatch = userByTelegramId.rows[0]?.user_id ?? null;
     }
 
@@ -755,16 +779,27 @@ export class AuthService {
         ? "lower(wallet_address) = lower($2)"
         : "wallet_address = $2";
 
-      const owner = await client.query<{ user_id: string }>(
-        `SELECT user_id
+      const owner = await client.query<{
+        is_active: boolean;
+        user_id: string;
+      }>(
+        `SELECT user_wallets.user_id, users.is_active
            FROM user_wallets
+           JOIN users ON users.id = user_wallets.user_id
            WHERE wallet_type = $1
              AND ${match}
            LIMIT 2`,
         [wallet.walletType, wallet.address],
       );
 
-      for (const row of owner.rows) matchedUserIds.add(row.user_id);
+      for (const row of owner.rows) {
+        if (row.is_active === false) {
+          throw new PrivyAccountRecoveryRequiredError(
+            "This wallet belongs to a deactivated Hunch account with retained financial activity",
+          );
+        }
+        matchedUserIds.add(row.user_id);
+      }
       if (owner.rows.length > 0) {
         matchedWalletAddresses.add(wallet.address);
       }
@@ -815,9 +850,11 @@ export class AuthService {
 
     const userByEmail = await client.query<{
       id: string;
+      is_active: boolean;
       privy_bind_grant_expires_at: Date | null;
     }>(
       `SELECT id
+              , is_active
               , privy_bind_grant_expires_at
          FROM users
         WHERE lower(email) = lower($1)
@@ -832,6 +869,11 @@ export class AuthService {
     }
 
     if (userByEmail.rows.length === 1) {
+      if (userByEmail.rows[0]?.is_active === false) {
+        throw new PrivyAccountRecoveryRequiredError(
+          "This Hunch account is deactivated while retained financial activity is being reconciled",
+        );
+      }
       const grantExpiresAt = userByEmail.rows[0]?.privy_bind_grant_expires_at;
       if (grantExpiresAt && grantExpiresAt.getTime() > Date.now()) {
         return {
@@ -1454,8 +1496,280 @@ export class AuthService {
     return mapUserRow(result.rows[0]);
   }
 
-  static async deleteUser(userId: string): Promise<void> {
-    await pool.query("DELETE FROM users WHERE id = $1", [userId]);
+  static async deleteUser(
+    userId: string,
+    transactionClient?: PoolClient,
+  ): Promise<UserDeletionResult> {
+    const client = transactionClient ?? (await pool.connect());
+    const ownsTransaction = transactionClient == null;
+    try {
+      if (ownsTransaction) await client.query("BEGIN");
+      const userResult = await client.query<{
+        id: string;
+        privy_user_id: string | null;
+      }>(
+        `
+          select id, privy_user_id
+          from users
+          where id = $1
+          for update
+        `,
+        [userId],
+      );
+      const user = userResult.rows[0];
+      if (!user) {
+        if (ownsTransaction) await client.query("COMMIT");
+        return {
+          disposition: "hard_deleted",
+          activeMovement: false,
+          privyDeletionAllowed: true,
+          protectedReasons: [],
+        };
+      }
+
+      const referenceResult = await client.query<{
+        active_funding_movement: boolean;
+        active_legacy_bridge: boolean;
+        active_telegram_intent: boolean;
+        deposit_evidence: boolean;
+        funding_evidence: boolean;
+        legacy_bridge_evidence: boolean;
+        trading_evidence: boolean;
+      }>(
+        `
+          select
+            (
+              exists (
+                select 1
+                from funding_operations operation
+                where operation.user_id = $1
+                  and operation.status not in (
+                    'completed', 'refunded', 'failed', 'cancelled'
+                  )
+              )
+              or exists (
+                select 1
+                from balance_reservations reservation
+                where reservation.user_id = $1
+                  and reservation.state = 'active'
+              )
+              or exists (
+                select 1
+                from funding_operation_step_attempts attempt
+                join funding_operation_steps step on step.id = attempt.step_id
+                join funding_operations operation
+                  on operation.id = step.operation_id
+                where operation.user_id = $1
+                  and operation.status not in (
+                    'completed', 'refunded', 'failed', 'cancelled'
+                  )
+                  and (
+                    attempt.outcome = 'ambiguous'
+                    or attempt.broadcast_may_have_occurred
+                  )
+              )
+              or exists (
+                select 1
+                from funding_reconciliation_jobs job
+                join funding_operations operation
+                  on operation.id = job.operation_id
+                where operation.user_id = $1
+                  and job.status = 'leased'
+                  and job.lease_until > now()
+              )
+              or exists (
+                select 1
+                from funding_route_observations route
+                where route.user_id = $1
+                  and route.outcome = 'in_progress'
+              )
+            ) as active_funding_movement,
+            exists (
+              select 1
+              from bridge_orders bridge
+              where bridge.user_id = $1
+                and lower(trim(bridge.status)) not in (
+                  'fulfilled', 'filled', 'completed', 'success', 'confirmed',
+                  'failed', 'reverted', 'error', 'expired', 'refunded',
+                  'cancelled', 'canceled'
+                )
+            ) as active_legacy_bridge,
+            exists (
+              select 1
+              from telegram_trade_intents intent
+              where intent.user_id = $1
+                and intent.status in (
+                  'executing', 'submitted', 'reconcile_required'
+                )
+            ) as active_telegram_intent,
+            exists (
+              select 1 from funding_quotes where user_id = $1
+              union all
+              select 1 from funding_withdrawal_destinations where user_id = $1
+              union all
+              select 1 from funding_operations where user_id = $1
+              union all
+              select 1 from balance_reservations where user_id = $1
+              union all
+              select 1 from funding_route_observations where user_id = $1
+              limit 1
+            ) as funding_evidence,
+            exists (
+              select 1 from bridge_orders where user_id = $1
+            ) as legacy_bridge_evidence,
+            exists (
+              select 1 from deposit_events where user_id = $1
+            ) as deposit_evidence,
+            exists (
+              select 1 from orders where user_id = $1
+              union all
+              select 1 from positions where user_id = $1
+              union all
+              select 1 from executions where user_id = $1
+              limit 1
+            ) as trading_evidence
+        `,
+        [userId],
+      );
+      const references = referenceResult.rows[0];
+      if (!references) {
+        throw new Error("Account deletion reference preflight returned no row");
+      }
+      const activeMovement =
+        references.active_funding_movement ||
+        references.active_legacy_bridge ||
+        references.active_telegram_intent;
+      const protectedReasons = [
+        references.funding_evidence ? "funding_evidence" : null,
+        references.legacy_bridge_evidence ? "legacy_bridge_evidence" : null,
+        references.deposit_evidence ? "deposit_evidence" : null,
+        references.trading_evidence ? "trading_evidence" : null,
+        references.active_funding_movement ? "active_funding_movement" : null,
+        references.active_legacy_bridge ? "active_legacy_bridge" : null,
+        references.active_telegram_intent ? "active_telegram_intent" : null,
+      ].filter((reason): reason is string => reason !== null);
+
+      if (protectedReasons.length === 0) {
+        await client.query("delete from users where id = $1", [userId]);
+        if (ownsTransaction) await client.query("COMMIT");
+        return {
+          disposition: "hard_deleted",
+          activeMovement: false,
+          privyDeletionAllowed: true,
+          protectedReasons: [],
+        };
+      }
+
+      await client.query(
+        `
+          update funding_quotes
+          set invalidated_at = now(),
+              invalidation_reason = 'account_deletion'
+          where user_id = $1
+            and consumed_at is null
+            and invalidated_at is null
+        `,
+        [userId],
+      );
+      await client.query(
+        `
+          update funding_withdrawal_destinations
+          set revoked_at = now(),
+              revocation_reason = 'account_deletion',
+              address_ciphertext = case
+                when $2::boolean then address_ciphertext
+                else null
+              end
+          where user_id = $1
+            and revoked_at is null
+        `,
+        [userId, activeMovement],
+      );
+      await client.query(
+        "delete from user_asset_funding_preferences where user_id = $1",
+        [userId],
+      );
+      await client.query(
+        "update user_sessions set is_active = false where user_id = $1",
+        [userId],
+      );
+      await client.query(
+        `
+          update user_venue_credentials
+          set is_active = false,
+              updated_at = now()
+          where user_id = $1
+            and is_active = true
+        `,
+        [userId],
+      );
+      await client.query(
+        `
+          update telegram_bot_trading_authorizations
+          set enabled = false,
+              disabled_at = coalesce(disabled_at, now()),
+              updated_at = now()
+          where user_id = $1
+            and enabled = true
+        `,
+        [userId],
+      );
+      await client.query(
+        `
+          update telegram_trade_intents
+          set status = 'cancelled',
+              error_code = 'account_deactivated',
+              error_message = 'Account was deactivated before submission.',
+              updated_at = now()
+          where user_id = $1
+            and (
+              status = any($2::text[])
+              or (status = 'executing' and submit_started_at is null)
+            )
+        `,
+        [userId, ["draft", "previewed", "confirming"]],
+      );
+      await client.query(
+        `
+          update users
+          set email = null,
+              username = null,
+              display_name = null,
+              avatar_url = null,
+              is_active = false,
+              is_verified = false,
+              privy_user_id = case
+                when $2::boolean then privy_user_id
+                else null
+              end,
+              financial_deactivated_at = coalesce(
+                financial_deactivated_at,
+                now()
+              ),
+              financial_pseudonymized_at = coalesce(
+                financial_pseudonymized_at,
+                now()
+              ),
+              financial_deactivation_reason = 'account_deletion',
+              privy_deletion_pending = $2::boolean
+                and privy_user_id is not null
+          where id = $1
+        `,
+        [userId, activeMovement],
+      );
+      if (ownsTransaction) await client.query("COMMIT");
+      return {
+        disposition: "deactivated",
+        activeMovement,
+        privyDeletionAllowed: !activeMovement,
+        protectedReasons,
+      };
+    } catch (error) {
+      if (ownsTransaction) await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      if (ownsTransaction) client.release();
+    }
   }
 
   /**

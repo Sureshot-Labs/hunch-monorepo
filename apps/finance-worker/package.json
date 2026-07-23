@@ -16,6 +16,7 @@
     "format:check": "prettier -c . --ignore-path ../../.gitignore --ignore-unknown"
   },
   "dependencies": {
+    "@hunch/infra": "workspace:*",
     "api": "workspace:*"
   },
   "devDependencies": {

@@ -852,8 +852,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       const privyUserId = user.privyUserId;
 
+      let deletion;
       try {
-        await AuthService.deleteUser(user.id);
+        deletion = await AuthService.deleteUser(user.id);
       } catch (error) {
         app.log.error({ error, userId: user.id }, "Failed to delete user");
         reply.code(500);
@@ -863,7 +864,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       let privyDeleted = false;
-      if (privyUserId) {
+      if (privyUserId && deletion.privyDeletionAllowed) {
         try {
           await PrivyService.deleteUser(privyUserId);
           privyDeleted = true;
@@ -876,7 +877,14 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
 
       reply.header("Content-Type", "application/json; charset=utf-8");
-      return reply.send({ ok: true, privyDeleted });
+      return reply.send({
+        ok: true,
+        disposition: deletion.disposition,
+        activeMovement: deletion.activeMovement,
+        privyDeleted,
+        privyDeletionPending:
+          Boolean(privyUserId) && !deletion.privyDeletionAllowed,
+      });
     },
   );
 

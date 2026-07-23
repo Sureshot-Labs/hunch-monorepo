@@ -1,6 +1,6 @@
 # Funding WP3 implementation tracker
 
-Status: **entry contract frozen; implementation not started**
+Status: **implemented and verified locally; not committed or deployed**
 
 Date: 2026-07-23  
 Branch: `unibalance`
@@ -26,6 +26,54 @@ policy, activate a route, deploy, or mutate production.
   create a replacement or competing preference store.
 
 New WP3 migrations therefore begin at `0184`.
+
+## Delivered implementation
+
+WP3 is implemented as an inactive durable control plane:
+
+- the single squashed migration `0184_funding_operations_core.sql` adds the
+  financial schema, lifecycle constraints, deterministic legacy tagging, user
+  deactivation metadata, deferred segment-shape validation, and complete
+  evidence-immutability guards;
+- canonical quote/commit repositories enforce authenticated ownership,
+  canonical payload hashing, exact idempotent replay, immutable consented
+  plans, and transaction-wide creation of operations, steps, reservations, and
+  jobs;
+- an advisory transaction lock serializes concurrent commits for one
+  `user_id + idempotency_key`, while database uniqueness remains the
+  authoritative collision guard;
+- destination, provider-request, attempt, observation, reservation, and lease
+  repositories preserve encrypted-reference/HMAC separation and fail closed on
+  ambiguous broadcast or allocation;
+- webhook, polling, chain RPC, and venue API discoveries share one
+  allocation-and-wake boundary and one reducer;
+- the reducer consumes only canonical finalized observations, follows the WP1
+  transition map, records actual amounts separately from consented amounts,
+  releases source reservations, and handles refund/reorg recovery;
+- Account Value reads active reservations, submitted debits, and durable
+  in-transit claims while suppressing stale source representations;
+- `finance-worker` runs the reconciliation batch independently of the legacy
+  execution switch, with sidecar-local optional database configuration and
+  PostgreSQL leases;
+- merge, account deletion/deactivation, market retention, and legacy bridge
+  creation tagging were integrated in the same lifecycle slice.
+
+No funding HTTP commit/execute surface or provider adapter was added in WP3.
+WP4 will attach provider observations and compatibility logic to these
+boundaries; WP5 will add planning/route selection.
+
+## Migrations
+
+| Migration                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0184_funding_operations_core.sql` | All WP3 tables; ownership, state, amount, evidence, lifecycle, and immutability constraints; observations, reservations, and leases; transaction-local terminal merge context; active-only destination uniqueness; one-way ciphertext shredding; user financial lifecycle fields; Telegram ownership FK; corrected deferred segment-shape validation; and deterministic legacy classification/backfill |
+
+During local development, follow-up migrations `0185`–`0189` captured defects
+found by integration tests and the final invariant audit. Before any commit or
+production application, their final definitions were folded into `0184`.
+The existing local database was reconciled transactionally to the same catalog
+fingerprint as a clean 193-migration database, then the normal migration runner
+confirmed the database was up to date. No production ledger was rewritten.
 
 ## Work slices
 
@@ -149,7 +197,58 @@ WP3 is complete only when:
   pass;
 - no provider execution path is reachable.
 
-## Planned verification
+## Verification evidence
+
+Completed locally on 2026-07-23:
+
+- the final repository contains one WP3 migration, `0184`, with checksum
+  `567af5581833d39f97c760506dba6ec60a48bb8a82a52aab18ccf509f8dadeec`;
+- an isolated empty database applied all 193 repository migration files through
+  `0184`, exposed all 11 WP3 tables and their evidence guards, and passed the
+  complete WP3 persistence integration suite;
+- the existing local database was transactionally reconciled from the
+  development-only `0184`–`0189` ledger to the final `0184` checksum. Its
+  columns, constraints, functions, indexes, lifecycle columns, and triggers
+  have the exact same catalog fingerprint as the isolated database, and
+  `pnpm migrate` reports `Migrations up to date`;
+- concurrent identical commits produced one operation and one exact replay;
+- a failure after operation insertion rolled back the operation, children,
+  job, and quote consumption;
+- DB integration coverage passed for IDOR/ownership, changed-payload
+  idempotency conflict, one-segment enforcement, invalid state/stage,
+  destination revocation/crypto-shredding, provider request identity, ambiguous
+  attempt retry blocking, observation dedupe/allocation, finality, reorg,
+  reservations, durable Account Value facts, stale-source suppression,
+  duplicate wake-up, lease exclusion, stale-token rejection, expired-lease
+  reclaim, active-route merge blocking, terminal route reassignment, hard
+  deletion, active-route deletion blocking, and retention-aware deactivation;
+- market-retention integration tests report `funding_operations` as a protected
+  reference;
+- representative local legacy data has 270 classified rows and zero unknown
+  active or unknown total adapter versions;
+- all WP3 integration tests clean up or roll back; the final local audit showed
+  zero rows in all 11 WP3 tables;
+- API fast suite passed 22/22 files, finance-worker tests passed 9/9, repository
+  typecheck passed 12/12 packages, lint passed 11/11 packages, and the full
+  repository build and format check passed.
+
+The repository-wide API integration runner is not claimed as green: after
+`auth-tests` passed 40/40, it stopped on the `clusters-routes-tests`
+ascending-order assertion, outside the changed funding surface. The WP3
+database integration suite and the dedicated market-retention integration
+suite both pass independently.
+
+The DB suite and final invariant audit exposed and repaired issues that a
+schema-only review would not catch: the deferred segment-shape trigger targeted
+the wrong key on operation rows; timestamp parameters needed explicit
+`timestamptz` typing; terminal provider/route/attempt/observation evidence and
+actual segment amounts needed stronger one-way immutability; a successful
+attempt could otherwise be retried; and a finalized refund discovered without
+a prior source observation needed to infer the segment submission timestamp.
+All fixes now live directly in `0184` and are covered by clean-DB and
+existing-DB integration tests.
+
+The following commands are the repeatable verification surface:
 
 From `hunch-monorepo`:
 
@@ -157,16 +256,25 @@ From `hunch-monorepo`:
 pnpm migrate
 pnpm -F api run test:fast
 pnpm -F api run test:integration
-pnpm -F api run typecheck
 pnpm -F finance-worker run test
-pnpm -F finance-worker run typecheck
-pnpm -F finance-worker run lint
+pnpm typecheck
 pnpm lint
-pnpm exec prettier --check <WP3 touched files>
+pnpm build
+pnpm format:check
 ```
 
 Migration and database tests run against local infrastructure only. Production
 commands and live rehearsal are separate, explicitly authorized later gates.
-The repository-wide format baseline currently has unrelated committed warnings;
-WP3 uses a deterministic touched-file check and must not silently reformat
-unrelated files. The full repository check remains a deliberate handoff gate.
+
+## Completion boundary
+
+WP3 is complete locally. Funding remains deliberately unusable:
+
+- default `creationMode` is `off`;
+- quote, commit, and start-unsubmitted-action gates are false;
+- `PRODUCTION_FUNDING_REGISTRY` has no provider adapter, action validator,
+  network executor, or reconciler;
+- the new persistence/reconciliation modules contain no HTTP/provider,
+  signing, or broadcasting call;
+- no production migration, configuration change, commit, deployment, policy
+  publication, or live transaction was performed.

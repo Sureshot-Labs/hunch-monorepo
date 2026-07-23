@@ -50,6 +50,7 @@ function parseOptionalPositiveUsdcString(key: string): string | undefined {
 
 const enabled = parseBool(process.env.HUNCH_FINANCE_WORKER_ENABLED, false);
 const executeEnabled = parseBool(process.env.HUNCH_FINANCE_EXECUTE, false);
+const databaseUrl = readEnv("DATABASE_URL");
 const telegramTradeIntentsEnabledRaw = readEnv(
   "HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED",
 );
@@ -61,6 +62,40 @@ const telegramTradeIntentsEnabled = parseBool(
 export const env = {
   enabled,
   executeEnabled,
+  databaseUrl,
+
+  fundingReconciliationEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_ENABLED"),
+    true,
+  ),
+  fundingReconciliationIntervalSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_INTERVAL_SEC"),
+    15,
+  ),
+  fundingReconciliationBatchSize: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_BATCH_SIZE"),
+    25,
+  ),
+  fundingReconciliationLeaseSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_LEASE_SEC"),
+    30,
+  ),
+  fundingReconciliationPollSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_POLL_SEC"),
+    15,
+  ),
+  fundingReconciliationRetrySec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_RETRY_SEC"),
+    30,
+  ),
+  fundingReconciliationMaxAttempts: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_MAX_ATTEMPTS"),
+    20,
+  ),
+  fundingReconciliationPoolSize: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_POOL_SIZE"),
+    4,
+  ),
 
   feesCollectEnabled: parseBool(readEnv("HUNCH_FINANCE_COLLECT_ENABLED"), true),
   feesCollectIntervalSec: parsePositiveInt(

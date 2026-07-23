@@ -10,6 +10,10 @@ import {
   runTelegramTradeIntentReconcileJob,
   runTreasurySweepJob,
 } from "./finance-jobs.js";
+import {
+  closeFundingReconciliationPool,
+  runFundingReconciliationJob,
+} from "./funding-reconciliation.js";
 import { env } from "./env.js";
 import { InMemoryLockManager } from "./locks.js";
 import { IntervalScheduler, type ScheduledJob } from "./scheduler.js";
@@ -44,6 +48,18 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
     );
   }
   return [
+    {
+      name: "funding_reconciliation",
+      enabled:
+        workerEnv.fundingReconciliationEnabled &&
+        Boolean(workerEnv.databaseUrl),
+      intervalSec: workerEnv.fundingReconciliationIntervalSec,
+      timeoutSec: workerEnv.jobTimeoutSec,
+      maxRetries: 0,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: workerEnv.jitterSec,
+      run: () => runFundingReconciliationJob(),
+    },
     {
       name: "api_cache_warm",
       enabled: workerEnv.apiCacheWarmEnabled,
@@ -210,11 +226,11 @@ function main() {
 
   process.on("SIGINT", () => {
     scheduler.shutdown();
-    process.exit(0);
+    void closeFundingReconciliationPool().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
     scheduler.shutdown();
-    process.exit(0);
+    void closeFundingReconciliationPool().finally(() => process.exit(0));
   });
 
   log("worker_started", {

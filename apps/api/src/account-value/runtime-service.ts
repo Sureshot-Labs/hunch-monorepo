@@ -58,6 +58,12 @@ import {
   fetchAssetFundingPreferences,
   type StoredAssetFundingPreference,
 } from "./asset-preferences.js";
+import {
+  applyFundingSourceDebitSuppression,
+  buildFundingInTransitObservations,
+  loadFundingAccountValueFacts,
+  type FundingAccountValueFacts,
+} from "./funding-movement-feed.js";
 
 const SOLANA_CHAIN_ID = "7565164";
 const UNPRICED_POLICY_ID = "unpriced";
@@ -576,6 +582,45 @@ export async function buildAccountValueReadModel(inputs: {
     deduplicated.observations,
     now,
   );
+  let fundingFacts: FundingAccountValueFacts = {
+    schemaReady: false,
+    availability: [],
+    inTransit: [],
+  };
+  const fundingFactErrors: CollectorError[] = [];
+  try {
+    fundingFacts = await loadFundingAccountValueFacts(
+      inputs.pool,
+      inputs.userId,
+    );
+  } catch {
+    fundingFactErrors.push({
+      collectorId: "funding-account-value-facts",
+      code: "funding_movement_collection_failed",
+      retryable: true,
+    });
+  }
+  const movementPolicies: AssetValuationPolicy[] = valuationPolicies.map(
+    (policy) => ({
+      ...policy,
+      category: "in_transit",
+      executionEligibility: "ineligible",
+      maximumObservationAgeMs: Number.MAX_SAFE_INTEGER,
+    }),
+  );
+  const movementValuationService = new ValuationService({
+    policies: movementPolicies,
+    adapters: [new ExactStablePriceAdapter(stableStates)],
+    stableStates,
+  });
+  const inTransitAssets = await movementValuationService.value(
+    buildFundingInTransitObservations(inputs.userId, fundingFacts.inTransit),
+    now,
+  );
+  const projectedAssets = [
+    ...applyFundingSourceDebitSuppression(valuedAssets, fundingFacts.inTransit),
+    ...inTransitAssets,
+  ];
 
   const linkedWalletAddresses = linkedWallets.map(
     (wallet) => wallet.walletAddress,
@@ -632,7 +677,7 @@ export async function buildAccountValueReadModel(inputs: {
     polymarket: new Map<string, bigint>(),
     limitless: new Map<string, bigint>(),
   };
-  const availabilityErrors: CollectorError[] = [];
+  const availabilityErrors: CollectorError[] = [...fundingFactErrors];
   try {
     locks = await fetchOpenOrderCollateralLocks(inputs.pool, {
       userId: inputs.userId,
@@ -652,6 +697,9 @@ export async function buildAccountValueReadModel(inputs: {
   }
   const catalogByAsset = new Map(
     catalog.map((entry) => [canonicalAssetKey(entry.asset), entry]),
+  );
+  const fundingAvailabilityByComponent = new Map(
+    fundingFacts.availability.map((fact) => [fact.componentId, fact]),
   );
   const adjustments: CashAvailabilityAdjustment[] = valuedAssets
     .filter((component) => component.category === "cash")
@@ -674,6 +722,15 @@ export async function buildAccountValueReadModel(inputs: {
           : venueId === "limitless" && address
             ? (locks.limitless.get(address) ?? 0n).toString()
             : "0";
+      const fundingAvailability = fundingAvailabilityByComponent.get(
+        component.componentId,
+      );
+      const submittedDebitRaw =
+        fundingAvailability?.submittedDebitObservedAt != null &&
+        Date.parse(component.observedAt) <
+          Date.parse(fundingAvailability.submittedDebitObservedAt)
+          ? fundingAvailability.submittedDebitRaw
+          : "0";
       return {
         componentId: component.componentId,
         venueId,
@@ -685,11 +742,12 @@ export async function buildAccountValueReadModel(inputs: {
               )
             : null,
         lockedRaw,
-        reservedRaw: "0",
-        submittedDebitRaw: "0",
+        reservedRaw: fundingAvailability?.reservedRaw ?? "0",
+        submittedDebitRaw,
         availabilityKnown:
-          availabilityErrors.length === 0 ||
-          (venueId !== "polymarket" && venueId !== "limitless"),
+          fundingFactErrors.length === 0 &&
+          (availabilityErrors.length === 0 ||
+            (venueId !== "polymarket" && venueId !== "limitless")),
       };
     });
   const cashAvailability = projectCashAvailability({
@@ -698,11 +756,15 @@ export async function buildAccountValueReadModel(inputs: {
     collectorErrors: availabilityErrors,
     asOf,
   });
-  const collectorErrors = [...inventory.errors, ...positionErrors];
+  const collectorErrors = [
+    ...inventory.errors,
+    ...positionErrors,
+    ...fundingFactErrors,
+  ];
   const projection = projectAccountValue({
     accountId: inputs.userId,
     headlineMode: resolvedPolicy.policy.headline.mode,
-    components: valuedAssets,
+    components: projectedAssets,
     positionComponents,
     collectorErrors,
     asOf,
@@ -716,7 +778,7 @@ export async function buildAccountValueReadModel(inputs: {
     headline: resolveEffectiveHeadline(projection),
     cashAvailability,
     venues: summarizeVenues({
-      assets: valuedAssets,
+      assets: projectedAssets,
       positions: positionComponents,
       cashAvailability,
       catalog,

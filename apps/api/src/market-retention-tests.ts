@@ -376,6 +376,139 @@ await test("unified retention protects Limitless token_yes/token_no position var
   }
 });
 
+await test("unified retention protects markets referenced by funding operations", async () => {
+  const rawTokenId = numericTokenId();
+  const marketId = `retention-funding:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  let quoteId: string | null = null;
+  let operationId: string | null = null;
+
+  try {
+    await insertUnifiedLimitlessMarket({ marketId, rawTokenId });
+    const quoteResult = await pool.query<{ id: string }>(
+      `
+        insert into funding_quotes (
+          user_id,
+          discovery_projection_id,
+          selected_source_option_snapshot,
+          destination_option_snapshot,
+          plan_snapshot,
+          policy_version,
+          policy_revision,
+          canonical_request_hash,
+          plan_hash,
+          consent_token_hash,
+          expires_at,
+          consumed_at
+        )
+        values (
+          $1,
+          'retention-test',
+          '{}'::jsonb,
+          '{}'::jsonb,
+          '{}'::jsonb,
+          1,
+          'retention-test',
+          repeat('a', 64),
+          repeat('b', 64),
+          repeat('c', 64),
+          now() + interval '1 hour',
+          now()
+        )
+        returning id
+      `,
+      [userId],
+    );
+    quoteId = quoteResult.rows[0]?.id ?? null;
+    assert.ok(quoteId);
+    const operationResult = await pool.query<{ id: string }>(
+      `
+        insert into funding_operations (
+          user_id,
+          quote_id,
+          purpose,
+          status,
+          progress_stage,
+          experience_mode,
+          plan_kind,
+          idempotency_key,
+          commit_request_hash,
+          plan_hash,
+          policy_version,
+          policy_revision,
+          destination_target_snapshot,
+          market_id,
+          placement_snapshot,
+          quote_snapshot,
+          consent_snapshot,
+          original_subject_lookup_hmac,
+          subject_lookup_key_version,
+          completed_at
+        )
+        values (
+          $1,
+          $2,
+          'trade_shortfall',
+          'completed',
+          'terminal',
+          'instant',
+          'already_available',
+          $3,
+          repeat('d', 64),
+          repeat('b', 64),
+          1,
+          'retention-test',
+          '{}'::jsonb,
+          $4,
+          '{}'::jsonb,
+          '{}'::jsonb,
+          '{}'::jsonb,
+          repeat('e', 64),
+          1,
+          now()
+        )
+        returning id
+      `,
+      [userId, quoteId, `retention:${crypto.randomUUID()}`, marketId],
+    );
+    operationId = operationResult.rows[0]?.id ?? null;
+    assert.ok(operationId);
+
+    const report = await runApiScriptJson("market-retention-selector.ts", [
+      "--venue=limitless",
+      "--cutoff-days=30",
+      "--limit=50000",
+      "--sample=200",
+      "--json",
+    ]);
+    const rows = summaryRows(report, "batchSummary");
+    assert.ok(
+      countFor(rows, {
+        section: "protected_by_reason",
+        label: "funding_operations",
+      }) >= 1,
+    );
+    const samples = summaryRows(report, "removableSamples");
+    assert.equal(
+      samples.some((row) => row.marketId === marketId),
+      false,
+    );
+  } finally {
+    if (operationId) {
+      await pool.query("delete from funding_operations where id = $1", [
+        operationId,
+      ]);
+    }
+    if (quoteId) {
+      await pool.query("delete from funding_quotes where id = $1", [quoteId]);
+    }
+    await cleanupUnifiedRetentionTest(userId, marketId, [
+      rawTokenId,
+      `other-${rawTokenId}`,
+    ]);
+  }
+});
+
 await test("unified retention protects Telegram outbox market references", async () => {
   const rawTokenId = numericTokenId();
   const marketId = `retention-telegram:${crypto.randomUUID()}`;

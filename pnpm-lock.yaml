@@ -189,6 +189,9 @@ importers:
 
   apps/finance-worker:
     dependencies:
+      '@hunch/infra':
+        specifier: workspace:*
+        version: link:../../packages/infra
       api:
         specifier: workspace:*
         version: link:../api

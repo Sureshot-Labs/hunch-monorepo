@@ -3568,15 +3568,37 @@ Completion evidence:
 - restart/ambiguous broadcast/refund simulations converge;
 - old operation rows remain untouched and reconcilable.
 
-#### WP3 entry status — 2026-07-23
+#### WP3 completion status — 2026-07-23
 
-The entry contract is frozen and implementation has not started. New migrations
-begin at `0184`; the WP2 preference table from `0183` is consumed rather than
-recreated. WP3 keeps funding creation `off`, the production registry empty, and
-all provider/wallet execution unreachable while persistence, repositories,
-observations, reservations, finance-worker leases, lifecycle protection, and
-legacy dispatch are implemented. Detailed work slices and acceptance evidence:
-`docs/funding/wp3/README.md`.
+WP3 is implemented and verified locally in the single squashed migration
+`0184_funding_operations_core.sql`. The WP2 preference table from `0183` is
+consumed rather than recreated. Atomic quote/commit repositories, immutable
+operations and evidence, exact observation allocation, reservations, Account
+Value in-transit facts, the shared reducer, durable finance-worker leases,
+merge/deletion/retention protection, and deterministic legacy adapter
+classification are covered by database and unit tests.
+
+An isolated empty database applied all 193 repository migration files through
+`0184` and passed the full WP3 persistence suite. The existing local database
+was then transactionally reconciled from the development-only `0184`–`0189`
+ledger to the final `0184` checksum; its catalog fingerprint exactly matches the
+clean database, the normal migration runner reports up to date, and no local
+application data was reset. Concurrent commit, rollback, IDOR, immutable
+provider/route/attempt/observation evidence, invalid transition, ambiguous
+broadcast, duplicate observation/wake, finality/reorg, refund without a prior
+source observation, expired lease reclaim, active-route merge/deletion
+blocking, terminal merge, retention-aware deletion, and protected-market
+scenarios pass. Representative local legacy data has zero unknown active
+adapter versions and test cleanup leaves all 11 WP3 tables empty.
+
+The squash was completed before commit or production application. The final
+repository therefore has no `0185`–`0189` follow-up files and no production
+migration-ledger rewrite is required.
+
+Funding creation remains `off`, the production registry remains empty, and no
+provider/wallet execution path, policy publication, production migration,
+deployment, or live transaction was added or performed. Detailed implementation
+and repeatable evidence: `docs/funding/wp3/README.md`.
 
 ### Work package 4 — Relay adapter and provider compatibility isolation
 

@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 
 import type { QueryResult, QueryResultRow } from "pg";
 
-import { mergeUsers, type UserRow } from "./admin-merge-user-core.js";
+import {
+  FundingMergeConflictError,
+  mergeUsers,
+  type FundingMergeConflictSummary,
+  type UserRow,
+} from "./admin-merge-user-core.js";
 
 type QueryCall = {
   params?: unknown[];
@@ -13,6 +18,7 @@ type MergeDbFixture = {
   assetPreferenceConflicts?: number;
   assetPreferenceRows?: number;
   authRows?: number;
+  fundingConflicts?: Partial<FundingMergeConflictSummary>;
   intentRows?: number;
   sourceTelegramUserId?: string;
   targetTelegramUserId?: string;
@@ -77,6 +83,48 @@ function createMergeDb(fixture: MergeDbFixture) {
       }
       if (normalized.startsWith("select pg_advisory_xact_lock")) {
         return result<T>();
+      }
+      if (
+        normalized.startsWith("select id from users") &&
+        normalized.includes("for update")
+      ) {
+        return result<T>([
+          { id: "source" },
+          { id: "target" },
+        ] as unknown as T[]);
+      }
+      if (
+        normalized.includes("as non_terminal_funding_operations") &&
+        normalized.includes("as funding_consent_conflicts")
+      ) {
+        const conflicts = fixture.fundingConflicts ?? {};
+        return result<T>([
+          {
+            active_funding_leases: String(conflicts.activeFundingLeases ?? 0),
+            active_funding_routes: String(conflicts.activeFundingRoutes ?? 0),
+            ambiguous_funding_attempts: String(
+              conflicts.ambiguousFundingAttempts ?? 0,
+            ),
+            funding_consent_conflicts: String(
+              conflicts.fundingConsentConflicts ?? 0,
+            ),
+            funding_idempotency_conflicts: String(
+              conflicts.fundingIdempotencyConflicts ?? 0,
+            ),
+            live_funding_reservations: String(
+              conflicts.liveFundingReservations ?? 0,
+            ),
+            non_terminal_funding_operations: String(
+              conflicts.nonTerminalFundingOperations ?? 0,
+            ),
+            non_terminal_legacy_bridge_orders: String(
+              conflicts.nonTerminalLegacyBridgeOrders ?? 0,
+            ),
+            non_terminal_telegram_trade_intents: String(
+              conflicts.nonTerminalTelegramTradeIntents ?? 0,
+            ),
+          },
+        ] as unknown as T[]);
       }
       if (
         normalized.includes("from user_telegram_accounts") &&
@@ -166,6 +214,50 @@ function countCalls(calls: QueryCall[], pattern: RegExp): number {
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> }> = [
+  {
+    name: "merge reports the complete funding conflict set before mutation",
+    run: async () => {
+      const fake = createMergeDb({
+        fundingConflicts: {
+          activeFundingLeases: 1,
+          activeFundingRoutes: 7,
+          ambiguousFundingAttempts: 2,
+          liveFundingReservations: 3,
+          nonTerminalFundingOperations: 4,
+          nonTerminalLegacyBridgeOrders: 5,
+          nonTerminalTelegramTradeIntents: 6,
+        },
+      });
+
+      await assert.rejects(
+        () =>
+          mergeUsers(
+            user("source"),
+            user("target"),
+            { dryRun: false, keepSource: false },
+            fake.db as never,
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof FundingMergeConflictError);
+          assert.deepEqual(error.conflicts, {
+            activeFundingLeases: 1,
+            activeFundingRoutes: 7,
+            ambiguousFundingAttempts: 2,
+            fundingConsentConflicts: 0,
+            fundingIdempotencyConflicts: 0,
+            liveFundingReservations: 3,
+            nonTerminalFundingOperations: 4,
+            nonTerminalLegacyBridgeOrders: 5,
+            nonTerminalTelegramTradeIntents: 6,
+          });
+          return true;
+        },
+      );
+      assert.equal(fake.state.rolledBack, true);
+      assert.equal(countCalls(fake.calls, /^update funding_quotes/), 0);
+      assert.equal(countCalls(fake.calls, /^update user_wallets/), 0);
+    },
+  },
   {
     name: "merge moves source Telegram account, bot authorizations, and intents",
     run: async () => {

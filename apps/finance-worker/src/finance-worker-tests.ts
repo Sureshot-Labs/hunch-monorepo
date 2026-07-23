@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import type { Pool } from "@hunch/infra";
 
 import { env } from "./env.js";
 import {
@@ -9,6 +10,11 @@ import {
   runTelegramTradeIntentReconcileJob,
   setFinanceJobsModuleLoaderForTests,
 } from "./finance-jobs.js";
+import {
+  resetFundingWorkerModuleLoaderForTests,
+  runFundingReconciliationJob,
+  setFundingWorkerModuleLoaderForTests,
+} from "./funding-reconciliation.js";
 import { buildJobs } from "./main.js";
 
 type TestCase = {
@@ -39,6 +45,35 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "funding reconciliation remains enabled when finance execute is false",
+    run: () => {
+      const job = buildJobs(
+        buildTestEnv({
+          databaseUrl: "postgresql://local/funding-test",
+          executeEnabled: false,
+          fundingReconciliationEnabled: true,
+          fundingReconciliationIntervalSec: 17,
+        }),
+      ).find((candidate) => candidate.name === "funding_reconciliation");
+      assert.ok(job);
+      assert.equal(job.enabled, true);
+      assert.equal(job.intervalSec, 17);
+      assert.equal(job.maxRetries, 0);
+    },
+  },
+  {
+    name: "funding reconciliation is disabled without sidecar database config",
+    run: () => {
+      const job = buildJobs(
+        buildTestEnv({
+          databaseUrl: undefined,
+          fundingReconciliationEnabled: true,
+        }),
+      ).find((candidate) => candidate.name === "funding_reconciliation");
+      assert.equal(job?.enabled, false);
+    },
+  },
   {
     name: "position resolution notification producer polls every minute behind runtime policy",
     run: () => {
@@ -163,6 +198,44 @@ const tests: TestCase[] = [
       assert.equal(typeof jobs.runTelegramTradeIntentReconcileJob, "function");
       assert.equal(typeof jobs.runFeesCollectJob, "function");
       resetFinanceJobsModuleLoaderForTests();
+    },
+  },
+  {
+    name: "funding job bridge passes sidecar-safe bounded configuration",
+    run: async () => {
+      const fakePool = {} as Pool;
+      let observedPool: Pool | null = null;
+      let observedOptions: Record<string, unknown> = {};
+      setFundingWorkerModuleLoaderForTests(
+        async () => ({
+          runFundingReconciliationJob: async (pool, options) => {
+            observedPool = pool;
+            observedOptions = options;
+            return {
+              claimed: 0,
+              completed: 0,
+              requeued: 0,
+              failed: 0,
+              deadLettered: 0,
+              operationIds: [],
+            };
+          },
+        }),
+        fakePool,
+      );
+      try {
+        const result = await runFundingReconciliationJob();
+        assert.equal(result.claimed, 0);
+        assert.equal(observedPool, fakePool);
+        assert.equal(observedOptions.limit, env.fundingReconciliationBatchSize);
+        assert.equal(
+          observedOptions.leaseSeconds,
+          env.fundingReconciliationLeaseSec,
+        );
+        assert.match(String(observedOptions.workerId), /:\d+$/);
+      } finally {
+        resetFundingWorkerModuleLoaderForTests();
+      }
     },
   },
 ];

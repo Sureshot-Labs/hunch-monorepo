@@ -9,6 +9,7 @@ import { env } from "../env.js";
 import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchSolanaSignatureStatus } from "../services/solana-rpc.js";
+import { resolveLegacyCreationAdapterVersion } from "../funding/legacy/bridge-adapter-classifier.js";
 import {
   buildBridgeNotification,
   createNotificationSafe,
@@ -1791,7 +1792,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   order_id,
                   status,
                   fees,
-                  metadata
+                  metadata,
+                  adapter_version
                 )
                 values (
                   $1,
@@ -1807,7 +1809,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   $11,
                   $12,
                   $13,
-                  $14
+                  $14,
+                  $15
                 )
                 returning id
               `,
@@ -1847,6 +1850,11 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   providerPayload,
                 },
               },
+              resolveLegacyCreationAdapterVersion({
+                provider: "across",
+                swapType,
+                providerPayload,
+              }),
             ],
           );
           const bridgeOrderId = insertResult.rows[0]?.id ?? null;
@@ -2025,7 +2033,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             order_id,
             status,
             fees,
-            metadata
+            metadata,
+            adapter_version
           )
           values (
             $1,
@@ -2041,7 +2050,8 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
             $11,
             $12,
             $13,
-            $14
+            $14,
+            $15
           )
           returning id
         `,
@@ -2060,6 +2070,10 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           "created",
           fees,
           { tx: txMeta, estimation, tokenIn, tokenOut },
+          resolveLegacyCreationAdapterVersion({
+            provider: "debridge",
+            swapType,
+          }),
         ],
       );
 
