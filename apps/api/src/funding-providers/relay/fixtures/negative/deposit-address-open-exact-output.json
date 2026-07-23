@@ -1,0 +1,23 @@
+{
+  "_fixture": {
+    "kind": "negative-policy",
+    "sourceId": "relay-deposit-address-docs",
+    "mutation": "set EXACT_OUTPUT without strict mode"
+  },
+  "request": {
+    "user": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 8453,
+    "originCurrency": "0x0000000000000000000000000000000000000000",
+    "destinationChainId": 10,
+    "destinationCurrency": "0x0000000000000000000000000000000000000000",
+    "tradeType": "EXACT_OUTPUT",
+    "amount": "100000000000000000",
+    "useDepositAddress": true,
+    "refundTo": "0x4444444444444444444444444444444444444444"
+  },
+  "expected": {
+    "providerCallAllowed": false,
+    "reason": "open-exact-output-not-supported"
+  }
+}

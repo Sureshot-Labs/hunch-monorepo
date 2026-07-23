@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "kind": "negative-policy",
+    "sourceIds": ["relay-status-v3", "relay-openapi"],
+    "mutation": "use status documented in prose but absent from OpenAPI enum"
+  },
+  "response": {
+    "status": "delayed"
+  },
+  "expected": {
+    "terminal": false,
+    "rawStatusPreserved": true,
+    "normalizedAction": "reconcile",
+    "reason": "documented-status-missing-from-openapi-enum"
+  }
+}

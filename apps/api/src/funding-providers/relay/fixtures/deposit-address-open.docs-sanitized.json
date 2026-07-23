@@ -1,0 +1,69 @@
+{
+  "_fixture": {
+    "kind": "official-docs-sanitized",
+    "sourceId": "relay-deposit-address-docs",
+    "retrievedAt": "2026-07-23",
+    "liveRequestCreated": false,
+    "hunchInitialRolloutPolicy": "reject",
+    "documentationObservation": "The guide prose says 0.01 ETH while its raw request amount is 0.1 ETH; this fixture follows the raw request field."
+  },
+  "request": {
+    "user": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 8453,
+    "originCurrency": "0x0000000000000000000000000000000000000000",
+    "destinationChainId": 10,
+    "destinationCurrency": "0x0000000000000000000000000000000000000000",
+    "tradeType": "EXACT_INPUT",
+    "amount": "100000000000000000",
+    "useDepositAddress": true,
+    "refundTo": "0x4444444444444444444444444444444444444444"
+  },
+  "response": {
+    "steps": [
+      {
+        "id": "deposit",
+        "action": "Confirm transaction in your wallet",
+        "description": "Deposit funds to execute the route",
+        "kind": "transaction",
+        "requestId": "fixture-request-open-001",
+        "depositAddress": "0x5555555555555555555555555555555555555555",
+        "items": [
+          {
+            "status": "incomplete",
+            "data": {
+              "from": "0x1111111111111111111111111111111111111111",
+              "to": "0x5555555555555555555555555555555555555555",
+              "data": "0x",
+              "value": "100000000000000000",
+              "chainId": 8453
+            },
+            "check": {
+              "endpoint": "/intents/status/v3?requestId=fixture-request-open-001",
+              "method": "GET"
+            }
+          }
+        ]
+      }
+    ],
+    "details": {
+      "operation": "swap",
+      "currencyIn": {
+        "amount": "100000000000000000",
+        "minimumAmount": "100000000000000000"
+      },
+      "currencyOut": {
+        "amount": "99980000000000000",
+        "minimumAmount": "97980000000000000"
+      },
+      "timeEstimate": 2
+    }
+  },
+  "documentedSemantics": {
+    "reusableForSameRoute": true,
+    "variableAmount": true,
+    "mayCreateChildRequest": true,
+    "correlatePrimarilyByDepositAddress": true,
+    "automaticRefundWithoutRefundTo": false
+  }
+}

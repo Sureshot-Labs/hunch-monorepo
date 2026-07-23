@@ -1,0 +1,150 @@
+{
+  "_fixture": {
+    "kind": "live-quote-only-sanitized",
+    "sourceId": "relay-quote-v2-live",
+    "capturedAt": "2026-07-23T00:22:53.790Z",
+    "liveRequestCreated": true,
+    "requestIdSanitized": true,
+    "responseBodyRetained": false,
+    "responseSummaryRetained": true,
+    "routeAvailabilityScope": "quote-only",
+    "warning": "This proves that Relay quoted direct pUSD output despite its absence from the /chains currency catalog; it does not prove execution or venue visibility."
+  },
+  "safety": {
+    "fixtureAddressWithoutKnownPrivateKey": true,
+    "useDepositAddressRequested": false,
+    "signatureCreated": false,
+    "transactionBroadcast": false,
+    "fundsSpentRaw": "0"
+  },
+  "request": {
+    "user": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 8453,
+    "destinationChainId": 137,
+    "originCurrency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "destinationCurrency": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+    "amount": "10000000",
+    "tradeType": "EXACT_INPUT"
+  },
+  "quote": {
+    "httpStatus": 200,
+    "responseBytes": 8320,
+    "responseSha256": "87e11063e9a2f53c9f2de4614d1e417bffc737e9e5a1ea0ec431a6d861fd63d8",
+    "requestIdFingerprint": "sha256:1c7370076086a769",
+    "topLevelKeys": ["details", "fees", "protocol", "steps"],
+    "steps": [
+      {
+        "id": "approve",
+        "kind": "transaction",
+        "itemStatus": "incomplete",
+        "chainId": 8453,
+        "from": "0x1111111111111111111111111111111111111111",
+        "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "value": "0",
+        "calldataBytes": 68,
+        "calldataSelector": "0x095ea7b3",
+        "calldataSha256": "703dd0fc5535abec5e2a018b32a11de56e67a0f8b412762f18ebfc7b3f5dafe8"
+      },
+      {
+        "id": "deposit",
+        "kind": "transaction",
+        "itemStatus": "incomplete",
+        "chainId": 8453,
+        "from": "0x1111111111111111111111111111111111111111",
+        "to": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+        "value": "0",
+        "calldataBytes": 132,
+        "calldataSelector": "0xe8017952",
+        "calldataSha256": "4ee4127768050a3ab78db7d7e2814be11d25b4d0226e4bbe72a2fcead2e5d00a",
+        "statusCheck": {
+          "method": "GET",
+          "endpointPath": "/intents/status/v3"
+        },
+        "depositAddressField": {
+          "type": "string",
+          "valueRetained": false,
+          "addressAllocationNotInferred": true
+        }
+      }
+    ],
+    "fees": {
+      "gas": {
+        "amount": "459978749230",
+        "currencySymbol": "ETH",
+        "currencyDecimals": 18
+      },
+      "relayer": {
+        "amount": "44273",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "relayerGas": {
+        "amount": "22326",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "relayerService": {
+        "amount": "21947",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "app": {
+        "amount": "0",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "subsidized": {
+        "amount": "0",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      }
+    },
+    "details": {
+      "operation": "swap",
+      "inputAmount": "10000000",
+      "expectedOutputAmount": "9944129",
+      "minimumOutputAmount": "9745246",
+      "outputCurrency": {
+        "chainId": 137,
+        "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+        "symbol": "pUSD",
+        "decimals": 6
+      },
+      "timeEstimateSeconds": 3,
+      "isFixedRate": false
+    },
+    "protocol": {
+      "version": "v2",
+      "orderIdFingerprint": "sha256:830a59e2ff43c52a",
+      "orderDataKeys": [
+        "fees",
+        "inputs",
+        "output",
+        "salt",
+        "solver",
+        "solverChainId",
+        "version"
+      ],
+      "paymentDetails": {
+        "chainId": "base",
+        "depository": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+        "currency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "amount": "10000000"
+      }
+    }
+  },
+  "immediateReads": {
+    "statusV3": {
+      "httpStatus": 200,
+      "status": "waiting",
+      "responseKeys": ["quoteCreatedAt", "status"]
+    },
+    "requestsV3ByExactIdWithChildren": {
+      "httpStatus": 200,
+      "response": {
+        "requests": []
+      }
+    }
+  }
+}

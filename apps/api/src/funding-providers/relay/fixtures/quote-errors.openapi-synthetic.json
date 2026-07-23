@@ -1,0 +1,47 @@
+{
+  "_fixture": {
+    "kind": "contract-extract-synthetic",
+    "sourceId": "relay-openapi",
+    "retrievedAt": "2026-07-23T00:03:07.159Z",
+    "liveErrorsTriggered": false,
+    "validationScope": "error field presence and adapter classification only"
+  },
+  "responses": [
+    {
+      "httpStatus": 400,
+      "body": {
+        "message": "fixture invalid quote",
+        "errorCode": "FIXTURE_BAD_REQUEST",
+        "errorData": null,
+        "requestId": "fixture-error-request-400",
+        "approxSimulatedBlock": null,
+        "failedCallData": null
+      },
+      "classification": "provider-rejected"
+    },
+    {
+      "httpStatus": 401,
+      "body": {
+        "message": "fixture unauthorized",
+        "errorCode": "FIXTURE_UNAUTHORIZED"
+      },
+      "classification": "provider-auth-misconfigured"
+    },
+    {
+      "httpStatus": 429,
+      "body": {
+        "message": "fixture rate limited"
+      },
+      "classification": "provider-temporarily-unavailable"
+    },
+    {
+      "httpStatus": 500,
+      "body": {
+        "message": "fixture provider failure",
+        "errorCode": "FIXTURE_INTERNAL",
+        "requestId": "fixture-error-request-500"
+      },
+      "classification": "provider-temporarily-unavailable"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "_fixture": {
+    "kind": "live-read-only",
+    "sourceId": "relay-chains",
+    "retrievedAt": "2026-07-23T00:02:48.475Z",
+    "httpStatus": 200,
+    "validationScope": "exact chain and currency catalog matches only"
+  },
+  "chainIdMapping": {
+    "hunchSolana": 7565164,
+    "relaySolana": 792703809
+  },
+  "assets": [
+    {
+      "routeKey": "polygon-usdce",
+      "chainId": 137,
+      "vmType": "evm",
+      "depositEnabled": true,
+      "chainDisabled": false,
+      "address": "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+      "catalogMatch": {
+        "id": "usdc.e",
+        "symbol": "USDC.e",
+        "decimals": 6
+      }
+    },
+    {
+      "routeKey": "polygon-usdc-native",
+      "chainId": 137,
+      "vmType": "evm",
+      "depositEnabled": true,
+      "chainDisabled": false,
+      "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "catalogMatch": {
+        "id": "usdc",
+        "symbol": "USDC",
+        "decimals": 6
+      }
+    },
+    {
+      "routeKey": "polygon-pusd",
+      "chainId": 137,
+      "vmType": "evm",
+      "depositEnabled": true,
+      "chainDisabled": false,
+      "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+      "catalogMatch": null,
+      "conclusion": "unproven-not-unsupported"
+    },
+    {
+      "routeKey": "base-usdc",
+      "chainId": 8453,
+      "vmType": "evm",
+      "depositEnabled": true,
+      "chainDisabled": false,
+      "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "catalogMatch": {
+        "id": "usdc",
+        "symbol": "USDC",
+        "decimals": 6
+      }
+    },
+    {
+      "routeKey": "solana-usdc",
+      "chainId": 792703809,
+      "vmType": "svm",
+      "depositEnabled": true,
+      "chainDisabled": false,
+      "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "catalogMatch": {
+        "id": "usdc",
+        "symbol": "USDC",
+        "decimals": 6
+      }
+    }
+  ]
+}

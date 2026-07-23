@@ -1,0 +1,33 @@
+{
+  "_fixture": {
+    "kind": "negative-policy",
+    "sourceId": "relay-openapi",
+    "mutation": "enable provider capabilities outside initial Hunch Relay policy"
+  },
+  "request": {
+    "user": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 8453,
+    "destinationChainId": 137,
+    "originCurrency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "destinationCurrency": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    "amount": "10000000",
+    "tradeType": "EXACT_INPUT",
+    "topupGas": true,
+    "subsidizeFees": true,
+    "depositFeePayer": "0x3333333333333333333333333333333333333333",
+    "authorizationList": ["fixture-authorization"],
+    "txs": ["fixture-provider-supplied-transaction"]
+  },
+  "expected": {
+    "providerCallAllowed": false,
+    "rejectedFields": [
+      "topupGas",
+      "subsidizeFees",
+      "depositFeePayer",
+      "authorizationList",
+      "txs"
+    ],
+    "reason": "capability-not-implemented-or-enabled"
+  }
+}

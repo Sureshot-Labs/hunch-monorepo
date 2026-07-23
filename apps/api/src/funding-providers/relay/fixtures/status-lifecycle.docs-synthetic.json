@@ -1,0 +1,44 @@
+{
+  "_fixture": {
+    "kind": "official-docs-synthetic",
+    "sourceIds": ["relay-openapi", "relay-status-v3", "relay-webhook-docs"],
+    "retrievedAt": "2026-07-23",
+    "liveStatusesObserved": ["success", "unknown"]
+  },
+  "cases": [
+    { "rawStatus": "waiting", "terminal": false, "action": "reconcile" },
+    { "rawStatus": "depositing", "terminal": false, "action": "reconcile" },
+    { "rawStatus": "pending", "terminal": false, "action": "reconcile" },
+    { "rawStatus": "submitted", "terminal": false, "action": "reconcile" },
+    {
+      "rawStatus": "success",
+      "terminal": true,
+      "action": "require-owned-destination-evidence"
+    },
+    {
+      "rawStatus": "failure",
+      "terminal": false,
+      "action": "reconcile-failure-or-refund"
+    },
+    {
+      "rawStatus": "refund",
+      "terminal": false,
+      "action": "require-owned-refund-evidence"
+    },
+    {
+      "rawStatus": "delayed",
+      "terminal": false,
+      "action": "preserve-raw-and-reconcile"
+    },
+    {
+      "rawStatus": "unknown",
+      "terminal": false,
+      "action": "preserve-raw-and-reconcile"
+    },
+    {
+      "rawStatus": "refunded",
+      "terminal": false,
+      "action": "preserve-raw-and-reconcile"
+    }
+  ]
+}

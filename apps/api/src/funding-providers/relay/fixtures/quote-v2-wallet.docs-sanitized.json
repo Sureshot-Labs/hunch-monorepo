@@ -1,0 +1,121 @@
+{
+  "_fixture": {
+    "kind": "official-docs-sanitized",
+    "sourceId": "relay-quote-v2-docs",
+    "retrievedAt": "2026-07-23",
+    "liveRequestCreated": false,
+    "validationScope": "representative Quote v2 wallet request and transaction response shape",
+    "warning": "This fixture does not prove route availability, pricing, allowance, executable calldata, or settlement."
+  },
+  "request": {
+    "user": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 8453,
+    "destinationChainId": 137,
+    "originCurrency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "destinationCurrency": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    "amount": "10000000",
+    "tradeType": "EXACT_INPUT"
+  },
+  "response": {
+    "steps": [
+      {
+        "id": "deposit",
+        "action": "Confirm transaction in your wallet",
+        "description": "Deposit the origin currency to execute the route",
+        "kind": "transaction",
+        "requestId": "fixture-request-wallet-001",
+        "items": [
+          {
+            "status": "incomplete",
+            "data": {
+              "from": "0x1111111111111111111111111111111111111111",
+              "to": "0x3333333333333333333333333333333333333333",
+              "data": "0x00fad611",
+              "value": "0",
+              "chainId": 8453
+            },
+            "check": {
+              "endpoint": "/intents/status/v3?requestId=fixture-request-wallet-001",
+              "method": "GET"
+            }
+          }
+        ]
+      }
+    ],
+    "fees": {
+      "gas": {
+        "currency": {
+          "chainId": 8453,
+          "address": "0x0000000000000000000000000000000000000000",
+          "symbol": "ETH",
+          "name": "Ether",
+          "decimals": 18
+        },
+        "amount": "10000000000000",
+        "amountFormatted": "0.00001",
+        "amountUsd": "0.03",
+        "minimumAmount": "10000000000000"
+      },
+      "relayer": {
+        "currency": {
+          "chainId": 8453,
+          "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "symbol": "USDC",
+          "name": "USD Coin",
+          "decimals": 6
+        },
+        "amount": "10000",
+        "amountFormatted": "0.01",
+        "amountUsd": "0.01",
+        "minimumAmount": "10000"
+      }
+    },
+    "details": {
+      "operation": "bridge",
+      "sender": "0x1111111111111111111111111111111111111111",
+      "recipient": "0x2222222222222222222222222222222222222222",
+      "currencyIn": {
+        "currency": {
+          "chainId": 8453,
+          "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "symbol": "USDC",
+          "name": "USD Coin",
+          "decimals": 6
+        },
+        "amount": "10000000",
+        "amountFormatted": "10.0",
+        "amountUsd": "10.0",
+        "minimumAmount": "10000000"
+      },
+      "currencyOut": {
+        "currency": {
+          "chainId": 137,
+          "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+          "symbol": "USDC",
+          "name": "USD Coin",
+          "decimals": 6
+        },
+        "amount": "9980000",
+        "amountFormatted": "9.98",
+        "amountUsd": "9.98",
+        "minimumAmount": "9900000"
+      },
+      "timeEstimate": 12
+    },
+    "protocol": {
+      "v2": {
+        "orderId": "fixture-order-wallet-001",
+        "orderData": {
+          "version": "v1"
+        },
+        "paymentDetails": {
+          "chainId": "base",
+          "depository": "0x3333333333333333333333333333333333333333",
+          "currency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000000"
+        }
+      }
+    }
+  }
+}

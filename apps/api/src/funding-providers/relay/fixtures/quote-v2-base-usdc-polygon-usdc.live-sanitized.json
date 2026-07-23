@@ -1,0 +1,145 @@
+{
+  "_fixture": {
+    "kind": "live-quote-only-sanitized",
+    "sourceId": "relay-quote-v2-live",
+    "capturedAt": "2026-07-23T00:24:45.644Z",
+    "liveRequestCreated": true,
+    "requestIdSanitized": true,
+    "responseBodyRetained": false,
+    "responseSummaryRetained": true,
+    "routeAvailabilityScope": "quote-only",
+    "warning": "This proves quote generation and returned action shape, not action validity, wallet balance, execution, or settlement."
+  },
+  "safety": {
+    "fixtureAddressWithoutKnownPrivateKey": true,
+    "useDepositAddressRequested": false,
+    "signatureCreated": false,
+    "transactionBroadcast": false,
+    "fundsSpentRaw": "0"
+  },
+  "request": {
+    "user": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 8453,
+    "destinationChainId": 137,
+    "originCurrency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "destinationCurrency": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    "amount": "10000000",
+    "tradeType": "EXACT_INPUT"
+  },
+  "quote": {
+    "httpStatus": 200,
+    "responseBytes": 8228,
+    "responseSha256": "5dc77c9b1e4f977b66544dd019d8d42c6ac8e578d45a0c30e5756dad3c6493a8",
+    "requestIdFingerprint": "sha256:170de743f15ebd82",
+    "topLevelKeys": ["details", "fees", "protocol", "steps"],
+    "steps": [
+      {
+        "id": "approve",
+        "kind": "transaction",
+        "itemStatus": "incomplete",
+        "chainId": 8453,
+        "from": "0x1111111111111111111111111111111111111111",
+        "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "value": "0",
+        "calldataBytes": 68,
+        "calldataSelector": "0x095ea7b3",
+        "calldataSha256": "703dd0fc5535abec5e2a018b32a11de56e67a0f8b412762f18ebfc7b3f5dafe8",
+        "statusCheck": null
+      },
+      {
+        "id": "deposit",
+        "kind": "transaction",
+        "itemStatus": "incomplete",
+        "chainId": 8453,
+        "from": "0x1111111111111111111111111111111111111111",
+        "to": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+        "value": "0",
+        "calldataBytes": 132,
+        "calldataSelector": "0xe8017952",
+        "calldataSha256": "54acdd54c0895e6af2927c786f14a733dc800167d44ac1b430228e533d8f156b",
+        "statusCheck": {
+          "method": "GET",
+          "endpointPath": "/intents/status/v3"
+        },
+        "depositAddressField": {
+          "type": "string",
+          "empty": true,
+          "addressAllocated": false
+        }
+      }
+    ],
+    "fees": {
+      "gas": {
+        "amount": "460073486900",
+        "currencySymbol": "ETH",
+        "currencyDecimals": 18
+      },
+      "relayer": {
+        "amount": "24105",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "relayerGas": {
+        "amount": "3154",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "relayerService": {
+        "amount": "20951",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "app": {
+        "amount": "0",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "subsidized": {
+        "amount": "0",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      }
+    },
+    "details": {
+      "operation": "swap",
+      "inputAmount": "10000000",
+      "expectedOutputAmount": "9975895",
+      "minimumOutputAmount": "9776378",
+      "timeEstimateSeconds": 3,
+      "isFixedRate": false
+    },
+    "protocol": {
+      "version": "v2",
+      "orderIdFingerprint": "sha256:5b4d72c5e09822ec",
+      "orderDataKeys": [
+        "fees",
+        "inputs",
+        "output",
+        "salt",
+        "solver",
+        "solverChainId",
+        "version"
+      ],
+      "paymentDetails": {
+        "chainId": "base",
+        "depository": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+        "currency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "amount": "10000000"
+      }
+    }
+  },
+  "immediateReads": {
+    "statusV3": {
+      "httpStatus": 200,
+      "status": "waiting",
+      "responseKeys": ["quoteCreatedAt", "status"]
+    },
+    "requestsV3ByExactIdWithChildren": {
+      "httpStatus": 200,
+      "response": {
+        "requests": []
+      }
+    }
+  }
+}

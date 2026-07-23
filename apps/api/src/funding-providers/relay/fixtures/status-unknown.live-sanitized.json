@@ -1,0 +1,13 @@
+{
+  "_fixture": {
+    "kind": "live-read-only-sanitized",
+    "sourceId": "relay-status-v3",
+    "retrievedAt": "2026-07-23T00:02:05.290Z",
+    "httpStatus": 200,
+    "requestFingerprints": ["f2785731e4e80219", "dc70486ba63e5111"],
+    "note": "One fingerprint represents an ID published in Relay quote documentation and one a synthetic nonexistent ID."
+  },
+  "response": {
+    "status": "unknown"
+  }
+}

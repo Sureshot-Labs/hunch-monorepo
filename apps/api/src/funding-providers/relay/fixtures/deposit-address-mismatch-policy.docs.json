@@ -1,0 +1,31 @@
+{
+  "_fixture": {
+    "kind": "official-docs-policy-extract",
+    "sourceId": "relay-deposit-address-docs",
+    "retrievedAt": "2026-07-23",
+    "liveDepositsCreated": false
+  },
+  "strict": {
+    "underpayment": "fail-and-refund",
+    "exactPayment": "fill-original-order",
+    "overpayment": "fill-original-order-and-refund-excess",
+    "wrongToken": "no-automatic-recovery",
+    "wrongChain": "no-automatic-recovery"
+  },
+  "open": {
+    "sameTokenOverpayment": "requote-and-fill",
+    "sameTokenViableUnderpayment": "requote-and-fill",
+    "sameTokenTooSmall": "refund-if-refundTo-set",
+    "differentSolverToken": "chain-dependent-requote-or-manual-reindex",
+    "differentNonSolverToken": "not-recoverable",
+    "wrongChainSameVm": "chain-dependent-and-may-require-reindex",
+    "wrongChainDifferentVm": "not-supported"
+  },
+  "hunchInitialPolicy": {
+    "openExecutable": false,
+    "strictExecutableByDefault": false,
+    "requiresControlledSource": true,
+    "requiresVerifiedUserOwnedRefundLocation": true,
+    "requiresTinyValueEvidence": true
+  }
+}

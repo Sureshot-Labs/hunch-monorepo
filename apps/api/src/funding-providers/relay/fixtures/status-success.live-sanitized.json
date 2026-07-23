@@ -1,0 +1,19 @@
+{
+  "_fixture": {
+    "kind": "live-read-only-sanitized",
+    "sourceId": "relay-status-v3",
+    "retrievedAt": "2026-07-23T00:02:05.290Z",
+    "httpStatus": 200,
+    "requestFingerprint": "b49d9d2de9e9dbad",
+    "sanitizedFields": ["inTxHashes", "txHashes"]
+  },
+  "response": {
+    "status": "success",
+    "inTxHashes": ["sha256:origin-transaction-reference-redacted"],
+    "txHashes": ["sha256:destination-transaction-reference-redacted"],
+    "updatedAt": 1769988962883,
+    "originChainId": 8453,
+    "destinationChainId": 792703809,
+    "quoteCreatedAt": 1769988606796
+  }
+}

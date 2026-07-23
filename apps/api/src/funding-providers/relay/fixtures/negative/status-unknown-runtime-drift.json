@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "kind": "negative-policy",
+    "sourceIds": ["relay-status-v3", "relay-openapi"],
+    "mutation": "use runtime status observed with HTTP 200 but absent from OpenAPI enum"
+  },
+  "response": {
+    "status": "unknown"
+  },
+  "expected": {
+    "terminal": false,
+    "rawStatusPreserved": true,
+    "normalizedAction": "reconcile",
+    "reason": "runtime-status-missing-from-openapi-enum"
+  }
+}

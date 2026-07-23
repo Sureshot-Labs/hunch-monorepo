@@ -1,0 +1,146 @@
+{
+  "_fixture": {
+    "kind": "contract-extract",
+    "sourceId": "relay-openapi",
+    "retrievedAt": "2026-07-23T00:03:07.159Z",
+    "validationScope": "operation hashes and relevant request/response fields"
+  },
+  "document": {
+    "openapi": "3.0.3",
+    "title": "Cross-chain solver",
+    "version": "1.0.0",
+    "sha256": "50033524cd8165c6b265a7c59222b1d940356ed35b69d135495af70fa465fa74"
+  },
+  "operations": {
+    "quoteV2": {
+      "method": "POST",
+      "path": "/quote/v2",
+      "sha256": "552ff21940e7bbe4559f0b09a99d8e101cb9db5ce289fbeabb3712811ae3be75",
+      "requestRequired": [
+        "user",
+        "originChainId",
+        "destinationChainId",
+        "originCurrency",
+        "destinationCurrency",
+        "amount",
+        "tradeType"
+      ],
+      "requestProperties": [
+        "user",
+        "recipient",
+        "originChainId",
+        "destinationChainId",
+        "originCurrency",
+        "destinationCurrency",
+        "amount",
+        "tradeType",
+        "txs",
+        "txsGasLimit",
+        "authorizationList",
+        "additionalData",
+        "referrer",
+        "referrerAddress",
+        "refundTo",
+        "recoveryAddress",
+        "refundOnOrigin",
+        "topupGas",
+        "topupGasAmount",
+        "enableTrueExactOutput",
+        "explicitDeposit",
+        "useExternalLiquidity",
+        "useFallbacks",
+        "usePermit",
+        "permitExpiry",
+        "includeProtocolData",
+        "useDepositAddress",
+        "strict",
+        "slippageTolerance",
+        "latePaymentSlippageTolerance",
+        "appFees",
+        "gasLimitForDepositSpecifiedTxs",
+        "forceSolverExecution",
+        "subsidizeFees",
+        "sponsoredFeeComponents",
+        "maxSubsidizationAmount",
+        "subsidizeRent",
+        "includedSwapSources",
+        "excludedSwapSources",
+        "includedOriginSwapSources",
+        "includedDestinationSwapSources",
+        "originGasOverhead",
+        "depositFeePayer",
+        "maxRouteLength",
+        "useSharedAccounts",
+        "includeComputeUnitLimit",
+        "overridePriceImpact",
+        "disableOriginSwaps",
+        "fixedRate",
+        "ttl"
+      ],
+      "tradeTypeEnum": ["EXACT_INPUT", "EXACT_OUTPUT", "EXPECTED_OUTPUT"],
+      "successProperties": [
+        "steps",
+        "fees",
+        "feeSponsorship",
+        "details",
+        "protocol"
+      ],
+      "errorPropertiesByStatus": {
+        "400": [
+          "message",
+          "errorCode",
+          "errorData",
+          "requestId",
+          "approxSimulatedBlock",
+          "failedCallData"
+        ],
+        "401": ["message", "errorCode"],
+        "429": ["message"],
+        "500": ["message", "errorCode", "requestId"]
+      }
+    },
+    "statusV3": {
+      "method": "GET",
+      "path": "/intents/status/v3",
+      "sha256": "ee195931d07ffd286377c6345ef9d51f7bdaa310f26193490a0ff44b42b30c22",
+      "requestIdRequiredByOpenApi": false,
+      "successProperties": [
+        "status",
+        "details",
+        "inTxHashes",
+        "txHashes",
+        "updatedAt",
+        "originChainId",
+        "destinationChainId",
+        "quoteCreatedAt"
+      ],
+      "statusEnum": [
+        "refund",
+        "waiting",
+        "depositing",
+        "failure",
+        "pending",
+        "submitted",
+        "success"
+      ]
+    },
+    "requestsV3": {
+      "method": "GET",
+      "path": "/requests/v3",
+      "sha256": "1b2404271f8ee133c23b71b3e8dccca7de5a2eee0479462e36d4287f7b9619cf",
+      "supportsExactIdFilter": true,
+      "includeChildRequestsRequiresId": true,
+      "captureCalled": false,
+      "skipReason": "Avoid broad API-key-scoped customer request disclosure"
+    },
+    "chains": {
+      "method": "GET",
+      "path": "/chains",
+      "sha256": "2cfb115ffcf7f1b5e04421dfcf85c62d2c717ab1b64006b136529ca8025566d2"
+    }
+  },
+  "observedDrift": {
+    "runtimeStatusMissingFromOpenApiEnum": "unknown",
+    "documentedStatusMissingFromOpenApiEnum": "delayed"
+  }
+}

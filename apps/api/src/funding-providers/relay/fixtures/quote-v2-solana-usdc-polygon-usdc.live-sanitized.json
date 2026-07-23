@@ -1,0 +1,137 @@
+{
+  "_fixture": {
+    "kind": "live-quote-only-sanitized",
+    "sourceId": "relay-quote-v2-live",
+    "capturedAt": "2026-07-23T00:25:45.393Z",
+    "liveRequestCreated": true,
+    "requestIdSanitized": true,
+    "responseBodyRetained": false,
+    "responseSummaryRetained": true,
+    "routeAvailabilityScope": "quote-only",
+    "warning": "This proves quote generation and returned instruction shape, not program allowlisting, signing, execution, or settlement."
+  },
+  "safety": {
+    "fixtureAddressWithoutKnownPrivateKey": true,
+    "useDepositAddressRequested": false,
+    "signatureCreated": false,
+    "transactionBroadcast": false,
+    "fundsSpentRaw": "0"
+  },
+  "request": {
+    "user": "9HXGB1nMpw4vhMUCZC5JLfpZt6RXZoaf2HptmormMReH",
+    "recipient": "0x2222222222222222222222222222222222222222",
+    "originChainId": 792703809,
+    "destinationChainId": 137,
+    "originCurrency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "destinationCurrency": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    "amount": "10000000",
+    "tradeType": "EXACT_INPUT"
+  },
+  "quote": {
+    "httpStatus": 200,
+    "responseBytes": 8355,
+    "responseSha256": "f757eb002c8391c622b13f4f360ab434b717892e60368cc9b9dc57ad30f7d59c",
+    "requestIdFingerprint": "sha256:aa03ac90b6e6a6b8",
+    "topLevelKeys": ["details", "fees", "protocol", "steps"],
+    "steps": [
+      {
+        "id": "deposit",
+        "kind": "transaction",
+        "itemStatus": "incomplete",
+        "dataKeys": ["addressLookupTableAddresses", "instructions"],
+        "addressLookupTableFingerprints": ["sha256:4cc43709a887f832"],
+        "instructions": [
+          {
+            "programId": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+            "encodedDataLength": 96,
+            "encodedDataSha256": "e66eee99de9b699037a548555213e3db44f39127f6f5b0e091f6e62ac4629a59",
+            "keyCount": 10,
+            "signerKeyCount": 1,
+            "writableKeyCount": 3
+          }
+        ],
+        "statusCheck": {
+          "method": "GET",
+          "endpointPath": "/intents/status/v3"
+        },
+        "depositAddressField": {
+          "type": "string",
+          "empty": true,
+          "addressAllocated": false
+        }
+      }
+    ],
+    "fees": {
+      "gas": {
+        "amount": "10002",
+        "currencySymbol": "SOL",
+        "currencyDecimals": 9
+      },
+      "relayer": {
+        "amount": "25377",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "relayerGas": {
+        "amount": "3126",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "relayerService": {
+        "amount": "22251",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "app": {
+        "amount": "0",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      },
+      "subsidized": {
+        "amount": "0",
+        "currencySymbol": "USDC",
+        "currencyDecimals": 6
+      }
+    },
+    "details": {
+      "operation": "swap",
+      "inputAmount": "10000000",
+      "expectedOutputAmount": "9974623",
+      "minimumOutputAmount": "9775131",
+      "timeEstimateSeconds": 3,
+      "isFixedRate": false
+    },
+    "protocol": {
+      "version": "v2",
+      "orderIdFingerprint": "sha256:e73e274db312caf5",
+      "orderDataKeys": [
+        "fees",
+        "inputs",
+        "output",
+        "salt",
+        "solver",
+        "solverChainId",
+        "version"
+      ],
+      "paymentDetails": {
+        "chainId": "solana",
+        "depository": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+        "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "amount": "10000000"
+      }
+    }
+  },
+  "immediateReads": {
+    "statusV3": {
+      "httpStatus": 200,
+      "status": "waiting",
+      "responseKeys": ["quoteCreatedAt", "status"]
+    },
+    "requestsV3ByExactIdWithChildren": {
+      "httpStatus": 200,
+      "response": {
+        "requests": []
+      }
+    }
+  }
+}

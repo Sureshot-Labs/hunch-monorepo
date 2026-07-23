@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-07-23T00:25:45.393Z",
+  "capturePhases": {
+    "initialReadOnly": {
+      "externalStateChanges": false
+    },
+    "authorizedQuoteOnly": {
+      "externalStateChanges": true,
+      "externalStateScope": "six Relay quote request/log records only",
+      "quoteRequestsCreated": 6,
+      "depositAddressModeRequests": 0
+    },
+    "sharedSafety": {
+      "walletKeysUsed": false,
+      "walletSignaturesCreated": false,
+      "transactionsBroadcast": false,
+      "fundsUsed": false,
+      "relayApiKeyPersisted": false
+    }
+  },
+  "readOnlyCalls": [
+    "GET /documentation/json",
+    "GET /chains",
+    "GET /intents/status/v3?requestId=<official-doc-id>",
+    "GET /intents/status/v3?requestId=<synthetic-unknown-id>",
+    "GET /intents/status/v3?requestId=<created-quote-id>",
+    "GET /requests/v3?id=<created-quote-id>&includeChildRequests=true"
+  ],
+  "authorizedStateChangingCalls": [
+    "POST /quote/v2 x6 (three target routes plus three bounded capture repeats)"
+  ],
+  "intentionallySkipped": [
+    "POST /quote/v2 with useDepositAddress=true",
+    "GET /requests/v3 without an exact created request ID filter",
+    "all execution, permit, gasless, index/reindex, fast-fill, fee, wallet, signing, and transaction endpoints"
+  ],
+  "sources": [
+    {
+      "id": "relay-openapi",
+      "kind": "live-read-only",
+      "url": "https://api.relay.link/documentation/json",
+      "retrievedAt": "2026-07-23T00:02:05.290Z",
+      "openapiVersion": "3.0.3",
+      "documentSha256": "50033524cd8165c6b265a7c59222b1d940356ed35b69d135495af70fa465fa74"
+    },
+    {
+      "id": "relay-chains",
+      "kind": "live-read-only",
+      "url": "https://api.relay.link/chains",
+      "retrievedAt": "2026-07-23T00:02:48.475Z"
+    },
+    {
+      "id": "relay-status-v3",
+      "kind": "live-read-only-sanitized",
+      "url": "https://api.relay.link/intents/status/v3",
+      "retrievedAt": "2026-07-23T00:02:05.290Z"
+    },
+    {
+      "id": "relay-quote-v2-docs",
+      "kind": "official-docs-sanitized",
+      "url": "https://docs.relay.link/references/api/get-quote-v2",
+      "retrievedAt": "2026-07-23"
+    },
+    {
+      "id": "relay-quote-v2-live",
+      "kind": "live-quote-only-sanitized",
+      "url": "https://api.relay.link/quote/v2",
+      "retrievedAt": "2026-07-23T00:22:53.790Z/2026-07-23T00:25:45.393Z",
+      "quoteRequestsCreated": 6,
+      "requestIdsPersisted": false
+    },
+    {
+      "id": "relay-deposit-address-docs",
+      "kind": "official-docs-sanitized",
+      "url": "https://docs.relay.link/features/deposit-addresses",
+      "retrievedAt": "2026-07-23"
+    },
+    {
+      "id": "relay-webhook-docs",
+      "kind": "official-docs-sanitized",
+      "url": "https://docs.relay.link/references/api/api_guides/webhooks",
+      "retrievedAt": "2026-07-23"
+    }
+  ],
+  "files": [
+    "openapi-contract.json",
+    "chains-hunch-assets.live.json",
+    "status-success.live-sanitized.json",
+    "status-unknown.live-sanitized.json",
+    "quote-v2-wallet.docs-sanitized.json",
+    "quote-v2-base-usdc-polygon-usdc.live-sanitized.json",
+    "quote-v2-solana-usdc-polygon-usdc.live-sanitized.json",
+    "quote-v2-base-usdc-polygon-pusd.live-sanitized.json",
+    "deposit-address-open.docs-sanitized.json",
+    "deposit-address-strict.docs-sanitized.json",
+    "webhook-status-updated.docs-sanitized.json",
+    "quote-errors.openapi-synthetic.json",
+    "status-lifecycle.docs-synthetic.json",
+    "deposit-address-mismatch-policy.docs.json",
+    "negative/deposit-address-strict-missing-refund-to.json",
+    "negative/deposit-address-open-exact-output.json",
+    "negative/status-delayed-docs-drift.json",
+    "negative/status-unknown-runtime-drift.json",
+    "negative/quote-disabled-capabilities.json",
+    "negative/deposit-address-unsafe-refund-location.json"
+  ]
+}

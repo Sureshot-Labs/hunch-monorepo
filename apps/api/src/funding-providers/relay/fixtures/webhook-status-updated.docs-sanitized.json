@@ -1,0 +1,49 @@
+{
+  "_fixture": {
+    "kind": "official-docs-sanitized",
+    "sourceId": "relay-webhook-docs",
+    "retrievedAt": "2026-07-23",
+    "liveWebhookReceived": false,
+    "validationScope": "payload and verification-header shape"
+  },
+  "headers": {
+    "X-Signature-Timestamp": "1774993296140",
+    "X-Signature-SHA256": "sha256:hmac-signature-redacted"
+  },
+  "verification": {
+    "algorithm": "HMAC-SHA256",
+    "signedMessage": "${timestamp}.${rawBody}",
+    "comparison": "constant-time",
+    "replayWindowRequiredByHunch": true
+  },
+  "payload": {
+    "event": "request.status.updated",
+    "timestamp": 1774993296140,
+    "data": {
+      "status": "refund",
+      "inTxHashes": [
+        "0x7777777777777777777777777777777777777777777777777777777777777777"
+      ],
+      "txHashes": [],
+      "updatedAt": 1774993296121,
+      "originChainId": 8453,
+      "destinationChainId": 42161,
+      "depositAddress": {
+        "address": "0x5555555555555555555555555555555555555555",
+        "depositAddressType": "open",
+        "depositor": "0x1111111111111111111111111111111111111111",
+        "depositTxHash": "0x7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "requestId": "fixture-request-webhook-001",
+      "referrer": "hunch-fixture",
+      "details": null,
+      "failReason": "DOUBLE_SPEND",
+      "refundFailReason": "N/A"
+    }
+  },
+  "delivery": {
+    "documentedMaximumRetries": 10,
+    "directTerminalMutationAllowed": false,
+    "action": "enqueue-reconciliation"
+  }
+}

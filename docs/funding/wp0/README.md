@@ -1,10 +1,15 @@
 # Funding WP0 evidence pack
 
-Status: **WP0A read-only evidence capture complete; WP0 implementation gate not yet passed.**
+Status: **WP0A read-only evidence and the Relay fixture/quote baseline are
+complete; the WP0 implementation gate is not yet passed.**
 
-Captured on 2026-07-23 without changing production, Privy configuration, code,
-branches, or deployment state. The only changes made by this audit are the
-documents in this directory.
+WP0A was captured on 2026-07-23 without changing production, Privy
+configuration, code, branches, or deployment state. A subsequent explicitly
+authorized local step added the sanitized Relay fixture corpus and its unit
+test. A later quote-only capture created six Relay request/log records using
+non-owned fixture addresses. It made no Deposit Address mode request, wallet
+signature, transaction, fund movement, production, Privy, branch, commit, or
+deployment change.
 
 ## What is complete
 
@@ -18,22 +23,30 @@ documents in this directory.
   controls were verified in the Dashboard without editing them.
 - Relay, Privy, Across, deBridge, and Bungee claims are tied to official
   documentation and the 2026-07-23 retrieval date.
+- Relay OpenAPI, chain/currency, Status v3, Quote v2, Deposit Address, webhook,
+  error, drift, and negative-policy shapes are pinned in a sanitized fixture
+  corpus. Live evidence includes read-only OpenAPI, chain and status GETs plus
+  three quote-only route summaries; docs/synthetic fixtures remain labeled
+  explicitly.
 - Deterministic clone baselines were captured.
 - The four mandatory WP0 matrices/runbook exist with accountable owner roles
   and current rows.
 
 ## Why WP0 is not yet complete
 
-WP0 requires executable/sanitized provider fixtures and a guarded tiny-value
-rehearsal runner. Read-only WP0A could define and review that harness, but could
-not add executable code, spend funds, create Relay requests, or change Privy
-configuration. In addition, 106 legacy bridge rows are still non-terminal in
-production, so legacy reconcilers cannot be removed.
+The sanitized provider-contract baseline and three quote-only route summaries
+now exist. They do not yet prove the returned EVM/Solana actions against the
+future Hunch allowlist, a real wallet's readiness, execution, destination
+visibility, or refund. The guarded rehearsal runner and tiny-value
+settlement/refund evidence are also absent. In addition, 106 legacy bridge rows
+were non-terminal at the WP0A production snapshot, so legacy reconcilers cannot
+be removed.
 
-The remaining gate is therefore explicit: implement the harness and sanitized
-fixture corpus as code, run dry preflights, obtain separate approval for any
-tiny-value live action, reconcile/classify the 106 legacy rows, then record the
-results here. No product route is activated by this evidence pack.
+The remaining gate is therefore explicit: implement the Relay schemas/adapters
+and guarded runner against this corpus, validate the captured action shapes,
+run dry preflights, obtain separate approval for any tiny-value live action,
+reconcile/classify the 106 legacy rows, then record the results here. No product
+route is activated by this evidence pack or fixture corpus.
 
 ## Artifacts
 
@@ -43,6 +56,7 @@ results here. No product route is activated by this evidence pack.
 - [Functional Parity Matrix](functional-parity-matrix.md)
 - [User Data Lifecycle Matrix](user-data-lifecycle-matrix.md)
 - [Deterministic duplication baseline](duplication-baseline.md)
+- [Relay fixture corpus](../../../apps/api/src/funding-providers/relay/fixtures/README.md)
 
 ## Accountable roles
 
