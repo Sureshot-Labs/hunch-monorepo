@@ -74,6 +74,7 @@ import {
   signalPostCopyPolicySchema,
 } from "../services/signal-post-copy-policy.js";
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
+import { registerAdminFundingRoutes } from "./admin-funding.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import { fetchEvmMulticall } from "../services/polygon-rpc.js";
@@ -1850,6 +1851,13 @@ function loadSolanaKeypair(secret: string): Keypair {
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  registerAdminFundingRoutes(app, {
+    db: pool,
+    authorize: (permission) =>
+      createAdminMiddleware({ requiredAdminPermission: permission }),
+    transact: (work) => tx(pool, (client: PoolClient) => work(client)),
+  });
 
   z.get(
     "/admin/overview",

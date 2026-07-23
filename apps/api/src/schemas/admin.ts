@@ -687,6 +687,27 @@ export const adminIntelPolicyBodySchema = z.object({
   payload: z.record(z.string(), z.unknown()),
 });
 
+export const adminFundingPolicyDiffBodySchema = z
+  .object({
+    candidate: z.unknown(),
+  })
+  .strict();
+
+export const adminFundingPolicyPublishBodySchema = z
+  .object({
+    candidate: z.unknown(),
+    expectedCurrentRevision: z.string().trim().min(8).max(96),
+    candidateRevision: z.string().trim().min(8).max(96),
+    confirmation: z.string().trim().min(16).max(320),
+    requestId: z
+      .string()
+      .trim()
+      .min(8)
+      .max(192)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9:_-]{7,191}$/),
+  })
+  .strict();
+
 export const adminMarketPresentationSearchSchema = z.object({
   q: z.string().trim().min(1).max(320),
 });
@@ -736,6 +757,12 @@ export type AdminIntelPolicyParams = z.infer<
   typeof adminIntelPolicyParamsSchema
 >;
 export type AdminIntelPolicyBody = z.infer<typeof adminIntelPolicyBodySchema>;
+export type AdminFundingPolicyDiffBody = z.infer<
+  typeof adminFundingPolicyDiffBodySchema
+>;
+export type AdminFundingPolicyPublishBody = z.infer<
+  typeof adminFundingPolicyPublishBodySchema
+>;
 export type AdminPointsBody = z.infer<typeof adminPointsSchema>;
 export type AdminRewardsBulkAdjustmentPreviewBody = z.infer<
   typeof adminRewardsBulkAdjustmentPreviewSchema

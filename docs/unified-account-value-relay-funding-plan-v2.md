@@ -3424,6 +3424,31 @@ Completion evidence:
   reconciliation, webhook ingestion, polling, and recovery active;
 - future custom location type passes contract tests without core branch.
 
+#### WP1 implementation status — 2026-07-23
+
+The provider-neutral domain, fail-closed control plane, and operator surface are
+implemented.
+Provider/venue-neutral types, strict discovery/quote/commit schemas, opaque
+current-intent selection, normalized action/executor ports, one transition map,
+immutable policy, cross-field publication validation, production-versus-fixture
+registries, local simulator interfaces, and dedicated admin
+read/diff/confirm/publish endpoints now have contract tests. Fastify injection
+tests additionally cover authentication, dedicated read/write permissions,
+write CSRF, exact confirmation, admin-account attribution, and stale-revision
+conflict.
+
+The default policy keeps creation off while reconciliation, webhook ingestion,
+polling, refund, recovery, and worker drain remain on. The production registry
+is deliberately empty, so no route can pass publication or activate.
+
+The dedicated `hunch-admin` page exposes the effective fail-closed status and
+complete policy to readers. Writers must obtain the normalized server-side diff
+and type the exact revision-bound confirmation phrase; draft changes and
+revision conflicts invalidate publication. WP1 code and acceptance evidence are
+complete, but no runtime policy row was published and no product route was
+activated. Detailed status and verification commands:
+`docs/funding/wp1/README.md`.
+
 ### Work package 2 — Ownership, inventory, valuation, and projections
 
 Required work:
