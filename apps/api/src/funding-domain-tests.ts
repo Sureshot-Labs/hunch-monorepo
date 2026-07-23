@@ -112,7 +112,7 @@ function productionTestRegistry(
 
 function activeRoutePolicy(): MutableFundingPolicy {
   const policy = mutableDefaultPolicy();
-  policy.creationMode = "internal";
+  policy.creationMode = "on";
   policy.gates.quoteCreation = true;
   policy.gates.commit = true;
   policy.gates.startUnsubmittedAction = true;
@@ -201,7 +201,6 @@ function activeRoutePolicy(): MutableFundingPolicy {
       experienceMode: "prepare_first",
       measuredObservationCount: 1,
       minimumInlineObservationCount: 20,
-      temporaryInternalInlineOverride: false,
       fallbackKind: null,
       depositAddress: null,
     },
@@ -525,7 +524,27 @@ await test("default policy is immutable and fail-closed for creation only", () =
   }
 });
 
-await test("accepts a fully registered internal route", () => {
+await test("rejects retired rollout modes", () => {
+  for (const creationMode of ["shadow", "internal", "cohort"]) {
+    const policy = mutableDefaultPolicy() as unknown as Record<string, unknown>;
+    policy.creationMode = creationMode;
+    const result = validateFundingRuntimePolicy(policy);
+    assert.equal(
+      result.ok,
+      false,
+      `${creationMode} must not remain publishable`,
+    );
+    assert.ok(
+      !result.ok &&
+        result.issues.some(
+          (issue) =>
+            issue.code === "schema_invalid" && issue.path === "creationMode",
+        ),
+    );
+  }
+});
+
+await test("accepts a fully registered production route", () => {
   const result = validateFundingRuntimePolicy(
     activeRoutePolicy(),
     productionTestRegistry(),

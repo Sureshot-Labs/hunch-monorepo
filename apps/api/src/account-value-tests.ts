@@ -634,7 +634,7 @@ await test("account routes require auth and preference response denies authority
       },
     },
     policy: {
-      creationMode: "off",
+      creationMode: "off" as const,
       revision: "revision_00000001",
       source: "default" as const,
       invalidStoredPolicy: false,

@@ -7,6 +7,7 @@ import {
   moneySchema,
   usdAmountSchema,
 } from "../funding/domain/schemas.js";
+import { fundingCreationModeSchema } from "../funding/policies/funding-policy.js";
 
 const fundingReasonCodeSchema = z.enum(FUNDING_REASON_CODES);
 const freshnessSchema = z.enum(["fresh", "stale", "unknown"]);
@@ -140,7 +141,7 @@ export const accountValueReadModelSchema = z
     venues: z.record(z.string(), venueSummarySchema),
     policy: z
       .object({
-        creationMode: z.string().min(1).max(32),
+        creationMode: fundingCreationModeSchema,
         revision: z.string().min(1).max(160),
         source: z.enum(["default", "db"]),
         invalidStoredPolicy: z.boolean(),

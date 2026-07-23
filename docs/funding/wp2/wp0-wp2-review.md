@@ -1,9 +1,10 @@
 # Unified funding review: WP0 through WP2
 
 Date: 2026-07-23  
-Scope: committed WP0/WP1 work plus the uncommitted WP2 implementation  
-Safety boundary: no commit, push, deployment, migration application, policy
-publication, Privy change, or live transaction
+Scope: committed WP0/WP1 work plus the then-uncommitted WP2 implementation
+Original safety boundary: no commit, push, deployment, migration application,
+policy publication, Privy change, or live transaction. A post-review addendum
+below records the later local migration and read-only DB/RPC validation.
 
 ## Executive verdict
 
@@ -40,7 +41,7 @@ Overall assessment:
 | WP2          | In-transit single representation                                                   | movement-stage suppression and property test                                          | Projector complete; runtime feed waits for WP3         |
 | WP2          | Separate positions and display-only headline                                       | separate components/totals and invariance tests                                       | Complete                                               |
 | WP2          | Polymarket/Limitless position value                                                | thin exact-text collectors and canonical market marks                                 | Complete                                               |
-| WP2          | Asset suggestion preferences                                                       | authenticated API, migration, merge rule, non-authority test                          | Complete; migration unapplied                          |
+| WP2          | Asset suggestion preferences                                                       | authenticated API, migration, merge rule, non-authority test, local DB rollback smoke | Complete; migration applied locally only               |
 | WP2          | Replace frontend-local totals                                                      | shared query, removed local total owner, desktop/mobile integration                   | Complete                                               |
 | WP2          | Truthful degraded states                                                           | partial/stale/unpriced/unavailable UI and fail-closed trade selector                  | Complete                                               |
 
@@ -130,12 +131,12 @@ Overall assessment:
    helpers should eventually live in a focused inventory service so domain
    runtime does not depend on an HTTP route module.
 
-8. **Activation sequencing must be explicit**
+8. **Account Value rollout is deployment-owned**
 
-   The read response exposes the effective creation mode, but the feature code
-   itself is present on the branch. Deployment must first use the approved
-   `shadow` comparison stage and expose user-facing totals only at an approved
-   `internal` or later stage. No activation occurred in this work.
+   Account Value is a read-only product projection and does not use the funding
+   creation switch. It is verified locally and deployed normally; rollback uses
+   the previous backend/frontend deployment. Funding creation remains
+   independently fail-closed until WP3-WP6 and exact route gates pass.
 
 9. **Pagination is deterministic but not snapshot-bound**
 
@@ -157,8 +158,9 @@ Overall assessment:
 - Stable impairment, stale price, stale observation, unpriced asset, ambiguous
   duplicate, and unknown locks all fail closed.
 - Wallet/profile evidence does not grant delegated signing or sponsorship.
-- No provider calldata, private key, live wallet, production policy, or
-  external state was touched by WP2.
+- The original review touched no provider calldata, private key, live wallet,
+  production policy, or external state. The later validation used only
+  read-only RPC and a local SQL transaction that was fully rolled back.
 
 ## Data and arithmetic review
 
@@ -217,6 +219,22 @@ Passing checks:
 - `git diff --check` for both changed repositories.
 - `hunch-admin` remains clean; its committed WP1 build, lint, format, and
   unimported checks passed during the WP1/WP2 review.
+
+## Post-review local validation addendum
+
+Migration `0183_user_asset_funding_preferences.sql` was subsequently applied to
+the local development database only. Schema inspection and a real local
+Account Value read proved the migration/repository/runtime boundary with 5
+linked wallets, 12 asset components, `65.613572` USD liquid/cash available,
+complete/fresh asset state, and no collector errors. Eighteen stale position
+components remained separate and were excluded fail-closed from effective
+value. Preference revision, enum constraint, ranking, and rollback behavior
+passed; zero smoke rows remained. The API fast suite passed 20/20 test files.
+
+The rollout decision was also simplified: there is no production
+background-comparison rollout stage. Account Value follows local verification,
+ordinary deployment, and deployment rollback. Funding creation uses a binary
+`off`/`on` control plus independent exact route/capability gates.
 
 ## What is ahead
 

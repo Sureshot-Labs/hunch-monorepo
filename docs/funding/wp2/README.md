@@ -1,7 +1,8 @@
 # Funding WP2 implementation status
 
-Status: **code and contract implementation complete; migration, runtime policy,
-deployment, and product activation have not been performed.**
+Status: **code and contract implementation complete; migration applied and
+verified locally; runtime policy, deployment, production migration, and product
+activation have not been performed.**
 
 Date: 2026-07-23  
 Branches: `unibalance` in `hunch-monorepo`, `Hunch_App`, and `hunch-admin`
@@ -133,7 +134,7 @@ pnpm exec prettier --check \
   apps/api/src/schemas/account-value.ts
 ```
 
-Final results:
+Original WP2 milestone results:
 
 - Account Value focused tests: 15/15.
 - User-merge focused tests: 4/4.
@@ -156,12 +157,35 @@ Final results:
 - Typecheck, lint, and formatting: pass.
 - Next.js production build: pass.
 
-No live RPC, provider, wallet, transaction, deployment, or production database
-mutation was part of WP2 verification.
+### Post-commit local database and runtime validation
+
+After the WP2 commit, migration `0183` was applied to the local development
+database. The migration ledger, columns, primary/foreign keys, constrained
+preference enum, monotonic revision check, and selector index were inspected.
+
+An explicitly authorized read-only DB/RPC smoke selected an existing local user
+without printing wallet addresses or raw user identifiers and proved:
+
+- 5 linked wallets produced 12 unique asset components;
+- liquid assets and cash available both projected as `65.613572` USD;
+- asset valuation and availability were `complete` and `fresh`;
+- collector error count was zero;
+- 18 position components were retained separately; all were stale, so the
+  position projection truthfully reported `partial`/`stale` and excluded them
+  from the effective value;
+- preference changes `suggest` -> `never_suggest` advanced the revision;
+- PostgreSQL rejected the invalid transaction-authority value `execute`;
+- the entire preference exercise was rolled back and a read-only SQL check
+  confirmed zero smoke rows remained.
+
+The API fast suite then passed 20/20 test files. RPC interaction was read-only;
+no wallet transaction, provider mutation, policy publication, deployment, or
+production database mutation occurred.
 
 ## Deliberately inactive or deferred
 
-- Migration `0183` exists but has not been applied.
+- Migration `0183` is applied only to the local development database. Production
+  remains unchanged.
 - No funding policy row was published and the WP1 production registry remains
   empty. No quote, commit, Relay route, or executable Funding Operation is
   activated.
@@ -182,9 +206,10 @@ mutation was part of WP2 verification.
 - The read model relies on underlying short-lived wallet caches and frontend
   query caching. A component-revision keyed derived Account Value cache remains
   a performance improvement before broad rollout.
-- The code returns the effective `creationMode`, but deployment sequencing must
-  still respect the activation ladder: compare in `shadow`, then expose only in
-  an approved `internal` or later stage. This branch was not activated.
+- Account Value presentation is intentionally independent of funding creation
+  mode. It will be manually verified in the local UI and deployed normally;
+  rollback uses the previous frontend/backend deployment. Funding creation
+  remains `off` until the later work packages and route-specific gates pass.
 
 ## WP2 completion boundary
 

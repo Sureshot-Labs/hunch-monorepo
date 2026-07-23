@@ -9,6 +9,7 @@ import type {
   ValuedAssetComponent,
   ValuedPositionComponent,
 } from "../funding/domain/types.js";
+import type { FundingCreationMode } from "../funding/policies/funding-policy.js";
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "../services/polymarket-onchain.js";
@@ -83,7 +84,7 @@ export type AccountValueReadModel = Readonly<{
   cashAvailability: CashAvailabilityProjection;
   venues: Readonly<Record<string, AccountValueVenueSummary>>;
   policy: Readonly<{
-    creationMode: string;
+    creationMode: FundingCreationMode;
     revision: string;
     source: "default" | "db";
     invalidStoredPolicy: boolean;

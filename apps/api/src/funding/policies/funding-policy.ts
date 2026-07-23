@@ -51,13 +51,7 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
 
 const locationCapabilitySchema = z.enum(LOCATION_CAPABILITIES);
 
-export const fundingCreationModeSchema = z.enum([
-  "off",
-  "shadow",
-  "internal",
-  "cohort",
-  "on",
-]);
+export const fundingCreationModeSchema = z.enum(["off", "on"]);
 
 export type FundingCreationMode = z.infer<typeof fundingCreationModeSchema>;
 
@@ -177,7 +171,6 @@ const fundingRoutePolicySchema = z
     experienceMode: z.enum(["prepare_first", "inline"]),
     measuredObservationCount: z.number().int().min(0),
     minimumInlineObservationCount: z.number().int().positive(),
-    temporaryInternalInlineOverride: z.boolean(),
     fallbackKind: z
       .enum([
         "across_swap_api",
@@ -710,14 +703,13 @@ function validateParsedFundingPolicy(
 
     if (
       route.experienceMode === "inline" &&
-      route.measuredObservationCount < route.minimumInlineObservationCount &&
-      !route.temporaryInternalInlineOverride
+      route.measuredObservationCount < route.minimumInlineObservationCount
     ) {
       addIssue(
         issues,
         "inline_evidence_missing",
         `routes.${index}.experienceMode`,
-        "inline route lacks measured observations or internal override",
+        "inline route lacks measured observations",
       );
     }
 

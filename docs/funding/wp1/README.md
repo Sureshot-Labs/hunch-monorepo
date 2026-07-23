@@ -24,8 +24,9 @@ Branch: `unibalance`
 - Pure destination selection. One valid destination may be selected
   automatically; multiple valid destinations require an opaque explicit choice.
   `recommended` is never treated as authorization.
-- Immutable funding runtime policy v1 with a conservative default:
-  `creationMode=off`, quote/commit/unsubmitted-action gates closed, and
+- Immutable funding runtime policy v1 with a binary `off`/`on` creation switch
+  and a conservative default: `creationMode=off`,
+  quote/commit/unsubmitted-action gates closed, and
   reconciliation/webhook/polling/refund/recovery/worker-drain gates open.
 - Static production component registry. An enabled route must bind exact
   production adapter, validator, executor, reconciler, refund, observer, and
