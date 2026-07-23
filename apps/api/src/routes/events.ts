@@ -558,8 +558,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
             bestBid: observedTop.yesBid,
             bestAsk: observedTop.yesAsk,
-            lastPrice:
-              row.last_price != null ? Number(row.last_price) : null,
+            lastPrice: row.last_price != null ? Number(row.last_price) : null,
             outcomes,
             tokens,
             conditionId: row.condition_id || null,
