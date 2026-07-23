@@ -10,6 +10,13 @@ type FundingReconciliationOptions = {
   retryDelayMs?: number;
   pollDelayMs?: number;
   maxAttempts?: number;
+  relay?: Readonly<{
+    apiKey: string;
+    credentialsEncryptionKey: string;
+    referenceLookupHmacKey: string;
+    referenceKeyVersion: number;
+    timeoutMs?: number;
+  }>;
 };
 
 type FundingReconciliationResult = {
@@ -31,6 +38,34 @@ type FundingWorkerModule = {
 };
 
 type FundingWorkerModuleLoader = () => Promise<FundingWorkerModule>;
+
+export function relayFundingWorkerConfig(
+  input: Pick<
+    typeof env,
+    | "relayApiKey"
+    | "relayRequestTimeoutMs"
+    | "credentialsEncryptionKey"
+    | "fundingReferenceLookupHmacKey"
+    | "fundingReferenceLookupKeyVersion"
+  >,
+): FundingReconciliationOptions["relay"] {
+  if (
+    !input.relayApiKey ||
+    !input.credentialsEncryptionKey ||
+    !input.fundingReferenceLookupHmacKey
+  ) {
+    return undefined;
+  }
+  return {
+    apiKey: input.relayApiKey,
+    credentialsEncryptionKey: input.credentialsEncryptionKey,
+    referenceLookupHmacKey: input.fundingReferenceLookupHmacKey,
+    referenceKeyVersion: input.fundingReferenceLookupKeyVersion,
+    ...(input.relayRequestTimeoutMs
+      ? { timeoutMs: input.relayRequestTimeoutMs }
+      : {}),
+  };
+}
 
 let fundingModulePromise: Promise<FundingWorkerModule> | null = null;
 let fundingPool: Pool | null = null;
@@ -83,6 +118,7 @@ export function fundingWorkerId(): string {
 
 export async function runFundingReconciliationJob(): Promise<FundingReconciliationResult> {
   const module = await getFundingWorkerModule();
+  const relay = relayFundingWorkerConfig(env);
   return module.runFundingReconciliationJob(getFundingPool(), {
     workerId: fundingWorkerId(),
     limit: env.fundingReconciliationBatchSize,
@@ -90,6 +126,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     retryDelayMs: env.fundingReconciliationRetrySec * 1_000,
     pollDelayMs: env.fundingReconciliationPollSec * 1_000,
     maxAttempts: env.fundingReconciliationMaxAttempts,
+    ...(relay ? { relay } : {}),
   });
 }
 

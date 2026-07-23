@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-function decodeKey(raw: string): Buffer {
+export function decodeCredentialsEncryptionKey(raw: string): Buffer {
   const trimmed = raw.trim();
   if (!trimmed.length) {
     throw new Error("CREDENTIALS_ENCRYPTION_KEY is empty");
@@ -25,7 +25,7 @@ export function getCredentialsEncryptionKey(): Buffer {
   if (!raw) {
     throw new Error("Missing CREDENTIALS_ENCRYPTION_KEY env var");
   }
-  return decodeKey(raw);
+  return decodeCredentialsEncryptionKey(raw);
 }
 
 export function encryptCredentialsString(

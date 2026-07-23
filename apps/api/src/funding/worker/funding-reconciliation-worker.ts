@@ -1,10 +1,31 @@
 import type { Pool } from "@hunch/infra";
 
+import { RelayClient } from "../../funding-providers/relay/client.js";
+import {
+  createRelayDepositAddressCodec,
+  createRelayReferenceCodec,
+} from "../../funding-providers/relay/reference-codec.js";
+import { RelayReconciliationDriver } from "../../funding-providers/relay/reconciliation.js";
+import { decodeCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import {
   runFundingReconciliationBatch,
   type FundingReconciliationBatchOptions,
   type FundingReconciliationBatchResult,
 } from "../reconciliation/funding-reducer.js";
+
+export type RelayFundingWorkerConfig = Readonly<{
+  apiKey: string;
+  credentialsEncryptionKey: string;
+  referenceLookupHmacKey: string;
+  referenceKeyVersion: number;
+  timeoutMs?: number;
+}>;
+
+export type FundingReconciliationJobOptions =
+  FundingReconciliationBatchOptions &
+    Readonly<{
+      relay?: RelayFundingWorkerConfig;
+    }>;
 
 export type FundingReconciliationJobResult =
   | FundingReconciliationBatchResult
@@ -36,7 +57,7 @@ export async function isFundingReconciliationSchemaReady(
 
 export async function runFundingReconciliationJob(
   pool: Pool,
-  options: FundingReconciliationBatchOptions,
+  options: FundingReconciliationJobOptions,
 ): Promise<FundingReconciliationJobResult> {
   if (!(await isFundingReconciliationSchemaReady(pool))) {
     return {
@@ -50,7 +71,29 @@ export async function runFundingReconciliationJob(
       operationIds: [],
     };
   }
-  return runFundingReconciliationBatch(pool, options);
+  const relay = options.relay;
+  if (!relay) return runFundingReconciliationBatch(pool, options);
+  const encryptionKey = decodeCredentialsEncryptionKey(
+    relay.credentialsEncryptionKey,
+  );
+  const codecConfig = {
+    encryptionKey,
+    lookupHmacKey: relay.referenceLookupHmacKey,
+    keyVersion: relay.referenceKeyVersion,
+  };
+  const driver = new RelayReconciliationDriver(
+    new RelayClient({
+      apiKey: relay.apiKey,
+      timeoutMs: relay.timeoutMs,
+    }),
+    createRelayReferenceCodec(codecConfig),
+    createRelayDepositAddressCodec(codecConfig),
+  );
+  return runFundingReconciliationBatch(pool, {
+    ...options,
+    providerPoll: (operationId, now) =>
+      driver.pollOperation(pool, operationId, now),
+  });
 }
 
 export type {

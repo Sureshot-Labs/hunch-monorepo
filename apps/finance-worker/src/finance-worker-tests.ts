@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 
-import { env } from "./env.js";
+import { env, parseFundingReferenceLookupKeyVersion } from "./env.js";
 import {
   loadFinanceJobsModuleForSmoke,
   resetFinanceJobsModuleLoaderForTests,
@@ -12,6 +12,7 @@ import {
 } from "./finance-jobs.js";
 import {
   resetFundingWorkerModuleLoaderForTests,
+  relayFundingWorkerConfig,
   runFundingReconciliationJob,
   setFundingWorkerModuleLoaderForTests,
 } from "./funding-reconciliation.js";
@@ -45,6 +46,42 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Relay reference key version fails closed on invalid explicit input",
+    run: () => {
+      assert.equal(parseFundingReferenceLookupKeyVersion(undefined), 1);
+      assert.equal(parseFundingReferenceLookupKeyVersion("7"), 7);
+      for (const invalid of ["0", "-1", "1.5", "not-a-version"]) {
+        assert.throws(() => parseFundingReferenceLookupKeyVersion(invalid));
+      }
+    },
+  },
+  {
+    name: "Relay worker config requires the complete secret set",
+    run: () => {
+      const complete = {
+        relayApiKey: "relay-api-key",
+        relayRequestTimeoutMs: 1_500,
+        credentialsEncryptionKey: "credentials-key",
+        fundingReferenceLookupHmacKey: "lookup-key",
+        fundingReferenceLookupKeyVersion: 4,
+      };
+      assert.deepEqual(relayFundingWorkerConfig(complete), {
+        apiKey: "relay-api-key",
+        timeoutMs: 1_500,
+        credentialsEncryptionKey: "credentials-key",
+        referenceLookupHmacKey: "lookup-key",
+        referenceKeyVersion: 4,
+      });
+      assert.equal(
+        relayFundingWorkerConfig({
+          ...complete,
+          fundingReferenceLookupHmacKey: undefined,
+        }),
+        undefined,
+      );
+    },
+  },
   {
     name: "funding reconciliation remains enabled when finance execute is false",
     run: () => {

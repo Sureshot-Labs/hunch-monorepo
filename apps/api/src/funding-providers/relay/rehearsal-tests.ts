@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { Interface, ZeroAddress } from "ethers";
+import { PublicKey } from "@solana/web3.js";
 import {
   BASE_USDC,
+  EVM_NATIVE_ASSET_SENTINEL,
+  MAYAN_ALLOWANCE_HOLDER,
+  MAYAN_FORWARDER,
   POLYGON_PUSD,
+  POLYGON_USDC,
+  POLYGON_USDCE_LEGACY,
+  POLYMARKET_COLLATERAL_OFFRAMP,
   RELAY_APPROVAL_PROXY_V3,
   RELAY_DEPOSITORY_V2,
   RELAY_ROUTER_V3,
+  RELAY_SEQUENTIAL_SWAP_EXECUTOR,
   RELAY_SOLVER,
   SOLANA_NATIVE,
   relayRehearsalScenarios,
@@ -27,6 +35,24 @@ const approvalProxyV3 = new Interface([
 ]);
 const depositoryV2 = new Interface([
   "function depositErc20(address depositor,address token,uint256 amount,bytes32 id)",
+]);
+const cleanup = new Interface([
+  "function cleanupErc20sViaCall(address[] tokens,address[] recipients,bytes[] calls,uint256[] values)",
+]);
+const cleanupDeposit = new Interface([
+  "function depositErc20(address depositor,address token,bytes32 id)",
+]);
+const sequentialSwap = new Interface([
+  "function sequentialSwap(uint256 amountIn,address tokenIn,address tokenOut,uint256 minOut,address recipient,(uint16,address,uint256,uint256,bytes) params,bytes data)",
+]);
+const collateralOfframp = new Interface([
+  "function unwrap(address asset,address to,uint256 amount)",
+]);
+const mayanAllowanceHolder = new Interface([
+  "function exec(address tokenIn,address tokenOut,uint256 amountIn,address recipient,bytes data)",
+]);
+const mayanExecutor = new Interface([
+  "function execute((address,address,uint256) order,bytes[] calls,bytes32 orderHash)",
 ]);
 
 function required<T>(value: T | undefined, label: string): T {
@@ -99,8 +125,48 @@ function details(input: {
   };
 }
 
-function crossVmNativeQuote() {
+function relayCleanupCall(token: string) {
+  return [
+    RELAY_ROUTER_V3,
+    false,
+    0n,
+    cleanup.encodeFunctionData("cleanupErc20sViaCall", [
+      [token],
+      [RELAY_DEPOSITORY_V2],
+      [
+        cleanupDeposit.encodeFunctionData("depositErc20", [
+          user,
+          token,
+          `0x${"22".repeat(32)}`,
+        ]),
+      ],
+      [0n],
+    ]),
+  ] as const;
+}
+
+function crossVmNativeQuote(
+  input: Readonly<{
+    calls?: readonly string[];
+    orderOutputToken?: string;
+  }> = {},
+) {
   const amount = 2_000_000_000_000_000_000n;
+  const recipientBytes = Buffer.from(
+    new PublicKey(solanaRecipient).toBytes(),
+  ).toString("hex");
+  const calls = input.calls ?? [
+    "0xbd01c226",
+    "0x38c9c147",
+    "0x38c9c147",
+    "0xaf72634f",
+    `0x34ee90ca${recipientBytes}`,
+  ];
+  const mayanPayload = mayanExecutor.encodeFunctionData("execute", [
+    [RELAY_ROUTER_V3, input.orderOutputToken ?? POLYGON_USDC, 1n],
+    calls,
+    `0x${"33".repeat(32)}`,
+  ]);
   return {
     details: details({
       originChainId: 137,
@@ -121,8 +187,19 @@ function crossVmNativeQuote() {
         value: amount.toString(),
         data: routerV3.encodeFunctionData("multicall", [
           [
-            [routeTarget, false, amount, "0x12345678"],
-            [RELAY_ROUTER_V3, false, 0n, "0x73b7bb2f"],
+            [
+              MAYAN_ALLOWANCE_HOLDER,
+              false,
+              amount,
+              mayanAllowanceHolder.encodeFunctionData("exec", [
+                MAYAN_FORWARDER,
+                ZeroAddress,
+                amount,
+                MAYAN_FORWARDER,
+                mayanPayload,
+              ]),
+            ],
+            relayCleanupCall(POLYGON_USDC),
           ],
           ZeroAddress,
           ZeroAddress,
@@ -133,7 +210,13 @@ function crossVmNativeQuote() {
   };
 }
 
-function nativeQuote() {
+function nativeQuote(
+  input: Readonly<{
+    paramsCap?: bigint;
+    paramsTarget?: string;
+    routeData?: string;
+  }> = {},
+) {
   const amount = 1_000_000_000_000_000_000n;
   return {
     details: details({
@@ -154,8 +237,27 @@ function nativeQuote() {
         value: amount.toString(),
         data: routerV3.encodeFunctionData("multicall", [
           [
-            [routeTarget, false, amount, "0x12345678"],
-            [RELAY_ROUTER_V3, false, 0n, "0x73b7bb2f"],
+            [
+              RELAY_SEQUENTIAL_SWAP_EXECUTOR,
+              false,
+              amount,
+              sequentialSwap.encodeFunctionData("sequentialSwap", [
+                amount,
+                EVM_NATIVE_ASSET_SENTINEL,
+                POLYGON_USDC,
+                1n,
+                RELAY_ROUTER_V3,
+                [
+                  0,
+                  input.paramsTarget ?? ZeroAddress,
+                  0n,
+                  input.paramsCap ?? BigInt(`0x${"ff".repeat(32)}`),
+                  "0x",
+                ],
+                input.routeData ?? "0xd001",
+              ]),
+            ],
+            relayCleanupCall(POLYGON_USDC),
           ],
           ZeroAddress,
           ZeroAddress,
@@ -200,8 +302,32 @@ function erc20Quote() {
           [POLYGON_PUSD],
           [amount],
           [
-            [POLYGON_PUSD, false, 0n, "0x095ea7b3"],
-            [RELAY_ROUTER_V3, false, 0n, "0x73b7bb2f"],
+            [
+              POLYGON_PUSD,
+              false,
+              0n,
+              erc20.encodeFunctionData("approve", [RELAY_ROUTER_V3, amount]),
+            ],
+            [
+              POLYGON_PUSD,
+              false,
+              0n,
+              erc20.encodeFunctionData("approve", [
+                POLYMARKET_COLLATERAL_OFFRAMP,
+                amount,
+              ]),
+            ],
+            [
+              POLYMARKET_COLLATERAL_OFFRAMP,
+              false,
+              0n,
+              collateralOfframp.encodeFunctionData("unwrap", [
+                POLYGON_USDCE_LEGACY,
+                RELAY_ROUTER_V3,
+                amount,
+              ]),
+            ],
+            relayCleanupCall(POLYGON_USDCE_LEGACY),
           ],
           RELAY_SOLVER,
           RELAY_SOLVER,
@@ -280,6 +406,28 @@ function v2Erc20Quote() {
   assert.equal(validated.minimumOutputRaw, 28_000_000_000_000n);
 }
 
+for (const [name, quote] of [
+  ["sequentialSwap nonzero target", nativeQuote({ paramsTarget: routeTarget })],
+  ["sequentialSwap reduced cap", nativeQuote({ paramsCap: 1n })],
+  [
+    "sequentialSwap unknown route envelope",
+    nativeQuote({ routeData: "0x1234" }),
+  ],
+] as const) {
+  assert.throws(
+    () =>
+      validateRelayRehearsalQuote({
+        amount: 1_000_000_000_000_000_000n,
+        minimumOutputFloor: 20_000_000_000_000n,
+        quote,
+        scenario: relayRehearsalScenarios["polygon-pol-to-base-eth"],
+        user,
+      }),
+    Error,
+    name,
+  );
+}
+
 {
   const validated = validateRelayRehearsalQuote({
     amount: 1_000_000n,
@@ -325,6 +473,53 @@ function v2Erc20Quote() {
   );
 }
 
+for (const [name, quote] of [
+  [
+    "Mayan wrong output token",
+    crossVmNativeQuote({ orderOutputToken: POLYGON_PUSD }),
+  ],
+  [
+    "Mayan unknown nested selector",
+    crossVmNativeQuote({
+      calls: [
+        "0x12345678",
+        "0x38c9c147",
+        "0x38c9c147",
+        "0xaf72634f",
+        `0x34ee90ca${Buffer.from(
+          new PublicKey(solanaRecipient).toBytes(),
+        ).toString("hex")}`,
+      ],
+    }),
+  ],
+  [
+    "Mayan missing recipient binding",
+    crossVmNativeQuote({
+      calls: [
+        "0xbd01c226",
+        "0x38c9c147",
+        "0x38c9c147",
+        "0xaf72634f",
+        "0x34ee90ca",
+      ],
+    }),
+  ],
+] as const) {
+  assert.throws(
+    () =>
+      validateRelayRehearsalQuote({
+        amount: 2_000_000_000_000_000_000n,
+        minimumOutputFloor: 1_100_000n,
+        quote,
+        recipient: solanaRecipient,
+        scenario: relayRehearsalScenarios["polygon-pol-to-solana-sol"],
+        user,
+      }),
+    Error,
+    name,
+  );
+}
+
 {
   const validated = validateRelayRehearsalQuote({
     amount: 500_000n,
@@ -357,6 +552,52 @@ for (const mutation of [
           RELAY_APPROVAL_PROXY_V3,
           1_000_001n,
         ]);
+    },
+  },
+  {
+    name: "wrong source chain",
+    apply: (quote: ReturnType<typeof erc20Quote>) => {
+      const depositStep = required(quote.steps[1], "deposit step");
+      required(depositStep.items[0], "deposit item").data.chainId = 8453;
+    },
+  },
+  {
+    name: "wrong source token",
+    apply: (quote: ReturnType<typeof erc20Quote>) => {
+      quote.details.currencyIn.currency.address = BASE_USDC;
+    },
+  },
+  {
+    name: "wrong approval spender",
+    apply: (quote: ReturnType<typeof erc20Quote>) => {
+      const approveStep = required(quote.steps[0], "approve step");
+      required(approveStep.items[0], "approve item").data.data =
+        erc20.encodeFunctionData("approve", [routeTarget, 1_000_000n]);
+    },
+  },
+  {
+    name: "wrong approval selector",
+    apply: (quote: ReturnType<typeof erc20Quote>) => {
+      const approveStep = required(quote.steps[0], "approve step");
+      required(approveStep.items[0], "approve item").data.data = "0x12345678";
+    },
+  },
+  {
+    name: "provider authorization action",
+    apply: (quote: ReturnType<typeof erc20Quote>) => {
+      const depositStep = required(quote.steps[1], "deposit step");
+      Object.assign(required(depositStep.items[0], "deposit item").data, {
+        authorizationList: [],
+      });
+    },
+  },
+  {
+    name: "unknown executable field",
+    apply: (quote: ReturnType<typeof erc20Quote>) => {
+      const depositStep = required(quote.steps[1], "deposit step");
+      Object.assign(required(depositStep.items[0], "deposit item").data, {
+        futureExecutionField: false,
+      });
     },
   },
   {

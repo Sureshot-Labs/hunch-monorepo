@@ -40,13 +40,57 @@ export type FundingStaticRegistry = Readonly<{
 
 export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
   locationKinds: ["wallet", "venue_account", "in_transit_claim"],
-  providerAdapters: [],
-  actionValidators: [],
+  providerAdapters: [
+    {
+      id: "relay_quote_v2",
+      providerId: "relay",
+      runtimeKind: "production",
+      capabilities: [
+        "same_network_swap",
+        "cross_network_transfer",
+        "cross_network_swap",
+      ],
+    },
+    {
+      id: "relay_strict_deposit_address_v1",
+      providerId: "relay",
+      runtimeKind: "production",
+      capabilities: ["deposit_address"],
+    },
+  ],
+  actionValidators: [
+    { id: "relay_evm_action_v1", runtimeKind: "production" },
+    { id: "relay_svm_action_v1", runtimeKind: "production" },
+  ],
   networkExecutors: [],
-  reconcilers: [],
-  refundSemantics: [],
-  destinationObservers: [],
-  fixtureIds: [],
+  reconcilers: [
+    { id: "relay_status_v3", runtimeKind: "production" },
+    { id: "across_legacy", runtimeKind: "production" },
+    { id: "bungee_legacy", runtimeKind: "production" },
+    { id: "debridge_dln_legacy", runtimeKind: "production" },
+    { id: "debridge_same_chain_legacy", runtimeKind: "production" },
+  ],
+  refundSemantics: [
+    {
+      id: "relay_owned_refund_observation_v1",
+      runtimeKind: "production",
+    },
+  ],
+  destinationObservers: [
+    {
+      id: "relay_owned_destination_observation_v1",
+      runtimeKind: "production",
+    },
+  ],
+  fixtureIds: [
+    "relay_quote_v2_wallet_docs",
+    "relay_wallet_evm_roundtrip_live",
+    "relay_wallet_solana_roundtrip_live",
+    "relay_status_lifecycle_v3",
+    "relay_webhook_status_updated",
+    "relay_deposit_address_strict_docs",
+    "relay_deposit_address_mismatch_policy",
+  ],
 });
 
 const locationCapabilitySchema = z.enum(LOCATION_CAPABILITIES);

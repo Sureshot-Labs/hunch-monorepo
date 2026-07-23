@@ -615,6 +615,10 @@ export type FundingReconciliationBatchOptions = Readonly<{
   pollDelayMs?: number;
   maxAttempts?: number;
   now?: Date;
+  providerPoll?: (
+    operationId: string,
+    now: Date,
+  ) => Promise<Readonly<{ requestsPolled: number }>>;
 }>;
 
 export type FundingReconciliationBatchResult = Readonly<{
@@ -650,8 +654,10 @@ async function processLease(
     >
   > &
     Readonly<{ now: Date }>,
+  providerPoll?: FundingReconciliationBatchOptions["providerPoll"],
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
   try {
+    await providerPoll?.(lease.operationId, options.now);
     const reduction = await reduceFundingOperation(pool, {
       operationId: lease.operationId,
       now: options.now,
@@ -715,12 +721,17 @@ export async function runFundingReconciliationBatch(
     deadLettered: 0,
   };
   for (const lease of leases) {
-    const outcome = await processLease(pool, lease, {
-      maxAttempts: options.maxAttempts ?? 20,
-      pollDelayMs: options.pollDelayMs ?? 15_000,
-      retryDelayMs: options.retryDelayMs ?? 30_000,
-      now,
-    });
+    const outcome = await processLease(
+      pool,
+      lease,
+      {
+        maxAttempts: options.maxAttempts ?? 20,
+        pollDelayMs: options.pollDelayMs ?? 15_000,
+        retryDelayMs: options.retryDelayMs ?? 30_000,
+        now,
+      },
+      options.providerPoll,
+    );
     if (outcome === "dead_lettered") counts.deadLettered += 1;
     else counts[outcome] += 1;
   }

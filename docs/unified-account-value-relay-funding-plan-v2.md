@@ -3624,6 +3624,61 @@ Completion evidence:
 - all active legacy versions reconcile;
 - no new Across suggested-fees or deBridge cross-chain operation can be created.
 
+#### WP4 completion status — 2026-07-23
+
+WP4 is implemented and verified locally. Relay Quote v2, Status v3, Requests
+v2, exact network/asset mappings, normalized EVM/Solana actions, final
+immutable-action validation, polling, raw-body webhook HMAC verification,
+encrypted/HMAC-separated provider correlation, strict Deposit Address policy,
+child-request discovery, and observation-only terminal accounting are present.
+
+The initial strict Deposit Address implementation is deliberately pinned to a
+native EVM controlled-wallet source with the same verified user-owned refund
+location. Open/variable, exchange/manual sender, Privy composition,
+app-controlled refund, destination calldata, unknown fee shapes, nonzero
+subsidy, top-up, gasless, deposit-fee-payer, and provider authorization
+capabilities fail closed. Relay success/refund never settles Hunch accounting
+without canonical owned destination/refund evidence.
+
+The final WP4 code review tightened the trust boundary further: the Relay HTTP
+timeout now covers bounded body streaming, EVM items accept only the observed
+executable field set, nested Polygon/Mayan route shapes have route-specific
+negative mutations, strict Deposit Address responses reject extra transfer
+items/fields and conflicting addresses, and webhook persistence suppresses
+both replay and stale/out-of-order status regression. Explicitly invalid lookup
+key versions fail configuration rather than silently selecting another key.
+Official Requests v2 wire rows are pinned as `id` plus ISO-or-numeric
+`updatedAt` and normalized to the internal request correlation only inside the
+Relay module.
+
+The production static registry now contains the reviewed Relay and legacy
+reconciliation component identities and pinned fixture IDs. This does not
+activate funding: the default policy still has creation off, empty providers
+and routes, closed quote/commit/start gates, an empty network-executor registry,
+and empty Across/deBridge fallback allowlists.
+
+Across Swap API and suggested-fees legacy versions resolve only through the
+Across legacy reconciler; Bungee remains legacy-only; deBridge DLN and
+same-chain compatibility identities are separate. Across suggested-fees,
+Bungee, and deBridge DLN cannot create a new Funding Operation.
+
+`finance-worker` receives `RELAY_API_KEY` from the API runtime secret bundle and
+the encryption/reference-HMAC keys from the shared bundle through
+sidecar-local optional configuration. The same Relay API key verifies webhook
+HMAC, matching the official contract. No key is stored in code, fixtures, the
+browser, or funding rows.
+
+API fast tests pass 27/27 files, finance-worker tests pass 11/11, secret-bundle
+tests pass, and the focused WP3/WP4 database integration suite passes 2/2. No
+external Relay call, wallet action, production SQL, policy publication,
+deployment, commit, or branch change occurred. Detailed implementation and
+repeatable evidence: `docs/funding/wp4/README.md`.
+
+The deterministic Type-1 duplication audit over 28 WP4 surface files reports
+2.50% duplicate coverage and 1.25% estimated redundancy. Remaining structural
+similarity is primarily intentional VM-specific validation and fixture-builder
+shape; no cross-provider runtime abstraction was introduced.
+
 ### Work package 5 — Destination, placement, Intent Liquidity, and planner
 
 Required work:

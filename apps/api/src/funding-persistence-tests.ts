@@ -46,7 +46,7 @@ const tests: readonly Test[] = [
     },
   },
   {
-    name: "WP3 keeps provider execution unreachable",
+    name: "WP4 registers reviewed provider components but keeps execution unreachable",
     run: () => {
       assert.equal(DEFAULT_FUNDING_RUNTIME_POLICY.creationMode, "off");
       assert.deepEqual(DEFAULT_FUNDING_RUNTIME_POLICY.providers, []);
@@ -56,10 +56,20 @@ const tests: readonly Test[] = [
         DEFAULT_FUNDING_RUNTIME_POLICY.gates.startUnsubmittedAction,
         false,
       );
-      assert.deepEqual(PRODUCTION_FUNDING_REGISTRY.providerAdapters, []);
-      assert.deepEqual(PRODUCTION_FUNDING_REGISTRY.actionValidators, []);
+      assert.deepEqual(
+        PRODUCTION_FUNDING_REGISTRY.providerAdapters.map(({ id }) => id),
+        ["relay_quote_v2", "relay_strict_deposit_address_v1"],
+      );
+      assert.deepEqual(
+        PRODUCTION_FUNDING_REGISTRY.actionValidators.map(({ id }) => id),
+        ["relay_evm_action_v1", "relay_svm_action_v1"],
+      );
       assert.deepEqual(PRODUCTION_FUNDING_REGISTRY.networkExecutors, []);
-      assert.deepEqual(PRODUCTION_FUNDING_REGISTRY.reconcilers, []);
+      assert.ok(
+        PRODUCTION_FUNDING_REGISTRY.reconcilers.some(
+          ({ id }) => id === "relay_status_v3",
+        ),
+      );
       assert.equal(legacyBridgeCreationAllowed("across_swap_api_v1"), false);
 
       const persistenceSource = readFileSync(

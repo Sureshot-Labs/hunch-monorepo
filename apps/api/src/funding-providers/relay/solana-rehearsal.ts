@@ -105,6 +105,7 @@ function currencyAmount(
     address: string;
     amount?: bigint;
     chainId: number;
+    decimals: number;
     vm: "evm" | "svm";
   },
 ): { amount: bigint; minimumAmount: bigint } {
@@ -126,6 +127,12 @@ function currencyAmount(
     )
   ) {
     throw new Error(`details.${field}.currency.address mismatch`);
+  }
+  if (
+    currency.decimals !== undefined &&
+    Number(currency.decimals) !== expected.decimals
+  ) {
+    throw new Error(`details.${field}.currency.decimals mismatch`);
   }
   const amount = unsigned(value.amount, `details.${field}.amount`);
   const minimumAmount = unsigned(
@@ -307,11 +314,13 @@ export function validateRelaySolanaRehearsalQuote(input: {
     address: SOLANA_USDC,
     amount: input.amount,
     chainId: RELAY_SOLANA_CHAIN_ID,
+    decimals: 6,
     vm: "svm",
   });
   const output = currencyAmount(details, "currencyOut", {
     address: POLYGON_PUSD,
     chainId: 137,
+    decimals: 6,
     vm: "evm",
   });
   if (output.minimumAmount < input.minimumOutputFloor) {

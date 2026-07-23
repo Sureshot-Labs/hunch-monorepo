@@ -48,6 +48,33 @@ function parseOptionalPositiveUsdcString(key: string): string | undefined {
   return normalized;
 }
 
+function parseOptionalPositiveInt(
+  key: string,
+  fallback: number,
+): number | undefined {
+  const raw = readEnv(key);
+  if (!raw) return undefined;
+  return parsePositiveInt(raw, fallback);
+}
+
+export function parseFundingReferenceLookupKeyVersion(
+  raw: string | undefined,
+): number {
+  if (!raw) return 1;
+  if (!/^[1-9]\d*$/u.test(raw)) {
+    throw new Error(
+      "FUNDING_REFERENCE_LOOKUP_KEY_VERSION must be a positive integer",
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(
+      "FUNDING_REFERENCE_LOOKUP_KEY_VERSION must be a safe positive integer",
+    );
+  }
+  return value;
+}
+
 const enabled = parseBool(process.env.HUNCH_FINANCE_WORKER_ENABLED, false);
 const executeEnabled = parseBool(process.env.HUNCH_FINANCE_EXECUTE, false);
 const databaseUrl = readEnv("DATABASE_URL");
@@ -95,6 +122,16 @@ export const env = {
   fundingReconciliationPoolSize: parsePositiveInt(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_POOL_SIZE"),
     4,
+  ),
+  relayApiKey: readEnv("RELAY_API_KEY"),
+  relayRequestTimeoutMs: parseOptionalPositiveInt(
+    "RELAY_REQUEST_TIMEOUT_MS",
+    10_000,
+  ),
+  credentialsEncryptionKey: readEnv("CREDENTIALS_ENCRYPTION_KEY"),
+  fundingReferenceLookupHmacKey: readEnv("FUNDING_REFERENCE_LOOKUP_HMAC_KEY"),
+  fundingReferenceLookupKeyVersion: parseFundingReferenceLookupKeyVersion(
+    readEnv("FUNDING_REFERENCE_LOOKUP_KEY_VERSION"),
   ),
 
   feesCollectEnabled: parseBool(readEnv("HUNCH_FINANCE_COLLECT_ENABLED"), true),
