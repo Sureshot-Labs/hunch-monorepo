@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 2,
-  "capturedAt": "2026-07-23T00:25:45.393Z",
+  "schemaVersion": 4,
+  "capturedAt": "2026-07-23T00:25:45.393Z/2026-07-23T15:25:00.000Z",
   "capturePhases": {
     "initialReadOnly": {
       "externalStateChanges": false
@@ -11,12 +11,26 @@
       "quoteRequestsCreated": 6,
       "depositAddressModeRequests": 0
     },
+    "authorizedLiveRehearsal": {
+      "externalStateChanges": true,
+      "externalStateScope": "guarded dedicated-burner Relay EVM and Solana rehearsal only",
+      "quoteCallsIssued": 36,
+      "executedRelayRequests": 6,
+      "walletSignaturesCreated": 9,
+      "transactionsBroadcast": 9,
+      "successfulTransactionsObserved": 9,
+      "destinationSettlementsObserved": 6,
+      "depositAddressModeRequests": 0,
+      "grossInitialPolygonPolInputRaw": "3000000000000000000",
+      "grossInitialPolygonPusdInputRaw": "1500000",
+      "solanaTransactionFeeLamports": "5000"
+    },
     "sharedSafety": {
-      "walletKeysUsed": false,
-      "walletSignaturesCreated": false,
-      "transactionsBroadcast": false,
-      "fundsUsed": false,
-      "relayApiKeyPersisted": false
+      "walletSecretPersisted": false,
+      "relayApiCredentialPersisted": false,
+      "rawProviderRequestReferencesPersisted": false,
+      "rawTransactionHashesPersisted": false,
+      "rawCalldataPersisted": false
     }
   },
   "readOnlyCalls": [
@@ -25,15 +39,22 @@
     "GET /intents/status/v3?requestId=<official-doc-id>",
     "GET /intents/status/v3?requestId=<synthetic-unknown-id>",
     "GET /intents/status/v3?requestId=<created-quote-id>",
-    "GET /requests/v3?id=<created-quote-id>&includeChildRequests=true"
+    "GET /requests/v3?id=<created-quote-id>&includeChildRequests=true",
+    "GET /requests/v3?depositTxHash=<exact-rehearsal-tx-hash> x6",
+    "Alchemy RPC balance, receipt/signature-status, transaction, account, program, and lookup-table reads for exact rehearsal identities"
   ],
   "authorizedStateChangingCalls": [
-    "POST /quote/v2 x6 (three target routes plus three bounded capture repeats)"
+    "POST /quote/v2 x6 (initial three target routes plus three bounded capture repeats)",
+    "POST /quote/v2 x36 (guarded live-rehearsal fail-closed preflights, bounded route/rent discovery, refreshes, and six executed requests)",
+    "EVM wallet transaction broadcast x8 through configured Alchemy RPC (all receipts successful)",
+    "Solana wallet transaction broadcast x1 through configured Alchemy RPC (finalized successfully)"
   ],
   "intentionallySkipped": [
     "POST /quote/v2 with useDepositAddress=true",
     "GET /requests/v3 without an exact created request ID filter",
-    "all execution, permit, gasless, index/reindex, fast-fill, fee, wallet, signing, and transaction endpoints"
+    "all Relay execution, permit, gasless, index/reindex, fast-fill, and fee endpoints",
+    "Privy policy/configuration changes and delegated actions",
+    "Polymarket/Limitless venue settlement, order, or readiness mutations"
   ],
   "sources": [
     {
@@ -71,6 +92,33 @@
       "requestIdsPersisted": false
     },
     {
+      "id": "relay-live-rehearsal",
+      "kind": "live-execution-sanitized",
+      "url": "https://api.relay.link/quote/v2 + configured Alchemy RPC",
+      "retrievedAt": "2026-07-23T14:40:18.591Z/2026-07-23T14:57:01.044Z",
+      "executedRelayRequests": 3,
+      "transactionsBroadcast": 5,
+      "requestIdsPersisted": false,
+      "transactionHashesPersisted": false
+    },
+    {
+      "id": "relay-solana-live-rehearsal",
+      "kind": "live-execution-sanitized",
+      "url": "https://api.relay.link/quote/v2 + configured Alchemy Polygon/Solana RPC",
+      "retrievedAt": "2026-07-23T15:11:51.204Z/2026-07-23T15:25:00.000Z",
+      "executedRelayRequests": 3,
+      "transactionsBroadcast": 4,
+      "requestIdsPersisted": false,
+      "transactionHashesPersisted": false
+    },
+    {
+      "id": "relay-svm-wallet-adapter",
+      "kind": "official-source",
+      "url": "https://github.com/relayprotocol/relay-kit/blob/main/packages/relay-svm-wallet-adapter/src/adapter.ts",
+      "retrievedAt": "2026-07-23",
+      "pinnedFinding": "Solana instruction data is hex without a prefix and is decoded with Buffer.from(data, 'hex')"
+    },
+    {
       "id": "relay-deposit-address-docs",
       "kind": "official-docs-sanitized",
       "url": "https://docs.relay.link/features/deposit-addresses",
@@ -92,6 +140,8 @@
     "quote-v2-base-usdc-polygon-usdc.live-sanitized.json",
     "quote-v2-solana-usdc-polygon-usdc.live-sanitized.json",
     "quote-v2-base-usdc-polygon-pusd.live-sanitized.json",
+    "rehearsal-evm-roundtrip.live-sanitized.json",
+    "rehearsal-solana-roundtrip.live-sanitized.json",
     "deposit-address-open.docs-sanitized.json",
     "deposit-address-strict.docs-sanitized.json",
     "webhook-status-updated.docs-sanitized.json",

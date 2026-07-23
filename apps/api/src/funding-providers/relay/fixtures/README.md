@@ -1,11 +1,11 @@
 # Relay fixture corpus
 
-This directory pins Relay facts captured first read-only and then through an
-explicitly authorized quote-only phase. The quote phase created Relay request
-and log records, but no Deposit Address mode request, wallet signature,
-transaction, token movement, configuration change, or other execution. It is an
-implementation input for the Relay adapter; it does not enable any capability
-or route.
+This directory pins Relay facts captured first read-only, then through an
+explicitly authorized quote-only phase, and finally through a bounded
+dedicated-burner live rehearsal. The live phase executed six tiny Relay routes
+across Polygon, Base, and Solana while staying below the authorized aggregate
+budget. It made no Deposit Address request or configuration change and does not
+enable any product capability or route.
 
 ## Evidence classes
 
@@ -16,6 +16,10 @@ or route.
   deterministic public fixture addresses with no known private keys. Request,
   order, lookup-table, and response identifiers are fingerprinted; actions were
   never signed or submitted.
+- `live-execution-sanitized`: exact-spend preflight and settlement evidence from
+  dedicated EVM/Solana burners. Raw keys, request IDs, transaction hashes,
+  calldata/instruction data, and RPC credentials are replaced by fingerprints
+  or omitted.
 - `official-docs-sanitized`: copied from the documented request/response shape
   and replaced with reserved fixture identities. No corresponding Relay request
   was created.
@@ -24,8 +28,9 @@ or route.
 - `negative-policy`: deliberately invalid or unsupported inputs that a future
   Hunch Relay adapter must reject before any provider call or execution.
 
-The local `RELAY_API_KEY` was used only in the request header for permitted GET
-and quote-only calls. It is not stored here. The fixture integrity test rejects
+The local `RELAY_API_KEY` was used only in the request header for permitted
+GET/Quote calls. Alchemy RPC URLs and wallet keys remained in ignored local
+files/environment. None are stored here. The fixture integrity test rejects
 secret-shaped JSON fields and accidental raw provider request IDs in live
 captures.
 
@@ -53,16 +58,27 @@ Every quote used a deterministic public fixture address without a known private
 key. `useDepositAddress` was omitted, and no signing or execution method was
 called.
 
+Subsequent explicitly authorized live rehearsal:
+
+- 36 guarded `POST /quote/v2` calls across preflight, bounded rent/route
+  discovery, approval refreshes, and six executed requests;
+- eight EVM broadcasts and one Solana broadcast, all successful;
+- six independently observed destination settlements;
+- exact `GET /requests/v3?depositTxHash=...` reconciliation for every executed
+  request;
+- EVM/Solana Alchemy RPC reads, EVM gas simulation, Solana account/program/LUT
+  validation, and unsigned/signed Solana simulation;
+- gross initial inputs of 3 POL and 1.5 pUSD, below the authorized 10 POL and
+  3 pUSD limits.
+
 Deliberately not called:
 
 - `POST /quote/v2` with `useDepositAddress: true`;
 - broad or unfiltered `GET /requests/v3` listing that could expose unrelated
   customer request data;
-- execution, permit, gasless, index/reindex, fast-fill, fee, or transaction
-  endpoints;
-- any wallet, signer, RPC broadcast, or venue endpoint.
-
-No wallet key, signature, token, or real-value transfer was needed.
+- Relay execution, permit, gasless, index/reindex, fast-fill, fee, or
+  transaction endpoints other than Quote/Status/Requests;
+- Privy mutation/signing, venue mutation, order, or readiness endpoints.
 
 ## Findings encoded by the fixtures
 
@@ -93,16 +109,31 @@ No wallet key, signature, token, or real-value transfer was needed.
 8. Immediately after creation, Status v3 returned `waiting`, while exact
    Requests v3 lookup returned `{ "requests": [] }`. Quote creation and Requests
    visibility are therefore not the same lifecycle boundary.
+9. The six executed tiny-value routes all settled above their authorized
+   minimum output. EVM action shapes observed Router V3, Approval Proxy V3, and
+   Depository V2; remaining ERC-20 allowances were zero.
+10. Relay's Solana adapter decodes instruction data as hex without `0x`, not
+    base64. The executed action contained one allowlisted Relay program
+    instruction, one controlled signer, the derived source ATA, three writable
+    accounts, and one lookup table. Both unsigned and signed simulations passed.
+11. A new Solana account required at least `0.000891 SOL`. One POL was
+    insufficient; 1.5 POL quoted but lacked robust rent-plus-return-fee
+    headroom, so the rehearsal selected 2 POL and avoided an external SOL
+    top-up.
+12. Alchemy HTTP RPC accepted and finalized the Solana transaction, while its
+    derived WebSocket endpoint returned `signatureSubscribe` method-not-found.
+    The runner now confirms by HTTP status polling and never retries an
+    already-broadcast transaction blindly.
 
 ## Validation scope
 
 `fixtures-tests.ts` checks provenance, source pins, chain/currency mappings,
-Deposit Address cross-field rules, live quote summaries, status drift, webhook
-shape, sanitization, and negative-policy mutations. Live quote fixtures prove
-that Relay returned a candidate at that instant; they do not prove action
-allowlisting, current economics, wallet readiness, execution, or settlement.
-Those require the guarded tiny-value rehearsal described in
-`docs/funding/wp0/live-rehearsal-harness.md`.
+Deposit Address cross-field rules, live quote/execution summaries, EVM and
+Solana action constraints, status drift, webhook shape, sanitization, and
+negative-policy mutations. The live fixtures prove bounded burner execution
+and owned-destination settlement only at the captured amount bands. They do not
+prove Privy delegated execution, venue-visible readiness, Deposit Address
+recovery, timeout/refund convergence, or production activation.
 
 Sources:
 
@@ -112,3 +143,5 @@ Sources:
 - <https://docs.relay.link/references/api/get-requests>
 - <https://docs.relay.link/features/deposit-addresses>
 - <https://docs.relay.link/references/api/api_guides/webhooks>
+- <https://docs.relay.link/references/api/api_guides/solana>
+- <https://github.com/relayprotocol/relay-kit/blob/main/packages/relay-svm-wallet-adapter/src/adapter.ts>

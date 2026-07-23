@@ -7,11 +7,15 @@ official provider documentation, and deterministic duplicate analysis.
 
 ## Safety and method
 
-All remote actions were reads. SQL returned schemas and aggregates only; no
+All WP0A remote actions were reads. SQL returned schemas and aggregates only; no
 wallet addresses, user identities, payload bodies, secrets, or signing material
 are reproduced here. Privy was inspected without clicking Edit, Save, Create,
 Test, or Delete. No branch, code, configuration, deployment, database row,
 policy, webhook, or schedule was changed.
+
+The later section **Authorized live-rehearsal addendum** is intentionally
+separate: it records subsequent user-authorized dedicated-burner transactions,
+not WP0A read-only activity.
 
 ## Pinned source revisions
 
@@ -225,6 +229,7 @@ date; no unversioned schema is inferred beyond the page.
 | Relay    | [Quote API](https://docs.relay.link/references/api/get-quote), current endpoint page, retrieved 2026-07-23                                                                                                                                                                                                                                                                         | Quote is the pinned planning boundary; Hunch must normalize and validate returned actions.                                                                                                                                                                              |
 | Relay    | [Intent Status API v3](https://docs.relay.link/references/api/get-intents-status-v3), v3, retrieved 2026-07-23                                                                                                                                                                                                                                                                     | Reconciliation uses provider progress but requires owned destination/refund observation for Hunch settlement.                                                                                                                                                           |
 | Relay    | [Webhooks guide](https://docs.relay.link/references/api/api_guides/webhooks), retrieved 2026-07-23                                                                                                                                                                                                                                                                                 | HMAC covers timestamp plus body; delivery retries exist; status vocabulary must be mapped fail-closed.                                                                                                                                                                  |
+| Relay    | [Solana guide](https://docs.relay.link/references/api/api_guides/solana) and [official SVM adapter source](https://github.com/relayprotocol/relay-kit/blob/main/packages/relay-svm-wallet-adapter/src/adapter.ts), retrieved 2026-07-23                                                                                                                                            | Relay uses chain ID 792703809 for Solana; instruction data is decoded as hex without a prefix, with supplied instruction accounts and lookup tables.                                                                                                                    |
 | Privy    | [Funding overview](https://docs.privy.io/wallets/funding/overview), retrieved 2026-07-23                                                                                                                                                                                                                                                                                           | Funding method configuration and wallet destination are separate from Hunch settlement proof.                                                                                                                                                                           |
 | Privy    | [Funding configuration](https://docs.privy.io/wallets/funding/configuration), retrieved 2026-07-23                                                                                                                                                                                                                                                                                 | User-visible methods are enabled on Account Funding; integration-key presence alone does not prove method enablement.                                                                                                                                                   |
 | Privy    | [`wallet.funds_deposited`](https://docs.privy.io/api-reference/webhooks/wallet/funds_deposited), event revision by name, retrieved 2026-07-23                                                                                                                                                                                                                                      | Incoming asset event shape and idempotent ingestion basis.                                                                                                                                                                                                              |
@@ -239,26 +244,59 @@ date; no unversioned schema is inferred beyond the page.
 
 ## Requirements-to-evidence ownership
 
-| Requirement                            | Fixture/test evidence                                                                         | Command or inspection owner                   |
-| -------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| No value double count                  | projector property tests: source → in-transit → destination/refund                            | `FundingPlatformOwner`, backend test command  |
-| Quote/commit ownership and idempotency | cross-user, replay, hash mismatch and stale projection tests                                  | `FundingPlatformOwner`, API integration suite |
-| Relay exact actions/status             | sanitized Quote/Status/Webhook/Deposit Address fixtures plus negative mutations               | `FundingPlatformOwner`, guarded harness       |
-| Privy action limits                    | policy JSON snapshot, validator fixtures, Dashboard read-only check                           | `WalletPolicyOwner`                           |
-| PM/Limitless readiness                 | internal/external/Safe/deposit-wallet matrices and tiny-value visibility rehearsal            | `VenueIntegrationOwner`                       |
-| Solana sponsorship                     | fee payer, transfer, ATA/rent, close destination and cap mutation tests                       | `WalletPolicyOwner`                           |
-| Telegram parity                        | buy/sell/redeem/funding/recovery contract tests; redeem stays unavailable until policy exists | `TelegramTradingOwner`                        |
-| Legacy convergence                     | classifier zero-unknown query; per-adapter terminal replay and age report                     | `FinanceOperationsOwner`                      |
-| Merge/delete/retention                 | DB FK, merge conflict, deletion hold, crypto-shred, market-protected-reference tests          | `DataLifecycleOwner`                          |
-| Shared UI state                        | desktop/mobile journey suite over one controller; clone baseline comparison                   | `FundingUIOwner`                              |
+| Requirement                            | Fixture/test evidence                                                                                                | Command or inspection owner                   |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| No value double count                  | projector property tests: source → in-transit → destination/refund                                                   | `FundingPlatformOwner`, backend test command  |
+| Quote/commit ownership and idempotency | cross-user, replay, hash mismatch and stale projection tests                                                         | `FundingPlatformOwner`, API integration suite |
+| Relay exact actions/status             | sanitized Quote/Status/Webhook/Deposit Address fixtures, EVM/Solana live execution fixtures, and negative mutations  | `FundingPlatformOwner`, guarded harness       |
+| Privy action limits                    | policy JSON snapshot, validator fixtures, Dashboard read-only check                                                  | `WalletPolicyOwner`                           |
+| PM/Limitless readiness                 | internal/external/Safe/deposit-wallet matrices and tiny-value visibility rehearsal                                   | `VenueIntegrationOwner`                       |
+| Solana execution baseline              | controlled signer/source ATA/program/LUT/rent/fee validation, unsigned/signed simulation, finalized tiny-value route | `WalletPolicyOwner`                           |
+| Telegram parity                        | buy/sell/redeem/funding/recovery contract tests; redeem stays unavailable until policy exists                        | `TelegramTradingOwner`                        |
+| Legacy convergence                     | classifier zero-unknown query; per-adapter terminal replay and age report                                            | `FinanceOperationsOwner`                      |
+| Merge/delete/retention                 | DB FK, merge conflict, deletion hold, crypto-shred, market-protected-reference tests                                 | `DataLifecycleOwner`                          |
+| Shared UI state                        | desktop/mobile journey suite over one controller; clone baseline comparison                                          | `FundingUIOwner`                              |
+
+## Authorized live-rehearsal addendum
+
+After WP0A, the user separately authorized a dedicated-burner limit of 10 POL
+and 3 pUSD. No production, Privy, deployment, branch, or configuration mutation
+was authorized or performed.
+
+Six Relay requests executed successfully across Polygon, Base, and Solana. The
+nine broadcasts all succeeded, every destination delta exceeded its authorized
+floor, and the final EVM allowances to Relay V2/V3 were zero. Gross initial
+route inputs were 3 POL and 1.5 pUSD. Final burner balances were:
+
+| Location     |     Final raw balance |          Display balance |
+| ------------ | --------------------: | -----------------------: |
+| Polygon POL  | `6480583092818967158` | 6.480583092818967158 POL |
+| Polygon pUSD |             `2152946` |            2.152946 pUSD |
+| Base ETH     |      `29513645959152` | 0.000029513645959152 ETH |
+| Base USDC    |              `469156` |            0.469156 USDC |
+| Solana SOL   |             `1509964` |          0.001509964 SOL |
+| Solana USDC  |               `34047` |            0.034047 USDC |
+
+The Solana return exposed an RPC observation issue without causing a chain
+failure: Alchemy HTTP accepted/finalized the transaction, while the derived
+WebSocket endpoint rejected `signatureSubscribe`. The transaction was not
+resent. Exact HTTP signature/transaction and Relay deposit-hash reconciliation
+proved finality, 5,000-lamport fee, Relay `success`, and 201,796 raw pUSD output.
+The runner now uses HTTP status polling.
+
+Detailed sanitized facts and timing are in
+`rehearsal-evm-roundtrip.live-sanitized.json` and
+`rehearsal-solana-roundtrip.live-sanitized.json`.
 
 ## Audit conclusions
 
 1. The plan's architecture is materially correct and better grounded after
    WP0A, especially its separation of ownership value, spendability, routing,
    and venue binding.
-2. Relay must remain off until fixtures and exact live rehearsals exist; no
-   Relay configuration was found in production.
+2. Relay wallet fixtures and bounded EVM/Solana live rehearsals now exist. Relay
+   product creation must still remain off until durable operations,
+   reconciliation, destination/venue readiness, and per-capability activation
+   gates are implemented.
 3. Legacy reconciliation is a hard migration dependency because 106 records are
    non-terminal and 104 are older than 30 days.
 4. Privy BUY/SELL/funding controls are concrete and restrictive, but delegated
@@ -268,6 +306,6 @@ date; no unversioned schema is inferred beyond the page.
    cross-chain ingress, or Privy Deposit Address support.
 6. The current web funding UI has enough exact duplication that a shared
    controller is a prerequisite, not optional cleanup.
-7. WP1 implementation may begin only after the executable harness/fixture gap is
-   accepted as an explicit remaining WP0 item or completed. Production route
-   activation must wait for the full WP0 gate.
+7. The executable harness/fixture gap for the Relay wallet subset is complete,
+   so WP1 implementation may begin. Production route activation still waits for
+   the later work-package and per-capability gates.

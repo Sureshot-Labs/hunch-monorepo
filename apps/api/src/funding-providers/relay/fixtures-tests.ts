@@ -34,7 +34,7 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
 );
 
 {
-  assert.equal(manifest.schemaVersion, 2);
+  assert.equal(manifest.schemaVersion, 4);
   const capturePhases = object(
     manifest.capturePhases,
     "manifest.capturePhases",
@@ -51,16 +51,25 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
   assert.equal(authorizedQuoteOnly.externalStateChanges, true);
   assert.equal(authorizedQuoteOnly.quoteRequestsCreated, 6);
   assert.equal(authorizedQuoteOnly.depositAddressModeRequests, 0);
+  const authorizedLiveRehearsal = object(
+    capturePhases.authorizedLiveRehearsal,
+    "manifest.capturePhases.authorizedLiveRehearsal",
+  );
+  assert.equal(authorizedLiveRehearsal.executedRelayRequests, 6);
+  assert.equal(authorizedLiveRehearsal.transactionsBroadcast, 9);
+  assert.equal(authorizedLiveRehearsal.successfulTransactionsObserved, 9);
+  assert.equal(authorizedLiveRehearsal.destinationSettlementsObserved, 6);
+  assert.equal(authorizedLiveRehearsal.depositAddressModeRequests, 0);
   const sharedSafety = object(
     capturePhases.sharedSafety,
     "manifest.capturePhases.sharedSafety",
   );
   for (const field of [
-    "walletKeysUsed",
-    "walletSignaturesCreated",
-    "transactionsBroadcast",
-    "fundsUsed",
-    "relayApiKeyPersisted",
+    "walletSecretPersisted",
+    "relayApiCredentialPersisted",
+    "rawProviderRequestReferencesPersisted",
+    "rawTransactionHashesPersisted",
+    "rawCalldataPersisted",
   ]) {
     assert.equal(sharedSafety[field], false, `${field} must remain false`);
   }
@@ -109,6 +118,153 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
       `${path} must not persist a raw provider request ID`,
     );
   }
+}
+
+{
+  const rehearsal = await fixture(
+    "rehearsal-evm-roundtrip.live-sanitized.json",
+  );
+  const metadata = object(rehearsal._fixture, "rehearsal._fixture");
+  assert.equal(metadata.liveRequestsExecuted, 3);
+  assert.equal(metadata.walletTransactionsBroadcast, 5);
+  const security = object(rehearsal.security, "rehearsal.security");
+  assert.equal(security.useDepositAddressRequested, false);
+  assert.equal(security.walletSecretPersistedInFixture, false);
+  assert.equal(security.rawTransactionHashesPersisted, false);
+  const routes = array(rehearsal.routes, "rehearsal.routes").map(
+    (value, index) => object(value, `rehearsal.routes[${index}]`),
+  );
+  assert.deepEqual(
+    routes.map((route) => route.scenarioId),
+    [
+      "polygon-pol-to-base-eth",
+      "polygon-pusd-to-base-usdc",
+      "base-usdc-to-polygon-pusd",
+    ],
+  );
+  assert.deepEqual(
+    routes.map((route) => route.routeShape),
+    [
+      "relay-router-v3-native",
+      "relay-approval-proxy-v3-erc20",
+      "relay-depository-v2-erc20",
+    ],
+  );
+  for (const route of routes) {
+    const output = object(route.output, "rehearsal.route.output");
+    assert.ok(
+      BigInt(string(output.actualRaw, "rehearsal output actual")) >=
+        BigInt(
+          string(
+            output.authorizedMinimumRaw,
+            "rehearsal output authorized minimum",
+          ),
+        ),
+    );
+    const relay = object(route.relay, "rehearsal.route.relay");
+    assert.equal(relay.status, "success");
+    assert.equal(relay.refunds, 0);
+    assert.equal(relay.fills, 1);
+    for (const transaction of array(
+      route.sourceTransactions,
+      "rehearsal.route.sourceTransactions",
+    )) {
+      assert.equal(object(transaction, "rehearsal transaction").status, 1);
+    }
+  }
+  const budget = object(
+    rehearsal.budgetReconciliation,
+    "rehearsal.budgetReconciliation",
+  );
+  assert.equal(budget.withinAuthorizedBudget, true);
+  const allowances = object(
+    budget.remainingAllowances,
+    "rehearsal.remainingAllowances",
+  );
+  assert.equal(allowances.polygonPusdToRelayV3Raw, "0");
+  assert.equal(allowances.baseUsdcToRelayV2Raw, "0");
+}
+
+{
+  const rehearsal = await fixture(
+    "rehearsal-solana-roundtrip.live-sanitized.json",
+  );
+  const metadata = object(rehearsal._fixture, "solanaRehearsal._fixture");
+  assert.equal(metadata.liveRequestsExecuted, 3);
+  assert.equal(metadata.walletTransactionsBroadcast, 4);
+  const security = object(rehearsal.security, "solanaRehearsal.security");
+  assert.equal(security.useDepositAddressRequested, false);
+  assert.equal(security.walletSecretPersistedInFixture, false);
+  assert.equal(security.rawTransactionHashesPersisted, false);
+  assert.equal(security.rawSolanaInstructionDataPersisted, false);
+  const policy = object(rehearsal.solanaPolicy, "solanaRehearsal.policy");
+  assert.equal(policy.instructionEncoding, "hex-without-prefix");
+  assert.equal(policy.instructionDataBytes, 48);
+  assert.equal(policy.instructionKeyCount, 10);
+  assert.deepEqual(policy.signerKeyIndexes, [1]);
+  assert.deepEqual(policy.writableKeyIndexes, [1, 5, 6]);
+  assert.equal(policy.sourceAtaDerivedAndMatched, true);
+  const routes = array(rehearsal.routes, "solanaRehearsal.routes").map(
+    (value, index) => object(value, `solanaRehearsal.routes[${index}]`),
+  );
+  assert.deepEqual(
+    routes.map((route) => route.scenarioId),
+    [
+      "polygon-pol-to-solana-sol",
+      "polygon-pusd-to-solana-usdc",
+      "solana-usdc-to-polygon-pusd",
+    ],
+  );
+  for (const route of routes) {
+    const output = object(route.output, "solanaRehearsal.route.output");
+    assert.ok(
+      BigInt(string(output.actualRaw, "solana rehearsal output actual")) >=
+        BigInt(
+          string(
+            output.authorizedMinimumRaw,
+            "solana rehearsal output authorized minimum",
+          ),
+        ),
+    );
+    assert.equal(
+      object(route.relay, "solanaRehearsal.route.relay").status,
+      "success",
+    );
+  }
+  const returnRoute = object(routes[2], "solanaRehearsal.routes[2]");
+  const returnPreflight = object(
+    returnRoute.preflight,
+    "solanaRehearsal.return.preflight",
+  );
+  assert.equal(returnPreflight.unsignedSimulationPassed, true);
+  assert.equal(returnPreflight.signedSimulationPassed, true);
+  assert.equal(returnPreflight.estimatedNetworkFeeLamports, "5000");
+  const returnSource = object(
+    array(
+      returnRoute.sourceTransactions,
+      "solanaRehearsal.return.sourceTransactions",
+    )[0],
+    "solanaRehearsal.return.sourceTransaction",
+  );
+  assert.equal(returnSource.status, "finalized");
+  assert.equal(returnSource.onchainError, null);
+  const budget = object(
+    rehearsal.budgetReconciliation,
+    "solanaRehearsal.budgetReconciliation",
+  );
+  assert.equal(budget.withinAuthorizedBudget, true);
+  const finalBalances = object(
+    budget.final,
+    "solanaRehearsal.budgetReconciliation.final",
+  );
+  assert.equal(finalBalances.solanaSolLamports, "1509964");
+  assert.equal(finalBalances.solanaUsdcRaw, "34047");
+  const allowances = object(
+    budget.remainingAllowances,
+    "solanaRehearsal.remainingAllowances",
+  );
+  assert.equal(allowances.polygonPusdToRelayV3Raw, "0");
+  assert.equal(allowances.baseUsdcToRelayV2Raw, "0");
 }
 
 {

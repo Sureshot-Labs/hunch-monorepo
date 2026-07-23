@@ -1,0 +1,302 @@
+{
+  "_fixture": {
+    "kind": "live-execution-sanitized",
+    "sourceId": "relay-solana-live-rehearsal",
+    "capturedAt": "2026-07-23T15:11:51.204Z/2026-07-23T15:22:00.000Z",
+    "reconciledAt": "2026-07-23T15:25:00.000Z",
+    "liveRequestsExecuted": 3,
+    "walletTransactionsBroadcast": 4,
+    "warning": "This proves three tiny-value dedicated-burner routes spanning Polygon and Solana at the captured amount band. It does not activate a product route, prove Privy delegated signing, exercise Deposit Address mode, or prove venue readiness/refund recovery."
+  },
+  "authorization": {
+    "dedicatedBurnersOnly": true,
+    "initialBudget": {
+      "polygonPolRaw": "10000000000000000000",
+      "polygonPusdRaw": "3000000"
+    },
+    "grossAuthorizedBudgetNotExceeded": true,
+    "depositAddressModeAuthorized": false
+  },
+  "security": {
+    "evmBurnerFingerprint": "sha256:372d77f2d3caa603",
+    "solanaBurnerFingerprint": "sha256:91a89ce12b71fb99",
+    "walletSecretPersistedInFixture": false,
+    "relayApiCredentialPersisted": false,
+    "rawProviderRequestReferencesPersisted": false,
+    "rawTransactionHashesPersisted": false,
+    "rawEvmCalldataPersisted": false,
+    "rawSolanaInstructionDataPersisted": false,
+    "alchemyRpcCredentialsPersisted": false,
+    "rpcMode": "alchemy-from-local-env",
+    "useDepositAddressRequested": false
+  },
+  "solanaPolicy": {
+    "relayChainId": 792703809,
+    "nativeCurrency": "11111111111111111111111111111111",
+    "usdcMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "relayProgram": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+    "instructionEncoding": "hex-without-prefix",
+    "instructionDataBytes": 48,
+    "instructionKeyCount": 10,
+    "signerKeyIndexes": [1],
+    "writableKeyIndexes": [1, 5, 6],
+    "sourceAtaDerivedAndMatched": true,
+    "tokenProgramMatched": true,
+    "associatedTokenProgramMatched": true,
+    "systemProgramMatched": true,
+    "lookupTableCount": 1,
+    "lookupTableFingerprint": "sha256:4cc43709a887f832",
+    "programExecutable": true
+  },
+  "minimumFundingDiscovery": {
+    "selectedPolygonPolInputRaw": "2000000000000000000",
+    "attempts": [
+      {
+        "input": "zero-address Solana native currency",
+        "result": "rejected-before-signing",
+        "providerReason": "Invalid output currency"
+      },
+      {
+        "inputPolygonPolRaw": "500000000000000000",
+        "result": "rejected-before-signing",
+        "providerReason": "output too small to cover execution fees"
+      },
+      {
+        "inputPolygonPolRaw": "1000000000000000000",
+        "result": "rejected-before-signing",
+        "providerReason": "below required 0.000891 SOL rent minimum"
+      },
+      {
+        "inputPolygonPolRaw": "1500000000000000000",
+        "quoteExpectedSolLamports": "969667",
+        "quoteMinimumSolLamports": "922250",
+        "result": "locally-rejected-before-signing",
+        "localReason": "insufficient robust headroom above rent reserve for the planned return transaction"
+      },
+      {
+        "inputPolygonPolRaw": "2000000000000000000",
+        "preflightExpectedSolLamports": "1488238",
+        "preflightMinimumSolLamports": "1416059",
+        "result": "selected-after-simulation"
+      }
+    ]
+  },
+  "routes": [
+    {
+      "scenarioId": "polygon-pol-to-solana-sol",
+      "routeShape": "relay-router-v3-native-to-svm",
+      "input": {
+        "chainId": 137,
+        "symbol": "POL",
+        "amountRaw": "2000000000000000000"
+      },
+      "output": {
+        "chainId": 792703809,
+        "symbol": "SOL",
+        "quoteExpectedRaw": "1487986",
+        "quoteMinimumRaw": "1415819",
+        "authorizedMinimumRaw": "1100000",
+        "actualRaw": "1514964"
+      },
+      "preflight": {
+        "estimatedGas": "370018",
+        "quoteWorstCaseGasRaw": "235732313376334011",
+        "authorizedMaxGasRaw": "1000000000000000000"
+      },
+      "sourceTransactions": [
+        {
+          "stepId": "deposit",
+          "txFingerprint": "sha256:4c9e33972395e925",
+          "blockNumber": 90743012,
+          "blockTimestamp": "2026-07-23T15:11:55.000Z",
+          "broadcastAt": "2026-07-23T15:11:53.190Z",
+          "receiptObservedAt": "2026-07-23T15:11:57.729Z",
+          "receiptLatencyMs": 4539,
+          "status": 1,
+          "gasUsed": "293564",
+          "gasCostRaw": "116373595635690388"
+        }
+      ],
+      "relay": {
+        "requestFingerprint": "sha256:4397d07e9be76947",
+        "status": "success",
+        "createdAt": "2026-07-23T15:11:54.823Z",
+        "updatedAt": "2026-07-23T15:12:06.263Z",
+        "lifecycleMs": 11440,
+        "failReason": null,
+        "refundFailReason": null
+      },
+      "destinationTransaction": {
+        "txFingerprint": "sha256:b7c948c106046cb5",
+        "slot": 434738531,
+        "blockTimestamp": "2026-07-23T15:11:54.000Z",
+        "status": "success"
+      },
+      "timings": {
+        "depositBroadcastToDestinationObservedMs": 4772,
+        "depositReceiptToDestinationObservedMs": 233,
+        "fullRunnerWallClockMs": 6812,
+        "note": "Use client observation times for cross-chain latency; Polygon and Solana block clocks are not guaranteed to be monotonic relative to each other."
+      }
+    },
+    {
+      "scenarioId": "polygon-pusd-to-solana-usdc",
+      "routeShape": "relay-approval-proxy-v3-erc20-to-svm",
+      "input": {
+        "chainId": 137,
+        "symbol": "pUSD",
+        "amountRaw": "500000"
+      },
+      "output": {
+        "chainId": 792703809,
+        "symbol": "USDC",
+        "quoteExpectedRaw": "283962",
+        "quoteMinimumRaw": "271127",
+        "authorizedMinimumRaw": "250000",
+        "actualRaw": "284047"
+      },
+      "preflight": {
+        "approveEstimatedGas": "55789",
+        "depositSimulation": "deferred-until-exact-approval",
+        "authorizedMaxGasRaw": "1500000000000000000"
+      },
+      "sourceTransactions": [
+        {
+          "stepId": "approve",
+          "txFingerprint": "sha256:e212e808ba76ac24",
+          "blockNumber": 90743040,
+          "blockTimestamp": "2026-07-23T15:12:37.000Z",
+          "broadcastAt": "2026-07-23T15:12:35.121Z",
+          "receiptObservedAt": "2026-07-23T15:12:39.397Z",
+          "receiptLatencyMs": 4276,
+          "status": 1,
+          "gasUsed": "54988",
+          "gasCostRaw": "21004153767011388"
+        },
+        {
+          "stepId": "deposit",
+          "txFingerprint": "sha256:99451544a696df0a",
+          "blockNumber": 90743044,
+          "blockTimestamp": "2026-07-23T15:12:43.000Z",
+          "broadcastAt": "2026-07-23T15:12:40.977Z",
+          "receiptObservedAt": "2026-07-23T15:12:45.272Z",
+          "receiptLatencyMs": 4295,
+          "status": 1,
+          "gasUsed": "294678",
+          "gasCostRaw": "111703874863599306"
+        }
+      ],
+      "relay": {
+        "requestFingerprint": "sha256:480078e121bc183d",
+        "status": "success",
+        "createdAt": "2026-07-23T15:12:42.766Z",
+        "updatedAt": "2026-07-23T15:12:44.509Z",
+        "lifecycleMs": 1743,
+        "failReason": null,
+        "refundFailReason": null
+      },
+      "destinationTransaction": {
+        "txFingerprint": "sha256:177accc172b0db19",
+        "slot": 434738649,
+        "blockTimestamp": "2026-07-23T15:12:43.000Z",
+        "status": "success"
+      },
+      "timings": {
+        "depositBroadcastToDestinationObservedMs": 4623,
+        "depositReceiptToDestinationObservedMs": 328,
+        "fullRunnerWallClockMs": 13593
+      }
+    },
+    {
+      "scenarioId": "solana-usdc-to-polygon-pusd",
+      "routeShape": "relay-solana-depository-v2-erc20-to-evm",
+      "input": {
+        "chainId": 792703809,
+        "symbol": "USDC",
+        "amountRaw": "250000"
+      },
+      "output": {
+        "chainId": 137,
+        "symbol": "pUSD",
+        "quoteExpectedRaw": "201719",
+        "quoteMinimumRaw": "192117",
+        "authorizedMinimumRaw": "180000",
+        "actualRaw": "201796"
+      },
+      "preflight": {
+        "estimatedNetworkFeeLamports": "5000",
+        "authorizedMaxFeeLamports": "100000",
+        "rentReserveLamports": "890880",
+        "unsignedSimulationPassed": true,
+        "signedSimulationPassed": true,
+        "simulationUnitsConsumed": 23574
+      },
+      "sourceTransactions": [
+        {
+          "stepId": "deposit",
+          "txFingerprint": "sha256:bf5295542614aed1",
+          "slot": 434739951,
+          "blockTimestamp": "2026-07-23T15:21:54.000Z",
+          "broadcastAt": "2026-07-23T15:21:54.966Z",
+          "status": "finalized",
+          "onchainError": null,
+          "feeLamports": "5000"
+        }
+      ],
+      "relay": {
+        "requestFingerprint": "sha256:b2219e2f2eed2523",
+        "status": "success",
+        "createdAt": "2026-07-23T15:21:55.682Z",
+        "updatedAt": "2026-07-23T15:21:59.774Z",
+        "lifecycleMs": 4092,
+        "failReason": null,
+        "refundFailReason": null
+      },
+      "destinationTransaction": {
+        "txFingerprint": "sha256:d3bd5feeb17a9046",
+        "blockNumber": 90743415,
+        "blockTimestamp": "2026-07-23T15:22:00.000Z",
+        "status": "success"
+      },
+      "timings": {
+        "sourceBroadcastToDestinationBlockMs": 5034,
+        "fullRouteWallClockMs": 8180,
+        "confirmationNote": "Alchemy HTTP RPC accepted and finalized the transaction, but the derived WebSocket endpoint returned signatureSubscribe method-not-found. The runner was stopped without retry, then exact HTTP getSignatureStatuses/getTransaction and Relay depositTxHash reconciliation proved success."
+      }
+    }
+  ],
+  "budgetReconciliation": {
+    "initial": {
+      "polygonPolRaw": "10000000000000000000",
+      "polygonPusdRaw": "3000000",
+      "baseEthRaw": "0",
+      "baseUsdcRaw": "0",
+      "solanaSolLamports": "0",
+      "solanaUsdcRaw": "0"
+    },
+    "final": {
+      "polygonPolRaw": "6480583092818967158",
+      "polygonPusdRaw": "2152946",
+      "baseEthRaw": "29513645959152",
+      "baseUsdcRaw": "469156",
+      "solanaSolLamports": "1509964",
+      "solanaUsdcRaw": "34047"
+    },
+    "grossInitialAssetSpendAcrossEvmAndSolanaRehearsals": {
+      "polygonPolRouteInputRaw": "3000000000000000000",
+      "polygonPusdRouteInputRaw": "1500000",
+      "baseUsdcReturnInputRaw": "500000",
+      "solanaUsdcReturnInputRaw": "250000"
+    },
+    "gasAcrossEvmAndSolanaRehearsals": {
+      "polygonPolRaw": "519416907181032842",
+      "baseEthRaw": "655122000000",
+      "solanaLamports": "5000"
+    },
+    "remainingAllowances": {
+      "polygonPusdToRelayV3Raw": "0",
+      "baseUsdcToRelayV2Raw": "0"
+    },
+    "withinAuthorizedBudget": true
+  }
+}

@@ -3346,6 +3346,60 @@ Completion evidence:
 - all current wallet/venue/signing facts have repository paths;
 - product defaults and unsupported features have no placeholders.
 
+#### WP0 evidence status — 2026-07-23
+
+The WP0 contract/evidence gate is complete enough to begin WP1. This statement
+does not activate a route.
+
+In addition to the read-only production/Privy/source audit, the guarded
+dedicated-burner harness executed six bounded Relay requests:
+
+- Polygon POL → Base ETH;
+- Polygon pUSD → Base USDC;
+- partial Base USDC → Polygon pUSD;
+- Polygon POL → Solana SOL;
+- Polygon pUSD → Solana USDC;
+- partial Solana USDC → Polygon pUSD.
+
+All nine wallet broadcasts succeeded, every destination delta exceeded the
+caller-authorized minimum, and final Relay ERC-20 allowances were zero. Gross
+initial route inputs were 3 POL and 1.5 pUSD against the authorized limits of
+10 POL and 3 pUSD. Checked-in fixtures retain only fingerprints and sanitized
+amount/timing evidence; ignored local reports and burner files remain mode
+`0600`.
+
+The rehearsal pins these implementation facts:
+
+- Polygon native input used Relay Router V3; Polygon pUSD used Approval Proxy
+  V3; Base USDC used Depository V2. Adapter version/shape is therefore a route
+  input, not a globally assumed contract version.
+- Relay's Solana chain ID is `792703809`, native SOL identifier is
+  `11111111111111111111111111111111`, and Solana instruction data is hex
+  without `0x`, matching the official Relay SVM adapter.
+- A new Solana wallet required at least `0.000891 SOL`. The harness selected
+  2 POL after lower quote bands failed or lacked rent-plus-return-fee headroom,
+  avoiding an external SOL top-up.
+- The Solana origin action allowed one Relay program instruction, one
+  controlled signer, the derived source ATA, exact Token/ATA/System programs,
+  three writable accounts, and one live lookup table. Unsigned and signed
+  simulations passed; the transaction finalized with a 5,000-lamport fee.
+- Alchemy HTTP RPC worked, while its derived Solana WebSocket endpoint did not
+  support `signatureSubscribe`. Confirmation uses HTTP signature-status polling;
+  an ambiguous local observer failure never authorizes blind rebroadcast.
+
+Remaining Deposit Address/refund/timeout, Polymarket/Limitless
+venue-visibility, Privy delegated-action, withdrawal, redemption, and
+fault-injection rehearsals are activation gates for those capabilities, not
+prerequisites for starting WP1. Existing reconcilers remain required for the
+106 non-terminal legacy bridge rows observed during WP0A.
+
+Evidence:
+
+- `docs/funding/wp0/README.md`
+- `docs/funding/wp0/live-rehearsal-harness.md`
+- `apps/api/src/funding-providers/relay/fixtures/rehearsal-evm-roundtrip.live-sanitized.json`
+- `apps/api/src/funding-providers/relay/fixtures/rehearsal-solana-roundtrip.live-sanitized.json`
+
 ### Work package 1 — Domain, policy, and fail-closed control plane
 
 Required work:

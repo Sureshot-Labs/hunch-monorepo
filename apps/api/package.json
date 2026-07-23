@@ -33,6 +33,8 @@
     "rewards:treasury:sweep": "tsx src/rewards-treasury-sweep.ts",
     "rewards:wallets:generate": "tsx src/rewards-wallets-generate.ts",
     "rewards:migration:preflight": "tsx src/rewards-migration-preflight.ts",
+    "relay:rehearsal": "tsx src/relay-live-rehearsal.ts",
+    "relay:solana:rehearsal": "tsx src/relay-solana-live-rehearsal.ts",
     "ai:embed:backfill": "tsx src/ai-embed-backfill.ts",
     "ai:embed:clusters": "tsx src/ai-embed-cluster.ts",
     "ai:map-build:run": "tsx src/ai-map-build-run.ts",

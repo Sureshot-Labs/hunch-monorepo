@@ -1,0 +1,278 @@
+{
+  "_fixture": {
+    "kind": "live-execution-sanitized",
+    "sourceId": "relay-live-rehearsal",
+    "capturedAt": "2026-07-23T14:40:18.591Z/2026-07-23T14:54:21.755Z",
+    "reconciledAt": "2026-07-23T14:57:01.044Z",
+    "liveRequestsExecuted": 3,
+    "walletTransactionsBroadcast": 5,
+    "warning": "This proves three tiny-value burner-wallet routes and destination settlement at the captured amount band. It does not activate a product route, prove venue readiness, exercise Deposit Address mode, or prove refund recovery."
+  },
+  "authorization": {
+    "dedicatedBurnerOnly": true,
+    "initialBudget": {
+      "polygonPolRaw": "10000000000000000000",
+      "polygonPusdRaw": "3000000"
+    },
+    "grossAuthorizedBudgetNotExceeded": true,
+    "depositAddressModeAuthorized": false
+  },
+  "security": {
+    "burnerFingerprint": "sha256:372d77f2d3caa603",
+    "walletSecretPersistedInFixture": false,
+    "relayApiCredentialPersisted": false,
+    "rawProviderRequestReferencesPersisted": false,
+    "rawTransactionHashesPersisted": false,
+    "rawCalldataPersisted": false,
+    "alchemyRpcCredentialsPersisted": false,
+    "rpcMode": "alchemy-from-local-env",
+    "useDepositAddressRequested": false
+  },
+  "contracts": {
+    "relayRouterV3": {
+      "address": "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f",
+      "selector": "0xcd6e13f7",
+      "verifiedName": "RelayRouterV3"
+    },
+    "relayApprovalProxyV3": {
+      "address": "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
+      "selector": "0xf9e4bab4",
+      "verifiedName": "RelayApprovalProxyV3"
+    },
+    "relayDepositoryV2": {
+      "address": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+      "selector": "0xe8017952",
+      "verifiedFunction": "depositErc20(address,address,uint256,bytes32)"
+    },
+    "erc20ApproveSelector": "0x095ea7b3"
+  },
+  "routes": [
+    {
+      "scenarioId": "polygon-pol-to-base-eth",
+      "routeShape": "relay-router-v3-native",
+      "input": {
+        "chainId": 137,
+        "symbol": "POL",
+        "amountRaw": "1000000000000000000"
+      },
+      "output": {
+        "chainId": 8453,
+        "symbol": "ETH",
+        "quoteExpectedRaw": "29623474279215",
+        "quoteMinimumRaw": "28165999344677",
+        "authorizedMinimumRaw": "20000000000000",
+        "actualRaw": "30180139399958"
+      },
+      "preflight": {
+        "actionCount": 1,
+        "estimatedGas": "404891",
+        "quoteWorstCaseGasRaw": "238918779961077152",
+        "authorizedMaxGasRaw": "500000000000000000"
+      },
+      "sourceTransactions": [
+        {
+          "stepId": "deposit",
+          "txFingerprint": "sha256:e1b9880a6a111c9c",
+          "blockNumber": 90741751,
+          "blockTimestamp": "2026-07-23T14:40:24.000Z",
+          "status": 1,
+          "gasUsed": "337094",
+          "effectiveGasPriceRaw": "371073519842",
+          "gasCostRaw": "125086657097619148"
+        }
+      ],
+      "relay": {
+        "requestFingerprint": "sha256:ab2631b0ba50b941",
+        "status": "success",
+        "requestType": "Crosschain Swap",
+        "createdAt": "2026-07-23T14:40:23.162Z",
+        "updatedAt": "2026-07-23T14:40:24.446Z",
+        "lifecycleMs": 1284,
+        "failReason": null,
+        "refunds": 0,
+        "fills": 1,
+        "actualExecutionFeeRaw": "20328",
+        "actualExecutionFeeCurrency": "USDC"
+      },
+      "destinationTransaction": {
+        "txFingerprint": "sha256:b6930eba8cce332e",
+        "blockNumber": 49014139,
+        "blockTimestamp": "2026-07-23T14:40:25.000Z",
+        "status": "success"
+      },
+      "timings": {
+        "sourceBlockToDestinationBlockMs": 1000,
+        "note": "Client receipt polling hit a dRPC batch-limit error after broadcast; nonce, receipt, exact Relay lookup, and two independent Base balance reads reconciled the already successful transaction without retry."
+      }
+    },
+    {
+      "scenarioId": "polygon-pusd-to-base-usdc",
+      "routeShape": "relay-approval-proxy-v3-erc20",
+      "input": {
+        "chainId": 137,
+        "symbol": "pUSD",
+        "amountRaw": "1000000"
+      },
+      "output": {
+        "chainId": 8453,
+        "symbol": "USDC",
+        "quoteExpectedRaw": "969149",
+        "quoteMinimumRaw": "929511",
+        "authorizedMinimumRaw": "850000",
+        "actualRaw": "969156"
+      },
+      "preflight": {
+        "approveEstimatedGas": "55789",
+        "depositSimulation": "deferred-until-exact-approval",
+        "authorizedMaxGasRaw": "2000000000000000000"
+      },
+      "sourceTransactions": [
+        {
+          "stepId": "approve",
+          "txFingerprint": "sha256:88f7085cdca6ad25",
+          "blockNumber": 90742084,
+          "blockTimestamp": "2026-07-23T14:48:43.000Z",
+          "status": 1,
+          "gasUsed": "54988",
+          "gasCostRaw": "22524346273879272"
+        },
+        {
+          "stepId": "deposit",
+          "txFingerprint": "sha256:b559cb836f46118f",
+          "blockNumber": 90742088,
+          "blockTimestamp": "2026-07-23T14:48:49.000Z",
+          "status": 1,
+          "gasUsed": "294678",
+          "gasCostRaw": "122724279543233340"
+        }
+      ],
+      "relay": {
+        "requestFingerprint": "sha256:495b8e84497d33bc",
+        "status": "success",
+        "requestType": "Crosschain Swap",
+        "createdAt": "2026-07-23T14:48:49.023Z",
+        "updatedAt": "2026-07-23T14:48:50.131Z",
+        "lifecycleMs": 1108,
+        "failReason": null,
+        "refunds": 0,
+        "fills": 1,
+        "actualExecutionFeeRaw": "21054",
+        "actualExecutionFeeCurrency": "USDC.e"
+      },
+      "destinationTransaction": {
+        "txFingerprint": "sha256:4fd2d757b03875cf",
+        "blockNumber": 49014392,
+        "blockTimestamp": "2026-07-23T14:48:51.000Z",
+        "status": "success"
+      },
+      "timings": {
+        "approvalBlockToDepositBlockMs": 6000,
+        "sourceBlockToDestinationBlockMs": 2000,
+        "fullRunnerWallClockMs": 12878
+      }
+    },
+    {
+      "scenarioId": "base-usdc-to-polygon-pusd",
+      "routeShape": "relay-depository-v2-erc20",
+      "input": {
+        "chainId": 8453,
+        "symbol": "USDC",
+        "amountRaw": "500000"
+      },
+      "output": {
+        "chainId": 137,
+        "symbol": "pUSD",
+        "quoteExpectedRaw": "451296",
+        "quoteMinimumRaw": "430898",
+        "authorizedMinimumRaw": "400000",
+        "actualRaw": "451150"
+      },
+      "preflight": {
+        "quoteLatencyMs": [1288, 1131],
+        "approveEstimatedGas": "56240",
+        "depositSimulation": "deferred-until-exact-approval",
+        "authorizedMaxGasRaw": "25000000000000"
+      },
+      "sourceTransactions": [
+        {
+          "stepId": "approve",
+          "txFingerprint": "sha256:cdd13da390eaa658",
+          "blockNumber": 49014550,
+          "blockTimestamp": "2026-07-23T14:54:07.000Z",
+          "broadcastAt": "2026-07-23T14:54:05.138Z",
+          "receiptObservedAt": "2026-07-23T14:54:09.584Z",
+          "receiptLatencyMs": 4446,
+          "status": 1,
+          "gasUsed": "55437",
+          "gasCostRaw": "332622000000"
+        },
+        {
+          "stepId": "deposit",
+          "txFingerprint": "sha256:75eae51cf784b7d2",
+          "blockNumber": 49014553,
+          "blockTimestamp": "2026-07-23T14:54:13.000Z",
+          "broadcastAt": "2026-07-23T14:54:11.483Z",
+          "receiptObservedAt": "2026-07-23T14:54:15.944Z",
+          "receiptLatencyMs": 4461,
+          "status": 1,
+          "gasUsed": "53750",
+          "gasCostRaw": "322500000000"
+        }
+      ],
+      "relay": {
+        "requestFingerprint": "sha256:5626cd35c45e47d9",
+        "status": "success",
+        "statusHistory": ["submitted", "success"],
+        "requestType": "Crosschain Swap",
+        "createdAt": "2026-07-23T14:54:11.976Z",
+        "updatedAt": "2026-07-23T14:54:20.718Z",
+        "lifecycleMs": 8742,
+        "failReason": null,
+        "refunds": 0,
+        "fills": 1,
+        "actualExecutionFeeRaw": "38206",
+        "actualExecutionFeeCurrency": "USDC"
+      },
+      "destinationTransaction": {
+        "txFingerprint": "sha256:300325ba214b0ecf",
+        "blockNumber": 90742308,
+        "blockTimestamp": "2026-07-23T14:54:19.000Z",
+        "status": "success"
+      },
+      "timings": {
+        "approvalBlockToDepositBlockMs": 6000,
+        "sourceBlockToDestinationBlockMs": 6000,
+        "depositBroadcastToDestinationObservedMs": 10106,
+        "depositReceiptToDestinationObservedMs": 5645,
+        "fullRunnerWallClockMs": 18701
+      }
+    }
+  ],
+  "budgetReconciliation": {
+    "initial": {
+      "polygonPolRaw": "10000000000000000000",
+      "polygonPusdRaw": "3000000",
+      "baseEthRaw": "0",
+      "baseUsdcRaw": "0"
+    },
+    "final": {
+      "polygonPolRaw": "8729664717085268240",
+      "polygonPusdRaw": "2451150",
+      "baseEthRaw": "29513645959152",
+      "baseUsdcRaw": "469156"
+    },
+    "grossInitialAssetSpend": {
+      "polygonPolRouteInputRaw": "1000000000000000000",
+      "polygonPusdRouteInputRaw": "1000000"
+    },
+    "gas": {
+      "polygonPolRaw": "270335282914731760",
+      "baseEthRaw": "655122000000"
+    },
+    "remainingAllowances": {
+      "polygonPusdToRelayV3Raw": "0",
+      "baseUsdcToRelayV2Raw": "0"
+    },
+    "withinAuthorizedBudget": true
+  }
+}

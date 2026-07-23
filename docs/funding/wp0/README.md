@@ -1,15 +1,16 @@
 # Funding WP0 evidence pack
 
-Status: **WP0A read-only evidence and the Relay fixture/quote baseline are
-complete; the WP0 implementation gate is not yet passed.**
+Status: **WP0 contract/evidence gate is sufficient to begin WP1. The route
+activation gate is not passed.**
 
 WP0A was captured on 2026-07-23 without changing production, Privy
 configuration, code, branches, or deployment state. A subsequent explicitly
 authorized local step added the sanitized Relay fixture corpus and its unit
-test. A later quote-only capture created six Relay request/log records using
-non-owned fixture addresses. It made no Deposit Address mode request, wallet
-signature, transaction, fund movement, production, Privy, branch, commit, or
-deployment change.
+tests. A later quote-only capture created six Relay request/log records using
+non-owned fixture addresses. Finally, an explicitly authorized bounded
+dedicated-burner rehearsal executed six tiny Relay routes across Polygon, Base,
+and Solana. No Deposit Address mode, production/Privy configuration, branch,
+commit, or deployment change occurred.
 
 ## What is complete
 
@@ -28,25 +29,36 @@ deployment change.
   corpus. Live evidence includes read-only OpenAPI, chain and status GETs plus
   three quote-only route summaries; docs/synthetic fixtures remain labeled
   explicitly.
+- The guarded runner is executable, defaults to preflight, requires exact live
+  confirmation and fee/output bounds, uses Alchemy RPCs from local environment,
+  persists only ignored raw reports, and has EVM/Solana negative mutation tests.
+- Six wallet routes settled above their authorized minimums:
+  Polygon POL → Base ETH, Polygon pUSD → Base USDC, partial Base USDC → Polygon
+  pUSD, Polygon POL → Solana SOL, Polygon pUSD → Solana USDC, and partial Solana
+  USDC → Polygon pUSD.
+- All nine broadcasts succeeded; both remaining ERC-20 allowances are zero.
+  Gross initial inputs were 3 POL and 1.5 pUSD, below the authorized 10 POL /
+  3 pUSD limits.
 - Deterministic clone baselines were captured.
 - The four mandatory WP0 matrices/runbook exist with accountable owner roles
   and current rows.
 
-## Why WP0 is not yet complete
+## What still blocks activation, not WP1
 
-The sanitized provider-contract baseline and three quote-only route summaries
-now exist. They do not yet prove the returned EVM/Solana actions against the
-future Hunch allowlist, a real wallet's readiness, execution, destination
-visibility, or refund. The guarded rehearsal runner and tiny-value
-settlement/refund evidence are also absent. In addition, 106 legacy bridge rows
-were non-terminal at the WP0A production snapshot, so legacy reconcilers cannot
-be removed.
+The completed wallet rehearsal proves only bounded burner execution and owned
+destination settlement at the captured amount bands. It does not prove:
 
-The remaining gate is therefore explicit: implement the Relay schemas/adapters
-and guarded runner against this corpus, validate the captured action shapes,
-run dry preflights, obtain separate approval for any tiny-value live action,
-reconcile/classify the 106 legacy rows, then record the results here. No product
-route is activated by this evidence pack or fixture corpus.
+- strict Relay Deposit Address under/overpayment, child correlation, wrong
+  asset, timeout, or refund recovery;
+- Polymarket/Limitless venue-visible collateral and readiness;
+- Privy delegated policy/sponsorship execution;
+- external-wallet setup, withdrawal, redemption, or ambiguous-timeout recovery.
+
+Those scenarios remain off and must be implemented and rehearsed before their
+individual activation. The 106 non-terminal legacy bridge rows at the WP0A
+snapshot also require their existing reconcilers to remain; they do not block
+WP1 domain/policy implementation, but they do block legacy reconciler removal.
+No product route is activated by this evidence pack.
 
 ## Artifacts
 
