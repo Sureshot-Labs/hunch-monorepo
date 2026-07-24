@@ -69,6 +69,7 @@ export async function handleSignalBotMarketSearchInput(input: {
   text: string;
 }): Promise<boolean> {
   const state = await readSignalBotMenuInput(input);
+  if (state && state.kind !== "awaiting_market_query") return false;
   const query = input.text.trim();
   if (!query) return false;
   if (query.startsWith("/")) {

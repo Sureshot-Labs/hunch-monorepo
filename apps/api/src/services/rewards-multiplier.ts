@@ -1,5 +1,6 @@
 import { tx } from "@hunch/infra";
 import type { Pool, PoolClient } from "pg";
+import { REWARDS_REFERRAL_QUALIFICATION_POINTS } from "../lib/rewards-referral-policy.js";
 import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
 import {
   buildQualificationPointsContributionSql,
@@ -48,8 +49,6 @@ type BatchInsertInput = {
     createdAt: Date;
   }>;
 };
-
-const OBSERVER_THRESHOLD = 500;
 
 function safePositiveNumber(value: unknown, fallback: number): number {
   const parsed = Number(value);
@@ -135,7 +134,9 @@ async function fetchQualifiedReferralCountAtEvent(
   eventTime: Date,
   referrerQualificationPointsAtEvent: number,
 ): Promise<number> {
-  if (referrerQualificationPointsAtEvent < OBSERVER_THRESHOLD) {
+  if (
+    referrerQualificationPointsAtEvent < REWARDS_REFERRAL_QUALIFICATION_POINTS
+  ) {
     return 0;
   }
 
@@ -158,7 +159,7 @@ async function fetchQualifiedReferralCountAtEvent(
         and r.status <> 'blocked'
         and coalesce(rp.points, 0) >= $3
     `,
-    [userId, eventTime, OBSERVER_THRESHOLD],
+    [userId, eventTime, REWARDS_REFERRAL_QUALIFICATION_POINTS],
   );
   return Number(rows[0]?.total ?? 0);
 }

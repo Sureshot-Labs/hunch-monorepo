@@ -1758,11 +1758,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "👤 My trading",
         "Deposit",
         "🔔 Notifications",
+        "🎁 Rewards & referrals",
         "⚙️ Settings",
         "❓ Help",
         "Open Hunch Mini App",
       ]);
-      const mainMiniAppRow = regular.keyboard.inline_keyboard[6];
+      const rewardsRow = regular.keyboard.inline_keyboard[5];
+      assert.equal(rewardsRow?.length, 1);
+      const rewardsButton = rewardsRow?.[0];
+      assert.ok(rewardsButton);
+      assert.equal(rewardsButton.text, "🎁 Rewards & referrals");
+      assert.equal("icon_custom_emoji_id" in rewardsButton, false);
+      assert.equal(
+        "callback_data" in rewardsButton ? rewardsButton.callback_data : null,
+        "hm:v1:rewards",
+      );
+      const mainMiniAppRow = regular.keyboard.inline_keyboard[7];
       assert.equal(mainMiniAppRow?.length, 1);
       const mainMiniAppButton = mainMiniAppRow?.[0];
       assert.ok(mainMiniAppButton);
@@ -9075,6 +9086,109 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           .some((button) => button.text === "⬜ Order fills"),
         true,
       );
+    },
+  },
+  {
+    name: "rewards menu supports native navigation and confirmed referral code changes",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+          "https://t.me/hunch_bot/hunch",
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      const db = {
+        query: async () => ({ rows: [{ linked: true }] }),
+      } as never;
+      const loaded: Array<{
+        notice?: string | null;
+        view: { kind: string };
+      }> = [];
+      const loadRewards = async (input: {
+        notice?: string | null;
+        telegramUserId: number;
+        view: { kind: string };
+      }) => {
+        loaded.push({ notice: input.notice, view: input.view });
+        return {
+          parse_mode: "MarkdownV2" as const,
+          reply_markup: { inline_keyboard: [] },
+          text: `🎁 *${input.view.kind}*`,
+        };
+      };
+      const callback = (data: string): TelegramBotCallbackQuery => ({
+        data,
+        from: { id: 999 },
+        id: `callback-${data}`,
+        message: { chat: { id: 999, type: "private" }, message_id: 90 },
+      });
+
+      assert.equal(
+        await handleSignalBotMenuCallback({
+          callbackQuery: callback("hm:v1:rewards"),
+          config,
+          db,
+          loadRewards,
+          redis,
+          sendTestSignal: async () => false,
+          telegram,
+        }),
+        true,
+      );
+      assert.equal(loaded.at(-1)?.view.kind, "overview");
+      assert.match(telegram.edits.at(-1)?.text ?? "", /overview/);
+
+      await handleSignalBotMenuCallback({
+        callbackQuery: callback("hm:v1:rw:c"),
+        config,
+        db,
+        loadRewards,
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.match(telegram.edits.at(-1)?.text ?? "", /Change referral code/);
+
+      assert.equal(
+        await handleSignalBotMenuInput({
+          config,
+          db,
+          message: {
+            chat: { id: 999, type: "private" },
+            from: { id: 999 },
+            message_id: 91,
+            text: "alpha7",
+          },
+          prepareRewardsReferralCodeChange: async ({ code }) => ({
+            currentCode: "HUNCH42",
+            nextCode: code,
+            status: "ready" as const,
+          }),
+          redis,
+          telegram,
+        }),
+        true,
+      );
+      assert.match(telegram.edits.at(-1)?.text ?? "", /HUNCH42/);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /ALPHA7/);
+
+      await handleSignalBotMenuCallback({
+        callbackQuery: callback("hm:v1:rw:ok:c"),
+        config,
+        db,
+        loadRewards,
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+        updateRewardsReferralCode: async ({ code }) => ({
+          code,
+          status: "changed" as const,
+        }),
+      });
+      assert.equal(loaded.at(-1)?.view.kind, "overview");
+      assert.equal(loaded.at(-1)?.notice, "Referral code changed to ALPHA7.");
+      assert.equal(redis.strings.size, 0);
     },
   },
   {

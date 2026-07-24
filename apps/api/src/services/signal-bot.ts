@@ -134,6 +134,16 @@ import {
   type TelegramBotMenuAudience,
 } from "./telegram-bot-menu-audience.js";
 import { handleSignalBotMarketSearchInput } from "./telegram-bot-menu-search-input.js";
+import { buildSignalBotPrivateMenuEntry } from "./telegram-bot-private-menu-entry.js";
+import {
+  parseTelegramBotRewardsCallbackRoute,
+  type TelegramBotRewardsCallbackRoute,
+} from "./telegram-bot-rewards.js";
+import {
+  handleTelegramBotRewardsCallback,
+  handleTelegramBotRewardsInput,
+  type TelegramBotRewardsMenuDependencies,
+} from "./telegram-bot-rewards-menu.js";
 import {
   buildHunchMiniAppDeepLinkButton,
   buildHunchMiniAppWebButton,
@@ -670,7 +680,7 @@ const SEND_FAILURE_COOLDOWN_SEC = 300;
 const FOLLOWTHROUGH_RETRY_COOLDOWN_MS = 15 * 60_000;
 const FOLLOWTHROUGH_MIN_LATEST_SNAPSHOT_FRESH_MS = 24 * 60 * 60 * 1_000;
 const SIGNAL_BOT_COPY_VERSION = "signal_bot_copy_v10";
-const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
+export const SIGNAL_BOT_MENU_CALLBACK_PREFIX = "hm:v1:";
 const HOLDER_LINK_STOP_LABELS = new Set([
   "ATRACKEDWALLET",
   "TRACKEDWALLET",
@@ -2037,6 +2047,7 @@ type SignalBotMenuCallbackRoute =
       period: SignalBotStatsPeriod;
     }
   | { kind: "stale" }
+  | TelegramBotRewardsCallbackRoute
   | SignalBotInteractiveMenuRoute
   | { kind: "trading_status" };
 
@@ -2189,6 +2200,7 @@ export function buildSignalBotMenuScreen(input: {
       [callback("trading:status", "👤 My trading")],
       [callback("deposit", "Deposit", telegramCustomEmojiId("usdc"))],
       [callback("settings:notifications", "🔔 Notifications")],
+      [callback("rewards", "🎁 Rewards & referrals")],
       [callback("settings", "⚙️ Settings"), callback("help", "❓ Help")],
       ...buildSignalBotOptionalButtonRows(
         buildSignalBotMainMiniAppButton({
@@ -2698,6 +2710,8 @@ function parseSignalBotMenuCallback(
   const route = data.slice(SIGNAL_BOT_MENU_CALLBACK_PREFIX.length);
   const interactiveRoute = parseSignalBotInteractiveMenuRoute(route);
   if (interactiveRoute) return interactiveRoute;
+  const rewardsRoute = parseTelegramBotRewardsCallbackRoute(route);
+  if (rewardsRoute) return rewardsRoute;
   const notificationParts = route.split(":");
   if (notificationParts.length === 3 && notificationParts[0] === "ntf") {
     const topics: Record<string, TelegramNotificationTopic> = {
@@ -2886,53 +2900,6 @@ async function sendOrEditSignalBotMenuMessage(input: {
   });
 }
 
-function buildSignalBotPrivateMenuEntry(input: {
-  botUsername?: string | null;
-  chatId: string;
-  chatType?: string | null;
-  config: SignalBotConfig;
-}): TelegramSendMessageInput {
-  const targetUrl = input.botUsername
-    ? "https://t.me/" + input.botUsername
-    : input.config.telegramMiniAppLinkBase;
-  return {
-    chat_id: input.chatId,
-    disable_web_page_preview: true,
-    parse_mode: "MarkdownV2",
-    ...(targetUrl
-      ? {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  ...(input.chatType === "channel"
-                    ? {}
-                    : {
-                        icon_custom_emoji_id: telegramCustomEmojiId("hunch"),
-                      }),
-                  text:
-                    input.chatType === "channel"
-                      ? "🟠 Open bot menu"
-                      : "Open bot menu",
-                  url: targetUrl,
-                },
-              ],
-            ],
-          },
-        }
-      : {}),
-    text: [
-      input.chatType === "channel"
-        ? `🟠 ${formatTelegramBold("Hunch Signal Bot")}`
-        : formatHunchTelegramTitle("Hunch Signal Bot"),
-      "",
-      escapeTelegramMarkdownV2(
-        "Open a private chat with the bot to use trading, account controls, and the Hunch Mini App.",
-      ),
-    ].join("\n"),
-  };
-}
-
 type SignalBotMenuMessage = {
   marketFound?: boolean;
   parse_mode?: "MarkdownV2";
@@ -2940,7 +2907,7 @@ type SignalBotMenuMessage = {
   text: string;
 };
 
-type SignalBotMenuLoaders = {
+type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
   loadDeposit?: (input: {
     telegramUserId: number;
     venue: string | null;
@@ -3074,10 +3041,34 @@ export async function handleSignalBotMenuCallback(
     ...(route.kind === "stats" ||
     route.kind === "trading_status" ||
     route.kind === "admin_preview" ||
+    route.kind === "rewards_confirm" ||
+    route.kind === "rewards_view" ||
     (route.kind === "screen" && route.screen === "positions")
       ? { text: "⏳ Working…" }
       : {}),
   });
+  if (
+    route.kind === "rewards_view" ||
+    route.kind === "rewards_begin_input" ||
+    route.kind === "rewards_cancel_input" ||
+    route.kind === "rewards_confirm"
+  ) {
+    return handleTelegramBotRewardsCallback({
+      appBaseUrl: input.config.appBaseUrl,
+      attachRewardsReferralCode: input.attachRewardsReferralCode,
+      callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+      chatId,
+      loadRewards: input.loadRewards,
+      messageId,
+      miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
+      prepareRewardsReferralCodeChange: input.prepareRewardsReferralCodeChange,
+      redis: input.redis,
+      route,
+      telegramUserId,
+      transport: input.telegram,
+      updateRewardsReferralCode: input.updateRewardsReferralCode,
+    });
+  }
   if (
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
@@ -3474,6 +3465,7 @@ export async function handleSignalBotMenuInput(input: {
     reply_markup?: TelegramInlineKeyboard;
     text: string;
   }>;
+  prepareRewardsReferralCodeChange?: SignalBotMenuLoaders["prepareRewardsReferralCodeChange"];
   searchMarkets?: (input: {
     query?: string | null;
   }) => Promise<SignalBotMarketSearchResult[]>;
@@ -3509,6 +3501,19 @@ export async function handleSignalBotMenuInput(input: {
       telegramUserId,
       transport: input.telegram,
     });
+    return true;
+  }
+  if (
+    await handleTelegramBotRewardsInput({
+      callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+      chatId,
+      prepareRewardsReferralCodeChange: input.prepareRewardsReferralCodeChange,
+      redis: input.redis,
+      telegramUserId,
+      text: input.message.text,
+      transport: input.telegram,
+    })
+  ) {
     return true;
   }
   const loadMarketCard = input.loadMarketCard;
@@ -3690,7 +3695,7 @@ export async function handleSignalBotCommand(input: {
           botUsername: input.botUsername,
           chatId,
           chatType: input.message.chat.type,
-          config: input.config,
+          miniAppLinkBase: input.config.telegramMiniAppLinkBase,
         }),
       );
       return true;
@@ -3720,7 +3725,7 @@ export async function handleSignalBotCommand(input: {
           botUsername: input.botUsername,
           chatId,
           chatType: input.message.chat.type,
-          config: input.config,
+          miniAppLinkBase: input.config.telegramMiniAppLinkBase,
         }),
       );
       return true;
@@ -3761,7 +3766,7 @@ export async function handleSignalBotCommand(input: {
           botUsername: input.botUsername,
           chatId,
           chatType: input.message.chat.type,
-          config: input.config,
+          miniAppLinkBase: input.config.telegramMiniAppLinkBase,
         }),
       );
       return true;
@@ -4290,6 +4295,8 @@ export async function pollSignalBotCommands(
               message: update.message,
               redis: input.redis,
               loadMarketCard: input.loadMarketCard,
+              prepareRewardsReferralCodeChange:
+                input.prepareRewardsReferralCodeChange,
               searchMarkets: input.searchMarkets,
               telegram: input.telegram,
             });
@@ -4333,6 +4340,7 @@ export async function pollSignalBotCommands(
       if (update.callback_query) {
         const callbackQuery = update.callback_query;
         const handledMenuCallback = await handleSignalBotMenuCallback({
+          attachRewardsReferralCode: input.attachRewardsReferralCode,
           callbackQuery,
           config: input.config,
           db: input.db,
@@ -4341,12 +4349,16 @@ export async function pollSignalBotCommands(
           loadDeposit: input.loadDeposit,
           loadPositionCard: input.loadPositionCard,
           loadPositions: input.loadPositions,
+          loadRewards: input.loadRewards,
           searchMarkets: input.searchMarkets,
           loadTradeStatus: input.loadTradeStatus,
+          prepareRewardsReferralCodeChange:
+            input.prepareRewardsReferralCodeChange,
           sendStatsReport: input.sendStatsReport,
           sendTestSignal: input.sendTestSignal,
           sendTradeStatus: input.sendTradeStatus,
           telegram: input.telegram,
+          updateRewardsReferralCode: input.updateRewardsReferralCode,
         }).catch(async () => {
           await input.telegram
             .answerCallbackQuery({

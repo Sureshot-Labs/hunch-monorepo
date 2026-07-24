@@ -1051,6 +1051,12 @@ function createFetchReferralsDb(seed: {
       if (sql.includes("with referral_rows as")) {
         return { rows: seed.rows };
       }
+      if (
+        sql.includes("select count(*)::text as total") &&
+        sql.includes("where referrer_user_id = $1")
+      ) {
+        return { rows: [{ total: String(seed.rows.length) }] };
+      }
       if (sql.includes("from rewards_policy")) {
         return {
           rows: [
@@ -1084,6 +1090,7 @@ function createFetchReferralsDb(seed: {
 
 const samplePolicy: RewardsPolicy = {
   effectiveAt: null,
+  referralQualification: { pointsRequired: 500 },
   tiers: [
     { tier: 0, name: "Novice", points: 0, cashbackBps: 0 },
     { tier: 1, name: "Observer", points: 500, cashbackBps: 2500 },

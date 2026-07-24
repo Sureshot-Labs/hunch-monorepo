@@ -1,12 +1,11 @@
 import type { PoolClient } from "pg";
 import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
+import { REWARDS_REFERRAL_QUALIFICATION_POINTS } from "../lib/rewards-referral-policy.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "../lib/usdc.js";
 import {
   buildQualificationPointsContributionSql,
   buildTierPointsContributionSql,
 } from "../repos/rewards.js";
-
-const OBSERVER_THRESHOLD = 500;
 
 type RewardsTier = {
   tier: number;
@@ -213,7 +212,7 @@ async function fetchQualifiedReferralCountAtEvent(
         and r.status <> 'blocked'
         and coalesce(rp.points, 0) >= $3
     `,
-    [referrerUserId, eventTime, OBSERVER_THRESHOLD],
+    [referrerUserId, eventTime, REWARDS_REFERRAL_QUALIFICATION_POINTS],
   );
   return Number(rows[0]?.total ?? 0);
 }
@@ -283,8 +282,8 @@ export async function resolveFeeEventSnapshotAtWrite(
   let referralBpsApplied = 0;
   const hasQualifiedReferralLink = Boolean(
     referrerUserId &&
-    referredQualificationPoints >= OBSERVER_THRESHOLD &&
-    referrerQualificationPoints >= OBSERVER_THRESHOLD,
+    referredQualificationPoints >= REWARDS_REFERRAL_QUALIFICATION_POINTS &&
+    referrerQualificationPoints >= REWARDS_REFERRAL_QUALIFICATION_POINTS,
   );
   if (hasQualifiedReferralLink && referrerUserId) {
     await markReferralQualified(client, inputs.userId, inputs.eventTime);

@@ -21,12 +21,19 @@ import {
   publishSignalBotTick,
   refreshSignalBotLock,
   releaseSignalBotLock,
+  SIGNAL_BOT_MENU_CALLBACK_PREFIX,
   sendSignalBotFollowthroughPreview,
   sendSignalBotRichLayoutPreview,
   sendSignalBotStatsReport,
   sendLatestSignalBotTestSignal,
   TelegramBotApiClient,
 } from "./services/signal-bot.js";
+import {
+  attachTelegramBotReferralCode,
+  loadTelegramBotRewardsMessage,
+  prepareTelegramBotReferralCodeChange,
+  updateTelegramBotReferralCode,
+} from "./services/telegram-bot-rewards.js";
 import {
   cleanupTelegramNotificationOutbox,
   deliverTelegramNotificationOutbox,
@@ -236,6 +243,12 @@ export async function runSignalBotRunner(): Promise<void> {
         if (heartbeatLost) break;
 
         const handledCommands = await pollSignalBotCommands({
+          attachRewardsReferralCode: ({ code, telegramUserId }) =>
+            attachTelegramBotReferralCode({
+              code,
+              pool: db,
+              telegramUserId,
+            }),
           botUsername,
           config,
           db,
@@ -283,6 +296,16 @@ export async function runSignalBotRunner(): Promise<void> {
                     throw error;
                   })
               : Promise.reject(new Error("Positions API is unavailable")),
+          loadRewards: ({ notice, telegramUserId, view }) =>
+            loadTelegramBotRewardsMessage({
+              appBaseUrl: config.appBaseUrl,
+              callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+              miniAppEnabled: config.telegramMiniAppLinkBase != null,
+              notice,
+              pool: db,
+              telegramUserId,
+              view,
+            }),
           loadDeposit: ({ telegramUserId, venue }) =>
             tradingInternalApi
               ? tradingInternalApi
@@ -350,6 +373,12 @@ export async function runSignalBotRunner(): Promise<void> {
                     throw error;
                   })
               : Promise.reject(new Error("Trading status is unavailable")),
+          prepareRewardsReferralCodeChange: ({ code, telegramUserId }) =>
+            prepareTelegramBotReferralCodeChange({
+              code,
+              pool: db,
+              telegramUserId,
+            }),
           sendTradeStatus: async (chatId, telegramUserId) => {
             const message = tradingInternalApi
               ? await tradingInternalApi
@@ -385,6 +414,12 @@ export async function runSignalBotRunner(): Promise<void> {
             });
             return result.ok;
           },
+          updateRewardsReferralCode: ({ code, telegramUserId }) =>
+            updateTelegramBotReferralCode({
+              code,
+              pool: db,
+              telegramUserId,
+            }),
           disableTrading: async (_chatId, telegramUserId) =>
             tradingInternalApi
               ? await tradingInternalApi
