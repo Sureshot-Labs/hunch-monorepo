@@ -1760,7 +1760,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "🔔 Notifications",
         "⚙️ Settings",
         "❓ Help",
+        "Open Hunch Mini App",
       ]);
+      const mainMiniAppRow = regular.keyboard.inline_keyboard[6];
+      assert.equal(mainMiniAppRow?.length, 1);
+      const mainMiniAppButton = mainMiniAppRow?.[0];
+      assert.ok(mainMiniAppButton);
+      assert.equal(
+        mainMiniAppButton.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.hunch.id,
+      );
+      if (!("web_app" in mainMiniAppButton) || !mainMiniAppButton.web_app) {
+        assert.fail("main menu CTA must use a Mini App button");
+      }
+      assert.equal(mainMiniAppButton.web_app.url, "https://app.hunch.trade/tg");
       assert.equal(
         regularButtons.find((button) => button.text === "Deposit")
           ?.icon_custom_emoji_id,

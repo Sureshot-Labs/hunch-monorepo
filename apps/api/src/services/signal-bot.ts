@@ -2190,6 +2190,13 @@ export function buildSignalBotMenuScreen(input: {
       [callback("deposit", "Deposit", telegramCustomEmojiId("usdc"))],
       [callback("settings:notifications", "🔔 Notifications")],
       [callback("settings", "⚙️ Settings"), callback("help", "❓ Help")],
+      ...buildSignalBotOptionalButtonRows(
+        buildSignalBotMainMiniAppButton({
+          appBaseUrl: input.appBaseUrl,
+          miniAppEnabled: input.miniAppEnabled,
+          text: "Open Hunch Mini App",
+        }),
+      ),
     ];
     if (input.isAdmin) {
       rows.push([callback("admin", "🛠 Admin")]);
