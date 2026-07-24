@@ -110,6 +110,28 @@ export async function findTradeMarketByRef(
   return rows[0] ?? null;
 }
 
+export async function findTradeMarketByRefForVenue(
+  db: DbQuery,
+  marketRef: string,
+  venue: SupportedBotTradingVenue,
+): Promise<ApiTradeMarket | null> {
+  const { rows } = await db.query<ApiTradeMarket>(
+    `${TRADE_MARKET_SELECT_SQL}
+     WHERE m.venue = $2
+       AND (
+         m.id = $1
+         OR m.venue_market_id = $1
+         OR m.slug = $1
+       )
+     ORDER BY
+       CASE WHEN m.id = $1 THEN 0 WHEN m.venue_market_id = $1 THEN 1 ELSE 2 END,
+       m.updated_at_db DESC NULLS LAST
+     LIMIT 1`,
+    [marketRef, venue],
+  );
+  return rows[0] ?? null;
+}
+
 export async function loadUser(pool: Pool, userId: string): Promise<User> {
   const { rows } = await pool.query<{
     avatar_url: string | null;

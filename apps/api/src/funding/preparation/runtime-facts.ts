@@ -20,6 +20,7 @@ export type RuntimeWalletAuthority = Readonly<{
   internal: boolean;
   privyWalletId: string | null;
   profileObservedAt: string | null;
+  displayLabel?: string;
 }>;
 
 export type RuntimeCredentialEvidence = Readonly<{
@@ -752,7 +753,10 @@ export function buildPolymarketRuntimeFacts(
     !topologySupported;
   return {
     binding: evidence.binding,
-    safeLabel: `Polymarket · ${evidence.binding.accountRef.slice(0, 8)}…`,
+    safeLabel: `Polymarket · ${
+      evidence.wallet.displayLabel ??
+      `Trading Wallet ${evidence.binding.accountRef.slice(0, 8)}…`
+    }`,
     purpose: input.purpose,
     marketClass: input.marketClass,
     readinessClass: readinessClass(evidence.wallet, setupMissing),
@@ -930,7 +934,10 @@ export function buildLimitlessRuntimeFacts(
     !evidence.credentials.present || evidence.topology === "unknown_wallet";
   return {
     binding: evidence.binding,
-    safeLabel: `Limitless · ${evidence.binding.accountRef.slice(0, 8)}…`,
+    safeLabel: `Limitless · ${
+      evidence.wallet.displayLabel ??
+      `Trading Wallet ${evidence.binding.accountRef.slice(0, 8)}…`
+    }`,
     purpose: input.purpose,
     marketClass: input.marketClass,
     readinessClass: readinessClass(evidence.wallet, setupMissing),

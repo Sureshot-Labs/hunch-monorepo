@@ -23,6 +23,7 @@ import {
   registerFundingRoutes,
   type FundingRouteDependencies,
 } from "../../../routes/funding.js";
+import { fundingValidationErrorResponseSchema } from "../../../schemas/funding.js";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -318,6 +319,70 @@ await test("funding routes derive ownership only from authenticated session", as
       ),
       false,
     );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("destinations accept short backend market references", async () => {
+  let observedQuery:
+    | Parameters<FundingRouteDependencies["destinations"]>[1]
+    | undefined;
+  const app = await buildApp({
+    destinations: async (_userId, query) => {
+      observedQuery = query;
+      return [destination()];
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url:
+        "/funding/destinations?purpose=buy&marketContextId=561251" +
+        "&controllerWalletRef=8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedQuery?.marketContextId, "561251");
+    assert.equal(
+      observedQuery?.controllerWalletRef,
+      "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("sanitized funding validation errors remain serializable", () => {
+  assert.doesNotThrow(() =>
+    fundingValidationErrorResponseSchema.parse({
+      statusCode: 400,
+      code: "FST_ERR_VALIDATION",
+      error: "Bad Request",
+    }),
+  );
+  assert.doesNotThrow(() =>
+    fundingValidationErrorResponseSchema.parse({
+      error: "Invalid request",
+    }),
+  );
+});
+
+await test("standard auth errors remain serializable", async () => {
+  const app = await buildApp({
+    authenticate: async (_request, reply) =>
+      reply
+        .code(401)
+        .send({ error: "Missing or invalid authorization header" }),
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/operations?limit=25",
+    });
+    assert.equal(response.statusCode, 401);
+    assert.deepEqual(response.json(), {
+      error: "Missing or invalid authorization header",
+    });
   } finally {
     await app.close();
   }

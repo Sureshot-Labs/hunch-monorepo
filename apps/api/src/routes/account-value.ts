@@ -37,6 +37,17 @@ export type AccountValueRouteDependencies = Readonly<{
   }>;
 }>;
 
+function publicAccountValueReadModel(
+  account: AccountValueReadModel,
+): Omit<AccountValueReadModel, "ownership" | "runtimePolicy"> {
+  const {
+    ownership: _ownership,
+    runtimePolicy: _runtimePolicy,
+    ...publicAccount
+  } = account;
+  return publicAccount;
+}
+
 export function registerAccountValueRoutes(
   app: FastifyInstance,
   dependencies: AccountValueRouteDependencies,
@@ -66,7 +77,10 @@ export function registerAccountValueRoutes(
         const account = await dependencies.build(request.user.id);
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(
-          accountValueResponseSchema.parse({ ok: true, account }),
+          accountValueResponseSchema.parse({
+            ok: true,
+            account: publicAccountValueReadModel(account),
+          }),
         );
       } catch (error) {
         app.log.error(

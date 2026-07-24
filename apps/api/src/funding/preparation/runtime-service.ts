@@ -5,8 +5,8 @@ import { AuthService, type UserWallet } from "../../auth.js";
 import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
+  findTradeMarketByRefForVenue,
   isOrderable,
-  loadMarketForVenue,
   type ApiTradeMarket,
 } from "../../services/api-trading-market-repo.js";
 import { resolvePolymarketBotPolicyFundingCapRaw } from "../../services/api-trading-common.js";
@@ -189,11 +189,16 @@ function allowanceEnough(value: string | null): boolean {
 }
 
 function walletAuthority(wallet: UserWallet): RuntimeWalletAuthority {
+  const name = wallet.name?.trim();
+  const displayLabel = wallet.isInternalWallet
+    ? "Hunch Trading Wallet"
+    : name || `Connected wallet ${wallet.walletAddress.slice(0, 8)}…`;
   return {
     source: wallet.walletSource,
     internal: wallet.isInternalWallet,
     privyWalletId: wallet.privyWalletId,
     profileObservedAt: wallet.privyProfileUpdatedAt?.toISOString() ?? null,
+    displayLabel,
   };
 }
 
@@ -356,12 +361,28 @@ async function loadRuntimeMarketContext(input: {
   }
   let market: ApiTradeMarket | null = null;
   try {
-    market = await loadMarketForVenue(
+    market = await findTradeMarketByRefForVenue(
       input.db,
       input.marketContextId,
       input.venue,
     );
   } catch {
+    return {
+      market: null,
+      marketClass: input.requestedMarketClass,
+      adapterAddress: null,
+      ammAddress: null,
+      evidence: {
+        resolved: false,
+        orderable: false,
+        adapterResolved: false,
+        exchangeResolved: false,
+        quoteGuardAvailable: false,
+        safeMarketRef: input.marketContextId,
+      },
+    };
+  }
+  if (!market) {
     return {
       market: null,
       marketClass: input.requestedMarketClass,

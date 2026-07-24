@@ -85,6 +85,7 @@ function polymarketEvidence(
       internal: true,
       privyWalletId: "privy_wallet_runtime_12345678",
       profileObservedAt: OBSERVED_AT,
+      displayLabel: "Hunch Trading Wallet",
     },
     topology: "deposit_wallet",
     executionMode: "venue_relayer",
@@ -160,6 +161,7 @@ function limitlessEvidence(
       internal: true,
       privyWalletId: "privy_wallet_runtime_12345678",
       profileObservedAt: OBSERVED_AT,
+      displayLabel: "Hunch Trading Wallet",
     },
     topology: "internal_eoa",
     executionMode: "privy_authorization",
@@ -238,6 +240,11 @@ await test("Polymarket runtime facts produce ready rows for every purpose", asyn
       );
       const result = await adapter.inspect(exactInput);
       assert.equal(result.status, "ready", `${purpose}:${marketClass}`);
+      assert.equal(
+        result.safeLabel,
+        "Polymarket · Hunch Trading Wallet",
+        `${purpose}:${marketClass}`,
+      );
     }
   }
 });
@@ -256,6 +263,7 @@ await test("unknown wallet authority fails closed", async () => {
             internal: false,
             privyWalletId: null,
             profileObservedAt: null,
+            displayLabel: "Connected wallet 0x000000…",
           },
         }),
       ),
@@ -363,6 +371,7 @@ await test("Limitless fund readiness does not imply CLOB or AMM readiness", asyn
   const clobBuy = await adapter.inspect(input(exactBinding, "buy", "clob"));
   const ammBuy = await adapter.inspect(input(exactBinding, "buy", "amm"));
   assert.equal(fund.status, "ready");
+  assert.equal(fund.safeLabel, "Limitless · Hunch Trading Wallet");
   assert.equal(clobBuy.status, "setup_required");
   assert.equal(ammBuy.status, "setup_required");
   assert.ok(clobBuy.reasonCodes.includes("venue_profile_missing"));

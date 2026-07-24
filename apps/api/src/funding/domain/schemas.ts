@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const canonicalIdPattern = /^[a-z0-9][a-z0-9:_-]{1,159}$/;
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9:_-]{7,191}$/;
+const marketReferencePattern = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,191}$/;
 const unsignedIntegerPattern = /^(0|[1-9]\d*)$/;
 const unsignedDecimalPattern = /^(0|[1-9]\d*)(\.\d+)?$/;
 const hexDataPattern = /^0x(?:[0-9a-fA-F]{2})*$/;
@@ -20,6 +21,13 @@ export const opaqueIdSchema = z
   .min(8)
   .max(192)
   .regex(opaqueIdPattern);
+
+export const marketReferenceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(192)
+  .regex(marketReferencePattern);
 
 export const rawAmountSchema = z.string().regex(unsignedIntegerPattern);
 
@@ -114,7 +122,7 @@ export const fundingDiscoveryRequestSchema = z
     purpose: fundingPurposeSchema,
     requestedDestinationAmount: moneySchema.nullable(),
     confirmedSourceAmount: moneySchema.nullable(),
-    marketContextId: opaqueIdSchema.nullable(),
+    marketContextId: marketReferenceSchema.nullable(),
     destinationOptionId: opaqueIdSchema.nullable(),
     withdrawalRecipientId: opaqueIdSchema.nullable(),
     venueBindingOptionId: opaqueIdSchema.nullable(),
@@ -208,9 +216,9 @@ export const fundingCommitRequestSchema = z
 
 export const marketContextBindingSchema = z
   .object({
-    marketContextId: opaqueIdSchema,
+    marketContextId: marketReferenceSchema,
     venueId: canonicalIdSchema,
-    marketId: opaqueIdSchema,
+    marketId: marketReferenceSchema,
     side: z.string().trim().min(1).max(80),
     executionProfileId: canonicalIdSchema,
     marketPriceRevision: opaqueIdSchema,

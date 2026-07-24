@@ -45,6 +45,7 @@ import type {
   ValuedAssetComponent,
   ValuedPositionComponent,
 } from "./funding/domain/types.js";
+import { DEFAULT_FUNDING_RUNTIME_POLICY } from "./funding/policies/funding-policy.js";
 import {
   registerAccountValueRoutes,
   type AccountValueRouteDependencies,
@@ -655,7 +656,15 @@ await test("account routes require auth and preference response denies authority
       source: "default" as const,
       invalidStoredPolicy: false,
     },
+    runtimePolicy: DEFAULT_FUNDING_RUNTIME_POLICY,
     ownershipEvidenceRevision: "a".repeat(64),
+    ownership: {
+      accountId: "account_00000001",
+      wallets: [],
+      venueBindings: [],
+      evidenceRevision: "a".repeat(64),
+      asOf: NOW.toISOString(),
+    },
     duplicateAssetObservationCount: 0,
     assetPreferences: {},
   };
@@ -692,6 +701,8 @@ await test("account routes require auth and preference response denies authority
   });
   assert.equal(value.statusCode, 200);
   assert.equal(value.json().account.headline.estimatedUsd, "2");
+  assert.equal("runtimePolicy" in value.json().account, false);
+  assert.equal("ownership" in value.json().account, false);
 
   const firstAssetsPage = await app.inject({
     method: "GET",

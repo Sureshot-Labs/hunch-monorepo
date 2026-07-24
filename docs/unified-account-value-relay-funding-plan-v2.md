@@ -331,7 +331,9 @@ wallets. The deterministic precedence is:
 1. the binding that owns an existing position for Sell or Redeem;
 2. an explicit valid selection for the current intent;
 3. the internal Hunch Trading Wallet;
-4. other executable or setup-capable external alternatives shown for choice.
+4. other executable or setup-capable external alternatives only after a
+   separate explicit advanced external-wallet action; they are not normal Add
+   Funds destinations.
 
 An external wallet is not selected because it has the largest observed balance.
 The initial selection scope is deliberately `current_intent`. The first rollout
@@ -380,6 +382,17 @@ distinct. The frozen pre-implementation inventory, side-effect ledger, purpose
 matrices, caller map, and mandatory parity tests are normative in
 `docs/funding/wp6/README.md`.
 
+For internal Hunch wallets, Auth owns proactive preparation. Immediately after
+wallet creation/reconciliation it performs every safe prerequisite that does
+not require a concrete market or trade: venue connection, contract-wallet
+deployment/registration, canonical base approvals, Polymarket Funding Router
+signer and Deposit Wallet allowances, and equivalent available Limitless
+readiness. These actions use the existing Privy authorization policies,
+sponsorship, single-flight guards, and allowlisted relayer paths without a
+Deposit/Buy setup step. A caller may re-inspect readiness, but does not become a
+second preparer. Only genuinely market/side-specific facts that cannot be known
+at login are prepared automatically immediately before that operation.
+
 ### 2.9 Approved initial UX decisions
 
 The initial product behavior is now closed:
@@ -387,12 +400,15 @@ The initial product behavior is now closed:
 1. headline mode is runtime-controlled; no user toggle ships initially;
 2. Trading Wallet choice applies only to the current intent; no remembered-wallet
    setting or preference persistence ships initially;
-3. each Add Funds destination is one combined `Venue · Trading Wallet` card;
-   network and collateral are secondary read-only details;
+3. normal Add Funds is venue-first: each card is a venue such as Polymarket or
+   Limitless, while its opaque destination already binds the exact internal
+   Hunch Trading Wallet; raw wallet, network, and collateral identifiers are
+   not choices;
 4. one valid destination skips the destination step; several valid destinations
    require an explicit card selection, with Polymarket visibly recommended;
-5. the internal Hunch Trading Wallet is the primary path; external setup is a
-   secondary path shown only after explicit external-wallet interest.
+5. the internal Hunch Trading Wallet is the only normal destination path;
+   external wallets may fund it as explicit sources, while external venue setup
+   is available only from a separate explicit advanced flow.
 
 Normative Add Funds decision flow:
 
@@ -401,22 +417,17 @@ flowchart TD
   A["Open Add Funds"] --> B{"Active trade context?"}
   B -->|Yes| C["Fix Venue + Trading Wallet destination"]
   B -->|No| D["Load valid destination cards"]
-  D --> E{"How many valid destinations?"}
+  D --> E{"How many internal venue destinations?"}
   E -->|Zero| F["Typed unavailable or repair state"]
   E -->|One| C
-  E -->|Several| G["Choose one Venue + Trading Wallet card"]
+  E -->|Several| G["Choose venue; Hunch binds its Trading Wallet"]
   G --> C
   C --> H["Load Pay with source options"]
   H --> I{"How many real sources?"}
   I -->|One| J["Review"]
   I -->|Several| K["Recommended source + Change"]
   K --> J
-  J --> L{"External destination needs setup?"}
-  L -->|No| M["Quote and confirm"]
-  L -->|Yes| N["Primary: Use Hunch Trading Wallet"]
-  L -->|Explicit alternative| O["Secondary: Set up external wallet"]
-  N --> H
-  O --> M
+  J --> M["Quote and confirm"]
   M --> P{"Measured route experience"}
   P -->|Inline and safe| Q["Fund or convert, then fresh Buy"]
   P -->|Slow or unproven| R["Prepare Funds, notify, then fresh Buy"]
@@ -609,7 +620,7 @@ flowchart TD
   D --> E["Header / Wallet / Portfolio / Trade / Telegram"]
 
   F["Trade or Add Funds intent"] --> G["Destination + Binding resolver"]
-  G --> H["Combined Venue + Trading Wallet option"]
+  G --> H["Venue option backed by internal Hunch binding"]
   H --> I["Source options"]
   I --> J["Relay-first planner"]
   J --> K["Durable Funding Operation"]
@@ -1661,6 +1672,9 @@ venue, binding, network, collateral, and readiness. Examples include
 `Polymarket · Hunch Trading Wallet` on its configured Polygon collateral or
 `Limitless · Hunch Trading Wallet` on its configured Base collateral. These are
 labels over backend facts, not client-assembled choices.
+They are safe diagnostic labels, not normal product copy: Add Funds renders
+only the venue and a generic trading-balance description. It never renders the
+wallet address, Deposit Wallet, router, approval, or preparation-stage name.
 
 For generic Add Funds without a trade:
 
@@ -2599,27 +2613,24 @@ Thin presentation boundaries:
 Default Add Funds flow:
 
 1. resolve valid destinations and sources;
-2. if several destinations exist, ask `Where to add` with one combined
-   `Venue · Trading Wallet` card per opaque option, visibly mark Polymarket as
-   recommended, and require an explicit card selection; if one exists, skip this step;
+2. if several internal venue destinations exist, ask `Where to add` with one
+   venue card per opaque internal-Hunch binding, visibly mark Polymarket as
+   recommended, and require an explicit venue selection; if one exists, skip
+   this step;
 3. show a recommended `Pay with` and `Change` only when several sources exist;
-4. review destination/Trading Wallet label, expected receipt, fee, ETA,
-   signatures/setup, and actions;
+4. review venue, expected receipt, fee, ETA, and value-moving actions;
 5. confirm and follow progress.
 
 Advanced source/network details are expanded only for exchange/manual Receive or
-when several real choices differ materially. Destination venue/Trading Wallet
-can be changed through opaque valid options, but chain/collateral remains
-backend-resolved.
+when several real source choices differ materially. Destination venue can be
+changed through opaque valid internal-Hunch options, but wallet, chain, and
+collateral remain backend-resolved.
 
-The internal Hunch card is the primary path. External alternatives live under
-`Change` or the expanded destination list. If the user explicitly selects a
-setup-capable external Trading Wallet, show `Use Hunch Trading Wallet` as the
-primary repair and `Set up this external wallet` as the secondary action. The
-external wallet may still appear under `Pay with` and requires its explicit
-signature. Source-only/view-only wallets never appear as destinations. If an
-internal wallet already has spendable balance, suggest the Hunch path; never
-move that balance silently into the external wallet.
+External wallets never appear in the normal destination list. They may still
+appear under `Pay with` and require their explicit signature, or be configured
+through a separate advanced flow. Source-only/view-only wallets are never
+destinations. Hunch never moves an internal balance into an external wallet
+silently.
 
 Tokens are a section of the same source selector, not a separate orchestration
 product. Suggestion preference is editable from Tokens but conversion always
@@ -2782,10 +2793,11 @@ if it would delay the core Add Funds/trade-shortfall path.
 
 ### 19.9 Generic Add Funds without a trade
 
-1. Backend returns active destination combinations for supported venues and bindings.
-2. If only one exists, the flow proceeds directly; otherwise the user chooses
-   one combined `Venue · Trading Wallet` card under `Where to add`, with
-   Polymarket initially marked recommended.
+1. Backend returns active internal-Hunch destination combinations for supported
+   venues.
+2. If only one venue exists, the flow proceeds directly; otherwise the user
+   chooses one venue card under `Where to add`, with Polymarket initially marked
+   recommended. The opaque option already binds the exact Hunch wallet.
 3. Backend resolves sources for the selected destination and shows `Pay with`
    only when several real choices exist.
 4. Review freezes the opaque destination and binding together with source,
@@ -2794,11 +2806,12 @@ if it would delay the core Add Funds/trade-shortfall path.
 
 ### 19.10 External wallet alternative
 
-1. A linked external address is classified before it appears as a Trading Wallet.
-2. `external_ready` may be explicitly selected and requires the supported client signature.
-3. The internal Hunch binding is the primary path. After explicit external
-   selection, `external_setup_available` offers `Use Hunch Trading Wallet` as
-   primary repair and external setup as the secondary alternative.
+1. A linked external address is classified but never appears as a normal Add
+   Funds destination.
+2. `external_ready` may be selected only from a separate explicit advanced flow
+   and requires the supported client signature.
+3. The internal Hunch binding remains the normal path; Deposit never asks the
+   user to switch between internal and external venue wallets.
 4. `external_source_only` may appear only under `Pay with`; funding the Hunch
    wallet is an explicit signed transfer/conversion.
 5. `external_view_only` contributes eligible estimated value but is not actionable.
@@ -2858,11 +2871,11 @@ if it would delay the core Add Funds/trade-shortfall path.
 | Trade abandoned after preparation                  | release reservation as venue cash                                               | bridge funds back automatically                               |
 | Existing Limitless balance covers source           | move only shortfall                                                             | sweep whole balance                                           |
 | Headline includes positions                        | change display label/composition only                                           | use positions as executable liquidity                         |
-| Multiple Add Funds destinations                    | require one combined Venue + Trading Wallet card choice and mark recommendation | separate arbitrary network/collateral choice or auto-commit   |
+| Multiple Add Funds destinations                    | show one internal-Hunch venue card and mark recommendation                       | expose wallet/network/collateral choice or auto-commit        |
 | One destination and one source                     | go directly to review                                                           | show redundant selection screens                              |
 | External wallet has larger balance                 | keep position/explicit-current-intent/internal precedence                       | silently switch Trading Wallet                                |
 | External source selected                           | require supported user signature                                                | server-pull linked assets                                     |
-| External wallet lacks venue setup                  | prefer Hunch wallet; show external setup after explicit interest                | call it ready because address/balance exists                  |
+| External wallet lacks venue setup                  | keep it outside normal Deposit; use a separate explicit advanced flow           | call it ready because address/balance exists                  |
 | External binding owns position                     | prepare/redeem through that owner binding                                       | switch to Hunch wallet for redemption                         |
 | Token suggestion preference changes                | affect future source suggestions only                                           | mutate active operation, wallet selection, or rebalance money |
 | Across/deBridge new fallback disabled              | do not query/create                                                             | silently use legacy provider                                  |
@@ -3254,11 +3267,12 @@ across route handlers.
 - reload resumes from backend operation;
 - multiple wallet bindings use opaque options and safe labels;
 - destination and source selectors appear only for real choices;
-- destination choice renders one opaque Venue + Trading Wallet card, never
-  independent venue/network/collateral/wallet combinators;
-- external setup versus internal-Hunch switch renders from typed readiness;
-- Hunch Trading Wallet is the primary new-intent path; external setup appears
-  only after explicit external-wallet interest;
+- destination choice renders one venue card backed by one opaque internal-Hunch
+  destination, never independent network/collateral/wallet combinators;
+- internal readiness preparation is auth-owned and invisible to normal
+  Deposit/Buy UX; no check/setup/approval CTA is exposed;
+- external wallets do not compete with venue destinations in normal Add Funds;
+  they may appear as explicit funding sources or in a separate advanced flow;
 - headline mode changes label/composition but never trade CTA;
 - no initial user headline-toggle or remembered-wallet settings surface exists;
 - error codes map through one copy registry;
@@ -3969,7 +3983,9 @@ Privy EVM/Solana wallet creation remains exclusively in the existing
 re-inspect after Auth reconciliation. Existing funding/redemption components
 remain an explicit compatibility boundary for creation-mode-off and for
 `signature`/`external_handoff` action kinds that do not yet have generic
-resumable execute/report/postcondition parity. Existing redemption also remains
+resumable execute/report/postcondition parity. The exact allowlisted internal
+Polymarket Deposit Wallet handoffs are implemented through the existing
+relayer; unknown handoff kinds remain behind the boundary. Existing redemption also remains
 available for exit-only/unsupported venues and old positions that cannot yet be
 resolved to one exact `positionActionRef` and owner binding. The old components
 receive no new business logic and cannot be removed before WP9 evidence.
@@ -3979,21 +3995,33 @@ in `docs/funding/wp7/README.md`.
 Required work:
 
 - implement shared account-value, asset, liquidity, quote, and operation hooks;
-- implement conditional `Where to add`, `Pay with`, and Trading Wallet choice
-  from combined opaque Venue + Trading Wallet cards, including Hunch-primary
-  external setup/internal switch copy;
+- implement conditional `Where to add` and `Pay with`: normal destinations are
+  venue cards backed by exact opaque internal-Hunch bindings; connected
+  external wallets remain explicit sources or separate advanced setup and do
+  not appear in the normal destination list;
 - implement runtime-controlled headline presentation and current-intent Trading
   Wallet selection without a preferences settings surface;
 - replace Deposit orchestration with one controller and thin desktop/mobile renderers;
 - implement Tokens source/preference UX;
 - implement direct Receive, Relay Deposit Address, and Privy handoff presentations;
 - implement common progress, Activity, recovery, and error copy;
+- keep internal wallet/router/approval setup inside Auth background bootstrap;
+  normal Deposit and Buy consume readiness and expose no Check, Set up, or
+  Preparing-wallet CTA. A value-moving `venue_preparation` plan remains a
+  durable funding operation but is presented only as using available balances
+  and adding funds;
+- automatically execute exact non-value-moving `privy_authorization`
+  trade-preparation actions and keep successful checking/progress out of the
+  confirmation steps; retain explicit confirmation for value-moving or
+  external `web_client` actions and expose only a retryable venue-unavailable
+  state when internal background preparation actually fails;
 - keep legacy funding UI behind creation-mode-off compatibility; until the
   generic action boundary has exact resumable parity, permit a narrow fail-safe
   fallback for explicitly unsupported `signature` and `external_handoff`
-  action kinds, exit-only/unsupported redemption venues, and old positions
-  without an exact owner projection, without adding new logic to the old
-  components.
+  action kinds. The allowlisted internal Polymarket Deposit Wallet deploy/proxy
+  handoffs use the existing relayer executor; other handoffs, exit-only/
+  unsupported redemption venues, and old positions without an exact owner
+  projection retain the fallback without adding new logic to the old components.
 
 Completion evidence:
 
@@ -4005,6 +4033,8 @@ Completion evidence:
 - one destination/source proceeds directly, while real alternatives remain discoverable;
 - external source requires an explicit signature and is never silently pulled;
 - the initial UI contains no headline toggle or remembered-wallet setting.
+- internal preparation implementation names never appear in normal product
+  copy;
 - Privy wallet provisioning remains single-owner in `AuthProvider`;
 - unsupported action kinds preserve the old path instead of claiming false
   completion, while normalized EVM/SVM actions use the shared controller.
@@ -4218,18 +4248,21 @@ stops new selection but preserves status polling/webhooks.
 30. Hyperliquid is contract stress-test only. Kalshi/DFlow new exposure remains
     disabled while existing exit-only account read, cancel, reconcile, redeem,
     and reduce-exposure behavior is preserved.
-31. Trading Wallet precedence is position owner, explicit current-intent choice,
-    internal Hunch default, then user-visible external alternatives; never balance size.
+31. Trading Wallet precedence is position owner, explicit current-intent venue
+    choice, then the internal Hunch default. External venue bindings require a
+    separate explicit advanced action and are never selected by balance size.
 32. Trading Wallet selection is `current_intent` only; no session/per-venue
     memory, user setting, or preferences persistence ships initially.
 33. External wallet execution is always user-signed; setup does not create
     delegated authority.
 34. The 45-second inline cap is an initial route-policy value proven per route,
     not a Relay guarantee; unknown/unproven routes use Prepare Funds.
-35. Add Funds destinations render as combined `Venue · Trading Wallet` cards;
-    network/collateral are secondary backend-resolved details.
-36. The internal Hunch Trading Wallet is the primary new-intent path. External
-    wallet setup is secondary and appears only after explicit external interest.
+35. Add Funds destinations render as venue cards backed by opaque internal
+    `Venue + Trading Wallet` bindings; wallet/network/collateral identifiers are
+    backend-resolved and hidden from the normal selector.
+36. The internal Hunch Trading Wallet is the normal new-intent destination.
+    External wallets may be explicit sources; external venue setup is separate
+    advanced functionality.
 37. Each initial source leg contains exactly one provider segment. A selected
     composite may contain multiple independent legs targeting the same
     destination; no leg consumes another leg's output. Any chained continuation
@@ -4257,9 +4290,9 @@ stops new selection but preserves status polling/webhooks.
 - user can resume/recover from web and Telegram Activity;
 - normal UX never requires provider or destination-chain knowledge;
 - no-context Add Funds skips fake choices but requires an explicit destination
-  choice when several valid venue/Trading Wallet destinations exist;
-- destination uses combined Venue + Trading Wallet cards, with Hunch primary
-  and external setup secondary after explicit interest;
+  choice when several valid internal-Hunch venue destinations exist;
+- destination uses venue cards backed by opaque internal-Hunch bindings;
+  external wallet setup is outside normal Deposit;
 - the initial product has no user headline toggle or remembered-wallet setting;
 
 ### 29.2 Architecture

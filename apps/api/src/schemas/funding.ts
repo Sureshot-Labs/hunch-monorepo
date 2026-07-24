@@ -7,6 +7,7 @@ import {
   fundingCommitRequestSchema,
   fundingDiscoveryRequestSchema,
   fundingQuoteRequestSchema,
+  marketReferenceSchema,
   moneySchema,
   normalizedActionSchema,
   opaqueIdSchema,
@@ -52,7 +53,7 @@ const preparationRequestBaseSchema = z
   .object({
     venueBindingOptionId: opaqueIdSchema,
     purpose: preparationPurposeSchema,
-    marketContextId: opaqueIdSchema.nullable(),
+    marketContextId: marketReferenceSchema.nullable(),
     marketClass: z.string().trim().min(1).max(80).nullable(),
   })
   .strict();
@@ -402,7 +403,7 @@ export const fundingWithdrawalDestinationRevokeResponseSchema = z
 export const intentLiquidityProjectionSchema = z
   .object({
     liquidityProjectionId: opaqueIdSchema,
-    marketContextId: opaqueIdSchema.nullable(),
+    marketContextId: marketReferenceSchema.nullable(),
     venueId: z.string().trim().min(2).max(160).nullable(),
     venueBindingOptionId: opaqueIdSchema.nullable(),
     destinationOptionId: opaqueIdSchema.nullable(),
@@ -477,7 +478,7 @@ export const fundingQuoteSummarySchema = z
 export const fundingDestinationsQuerySchema = z
   .object({
     purpose: preparationPurposeSchema.default("fund"),
-    marketContextId: opaqueIdSchema.nullable().optional(),
+    marketContextId: marketReferenceSchema.nullable().optional(),
     marketClass: z.string().trim().min(1).max(80).nullable().optional(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
   })
@@ -673,7 +674,7 @@ export const fundingOperationsResponseSchema = z
 export const fundingApiErrorResponseSchema = z
   .object({
     error: z.string(),
-    code: z.string(),
+    code: z.string().optional(),
   })
   .strict();
 
@@ -684,7 +685,7 @@ export const fundingValidationErrorResponseSchema = z.union([
       statusCode: z.literal(400),
       code: z.string(),
       error: z.string(),
-      message: z.string(),
+      message: z.string().optional(),
     })
     .passthrough(),
 ]);

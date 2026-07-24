@@ -26,9 +26,9 @@ submission into funding readiness, redemption completion, or a trade.
 - Typed clients cover Account Assets, Funding destinations/liquidity/quotes/
   operations/actions, wallet preparation, withdrawal-recipient registration,
   and owner-bound Position Actions.
-- `useFundingController` plus its reducer owns Add Funds, Convert, Bridge,
-  direct Receive, Privy handoff, Withdraw, multi-leg execution, reporting,
-  polling, recovery, and backend status presentation.
+- `useFundingController` plus its reducer owns Add Funds, Convert, direct
+  Receive, bridge/Relay source routes, Privy handoff, Withdraw, multi-leg
+  execution, reporting, polling, recovery, and backend status presentation.
 - Desktop and mobile Deposit/Withdraw surfaces are thin wrappers around the
   same `FundingFlow`.
 - Desktop and mobile redemption surfaces are thin wrappers around the same
@@ -81,6 +81,16 @@ readiness.
 Static review found no wallet-creation call in the new Funding feature, funding
 hooks, or funding library.
 
+Auth also owns proactive internal venue preparation. Its existing Polymarket
+bootstrap now performs the canonical signer and Deposit Wallet Funding Router
+allowances in the background, in addition to deployment, registration,
+connection, and base venue approvals. It reuses the existing Privy
+authorization, sponsorship, relayer, and single-flight paths. The existing
+Limitless bootstrap continues to establish the internal profile at login;
+market/side-specific Limitless requirements remain automatically checked at
+the operation boundary because they cannot all be known at authentication.
+Deposit does not execute or display a setup workflow.
+
 ## Existing-UI compatibility boundary
 
 The `onLegacyRequired` callback switches a thin unified wrapper to the
@@ -91,8 +101,10 @@ It is used only when:
 
 1. funding creation is disabled by runtime policy; or
 2. the backend returns a `signature` or `external_handoff` preparation action
-   for which the new generic web boundary cannot yet durably execute, report,
-   and verify venue-specific postconditions; or
+   for which the new web boundary has no exact allowlisted executor. Internal
+   Polymarket Deposit Wallet deployment/proxy execution is supported through
+   the existing relayer and embedded authorization path; unknown handoff kinds
+   still fail closed; or
 3. an existing redemption belongs to an exit-only/unsupported venue or an old
    position cannot yet be resolved to exactly one `positionActionRef` and
    owner binding.
@@ -150,6 +162,35 @@ The final review found and corrected:
   closed;
 - token preference and Funding Activity contracts existed without a shared WP7
   presentation; both now use the typed backend APIs.
+- ordinary destination/recovery reads were accidentally treated as blocking
+  Privy presentation, freezing tabs and dismissal; only real mutation/
+  presentation phases now block the dialog;
+- a technical `Check Trading Wallet setup` action made backend inspection the
+  user's problem; destination readiness is now inspected automatically;
+- normal Add Funds exposed every external wallet/venue binding and raw wallet
+  labels; it now renders one Hunch-managed card per venue, recommends the
+  backend-selected Polymarket destination, and collapses other venues;
+- connected external wallets no longer compete as destinations. They remain
+  explicit sources or separate advanced compatibility flows;
+- `Bridge` duplicated a source route as a top-level product mode; the unified
+  UI now has Add Funds and Convert, while bridge/Relay remains an Add Funds
+  source and old deep links normalize safely;
+- stale evidence and a genuinely unsupported source were rendered as the same
+  dead end; stale balance/price evidence now offers a bounded refresh;
+- Polymarket Funding Router preparation was leaking approval jargon into
+  Deposit. The existing auth bootstrap now performs its signer and Deposit
+  Wallet router allowances in the background through Privy authorization,
+  sponsorship, and the allowlisted relayer path. Deposit only consumes
+  readiness and exposes no setup CTA;
+- the Buy confirmation still exposed the same internal readiness as
+  `Check/Prepare/Preparing Trading Wallet`. Privy-authorized preparation now
+  auto-runs only when every normalized action is non-value-moving, successful
+  background progress is not a user step, and only a terminal retryable failure
+  appears as `Trading temporarily unavailable`;
+- value-moving `venue_preparation` operations remain durable backend plans, but
+  their product copy is `Use available Hunch balances` / `Adding funds`; the
+  browser does not expose the internal Deposit Wallet, router, approval, or
+  preparation-stage names.
 
 ## Local verification
 
@@ -158,8 +199,9 @@ Frontend:
 - `bun run type-check` — pass
 - `bun run lint` — pass
 - `bun run format:check` — pass
-- `bun test tests/funding` — 21/21 pass
-- `bun test tests` — 554/554 pass
+- `bun test tests/funding` — 26/26 pass after the final venue-only,
+  presentation, and background-preparation corrections
+- `bun test tests` — 559/559 pass
 - `bun run build` — pass; all 36 static pages generated
 
 Backend:
