@@ -16,6 +16,7 @@ import { FundingStepReceiptReconciliationDriver } from "../execution/step-receip
 import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-funding-reconciler.js";
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
+import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 
 export type RelayFundingWorkerConfig = Readonly<{
   apiKey: string;
@@ -76,7 +77,14 @@ export async function runFundingReconciliationJob(
     };
   }
   const relay = options.relay;
-  if (!relay) return runFundingReconciliationBatch(pool, options);
+  const directIngressObserver = new DirectIngressDestinationObserver();
+  if (!relay) {
+    return runFundingReconciliationBatch(pool, {
+      ...options,
+      destinationPoll: (operationId, now) =>
+        directIngressObserver.pollOperation(pool, operationId, now),
+    });
+  }
   const encryptionKey = decodeCredentialsEncryptionKey(
     relay.credentialsEncryptionKey,
   );
@@ -112,6 +120,8 @@ export async function runFundingReconciliationJob(
         operationId,
         now,
       ),
+    destinationPoll: (operationId, now) =>
+      directIngressObserver.pollOperation(pool, operationId, now),
   });
 }
 

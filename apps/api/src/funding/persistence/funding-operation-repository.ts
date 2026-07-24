@@ -775,6 +775,51 @@ async function insertCommitReservations(
         "balance reservation references an unavailable segment ordinal",
       );
     }
+    if (reservation.mode === "advisory_destination") {
+      await client.query(
+        `
+          select pg_advisory_xact_lock(
+            hashtextextended($1, 0)
+          )
+        `,
+        [
+          [
+            "funding-destination-reservation",
+            userId,
+            reservation.locationId,
+            reservation.networkId,
+            reservation.assetId.toLowerCase(),
+          ].join(":"),
+        ],
+      );
+      const conflict = await client.query<{ id: string }>(
+        `
+          select id
+          from balance_reservations
+          where user_id = $1
+            and location_id = $2
+            and network_id = $3
+            and lower(asset_id) = lower($4)
+            and mode = 'advisory_destination'
+            and state = 'active'
+            and expires_at > now()
+          limit 1
+          for update
+        `,
+        [
+          userId,
+          reservation.locationId,
+          reservation.networkId,
+          reservation.assetId,
+        ],
+      );
+      if (conflict.rows[0]) {
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "another direct funding operation already observes this destination",
+        );
+      }
+    }
     await client.query(
       `
         insert into balance_reservations (

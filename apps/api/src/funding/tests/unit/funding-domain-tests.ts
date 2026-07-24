@@ -413,7 +413,9 @@ await test("never auto-commits a recommended destination", () => {
     {
       destinationOptionId: "destination_poly_12345678",
       venueId: "polymarket",
+      venueBindingId: "binding_account_poly_12345678",
       venueBindingOptionId: "binding_poly_12345678",
+      controllerWalletId: "wallet_poly_12345678",
       safeLabel: "Polymarket · Hunch Trading Wallet",
       requiredAsset: polygonPusd,
       networkLabel: "Polygon",
@@ -431,7 +433,9 @@ await test("never auto-commits a recommended destination", () => {
     {
       destinationOptionId: "destination_limitless_12345678",
       venueId: "limitless",
+      venueBindingId: "binding_account_limitless_12345678",
       venueBindingOptionId: "binding_limitless_12345678",
+      controllerWalletId: "wallet_limitless_12345678",
       safeLabel: "Limitless · Hunch Trading Wallet",
       requiredAsset: baseUsdc,
       networkLabel: "Base",

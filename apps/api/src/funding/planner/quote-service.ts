@@ -316,6 +316,7 @@ export class FundingQuoteService {
       fees: selected.option.fees,
       eta: selected.option.eta,
       requiredActions: selected.option.requiredActions,
+      ingress: selected.option.ingress ?? null,
       planHash: canonicalJsonHash(plan),
       consentToken,
       expiresAt: stored.expiresAt.toISOString(),

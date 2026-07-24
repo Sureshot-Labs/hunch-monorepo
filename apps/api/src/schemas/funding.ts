@@ -131,6 +131,19 @@ const etaSchema = z
   .strict()
   .refine((value) => value.maxSeconds >= value.minSeconds);
 
+export const externalIngressInstructionSchema = z
+  .object({
+    ingressKind: z.enum(["controlled_wallet", "exchange", "privy", "manual"]),
+    sourceNetworkId: z.string().trim().min(2).max(160).nullable(),
+    sourceAsset: assetRefSchema.nullable(),
+    destinationOptionId: opaqueIdSchema,
+    destinationAddress: z.string().trim().min(16).max(256),
+    exactAmount: moneySchema.nullable(),
+    expiresAt: z.string().datetime().nullable(),
+    safeInstructions: z.array(z.string().trim().min(1).max(240)).max(16),
+  })
+  .strict();
+
 const sourceOptionLegSchema = z
   .object({
     sourceLegId: opaqueIdSchema,
@@ -163,6 +176,7 @@ export const sourceOptionSchema = z
     ]),
     safeLabel: z.string().trim().min(1).max(160),
     source: fundingSourceRefSchema,
+    ingress: externalIngressInstructionSchema.optional(),
     sourceLegs: z.array(sourceOptionLegSchema).min(2).max(16).optional(),
     amountMode: z.enum(["exact_input", "exact_output", "variable_external"]),
     maximumSourceRaw: rawAmountSchema.nullable(),
@@ -193,6 +207,33 @@ export const sourceOptionSchema = z
       });
       return;
     }
+    const directIngress =
+      option.kind === "manual_receive" ||
+      option.kind === "privy_funding_method" ||
+      option.kind === "relay_deposit_address";
+    if (
+      directIngress !==
+      (option.source.kind === "external_ingress" && Boolean(option.ingress))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ingress"],
+        message:
+          "external ingress source kind, source reference, and instructions must agree",
+      });
+    }
+    if (
+      option.ingress &&
+      option.ingress.destinationOptionId.trim().length > 0 &&
+      option.source.kind === "external_ingress" &&
+      option.ingress.ingressKind !== option.source.ingressKind
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["ingress", "ingressKind"],
+        message: "external ingress instruction kind differs from source",
+      });
+    }
     if (
       (option.kind === "venue_preparation") !==
       (option.source.kind === "venue_preparation")
@@ -221,7 +262,9 @@ export const fundingDestinationOptionSchema = z
   .object({
     destinationOptionId: opaqueIdSchema,
     venueId: z.string().trim().min(2).max(160),
+    venueBindingId: opaqueIdSchema,
     venueBindingOptionId: opaqueIdSchema,
+    controllerWalletId: opaqueIdSchema,
     safeLabel: z.string().trim().min(1).max(160),
     requiredAsset: assetRefSchema,
     networkLabel: z.string().trim().min(1).max(80),
@@ -317,6 +360,7 @@ export const fundingPreparationPrepareResponseSchema = z
   .object({
     ok: z.literal(true),
     actions: z.array(normalizedActionSchema).max(64),
+    controllerWalletRef: z.string().uuid(),
   })
   .strict();
 
@@ -422,6 +466,7 @@ export const fundingQuoteSummarySchema = z
     fees: z.array(feeSchema).max(32),
     eta: etaSchema.nullable(),
     requiredActions: z.array(actionSummarySchema).max(64),
+    ingress: externalIngressInstructionSchema.nullable(),
     planHash: z.string().trim().min(32).max(192),
     consentToken: opaqueIdSchema,
     expiresAt: z.string().datetime(),
@@ -434,6 +479,7 @@ export const fundingDestinationsQuerySchema = z
     purpose: preparationPurposeSchema.default("fund"),
     marketContextId: opaqueIdSchema.nullable().optional(),
     marketClass: z.string().trim().min(1).max(80).nullable().optional(),
+    controllerWalletRef: z.string().uuid().nullable().optional(),
   })
   .strict();
 
@@ -487,10 +533,51 @@ export const fundingOperationPublicSchema = z
   })
   .strict();
 
+export const fundingOperationStepPublicSchema = z
+  .object({
+    stepId: opaqueIdSchema,
+    ordinal: z.number().int().min(0),
+    kind: z.enum([
+      "approval",
+      "transaction",
+      "signature",
+      "external_handoff",
+      "server_action",
+      "venue_preparation",
+    ]),
+    state: z.enum([
+      "planned",
+      "action_required",
+      "submitted",
+      "succeeded",
+      "reconcile_required",
+      "recovery_required",
+      "failed",
+      "cancelled",
+    ]),
+    dependsOnStepId: opaqueIdSchema.nullable(),
+    dependencyState: z
+      .enum([
+        "planned",
+        "action_required",
+        "submitted",
+        "succeeded",
+        "reconcile_required",
+        "recovery_required",
+        "failed",
+        "cancelled",
+      ])
+      .nullable(),
+    actionable: z.boolean(),
+  })
+  .strict();
+
 export const fundingOperationResponseSchema = z
   .object({
     ok: z.literal(true),
     operation: fundingOperationPublicSchema,
+    steps: z.array(fundingOperationStepPublicSchema).max(256),
+    ingress: externalIngressInstructionSchema.nullable(),
     consumerReservation: z
       .object({
         operationId: opaqueIdSchema,
@@ -523,6 +610,7 @@ export const fundingOperationActionPrepareResponseSchema = z
     attemptId: opaqueIdSchema,
     action: normalizedActionSchema,
     actionFingerprint: z.string().trim().min(32).max(192),
+    controllerWalletRef: z.string().uuid(),
     executorId: z.string().trim().min(2).max(160),
     executionMode: z.enum(["web_client", "privy_authorization"]),
     payerRequirement: z.enum(["user", "privy_sponsor"]),

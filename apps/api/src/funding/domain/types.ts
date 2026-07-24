@@ -149,6 +149,7 @@ export type AssetLocationPolicy = Readonly<{
 
 export type WalletExecutionProfile = Readonly<{
   walletId: WalletId;
+  controllerWalletRef?: string | null;
   networkId: NetworkId;
   address: string;
   source: "embedded" | "smart" | "external";
@@ -248,6 +249,7 @@ export type ValuedPositionComponent = Readonly<{
   venueId: VenueId;
   venueBindingId: VenueBindingId;
   positionRef: string;
+  positionActionRef: string;
   estimatedUsd: UsdEstimate | null;
   valuationMethod: string;
   observedAt: string;
@@ -346,6 +348,7 @@ export type SourceOption = Readonly<{
     | "composite";
   safeLabel: string;
   source: FundingSourceRef;
+  ingress?: ExternalIngressInstruction;
   sourceLegs?: readonly SourceOptionLeg[];
   amountMode: "exact_input" | "exact_output" | "variable_external";
   maximumSourceRaw: RawAmount | null;
@@ -369,7 +372,9 @@ export type SourceOption = Readonly<{
 export type FundingDestinationOption = Readonly<{
   destinationOptionId: string;
   venueId: VenueId;
+  venueBindingId: VenueBindingId;
   venueBindingOptionId: string;
+  controllerWalletId: WalletId;
   safeLabel: string;
   requiredAsset: AssetRef;
   networkLabel: string;
@@ -442,6 +447,7 @@ export type FundingQuoteSummary = Readonly<{
   fees: SourceOption["fees"];
   eta: Readonly<{ minSeconds: number; maxSeconds: number }> | null;
   requiredActions: readonly ActionSummary[];
+  ingress: ExternalIngressInstruction | null;
   planHash: string;
   consentToken: string;
   expiresAt: string;
@@ -499,6 +505,7 @@ export type ExternalIngressInstruction = Readonly<{
   sourceNetworkId: NetworkId | null;
   sourceAsset: AssetRef | null;
   destinationOptionId: string;
+  destinationAddress: string;
   exactAmount: Money | null;
   expiresAt: string | null;
   safeInstructions: readonly string[];

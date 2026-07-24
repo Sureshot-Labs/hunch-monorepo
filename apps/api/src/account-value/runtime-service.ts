@@ -505,6 +505,7 @@ export async function buildAccountValueReadModel(inputs: {
         walletType: resolution.walletType === "solana" ? "solana" : "ethereum",
         source: linked ? sourceForWallet(linked) : "smart",
         linkedAddress: resolution.linkedWalletAddress,
+        controllerWalletRef: linked?.id ?? null,
         serverWalletRef:
           linked?.isInternalWallet === true ? linked.privyWalletId : null,
       };

@@ -1310,7 +1310,9 @@ export class WalletPreparationRuntimeService {
     input: DestinationOptionsInput,
   ): Promise<readonly PreparedRuntimeDestination[]> {
     const wallets = (await AuthService.getUserWallets(input.accountId)).filter(
-      (wallet) => wallet.isVerified,
+      (wallet) =>
+        wallet.isVerified &&
+        (!input.controllerWalletRef || wallet.id === input.controllerWalletRef),
     );
     const results = await Promise.all(
       this.venueDrivers.flatMap((driver) =>
@@ -1427,7 +1429,12 @@ export class WalletPreparationRuntimeService {
         operationId: string;
         expectedInspectionRevision: string;
       }>,
-  ): Promise<readonly NormalizedAction[]> {
+  ): Promise<
+    Readonly<{
+      actions: readonly NormalizedAction[];
+      controllerWalletRef: string;
+    }>
+  > {
     const candidates = await this.preparedDestinations(input);
     const candidate = candidates.find(
       (entry) =>
@@ -1440,11 +1447,15 @@ export class WalletPreparationRuntimeService {
         "venue binding option is not owned or no longer available",
       );
     }
-    return candidate.adapter.prepare({
+    const actions = await candidate.adapter.prepare({
       ...candidate.inspectionInput,
       operationId: input.operationId,
       expectedInspectionRevision: input.expectedInspectionRevision,
     });
+    return {
+      actions,
+      controllerWalletRef: candidate.wallet.id,
+    };
   }
 
   async listDestinationOptions(

@@ -95,7 +95,9 @@ function toOption(
   return {
     destinationOptionId: stableOpaqueId("destination", destinationKey(fact)),
     venueId: fact.venueId,
+    venueBindingId: fact.preparation.binding.bindingId,
     venueBindingOptionId: fact.bindingOption.venueBindingOptionId,
+    controllerWalletId: fact.preparation.binding.controllerWalletId,
     safeLabel: fact.bindingOption.safeLabel,
     requiredAsset: fact.requiredAsset,
     networkLabel: fact.networkLabel,

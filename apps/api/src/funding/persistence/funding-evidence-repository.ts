@@ -126,6 +126,30 @@ export async function fetchFundingOperationStepForUser(
   return rows[0] ? mapOperationStep(rows[0]) : null;
 }
 
+export async function listFundingOperationStepsForUser(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+  }>,
+): Promise<readonly FundingOperationStep[]> {
+  const { rows } = await db.query<FundingOperationStepDbRow>(
+    `
+      select ${operationStepColumns}
+      from funding_operation_steps step
+      join funding_operations operation on operation.id = step.operation_id
+      left join funding_operation_steps dependency
+        on dependency.id = step.depends_on_step_id
+       and dependency.operation_id = step.operation_id
+      where operation.user_id = $1
+        and operation.id = $2
+      order by step.ordinal asc
+    `,
+    [input.userId, input.operationId],
+  );
+  return rows.map(mapOperationStep);
+}
+
 export type FundingWithdrawalDestination = Readonly<{
   id: string;
   userId: string;

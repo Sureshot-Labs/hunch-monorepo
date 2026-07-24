@@ -3956,6 +3956,26 @@ Completion evidence:
 
 ### Work package 7 — One web UX
 
+Implementation status (2026-07-24): **locally complete and reviewed for the
+web transaction-capable paths; no production activation.** Shared typed
+clients, controller/reducers, desktop/mobile wrappers, exact owner references,
+multi-leg execution, direct/Privy ingress presentation, token suggestion
+preference, Funding Activity, Buy/Sell preparation, and owner-bound redemption
+are implemented. Browser submission never declares funding or redemption
+complete, and reload recovery reads authoritative backend state.
+
+Privy EVM/Solana wallet creation remains exclusively in the existing
+`AuthProvider`; WP7 callers only consume typed missing-wallet prerequisites and
+re-inspect after Auth reconciliation. Existing funding/redemption components
+remain an explicit compatibility boundary for creation-mode-off and for
+`signature`/`external_handoff` action kinds that do not yet have generic
+resumable execute/report/postcondition parity. Existing redemption also remains
+available for exit-only/unsupported venues and old positions that cannot yet be
+resolved to one exact `positionActionRef` and owner binding. The old components
+receive no new business logic and cannot be removed before WP9 evidence.
+Detailed implementation, review corrections, and passing evidence are recorded
+in `docs/funding/wp7/README.md`.
+
 Required work:
 
 - implement shared account-value, asset, liquidity, quote, and operation hooks;
@@ -3968,7 +3988,12 @@ Required work:
 - implement Tokens source/preference UX;
 - implement direct Receive, Relay Deposit Address, and Privy handoff presentations;
 - implement common progress, Activity, recovery, and error copy;
-- keep legacy funding UI behind creation-mode-off compatibility only.
+- keep legacy funding UI behind creation-mode-off compatibility; until the
+  generic action boundary has exact resumable parity, permit a narrow fail-safe
+  fallback for explicitly unsupported `signature` and `external_handoff`
+  action kinds, exit-only/unsupported redemption venues, and old positions
+  without an exact owner projection, without adding new logic to the old
+  components.
 
 Completion evidence:
 
@@ -3980,6 +4005,9 @@ Completion evidence:
 - one destination/source proceeds directly, while real alternatives remain discoverable;
 - external source requires an explicit signature and is never silently pulled;
 - the initial UI contains no headline toggle or remembered-wallet setting.
+- Privy wallet provisioning remains single-owner in `AuthProvider`;
+- unsupported action kinds preserve the old path instead of claiming false
+  completion, while normalized EVM/SVM actions use the shared controller.
 
 ### Work package 8 — Telegram and Privy policy integration
 

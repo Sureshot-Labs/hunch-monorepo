@@ -205,6 +205,7 @@ function buildComponent(inputs: {
     venueId: inputs.position.venue,
     venueBindingId: positionBindingId(inputs.position),
     positionRef: identity,
+    positionActionRef: inputs.position.id,
     estimatedUsd:
       estimatedValue == null
         ? null
@@ -300,6 +301,7 @@ export async function collectUnpricedKalshiPositions(inputs: {
       venueId: "kalshi",
       venueBindingId: positionBindingId(position),
       positionRef: identity,
+      positionActionRef: position.id,
       estimatedUsd: null,
       valuationMethod: "unavailable",
       observedAt,

@@ -230,6 +230,7 @@ export function registerPositionActionRoutes(
             ok: true,
             operation: publicOperation(prepared.operation),
             actions: prepared.actions,
+            controllerWalletRef: prepared.controllerWalletRef,
             replayed: prepared.replayed,
           }),
         );

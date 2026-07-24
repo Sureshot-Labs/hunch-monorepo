@@ -17,6 +17,7 @@ export type ExistingWalletOwnershipFact = Readonly<{
   walletType: "ethereum" | "solana";
   source: "embedded" | "smart" | "external";
   linkedAddress: string;
+  controllerWalletRef?: string | null;
   serverWalletRef: string | null;
 }>;
 
@@ -40,6 +41,7 @@ function walletProfile(
       "wallet",
       `${fact.walletType}:${networkId}:${fact.address.toLowerCase()}`,
     ),
+    controllerWalletRef: fact.controllerWalletRef ?? null,
     networkId,
     address: fact.address,
     source: fact.source,
@@ -134,6 +136,7 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
       accountId,
       profiles: profiles.map((profile) => ({
         walletId: profile.walletId,
+        controllerWalletRef: profile.controllerWalletRef ?? null,
         networkId: profile.networkId,
         address: profile.address.toLowerCase(),
         source: profile.source,

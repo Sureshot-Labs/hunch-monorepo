@@ -55,6 +55,7 @@ const POSITION_ACTION_TTL_MS = 45_000;
 const ZERO_POSITION_RE = /^0(?:\.0+)?$/;
 
 type CollectedRedemptionEvidence = Readonly<{
+  controllerWalletRef: string;
   driver: PositionActionVenueDriver;
   evidence: RedemptionRuntimeEvidence;
   executionAddress: string;
@@ -70,6 +71,7 @@ type CollectedRedemptionEvidence = Readonly<{
 
 export type PreparedPositionAction = Readonly<{
   actions: readonly NormalizedAction[];
+  controllerWalletRef: string;
   operation: StoredPositionAction;
   replayed: boolean;
 }>;
@@ -283,6 +285,7 @@ export class PositionActionRuntimeService {
     });
     const now = this.clock();
     return {
+      controllerWalletRef: ownerPreparation.wallet.id,
       driver,
       position,
       market,
@@ -434,6 +437,7 @@ export class PositionActionRuntimeService {
     });
     return {
       actions,
+      controllerWalletRef: collected.controllerWalletRef,
       operation: created.operation,
       replayed: created.replayed,
     };

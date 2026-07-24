@@ -426,6 +426,7 @@ await test("headline mode changes presentation only", async () => {
     venueId: "polymarket",
     venueBindingId: "binding_00000001",
     positionRef: "polymarket:wallet:token",
+    positionActionRef: "00000000-0000-4000-8000-000000000001",
     estimatedUsd: {
       value: "3",
       asOf: NOW.toISOString(),
@@ -545,6 +546,7 @@ await test("duplicate positions count once and conflicting marks fail closed", (
     venueId: "limitless",
     venueBindingId: "binding_00000001",
     positionRef: "limitless:wallet:token",
+    positionActionRef: "00000000-0000-4000-8000-000000000001",
     estimatedUsd: {
       value: "2",
       asOf: NOW.toISOString(),
@@ -610,11 +612,25 @@ await test("suggestion preference ranks only and grants no execution eligibility
 await test("account routes require auth and preference response denies authority", async () => {
   const cash = await valuedAsset({ id: "route", raw: "1000000" });
   const secondCash = await valuedAsset({ id: "route-second", raw: "1000000" });
+  const position: ValuedPositionComponent = {
+    componentId: "position_route_0001",
+    venueId: "polymarket",
+    venueBindingId: "binding_route_0001",
+    positionRef: "polymarket:wallet:token",
+    positionActionRef: "00000000-0000-4000-8000-000000000099",
+    estimatedUsd: null,
+    valuationMethod: "unavailable",
+    observedAt: NOW.toISOString(),
+    observationFreshness: "fresh",
+    observationError: null,
+    valuationEligibility: "unpriced",
+    reasonCodes: ["asset_unpriced"],
+  };
   const projection = projectAccountValue({
     accountId: "account_00000001",
     headlineMode: "liquid_only",
     components: [cash, secondCash],
-    positionComponents: [],
+    positionComponents: [position],
     asOf: NOW.toISOString(),
   });
   const account = {
@@ -679,7 +695,7 @@ await test("account routes require auth and preference response denies authority
 
   const firstAssetsPage = await app.inject({
     method: "GET",
-    url: "/account/assets?limit=1",
+    url: "/account/assets?category=cash&limit=1",
     headers: { authorization: "test" },
   });
   assert.equal(firstAssetsPage.statusCode, 200);
@@ -689,7 +705,7 @@ await test("account routes require auth and preference response denies authority
 
   const secondAssetsPage = await app.inject({
     method: "GET",
-    url: `/account/assets?limit=1&cursor=${encodeURIComponent(
+    url: `/account/assets?category=cash&limit=1&cursor=${encodeURIComponent(
       String(firstAssetsPage.json().nextCursor),
     )}`,
     headers: { authorization: "test" },
@@ -697,6 +713,20 @@ await test("account routes require auth and preference response denies authority
   assert.equal(secondAssetsPage.statusCode, 200);
   assert.equal(secondAssetsPage.json().items.length, 1);
   assert.equal(secondAssetsPage.json().nextCursor, null);
+
+  const exactPosition = await app.inject({
+    method: "GET",
+    url:
+      "/account/assets?category=position&positionActionRef=" +
+      position.positionActionRef,
+    headers: { authorization: "test" },
+  });
+  assert.equal(exactPosition.statusCode, 200);
+  assert.equal(exactPosition.json().items.length, 1);
+  assert.equal(
+    exactPosition.json().items[0].positionActionRef,
+    position.positionActionRef,
+  );
 
   const preference = await app.inject({
     method: "PATCH",

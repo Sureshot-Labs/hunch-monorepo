@@ -110,6 +110,7 @@ export type DestinationOptionsInput = Readonly<{
   marketContextId: string | null;
   marketClass: string | null;
   compatibleVenueBindingOptionIds: readonly string[] | null;
+  controllerWalletRef?: string | null;
 }>;
 
 export type DestinationInput = Readonly<{

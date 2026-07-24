@@ -133,7 +133,9 @@ function destinationOption(
   return {
     destinationOptionId: "destination_poly_12345678",
     venueId: "polymarket",
+    venueBindingId: "binding_account_poly_12345678",
     venueBindingOptionId: "binding_poly_12345678",
+    controllerWalletId: "wallet_poly_12345678",
     safeLabel: "Polymarket · Hunch Trading Wallet",
     requiredAsset: POLYGON_PUSD,
     networkLabel: "Polygon",

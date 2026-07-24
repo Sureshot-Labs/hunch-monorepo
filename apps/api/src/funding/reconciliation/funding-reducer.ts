@@ -1089,6 +1089,10 @@ export type FundingReconciliationBatchOptions = Readonly<{
     operationId: string,
     now: Date,
   ) => Promise<Readonly<{ postconditionsPolled: number }>>;
+  destinationPoll?: (
+    operationId: string,
+    now: Date,
+  ) => Promise<Readonly<{ destinationsPolled: number }>>;
 }>;
 
 export type FundingReconciliationBatchResult = Readonly<{
@@ -1127,11 +1131,13 @@ async function processLease(
   providerPoll?: FundingReconciliationBatchOptions["providerPoll"],
   receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"],
   postconditionPoll?: FundingReconciliationBatchOptions["postconditionPoll"],
+  destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"],
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
   try {
     await receiptPoll?.(lease.operationId, options.now);
     await postconditionPoll?.(lease.operationId, options.now);
     await providerPoll?.(lease.operationId, options.now);
+    await destinationPoll?.(lease.operationId, options.now);
     const reduction = await reduceFundingOperation(pool, {
       operationId: lease.operationId,
       now: options.now,
@@ -1207,6 +1213,7 @@ export async function runFundingReconciliationBatch(
       options.providerPoll,
       options.receiptPoll,
       options.postconditionPoll,
+      options.destinationPoll,
     );
     if (outcome === "dead_lettered") counts.deadLettered += 1;
     else counts[outcome] += 1;

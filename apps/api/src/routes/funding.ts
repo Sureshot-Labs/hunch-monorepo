@@ -32,6 +32,7 @@ import {
 import {
   fetchFundingConsumerReservationForUser,
   type FundingConsumerReservation,
+  type FundingOperationStep,
 } from "../funding/persistence/funding-evidence-repository.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
 import {
@@ -60,12 +61,14 @@ import {
   fundingWithdrawalDestinationRequestSchema,
   fundingWithdrawalDestinationResponseSchema,
   fundingWithdrawalDestinationRevokeResponseSchema,
+  externalIngressInstructionSchema,
 } from "../schemas/funding.js";
 
 type FundingDestinationQuery = Readonly<{
   purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
   marketContextId?: string | null;
   marketClass?: string | null;
+  controllerWalletRef?: string | null;
 }>;
 
 export type FundingRouteDependencies = Readonly<{
@@ -131,7 +134,12 @@ export type FundingRouteDependencies = Readonly<{
       operationId: string;
       expectedInspectionRevision: string;
     }>,
-  ): Promise<readonly NormalizedAction[]>;
+  ): Promise<
+    Readonly<{
+      actions: readonly NormalizedAction[];
+      controllerWalletRef: string;
+    }>
+  >;
   liquidity(
     userId: string,
     request: FundingDiscoveryRequest,
@@ -148,6 +156,10 @@ export type FundingRouteDependencies = Readonly<{
     userId: string,
     operationId: string,
   ): Promise<FundingOperationRow | null>;
+  operationSteps(
+    userId: string,
+    operationId: string,
+  ): Promise<readonly FundingOperationStep[]>;
   consumerReservation(
     userId: string,
     operationId: string,
@@ -208,6 +220,13 @@ function publicOperation(operation: FundingOperationRow) {
   };
 }
 
+function publicIngress(operation: FundingOperationRow) {
+  const parsed = externalIngressInstructionSchema.safeParse(
+    operation.sourceSnapshot?.ingress,
+  );
+  return parsed.success ? parsed.data : null;
+}
+
 function publicConsumerReservation(
   reservation: FundingConsumerReservation | null,
 ) {
@@ -220,6 +239,20 @@ function publicConsumerReservation(
         expiresAt: reservation.expiresAt.toISOString(),
       }
     : null;
+}
+
+function publicOperationStep(step: FundingOperationStep) {
+  return {
+    stepId: step.id,
+    ordinal: step.ordinal,
+    kind: step.stepKind,
+    state: step.state,
+    dependsOnStepId: step.dependsOnStepId,
+    dependencyState: step.dependencyState,
+    actionable:
+      step.state === "action_required" &&
+      (step.dependsOnStepId === null || step.dependencyState === "succeeded"),
+  };
 }
 
 function errorStatus(error: unknown): number {
@@ -588,11 +621,11 @@ export function registerFundingRoutes(
           publicError: "Wallet preparation actions could not be constructed",
         },
         async (userId) => {
-          const actions = await dependencies.prepare(userId, request.body);
+          const prepared = await dependencies.prepare(userId, request.body);
           return reply.send(
             fundingPreparationPrepareResponseSchema.parse({
               ok: true,
-              actions,
+              ...prepared,
             }),
           );
         },
@@ -679,6 +712,10 @@ export function registerFundingRoutes(
           return reply.send({
             ok: true,
             operation: publicOperation(committed.operation),
+            steps: (
+              await dependencies.operationSteps(userId, committed.operation.id)
+            ).map(publicOperationStep),
+            ingress: publicIngress(committed.operation),
             replayed: committed.replayed,
           });
         },
@@ -712,6 +749,10 @@ export function registerFundingRoutes(
           return reply.send({
             ok: true,
             operation: publicOperation(operation),
+            steps: (
+              await dependencies.operationSteps(userId, operation.id)
+            ).map(publicOperationStep),
+            ingress: publicIngress(operation),
           });
         },
       ),
@@ -750,6 +791,10 @@ export function registerFundingRoutes(
           return reply.send({
             ok: true,
             operation: publicOperation(operation),
+            steps: (
+              await dependencies.operationSteps(userId, operation.id)
+            ).map(publicOperationStep),
+            ingress: publicIngress(operation),
             consumerReservation: publicConsumerReservation(
               await dependencies.consumerReservation(userId, request.params.id),
             ),
@@ -813,6 +858,8 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     quote: (userId, request) => runtime.quote(userId, request),
     commit: (userId, request) => runtime.commit(userId, request),
     operation: (userId, operationId) => runtime.operation(userId, operationId),
+    operationSteps: (userId, operationId) =>
+      runtime.operationSteps(userId, operationId),
     consumerReservation: (userId, operationId) =>
       fetchFundingConsumerReservationForUser(pool, {
         userId,

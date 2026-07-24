@@ -1,11 +1,14 @@
 import type { Pool } from "@hunch/infra";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
-import { lookupHmac } from "../persistence/canonical.js";
+import { stableOpaqueId } from "../../account-value/canonical.js";
+import { fetchMarketsByTokenIds } from "../../repos/unified-read.js";
+import { canonicalJsonHash, lookupHmac } from "../persistence/canonical.js";
 import {
   fetchFundingOperationForUser,
   listFundingOperationsForUser,
 } from "../persistence/funding-operation-repository.js";
+import { listFundingOperationStepsForUser } from "../persistence/funding-evidence-repository.js";
 import { PostgresFundingPlanningStore } from "../persistence/funding-planning-repository.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
 import type {
@@ -21,9 +24,11 @@ import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
 import { FundingOperationService } from "./operation-service.js";
 import { FundingPlannerError } from "./money.js";
+import { sameAsset } from "./money.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
+import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
 import {
   FundingOperationActionRuntime,
   type FundingActionReportOutcome,
@@ -75,6 +80,7 @@ export class FundingPlanningRuntime {
       purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
       marketContextId?: string | null;
       marketClass?: string | null;
+      controllerWalletRef?: string | null;
     }>,
   ): Promise<readonly FundingDestinationOption[]> {
     return this.preparationRuntime.listDestinationOptions({
@@ -83,6 +89,7 @@ export class FundingPlanningRuntime {
       marketContextId: query.marketContextId ?? null,
       marketClass: query.marketClass ?? null,
       compatibleVenueBindingOptionIds: null,
+      controllerWalletRef: query.controllerWalletRef ?? null,
     });
   }
 
@@ -115,7 +122,12 @@ export class FundingPlanningRuntime {
       operationId: string;
       expectedInspectionRevision: string;
     }>,
-  ): Promise<readonly NormalizedAction[]> {
+  ): Promise<
+    Readonly<{
+      actions: readonly NormalizedAction[];
+      controllerWalletRef: string;
+    }>
+  > {
     return this.preparationRuntime.prepareBindingOption({
       accountId: userId,
       venueBindingOptionId: request.venueBindingOptionId,
@@ -148,12 +160,68 @@ export class FundingPlanningRuntime {
           compatibleVenueBindingOptionIds:
             marketContext?.compatibleVenueBindingOptionIds ?? null,
         }),
-      resolveMarketContext: async () => null,
+      resolveMarketContext: async ({ accountId, marketContextId }) => {
+        const requestedAmount = request.requestedDestinationAmount;
+        if (!requestedAmount) return null;
+        const rows = await fetchMarketsByTokenIds(this.db, {
+          tokenIds: [marketContextId],
+          includeTop: false,
+        });
+        const exact = rows.filter(
+          (row) =>
+            row.token_id === marketContextId &&
+            (row.side === "YES" || row.side === "NO"),
+        );
+        if (exact.length !== 1) return null;
+        const market = exact[0];
+        if (!market) return null;
+        const candidates = await this.preparationRuntime.resolvedCandidates({
+          accountId,
+          purpose: "buy",
+          marketContextId: market.market_id,
+          marketClass: null,
+          compatibleVenueBindingOptionIds: null,
+        });
+        const compatible = candidates.filter(
+          (candidate) =>
+            candidate.option.selectable &&
+            candidate.option.venueId === market.venue &&
+            sameAsset(candidate.option.requiredAsset, requestedAmount.asset),
+        );
+        if (compatible.length === 0) return null;
+        const now = new Date();
+        return {
+          marketContextId,
+          venueId: market.venue,
+          marketId: market.market_id,
+          side: market.side as "YES" | "NO",
+          executionProfileId: `funding_${market.venue}_buy_v1`,
+          marketPriceRevision: stableOpaqueId(
+            "market_revision",
+            canonicalJsonHash({
+              marketId: market.market_id,
+              side: market.side,
+              status: market.market_status,
+              acceptingOrders: market.pm_accepting_orders,
+              updatedAt: market.updated_at,
+            }),
+          ),
+          collateralAsset: requestedAmount.asset,
+          requestedCollateralRaw: requestedAmount.raw,
+          compatibleVenueBindingOptionIds: compatible.map(
+            (candidate) => candidate.bindingOption.venueBindingOptionId,
+          ),
+          expiresAt: new Date(
+            now.getTime() + resolvedPolicy.policy.ttl.quoteMs,
+          ).toISOString(),
+        };
+      },
       resolveWithdrawalRecipient: async ({ accountId, recipientId }) =>
         this.withdrawalRuntime.resolve(accountId, recipientId),
       listSources: (sourceInput) =>
         new ProductionFundingSourcePlanner(this.db, account, [
           new PolymarketFundingSourceAdapter(account),
+          new DirectIngressFundingSourceAdapter(),
         ]).list(sourceInput),
       store: this.planningStore,
     });
@@ -229,6 +297,13 @@ export class FundingPlanningRuntime {
 
   operation(userId: string, operationId: string) {
     return fetchFundingOperationForUser(this.db, { userId, operationId });
+  }
+
+  operationSteps(userId: string, operationId: string) {
+    return listFundingOperationStepsForUser(this.db, {
+      userId,
+      operationId,
+    });
   }
 
   prepareOperationAction(

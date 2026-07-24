@@ -14,6 +14,7 @@ import type {
   NormalizedAction,
 } from "../../domain/types.js";
 import type { PreparationResult } from "../../domain/contracts.js";
+import type { FundingOperationStep } from "../../persistence/funding-evidence-repository.js";
 import type { FundingOperationRow } from "../../persistence/funding-operation-repository.js";
 import { WithdrawalDestinationError } from "../../execution/withdrawal-destination-runtime.js";
 import { FundingPlannerError } from "../../planner/money.js";
@@ -40,7 +41,9 @@ function destination(): FundingDestinationOption {
   return {
     destinationOptionId: "destination_poly_12345678",
     venueId: "polymarket",
+    venueBindingId: "binding_account_poly_12345678",
     venueBindingOptionId: "binding_poly_12345678",
+    controllerWalletId: "wallet_poly_12345678",
     safeLabel: "Polymarket · Hunch Trading Wallet",
     requiredAsset: ASSET,
     networkLabel: "Polygon",
@@ -160,6 +163,7 @@ function quote(): FundingQuoteSummary {
     fees: [],
     eta: { minSeconds: 5, maxSeconds: 20 },
     requiredActions: [],
+    ingress: null,
     planHash: "a".repeat(64),
     consentToken: "consent_token_12345678",
     expiresAt: "2026-07-24T12:01:00.000Z",
@@ -200,6 +204,26 @@ function operation(): FundingOperationRow {
   };
 }
 
+function operationSteps(): readonly FundingOperationStep[] {
+  return [
+    {
+      id: "step_id_12345678",
+      operationId: "operation_id_12345678",
+      segmentId: null,
+      ordinal: 0,
+      stepKind: "transaction",
+      state: "action_required",
+      actionFingerprint: "c".repeat(64),
+      executorId: "wallet_profile_evm_v1",
+      payerRequirement: "user",
+      dependsOnStepId: null,
+      dependencyState: null,
+      normalizedAction: preparedAction(),
+      actionValidationResult: {},
+    },
+  ];
+}
+
 async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
   const app = Fastify({ logger: false });
   app.setValidatorCompiler(validatorCompiler);
@@ -230,11 +254,15 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
     }),
     destinations: async () => [destination()],
     inspectPreparation: async () => preparation(),
-    prepare: async () => preparedActions(),
+    prepare: async () => ({
+      actions: preparedActions(),
+      controllerWalletRef: USER_ID,
+    }),
     liquidity: async () => liquidity(),
     quote: async () => quote(),
     commit: async () => ({ operation: operation(), replayed: false }),
     operation: async () => operation(),
+    operationSteps: async () => operationSteps(),
     consumerReservation: async () => null,
     operations: async () => [operation()],
     cancelOperation: async () => ({
@@ -247,6 +275,7 @@ async function buildApp(overrides: Partial<FundingRouteDependencies> = {}) {
       attemptId: "attempt_id_12345678",
       action: preparedAction(),
       actionFingerprint: "c".repeat(64),
+      controllerWalletRef: USER_ID,
       executorId: "wallet_profile_evm_v1",
       executionMode: "web_client",
       payerRequirement: "user",
@@ -528,6 +557,20 @@ await test("operation reads expose safe resumable state, not internal snapshots"
       purpose: "trade_shortfall",
       status: "ready",
       progressStage: "ready_for_consumer",
+      sourceSnapshot: {
+        ingress: {
+          ingressKind: "manual",
+          sourceNetworkId: ASSET.networkId,
+          sourceAsset: ASSET,
+          destinationOptionId: "destination_poly_12345678",
+          destinationAddress: "0x0000000000000000000000000000000000000004",
+          exactAmount: { asset: ASSET, raw: "1000000" },
+          expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+          safeInstructions: [
+            "Send only the exact asset to the exact destination.",
+          ],
+        },
+      },
     }),
     consumerReservation: async (userId, operationId) => {
       reservationScope = { userId, operationId };
@@ -550,6 +593,28 @@ await test("operation reads expose safe resumable state, not internal snapshots"
     assert.equal(body.operation.operationId, "operation_id_12345678");
     assert.equal("destinationTargetSnapshot" in body.operation, false);
     assert.equal("sourceSnapshot" in body.operation, false);
+    assert.deepEqual(body.steps, [
+      {
+        stepId: "step_id_12345678",
+        ordinal: 0,
+        kind: "transaction",
+        state: "action_required",
+        dependsOnStepId: null,
+        dependencyState: null,
+        actionable: true,
+      },
+    ]);
+    assert.equal("normalizedAction" in body.steps[0], false);
+    assert.deepEqual(body.ingress, {
+      ingressKind: "manual",
+      sourceNetworkId: ASSET.networkId,
+      sourceAsset: ASSET,
+      destinationOptionId: "destination_poly_12345678",
+      destinationAddress: "0x0000000000000000000000000000000000000004",
+      exactAmount: { asset: ASSET, raw: "1000000" },
+      expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+      safeInstructions: ["Send only the exact asset to the exact destination."],
+    });
     assert.deepEqual(reservationScope, {
       userId: USER_ID,
       operationId: "operation_id_12345678",
@@ -577,6 +642,7 @@ await test("operation action prepare is owner-scoped and returns only the commit
         attemptId: "attempt_id_12345678",
         action: preparedAction(),
         actionFingerprint: "c".repeat(64),
+        controllerWalletRef: USER_ID,
         executorId: "wallet_profile_evm_v1",
         executionMode: "privy_authorization",
         payerRequirement: "privy_sponsor",
@@ -596,6 +662,7 @@ await test("operation action prepare is owner-scoped and returns only the commit
       stepId: "step_id_12345678",
     });
     assert.equal(response.json().action.kind, "evm_transaction");
+    assert.equal(response.json().controllerWalletRef, USER_ID);
     assert.equal("providerQuoteRef" in response.json(), false);
   } finally {
     await app.close();

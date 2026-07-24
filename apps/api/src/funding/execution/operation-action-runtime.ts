@@ -64,7 +64,10 @@ function assertClientExecutable(
   action: NormalizedAction,
   executorId: string,
   profiles: readonly WalletExecutionProfile[],
-): ResolvedActionSponsorship {
+): Readonly<{
+  controllerWalletRef: string;
+  sponsorship: ResolvedActionSponsorship;
+}> {
   if (action.kind !== "evm_transaction" && action.kind !== "svm_transaction") {
     throw new FundingPersistenceError(
       "quote_mismatch",
@@ -88,7 +91,16 @@ function assertClientExecutable(
       "committed signer is no longer owned and client-executable",
     );
   }
-  return resolveActionSponsorship({ action, profile });
+  if (!profile.controllerWalletRef) {
+    throw new FundingPersistenceError(
+      "quote_invalidated",
+      "committed signer has no authenticated wallet reference",
+    );
+  }
+  return {
+    controllerWalletRef: profile.controllerWalletRef,
+    sponsorship: resolveActionSponsorship({ action, profile }),
+  };
 }
 
 export type FundingActionReportOutcome =
@@ -140,6 +152,7 @@ export class FundingOperationActionRuntime {
       attemptId: string;
       action: NormalizedAction;
       actionFingerprint: string;
+      controllerWalletRef: string;
       executorId: string;
       executionMode: "web_client" | "privy_authorization";
       payerRequirement: "user" | "privy_sponsor";
@@ -199,7 +212,7 @@ export class FundingOperationActionRuntime {
         "stored funding action differs from its immutable fingerprint",
       );
     }
-    const sponsorship = assertClientExecutable(
+    const execution = assertClientExecutable(
       action,
       step.executorId,
       account.ownership?.wallets ?? [],
@@ -215,10 +228,11 @@ export class FundingOperationActionRuntime {
       attemptId: started.attempt.id,
       action,
       actionFingerprint: fingerprint,
+      controllerWalletRef: execution.controllerWalletRef,
       executorId: step.executorId,
-      executionMode: sponsorship.signingMode,
-      payerRequirement: sponsorship.payerRequirement,
-      sponsorshipPolicyId: sponsorship.policyId,
+      executionMode: execution.sponsorship.signingMode,
+      payerRequirement: execution.sponsorship.payerRequirement,
+      sponsorshipPolicyId: execution.sponsorship.policyId,
     };
   }
 

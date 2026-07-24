@@ -106,6 +106,7 @@ export function registerAccountValueRoutes(
         const query = request.query;
         const assetItems = account.projection.components.filter(
           (component) =>
+            !query.positionActionRef &&
             (!query.category || query.category === component.category) &&
             (!query.valuationEligibility ||
               query.valuationEligibility === component.valuationEligibility),
@@ -113,6 +114,8 @@ export function registerAccountValueRoutes(
         const positionItems = account.projection.positionComponents.filter(
           (component) =>
             (!query.category || query.category === "position") &&
+            (!query.positionActionRef ||
+              query.positionActionRef === component.positionActionRef) &&
             (!query.valuationEligibility ||
               query.valuationEligibility === component.valuationEligibility),
         );

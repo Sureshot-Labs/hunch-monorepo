@@ -52,6 +52,7 @@ const valuedPositionComponentSchema = z
     venueId: z.string().min(1).max(160),
     venueBindingId: z.string().min(8).max(192),
     positionRef: z.string().min(1).max(512),
+    positionActionRef: z.string().uuid(),
     estimatedUsd: usdEstimateSchema.nullable(),
     valuationMethod: z.string().min(1).max(160),
     observedAt: z.string().datetime(),
@@ -175,6 +176,7 @@ export const accountAssetsQuerySchema = z
     valuationEligibility: z
       .enum(["included", "unpriced", "stale", "excluded"])
       .optional(),
+    positionActionRef: z.string().uuid().optional(),
     cursor: z.string().min(8).max(192).optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
   })

@@ -131,6 +131,7 @@ async function buildApp(
     inspect: async () => readiness(),
     prepare: async () => ({
       actions: [action()],
+      controllerWalletRef: "00000000-0000-4000-8000-000000000099",
       operation: operation(),
       replayed: false,
     }),
@@ -242,6 +243,32 @@ await test("stale preparation fails before a durable action is returned", async 
     });
     assert.equal(response.statusCode, 409);
     assert.equal(response.json().code, "evidence_stale");
+  } finally {
+    await app.close();
+  }
+});
+
+await test("prepared action exposes only its authenticated wallet reference", async () => {
+  const app = await buildApp();
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/position-actions/prepare",
+      payload: {
+        action: "redeem",
+        venueId: "polymarket",
+        positionRef: POSITION_ID,
+        ownerBindingId: BINDING_ID,
+        expectedInspectionRevision: REVISION,
+        idempotencyKey: "position_action_idempotency_12345678",
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      response.json().controllerWalletRef,
+      "00000000-0000-4000-8000-000000000099",
+    );
+    assert.equal("ownerAddress" in response.json(), false);
   } finally {
     await app.close();
   }

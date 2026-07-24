@@ -152,6 +152,7 @@ export const positionActionPrepareResponseSchema = z
     ok: z.literal(true),
     operation: positionActionPublicSchema,
     actions: z.array(normalizedActionSchema).max(16),
+    controllerWalletRef: z.string().uuid(),
     replayed: z.boolean(),
   })
   .strict();
