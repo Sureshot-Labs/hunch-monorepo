@@ -371,6 +371,15 @@ Hunch never silently pulls external assets or moves internal funds into an
 external wallet. For Sell or Redeem, the position-owning binding is mandatory:
 switching to the Hunch wallet cannot act on a position owned by an external Safe.
 
+Readiness is purpose- and market-class-specific, not a venue-wide boolean.
+Wallet provisioning, venue connection, contract-wallet deployment/registration,
+credentials, approvals, collateral visibility, and execution authorization are
+separate facts. Polymarket signer, Deposit Wallet, Safe, and Magic-proxy
+topologies remain distinct, while Limitless CLOB and AMM readiness remain
+distinct. The frozen pre-implementation inventory, side-effect ledger, purpose
+matrices, caller map, and mandatory parity tests are normative in
+`docs/funding/wp6/README.md`.
+
 ### 2.9 Approved initial UX decisions
 
 The initial product behavior is now closed:
@@ -1299,6 +1308,16 @@ interface RoutingProviderAdapter {
 }
 ```
 
+`WalletPreparationAdapter.inspect` is side-effect free. It returns one exact
+authenticated binding, purpose, market class where applicable,
+security-relevant revision, topology, credential/profile evidence,
+allowances/approvals, spendability/locks, execution mode, required normalized
+actions, postconditions, and typed reason codes. `prepare` re-inspects and
+validates the same revision but does not submit. Privy wallet creation, venue
+connect/login, contract deployment, approval, Funding Router, trade, and
+redemption side effects occur only through their existing exact execution
+boundaries. The complete frozen contract is `docs/funding/wp6/README.md`.
+
 ## 8. Target backend boundaries
 
 Target module ownership under `apps/api/src`:
@@ -2182,12 +2201,19 @@ Reuse existing:
 
 - linked and embedded wallet enumeration;
 - EVM and Solana embedded wallet provisioning;
+- `AuthProvider` provisioning single-flight, refresh, already-exists handling,
+  and backend wallet reconciliation;
+- `AuthPolymarketWalletBootstrap` and `AuthLimitlessWalletBootstrap` only as
+  compatibility callers until each venue call is replaced by the shared
+  preparation contract;
 - current `useDepositFundWallet` entry point;
 - Privy server wallet references and policies;
 - existing action-specific sponsorship mechanisms.
 
 Add resolvers and thin presentation adapters. Do not create another AuthProvider,
 wallet linker, wallet database, or generic wallet mega-adapter.
+The preparation adapter never calls Privy `createWallet` or
+`createSolanaWallet`; missing provisioning is a typed prerequisite state.
 
 ### 14.2 Funding method capability
 
@@ -2305,6 +2331,16 @@ observation, reconciliation, and Activity, but it does not create a
 external Safe must be redeemed through that binding; setup/repair may be offered,
 but switching to an internal wallet is not a valid redemption solution.
 
+The adapter preserves four distinct current funder topologies: signer/EOA,
+legacy Magic proxy, supported Safe-like funder, and signature-type-3 Deposit
+Wallet. It also preserves separate `fund`, `buy`, `sell`, `redeem`, and
+`withdraw` requirements, including normal versus neg-risk approvals. Deposit
+Wallet deployment must prove the same signer-derived address on-chain after
+relayer submission. Funding Router readiness retains the exact funding nonce,
+cap, lock, balance, and three allowance checks and completes only after pUSD is
+CLOB-visible. The exhaustive current/target matrix is
+`docs/funding/wp6/README.md`.
+
 This phase does not invent a second generic durable aggregate for redemption.
 The focused executor wraps the current web redemption marker/sync path and the
 existing durable Telegram trade-intent action where applicable. A broader
@@ -2317,9 +2353,30 @@ wallet binding, readiness, and execution service. Existing Limitless cash is
 used before any shortfall movement.
 
 Its historically slow route classes remain `prepare_first` until route-specific
-observations satisfy inline thresholds. Telegram Limitless trading remains off
-while its existing order path lacks the required enforceable price/slippage
-guard; funding capability does not bypass trading policy.
+observations satisfy inline thresholds. Telegram Limitless CLOB trading remains
+off while its existing order path lacks the required enforceable
+price/slippage guard; funding capability does not bypass trading policy or
+weaken separately guarded AMM execution.
+
+Limitless preparation preserves two connection modes and two market classes:
+
+- internal embedded wallets use the prepared Privy personal-sign
+  `/embedded/ensure-ready/prepare` and `/execute` sequence;
+- external wallets use a fresh signing message, explicit client signature, and
+  exact-account login;
+- CLOB readiness requires the exact market exchange, optional adapter, account
+  freshness, balance/locks, and purpose-specific allowances/approvals;
+- AMM readiness requires the canonical market/spender/outcome mapping, fresh
+  on-chain balance, exact allowance/approval, and bounded output;
+- profile `409` recovery succeeds only when the exact account profile ID is
+  recovered; foreign profiles and legacy rows do not become ready implicitly.
+
+Limitless standard and neg-risk redemption remain owner-bound focused position
+actions. Standard redemption targets canonical Conditional Tokens; neg-risk
+redemption requires the canonical adapter and operator approval. Neither path
+requires a generic Funding Operation, silently switches wallets, nor treats a
+notification marker as settlement evidence. The complete purpose and parity
+matrix is `docs/funding/wp6/README.md`.
 
 ### 15.3 Future venues
 
@@ -2702,6 +2759,23 @@ if it would delay the core Add Funds/trade-shortfall path.
 5. Reconcile redemption and refresh position/cash projections and Activity.
 6. Never switch to the internal Hunch wallet to redeem an externally owned position.
 
+### 19.12 Limitless redemption
+
+1. Resolve the exact position owner and its Limitless binding.
+2. Read fresh resolution, normalized token ID, owner token balance, and
+   standard-versus-neg-risk market class.
+3. For a standard market, validate the canonical Conditional Tokens target and
+   direct redemption calldata.
+4. For neg-risk, validate the canonical adapter and required operator approval.
+5. Execute through the exact internal Privy or external client signer path and
+   persist possible-broadcast correlation before retry is possible.
+6. Require a successful Base receipt, refresh position/collateral projections,
+   and write Activity idempotently.
+7. A failed compatibility marker after a successful receipt enters recovery;
+   it never triggers another redemption transaction.
+8. Never switch to a different wallet or require Limitless login when the
+   exact owner-bound on-chain redemption action itself does not require it.
+
 ## 20. Failure and side-effect audit
 
 | Condition                                          | Required behavior                                                               | Forbidden behavior                                            |
@@ -2991,6 +3065,22 @@ Wallet/binding/preparation:
 - one Polymarket preparation contract produces purpose-specific readiness for
   auth bootstrap, Add Funds, Buy, Sell, Redeem, and Telegram;
 - external Safe threshold/deployment/registration/credential/approval mutations fail closed;
+- missing Privy EVM/Solana provisioning remains owned by Auth and is never
+  recreated by funding preparation;
+- Polymarket signer, Deposit Wallet, supported 1/1 Safe, Magic proxy,
+  undeployed/unsupported contract, stale credential, and RPC-uncertain rows
+  pass the purpose matrix;
+- normal and neg-risk Polymarket Buy/Sell/Redemption approval sets remain
+  distinct;
+- Limitless internal prepared-auth and external client login have exact-wallet
+  parity, concurrency, reconnect, foreign-profile, and recoverable/unrecoverable
+  `409` tests;
+- Limitless CLOB and AMM have separate exchange/adapter/spender, approval,
+  freshness, balance/lock, and slippage matrices;
+- Limitless standard and neg-risk redemption have focused plan and execution
+  tests for internal/external owner bindings;
+- successful receipt plus failed Activity/notification marker recovers without
+  duplicate Funding Router, approval, trade, or redemption broadcast;
 - redemption never creates a Funding Operation or routes through Withdrawal.
 
 State machine:
@@ -3135,23 +3225,27 @@ across route handlers.
 
 At minimum:
 
-| Source                        | Destination                | Purpose/mode                        | Required evidence                                     |
-| ----------------------------- | -------------------------- | ----------------------------------- | ----------------------------------------------------- |
-| existing PM collateral        | Polymarket                 | instant trade                       | binding, locks, readiness                             |
-| existing Limitless collateral | Limitless                  | instant trade                       | binding, locks, readiness                             |
-| Solana SOL                    | Polymarket                 | Add Funds exact input               | Relay, gas/rent, PM follow-up                         |
-| Solana USDC                   | Polymarket                 | Add Funds                           | Relay route/settlement                                |
-| Ethereum supported USDT/USDC  | Polymarket                 | prepare/inline by evidence          | exact mapping, refund, net output                     |
-| supported wallet token        | active venue               | conversion                          | consent, price, route, min output                     |
-| exchange stablecoin           | owned receive location     | direct Receive                      | exact asset/network, observation                      |
-| controlled wallet stablecoin  | active venue               | strict Relay deposit address, gated | exact amount, owned refund, request correlation       |
-| Privy configured on-ramp      | exact owned destination    | external handoff                    | method config, KYC/config where required, observation |
-| existing other-venue cash     | target venue               | shortfall only                      | withdrawal/movement capability                        |
-| any enabled source            | Limitless slow route       | Prepare Funds                       | measured latency, fresh Buy                           |
-| eligible cash                 | validated user destination | withdrawal                          | destination ID, recovery                              |
-| external ready binding        | active venue               | explicit Trading Wallet             | signer, setup, readiness                              |
-| external source-only wallet   | internal Hunch destination | explicit funding                    | client signature, observation                         |
-| owned PM position             | owner PM binding           | redeem                              | owner proof, preparation, action validation           |
+| Source                            | Destination                | Purpose/mode                        | Required evidence                                      |
+| --------------------------------- | -------------------------- | ----------------------------------- | ------------------------------------------------------ |
+| existing PM collateral            | Polymarket                 | instant trade                       | binding, locks, readiness                              |
+| existing Limitless collateral     | Limitless                  | instant trade                       | binding, locks, readiness                              |
+| existing Limitless collateral     | Limitless CLOB             | Buy/Sell                            | profile, exchange/adapter, approvals, locks, slippage  |
+| existing Limitless collateral     | Limitless AMM              | Buy/Sell                            | profile, market/spender, approvals, locks, min output  |
+| Solana SOL                        | Polymarket                 | Add Funds exact input               | Relay, gas/rent, PM follow-up                          |
+| Solana USDC                       | Polymarket                 | Add Funds                           | Relay route/settlement                                 |
+| Ethereum supported USDT/USDC      | Polymarket                 | prepare/inline by evidence          | exact mapping, refund, net output                      |
+| supported wallet token            | active venue               | conversion                          | consent, price, route, min output                      |
+| exchange stablecoin               | owned receive location     | direct Receive                      | exact asset/network, observation                       |
+| controlled wallet stablecoin      | active venue               | strict Relay deposit address, gated | exact amount, owned refund, request correlation        |
+| Privy configured on-ramp          | exact owned destination    | external handoff                    | method config, KYC/config where required, observation  |
+| existing other-venue cash         | target venue               | shortfall only                      | withdrawal/movement capability                         |
+| any enabled source                | Limitless slow route       | Prepare Funds                       | measured latency, fresh Buy                            |
+| eligible cash                     | validated user destination | withdrawal                          | destination ID, recovery                               |
+| external ready binding            | active venue               | explicit Trading Wallet             | signer, setup, readiness                               |
+| external source-only wallet       | internal Hunch destination | explicit funding                    | client signature, observation                          |
+| owned PM position                 | owner PM binding           | redeem                              | owner proof, preparation, action validation            |
+| owned Limitless position          | owner Limitless binding    | standard redeem                     | resolution, token balance, canonical CTF call, receipt |
+| owned Limitless neg-risk position | owner Limitless binding    | neg-risk redeem                     | resolution, adapter, approval, receipt                 |
 
 Every proposed active route runs through Relay first. Across/deBridge matrix
 rows exist only for legacy reconciliation or an explicit disabled-by-default
@@ -3683,6 +3777,9 @@ shape; no cross-provider runtime abstraction was introduced.
 
 Required work:
 
+- freeze and consume the side-effect-free preparation inspection/simulator
+  contract in `docs/funding/wp6/README.md`; WP5 cannot call provisioning,
+  connect/login, deployment, approvals, Funding Router, trade, or redemption;
 - implement PM/Limitless binding and destination adapters;
 - implement valid destination-option enumeration, configurable recommendation,
   deterministic Trading Wallet selection, and pure Placement Policy;
@@ -3700,6 +3797,8 @@ Completion evidence:
 - no-context multi-destination Add Funds cannot quote until the user chooses;
 - no quote can commit without one selected source option and exact raw amounts;
 - external balance size never overrides position/explicit-current-intent/internal precedence;
+- planner fixtures distinguish Polymarket funder topologies, Limitless CLOB
+  versus AMM, and purpose-specific readiness without executing setup;
 - unknown speed is Prepare Funds;
 - disabled/unfundable venue returns typed unavailable, never fallback destination.
 
@@ -3707,13 +3806,23 @@ Completion evidence:
 
 Required work:
 
+- implement the complete inventory, ownership boundaries, side-effect ledger,
+  purpose matrices, migration order, and missing tests frozen in
+  `docs/funding/wp6/README.md`;
+- preserve existing Privy EVM/Solana provisioning in Auth and expose missing
+  provisioning only as a typed prerequisite;
 - integrate Polymarket Deposit Wallet receipt, Funding Router follow-up,
   readiness, reservation, and fresh trade;
-- extract current Polymarket internal bootstrap, external Safe/deposit-wallet
-  setup, credential/approval, and readiness logic behind one purpose-aware adapter;
-- integrate owner-bound Polymarket redemption through a focused position-action
-  executor without modeling it as funding or withdrawal;
-- integrate Limitless collateral/readiness without weakening trade guards;
+- extract current Polymarket internal bootstrap, external signer/Safe/Magic/
+  Deposit Wallet setup, credential/approval, normal/neg-risk, and readiness
+  logic behind one purpose-aware adapter;
+- integrate owner-bound Polymarket standard/neg-risk redemption through a
+  focused position-action executor without modeling it as funding or withdrawal;
+- integrate Limitless internal prepared-auth, external client login, CLOB/AMM
+  collateral/readiness, exact profile binding, approvals, and account freshness
+  without weakening trade guards;
+- integrate owner-bound Limitless standard/neg-risk redemption through the same
+  focused position-action boundary;
 - implement supported token conversion through common operations;
 - integrate optional withdrawal behind an independent gate;
 - consume/release funding reservations atomically with web and Telegram
@@ -3722,14 +3831,25 @@ Required work:
 
 Completion evidence:
 
+- Privy missing-EVM/missing-Solana/already-exists/reconciliation cases retain
+  current Auth behavior and venue adapters never provision wallets;
 - PM collateral is CLOB-visible before executable readiness;
+- signer, Deposit Wallet, supported 1/1 Safe, and Magic-proxy Polymarket rows
+  pass Fund/Buy/Sell/Redeem/Withdraw parity, including normal/neg-risk variants;
+- Limitless internal/external connection and CLOB/AMM readiness matrices pass;
+- generic `LimitlessVenueStatus.ready` remains a wallet-summary/bootstrap hint
+  and never satisfies market/side-specific CLOB or AMM readiness;
 - Limitless slow route prepares and requotes;
+- Polymarket and Limitless standard/neg-risk owner-bound redemption pass receipt,
+  marker-failure, restart, and no-duplicate-broadcast tests;
 - token conversion uses actual outputs;
 - abandoned trade releases prepared cash without auto-return;
 - auth, Add Funds, Buy, Sell, Redeem, and Telegram consume one preparation contract;
 - external ready/setup/source-only/view-only classifications match signer,
   deployment, registration, credentials, approvals, and exact execution capability;
-- an external position can only be redeemed by its owner binding.
+- an external position can only be redeemed by its owner binding;
+- no existing caller or reconciliation path is removed before its old-versus-new
+  parity and guarded live evidence are green.
 
 ### Work package 7 — One web UX
 
@@ -3831,7 +3951,9 @@ The order is intentional:
    new-plan creation switches.
 
 Work package 5 may plan only against the frozen preparation contract, simulator,
-or a thin current-behavior wrapper. It must not duplicate Polymarket setup logic.
+or a thin current-behavior wrapper defined by `docs/funding/wp6/README.md`. It
+must not duplicate Polymarket setup logic, collapse Limitless CLOB/AMM
+readiness, provision wallets, connect a venue, approve, fund, trade, or redeem.
 No new venue route becomes active until work package 6 installs and verifies the
 single real preparation/position-action capabilities.
 
@@ -4133,14 +4255,28 @@ Backend starting evidence:
 - `apps/api/src/services/deposit-events.ts` — current correlation behavior;
 - `apps/api/src/services/notifications.ts` — reusable notifications;
 - `apps/api/src/privy-service.ts` and `apps/api/src/routes/auth.ts` — wallet facts;
+- `apps/api/src/auth.ts` and `apps/api/src/services/embedded-privy.ts` —
+  exact user-wallet binding and prepared internal-wallet authorization;
 - `apps/api/src/services/embedded-solana.ts` — generic behavior to extract without DFlow;
+- `apps/api/src/services/polymarket-funder.ts` and
+  `apps/api/src/services/polymarket-onchain.ts` — signer/Deposit Wallet/
+  Safe/Magic topology, locks, balances, and approvals;
 - `apps/api/src/services/polymarket-embedded.ts` — PM wallet/readiness behavior;
 - `apps/api/src/services/api-trading-wallet-signing.ts` — signing boundary;
 - `apps/api/src/services/polymarket-funding-router.ts` — PM follow-up;
 - `apps/api/src/services/polymarket-redemption-plan.ts` — canonical redemption
   adapters and position validation to preserve behind the focused capability;
 - `apps/api/src/services/polymarket-trading-execution-service.ts` — PM execution;
-- `apps/api/src/services/limitless-trading-execution-service.ts` — Limitless guards;
+- `apps/api/src/routes/limitless-private.ts`,
+  `apps/api/src/services/limitless-auth.ts`, and
+  `apps/api/src/services/limitless-client.ts` — internal/external Limitless
+  connection, exact profile binding, and partner auth;
+- `apps/api/src/services/limitless-onchain.ts` and
+  `apps/api/src/services/limitless-trading-execution-service.ts` — CLOB/AMM
+  balances, approvals, readiness, and execution guards;
+- `apps/api/src/services/limitless-redemption-plan.ts` and
+  `apps/api/src/services/limitless-redemption.ts` — standard/neg-risk
+  owner-bound redemption evidence;
 - `apps/api/src/services/telegram-bot-trading.ts` — existing bot workflow;
 - `apps/finance-worker/src/*` — durable scheduler/lease owner to extend with
   sidecar-safe funding reconciliation;
@@ -4163,6 +4299,10 @@ Frontend starting evidence:
 - `src/providers/auth/AuthPolymarketWalletBootstrap.tsx` and
   `src/lib/auth/embedded-polymarket-bootstrap-rules.ts` — current proactive
   internal-wallet preparation inputs;
+- `src/providers/auth/AuthLimitlessWalletBootstrap.tsx`,
+  `src/lib/trade/limitless-embedded-ready.ts`, and
+  `src/lib/trade/limitless-connect-flow.ts` — current internal prepared-auth
+  and external client connection paths;
 - `src/lib/auth/privy-wallets.ts` — wallet classification;
 - `src/hooks/trade/useTradeWalletGate.ts` — current internal-first trade gate;
 - `src/hooks/confirmation/useSafeCandidatesByWallet.ts` — current deployed Safe,
@@ -4171,8 +4311,16 @@ Frontend starting evidence:
   credentials, approvals, and redemption-adapter preparation behavior;
 - `src/hooks/trade/usePolymarketTrade.ts` — current mixed external
   Safe/deposit-wallet setup that must move behind the preparation capability;
-- `src/hooks/trade/usePolymarketRedemption.ts` and
-  `src/hooks/trade/useRedemptionWalletGate.ts` — current owner-bound redemption paths;
+- `src/hooks/trade/useEmbeddedLimitlessPreparation.ts`,
+  `src/hooks/trade/useEmbeddedLimitlessAmmPreparation.ts`,
+  `src/hooks/trade/useLimitlessTrade.ts`, and
+  `src/hooks/trade/useLimitlessAmmTrade.ts` — distinct current Limitless
+  CLOB/AMM preparation paths;
+- `src/hooks/trade/usePolymarketRedemption.ts`,
+  `src/hooks/trade/useLimitlessRedemption.ts`,
+  `src/hooks/trade/useRedemptionWalletGate.ts`, and
+  `src/hooks/trade/redemption-marker.ts` — current owner-bound redemption,
+  receipt, sync, and compatibility-marker paths;
 - `src/hooks/bridge/useBridgeFundingSuggestion.ts` — legacy balance-driven source
   scanning to replace with separate destination/binding/source policy;
 - `src/hooks/deposit/useDepositFundWallet.ts` — Privy funding entry point;
