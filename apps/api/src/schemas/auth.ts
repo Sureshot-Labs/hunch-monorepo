@@ -4,30 +4,15 @@ import { zEthAddress, zRequiredString, zVenue } from "./common.js";
 export const authPrivyBodySchema = z.object({
   accessToken: zRequiredString("accessToken is required"),
   referralCode: z.string().trim().min(3).max(10).optional(),
-  inviteConfirmed: z.boolean().optional(),
   expectedAddedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
   expectedRemovedWalletAddresses: z.array(z.string().trim().min(1)).optional(),
   expectedRemovedTelegramUserId: z.string().trim().regex(/^\d+$/).optional(),
   expectedTelegramUserId: z.string().trim().regex(/^\d+$/).optional(),
 });
 
-export const inviteReasonSchema = z.enum([
-  "missing_code",
-  "invalid_code",
-  "not_found",
-  "self_referral",
-]);
-
 export const authErrorResponseSchema = z.object({
   error: z.string(),
   message: z.string().optional(),
-});
-
-export const authInviteRequiredResponseSchema = z.object({
-  error: z.literal("invite_required"),
-  reason: inviteReasonSchema,
-  inviteOnly: z.literal(true),
-  invitePolicyVersion: z.string(),
 });
 
 export const authPrivyTerminalErrorCodeSchema = z.enum([
@@ -61,7 +46,6 @@ export const authUserSchema = z.object({
   isAdmin: z.boolean(),
   isActive: z.boolean(),
   isVerified: z.boolean(),
-  postSignupOnboardingRequired: z.boolean(),
   createdAt: z.string(),
   lastLoginAt: z.string().optional(),
 });
@@ -99,9 +83,6 @@ export const authPrivySuccessResponseSchema = z.object({
   walletAddresses: z.array(z.string()),
   primaryWalletAddress: z.string(),
   privyUserId: z.string(),
-  invitePrompt: z.boolean().optional(),
-  inviteReason: inviteReasonSchema.optional(),
-  invitePolicyVersion: z.string().optional(),
   referralSignupAttribution: z
     .object({
       referralCode: z.string(),
