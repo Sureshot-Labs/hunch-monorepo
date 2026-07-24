@@ -138,7 +138,11 @@ export type WalletExecutionProfile = Readonly<{
   networkId: NetworkId;
   address: string;
   source: "embedded" | "smart" | "external";
-  signingModes: readonly ("web_client" | "privy_delegated")[];
+  signingModes: readonly (
+    | "web_client"
+    | "privy_authorization"
+    | "privy_delegated"
+  )[];
   serverWalletRef: string | null;
   sponsorshipPolicyIds: readonly string[];
 }>;
@@ -163,6 +167,12 @@ export type PreparationStatus =
   | "user_action_required"
   | "unavailable";
 
+export type PreparationExecutionMode =
+  | "web_client"
+  | "privy_authorization"
+  | "privy_delegated"
+  | "venue_relayer";
+
 export type VenueAccountBinding = Readonly<{
   bindingId: VenueBindingId;
   venueId: VenueId;
@@ -170,7 +180,7 @@ export type VenueAccountBinding = Readonly<{
   executionWalletId: WalletId;
   accountRef: string;
   settlementLocation: AssetLocation;
-  signingMode: "web_client" | "privy_delegated";
+  signingMode: "web_client" | "privy_authorization" | "privy_delegated";
 }>;
 
 export type VenueBindingOption = Readonly<{
@@ -178,6 +188,9 @@ export type VenueBindingOption = Readonly<{
   safeLabel: string;
   readinessClass: TradingWalletReadinessClass;
   preparationPurpose: PreparationPurpose;
+  marketClass: string | null;
+  topology: string;
+  inspectionRevision: string;
   selectable: boolean;
   reasonCodes: readonly FundingReasonCode[];
 }>;
@@ -303,6 +316,13 @@ export type SourceOption = Readonly<{
   expectedDestination: Money | null;
   minimumDestination: Money | null;
   estimatedUsd: string | null;
+  fees: readonly Readonly<{
+    kind: string;
+    amount: Money;
+    estimatedUsd: string | null;
+  }>[];
+  eta: Readonly<{ minSeconds: number; maxSeconds: number }> | null;
+  experienceMode: "inline_funding" | "prepare_first" | "unavailable";
   requiredActions: readonly ActionSummary[];
   expiresAt: string;
   recommended: boolean;
@@ -318,6 +338,12 @@ export type FundingDestinationOption = Readonly<{
   requiredAsset: AssetRef;
   networkLabel: string;
   readinessClass: TradingWalletReadinessClass;
+  preparationStatus: PreparationStatus;
+  preparationPurpose: PreparationPurpose;
+  executionMode: PreparationExecutionMode;
+  marketClass: string | null;
+  topology: string;
+  inspectionRevision: string;
   recommended: boolean;
   selectable: boolean;
   reasonCodes: readonly FundingReasonCode[];
@@ -349,6 +375,7 @@ export type IntentLiquidityProjection = Readonly<{
   freshness: "fresh" | "stale";
   errors: readonly ObservationError[];
   reasonCodes: readonly FundingReasonCode[];
+  destinationOptions: readonly FundingDestinationOption[];
 }>;
 
 export type FundingDiscoveryRequest = FundingIntent;
@@ -364,6 +391,25 @@ export type FundingCommitRequest = Readonly<{
   quoteId: string;
   consentToken: string;
   idempotencyKey: string;
+}>;
+
+export type FundingQuoteSummary = Readonly<{
+  quoteId: string;
+  liquidityProjectionId: string;
+  selectedSourceOptionId: string;
+  destinationOptionId: string;
+  venueBindingOptionId: string;
+  planKind: FundingExecutionPlan["kind"];
+  experienceMode: "instant" | "inline_funding" | "prepare_first";
+  expectedDestination: Money;
+  minimumDestination: Money;
+  fees: SourceOption["fees"];
+  eta: Readonly<{ minSeconds: number; maxSeconds: number }> | null;
+  requiredActions: readonly ActionSummary[];
+  planHash: string;
+  consentToken: string;
+  expiresAt: string;
+  policyVersion: number;
 }>;
 
 export type MarketContextBinding = Readonly<{
@@ -502,9 +548,12 @@ export const FUNDING_REASON_CODES = [
   "cash_availability_unknown",
   "creation_mode_off",
   "destination_not_selected",
+  "destination_selection_required",
+  "destination_setup_required",
   "destination_unavailable",
   "external_signer_required",
   "fee_limit_exceeded",
+  "funding_cost_warning",
   "fixture_adapter_forbidden",
   "insufficient_gas",
   "insufficient_liquidity",
@@ -512,6 +561,7 @@ export const FUNDING_REASON_CODES = [
   "invalid_amount",
   "invalid_market_context",
   "invalid_policy",
+  "market_class_required",
   "invalid_state_transition",
   "minimum_output_not_met",
   "movement_representation_replaced",
@@ -519,6 +569,7 @@ export const FUNDING_REASON_CODES = [
   "policy_gate_closed",
   "provider_capability_disabled",
   "provider_status_unknown",
+  "preparation_evidence_stale",
   "quote_expired",
   "refund_location_unsafe",
   "route_not_allowlisted",
@@ -529,6 +580,8 @@ export const FUNDING_REASON_CODES = [
   "trusted_price_unavailable",
   "unsupported_location",
   "unsupported_signer",
+  "wallet_provisioning_pending",
+  "wallet_unavailable",
   "withdrawal_recipient_invalid",
 ] as const;
 

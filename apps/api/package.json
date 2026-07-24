@@ -68,7 +68,7 @@
     "pretest": "pnpm -C ../../packages/infra run build",
     "pretest:fast": "pnpm run pretest",
     "test": "tsx src/test-runner.ts",
-    "test:fast": "tsx src/test-runner.ts --unit account-value-tests admin-funding-routes-tests admin-market-presentations-tests admin-merge-user-tests ai-response-tests cli-args-tests funding-domain-tests funding-legacy-tests funding-persistence-tests funding-relay-webhook-tests relay/fixtures-tests relay/rehearsal-tests relay/runtime-tests relay/solana-rehearsal-tests hot-token-selection-tests limitless-metadata-tests orders-repo-tests polymarket-max-spend-tests kalshi-dflow-transaction-safety-tests trading-ready-static-tests trading-service-tests polymarket-embedded-tests limitless-history-tests signal-bot-tests signal-evidence-tests signal-notification-headline-tests signal-post-copy-policy-tests",
+    "test:fast": "tsx src/test-runner.ts --unit account-value-tests admin-funding-routes-tests admin-market-presentations-tests admin-merge-user-tests ai-response-tests cli-args-tests funding-domain-tests funding-legacy-tests funding-persistence-tests funding-planner-tests funding-routes-tests funding-relay-webhook-tests relay/fixtures-tests relay/rehearsal-tests relay/runtime-tests relay/solana-rehearsal-tests hot-token-selection-tests limitless-metadata-tests orders-repo-tests polymarket-max-spend-tests kalshi-dflow-transaction-safety-tests trading-ready-static-tests trading-service-tests polymarket-embedded-tests limitless-history-tests signal-bot-tests signal-evidence-tests signal-notification-headline-tests signal-post-copy-policy-tests",
     "test:integration": "tsx src/test-runner.ts --integration",
     "test:unit": "tsx src/test-runner.ts --unit",
     "lint": "eslint .",

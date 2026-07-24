@@ -1672,6 +1672,10 @@ export class AuthService {
         [userId],
       );
       await client.query(
+        "delete from funding_liquidity_projections where user_id = $1",
+        [userId],
+      );
+      await client.query(
         `
           update funding_withdrawal_destinations
           set revoked_at = now(),

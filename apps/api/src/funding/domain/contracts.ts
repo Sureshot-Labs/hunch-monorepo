@@ -11,6 +11,7 @@ import type {
   NormalizedAction,
   ObservedAsset,
   OperationId,
+  PreparationExecutionMode,
   PreparationPurpose,
   PreparationStatus,
   ProviderId,
@@ -107,12 +108,17 @@ export type DestinationOptionsInput = Readonly<{
   accountId: AccountId;
   purpose: PreparationPurpose;
   marketContextId: string | null;
+  marketClass: string | null;
+  compatibleVenueBindingOptionIds: readonly string[] | null;
 }>;
 
 export type DestinationInput = Readonly<{
   accountId: AccountId;
   destinationOptionId: string;
   purpose: PreparationPurpose;
+  marketClass: string | null;
+  marketContextId: string | null;
+  requestedAmount: Money;
 }>;
 
 export type FundingRequirement = Readonly<{
@@ -132,12 +138,33 @@ export type PreparationInspectionInput = Readonly<{
   accountId: AccountId;
   binding: VenueAccountBinding;
   purpose: PreparationPurpose;
+  marketClass: string | null;
+  marketContextId: string | null;
+}>;
+
+export type PreparationPostcondition = Readonly<{
+  kind: string;
+  safeLabel: string;
 }>;
 
 export type PreparationResult = Readonly<{
   status: PreparationStatus;
   binding: VenueAccountBinding;
+  purpose: PreparationPurpose;
+  marketClass: string | null;
+  readinessClass:
+    | "internal_managed"
+    | "external_ready"
+    | "external_setup_available"
+    | "external_source_only"
+    | "external_view_only";
+  executionMode: PreparationExecutionMode;
+  topology: string;
+  inspectionRevision: string;
+  inspectedAt: string;
+  expiresAt: string;
   requiredActions: readonly ActionSummary[];
+  postconditions: readonly PreparationPostcondition[];
   reasonCodes: readonly FundingReasonCode[];
 }>;
 

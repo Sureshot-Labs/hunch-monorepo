@@ -3608,7 +3608,8 @@ backend projection. The old frontend venue-total owner and independent header
 total functions were removed. Cached read errors fail transaction-facing cash
 selection closed, while non-transactional views label retained data stale.
 Polymarket Buy deliberately keeps its more specific
-signer/deposit-wallet/funder buying-power owner until WP5 Intent Liquidity.
+signer/deposit-wallet/funder buying-power owner until WP6 wires real
+preparation facts into the now-implemented WP5 Intent Liquidity boundary.
 
 Migration `0183_user_asset_funding_preferences.sql` is additive and the existing
 user-merge path implements the frozen lifecycle rule: identical preferences
@@ -3775,6 +3776,11 @@ shape; no cross-provider runtime abstraction was introduced.
 
 ### Work package 5 — Destination, placement, Intent Liquidity, and planner
 
+Implementation status (2026-07-24): **locally complete; activation remains
+blocked pending WP6 real preparation adapters.** The implementation inventory,
+acceptance matrix, review corrections, local migration evidence, and passing
+verification commands are recorded in `docs/funding/wp5/README.md`.
+
 Required work:
 
 - freeze and consume the side-effect-free preparation inspection/simulator
@@ -3786,6 +3792,9 @@ Required work:
 - implement cash spendability, shortfall, source options, route economics, and experience classification;
 - implement Relay-first deterministic single-segment selection and reject a
   second segment or staged continuation;
+- bind eligible source facts to exactly one source/destination location-pattern
+  route before calling the Relay-only quote boundary; ambiguous duplicate
+  mappings fail policy publication;
 - implement quote storage, plan hash, consent, and public APIs;
 - integrate actual route observations into policy classification.
 
@@ -3797,10 +3806,16 @@ Completion evidence:
 - no-context multi-destination Add Funds cannot quote until the user chooses;
 - no quote can commit without one selected source option and exact raw amounts;
 - external balance size never overrides position/explicit-current-intent/internal precedence;
+- destination cash subtracts locks, reservations, and submitted debits; missing,
+  stale, or inconsistent spendability/price evidence fails closed before quote;
+- exact Relay candidates obey absolute/percentage cost caps, minimum destination
+  value, a 1.5-second quote budget, and a 3.5-second total planning budget;
 - planner fixtures distinguish Polymarket funder topologies, Limitless CLOB
   versus AMM, and purpose-specific readiness without executing setup;
 - unknown speed is Prepare Funds;
-- disabled/unfundable venue returns typed unavailable, never fallback destination.
+- disabled/unfundable venue returns typed unavailable, never fallback destination;
+- live projection market references protect retention while expired projections
+  are reported and removed by the retention cleanup path.
 
 ### Work package 6 — Wallet preparation, position actions, and active trading integration
 

@@ -249,7 +249,9 @@ const walletPreparationCapabilitySchema = z
       "external_source_only",
       "external_view_only",
     ]),
-    signerPath: z.enum(["web_client", "privy_delegated"]).nullable(),
+    signerPath: z
+      .enum(["web_client", "privy_authorization", "privy_delegated"])
+      .nullable(),
     selectable: z.boolean(),
     enabled: z.boolean(),
   })
@@ -293,10 +295,27 @@ export const fundingRuntimePolicySchema = z
       .object({
         requireExplicitNoTradeDestinationSelection: z.boolean(),
         maximumBufferBps: z.number().int().min(0).max(10_000),
-        maximumSlippageBps: z.number().int().min(0).max(10_000),
+        maximumBufferUsd: usdAmountSchema.default("0"),
+        maximumSlippageBps: z.number().int().min(0).max(500),
         maximumFeeUsd: usdAmountSchema,
+        maximumFeeBps: z.number().int().min(0).max(10_000).default(2_000),
+        warningFeeUsd: usdAmountSchema.default("5"),
+        warningFeeBps: z.number().int().min(0).max(10_000).default(1_000),
+        minimumDestinationUsd: usdAmountSchema.default("1"),
       })
       .strict(),
+    routeExperience: z
+      .object({
+        maximumInlineP95Ms: z.number().int().positive(),
+        minimumInlineSuccessBps: z.number().int().min(0).max(10_000),
+        minimumInlineObservationCount: z.number().int().positive(),
+      })
+      .strict()
+      .default({
+        maximumInlineP95Ms: 45_000,
+        minimumInlineSuccessBps: 9_500,
+        minimumInlineObservationCount: 20,
+      }),
     ttl: z
       .object({
         collectorMs: z.number().int().positive(),
@@ -359,8 +378,18 @@ export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
   placement: {
     requireExplicitNoTradeDestinationSelection: true,
     maximumBufferBps: 0,
+    maximumBufferUsd: "0",
     maximumSlippageBps: 100,
-    maximumFeeUsd: "0",
+    maximumFeeUsd: "10",
+    maximumFeeBps: 2_000,
+    warningFeeUsd: "5",
+    warningFeeBps: 1_000,
+    minimumDestinationUsd: "1",
+  },
+  routeExperience: {
+    maximumInlineP95Ms: 45_000,
+    minimumInlineSuccessBps: 9_500,
+    minimumInlineObservationCount: 20,
   },
   ttl: {
     collectorMs: 60_000,
@@ -497,6 +526,24 @@ function validateParsedFundingPolicy(
     ...duplicateIssues(
       policy.routes.map(({ routeId }) => routeId),
       "routes",
+    ),
+    ...duplicateIssues(
+      policy.routes
+        .filter(
+          (route) =>
+            route.enabled &&
+            route.providerId === "relay" &&
+            route.capability !== "deposit_address",
+        )
+        .map((route) =>
+          [
+            route.sourceLocationPatternId,
+            route.destinationLocationPatternId,
+            assetKey(route.sourceAsset),
+            assetKey(route.destinationAsset),
+          ].join("|"),
+        ),
+      "routes.exactWalletMapping",
     ),
     ...duplicateIssues(
       policy.privyFundingMethods.map(({ methodId }) => methodId),
@@ -747,7 +794,11 @@ function validateParsedFundingPolicy(
 
     if (
       route.experienceMode === "inline" &&
-      route.measuredObservationCount < route.minimumInlineObservationCount
+      route.measuredObservationCount <
+        Math.max(
+          route.minimumInlineObservationCount,
+          policy.routeExperience.minimumInlineObservationCount,
+        )
     ) {
       addIssue(
         issues,

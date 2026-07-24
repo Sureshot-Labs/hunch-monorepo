@@ -55,6 +55,21 @@ export function addUnsignedDecimals(values: readonly string[]): string {
   return formatUnsignedDecimal(total, scale);
 }
 
+export function compareUnsignedDecimals(left: string, right: string): number {
+  const leftParsed = parseUnsignedDecimal(left);
+  const rightParsed = parseUnsignedDecimal(right);
+  const scale = Math.max(leftParsed.scale, rightParsed.scale);
+  const leftCoefficient =
+    leftParsed.coefficient * powerOfTen(scale - leftParsed.scale);
+  const rightCoefficient =
+    rightParsed.coefficient * powerOfTen(scale - rightParsed.scale);
+  return leftCoefficient < rightCoefficient
+    ? -1
+    : leftCoefficient > rightCoefficient
+      ? 1
+      : 0;
+}
+
 export function multiplyRawByUnitPrice(inputs: {
   raw: string;
   decimals: number;

@@ -164,6 +164,6 @@ export function selectFundingDestination(
     reasonCodes:
       selectable.length === 0
         ? ["destination_unavailable"]
-        : ["destination_not_selected"],
+        : ["destination_selection_required"],
   };
 }

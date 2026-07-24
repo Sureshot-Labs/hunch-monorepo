@@ -509,6 +509,142 @@ await test("unified retention protects markets referenced by funding operations"
   }
 });
 
+await test("unified retention protects live funding projections and reports expired cleanup", async () => {
+  const rawTokenId = numericTokenId();
+  const marketId = `retention-funding-projection:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  const activeProjectionId = `projection_${crypto.randomUUID()}`;
+  const expiredProjectionId = `projection_${crypto.randomUUID()}`;
+
+  try {
+    await insertUnifiedLimitlessMarket({ marketId, rawTokenId });
+    await pool.query(
+      `
+        insert into funding_liquidity_projections (
+          id,
+          user_id,
+          request_snapshot,
+          projection_snapshot,
+          planner_snapshot,
+          policy_version,
+          policy_revision,
+          ownership_revision,
+          expires_at
+        )
+        values (
+          $1,
+          $2,
+          '{}'::jsonb,
+          '{}'::jsonb,
+          jsonb_build_object(
+            'marketContext',
+            jsonb_build_object('marketId', $3::text)
+          ),
+          1,
+          'retention-policy',
+          'retention-ownership',
+          now() + interval '1 hour'
+        )
+      `,
+      [activeProjectionId, userId, marketId],
+    );
+
+    const activeReport = await runApiScriptJson(
+      "market-retention-selector.ts",
+      [
+        "--venue=limitless",
+        "--cutoff-days=30",
+        "--limit=50000",
+        "--sample=200",
+        "--json",
+      ],
+    );
+    const activeRows = summaryRows(activeReport, "batchSummary");
+    assert.ok(
+      countFor(activeRows, {
+        section: "protected_by_reason",
+        label: "funding_liquidity_projections",
+      }) >= 1,
+    );
+    assert.equal(
+      summaryRows(activeReport, "removableSamples").some(
+        (row) => row.marketId === marketId,
+      ),
+      false,
+    );
+
+    await pool.query(
+      "delete from funding_liquidity_projections where id = $1",
+      [activeProjectionId],
+    );
+    await pool.query(
+      `
+        insert into funding_liquidity_projections (
+          id,
+          user_id,
+          request_snapshot,
+          projection_snapshot,
+          planner_snapshot,
+          policy_version,
+          policy_revision,
+          ownership_revision,
+          expires_at,
+          created_at
+        )
+        values (
+          $1,
+          $2,
+          '{}'::jsonb,
+          '{}'::jsonb,
+          jsonb_build_object(
+            'marketContext',
+            jsonb_build_object('marketId', $3::text)
+          ),
+          1,
+          'retention-policy',
+          'retention-ownership',
+          now() - interval '1 hour',
+          now() - interval '2 hours'
+        )
+      `,
+      [expiredProjectionId, userId, marketId],
+    );
+
+    const expiredReport = await runApiScriptJson(
+      "market-retention-selector.ts",
+      [
+        "--venue=limitless",
+        "--cutoff-days=30",
+        "--limit=50000",
+        "--sample=200",
+        "--json",
+      ],
+    );
+    const expiredRows = summaryRows(expiredReport, "batchSummary");
+    assert.ok(
+      countFor(expiredRows, {
+        section: "derived_by_table",
+        label: "funding_liquidity_projections_expired_cleanup",
+      }) >= 1,
+    );
+    assert.equal(
+      summaryRows(expiredReport, "removableSamples").some(
+        (row) => row.marketId === marketId,
+      ),
+      true,
+    );
+  } finally {
+    await pool.query(
+      "delete from funding_liquidity_projections where id = any($1::text[])",
+      [[activeProjectionId, expiredProjectionId]],
+    );
+    await cleanupUnifiedRetentionTest(userId, marketId, [
+      rawTokenId,
+      `other-${rawTokenId}`,
+    ]);
+  }
+});
+
 await test("unified retention protects Telegram outbox market references", async () => {
   const rawTokenId = numericTokenId();
   const marketId = `retention-telegram:${crypto.randomUUID()}`;

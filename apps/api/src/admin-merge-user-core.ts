@@ -394,6 +394,13 @@ export async function mergeUsers(
     }
     await client.query(
       `
+        delete from funding_liquidity_projections
+        where user_id = any($1::uuid[])
+      `,
+      [[source.id, target.id]],
+    );
+    await client.query(
+      `
         select set_config('hunch.funding_user_merge', 'on', true);
         set constraints
           funding_operations_quote_ownership_fk,

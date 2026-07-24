@@ -350,6 +350,9 @@ await test("selects only current-intent opaque Trading Wallet options", () => {
       safeLabel: "Hunch Trading Wallet",
       readinessClass: "internal_managed" as const,
       preparationPurpose: "buy" as const,
+      marketClass: "standard",
+      topology: "deposit_wallet",
+      inspectionRevision: "inspection_hunch_12345678",
       selectable: true,
       reasonCodes: [],
     },
@@ -358,6 +361,9 @@ await test("selects only current-intent opaque Trading Wallet options", () => {
       safeLabel: "External wallet …1234",
       readinessClass: "external_ready" as const,
       preparationPurpose: "buy" as const,
+      marketClass: "standard",
+      topology: "signer_eoa",
+      inspectionRevision: "inspection_external_12345678",
       selectable: true,
       reasonCodes: [],
     },
@@ -412,6 +418,12 @@ await test("never auto-commits a recommended destination", () => {
       requiredAsset: polygonPusd,
       networkLabel: "Polygon",
       readinessClass: "internal_managed" as const,
+      preparationStatus: "ready" as const,
+      preparationPurpose: "fund" as const,
+      executionMode: "privy_authorization" as const,
+      marketClass: null,
+      topology: "deposit_wallet",
+      inspectionRevision: "inspection_poly_12345678",
       recommended: true,
       selectable: true,
       reasonCodes: [],
@@ -424,6 +436,12 @@ await test("never auto-commits a recommended destination", () => {
       requiredAsset: baseUsdc,
       networkLabel: "Base",
       readinessClass: "internal_managed" as const,
+      preparationStatus: "ready" as const,
+      preparationPurpose: "fund" as const,
+      executionMode: "privy_authorization" as const,
+      marketClass: null,
+      topology: "embedded_eoa",
+      inspectionRevision: "inspection_limitless_12345678",
       recommended: false,
       selectable: true,
       reasonCodes: [],
@@ -434,7 +452,7 @@ await test("never auto-commits a recommended destination", () => {
     explicitDestinationOptionId: null,
   });
   assert.equal(unselected.selected, null);
-  assert.deepEqual(unselected.reasonCodes, ["destination_not_selected"]);
+  assert.deepEqual(unselected.reasonCodes, ["destination_selection_required"]);
 
   const explicit = selectFundingDestination({
     options: destinations,
@@ -524,6 +542,43 @@ await test("default policy is immutable and fail-closed for creation only", () =
   }
 });
 
+await test("older stored policies receive fail-closed WP5 economics defaults", () => {
+  const legacyCandidate = structuredClone(
+    DEFAULT_FUNDING_RUNTIME_POLICY,
+  ) as unknown as Record<string, unknown>;
+  delete legacyCandidate.routeExperience;
+  const placement = legacyCandidate.placement as Record<string, unknown>;
+  delete placement.maximumBufferUsd;
+  delete placement.maximumFeeBps;
+  delete placement.warningFeeUsd;
+  delete placement.warningFeeBps;
+  delete placement.minimumDestinationUsd;
+  const validated = validateFundingRuntimePolicy(legacyCandidate);
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  assert.deepEqual(validated.policy.routeExperience, {
+    maximumInlineP95Ms: 45_000,
+    minimumInlineSuccessBps: 9_500,
+    minimumInlineObservationCount: 20,
+  });
+  assert.deepEqual(
+    {
+      maximumBufferUsd: validated.policy.placement.maximumBufferUsd,
+      maximumFeeBps: validated.policy.placement.maximumFeeBps,
+      warningFeeUsd: validated.policy.placement.warningFeeUsd,
+      warningFeeBps: validated.policy.placement.warningFeeBps,
+      minimumDestinationUsd: validated.policy.placement.minimumDestinationUsd,
+    },
+    {
+      maximumBufferUsd: "0",
+      maximumFeeBps: 2_000,
+      warningFeeUsd: "5",
+      warningFeeBps: 1_000,
+      minimumDestinationUsd: "1",
+    },
+  );
+});
+
 await test("rejects retired rollout modes", () => {
   for (const creationMode of ["shadow", "internal", "cohort"]) {
     const policy = mutableDefaultPolicy() as unknown as Record<string, unknown>;
@@ -553,6 +608,31 @@ await test("accepts a fully registered production route", () => {
     result.ok,
     true,
     result.ok ? undefined : JSON.stringify(result.issues),
+  );
+});
+
+await test("rejects ambiguous duplicate Relay wallet route mappings", () => {
+  const candidate = activeRoutePolicy();
+  const exactRoute = candidate.routes[0];
+  assert.ok(exactRoute);
+  candidate.routes.push({
+    ...structuredClone(exactRoute),
+    routeId: "polygon-pusd-to-base-usdc-second",
+  });
+  const result = validateFundingRuntimePolicy(
+    candidate,
+    productionTestRegistry(),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.ok
+      ? false
+      : result.issues.some(
+          (issue) =>
+            issue.code === "duplicate_id" &&
+            issue.path === "routes.exactWalletMapping",
+        ),
+    true,
   );
 });
 
@@ -760,7 +840,7 @@ await test("builds deterministic revisions and structural diffs", () => {
   assert.deepEqual(diffFundingPolicies(before, after), [
     {
       path: "placement.maximumFeeUsd",
-      before: "0",
+      before: "10",
       after: "2.50",
     },
   ]);

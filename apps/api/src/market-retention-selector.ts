@@ -156,6 +156,7 @@ function protectedRefsSql(
   candidateRefTokensTable: string,
   options: {
     includeFundingOperations?: boolean;
+    includeFundingLiquidityProjections?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
 ): string {
@@ -167,6 +168,17 @@ function protectedRefsSql(
     join funding_operations operation on operation.market_id = c.market_id
   `
     : "";
+  const fundingLiquidityProjectionsRef =
+    options.includeFundingLiquidityProjections
+      ? `
+    union
+    select distinct c.market_id, 'funding_liquidity_projections' as reason
+    from ${candidatePoolTable} c
+    join funding_liquidity_projections projection
+      on projection.planner_snapshot #>> '{marketContext,marketId}' = c.market_id
+    where projection.expires_at > now()
+  `
+      : "";
   const telegramTradeIntentsRef = options.includeTelegramTradeIntents
     ? `
     union
@@ -197,6 +209,7 @@ function protectedRefsSql(
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
     ${fundingOperationsRef}
+    ${fundingLiquidityProjectionsRef}
     ${telegramTradeIntentsRef}
     union
     select distinct c.market_id, 'wallet_position_snapshots' as reason
@@ -281,6 +294,25 @@ function telegramTradeIntentEphemeralDerivedSql(
   `;
 }
 
+function fundingLiquidityProjectionExpiredPredicate(alias: string): string {
+  return `${alias}.expires_at <= now()`;
+}
+
+function fundingLiquidityProjectionExpiredDerivedSql(
+  candidatePoolTable: string,
+): string {
+  return `
+        union all
+        select 'funding_liquidity_projections_expired_cleanup' as label,
+          count(distinct c.market_id)::text as markets,
+          count(*)::text as rows
+        from funding_liquidity_projections x
+        join ${candidatePoolTable} c
+          on x.planner_snapshot #>> '{marketContext,marketId}' = c.market_id
+        where ${fundingLiquidityProjectionExpiredPredicate("x")}
+  `;
+}
+
 function refTokensSql(
   candidatePoolTable: string,
   candidateTokensTable: string,
@@ -307,6 +339,7 @@ function refTokensSql(
 function candidateCte(
   options: {
     includeFundingOperations?: boolean;
+    includeFundingLiquidityProjections?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
 ): string {
@@ -533,14 +566,23 @@ async function relationExists(
 
 async function protectedRefOptions(client: PoolClient): Promise<{
   includeFundingOperations: boolean;
+  includeFundingLiquidityProjections: boolean;
   includeTelegramTradeIntents: boolean;
 }> {
-  const [includeFundingOperations, includeTelegramTradeIntents] =
-    await Promise.all([
-      relationExists(client, "public.funding_operations"),
-      relationExists(client, "public.telegram_trade_intents"),
-    ]);
-  return { includeFundingOperations, includeTelegramTradeIntents };
+  const [
+    includeFundingOperations,
+    includeFundingLiquidityProjections,
+    includeTelegramTradeIntents,
+  ] = await Promise.all([
+    relationExists(client, "public.funding_operations"),
+    relationExists(client, "public.funding_liquidity_projections"),
+    relationExists(client, "public.telegram_trade_intents"),
+  ]);
+  return {
+    includeFundingOperations,
+    includeFundingLiquidityProjections,
+    includeTelegramTradeIntents,
+  };
 }
 
 async function queryBatchSummary(
@@ -551,6 +593,10 @@ async function queryBatchSummary(
   const telegramTradeIntentsEphemeralDerived =
     options.includeTelegramTradeIntents
       ? telegramTradeIntentEphemeralDerivedSql("candidate_pool")
+      : "";
+  const fundingLiquidityProjectionsExpiredDerived =
+    options.includeFundingLiquidityProjections
+      ? fundingLiquidityProjectionExpiredDerivedSql("candidate_pool")
       : "";
   const { rows } = await client.query<BatchSummaryRow>(
     `
@@ -611,6 +657,7 @@ async function queryBatchSummary(
         select 'unified_event_activity_metrics_24h' as label, count(distinct c.event_id)::text as markets, count(*)::text as rows
         from unified_event_activity_metrics_24h x
         join candidate_events c on c.event_id = x.event_id
+        ${fundingLiquidityProjectionsExpiredDerived}
         ${telegramTradeIntentsEphemeralDerived}
       )
       select
@@ -951,10 +998,11 @@ async function materializeDeletionSet(
 
 async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
   const counts: DeleteCountRow[] = [];
-  const includeTelegramTradeIntents = await relationExists(
-    client,
-    "public.telegram_trade_intents",
-  );
+  const [includeFundingLiquidityProjections, includeTelegramTradeIntents] =
+    await Promise.all([
+      relationExists(client, "public.funding_liquidity_projections"),
+      relationExists(client, "public.telegram_trade_intents"),
+    ]);
 
   counts.push(
     await deleteAndCount(
@@ -1054,6 +1102,20 @@ async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
           using tmp_market_retention_removable_markets r
           where x.market_id = r.market_id
             and ${telegramTradeIntentEphemeralPredicate("x")}
+        `,
+      ),
+    );
+  }
+  if (includeFundingLiquidityProjections) {
+    counts.push(
+      await deleteAndCount(
+        client,
+        "funding_liquidity_projections_expired_cleanup",
+        `
+          delete from funding_liquidity_projections x
+          using tmp_market_retention_removable_markets r
+          where x.planner_snapshot #>> '{marketContext,marketId}' = r.market_id
+            and ${fundingLiquidityProjectionExpiredPredicate("x")}
         `,
       ),
     );

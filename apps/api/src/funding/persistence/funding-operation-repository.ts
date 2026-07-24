@@ -428,6 +428,21 @@ export async function createFundingQuote(
   return tx(pool, (client) => createFundingQuoteInTransaction(client, input));
 }
 
+export async function fetchFundingQuoteForUser(
+  db: Pick<Pool, "query">,
+  input: Readonly<{ userId: string; quoteId: string }>,
+): Promise<StoredFundingQuote | null> {
+  const { rows } = await db.query<FundingQuoteDbRow>(
+    `
+      select ${quoteColumns}
+      from funding_quotes
+      where user_id = $1 and id = $2
+    `,
+    [input.userId, input.quoteId],
+  );
+  return rows[0] ? mapQuote(rows[0]) : null;
+}
+
 function assertQuoteMatchesCommit(
   quote: StoredFundingQuote,
   input: FundingCommitInput,
@@ -891,6 +906,31 @@ export async function fetchFundingOperationForUser(
     [input.userId, input.operationId],
   );
   return rows[0] ? mapOperation(rows[0]) : null;
+}
+
+export async function listFundingOperationsForUser(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    userId: string;
+    limit: number;
+    beforeCreatedAt?: Date | null;
+  }>,
+): Promise<readonly FundingOperationRow[]> {
+  if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    throw new Error("funding operation history limit is outside policy");
+  }
+  const { rows } = await db.query<FundingOperationDbRow>(
+    `
+      select ${operationColumns}
+      from funding_operations
+      where user_id = $1
+        and ($2::timestamptz is null or created_at < $2)
+      order by created_at desc, id desc
+      limit $3
+    `,
+    [input.userId, input.beforeCreatedAt ?? null, input.limit],
+  );
+  return rows.map(mapOperation);
 }
 
 type FundingOperationScope =
