@@ -7,12 +7,12 @@ import {
   canonicalJsonHash,
   hashOpaqueToken,
   lookupHmac,
-} from "./funding/persistence/canonical.js";
-import { legacyBridgeCreationAllowed } from "./funding/legacy/bridge-adapter-classifier.js";
+} from "../../persistence/canonical.js";
+import { legacyBridgeCreationAllowed } from "../../legacy/bridge-adapter-classifier.js";
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   PRODUCTION_FUNDING_REGISTRY,
-} from "./funding/policies/funding-policy.js";
+} from "../../policies/funding-policy.js";
 
 type Test = Readonly<{ name: string; run: () => void }>;
 
@@ -46,7 +46,7 @@ const tests: readonly Test[] = [
     },
   },
   {
-    name: "WP4 registers reviewed provider components but keeps execution unreachable",
+    name: "production funding registry pins reviewed providers and wallet-profile executors",
     run: () => {
       assert.equal(DEFAULT_FUNDING_RUNTIME_POLICY.creationMode, "off");
       assert.deepEqual(DEFAULT_FUNDING_RUNTIME_POLICY.providers, []);
@@ -64,7 +64,10 @@ const tests: readonly Test[] = [
         PRODUCTION_FUNDING_REGISTRY.actionValidators.map(({ id }) => id),
         ["relay_evm_action_v1", "relay_svm_action_v1"],
       );
-      assert.deepEqual(PRODUCTION_FUNDING_REGISTRY.networkExecutors, []);
+      assert.deepEqual(
+        PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id),
+        ["wallet_profile_evm_v1", "wallet_profile_svm_v1"],
+      );
       assert.ok(
         PRODUCTION_FUNDING_REGISTRY.reconcilers.some(
           ({ id }) => id === "relay_status_v3",
@@ -74,21 +77,21 @@ const tests: readonly Test[] = [
 
       const persistenceSource = readFileSync(
         new URL(
-          "./funding/persistence/funding-operation-repository.ts",
+          "../../persistence/funding-operation-repository.ts",
           import.meta.url,
         ),
         "utf8",
       );
       const evidenceSource = readFileSync(
         new URL(
-          "./funding/persistence/funding-evidence-repository.ts",
+          "../../persistence/funding-evidence-repository.ts",
           import.meta.url,
         ),
         "utf8",
       );
       const workerSource = readFileSync(
         new URL(
-          "./funding/worker/funding-reconciliation-worker.ts",
+          "../../worker/funding-reconciliation-worker.ts",
           import.meta.url,
         ),
         "utf8",
@@ -104,7 +107,7 @@ const tests: readonly Test[] = [
     name: "notifications cannot become settlement evidence",
     run: () => {
       const reducerSource = readFileSync(
-        new URL("./funding/reconciliation/funding-reducer.ts", import.meta.url),
+        new URL("../../reconciliation/funding-reducer.ts", import.meta.url),
         "utf8",
       );
       assert.match(reducerSource, /listFundingObservationsForOperation/);
@@ -113,7 +116,7 @@ const tests: readonly Test[] = [
 
       const ingestionSource = readFileSync(
         new URL(
-          "./funding/reconciliation/funding-observation-ingestion.ts",
+          "../../reconciliation/funding-observation-ingestion.ts",
           import.meta.url,
         ),
         "utf8",

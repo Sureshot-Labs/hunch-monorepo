@@ -113,6 +113,8 @@ function buildExecution(overrides: Partial<ExecutionRow> = {}): ExecutionRow {
     created_at: new Date("2026-01-01T00:00:00.000Z"),
     updated_at: new Date("2026-01-01T00:00:00.000Z"),
     ...overrides,
+    funding_operation_id: overrides.funding_operation_id ?? null,
+    funding_reservation_id: overrides.funding_reservation_id ?? null,
   };
 }
 

@@ -8,7 +8,7 @@ import {
   LEGACY_BRIDGE_ADAPTER_VERSIONS,
   resolveLegacyBridgeReconciler,
   resolveLegacyCreationAdapterVersion,
-} from "./funding/legacy/bridge-adapter-classifier.js";
+} from "../../legacy/bridge-adapter-classifier.js";
 import {
   ACROSS_SWAP_API_OPTIONAL_ADAPTER,
   BUNGEE_LEGACY_RECONCILER,
@@ -18,7 +18,7 @@ import {
   assertNoLegacyCreationAdapter,
   assertOptionalFallbackRouteEnabled,
   legacyBridgeReconcilerForVersion,
-} from "./funding/legacy/provider-compatibility.js";
+} from "../../legacy/provider-compatibility.js";
 
 const fixtures = [
   {

@@ -37,9 +37,9 @@ import {
   buildDepositWalletSubmitBody,
   POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES,
   POLYMARKET_DEPOSIT_WALLET_FACTORY_ADDRESS,
-  sumTokenTransfersTo,
   validateCanonicalRedemptionBatch,
 } from "./services/polymarket-deposit-wallet-relayer.js";
+import { sumErc20TransfersTo } from "./funding/execution/evm-erc20-receipt.js";
 import { kalshiTradingExecutionTestHooks } from "./services/kalshi-trading-execution-service.js";
 import {
   isLimitlessBotClobExecutable,
@@ -1762,7 +1762,7 @@ const tests: TestCase[] = [
       const addressTopic = (address: string) =>
         ethers.zeroPadValue(address, 32);
       assert.equal(
-        sumTokenTransfersTo({
+        sumErc20TransfersTo({
           logs: [
             {
               address: "0x0000000000000000000000000000000000000030",
@@ -2881,16 +2881,13 @@ const tests: TestCase[] = [
         "validatePolymarketOrderBuilderCodeForConfig",
       );
       assert.notEqual(preflightIndex, -1);
-      assert.notEqual(fundingIndex, -1);
+      assert.equal(fundingIndex, -1);
       assert.notEqual(builderValidationIndex, -1);
-      assert.ok(
-        preflightIndex < fundingIndex,
-        "Polymarket order/funds preflight must run before router funding",
+      assert.match(
+        prepareBlock,
+        /requires a completed FundingOperation, venue-visible pUSD, and a fresh quote/,
       );
-      assert.ok(
-        builderValidationIndex < fundingIndex,
-        "Polymarket builder validation must run before router funding",
-      );
+      assert.ok(preflightIndex > builderValidationIndex);
       const accountBlock = sourceSlice(
         executionSource,
         "export async function fetchPolymarketAccountRoute",

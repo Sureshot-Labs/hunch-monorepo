@@ -1054,6 +1054,13 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         body: request.body,
         log: request.log,
         pool,
+        fundingReservation:
+          request.body.fundingOperationId && request.body.fundingReservationId
+            ? {
+                operationId: request.body.fundingOperationId,
+                reservationId: request.body.fundingReservationId,
+              }
+            : null,
         settlementMode: "legacy_assume_filled",
         signer,
         userId: user.id,

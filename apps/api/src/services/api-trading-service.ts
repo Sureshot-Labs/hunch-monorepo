@@ -4,6 +4,10 @@ import type {
   ApiVenueTradingExecutor,
   SupportedBotTradingVenue,
 } from "./api-trading-types.js";
+import {
+  assertFundingReservationReadyForTrade,
+  releaseFundingReservationForAbandonedTrade,
+} from "../funding/persistence/funding-evidence-repository.js";
 import { createKalshiTradingExecutionService } from "./kalshi-trading-execution-service.js";
 import { createLimitlessTradingExecutionService } from "./limitless-trading-execution-service.js";
 import { createPolymarketTradingExecutionService } from "./polymarket-trading-execution-service.js";
@@ -11,7 +15,7 @@ import {
   normalizeTradingError,
   TradingServiceError,
 } from "./trading-errors.js";
-import type { TradingVenue } from "./trading-types.js";
+import type { TradeIntent, TradingVenue } from "./trading-types.js";
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 
 export type {
@@ -58,11 +62,7 @@ export function createApiTradingApplicationService(
     return executor;
   };
 
-  const assertIntentAllowed = async (intent: {
-    action: "BUY" | "SELL";
-    actor: { kind: string };
-    venue: TradingVenue;
-  }): Promise<void> => {
+  const assertIntentAllowed = async (intent: TradeIntent): Promise<void> => {
     const allowed = await venueLifecycleAllowsTradingAction(
       input.pool,
       intent.venue,
@@ -80,15 +80,62 @@ export function createApiTradingApplicationService(
       venue: intent.venue,
     });
   };
+  const assertFundingReady = async (intent: TradeIntent): Promise<void> => {
+    if (!intent.fundingReservation) return;
+    if (intent.action !== "BUY") {
+      throw new TradingServiceError({
+        code: "invalid_trade_request",
+        message: "A funding reservation can only be linked to a buy.",
+        statusCode: 409,
+        venue: intent.venue,
+      });
+    }
+    try {
+      await assertFundingReservationReadyForTrade(input.pool, {
+        userId: intent.actor.userId,
+        link: intent.fundingReservation,
+        venue: intent.venue,
+        marketId: intent.target.marketId,
+      });
+    } catch (error) {
+      throw new TradingServiceError({
+        code: "insufficient_readiness",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Funding reservation is unavailable.",
+        statusCode: 409,
+        venue: intent.venue,
+      });
+    }
+  };
+  const assertReadyIntent = async (intent: TradeIntent): Promise<void> => {
+    await assertIntentAllowed(intent);
+    await assertFundingReady(intent);
+  };
 
   return {
     applyTradeEffects: (effectsInput) =>
       executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
     executePreparedTrade: async (executeInput) => {
-      await assertIntentAllowed(executeInput.prepared.intent);
-      return executorFor(executeInput.prepared.venue).executePreparedTrade(
-        executeInput,
-      );
+      const intent = executeInput.prepared.intent;
+      await assertReadyIntent(intent);
+      const executed = await executorFor(
+        executeInput.prepared.venue,
+      ).executePreparedTrade(executeInput);
+      if (
+        intent.fundingReservation &&
+        ["cancelled", "failed", "no_fill"].includes(
+          executed.submitResult.status,
+        )
+      ) {
+        await releaseFundingReservationForAbandonedTrade(input.pool, {
+          userId: intent.actor.userId,
+          link: intent.fundingReservation,
+          outcomeReason: `trade_${executed.submitResult.status}`,
+        });
+      }
+      return executed;
     },
     ensureReadiness: async (readinessInput) => {
       const executor = executorFor(readinessInput.venue);
@@ -113,15 +160,15 @@ export function createApiTradingApplicationService(
     persistTrade: (persistInput) =>
       executorFor(persistInput.intent.venue).persistTrade(persistInput),
     prepareTrade: async (prepareInput) => {
-      await assertIntentAllowed(prepareInput.intent);
+      await assertReadyIntent(prepareInput.intent);
       return executorFor(prepareInput.intent.venue).prepareTrade(prepareInput);
     },
     quote: async (quoteInput) => {
-      await assertIntentAllowed(quoteInput.intent);
+      await assertReadyIntent(quoteInput.intent);
       return executorFor(quoteInput.intent.venue).quote(quoteInput);
     },
     submitPreparedTrade: async (submitInput) => {
-      await assertIntentAllowed(submitInput.prepared.intent);
+      await assertReadyIntent(submitInput.prepared.intent);
       return executorFor(submitInput.prepared.venue).submitPreparedTrade(
         submitInput,
       );

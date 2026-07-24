@@ -865,7 +865,7 @@ const destination: FundingTarget = {
         payloadKind: "eip712",
         payload: {},
       }),
-    /signature and authorization/u,
+    /signature, authorization, and external handoff/u,
   );
 }
 
@@ -878,7 +878,10 @@ const destination: FundingTarget = {
       "solana-usdc-to-polygon-pusd",
     ].sort(),
   );
-  assert.equal(PRODUCTION_FUNDING_REGISTRY.networkExecutors.length, 0);
+  assert.deepEqual(
+    PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id).sort(),
+    ["wallet_profile_evm_v1", "wallet_profile_svm_v1"],
+  );
   assert.ok(
     PRODUCTION_FUNDING_REGISTRY.providerAdapters.some(
       ({ id }) => id === "relay_quote_v2",

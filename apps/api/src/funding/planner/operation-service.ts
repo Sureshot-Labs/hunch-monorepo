@@ -18,6 +18,10 @@ export class FundingOperationService {
       subjectLookupHmac: (userId: string) => string;
       subjectLookupKeyVersion: number;
       resolveOwnershipRevision: (userId: string) => Promise<string>;
+      revalidateWithdrawalRecipient?: (
+        db: Pick<Pool, "query">,
+        input: Readonly<{ userId: string; recipientId: string }>,
+      ) => Promise<void>;
       fetchQuote?: typeof fetchFundingQuoteForUser;
       commitOperation?: typeof commitFundingOperation;
       resolvePolicy?: typeof resolveFundingPolicy;
@@ -50,6 +54,25 @@ export class FundingOperationService {
       throw new FundingPersistenceError(
         "quote_not_found",
         "funding quote was not found for authenticated user",
+      );
+    }
+    const withdrawal = quote.planSnapshot.operation.purpose === "withdrawal";
+    const externalRecipientId =
+      quote.planSnapshot.operation.externalRecipientId;
+    if (withdrawal !== Boolean(externalRecipientId)) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "withdrawal purpose and external recipient binding differ",
+      );
+    }
+    if (
+      withdrawal &&
+      (!input.policy.gates.withdrawalExecution ||
+        !this.dependencies.revalidateWithdrawalRecipient)
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "withdrawal execution is disabled or lacks recipient revalidation",
       );
     }
     if (
@@ -88,6 +111,7 @@ export class FundingOperationService {
           if (
             currentPolicy.policy.creationMode !== "on" ||
             !currentPolicy.policy.gates.commit ||
+            (withdrawal && !currentPolicy.policy.gates.withdrawalExecution) ||
             currentPolicy.policy.version !== lockedQuote.policyVersion ||
             currentPolicy.revision !== lockedQuote.policyRevision
           ) {
@@ -103,6 +127,12 @@ export class FundingOperationService {
               "quote_invalidated",
               "wallet ownership facts changed while committing the quote",
             );
+          }
+          if (withdrawal && externalRecipientId) {
+            await this.dependencies.revalidateWithdrawalRecipient?.(client, {
+              userId: input.userId,
+              recipientId: externalRecipientId,
+            });
           }
         },
       },

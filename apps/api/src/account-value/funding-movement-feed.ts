@@ -16,6 +16,7 @@ export type FundingAvailabilityFact = Readonly<{
 
 export type FundingInTransitFact = Readonly<{
   operationId: string;
+  segmentId: string | null;
   sourceComponentId: string;
   sourceLocationId: string;
   amount: Readonly<{
@@ -40,6 +41,7 @@ type AvailabilityRow = {
 
 type InTransitRow = {
   operation_id: string;
+  segment_id: string | null;
   source_component_id: string;
   source_location_id: string;
   network_id: string;
@@ -82,11 +84,14 @@ export async function loadFundingAccountValueFacts(
           from balance_reservations
           where balance_reservations.user_id = $1
             and balance_reservations.state = 'active'
+            and balance_reservations.expires_at > now()
             and not exists (
               select 1
               from funding_observations observation
               where observation.operation_id =
                     balance_reservations.operation_id
+                and observation.segment_id is not distinct from
+                    balance_reservations.segment_id
                 and observation.kind in ('source_debit', 'source_credit')
                 and observation.canonical
                 and observation.finality_status = 'finalized'
@@ -106,6 +111,8 @@ export async function loadFundingAccountValueFacts(
            and reservation.mode = 'subtract_available'
           join funding_observations observation
             on observation.operation_id = operation.id
+           and observation.segment_id is not distinct from
+               reservation.segment_id
            and observation.kind = 'source_debit'
            and observation.canonical
            and observation.finality_status = 'finalized'
@@ -114,6 +121,8 @@ export async function loadFundingAccountValueFacts(
               select 1
               from funding_observations replacement
               where replacement.operation_id = operation.id
+                and replacement.segment_id is not distinct from
+                    reservation.segment_id
                 and replacement.kind in ('destination_credit', 'refund_credit')
                 and replacement.canonical
                 and replacement.finality_status = 'finalized'
@@ -144,6 +153,7 @@ export async function loadFundingAccountValueFacts(
         with source_evidence as (
           select
             operation_id,
+            segment_id,
             min(network_id) as network_id,
             min(asset_id) as asset_id,
             count(distinct network_id) as network_count,
@@ -154,10 +164,11 @@ export async function loadFundingAccountValueFacts(
           where kind in ('source_debit', 'source_credit')
             and canonical
             and finality_status = 'finalized'
-          group by operation_id
+          group by operation_id, segment_id
         )
         select
           operation.id as operation_id,
+          source.segment_id,
           coalesce(
             nullif(operation.source_snapshot->>'componentId', ''),
             reservation.component_id
@@ -168,31 +179,46 @@ export async function loadFundingAccountValueFacts(
           ) as source_location_id,
           source.network_id,
           source.asset_id,
-          (operation.requested_source_amount #>> '{asset,decimals}')::integer
+          coalesce(
+            (segment.quoted_input #>> '{asset,decimals}')::integer,
+            (operation.requested_source_amount #>> '{asset,decimals}')::integer
+          )
             as asset_decimals,
           source.raw_amount,
           source.observed_at
         from funding_operations operation
         join source_evidence source on source.operation_id = operation.id
+        left join funding_operation_segments segment
+          on segment.operation_id = operation.id
+         and segment.id = source.segment_id
         join lateral (
           select component_id, location_id
           from balance_reservations
           where operation_id = operation.id
             and mode = 'subtract_available'
+            and segment_id is not distinct from source.segment_id
           order by created_at asc
           limit 1
         ) reservation on true
         where operation.user_id = $1
           and source.network_count = 1
           and source.asset_count = 1
-          and operation.requested_source_amount #>> '{asset,networkId}'
+          and coalesce(
+                segment.quoted_input #>> '{asset,networkId}',
+                operation.requested_source_amount #>> '{asset,networkId}'
+              )
             = source.network_id
-          and operation.requested_source_amount #>> '{asset,assetId}'
+          and coalesce(
+                segment.quoted_input #>> '{asset,assetId}',
+                operation.requested_source_amount #>> '{asset,assetId}'
+              )
             = source.asset_id
           and not exists (
             select 1
             from funding_observations replacement
             where replacement.operation_id = operation.id
+              and replacement.segment_id is not distinct from
+                  source.segment_id
               and replacement.kind in ('destination_credit', 'refund_credit')
               and replacement.canonical
               and replacement.finality_status = 'finalized'
@@ -214,6 +240,7 @@ export async function loadFundingAccountValueFacts(
     })),
     inTransit: movementResult.rows.map((row) => ({
       operationId: row.operation_id,
+      segmentId: row.segment_id,
       sourceComponentId: row.source_component_id,
       sourceLocationId: row.source_location_id,
       amount: {
@@ -233,27 +260,31 @@ export function buildFundingInTransitObservations(
   userId: string,
   facts: readonly FundingInTransitFact[],
 ): readonly ObservedAsset[] {
-  return facts.map((fact) => ({
-    componentId: `funding-movement:${fact.operationId}`,
-    location: {
-      kind: "in_transit_claim",
-      locationId: `funding-in-transit:${fact.operationId}`,
-      accountId: userId,
-      asset: fact.amount.asset,
-      details: {
-        movementId: fact.operationId,
-        representationStage: "in_transit",
-        sourceComponentId: fact.sourceComponentId,
-        sourceLocationId: fact.sourceLocationId,
+  return facts.map((fact) => {
+    const movementId = `${fact.operationId}:${fact.segmentId ?? "operation"}`;
+    return {
+      componentId: `funding-movement:${movementId}`,
+      location: {
+        kind: "in_transit_claim",
+        locationId: `funding-in-transit:${movementId}`,
+        accountId: userId,
+        asset: fact.amount.asset,
+        details: {
+          movementId,
+          segmentId: fact.segmentId ?? "operation",
+          representationStage: "in_transit",
+          sourceComponentId: fact.sourceComponentId,
+          sourceLocationId: fact.sourceLocationId,
+        },
       },
-    },
-    amount: fact.amount,
-    ownershipEvidenceId: `funding-observation:${fact.operationId}`,
-    observedAt: fact.observedAt,
-    observationFreshness: "fresh",
-    observationError: null,
-    metadataRisk: "verified",
-  }));
+      amount: fact.amount,
+      ownershipEvidenceId: `funding-observation:${movementId}`,
+      observedAt: fact.observedAt,
+      observationFreshness: "fresh",
+      observationError: null,
+      metadataRisk: "verified",
+    };
+  });
 }
 
 export function applyFundingSourceDebitSuppression(

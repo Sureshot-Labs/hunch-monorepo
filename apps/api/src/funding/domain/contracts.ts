@@ -147,9 +147,35 @@ export type PreparationPostcondition = Readonly<{
   safeLabel: string;
 }>;
 
+export type PreparationCheckStatus =
+  | "satisfied"
+  | "action_required"
+  | "user_action_required"
+  | "pending"
+  | "unavailable"
+  | "unsupported";
+
+export type PreparationCheckEvidence = Readonly<{
+  checkId: string;
+  status: PreparationCheckStatus;
+  safeLabel: string;
+  reasonCode: FundingReasonCode | null;
+}>;
+
+export type PreparationInspectionEvidence = Readonly<{
+  /**
+   * Sanitized, non-secret evidence only. Credential secrets, authorization
+   * material, signatures, private keys, and raw provider responses must never
+   * be placed in this object.
+   */
+  facts: JsonObject;
+  checks: readonly PreparationCheckEvidence[];
+}>;
+
 export type PreparationResult = Readonly<{
   status: PreparationStatus;
   binding: VenueAccountBinding;
+  safeLabel: string;
   purpose: PreparationPurpose;
   marketClass: string | null;
   readinessClass:
@@ -166,11 +192,13 @@ export type PreparationResult = Readonly<{
   requiredActions: readonly ActionSummary[];
   postconditions: readonly PreparationPostcondition[];
   reasonCodes: readonly FundingReasonCode[];
+  evidence: PreparationInspectionEvidence;
 }>;
 
 export type PreparationInput = PreparationInspectionInput &
   Readonly<{
     operationId: OperationId;
+    expectedInspectionRevision: string;
   }>;
 
 export interface WalletPreparationAdapter {
@@ -221,14 +249,23 @@ export type PositionActionInspectionInput = Readonly<{
 
 export type PositionActionReadiness = Readonly<{
   ready: boolean;
+  action: PositionActionKind;
+  venueId: VenueId;
+  positionRef: string;
   ownerBindingId: VenueBindingId;
+  inspectionRevision: string;
+  inspectedAt: string;
+  expiresAt: string;
   requiredActions: readonly ActionSummary[];
+  postconditions: readonly PreparationPostcondition[];
   reasonCodes: readonly FundingReasonCode[];
+  evidence: PreparationInspectionEvidence;
 }>;
 
 export type PositionActionInput = PositionActionInspectionInput &
   Readonly<{
     actionOperationId: string;
+    expectedInspectionRevision: string;
   }>;
 
 export type PositionActionReconcileInput = Readonly<{
@@ -238,6 +275,7 @@ export type PositionActionReconcileInput = Readonly<{
 
 export type PositionActionResult = Readonly<{
   status: "in_progress" | "completed" | "reconcile_required" | "failed";
+  submissionFingerprint: string | null;
   reasonCodes: readonly FundingReasonCode[];
 }>;
 

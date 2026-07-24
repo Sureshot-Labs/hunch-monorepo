@@ -62,7 +62,10 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
     { id: "relay_evm_action_v1", runtimeKind: "production" },
     { id: "relay_svm_action_v1", runtimeKind: "production" },
   ],
-  networkExecutors: [],
+  networkExecutors: [
+    { id: "wallet_profile_evm_v1", runtimeKind: "production" },
+    { id: "wallet_profile_svm_v1", runtimeKind: "production" },
+  ],
   reconcilers: [
     { id: "relay_status_v3", runtimeKind: "production" },
     { id: "across_legacy", runtimeKind: "production" },
@@ -111,6 +114,8 @@ const fundingOperationalGatesSchema = z
     refunds: z.boolean(),
     recovery: z.boolean(),
     workerDrain: z.boolean(),
+    withdrawalRegistration: z.boolean().default(false),
+    withdrawalExecution: z.boolean().default(false),
   })
   .strict();
 
@@ -361,6 +366,8 @@ export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
     refunds: true,
     recovery: true,
     workerDrain: true,
+    withdrawalRegistration: false,
+    withdrawalExecution: false,
   },
   headline: {
     mode: "liquid_only",
@@ -601,6 +608,7 @@ function validateParsedFundingPolicy(
     const sensitiveCapabilities: readonly LocationCapability[] = [
       "venue_settlement",
       "intermediate",
+      "withdrawal_source",
     ];
     if (
       location.enabled &&

@@ -203,11 +203,9 @@ export class RelayReconciliationDriver {
     if (segmentResult.rows.length === 0) {
       return { requestsPolled: 0, childrenDiscovered: 0 };
     }
-    if (segmentResult.rows.length !== 1) {
-      throw new Error("Relay funding operation must contain one segment");
-    }
-    const segment = segmentResult.rows[0];
-    if (!segment) throw new Error("Relay segment query returned no row");
+    const segmentsById = new Map(
+      segmentResult.rows.map((segment) => [segment.id, segment] as const),
+    );
 
     const initialRequestResult = await pool.query<StoredRelayRequest>(
       `
@@ -244,19 +242,20 @@ export class RelayReconciliationDriver {
         ciphertext: request.request_ref_ciphertext,
       });
     }
-    if (
-      segment.deposit_address_ciphertext &&
-      ![...existingByRequestId.values()].some(
-        ({ request_kind }) => request_kind === "initial",
-      )
-    ) {
-      throw new Error(
-        "Relay Deposit Address segment is missing its committed initial request",
-      );
-    }
-
     let childrenDiscovered = 0;
-    if (segment.deposit_address_ciphertext) {
+    for (const segment of segmentResult.rows) {
+      if (!segment.deposit_address_ciphertext) continue;
+      if (
+        ![...existingByRequestId.values()].some(
+          (request) =>
+            request.segment_id === segment.id &&
+            request.request_kind === "initial",
+        )
+      ) {
+        throw new Error(
+          "Relay Deposit Address segment is missing its committed initial request",
+        );
+      }
       const depositAddress = this.depositAddressCodec.decrypt(
         segment.deposit_address_ciphertext,
       );
@@ -278,6 +277,11 @@ export class RelayReconciliationDriver {
           );
         }
         const existing = existingByRequestId.get(request.requestId);
+        if (existing && existing.segment_id !== segment.id) {
+          throw new Error(
+            "Relay child request is already bound to another segment",
+          );
+        }
         const requestCiphertext =
           existing?.ciphertext ??
           this.referenceCodec.encrypt(request.requestId);
@@ -309,6 +313,9 @@ export class RelayReconciliationDriver {
 
     let requestsPolled = 0;
     for (const [requestId, request] of existingByRequestId) {
+      if (!segmentsById.has(request.segment_id)) {
+        throw new Error("Relay provider request references another operation");
+      }
       const status = await this.client.status(requestId);
       if (status.requestId !== undefined && status.requestId !== requestId) {
         throw new Error("Relay Status v3 request ID does not match lookup");

@@ -12,6 +12,10 @@ import {
   type FundingReconciliationBatchOptions,
   type FundingReconciliationBatchResult,
 } from "../reconciliation/funding-reducer.js";
+import { FundingStepReceiptReconciliationDriver } from "../execution/step-receipt-reconciler.js";
+import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
+import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-funding-reconciler.js";
+import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 
 export type RelayFundingWorkerConfig = Readonly<{
   apiKey: string;
@@ -89,10 +93,25 @@ export async function runFundingReconciliationJob(
     createRelayReferenceCodec(codecConfig),
     createRelayDepositAddressCodec(codecConfig),
   );
+  const transactionCodec = createFundingTransactionReferenceCodec(codecConfig);
+  const receiptDriver = new FundingStepReceiptReconciliationDriver(
+    transactionCodec,
+  );
+  const polymarketPostconditionDriver =
+    new PolymarketFundingPostconditionDriver(transactionCodec);
   return runFundingReconciliationBatch(pool, {
     ...options,
     providerPoll: (operationId, now) =>
       driver.pollOperation(pool, operationId, now),
+    receiptPoll: (operationId, now) =>
+      receiptDriver.pollOperation(pool, operationId, now),
+    postconditionPoll: (operationId, now) =>
+      pollFundingPostconditions(
+        [polymarketPostconditionDriver],
+        pool,
+        operationId,
+        now,
+      ),
   });
 }
 

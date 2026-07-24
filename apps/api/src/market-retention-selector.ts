@@ -157,6 +157,7 @@ function protectedRefsSql(
   options: {
     includeFundingOperations?: boolean;
     includeFundingLiquidityProjections?: boolean;
+    includePositionActionOperations?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
 ): string {
@@ -179,6 +180,14 @@ function protectedRefsSql(
     where projection.expires_at > now()
   `
       : "";
+  const positionActionOperationsRef = options.includePositionActionOperations
+    ? `
+    union
+    select distinct c.market_id, 'position_action_operations' as reason
+    from ${candidatePoolTable} c
+    join position_action_operations action on action.market_id = c.market_id
+  `
+    : "";
   const telegramTradeIntentsRef = options.includeTelegramTradeIntents
     ? `
     union
@@ -210,6 +219,7 @@ function protectedRefsSql(
     join executions ex on ex.unified_market_id = c.market_id
     ${fundingOperationsRef}
     ${fundingLiquidityProjectionsRef}
+    ${positionActionOperationsRef}
     ${telegramTradeIntentsRef}
     union
     select distinct c.market_id, 'wallet_position_snapshots' as reason
@@ -340,6 +350,7 @@ function candidateCte(
   options: {
     includeFundingOperations?: boolean;
     includeFundingLiquidityProjections?: boolean;
+    includePositionActionOperations?: boolean;
     includeTelegramTradeIntents?: boolean;
   } = {},
 ): string {
@@ -567,20 +578,24 @@ async function relationExists(
 async function protectedRefOptions(client: PoolClient): Promise<{
   includeFundingOperations: boolean;
   includeFundingLiquidityProjections: boolean;
+  includePositionActionOperations: boolean;
   includeTelegramTradeIntents: boolean;
 }> {
   const [
     includeFundingOperations,
     includeFundingLiquidityProjections,
+    includePositionActionOperations,
     includeTelegramTradeIntents,
   ] = await Promise.all([
     relationExists(client, "public.funding_operations"),
     relationExists(client, "public.funding_liquidity_projections"),
+    relationExists(client, "public.position_action_operations"),
     relationExists(client, "public.telegram_trade_intents"),
   ]);
   return {
     includeFundingOperations,
     includeFundingLiquidityProjections,
+    includePositionActionOperations,
     includeTelegramTradeIntents,
   };
 }

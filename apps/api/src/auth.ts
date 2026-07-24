@@ -105,6 +105,10 @@ export interface UserWallet {
   name: string | null;
   isPrimary: boolean;
   isVerified: boolean;
+  privyWalletId: string | null;
+  walletSource: "embedded" | "smart" | "external" | "unknown";
+  isInternalWallet: boolean;
+  privyProfileUpdatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -274,9 +278,19 @@ type UserWalletRow = {
   name: string | null;
   is_primary: boolean;
   is_verified: boolean;
+  privy_wallet_id?: string | null;
+  wallet_source?: "embedded" | "smart" | "external" | "unknown";
+  is_internal_wallet?: boolean;
+  privy_profile_updated_at?: Date | null;
   created_at: Date;
   updated_at: Date;
 };
+
+const USER_WALLET_COLUMNS = `
+  id, user_id, wallet_address, wallet_type, name, is_primary, is_verified,
+  privy_wallet_id, wallet_source, is_internal_wallet,
+  privy_profile_updated_at, created_at, updated_at
+`;
 
 function mapUserWalletRow(row: UserWalletRow): UserWallet {
   return {
@@ -287,6 +301,10 @@ function mapUserWalletRow(row: UserWalletRow): UserWallet {
     name: row.name,
     isPrimary: row.is_primary,
     isVerified: row.is_verified,
+    privyWalletId: row.privy_wallet_id ?? null,
+    walletSource: row.wallet_source ?? "unknown",
+    isInternalWallet: row.is_internal_wallet ?? false,
+    privyProfileUpdatedAt: row.privy_profile_updated_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1115,9 +1133,8 @@ export class AuthService {
     const privyUserId = privyUser.id;
     const privyWallets = PrivyService.extractWallets(privyUser);
     const telegramAccount = PrivyService.extractTelegramAccount(privyUser);
-    const walletProfiles = telegramAccount
-      ? PrivyService.classifyWallets(privyUser)
-      : [];
+    const walletProfiles = PrivyService.classifyWallets(privyUser);
+    const walletProfileLookup = buildWalletProfileLookup(walletProfiles);
     const primaryWallet = privyWallets[0];
     if (!primaryWallet) {
       throw new Error("No wallet address found in Privy user data");
@@ -1238,6 +1255,13 @@ export class AuthService {
 
       // Add any new wallet addresses
       for (const wallet of privyWallets) {
+        const profile =
+          walletProfileLookup.get(
+            walletLookupKey(wallet.walletType, wallet.address),
+          ) ?? null;
+        const walletSource = profile?.source ?? "unknown";
+        const isInternalWallet = profile?.isInternalWallet ?? false;
+        const privyWalletId = profile?.walletId?.trim() || null;
         const match = ETH_ADDRESS_RE.test(wallet.address)
           ? "lower(wallet_address) = lower($2)"
           : "wallet_address = $2";
@@ -1253,25 +1277,47 @@ export class AuthService {
 
         if (existingWallet.rows.length === 0) {
           await client.query(
-            `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
-               VALUES ($1, $2, $3, false, true)`,
-            [userId, wallet.address, wallet.walletType],
+            `INSERT INTO user_wallets (
+               user_id, wallet_address, wallet_type, is_primary, is_verified,
+               privy_wallet_id, wallet_source, is_internal_wallet,
+               privy_profile_updated_at
+             )
+             VALUES (
+               $1, $2, $3, false, true, $4, $5, $6,
+               case when $5 = 'unknown' then null else now() end
+             )`,
+            [
+              userId,
+              wallet.address,
+              wallet.walletType,
+              privyWalletId,
+              walletSource,
+              isInternalWallet,
+            ],
           );
           continue;
         }
 
-        const existing = existingWallet.rows[0];
-        if (
-          existing.wallet_type !== wallet.walletType ||
-          !existing.is_verified
-        ) {
-          await client.query(
-            `UPDATE user_wallets
-               SET wallet_type = $3, is_verified = true, updated_at = now()
-               WHERE user_id = $1 AND ${match}`,
-            [userId, wallet.address, wallet.walletType],
-          );
-        }
+        await client.query(
+          `UPDATE user_wallets
+             SET wallet_type = $3,
+                 is_verified = true,
+                 privy_wallet_id = $4,
+                 wallet_source = $5,
+                 is_internal_wallet = $6,
+                 privy_profile_updated_at =
+                   case when $5 = 'unknown' then null else now() end,
+                 updated_at = now()
+             WHERE user_id = $1 AND ${match}`,
+          [
+            userId,
+            wallet.address,
+            wallet.walletType,
+            privyWalletId,
+            walletSource,
+            isInternalWallet,
+          ],
+        );
       }
 
       await client.query(
@@ -1299,14 +1345,29 @@ export class AuthService {
 
       // Create wallet records
       for (const wallet of privyWallets) {
+        const profile =
+          walletProfileLookup.get(
+            walletLookupKey(wallet.walletType, wallet.address),
+          ) ?? null;
+        const walletSource = profile?.source ?? "unknown";
         await client.query(
-          `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified) 
-             VALUES ($1, $2, $3, $4, true)`,
+          `INSERT INTO user_wallets (
+             user_id, wallet_address, wallet_type, is_primary, is_verified,
+             privy_wallet_id, wallet_source, is_internal_wallet,
+             privy_profile_updated_at
+           )
+           VALUES (
+             $1, $2, $3, $4, true, $5, $6, $7,
+             case when $6 = 'unknown' then null else now() end
+           )`,
           [
             userId,
             wallet.address,
             wallet.walletType,
             wallet.address === primaryWalletAddress,
+            profile?.walletId?.trim() || null,
+            walletSource,
+            profile?.isInternalWallet ?? false,
           ],
         );
       }
@@ -1530,10 +1591,12 @@ export class AuthService {
       const referenceResult = await client.query<{
         active_funding_movement: boolean;
         active_legacy_bridge: boolean;
+        active_position_action: boolean;
         active_telegram_intent: boolean;
         deposit_evidence: boolean;
         funding_evidence: boolean;
         legacy_bridge_evidence: boolean;
+        position_action_evidence: boolean;
         trading_evidence: boolean;
       }>(
         `
@@ -1586,6 +1649,12 @@ export class AuthService {
             ) as active_funding_movement,
             exists (
               select 1
+              from position_action_operations action
+              where action.user_id = $1
+                and action.status not in ('completed', 'failed', 'cancelled')
+            ) as active_position_action,
+            exists (
+              select 1
               from bridge_orders bridge
               where bridge.user_id = $1
                 and lower(trim(bridge.status)) not in (
@@ -1615,6 +1684,11 @@ export class AuthService {
               limit 1
             ) as funding_evidence,
             exists (
+              select 1
+              from position_action_operations
+              where user_id = $1
+            ) as position_action_evidence,
+            exists (
               select 1 from bridge_orders where user_id = $1
             ) as legacy_bridge_evidence,
             exists (
@@ -1637,14 +1711,17 @@ export class AuthService {
       }
       const activeMovement =
         references.active_funding_movement ||
+        references.active_position_action ||
         references.active_legacy_bridge ||
         references.active_telegram_intent;
       const protectedReasons = [
         references.funding_evidence ? "funding_evidence" : null,
+        references.position_action_evidence ? "position_action_evidence" : null,
         references.legacy_bridge_evidence ? "legacy_bridge_evidence" : null,
         references.deposit_evidence ? "deposit_evidence" : null,
         references.trading_evidence ? "trading_evidence" : null,
         references.active_funding_movement ? "active_funding_movement" : null,
+        references.active_position_action ? "active_position_action" : null,
         references.active_legacy_bridge ? "active_legacy_bridge" : null,
         references.active_telegram_intent ? "active_telegram_intent" : null,
       ].filter((reason): reason is string => reason !== null);
@@ -1781,7 +1858,10 @@ export class AuthService {
    */
   static async getUserWallets(userId: string): Promise<UserWallet[]> {
     const result = await pool.query<UserWalletRow>(
-      "SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at FROM user_wallets WHERE user_id = $1 ORDER BY is_primary DESC, created_at ASC",
+      `SELECT ${USER_WALLET_COLUMNS}
+       FROM user_wallets
+       WHERE user_id = $1
+       ORDER BY is_primary DESC, created_at ASC`,
       [userId],
     );
 
@@ -1796,7 +1876,7 @@ export class AuthService {
     const isEth = /^0x[a-fA-F0-9]{40}$/.test(normalized);
 
     const result = await pool.query<UserWalletRow>(
-      `SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at
+      `SELECT ${USER_WALLET_COLUMNS}
        FROM user_wallets
        WHERE user_id = $1 AND ${
          isEth ? "lower(wallet_address) = lower($2)" : "wallet_address = $2"
@@ -1837,9 +1917,13 @@ export class AuthService {
       }
 
       const result = await client.query<UserWalletRow>(
-        `INSERT INTO user_wallets (user_id, wallet_address, wallet_type, is_primary, is_verified, verification_signature)
-         VALUES ($1, $2, $3, false, $4, $5)
-         RETURNING id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at`,
+        `INSERT INTO user_wallets (
+           user_id, wallet_address, wallet_type, is_primary, is_verified,
+           verification_signature, wallet_source, is_internal_wallet,
+           privy_profile_updated_at
+         )
+         VALUES ($1, $2, $3, false, $4, $5, 'external', false, now())
+         RETURNING ${USER_WALLET_COLUMNS}`,
         [
           userId,
           input.walletAddress,
@@ -1874,7 +1958,7 @@ export class AuthService {
            updated_at = now()
        WHERE user_id = $1
          AND ${isEth ? "lower(wallet_address) = lower($2)" : "wallet_address = $2"}
-       RETURNING id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at`,
+       RETURNING ${USER_WALLET_COLUMNS}`,
       [userId, normalized, name],
     );
 
@@ -1905,7 +1989,7 @@ export class AuthService {
         : "wallet_address = $2";
 
       const targetResult = await client.query<UserWalletRow>(
-        `SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at
+        `SELECT ${USER_WALLET_COLUMNS}
          FROM user_wallets
          WHERE user_id = $1 AND ${match}
          LIMIT 1`,
@@ -1917,7 +2001,7 @@ export class AuthService {
       }
 
       const walletsResult = await client.query<UserWalletRow>(
-        `SELECT id, user_id, wallet_address, wallet_type, name, is_primary, is_verified, created_at, updated_at
+        `SELECT ${USER_WALLET_COLUMNS}
          FROM user_wallets
          WHERE user_id = $1
          ORDER BY is_primary DESC, created_at ASC`,
@@ -1935,6 +2019,27 @@ export class AuthService {
       });
       if (!walletRemovalPolicy.allowed) {
         throw new WalletUnlinkNotAllowedError(walletRemovalPolicy.reason);
+      }
+
+      const activePositionAction = await client.query<{ active: boolean }>(
+        `
+          select exists (
+            select 1
+            from position_action_operations action
+            where action.user_id = $1
+              and action.status not in ('completed', 'failed', 'cancelled')
+              and (
+                lower(action.owner_address) = lower($2)
+                or lower(action.execution_address) = lower($2)
+              )
+          ) as active
+        `,
+        [userId, target.wallet_address],
+      );
+      if (activePositionAction.rows[0]?.active) {
+        throw new WalletUnlinkNotAllowedError(
+          "Cannot unlink a wallet while its sell or redemption action is in progress.",
+        );
       }
 
       const remainingRows: UserWalletRow[] = walletsResult.rows.filter(

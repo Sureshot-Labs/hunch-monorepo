@@ -407,7 +407,10 @@ export async function mergeUsers(
           funding_operations_recipient_ownership_fk,
           balance_reservations_operation_ownership_fk,
           funding_route_observations_operation_ownership_fk,
-          telegram_trade_intents_funding_operation_ownership_fk
+          orders_funding_reservation_ownership_fk,
+          executions_funding_reservation_ownership_fk,
+          telegram_trade_intents_funding_operation_ownership_fk,
+          telegram_trade_intents_funding_reservation_ownership_fk
         deferred
       `,
     );

@@ -1,7 +1,8 @@
 # WP5 Destination, Placement, Intent Liquidity, and Planner
 
-Status: **implementation-complete and locally verified on 2026-07-24;
-activation intentionally blocked pending WP6.**
+Status: **implementation-complete and locally verified on 2026-07-24. The WP6
+real-adapter prerequisite is now satisfied locally; activation remains blocked
+by WP7/WP8 caller migration, WP9 evidence, and runtime policy.**
 
 This evidence is based on the `unibalance` worktree after committed baseline
 revision `52029b0`; the baseline documents through WP4 are already committed.
@@ -21,8 +22,8 @@ WP5 now provides:
   reservations, and submitted debits, with revision and expiry validation;
 - an explicitly requested trade buffer bounded independently by raw percentage
   and USD policy caps; no blanket maximum buffer is added;
-- an explicit rejection of manual/automatic rebalance and staged or
-  second-segment funding;
+- an explicit rejection of manual/automatic rebalance and chained funding where
+  one route spends another route's output;
 - opaque destination enumeration and deterministic recommendation without
   treating a recommendation as consent;
 - deterministic current-intent Trading Wallet precedence that never considers
@@ -48,8 +49,8 @@ WP5 now provides:
   `funding_route_observations`; missing or insufficient evidence is
   `prepare_first`;
 - immutable, owned, expiring Intent Liquidity projection persistence;
-- immutable quote creation with one selected source, exact raw amounts, plan
-  hash, and an opaque consent token;
+- immutable quote creation with one selected source option, exact raw amounts
+  for each frozen source leg, plan hash, and an opaque consent token;
 - idempotent operation commit with policy and ownership revalidation inside
   the commit transaction;
 - authenticated, user-scoped, fail-closed public endpoints for destinations,
@@ -61,18 +62,19 @@ WP5 now provides:
   cleanup of expired projection references;
 - admin policy typing for measured route-experience thresholds.
 
-The production destination runtime deliberately returns no invented PM or
-Limitless readiness fact until WP6 installs the real side-effect-free
-inspection adapters. Creation gates remain off by default, the production
-funding registry still has no network executor, and this work cannot broadcast,
-prepare a wallet, provision, connect, approve, trade, redeem, or deploy.
+At WP5 completion the production destination runtime deliberately returned no
+invented PM or Limitless readiness fact and the production funding registry had
+no network executor. WP6 may register exact wallet-profile executors only behind
+its owner-bound action boundary. Creation gates remain off by default; the WP5
+planner itself cannot broadcast, prepare a wallet, provision, connect, approve,
+trade, redeem, or deploy.
 
 ## 2. Acceptance evidence
 
 | WP5 criterion                                                             | Evidence                                                                                                                                                                                                    |
 | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Add Funds 100 is not reduced to a viewed trade or existing-cash shortfall | Exact tests keep `100000000` raw for Add Funds while a 5-unit trade with 2 available produces `3000000` raw shortfall.                                                                                      |
-| No Base parking or automatic rebalance                                    | Placement rejects `manual_rebalance`; planner allows at most one exact segment and contains no parking target.                                                                                              |
+| No Base parking or automatic rebalance                                    | Placement rejects `manual_rebalance`; every leg is one exact route to the immutable destination and no leg spends another leg's output.                                                                     |
 | Client cannot choose provider or destination address                      | Strict request schemas reject extra `providerId` and `destinationAddress`; quote accepts only owned opaque projection/source IDs.                                                                           |
 | Multiple no-context destinations require a choice                         | Planner returns `destination_selection_required` even when one internal destination competes with a much larger external balance.                                                                           |
 | Quote freezes one source and exact amounts                                | Quote tests reject changed raw amounts, source mismatch, destination/binding/placement mismatch, stale ownership, and stale policy.                                                                         |
@@ -183,8 +185,8 @@ The final review corrected:
 - bounded Relay and total planner quote time;
 - preservation of exact but economically unavailable Relay quotes as typed
   unselectable source options rather than silent omission;
-- source-option uniqueness, expiry, output, and one-segment validation in core,
-  independent of adapter behavior;
+- source-option uniqueness, expiry, output, and exact single-leg/composite-leg
+  shape validation in core, independent of adapter behavior;
 - quote-to-source/destination/binding/market/placement canonical equality;
 - consent-token prefixing to satisfy the opaque-ID contract deterministically;
 - policy and ownership revalidation under the locked quote transaction;

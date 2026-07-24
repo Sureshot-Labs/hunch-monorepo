@@ -67,6 +67,10 @@ export class FundingQuoteService {
       db: Pool;
       planningStore: FundingPlanningStore;
       createQuote?: typeof createFundingQuote;
+      revalidateWithdrawalRecipient?: (
+        userId: string,
+        recipientId: string,
+      ) => Promise<void>;
       now?: () => Date;
     }>,
   ) {}
@@ -89,6 +93,7 @@ export class FundingQuoteService {
         "funding quote creation is disabled",
       );
     }
+    const withdrawalGateEnabled = input.policy.gates.withdrawalExecution;
     const now = this.dependencies.now?.() ?? new Date();
     const planning = await this.dependencies.planningStore.fetchOwnedCurrent({
       userId: input.userId,
@@ -122,6 +127,33 @@ export class FundingQuoteService {
       );
     }
     const storedPlan = selected.commitPlan;
+    const withdrawalIntent = planning.request.purpose === "withdrawal";
+    const externalRecipientId = storedPlan.operation.externalRecipientId;
+    if (
+      withdrawalIntent !== Boolean(externalRecipientId) ||
+      externalRecipientId !== planning.request.withdrawalRecipientId
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "withdrawal source plan differs from the frozen recipient",
+      );
+    }
+    if (
+      withdrawalIntent &&
+      (!withdrawalGateEnabled ||
+        !this.dependencies.revalidateWithdrawalRecipient)
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "withdrawal execution is disabled or lacks recipient revalidation",
+      );
+    }
+    if (withdrawalIntent && externalRecipientId) {
+      await this.dependencies.revalidateWithdrawalRecipient?.(
+        input.userId,
+        externalRecipientId,
+      );
+    }
     const plannedSource = planMoney(storedPlan.operation.requestedSourceAmount);
     const plannedDestination = planMoney(
       storedPlan.operation.requestedDestinationAmount,
@@ -152,11 +184,39 @@ export class FundingQuoteService {
       );
     }
     const destination = planning.plannerSnapshot.destination;
-    if (!destination || !planning.plannerSnapshot.placement) {
+    const withdrawalRecipient = planning.plannerSnapshot.withdrawalRecipient;
+    if (
+      !planning.plannerSnapshot.placement ||
+      (withdrawalIntent ? !withdrawalRecipient : !destination)
+    ) {
       throw new FundingPlannerError(
         "destination_unavailable",
         "funding projection has no exact destination and placement",
       );
+    }
+    let frozenTarget;
+    let frozenBinding;
+    if (withdrawalIntent) {
+      if (!withdrawalRecipient) {
+        throw new FundingPlannerError(
+          "destination_unavailable",
+          "withdrawal projection has no frozen recipient",
+        );
+      }
+      frozenTarget = {
+        kind: "external_recipient" as const,
+        recipient: withdrawalRecipient,
+      };
+      frozenBinding = null;
+    } else {
+      if (!destination) {
+        throw new FundingPlannerError(
+          "destination_unavailable",
+          "funding projection has no frozen venue destination",
+        );
+      }
+      frozenTarget = destination.target;
+      frozenBinding = destination.bindingOption;
     }
     if (
       !canonicalJsonEqual(
@@ -165,11 +225,11 @@ export class FundingQuoteService {
       ) ||
       !canonicalJsonEqual(
         storedPlan.operation.destinationTargetSnapshot,
-        destination.target,
+        frozenTarget,
       ) ||
       !canonicalJsonEqual(
         storedPlan.operation.venueBindingSnapshot,
-        destination.bindingOption,
+        frozenBinding,
       ) ||
       !canonicalJsonEqual(
         storedPlan.operation.marketContextSnapshot,
@@ -231,15 +291,8 @@ export class FundingQuoteService {
         expiresAt,
       },
     );
-    const firstSegment = plan.segments[0];
-    const expected =
-      firstSegment == null
-        ? planning.plannerSnapshot.placement.destinationRequirement
-        : planMoney(firstSegment.quotedExpectedOutput);
-    const minimum =
-      firstSegment == null
-        ? planning.plannerSnapshot.placement.destinationRequirement
-        : planMoney(firstSegment.quotedMinOutput);
+    const expected = selected.option.expectedDestination;
+    const minimum = selected.option.minimumDestination;
     if (!expected || !minimum) {
       throw new FundingPersistenceError(
         "quote_mismatch",
@@ -250,8 +303,9 @@ export class FundingQuoteService {
       quoteId: stored.id,
       liquidityProjectionId: planning.id,
       selectedSourceOptionId: selected.option.sourceOptionId,
-      destinationOptionId: destination.option.destinationOptionId,
-      venueBindingOptionId: destination.bindingOption.venueBindingOptionId,
+      destinationOptionId: destination?.option.destinationOptionId ?? null,
+      venueBindingOptionId:
+        destination?.bindingOption.venueBindingOptionId ?? null,
       planKind: plan.operation.planKind,
       experienceMode:
         plan.operation.experienceMode === "inline"

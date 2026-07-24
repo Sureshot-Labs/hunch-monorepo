@@ -101,23 +101,26 @@ function assertOwnedRouteBindings(
   if (destinationAccountId !== input.source.location.accountId) {
     throw new Error("Relay source and destination ownership do not match");
   }
-  const destinationAddress =
-    input.destination.kind === "owned_location"
-      ? requiredLocationDetail(input.destination.location.details, "address")
-      : input.destination.recipient.address;
   if (
+    input.destination.kind === "owned_location" &&
     normalizeRelayAssetId(
       input.route.destination.networkId,
-      destinationAddress,
+      requiredLocationDetail(input.destination.location.details, "address"),
     ) !==
-    normalizeRelayAssetId(
-      input.route.destination.networkId,
-      input.recipientAddress,
-    )
+      normalizeRelayAssetId(
+        input.route.destination.networkId,
+        input.recipientAddress,
+      )
   ) {
     throw new Error(
       "Relay recipient address does not match the resolved destination",
     );
+  }
+  if (
+    input.destination.kind === "external_recipient" &&
+    input.destination.recipient.addressFingerprint.length < 8
+  ) {
+    throw new Error("Relay external recipient fingerprint is missing");
   }
 }
 

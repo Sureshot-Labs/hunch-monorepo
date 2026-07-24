@@ -11,15 +11,17 @@ import {
   FundingMergeConflictError,
   mergeUsers,
   type UserRow as MergeUserRow,
-} from "./admin-merge-user-core.js";
-import { pool } from "./db.js";
-import { AuthService } from "./auth.js";
+} from "../../../admin-merge-user-core.js";
+import { pool } from "../../../db.js";
+import { AuthService } from "../../../auth.js";
+import { storeExecutionInTransaction } from "../../../repos/executions-repo.js";
 import {
   applyFundingSourceDebitSuppression,
   loadFundingAccountValueFacts,
-} from "./account-value/funding-movement-feed.js";
-import type { ValuedAssetComponent } from "./funding/domain/types.js";
+} from "../../../account-value/funding-movement-feed.js";
+import type { ValuedAssetComponent } from "../../domain/types.js";
 import {
+  assertFundingReservationReadyForTrade,
   consumeFundingReservationForLinkedConsumerInTransaction,
   fetchFundingWithdrawalDestinationForUser,
   finishFundingRouteObservationInTransaction,
@@ -30,7 +32,7 @@ import {
   startFundingRouteObservationInTransaction,
   startFundingStepAttemptInTransaction,
   upsertFundingProviderRequestInTransaction,
-} from "./funding/persistence/funding-evidence-repository.js";
+} from "../../persistence/funding-evidence-repository.js";
 import {
   advanceFundingObservationFinalityInTransaction,
   allocateFundingObservationInTransaction,
@@ -49,9 +51,9 @@ import {
   type FundingCommitInput,
   type FundingCommitPlan,
   type FundingQuoteInsert,
-} from "./funding/persistence/funding-operation-repository.js";
-import { ingestFundingObservationInTransaction } from "./funding/reconciliation/funding-observation-ingestion.js";
-import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
+} from "../../persistence/funding-operation-repository.js";
+import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
+import { reduceFundingOperationInTransaction } from "../../reconciliation/funding-reducer.js";
 
 const ASSET = {
   networkId: "eip155:137",
@@ -75,6 +77,8 @@ function buildPlan(
   input: {
     purpose?: "add_funds" | "trade_shortfall";
     planKind?: "wallet_route" | "already_available";
+    marketId?: string | null;
+    venueId?: string | null;
     includeReservation?: boolean;
     includeStep?: boolean;
     invalidDependency?: boolean;
@@ -106,9 +110,12 @@ function buildPlan(
       sourceSnapshot,
       destinationTargetSnapshot,
       externalRecipientId: null,
-      venueId: null,
-      marketId: null,
-      marketContextSnapshot: null,
+      venueId: input.venueId ?? null,
+      marketId: input.marketId ?? null,
+      marketContextSnapshot:
+        input.marketId && input.venueId
+          ? { marketId: input.marketId, venueId: input.venueId }
+          : null,
       venueBindingSnapshot: null,
       walletExecutionSnapshot: null,
       placementSnapshot: {},
@@ -146,6 +153,7 @@ function buildPlan(
         : [
             {
               ordinal: 0,
+              segmentOrdinal: planKind === "already_available" ? null : 0,
               stepKind: "transaction",
               state: "planned",
               actionFingerprint: hash("b"),
@@ -156,19 +164,26 @@ function buildPlan(
               actionValidationResult: { valid: true },
             },
           ],
-    reservation:
+    reservations:
       input.includeReservation === false || planKind === "already_available"
-        ? null
-        : {
-            componentId: sourceSnapshot.componentId,
-            locationId: sourceSnapshot.locationId,
-            networkId: ASSET.networkId,
-            assetId: ASSET.assetId,
-            assetDecimals: ASSET.decimals,
-            rawAmount: "1000000",
-            mode: "subtract_available",
-            expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          },
+        ? []
+        : [
+            {
+              segmentOrdinal:
+                planKind === "wallet_route" ||
+                planKind === "relay_deposit_address"
+                  ? 0
+                  : null,
+              componentId: sourceSnapshot.componentId,
+              locationId: sourceSnapshot.locationId,
+              networkId: ASSET.networkId,
+              assetId: ASSET.assetId,
+              assetDecimals: ASSET.decimals,
+              rawAmount: "1000000",
+              mode: "subtract_available",
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          ],
   };
 }
 
@@ -500,6 +515,37 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
   try {
     const userA = await insertUser(client);
     const userB = await insertUser(client);
+    const eventId = opaque("event");
+    const marketId = opaque("market");
+    await client.query(
+      `
+        insert into unified_events (
+          id,
+          venue,
+          venue_event_id,
+          title,
+          status,
+          end_date
+        )
+        values ($1, 'polymarket', $2, 'WP6 reservation event', 'ACTIVE', now() + interval '1 day')
+      `,
+      [eventId, opaque("venue-event")],
+    );
+    await client.query(
+      `
+        insert into unified_markets (
+          id,
+          venue,
+          venue_market_id,
+          event_id,
+          title,
+          status,
+          market_type
+        )
+        values ($1, 'polymarket', $2, $3, 'WP6 reservation market', 'ACTIVE', 'binary')
+      `,
+      [marketId, opaque("venue-market"), eventId],
+    );
     const userBPrivyId = `did:privy:wp3-${crypto.randomUUID()}`;
     await client.query("update users set privy_user_id = $2 where id = $1", [
       userB,
@@ -552,7 +598,11 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       null,
     );
 
-    const planB = buildPlan({ purpose: "trade_shortfall" });
+    const planB = buildPlan({
+      purpose: "trade_shortfall",
+      venueId: "polymarket",
+      marketId,
+    });
     const tokenB = opaque("consent");
     const quoteB = await createFundingQuoteInTransaction(
       client,
@@ -578,33 +628,71 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     await client.query("set constraints all immediate");
     await client.query("set constraints all deferred");
 
+    const destinationNow = new Date();
+    const destinationInput = {
+      userId: userA,
+      networkId: ASSET.networkId,
+      assetId: ASSET.assetId,
+      assetDecimals: ASSET.decimals,
+      addressCiphertext: "ciphertext:destination",
+      addressLookupHmac: hash("d"),
+      lookupKeyVersion: 1,
+      validationEvidence: { owned: true },
+      policyVersion: 1,
+      expiresAt: new Date(destinationNow.getTime() + 60_000),
+      now: destinationNow,
+    };
     const destination = await registerFundingWithdrawalDestinationInTransaction(
       client,
-      {
-        userId: userA,
-        networkId: ASSET.networkId,
-        assetId: ASSET.assetId,
-        assetDecimals: ASSET.decimals,
-        addressCiphertext: "ciphertext:destination",
-        addressLookupHmac: hash("d"),
-        lookupKeyVersion: 1,
-        validationEvidence: { owned: true },
-        policyVersion: 1,
-        expiresAt: new Date(Date.now() + 60_000),
-      },
+      destinationInput,
     );
     assert.equal(destination.replayed, false);
+    const destinationReplay =
+      await registerFundingWithdrawalDestinationInTransaction(client, {
+        ...destinationInput,
+        addressCiphertext: "ciphertext:randomized-replay",
+        validationEvidence: { owned: true, refreshed: true },
+        expiresAt: new Date(destinationNow.getTime() + 120_000),
+        now: new Date(destinationNow.getTime() + 10_000),
+      });
+    assert.equal(destinationReplay.replayed, true);
+    assert.equal(destinationReplay.destination.id, destination.destination.id);
+    assert.equal(
+      destinationReplay.destination.addressCiphertext,
+      "ciphertext:destination",
+    );
+
+    const renewedDestination =
+      await registerFundingWithdrawalDestinationInTransaction(client, {
+        ...destinationInput,
+        addressCiphertext: "ciphertext:renewed-destination",
+        validationEvidence: { owned: true, renewed: true },
+        expiresAt: new Date(destinationNow.getTime() + 180_000),
+        now: new Date(destinationNow.getTime() + 61_000),
+      });
+    assert.equal(renewedDestination.replayed, false);
+    assert.notEqual(
+      renewedDestination.destination.id,
+      destination.destination.id,
+    );
+    const supersededDestination =
+      await fetchFundingWithdrawalDestinationForUser(client as never, {
+        userId: userA,
+        destinationId: destination.destination.id,
+      });
+    assert.equal(supersededDestination?.addressCiphertext, null);
+    assert.equal(supersededDestination?.revocationReason, "revalidated");
     assert.equal(
       await fetchFundingWithdrawalDestinationForUser(client as never, {
         userId: userB,
-        destinationId: destination.destination.id,
+        destinationId: renewedDestination.destination.id,
       }),
       null,
     );
     await expectFundingError(
       revokeFundingWithdrawalDestinationInTransaction(client, {
         userId: userB,
-        destinationId: destination.destination.id,
+        destinationId: renewedDestination.destination.id,
         reason: "idor-test",
         cryptoShred: true,
       }),
@@ -614,7 +702,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       client,
       {
         userId: userA,
-        destinationId: destination.destination.id,
+        destinationId: renewedDestination.destination.id,
         reason: "test_complete",
         cryptoShred: true,
       },
@@ -629,7 +717,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
           set address_ciphertext = 'ciphertext:restored'
           where id = $1
         `,
-        [destination.destination.id],
+        [renewedDestination.destination.id],
       ),
     );
     await client.query("rollback to savepoint destination_ciphertext_restore");
@@ -1309,9 +1397,13 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       [committedB.operation.id],
     );
     assert.equal(readySegment.rows[0]?.status, "succeeded");
-    const reservationB = await client.query<{ id: string; raw_amount: string }>(
+    const reservationB = await client.query<{
+      expires_at: Date;
+      id: string;
+      raw_amount: string;
+    }>(
       `
-        select id, raw_amount
+        select id, raw_amount, expires_at
         from balance_reservations
         where operation_id = $1 and mode = 'settled_for_consumer'
       `,
@@ -1320,6 +1412,33 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     const reservationBId = reservationB.rows[0]?.id;
     assert.ok(reservationBId);
     assert.equal(reservationB.rows[0]?.raw_amount, "990000");
+    assert.deepEqual(
+      await assertFundingReservationReadyForTrade(client as never, {
+        userId: userB,
+        link: {
+          operationId: committedB.operation.id,
+          reservationId: reservationBId,
+        },
+        venue: "polymarket",
+        marketId,
+      }),
+      {
+        rawAmount: "990000",
+        expiresAt: reservationB.rows[0]?.expires_at,
+      },
+    );
+    await expectFundingError(
+      assertFundingReservationReadyForTrade(client as never, {
+        userId: userB,
+        link: {
+          operationId: committedB.operation.id,
+          reservationId: reservationBId,
+        },
+        venue: "polymarket",
+        marketId: null,
+      }),
+      "invalid_state_transition",
+    );
     await expectFundingError(
       consumeFundingReservationForLinkedConsumerInTransaction(client, {
         userId: userB,
@@ -1332,34 +1451,94 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       }),
       "operation_not_found",
     );
-    const executionResult = await client.query<{ id: string }>(
+    await client.query("savepoint wrong_trade_consumer_scope");
+    const wrongConsumer = await client.query<{ id: string }>(
       `
-        insert into executions (user_id, venue, status)
-        values ($1, 'polymarket', 'confirmed')
+        insert into executions (
+          user_id,
+          wallet_address,
+          venue,
+          unified_market_id,
+          side,
+          tx_signature,
+          status,
+          funding_operation_id,
+          funding_reservation_id
+        )
+        values ($1, $2, 'limitless', $3, 'SELL', $4, 'confirmed', $5, $6)
         returning id
       `,
-      [userB],
+      [
+        userB,
+        "0x00000000000000000000000000000000000000b1",
+        opaque("wrong-market"),
+        opaque("wrong-consumer"),
+        committedB.operation.id,
+        reservationBId,
+      ],
     );
-    const executionId = executionResult.rows[0]?.id;
-    assert.ok(executionId);
-    const consumed =
-      await consumeFundingReservationForLinkedConsumerInTransaction(client, {
-        userId: userB,
-        reservationId: reservationBId,
-        consumer: { kind: "execution", executionId },
-        outcomeReason: "consumed_once",
-      });
-    assert.equal(consumed.state, "consumed");
-    assert.equal(consumed.consumerKind, "execution");
-    assert.equal(consumed.consumerRef, executionId);
     await expectFundingError(
       consumeFundingReservationForLinkedConsumerInTransaction(client, {
         userId: userB,
         reservationId: reservationBId,
-        consumer: { kind: "execution", executionId },
-        outcomeReason: "duplicate_consume",
+        consumer: {
+          kind: "execution",
+          executionId: String(wrongConsumer.rows[0]?.id),
+        },
+        outcomeReason: "wrong_trade_scope",
       }),
-      "invalid_state_transition",
+      "operation_not_found",
+    );
+    await client.query("rollback to savepoint wrong_trade_consumer_scope");
+    const executionInput = {
+      userId: userB,
+      walletAddress: "0x00000000000000000000000000000000000000b1",
+      venue: "polymarket",
+      unifiedMarketId: marketId,
+      side: "BUY",
+      status: "confirmed",
+      txSignature: opaque("trade-execution"),
+      fundingReservation: {
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+      },
+    } as const;
+    const execution = await storeExecutionInTransaction(client, executionInput);
+    assert.equal(execution.funding_operation_id, committedB.operation.id);
+    assert.equal(execution.funding_reservation_id, reservationBId);
+    const replayedExecution = await storeExecutionInTransaction(
+      client,
+      executionInput,
+    );
+    assert.equal(replayedExecution.id, execution.id);
+    const consumed = await client.query<{
+      consumer_kind: string | null;
+      consumer_ref: string | null;
+      state: string;
+    }>(
+      `
+        select state, consumer_kind, consumer_ref
+        from balance_reservations
+        where id = $1
+      `,
+      [reservationBId],
+    );
+    assert.equal(consumed.rows[0]?.state, "consumed");
+    assert.equal(consumed.rows[0]?.consumer_kind, "execution");
+    assert.equal(consumed.rows[0]?.consumer_ref, execution.id);
+    const consumedOperation = await fetchFundingOperationForUser(
+      client as never,
+      {
+        userId: userB,
+        operationId: committedB.operation.id,
+      },
+    );
+    assert.deepEqual(
+      {
+        stage: consumedOperation?.progressStage,
+        status: consumedOperation?.status,
+      },
+      { stage: "terminal", status: "completed" },
     );
 
     await client.query(
@@ -1598,34 +1777,37 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     await client.query("rollback to savepoint invalid_state");
 
     await client.query("savepoint second_segment");
-    await assert.rejects(
-      client.query(
+    await assert.rejects(async () => {
+      await client.query(
         `
-          insert into funding_operation_segments (
-            operation_id,
-            ordinal,
-            provider_id,
-            adapter_id,
-            adapter_version,
-            segment_kind,
-            status,
-            source_snapshot,
-            destination_target_snapshot,
-            quoted_input,
-            quoted_expected_output,
-            quoted_min_output,
-            lookup_key_version,
-            quote_expires_at
-          )
-          values (
-            $1, 1, 'synthetic', 'synthetic', 1, 'same_network_swap',
-            'planned', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
-            '{}'::jsonb, 1, now() + interval '1 hour'
-          )
-        `,
+            insert into funding_operation_segments (
+              operation_id,
+              ordinal,
+              provider_id,
+              adapter_id,
+              adapter_version,
+              segment_kind,
+              status,
+              source_snapshot,
+              destination_target_snapshot,
+              quoted_input,
+              quoted_expected_output,
+              quoted_min_output,
+              lookup_key_version,
+              quote_expires_at
+            )
+            values (
+              $1, 1, 'synthetic', 'synthetic', 1, 'same_network_swap',
+              'planned', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+              '{}'::jsonb, 1, now() + interval '1 hour'
+            )
+          `,
         [committedB.operation.id],
-      ),
-    );
+      );
+      await client.query(
+        "set constraints funding_operation_segments_shape immediate",
+      );
+    });
     await client.query("rollback to savepoint second_segment");
 
     const unknownLegacy = await client.query<{ count: string }>(

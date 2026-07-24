@@ -5,6 +5,10 @@ import { AuthService, type User } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
 import { env } from "../env.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
+import {
+  assertFundingReservationReadyForTrade,
+  releaseFundingReservationForAbandonedTrade,
+} from "../funding/persistence/funding-evidence-repository.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
@@ -153,7 +157,6 @@ import {
   PolymarketFundingPlanError,
   type PolymarketFundingPlan,
 } from "./polymarket-funding-router.js";
-import { executeServerEmbeddedEthereumTransaction } from "./embedded-ethereum.js";
 import type {
   EnsureReadinessInput,
   EnsureReadinessResult,
@@ -241,6 +244,8 @@ type PolymarketClientOrderBody = {
   order: Record<string, unknown>;
   orderType?: unknown;
   positionWalletAddress?: string | null;
+  fundingOperationId?: string;
+  fundingReservationId?: string;
 };
 
 type PolymarketOpenOrdersQuery = {
@@ -5553,7 +5558,7 @@ function polymarketMaxSpendUnavailable(
   return { ok: false, reason, message };
 }
 
-function resolvePolymarketFunderExecutionKindForMaxSpend(
+export function resolvePolymarketFunderExecutionKindForMaxSpend(
   candidate: PolymarketFunderCandidate | null | undefined,
 ): PolymarketFunderExecutionKind {
   if (!candidate) return null;
@@ -6051,7 +6056,7 @@ function maxRaw(a: bigint | null | undefined, b: bigint | null | undefined) {
   return left > right ? left : right;
 }
 
-async function resolvePolymarketMaxSpendFunds(inputs: {
+export async function resolvePolymarketMaxSpendFunds(inputs: {
   creds: PolymarketL2Credentials;
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
@@ -6193,7 +6198,7 @@ async function resolvePolymarketMaxSpendFunds(inputs: {
   };
 }
 
-function buildPreparedPolymarketFundingPlan(input: {
+export function buildPreparedPolymarketFundingPlan(input: {
   funder: string;
   funderExecutionKind: PolymarketFunderExecutionKind;
   funds: Awaited<ReturnType<typeof resolvePolymarketMaxSpendFunds>>;
@@ -6630,6 +6635,33 @@ export async function submitPolymarketClientSignedOrder(input: {
       },
     };
   }
+  const fundingReservation =
+    input.body.fundingOperationId && input.body.fundingReservationId
+      ? {
+          operationId: input.body.fundingOperationId,
+          reservationId: input.body.fundingReservationId,
+        }
+      : null;
+  if (
+    Boolean(input.body.fundingOperationId) !==
+    Boolean(input.body.fundingReservationId)
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error:
+          "fundingOperationId and fundingReservationId must be provided together",
+      },
+    };
+  }
+  if (fundingReservation && side !== "BUY") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "Funding reservations can only be linked to buys" },
+    };
+  }
   if (
     !(await venueLifecycleAllowsTradingAction(input.pool, "polymarket", side))
   ) {
@@ -6728,6 +6760,27 @@ export async function submitPolymarketClientSignedOrder(input: {
   const marketInfo = orderTokenId
     ? await fetchPolymarketMarketInfo(input.pool, { tokenId: orderTokenId })
     : null;
+  if (fundingReservation) {
+    try {
+      await assertFundingReservationReadyForTrade(input.pool, {
+        userId: input.userId,
+        link: fundingReservation,
+        venue: "polymarket",
+        marketId: marketInfo?.unified_market_id ?? null,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation is unavailable",
+        },
+      };
+    }
+  }
 
   const normalizedOrder = normalizeOrderForPayload(order, side);
   const normalizedForHash = normalizeOrderForHash(order, side);
@@ -6976,7 +7029,17 @@ export async function submitPolymarketClientSignedOrder(input: {
     feeCollectorAddress: null,
     feeDeadline: null,
     feePolicySnapshot,
+    fundingReservation: isPolymarketClobNoFillTerminalStatus(status)
+      ? null
+      : fundingReservation,
   });
+  if (fundingReservation && isPolymarketClobNoFillTerminalStatus(status)) {
+    await releaseFundingReservationForAbandonedTrade(input.pool, {
+      userId: input.userId,
+      link: fundingReservation,
+      outcomeReason: "trade_no_fill",
+    });
+  }
 
   const referralFirstTrade =
     stored.kind === "stored" && status === "matched"
@@ -7683,7 +7746,7 @@ async function prepareTrade(
     feePolicySnapshot = preparedQuote.feePolicySnapshot;
     const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
     const policyFundingCapRaw = await resolvePolymarketBotPolicyFundingCapRaw();
-    let executableFunds = await resolvePolymarketMaxSpendFunds({
+    const executableFunds = await resolvePolymarketMaxSpendFunds({
       creds: l2Creds,
       funder: candidate.funder,
       funderExecutionKind,
@@ -7706,90 +7769,16 @@ async function prepareTrade(
       requiredSpendRaw,
     });
     if (fundingPlan) {
-      const fundingReferenceId = `hunch:tgfund:${
-        intent.id?.trim() ||
-        crypto
-          .createHash("sha256")
-          .update(intent.idempotencyKey)
-          .digest("hex")
-          .slice(0, 40)
-      }`;
-      let acceptedTransactionId: string | null = null;
-      await assertServerEvmWalletAuthorization({
-        action: "BUY",
-        privyUserId: intent.executionAuthorization?.privyUserId,
-        signer,
+      throw tradingError({
+        code: "insufficient_readiness",
+        message:
+          "Polymarket buy requires a completed FundingOperation, venue-visible pUSD, and a fresh quote.",
         venue: "polymarket",
-        walletId: getPrivyWalletId(intent),
       });
-      await executeServerEmbeddedEthereumTransaction({
-        chainId: POLYGON_CHAIN_ID,
-        signer,
-        walletId: getPrivyWalletId(intent),
-        walletClient: createServerWalletClient(),
-        transaction: {
-          id: "polymarket-funding-router",
-          label: "Polymarket funding router",
-          to: fundingPlan.routerAddress,
-          data: fundingPlan.calldata,
-          value: "0x0",
-          sponsor: true,
-          referenceId: fundingReferenceId.slice(0, 64),
-        },
-        onAccepted: async (reference) => {
-          acceptedTransactionId = reference.transactionId;
-          await input.onSetupTransactionSubmitted?.({
-            kind: "funding_router",
-            referenceId:
-              reference.referenceId ?? fundingReferenceId.slice(0, 64),
-            transactionId: reference.transactionId,
-            txHash: reference.txHash,
-          });
-        },
-        onSubmitted: (txHash) =>
-          input.onSetupTransactionSubmitted?.({
-            kind: "funding_router",
-            referenceId: fundingReferenceId.slice(0, 64),
-            transactionId: acceptedTransactionId,
-            txHash,
-          }),
-      });
-
-      const balanceSync = await syncPolymarketBalanceAllowanceRoute({
-        body: { assetType: "COLLATERAL", signatureType: 3 },
-        log: ctx.logger,
-        signer,
-        userId: intent.actor.userId,
-      });
-      if (!balanceSync.ok) {
-        throw tradingError({
-          code: "insufficient_readiness",
-          message: "Polymarket balance sync failed after funding.",
-          venue: "polymarket",
-        });
-      }
-      executableFunds = await resolvePolymarketMaxSpendFunds({
-        creds: l2Creds,
-        funder: candidate.funder,
-        funderExecutionKind,
-        fundingCapRaw: policyFundingCapRaw,
-        negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
-        pool: ctx.pool,
-        signer,
-        userId: intent.actor.userId,
-      });
-      if (executableFunds.funderPusdAvailableRaw < requiredSpendRaw) {
-        throw tradingError({
-          code: "insufficient_readiness",
-          message:
-            "Polymarket funding was confirmed but funds are unavailable.",
-          venue: "polymarket",
-        });
-      }
     }
     assertPolymarketPreparedFunds({
       buyApprovalOk: executableFunds.buyApproval.ok,
-      executableFundsRaw: executableFunds.executableFundsRaw,
+      executableFundsRaw: executableFunds.funderPusdAvailableRaw,
       requiredSpendRaw,
     });
   } else {
@@ -8141,6 +8130,10 @@ async function persistTrade(
     orderPayloadVersion: "polymarket_clob_v2",
     orderHash: payload.orderHash,
     feePolicySnapshot: payload.feePolicySnapshot,
+    fundingReservation:
+      input.submitResult.status === "no_fill"
+        ? null
+        : input.intent.fundingReservation,
     filledAt: input.submitResult.status === "filled" ? new Date() : null,
   });
   return {

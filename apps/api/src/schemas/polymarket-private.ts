@@ -93,6 +93,19 @@ export const polymarketPlaceOrderBodySchema = z
     exchangeAddress: zEthAddress.optional(),
     negRisk: z.boolean().optional(),
     positionWalletAddress: zEthAddress.optional(),
+    fundingOperationId: z.string().uuid().optional(),
+    fundingReservationId: z.string().uuid().optional(),
+  })
+  .superRefine((value, context) => {
+    if (
+      Boolean(value.fundingOperationId) !== Boolean(value.fundingReservationId)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "fundingOperationId and fundingReservationId must be provided together",
+      });
+    }
   })
   .strict();
 

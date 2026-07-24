@@ -12,7 +12,7 @@ import type {
 import type { ProviderQuoteCandidate } from "../domain/contracts.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
 import type { PlannedSourceOption } from "./planning-types.js";
-import type { ResolvedDestinationCandidate } from "./destination-adapters.js";
+import type { ResolvedRouteDestination } from "./destination-adapters.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import {
   addUnsignedDecimals,
@@ -31,9 +31,11 @@ import {
   routeAmountBand,
   type RouteExperienceObservation,
 } from "./route-experience.js";
+import { buildCompositeRelaySourceOption } from "./composite-source-options.js";
 
 export const RELAY_QUOTE_TIMEOUT_MS = 1_500;
 export const TOTAL_FUNDING_PLANNER_TIMEOUT_MS = 3_500;
+export const MAX_RELAY_SOURCE_QUOTES = 16;
 
 export type RelayFirstCandidate = Readonly<{
   routeId: string;
@@ -55,6 +57,7 @@ export type RelayEligibleSourceFact = Readonly<{
   safeLabel: string;
   source: FundingSourceRef;
   quoteInputAmount: Money;
+  quoteMinimumOutput?: Money;
   maximumSourceRaw: string;
   estimatedUsd: string | null;
   transferable: boolean;
@@ -78,7 +81,7 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
     input: Readonly<{
       accountId: string;
       request: FundingDiscoveryRequest;
-      destination: ResolvedDestinationCandidate;
+      destination: ResolvedRouteDestination;
       requiredAmount: Money;
       policyRevision: string;
       now: Date;
@@ -88,7 +91,7 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
     input: Readonly<{
       route: FundingRuntimePolicy["routes"][number];
       source: RelayEligibleSourceFact;
-      destination: ResolvedDestinationCandidate;
+      destination: ResolvedRouteDestination;
       sourceAmount: Money;
       minimumOutput: Money;
       quoteCorrelationId: string;
@@ -149,6 +152,12 @@ export function buildRelayWalletSourceOption(
     input.quote.capability !== input.route.capability
   ) {
     throw new Error("Relay quote differs from the exact route policy");
+  }
+  if (
+    input.quote.source.kind === "composite" ||
+    input.quote.source.kind === "venue_preparation"
+  ) {
+    throw new Error("Relay quote cannot contain a nested composite source");
   }
   const sourceAsset =
     input.quote.source.kind === "owned_location"
@@ -346,7 +355,7 @@ function assertRelayPlanningQuote(
     quote: RelayPlanningQuote;
     route: FundingRuntimePolicy["routes"][number];
     source: RelayEligibleSourceFact;
-    destination: ResolvedDestinationCandidate;
+    destination: ResolvedRouteDestination;
     deadline: Date;
     now: Date;
   }>,
@@ -430,7 +439,7 @@ export class RelayFirstSourcePlanner {
       accountId: string;
       request: FundingDiscoveryRequest;
       marketContext: MarketContextBinding | null;
-      destination: ResolvedDestinationCandidate;
+      destination: ResolvedRouteDestination;
       placement: PlacementDecision;
       requiredAmount: Money;
       policy: FundingRuntimePolicy;
@@ -477,161 +486,192 @@ export class RelayFirstSourcePlanner {
           right.sourceLocationPatternId,
         ),
     );
-    const candidates: RelayFirstCandidate[] = [];
-
-    for (const source of sourceFacts) {
-      if (
-        source.source.kind !== "owned_location" ||
-        source.source.location.accountId !== input.accountId ||
-        !source.transferable ||
-        !source.riskEligible ||
-        !source.walletExecutionReady ||
-        !source.nativeGasReady ||
-        source.freshness !== "fresh" ||
-        !sameAsset(
-          source.source.location.asset,
-          source.quoteInputAmount.asset,
-        ) ||
-        rawAmount(source.quoteInputAmount.raw) === 0n ||
-        rawAmount(source.maximumSourceRaw) <
-          rawAmount(source.quoteInputAmount.raw)
-      ) {
-        continue;
-      }
-      const routes = enabledRoutes.filter(
-        (route) =>
-          route.sourceLocationPatternId === source.sourceLocationPatternId &&
-          sameAsset(route.sourceAsset, source.quoteInputAmount.asset),
-      );
-      if (routes.length > 1) {
-        throw new FundingPlannerError(
-          "invalid_policy",
-          "multiple enabled Relay routes match one exact source and destination",
-        );
-      }
-      const route = routes[0];
-      if (!route) continue;
-      const quoteCorrelationId = stableOpaqueId(
-        "funding_quote",
-        [
-          input.accountId,
-          input.policyRevision,
-          input.destination.option.destinationOptionId,
-          source.componentId,
-          route.routeId,
-          source.quoteInputAmount.raw,
-          input.requiredAmount.raw,
-          input.now.toISOString(),
-        ].join("|"),
-      );
-      const remainingPlannerMs =
-        this.totalPlannerTimeoutMs - (this.monotonicNow() - planningStartedAt);
-      if (remainingPlannerMs <= 0) break;
-      const plannedQuote = await this.quoteRelayWithinBudget(
-        {
-          route,
-          source,
-          destination: input.destination,
-          sourceAmount: source.quoteInputAmount,
-          minimumOutput: input.requiredAmount,
-          quoteCorrelationId,
-          deadline,
-          policyRevision: input.policyRevision,
-        },
-        Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
-      );
-      if (!plannedQuote) continue;
-      assertRelayPlanningQuote({
-        quote: plannedQuote,
-        route,
-        source,
-        destination: input.destination,
-        deadline,
-        now: input.now,
-      });
-      const observation = await this.dependencies.observeRoute({
-        route,
-        amountBand: routeAmountBand(source.estimatedUsd),
-        now: input.now,
-      });
-      const option = buildRelayWalletSourceOption({
-        sourceOptionId: stableOpaqueId(
-          "source",
-          [
-            quoteCorrelationId,
-            plannedQuote.candidate.opaqueQuoteRef,
-            plannedQuote.candidate.expiresAt,
-          ].join("|"),
-        ),
-        safeLabel: source.safeLabel,
-        maximumSourceRaw: source.maximumSourceRaw,
-        estimatedUsd: source.estimatedUsd,
-        quote: plannedQuote.candidate,
-        feeUsd: plannedQuote.feeUsd,
-        route,
-        routeObservation: observation,
-        routeExperiencePolicy: input.policy.routeExperience,
-        maximumFeeUsd: limits.maximumFeeUsd,
-        maximumFeeBps: limits.maximumFeeBps,
-        warningFeeUsd: limits.warningFeeUsd,
-        warningFeeBps: limits.warningFeeBps,
-        minimumDestinationUsd: limits.minimumDestinationUsd,
-        maximumSlippageBps: limits.maximumSlippageBps,
-        minimumDestinationEstimatedUsd:
-          plannedQuote.minimumDestinationEstimatedUsd,
-        recommended: source.suggestionPreferred,
-      });
-      const experienceMode =
-        option.experienceMode === "inline_funding"
-          ? "inline"
-          : option.experienceMode === "prepare_first"
-            ? "prepare_first"
-            : plannedQuote.commitPlan.operation.experienceMode;
-      const commitPlan = {
-        ...plannedQuote.commitPlan,
-        operation: {
-          ...plannedQuote.commitPlan.operation,
-          purpose: input.request.purpose,
-          experienceMode,
-          sourceSnapshot: jsonRecord(option),
-          destinationTargetSnapshot: jsonRecord(input.destination.target),
-          externalRecipientId: null,
-          venueId: input.destination.option.venueId,
-          marketId: input.marketContext?.marketId ?? null,
-          marketContextSnapshot: input.marketContext
-            ? jsonRecord(input.marketContext)
-            : null,
-          venueBindingSnapshot: jsonRecord(input.destination.bindingOption),
-          placementSnapshot: jsonRecord(input.placement),
-          requestedSourceAmount: jsonRecord(source.quoteInputAmount),
-          requestedDestinationAmount: jsonRecord(input.requiredAmount),
-        },
-        segments: plannedQuote.commitPlan.segments.map((segment) => ({
-          ...segment,
-          sourceSnapshot: jsonRecord(source.source),
-          destinationTargetSnapshot: jsonRecord(input.destination.target),
-          quotedInput: jsonRecord(source.quoteInputAmount),
-          quotedExpectedOutput: jsonRecord(
-            plannedQuote.candidate.expectedOutput,
-          ),
-          quotedMinOutput: jsonRecord(plannedQuote.candidate.minimumOutput),
-          quoteExpiresAt: plannedQuote.candidate.expiresAt,
-        })),
-      };
-      candidates.push({
-        routeId: route.routeId,
-        providerId: "relay",
-        routeEnabled: true,
-        sourceOption: option,
-        executionPlan: plannedQuote.executionPlan,
-        commitPlan,
-      });
-    }
-    return selectRelayFirstSourceOptions({
+    const plannedCandidates = await Promise.all(
+      sourceFacts
+        .slice(0, MAX_RELAY_SOURCE_QUOTES)
+        .map(async (source): Promise<RelayFirstCandidate | null> => {
+          if (
+            source.source.kind !== "owned_location" ||
+            source.source.location.accountId !== input.accountId ||
+            !source.transferable ||
+            !source.riskEligible ||
+            !source.walletExecutionReady ||
+            !source.nativeGasReady ||
+            source.freshness !== "fresh" ||
+            !sameAsset(
+              source.source.location.asset,
+              source.quoteInputAmount.asset,
+            ) ||
+            rawAmount(source.quoteInputAmount.raw) === 0n ||
+            rawAmount(source.maximumSourceRaw) <
+              rawAmount(source.quoteInputAmount.raw)
+          ) {
+            return null;
+          }
+          const routes = enabledRoutes.filter(
+            (route) =>
+              route.sourceLocationPatternId ===
+                source.sourceLocationPatternId &&
+              sameAsset(route.sourceAsset, source.quoteInputAmount.asset),
+          );
+          if (routes.length > 1) {
+            throw new FundingPlannerError(
+              "invalid_policy",
+              "multiple enabled Relay routes match one exact source and destination",
+            );
+          }
+          const route = routes[0];
+          if (!route) return null;
+          const quoteCorrelationId = stableOpaqueId(
+            "funding_quote",
+            [
+              input.accountId,
+              input.policyRevision,
+              input.destination.destinationId,
+              source.componentId,
+              route.routeId,
+              source.quoteInputAmount.raw,
+              input.requiredAmount.raw,
+              input.now.toISOString(),
+            ].join("|"),
+          );
+          const remainingPlannerMs =
+            this.totalPlannerTimeoutMs -
+            (this.monotonicNow() - planningStartedAt);
+          if (remainingPlannerMs <= 0) return null;
+          const plannedQuote = await this.quoteRelayWithinBudget(
+            {
+              route,
+              source,
+              destination: input.destination,
+              sourceAmount: source.quoteInputAmount,
+              minimumOutput: source.quoteMinimumOutput ?? input.requiredAmount,
+              quoteCorrelationId,
+              deadline,
+              policyRevision: input.policyRevision,
+            },
+            Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
+          );
+          if (!plannedQuote) return null;
+          assertRelayPlanningQuote({
+            quote: plannedQuote,
+            route,
+            source,
+            destination: input.destination,
+            deadline,
+            now: input.now,
+          });
+          const observation = await this.dependencies.observeRoute({
+            route,
+            amountBand: routeAmountBand(source.estimatedUsd),
+            now: input.now,
+          });
+          let option = buildRelayWalletSourceOption({
+            sourceOptionId: stableOpaqueId(
+              "source",
+              [
+                quoteCorrelationId,
+                plannedQuote.candidate.opaqueQuoteRef,
+                plannedQuote.candidate.expiresAt,
+              ].join("|"),
+            ),
+            safeLabel: source.safeLabel,
+            maximumSourceRaw: source.maximumSourceRaw,
+            estimatedUsd: source.estimatedUsd,
+            quote: plannedQuote.candidate,
+            feeUsd: plannedQuote.feeUsd,
+            route,
+            routeObservation: observation,
+            routeExperiencePolicy: input.policy.routeExperience,
+            maximumFeeUsd: limits.maximumFeeUsd,
+            maximumFeeBps: limits.maximumFeeBps,
+            warningFeeUsd: limits.warningFeeUsd,
+            warningFeeBps: limits.warningFeeBps,
+            minimumDestinationUsd: limits.minimumDestinationUsd,
+            maximumSlippageBps: limits.maximumSlippageBps,
+            minimumDestinationEstimatedUsd:
+              plannedQuote.minimumDestinationEstimatedUsd,
+            recommended: source.suggestionPreferred,
+          });
+          if (
+            plannedQuote.commitPlan.steps.some(
+              (step) => step.payerRequirement === "privy_sponsor",
+            )
+          ) {
+            option = {
+              ...option,
+              requiredActions: option.requiredActions.map((action) => ({
+                ...action,
+                sponsorship:
+                  action.kind === "evm_transaction" ? "requested" : "none",
+              })),
+            };
+          }
+          const experienceMode =
+            option.experienceMode === "inline_funding"
+              ? "inline"
+              : option.experienceMode === "prepare_first"
+                ? "prepare_first"
+                : plannedQuote.commitPlan.operation.experienceMode;
+          const commitPlan = {
+            ...plannedQuote.commitPlan,
+            operation: {
+              ...plannedQuote.commitPlan.operation,
+              purpose: input.request.purpose,
+              experienceMode,
+              sourceSnapshot: jsonRecord(option),
+              destinationTargetSnapshot: jsonRecord(input.destination.target),
+              externalRecipientId: input.destination.externalRecipientId,
+              venueId: input.destination.venueId,
+              marketId: input.marketContext?.marketId ?? null,
+              marketContextSnapshot: input.marketContext
+                ? jsonRecord(input.marketContext)
+                : null,
+              venueBindingSnapshot: input.destination.venueBindingOption
+                ? jsonRecord(input.destination.venueBindingOption)
+                : null,
+              placementSnapshot: jsonRecord(input.placement),
+              requestedSourceAmount: jsonRecord(source.quoteInputAmount),
+              requestedDestinationAmount: jsonRecord(input.requiredAmount),
+            },
+            segments: plannedQuote.commitPlan.segments.map((segment) => ({
+              ...segment,
+              sourceSnapshot: jsonRecord(source.source),
+              destinationTargetSnapshot: jsonRecord(input.destination.target),
+              quotedInput: jsonRecord(source.quoteInputAmount),
+              quotedExpectedOutput: jsonRecord(
+                plannedQuote.candidate.expectedOutput,
+              ),
+              quotedMinOutput: jsonRecord(plannedQuote.candidate.minimumOutput),
+              quoteExpiresAt: plannedQuote.candidate.expiresAt,
+            })),
+          };
+          return {
+            routeId: route.routeId,
+            providerId: "relay",
+            routeEnabled: true,
+            sourceOption: option,
+            executionPlan: plannedQuote.executionPlan,
+            commitPlan,
+          };
+        }),
+    );
+    const candidates = plannedCandidates.filter(
+      (candidate): candidate is RelayFirstCandidate => candidate !== null,
+    );
+    const selected = selectRelayFirstSourceOptions({
       candidates,
       requiredDestination: input.requiredAmount,
       policy: input.policy,
     }).sources;
+    if (selected.some((source) => source.option.selectable)) return selected;
+    const composite = buildCompositeRelaySourceOption({
+      candidates: selected,
+      requiredDestination: input.requiredAmount,
+      maximumFeeUsd: limits.maximumFeeUsd,
+      maximumFeeBps: limits.maximumFeeBps,
+    });
+    return composite ? [...selected, composite] : selected;
   }
 
   private async quoteRelayWithinBudget(
@@ -772,6 +812,14 @@ export function selectRelayFirstSourceOptions(
       ) {
         throw new Error("public and committed provider segments differ");
       }
+      if (
+        candidate.sourceOption.source.kind === "composite" ||
+        candidate.sourceOption.source.kind === "venue_preparation"
+      ) {
+        throw new Error(
+          "single Relay candidate cannot contain a composite source",
+        );
+      }
       const sourceAsset =
         candidate.sourceOption.source.kind === "owned_location"
           ? candidate.sourceOption.source.location.asset
@@ -784,6 +832,7 @@ export function selectRelayFirstSourceOptions(
         throw new Error("source option assets differ from route policy");
       }
       let option = candidate.sourceOption;
+      const compositeEligible = option.selectable;
       const expected = option.expectedDestination;
       const minimum = option.minimumDestination;
       if (!expected || !minimum) {
@@ -820,6 +869,7 @@ export function selectRelayFirstSourceOptions(
         commitPlan: candidate.commitPlan,
         routeId: candidate.routeId,
         providerId: "relay",
+        compositeEligible,
       };
     });
   return {

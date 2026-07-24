@@ -967,6 +967,10 @@ async function persistTrade(
     venueOrderId: input.submitResult.venueOrderId,
     status:
       normalizeKalshiExecutionStatus(input.submitResult.status) ?? "submitted",
+    fundingReservation:
+      input.submitResult.status === "no_fill"
+        ? null
+        : input.intent.fundingReservation,
     raw: mergeKalshiExecutionRaw(input.submitResult.raw, {
       ...buildTelegramTradeSourceMetadata(input),
       purpose: "trade",

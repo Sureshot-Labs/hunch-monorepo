@@ -8,13 +8,19 @@ import type {
   MarketContextBinding,
   Money,
   PlacementDecision,
+  ResolvedExternalRecipient,
+  ValidatedExternalRecipient,
 } from "../domain/types.js";
 import {
   selectFundingDestination,
   selectVenueBindingForCurrentIntent,
 } from "../domain/selections.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
-import type { ResolvedDestinationCandidate } from "./destination-adapters.js";
+import {
+  toResolvedRouteDestination,
+  type ResolvedDestinationCandidate,
+  type ResolvedRouteDestination,
+} from "./destination-adapters.js";
 import {
   FundingPlannerError,
   assertSameAsset,
@@ -42,12 +48,19 @@ export type FundingPlannerDependencies = Readonly<{
       marketContextId: string;
     }>,
   ): Promise<MarketContextBinding | null>;
+  resolveWithdrawalRecipient?(
+    input: Readonly<{
+      accountId: string;
+      recipientId: string;
+    }>,
+  ): Promise<ResolvedExternalRecipient | null>;
   listSources(
     input: Readonly<{
       accountId: string;
       request: FundingDiscoveryRequest;
       marketContext: MarketContextBinding | null;
-      destination: ResolvedDestinationCandidate;
+      destinationFacts: ResolvedDestinationCandidate | null;
+      destination: ResolvedRouteDestination;
       placement: PlacementDecision;
       requiredAmount: Money;
       policy: FundingRuntimePolicy;
@@ -99,18 +112,145 @@ function validatePlannedSources(
     ids.add(source.option.sourceOptionId);
     const segmentCount = source.commitPlan.segments.length;
     const planKind = source.commitPlan.operation.planKind;
+    const composite =
+      source.option.kind === "composite" ||
+      source.option.source.kind === "composite" ||
+      source.option.sourceLegs != null ||
+      planKind === "composite_route";
     if (
-      segmentCount > 1 ||
       ((planKind === "wallet_route" || planKind === "relay_deposit_address") &&
         (segmentCount !== 1 ||
           source.commitPlan.segments[0]?.providerId !== "relay")) ||
       ((planKind === "already_available" ||
-        planKind === "direct_external_handoff") &&
-        segmentCount !== 0)
+        planKind === "direct_external_handoff" ||
+        planKind === "venue_preparation") &&
+        segmentCount !== 0) ||
+      (planKind === "composite_route" &&
+        (segmentCount < 2 ||
+          source.commitPlan.segments.some(
+            (segment) => segment.providerId !== "relay",
+          )))
     ) {
       throw new FundingPlannerError(
         "invalid_policy",
-        "funding source contains a staged, second, or non-Relay segment",
+        "funding source plan shape is incompatible with its execution kind",
+      );
+    }
+    if (
+      planKind === "venue_preparation" &&
+      (source.option.kind !== "venue_preparation" ||
+        source.option.source.kind !== "venue_preparation" ||
+        source.commitPlan.steps.length !== 1 ||
+        source.commitPlan.steps[0]?.stepKind !== "venue_preparation" ||
+        source.commitPlan.steps[0]?.segmentOrdinal !== null ||
+        source.commitPlan.reservations.length !==
+          source.option.source.inputCount ||
+        source.commitPlan.reservations.some(
+          (reservation) =>
+            reservation.segmentOrdinal !== null ||
+            reservation.mode !== "subtract_available",
+        ))
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "venue preparation source, action, and exact inputs differ",
+      );
+    }
+    if (
+      planKind !== "venue_preparation" &&
+      (source.option.kind === "venue_preparation" ||
+        source.option.source.kind === "venue_preparation")
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "venue preparation source requires the canonical preparation plan",
+      );
+    }
+    if (composite) {
+      const legs = source.option.sourceLegs;
+      if (
+        source.option.kind !== "composite" ||
+        source.option.source.kind !== "composite" ||
+        !legs ||
+        legs.length < 2 ||
+        legs.length !== source.option.source.legCount ||
+        legs.length !== segmentCount ||
+        planKind !== "composite_route"
+      ) {
+        throw new FundingPlannerError(
+          "invalid_policy",
+          "composite source option, legs, and committed segments differ",
+        );
+      }
+      const legIds = new Set<string>();
+      let expectedRaw = 0n;
+      let minimumRaw = 0n;
+      for (const [ordinal, leg] of legs.entries()) {
+        if (legIds.has(leg.sourceLegId)) {
+          throw new FundingPlannerError(
+            "invalid_policy",
+            "composite source contains duplicate or nested legs",
+          );
+        }
+        legIds.add(leg.sourceLegId);
+        assertSameAsset(
+          leg.expectedDestination.asset,
+          requiredAmount.asset,
+          "composite source expected output",
+        );
+        assertSameAsset(
+          leg.minimumDestination.asset,
+          requiredAmount.asset,
+          "composite source minimum output",
+        );
+        if (
+          rawAmount(leg.sourceAmount.raw) === 0n ||
+          rawAmount(leg.expectedDestination.raw) <
+            rawAmount(leg.minimumDestination.raw) ||
+          rawAmount(leg.minimumDestination.raw) === 0n
+        ) {
+          throw new FundingPlannerError(
+            "invalid_policy",
+            "composite source leg lacks positive exact economics",
+          );
+        }
+        const segment = source.commitPlan.segments[ordinal];
+        if (
+          !segment ||
+          rawAmount(
+            (segment.quotedInput as Readonly<{ raw?: string }>).raw ?? "0",
+          ) !== rawAmount(leg.sourceAmount.raw) ||
+          rawAmount(
+            (segment.quotedExpectedOutput as Readonly<{ raw?: string }>).raw ??
+              "0",
+          ) !== rawAmount(leg.expectedDestination.raw) ||
+          rawAmount(
+            (segment.quotedMinOutput as Readonly<{ raw?: string }>).raw ?? "0",
+          ) !== rawAmount(leg.minimumDestination.raw)
+        ) {
+          throw new FundingPlannerError(
+            "invalid_policy",
+            "composite public leg economics differ from committed segment",
+          );
+        }
+        expectedRaw += rawAmount(leg.expectedDestination.raw);
+        minimumRaw += rawAmount(leg.minimumDestination.raw);
+      }
+      if (
+        !source.option.expectedDestination ||
+        !source.option.minimumDestination ||
+        expectedRaw !== rawAmount(source.option.expectedDestination.raw) ||
+        minimumRaw !== rawAmount(source.option.minimumDestination.raw)
+      ) {
+        throw new FundingPlannerError(
+          "invalid_policy",
+          "composite source aggregate economics differ from its legs",
+        );
+      }
+    } else if (segmentCount > 1) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "single source option cannot contain composite execution state",
       );
     }
     if (source.option.selectable) {
@@ -171,6 +311,13 @@ function requestAmount(
     };
   }
   return null;
+}
+
+function validatedRecipient(
+  recipient: ResolvedExternalRecipient,
+): ValidatedExternalRecipient {
+  const { address: _address, ...validated } = recipient;
+  return validated;
 }
 
 function valueCollateral(
@@ -390,6 +537,9 @@ export class FundingPlanner {
     }>,
   ): Promise<IntentLiquidityProjection> {
     const now = this.now();
+    if (input.request.purpose === "withdrawal") {
+      return this.discoverWithdrawal(input, now);
+    }
     const marketContext = input.request.marketContextId
       ? await this.dependencies.resolveMarketContext({
           accountId: input.accountId,
@@ -473,6 +623,7 @@ export class FundingPlanner {
         request: input.request,
         marketContext,
         destination: null,
+        withdrawalRecipient: null,
         placement: null,
         sources: [],
         projection,
@@ -533,7 +684,8 @@ export class FundingPlanner {
             accountId: input.accountId,
             request: input.request,
             marketContext,
-            destination: selected,
+            destinationFacts: selected,
+            destination: toResolvedRouteDestination(selected),
             placement,
             requiredAmount: {
               asset: amount.asset,
@@ -631,6 +783,7 @@ export class FundingPlanner {
       request: input.request,
       marketContext,
       destination: selected,
+      withdrawalRecipient: null,
       placement,
       sources,
       projection,
@@ -646,6 +799,7 @@ export class FundingPlanner {
       request: FundingDiscoveryRequest;
       marketContext: MarketContextBinding | null;
       destination: ResolvedDestinationCandidate | null;
+      withdrawalRecipient: ValidatedExternalRecipient | null;
       placement: FundingPlanningSnapshot["placement"];
       sources: readonly PlannedSourceOption[];
       projection: IntentLiquidityProjection;
@@ -658,6 +812,7 @@ export class FundingPlanner {
       request: input.request,
       marketContext: input.marketContext,
       destination: input.destination,
+      withdrawalRecipient: input.withdrawalRecipient,
       placement: input.placement,
       sources: input.sources,
       projection: input.projection,
@@ -678,5 +833,191 @@ export class FundingPlanner {
       ...input.projection,
       liquidityProjectionId: stored.id,
     };
+  }
+
+  private async discoverWithdrawal(
+    input: Readonly<{
+      accountId: string;
+      request: FundingDiscoveryRequest;
+      policy: FundingRuntimePolicy;
+      policyRevision: string;
+      ownershipRevision: string;
+    }>,
+    now: Date,
+  ): Promise<IntentLiquidityProjection> {
+    const amount = input.request.requestedDestinationAmount;
+    const recipientId = input.request.withdrawalRecipientId;
+    if (
+      input.policy.creationMode !== "on" ||
+      !input.policy.gates.withdrawalExecution
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "withdrawal execution is disabled",
+      );
+    }
+    if (
+      !amount ||
+      rawAmount(amount.raw) === 0n ||
+      !recipientId ||
+      !this.dependencies.resolveWithdrawalRecipient
+    ) {
+      throw new FundingPlannerError(
+        "invalid_amount",
+        "withdrawal requires an exact amount and validated recipient",
+      );
+    }
+    const recipient = await this.dependencies.resolveWithdrawalRecipient({
+      accountId: input.accountId,
+      recipientId,
+    });
+    if (
+      !recipient ||
+      recipient.accountId !== input.accountId ||
+      recipient.recipientId !== recipientId ||
+      Date.parse(recipient.expiresAt) <= now.getTime()
+    ) {
+      throw new FundingPlannerError(
+        "destination_unavailable",
+        "withdrawal recipient is absent, expired, or not owned",
+      );
+    }
+    assertSameAsset(
+      recipient.asset,
+      amount.asset,
+      "withdrawal recipient and amount",
+    );
+    const recipientLocations = input.policy.locations.filter(
+      (location) =>
+        location.enabled &&
+        location.ownership === "external_recipient" &&
+        location.asset.networkId === amount.asset.networkId &&
+        location.asset.assetId.toLowerCase() ===
+          amount.asset.assetId.toLowerCase() &&
+        location.asset.decimals === amount.asset.decimals,
+    );
+    if (recipientLocations.length !== 1) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "withdrawal asset must map to one exact external-recipient pattern",
+      );
+    }
+    const recipientLocation = recipientLocations[0];
+    if (!recipientLocation) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "withdrawal recipient location disappeared",
+      );
+    }
+    const recipientSnapshot = validatedRecipient(recipient);
+    const target = {
+      kind: "external_recipient" as const,
+      recipient: recipientSnapshot,
+    };
+    const placement = decidePlacement({
+      intent: input.request,
+      target,
+      targetVenueId: null,
+      targetRequirement: amount,
+      availableNow: { asset: amount.asset, raw: "0" },
+      selectionReason: "explicit",
+      policy: input.policy,
+    });
+    const routeDestination: ResolvedRouteDestination = {
+      destinationId: recipient.recipientId,
+      destinationLocationPatternId: recipientLocation.locationPatternId,
+      target,
+      requiredAsset: amount.asset,
+      venueId: null,
+      venueBindingOption: null,
+      externalRecipientId: recipient.recipientId,
+      recipientAddress: recipient.address,
+    };
+    const sources = validatePlannedSources(
+      await this.dependencies.listSources({
+        accountId: input.accountId,
+        request: input.request,
+        marketContext: null,
+        destinationFacts: null,
+        destination: routeDestination,
+        placement,
+        requiredAmount: amount,
+        policy: input.policy,
+        policyRevision: input.policyRevision,
+        now,
+      }),
+      amount,
+      now,
+    );
+    const recommended = recommendedSource(sources);
+    const sourceOptions = sources.map((source) => ({
+      ...source.option,
+      recommended:
+        source.option.sourceOptionId === recommended?.option.sourceOptionId,
+    }));
+    const expiresAt = new Date(
+      Math.min(
+        now.getTime() + input.policy.ttl.quoteMs,
+        Date.parse(recipient.expiresAt),
+      ),
+    );
+    if (expiresAt.getTime() <= now.getTime()) {
+      throw new FundingPlannerError(
+        "destination_unavailable",
+        "withdrawal recipient expired while planning",
+      );
+    }
+    const mode: IntentLiquidityProjection["mode"] =
+      recommended?.option.experienceMode === "inline_funding"
+        ? "inline_funding"
+        : recommended?.option.experienceMode === "prepare_first"
+          ? "prepare_first"
+          : "unavailable";
+    const projection: IntentLiquidityProjection = {
+      liquidityProjectionId: `projection_${randomUUID()}`,
+      marketContextId: null,
+      venueId: null,
+      venueBindingOptionId: null,
+      destinationOptionId: null,
+      collateralAsset: amount.asset,
+      requestedCollateralRaw: amount.raw,
+      availableNowRaw: "0",
+      shortfallRaw: amount.raw,
+      convertibleRaw: "0",
+      requestedUsd: "0",
+      availableNowUsd: "0",
+      shortfallUsd: "0",
+      convertibleUsd: "0",
+      mode,
+      eta: recommended?.option.eta ?? null,
+      requiredActions: recommended?.option.requiredActions ?? [],
+      sourceOptions,
+      asOf: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      policyVersion: input.policy.version,
+      completeness: "partial",
+      freshness: "fresh",
+      errors: [{ code: "trusted_price_unavailable", retryable: true }],
+      reasonCodes: [
+        "trusted_price_unavailable",
+        ...(sourceOptions.some((source) => source.selectable)
+          ? []
+          : (["insufficient_liquidity"] as const)),
+      ],
+      destinationOptions: [],
+    };
+    return this.persist({
+      accountId: input.accountId,
+      request: input.request,
+      marketContext: null,
+      destination: null,
+      withdrawalRecipient: recipientSnapshot,
+      placement,
+      sources,
+      projection,
+      policyRevision: input.policyRevision,
+      ownershipRevision: input.ownershipRevision,
+      expiresAt,
+    });
   }
 }

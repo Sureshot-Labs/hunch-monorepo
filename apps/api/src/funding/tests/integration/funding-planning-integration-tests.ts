@@ -7,24 +7,24 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
-import { pool } from "./db.js";
+import { pool } from "../../../db.js";
 import type {
   FundingDiscoveryRequest,
   IntentLiquidityProjection,
-} from "./funding/domain/types.js";
+} from "../../domain/types.js";
 import {
   PostgresFundingPlanningStore,
   deleteExpiredFundingPlanningSnapshots,
-} from "./funding/persistence/funding-planning-repository.js";
+} from "../../persistence/funding-planning-repository.js";
 import {
   commitFundingOperation,
   createFundingQuote,
   type FundingCommitPlan,
-} from "./funding/persistence/funding-operation-repository.js";
+} from "../../persistence/funding-operation-repository.js";
 import {
   fetchFundingRouteExperience,
   fundingRouteExperienceFingerprint,
-} from "./funding/persistence/route-experience-repository.js";
+} from "../../persistence/route-experience-repository.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -110,6 +110,7 @@ try {
       request: request(),
       marketContext: null,
       destination: null,
+      withdrawalRecipient: null,
       placement: null,
       sources: [],
       projection: publicProjection,
@@ -194,7 +195,7 @@ try {
     },
     segments: [],
     steps: [],
-    reservation: null,
+    reservations: [],
   };
   const consentToken = `consent_${crypto.randomUUID()}`;
   const quote = await createFundingQuote(pool, {

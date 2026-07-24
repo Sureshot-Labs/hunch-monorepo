@@ -105,6 +105,7 @@ export type FundingCommitSegment = Readonly<{
 
 export type FundingCommitStep = Readonly<{
   ordinal: number;
+  segmentOrdinal: number | null;
   stepKind:
     | "approval"
     | "transaction"
@@ -135,6 +136,7 @@ export type FundingCommitStep = Readonly<{
 }>;
 
 export type FundingCommitReservation = Readonly<{
+  segmentOrdinal: number | null;
   componentId: string;
   locationId: string;
   networkId: string;
@@ -154,7 +156,9 @@ export type FundingCommitPlan = Readonly<{
       | "wallet_route"
       | "relay_deposit_address"
       | "direct_external_handoff"
-      | "already_available";
+      | "already_available"
+      | "venue_preparation"
+      | "composite_route";
     sourceSnapshot: JsonRecord | null;
     destinationTargetSnapshot: JsonRecord;
     externalRecipientId: string | null;
@@ -170,7 +174,7 @@ export type FundingCommitPlan = Readonly<{
   }>;
   segments: readonly FundingCommitSegment[];
   steps: readonly FundingCommitStep[];
-  reservation: FundingCommitReservation | null;
+  reservations: readonly FundingCommitReservation[];
 }>;
 
 export type FundingCommitInput = Readonly<{
@@ -201,7 +205,9 @@ export type FundingOperationRow = Readonly<{
     | "wallet_route"
     | "relay_deposit_address"
     | "direct_external_handoff"
-    | "already_available";
+    | "already_available"
+    | "venue_preparation"
+    | "composite_route";
   idempotencyKey: string;
   commitRequestHash: string;
   planHash: string;
@@ -209,6 +215,8 @@ export type FundingOperationRow = Readonly<{
   policyRevision: string;
   sourceSnapshot: JsonRecord | null;
   destinationTargetSnapshot: JsonRecord;
+  externalRecipientId: string | null;
+  venueId: string | null;
   marketId: string | null;
   requestedSourceAmount: JsonRecord | null;
   requestedDestinationAmount: JsonRecord | null;
@@ -257,6 +265,8 @@ type FundingOperationDbRow = {
   policy_revision: string;
   source_snapshot: JsonRecord | null;
   destination_target_snapshot: JsonRecord;
+  external_recipient_id: string | null;
+  venue_id: string | null;
   market_id: string | null;
   requested_source_amount: JsonRecord | null;
   requested_destination_amount: JsonRecord | null;
@@ -308,6 +318,8 @@ function mapOperation(row: FundingOperationDbRow): FundingOperationRow {
     policyRevision: row.policy_revision,
     sourceSnapshot: row.source_snapshot,
     destinationTargetSnapshot: row.destination_target_snapshot,
+    externalRecipientId: row.external_recipient_id,
+    venueId: row.venue_id,
     marketId: row.market_id,
     requestedSourceAmount: row.requested_source_amount,
     requestedDestinationAmount: row.requested_destination_amount,
@@ -357,6 +369,8 @@ const operationColumns = `
   policy_revision,
   source_snapshot,
   destination_target_snapshot,
+  external_recipient_id,
+  venue_id,
   market_id,
   requested_source_amount,
   requested_destination_amount,
@@ -534,9 +548,20 @@ async function insertCommitSegments(
   client: Pick<PoolClient, "query">,
   operationId: string,
   segments: readonly FundingCommitSegment[],
-): Promise<void> {
+  now: Date,
+): Promise<ReadonlyMap<number, string>> {
+  const segmentIdByOrdinal = new Map<number, string>();
   for (const [ordinal, segment] of segments.entries()) {
-    await client.query(
+    if (
+      Boolean(segment.providerQuoteRefCiphertext) !==
+      Boolean(segment.providerQuoteRefLookupHmac)
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "provider quote reference must be one protected ciphertext/HMAC tuple",
+      );
+    }
+    const { rows } = await client.query<{ id: string }>(
       `
         insert into funding_operation_segments (
           operation_id,
@@ -565,6 +590,7 @@ async function insertCommitSegments(
           $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18::jsonb,
           $19, $20::jsonb
         )
+        returning id
       `,
       [
         operationId,
@@ -589,13 +615,49 @@ async function insertCommitSegments(
         segment.supportMetadata ?? {},
       ],
     );
+    const segmentId = rows[0]?.id;
+    if (!segmentId) throw new Error("funding segment insert returned no row");
+    segmentIdByOrdinal.set(ordinal, segmentId);
+    if (
+      segment.providerQuoteRefCiphertext &&
+      segment.providerQuoteRefLookupHmac
+    ) {
+      await client.query(
+        `
+          insert into funding_provider_requests (
+            segment_id,
+            request_kind,
+            request_ref_ciphertext,
+            request_ref_lookup_hmac,
+            discovery_source,
+            lookup_key_version,
+            first_seen_at,
+            last_seen_at,
+            support_metadata
+          )
+          values (
+            $1, 'initial', $2, $3, 'committed_quote', $4, $5, $5,
+            '{"committed":true}'::jsonb
+          )
+        `,
+        [
+          segmentId,
+          segment.providerQuoteRefCiphertext,
+          segment.providerQuoteRefLookupHmac,
+          segment.lookupKeyVersion,
+          now,
+        ],
+      );
+    }
   }
+  return segmentIdByOrdinal;
 }
 
 async function insertCommitSteps(
   client: Pick<PoolClient, "query">,
   operationId: string,
   steps: readonly FundingCommitStep[],
+  segmentIdByOrdinal: ReadonlyMap<number, string>,
 ): Promise<void> {
   const stepIdByOrdinal = new Map<number, string>();
   for (const step of [...steps].sort(
@@ -611,10 +673,21 @@ async function insertCommitSteps(
         `step ${step.ordinal} depends on an unavailable prior ordinal`,
       );
     }
+    const segmentId =
+      step.segmentOrdinal == null
+        ? null
+        : segmentIdByOrdinal.get(step.segmentOrdinal);
+    if (step.segmentOrdinal != null && !segmentId) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        `step ${step.ordinal} references an unavailable segment ordinal`,
+      );
+    }
     const { rows } = await client.query<{ id: string }>(
       `
         insert into funding_operation_steps (
           operation_id,
+          segment_id,
           ordinal,
           step_kind,
           state,
@@ -626,12 +699,13 @@ async function insertCommitSteps(
           action_validation_result
         )
         values (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb
         )
         returning id
       `,
       [
         operationId,
+        segmentId,
         step.ordinal,
         step.stepKind,
         step.state,
@@ -649,42 +723,90 @@ async function insertCommitSteps(
   }
 }
 
-async function insertCommitReservation(
+function commitReservations(
+  plan: Pick<FundingCommitPlan, "reservations">,
+): readonly FundingCommitReservation[] {
+  const reservations = plan.reservations;
+  if (reservations.length > 32) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "funding plan contains too many balance reservations",
+    );
+  }
+  const keys = new Set<string>();
+  for (const reservation of reservations) {
+    const key = `${reservation.componentId}\u0000${reservation.mode}`;
+    if (
+      keys.has(key) ||
+      !/^[1-9][0-9]*$/.test(reservation.rawAmount) ||
+      (reservation.segmentOrdinal !== null &&
+        (!Number.isInteger(reservation.segmentOrdinal) ||
+          reservation.segmentOrdinal < 0)) ||
+      !Number.isInteger(reservation.assetDecimals) ||
+      reservation.assetDecimals < 0 ||
+      reservation.assetDecimals > 36 ||
+      !Number.isFinite(Date.parse(reservation.expiresAt))
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "funding plan contains an invalid or duplicate balance reservation",
+      );
+    }
+    keys.add(key);
+  }
+  return reservations;
+}
+
+async function insertCommitReservations(
   client: Pick<PoolClient, "query">,
   userId: string,
   operationId: string,
-  reservation: FundingCommitReservation | null,
+  reservations: readonly FundingCommitReservation[],
+  segmentIdByOrdinal: ReadonlyMap<number, string>,
 ): Promise<void> {
-  if (!reservation) return;
-  await client.query(
-    `
-      insert into balance_reservations (
-        user_id,
-        operation_id,
-        component_id,
-        location_id,
-        network_id,
-        asset_id,
-        asset_decimals,
-        raw_amount,
-        mode,
-        expires_at
-      )
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    `,
-    [
-      userId,
-      operationId,
-      reservation.componentId,
-      reservation.locationId,
-      reservation.networkId,
-      reservation.assetId,
-      reservation.assetDecimals,
-      reservation.rawAmount,
-      reservation.mode,
-      reservation.expiresAt,
-    ],
-  );
+  for (const reservation of reservations) {
+    const segmentId =
+      reservation.segmentOrdinal == null
+        ? null
+        : segmentIdByOrdinal.get(reservation.segmentOrdinal);
+    if (reservation.segmentOrdinal != null && !segmentId) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "balance reservation references an unavailable segment ordinal",
+      );
+    }
+    await client.query(
+      `
+        insert into balance_reservations (
+          user_id,
+          operation_id,
+          segment_id,
+          component_id,
+          location_id,
+          network_id,
+          asset_id,
+          asset_decimals,
+          raw_amount,
+          mode,
+          expires_at
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `,
+      [
+        userId,
+        operationId,
+        segmentId,
+        reservation.componentId,
+        reservation.locationId,
+        reservation.networkId,
+        reservation.assetId,
+        reservation.assetDecimals,
+        reservation.rawAmount,
+        reservation.mode,
+        reservation.expiresAt,
+      ],
+    );
+  }
 }
 
 export async function commitFundingOperationInTransaction(
@@ -845,13 +967,24 @@ export async function commitFundingOperationInTransaction(
   if (!inserted) throw new Error("funding operation insert returned no row");
   const operation = mapOperation(inserted);
 
-  await insertCommitSegments(client, operation.id, input.plan.segments);
-  await insertCommitSteps(client, operation.id, input.plan.steps);
-  await insertCommitReservation(
+  const segmentIdByOrdinal = await insertCommitSegments(
+    client,
+    operation.id,
+    input.plan.segments,
+    now,
+  );
+  await insertCommitSteps(
+    client,
+    operation.id,
+    input.plan.steps,
+    segmentIdByOrdinal,
+  );
+  await insertCommitReservations(
     client,
     input.userId,
     operation.id,
-    input.plan.reservation,
+    commitReservations(input.plan),
+    segmentIdByOrdinal,
   );
   await client.query(
     `
@@ -1449,6 +1582,7 @@ export type FundingReservationRow = Readonly<{
   id: string;
   userId: string;
   operationId: string;
+  segmentId: string | null;
   componentId: string;
   locationId: string;
   networkId: string;
@@ -1466,6 +1600,7 @@ type FundingReservationDbRow = {
   id: string;
   user_id: string;
   operation_id: string;
+  segment_id: string | null;
   component_id: string;
   location_id: string;
   network_id: string;
@@ -1484,6 +1619,7 @@ function mapReservation(row: FundingReservationDbRow): FundingReservationRow {
     id: row.id,
     userId: row.user_id,
     operationId: row.operation_id,
+    segmentId: row.segment_id,
     componentId: row.component_id,
     locationId: row.location_id,
     networkId: row.network_id,
@@ -1509,6 +1645,32 @@ export async function consumeFundingReservationInTransaction(
     now?: Date;
   }>,
 ): Promise<FundingReservationRow> {
+  const currentResult = await client.query<FundingReservationDbRow>(
+    `
+      select
+        id, user_id, operation_id, segment_id, component_id, location_id, network_id,
+        asset_id, asset_decimals, raw_amount, mode, state, expires_at,
+        consumer_kind, consumer_ref
+      from balance_reservations
+      where id = $1 and user_id = $2
+      for update
+    `,
+    [input.reservationId, input.userId],
+  );
+  const current = currentResult.rows[0];
+  if (
+    current?.state === "consumed" &&
+    current.consumer_kind === input.consumerKind &&
+    current.consumer_ref === input.consumerRef
+  ) {
+    return mapReservation(current);
+  }
+  if (!current || current.state !== "active") {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding reservation is not active for authenticated user",
+    );
+  }
   const { rows } = await client.query<FundingReservationDbRow>(
     `
       update balance_reservations
@@ -1519,7 +1681,7 @@ export async function consumeFundingReservationInTransaction(
           consumed_at = $6
       where id = $1 and user_id = $2 and state = 'active'
       returning
-        id, user_id, operation_id, component_id, location_id, network_id,
+        id, user_id, operation_id, segment_id, component_id, location_id, network_id,
         asset_id, asset_decimals, raw_amount, mode, state, expires_at,
         consumer_kind, consumer_ref
     `,
@@ -1557,7 +1719,7 @@ export async function releaseFundingReservationInTransaction(
           released_at = $3
       where id = $1 and state = 'active'
       returning
-        id, user_id, operation_id, component_id, location_id, network_id,
+        id, user_id, operation_id, segment_id, component_id, location_id, network_id,
         asset_id, asset_decimals, raw_amount, mode, state, expires_at,
         consumer_kind, consumer_ref
     `,

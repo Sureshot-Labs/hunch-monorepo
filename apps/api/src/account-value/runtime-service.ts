@@ -9,7 +9,11 @@ import type {
   ValuedAssetComponent,
   ValuedPositionComponent,
 } from "../funding/domain/types.js";
-import type { FundingCreationMode } from "../funding/policies/funding-policy.js";
+import type { OwnershipGraph } from "../funding/domain/contracts.js";
+import type {
+  FundingCreationMode,
+  FundingRuntimePolicy,
+} from "../funding/policies/funding-policy.js";
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "../services/polymarket-onchain.js";
@@ -95,7 +99,9 @@ export type AccountValueReadModel = Readonly<{
     source: "default" | "db";
     invalidStoredPolicy: boolean;
   }>;
+  runtimePolicy?: FundingRuntimePolicy;
   ownershipEvidenceRevision: string;
+  ownership?: OwnershipGraph;
   duplicateAssetObservationCount: number;
   assetPreferences: Readonly<Record<string, StoredAssetFundingPreference>>;
 }>;
@@ -254,6 +260,12 @@ function buildObservation(inputs: {
     asset: inputs.entry.asset,
     details: {
       address,
+      walletId: stableOpaqueId(
+        "wallet",
+        `${
+          inputs.resolution.walletType === "solana" ? "solana" : "ethereum"
+        }:${inputs.entry.asset.networkId}:${address}`,
+      ),
       linkedAddress: inputs.resolution.linkedWalletAddress,
       balanceClass: inputs.entry.venueId ?? "wallet",
       ...(inputs.entry.venueId ? { venueId: inputs.entry.venueId } : {}),
@@ -367,9 +379,11 @@ async function collectInventory(inputs: {
 }
 
 function sourceForWallet(
-  _wallet: Awaited<ReturnType<typeof AuthService.getUserWallets>>[number],
+  wallet: Awaited<ReturnType<typeof AuthService.getUserWallets>>[number],
 ): "embedded" | "smart" | "external" {
-  return "external";
+  return wallet.walletSource === "embedded" || wallet.walletSource === "smart"
+    ? wallet.walletSource
+    : "external";
 }
 
 function summarizeVenues(inputs: {
@@ -491,7 +505,8 @@ export async function buildAccountValueReadModel(inputs: {
         walletType: resolution.walletType === "solana" ? "solana" : "ethereum",
         source: linked ? sourceForWallet(linked) : "smart",
         linkedAddress: resolution.linkedWalletAddress,
-        serverWalletRef: null,
+        serverWalletRef:
+          linked?.isInternalWallet === true ? linked.privyWalletId : null,
       };
     },
   );
@@ -501,11 +516,16 @@ export async function buildAccountValueReadModel(inputs: {
       if (polymarket) {
         facts.push({
           venueId: "polymarket",
-          controllerAddress: polymarket.funderAddress ?? wallet.walletAddress,
+          // A Safe/Magic/Deposit Wallet is the venue account/funder, not a
+          // second authenticated controller. The verified signer remains the
+          // controller and execution wallet for the binding.
+          controllerAddress: wallet.walletAddress,
           executionAddress: wallet.walletAddress,
           accountRef: polymarket.funderAddress ?? wallet.walletAddress,
           settlementAsset: polymarketAsset,
-          signingMode: "web_client",
+          signingMode: wallet.isInternalWallet
+            ? "privy_authorization"
+            : "web_client",
         });
       }
       if (limitless) {
@@ -515,7 +535,9 @@ export async function buildAccountValueReadModel(inputs: {
           executionAddress: wallet.walletAddress,
           accountRef: wallet.walletAddress,
           settlementAsset: limitlessAsset,
-          signingMode: "web_client",
+          signingMode: wallet.isInternalWallet
+            ? "privy_authorization"
+            : "web_client",
         });
       }
       return facts;
@@ -789,7 +811,9 @@ export async function buildAccountValueReadModel(inputs: {
       source: resolvedPolicy.source,
       invalidStoredPolicy: resolvedPolicy.invalidStoredPolicy,
     },
+    runtimePolicy: resolvedPolicy.policy,
     ownershipEvidenceRevision: ownership.evidenceRevision,
+    ownership,
     duplicateAssetObservationCount: deduplicated.duplicateCount,
     assetPreferences,
   };

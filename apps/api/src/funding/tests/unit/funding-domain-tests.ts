@@ -9,11 +9,11 @@ import {
   fundingQuoteRequestSchema,
   moneySchema,
   rawAmountSchema,
-} from "./funding/domain/schemas.js";
+} from "../../domain/schemas.js";
 import {
   selectFundingDestination,
   selectVenueBindingForCurrentIntent,
-} from "./funding/domain/selections.js";
+} from "../../domain/selections.js";
 import {
   FUNDING_OPERATION_TRANSITIONS,
   assertFundingOperationTransition,
@@ -22,11 +22,11 @@ import {
   isValidFundingOperationState,
   type FundingOperationState,
   type FundingStateKey,
-} from "./funding/domain/transitions.js";
+} from "../../domain/transitions.js";
 import type {
   AssetLocation,
   FundingCommitRequest,
-} from "./funding/domain/types.js";
+} from "../../domain/types.js";
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   createFundingStaticRegistry,
@@ -36,13 +36,13 @@ import {
   validateFundingRuntimePolicy,
   type FundingRuntimePolicy,
   type FundingStaticRegistry,
-} from "./funding/policies/funding-policy.js";
+} from "../../policies/funding-policy.js";
 import {
   FundingPolicyPublishError,
   previewFundingPolicy,
   publishFundingPolicy,
   resolveFundingPolicy,
-} from "./funding/policies/funding-policy-service.js";
+} from "../../policies/funding-policy-service.js";
 
 type DeepMutable<T> = T extends readonly (infer Item)[]
   ? DeepMutable<Item>[]
@@ -972,21 +972,21 @@ await test("falls back closed when stored policy is invalid", async () => {
 
 await test("keeps core provider-neutral and simulator out of production registry", () => {
   for (const relative of [
-    "./funding/domain/types.ts",
-    "./funding/domain/schemas.ts",
-    "./funding/domain/selections.ts",
-    "./funding/domain/transitions.ts",
-    "./funding/domain/contracts.ts",
+    "../../domain/types.ts",
+    "../../domain/schemas.ts",
+    "../../domain/selections.ts",
+    "../../domain/transitions.ts",
+    "../../domain/contracts.ts",
   ]) {
     const source = readFileSync(new URL(relative, import.meta.url), "utf8");
     assert.doesNotMatch(source, /funding-providers|venue-capabilities/);
   }
   const productionPolicySource = readFileSync(
-    new URL("./funding/policies/funding-policy.ts", import.meta.url),
+    new URL("../../policies/funding-policy.ts", import.meta.url),
     "utf8",
   );
   const productionServiceSource = readFileSync(
-    new URL("./funding/policies/funding-policy-service.ts", import.meta.url),
+    new URL("../../policies/funding-policy-service.ts", import.meta.url),
     "utf8",
   );
   assert.doesNotMatch(productionPolicySource, /local-simulator/);
@@ -995,7 +995,7 @@ await test("keeps core provider-neutral and simulator out of production registry
 
 await test("protects funding admin routes with dedicated permissions", () => {
   const routesSource = readFileSync(
-    new URL("./routes/admin-funding.ts", import.meta.url),
+    new URL("../../../routes/admin-funding.ts", import.meta.url),
     "utf8",
   );
   assert.match(
@@ -1015,7 +1015,7 @@ await test("protects funding admin routes with dedicated permissions", () => {
     /const actorId = request\.adminActor\?\.id \?\? request\.user\?\.id;/,
   );
   const adminRoutesSource = readFileSync(
-    new URL("./routes/admin.ts", import.meta.url),
+    new URL("../../../routes/admin.ts", import.meta.url),
     "utf8",
   );
   assert.match(

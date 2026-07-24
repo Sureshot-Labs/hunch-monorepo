@@ -37,6 +37,7 @@ function mapProjection(
     projection,
     plannerSnapshot: {
       ...row.planner_snapshot,
+      withdrawalRecipient: row.planner_snapshot.withdrawalRecipient ?? null,
       projection,
     },
     policyVersion: Number(row.policy_version),

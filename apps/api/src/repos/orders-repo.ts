@@ -4,6 +4,7 @@ import {
   normalizeOptionalWalletForStorage,
   normalizeWalletForStorage,
 } from "../lib/wallet-address.js";
+import { consumeFundingReservationForLinkedConsumerInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
 const POSITION_DELTA_APPLIED_MARKER = "_hunchPositionDeltaAppliedAt";
@@ -241,36 +242,42 @@ export type StoreOrderResult =
       };
     };
 
-async function storeOrderInTx(
+export type StoreOrderInput = {
+  userId: string;
+  walletAddress: string;
+  signerAddress?: string | null;
+  venue: string;
+  venueOrderId: string;
+  tokenId: string | null;
+  side: string | null;
+  orderType?: "GTC" | "GTD" | "FAK" | "FOK" | null;
+  price: number | null;
+  size: number | null;
+  status: string;
+  errorMessage: string | null;
+  rawError: string | null;
+  orderHash?: string | null;
+  feeBps?: number | null;
+  feeAuth?: unknown | null;
+  feeAuthSig?: string | null;
+  feeCollectorAddress?: string | null;
+  feeDeadline?: number | null;
+  feePolicySnapshot?: unknown | null;
+  orderPayload?: unknown | null;
+  orderPayloadVersion?: string | null;
+  fundingReservation?: Readonly<{
+    operationId: string;
+    reservationId: string;
+  }> | null;
+  postedAt?: Date | null;
+  lastUpdate?: Date | null;
+  filledAt?: Date | null;
+  cancelledAt?: Date | null;
+};
+
+export async function storeOrderInTransaction(
   client: PoolClient,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    signerAddress?: string | null;
-    venue: string;
-    venueOrderId: string;
-    tokenId: string | null;
-    side: string | null;
-    orderType?: "GTC" | "GTD" | "FAK" | "FOK" | null;
-    price: number | null;
-    size: number | null;
-    status: string;
-    errorMessage: string | null;
-    rawError: string | null;
-    orderHash?: string | null;
-    feeBps?: number | null;
-    feeAuth?: unknown | null;
-    feeAuthSig?: string | null;
-    feeCollectorAddress?: string | null;
-    feeDeadline?: number | null;
-    feePolicySnapshot?: unknown | null;
-    orderPayload?: unknown | null;
-    orderPayloadVersion?: string | null;
-    postedAt?: Date | null;
-    lastUpdate?: Date | null;
-    filledAt?: Date | null;
-    cancelledAt?: Date | null;
-  },
+  inputs: StoreOrderInput,
 ): Promise<StoreOrderResult> {
   const payloadMaker = extractPayloadAddress(inputs.orderPayload, "maker");
   const payloadSigner = extractPayloadAddress(inputs.orderPayload, "signer");
@@ -298,8 +305,11 @@ async function storeOrderInTx(
     order_payload: unknown | null;
     order_payload_version: string | null;
     fee_policy_snapshot: unknown | null;
+    funding_operation_id: string | null;
+    funding_reservation_id: string | null;
   }>(
-    `SELECT id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot
+    `SELECT id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot,
+            funding_operation_id, funding_reservation_id
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
      ORDER BY
@@ -319,6 +329,16 @@ async function storeOrderInTx(
     const params: PgParams = [];
     let paramCount = 0;
     const signerAddress = resolvedSignerAddress;
+    const funding = inputs.fundingReservation ?? null;
+    if (
+      funding &&
+      ((existing.funding_operation_id &&
+        existing.funding_operation_id !== funding.operationId) ||
+        (existing.funding_reservation_id &&
+          existing.funding_reservation_id !== funding.reservationId))
+    ) {
+      throw new Error("Order is already linked to another funding reservation");
+    }
 
     if (
       !existing.wallet_address ||
@@ -358,6 +378,14 @@ async function storeOrderInTx(
       updates.push(`fee_policy_snapshot = $${paramCount}`);
       params.push(JSON.stringify(inputs.feePolicySnapshot));
     }
+    if (funding && !existing.funding_operation_id) {
+      paramCount += 1;
+      updates.push(`funding_operation_id = $${paramCount}`);
+      params.push(funding.operationId);
+      paramCount += 1;
+      updates.push(`funding_reservation_id = $${paramCount}`);
+      params.push(funding.reservationId);
+    }
     if (updates.length) {
       paramCount += 1;
       params.push(existing.id);
@@ -365,6 +393,14 @@ async function storeOrderInTx(
         `UPDATE orders SET ${updates.join(", ")} WHERE id = $${paramCount}`,
         params,
       );
+    }
+    if (funding) {
+      await consumeFundingReservationForLinkedConsumerInTransaction(client, {
+        userId: inputs.userId,
+        reservationId: funding.reservationId,
+        consumer: { kind: "web_order", orderId: existing.id },
+        outcomeReason: "trade_order_recorded",
+      });
     }
     return {
       kind: "exists",
@@ -390,11 +426,12 @@ async function storeOrderInTx(
         id, user_id, wallet_address, signer_address, venue, venue_order_id, token_id, side, order_type,
         price, size, status, filled_size, error_message, raw_error,
         order_payload, order_payload_version, order_hash, fee_bps, fee_auth, fee_auth_sig, fee_collector_address, fee_deadline, fee_policy_snapshot,
+        funding_operation_id, funding_reservation_id,
         filled_at, cancelled_at, posted_at, last_update
       ) VALUES (
         gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21,
-        $22, $23, $24, COALESCE($25, now()), COALESCE($26, now())
+        $22, $23, $24, $25, $26, COALESCE($27, now()), COALESCE($28, now())
       ) RETURNING id, venue_order_id, status, posted_at`,
     [
       inputs.userId,
@@ -419,17 +456,29 @@ async function storeOrderInTx(
       inputs.feeCollectorAddress ?? null,
       inputs.feeDeadline ?? null,
       inputs.feePolicySnapshot ?? null,
+      inputs.fundingReservation?.operationId ?? null,
+      inputs.fundingReservation?.reservationId ?? null,
       inputs.filledAt ?? null,
       inputs.cancelledAt ?? null,
       inputs.postedAt ?? null,
       inputs.lastUpdate ?? null,
     ],
   );
+  const inserted = result.rows[0];
+  if (!inserted) throw new Error("Failed to store order");
+  if (inputs.fundingReservation) {
+    await consumeFundingReservationForLinkedConsumerInTransaction(client, {
+      userId: inputs.userId,
+      reservationId: inputs.fundingReservation.reservationId,
+      consumer: { kind: "web_order", orderId: inserted.id },
+      outcomeReason: "trade_order_recorded",
+    });
+  }
 
   return {
     kind: "stored",
     order: {
-      ...result.rows[0],
+      ...inserted,
       position_delta_applied: false,
     },
   };
@@ -437,39 +486,12 @@ async function storeOrderInTx(
 
 export async function storeOrder(
   pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    signerAddress?: string | null;
-    venue: string;
-    venueOrderId: string;
-    tokenId: string | null;
-    side: string | null;
-    orderType?: "GTC" | "GTD" | "FAK" | "FOK" | null;
-    price: number | null;
-    size: number | null;
-    status: string;
-    errorMessage: string | null;
-    rawError: string | null;
-    orderHash?: string | null;
-    feeBps?: number | null;
-    feeAuth?: unknown | null;
-    feeAuthSig?: string | null;
-    feeCollectorAddress?: string | null;
-    feeDeadline?: number | null;
-    feePolicySnapshot?: unknown | null;
-    orderPayload?: unknown | null;
-    orderPayloadVersion?: string | null;
-    postedAt?: Date | null;
-    lastUpdate?: Date | null;
-    filledAt?: Date | null;
-    cancelledAt?: Date | null;
-  },
+  inputs: StoreOrderInput,
 ): Promise<StoreOrderResult> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const result = await storeOrderInTx(client, inputs);
+    const result = await storeOrderInTransaction(client, inputs);
     await client.query("COMMIT");
     return result;
   } catch (error) {

@@ -6,6 +6,7 @@ import type {
   MarketContextBinding,
   PlacementDecision,
   SourceOption,
+  ValidatedExternalRecipient,
 } from "../domain/types.js";
 import type { ResolvedDestinationCandidate } from "./destination-adapters.js";
 
@@ -14,12 +15,14 @@ export type PlannedSourceOption = Readonly<{
   commitPlan: FundingCommitPlan;
   routeId: string | null;
   providerId: string | null;
+  compositeEligible?: boolean;
 }>;
 
 export type FundingPlanningSnapshot = Readonly<{
   request: FundingDiscoveryRequest;
   marketContext: MarketContextBinding | null;
   destination: ResolvedDestinationCandidate | null;
+  withdrawalRecipient: ValidatedExternalRecipient | null;
   placement: PlacementDecision | null;
   sources: readonly PlannedSourceOption[];
   projection: IntentLiquidityProjection;

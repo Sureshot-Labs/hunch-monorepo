@@ -23,7 +23,7 @@ const negRiskAdapterIface = new Interface([
   "function redeemPositions(bytes32 conditionId,uint256[] amounts)",
 ]);
 
-type LimitlessRedemptionPlanInputs = {
+export type LimitlessRedemptionPlanInputs = {
   rpcUrl: string;
   timeoutMs: number;
   owner: string;
@@ -183,6 +183,19 @@ export async function buildLimitlessRedemptionPlan(
         resolvedOutcomePct: condition.resolvedOutcomePct,
       });
     }
+    const expectedPayout =
+      (balance * selectedPayoutNumerator) / condition.payoutDenominator;
+    if (expectedPayout <= 0n) {
+      return buildUnavailableRedemptionPlan({
+        venue: "limitless",
+        chainId: BASE_CHAIN_ID,
+        reason: "resolved_zero_payout",
+        reasonMessage: "Resolved position has no payable collateral.",
+        conditionResolved: true,
+        resolvedOutcome: condition.resolvedOutcome,
+        resolvedOutcomePct: condition.resolvedOutcomePct,
+      });
+    }
 
     if (inputs.isNegRisk) {
       if (!inputs.adapterAddress) {
@@ -207,6 +220,13 @@ export async function buildLimitlessRedemptionPlan(
         chainId: BASE_CHAIN_ID,
         targetAddress: adapterAddress,
         data,
+        collateralTokenAddress: env.limitlessUsdcAddress,
+        payoutTokenAddress: env.limitlessUsdcAddress,
+        operatorApprovalAddress: adapterAddress,
+        payoutAmountRaw: expectedPayout.toString(),
+        expectedPayoutRaw: expectedPayout.toString(),
+        yesBalanceRaw: inputs.outcome === "YES" ? balance.toString() : "0",
+        noBalanceRaw: inputs.outcome === "NO" ? balance.toString() : "0",
         conditionResolved: true,
         resolvedOutcome: condition.resolvedOutcome,
         resolvedOutcomePct: condition.resolvedOutcomePct,
@@ -224,6 +244,12 @@ export async function buildLimitlessRedemptionPlan(
       chainId: BASE_CHAIN_ID,
       targetAddress: conditionalTokensAddress,
       data,
+      collateralTokenAddress: env.limitlessUsdcAddress,
+      payoutTokenAddress: env.limitlessUsdcAddress,
+      payoutAmountRaw: expectedPayout.toString(),
+      expectedPayoutRaw: expectedPayout.toString(),
+      yesBalanceRaw: inputs.outcome === "YES" ? balance.toString() : "0",
+      noBalanceRaw: inputs.outcome === "NO" ? balance.toString() : "0",
       conditionResolved: true,
       resolvedOutcome: condition.resolvedOutcome,
       resolvedOutcomePct: condition.resolvedOutcomePct,

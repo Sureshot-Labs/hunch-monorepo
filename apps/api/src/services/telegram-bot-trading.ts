@@ -51,9 +51,9 @@ import {
   POLYMARKET_RELAYER_FAILED_STATES,
   POLYMARKET_RELAYER_SUCCESS_STATES,
   submitPolymarketDepositWalletBatch,
-  sumTokenTransfersTo,
   waitForPolymarketRelayerTransaction,
 } from "./polymarket-deposit-wallet-relayer.js";
+import { sumErc20TransfersTo } from "../funding/execution/evm-erc20-receipt.js";
 import type { ApiBotTradingExecutor } from "./api-trading-service.js";
 import type {
   KalshiTradeEligibility,
@@ -414,6 +414,8 @@ type TelegramTradeIntentRow = {
   error_code: string | null;
   error_message: string | null;
   submit_started_at: Date | null;
+  funding_operation_id: string | null;
+  funding_reservation_id: string | null;
   quote_snapshot: Record<string, unknown>;
   policy_snapshot: Record<string, unknown>;
   expires_at: Date;
@@ -1502,6 +1504,7 @@ function buildTelegramTradeIntent(input: {
   market: TelegramBotMarketRow;
   maxSlippageBps: number;
   side: TelegramBotTradingSide;
+  fundingReservation?: TradeIntent["fundingReservation"];
 }): TradeIntent {
   return {
     id: input.intentId,
@@ -1527,6 +1530,7 @@ function buildTelegramTradeIntent(input: {
     amount: { type: "usd", value: String(input.amountUsd) },
     orderType: "FOK",
     slippageBps: input.maxSlippageBps,
+    fundingReservation: input.fundingReservation,
     idempotencyKey: `telegram-bot:${input.intentId}`,
     raw: {},
   };
@@ -4052,6 +4056,8 @@ async function loadIntent(
        i.error_code,
        i.error_message,
        i.submit_started_at,
+       i.funding_operation_id,
+       i.funding_reservation_id,
        i.quote_snapshot,
        i.policy_snapshot,
        i.expires_at,
@@ -4893,7 +4899,7 @@ async function handleTelegramRedeemCallback(input: {
       definitiveFailure = receipt != null;
       throw new Error("Polymarket redemption transaction reverted.");
     }
-    const actualPayoutRaw = sumTokenTransfersTo({
+    const actualPayoutRaw = sumErc20TransfersTo({
       logs: receipt.logs,
       recipient: depositWallet,
       tokenAddress: env.polymarketPusdAddress,
@@ -5333,6 +5339,13 @@ export async function handleTelegramBotTradingCallback(
             market,
             maxSlippageBps: policy.maxSlippageBps,
             side,
+            fundingReservation:
+              intent.funding_operation_id && intent.funding_reservation_id
+                ? {
+                    operationId: intent.funding_operation_id,
+                    reservationId: intent.funding_reservation_id,
+                  }
+                : null,
           });
     let previewQuote: TradeQuote;
     try {
@@ -5820,6 +5833,13 @@ export async function handleTelegramBotTradingCallback(
           market,
           maxSlippageBps: policy.maxSlippageBps,
           side,
+          fundingReservation:
+            intent.funding_operation_id && intent.funding_reservation_id
+              ? {
+                  operationId: intent.funding_operation_id,
+                  reservationId: intent.funding_reservation_id,
+                }
+              : null,
         });
   let submittedRefs: SubmittedTradeRefs | null = null;
   let submitStarted = false;

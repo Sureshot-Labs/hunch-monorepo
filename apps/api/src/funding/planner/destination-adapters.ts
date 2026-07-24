@@ -10,13 +10,15 @@ import type {
   AssetRef,
   FundingDestinationOption,
   FundingTarget,
+  JsonObject,
   Money,
   VenueBindingOption,
+  VenueId,
 } from "../domain/types.js";
 import { FundingPlannerError, assertSameAsset } from "./money.js";
 
 export type FrozenPreparationDestination = Readonly<{
-  venueId: "polymarket" | "limitless";
+  venueId: VenueId;
   destinationLocationPatternId: string;
   collateralValuation: FrozenCollateralValuation | null;
   spendability: FrozenSpendabilityEvidence;
@@ -25,6 +27,18 @@ export type FrozenPreparationDestination = Readonly<{
   target: FundingTarget;
   requiredAsset: AssetRef;
   networkLabel: string;
+  sourcePlanningEvidence: SourcePlanningEvidence | null;
+}>;
+
+/**
+ * Opaque evidence owned and decoded by one source adapter. Core planning only
+ * transports this envelope; adding a venue must not add another core field or
+ * a venue switch.
+ */
+export type SourcePlanningEvidence = Readonly<{
+  adapterId: string;
+  schemaRevision: string;
+  payload: JsonObject;
 }>;
 
 export type FrozenCollateralValuation = Readonly<{
@@ -103,11 +117,10 @@ function toOption(
   };
 }
 
-abstract class FrozenVenueDestinationAdapter implements FundingDestination {
-  abstract readonly venueId: FrozenPreparationDestination["venueId"];
-  abstract readonly supportedMarketClasses: readonly string[];
-
+export class FrozenPreparationDestinationAdapter implements FundingDestination {
   constructor(
+    readonly venueId: VenueId,
+    readonly supportedMarketClasses: readonly string[],
     private readonly resolveFacts: FrozenPreparationFactsResolver,
     private readonly clock: () => Date = () => new Date(),
   ) {}
@@ -193,21 +206,6 @@ abstract class FrozenVenueDestinationAdapter implements FundingDestination {
   }
 }
 
-export class PolymarketDestinationAdapter extends FrozenVenueDestinationAdapter {
-  readonly venueId = "polymarket" as const;
-  readonly supportedMarketClasses = ["standard", "neg_risk"] as const;
-}
-
-export class LimitlessDestinationAdapter extends FrozenVenueDestinationAdapter {
-  readonly venueId = "limitless" as const;
-  readonly supportedMarketClasses = [
-    "clob",
-    "clob_neg_risk",
-    "amm",
-    "amm_neg_risk",
-  ] as const;
-}
-
 export class CombinedFundingDestinationResolver implements FundingDestination {
   constructor(
     private readonly adapters: readonly FundingDestination[],
@@ -256,7 +254,41 @@ export type ResolvedDestinationCandidate = Readonly<{
   preparationActions: PreparationResult["requiredActions"];
   completeness: "complete" | "partial";
   freshness: "fresh" | "stale";
+  venueBinding: PreparationResult["binding"];
+  sourcePlanningEvidence: SourcePlanningEvidence | null;
 }>;
+
+/**
+ * The provider-routing boundary needs only an exact immutable target. Venue
+ * destinations and validated external withdrawal recipients deliberately
+ * share this small shape without pretending that an external address is an
+ * owned Account Value location or a venue binding.
+ */
+export type ResolvedRouteDestination = Readonly<{
+  destinationId: string;
+  destinationLocationPatternId: string;
+  target: FundingTarget;
+  requiredAsset: AssetRef;
+  venueId: string | null;
+  venueBindingOption: VenueBindingOption | null;
+  externalRecipientId: string | null;
+  recipientAddress: string | null;
+}>;
+
+export function toResolvedRouteDestination(
+  candidate: ResolvedDestinationCandidate,
+): ResolvedRouteDestination {
+  return {
+    destinationId: candidate.option.destinationOptionId,
+    destinationLocationPatternId: candidate.destinationLocationPatternId,
+    target: candidate.target,
+    requiredAsset: candidate.option.requiredAsset,
+    venueId: candidate.option.venueId,
+    venueBindingOption: candidate.bindingOption,
+    externalRecipientId: null,
+    recipientAddress: null,
+  };
+}
 
 function assertFrozenDestinationFact(
   fact: FrozenPreparationDestination,

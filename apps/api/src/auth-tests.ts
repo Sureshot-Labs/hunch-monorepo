@@ -52,6 +52,10 @@ function makeUserWallet(overrides: Partial<UserWallet> = {}): UserWallet {
     name: null,
     isPrimary: false,
     isVerified: true,
+    privyWalletId: null,
+    walletSource: "external",
+    isInternalWallet: false,
+    privyProfileUpdatedAt: new Date("2026-01-01T00:00:00.000Z"),
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     ...overrides,
@@ -1858,6 +1862,9 @@ const tests: TestCase[] = [
               ],
             };
           }
+          if (/UPDATE user_wallets\s+SET wallet_type = \$3/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/UPDATE user_wallets SET is_primary = false/i.test(sql)) {
             return { rows: [] };
           }
@@ -1926,6 +1933,18 @@ const tests: TestCase[] = [
       );
 
       assert.equal(user.id, "user-existing");
+      const walletProfileUpdate = calls.find((call) =>
+        /UPDATE user_wallets\s+SET wallet_type = \$3/i.test(call.sql),
+      );
+      assert.ok(walletProfileUpdate);
+      assert.deepEqual(walletProfileUpdate.params, [
+        "user-existing",
+        "0xabc0000000000000000000000000000000000000",
+        "ethereum",
+        null,
+        "external",
+        false,
+      ]);
       const telegramDelete = calls.find((call) =>
         /DELETE FROM user_telegram_accounts WHERE user_id = \$1/i.test(
           call.sql,

@@ -84,12 +84,26 @@ export const limitlessEmbeddedSignOrderExecuteBodySchema = z.object({
   authorizationSignature: z.string().trim().min(1).optional(),
 });
 
-export const limitlessOrderBodySchema = z.object({
-  order: limitlessOrderSchema,
-  orderType: zOrderType.default("GTC"),
-  marketSlug: zLimitlessSlug,
-  ownerId: z.coerce.number().int().optional(),
-});
+export const limitlessOrderBodySchema = z
+  .object({
+    order: limitlessOrderSchema,
+    orderType: zOrderType.default("GTC"),
+    marketSlug: zLimitlessSlug,
+    ownerId: z.coerce.number().int().optional(),
+    fundingOperationId: z.string().uuid().optional(),
+    fundingReservationId: z.string().uuid().optional(),
+  })
+  .superRefine((value, context) => {
+    if (
+      Boolean(value.fundingOperationId) !== Boolean(value.fundingReservationId)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "fundingOperationId and fundingReservationId must be provided together",
+      });
+    }
+  });
 
 export const limitlessOrderIdParamsSchema = z.object({
   orderId: zRequiredString("orderId is required"),
@@ -126,18 +140,32 @@ export const limitlessCancelBatchBodySchema = z.object({
     .min(1, "orderIds is required"),
 });
 
-export const limitlessAmmOrderBodySchema = z.object({
-  tokenId: zRequiredString("tokenId is required"),
-  side: z.enum(["BUY", "SELL"]),
-  size: z.number().positive("size is required"),
-  price: z.number().positive().optional(),
-  amountUsd: z.number().positive().optional(),
-  marketSlug: zLimitlessSlug.optional(),
-  txHash: z
-    .string()
-    .min(1, "txHash is required")
-    .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format"),
-});
+export const limitlessAmmOrderBodySchema = z
+  .object({
+    tokenId: zRequiredString("tokenId is required"),
+    side: z.enum(["BUY", "SELL"]),
+    size: z.number().positive("size is required"),
+    price: z.number().positive().optional(),
+    amountUsd: z.number().positive().optional(),
+    marketSlug: zLimitlessSlug.optional(),
+    txHash: z
+      .string()
+      .min(1, "txHash is required")
+      .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid tx hash format"),
+    fundingOperationId: z.string().uuid().optional(),
+    fundingReservationId: z.string().uuid().optional(),
+  })
+  .superRefine((value, context) => {
+    if (
+      Boolean(value.fundingOperationId) !== Boolean(value.fundingReservationId)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "fundingOperationId and fundingReservationId must be provided together",
+      });
+    }
+  });
 
 export const limitlessRedemptionQuerySchema = z.object({
   conditionIds: zCsvString("conditionIds is required"),

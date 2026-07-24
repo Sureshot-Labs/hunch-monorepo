@@ -78,7 +78,6 @@ export const validatedExternalRecipientSchema = z
     accountId: opaqueIdSchema,
     networkId: canonicalIdSchema,
     asset: assetRefSchema,
-    address: z.string().trim().min(1).max(256),
     addressFingerprint: z.string().trim().min(8).max(128),
     validatedAt: z.string().datetime(),
     expiresAt: z.string().datetime(),
@@ -126,11 +125,14 @@ export const fundingDiscoveryRequestSchema = z
   .strict()
   .superRefine((request, context) => {
     const withdrawal = request.purpose === "withdrawal";
-    if (withdrawal && !request.withdrawalRecipientId) {
+    if (
+      withdrawal &&
+      (!request.withdrawalRecipientId || !request.requestedDestinationAmount)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["withdrawalRecipientId"],
-        message: "withdrawal requires an opaque recipient ID",
+        message: "withdrawal requires an opaque recipient ID and exact amount",
       });
     }
     if (
@@ -276,8 +278,26 @@ export const signatureActionSchema = normalizedActionBaseSchema
   })
   .strict();
 
+export const externalHandoffActionSchema = normalizedActionBaseSchema
+  .extend({
+    kind: z.literal("external_handoff"),
+    actorWalletId: opaqueIdSchema,
+    handoffKind: z
+      .string()
+      .trim()
+      .min(3)
+      .max(120)
+      .regex(
+        /^[a-z][a-z0-9]*(?:[._:-][a-z0-9]+)*$/,
+        "handoffKind must be a stable namespaced adapter action type",
+      ),
+    payload: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
 export const normalizedActionSchema = z.discriminatedUnion("kind", [
   evmTransactionActionSchema,
+  externalHandoffActionSchema,
   svmTransactionActionSchema,
   signatureActionSchema,
 ]);

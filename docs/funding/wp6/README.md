@@ -1,7 +1,8 @@
 # WP6 Wallet Preparation and Position-Action Contract
 
-Status: **pre-implementation contract frozen for WP5 planning and WP6
-implementation; no caller has been migrated by this document.**
+Status: **contract frozen; the WP6 backend boundary is implementation-complete
+and locally verified on 2026-07-24. WP7/WP8 caller migration, guarded live
+rehearsal, and production activation remain separate work.**
 
 Captured on 2026-07-24 from:
 
@@ -10,11 +11,75 @@ Captured on 2026-07-24 from:
 - `Hunch_App` revision
   `bdf65384c1227c39580882367b61bfbe86b74ba1`.
 
-Both repositories were on `unibalance` with clean worktrees at capture time.
-This artifact records current working behavior, the target ownership boundary,
-required parity, and the evidence needed before legacy callers can be removed.
-It does not authorize a transaction, policy change, rollout, deployment, or
-legacy deletion.
+Both repositories were on `unibalance` with clean worktrees when the contract
+baseline was captured. The implementation described below is the subsequent
+uncommitted local WP6 worktree. This artifact records current working behavior,
+the target ownership boundary, required parity, and the evidence needed before
+legacy callers can be removed. It does not authorize a transaction, policy
+change, rollout, deployment, or legacy deletion.
+
+## 0. Delivered backend boundary
+
+WP6 now provides one backend-owned contract for wallet/venue preparation,
+funding follow-up, durable action evidence, and owner-bound position actions:
+
+- side-effect-free, purpose-aware Polymarket and Limitless inspection plus
+  stale-revision rejection;
+- normalized preparation actions and postcondition drivers without wallet
+  provisioning or trade submission;
+- exact Polymarket funding snapshots, source planning, Funding Router
+  follow-up, receipt reconciliation, and CLOB-visible readiness;
+- bounded multi-leg source composition whose independent legs share one
+  operation, reducer, reservation model, and aggregate minimum-output gate;
+- immutable action fingerprints, exact owned-wallet execution profiles,
+  withdrawal-destination gates, and action-specific Privy sponsorship checks;
+- durable EVM/Solana receipt references, possible-broadcast recovery,
+  postconditions, reducer integration, reservation creation, expiry, release,
+  and exact order/execution consumer linkage;
+- owner-bound Polymarket and Limitless redemption through a generic
+  `PositionActionVenueDriver` registry;
+- public inspect/prepare/action-report/reconcile and
+  position-action inspect/prepare/claim/report/reconcile APIs;
+- no server-side Polymarket auto-funding inside trade submission: a buy may
+  consume only an active, unexpired reservation from a `ready`
+  `trade_shortfall` operation for the exact user, venue, and market; consuming
+  the reservation atomically completes the operation, and the trade still
+  passes the normal fresh quote/order boundary.
+
+The common planner, operation state machine, receipt tables, reducer,
+reservation model, and position-action runtime are venue-neutral. The
+`future_venue` fixtures prove that a new stable venue ID passes the preparation
+registry, position-action registry, public schema, and database persistence
+without adding a core venue branch.
+
+Production source is organized feature-first under:
+
+```text
+apps/api/src/funding/
+  domain/
+  planner/
+  preparation/
+  execution/
+  persistence/
+  reconciliation/
+  position-actions/
+  worker/
+  tests/
+    unit/
+    integration/
+```
+
+The API test runner recursively discovers `*-tests.ts`; database suites carry
+explicit `@requires-db` or `@api-integration` markers. New WP6 tests belong in
+the feature test directories instead of the already crowded API `src` root.
+Reorganizing unrelated legacy API files is intentionally outside WP6 because
+it would create a large, behavior-free conflict surface.
+
+This is a backend completion claim, not an activation claim. The existing web
+Auth provisioning flow remains the single owner of embedded EVM/Solana wallet
+creation. WP7 must migrate desktop/mobile callers to shared controllers, WP8
+must migrate Telegram orchestration, and WP9 must perform guarded live parity
+and activation evidence before legacy caller deletion.
 
 ## 1. Non-negotiable ownership boundaries
 
@@ -95,6 +160,31 @@ The contract must distinguish:
 No caller may interpret a generic `ready: true` without the exact purpose,
 binding, revision, and readiness evidence.
 
+### 2.1 Venue extension boundary
+
+WP6 must not add venue branches to the planner, action runtime, receipt
+runtime, or reducer. A venue-specific integration is split into three small
+capabilities:
+
+1. a destination/preparation adapter freezes purpose-specific binding and
+   spendability facts;
+2. an optional source adapter returns only the common immutable
+   `plan + steps + reservations` contract;
+3. an optional postcondition driver converts a finalized exact receipt plus
+   venue-visible evidence into a common `venue_readiness` observation.
+
+The composition root registers these adapters. The common quote, commit,
+possible-broadcast, receipt, reservation, reducer, and consumer-linkage code
+does not switch on venue ID or adapter ID. Adding a future venue may add
+adapter implementations and registration, policy/location/route data, and
+fixtures, but must not add another planner, operation state machine, receipt
+table, balance reservation model, or caller-specific readiness path.
+
+An adapter is accepted only when a fake independent adapter composes through
+the same registry without changing core code, its provider/venue DTOs remain
+inside the adapter, and unsupported facts return no selectable source rather
+than falling through to another venue.
+
 ## 3. Current Privy provisioning and execution truth
 
 ### 3.1 Embedded wallet provisioning
@@ -130,6 +220,43 @@ reconciliation.
 An external linked wallet always remains client-controlled. A wallet address,
 balance, old venue credential, or previous setup is not sufficient authority
 for server execution.
+
+### 3.3 Gas readiness and sponsorship
+
+For an exact internal EVM action, gas readiness may be proven by either:
+
+- a fresh sufficient native-token balance for the exact execution wallet; or
+- an exact Privy sponsorship capability resolved for the same wallet, network,
+  action class, and immutable normalized action.
+
+Sponsorship is not a wallet-wide property. `serverWalletRef`, internal-wallet
+classification, a prior sponsored transaction, or the client requesting
+`sponsor: true` is insufficient on its own. Before a committed action can carry
+`payerRequirement=privy_sponsor`, the backend must:
+
+1. resolve the same owned internal wallet profile and Privy wallet ID;
+2. require the locally enabled sponsorship capability and execution mode;
+3. validate the immutable transaction using its route/action-specific
+   allowlist, including chain, target, selector/calldata, token, amount, native
+   value, and bounded gas where applicable;
+4. bind the sponsorship decision and validator result into the committed step;
+5. re-resolve ownership, policy revision, action fingerprint, and sponsorship
+   immediately before returning an executable authorization request;
+6. treat Privy as the final policy and sponsorship enforcement boundary; and
+7. reconcile the submitted transaction and destination postconditions instead
+   of treating client or Privy acceptance as settlement.
+
+An external wallet always remains `web_client` with
+`payerRequirement=user`. If sponsorship evidence is absent, stale, mismatched,
+or outside its cap, the action is not sponsorship-ready and must fall back to a
+proven user-paid gas path or fail closed. EVM sponsorship does not grant
+delegated trading authority and never permits a provider-supplied
+`authorizationList`.
+
+Solana fee sponsorship is not inferred from this EVM capability. It remains a
+separate exact transaction-inspection policy with fee-payer, native transfer,
+program, ATA, rent-recipient, and cap checks; otherwise sufficient user SOL is
+required.
 
 ## 4. Current Polymarket truth
 
@@ -204,7 +331,37 @@ The router may use Deposit Wallet USDC.e first, then signer pUSD, then signer
 USDC.e. It never sweeps unrelated funds. Router readiness is not an order
 submission and is not inferred from a successful transaction alone.
 
-### 4.5 Purpose matrix
+### 4.5 Composite source legs
+
+WP6 supports one backend-issued composite source option when no individual
+owned source can cover the exact destination requirement but a bounded
+combination can. This is not a generic token sweep and not an atomic
+cross-chain transaction.
+
+- discovery quotes every candidate leg independently through one enabled,
+  pinned Relay route;
+- each leg freezes one source component, exact input, expected/minimum output,
+  fees, expiry, normalized actions, signer, gas or exact Privy sponsorship
+  capability, and refund semantics;
+- aggregate eligibility uses the sum of minimum outputs after fees/slippage;
+- one SQL commit persists the ordered legs and reserves every source component;
+- external legs then execute sequentially with per-leg possible-broadcast
+  evidence and reconciliation;
+- a confirmed leg is never broadcast again after restart;
+- ambiguous submission stops the chain in `reconcile_required`;
+- later failure leaves prior credits as ordinary venue cash and releases only
+  unused reservations;
+- full destination and venue readiness is required before completion;
+- neither destination-ready nor partial funding submits a trade. Buy always
+  obtains a fresh market quote and separate user confirmation.
+
+The destination venue binding remains singular and immutable. Composite legs
+may originate from different owned sources such as withdrawable Limitless cash,
+an embedded EVM wallet, and a Solana USDC wallet, provided every corresponding
+location has the exact source capability and executable route. Linked external
+balances are never pulled without their explicit client actions.
+
+### 4.6 Purpose matrix
 
 | Purpose    | Minimum Polymarket evidence                                                                                                                                                                                          |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -490,47 +647,62 @@ The source map is a migration checklist. A replacement is incomplete if any
 listed caller still independently computes readiness or submits an untracked
 setup action.
 
-## 11. Existing evidence and mandatory missing tests
+## 11. Backend evidence and remaining cross-WP validation
 
-Existing tests already cover parts of the contract:
+The locally passing backend evidence covers:
 
 - Privy/auth conflicts and wallet classification;
-- embedded Polymarket bootstrap selection;
 - Polymarket connect typed data and prepared authorization requests;
-- signer, Safe, Magic, and Deposit Wallet action validation;
+- signer, Safe, Magic, and Deposit Wallet topology/action validation;
 - Deposit Wallet transfer/wrap/redemption call allowlists and single-flight;
-- normal/neg-risk Polymarket approval readiness;
+- normal/neg-risk Polymarket purpose and approval readiness;
 - exact Funding Router amounts, nonce, cap, balance, and allowance failures;
-- Polymarket standard/neg-risk redemption plan validation;
+- receipt-success-but-not-visible, ambiguous submission, restart, and
+  postcondition reconciliation;
+- atomic reservation creation, expiry, release, order/execution linkage, and
+  operation completion;
+- Polymarket and Limitless standard/neg-risk redemption planning;
+- generic position-action persistence, ownership, submission claim, receipt,
+  postconditions, recovery, and independent future-venue registration;
 - Limitless auth profile binding/recovery and legacy-row rejection;
-- Limitless AMM submit-boundary behavior;
+- distinct Limitless CLOB/AMM facts and AMM submit-boundary behavior;
+- exact sponsorship allowlists and action-fingerprint revalidation;
+- multi-leg partial coverage, aggregate readiness, and partial-failure recovery;
 - existing trade lifecycle, persistence, and delegated policy guards.
 
-WP6 cannot be marked complete until the following explicit gaps are covered:
+Local verification on 2026-07-24:
 
-1. Privy provisioning tests for missing EVM only, missing Solana only, both
-   missing, already-exists races, refresh failure, and backend reconciliation.
-2. A table-driven Polymarket matrix for every preparation purpose across
-   signer, Deposit Wallet, supported 1/1 Safe, Magic proxy, unsupported Safe
-   threshold, undeployed contract, stale credential, and RPC uncertainty.
-3. Separate normal and neg-risk Buy/Sell approval mutation suites.
-4. Funding Router receipt-success-but-CLOB-not-visible, stale nonce, ambiguous
-   broadcast, cap, lock, and reservation-release tests.
-5. Limitless internal prepared-auth and external client-connect parity,
-   including stale/foreign profile, recoverable/unrecoverable `409`, concurrent
-   connect, and forced reconnect.
-6. Separate Limitless CLOB and AMM preparation matrices covering exchange,
-   adapter, approval, account freshness, balance/locks, quote/slippage, and
-   unavailable upstream evidence.
-7. Limitless standard and neg-risk redemption plan unit tests; the repository
-   currently has no focused `limitless-redemption-plan-tests.ts`.
-8. PM and Limitless redemption execution tests for internal and external
-   owners, missing operator approval, wrong wallet, reverted receipt, ambiguous
-   submit, marker failure after success, restart, and idempotent reconciliation.
-9. Desktop/mobile parity tests proving both surfaces call one controller and do
-   not contain venue readiness reducers after WP7 migration.
-10. Import-graph and duplication checks proving Auth, Add Funds, Buy, Sell,
-    Redeem, Withdraw, and Telegram no longer own copies of venue preparation.
+- all migrations `0000` through `0187` applied to a clean temporary database;
+- focused funding/action/planning/position-action DB suites passed `5/5`;
+- the complete API unit runner passed `114/114` files;
+- repository format, lint, typecheck, and build gates passed;
+- the deterministic production-only duplication scan over 42 WP6 core files
+  (tests excluded, minimum 60 tokens/5 lines) reported Type-1 coverage
+  `1.066%` with `0.540%` estimated redundancy and Type-2 coverage `7.457%`
+  with `3.725%` estimated redundancy;
+- venue-branch and secret-placeholder scans found no unresolved core venue
+  switch or embedded secret.
+
+The complete API integration runner still exposes one pre-existing,
+WP6-unrelated assertion in `clusters-routes-tests.ts` for
+`sort_dir=asc`. Its runner lifecycle was corrected so the failure is reported
+instead of being hidden by `process.exit`; the unrelated cluster sorting
+behavior was not changed in WP6.
+
+The remaining validation belongs to later packages and is not silently counted
+as backend evidence:
+
+1. WP7: missing-EVM/missing-Solana/already-exists frontend provisioning races
+   and desktop/mobile parity through one controller.
+2. WP7: removal of web-owned preparation reducers only after per-caller parity.
+3. WP8: Telegram preparation/reservation integration and delegated-policy
+   mutation/revocation coverage.
+4. WP9: guarded live PM/Limitless preparation, CLOB visibility, redemption,
+   Privy sponsorship, and restart evidence for the exact capabilities proposed
+   for activation.
+5. WP9: final import-graph proof that activated Auth, Add Funds, Buy, Sell,
+   Redeem, Withdraw, and Telegram callers no longer own parallel preparation
+   logic.
 
 ## 12. WP5 planning prerequisite
 
@@ -553,9 +725,11 @@ WP5 must not:
   the exact venue action does not require them;
 - silently choose CLOB or AMM execution without the market binding.
 
-If the adapter implementation is not yet present, WP5 uses deterministic
-fixtures conforming to this contract. The planner output remains unreachable
-from transaction execution until WP6 is parity-green.
+WP5 originally used deterministic fixtures while real adapters were absent.
+The real WP6 adapters now satisfy this local prerequisite. Planner output
+remains unreachable from production transaction execution while creation
+policy is off and until WP7/WP8 caller migration plus WP9 activation evidence
+are complete.
 
 ## 13. Safe migration sequence
 
@@ -564,18 +738,21 @@ from transaction execution until WP6 is parity-green.
    services.
 3. Implement normalized action preparation and postcondition verification as
    thin wrappers over existing execution boundaries.
-4. Run old-versus-new parity tests for every matrix row.
-5. Migrate one caller and purpose at a time behind local creation policy:
+4. Verify the backend matrices, persistence, recovery, and independent-adapter
+   extension boundary.
+5. In WP7/WP8, migrate one caller and purpose at a time behind local creation
+   policy:
    Auth venue bootstrap, Add Funds, Buy, Sell, Redeem, Withdraw, then Telegram.
 6. Keep old execution/reconciliation callable for already-started work.
-7. Run guarded live rehearsals for exact PM settlement visibility, Limitless
-   CLOB and AMM readiness, external setup, and both venue redemptions.
+7. In WP9, run guarded live rehearsals for exact PM settlement visibility,
+   Limitless CLOB and AMM readiness, external setup, and both venue
+   redemptions.
 8. Remove a legacy branch only after import search, parity, recovery, type,
    lint, format, build, and live evidence are green.
 
 ## 14. Completion and review gate
 
-WP6 is complete only when:
+The WP6 backend boundary is complete when:
 
 - every matrix row has a typed inspection result and exact required actions;
 - `inspect` has no side effects and stale revisions fail closed;
@@ -586,14 +763,17 @@ WP6 is complete only when:
 - Limitless CLOB and AMM have distinct, tested readiness;
 - redemption always uses the position owner and survives marker failure or
   restart without duplicate broadcast;
-- Auth, Add Funds, Buy, Sell, Redeem, Withdraw, and Telegram consume one
-  preparation contract instead of copies;
 - existing trade quote, slippage, order, lifecycle, cancellation, and
   reconciliation guards remain green;
 - no legacy caller or reconciliation path is removed merely because the target
   adapter exists;
+- a fake independent venue passes preparation, position-action, API schema, and
+  persistence without modifying the core state machine or reducer;
 - code review reports no unresolved money-safety, ownership, signing,
   idempotency, or recovery finding.
 
-Live activation remains separately gated by current runtime policy, exact
-Privy policies, guarded tiny-value evidence, and deployment approval.
+The cross-package migration is complete only after WP7/WP8 make Auth, Add
+Funds, Buy, Sell, Redeem, Withdraw, and Telegram consume the shared contract
+instead of copies. Live activation remains separately gated by current runtime
+policy, exact Privy policies, guarded tiny-value evidence, WP9 review, and
+deployment approval.

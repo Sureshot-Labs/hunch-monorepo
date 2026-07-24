@@ -21,8 +21,13 @@ export class RelayPinnedActionValidator implements ActionValidator {
   readonly validatorId: string;
 
   constructor(readonly expectedAction: NormalizedAction) {
-    if (expectedAction.kind === "signature") {
-      throw new Error("Relay signature and authorization actions are disabled");
+    if (
+      expectedAction.kind !== "evm_transaction" &&
+      expectedAction.kind !== "svm_transaction"
+    ) {
+      throw new Error(
+        "Relay signature, authorization, and external handoff actions are disabled",
+      );
     }
     this.validatorId =
       expectedAction.kind === "evm_transaction"
@@ -34,8 +39,13 @@ export class RelayPinnedActionValidator implements ActionValidator {
     action: NormalizedAction,
     context: ActionValidationContext,
   ): Promise<ValidatedNormalizedAction> {
-    if (action.kind === "signature") {
-      throw new Error("Relay signature and authorization actions are disabled");
+    if (
+      action.kind !== "evm_transaction" &&
+      action.kind !== "svm_transaction"
+    ) {
+      throw new Error(
+        "Relay signature, authorization, and external handoff actions are disabled",
+      );
     }
     if (!canonicalJsonEqual(action, this.expectedAction)) {
       throw new Error("Relay action does not match immutable committed action");

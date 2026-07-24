@@ -476,9 +476,4 @@ async function main() {
   }
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error("[clusters-routes-tests] failed", error);
-    process.exit(1);
-  });
+await main();

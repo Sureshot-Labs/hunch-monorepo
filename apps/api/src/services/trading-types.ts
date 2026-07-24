@@ -124,6 +124,10 @@ export type TradeIntent = {
   orderType?: TradeOrderType | null;
   limitPrice?: number | null;
   slippageBps?: number | null;
+  fundingReservation?: Readonly<{
+    operationId: string;
+    reservationId: string;
+  }> | null;
   idempotencyKey: string;
   raw?: unknown;
 };

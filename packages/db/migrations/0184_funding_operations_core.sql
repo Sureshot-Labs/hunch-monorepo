@@ -233,7 +233,9 @@ create table funding_operations (
         'wallet_route',
         'relay_deposit_address',
         'direct_external_handoff',
-        'already_available'
+        'already_available',
+        'venue_preparation',
+        'composite_route'
       )
     ),
   constraint funding_operations_hashes_check
@@ -310,7 +312,7 @@ create index funding_operations_market_idx
 create table funding_operation_segments (
   id uuid primary key default gen_random_uuid(),
   operation_id uuid not null references funding_operations(id) on delete restrict,
-  ordinal smallint not null check (ordinal = 0),
+  ordinal smallint not null check (ordinal >= 0),
   provider_id text not null,
   adapter_id text not null,
   adapter_version integer not null check (adapter_version > 0),
@@ -469,6 +471,7 @@ create index funding_provider_requests_lookup_idx
 create table funding_operation_steps (
   id uuid primary key default gen_random_uuid(),
   operation_id uuid not null references funding_operations(id) on delete restrict,
+  segment_id uuid,
   ordinal smallint not null check (ordinal >= 0),
   step_kind text not null,
   state text not null default 'planned',
@@ -486,6 +489,10 @@ create table funding_operation_steps (
     unique (operation_id, action_fingerprint),
   constraint funding_operation_steps_operation_id_id_unique
     unique (operation_id, id),
+  constraint funding_operation_steps_segment_same_operation_fk
+    foreign key (operation_id, segment_id)
+    references funding_operation_segments(operation_id, id)
+    on delete restrict,
   constraint funding_operation_steps_dependency_same_operation_fk
     foreign key (operation_id, depends_on_step_id)
     references funding_operation_steps(operation_id, id)
@@ -554,6 +561,8 @@ create table funding_operation_step_attempts (
   updated_at timestamptz not null default now(),
   constraint funding_operation_step_attempts_step_number_unique
     unique (step_id, attempt_number),
+  constraint funding_operation_step_attempts_step_id_id_unique
+    unique (step_id, id),
   constraint funding_operation_step_attempts_outcome_check
     check (
       outcome in (
@@ -615,6 +624,77 @@ create index funding_operation_step_attempts_lookup_idx
 create index funding_operation_step_attempts_ambiguous_idx
   on funding_operation_step_attempts (updated_at)
   where outcome = 'ambiguous' or broadcast_may_have_occurred;
+
+create table funding_step_receipt_observations (
+  id uuid primary key default gen_random_uuid(),
+  operation_id uuid not null,
+  step_id uuid not null,
+  attempt_id uuid not null,
+  network_id text not null,
+  status text not null,
+  action_match boolean,
+  ledger_height text,
+  block_hash text,
+  canonical boolean not null default true,
+  failure_code text,
+  evidence jsonb not null default '{}'::jsonb,
+  first_seen_at timestamptz not null,
+  observed_at timestamptz not null,
+  finalized_at timestamptz,
+  reorged_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint funding_step_receipt_observations_attempt_unique
+    unique (attempt_id),
+  constraint funding_step_receipt_observations_step_attempt_fk
+    foreign key (step_id, attempt_id)
+    references funding_operation_step_attempts(step_id, id)
+    on delete restrict,
+  constraint funding_step_receipt_observations_operation_step_fk
+    foreign key (operation_id, step_id)
+    references funding_operation_steps(operation_id, id)
+    on delete restrict,
+  constraint funding_step_receipt_observations_status_check
+    check (
+      status in (
+        'pending',
+        'confirmed',
+        'finalized',
+        'failed',
+        'mismatch',
+        'reorged'
+      )
+    ),
+  constraint funding_step_receipt_observations_match_check
+    check (
+      (status = 'mismatch' and action_match = false)
+      or (
+        status = 'pending'
+        and (action_match is null or action_match = true)
+      )
+      or (status not in ('pending', 'mismatch') and action_match = true)
+    ),
+  constraint funding_step_receipt_observations_canonicality_check
+    check (
+      (status = 'reorged' and canonical = false and reorged_at is not null)
+      or (status <> 'reorged' and canonical = true and reorged_at is null)
+    ),
+  constraint funding_step_receipt_observations_finalized_check
+    check (
+      (status = 'finalized' and finalized_at is not null)
+      or (status <> 'finalized' and finalized_at is null)
+    ),
+  constraint funding_step_receipt_observations_time_check
+    check (observed_at >= first_seen_at),
+  constraint funding_step_receipt_observations_evidence_object_check
+    check (jsonb_typeof(evidence) = 'object')
+);
+
+create index funding_step_receipt_observations_operation_status_idx
+  on funding_step_receipt_observations (operation_id, status, observed_at);
+create index funding_step_receipt_observations_pending_idx
+  on funding_step_receipt_observations (observed_at)
+  where status in ('pending', 'confirmed');
 
 create table funding_observations (
   id uuid primary key default gen_random_uuid(),
@@ -694,6 +774,7 @@ create table balance_reservations (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete restrict,
   operation_id uuid not null,
+  segment_id uuid,
   component_id text not null,
   location_id text not null,
   network_id text not null,
@@ -715,8 +796,14 @@ create table balance_reservations (
     references funding_operations(user_id, id)
     on delete restrict
     deferrable initially immediate,
-  constraint balance_reservations_operation_mode_unique
-    unique (operation_id, mode),
+  constraint balance_reservations_segment_same_operation_fk
+    foreign key (operation_id, segment_id)
+    references funding_operation_segments(operation_id, id)
+    on delete restrict,
+  constraint balance_reservations_operation_component_mode_unique
+    unique (operation_id, component_id, mode),
+  constraint balance_reservations_user_operation_id_unique
+    unique (user_id, operation_id, id),
   constraint balance_reservations_amount_check
     check (raw_amount ~ '^(0|[1-9][0-9]*)$' and raw_amount <> '0'),
   constraint balance_reservations_mode_check
@@ -726,6 +813,11 @@ create table balance_reservations (
         'advisory_destination',
         'settled_for_consumer'
       )
+    ),
+  constraint balance_reservations_segment_mode_check
+    check (
+      mode = 'subtract_available'
+      or segment_id is null
     ),
   constraint balance_reservations_state_check
     check (state in ('active', 'consumed', 'released')),
@@ -760,6 +852,9 @@ create index balance_reservations_user_component_active_idx
 create index balance_reservations_expiry_active_idx
   on balance_reservations (expires_at)
   where state = 'active';
+create index balance_reservations_segment_idx
+  on balance_reservations (segment_id, state)
+  where segment_id is not null;
 
 create table funding_route_observations (
   id uuid primary key default gen_random_uuid(),
@@ -875,17 +970,71 @@ create index funding_reconciliation_jobs_expired_lease_idx
   on funding_reconciliation_jobs (lease_until, id)
   where status = 'leased';
 
+alter table orders
+  add column funding_operation_id uuid,
+  add column funding_reservation_id uuid;
+
+alter table orders
+  add constraint orders_funding_link_pair_check
+  check (
+    (funding_operation_id is null) = (funding_reservation_id is null)
+  ),
+  add constraint orders_funding_reservation_ownership_fk
+  foreign key (user_id, funding_operation_id, funding_reservation_id)
+  references balance_reservations(user_id, operation_id, id)
+  on delete restrict
+  deferrable initially immediate;
+
+create index orders_funding_operation_idx
+  on orders (funding_operation_id)
+  where funding_operation_id is not null;
+
+alter table executions
+  add column funding_operation_id uuid,
+  add column funding_reservation_id uuid;
+
+alter table executions
+  add constraint executions_funding_link_pair_check
+  check (
+    (funding_operation_id is null) = (funding_reservation_id is null)
+  ),
+  add constraint executions_funding_reservation_ownership_fk
+  foreign key (user_id, funding_operation_id, funding_reservation_id)
+  references balance_reservations(user_id, operation_id, id)
+  on delete restrict
+  deferrable initially immediate;
+
+create index executions_funding_operation_idx
+  on executions (funding_operation_id)
+  where funding_operation_id is not null;
+
 alter table telegram_trade_intents
-  add column funding_operation_id uuid;
+  add column funding_operation_id uuid,
+  add column funding_reservation_id uuid;
 
 alter table telegram_trade_intents
   add constraint telegram_trade_intents_funding_user_check
-  check (funding_operation_id is null or user_id is not null);
+  check (
+    funding_operation_id is null
+    or user_id is not null
+  ),
+  add constraint telegram_trade_intents_funding_reservation_requires_operation_check
+  check (
+    funding_reservation_id is null
+    or funding_operation_id is not null
+  );
 
 alter table telegram_trade_intents
   add constraint telegram_trade_intents_funding_operation_ownership_fk
   foreign key (user_id, funding_operation_id)
   references funding_operations(user_id, id)
+  on delete restrict
+  deferrable initially immediate;
+
+alter table telegram_trade_intents
+  add constraint telegram_trade_intents_funding_reservation_ownership_fk
+  foreign key (user_id, funding_operation_id, funding_reservation_id)
+  references balance_reservations(user_id, operation_id, id)
   on delete restrict
   deferrable initially immediate;
 
@@ -957,6 +1106,10 @@ for each row execute function funding_touch_updated_at();
 
 create trigger funding_operation_step_attempts_touch_updated_at
 before update on funding_operation_step_attempts
+for each row execute function funding_touch_updated_at();
+
+create trigger funding_step_receipt_observations_touch_updated_at
+before update on funding_step_receipt_observations
 for each row execute function funding_touch_updated_at();
 
 create trigger funding_observations_touch_updated_at
@@ -1200,6 +1353,7 @@ as $$
 begin
   if (
     new.operation_id,
+    new.id,
     new.ordinal,
     new.provider_id,
     new.adapter_id,
@@ -1218,6 +1372,7 @@ begin
     new.created_at
   ) is distinct from (
     old.operation_id,
+    old.id,
     old.ordinal,
     old.provider_id,
     old.adapter_id,
@@ -1285,6 +1440,7 @@ as $$
 begin
   if (
     new.operation_id,
+    new.segment_id,
     new.ordinal,
     new.step_kind,
     new.action_fingerprint,
@@ -1296,6 +1452,7 @@ begin
     new.created_at
   ) is distinct from (
     old.operation_id,
+    old.segment_id,
     old.ordinal,
     old.step_kind,
     old.action_fingerprint,
@@ -1307,6 +1464,46 @@ begin
     old.created_at
   ) then
     raise exception 'funding operation step plan is immutable'
+      using errcode = '23514';
+  end if;
+  if new.state is distinct from old.state
+    and not (
+      (old.state = 'planned' and new.state in (
+        'action_required',
+        'submitted',
+        'reconcile_required',
+        'failed',
+        'cancelled'
+      ))
+      or (old.state = 'action_required' and new.state in (
+        'submitted',
+        'reconcile_required',
+        'failed',
+        'cancelled'
+      ))
+      or (old.state = 'submitted' and new.state in (
+        'action_required',
+        'succeeded',
+        'reconcile_required',
+        'recovery_required',
+        'failed'
+      ))
+      or (old.state = 'reconcile_required' and new.state in (
+        'action_required',
+        'submitted',
+        'succeeded',
+        'recovery_required',
+        'failed'
+      ))
+      or (old.state = 'succeeded' and new.state = 'recovery_required')
+      or (old.state = 'recovery_required' and new.state in (
+        'succeeded',
+        'failed'
+      ))
+    ) then
+    raise exception 'invalid funding operation step state transition: % -> %',
+      old.state,
+      new.state
       using errcode = '23514';
   end if;
   return new;
@@ -1397,6 +1594,89 @@ $$;
 create trigger funding_operation_step_attempts_guard_update
 before update or delete on funding_operation_step_attempts
 for each row execute function funding_guard_attempt_update();
+
+create or replace function funding_guard_step_receipt_observation_update()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'funding step receipt observations cannot be deleted'
+      using errcode = '23514';
+  end if;
+  if (
+    new.operation_id,
+    new.step_id,
+    new.attempt_id,
+    new.network_id,
+    new.first_seen_at,
+    new.created_at
+  ) is distinct from (
+    old.operation_id,
+    old.step_id,
+    old.attempt_id,
+    old.network_id,
+    old.first_seen_at,
+    old.created_at
+  ) then
+    raise exception 'funding step receipt observation identity is immutable'
+      using errcode = '23514';
+  end if;
+  if new.status is distinct from old.status
+    and not (
+      (old.status = 'pending' and new.status in (
+        'confirmed',
+        'finalized',
+        'failed',
+        'mismatch',
+        'reorged'
+      ))
+      or (old.status = 'confirmed' and new.status in (
+        'finalized',
+        'failed',
+        'mismatch',
+        'reorged'
+      ))
+      or (old.status = 'finalized' and new.status = 'reorged')
+    ) then
+    raise exception 'invalid funding step receipt transition: % -> %',
+      old.status,
+      new.status
+      using errcode = '23514';
+  end if;
+  if old.status in ('failed', 'mismatch', 'reorged') and (
+    new.status,
+    new.action_match,
+    new.ledger_height,
+    new.block_hash,
+    new.canonical,
+    new.failure_code,
+    new.evidence,
+    new.observed_at,
+    new.finalized_at,
+    new.reorged_at
+  ) is distinct from (
+    old.status,
+    old.action_match,
+    old.ledger_height,
+    old.block_hash,
+    old.canonical,
+    old.failure_code,
+    old.evidence,
+    old.observed_at,
+    old.finalized_at,
+    old.reorged_at
+  ) then
+    raise exception 'terminal funding step receipt observation is immutable'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger funding_step_receipt_observations_guard_update
+before update or delete on funding_step_receipt_observations
+for each row execute function funding_guard_step_receipt_observation_update();
 
 create or replace function funding_guard_observation_update()
 returns trigger
@@ -1668,6 +1948,19 @@ declare
   operation_plan_kind text;
   segment_count integer;
   relay_segment_count integer;
+  relay_deposit_segment_count integer;
+  minimum_ordinal integer;
+  maximum_ordinal integer;
+  step_count integer;
+  unbound_step_count integer;
+  venue_preparation_step_count integer;
+  minimum_step_ordinal integer;
+  maximum_step_ordinal integer;
+  segment_without_step_count integer;
+  segment_without_reservation_count integer;
+  invalid_observation_binding_count integer;
+  invalid_reservation_binding_count integer;
+  source_reservation_count integer;
 begin
   select plan_kind
   into operation_plan_kind
@@ -1681,9 +1974,19 @@ begin
   select
     count(*)::integer,
     count(*) filter (
+      where provider_id = 'relay'
+    )::integer,
+    count(*) filter (
       where provider_id = 'relay' and segment_kind = 'deposit_address'
-    )::integer
-  into segment_count, relay_segment_count
+    )::integer,
+    min(ordinal)::integer,
+    max(ordinal)::integer
+  into
+    segment_count,
+    relay_segment_count,
+    relay_deposit_segment_count,
+    minimum_ordinal,
+    maximum_ordinal
   from funding_operation_segments
   where operation_id = target_operation_id;
 
@@ -1695,7 +1998,11 @@ begin
       using errcode = '23514';
   end if;
 
-  if operation_plan_kind in ('direct_external_handoff', 'already_available')
+  if operation_plan_kind in (
+    'direct_external_handoff',
+    'already_available',
+    'venue_preparation'
+  )
     and segment_count <> 0 then
     raise exception 'funding plan % requires zero segments, found %',
       operation_plan_kind,
@@ -1703,9 +2010,181 @@ begin
       using errcode = '23514';
   end if;
 
+  if operation_plan_kind = 'composite_route' then
+    if segment_count < 2 then
+      raise exception 'composite funding plan requires at least two segments'
+        using errcode = '23514';
+    end if;
+    if relay_segment_count <> segment_count then
+      raise exception 'composite funding plan currently supports Relay legs only'
+        using errcode = '23514';
+    end if;
+  end if;
+
+  if segment_count > 0
+    and (minimum_ordinal <> 0 or maximum_ordinal <> segment_count - 1) then
+    raise exception 'funding segments must have contiguous ordinals from zero'
+      using errcode = '23514';
+  end if;
+
   if operation_plan_kind = 'relay_deposit_address'
-    and relay_segment_count <> 1 then
+    and relay_deposit_segment_count <> 1 then
     raise exception 'Relay deposit-address plan requires one Relay deposit-address segment'
+      using errcode = '23514';
+  end if;
+
+  select
+    count(*)::integer,
+    count(*) filter (where segment_id is null)::integer,
+    count(*) filter (where step_kind = 'venue_preparation')::integer,
+    min(ordinal)::integer,
+    max(ordinal)::integer
+  into
+    step_count,
+    unbound_step_count,
+    venue_preparation_step_count,
+    minimum_step_ordinal,
+    maximum_step_ordinal
+  from funding_operation_steps
+  where operation_id = target_operation_id;
+
+  if step_count > 0
+    and (
+      minimum_step_ordinal <> 0
+      or maximum_step_ordinal <> step_count - 1
+    ) then
+    raise exception 'funding steps must have contiguous ordinals from zero'
+      using errcode = '23514';
+  end if;
+
+  if operation_plan_kind in (
+    'wallet_route',
+    'relay_deposit_address',
+    'composite_route'
+  ) and unbound_step_count <> 0 then
+    raise exception 'provider route steps must bind to an exact segment'
+      using errcode = '23514';
+  end if;
+
+  if operation_plan_kind in (
+    'direct_external_handoff',
+    'already_available',
+    'venue_preparation'
+  ) and unbound_step_count <> step_count then
+    raise exception 'zero-provider plan cannot bind a step to a segment'
+      using errcode = '23514';
+  end if;
+
+  if operation_plan_kind = 'venue_preparation'
+    and (step_count <> 1 or venue_preparation_step_count <> 1) then
+    raise exception 'venue preparation plan requires one exact preparation step'
+      using errcode = '23514';
+  end if;
+
+  if operation_plan_kind <> 'venue_preparation'
+    and venue_preparation_step_count <> 0 then
+    raise exception 'venue preparation step requires a venue preparation plan'
+      using errcode = '23514';
+  end if;
+
+  if operation_plan_kind = 'composite_route' then
+    select count(*)::integer
+    into segment_without_step_count
+    from funding_operation_segments segment
+    where segment.operation_id = target_operation_id
+      and not exists (
+        select 1
+        from funding_operation_steps step
+        where step.operation_id = segment.operation_id
+          and step.segment_id = segment.id
+      );
+    if segment_without_step_count <> 0 then
+      raise exception 'every composite segment requires at least one bound step'
+      using errcode = '23514';
+    end if;
+  end if;
+
+  if operation_plan_kind in (
+    'wallet_route',
+    'relay_deposit_address',
+    'composite_route'
+  ) then
+    select count(*)::integer
+    into invalid_reservation_binding_count
+    from balance_reservations reservation
+    where reservation.operation_id = target_operation_id
+      and reservation.mode = 'subtract_available'
+      and reservation.segment_id is null;
+  else
+    select count(*)::integer
+    into invalid_reservation_binding_count
+    from balance_reservations reservation
+    where reservation.operation_id = target_operation_id
+      and reservation.segment_id is not null;
+  end if;
+  if invalid_reservation_binding_count <> 0 then
+    raise exception 'funding reservation is not bound to the exact plan shape'
+      using errcode = '23514';
+  end if;
+
+  if operation_plan_kind = 'venue_preparation' then
+    select count(*)::integer
+    into source_reservation_count
+    from balance_reservations reservation
+    where reservation.operation_id = target_operation_id
+      and reservation.mode = 'subtract_available';
+    if source_reservation_count < 1 then
+      raise exception 'venue preparation plan requires reserved exact inputs'
+        using errcode = '23514';
+    end if;
+  end if;
+
+  if operation_plan_kind in ('wallet_route', 'composite_route') then
+    select count(*)::integer
+    into segment_without_reservation_count
+    from funding_operation_segments segment
+    where segment.operation_id = target_operation_id
+      and (
+        select count(*)
+        from balance_reservations reservation
+        where reservation.operation_id = segment.operation_id
+          and reservation.segment_id = segment.id
+          and reservation.mode = 'subtract_available'
+      ) <> 1;
+    if segment_without_reservation_count <> 0 then
+      raise exception 'each wallet-route segment requires one source reservation'
+        using errcode = '23514';
+    end if;
+  end if;
+
+  if operation_plan_kind in (
+    'wallet_route',
+    'relay_deposit_address',
+    'composite_route'
+  ) then
+    select count(*)::integer
+    into invalid_observation_binding_count
+    from funding_observations observation
+    where observation.operation_id = target_operation_id
+      and (
+        (
+          observation.kind = 'venue_readiness'
+          and observation.segment_id is not null
+        )
+        or (
+          observation.kind <> 'venue_readiness'
+          and observation.segment_id is null
+        )
+      );
+  else
+    select count(*)::integer
+    into invalid_observation_binding_count
+    from funding_observations observation
+    where observation.operation_id = target_operation_id
+      and observation.segment_id is not null;
+  end if;
+  if invalid_observation_binding_count <> 0 then
+    raise exception 'funding observation is not bound to the exact plan shape'
       using errcode = '23514';
   end if;
 end;
@@ -1722,6 +2201,15 @@ begin
     target_operation_id :=
       case when tg_op = 'DELETE' then old.id else new.id end;
   elsif tg_table_name = 'funding_operation_segments' then
+    target_operation_id :=
+      case when tg_op = 'DELETE' then old.operation_id else new.operation_id end;
+  elsif tg_table_name = 'funding_operation_steps' then
+    target_operation_id :=
+      case when tg_op = 'DELETE' then old.operation_id else new.operation_id end;
+  elsif tg_table_name = 'funding_observations' then
+    target_operation_id :=
+      case when tg_op = 'DELETE' then old.operation_id else new.operation_id end;
+  elsif tg_table_name = 'balance_reservations' then
     target_operation_id :=
       case when tg_op = 'DELETE' then old.operation_id else new.operation_id end;
   else
@@ -1742,6 +2230,21 @@ for each row execute function funding_validate_operation_segment_shape_trigger()
 
 create constraint trigger funding_operation_segments_shape
 after insert or update or delete on funding_operation_segments
+deferrable initially deferred
+for each row execute function funding_validate_operation_segment_shape_trigger();
+
+create constraint trigger funding_operation_steps_shape
+after insert or update or delete on funding_operation_steps
+deferrable initially deferred
+for each row execute function funding_validate_operation_segment_shape_trigger();
+
+create constraint trigger funding_observations_shape
+after insert or update or delete on funding_observations
+deferrable initially deferred
+for each row execute function funding_validate_operation_segment_shape_trigger();
+
+create constraint trigger balance_reservations_shape
+after insert or update or delete on balance_reservations
 deferrable initially deferred
 for each row execute function funding_validate_operation_segment_shape_trigger();
 

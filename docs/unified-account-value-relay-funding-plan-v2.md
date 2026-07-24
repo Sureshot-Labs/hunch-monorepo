@@ -755,11 +755,14 @@ user-visible `recovery_action_required` state rather than an assumed refund.
 3. No provider, destination, wallet binding, or placement substitution occurs
    after approval, signature, external handoff start, or broadcast.
 4. Possible broadcast plus timeout becomes `reconcile_required`, not `failed`.
-5. Every executable initial route has at most one provider segment.
+5. Every executable source leg has exactly one provider segment. One selected
+   composite source option may contain a bounded ordered set of independent
+   legs that all target the same immutable destination.
 6. Actual observed amounts update accounting and settlement; they never mutate a
    committed route into an unapproved continuation.
-7. A future staged continuation requires a new quote over the observed output,
-   a new consent, and a linked operation; it is not segment two of an immutable quote.
+7. No composite leg may spend the observed output of another leg. A chained or
+   staged continuation over a prior output requires a new quote, new consent,
+   and a linked operation; it is not another leg of the immutable composite.
 8. Except for raw input to the dedicated authenticated withdrawal-recipient
    registration endpoint, the frontend cannot supply provider, recipient,
    venue contract, refund address, arbitrary calldata, external call, or hook
@@ -1526,8 +1529,11 @@ address, intermediate network, or calldata.
 8. Apply transferability, risk, wallet execution, native-gas, route, fee, and
    user-consent eligibility.
 9. Apply Placement Policy to determine the permissible source/destination amount.
-10. Ask Relay first for exact eligible candidates.
-11. Classify route experience from measured route policy.
+10. Ask Relay first for exact eligible candidates. If no one owned source can
+    satisfy the requirement, quote bounded partial amounts and assemble an
+    explicit composite option only when the sum of immutable per-leg minimum
+    outputs satisfies the requirement after all fees and slippage.
+11. Classify every leg's route experience from measured route policy.
 12. Persist an expiring discovery projection and return normalized source
     options plus one recommended source; never return a provider menu.
 13. Require the next quote request to name exactly one opaque source option and
@@ -1548,6 +1554,22 @@ Each `SourceOption` includes:
 - gas/rent and sponsorship readiness;
 - expiry, warnings, and typed unavailability reasons.
 
+A composite `SourceOption` additionally freezes an ordered list of source legs.
+Each leg names one owned executable source, exact input, expected and minimum
+destination output, fees, ETA, required actions, immutable Relay route/action
+evidence, and its own expiry. A composite is selectable only when:
+
+- every leg is independently owned, executable, fresh, and policy-valid;
+- no component is used or reserved twice;
+- the aggregate of **minimum**, not expected, destination outputs covers the
+  exact requirement;
+- aggregate fees and every per-leg slippage/action/gas or sponsorship check
+  remain within policy;
+- every leg targets the same immutable destination and venue binding.
+
+The client still selects exactly one opaque source option. It never constructs
+or edits the leg list.
+
 The selected source option, not just a source asset, is frozen into the quote.
 Discovery results and provider candidates are not executable and cannot be
 committed directly.
@@ -1563,7 +1585,9 @@ Ingress options are distinct from executable wallet sources:
 The UI vocabulary is deliberately two-dimensional:
 
 - **Where to add** selects one backend-issued destination option;
-- **Pay with** selects one source option for that destination.
+- **Pay with** selects one source option for that destination. That option may
+  show a backend-issued breakdown such as “Limitless cash + Solana wallet”, but
+  the client cannot add, remove, reorder, or resize its legs.
 
 When each side has one valid option, go directly to review. Show `Where to add`
 only for multiple real destinations. Show the recommended `Pay with` plus
@@ -1585,7 +1609,19 @@ changes ownership, signatures, setup, or execution. The first rollout persists
 no wallet preference beyond the current intent. The binding selected by commit
 is immutable.
 
-No order combines balances across bindings. Account Value may sum them for display.
+One trade always has one immutable destination venue binding and never combines
+positions or execution ownership across destination bindings. Funding may,
+however, combine independently owned source balances across wallets, venues, or
+networks through one explicit composite source option. Those source legs execute
+sequentially and are not an atomic cross-chain transaction.
+
+Before any external action, commit atomically reserves every source component
+and persists the complete ordered plan. Each successful leg is reconciled and
+never rebroadcast. If a later leg fails or is ambiguous, already delivered funds
+remain ordinary destination venue cash, unused reservations are released, and
+the operation enters recovery/reconciliation. Partial funding never submits a
+trade. Account Value may sum balances for display but cannot itself authorize a
+combination.
 
 ## 11. Destination and placement resolution
 
@@ -1785,10 +1821,13 @@ audited zero-old-version check.
 
 Constraints:
 
-- ordinals are unique per operation and limited to 0 in the initial schema;
-- direct external handoff and already-available plans have zero segments;
+- ordinals are unique, contiguous, and start at 0;
+- direct external handoff, already-available, and venue-preparation plans have
+  zero provider segments;
 - Relay Deposit Address plans have exactly one Relay segment;
 - wallet route plans have exactly one segment;
+- composite route plans have at least two independent Relay segments, one per
+  frozen source leg;
 - active stored adapter versions always have a reconciler.
 
 #### `funding_provider_requests`
@@ -2158,14 +2197,18 @@ Defaults:
 
 ### 13.7 Selection policy
 
-For each permitted single-segment shape:
+For each permitted source-leg shape:
 
 1. evaluate hard Hunch eligibility;
 2. ask Relay within a configured deadline;
 3. select Relay if valid;
 4. only if Relay has no eligible candidate, ask at most one exact-route fallback
    explicitly named by active policy;
-5. return one normalized Hunch quote;
+5. return one normalized Hunch leg quote;
+
+After independent leg validation, the planner may assemble one bounded
+composite source option under section 10.3. Provider selection remains local to
+each leg; the composite layer does not race or substitute providers.
 
 There is no hedged winner race, scored provider optimizer, recursive route
 search, provider menu, or background comparison-quote pipeline. Provider
@@ -2261,6 +2304,19 @@ address is linked, owns funds, or once completed venue setup.
 Privy-managed EIP-7702 may be used only inside the exact Privy sponsorship path
 whose transaction, policy, chain ID, typed-data domain, spender/recipient,
 selector, amounts, deadline, and native value are understood locally.
+
+For gas readiness, a fresh sufficient native balance and an exact sponsorship
+capability are alternative proofs, not cumulative requirements. Sponsorship is
+action-scoped, not wallet-scoped: internal-wallet classification,
+`serverWalletRef`, historical sponsorship, or a client `sponsor` flag is never
+sufficient by itself. The committed immutable action must pass its
+route-specific validator and match the owned Privy wallet ID, network,
+execution mode, local capability/policy revision, gas bound, and native-value
+rule. The backend records that decision on the step and revalidates it
+immediately before execution; Privy remains the final enforcement boundary.
+Missing, stale, or mismatched evidence fails closed to a proven user-paid path
+or route unavailability. External wallets are always user-paid and
+client-signed.
 
 A Relay quote containing `authorizationList` is rejected unless Hunch later
 implements that exact Relay capability as a separate pinned policy. Privy
@@ -3747,10 +3803,11 @@ Official Requests v2 wire rows are pinned as `id` plus ISO-or-numeric
 Relay module.
 
 The production static registry now contains the reviewed Relay and legacy
-reconciliation component identities and pinned fixture IDs. This does not
-activate funding: the default policy still has creation off, empty providers
-and routes, closed quote/commit/start gates, an empty network-executor registry,
-and empty Across/deBridge fallback allowlists.
+reconciliation component identities and pinned fixture IDs. WP6 additionally
+registers exact EVM/Solana wallet-profile executor identities, but registration
+does not activate funding: the default policy still has creation off, empty
+providers and routes, closed quote/commit/start gates, and empty
+Across/deBridge fallback allowlists.
 
 Across Swap API and suggested-fees legacy versions resolve only through the
 Across legacy reconciler; Bungee remains legacy-only; deBridge DLN and
@@ -3776,10 +3833,12 @@ shape; no cross-provider runtime abstraction was introduced.
 
 ### Work package 5 — Destination, placement, Intent Liquidity, and planner
 
-Implementation status (2026-07-24): **locally complete; activation remains
-blocked pending WP6 real preparation adapters.** The implementation inventory,
-acceptance matrix, review corrections, local migration evidence, and passing
-verification commands are recorded in `docs/funding/wp5/README.md`.
+Implementation status (2026-07-24): **locally complete; the WP6 real-adapter
+prerequisite is satisfied locally. Activation remains blocked by WP7/WP8
+caller migration, WP9 evidence, and runtime policy.** The implementation
+inventory, acceptance matrix, review corrections, local migration evidence,
+and passing verification commands are recorded in
+`docs/funding/wp5/README.md`.
 
 Required work:
 
@@ -3790,8 +3849,9 @@ Required work:
 - implement valid destination-option enumeration, configurable recommendation,
   deterministic Trading Wallet selection, and pure Placement Policy;
 - implement cash spendability, shortfall, source options, route economics, and experience classification;
-- implement Relay-first deterministic single-segment selection and reject a
-  second segment or staged continuation;
+- implement Relay-first deterministic selection: one segment for a single
+  source, or a bounded composite option with one independently quoted segment
+  per source leg; reject chained/staged continuations;
 - bind eligible source facts to exactly one source/destination location-pattern
   route before calling the Relay-only quote boundary; ambiguous duplicate
   mappings fail policy publication;
@@ -3804,7 +3864,8 @@ Completion evidence:
 - no Base parking or automatic rebalance path exists;
 - UI input cannot choose provider/destination address;
 - no-context multi-destination Add Funds cannot quote until the user chooses;
-- no quote can commit without one selected source option and exact raw amounts;
+- no quote can commit without one selected source option and exact raw amounts
+  for every frozen leg;
 - external balance size never overrides position/explicit-current-intent/internal precedence;
 - destination cash subtracts locks, reservations, and submitted debits; missing,
   stale, or inconsistent spendability/price evidence fails closed before quote;
@@ -3818,6 +3879,31 @@ Completion evidence:
   are reported and removed by the retention cleanup path.
 
 ### Work package 6 — Wallet preparation, position actions, and active trading integration
+
+Implementation status (2026-07-24): **backend boundary locally complete and
+verified; no production activation.** Delivered evidence includes:
+
+- purpose-aware PM/Limitless inspection, preparation, and postcondition
+  drivers that never provision a wallet or auto-submit a trade;
+- PM Funding Router follow-up and venue-visible reconciliation;
+- independent multi-leg source composition through one operation/reducer;
+- exact owned-wallet action profiles, withdrawal gates, and action-scoped
+  Privy sponsorship validation;
+- durable possible-broadcast, EVM/Solana receipt, postcondition, reservation,
+  expiry/release, and exact trade-consumer linkage;
+- generic owner-bound PM/Limitless redemption through a position-action venue
+  registry, with `future_venue` fixtures proving extension without a new core
+  state machine, receipt table, reducer, or venue switch;
+- feature-first source/test organization under `apps/api/src/funding`;
+- clean migration replay through `0187`, focused DB suites `5/5`, complete API
+  unit runner `114/114`, and passing format/lint/typecheck/build gates.
+
+The full integration runner separately reports one pre-existing
+`clusters-routes-tests.ts` ascending-sort assertion unrelated to WP6; WP6 does
+not change cluster behavior. Detailed implementation boundaries and evidence
+are recorded in `docs/funding/wp6/README.md`. WP7 owns web controller/caller
+migration, WP8 owns Telegram integration, and WP9 owns guarded live evidence,
+activation review, and legacy removal.
 
 Required work:
 
@@ -3859,7 +3945,9 @@ Completion evidence:
   marker-failure, restart, and no-duplicate-broadcast tests;
 - token conversion uses actual outputs;
 - abandoned trade releases prepared cash without auto-return;
-- auth, Add Funds, Buy, Sell, Redeem, and Telegram consume one preparation contract;
+- the backend exposes one preparation/reservation/position-action contract for
+  Auth, Add Funds, Buy, Sell, Redeem, and Telegram; WP7/WP8 own adoption by the
+  remaining web and Telegram callers;
 - external ready/setup/source-only/view-only classifications match signer,
   deployment, registration, credentials, approvals, and exact execution capability;
 - an external position can only be redeemed by its owner binding;
@@ -4114,8 +4202,10 @@ stops new selection but preserves status polling/webhooks.
     network/collateral are secondary backend-resolved details.
 36. The internal Hunch Trading Wallet is the primary new-intent path. External
     wallet setup is secondary and appears only after explicit external interest.
-37. Initial executable routes contain at most one provider segment. Any future
-    continuation starts from a fresh quote and separate explicit consent.
+37. Each initial source leg contains exactly one provider segment. A selected
+    composite may contain multiple independent legs targeting the same
+    destination; no leg consumes another leg's output. Any chained continuation
+    starts from a fresh quote and separate explicit consent.
 38. `users.id`/`user_id` is the only account identity; all account/funding APIs
     derive it from authentication and enforce ownership on every opaque ID.
 39. Reconciliation/webhook/polling/recovery remain active when creation mode is off.
@@ -4155,6 +4245,11 @@ stops new selection but preserves status polling/webhooks.
 - no second account/wallet registry;
 - no automatic rebalance or canonical parking network;
 - future custom venue location passes contracts without core changes;
+- venue-specific destination inspection, source-plan construction, and
+  postcondition verification plug into registered adapter boundaries; the
+  common quote/commit/action/receipt/reservation/reducer core contains no
+  venue switch and adding a venue cannot create a second operation state
+  machine;
 - external balance cannot silently select a Trading Wallet and external
   source-only/view-only addresses cannot become executable bindings;
 - legacy APIs contain no new feature branches.
@@ -4430,7 +4525,7 @@ time because provider contracts and enabled routes can change.
 | withdrawal recipients outside owned Account Value                   | 7.2, 12.2, 19.7      | 23.3–23.5, WP6                    |
 | user merge/deletion/retention lifecycle                             | 12.6–12.7            | WP0 Lifecycle Matrix, WP3, WP9    |
 | Kalshi exit-only preservation without new exposure                  | 15.4                 | 23.1, WP9 parity evidence         |
-| single-segment initial execution and future staged consent          | 6.2, 13.8            | 23.1–23.4, WP5                    |
+| single-leg/composite execution and future staged consent            | 6.2, 10.3, 13.8      | 23.1–23.4, WP5–WP6                |
 | runtime activation/rollback                                         | 21, 27               | 25 WP9, 29.5                      |
 | KISS/DRY                                                            | 8, 24                | 23, 29.4                          |
 | legacy code exits instead of becoming permanent growth              | 24, 27.1             | WP0 Legacy Exit Matrix, WP9       |

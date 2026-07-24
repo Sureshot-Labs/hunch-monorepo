@@ -10,6 +10,7 @@ import type {
   WalletExecutionProfile,
 } from "../funding/domain/types.js";
 import { stableOpaqueId } from "./canonical.js";
+import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../funding/execution/sponsorship-policy.js";
 
 export type ExistingWalletOwnershipFact = Readonly<{
   address: string;
@@ -25,13 +26,15 @@ export type ExistingVenueBindingFact = Readonly<{
   executionAddress: string;
   accountRef: string;
   settlementAsset: AssetRef;
-  signingMode: "web_client" | "privy_delegated";
+  signingMode: "web_client" | "privy_authorization" | "privy_delegated";
 }>;
 
 function walletProfile(
   fact: ExistingWalletOwnershipFact,
   networkId: string,
 ): WalletExecutionProfile {
+  const internallyManaged =
+    fact.source !== "external" && Boolean(fact.serverWalletRef);
   return {
     walletId: stableOpaqueId(
       "wallet",
@@ -40,9 +43,17 @@ function walletProfile(
     networkId,
     address: fact.address,
     source: fact.source,
-    signingModes: ["web_client"],
+    signingModes:
+      fact.source === "external"
+        ? ["web_client"]
+        : fact.serverWalletRef
+          ? ["web_client", "privy_authorization"]
+          : ["web_client"],
     serverWalletRef: fact.serverWalletRef,
-    sponsorshipPolicyIds: [],
+    sponsorshipPolicyIds:
+      internallyManaged && networkId.startsWith("evm:")
+        ? [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID]
+        : [],
   };
 }
 
@@ -125,11 +136,18 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
         walletId: profile.walletId,
         networkId: profile.networkId,
         address: profile.address.toLowerCase(),
+        source: profile.source,
+        signingModes: profile.signingModes,
+        serverWalletRef: profile.serverWalletRef,
+        sponsorshipPolicyIds: profile.sponsorshipPolicyIds,
       })),
       venueBindings: venueBindings.map((binding) => ({
         bindingId: binding.bindingId,
         venueId: binding.venueId,
         accountRef: binding.accountRef.toLowerCase(),
+        controllerWalletId: binding.controllerWalletId,
+        executionWalletId: binding.executionWalletId,
+        signingMode: binding.signingMode,
       })),
     });
     return {

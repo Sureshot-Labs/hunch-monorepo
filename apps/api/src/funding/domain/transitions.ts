@@ -78,11 +78,13 @@ export const FUNDING_OPERATION_TRANSITIONS = defineTransitions({
     "in_progress:source_action",
     "awaiting_user:source_action",
     "awaiting_external_funds:source_action",
+    "cancelled:terminal",
   ],
   "in_progress:source_action": [
     "in_progress:source_observed",
     "reconcile_required:source_action",
     "recovery_required:source_action",
+    "cancelled:terminal",
   ],
   "in_progress:source_observed": [
     "in_progress:routing",

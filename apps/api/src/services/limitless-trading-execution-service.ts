@@ -3,6 +3,10 @@ import { ethers } from "ethers";
 
 import { AuthService } from "../auth.js";
 import { env } from "../env.js";
+import {
+  assertFundingReservationReadyForTrade,
+  releaseFundingReservationForAbandonedTrade,
+} from "../funding/persistence/funding-evidence-repository.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   normalizeLimitlessRawTokenId,
@@ -196,6 +200,8 @@ type LimitlessClientOrderBody = {
   order: Record<string, unknown>;
   orderType: "FOK" | "GTC";
   ownerId?: number | null;
+  fundingOperationId?: string;
+  fundingReservationId?: string;
 };
 
 type LimitlessAmmQuoteQuery = {
@@ -576,7 +582,7 @@ function normalizeLimitlessProfileForAccount(input: {
   };
 }
 
-async function lookupLimitlessPartnerAccountProfile(input: {
+export async function inspectLimitlessPartnerAccountProfile(input: {
   account: string;
   clientType: LimitlessConnectClientType;
 }): Promise<{
@@ -759,7 +765,7 @@ export async function connectLimitlessPartnerAccountRoute(input: {
       if (!upstream.ok) {
         if (upstream.status === 409) {
           const partnerAccountLookup =
-            await lookupLimitlessPartnerAccountProfile({
+            await inspectLimitlessPartnerAccountProfile({
               account: checksumAccount,
               clientType: input.clientType,
             });
@@ -2748,7 +2754,11 @@ function normalizeRawLimitlessTokenIdFromUnknown(
     : null;
 }
 
-type LimitlessTokenPair = { tokenNo: string | null; tokenYes: string | null };
+type LimitlessTokenPair = {
+  marketId: string | null;
+  tokenNo: string | null;
+  tokenYes: string | null;
+};
 
 function extractLimitlessPositionTokenIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -2759,7 +2769,7 @@ function extractLimitlessPositionTokenIds(value: unknown): string[] {
 
 function extractLimitlessTokenPair(
   payload: unknown,
-): LimitlessTokenPair | null {
+): Omit<LimitlessTokenPair, "marketId"> | null {
   const marketRecord = isRecord(payload)
     ? isRecord(payload.market)
       ? payload.market
@@ -2933,11 +2943,12 @@ async function resolveLimitlessTokenPairForSlug(input: {
   if (!slug) return null;
 
   const dbRow = await input.pool.query<{
+    id: string;
     token_yes: string | null;
     token_no: string | null;
   }>(
     `
-      select token_yes, token_no
+      select id, token_yes, token_no
       from unified_markets
       where venue = 'limitless'
         and slug = $1
@@ -2951,8 +2962,9 @@ async function resolveLimitlessTokenPairForSlug(input: {
   const dbTokenNo = normalizeLimitlessRawTokenId(
     dbRow.rows[0]?.token_no ?? null,
   );
+  const marketId = dbRow.rows[0]?.id ?? null;
   if (dbTokenYes && dbTokenNo) {
-    return { tokenYes: dbTokenYes, tokenNo: dbTokenNo };
+    return { marketId, tokenYes: dbTokenYes, tokenNo: dbTokenNo };
   }
 
   const upstream = await limitlessRequest({
@@ -2962,18 +2974,19 @@ async function resolveLimitlessTokenPairForSlug(input: {
   });
   if (!upstream.ok) {
     return dbTokenYes || dbTokenNo
-      ? { tokenYes: dbTokenYes, tokenNo: dbTokenNo }
+      ? { marketId, tokenYes: dbTokenYes, tokenNo: dbTokenNo }
       : null;
   }
 
   const upstreamTokens = extractLimitlessTokenPair(upstream.payload);
   if (!upstreamTokens) {
     return dbTokenYes || dbTokenNo
-      ? { tokenYes: dbTokenYes, tokenNo: dbTokenNo }
+      ? { marketId, tokenYes: dbTokenYes, tokenNo: dbTokenNo }
       : null;
   }
 
   return {
+    marketId,
     tokenYes: upstreamTokens.tokenYes ?? dbTokenYes,
     tokenNo: upstreamTokens.tokenNo ?? dbTokenNo,
   };
@@ -3094,6 +3107,33 @@ export async function submitLimitlessClientSignedOrder(input: {
       ok: false,
       statusCode: 400,
       payload: { error: "Order side must be BUY/SELL (or 0/1)" },
+    };
+  }
+  const fundingReservation =
+    input.body.fundingOperationId && input.body.fundingReservationId
+      ? {
+          operationId: input.body.fundingOperationId,
+          reservationId: input.body.fundingReservationId,
+        }
+      : null;
+  if (
+    Boolean(input.body.fundingOperationId) !==
+    Boolean(input.body.fundingReservationId)
+  ) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error:
+          "fundingOperationId and fundingReservationId must be provided together",
+      },
+    };
+  }
+  if (fundingReservation && side !== "BUY") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "Funding reservations can only be linked to buys" },
     };
   }
   if (
@@ -3391,6 +3431,27 @@ export async function submitLimitlessClientSignedOrder(input: {
       },
     };
   }
+  if (fundingReservation) {
+    try {
+      await assertFundingReservationReadyForTrade(input.pool, {
+        userId: input.userId,
+        link: fundingReservation,
+        venue: "limitless",
+        marketId: marketTokens?.marketId ?? null,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation is unavailable",
+        },
+      };
+    }
+  }
 
   const tokenId = normalizeLimitlessScopedTokenId(requestedRawTokenId);
   const makerAmount = coercedMakerAmount;
@@ -3426,6 +3487,13 @@ export async function submitLimitlessClientSignedOrder(input: {
       };
     }
     if (isLimitlessClobDefinitiveNoFill(depthQuote.status)) {
+      if (fundingReservation) {
+        await releaseFundingReservationForAbandonedTrade(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          outcomeReason: "trade_no_fill",
+        });
+      }
       return {
         ok: true,
         payload: {
@@ -3454,20 +3522,28 @@ export async function submitLimitlessClientSignedOrder(input: {
       isLimitlessFokUnmatchedMessage(upstreamMessage)
     ) {
       const venueOrderId = extractLimitlessOrderIdFromMessage(upstreamMessage);
+      const noFill = await recordLimitlessFokNoFill({
+        orderPayload,
+        pool: input.pool,
+        price,
+        rawPayload: upstream.payload,
+        side,
+        signer,
+        size,
+        tokenId,
+        userId: input.userId,
+        venueOrderId,
+      });
+      if (fundingReservation) {
+        await releaseFundingReservationForAbandonedTrade(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          outcomeReason: "trade_no_fill",
+        });
+      }
       return {
         ok: true,
-        payload: await recordLimitlessFokNoFill({
-          orderPayload,
-          pool: input.pool,
-          price,
-          rawPayload: upstream.payload,
-          side,
-          signer,
-          size,
-          tokenId,
-          userId: input.userId,
-          venueOrderId,
-        }),
+        payload: noFill,
       };
     }
     return {
@@ -3487,20 +3563,28 @@ export async function submitLimitlessClientSignedOrder(input: {
   const parsedResult = parseLimitlessOrderResult(upstream.payload);
 
   if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
+    const noFill = await recordLimitlessFokNoFill({
+      orderPayload,
+      pool: input.pool,
+      price,
+      rawPayload: upstream.payload,
+      side,
+      signer,
+      size,
+      tokenId,
+      userId: input.userId,
+      venueOrderId,
+    });
+    if (fundingReservation) {
+      await releaseFundingReservationForAbandonedTrade(input.pool, {
+        userId: input.userId,
+        link: fundingReservation,
+        outcomeReason: "trade_no_fill",
+      });
+    }
     return {
       ok: true,
-      payload: await recordLimitlessFokNoFill({
-        orderPayload,
-        pool: input.pool,
-        price,
-        rawPayload: upstream.payload,
-        side,
-        signer,
-        size,
-        tokenId,
-        userId: input.userId,
-        venueOrderId,
-      }),
+      payload: noFill,
     };
   }
 
@@ -3556,6 +3640,7 @@ export async function submitLimitlessClientSignedOrder(input: {
     rawError: null,
     orderPayload: storedOrderPayload,
     orderHash: parsedResult.txHash,
+    fundingReservation,
     lastUpdate: confirmedFillAt,
     filledAt: confirmedFillAt,
   });
@@ -3784,6 +3869,7 @@ export async function recordLimitlessAmmOrder(input: {
   pool: ApiTradingApplicationServiceInput["pool"];
   settlementMode?: "confirmed" | "legacy_assume_filled";
   source?: Record<string, unknown> | null;
+  fundingReservation?: TradeIntent["fundingReservation"];
   signer: string;
   userId: string;
 }): Promise<LimitlessAmmRecordRouteResult> {
@@ -3806,6 +3892,58 @@ export async function recordLimitlessAmmOrder(input: {
   }
 
   const side = input.body.side;
+  if (input.fundingReservation && side !== "BUY") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "Funding reservations can only be linked to buys" },
+    };
+  }
+  if (input.fundingReservation) {
+    const marketResult = await input.pool.query<{ id: string }>(
+      `
+        select distinct market.id
+        from unified_markets market
+        left join unified_tokens token
+          on token.market_id = market.id
+         and token.venue = 'limitless'
+        where market.venue = 'limitless'
+          and (
+            ($1::text is not null and market.slug = $1)
+            or token.token_id = $2
+          )
+        order by market.id
+        limit 2
+      `,
+      [
+        input.body.marketSlug?.trim() || null,
+        normalizeLimitlessScopedTokenId(input.body.tokenId),
+      ],
+    );
+    const marketId =
+      marketResult.rows.length === 1
+        ? (marketResult.rows[0]?.id ?? null)
+        : null;
+    try {
+      await assertFundingReservationReadyForTrade(input.pool, {
+        userId: input.userId,
+        link: input.fundingReservation,
+        venue: "limitless",
+        marketId,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Funding reservation is unavailable",
+        },
+      };
+    }
+  }
   const size = input.body.size;
   const amountUsd = input.body.amountUsd ?? null;
   let price = input.body.price ?? null;
@@ -3876,6 +4014,7 @@ export async function recordLimitlessAmmOrder(input: {
       price,
     },
     orderHash: txHash,
+    fundingReservation: input.fundingReservation,
     postedAt: now,
     lastUpdate: now,
     filledAt,
@@ -5238,6 +5377,7 @@ async function persistTrade(
       onchainConfirmed: true,
       pool: ctx.pool,
       source: buildTelegramTradeSourceMetadata(input),
+      fundingReservation: input.intent.fundingReservation,
       signer: input.intent.walletAddress,
       userId: input.intent.actor.userId,
     });
@@ -5295,6 +5435,10 @@ async function persistTrade(
       _hunchUpstream: upstreamPayload,
     },
     orderHash: input.submitResult.orderHash,
+    fundingReservation:
+      input.submitResult.status === "no_fill"
+        ? null
+        : input.intent.fundingReservation,
     filledAt,
   });
   if (filledAt) {

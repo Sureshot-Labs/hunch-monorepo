@@ -1,4 +1,5 @@
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
+import { consumeFundingReservationForLinkedConsumerInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import type { PgParams } from "../server-types.js";
 
 export type ExecutionRow = {
@@ -20,6 +21,8 @@ export type ExecutionRow = {
   venue_order_id: string | null;
   status: string | null;
   raw: unknown;
+  funding_operation_id: string | null;
+  funding_reservation_id: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -54,27 +57,33 @@ function buildExecutionRawUpdateSql(): string {
 
 const EXECUTION_RAW_UPDATE_SQL = buildExecutionRawUpdateSql();
 
-export async function storeExecution(
-  pool: Pool,
-  inputs: {
-    userId: string;
-    walletAddress: string;
-    venue: string;
-    unifiedMarketId?: string | null;
-    side?: string | null;
-    outcome?: string | null;
-    inputMint?: string | null;
-    outputMint?: string | null;
-    amountIn?: string | number | null;
-    amountOut?: string | number | null;
-    inputDecimals?: number | null;
-    outputDecimals?: number | null;
-    quoteId?: string | null;
-    txSignature?: string | null;
-    venueOrderId?: string | null;
-    status?: string | null;
-    raw?: unknown;
-  },
+export type StoreExecutionInput = {
+  userId: string;
+  walletAddress: string;
+  venue: string;
+  unifiedMarketId?: string | null;
+  side?: string | null;
+  outcome?: string | null;
+  inputMint?: string | null;
+  outputMint?: string | null;
+  amountIn?: string | number | null;
+  amountOut?: string | number | null;
+  inputDecimals?: number | null;
+  outputDecimals?: number | null;
+  quoteId?: string | null;
+  txSignature?: string | null;
+  venueOrderId?: string | null;
+  status?: string | null;
+  raw?: unknown;
+  fundingReservation?: Readonly<{
+    operationId: string;
+    reservationId: string;
+  }> | null;
+};
+
+export async function storeExecutionInTransaction(
+  client: Pick<PoolClient, "query">,
+  inputs: StoreExecutionInput,
 ): Promise<ExecutionRow> {
   const amountIn = inputs.amountIn == null ? null : String(inputs.amountIn);
   const amountOut = inputs.amountOut == null ? null : String(inputs.amountOut);
@@ -82,7 +91,7 @@ export async function storeExecution(
     throw new Error("storeExecution requires txSignature for idempotency");
   }
 
-  const { rows } = await pool.query<ExecutionRow>(
+  const { rows } = await client.query<ExecutionRow>(
     `
       insert into executions (
         id,
@@ -103,13 +112,15 @@ export async function storeExecution(
         venue_order_id,
         status,
         raw,
+        funding_operation_id,
+        funding_reservation_id,
         created_at,
         updated_at
       )
       values (
         gen_random_uuid(),
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, $16, $17,
+        $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
         now(), now()
       )
       on conflict on constraint executions_user_id_wallet_address_venue_tx_signature_key
@@ -127,6 +138,14 @@ export async function storeExecution(
         venue_order_id = coalesce(excluded.venue_order_id, executions.venue_order_id),
         status = ${EXECUTION_STATUS_UPDATE_SQL},
         raw = ${EXECUTION_RAW_UPDATE_SQL},
+        funding_operation_id = coalesce(
+          executions.funding_operation_id,
+          excluded.funding_operation_id
+        ),
+        funding_reservation_id = coalesce(
+          executions.funding_reservation_id,
+          excluded.funding_reservation_id
+        ),
         updated_at = now()
       returning
         id,
@@ -147,6 +166,8 @@ export async function storeExecution(
         venue_order_id,
         status,
         raw,
+        funding_operation_id,
+        funding_reservation_id,
         created_at,
         updated_at
     `,
@@ -168,14 +189,55 @@ export async function storeExecution(
       inputs.venueOrderId ?? null,
       inputs.status ?? null,
       inputs.raw ?? null,
+      inputs.fundingReservation?.operationId ?? null,
+      inputs.fundingReservation?.reservationId ?? null,
     ],
   );
 
-  if (!rows[0]) {
+  const execution = rows[0];
+  if (!execution) {
     throw new Error("Failed to store execution");
   }
+  if (
+    inputs.fundingReservation &&
+    (execution.funding_operation_id !== inputs.fundingReservation.operationId ||
+      execution.funding_reservation_id !==
+        inputs.fundingReservation.reservationId)
+  ) {
+    throw new Error(
+      "Execution is already linked to another funding reservation",
+    );
+  }
+  if (inputs.fundingReservation) {
+    await consumeFundingReservationForLinkedConsumerInTransaction(client, {
+      userId: inputs.userId,
+      reservationId: inputs.fundingReservation.reservationId,
+      consumer: { kind: "execution", executionId: execution.id },
+      outcomeReason: "trade_execution_recorded",
+    });
+  }
+  return execution;
+}
 
-  return rows[0];
+export async function storeExecution(
+  pool: Pool,
+  inputs: StoreExecutionInput,
+): Promise<ExecutionRow> {
+  if (!inputs.fundingReservation) {
+    return storeExecutionInTransaction(pool, inputs);
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const execution = await storeExecutionInTransaction(client, inputs);
+    await client.query("COMMIT");
+    return execution;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function fetchPendingKalshiExecutions(

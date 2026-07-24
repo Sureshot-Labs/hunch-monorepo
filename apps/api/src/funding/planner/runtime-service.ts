@@ -13,11 +13,22 @@ import type {
   FundingDestinationOption,
   FundingDiscoveryRequest,
   FundingQuoteRequest,
+  NormalizedAction,
+  PreparationPurpose,
 } from "../domain/types.js";
+import type { PreparationResult } from "../domain/contracts.js";
 import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
 import { FundingOperationService } from "./operation-service.js";
 import { FundingPlannerError } from "./money.js";
+import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
+import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
+import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
+import {
+  FundingOperationActionRuntime,
+  type FundingActionReportOutcome,
+} from "../execution/operation-action-runtime.js";
+import { WithdrawalDestinationRuntime } from "../execution/withdrawal-destination-runtime.js";
 
 const SUBJECT_FINGERPRINT_DOMAIN = "hunch:funding:subject:v1:";
 
@@ -29,18 +40,92 @@ function positiveInt(raw: string | undefined): number | null {
 
 export class FundingPlanningRuntime {
   private readonly planningStore: PostgresFundingPlanningStore;
+  private readonly preparationRuntime: WalletPreparationRuntimeService;
+  private readonly actionRuntime: FundingOperationActionRuntime;
+  private readonly withdrawalRuntime: WithdrawalDestinationRuntime;
 
   constructor(private readonly db: Pool) {
     this.planningStore = new PostgresFundingPlanningStore(db);
+    this.preparationRuntime = new WalletPreparationRuntimeService(db);
+    this.actionRuntime = new FundingOperationActionRuntime(db);
+    this.withdrawalRuntime = new WithdrawalDestinationRuntime(db);
   }
 
-  /**
-   * WP5 exposes the fail-closed boundary. WP6 will install its side-effect-free
-   * PM/Limitless inspection adapters here; until then production returns no
-   * invented destination or readiness fact.
-   */
-  async destinations(): Promise<readonly FundingDestinationOption[]> {
-    return [];
+  registerWithdrawalDestination(
+    userId: string,
+    input: Readonly<{
+      asset: Readonly<{
+        networkId: string;
+        assetId: string;
+        decimals: number;
+      }>;
+      address: string;
+    }>,
+  ) {
+    return this.withdrawalRuntime.register(userId, input);
+  }
+
+  revokeWithdrawalDestination(userId: string, recipientId: string) {
+    return this.withdrawalRuntime.revoke(userId, recipientId);
+  }
+
+  async destinations(
+    userId: string,
+    query: Readonly<{
+      purpose: "fund" | "buy" | "sell" | "redeem" | "withdraw";
+      marketContextId?: string | null;
+      marketClass?: string | null;
+    }>,
+  ): Promise<readonly FundingDestinationOption[]> {
+    return this.preparationRuntime.listDestinationOptions({
+      accountId: userId,
+      purpose: query.purpose,
+      marketContextId: query.marketContextId ?? null,
+      marketClass: query.marketClass ?? null,
+      compatibleVenueBindingOptionIds: null,
+    });
+  }
+
+  inspectPreparation(
+    userId: string,
+    request: Readonly<{
+      venueBindingOptionId: string;
+      purpose: PreparationPurpose;
+      marketContextId: string | null;
+      marketClass: string | null;
+    }>,
+  ): Promise<PreparationResult> {
+    return this.preparationRuntime.inspectBindingOption({
+      accountId: userId,
+      venueBindingOptionId: request.venueBindingOptionId,
+      purpose: request.purpose,
+      marketContextId: request.marketContextId,
+      marketClass: request.marketClass,
+      compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
+    });
+  }
+
+  prepare(
+    userId: string,
+    request: Readonly<{
+      venueBindingOptionId: string;
+      purpose: PreparationPurpose;
+      marketContextId: string | null;
+      marketClass: string | null;
+      operationId: string;
+      expectedInspectionRevision: string;
+    }>,
+  ): Promise<readonly NormalizedAction[]> {
+    return this.preparationRuntime.prepareBindingOption({
+      accountId: userId,
+      venueBindingOptionId: request.venueBindingOptionId,
+      purpose: request.purpose,
+      marketContextId: request.marketContextId,
+      marketClass: request.marketClass,
+      compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
+      operationId: request.operationId,
+      expectedInspectionRevision: request.expectedInspectionRevision,
+    });
   }
 
   async liquidity(userId: string, request: FundingDiscoveryRequest) {
@@ -49,9 +134,27 @@ export class FundingPlanningRuntime {
       buildAccountValueReadModel({ pool: this.db, userId }),
     ]);
     const planner = new FundingPlanner({
-      listDestinations: async () => [],
+      listDestinations: async ({ accountId, request, marketContext }) =>
+        this.preparationRuntime.resolvedCandidates({
+          accountId,
+          purpose:
+            request.purpose === "trade_shortfall"
+              ? "buy"
+              : request.purpose === "withdrawal"
+                ? "withdraw"
+                : "fund",
+          marketContextId: marketContext?.marketId ?? null,
+          marketClass: null,
+          compatibleVenueBindingOptionIds:
+            marketContext?.compatibleVenueBindingOptionIds ?? null,
+        }),
       resolveMarketContext: async () => null,
-      listSources: async () => [],
+      resolveWithdrawalRecipient: async ({ accountId, recipientId }) =>
+        this.withdrawalRuntime.resolve(accountId, recipientId),
+      listSources: (sourceInput) =>
+        new ProductionFundingSourcePlanner(this.db, account, [
+          new PolymarketFundingSourceAdapter(account),
+        ]).list(sourceInput),
       store: this.planningStore,
     });
     return planner.discover({
@@ -71,6 +174,9 @@ export class FundingPlanningRuntime {
     return new FundingQuoteService({
       db: this.db,
       planningStore: this.planningStore,
+      revalidateWithdrawalRecipient: async (ownerId, recipientId) => {
+        await this.withdrawalRuntime.resolve(ownerId, recipientId);
+      },
     }).quote({
       userId,
       request,
@@ -106,6 +212,12 @@ export class FundingPlanningRuntime {
             userId: subjectUserId,
           })
         ).ownershipEvidenceRevision,
+      revalidateWithdrawalRecipient: async (db, input) => {
+        await this.withdrawalRuntime.resolve(input.userId, input.recipientId, {
+          db,
+          lockForShare: true,
+        });
+      },
     }).commit({
       userId,
       request,
@@ -117,6 +229,27 @@ export class FundingPlanningRuntime {
 
   operation(userId: string, operationId: string) {
     return fetchFundingOperationForUser(this.db, { userId, operationId });
+  }
+
+  prepareOperationAction(
+    userId: string,
+    input: Readonly<{ operationId: string; stepId: string }>,
+  ) {
+    return this.actionRuntime.prepare(userId, input);
+  }
+
+  reportOperationAction(
+    userId: string,
+    input: Readonly<{
+      operationId: string;
+      stepId: string;
+      attemptId: string;
+      outcome: FundingActionReportOutcome;
+      transactionReference: string | null;
+      actualCosts: Readonly<{ networkFeeRaw: string | null }>;
+    }>,
+  ) {
+    return this.actionRuntime.report(userId, input);
   }
 
   operations(

@@ -82,12 +82,16 @@ export type ValidatedExternalRecipient = Readonly<{
   accountId: AccountId;
   networkId: NetworkId;
   asset: AssetRef;
-  address: string;
   addressFingerprint: string;
   validatedAt: string;
   expiresAt: string;
   validationPolicyVersion: number;
 }>;
+
+export type ResolvedExternalRecipient = ValidatedExternalRecipient &
+  Readonly<{
+    address: string;
+  }>;
 
 export type FundingTarget =
   | Readonly<{ kind: "owned_location"; location: AssetLocation }>
@@ -110,6 +114,16 @@ export type FundingSourceRef =
       networkId: NetworkId | null;
       asset: AssetRef | null;
       controlledSender: boolean;
+    }>
+  | Readonly<{
+      kind: "composite";
+      legCount: number;
+    }>
+  | Readonly<{
+      kind: "venue_preparation";
+      venueId: VenueId;
+      venueBindingId: string;
+      inputCount: number;
     }>;
 
 export const LOCATION_CAPABILITIES = [
@@ -301,6 +315,25 @@ export type ActionSummary = Readonly<{
   sponsorship: "none" | "requested" | "required";
 }>;
 
+export type SourceOptionLeg = Readonly<{
+  sourceLegId: string;
+  safeLabel: string;
+  source: Extract<
+    FundingSourceRef,
+    Readonly<{ kind: "owned_location" | "external_ingress" }>
+  >;
+  sourceAmount: Money;
+  expectedDestination: Money;
+  minimumDestination: Money;
+  fees: readonly Readonly<{
+    kind: string;
+    amount: Money;
+    estimatedUsd: string | null;
+  }>[];
+  eta: Readonly<{ minSeconds: number; maxSeconds: number }> | null;
+  requiredActions: readonly ActionSummary[];
+}>;
+
 export type SourceOption = Readonly<{
   sourceOptionId: string;
   kind:
@@ -308,9 +341,12 @@ export type SourceOption = Readonly<{
     | "venue_cash"
     | "privy_funding_method"
     | "manual_receive"
-    | "relay_deposit_address";
+    | "relay_deposit_address"
+    | "venue_preparation"
+    | "composite";
   safeLabel: string;
   source: FundingSourceRef;
+  sourceLegs?: readonly SourceOptionLeg[];
   amountMode: "exact_input" | "exact_output" | "variable_external";
   maximumSourceRaw: RawAmount | null;
   expectedDestination: Money | null;
@@ -397,8 +433,8 @@ export type FundingQuoteSummary = Readonly<{
   quoteId: string;
   liquidityProjectionId: string;
   selectedSourceOptionId: string;
-  destinationOptionId: string;
-  venueBindingOptionId: string;
+  destinationOptionId: string | null;
+  venueBindingOptionId: string | null;
   planKind: FundingExecutionPlan["kind"];
   experienceMode: "instant" | "inline_funding" | "prepare_first";
   expectedDestination: Money;
@@ -486,6 +522,14 @@ export type FundingExecutionPlan =
   | Readonly<{
       kind: "already_available";
       segments: readonly [];
+    }>
+  | Readonly<{
+      kind: "venue_preparation";
+      segments: readonly [];
+    }>
+  | Readonly<{
+      kind: "composite_route";
+      segments: readonly ProviderSegment[];
     }>;
 
 export type EvmTransactionAction = Readonly<{
@@ -530,8 +574,23 @@ export type SignatureAction = Readonly<{
   payload: JsonObject;
 }>;
 
+export type ExternalHandoffAction = Readonly<{
+  kind: "external_handoff";
+  actionId: string;
+  networkId: NetworkId;
+  actorWalletId: WalletId;
+  /**
+   * Stable adapter-owned action type. Core deliberately treats this as an
+   * opaque, namespaced identifier; the matching handoff executor owns payload
+   * validation and execution policy.
+   */
+  handoffKind: string;
+  payload: JsonObject;
+}>;
+
 export type NormalizedAction =
   | EvmTransactionAction
+  | ExternalHandoffAction
   | SvmTransactionAction
   | SignatureAction;
 
@@ -546,6 +605,11 @@ export const FUNDING_REASON_CODES = [
   "binding_not_ready",
   "binding_owner_mismatch",
   "cash_availability_unknown",
+  "clob_collateral_not_visible",
+  "condition_unresolved",
+  "credentials_foreign",
+  "credentials_missing",
+  "credentials_stale",
   "creation_mode_off",
   "destination_not_selected",
   "destination_selection_required",
@@ -561,25 +625,38 @@ export const FUNDING_REASON_CODES = [
   "invalid_amount",
   "invalid_market_context",
   "invalid_policy",
+  "locked_funds",
   "market_class_required",
+  "market_evidence_unavailable",
   "invalid_state_transition",
   "minimum_output_not_met",
   "movement_representation_replaced",
+  "operator_approval_required",
   "operation_reconcile_required",
   "policy_gate_closed",
+  "position_action_required",
+  "position_owner_mismatch",
   "provider_capability_disabled",
   "provider_status_unknown",
   "preparation_evidence_stale",
   "quote_expired",
+  "quote_slippage_exceeded",
   "refund_location_unsafe",
+  "rpc_unavailable",
   "route_not_allowlisted",
   "source_not_selected",
   "stale_projection",
   "stable_asset_impaired",
   "trusted_price_stale",
   "trusted_price_unavailable",
+  "unsupported_safe_threshold",
   "unsupported_location",
   "unsupported_signer",
+  "unsupported_wallet_topology",
+  "venue_profile_foreign",
+  "venue_profile_missing",
+  "venue_profile_stale",
+  "wallet_not_deployed",
   "wallet_provisioning_pending",
   "wallet_unavailable",
   "withdrawal_recipient_invalid",

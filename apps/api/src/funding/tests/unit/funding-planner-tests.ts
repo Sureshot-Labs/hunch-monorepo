@@ -2,12 +2,15 @@
 
 import assert from "node:assert/strict";
 
-import type { FundingCommitPlan } from "./funding/persistence/funding-operation-repository.js";
+import type {
+  FundingCommitPlan,
+  StoredFundingQuote,
+} from "../../persistence/funding-operation-repository.js";
 import type {
   FundingPlanningStore,
   PersistedFundingPlanningSnapshot,
   PlannedSourceOption,
-} from "./funding/planner/planning-types.js";
+} from "../../planner/planning-types.js";
 import type {
   AssetRef,
   FundingDestinationOption,
@@ -17,36 +20,36 @@ import type {
   SourceOption,
   VenueAccountBinding,
   VenueBindingOption,
-} from "./funding/domain/types.js";
+} from "../../domain/types.js";
 import type {
   FrozenPreparationDestination,
   ResolvedDestinationCandidate,
-} from "./funding/planner/destination-adapters.js";
+} from "../../planner/destination-adapters.js";
 import {
   CombinedFundingDestinationResolver,
-  LimitlessDestinationAdapter,
-  PolymarketDestinationAdapter,
+  FrozenPreparationDestinationAdapter,
   recommendFundingDestinations,
-} from "./funding/planner/destination-adapters.js";
-import { decidePlacement } from "./funding/planner/placement-policy.js";
+  toResolvedRouteDestination,
+} from "../../planner/destination-adapters.js";
+import { decidePlacement } from "../../planner/placement-policy.js";
 import {
   classifyRouteExperience,
   routeAmountBand,
-} from "./funding/planner/route-experience.js";
+} from "../../planner/route-experience.js";
 import {
   RelayFirstSourcePlanner,
   assertSingleSegmentExecutionPlan,
   buildRelayWalletSourceOption,
   selectRelayFirstSourceOptions,
-} from "./funding/planner/source-options.js";
-import { FundingPlanner } from "./funding/planner/planner.js";
-import { FundingQuoteService } from "./funding/planner/quote-service.js";
-import { FundingOperationService } from "./funding/planner/operation-service.js";
-import { canonicalJsonHash } from "./funding/persistence/canonical.js";
+} from "../../planner/source-options.js";
+import { FundingPlanner } from "../../planner/planner.js";
+import { FundingQuoteService } from "../../planner/quote-service.js";
+import { FundingOperationService } from "../../planner/operation-service.js";
+import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   type FundingRuntimePolicy,
-} from "./funding/policies/funding-policy.js";
+} from "../../policies/funding-policy.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const USER_ID = "10000000-0000-4000-8000-000000000001";
@@ -194,10 +197,25 @@ function candidate(
     bindingOption: bindingOption(),
     target: target(POLYGON_PUSD),
     availableNow,
-    preparationActions: [],
-    completeness: "complete",
-    freshness: "fresh",
     ...overrides,
+    preparationActions: overrides.preparationActions ?? [],
+    completeness: overrides.completeness ?? "complete",
+    freshness: overrides.freshness ?? "fresh",
+    venueBinding: overrides.venueBinding ?? {
+      bindingId: "binding_poly_runtime_12345678",
+      venueId: "polymarket",
+      controllerWalletId: "wallet_poly_12345678",
+      executionWalletId: "wallet_poly_12345678",
+      accountRef: "0x00000000000000000000000000000000000000aa",
+      settlementLocation: (
+        target(POLYGON_PUSD) as Extract<
+          FundingTarget,
+          { kind: "owned_location" }
+        >
+      ).location,
+      signingMode: "privy_authorization",
+    },
+    sourcePlanningEvidence: overrides.sourcePlanningEvidence ?? null,
   };
 }
 
@@ -302,7 +320,7 @@ function commitPlan(
       },
     ],
     steps: [],
-    reservation: null,
+    reservations: [],
   };
 }
 
@@ -464,7 +482,7 @@ await test("configurable recommendation never selects among real alternatives", 
   );
 });
 
-await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM", async () => {
+await test("frozen adapters preserve venue topology and accept a new registry entry", async () => {
   const binding = (
     venueId: string,
     id: string,
@@ -484,7 +502,7 @@ await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM"
     signingMode: "privy_authorization",
   });
   const fact = (
-    venueId: "polymarket" | "limitless",
+    venueId: string,
     topology: string,
     marketClass: string,
     asset: AssetRef,
@@ -526,6 +544,7 @@ await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM"
       preparation: {
         status: "ready",
         binding: exactBinding,
+        safeLabel: `${venueId} ${topology} ${marketClass} ${purpose}`,
         purpose,
         marketClass,
         readinessClass: "internal_managed",
@@ -537,10 +556,12 @@ await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM"
         requiredActions: [],
         postconditions: [],
         reasonCodes: [],
+        evidence: { facts: {}, checks: [] },
       },
       target: target(asset, venueId),
       requiredAsset: asset,
       networkLabel: venueId === "polymarket" ? "Polygon" : "Base",
+      sourcePlanningEvidence: null,
     };
   };
   const facts = [
@@ -550,6 +571,7 @@ await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM"
     fact("polymarket", "deposit_wallet", "neg_risk", POLYGON_PUSD, "buy"),
     fact("limitless", "embedded_eoa", "clob", BASE_USDC, "buy"),
     fact("limitless", "embedded_eoa", "amm", BASE_USDC, "buy"),
+    fact("future_venue", "future_binding", "spot", BASE_USDC, "fund"),
   ] as const;
   const mutations = 0;
   const resolver = async () => {
@@ -558,10 +580,26 @@ await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM"
   };
   const combined = new CombinedFundingDestinationResolver(
     [
-      new PolymarketDestinationAdapter(resolver, () => NOW),
-      new LimitlessDestinationAdapter(resolver, () => NOW),
+      new FrozenPreparationDestinationAdapter(
+        "polymarket",
+        ["standard", "neg_risk"],
+        resolver,
+        () => NOW,
+      ),
+      new FrozenPreparationDestinationAdapter(
+        "limitless",
+        ["clob", "clob_neg_risk", "amm", "amm_neg_risk"],
+        resolver,
+        () => NOW,
+      ),
+      new FrozenPreparationDestinationAdapter(
+        "future_venue",
+        ["spot"],
+        resolver,
+        () => NOW,
+      ),
     ],
-    ["polymarket", "limitless"],
+    ["polymarket", "limitless", "future_venue"],
   );
   const polymarket = await combined.listOptions({
     accountId: USER_ID,
@@ -592,6 +630,15 @@ await test("frozen adapters preserve Polymarket topology and Limitless CLOB/AMM"
   assert.equal(limitlessClob[0]?.marketClass, "clob");
   assert.equal(limitlessAmm.length, 1);
   assert.equal(limitlessAmm[0]?.marketClass, "amm");
+  const futureVenue = await combined.listOptions({
+    accountId: USER_ID,
+    purpose: "fund",
+    marketContextId: null,
+    marketClass: "spot",
+    compatibleVenueBindingOptionIds: null,
+  });
+  assert.equal(futureVenue.length, 1);
+  assert.equal(futureVenue[0]?.venueId, "future_venue");
   assert.equal(mutations, 0);
 });
 
@@ -895,7 +942,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     accountId: USER_ID,
     request,
     marketContext: null,
-    destination: exactDestination,
+    destination: toResolvedRouteDestination(exactDestination),
     placement,
     requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
     policy,
@@ -954,6 +1001,73 @@ await test("Relay-first source planner asks only one exact Relay route", async (
   );
   assert.deepEqual(await timedOutPlanner.list(plannerInput), []);
   assert.equal(aborted, true);
+
+  let activeQuotes = 0;
+  let maximumConcurrentQuotes = 0;
+  let parallelQuoteCalls = 0;
+  const pendingResolvers: Array<() => void> = [];
+  const parallelPlanner = new RelayFirstSourcePlanner(
+    {
+      listEligibleSources: async () => [
+        {
+          componentId: "component_parallel_a_12345678",
+          sourceLocationPatternId: "wallet_polygon",
+          safeLabel: "Parallel A",
+          source: exactSource,
+          quoteInputAmount: { asset: POLYGON_PUSD, raw: "500000" },
+          quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "500000" },
+          maximumSourceRaw: "500000",
+          estimatedUsd: "0.5",
+          transferable: true,
+          riskEligible: true,
+          walletExecutionReady: true,
+          nativeGasReady: true,
+          freshness: "fresh",
+        },
+        {
+          componentId: "component_parallel_b_12345678",
+          sourceLocationPatternId: "wallet_polygon",
+          safeLabel: "Parallel B",
+          source: exactSource,
+          quoteInputAmount: { asset: POLYGON_PUSD, raw: "500000" },
+          quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "500000" },
+          maximumSourceRaw: "500000",
+          estimatedUsd: "0.5",
+          transferable: true,
+          riskEligible: true,
+          walletExecutionReady: true,
+          nativeGasReady: true,
+          freshness: "fresh",
+        },
+      ],
+      quoteRelay: ({ signal }) =>
+        new Promise((resolve) => {
+          parallelQuoteCalls += 1;
+          activeQuotes += 1;
+          maximumConcurrentQuotes = Math.max(
+            maximumConcurrentQuotes,
+            activeQuotes,
+          );
+          let finished = false;
+          const finish = () => {
+            if (finished) return;
+            finished = true;
+            activeQuotes -= 1;
+            resolve(null);
+          };
+          pendingResolvers.push(finish);
+          if (activeQuotes === 2) {
+            for (const release of pendingResolvers.splice(0)) release();
+          }
+          signal.addEventListener("abort", finish, { once: true });
+        }),
+      observeRoute: async () => null,
+    },
+    { relayQuoteTimeoutMs: 50, totalPlannerTimeoutMs: 80 },
+  );
+  assert.deepEqual(await parallelPlanner.list(plannerInput), []);
+  assert.equal(parallelQuoteCalls, 2);
+  assert.equal(maximumConcurrentQuotes, 2);
 });
 
 await test("source option experience consumes measured observation classification", () => {
@@ -1387,6 +1501,215 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   assert.equal(trade.sourceOptions[0]?.minimumDestination?.raw, "3000000");
 });
 
+await test("withdrawal binds one owner recipient through discovery, quote, and atomic commit", async () => {
+  const recipient = {
+    recipientId: "recipient_withdrawal_12345678",
+    accountId: USER_ID,
+    networkId: POLYGON_PUSD.networkId,
+    asset: POLYGON_PUSD,
+    address: "0x00000000000000000000000000000000000000d1",
+    addressFingerprint: "d".repeat(64),
+    validatedAt: NOW.toISOString(),
+    expiresAt: "2026-07-24T12:01:00.000Z",
+    validationPolicyVersion: 1,
+  } as const;
+  const { address: _recipientAddress, ...recipientSnapshot } = recipient;
+  const request = intent("withdrawal", "1000000", {
+    destinationOptionId: null,
+    withdrawalRecipientId: recipient.recipientId,
+  });
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  policy.gates.quoteCreation = true;
+  policy.gates.commit = true;
+  policy.gates.withdrawalExecution = true;
+  policy.locations = [
+    {
+      locationPatternId: "polygon_external_recipient_v1",
+      locationKind: "wallet",
+      asset: POLYGON_PUSD,
+      ownership: "external_recipient",
+      observable: false,
+      capabilities: [],
+      enabled: true,
+    },
+  ];
+  const store = new MemoryPlanningStore();
+  let frozenPlan: FundingCommitPlan | null = null;
+  const projection = await new FundingPlanner({
+    listDestinations: async () => {
+      throw new Error("withdrawal must not select a venue destination");
+    },
+    resolveMarketContext: async () => null,
+    resolveWithdrawalRecipient: async ({ accountId, recipientId }) => {
+      assert.equal(accountId, USER_ID);
+      assert.equal(recipientId, recipient.recipientId);
+      return recipient;
+    },
+    listSources: async ({ destination, placement, requiredAmount }) => {
+      assert.equal(destination.externalRecipientId, recipient.recipientId);
+      assert.equal(destination.venueId, null);
+      assert.equal(destination.venueBindingOption, null);
+      assert.equal(destination.recipientAddress, recipient.address);
+      assert.deepEqual(destination.target, {
+        kind: "external_recipient",
+        recipient: recipientSnapshot,
+      });
+      const option = sourceOption(requiredAmount.raw);
+      const base = commitPlan(requiredAmount.raw, option);
+      frozenPlan = {
+        ...base,
+        operation: {
+          ...base.operation,
+          purpose: "withdrawal",
+          sourceSnapshot: option as never,
+          destinationTargetSnapshot: destination.target as never,
+          externalRecipientId: recipient.recipientId,
+          venueId: null,
+          venueBindingSnapshot: null,
+          placementSnapshot: placement as never,
+        },
+        segments: base.segments.map((segment) => ({
+          ...segment,
+          destinationTargetSnapshot: destination.target as never,
+        })),
+      };
+      return [
+        {
+          option,
+          commitPlan: frozenPlan,
+          routeId: "relay_polygon_withdrawal",
+          providerId: "relay",
+        },
+      ];
+    },
+    store,
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+  assert.equal(projection.destinationOptionId, null);
+  assert.equal(projection.venueBindingOptionId, null);
+  assert.equal(projection.sourceOptions.length, 1);
+  assert.equal(projection.mode, "inline_funding");
+  assert.equal(
+    store.rows.get(projection.liquidityProjectionId)?.plannerSnapshot
+      .withdrawalRecipient?.recipientId,
+    recipient.recipientId,
+  );
+  assert.equal(
+    JSON.stringify(
+      store.rows.get(projection.liquidityProjectionId)?.plannerSnapshot,
+    ).includes(recipient.address),
+    false,
+  );
+  assert.ok(frozenPlan);
+
+  let currentRecipientChecks = 0;
+  let storedQuote: StoredFundingQuote | null = null;
+  const quoteService = new FundingQuoteService({
+    db: {} as never,
+    planningStore: store,
+    now: () => NOW,
+    revalidateWithdrawalRecipient: async (userId, recipientId) => {
+      currentRecipientChecks += 1;
+      assert.equal(userId, USER_ID);
+      assert.equal(recipientId, recipient.recipientId);
+    },
+    createQuote: async (_db, input) => {
+      storedQuote = {
+        id: "quote_withdrawal_12345678",
+        userId: input.userId,
+        discoveryProjectionId: input.discoveryProjectionId,
+        selectedSourceOptionSnapshot: input.selectedSourceOptionSnapshot,
+        marketContextSnapshot: input.marketContextSnapshot,
+        destinationOptionSnapshot: input.destinationOptionSnapshot,
+        venueBindingSnapshot: input.venueBindingSnapshot,
+        planSnapshot: input.planSnapshot,
+        policyVersion: input.policyVersion,
+        policyRevision: input.policyRevision,
+        canonicalRequestHash: "a".repeat(64),
+        planHash: canonicalJsonHash(input.planSnapshot),
+        consentTokenHash: "b".repeat(64),
+        expiresAt: input.expiresAt,
+        consumedAt: null,
+        invalidatedAt: null,
+      };
+      return storedQuote;
+    },
+  });
+  const selectedSourceOption = projection.sourceOptions[0];
+  assert.ok(selectedSourceOption);
+  const quoteSummary = await quoteService.quote({
+    userId: USER_ID,
+    request: {
+      liquidityProjectionId: projection.liquidityProjectionId,
+      selectedSourceOptionId: selectedSourceOption.sourceOptionId,
+      confirmedSourceAmount: null,
+      requestedDestinationAmount: {
+        asset: POLYGON_PUSD,
+        raw: "1000000",
+      },
+    },
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+  assert.equal(quoteSummary.destinationOptionId, null);
+  assert.equal(quoteSummary.venueBindingOptionId, null);
+  assert.equal(currentRecipientChecks, 1);
+  assert.ok(storedQuote);
+  const committedQuote = storedQuote as StoredFundingQuote;
+  assert.equal(
+    JSON.stringify(committedQuote.planSnapshot).includes(recipient.address),
+    false,
+  );
+
+  const resolvedPolicy = {
+    source: "db" as const,
+    policy,
+    revision: "policy_revision_12345678",
+    effectiveAt: NOW,
+    createdAt: NOW,
+    createdBy: USER_ID,
+    invalidStoredPolicy: false,
+    validationIssues: [],
+  };
+  await new FundingOperationService({
+    db: {} as never,
+    subjectLookupHmac: () => "c".repeat(64),
+    subjectLookupKeyVersion: 1,
+    resolveOwnershipRevision: async () => "ownership_revision_12345678",
+    revalidateWithdrawalRecipient: async (_db, input) => {
+      currentRecipientChecks += 1;
+      assert.equal(input.userId, USER_ID);
+      assert.equal(input.recipientId, recipient.recipientId);
+    },
+    fetchQuote: async () => committedQuote,
+    resolvePolicy: async () => resolvedPolicy,
+    commitOperation: async (_db, input) => {
+      await input.verifyCurrentFacts?.({} as never, committedQuote);
+      return { operation: {} as never, replayed: false };
+    },
+    now: () => NOW,
+  }).commit({
+    userId: USER_ID,
+    request: {
+      quoteId: committedQuote.id,
+      consentToken: quoteSummary.consentToken,
+      idempotencyKey: "withdrawal_commit_12345678",
+    },
+    policy,
+    policyRevision: resolvedPolicy.revision,
+    ownershipRevision: "ownership_revision_12345678",
+  });
+  assert.equal(currentRecipientChecks, 2);
+});
+
 await test("quote freezes one selected source and rejects changed raw amounts", async () => {
   const store = new MemoryPlanningStore();
   const exactDestination = candidate();
@@ -1430,6 +1753,7 @@ await test("quote freezes one selected source and rejects changed raw amounts", 
       request,
       marketContext: null,
       destination: exactDestination,
+      withdrawalRecipient: null,
       placement,
       sources: [
         {

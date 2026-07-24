@@ -15,7 +15,6 @@ import {
   commitFundingOperation,
   createFundingQuote,
 } from "../../funding/persistence/funding-operation-repository.js";
-import { upsertFundingProviderRequestInTransaction } from "../../funding/persistence/funding-evidence-repository.js";
 import { reduceFundingOperation } from "../../funding/reconciliation/funding-reducer.js";
 import { RelayClient } from "./client.js";
 import { RELAY_ROUTE_SPECS } from "./mappings.js";
@@ -114,7 +113,7 @@ function buildPlan(): FundingCommitPlan {
       },
     ],
     steps: [],
-    reservation: null,
+    reservations: [],
   };
 }
 
@@ -178,27 +177,6 @@ try {
   );
   const segmentId = segmentResult.rows[0]?.id;
   assert.ok(segmentId);
-  await pool.connect().then(async (client) => {
-    try {
-      await client.query("begin");
-      await upsertFundingProviderRequestInTransaction(client, {
-        operationId: committedOperationId,
-        segmentId,
-        requestKind: "initial",
-        requestRefCiphertext: referenceCodec.encrypt(initialRequestId),
-        requestRefLookupHmac: referenceCodec.fingerprint(initialRequestId),
-        rawStatus: "waiting",
-        discoverySource: "quote_commit",
-        lookupKeyVersion: 1,
-      });
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
-  });
 
   const client = new RelayClient({
     apiKey: "relay-integration-api-key",

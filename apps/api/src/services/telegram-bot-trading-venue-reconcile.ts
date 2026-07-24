@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { sumErc20TransfersTo } from "../funding/execution/evm-erc20-receipt.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   fetchEmbeddedEthereumPrivyTransaction,
@@ -12,7 +13,6 @@ import {
   fetchPolymarketRelayerTransaction,
   POLYMARKET_RELAYER_FAILED_STATES,
   POLYMARKET_RELAYER_SUCCESS_STATES,
-  sumTokenTransfersTo,
 } from "./polymarket-deposit-wallet-relayer.js";
 import {
   buildRedemptionNotification,
@@ -45,6 +45,8 @@ type VenueReconcileIntentRow = {
   result: Record<string, unknown> | null;
   venue_order_id: string | null;
   tx_signature: string | null;
+  funding_operation_id: string | null;
+  funding_reservation_id: string | null;
   wallet_address: string | null;
   wallet_chain: "ethereum" | "solana" | null;
   privy_user_id: string | null;
@@ -182,6 +184,13 @@ function reconstructTradeIntent(
         : { type: "usd", value: row.amount_usd as string },
     orderType: "FOK",
     idempotencyKey: `telegram-bot:${row.id}`,
+    fundingReservation:
+      row.funding_operation_id && row.funding_reservation_id
+        ? {
+            operationId: row.funding_operation_id,
+            reservationId: row.funding_reservation_id,
+          }
+        : null,
     raw: {
       recovered: true,
       ...(row.action === "sell" ? { sharesRaw: row.shares_raw } : {}),
@@ -298,7 +307,7 @@ async function inspectVenueSubmit(
     const expectedPayoutRaw = readString(plan?.expectedPayoutRaw);
     const actualPayoutRaw =
       receipt.succeeded && depositWallet && payoutTokenAddress
-        ? sumTokenTransfersTo({
+        ? sumErc20TransfersTo({
             logs: receipt.logs,
             recipient: depositWallet,
             tokenAddress: payoutTokenAddress,
@@ -650,6 +659,8 @@ async function loadCandidates(
        ti.result,
        ti.venue_order_id,
        ti.tx_signature,
+       ti.funding_operation_id,
+       ti.funding_reservation_id,
        a.wallet_address,
        a.wallet_chain,
        a.privy_user_id,

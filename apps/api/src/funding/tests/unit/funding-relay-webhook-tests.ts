@@ -9,7 +9,7 @@ import Fastify from "fastify";
 import {
   registerRelayWebhookRoute,
   relayWebhookConfigFromEnv,
-} from "./routes/funding-relay-webhook.js";
+} from "../../../routes/funding-relay-webhook.js";
 
 const apiKey = "relay-webhook-route-secret";
 const lookupKey = "relay-webhook-lookup-key".repeat(2);
