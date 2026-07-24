@@ -301,6 +301,7 @@ export async function runSignalBotRunner(): Promise<void> {
               appBaseUrl: config.appBaseUrl,
               callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
               miniAppEnabled: config.telegramMiniAppLinkBase != null,
+              miniAppLinkBase: config.telegramMiniAppLinkBase,
               notice,
               pool: db,
               telegramUserId,

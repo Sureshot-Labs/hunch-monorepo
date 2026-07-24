@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
   buildTelegramBotReferralCodeConfirmation,
+  buildTelegramBotReferralCodeInputPrompt,
   normalizeTelegramBotReferralCode,
   parseTelegramBotRewardsCallbackRoute,
   telegramBotRewardsTestHooks,
@@ -76,6 +77,7 @@ const tests: Array<{ name: string; run: () => void }> = [
         code: "HUNCH42",
         hasReferrer: false,
         miniAppEnabled: true,
+        miniAppLinkBase: "https://t.me/hunch_bot/hunch",
         summary,
         totalReferrals: 7,
       });
@@ -87,14 +89,12 @@ const tests: Array<{ name: string; run: () => void }> = [
         buttons.map((button) => button.text),
         [
           "📨 Share invite",
-          "📋 Copy link",
-          "🏷 Copy code",
           "👥 My referrals",
           "💰 Earnings",
           "✏️ Change code",
           "❓ How it works",
           "🏷 Enter invite code",
-          "Open Hunch Mini App",
+          "Open Rewards",
           "⬅️ Back",
         ],
       );
@@ -109,19 +109,120 @@ const tests: Array<{ name: string; run: () => void }> = [
           : null,
         TELEGRAM_CUSTOM_EMOJI.hunch.id,
       );
-      assert.equal(brandedButton?.text, "Open Hunch Mini App");
-      const copyLink = buttons.find((button) => button.text === "📋 Copy link");
-      assert.deepEqual(
-        copyLink && "copy_text" in copyLink ? copyLink.copy_text : null,
-        { text: "https://app.hunch.trade/@HUNCH42" },
+      assert.equal(brandedButton?.text, "Open Rewards");
+      const shareButton = buttons.find(
+        (button) => button.text === "📨 Share invite",
       );
-      const miniApp = buttons.find(
-        (button) => button.text === "Open Hunch Mini App",
+      assert.ok(shareButton && "url" in shareButton);
+      const sharedUrl = new URL(
+        new URL(
+          shareButton && "url" in shareButton ? shareButton.url : "",
+        ).searchParams.get("url") ?? "",
       );
+      assert.equal(sharedUrl.origin, "https://t.me");
+      assert.equal(sharedUrl.pathname, "/hunch_bot/hunch");
+      assert.equal(sharedUrl.searchParams.get("startapp"), "ref_HUNCH42");
+      const miniApp = buttons.find((button) => button.text === "Open Rewards");
       assert.equal(
         miniApp && "web_app" in miniApp ? miniApp.web_app.url : null,
         "https://app.hunch.trade/rewards",
       );
+      assert.doesNotMatch(message.text, /Your invite/);
+      assert.match(message.text, /🏷 \*Code:\*/);
+      assert.match(message.text, /🔗 \*Invite link:\*/);
+      assert.equal(
+        message.text
+          .split("\n")
+          .filter((line) => line.startsWith(">"))
+          .some(
+            (line) => line.includes("Code:") || line.includes("Referrals:"),
+          ),
+        false,
+      );
+    },
+  },
+  {
+    name: "empty referral list hides meaningless sorting controls",
+    run: () => {
+      const message = telegramBotRewardsTestHooks.buildReferralsMessage({
+        callbackPrefix: "hm:v1:",
+        data: {
+          hasMore: false,
+          limit: 5,
+          offset: 0,
+          policy: summary.policy,
+          referrals: [],
+          total: 0,
+        },
+        page: 0,
+        sortBy: "bonus",
+        summary,
+      });
+      assert.deepEqual(
+        message.reply_markup.inline_keyboard
+          .flat()
+          .map((button) => button.text),
+        ["⬅️ Back", "🏠 Home"],
+      );
+      assert.match(message.text, /👥 \*No referrals yet\*/);
+      assert.doesNotMatch(message.text, /Sorted by/);
+    },
+  },
+  {
+    name: "populated referral list explains sorting and only shows alternatives",
+    run: () => {
+      const message = telegramBotRewardsTestHooks.buildReferralsMessage({
+        callbackPrefix: "hm:v1:",
+        data: {
+          hasMore: true,
+          limit: 5,
+          offset: 0,
+          policy: summary.policy,
+          referrals: [
+            {
+              bonus: 4.18,
+              createdAt: new Date("2026-07-24T00:00:00.000Z"),
+              id: "referral-1",
+              points: 700,
+              qualifiedAt: new Date("2026-07-24T00:00:00.000Z"),
+              status: "qualified",
+              tier: summary.tier,
+              walletAddress: "0x1234567890abcdef",
+            },
+          ],
+          total: 6,
+        },
+        page: 0,
+        sortBy: "bonus",
+        summary: {
+          ...summary,
+          clout: { ...summary.clout, qualificationPoints: 500 },
+        },
+      });
+      assert.deepEqual(
+        message.reply_markup.inline_keyboard
+          .flat()
+          .map((button) => button.text),
+        ["⭐ Points", "🕒 Newest", "Next ➡️", "⬅️ Back", "🏠 Home"],
+      );
+      assert.match(message.text, /\*Sorted by:\* Referral earnings/);
+      assert.match(message.text, /\*Page:\* 1 \/ 2/);
+      assert.doesNotMatch(message.text, /^>/m);
+    },
+  },
+  {
+    name: "earnings summary uses ordinary lines instead of a quote card",
+    run: () => {
+      const message = telegramBotRewardsTestHooks.buildEarningsMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        callbackPrefix: "hm:v1:",
+        miniAppEnabled: true,
+        summary,
+      });
+      assert.match(message.text, /🎁 \*Current bonus:\*/);
+      assert.match(message.text, /💰 \*Referral earned:\*/);
+      assert.doesNotMatch(message.text, /^>/m);
+      assert.doesNotMatch(message.text, /Rewards summary/);
     },
   },
   {
@@ -159,6 +260,30 @@ const tests: Array<{ name: string; run: () => void }> = [
           ),
         ["hm:v1:rw:ok:c", "hm:v1:rw:x"],
       );
+      assert.doesNotMatch(message.text, />.*(?:Current|New):/);
+      assert.match(message.text, />⚠️ \*Before you change it\*/);
+    },
+  },
+  {
+    name: "input and help screens reserve quotes for important warnings",
+    run: () => {
+      const changePrompt = buildTelegramBotReferralCodeInputPrompt({
+        action: "change",
+        callbackPrefix: "hm:v1:",
+      });
+      const attachPrompt = buildTelegramBotReferralCodeInputPrompt({
+        action: "attach",
+        callbackPrefix: "hm:v1:",
+      });
+      const help = telegramBotRewardsTestHooks.buildHelpMessage({
+        callbackPrefix: "hm:v1:",
+        summary,
+      });
+
+      assert.doesNotMatch(changePrompt.text, /^>/m);
+      assert.match(attachPrompt.text, />⚠️ \*One\\-time attachment\*/);
+      assert.doesNotMatch(help.text, />.*(?:qualified|Referral bonus rates)/);
+      assert.match(help.text, />⚠️ \*Changing your code\*/);
     },
   },
 ];

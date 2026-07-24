@@ -285,7 +285,7 @@ export async function handleTelegramBotRewardsCallback(
   if (result.status === "attached" || result.status === "already_attached") {
     await clearSignalBotMenuInput(input);
     await render(
-      { kind: "invite" },
+      { kind: "overview" },
       result.status === "attached"
         ? `Invite code ${result.code ?? state.code} attached.`
         : "This account already has an invite attached.",

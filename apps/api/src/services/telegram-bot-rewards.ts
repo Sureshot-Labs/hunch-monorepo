@@ -12,6 +12,10 @@ import {
   setReferralCodeForUser,
   type ReferralAttachmentStatus,
 } from "./rewards.js";
+import {
+  buildSignalBotMiniAppUrl,
+  buildSignalBotReferralStartParam,
+} from "./signal-bot-mini-app-links.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import {
   escapeTelegramMarkdownV2,
@@ -31,7 +35,6 @@ export type TelegramBotRewardsSort = "bonus" | "createdAt" | "points";
 export type TelegramBotRewardsView =
   | { kind: "earnings" }
   | { kind: "help" }
-  | { kind: "invite" }
   | { kind: "overview" }
   | {
       kind: "referrals";
@@ -47,7 +50,6 @@ export type TelegramBotRewardsCallbackRoute =
 
 type RewardsInlineKeyboardButton =
   | { callback_data: string; text: string }
-  | { copy_text: { text: string }; text: string }
   | { icon_custom_emoji_id?: string; text: string; url: string }
   | {
       icon_custom_emoji_id?: string;
@@ -94,6 +96,27 @@ function nativeTitle(title: string): string {
   return `🎁 ${formatTelegramBoldMarkdownV2(title)}`;
 }
 
+function formatIconFieldMarkdownV2(
+  icon: string,
+  label: string,
+  value: string,
+): string {
+  return `${icon} ${formatTelegramFieldMarkdownV2(label, value)}`;
+}
+
+function formatIconFieldWithMarkdownV2(
+  icon: string,
+  label: string,
+  markdownValue: string,
+): string {
+  return `${icon} ${formatTelegramFieldWithMarkdownV2(label, markdownValue)}`;
+}
+
+function formatTelegramUrlMarkdownV2(url: string): string {
+  const target = url.replace(/[)\\]/g, (character) => `\\${character}`);
+  return `[${escapeTelegramMarkdownV2(url)}](${target})`;
+}
+
 function formatUsd(value: number): string {
   const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
   return new Intl.NumberFormat("en-US", {
@@ -115,17 +138,6 @@ function formatBonusBps(value: number): string {
   return `${percent.toLocaleString("en-US", { maximumFractionDigits: 2 })}%`;
 }
 
-function formatDate(value: Date | string | null): string {
-  if (!value) return "—";
-  const date = value instanceof Date ? value : new Date(value);
-  if (!Number.isFinite(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("en-US", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  }).format(date);
-}
-
 function formatWalletAddress(value: string | null): string {
   if (!value) return "Hunch user";
   const trimmed = value.trim();
@@ -133,19 +145,21 @@ function formatWalletAddress(value: string | null): string {
   return `${trimmed.slice(0, 6)}…${trimmed.slice(-4)}`;
 }
 
-function buildReferralLink(appBaseUrl: string, code: string): string {
-  try {
-    return new URL(`/@${encodeURIComponent(code)}`, appBaseUrl).toString();
-  } catch {
-    return `https://app.hunch.trade/@${code}`;
-  }
-}
-
-function buildShareUrl(referralLink: string, code: string): string {
+function buildShareUrl(inviteLink: string, code: string): string {
   const url = new URL("https://t.me/share/url");
-  url.searchParams.set("url", referralLink);
+  url.searchParams.set("url", inviteLink);
   url.searchParams.set("text", `Join me on Hunch. Use my invite code ${code}.`);
   return url.toString();
+}
+
+function buildTelegramReferralLink(input: {
+  code: string;
+  miniAppLinkBase: string | null;
+}): string | null {
+  return buildSignalBotMiniAppUrl({
+    base: input.miniAppLinkBase,
+    startParam: buildSignalBotReferralStartParam(input.code),
+  });
 }
 
 function buildRewardsMiniAppButton(input: {
@@ -156,7 +170,7 @@ function buildRewardsMiniAppButton(input: {
     appBaseUrl: input.appBaseUrl,
     enabled: input.miniAppEnabled,
     path: "/rewards",
-    text: "Open Hunch Mini App",
+    text: "Open Rewards",
   });
 }
 
@@ -186,27 +200,28 @@ function buildOverviewMessage(input: {
   code: string;
   hasReferrer: boolean;
   miniAppEnabled: boolean;
+  miniAppLinkBase: string | null;
   notice?: string | null;
   summary: RewardsSummary;
   totalReferrals: number;
 }): TelegramBotRewardsMessage {
-  const referralLink = buildReferralLink(input.appBaseUrl, input.code);
+  const inviteLink = buildTelegramReferralLink(input);
   const nextBonus = nextReferralBonus(input.summary);
   const pointsRequired =
     input.summary.policy.referralQualification.pointsRequired;
   const qualificationPoints = input.summary.clout.qualificationPoints;
   const miniAppButton = buildRewardsMiniAppButton(input);
   const rows: RewardsInlineKeyboardButton[][] = [
-    [
-      {
-        text: "📨 Share invite",
-        url: buildShareUrl(referralLink, input.code),
-      },
-    ],
-    [
-      { copy_text: { text: referralLink }, text: "📋 Copy link" },
-      { copy_text: { text: input.code }, text: "🏷 Copy code" },
-    ],
+    ...(inviteLink
+      ? [
+          [
+            {
+              text: "📨 Share invite",
+              url: buildShareUrl(inviteLink, input.code),
+            } satisfies RewardsInlineKeyboardButton,
+          ],
+        ]
+      : []),
     [
       callbackButton(input.callbackPrefix, "rw:r:b:0", "👥 My referrals"),
       callbackButton(input.callbackPrefix, "rw:e", "💰 Earnings"),
@@ -215,13 +230,9 @@ function buildOverviewMessage(input: {
       callbackButton(input.callbackPrefix, "rw:c", "✏️ Change code"),
       callbackButton(input.callbackPrefix, "rw:h", "❓ How it works"),
     ],
-    [
-      callbackButton(
-        input.callbackPrefix,
-        input.hasReferrer ? "rw:i" : "rw:a",
-        input.hasReferrer ? "🔗 My invite status" : "🏷 Enter invite code",
-      ),
-    ],
+    ...(!input.hasReferrer
+      ? [[callbackButton(input.callbackPrefix, "rw:a", "🏷 Enter invite code")]]
+      : []),
     ...(miniAppButton ? [[miniAppButton]] : []),
     ...buildRewardsNavigationRows({
       callbackPrefix: input.callbackPrefix,
@@ -229,37 +240,43 @@ function buildOverviewMessage(input: {
     }),
   ];
 
-  const overview = formatTelegramCalloutMarkdownV2({
-    bodyMarkdownV2: [
-      formatTelegramFieldWithMarkdownV2(
-        "Code",
-        formatTelegramCodeMarkdownV2(input.code),
-      ),
-      formatTelegramFieldWithMarkdownV2(
-        "Invite link",
-        formatTelegramCodeMarkdownV2(referralLink),
-      ),
-      "",
-      formatTelegramFieldMarkdownV2(
-        "Referrals",
-        `${input.totalReferrals} total · ${input.summary.referralBonus.qualifiedCount} qualified`,
-      ),
-      formatTelegramFieldMarkdownV2(
-        "Bonus rate",
-        formatBonusBps(input.summary.referralBonus.bonusBps),
-      ),
-      formatTelegramFieldMarkdownV2(
-        "Referral earnings",
-        formatUsd(input.summary.referralBonus.collected),
-      ),
-      formatTelegramFieldMarkdownV2(
-        "Pending",
-        formatUsd(input.summary.referralBonus.pending),
-      ),
-    ],
-    icon: "🔗",
-    title: "Your invite",
-  });
+  const overview = [
+    formatIconFieldWithMarkdownV2(
+      "🏷",
+      "Code",
+      formatTelegramCodeMarkdownV2(input.code),
+    ),
+    ...(inviteLink
+      ? [
+          formatIconFieldWithMarkdownV2(
+            "🔗",
+            "Invite link",
+            formatTelegramUrlMarkdownV2(inviteLink),
+          ),
+        ]
+      : []),
+    "",
+    formatIconFieldMarkdownV2(
+      "👥",
+      "Referrals",
+      `${input.totalReferrals} total · ${input.summary.referralBonus.qualifiedCount} qualified`,
+    ),
+    formatIconFieldMarkdownV2(
+      "🎁",
+      "Bonus rate",
+      formatBonusBps(input.summary.referralBonus.bonusBps),
+    ),
+    formatIconFieldMarkdownV2(
+      "💰",
+      "Referral earnings",
+      formatUsd(input.summary.referralBonus.collected),
+    ),
+    formatIconFieldMarkdownV2(
+      "⏳",
+      "Pending",
+      formatUsd(input.summary.referralBonus.pending),
+    ),
+  ];
 
   const progress = nextBonus
     ? `Need ${Math.max(
@@ -294,7 +311,7 @@ function buildOverviewMessage(input: {
     text: joinTelegramMarkdownV2Lines([
       nativeTitle("Rewards & referrals"),
       "",
-      overview,
+      ...overview,
       "",
       formatTelegramItalicMarkdownV2(progress),
       ...(qualificationWarning ? ["", qualificationWarning] : []),
@@ -309,6 +326,12 @@ function referralSortRoute(sortBy: TelegramBotRewardsSort): string {
   if (sortBy === "points") return "p";
   if (sortBy === "createdAt") return "n";
   return "b";
+}
+
+function referralSortLabel(sortBy: TelegramBotRewardsSort): string {
+  if (sortBy === "points") return "Points";
+  if (sortBy === "createdAt") return "Newest";
+  return "Referral earnings";
 }
 
 function referralStatusPresentation(status: string): {
@@ -342,11 +365,30 @@ function buildReferralsMessage(input: {
       escapeTelegramMarkdownV2(
         `${status.icon} ${status.label} · ${formatPoints(referral.points)} pts`,
       ),
-      formatTelegramFieldMarkdownV2("Your earnings", formatUsd(referral.bonus)),
+      formatIconFieldMarkdownV2(
+        "💰",
+        "Your earnings",
+        formatUsd(referral.bonus),
+      ),
       "",
     ];
   });
   const sortKey = referralSortRoute(input.sortBy);
+  const sortButtons = (
+    [
+      { label: "💰 Earnings", sortBy: "bonus" },
+      { label: "⭐ Points", sortBy: "points" },
+      { label: "🕒 Newest", sortBy: "createdAt" },
+    ] as const
+  )
+    .filter((option) => option.sortBy !== input.sortBy)
+    .map((option) =>
+      callbackButton(
+        input.callbackPrefix,
+        `rw:r:${referralSortRoute(option.sortBy)}:0`,
+        option.label,
+      ),
+    );
   const paginationRow: RewardsInlineKeyboardButton[] = [];
   if (page > 0) {
     paginationRow.push(
@@ -357,13 +399,6 @@ function buildReferralsMessage(input: {
       ),
     );
   }
-  paginationRow.push(
-    callbackButton(
-      input.callbackPrefix,
-      `rw:r:${sortKey}:${page}`,
-      `${page + 1}/${totalPages}`,
-    ),
-  );
   if (page + 1 < totalPages) {
     paginationRow.push(
       callbackButton(
@@ -381,13 +416,10 @@ function buildReferralsMessage(input: {
   const emptyLines =
     input.data.total === 0
       ? [
-          formatTelegramCalloutMarkdownV2({
-            bodyMarkdownV2: escapeTelegramMarkdownV2(
-              "Share your invite link to start building your referral bonus.",
-            ),
-            icon: "👥",
-            title: "No referrals yet",
-          }),
+          `👥 ${formatTelegramBoldMarkdownV2("No referrals yet")}`,
+          escapeTelegramMarkdownV2(
+            "Share your invite link to start building your referral bonus.",
+          ),
         ]
       : pageLines.slice(0, -1);
 
@@ -395,19 +427,8 @@ function buildReferralsMessage(input: {
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        [
-          callbackButton(input.callbackPrefix, "rw:r:b:0", "💰 Earnings"),
-          callbackButton(input.callbackPrefix, "rw:r:p:0", "⭐ Points"),
-          callbackButton(input.callbackPrefix, "rw:r:n:0", "🕒 Newest"),
-        ],
-        ...(input.data.total > 0 ? [paginationRow] : []),
-        [
-          callbackButton(
-            input.callbackPrefix,
-            "rw:r:" + sortKey + ":" + page,
-            "🔄 Refresh",
-          ),
-        ],
+        ...(input.data.total > 0 ? [sortButtons] : []),
+        ...(totalPages > 1 ? [paginationRow] : []),
         ...buildRewardsNavigationRows({
           callbackPrefix: input.callbackPrefix,
           includeBackToRewards: true,
@@ -417,20 +438,30 @@ function buildReferralsMessage(input: {
     text: joinTelegramMarkdownV2Lines([
       nativeTitle("My referrals"),
       "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: [
-          formatTelegramFieldMarkdownV2(
-            "Referrals",
-            `${input.data.total} total`,
-          ),
-          formatTelegramFieldMarkdownV2(
-            "Qualified",
-            String(input.summary.referralBonus.qualifiedCount),
-          ),
-        ],
-        icon: "👥",
-        title: "Referral status",
-      }),
+      formatIconFieldMarkdownV2("👥", "Referrals", `${input.data.total} total`),
+      formatIconFieldMarkdownV2(
+        "✅",
+        "Qualified",
+        String(input.summary.referralBonus.qualifiedCount),
+      ),
+      ...(input.data.total > 0
+        ? [
+            formatIconFieldMarkdownV2(
+              "↕️",
+              "Sorted by",
+              referralSortLabel(input.sortBy),
+            ),
+            ...(totalPages > 1
+              ? [
+                  formatIconFieldMarkdownV2(
+                    "📄",
+                    "Page",
+                    `${page + 1} / ${totalPages}`,
+                  ),
+                ]
+              : []),
+          ]
+        : []),
       ...(userNeedsQualification
         ? [
             "",
@@ -465,7 +496,7 @@ function buildEarningsMessage(input: {
     .filter(([, values]) => values.claimable > 0)
     .sort(([, left], [, right]) => right.claimable - left.claimable)
     .map(([chainId, values]) =>
-      formatTelegramFieldMarkdownV2(chainId, formatUsd(values.claimable)),
+      formatIconFieldMarkdownV2("⛓", chainId, formatUsd(values.claimable)),
     );
   return {
     parse_mode: "MarkdownV2",
@@ -482,45 +513,42 @@ function buildEarningsMessage(input: {
     text: joinTelegramMarkdownV2Lines([
       nativeTitle("Referral earnings"),
       "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: [
-          formatTelegramFieldMarkdownV2(
-            "Current bonus",
-            formatBonusBps(input.summary.referralBonus.bonusBps),
-          ),
-          formatTelegramFieldMarkdownV2(
-            "Qualified referrals",
-            String(input.summary.referralBonus.qualifiedCount),
-          ),
-          "",
-          formatTelegramFieldMarkdownV2(
-            "Cashback earned",
-            formatUsd(baseCashbackCollected),
-          ),
-          formatTelegramFieldMarkdownV2(
-            "Referral earned",
-            formatUsd(referralCollected),
-          ),
-          formatTelegramFieldMarkdownV2(
-            "Referral pending",
-            formatUsd(input.summary.referralBonus.pending),
-          ),
-          formatTelegramFieldMarkdownV2(
-            "All rewards available",
-            formatUsd(input.summary.cashback.claimable),
-          ),
-        ],
-        icon: "💰",
-        title: "Rewards summary",
-      }),
+      formatIconFieldMarkdownV2(
+        "🎁",
+        "Current bonus",
+        formatBonusBps(input.summary.referralBonus.bonusBps),
+      ),
+      formatIconFieldMarkdownV2(
+        "✅",
+        "Qualified referrals",
+        String(input.summary.referralBonus.qualifiedCount),
+      ),
+      "",
+      formatIconFieldMarkdownV2(
+        "💵",
+        "Cashback earned",
+        formatUsd(baseCashbackCollected),
+      ),
+      formatIconFieldMarkdownV2(
+        "💰",
+        "Referral earned",
+        formatUsd(referralCollected),
+      ),
+      formatIconFieldMarkdownV2(
+        "⏳",
+        "Referral pending",
+        formatUsd(input.summary.referralBonus.pending),
+      ),
+      formatIconFieldMarkdownV2(
+        "💳",
+        "All rewards available",
+        formatUsd(input.summary.cashback.claimable),
+      ),
       ...(chainLines.length
         ? [
             "",
-            formatTelegramCalloutMarkdownV2({
-              bodyMarkdownV2: chainLines,
-              icon: "🌐",
-              title: "Available by network",
-            }),
+            `🌐 ${formatTelegramBoldMarkdownV2("Available by network")}`,
+            ...chainLines,
           ]
         : []),
       "",
@@ -540,7 +568,8 @@ function buildHelpMessage(input: {
   const bonusLines = [...input.summary.policy.referralBonus]
     .sort((a, b) => a.minReferrals - b.minReferrals)
     .map((entry) =>
-      formatTelegramFieldMarkdownV2(
+      formatIconFieldMarkdownV2(
+        "🔸",
         `${entry.minReferrals}+ qualified`,
         formatBonusBps(entry.bonusBps),
       ),
@@ -556,126 +585,24 @@ function buildHelpMessage(input: {
     text: joinTelegramMarkdownV2Lines([
       nativeTitle("How referrals work"),
       "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: [
-          escapeTelegramMarkdownV2("1. Share your invite link or code."),
-          escapeTelegramMarkdownV2(
-            `2. Both you and the invited user need ${formatPoints(pointsRequired)} qualification points.`,
-          ),
-          escapeTelegramMarkdownV2(
-            "3. Qualified referrals increase your rate on future eligible trading fees.",
-          ),
-        ],
-        icon: "💡",
-        title: "Three steps",
-      }),
-      "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: bonusLines,
-        icon: "🎁",
-        title: "Referral bonus rates",
-      }),
-      "",
-      formatTelegramItalicMarkdownV2(
-        "Changing your code disables the old link for new users. Existing referrals and earnings remain attached.",
+      escapeTelegramMarkdownV2("1️⃣ Share your invite link or code."),
+      escapeTelegramMarkdownV2(
+        `2️⃣ Both you and the invited user need ${formatPoints(pointsRequired)} qualification points.`,
       ),
-    ]),
-  };
-}
-
-function buildInviteMessage(input: {
-  callbackPrefix: string;
-  notice?: string | null;
-  referral: Awaited<ReturnType<typeof getReferralAttachmentStatus>>;
-}): TelegramBotRewardsMessage {
-  if (!input.referral.hasReferrer) {
-    return {
-      parse_mode: "MarkdownV2",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            callbackButton(
-              input.callbackPrefix,
-              "rw:a",
-              "🏷 Enter invite code",
-            ),
-          ],
-          ...buildRewardsNavigationRows({
-            callbackPrefix: input.callbackPrefix,
-            includeBackToRewards: true,
-          }),
-        ],
-      },
-      text: joinTelegramMarkdownV2Lines([
-        nativeTitle("My invite"),
-        "",
-        formatTelegramCalloutMarkdownV2({
-          bodyMarkdownV2: escapeTelegramMarkdownV2(
-            "No invite code is attached to your account.",
-          ),
-          icon: "🔗",
-          title: "No referrer",
-        }),
-        ...(input.notice
-          ? ["", `ℹ️ ${formatTelegramItalicMarkdownV2(input.notice)}`]
-          : []),
-      ]),
-    };
-  }
-  const status = referralStatusPresentation(input.referral.status ?? "pending");
-  const referrerLabel =
-    input.referral.referrer?.displayName?.trim() ||
-    input.referral.referrer?.username?.trim() ||
-    "Hunch user";
-  return {
-    parse_mode: "MarkdownV2",
-    reply_markup: {
-      inline_keyboard: buildRewardsNavigationRows({
-        callbackPrefix: input.callbackPrefix,
-        includeBackToRewards: true,
-      }),
-    },
-    text: joinTelegramMarkdownV2Lines([
-      nativeTitle("My invite"),
+      escapeTelegramMarkdownV2(
+        "3️⃣ Qualified referrals increase your rate on future eligible trading fees.",
+      ),
+      "",
+      `🎁 ${formatTelegramBoldMarkdownV2("Referral bonus rates")}`,
+      ...bonusLines,
       "",
       formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: [
-          formatTelegramFieldWithMarkdownV2(
-            "Code",
-            formatTelegramCodeMarkdownV2(input.referral.code ?? "—"),
-          ),
-          formatTelegramFieldMarkdownV2("Invited by", referrerLabel),
-          formatTelegramFieldMarkdownV2(
-            "Status",
-            `${status.icon} ${status.label}`,
-          ),
-          formatTelegramFieldMarkdownV2(
-            "Linked",
-            formatDate(input.referral.linkedAt),
-          ),
-          ...(input.referral.qualifiedAt
-            ? [
-                formatTelegramFieldMarkdownV2(
-                  "Qualified",
-                  formatDate(input.referral.qualifiedAt),
-                ),
-              ]
-            : []),
-        ],
-        icon: "🔗",
-        title: "Invite status",
+        bodyMarkdownV2: escapeTelegramMarkdownV2(
+          "Changing your code disables the old link for new users. Existing referrals and earnings remain attached.",
+        ),
+        icon: "⚠️",
+        title: "Changing your code",
       }),
-      ...(input.referral.status === "blocked"
-        ? [
-            "",
-            formatTelegramItalicMarkdownV2(
-              "This referral is not eligible. Open Help from the main menu if this looks unexpected.",
-            ),
-          ]
-        : []),
-      ...(input.notice
-        ? ["", `ℹ️ ${formatTelegramItalicMarkdownV2(input.notice)}`]
-        : []),
     ]),
   };
 }
@@ -734,6 +661,7 @@ export async function loadTelegramBotRewardsMessage(input: {
   appBaseUrl: string;
   callbackPrefix: string;
   miniAppEnabled: boolean;
+  miniAppLinkBase: string | null;
   notice?: string | null;
   pool: Pool;
   telegramUserId: number;
@@ -804,16 +732,9 @@ export async function loadTelegramBotRewardsMessage(input: {
       summary: await getRewardsSummary(input.pool, { userId }),
     });
   }
-  if (input.view.kind === "help") {
-    return buildHelpMessage({
-      callbackPrefix: input.callbackPrefix,
-      summary: await getRewardsSummary(input.pool, { userId }),
-    });
-  }
-  return buildInviteMessage({
+  return buildHelpMessage({
     callbackPrefix: input.callbackPrefix,
-    notice: input.notice,
-    referral: await getReferralAttachmentStatus(input.pool, { userId }),
+    summary: await getRewardsSummary(input.pool, { userId }),
   });
 }
 
@@ -915,7 +836,7 @@ export function parseTelegramBotRewardsCallbackRoute(
     return { kind: "rewards_view", view: { kind: "help" } };
   }
   if (route === "rw:i") {
-    return { kind: "rewards_view", view: { kind: "invite" } };
+    return { kind: "rewards_view", view: { kind: "overview" } };
   }
   if (route === "rw:c" || route === "rw:a") {
     return {
@@ -974,17 +895,32 @@ export function buildTelegramBotReferralCodeInputPrompt(input: {
           : "Send the invite code in your next message.",
       ),
       "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: escapeTelegramMarkdownV2(
-          isChange
-            ? "Use 3–10 letters or numbers. The code is converted to uppercase."
-            : "An account can only have one referrer. You will confirm the code before it is attached.",
-        ),
-        icon: isChange ? "✏️" : "⚠️",
-        title: isChange ? "Code format" : "One-time attachment",
-      }),
+      ...(isChange
+        ? [
+            formatIconFieldMarkdownV2(
+              "✏️",
+              "Code format",
+              "3–10 letters or numbers; converted to uppercase",
+            ),
+          ]
+        : [
+            formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: escapeTelegramMarkdownV2(
+                "An account can only have one referrer. You will confirm the code before it is attached.",
+              ),
+              icon: "⚠️",
+              title: "One-time attachment",
+            }),
+          ]),
       ...(input.errorMessage
-        ? ["", `⚠️ ${formatTelegramBoldMarkdownV2(input.errorMessage)}`]
+        ? [
+            "",
+            formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: escapeTelegramMarkdownV2(input.errorMessage),
+              icon: "⚠️",
+              title: "Code not accepted",
+            }),
+          ]
         : []),
     ]),
   };
@@ -1014,30 +950,30 @@ export function buildTelegramBotReferralCodeConfirmation(input: {
     text: joinTelegramMarkdownV2Lines([
       nativeTitle(isChange ? "Confirm referral code" : "Confirm invite"),
       "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: [
-          ...(isChange && input.currentCode
-            ? [
-                formatTelegramFieldWithMarkdownV2(
-                  "Current",
-                  formatTelegramCodeMarkdownV2(input.currentCode),
-                ),
-              ]
-            : []),
-          formatTelegramFieldWithMarkdownV2(
-            isChange ? "New" : "Invite code",
-            formatTelegramCodeMarkdownV2(input.code),
-          ),
-        ],
-        icon: isChange ? "✏️" : "🔗",
-        title: isChange ? "Code change" : "Invite attachment",
-      }),
-      "",
-      formatTelegramItalicMarkdownV2(
-        isChange
-          ? "The old link will stop accepting new users. Existing referrals and earnings remain attached."
-          : "This account cannot switch or remove its referrer later.",
+      ...(isChange && input.currentCode
+        ? [
+            formatIconFieldWithMarkdownV2(
+              "🏷",
+              "Current",
+              formatTelegramCodeMarkdownV2(input.currentCode),
+            ),
+          ]
+        : []),
+      formatIconFieldWithMarkdownV2(
+        isChange ? "✏️" : "🏷",
+        isChange ? "New" : "Invite code",
+        formatTelegramCodeMarkdownV2(input.code),
       ),
+      "",
+      formatTelegramCalloutMarkdownV2({
+        bodyMarkdownV2: escapeTelegramMarkdownV2(
+          isChange
+            ? "The old link will stop accepting new users. Existing referrals and earnings remain attached."
+            : "This account cannot switch or remove its referrer later.",
+        ),
+        icon: "⚠️",
+        title: isChange ? "Before you change it" : "Before you attach it",
+      }),
     ]),
   };
 }
@@ -1045,7 +981,6 @@ export function buildTelegramBotReferralCodeConfirmation(input: {
 export const telegramBotRewardsTestHooks = {
   buildEarningsMessage,
   buildHelpMessage,
-  buildInviteMessage,
   buildOverviewMessage,
   buildReferralsMessage,
 };
