@@ -17,10 +17,11 @@ import {
   relayCurrencyForAsset,
   type RelayRouteSpec,
 } from "./mappings.js";
-import { normalizeRelayFees } from "./fees.js";
+import { normalizeRelayFees, normalizeRelayFeeUsd } from "./fees.js";
 import { rejectDisabledRelayCapabilities } from "./schemas.js";
 import { validateRelayRehearsalQuote } from "./rehearsal.js";
 import { validateRelaySolanaRehearsalQuote } from "./solana-rehearsal.js";
+import { validateRelaySolanaNativeQuote } from "./solana-native-validator.js";
 
 export const RELAY_PROVIDER_DESCRIPTOR: ProviderDescriptor = {
   providerId: "relay",
@@ -41,6 +42,9 @@ export type NormalizedRelayWalletQuote = Readonly<{
   requestId: string;
   requestFingerprint: string;
   routeShape: string;
+  sourceAmount: Money;
+  sourceEstimatedUsd: string | null;
+  feeUsd: readonly (string | null)[];
 }>;
 
 export type RelayWalletQuoteInput = Readonly<{
@@ -54,8 +58,13 @@ export type RelayWalletQuoteInput = Readonly<{
   senderWalletId: string;
   quoteCorrelationId: string;
   deadline: Date;
+  maximumSlippageBps?: number;
   now?: Date;
 }>;
+
+export class RelayQuoteEconomicsError extends Error {
+  readonly code = "relay_quote_economics_rejected";
+}
 
 function requiredLocationDetail(
   details: Readonly<Record<string, unknown>>,
@@ -160,6 +169,22 @@ function quoteExpiry(deadline: Date, now: Date): Date {
   return deadline < adapterLimit ? deadline : adapterLimit;
 }
 
+function bufferedExpectedOutput(
+  raw: string,
+  maximumSlippageBps: number,
+): string {
+  if (
+    !Number.isInteger(maximumSlippageBps) ||
+    maximumSlippageBps < 0 ||
+    maximumSlippageBps > 500
+  ) {
+    throw new Error("Relay slippage limit is outside hard policy");
+  }
+  const denominator = 10_000n - BigInt(maximumSlippageBps);
+  const value = BigInt(raw);
+  return ((value * 10_000n + denominator - 1n) / denominator).toString();
+}
+
 export class RelayWalletQuoteAdapter {
   constructor(
     readonly client: RelayClient,
@@ -206,6 +231,13 @@ export class RelayWalletQuoteAdapter {
       input.recipientAddress,
     );
 
+    const expectedOutputTargetRaw =
+      input.route.quoteMode === "expected_output"
+        ? bufferedExpectedOutput(
+            input.minimumOutput.raw,
+            input.maximumSlippageBps ?? 100,
+          )
+        : input.minimumOutput.raw;
     const request = {
       user: userAddress,
       recipient: recipientAddress,
@@ -215,8 +247,17 @@ export class RelayWalletQuoteAdapter {
       ),
       originCurrency: relayCurrencyForAsset(input.route.source),
       destinationCurrency: relayCurrencyForAsset(input.route.destination),
-      amount: input.sourceAmount.raw,
-      tradeType: "EXACT_INPUT" as const,
+      amount:
+        input.route.quoteMode === "expected_output"
+          ? expectedOutputTargetRaw
+          : input.sourceAmount.raw,
+      tradeType:
+        input.route.quoteMode === "expected_output"
+          ? ("EXPECTED_OUTPUT" as const)
+          : ("EXACT_INPUT" as const),
+      ...(input.route.quoteMode === "expected_output"
+        ? { slippageTolerance: (input.maximumSlippageBps ?? 100).toString() }
+        : {}),
       useDepositAddress: false,
     };
     const quote = await this.client.quote(request);
@@ -229,6 +270,9 @@ export class RelayWalletQuoteAdapter {
     let requestId: string;
     let expectedOutputRaw: bigint;
     let minimumOutputRaw: bigint;
+    let sourceAmountRaw = BigInt(input.sourceAmount.raw);
+    let sourceEstimatedUsd: string | null =
+      quote.details.currencyIn.amountUsd ?? null;
     let routeShape: string;
     let actions: readonly NormalizedAction[];
     if (input.route.sourceVm === "evm") {
@@ -263,6 +307,61 @@ export class RelayWalletQuoteAdapter {
           gasLimitRaw: action.gasLimit.toString(),
         };
       });
+    } else if (input.route.quoteMode === "expected_output") {
+      let validated;
+      try {
+        validated = validateRelaySolanaNativeQuote({
+          maximumSourceAmountRaw: BigInt(input.sourceAmount.raw),
+          expectedOutputTargetRaw: BigInt(expectedOutputTargetRaw),
+          minimumOutputFloorRaw: BigInt(input.minimumOutput.raw),
+          maximumSlippageBps: input.maximumSlippageBps ?? 100,
+          quote,
+          recipient: recipientAddress,
+          user: userAddress,
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message.includes("authorized source cap") ||
+            error.message.includes("authorized floor"))
+        ) {
+          throw new RelayQuoteEconomicsError(error.message);
+        }
+        throw error;
+      }
+      requestId = validated.requestId;
+      sourceAmountRaw = validated.sourceAmountRaw;
+      sourceEstimatedUsd = validated.sourceEstimatedUsd;
+      expectedOutputRaw = validated.expectedOutputRaw;
+      minimumOutputRaw = validated.minimumOutputRaw;
+      routeShape = "relay-solana-native-swap-depository-v1";
+      const requestFingerprint = canonicalJsonHash({
+        provider: "relay",
+        requestId,
+      });
+      const firstInstruction = validated.instructions[0];
+      if (!firstInstruction) {
+        throw new Error("Relay native SOL instructions disappeared");
+      }
+      actions = [
+        {
+          kind: "svm_transaction",
+          actionId: `relay:${requestFingerprint}:deposit`,
+          networkId: input.route.source.networkId,
+          signerWalletId: input.senderWalletId,
+          instructions: validated.instructions.map((instruction) => ({
+            programId: instruction.programId,
+            accounts: instruction.keys.map((key) => ({
+              address: key.pubkey,
+              signer: key.isSigner,
+              writable: key.isWritable,
+            })),
+            data: Buffer.from(instruction.data).toString("hex"),
+            dataEncoding: "hex",
+          })),
+          addressLookupTables: firstInstruction.addressLookupTableAddresses,
+        },
+      ];
     } else {
       const validated = validateRelaySolanaRehearsalQuote({
         amount: BigInt(input.sourceAmount.raw),
@@ -314,12 +413,16 @@ export class RelayWalletQuoteAdapter {
     });
     const expiresAt = quoteExpiry(input.deadline, completedAt);
     const estimate = Math.max(0, Math.ceil(quote.details.timeEstimate ?? 0));
+    const fees = normalizeRelayFees(quote);
     return {
       candidate: {
         providerId: "relay",
         adapterVersion: 1,
         capability: routeCapability(input.route),
-        amountMode: "exact_input",
+        amountMode:
+          input.route.quoteMode === "expected_output"
+            ? "exact_output"
+            : "exact_input",
         source: input.source,
         destination: input.destination,
         expectedOutput: {
@@ -330,7 +433,7 @@ export class RelayWalletQuoteAdapter {
           asset: input.route.destination,
           raw: minimumOutputRaw.toString(),
         },
-        fees: normalizeRelayFees(quote),
+        fees,
         eta: { minSeconds: estimate, maxSeconds: Math.max(estimate, 1) * 3 },
         expiresAt: expiresAt.toISOString(),
         actionKinds: actions.map((action) => action.kind),
@@ -341,6 +444,12 @@ export class RelayWalletQuoteAdapter {
       requestId,
       requestFingerprint,
       routeShape,
+      sourceAmount: {
+        asset: input.route.source,
+        raw: sourceAmountRaw.toString(),
+      },
+      sourceEstimatedUsd,
+      feeUsd: normalizeRelayFeeUsd(quote, fees),
     };
   }
 }

@@ -442,6 +442,10 @@ export type FundingQuoteSummary = Readonly<{
   venueBindingOptionId: string | null;
   planKind: FundingExecutionPlan["kind"];
   experienceMode: "instant" | "inline_funding" | "prepare_first";
+  sourceAmounts: readonly Readonly<{
+    safeLabel: string;
+    amount: Money;
+  }>[];
   expectedDestination: Money;
   minimumDestination: Money;
   fees: SourceOption["fees"];
@@ -506,7 +510,8 @@ export type ExternalIngressInstruction = Readonly<{
   sourceAsset: AssetRef | null;
   destinationOptionId: string;
   destinationAddress: string;
-  exactAmount: Money | null;
+  requestedAmount: Money | null;
+  amountSemantics: "minimum" | "exact";
   expiresAt: string | null;
   safeInstructions: readonly string[];
 }>;

@@ -6,7 +6,10 @@ import type { AccountValueReadModel } from "../../../account-value/runtime-servi
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
-import { deriveProductionRelayEligibleSourceFacts } from "../../planner/production-source-planner.js";
+import {
+  SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS,
+  deriveProductionRelayEligibleSourceFacts,
+} from "../../planner/production-source-planner.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const ACCOUNT_ID = "account_source_planner_12345678";
@@ -19,6 +22,11 @@ const POLYGON_PUSD = {
   networkId: "evm:137",
   assetId: RELAY_PINNED_ASSETS.polygonPusd,
   decimals: 6,
+} as const;
+const SOLANA_NATIVE = {
+  networkId: "solana:mainnet",
+  assetId: RELAY_PINNED_ASSETS.solanaNative,
+  decimals: 9,
 } as const;
 
 function policy(
@@ -288,6 +296,114 @@ const excludedByPreference = deriveProductionRelayEligibleSourceFacts({
   requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
 });
 assert.equal(excludedByPreference.length, 0);
+
+{
+  const nativePolicy = policy({
+    assets: [
+      {
+        asset: SOLANA_NATIVE,
+        enabled: true,
+        observationEnabled: true,
+        valuationEnabled: false,
+        pricePolicyId: null,
+      },
+    ],
+    locations: [
+      {
+        locationPatternId: "wallet_solana_native",
+        locationKind: "wallet",
+        ownership: "owned",
+        observable: true,
+        capabilities: ["observe", "value", "execution_source"],
+        asset: SOLANA_NATIVE,
+        enabled: true,
+      },
+    ],
+    routes: [
+      {
+        ...policy().routes[0],
+        routeId: "solana-sol-to-polygon-pusd",
+        sourceLocationPatternId: "wallet_solana_native",
+        sourceAsset: SOLANA_NATIVE,
+        actionValidatorId: "relay_svm_action_v1",
+        networkExecutorId: "wallet_profile_svm_v1",
+        fixtureIds: ["relay_wallet_solana_native_to_pusd_quote_live"],
+      },
+    ],
+  });
+  const base = account();
+  const location = {
+    kind: "wallet",
+    locationId: "location_solana_native_12345678",
+    accountId: ACCOUNT_ID,
+    asset: SOLANA_NATIVE,
+    details: {
+      walletId: "wallet_solana_native_12345678",
+      address: "78Hpb2CbmvW2Gp2aJGZec8nphXdqtRdfjPwwLfxKgo6t",
+    },
+  } as const;
+  const nativeComponent = {
+    ...base.projection.components[0],
+    componentId: "component_solana_native_12345678",
+    location,
+    amount: { asset: SOLANA_NATIVE, raw: "20000000" },
+    category: "cash",
+    estimatedUsd: null,
+    valuationEligibility: "unpriced",
+    executionEligibility: "unknown",
+    reasonCodes: ["trusted_price_unavailable"],
+  } as const;
+  const nativeAccount = {
+    ...base,
+    projection: { ...base.projection, components: [nativeComponent] },
+    cashAvailability: {
+      ...base.cashAvailability,
+      freshness: "stale",
+      components: [
+        {
+          ...base.cashAvailability.components[0],
+          componentId: nativeComponent.componentId,
+          amount: nativeComponent.amount,
+          availableRaw: "20000000",
+          availableEstimatedUsd: null,
+          freshness: "stale",
+          reasonCodes: ["trusted_price_unavailable"],
+        },
+      ],
+    },
+    runtimePolicy: nativePolicy,
+    ownership: {
+      ...base.ownership,
+      wallets: [
+        {
+          walletId: location.details.walletId,
+          networkId: "solana:mainnet",
+          address: location.details.address,
+          source: "embedded",
+          signingModes: ["web_client"],
+          serverWalletRef: null,
+          sponsorshipPolicyIds: [],
+        },
+      ],
+    },
+    assetPreferences: {},
+  } as unknown as AccountValueReadModel;
+  const nativeFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: nativeAccount,
+    policy: nativePolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(nativeFacts.length, 1);
+  assert.equal(
+    nativeFacts[0]?.quoteInputAmount.raw,
+    (20_000_000n - SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS).toString(),
+  );
+  assert.equal(nativeFacts[0]?.quoteMinimumOutput?.raw, "1000000");
+  assert.equal(nativeFacts[0]?.maximumSourceRaw, "17000000");
+  assert.equal(nativeFacts[0]?.safeLabel, "SOL on Solana");
+  assert.equal(nativeFacts[0]?.nativeGasReady, true);
+}
 
 const originalRoute = policy().routes[0];
 assert.ok(originalRoute);

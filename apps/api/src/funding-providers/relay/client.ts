@@ -37,10 +37,11 @@ export type RelayQuoteRequest = Readonly<{
   originCurrency: string;
   destinationCurrency: string;
   amount: string;
-  tradeType: "EXACT_INPUT";
+  tradeType: "EXACT_INPUT" | "EXPECTED_OUTPUT";
   useDepositAddress?: boolean;
   strict?: boolean;
   refundTo?: string;
+  slippageTolerance?: string;
 }>;
 
 export type RelayClientConfig = Readonly<{

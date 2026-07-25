@@ -139,7 +139,8 @@ export const externalIngressInstructionSchema = z
     sourceAsset: assetRefSchema.nullable(),
     destinationOptionId: opaqueIdSchema,
     destinationAddress: z.string().trim().min(16).max(256),
-    exactAmount: moneySchema.nullable(),
+    requestedAmount: moneySchema.nullable(),
+    amountSemantics: z.enum(["minimum", "exact"]),
     expiresAt: z.string().datetime().nullable(),
     safeInstructions: z.array(z.string().trim().min(1).max(240)).max(16),
   })
@@ -462,6 +463,16 @@ export const fundingQuoteSummarySchema = z
       "composite_route",
     ]),
     experienceMode: z.enum(["instant", "inline_funding", "prepare_first"]),
+    sourceAmounts: z
+      .array(
+        z
+          .object({
+            safeLabel: z.string().trim().min(1).max(160),
+            amount: moneySchema,
+          })
+          .strict(),
+      )
+      .max(16),
     expectedDestination: moneySchema,
     minimumDestination: moneySchema,
     fees: z.array(feeSchema).max(32),

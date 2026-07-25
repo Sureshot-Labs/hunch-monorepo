@@ -867,6 +867,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
         source: exactSource,
         quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
         maximumSourceRaw: "1000000",
+        maximumSlippageBps: 100,
         estimatedUsd: "1",
         transferable: false,
         riskEligible: true,
@@ -881,6 +882,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
         source: exactSource,
         quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
         maximumSourceRaw: "2000000",
+        maximumSlippageBps: 100,
         estimatedUsd: "1",
         transferable: true,
         riskEligible: true,
@@ -899,7 +901,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
       relayCalls += 1;
       assert.equal(route.providerId, "relay");
       assert.equal(route.routeId, "relay_polygon_pusd");
-      assert.equal(timeoutMs, 1_500);
+      assert.equal(timeoutMs, 5_000);
       assert.equal(signal.aborted, false);
       const executionPlan: FundingExecutionPlan = {
         kind: "wallet_route",
@@ -916,6 +918,8 @@ await test("Relay-first source planner asks only one exact Relay route", async (
         ],
       };
       return {
+        sourceAmount,
+        sourceEstimatedUsd: "1",
         candidate: {
           providerId: "relay",
           adapterVersion: 1,
@@ -976,6 +980,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
           source: exactSource,
           quoteInputAmount: { asset: POLYGON_PUSD, raw: "1000000" },
           maximumSourceRaw: "2000000",
+          maximumSlippageBps: 100,
           estimatedUsd: "1",
           transferable: true,
           riskEligible: true,
@@ -1019,6 +1024,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
           quoteInputAmount: { asset: POLYGON_PUSD, raw: "500000" },
           quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "500000" },
           maximumSourceRaw: "500000",
+          maximumSlippageBps: 100,
           estimatedUsd: "0.5",
           transferable: true,
           riskEligible: true,
@@ -1034,6 +1040,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
           quoteInputAmount: { asset: POLYGON_PUSD, raw: "500000" },
           quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "500000" },
           maximumSourceRaw: "500000",
+          maximumSlippageBps: 100,
           estimatedUsd: "0.5",
           transferable: true,
           riskEligible: true,

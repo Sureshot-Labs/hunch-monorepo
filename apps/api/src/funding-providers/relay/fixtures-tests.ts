@@ -34,7 +34,7 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
 );
 
 {
-  assert.equal(manifest.schemaVersion, 4);
+  assert.equal(manifest.schemaVersion, 5);
   const capturePhases = object(
     manifest.capturePhases,
     "manifest.capturePhases",
@@ -51,6 +51,15 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
   assert.equal(authorizedQuoteOnly.externalStateChanges, true);
   assert.equal(authorizedQuoteOnly.quoteRequestsCreated, 6);
   assert.equal(authorizedQuoteOnly.depositAddressModeRequests, 0);
+  const authorizedNativeSolQuoteOnly = object(
+    capturePhases.authorizedNativeSolQuoteOnly,
+    "manifest.capturePhases.authorizedNativeSolQuoteOnly",
+  );
+  assert.equal(authorizedNativeSolQuoteOnly.externalStateChanges, true);
+  assert.equal(authorizedNativeSolQuoteOnly.quoteRequestsCreated, 4);
+  assert.equal(authorizedNativeSolQuoteOnly.walletSignaturesCreated, 0);
+  assert.equal(authorizedNativeSolQuoteOnly.transactionsBroadcast, 0);
+  assert.equal(authorizedNativeSolQuoteOnly.depositAddressModeRequests, 0);
   const authorizedLiveRehearsal = object(
     capturePhases.authorizedLiveRehearsal,
     "manifest.capturePhases.authorizedLiveRehearsal",
@@ -265,6 +274,52 @@ const manifestFiles = array(manifest.files, "manifest.files").map((value) =>
   );
   assert.equal(allowances.polygonPusdToRelayV3Raw, "0");
   assert.equal(allowances.baseUsdcToRelayV2Raw, "0");
+}
+
+{
+  const nativeSol = await fixture(
+    "quote-v2-solana-sol-polygon-pusd.live-sanitized.json",
+  );
+  const metadata = object(nativeSol._fixture, "nativeSol._fixture");
+  assert.equal(metadata.quoteRequestsCreated, 4);
+  assert.equal(metadata.walletSignaturesCreated, 0);
+  assert.equal(metadata.transactionsBroadcast, 0);
+  const amountModel = object(nativeSol.amountModel, "nativeSol.amountModel");
+  assert.equal(amountModel.tradeType, "EXPECTED_OUTPUT");
+  assert.equal(amountModel.requestedDestinationRaw, "1000000");
+  assert.equal(amountModel.quotedDestinationRaw, "1010102");
+  assert.equal(amountModel.minimumDestinationRaw, "1000000");
+  assert.ok(
+    BigInt(string(amountModel.latestRequiredSourceRaw, "native SOL input")) >
+      0n,
+  );
+  const exactOutputProbe = object(
+    amountModel.exactOutputProbe,
+    "nativeSol.exactOutputProbe",
+  );
+  assert.equal(exactOutputProbe.httpStatus, 400);
+  assert.equal(exactOutputProbe.errorCode, "NO_SWAP_ROUTES_FOUND");
+  const action = object(nativeSol.actionShape, "nativeSol.actionShape");
+  assert.equal(action.transactionCount, 1);
+  assert.equal(action.instructionCount, 8);
+  assert.equal(action.addressLookupTableCount, 2);
+  assert.deepEqual(array(action.programSequence, "nativeSol.programSequence"), [
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "11111111111111111111111111111111",
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "DPArtTLbEqa6EuXHfL5UFLBZhFjiEXWRudhvXDrjwXUr",
+    "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+  ]);
+  const security = object(nativeSol.security, "nativeSol.security");
+  assert.equal(security.walletSecretPersistedInFixture, false);
+  assert.equal(security.relayApiCredentialPersisted, false);
+  assert.equal(security.rawProviderRequestReferencePersisted, false);
+  assert.equal(security.rawInstructionDataPersisted, false);
+  assert.equal(security.signed, false);
+  assert.equal(security.broadcast, false);
 }
 
 {

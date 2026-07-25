@@ -58,6 +58,13 @@ Every quote used a deterministic public fixture address without a known private
 key. `useDepositAddress` was omitted, and no signing or execution method was
 called.
 
+On 2026-07-25, four additional quote-only probes covered native SOL to Polygon
+pUSD. `EXPECTED_OUTPUT` returned the required SOL input and one unsigned
+eight-instruction SVM action. `EXACT_OUTPUT` returned
+`NO_SWAP_ROUTES_FOUND`, so the production adapter requests a bounded
+`EXPECTED_OUTPUT` amount whose quoted minimum equals the user's pUSD target.
+No instruction was signed or broadcast.
+
 Subsequent explicitly authorized live rehearsal:
 
 - 36 guarded `POST /quote/v2` calls across preflight, bounded rent/route
@@ -124,6 +131,13 @@ Deliberately not called:
     derived WebSocket endpoint returned `signatureSubscribe` method-not-found.
     The runner now confirms by HTTP status polling and never retries an
     already-broadcast transaction blindly.
+13. Native SOL to Polygon pUSD is quoteable with `EXPECTED_OUTPUT`. The
+    captured action wraps an exact SOL amount, swaps through Jupiter, deposits
+    the resulting Solana USDC into Relay, closes wrapped SOL, and binds the
+    memo/status reference. Hunch validates the exact program sequence, derived
+    token accounts, controlled signer, Jupiter amount/slippage tail, Relay
+    protocol order, owned refund paths, and destination pUSD floor before
+    exposing the action.
 
 ## Validation scope
 

@@ -311,6 +311,20 @@ export class FundingQuoteService {
         plan.operation.experienceMode === "inline"
           ? "inline_funding"
           : plan.operation.experienceMode,
+      sourceAmounts:
+        selected.option.kind === "composite"
+          ? (selected.option.sourceLegs ?? []).map((leg) => ({
+              safeLabel: leg.safeLabel,
+              amount: leg.sourceAmount,
+            }))
+          : plannedSource
+            ? [
+                {
+                  safeLabel: selected.option.safeLabel,
+                  amount: plannedSource,
+                },
+              ]
+            : [],
       expectedDestination: expected,
       minimumDestination: minimum,
       fees: selected.option.fees,

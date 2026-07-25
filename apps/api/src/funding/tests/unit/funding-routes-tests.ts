@@ -159,6 +159,12 @@ function quote(): FundingQuoteSummary {
     venueBindingOptionId: "binding_poly_12345678",
     planKind: "wallet_route",
     experienceMode: "prepare_first",
+    sourceAmounts: [
+      {
+        safeLabel: "Polygon wallet",
+        amount: { asset: ASSET, raw: "1000000" },
+      },
+    ],
     expectedDestination: { asset: ASSET, raw: "1000000" },
     minimumDestination: { asset: ASSET, raw: "990000" },
     fees: [],
@@ -629,7 +635,8 @@ await test("operation reads expose safe resumable state, not internal snapshots"
           sourceAsset: ASSET,
           destinationOptionId: "destination_poly_12345678",
           destinationAddress: "0x0000000000000000000000000000000000000004",
-          exactAmount: { asset: ASSET, raw: "1000000" },
+          requestedAmount: { asset: ASSET, raw: "1000000" },
+          amountSemantics: "minimum",
           expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
           safeInstructions: [
             "Send only the exact asset to the exact destination.",
@@ -676,7 +683,8 @@ await test("operation reads expose safe resumable state, not internal snapshots"
       sourceAsset: ASSET,
       destinationOptionId: "destination_poly_12345678",
       destinationAddress: "0x0000000000000000000000000000000000000004",
-      exactAmount: { asset: ASSET, raw: "1000000" },
+      requestedAmount: { asset: ASSET, raw: "1000000" },
+      amountSemantics: "minimum",
       expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
       safeInstructions: ["Send only the exact asset to the exact destination."],
     });

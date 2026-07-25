@@ -139,7 +139,8 @@ assert.equal(manualOnly.length, 1);
 assert.equal(manualOnly[0]?.option.kind, "manual_receive");
 assert.equal(manualOnly[0]?.option.amountMode, "exact_output");
 assert.equal(manualOnly[0]?.option.ingress?.destinationAddress, ADDRESS);
-assert.equal(manualOnly[0]?.option.ingress?.exactAmount?.raw, "3000000");
+assert.equal(manualOnly[0]?.option.ingress?.requestedAmount?.raw, "3000000");
+assert.equal(manualOnly[0]?.option.ingress?.amountSemantics, "minimum");
 assert.equal(
   manualOnly[0]?.commitPlan.operation.initialState.status,
   "awaiting_external_funds",
@@ -170,5 +171,5 @@ assert.equal(withPrivy[1]?.option.ingress?.ingressKind, "privy");
 sourceOptionSchema.parse(withPrivy[1]?.option);
 
 console.log(
-  "[funding-direct-ingress-source-tests] exact manual Receive and policy-gated Privy handoff passed",
+  "[funding-direct-ingress-source-tests] minimum-target manual Receive and policy-gated Privy handoff passed",
 );

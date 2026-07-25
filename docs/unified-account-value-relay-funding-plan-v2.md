@@ -448,6 +448,15 @@ The backend, not the UI, classifies a selected route:
 Prepare Funds reserves no market price and never auto-buys. When funds are ready,
 Hunch notifies the user and requires a fresh market quote and Buy confirmation.
 
+`Fund & Buy` is not the generic Add Funds wizard. The trade already freezes the
+market, outcome, destination binding, and exact shortfall. The planner discovers
+eligible existing sources, may compose several internal legs, and returns one
+review. After confirmation the UI shows one operation progress
+(`Preparing funds` → `Buying`) and does not ask the user to choose a destination
+or source again. If no eligible source covers the shortfall, the operation stops
+before commit and offers Add Funds; it never opens that dialog behind a claimed
+Buy.
+
 The 45-second value is an initial configurable upper bound for preserving a
 single Buy flow, not a claim about Relay or a permanent product constant. A
 route becomes inline only from route-key, amount-band, action-count, destination-
@@ -470,8 +479,9 @@ No destination chain, token address, or provider choice is required.
 
 1. Opens Add Funds from web or Telegram handoff.
 2. Chooses exchange/manual transfer and source network/asset only when necessary.
-3. Hunch issues an exact owned Receive instruction or an activation-gated Relay
-   Deposit Address instruction.
+3. Hunch issues an owned Receive target or an activation-gated strict Relay
+   Deposit Address instruction. The owned Receive target may be reached by
+   several transfers and may be exceeded; the Relay address remains exact.
 4. Backend observes and correlates the transfer; the user returns to Buy.
 
 The plan never uses an exchange hot-wallet sender as the refund address.
@@ -1251,6 +1261,30 @@ A Relay Deposit Address is not a zero-provider handoff: Relay has already
 created a routable request and must reconcile the deposit and child requests.
 A direct Privy/manual Receive to an owned final location has zero provider segments.
 
+```typescript
+type ExternalIngressInstruction = {
+  ingressKind: "controlled_wallet" | "exchange" | "privy" | "manual";
+  sourceNetworkId: NetworkId | null;
+  sourceAsset: AssetRef | null;
+  destinationOptionId: string;
+  destinationAddress: string;
+  requestedAmount: Money | null;
+  amountSemantics: "minimum" | "exact";
+  expiresAt: string | null;
+  safeInstructions: string[];
+};
+```
+
+Direct owned Receive uses `amountSemantics="minimum"`. An observed increase
+below the requested amount remains pending and may accumulate across transfers.
+Once the increase reaches the request, the operation credits exactly the
+requested amount; excess remains ordinary user-owned Account Value and is
+available to later operations. One active advisory destination reservation per
+user/location/asset prevents two concurrent handoffs from claiming the same
+balance increase. Strict Relay Deposit Address uses
+`amountSemantics="exact"` and retains Relay's separate underpayment,
+overpayment, refund, and child-request reconciliation.
+
 ### 7.8 Small capability ports
 
 ```typescript
@@ -1589,7 +1623,7 @@ Ingress options are distinct from executable wallet sources:
 
 - existing embedded/linked wallet asset;
 - Privy configured funding method;
-- exact manual Receive instruction;
+- minimum-target manual Receive instruction;
 - Relay Deposit Address instruction;
 - existing venue cash eligible for explicit shortfall movement.
 
@@ -2700,7 +2734,9 @@ Sell/Redeem.
 1. User enters Add Funds 100 USD while viewing a 5 USD Polymarket trade.
 2. Destination resolver fixes the active Polymarket binding and requirement.
 3. Placement Policy chooses `confirmed_deposit_amount`, not 5 USD shortfall.
-4. Relay quote converts/routes the confirmed SOL input to approved Polygon collateral.
+4. Relay `EXPECTED_OUTPUT` quote derives the required native SOL input for the
+   desired Polygon pUSD output. Hunch requests a bounded output buffer so the
+   quoted minimum, not merely the expected output, covers the user's target.
 5. User reviews full input, net output, fee, ETA, and actions.
 6. Commit reserves only owned internal source components; an external source is
    not subtracted until its authoritative debit.
@@ -2735,13 +2771,17 @@ Sell/Redeem.
 
 ### 19.4 Exchange or manual transfer
 
-1. User selects exchange/manual source, exact source asset/network, and amount semantics.
+1. User selects exchange/manual source and the exact source asset/network.
 2. Exchange ingress uses direct owned Receive in the initial rollout. A
    controlled-wallet source may offer a separately gated strict/exact Relay
    Deposit Address only with a verified user-owned refund location.
 3. For Relay, commit and persist request/address/refund facts before display.
-4. User sends only the instructed asset/network.
-5. Backend records exact transfer observation; client report is progress only.
+4. User sends only the instructed asset/network. For direct owned Receive the
+   displayed amount is a target: a smaller transfer remains pending, and an
+   excess is retained in Account Value. A strict Relay address requires its
+   exact amount.
+5. Backend records the authoritative balance increase; client report is
+   progress only.
 6. When Relay is used, Hunch queries by deposit address, tracks all returned
    request IDs, and reconciles final settlement or refund.
 7. Venue preparation completes separately.
@@ -3301,7 +3341,7 @@ At minimum:
 | existing Limitless collateral     | Limitless                  | instant trade                       | binding, locks, readiness                              |
 | existing Limitless collateral     | Limitless CLOB             | Buy/Sell                            | profile, exchange/adapter, approvals, locks, slippage  |
 | existing Limitless collateral     | Limitless AMM              | Buy/Sell                            | profile, market/spender, approvals, locks, min output  |
-| Solana SOL                        | Polymarket                 | Add Funds exact input               | Relay, gas/rent, PM follow-up                          |
+| Solana SOL                        | Polymarket                 | Add Funds desired pUSD output       | Relay expected-output quote, gas/rent, PM follow-up    |
 | Solana USDC                       | Polymarket                 | Add Funds                           | Relay route/settlement                                 |
 | Ethereum supported USDT/USDC      | Polymarket                 | prepare/inline by evidence          | exact mapping, refund, net output                      |
 | supported wallet token            | active venue               | conversion                          | consent, price, route, min output                      |
@@ -4217,13 +4257,16 @@ stops new selection but preserves status polling/webhooks.
 8. No Base parking, automatic consolidation, or rebalance worker.
 9. Token preference defaults to `ask`; every conversion needs exact consent.
 10. Exact-contract canonical stable assets only; symbols never imply 1 USD.
-11. Existing 0.02 SOL safety reserve remains a floor; exact action may require more.
+11. Native SOL routing retains 0.003 SOL outside the authorized quote input for
+    transaction fees and transient ATA/rent needs; a larger observed or
+    policy-configured requirement wins.
 12. Default slippage: 1% stable-to-stable, 3% volatile source, 5% hard ceiling.
 13. Cost warning: lower of 5 USD or 10%; rejection: lower of 10 USD or 20%.
 14. Minimum generic destination output is 1 USD, subject to stricter provider limits.
 15. Amount bands: under 100, 100–500, over 500 USD.
-16. Relay quote deadline is 1.5 seconds; at most one enabled fallback gets 1.5
-    seconds; total planner target is 3.5 seconds; no hedged winner race.
+16. Relay quote deadline is 5 seconds and the total planner target is 7 seconds,
+    based on observed native-SOL quote latency near 1.7–2.3 seconds; no hedged
+    winner race.
 17. Unknown route speed is Prepare Funds. Inline needs measured p95 <=45 seconds
     and configured success/economic thresholds.
 18. Across/deBridge new-plan fallback allowlists are empty; Bungee is legacy-only.

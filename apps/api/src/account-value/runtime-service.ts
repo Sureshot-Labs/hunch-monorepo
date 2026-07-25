@@ -70,6 +70,7 @@ import {
 } from "./funding-movement-feed.js";
 
 const SOLANA_CHAIN_ID = "7565164";
+const SOLANA_NATIVE_ASSET_ID = "11111111111111111111111111111111";
 const UNPRICED_POLICY_ID = "unpriced";
 
 type AccountAssetCatalogEntry = Readonly<{
@@ -201,13 +202,17 @@ function mergeCatalogWithPolicy(
       catalog.set(key, { ...existing, pricePolicyId });
       continue;
     }
+    const nativeSol =
+      item.asset.networkId === "solana:mainnet" &&
+      item.asset.assetId === SOLANA_NATIVE_ASSET_ID &&
+      item.asset.decimals === 9;
     catalog.set(key, {
       asset: item.asset,
-      category: "token",
-      symbol: "Token",
+      category: nativeSol ? "cash" : "token",
+      symbol: nativeSol ? "SOL" : "Token",
       venueId: null,
       pricePolicyId,
-      verified: false,
+      verified: nativeSol,
     });
   }
   return [...catalog.values()];

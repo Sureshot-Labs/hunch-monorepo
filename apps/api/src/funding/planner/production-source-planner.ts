@@ -16,7 +16,10 @@ import {
   RELAY_ROUTE_SPECS,
   type RelayRouteSpec,
 } from "../../funding-providers/relay/mappings.js";
-import { RelayWalletQuoteAdapter } from "../../funding-providers/relay/wallet-adapter.js";
+import {
+  RelayQuoteEconomicsError,
+  RelayWalletQuoteAdapter,
+} from "../../funding-providers/relay/wallet-adapter.js";
 import { RelayPinnedActionValidator } from "../../funding-providers/relay/action-validator.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import type {
@@ -54,6 +57,7 @@ import type {
 import { listAdaptedFundingSources } from "./source-adapter.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+export const SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS = 3_000_000n;
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -138,6 +142,14 @@ function isPinnedStableAsset(asset: AssetRef): boolean {
         normalized === RELAY_PINNED_ASSETS.polygonUsdce)) ||
     (asset.networkId === "solana:mainnet" &&
       asset.assetId === RELAY_PINNED_ASSETS.solanaUsdc)
+  );
+}
+
+function isSolanaNativeAsset(asset: AssetRef): boolean {
+  return (
+    asset.networkId === "solana:mainnet" &&
+    asset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
+    asset.decimals === 9
   );
 }
 
@@ -242,8 +254,9 @@ function sourceFactsForComponent(input: {
   requiredCapability: "execution_source" | "withdrawal_source";
   suggestionPreferred: boolean;
 }): RelayEligibleSourceFact[] {
+  const nativeSolSource = isSolanaNativeAsset(input.component.amount.asset);
   if (
-    !isPinnedStableAsset(input.component.amount.asset) ||
+    (!isPinnedStableAsset(input.component.amount.asset) && !nativeSolSource) ||
     !isPinnedStableAsset(input.requiredAmount.asset)
   ) {
     return [];
@@ -267,32 +280,48 @@ function sourceFactsForComponent(input: {
         sameAsset(location.asset, input.component.amount.asset),
     )
     .map((location): RelayEligibleSourceFact => {
-      const requiredSourceRaw = rescaleStableRaw(
-        input.requiredAmount.raw,
-        input.component.amount.asset.decimals,
-        input.requiredAmount.asset.decimals,
-      );
-      const slippageDenominator = 10_000 - input.maximumSlippageBps;
-      const sourceRawWithSlippage =
-        (BigInt(requiredSourceRaw) * 10_000n +
-          BigInt(slippageDenominator) -
-          1n) /
-        BigInt(slippageDenominator);
-      const raw =
-        BigInt(input.availableRaw) < sourceRawWithSlippage
-          ? input.availableRaw
-          : sourceRawWithSlippage.toString();
-      const grossDestinationRaw = rescaleStableRaw(
-        raw,
-        input.requiredAmount.asset.decimals,
-        input.component.amount.asset.decimals,
-      );
-      const minimumDestinationRaw =
-        (BigInt(grossDestinationRaw) *
-          BigInt(10_000 - input.maximumSlippageBps)) /
-        10_000n;
+      const availableRaw = BigInt(input.availableRaw);
+      const spendableRaw = nativeSolSource
+        ? availableRaw > SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
+          ? availableRaw - SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
+          : 0n
+        : availableRaw;
+      let raw: string;
+      let minimumDestinationRaw: string;
+      if (nativeSolSource) {
+        raw = spendableRaw.toString();
+        minimumDestinationRaw = input.requiredAmount.raw;
+      } else {
+        const requiredSourceRaw = rescaleStableRaw(
+          input.requiredAmount.raw,
+          input.component.amount.asset.decimals,
+          input.requiredAmount.asset.decimals,
+        );
+        const slippageDenominator = 10_000 - input.maximumSlippageBps;
+        const sourceRawWithSlippage =
+          (BigInt(requiredSourceRaw) * 10_000n +
+            BigInt(slippageDenominator) -
+            1n) /
+          BigInt(slippageDenominator);
+        raw =
+          spendableRaw < sourceRawWithSlippage
+            ? spendableRaw.toString()
+            : sourceRawWithSlippage.toString();
+        const grossDestinationRaw = rescaleStableRaw(
+          raw,
+          input.requiredAmount.asset.decimals,
+          input.component.amount.asset.decimals,
+        );
+        minimumDestinationRaw = (
+          (BigInt(grossDestinationRaw) *
+            BigInt(10_000 - input.maximumSlippageBps)) /
+          10_000n
+        ).toString();
+      }
       const estimatedUsd =
-        input.component.estimatedUsd && BigInt(input.component.amount.raw) > 0n
+        !nativeSolSource &&
+        input.component.estimatedUsd &&
+        BigInt(input.component.amount.raw) > 0n
           ? scaleUnsignedDecimalByRawRatio({
               value: input.component.estimatedUsd.value,
               numeratorRaw: raw,
@@ -302,7 +331,9 @@ function sourceFactsForComponent(input: {
       return {
         componentId: input.component.componentId,
         sourceLocationPatternId: location.locationPatternId,
-        safeLabel: `${input.component.amount.asset.networkId} wallet`,
+        safeLabel: nativeSolSource
+          ? "SOL on Solana"
+          : `${input.component.amount.asset.networkId} wallet`,
         source: {
           kind: "owned_location" as const,
           location: input.component.location,
@@ -313,16 +344,19 @@ function sourceFactsForComponent(input: {
         },
         quoteMinimumOutput: {
           asset: input.requiredAmount.asset,
-          raw: minimumDestinationRaw.toString(),
+          raw: minimumDestinationRaw,
         },
-        maximumSourceRaw: input.availableRaw,
+        maximumSourceRaw: spendableRaw.toString(),
+        maximumSlippageBps: input.maximumSlippageBps,
         estimatedUsd,
         transferable: true,
         riskEligible: true,
         walletExecutionReady:
           input.profile.signingModes.includes("web_client") ||
           input.profile.signingModes.includes("privy_authorization"),
-        nativeGasReady: hasNativeGas(input.account, input.profile),
+        nativeGasReady: nativeSolSource
+          ? spendableRaw > 0n
+          : hasNativeGas(input.account, input.profile),
         suggestionPreferred: input.suggestionPreferred,
         freshness: "fresh" as const,
       };
@@ -352,15 +386,18 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   for (const component of input.account.projection.components) {
     const availability = availabilityByComponent.get(component.componentId);
     const profile = profileForLocation(input.account, component.location);
+    const nativeSolSource = isSolanaNativeAsset(component.amount.asset);
     if (
       component.location.accountId !== input.accountId ||
       component.location.kind !== "wallet" ||
       component.category === "in_transit" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||
-      component.valuationEligibility !== "included" ||
+      (component.valuationEligibility !== "included" && !nativeSolSource) ||
       !availability ||
-      availability.freshness !== "fresh" ||
+      (availability.freshness !== "fresh" &&
+        (!nativeSolSource ||
+          availability.reasonCodes.includes("cash_availability_unknown"))) ||
       BigInt(availability.availableRaw) <= 0n ||
       !profile
     ) {
@@ -558,9 +595,15 @@ export class ProductionFundingSourcePlanner {
         senderWalletId: profile.walletId,
         quoteCorrelationId: input.quoteCorrelationId,
         deadline: input.deadline,
+        maximumSlippageBps: input.source.maximumSlippageBps,
       });
     } catch (error) {
-      if (error instanceof RelayClientError) return null;
+      if (
+        error instanceof RelayClientError ||
+        error instanceof RelayQuoteEconomicsError
+      ) {
+        return null;
+      }
       throw error;
     }
     if (input.signal.aborted) return null;
@@ -570,7 +613,7 @@ export class ProductionFundingSourcePlanner {
       policyRevision: input.policyRevision,
       quoteCorrelationId: input.quoteCorrelationId,
       route: input.route,
-      sourceAmount: input.sourceAmount,
+      sourceAmount: quote.sourceAmount,
       profile,
     });
     const plan = {
@@ -593,7 +636,7 @@ export class ProductionFundingSourcePlanner {
           : null,
         walletExecutionSnapshot: jsonRecord(profile),
         placementSnapshot: {},
-        requestedSourceAmount: jsonRecord(input.sourceAmount),
+        requestedSourceAmount: jsonRecord(quote.sourceAmount),
         requestedDestinationAmount: jsonRecord(input.minimumOutput),
         supportMetadata: {
           routeId: input.route.routeId,
@@ -610,7 +653,7 @@ export class ProductionFundingSourcePlanner {
           status: "planned" as const,
           sourceSnapshot: jsonRecord(input.source.source),
           destinationTargetSnapshot: jsonRecord(input.destination.target),
-          quotedInput: jsonRecord(input.sourceAmount),
+          quotedInput: jsonRecord(quote.sourceAmount),
           quotedExpectedOutput: jsonRecord(quote.candidate.expectedOutput),
           quotedMinOutput: jsonRecord(quote.candidate.minimumOutput),
           providerQuoteRefCiphertext: codec.encrypt(quote.requestId),
@@ -632,10 +675,10 @@ export class ProductionFundingSourcePlanner {
           segmentOrdinal: 0,
           componentId: input.source.componentId,
           locationId: sourceLocation.locationId,
-          networkId: input.sourceAmount.asset.networkId,
-          assetId: input.sourceAmount.asset.assetId,
-          assetDecimals: input.sourceAmount.asset.decimals,
-          rawAmount: input.sourceAmount.raw,
+          networkId: quote.sourceAmount.asset.networkId,
+          assetId: quote.sourceAmount.asset.assetId,
+          assetDecimals: quote.sourceAmount.asset.decimals,
+          rawAmount: quote.sourceAmount.raw,
           mode: "subtract_available" as const,
           expiresAt: quote.candidate.expiresAt,
         },
@@ -643,7 +686,12 @@ export class ProductionFundingSourcePlanner {
     };
     return {
       candidate: quote.candidate,
-      feeUsd: quote.candidate.fees.map((fee) => stableUsdValue(fee.amount)),
+      sourceAmount: quote.sourceAmount,
+      sourceEstimatedUsd: quote.sourceEstimatedUsd,
+      feeUsd: quote.feeUsd.map((estimated, index) => {
+        const fee = quote.candidate.fees[index];
+        return estimated ?? (fee ? stableUsdValue(fee.amount) : null);
+      }),
       minimumDestinationEstimatedUsd: stableUsdValue(
         quote.candidate.minimumOutput,
       ),

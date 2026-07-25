@@ -33,8 +33,8 @@ import {
 } from "./route-experience.js";
 import { buildCompositeRelaySourceOption } from "./composite-source-options.js";
 
-export const RELAY_QUOTE_TIMEOUT_MS = 1_500;
-export const TOTAL_FUNDING_PLANNER_TIMEOUT_MS = 3_500;
+export const RELAY_QUOTE_TIMEOUT_MS = 5_000;
+export const TOTAL_FUNDING_PLANNER_TIMEOUT_MS = 7_000;
 export const MAX_RELAY_SOURCE_QUOTES = 16;
 
 export type RelayFirstCandidate = Readonly<{
@@ -59,6 +59,7 @@ export type RelayEligibleSourceFact = Readonly<{
   quoteInputAmount: Money;
   quoteMinimumOutput?: Money;
   maximumSourceRaw: string;
+  maximumSlippageBps: number;
   estimatedUsd: string | null;
   transferable: boolean;
   riskEligible: boolean;
@@ -70,6 +71,8 @@ export type RelayEligibleSourceFact = Readonly<{
 
 export type RelayPlanningQuote = Readonly<{
   candidate: ProviderQuoteCandidate;
+  sourceAmount: Money;
+  sourceEstimatedUsd: string | null;
   feeUsd: readonly (string | null)[];
   minimumDestinationEstimatedUsd: string | null;
   executionPlan: FundingExecutionPlan;
@@ -366,7 +369,8 @@ function assertRelayPlanningQuote(
   const expiresAt = Date.parse(candidate.expiresAt);
   if (
     candidate.providerId !== "relay" ||
-    candidate.amountMode !== "exact_input" ||
+    (candidate.amountMode !== "exact_input" &&
+      candidate.amountMode !== "exact_output") ||
     candidate.capability !== input.route.capability ||
     candidate.adapterVersion !== input.route.adapterVersion ||
     !exactJson(candidate.source, input.source.source) ||
@@ -381,6 +385,21 @@ function assertRelayPlanningQuote(
     );
   }
   assertSingleSegmentExecutionPlan(input.quote.executionPlan);
+  assertSameAsset(
+    input.quote.sourceAmount.asset,
+    input.route.sourceAsset,
+    "Relay quoted source amount",
+  );
+  if (
+    rawAmount(input.quote.sourceAmount.raw) === 0n ||
+    rawAmount(input.quote.sourceAmount.raw) >
+      rawAmount(input.source.maximumSourceRaw)
+  ) {
+    throw new FundingPlannerError(
+      "invalid_policy",
+      "Relay quoted source amount exceeds the frozen available balance",
+    );
+  }
   if (
     input.quote.executionPlan.kind !== "wallet_route" ||
     input.quote.commitPlan.operation.planKind !== "wallet_route" ||
@@ -563,7 +582,7 @@ export class RelayFirstSourcePlanner {
           });
           const observation = await this.dependencies.observeRoute({
             route,
-            amountBand: routeAmountBand(source.estimatedUsd),
+            amountBand: routeAmountBand(plannedQuote.sourceEstimatedUsd),
             now: input.now,
           });
           let option = buildRelayWalletSourceOption({
@@ -577,7 +596,7 @@ export class RelayFirstSourcePlanner {
             ),
             safeLabel: source.safeLabel,
             maximumSourceRaw: source.maximumSourceRaw,
-            estimatedUsd: source.estimatedUsd,
+            estimatedUsd: plannedQuote.sourceEstimatedUsd,
             quote: plannedQuote.candidate,
             feeUsd: plannedQuote.feeUsd,
             route,
@@ -631,14 +650,14 @@ export class RelayFirstSourcePlanner {
                 ? jsonRecord(input.destination.venueBindingOption)
                 : null,
               placementSnapshot: jsonRecord(input.placement),
-              requestedSourceAmount: jsonRecord(source.quoteInputAmount),
+              requestedSourceAmount: jsonRecord(plannedQuote.sourceAmount),
               requestedDestinationAmount: jsonRecord(input.requiredAmount),
             },
             segments: plannedQuote.commitPlan.segments.map((segment) => ({
               ...segment,
               sourceSnapshot: jsonRecord(source.source),
               destinationTargetSnapshot: jsonRecord(input.destination.target),
-              quotedInput: jsonRecord(source.quoteInputAmount),
+              quotedInput: jsonRecord(plannedQuote.sourceAmount),
               quotedExpectedOutput: jsonRecord(
                 plannedQuote.candidate.expectedOutput,
               ),

@@ -1,0 +1,92 @@
+{
+  "_fixture": {
+    "source": "live-quote-only-sanitized",
+    "capturedAt": "2026-07-25",
+    "endpoint": "POST https://api.relay.link/quote/v2",
+    "quoteRequestsCreated": 4,
+    "walletSignaturesCreated": 0,
+    "transactionsBroadcast": 0
+  },
+  "route": {
+    "routeId": "solana-sol-to-polygon-pusd",
+    "originChainId": 792703809,
+    "originCurrency": "11111111111111111111111111111111",
+    "originDecimals": 9,
+    "destinationChainId": 137,
+    "destinationCurrency": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+    "destinationDecimals": 6,
+    "useDepositAddress": false
+  },
+  "amountModel": {
+    "tradeType": "EXPECTED_OUTPUT",
+    "requestedDestinationRaw": "1000000",
+    "quotedDestinationRaw": "1010102",
+    "minimumDestinationRaw": "1000000",
+    "slippageToleranceBps": 100,
+    "latestRequiredSourceRaw": "14359051",
+    "latestRequiredSourceFormatted": "0.014359051",
+    "latestRequiredSourceUsd": "1.060207",
+    "exactOutputProbe": {
+      "httpStatus": 400,
+      "errorCode": "NO_SWAP_ROUTES_FOUND"
+    }
+  },
+  "latestQuote": {
+    "latencyMs": 1694,
+    "timeEstimateSeconds": 3,
+    "originSwapOutputRaw": "1060249",
+    "originSwapMinimumOutputRaw": "1049647",
+    "fees": [
+      {
+        "kind": "gas",
+        "asset": "SOL",
+        "raw": "20002",
+        "estimatedUsd": "0.001477"
+      },
+      {
+        "kind": "relayer",
+        "asset": "USDC",
+        "raw": "49006",
+        "estimatedUsd": "0.049002"
+      }
+    ]
+  },
+  "actionShape": {
+    "transactionCount": 1,
+    "instructionCount": 8,
+    "addressLookupTableCount": 2,
+    "programSequence": [
+      "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "11111111111111111111111111111111",
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "DPArtTLbEqa6EuXHfL5UFLBZhFjiEXWRudhvXDrjwXUr",
+      "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+    ],
+    "jupiterDiscriminator": "sha256:shared-accounts-route-pinned",
+    "jupiterTailBindings": [
+      "sourceAmountRaw",
+      "originSwapOutputRaw",
+      "slippageToleranceBps",
+      "zeroPlatformFee"
+    ],
+    "relayDepositBindings": [
+      "controlledSigner",
+      "derivedUserUsdcAta",
+      "relayDepository",
+      "protocolOrderId",
+      "statusRequestCorrelation"
+    ]
+  },
+  "security": {
+    "sourceAndRecipientAreDedicatedBurnerPublicAddresses": true,
+    "walletSecretPersistedInFixture": false,
+    "relayApiCredentialPersisted": false,
+    "rawProviderRequestReferencePersisted": false,
+    "rawInstructionDataPersisted": false,
+    "signed": false,
+    "broadcast": false
+  }
+}

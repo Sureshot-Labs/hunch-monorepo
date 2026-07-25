@@ -52,11 +52,13 @@ function instruction(input: {
     sourceAsset: amount.asset,
     destinationOptionId: input.destinationOptionId,
     destinationAddress: input.destinationAddress,
-    exactAmount: amount,
+    requestedAmount: amount,
+    amountSemantics: "minimum",
     expiresAt: input.expiresAt,
     safeInstructions: [
-      `Send only asset ${amount.asset.assetId} on ${amount.asset.networkId}.`,
-      `Send exactly ${amount.raw} base units to the displayed destination.`,
+      "Use only the selected asset on the selected network.",
+      "You may make several smaller transfers until the requested amount is reached.",
+      "Any excess remains available in your Hunch balance.",
       "Funding completes only after backend observation and reconciliation.",
     ],
   };
@@ -173,7 +175,7 @@ function plannedSource(
         requestedDestinationAmount: jsonRecord(input.requiredAmount),
         supportMetadata: {
           adapterId: "direct_owned_receive_v1",
-          destinationObserverId: "owned_destination_balance_delta_v1",
+          destinationObserverId: "owned_destination_balance_delta_v2",
           destinationBaselineRaw:
             destinationFacts?.spendability.observedAmount.raw ?? null,
           destinationBaselineRevision:
@@ -233,7 +235,7 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
       planning: input,
       kind: "manual_receive",
       ingressKind: "manual",
-      safeLabel: "Receive exact transfer",
+      safeLabel: "Deposit to Hunch",
       expiresAt,
       destinationAddress,
     });

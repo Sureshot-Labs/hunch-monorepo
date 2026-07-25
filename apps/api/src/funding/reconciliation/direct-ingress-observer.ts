@@ -186,7 +186,7 @@ async function observeDestination(
   };
 }
 
-async function persistExactDelta(
+async function persistSatisfiedAmount(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
     target: DirectIngressObservationTarget;
@@ -194,12 +194,15 @@ async function persistExactDelta(
     now: Date;
   }>,
 ): Promise<boolean> {
-  const delta = directIngressExactDelta({
+  const creditedRaw = directIngressSatisfiedAmount({
     baselineRaw: input.target.baselineRaw,
     observedRaw: input.observation.observedRaw,
     requestedRaw: input.target.requestedRaw,
   });
-  if (delta == null) return false;
+  if (creditedRaw == null) return false;
+  const observedDeltaRaw = (
+    BigInt(input.observation.observedRaw) - BigInt(input.target.baselineRaw)
+  ).toString();
   await allocateFundingObservationInTransaction(client, {
     operationId: input.target.operationId,
     segmentId: null,
@@ -207,28 +210,33 @@ async function persistExactDelta(
     networkId: input.target.requestedAsset.networkId,
     assetId: input.target.requestedAsset.assetId,
     txHash: `direct-ingress:${input.target.operationId}:${input.observation.revision}`,
-    eventIndex: "exact-destination-balance-delta",
+    eventIndex: "minimum-destination-balance-delta",
     fromAddress: null,
     toAddress: input.target.destinationAddress,
-    rawAmount: delta,
+    rawAmount: creditedRaw,
     observedAt: new Date(input.observation.observedAt),
     ledgerHeight: null,
     blockHash: null,
     finalityStatus: "finalized",
     finalizedAt: input.now,
     metadata: {
-      observerId: "owned_destination_balance_delta_v1",
+      observerId: "owned_destination_balance_delta_v2",
       baselineRaw: input.target.baselineRaw,
       baselineRevision: input.target.baselineRevision,
       observedRaw: input.observation.observedRaw,
       observedRevision: input.observation.revision,
-      exactExpectedDelta: true,
+      observedDeltaRaw,
+      requestedRaw: input.target.requestedRaw,
+      minimumSatisfied: true,
+      excessRaw: (
+        BigInt(observedDeltaRaw) - BigInt(input.target.requestedRaw)
+      ).toString(),
     },
   });
   return true;
 }
 
-export function directIngressExactDelta(
+export function directIngressSatisfiedAmount(
   input: Readonly<{
     baselineRaw: string;
     observedRaw: string;
@@ -236,11 +244,12 @@ export function directIngressExactDelta(
   }>,
 ): string | null {
   const delta = BigInt(input.observedRaw) - BigInt(input.baselineRaw);
-  return delta === BigInt(input.requestedRaw) ? delta.toString() : null;
+  const requested = BigInt(input.requestedRaw);
+  return delta >= requested ? requested.toString() : null;
 }
 
 export class DirectIngressDestinationObserver {
-  readonly observerId = "owned_destination_balance_delta_v1";
+  readonly observerId = "owned_destination_balance_delta_v2";
 
   constructor(
     private readonly dependencies: Readonly<{
@@ -276,7 +285,7 @@ export class DirectIngressDestinationObserver {
       await this.dependencies.persist(pool, { target, observation, now });
     } else {
       await tx(pool, (client) =>
-        persistExactDelta(client, { target, observation, now }),
+        persistSatisfiedAmount(client, { target, observation, now }),
       );
     }
     return { destinationsPolled: 1 };

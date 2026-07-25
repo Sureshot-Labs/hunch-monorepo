@@ -2,9 +2,11 @@ import { z } from "zod";
 
 const unsignedIntegerStringSchema = z.string().regex(/^(0|[1-9]\d*)$/u);
 const relayAddressSchema = z.string().trim().min(1).max(512);
+const relayEmptyOrAddressSchema = z.union([z.literal(""), relayAddressSchema]);
 const relayRequestIdSchema = z.string().trim().min(8).max(512);
 const relayStatusSchema = z.string().trim().min(1).max(128);
 const relayTransactionReferenceSchema = z.string().trim().min(1).max(256);
+const unsignedDecimalSchema = z.string().regex(/^(0|[1-9]\d*)(?:\.\d+)?$/u);
 
 const relayDepositAddressObservationSchema = z
   .object({
@@ -31,6 +33,7 @@ const relayCurrencyAmountSchema = z
     currency: relayCurrencySchema,
     amount: unsignedIntegerStringSchema,
     minimumAmount: unsignedIntegerStringSchema,
+    amountUsd: unsignedDecimalSchema.optional(),
   })
   .passthrough();
 
@@ -53,7 +56,7 @@ const relayStepSchema = z
     id: z.string().trim().min(1).max(64),
     kind: z.string().trim().min(1).max(64),
     requestId: relayRequestIdSchema,
-    depositAddress: relayAddressSchema.nullable().optional(),
+    depositAddress: relayEmptyOrAddressSchema.nullable().optional(),
     items: z.array(relayStepItemSchema).min(1).max(8),
   })
   .passthrough();
@@ -63,6 +66,7 @@ const relayFeeSchema = z
     currency: relayCurrencySchema,
     amount: unsignedIntegerStringSchema,
     minimumAmount: unsignedIntegerStringSchema.optional(),
+    amountUsd: unsignedDecimalSchema.optional(),
   })
   .passthrough();
 
@@ -86,7 +90,7 @@ export const relayQuoteResponseSchema = z
       })
       .optional(),
     protocol: z.unknown().optional(),
-    depositAddress: relayAddressSchema.nullable().optional(),
+    depositAddress: relayEmptyOrAddressSchema.nullable().optional(),
   })
   .passthrough();
 

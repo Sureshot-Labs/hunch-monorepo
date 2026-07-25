@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 
 import {
-  directIngressExactDelta,
+  directIngressSatisfiedAmount,
   DirectIngressDestinationObserver,
   type DirectIngressObservationTarget,
 } from "../../reconciliation/direct-ingress-observer.js";
@@ -27,7 +27,7 @@ const target: DirectIngressObservationTarget = {
 };
 
 assert.equal(
-  directIngressExactDelta({
+  directIngressSatisfiedAmount({
     baselineRaw: "1000000",
     observedRaw: "4000000",
     requestedRaw: "3000000",
@@ -35,7 +35,7 @@ assert.equal(
   "3000000",
 );
 assert.equal(
-  directIngressExactDelta({
+  directIngressSatisfiedAmount({
     baselineRaw: "1000000",
     observedRaw: "3999999",
     requestedRaw: "3000000",
@@ -43,12 +43,12 @@ assert.equal(
   null,
 );
 assert.equal(
-  directIngressExactDelta({
+  directIngressSatisfiedAmount({
     baselineRaw: "1000000",
     observedRaw: "4000001",
     requestedRaw: "3000000",
   }),
-  null,
+  "3000000",
 );
 
 let persisted = 0;
@@ -79,5 +79,5 @@ assert.deepEqual(
 );
 
 console.log(
-  "[funding-direct-ingress-observer-tests] exact delta and scoped polling passed",
+  "[funding-direct-ingress-observer-tests] minimum delta and scoped polling passed",
 );

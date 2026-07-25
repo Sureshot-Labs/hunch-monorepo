@@ -84,3 +84,12 @@ export function normalizeRelayFees(
         fee !== null && BigInt(fee.amount.raw) !== 0n,
     );
 }
+
+export function normalizeRelayFeeUsd(
+  quote: RelayQuoteResponse,
+  normalizedFees: readonly ProviderFee[],
+): readonly (string | null)[] {
+  return normalizedFees.map(
+    ({ kind }) => quote.fees?.[kind]?.amountUsd ?? null,
+  );
+}

@@ -361,6 +361,26 @@ an embedded EVM wallet, and a Solana USDC wallet, provided every corresponding
 location has the exact source capability and executable route. Linked external
 balances are never pulled without their explicit client actions.
 
+#### 4.5.1 Native SOL and ingress amount contracts
+
+Native SOL is an eligible owned source when the runtime policy enables the
+exact `solana-sol-to-polygon-pusd` route. Add Funds and trade shortfall express
+the desired pUSD receipt; the Relay adapter uses `EXPECTED_OUTPUT` with a
+bounded output buffer because live `EXACT_OUTPUT` returned
+`NO_SWAP_ROUTES_FOUND`. The planner reserves 0.003 SOL outside the quoted input,
+and the fail-closed SVM validator binds the controlled signer, derived
+USDC/WSOL accounts, exact SOL wrap amount, Jupiter amount/slippage tail, zero
+platform fee, Relay protocol order/refund paths, destination pUSD floor, and
+memo/status correlation before the action can be prepared.
+
+Generic direct Receive and strict Relay ingress are different contracts.
+Privy/manual direct Receive uses a minimum target: partial transfers accumulate,
+the operation consumes only the requested amount after the target is reached,
+and excess remains ordinary Account Value. A per-destination advisory
+reservation prevents concurrent double attribution. A strict Relay deposit
+address remains exact and follows provider underpayment/overpayment/refund
+reconciliation.
+
 ### 4.6 Purpose matrix
 
 | Purpose    | Minimum Polymarket evidence                                                                                                                                                                                          |
