@@ -1,8 +1,10 @@
 # WP7 — Unified web funding UX
 
-Status: local implementation and review complete on 2026-07-24; no production
-activation, commit, deployment, policy mutation, wallet action, or external
-financial call was performed as part of this closure.
+Status: generic web funding foundations were implemented on 2026-07-24 and the
+external-ingress contract was re-reviewed on 2026-07-25. Full WP7 journey
+closure still requires the dedicated `Fund & Buy` caller described below. No
+production activation, commit, deployment, policy mutation, wallet action, or
+external financial call was performed as part of this review.
 
 ## Delivered boundary
 
@@ -60,7 +62,7 @@ submission into funding readiness, redemption completion, or a trade.
 - Destination discovery accepts the authenticated controller-wallet reference
   for exact current-intent BUY selection.
 - Manual Receive and policy-gated Privy ingress use a direct-ingress adapter
-  with exact destination, network, asset, and amount instructions.
+  with exact destination, network, and asset plus a minimum funding target.
 - Direct ingress reconciliation observes the exact destination balance delta,
   uses a destination advisory reservation, and does not depend on a Relay key.
 - Operation reads expose public steps and ingress instructions without
@@ -124,8 +126,10 @@ that a wallet signature alone proves completion.
   Bungee, Across, or deBridge.
 - Provider-specific signing details exist only in execution/presentation
   adapters.
-- An external wallet is never pulled silently. It must either approve a normal
-  wallet request or perform the exact manual Receive transfer.
+- A connected external wallet is not enumerated as a normal destination or
+  balance source. External funds enter through an explicit minimum-target
+  manual Receive or configured Privy handoff; any future connected-wallet route
+  requires its own explicit user-controlled signature.
 - Privy sponsorship is requested only when the prepared action explicitly
   reports `payerRequirement=privy_sponsor`.
 - Multi-leg funding is one durable operation. The controller executes only the
@@ -136,7 +140,9 @@ that a wallet signature alone proves completion.
   confirmed.
 - An unavailable redemption with no actionable preparation fails closed and
   exposes no active Prepare button.
-- Direct external ingress waits for the backend-observed exact balance delta.
+- Direct external ingress waits until the backend-observed balance delta reaches
+  the requested target. Partial transfers accumulate and excess remains
+  ordinary Account Value.
 - Pending reports are persisted before the report call, then retried after a
   reload. A 409 is resolved by reading the authoritative backend step/
   operation state.
@@ -170,8 +176,9 @@ The final review found and corrected:
 - normal Add Funds exposed every external wallet/venue binding and raw wallet
   labels; it now renders one Hunch-managed card per venue, recommends the
   backend-selected Polymarket destination, and collapses other venues;
-- connected external wallets no longer compete as destinations. They remain
-  explicit sources or separate advanced compatibility flows;
+- connected external wallets no longer compete as destinations or normal
+  `Pay with` balance rows. Direct Receive/Privy are the initial external-money
+  sources; connected-wallet routing remains a separate advanced contract;
 - `Bridge` duplicated a source route as a top-level product mode; the unified
   UI now has Add Funds and Convert, while bridge/Relay remains an Add Funds
   source and old deep links normalize safely;
@@ -223,6 +230,38 @@ Review searches:
 - no remaining application caller imports the old desktop/mobile
   Deposit/Withdraw/Redemption component directly; callers resolve through the
   unified index exports.
+
+## External-address consistency review — 2026-07-25
+
+The initial normal Add Funds contract is now explicit and consistent across
+the plan, backend source discovery, and web presentation:
+
+| Capability                                                                             | Status                                      | Initial behavior                                                                                                 |
+| -------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| destination selection                                                                  | implemented                                 | venue-first, one opaque Hunch-managed Trading Balance per venue                                                  |
+| Hunch-owned source balances, including enabled embedded SOL                            | implemented                                 | route or combine through backend-issued opaque source options                                                    |
+| direct transfer from an external address                                               | implemented                                 | `Deposit crypto` shows the exact final owned address, asset, and network                                         |
+| direct Receive amount handling                                                         | implemented                                 | requested amount is a minimum target; partial transfers accumulate and excess remains Account Value              |
+| Privy handoff                                                                          | implemented, policy-gated                   | exact destination is handed to the configured method; backend observation settles                                |
+| connected external wallet balance in normal `Pay with`                                 | deliberately excluded                       | it is neither auto-selected nor rendered; a future advanced signer contract is required                          |
+| external different-asset/network deposit, such as Phantom SOL directly to Polygon pUSD | not activated                               | direct Receive rejects the implication; strict Relay Deposit Address or a separate advanced contract is required |
+| strict Relay Deposit Address                                                           | architecture and fixtures exist, routes off | exact amount, refund, expiry, and reconciliation evidence remain activation gates                                |
+| one available source                                                                   | implemented                                 | source choice is skipped and the UI proceeds to review                                                           |
+| several sources                                                                        | implemented                                 | backend recommendation plus explicit `Pay with` choice                                                           |
+
+The direct Receive address is not a Relay address. Sending the displayed
+destination collateral to it is one operation. Sending a different token to an
+intermediate Hunch wallet and then routing it would be two sequential
+operations; the initial plan does not pretend those have one immutable quote or
+one automatic consent.
+
+The remaining material web gap is independent of manual Receive: current trade
+shortfall callers still use `openDepositDialog(...)` from the Confirmation
+missing-step path. That opens generic Add Funds and later returns to Buy. It is
+not yet the approved section 2.10 experience in which the market, destination,
+shortfall, and recommended source are already fixed and the user sees one
+`Fund & Buy` review followed only by operation progress and a fresh Buy quote.
+Until that caller is replaced, WP7 should not be described as fully closed.
 
 ## Activation and next work
 

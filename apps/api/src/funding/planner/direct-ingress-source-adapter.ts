@@ -71,6 +71,7 @@ function sourceOption(input: {
   safeLabel: string;
   expiresAt: string;
   destinationAddress: string;
+  recommended: boolean;
 }): SourceOption {
   const ingress = instruction({
     planning: input.planning,
@@ -125,7 +126,7 @@ function sourceOption(input: {
       },
     ],
     expiresAt: input.expiresAt,
-    recommended: false,
+    recommended: input.recommended,
     selectable: true,
     reasonCodes: [],
   };
@@ -235,9 +236,10 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
       planning: input,
       kind: "manual_receive",
       ingressKind: "manual",
-      safeLabel: "Deposit to Hunch",
+      safeLabel: "Deposit crypto",
       expiresAt,
       destinationAddress,
+      recommended: true,
     });
     const sources: PlannedSourceOption[] = [plannedSource(input, manual)];
     const privyEnabled = input.policy.privyFundingMethods.some(
@@ -259,6 +261,7 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
         safeLabel: "Fund with Privy",
         expiresAt,
         destinationAddress,
+        recommended: false,
       });
       sources.push(plannedSource(input, privy));
     }

@@ -141,6 +141,8 @@ assert.equal(manualOnly[0]?.option.amountMode, "exact_output");
 assert.equal(manualOnly[0]?.option.ingress?.destinationAddress, ADDRESS);
 assert.equal(manualOnly[0]?.option.ingress?.requestedAmount?.raw, "3000000");
 assert.equal(manualOnly[0]?.option.ingress?.amountSemantics, "minimum");
+assert.equal(manualOnly[0]?.option.safeLabel, "Deposit crypto");
+assert.equal(manualOnly[0]?.option.recommended, true);
 assert.equal(
   manualOnly[0]?.commitPlan.operation.initialState.status,
   "awaiting_external_funds",
@@ -168,6 +170,7 @@ assert.deepEqual(
   ["manual_receive", "privy_funding_method"],
 );
 assert.equal(withPrivy[1]?.option.ingress?.ingressKind, "privy");
+assert.equal(withPrivy[1]?.option.recommended, false);
 sourceOptionSchema.parse(withPrivy[1]?.option);
 
 console.log(

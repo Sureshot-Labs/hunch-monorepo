@@ -88,9 +88,9 @@ function recommendedSource(
   return (
     [...selectable].sort(
       (left, right) =>
-        Number(right.option.recommended) - Number(left.option.recommended) ||
         Number(left.option.source.kind === "external_ingress") -
           Number(right.option.source.kind === "external_ingress") ||
+        Number(right.option.recommended) - Number(left.option.recommended) ||
         left.option.sourceOptionId.localeCompare(right.option.sourceOptionId),
     )[0] ?? null
   );

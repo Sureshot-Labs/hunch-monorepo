@@ -281,13 +281,14 @@ assert.equal(sponsored[0]?.quoteMinimumOutput?.raw, "3000000");
 assert.equal(sponsored[0]?.maximumSourceRaw, "4000000");
 assert.equal(sponsored[0]?.nativeGasReady, true);
 
-const externalWithoutGas = deriveProductionRelayEligibleSourceFacts({
-  accountId: ACCOUNT_ID,
-  account: account({ internal: false }),
-  policy: policy(),
-  requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
-});
-assert.equal(externalWithoutGas[0]?.nativeGasReady, false);
+const externalWalletIsNotADefaultSource =
+  deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: account({ internal: false }),
+    policy: policy(),
+    requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+  });
+assert.equal(externalWalletIsNotADefaultSource.length, 0);
 
 const excludedByPreference = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,

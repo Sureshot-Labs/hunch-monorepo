@@ -1,6 +1,6 @@
 # Hunch Unified Account Value and Relay-First Funding Plan
 
-Status: normative implementation plan, reviewed correction revision 4
+Status: normative implementation plan, reviewed correction revision 5
 Scope: current Hunch frontend and backend; Polymarket and Limitless active;
 Kalshi/DFlow new exposure disabled with legacy exit-only safety preserved; future
 venues represented only through contracts
@@ -361,17 +361,21 @@ type TradingWalletReadinessClass =
 `external_ready` requires a connected signer/controller, a supported wallet or
 Safe threshold, a deployed and registered venue funding wallet where required,
 credentials/approvals, and an exact supported execution path. Setup-capable
-wallets may offer `Set up this external wallet`. Source-only wallets may fund
-the internal Hunch Trading Wallet through an explicit signed operation but
-cannot be presented as executable venue bindings.
+wallets may offer `Set up this external wallet` only in a separate advanced
+surface. Source-only wallets are inventory evidence but are not enumerated as
+normal `Pay with` balances in the initial rollout. External money enters the
+normal Add Funds flow through an explicit direct Receive or configured Privy
+handoff; a future advanced connected-wallet source contract may add a signed
+route without changing the normal destination.
 
 For a new Buy or Add Funds intent, `Use Hunch Trading Wallet` is the primary
-path. `Set up this external wallet` appears as a secondary alternative only
-after the user explicitly opens or selects that external wallet. Funding from
-the external source remains an explicit transfer/conversion and signature.
-Hunch never silently pulls external assets or moves internal funds into an
-external wallet. For Sell or Redeem, the position-owning binding is mandatory:
-switching to the Hunch wallet cannot act on a position owned by an external Safe.
+path. `Set up this external wallet` appears only after the user explicitly
+opens a separate advanced external-wallet flow. The initial normal flow neither
+lists nor auto-selects a connected external balance. A future signed external
+source route remains explicit and user-controlled. Hunch never silently pulls
+external assets or moves internal funds into an external wallet. For Sell or
+Redeem, the position-owning binding is mandatory: switching to the Hunch wallet
+cannot act on a position owned by an external Safe.
 
 Readiness is purpose- and market-class-specific, not a venue-wide boolean.
 Wallet provisioning, venue connection, contract-wallet deployment/registration,
@@ -407,8 +411,10 @@ The initial product behavior is now closed:
 4. one valid destination skips the destination step; several valid destinations
    require an explicit card selection, with Polymarket visibly recommended;
 5. the internal Hunch Trading Wallet is the only normal destination path;
-   external wallets may fund it as explicit sources, while external venue setup
-   is available only from a separate explicit advanced flow.
+   Hunch-owned balances, direct Receive, and configured Privy methods are the
+   initial source paths. Connected external-wallet balances are not listed in
+   normal `Pay with`; their venue setup or signed-source use requires a separate
+   explicit advanced flow.
 
 Normative Add Funds decision flow:
 
@@ -478,13 +484,39 @@ No destination chain, token address, or provider choice is required.
 #### Exchange user with USDC
 
 1. Opens Add Funds from web or Telegram handoff.
-2. Chooses exchange/manual transfer and source network/asset only when necessary.
-3. Hunch issues an owned Receive target or an activation-gated strict Relay
-   Deposit Address instruction. The owned Receive target may be reached by
-   several transfers and may be exceeded; the Relay address remains exact.
+2. Chooses `Deposit crypto`; Hunch shows the exact asset and network accepted by
+   the selected Trading Balance. The user does not choose an arbitrary source
+   token for a direct Receive.
+3. Hunch issues an owned Receive target in that exact destination asset/network.
+   It may be reached by several transfers and may be exceeded. A different
+   source asset/network requires a separately activation-gated strict Relay
+   Deposit Address; it is not silently composed with direct Receive.
 4. Backend observes and correlates the transfer; the user returns to Buy.
 
 The plan never uses an exchange hot-wallet sender as the refund address.
+
+#### External-address Add Funds contract
+
+The initial product contract is intentionally narrow:
+
+| User's funds are currently in                                                                                    | Normal `Pay with` option                           | Result                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| a Hunch-owned embedded wallet, including supported SOL                                                           | an opaque existing-balance/combined-balance option | Hunch may quote one Relay leg or a bounded independent multi-leg operation                                  |
+| any external wallet or exchange, already holding the destination collateral on the destination network           | `Deposit crypto`                                   | show the exact owned Receive address; partial transfers accumulate and excess remains Account Value         |
+| a configured Privy funding method                                                                                | `Fund with Privy`                                  | hand off the exact destination and wait for backend observation                                             |
+| an external wallet or exchange holding a different asset/network, for example SOL outside Hunch for Polygon pUSD | no initial one-operation option                    | fail closed until a strict Relay Deposit Address or a separate advanced signed-source contract is activated |
+
+The direct Receive address is the selected Hunch-owned final Trading Balance
+destination, not a Relay address. It accepts only the displayed asset/network.
+Its displayed amount is a minimum target, not an invoice: underpayment remains
+pending, overpayment remains available, and several transfers may satisfy the
+same operation.
+
+A strict Relay Deposit Address is a different, exact-amount provider contract.
+It is disabled by default and never masquerades as direct Receive. The initial
+flow also does not implement `external deposit -> Hunch intermediate wallet ->
+automatic second route` as one operation; that is the staged two-segment
+contract explicitly excluded by sections 3.2, 6.2, and 13.8.
 
 #### Existing Polymarket trader
 
@@ -1621,7 +1653,7 @@ committed directly.
 
 Ingress options are distinct from executable wallet sources:
 
-- existing embedded/linked wallet asset;
+- existing Hunch-owned embedded wallet asset;
 - Privy configured funding method;
 - minimum-target manual Receive instruction;
 - Relay Deposit Address instruction;
@@ -1637,8 +1669,10 @@ The UI vocabulary is deliberately two-dimensional:
 When each side has one valid option, go directly to review. Show `Where to add`
 only for multiple real destinations. Show the recommended `Pay with` plus
 `Change` only for multiple real sources. Internal managed sources are preferred
-for simplicity, but an external source may be offered with an explicit wallet
-signature. A linked external balance is never auto-pulled.
+for simplicity. The initial normal selector does not enumerate linked external
+balances; external money is represented by direct Receive or Privy ingress.
+A future advanced connected-wallet source must require its explicit supported
+signature and can never be auto-pulled.
 
 ### 10.4 Multiple venue bindings
 
@@ -2660,11 +2694,12 @@ when several real source choices differ materially. Destination venue can be
 changed through opaque valid internal-Hunch options, but wallet, chain, and
 collateral remain backend-resolved.
 
-External wallets never appear in the normal destination list. They may still
-appear under `Pay with` and require their explicit signature, or be configured
-through a separate advanced flow. Source-only/view-only wallets are never
-destinations. Hunch never moves an internal balance into an external wallet
-silently.
+External wallets never appear in the normal destination list or as balance
+rows in the initial normal `Pay with` selector. External funds enter through
+the product-level `Deposit crypto` or configured Privy options. A connected
+wallet signer or external venue binding belongs to a separate advanced flow.
+Source-only/view-only wallets are never destinations. Hunch never moves an
+internal balance into an external wallet silently.
 
 Tokens are a section of the same source selector, not a separate orchestration
 product. Suggestion preference is editable from Tokens but conversion always
@@ -2771,10 +2806,14 @@ Sell/Redeem.
 
 ### 19.4 Exchange or manual transfer
 
-1. User selects exchange/manual source and the exact source asset/network.
-2. Exchange ingress uses direct owned Receive in the initial rollout. A
-   controlled-wallet source may offer a separately gated strict/exact Relay
-   Deposit Address only with a verified user-owned refund location.
+1. User selects `Deposit crypto` after the destination and desired receipt
+   amount are known.
+2. Initial exchange/manual ingress uses direct owned Receive in the exact
+   destination collateral and network. The UI displays those immutable details;
+   it does not imply that arbitrary source assets can be sent to that address.
+   A controlled-wallet source on a different asset/network may offer a
+   separately gated strict/exact Relay Deposit Address only with a verified
+   user-owned refund location.
 3. For Relay, commit and persist request/address/refund facts before display.
 4. User sends only the instructed asset/network. For direct owned Receive the
    displayed amount is a target: a smaller transfer remains pending, and an
@@ -2852,8 +2891,9 @@ if it would delay the core Add Funds/trade-shortfall path.
    and requires the supported client signature.
 3. The internal Hunch binding remains the normal path; Deposit never asks the
    user to switch between internal and external venue wallets.
-4. `external_source_only` may appear only under `Pay with`; funding the Hunch
-   wallet is an explicit signed transfer/conversion.
+4. `external_source_only` is not listed as a balance row in the initial normal
+   `Pay with`. The normal external-money choices are direct Receive and Privy.
+   A later advanced signed-source flow may explicitly bind and route that wallet.
 5. `external_view_only` contributes eligible estimated value but is not actionable.
 6. No balance comparison silently changes the selected Trading Wallet.
 
@@ -2887,47 +2927,47 @@ if it would delay the core Add Funds/trade-shortfall path.
 
 ## 20. Failure and side-effect audit
 
-| Condition                                          | Required behavior                                                               | Forbidden behavior                                            |
-| -------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Price source stale                                 | mark component stale/partial                                                    | show old price as current                                     |
-| Token unpriced                                     | show `estimatedUsd: null`                                                       | count it as zero or guessed value                             |
-| Provider unavailable                               | preserve Account Value; route unavailable                                       | remove owned asset from headline                              |
-| Source debit observed, destination pending         | replace source with one in-transit estimate                                     | drop value or count both                                      |
-| Ambiguous broadcast                                | reconcile required                                                              | retry/broadcast again                                         |
-| Quote expires before signature                     | re-quote and re-confirm changed economics                                       | submit stale action                                           |
-| Quote omits source option or changes amount        | reject and return fresh discovery                                               | infer a source or mutate the quote                            |
-| Cross-user opaque ID                               | return no resource and audit/rate-limit                                         | reveal ownership or operate on it                             |
-| Relay unknown status                               | preserve raw status and reconcile                                               | map optimistically to success/failure                         |
-| Relay child requote                                | attach child request to same operation                                          | create unrelated user operation                               |
-| Deposit wrong asset/network                        | recovery/support state                                                          | pretend committed route settled                               |
-| Deposit-address under/overpayment                  | apply pinned mode behavior and actual amount                                    | assume requested amount arrived                               |
-| Unsafe refund address                              | route unavailable                                                               | refund to exchange hot wallet                                 |
-| CEX or Privy source requests Relay deposit address | offer direct owned Receive/handoff                                              | create initial-plan Relay instruction                         |
-| Privy modal closes                                 | continue awaiting observation                                                   | mark funding complete                                         |
-| Privy says submitted                               | record progress                                                                 | credit destination cash                                       |
-| Destination cash observed                          | run required venue preparation                                                  | mark venue executable prematurely                             |
-| PM router caller mismatch                          | use owner-authenticated follow-up                                               | pass unverified Relay destination call                        |
-| Slow route                                         | Prepare Funds                                                                   | hold old market quote or auto-buy                             |
-| Trade abandoned after preparation                  | release reservation as venue cash                                               | bridge funds back automatically                               |
-| Existing Limitless balance covers source           | move only shortfall                                                             | sweep whole balance                                           |
-| Headline includes positions                        | change display label/composition only                                           | use positions as executable liquidity                         |
-| Multiple Add Funds destinations                    | show one internal-Hunch venue card and mark recommendation                       | expose wallet/network/collateral choice or auto-commit        |
-| One destination and one source                     | go directly to review                                                           | show redundant selection screens                              |
-| External wallet has larger balance                 | keep position/explicit-current-intent/internal precedence                       | silently switch Trading Wallet                                |
-| External source selected                           | require supported user signature                                                | server-pull linked assets                                     |
-| External wallet lacks venue setup                  | keep it outside normal Deposit; use a separate explicit advanced flow           | call it ready because address/balance exists                  |
-| External binding owns position                     | prepare/redeem through that owner binding                                       | switch to Hunch wallet for redemption                         |
-| Token suggestion preference changes                | affect future source suggestions only                                           | mutate active operation, wallet selection, or rebalance money |
-| Across/deBridge new fallback disabled              | do not query/create                                                             | silently use legacy provider                                  |
-| Legacy operation active                            | reconcile stored adapter version                                                | migrate provider mid-flight                                   |
-| deBridge cancellation needs gas                    | recovery action required                                                        | claim automatic refund                                        |
-| Sponsorship policy revoked                         | fail closed with repair action                                                  | fall back to generic signer                                   |
-| Unknown action/calldata                            | reject and alert                                                                | forward provider payload                                      |
-| Duplicate webhook                                  | idempotent reconcile                                                            | regress or duplicate operation                                |
-| Canonical observation reorgs                       | retain evidence and recompute derived state                                     | leave settled value/order eligibility unchanged               |
-| Creation mode turns off mid-operation              | block new work; continue observation/reconcile/refund/recovery                  | stop worker or mark active work failed                        |
-| Browser/bot restarts                               | resume from backend operation                                                   | depend on local reducer state                                 |
-| Disabled venue                                     | omit exact venue capabilities                                                   | infer readiness from indexed data                             |
+| Condition                                          | Required behavior                                                     | Forbidden behavior                                            |
+| -------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Price source stale                                 | mark component stale/partial                                          | show old price as current                                     |
+| Token unpriced                                     | show `estimatedUsd: null`                                             | count it as zero or guessed value                             |
+| Provider unavailable                               | preserve Account Value; route unavailable                             | remove owned asset from headline                              |
+| Source debit observed, destination pending         | replace source with one in-transit estimate                           | drop value or count both                                      |
+| Ambiguous broadcast                                | reconcile required                                                    | retry/broadcast again                                         |
+| Quote expires before signature                     | re-quote and re-confirm changed economics                             | submit stale action                                           |
+| Quote omits source option or changes amount        | reject and return fresh discovery                                     | infer a source or mutate the quote                            |
+| Cross-user opaque ID                               | return no resource and audit/rate-limit                               | reveal ownership or operate on it                             |
+| Relay unknown status                               | preserve raw status and reconcile                                     | map optimistically to success/failure                         |
+| Relay child requote                                | attach child request to same operation                                | create unrelated user operation                               |
+| Deposit wrong asset/network                        | recovery/support state                                                | pretend committed route settled                               |
+| Deposit-address under/overpayment                  | apply pinned mode behavior and actual amount                          | assume requested amount arrived                               |
+| Unsafe refund address                              | route unavailable                                                     | refund to exchange hot wallet                                 |
+| CEX or Privy source requests Relay deposit address | offer direct owned Receive/handoff                                    | create initial-plan Relay instruction                         |
+| Privy modal closes                                 | continue awaiting observation                                         | mark funding complete                                         |
+| Privy says submitted                               | record progress                                                       | credit destination cash                                       |
+| Destination cash observed                          | run required venue preparation                                        | mark venue executable prematurely                             |
+| PM router caller mismatch                          | use owner-authenticated follow-up                                     | pass unverified Relay destination call                        |
+| Slow route                                         | Prepare Funds                                                         | hold old market quote or auto-buy                             |
+| Trade abandoned after preparation                  | release reservation as venue cash                                     | bridge funds back automatically                               |
+| Existing Limitless balance covers source           | move only shortfall                                                   | sweep whole balance                                           |
+| Headline includes positions                        | change display label/composition only                                 | use positions as executable liquidity                         |
+| Multiple Add Funds destinations                    | show one internal-Hunch venue card and mark recommendation            | expose wallet/network/collateral choice or auto-commit        |
+| One destination and one source                     | go directly to review                                                 | show redundant selection screens                              |
+| External wallet has larger balance                 | keep position/explicit-current-intent/internal precedence             | silently switch Trading Wallet                                |
+| External source selected                           | require supported user signature                                      | server-pull linked assets                                     |
+| External wallet lacks venue setup                  | keep it outside normal Deposit; use a separate explicit advanced flow | call it ready because address/balance exists                  |
+| External binding owns position                     | prepare/redeem through that owner binding                             | switch to Hunch wallet for redemption                         |
+| Token suggestion preference changes                | affect future source suggestions only                                 | mutate active operation, wallet selection, or rebalance money |
+| Across/deBridge new fallback disabled              | do not query/create                                                   | silently use legacy provider                                  |
+| Legacy operation active                            | reconcile stored adapter version                                      | migrate provider mid-flight                                   |
+| deBridge cancellation needs gas                    | recovery action required                                              | claim automatic refund                                        |
+| Sponsorship policy revoked                         | fail closed with repair action                                        | fall back to generic signer                                   |
+| Unknown action/calldata                            | reject and alert                                                      | forward provider payload                                      |
+| Duplicate webhook                                  | idempotent reconcile                                                  | regress or duplicate operation                                |
+| Canonical observation reorgs                       | retain evidence and recompute derived state                           | leave settled value/order eligibility unchanged               |
+| Creation mode turns off mid-operation              | block new work; continue observation/reconcile/refund/recovery        | stop worker or mark active work failed                        |
+| Browser/bot restarts                               | resume from backend operation                                         | depend on local reducer state                                 |
+| Disabled venue                                     | omit exact venue capabilities                                         | infer readiness from indexed data                             |
 
 ## 21. Runtime policy and admin control
 
@@ -3352,7 +3392,7 @@ At minimum:
 | any enabled source                | Limitless slow route       | Prepare Funds                       | measured latency, fresh Buy                            |
 | eligible cash                     | validated user destination | withdrawal                          | destination ID, recovery                               |
 | external ready binding            | active venue               | explicit Trading Wallet             | signer, setup, readiness                               |
-| external source-only wallet       | internal Hunch destination | explicit funding                    | client signature, observation                          |
+| external source-only wallet       | internal Hunch destination | future advanced explicit funding    | separate activation, client signature, observation     |
 | owned PM position                 | owner PM binding           | redeem                              | owner proof, preparation, action validation            |
 | owned Limitless position          | owner Limitless binding    | standard redeem                     | resolution, token balance, canonical CTF call, receipt |
 | owned Limitless neg-risk position | owner Limitless binding    | neg-risk redeem                     | resolution, adapter, approval, receipt                 |
@@ -4010,13 +4050,21 @@ Completion evidence:
 
 ### Work package 7 — One web UX
 
-Implementation status (2026-07-24): **locally complete and reviewed for the
-web transaction-capable paths; no production activation.** Shared typed
-clients, controller/reducers, desktop/mobile wrappers, exact owner references,
-multi-leg execution, direct/Privy ingress presentation, token suggestion
-preference, Funding Activity, Buy/Sell preparation, and owner-bound redemption
-are implemented. Browser submission never declares funding or redemption
-complete, and reload recovery reads authoritative backend state.
+Implementation status (reviewed 2026-07-25): **the generic web Add Funds,
+Convert, Activity, recovery, and owner-bound action foundations are locally
+implemented; WP7 is not yet closed as the complete approved web journey.**
+Shared typed clients, controller/reducers, desktop/mobile wrappers, exact owner
+references, multi-leg execution, direct/Privy ingress presentation, token
+suggestion preference, Funding Activity, Buy/Sell preparation, and owner-bound
+redemption are implemented. Browser submission never declares funding or
+redemption complete, and reload recovery reads authoritative backend state.
+
+The remaining user-visible WP7 gap is trade-shortfall adoption: current
+Confirmation missing-step callers still open the generic Deposit dialog and
+return to a later Buy. They do not yet implement section 2.10's dedicated
+`Fund & Buy` review/progress contract. External cross-asset ingress is also not
+an initial one-operation path: direct Receive accepts only destination
+collateral, while strict Relay Deposit Addresses remain gated off.
 
 Privy EVM/Solana wallet creation remains exclusively in the existing
 `AuthProvider`; WP7 callers only consume typed missing-wallet prerequisites and
@@ -4036,9 +4084,10 @@ Required work:
 
 - implement shared account-value, asset, liquidity, quote, and operation hooks;
 - implement conditional `Where to add` and `Pay with`: normal destinations are
-  venue cards backed by exact opaque internal-Hunch bindings; connected
-  external wallets remain explicit sources or separate advanced setup and do
-  not appear in the normal destination list;
+  venue cards backed by exact opaque internal-Hunch bindings; the initial
+  normal source list contains Hunch-owned balances, direct Receive, and
+  configured Privy methods. Connected external wallet balances and their setup
+  remain a separate advanced contract and do not appear in the normal list;
 - implement runtime-controlled headline presentation and current-intent Trading
   Wallet selection without a preferences settings surface;
 - replace Deposit orchestration with one controller and thin desktop/mobile renderers;
@@ -4071,7 +4120,11 @@ Completion evidence:
 - modal/client success never completes funding;
 - reload resumes backend state;
 - one destination/source proceeds directly, while real alternatives remain discoverable;
-- external source requires an explicit signature and is never silently pulled;
+- a Buy shortfall uses the dedicated section 2.10 `Fund & Buy` caller instead
+  of opening the generic Deposit wizard;
+- direct external ingress requires an explicit transfer/handoff and backend
+  observation; any future connected-wallet source requires an explicit
+  signature and is never silently pulled;
 - the initial UI contains no headline toggle or remembered-wallet setting.
 - internal preparation implementation names never appear in normal product
   copy;
@@ -4250,7 +4303,8 @@ stops new selection but preserves status polling/webhooks.
    `liquid_plus_positions` (`Portfolio value`) without changing execution logic.
 3. Account Value includes one conservative in-transit claim after source debit.
 4. `Available now` is always intent- and binding-specific.
-5. Generic Add Funds places the full confirmed/received amount.
+5. Generic Add Funds satisfies the confirmed target; partial direct Receive
+   remains pending and any excess remains ordinary owned Account Value.
 6. Existing placed capital moves shortfall only.
 7. Active trade fixes destination; generic Add Funds requires a choice when
    several valid destinations exist, with Polymarket initially recommended.

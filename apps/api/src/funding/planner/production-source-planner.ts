@@ -399,7 +399,11 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
         (!nativeSolSource ||
           availability.reasonCodes.includes("cash_availability_unknown"))) ||
       BigInt(availability.availableRaw) <= 0n ||
-      !profile
+      !profile ||
+      // Linked external wallets are inventory evidence, not default Add Funds
+      // sources. They need a separate explicit advanced signer contract; the
+      // initial flow accepts external money only through direct ingress.
+      profile.source === "external"
     ) {
       continue;
     }
