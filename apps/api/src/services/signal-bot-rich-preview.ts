@@ -6,7 +6,6 @@ import {
   telegramRichDivider,
   telegramRichFooter,
   telegramRichHeading,
-  telegramRichMarked,
   telegramRichMetricsTable,
   telegramRichParagraph,
   telegramRichReference,
@@ -41,7 +40,7 @@ function richPreviewHeadline(input: {
 }): TelegramRichText {
   return telegramRichText(
     `${input.emoji} `,
-    telegramRichMarked(input.hook),
+    telegramRichBold(input.hook),
     ` ${input.continuation}`,
   );
 }
@@ -349,7 +348,7 @@ function buildSignalBotRichPreviewFixtures(
         telegramRichHeading(
           telegramRichText(
             `${headingCopy.emoji} `,
-            telegramRichMarked(headingCopy.hook),
+            telegramRichBold(headingCopy.hook),
           ),
           5,
         ),

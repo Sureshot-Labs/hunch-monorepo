@@ -119,6 +119,22 @@ import {
 } from "./signal-delivery-target.js";
 import { resolveSignalBotVenueLifecycle } from "./signal-bot-venue-lifecycle.js";
 import {
+  buildSignalBotStructuredNarrative,
+  emphasizeSignalBotNarrativeText,
+  formatSignalBotPreciseCompactUsd,
+  formatSignalNotificationHeadlineRichText,
+  splitSignalBotNarrative,
+} from "./signal-bot-editorial-copy.js";
+import {
+  formatHunchTelegramTitle,
+  formatSignalNotificationHeadlineMarkdown,
+  formatTelegramBlockquote,
+  formatTelegramItalic,
+  formatTelegramLink,
+  formatTelegramNativeTitle,
+  joinTelegramMessageBlocks,
+} from "./signal-bot-markdown-format.js";
+import {
   buildSignalBotMarketSearchQueryPrompt,
   buildSignalBotMarketSearchScreen,
   writeSignalBotMarketSearchSession,
@@ -151,7 +167,6 @@ import {
 import {
   telegramCustomEmojiId,
   telegramCustomEmojiIdForVenue,
-  telegramCustomEmojiMarkdownV2,
 } from "./telegram-custom-emoji.js";
 import { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
@@ -161,7 +176,6 @@ import {
   formatTelegramCodeMarkdownV2,
   formatTelegramFieldMarkdownV2,
   joinTelegramMarkdownV2Lines,
-  TELEGRAM_VISUAL_BLANK_LINE,
 } from "./telegram-bot-trading-presentation.js";
 import {
   clearSignalBotMenuInput,
@@ -177,7 +191,6 @@ import {
 import {
   telegramRichBold,
   telegramRichItalic,
-  telegramRichMarked,
   telegramRichMetricsTable,
   telegramRichParagraph,
   telegramRichText,
@@ -819,95 +832,6 @@ function formatTelegramBold(value: string): string {
   return `*${escapeTelegramMarkdownV2(value)}*`;
 }
 
-function formatHunchTelegramTitle(value: string): string {
-  return `${telegramCustomEmojiMarkdownV2("hunch")} ${formatTelegramBold(value)}`;
-}
-
-function formatTelegramNativeTitle(icon: string, value: string): string {
-  return `${icon} ${formatTelegramBold(value)}`;
-}
-
-function formatTelegramItalic(value: string): string {
-  return `_${escapeTelegramMarkdownV2(value)}_`;
-}
-
-function formatTelegramLink(label: string, url: string): string {
-  return `__[${escapeTelegramMarkdownV2(label)}](${escapeTelegramMarkdownV2Url(url)})__`;
-}
-
-function formatSignalNotificationHeadlineMarkdown(
-  headline: SignalNotificationHeadline,
-): string {
-  const continuation = headline.continuation
-    ? ` ${escapeTelegramMarkdownV2(headline.continuation)}`
-    : "";
-  return `${headline.emoji} ${formatTelegramBold(headline.hook)}${continuation}`;
-}
-
-function formatSignalNotificationHeadlineRichText(
-  headline: SignalNotificationHeadline,
-): TelegramRichText {
-  return telegramRichText(
-    `${headline.emoji} `,
-    telegramRichMarked(headline.hook),
-    headline.continuation ? ` ${headline.continuation}` : null,
-  );
-}
-
-function emphasizeSignalBotNarrativeString(value: string): TelegramRichText {
-  const metricPattern =
-    /([+−-]?\$\d[\d,.]*(?:\.\d+)?[KMB]?|\d+(?:\.\d+)?%|\d+(?:\.\d+)?¢)/g;
-  const parts = value.split(metricPattern);
-  return telegramRichText(
-    ...parts.map((part, index) =>
-      index % 2 === 1 ? telegramRichBold(part) : part,
-    ),
-  );
-}
-
-function emphasizeSignalBotNarrativeText(
-  value: TelegramRichText,
-): TelegramRichText {
-  if (typeof value === "string")
-    return emphasizeSignalBotNarrativeString(value);
-  if (Array.isArray(value)) {
-    return value.map(emphasizeSignalBotNarrativeText);
-  }
-  if ("text" in value) {
-    return { ...value, text: emphasizeSignalBotNarrativeText(value.text) };
-  }
-  return value;
-}
-
-function splitSignalBotNarrative(value: string): string[] {
-  const sentences =
-    typeof Intl.Segmenter === "function"
-      ? Array.from(
-          new Intl.Segmenter("en", { granularity: "sentence" }).segment(value),
-          (segment) => segment.segment.trim(),
-        ).filter(Boolean)
-      : value
-          .split(/(?<=[.!?])\s+/)
-          .map((sentence) => sentence.trim())
-          .filter(Boolean);
-  if (sentences.length <= 2) return sentences;
-  return [sentences[0] ?? value, sentences.slice(1).join(" ")];
-}
-
-function joinTelegramMessageBlocks(
-  blocks: Array<string | null | undefined>,
-): string {
-  return blocks
-    .filter((block): block is string => Boolean(block?.trim()))
-    .join(`\n${TELEGRAM_VISUAL_BLANK_LINE}\n`);
-}
-
-function formatTelegramBlockquote(lines: string[]): string {
-  return lines
-    .map((line) => `>${line || TELEGRAM_VISUAL_BLANK_LINE}`)
-    .join("\n");
-}
-
 function cleanSignalBotDisplayText(
   value: string | null | undefined,
 ): string | null {
@@ -1486,6 +1410,13 @@ export function buildSignalBotMessage(input: {
   const richTableMarketValue = marketMiniAppUrl
     ? telegramRichUrl(telegramRichBold(tableMarketLabel), marketMiniAppUrl)
     : telegramRichBold(tableMarketLabel);
+  const currentSideLabel = buySide
+    ? resolveSignalBotCurrentSideLabel({
+        presentation,
+        side: buySide,
+        sideCopy: buySideCopy,
+      })
+    : null;
   const bodyRenderer = createSignalBotBodyTextRenderer(
     note,
     holderMiniAppUrl,
@@ -1517,7 +1448,7 @@ export function buildSignalBotMessage(input: {
   const canonicalDescription = sanitizedDescription
     ? normalizeTelegramPresentationAliases(sanitizedDescription, presentation)
     : null;
-  const description =
+  const fallbackDescription =
     canonicalDescription ??
     (messageKind === "initial" && buySideCopy
       ? formatSignalBotDescriptionFallback(buySideCopy)
@@ -1527,15 +1458,34 @@ export function buildSignalBotMessage(input: {
             notificationCopy.researchDelta,
           )
         : null);
+  const structuredNarrative = buildSignalBotStructuredNarrative({
+    evidenceRows,
+    editorialProbability: notificationCopy.editorialProbability,
+    headlineTemplateKey: notificationCopy.headline.templateKey,
+    marketLabel: notificationCopy.marketLabel,
+    messageKind,
+    note,
+    price: displayPrice,
+    researchDelta: notificationCopy.researchDelta,
+    side: buySide,
+    sideLabel: currentSideLabel,
+  });
+  const description = structuredNarrative
+    ? structuredNarrative.join("\n\n")
+    : fallbackDescription;
   const summary = description ? bodyRenderer.render(description) : null;
-  const richSummary = description
-    ? telegramRichText(
-        ...splitSignalBotNarrative(description).flatMap((paragraph, index) => [
-          ...(index > 0 ? (["\n\n"] as TelegramRichText[]) : []),
-          emphasizeSignalBotNarrativeText(richBodyRenderer.render(paragraph)),
-        ]),
-      )
-    : null;
+  const richSummaryParagraphs =
+    structuredNarrative ??
+    (description ? splitSignalBotNarrative(description) : []);
+  const richSummary =
+    richSummaryParagraphs.length > 0
+      ? telegramRichText(
+          ...richSummaryParagraphs.flatMap((paragraph, index) => [
+            ...(index > 0 ? (["\n\n"] as TelegramRichText[]) : []),
+            emphasizeSignalBotNarrativeText(richBodyRenderer.render(paragraph)),
+          ]),
+        )
+      : null;
   const researchPosition =
     messageKind === "research_update" && buySide
       ? formatSignalBotResearchPosition({
@@ -1558,13 +1508,35 @@ export function buildSignalBotMessage(input: {
         ),
       )
     : null;
+  const researchTrackRecord =
+    messageKind === "research_update" &&
+    note.holderActorMode === "single_holder"
+      ? scalarSignalEvidenceValue(evidenceRows, "track_record", "usd")
+      : null;
+  const researchPositionRows = researchPosition
+    ? [
+        ...researchPosition.rows,
+        ...(researchTrackRecord?.measurement.kind === "scalar" &&
+        researchTrackRecord.measurement.value !== 0
+          ? [
+              {
+                label: `Wallet ${researchTrackRecord.horizonDays ?? 30}d PnL`,
+                value: formatSignalBotPreciseCompactUsd(
+                  researchTrackRecord.measurement.value,
+                  true,
+                ),
+              },
+            ]
+          : []),
+      ]
+    : [];
   const renderedRichResearchPositionRows = researchPosition
     ? [
         {
           label: "Market",
           value: richTableMarketValue,
         },
-        ...researchPosition.rows.map((row) => ({
+        ...researchPositionRows.map((row) => ({
           label: row.label,
           value: telegramRichBold(
             richBodyRenderer.render(
@@ -1588,13 +1560,6 @@ export function buildSignalBotMessage(input: {
     messageKind === "initial" && supportingEvidenceRows.length > 0
       ? formatSignalBotEvidenceBlock(supportingEvidenceRows)
       : null;
-  const currentSideLabel = buySide
-    ? resolveSignalBotCurrentSideLabel({
-        presentation,
-        side: buySide,
-        sideCopy: buySideCopy,
-      })
-    : null;
   const richInitialPositionTable =
     messageKind === "initial" && buySide && currentSideLabel
       ? formatSignalBotInitialPositionRichTable({
@@ -7117,6 +7082,14 @@ function formatSignalBotFollowthroughRead(input: {
     return `${behavior}The trade has largely played out, and some early holders are no longer waiting for the final cent.`;
   }
   if (priceMoveCents != null && priceMoveCents > 0) {
+    if (
+      input.stats.joinedOrAddedWallets > 0 &&
+      input.stats.netSignalSideFlowUsd > 0 &&
+      input.stats.exitedWallets === 0 &&
+      input.stats.trimmedWallets <= input.stats.joinedOrAddedWallets
+    ) {
+      return `Fresh buying kept coming in as ${marketLabel} rose, suggesting conviction has not faded after the rally.`;
+    }
     if (input.dominantConfluence) {
       const outcome =
         input.stats.markPrice != null && input.stats.markPrice >= 0.95
@@ -7280,7 +7253,14 @@ function formatSignalBotFollowthroughLead(input: {
     stats.priceMoveCents > 0 &&
     stats.netSignalSideFlowUsd > 0
   ) {
-    return "The original call now has both market movement and fresh tracked buying behind it.";
+    if (stats.entryPrice != null && stats.markPrice != null) {
+      return `The market has moved from ${formatCents(
+        stats.entryPrice,
+      )} to ${formatCents(
+        stats.markPrice,
+      )} since the original call, but large wallets continue building their position instead of taking profit.`;
+    }
+    return "The market has moved since the original call, but large wallets continue building their position instead of taking profit.";
   }
   if (
     stats.exitedWallets > 0 ||
@@ -9019,6 +8999,7 @@ function buildSignalBotInitialNotificationCopy(input: {
   side: "NO" | "YES" | null;
 }): {
   headline: SignalNotificationHeadline;
+  editorialProbability: number | null;
   marketLabel: string;
   publishable: boolean;
   researchDelta: SignalBotResearchDelta | null;
@@ -9111,7 +9092,7 @@ function buildSignalBotInitialNotificationCopy(input: {
     currentPrice == null
       ? null
       : positionDirection === "against"
-        ? 1 - currentPrice
+        ? (input.note.signalPriceSnapshotV1?.YES.mark ?? 1 - currentPrice)
         : currentPrice;
   const trackedMoney = input.side
     ? resolveSignalBotTrackedMoneyContext(input.note, input.side)
@@ -9124,6 +9105,7 @@ function buildSignalBotInitialNotificationCopy(input: {
     ? isSignalNotificationSubjectComplete(subject.text, input.side)
     : false;
   return {
+    editorialProbability,
     headline: buildSignalNotificationHeadline({
       actorOpenPnlUsd,
       actorPnlEvidenceId: headlineTrackRecord?.id ?? null,
@@ -9234,6 +9216,18 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
           presentation,
         }).text
       : subject.text;
+  const headlineEditorialSubject = (() => {
+    const eventTitle = cleanPublicMarketText(input.candidate.event_title);
+    if (
+      eventTitle &&
+      /\bnato\b/i.test(eventTitle) &&
+      /\brussia\b/i.test(eventTitle) &&
+      /\b(?:clash|conflict|confrontation)\b/i.test(eventTitle)
+    ) {
+      return "a NATO–Russia clash";
+    }
+    return editorialSubject;
+  })();
   const editorialProbability =
     input.stats.markPrice == null
       ? null
@@ -9246,7 +9240,7 @@ function buildSignalBotFollowthroughNotificationCopy(input: {
       currentPrice: input.stats.markPrice,
       earlyWalletsCut: input.stats.earlyWalletsCut,
       editorialProbability,
-      editorialSubject,
+      editorialSubject: headlineEditorialSubject,
       exitedWallets: input.stats.exitedWallets,
       joinedWallets: input.stats.joinedOrAddedWallets,
       kind: input.kind === "followthrough_stats" ? "stats" : input.kind,

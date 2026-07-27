@@ -3034,11 +3034,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         initial?.blocks.map((block) => block.type),
         ["paragraph", "table"],
       );
-      assert.match(JSON.stringify(initial), /marked/);
-      assert.doesNotMatch(
-        JSON.stringify(initial),
-        /"text":\{"text":"\+\$542K last month\.","type":"marked"\},"type":"bold"/,
-      );
+      assert.match(JSON.stringify(initial), /"type":"bold"/);
+      assert.doesNotMatch(JSON.stringify(initial), /"type":"marked"/);
       assert.match(JSON.stringify(initial), /\\n\\n/);
       const initialTable = initial?.blocks[1];
       assert.equal(initialTable?.type, "table");
@@ -10138,11 +10135,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const lead = message.richMessage.blocks[0];
       assert.equal(lead?.type, "paragraph");
       if (lead?.type === "paragraph") {
-        assert.match(JSON.stringify(lead.text), /marked/);
-        assert.doesNotMatch(
-          JSON.stringify(lead.text),
-          /"text":\{"text":"\$12\.3K backs YES on “Will test resolve Yes”\.\s*","type":"marked"\},"type":"bold"/,
-        );
+        assert.match(JSON.stringify(lead.text), /"type":"bold"/);
+        assert.doesNotMatch(JSON.stringify(lead.text), /"type":"marked"/);
         assert.match(JSON.stringify(lead.text), /\\n\\n/);
       }
       const metrics = message.richMessage.blocks[1];
@@ -10903,7 +10897,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^📈 \*\\\+8¢ to 83¢\\\.\* NO on BTC hitting \$70K in July moved with the call\\\.$/,
+        /^📈 \*Bitcoin is now just 18% to hit \$70K in July\\\.\* A wallet up \$118K is still holding NO\\\.$/,
       );
       assert.ok(
         message.text.includes(
@@ -10914,9 +10908,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(message.publishable, true);
       assert.doesNotMatch(message.text, /different starting prices/i);
       assert.doesNotMatch(message.text, /Beat resolved prices|Wallet edge/);
-      assert.match(message.text, /market now gives/i);
+      assert.match(message.text, /market has moved in the wallet's favor/i);
       assert.match(message.text, /gmtrader/i);
-      assert.match(message.text, /still holding NO after the drop/i);
+      assert.match(message.text, /hasn't taken profit/i);
+      assert.match(message.text, /still holding \$7\\\.5K on NO/i);
+      assert.match(message.text, /\+\$829 open profit/i);
+      assert.match(message.text, /\$118K over the last 30 days/i);
       assert.doesNotMatch(message.text, /New research|repeat read/i);
       assert.doesNotMatch(message.text, /No cited external evidence|📰/i);
       const positionTable = message.richMessage.blocks.find(
@@ -10927,7 +10924,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(positionTable.caption, undefined);
         assert.deepEqual(
           positionTable.cells.map((row) => row[0]?.text),
-          ["Market", "Position", "NO price", "Open PnL"],
+          ["Market", "Position", "NO price", "Open PnL", "Wallet 30d PnL"],
         );
         assert.ok(
           positionTable.cells.every((row) =>
@@ -11218,7 +11215,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.match(
         message.text.split("\n")[0] ?? "",
-        /^💰 \*\\\+\$49\\\.4K added\\\.\* One tracked wallet increased its Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
+        /^💰 \*\\\+\$49\\\.4K added\\\.\* One wallet increased its Under 2\\\.5 total goals in Spain vs\\\. Argentina position\\\.$/,
       );
       assert.ok(
         message.text.includes(
@@ -13071,7 +13068,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /^📈 \*\\\+15¢ to 55¢\\\.\* YES on .* moved with the call/,
+        /^📈 \*Test resolve Yes is now priced at 55%\\\.\* Large wallets are still adding/,
       );
       assert.match(telegram.messages[0]?.text ?? "", />Wallets {2}\*2\* added/);
       assert.match(telegram.messages[0]?.text ?? "", />\*Since the call\*/);
@@ -13085,7 +13082,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         telegram.messages[0]?.text ?? "",
-        /backed by fresh wallet flow/,
+        /Fresh buying kept coming in/,
       );
       assert.match(telegram.messages[0]?.text ?? "", /\*Read\*:/);
       assert.match(

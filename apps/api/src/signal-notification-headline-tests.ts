@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 
+import type { SignalEvidenceMetricV1 } from "./services/holder-research-signal-evidence.js";
 import { buildMarketSideCopy } from "./services/market-side-copy.js";
+import { buildSignalBotStructuredNarrative } from "./services/signal-bot-editorial-copy.js";
 import {
   buildSignalNotificationHeadline,
   buildSignalNotificationSubject,
@@ -30,6 +32,27 @@ function subject(input: {
     side,
     sideCopy,
   });
+}
+
+function trackRecordEvidence(value: number): SignalEvidenceMetricV1[] {
+  return [
+    {
+      asOf: "2026-07-27T00:00:00.000Z",
+      context: null,
+      horizonDays: 30,
+      id: "representative_wallet:track_record:30d",
+      kind: "track_record",
+      measurement: { kind: "scalar", unit: "usd", value },
+      quality: "verified",
+      sampleSize: null,
+      scope: "representative_wallet",
+      source: {
+        kind: "hunch_wallet_intel",
+        label: "Representative wallet",
+        url: null,
+      },
+    },
+  ];
 }
 
 const tests: Array<{ name: string; run: () => void }> = [
@@ -688,7 +711,202 @@ const tests: Array<{ name: string; run: () => void }> = [
       });
       assert.equal(
         positionChange.text,
-        "💰 +$49.4K added. One tracked wallet increased its Under 2.5 total goals in Spain vs. Argentina position.",
+        "💰 +$49.4K added. One wallet increased its Under 2.5 total goals in Spain vs. Argentina position.",
+      );
+    },
+  },
+  {
+    name: "profitable wallet add leads with credibility and states the action",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorPnlUsd: 107_700,
+        currentPrice: 0.78,
+        editorialProbability: 0.23,
+        editorialSubject: "Bitcoin hitting $70K in July",
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          afterUsd: 14_900,
+          beforeUsd: 7_000,
+          kind: "position_change",
+          positionChangeUsd: 7_900,
+          scope: "representative_wallet",
+          walletId: "gmtrader",
+        },
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↑ 70,000",
+          side: "NO",
+        }),
+      });
+      assert.equal(result.templateKey, "research_profitable_wallet_added_v11");
+      assert.equal(
+        result.text,
+        "💰 A wallet up $108K just added to its bet that Bitcoin won't hit $70K in July.",
+      );
+    },
+  },
+  {
+    name: "profitable wallet hold leads with live probability after the move",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorPnlUsd: 111_800,
+        currentPrice: 0.84,
+        editorialProbability: 0.17,
+        editorialSubject: "Bitcoin hitting $70K in July",
+        kind: "research_update",
+        positionDirection: "against",
+        researchDelta: {
+          currentPrice: 0.84,
+          kind: "price_move",
+          priceMoveCents: 6,
+        },
+        subject: subject({
+          eventTitle: "What price will Bitcoin hit in July?",
+          marketTitle: "↑ 70,000",
+          side: "NO",
+        }),
+      });
+      assert.equal(
+        result.templateKey,
+        "research_profitable_price_target_hold_v11",
+      );
+      assert.equal(
+        result.text,
+        "📈 Bitcoin is now just 17% to hit $70K in July. A wallet up $112K is still holding NO.",
+      );
+    },
+  },
+  {
+    name: "expensive favorite leads with wallet quality and capital at risk",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        actorMode: "single_holder",
+        actorPnlUsd: 208_100,
+        currentPrice: 0.94,
+        editorialProbability: 0.94,
+        editorialSubject: "Spirit over OG",
+        holderPositionUsd: 27_100,
+        kind: "initial",
+        positionDirection: "backing",
+        subject: subject({
+          eventTitle: "Spirit vs OG",
+          marketTitle: "Spirit",
+          side: "YES",
+        }),
+      });
+      assert.equal(result.templateKey, "initial_expensive_favorite_v11");
+      assert.equal(
+        result.text,
+        "⚽ A wallet up $208K is risking $27.1K on Spirit despite 94¢ odds.",
+      );
+    },
+  },
+  {
+    name: "price and fresh buying lead with the market event, not raw deltas",
+    run: () => {
+      const result = buildSignalNotificationHeadline({
+        currentPrice: 0.3,
+        editorialProbability: 0.3,
+        editorialSubject: "a NATO–Russia clash",
+        joinedWallets: 1,
+        kind: "stats",
+        netCopyFlowUsd: 9_000,
+        positionDirection: "backing",
+        priceMoveCents: 12,
+        subject: subject({
+          eventTitle: "Will NATO and Russia clash?",
+          marketTitle: "December 31",
+          side: "YES",
+        }),
+      });
+      assert.equal(result.templateKey, "price_wallets_still_adding_v11");
+      assert.equal(
+        result.text,
+        "📈 A NATO–Russia clash is now priced at 30%. Large wallets are still adding.",
+      );
+    },
+  },
+  {
+    name: "manager scenarios render human prose without inventing evidence",
+    run: () => {
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.23,
+          evidenceRows: trackRecordEvidence(107_700),
+          headlineTemplateKey: "research_profitable_wallet_added_v11",
+          marketLabel: "Bitcoin hitting $70K in July",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: "gmtrader",
+            holderIdentityDisplayName: "gmtrader",
+            holderOpenPnlUsd: 1_200,
+            holderPositionUsd: 14_900,
+          },
+          price: 0.78,
+          researchDelta: {
+            afterUsd: 14_900,
+            kind: "position_change",
+            positionChangeUsd: 7_900,
+            scope: "representative_wallet",
+          },
+          side: "NO",
+          sideLabel: "NO on BTC hitting $70K in July",
+        }),
+        [
+          "Bitcoin hitting $70K in July is priced at 23%, but gmtrader has increased its NO position instead of taking profit.",
+          "The wallet is now holding $14.9K on NO, is sitting on +$1.2K open PnL, and has made $107.7K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.17,
+          evidenceRows: trackRecordEvidence(111_800),
+          headlineTemplateKey: "research_profitable_price_target_hold_v11",
+          marketLabel: "Bitcoin hitting $70K in July",
+          messageKind: "research_update",
+          note: {
+            holderDisplayName: "gmtrader",
+            holderIdentityDisplayName: "gmtrader",
+            holderOpenPnlUsd: 2_100,
+            holderPositionUsd: 16_100,
+          },
+          price: 0.84,
+          researchDelta: { kind: "price_move", priceMoveCents: 6 },
+          side: "NO",
+          sideLabel: "NO on BTC hitting $70K in July",
+        }),
+        [
+          "The market has moved in the wallet's favor, with NO moving from 78¢ to 84¢, but gmtrader hasn't taken profit.",
+          "Instead, the wallet is still holding $16.1K on NO and is now sitting on +$2.1K open profit after making $111.8K over the last 30 days.",
+        ],
+      );
+
+      assert.deepEqual(
+        buildSignalBotStructuredNarrative({
+          editorialProbability: 0.94,
+          evidenceRows: trackRecordEvidence(208_100),
+          headlineTemplateKey: "initial_expensive_favorite_v11",
+          marketLabel: "Spirit over OG",
+          messageKind: "initial",
+          note: {
+            holderDisplayName: "a wallet",
+            holderIdentityDisplayName: null,
+            holderOpenPnlUsd: -773,
+            holderPositionUsd: 27_100,
+          },
+          price: 0.94,
+          researchDelta: null,
+          side: "YES",
+          sideLabel: "Spirit",
+        }),
+        [
+          "Spirit is already a heavy favorite, but this wallet has still built a $27.1K position while making $208.1K over the last 30 days.",
+          "At 94¢, there is little room left for error, so risking $27.1K is a strong statement of conviction.",
+        ],
       );
     },
   },
