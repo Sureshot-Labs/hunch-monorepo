@@ -217,6 +217,39 @@ async function loadTarget(
                   '{location,locationId}' =
                 operation.destination_target_snapshot #>>
                   '{location,locationId}'
+            and not exists (
+              select 1
+              from funding_operation_segments competing_segment
+              where competing_segment.operation_id = competing.id
+                and competing_segment.ordinal = 0
+                and competing_segment.provider_id = 'relay'
+                and competing_segment.raw_status = 'success'
+                and competing_segment.support_metadata->>'relayStatusCategory' =
+                  'provider_success'
+                and (
+                  competing_segment.support_metadata
+                    ->>'destinationTransactionReferenceCount'
+                ) ~ '^[0-9]+$'
+                and (
+                  competing_segment.support_metadata
+                    ->>'destinationTransactionReferenceCount'
+                )::integer >= 1
+                and (
+                  competing_segment.support_metadata->>'providerUpdatedAt'
+                ) ~ '^[0-9]+$'
+                and (
+                  operation.support_metadata #>>
+                    '{destinationObservation,baselineAsOf}'
+                ) is not null
+                and to_timestamp(
+                  (
+                    competing_segment.support_metadata->>'providerUpdatedAt'
+                  )::numeric / 1000
+                ) <= (
+                  operation.support_metadata #>>
+                    '{destinationObservation,baselineAsOf}'
+                )::timestamptz
+            )
         ) as competing_count
       from funding_operations operation
       join funding_operation_segments segment

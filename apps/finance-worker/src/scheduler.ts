@@ -5,6 +5,7 @@ export type ScheduledJob = {
   enabled: boolean;
   intervalSec: number;
   run: () => Promise<unknown>;
+  isNoopResult?: (result: unknown) => boolean;
   lockKey?: LockKey;
   timeoutSec: number;
   maxRetries: number;
@@ -84,7 +85,9 @@ export class IntervalScheduler {
 
       running = true;
       const startedAt = Date.now();
-      this.logger("job_start", { job: job.name });
+      if (!job.isNoopResult) {
+        this.logger("job_start", { job: job.name });
+      }
 
       try {
         let attempt = 0;
@@ -92,12 +95,14 @@ export class IntervalScheduler {
           attempt += 1;
           try {
             const result = await withTimeout(job.run(), job.timeoutSec);
-            this.logger("job_done", {
-              job: job.name,
-              durationMs: Date.now() - startedAt,
-              attempt,
-              result,
-            });
+            if (!job.isNoopResult?.(result)) {
+              this.logger("job_done", {
+                job: job.name,
+                durationMs: Date.now() - startedAt,
+                attempt,
+                result,
+              });
+            }
             break;
           } catch (error) {
             if (attempt > job.maxRetries) {

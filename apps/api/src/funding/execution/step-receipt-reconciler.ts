@@ -22,6 +22,15 @@ import type { FundingTransactionReferenceCodec } from "./transaction-reference-c
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 export const EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 12;
+export const FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS = 2;
+
+const FAST_FINALITY_EVM_CHAIN_IDS = new Set([137n, 8453n]);
+
+export function evmFundingActionFinalityConfirmations(chainId: bigint): number {
+  return FAST_FINALITY_EVM_CHAIN_IDS.has(chainId)
+    ? FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS
+    : EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS;
+}
 
 export type EvmReceiptTransaction = Readonly<{
   chainId: bigint;
@@ -102,14 +111,10 @@ function evaluateSponsoredErc4337Action(
         callData: string;
       }>[]
     | undefined;
-  const operation = operations?.[0];
   if (
     parsedEntryPoint?.name !== "handleOps" ||
-    operations?.length !== 1 ||
-    !operation ||
-    operation.sender.toLowerCase() !==
-      input.expectedSignerAddress.toLowerCase() ||
-    operation.initCode !== "0x"
+    !operations ||
+    operations.length === 0
   ) {
     return {
       actionMatches: false,
@@ -118,22 +123,54 @@ function evaluateSponsoredErc4337Action(
     };
   }
 
-  let parsedExecute: ethers.TransactionDescription | null = null;
-  try {
-    parsedExecute = ERC7579_EXECUTE_INTERFACE.parseTransaction({
-      data: operation.callData,
-    });
-  } catch {
-    // Unknown account execution modes fail closed below.
+  const signerOperations = operations.filter(
+    (operation) =>
+      operation.sender.toLowerCase() ===
+        input.expectedSignerAddress.toLowerCase() &&
+      operation.initCode === "0x",
+  );
+  if (signerOperations.length === 0) {
+    return {
+      actionMatches: false,
+      userOperationSucceeded: null,
+      failureCode: "sponsored_user_operation_mismatch",
+    };
   }
-  const executionMode = parsedExecute?.args[0] as string | undefined;
-  const executionCalldata = parsedExecute?.args[1] as string | undefined;
-  const body = executionCalldata?.slice(2) ?? "";
-  if (
-    parsedExecute?.name !== "execute" ||
-    executionMode?.toLowerCase() !== ERC7579_SINGLE_EXECUTION_MODE ||
-    body.length < 104
-  ) {
+
+  const decodedOperations = signerOperations.flatMap((operation) => {
+    let parsedExecute: ethers.TransactionDescription | null = null;
+    try {
+      parsedExecute = ERC7579_EXECUTE_INTERFACE.parseTransaction({
+        data: operation.callData,
+      });
+    } catch {
+      return [];
+    }
+    const executionMode = parsedExecute?.args[0] as string | undefined;
+    const executionCalldata = parsedExecute?.args[1] as string | undefined;
+    const body = executionCalldata?.slice(2) ?? "";
+    if (
+      parsedExecute?.name !== "execute" ||
+      executionMode?.toLowerCase() !== ERC7579_SINGLE_EXECUTION_MODE ||
+      body.length < 104
+    ) {
+      return [];
+    }
+
+    try {
+      return [
+        {
+          operation,
+          target: ethers.getAddress(`0x${body.slice(0, 40)}`),
+          value: BigInt(`0x${body.slice(40, 104)}`),
+          data: `0x${body.slice(104)}`,
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
+  if (decodedOperations.length === 0) {
     return {
       actionMatches: false,
       userOperationSucceeded: null,
@@ -141,30 +178,23 @@ function evaluateSponsoredErc4337Action(
     };
   }
 
-  let target: string;
-  let value: bigint;
-  try {
-    target = ethers.getAddress(`0x${body.slice(0, 40)}`);
-    value = BigInt(`0x${body.slice(40, 104)}`);
-  } catch {
+  const matchingOperations = decodedOperations.filter(
+    (candidate) =>
+      candidate.target.toLowerCase() === input.action.to.toLowerCase() &&
+      candidate.value === BigInt(input.action.valueRaw) &&
+      normalizedHex(candidate.data) === normalizedHex(input.action.data),
+  );
+  if (matchingOperations.length !== 1) {
     return {
       actionMatches: false,
       userOperationSucceeded: null,
-      failureCode: "sponsored_execution_envelope_mismatch",
+      failureCode:
+        matchingOperations.length > 1
+          ? "sponsored_inner_action_ambiguous"
+          : "sponsored_inner_action_mismatch",
     };
   }
-  const data = `0x${body.slice(104)}`;
-  if (
-    target.toLowerCase() !== input.action.to.toLowerCase() ||
-    value !== BigInt(input.action.valueRaw) ||
-    normalizedHex(data) !== normalizedHex(input.action.data)
-  ) {
-    return {
-      actionMatches: false,
-      userOperationSucceeded: null,
-      failureCode: "sponsored_inner_action_mismatch",
-    };
-  }
+  const operation = matchingOperations[0]!.operation;
   if (!input.receipt || !input.receipt.succeeded) {
     return {
       actionMatches: true,
@@ -394,8 +424,10 @@ export function evaluateEvmActionReceipt(
       }),
     };
   }
-  const finalized =
-    input.receipt.confirmations >= EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS;
+  const confirmationPolicy = evmFundingActionFinalityConfirmations(
+    input.transaction.chainId,
+  );
+  const finalized = input.receipt.confirmations >= confirmationPolicy;
   return {
     status: finalized ? "finalized" : "confirmed",
     actionMatch: true,
@@ -404,7 +436,7 @@ export function evaluateEvmActionReceipt(
     canonical: true,
     failureCode: null,
     evidence: evidence({
-      confirmationPolicy: EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+      confirmationPolicy,
       confirmations: input.receipt.confirmations,
       receiptObserved: true,
     }),
@@ -644,8 +676,10 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
       evidence: evidence({ confirmations: input.receipt.confirmations }),
     };
   }
-  const finalized =
-    input.receipt.confirmations >= EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS;
+  const confirmationPolicy = evmFundingActionFinalityConfirmations(
+    input.transaction.chainId,
+  );
+  const finalized = input.receipt.confirmations >= confirmationPolicy;
   return {
     status: finalized ? "finalized" : "confirmed",
     actionMatch: true,
@@ -654,7 +688,7 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
     canonical: true,
     failureCode: null,
     evidence: evidence({
-      confirmationPolicy: EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+      confirmationPolicy,
       confirmations: input.receipt.confirmations,
       exactTransferObserved: true,
     }),

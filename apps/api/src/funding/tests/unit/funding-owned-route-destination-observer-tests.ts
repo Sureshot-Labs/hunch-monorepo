@@ -102,6 +102,26 @@ assert.deepEqual(
   { destinationsPolled: 0 },
 );
 
+let inspectedCompetitionQuery = false;
+const baselineAwareObserver = new OwnedRouteDestinationObserver();
+assert.deepEqual(
+  await baselineAwareObserver.pollOperation(
+    {
+      query: async (sql: string) => {
+        inspectedCompetitionQuery = true;
+        assert.match(sql, /providerUpdatedAt/);
+        assert.match(sql, /destinationObservation,baselineAsOf/);
+        assert.match(sql, /destinationTransactionReferenceCount/);
+        assert.match(sql, /to_timestamp/);
+        return { rows: [] };
+      },
+    } as unknown as Pool,
+    target.operationId,
+  ),
+  { destinationsPolled: 0 },
+);
+assert.equal(inspectedCompetitionQuery, true);
+
 console.log(
-  "[funding-owned-route-destination-observer-tests] exact balance delta and scoped polling passed",
+  "[funding-owned-route-destination-observer-tests] exact balance delta, baseline-aware competition, and scoped polling passed",
 );

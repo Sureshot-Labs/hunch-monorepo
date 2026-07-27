@@ -159,7 +159,24 @@ assert.deepEqual(
   ).target,
   { status: "recovery_required", stage: "routing" },
 );
+assert.deepEqual(
+  deriveTargetState(
+    {
+      ...operation,
+      status: "completed",
+      progressStage: "terminal",
+      completedAt: new Date("2026-07-24T10:02:00.000Z"),
+    },
+    [legOne, legTwo],
+    segments.map((segment) => ({ ...segment, status: "succeeded" as const })),
+    [
+      step("00000000-0000-4000-8000-000000000021", segments[0].id, "succeeded"),
+      step("00000000-0000-4000-8000-000000000022", segments[1].id, "succeeded"),
+    ],
+  ).target,
+  { status: "completed", stage: "terminal" },
+);
 
 console.log(
-  "[funding-multi-leg-reducer-tests] partial coverage, per-leg minimum, aggregate readiness, and partial failure recovery passed",
+  "[funding-multi-leg-reducer-tests] partial coverage, per-leg minimum, aggregate readiness, partial failure recovery, and terminal idempotency passed",
 );

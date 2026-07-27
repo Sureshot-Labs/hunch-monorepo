@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { Pool } from "@hunch/infra";
 
 import { env, parseFundingReferenceLookupKeyVersion } from "./env.js";
@@ -21,6 +22,19 @@ import { buildJobs } from "./main.js";
 type TestCase = {
   name: string;
   run: () => Promise<void> | void;
+};
+
+const kalshiExecutionReconcileSource = readFileSync(
+  new URL(
+    "../../api/src/services/kalshi-execution-reconcile.ts",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const apiPackage = JSON.parse(
+  readFileSync(new URL("../../api/package.json", import.meta.url), "utf8"),
+) as {
+  exports?: Record<string, string | Record<string, string>>;
 };
 
 function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
@@ -46,6 +60,30 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Bun development resolves the funding worker from source",
+    run: () => {
+      assert.deepEqual(apiPackage.exports?.["./funding-worker"], {
+        source: "./src/funding/worker/funding-reconciliation-worker.ts",
+        import: "./dist/funding/worker/funding-reconciliation-worker.js",
+      });
+    },
+  },
+  {
+    name: "Kalshi reconciliation stops a batch after shared RPC rate limiting",
+    run: () => {
+      assert.match(kalshiExecutionReconcileSource, /isRpcRateLimit\(error\)/);
+      assert.match(kalshiExecutionReconcileSource, /rpcRateLimited = true/);
+      assert.match(
+        kalshiExecutionReconcileSource,
+        /for \(const row of rpcRateLimited \? \[\] : feeBackfillRows\)/,
+      );
+      assert.match(
+        kalshiExecutionReconcileSource,
+        /reconcile deferred after RPC rate limit/,
+      );
+    },
+  },
   {
     name: "Relay reference key version fails closed on invalid explicit input",
     run: () => {
@@ -97,6 +135,9 @@ const tests: TestCase[] = [
       assert.equal(job.enabled, true);
       assert.equal(job.intervalSec, 17);
       assert.equal(job.maxRetries, 0);
+      assert.equal(job.jitterSec, 0);
+      assert.equal(job.isNoopResult?.({ claimed: 0 }), true);
+      assert.equal(job.isNoopResult?.({ claimed: 1 }), false);
     },
   },
   {
@@ -268,6 +309,14 @@ const tests: TestCase[] = [
         assert.equal(
           observedOptions.leaseSeconds,
           env.fundingReconciliationLeaseSec,
+        );
+        assert.equal(
+          observedOptions.pollDelayMs,
+          env.fundingReconciliationPollSec * 1_000,
+        );
+        assert.equal(
+          observedOptions.idlePollDelayMs,
+          env.fundingReconciliationIdlePollSec * 1_000,
         );
         assert.match(String(observedOptions.workerId), /:\d+$/);
       } finally {

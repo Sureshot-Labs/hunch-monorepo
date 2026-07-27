@@ -539,25 +539,39 @@ export async function fetchEmbeddedEthereumPrivyTransactionByReference(input: {
   };
 }
 
+export function resolvePrivyTransactionHash(
+  transaction: EmbeddedEthereumPrivyTransaction,
+  context: string,
+): string | null {
+  const { status, transactionHash } = transaction;
+  if (
+    status === "execution_reverted" ||
+    status === "failed" ||
+    status === "provider_error" ||
+    status === "replaced"
+  ) {
+    throw new Error(`${context} failed in Privy with status ${status}.`);
+  }
+  if (transactionHash) return transactionHash;
+  if (status === "confirmed" || status === "finalized") {
+    throw new Error(
+      `${context} was confirmed by Privy without a transaction hash.`,
+    );
+  }
+  return null;
+}
+
 async function waitForPrivyTransaction(
   transactionId: string,
   context: string,
 ): Promise<string | null> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
-    const { status, transactionHash } =
-      await fetchEmbeddedEthereumPrivyTransaction({ transactionId });
-    if (status === "confirmed" || status === "finalized") {
-      return transactionHash;
-    }
-    if (
-      status === "execution_reverted" ||
-      status === "failed" ||
-      status === "provider_error" ||
-      status === "replaced"
-    ) {
-      throw new Error(`${context} failed in Privy with status ${status}.`);
-    }
+    const transaction = await fetchEmbeddedEthereumPrivyTransaction({
+      transactionId,
+    });
+    const transactionHash = resolvePrivyTransactionHash(transaction, context);
+    if (transactionHash) return transactionHash;
 
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }

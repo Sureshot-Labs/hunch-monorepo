@@ -5,6 +5,8 @@ import { ethers } from "ethers";
 
 import {
   EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+  FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+  evmFundingActionFinalityConfirmations,
   evaluateEvmActionReceipt,
   evaluatePolymarketDepositWalletHandoffReceipt,
   evaluateSvmActionReceipt,
@@ -14,6 +16,7 @@ import type {
   FundingStepReceiptEvidence,
   FundingStepReceiptTarget,
 } from "../../persistence/funding-step-receipt-repository.js";
+import { shouldIgnoreFundingStepReceiptUpdate } from "../../persistence/funding-step-receipt-repository.js";
 
 const evmAction = {
   kind: "evm_transaction" as const,
@@ -40,6 +43,39 @@ const evmReceipt = {
   canonicalBlockHash: `0x${"ab".repeat(32)}`,
   logs: [],
 };
+
+assert.equal(evmFundingActionFinalityConfirmations(137n), 2);
+assert.equal(evmFundingActionFinalityConfirmations(8453n), 2);
+assert.equal(
+  evmFundingActionFinalityConfirmations(1n),
+  EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: evmTransaction.from,
+    transaction: evmTransaction,
+    receipt: {
+      ...evmReceipt,
+      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS - 1,
+    },
+    previous: null,
+  }).status,
+  "confirmed",
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: evmTransaction.from,
+    transaction: evmTransaction,
+    receipt: {
+      ...evmReceipt,
+      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+    },
+    previous: null,
+  }).status,
+  "finalized",
+);
 
 assert.equal(
   evaluateEvmActionReceipt({
@@ -106,24 +142,23 @@ const smartAccountCall = smartAccount.encodeFunctionData("execute", [
   `0x${"00".repeat(32)}`,
   executionCalldata,
 ]);
+const sponsoredUserOperation = {
+  sender: sponsoredSigner,
+  nonce: userOperationNonce,
+  initCode: "0x",
+  callData: smartAccountCall,
+  accountGasLimits: `0x${"00".repeat(32)}`,
+  preVerificationGas: 0,
+  gasFees: `0x${"00".repeat(32)}`,
+  paymasterAndData: "0x",
+  signature: "0x",
+};
 const sponsoredTransaction = {
   chainId: 137n,
   from: "0x3333333333333333333333333333333333333333",
   to: entryPointAddress,
   data: entryPoint.encodeFunctionData("handleOps", [
-    [
-      {
-        sender: sponsoredSigner,
-        nonce: userOperationNonce,
-        initCode: "0x",
-        callData: smartAccountCall,
-        accountGasLimits: `0x${"00".repeat(32)}`,
-        preVerificationGas: 0,
-        gasFees: `0x${"00".repeat(32)}`,
-        paymasterAndData: "0x",
-        signature: "0x",
-      },
-    ],
+    [sponsoredUserOperation],
     sponsoredTransactionBeneficiary,
   ]),
   value: 0n,
@@ -161,6 +196,54 @@ assert.equal(
     executionEnvelope: "privy_erc4337",
   }).status,
   "finalized",
+);
+const bundledSponsoredTransaction = {
+  ...sponsoredTransaction,
+  data: entryPoint.encodeFunctionData("handleOps", [
+    [
+      {
+        ...sponsoredUserOperation,
+        sender: "0x5555555555555555555555555555555555555555",
+        nonce: 1n,
+      },
+      sponsoredUserOperation,
+    ],
+    sponsoredTransactionBeneficiary,
+  ]),
+};
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: sponsoredSigner,
+    transaction: bundledSponsoredTransaction,
+    receipt: sponsoredReceipt,
+    previous: null,
+    executionEnvelope: "privy_erc4337",
+  }).status,
+  "finalized",
+);
+const ambiguousSponsoredTransaction = {
+  ...sponsoredTransaction,
+  data: entryPoint.encodeFunctionData("handleOps", [
+    [
+      sponsoredUserOperation,
+      { ...sponsoredUserOperation, nonce: userOperationNonce + 1n },
+    ],
+    sponsoredTransactionBeneficiary,
+  ]),
+};
+const ambiguousSponsoredEvidence = evaluateEvmActionReceipt({
+  action: evmAction,
+  expectedSignerAddress: sponsoredSigner,
+  transaction: ambiguousSponsoredTransaction,
+  receipt: sponsoredReceipt,
+  previous: null,
+  executionEnvelope: "privy_erc4337",
+});
+assert.equal(ambiguousSponsoredEvidence.status, "mismatch");
+assert.equal(
+  ambiguousSponsoredEvidence.failureCode,
+  "sponsored_inner_action_ambiguous",
 );
 assert.equal(
   evaluateEvmActionReceipt({
@@ -271,6 +354,19 @@ assert.equal(
     previous: null,
   }).status,
   "finalized",
+);
+assert.equal(
+  evaluatePolymarketDepositWalletHandoffReceipt({
+    action: handoffAction,
+    actionValidationResult: handoffValidation,
+    transaction: handoffTransaction,
+    receipt: {
+      ...handoffReceipt,
+      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS - 1,
+    },
+    previous: null,
+  }).status,
+  "confirmed",
 );
 const extraTransferLog = transferInterface.encodeEventLog(transferEvent, [
   handoffFunder,
@@ -415,6 +511,38 @@ const driverResult = await driver.pollOperation(
 );
 assert.deepEqual(driverResult, { receiptsPolled: 1, receiptsFinalized: 1 });
 assert.equal(applied[0]?.status, "finalized");
+
+const correctedFinalizedReceipt: FundingStepReceiptEvidence = {
+  status: "finalized",
+  actionMatch: true,
+  ledgerHeight: "10",
+  blockHash: evmReceipt.blockHash,
+  canonical: true,
+  failureCode: null,
+  evidence: {},
+};
+assert.equal(
+  shouldIgnoreFundingStepReceiptUpdate("mismatch", correctedFinalizedReceipt),
+  false,
+);
+assert.equal(
+  shouldIgnoreFundingStepReceiptUpdate("mismatch", {
+    ...correctedFinalizedReceipt,
+    actionMatch: false,
+  }),
+  true,
+);
+assert.equal(
+  shouldIgnoreFundingStepReceiptUpdate("mismatch", {
+    ...correctedFinalizedReceipt,
+    canonical: false,
+  }),
+  true,
+);
+assert.equal(
+  shouldIgnoreFundingStepReceiptUpdate("failed", correctedFinalizedReceipt),
+  true,
+);
 
 console.log(
   "[funding-step-receipt-tests] exact EVM/Solana receipt matching, finality, failure, reorg, and persisted polling passed",

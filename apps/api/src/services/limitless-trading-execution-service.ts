@@ -1712,11 +1712,11 @@ export async function fetchLimitlessAccountRoute(input: {
   if (cacheEnabled) {
     const cached = readLimitlessAccountCache(cacheKey);
     if (cached) return { ok: true, payload: cached };
-    const inflight = limitlessAccountInflight.get(cacheKey);
-    if (inflight) {
-      const payload = await inflight;
-      return { ok: true, payload };
-    }
+  }
+  const inflight = limitlessAccountInflight.get(cacheKey);
+  if (inflight) {
+    const payload = await inflight;
+    return { ok: true, payload };
   }
 
   if (hasCredentials && authContext) {
@@ -1891,14 +1891,10 @@ export async function fetchLimitlessAccountRoute(input: {
       };
     })();
 
-    if (cacheEnabled) {
-      limitlessAccountInflight.set(cacheKey, computePromise);
-    }
+    limitlessAccountInflight.set(cacheKey, computePromise);
     try {
       const payload = await computePromise;
-      if (cacheEnabled) {
-        writeLimitlessAccountCache(cacheKey, payload);
-      }
+      writeLimitlessAccountCache(cacheKey, payload);
       return { ok: true, payload };
     } finally {
       limitlessAccountInflight.delete(cacheKey);

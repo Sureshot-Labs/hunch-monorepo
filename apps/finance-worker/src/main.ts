@@ -57,8 +57,16 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       timeoutSec: workerEnv.jobTimeoutSec,
       maxRetries: 0,
       retryBackoffSec: workerEnv.retryBackoffSec,
-      jitterSec: workerEnv.jitterSec,
+      // Funding is an interactive user flow. Global worker jitter is useful
+      // for background jobs, but here it can hide a satisfied confirmation
+      // threshold for tens of seconds between reconciliation passes.
+      jitterSec: 0,
       run: () => runFundingReconciliationJob(),
+      isNoopResult: (result) =>
+        typeof result === "object" &&
+        result !== null &&
+        "claimed" in result &&
+        result.claimed === 0,
     },
     {
       name: "api_cache_warm",

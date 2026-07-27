@@ -13,10 +13,48 @@ import {
   DEFAULT_FUNDING_RUNTIME_POLICY,
   PRODUCTION_FUNDING_REGISTRY,
 } from "../../policies/funding-policy.js";
+import { fundingReconciliationPollDelayMs } from "../../reconciliation/funding-reducer.js";
 
 type Test = Readonly<{ name: string; run: () => void }>;
 
 const tests: readonly Test[] = [
+  {
+    name: "funding reconciliation polls active operations without hot-looping idle operations",
+    run: () => {
+      const delays = {
+        activePollDelayMs: 2_000,
+        idlePollDelayMs: 15_000,
+      };
+      assert.equal(
+        fundingReconciliationPollDelayMs(
+          { status: "in_progress", stage: "routing" },
+          delays,
+        ),
+        2_000,
+      );
+      assert.equal(
+        fundingReconciliationPollDelayMs(
+          { status: "reconcile_required", stage: "source_action" },
+          delays,
+        ),
+        2_000,
+      );
+      assert.equal(
+        fundingReconciliationPollDelayMs(
+          { status: "awaiting_external_funds", stage: "source_action" },
+          delays,
+        ),
+        15_000,
+      );
+      assert.equal(
+        fundingReconciliationPollDelayMs(
+          { status: "awaiting_user", stage: "source_action" },
+          delays,
+        ),
+        15_000,
+      );
+    },
+  },
   {
     name: "canonical JSON is key-order independent and rejects non-JSON values",
     run: () => {

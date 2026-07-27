@@ -1,3 +1,10 @@
+import {
+  isAbortError,
+  isRetryableHttpStatus,
+  isRpcRateLimit,
+  parseRetryAfterMs,
+  sleep,
+} from "@hunch/shared";
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
 import { fetchEvmMulticall } from "./polygon-rpc.js";
@@ -19,6 +26,23 @@ type MulticallEntry<T> = {
   fallback: T;
 };
 
+const limitlessEthCallInflight = new Map<string, Promise<string>>();
+const limitlessEthCallCache = new Map<
+  string,
+  Readonly<{ value: string; storedAt: number }>
+>();
+const LIMITLESS_ETH_CALL_FRESH_MS = 3_000;
+const LIMITLESS_ETH_CALL_STALE_IF_RATE_LIMITED_MS = 30_000;
+const limitlessSnapshotInflight = new Map<
+  string,
+  Promise<{
+    usdcBalance: bigint;
+    allowanceClob: bigint | null;
+    allowanceNegRisk: bigint | null;
+    allowanceAmm: bigint | null;
+  }>
+>();
+
 function decodeBigInt(iface: Interface, fn: string, data: string): bigint {
   const decoded = iface.decodeFunctionResult(fn, data) as unknown;
   const value = Array.isArray(decoded) ? decoded[0] : null;
@@ -28,56 +52,148 @@ function decodeBigInt(iface: Interface, fn: string, data: string): bigint {
   return value;
 }
 
+function computeRetryDelayMs(
+  attempt: number,
+  retryAfterMs: number | null,
+): number {
+  if (retryAfterMs != null && Number.isFinite(retryAfterMs)) {
+    return Math.min(
+      Math.max(0, retryAfterMs),
+      env.walletIntelRetryMaxBackoffMs,
+    );
+  }
+  const configuredDelay = Math.min(
+    env.walletIntelRetryBaseBackoffMs * 2 ** Math.max(0, attempt),
+    env.walletIntelRetryMaxBackoffMs,
+  );
+  const rateLimitFloor = Math.min(1_000 * 2 ** Math.max(0, attempt), 5_000);
+  return Math.max(configuredDelay, rateLimitFloor);
+}
+
+async function performLimitlessEthCall(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  to: string;
+  data: string;
+}): Promise<string> {
+  let lastError: unknown = null;
+  const maxAttempts = Math.max(1, env.walletIntelRetryMaxAttempts);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+
+    try {
+      const response = await fetch(inputs.rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_call",
+          params: [{ to: inputs.to, data: inputs.data }, "latest"],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const error = new Error(
+          `Limitless RPC error: ${response.status} ${response.statusText}`,
+        );
+        lastError = error;
+        if (
+          attempt < maxAttempts - 1 &&
+          isRetryableHttpStatus(response.status)
+        ) {
+          await sleep(
+            computeRetryDelayMs(
+              attempt,
+              parseRetryAfterMs(response.headers.get("retry-after")),
+            ),
+          );
+          continue;
+        }
+        throw error;
+      }
+
+      const json = (await response.json()) as unknown;
+      if (
+        !json ||
+        typeof json !== "object" ||
+        !("result" in json) ||
+        typeof (json as { result?: unknown }).result !== "string"
+      ) {
+        const message =
+          json &&
+          typeof json === "object" &&
+          "error" in json &&
+          typeof (json as { error?: { message?: unknown } }).error?.message ===
+            "string"
+            ? (json as { error: { message: string } }).error.message
+            : "Invalid Limitless RPC response";
+        const error = new Error(message);
+        lastError = error;
+        if (attempt < maxAttempts - 1 && isRpcRateLimit(error)) {
+          await sleep(computeRetryDelayMs(attempt, null));
+          continue;
+        }
+        throw error;
+      }
+
+      return (json as { result: string }).result;
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt < maxAttempts - 1 &&
+        (isAbortError(error) || isRpcRateLimit(error))
+      ) {
+        await sleep(computeRetryDelayMs(attempt, null));
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError ?? new Error("Limitless RPC request failed");
+}
+
 async function limitlessEthCall(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   to: string;
   data: string;
 }): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
-
-  try {
-    const response = await fetch(inputs.rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_call",
-        params: [{ to: inputs.to, data: inputs.data }, "latest"],
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `Limitless RPC error: ${response.status} ${response.statusText}`,
-      );
-    }
-
-    const json = (await response.json()) as unknown;
-    if (
-      !json ||
-      typeof json !== "object" ||
-      !("result" in json) ||
-      typeof (json as { result?: unknown }).result !== "string"
-    ) {
-      const message =
-        json &&
-        typeof json === "object" &&
-        "error" in json &&
-        typeof (json as { error?: { message?: unknown } }).error?.message ===
-          "string"
-          ? (json as { error: { message: string } }).error.message
-          : "Invalid Limitless RPC response";
-      throw new Error(message);
-    }
-
-    return (json as { result: string }).result;
-  } finally {
-    clearTimeout(timeout);
+  const key = `${inputs.rpcUrl}|${inputs.to.toLowerCase()}|${inputs.data}`;
+  const cached = limitlessEthCallCache.get(key);
+  if (cached && Date.now() - cached.storedAt <= LIMITLESS_ETH_CALL_FRESH_MS) {
+    return cached.value;
   }
+  const pending = limitlessEthCallInflight.get(key);
+  if (pending) return pending;
+
+  const promise = performLimitlessEthCall(inputs)
+    .then((value) => {
+      limitlessEthCallCache.set(key, { value, storedAt: Date.now() });
+      return value;
+    })
+    .catch((error) => {
+      if (
+        cached &&
+        Date.now() - cached.storedAt <=
+          LIMITLESS_ETH_CALL_STALE_IF_RATE_LIMITED_MS &&
+        isRpcRateLimit(error)
+      ) {
+        return cached.value;
+      }
+      throw error;
+    })
+    .finally(() => {
+      limitlessEthCallInflight.delete(key);
+    });
+  limitlessEthCallInflight.set(key, promise);
+  return promise;
 }
 
 async function fetchLimitlessAmmBuyAmount(inputs: {
@@ -187,84 +303,102 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   const clobAddress = inputs.clobAddress?.trim() || "";
   const negRiskAddress = inputs.negRiskAddress?.trim() || "";
   const ammAddress = inputs.ammAddress?.trim() || "";
+  const key = [
+    inputs.rpcUrl,
+    owner.toLowerCase(),
+    clobAddress.toLowerCase(),
+    negRiskAddress.toLowerCase(),
+    ammAddress.toLowerCase(),
+  ].join("|");
+  const pending = limitlessSnapshotInflight.get(key);
+  if (pending) return pending;
 
-  const entries: Array<MulticallEntry<unknown>> = [
-    {
-      target: env.limitlessUsdcAddress,
-      callData: erc20Iface.encodeFunctionData("balanceOf", [owner]),
-      decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
-      fallback: 0n,
-    },
-  ];
+  const promise = (async () => {
+    const entries: Array<MulticallEntry<unknown>> = [
+      {
+        target: env.limitlessUsdcAddress,
+        callData: erc20Iface.encodeFunctionData("balanceOf", [owner]),
+        decode: (data) => decodeBigInt(erc20Iface, "balanceOf", data),
+        fallback: 0n,
+      },
+    ];
 
-  if (clobAddress) {
-    entries.push({
-      target: env.limitlessUsdcAddress,
-      callData: erc20Iface.encodeFunctionData("allowance", [
-        owner,
-        clobAddress,
-      ]),
-      decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-      fallback: 0n,
-    });
-  }
-
-  if (negRiskAddress) {
-    entries.push({
-      target: env.limitlessUsdcAddress,
-      callData: erc20Iface.encodeFunctionData("allowance", [
-        owner,
-        negRiskAddress,
-      ]),
-      decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-      fallback: 0n,
-    });
-  }
-
-  if (ammAddress) {
-    entries.push({
-      target: env.limitlessUsdcAddress,
-      callData: erc20Iface.encodeFunctionData("allowance", [owner, ammAddress]),
-      decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
-      fallback: 0n,
-    });
-  }
-
-  const results = await fetchEvmMulticall({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    multicallAddress: env.baseMulticallAddress,
-    calls: entries.map((entry) => ({
-      target: entry.target,
-      callData: entry.callData,
-      allowFailure: true,
-    })),
-  });
-
-  const decoded = entries.map((entry, index) => {
-    const result = results[index];
-    if (!result?.success) return entry.fallback;
-    try {
-      return entry.decode(result.returnData);
-    } catch {
-      return entry.fallback;
+    if (clobAddress) {
+      entries.push({
+        target: env.limitlessUsdcAddress,
+        callData: erc20Iface.encodeFunctionData("allowance", [
+          owner,
+          clobAddress,
+        ]),
+        decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
+        fallback: 0n,
+      });
     }
+
+    if (negRiskAddress) {
+      entries.push({
+        target: env.limitlessUsdcAddress,
+        callData: erc20Iface.encodeFunctionData("allowance", [
+          owner,
+          negRiskAddress,
+        ]),
+        decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
+        fallback: 0n,
+      });
+    }
+
+    if (ammAddress) {
+      entries.push({
+        target: env.limitlessUsdcAddress,
+        callData: erc20Iface.encodeFunctionData("allowance", [
+          owner,
+          ammAddress,
+        ]),
+        decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
+        fallback: 0n,
+      });
+    }
+
+    const results = await fetchEvmMulticall({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      multicallAddress: env.baseMulticallAddress,
+      calls: entries.map((entry) => ({
+        target: entry.target,
+        callData: entry.callData,
+        allowFailure: true,
+      })),
+    });
+
+    const decoded = entries.map((entry, index) => {
+      const result = results[index];
+      if (!result?.success) return entry.fallback;
+      try {
+        return entry.decode(result.returnData);
+      } catch {
+        return entry.fallback;
+      }
+    });
+
+    let cursor = 0;
+    const usdcBalance = decoded[cursor++] as bigint;
+    const allowanceClob = clobAddress ? (decoded[cursor++] as bigint) : null;
+    const allowanceNegRisk = negRiskAddress
+      ? (decoded[cursor++] as bigint)
+      : null;
+    const allowanceAmm = ammAddress ? (decoded[cursor++] as bigint) : null;
+
+    return {
+      usdcBalance,
+      allowanceClob,
+      allowanceNegRisk,
+      allowanceAmm,
+    };
+  })().finally(() => {
+    limitlessSnapshotInflight.delete(key);
   });
-
-  let cursor = 0;
-  const usdcBalance = decoded[cursor++] as bigint;
-  const allowanceClob = clobAddress ? (decoded[cursor++] as bigint) : null;
-  const allowanceNegRisk = negRiskAddress
-    ? (decoded[cursor++] as bigint)
-    : null;
-  const allowanceAmm = ammAddress ? (decoded[cursor++] as bigint) : null;
-
-  return {
-    usdcBalance,
-    allowanceClob,
-    allowanceNegRisk,
-    allowanceAmm,
-  };
+  limitlessSnapshotInflight.set(key, promise);
+  return promise;
 }
 
 export async function fetchLimitlessAmmQuote(inputs: {

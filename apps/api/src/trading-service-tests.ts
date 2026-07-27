@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
 
+import { env } from "./env.js";
 import { createApiTradingApplicationService } from "./services/api-trading-service.js";
 import type { PrivyPolicyMetadata } from "./privy-service.js";
 import {
@@ -45,6 +46,7 @@ import {
   isLimitlessBotClobExecutable,
   limitlessTradingExecutionTestHooks,
 } from "./services/limitless-trading-execution-service.js";
+import { fetchLimitlessAmmQuote } from "./services/limitless-onchain.js";
 import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
 import {
   computePolymarketClobOpenPositionLocks,
@@ -411,6 +413,71 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Limitless AMM quote retries HTTP 429 and coalesces identical reads",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalMaxAttempts = env.walletIntelRetryMaxAttempts;
+      const originalBaseBackoff = env.walletIntelRetryBaseBackoffMs;
+      const originalMaxBackoff = env.walletIntelRetryMaxBackoffMs;
+      const iface = new ethers.Interface([
+        "function calcBuyAmount(uint256 investmentAmount,uint256 outcomeIndex) view returns (uint256)",
+      ]);
+      let calls = 0;
+
+      env.walletIntelRetryMaxAttempts = 2;
+      env.walletIntelRetryBaseBackoffMs = 10;
+      env.walletIntelRetryMaxBackoffMs = 10;
+      globalThis.fetch = async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response("rate limited", {
+            status: 429,
+            statusText: "Too Many Requests",
+            headers: { "retry-after": "0" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: iface.encodeFunctionResult("calcBuyAmount", [4_000_000n]),
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      };
+
+      const input = {
+        rpcUrl: "https://base.example",
+        timeoutMs: 100,
+        marketAddress: "0x0000000000000000000000000000000000000001",
+        outcomeIndex: 0,
+        side: "BUY" as const,
+        amountUsdRaw: 1_000_000n,
+      };
+
+      try {
+        const [first, second] = await Promise.all([
+          fetchLimitlessAmmQuote(input),
+          fetchLimitlessAmmQuote(input),
+        ]);
+        assert.equal(first.sharesRaw, 4_000_000n);
+        assert.equal(second.sharesRaw, 4_000_000n);
+        assert.equal(calls, 2);
+        const cached = await fetchLimitlessAmmQuote(input);
+        assert.equal(cached.sharesRaw, 4_000_000n);
+        assert.equal(calls, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.walletIntelRetryMaxAttempts = originalMaxAttempts;
+        env.walletIntelRetryBaseBackoffMs = originalBaseBackoff;
+        env.walletIntelRetryMaxBackoffMs = originalMaxBackoff;
+      }
+    },
+  },
   {
     name: "Privy bot policy resolver selects one exact action profile",
     run: () => {

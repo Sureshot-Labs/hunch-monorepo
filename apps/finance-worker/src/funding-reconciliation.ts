@@ -9,6 +9,7 @@ type FundingReconciliationOptions = {
   leaseSeconds?: number;
   retryDelayMs?: number;
   pollDelayMs?: number;
+  idlePollDelayMs?: number;
   maxAttempts?: number;
   relay?: Readonly<{
     apiKey: string;
@@ -125,6 +126,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     leaseSeconds: env.fundingReconciliationLeaseSec,
     retryDelayMs: env.fundingReconciliationRetrySec * 1_000,
     pollDelayMs: env.fundingReconciliationPollSec * 1_000,
+    idlePollDelayMs: env.fundingReconciliationIdlePollSec * 1_000,
     maxAttempts: env.fundingReconciliationMaxAttempts,
     ...(relay ? { relay } : {}),
   });

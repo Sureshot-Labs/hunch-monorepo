@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
   buildEmbeddedEthereumSendTransactionRequest,
   prepareEmbeddedEthereumTransactionRequests,
+  resolvePrivyTransactionHash,
   type EmbeddedEthereumWalletContext,
 } from "./services/embedded-ethereum.js";
 
@@ -104,6 +105,45 @@ const tests: TestCase[] = [
       };
       assert.equal(secondBody.caip2, "eip155:137");
       assert.equal(secondBody.sponsor, false);
+    },
+  },
+  {
+    name: "Privy polling hands off to the chain receipt as soon as a hash exists",
+    run: () => {
+      assert.equal(
+        resolvePrivyTransactionHash(
+          {
+            status: "pending",
+            transactionHash: "0xabc",
+            transactionId: "privy-transaction-id",
+          },
+          "Limitless buy",
+        ),
+        "0xabc",
+      );
+      assert.equal(
+        resolvePrivyTransactionHash(
+          {
+            status: "pending",
+            transactionHash: null,
+            transactionId: "privy-transaction-id",
+          },
+          "Limitless buy",
+        ),
+        null,
+      );
+      assert.throws(
+        () =>
+          resolvePrivyTransactionHash(
+            {
+              status: "failed",
+              transactionHash: null,
+              transactionId: "privy-transaction-id",
+            },
+            "Limitless buy",
+          ),
+        /failed in Privy with status failed/,
+      );
     },
   },
 ];

@@ -5,7 +5,10 @@
   "type": "module",
   "exports": {
     "./jobs/finance-jobs": "./dist/jobs/finance-jobs.js",
-    "./funding-worker": "./dist/funding/worker/funding-reconciliation-worker.js"
+    "./funding-worker": {
+      "source": "./src/funding/worker/funding-reconciliation-worker.ts",
+      "import": "./dist/funding/worker/funding-reconciliation-worker.js"
+    }
   },
   "scripts": {
     "dev": "tsx src/server.ts",

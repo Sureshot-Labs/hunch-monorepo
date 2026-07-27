@@ -195,7 +195,11 @@ export async function listFundingStepReceiptTargets(
       where step.operation_id = $1
         and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
         and (
-          step.state in ('submitted', 'reconcile_required')
+          step.state in (
+            'submitted',
+            'reconcile_required',
+            'recovery_required'
+          )
           or (
             step.state = 'succeeded'
             and receipt.status = 'finalized'
@@ -285,14 +289,22 @@ const receiptRank: Readonly<Record<FundingStepReceiptStatus, number>> = {
   reorged: 4,
 };
 
-function shouldIgnoreReceiptUpdate(
+export function shouldIgnoreFundingStepReceiptUpdate(
   previous: FundingStepReceiptStatus,
-  incoming: FundingStepReceiptStatus,
+  incoming: FundingStepReceiptEvidence,
 ): boolean {
-  if (previous === incoming) return false;
+  if (previous === incoming.status) return false;
+  if (
+    previous === "mismatch" &&
+    incoming.status === "finalized" &&
+    incoming.actionMatch === true &&
+    incoming.canonical
+  ) {
+    return false;
+  }
   if (["failed", "mismatch", "reorged"].includes(previous)) return true;
-  if (previous === "finalized") return incoming !== "reorged";
-  return receiptRank[incoming] < receiptRank[previous];
+  if (previous === "finalized") return incoming.status !== "reorged";
+  return receiptRank[incoming.status] < receiptRank[previous];
 }
 
 function stepStateForReceipt(
@@ -363,7 +375,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const previous = existing.rows[0];
   if (
     previous &&
-    shouldIgnoreReceiptUpdate(previous.status, input.receipt.status)
+    shouldIgnoreFundingStepReceiptUpdate(previous.status, input.receipt)
   ) {
     return mapReceipt(previous);
   }

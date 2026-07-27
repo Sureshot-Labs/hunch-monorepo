@@ -97,7 +97,7 @@ export const env = {
   ),
   fundingReconciliationIntervalSec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_INTERVAL_SEC"),
-    15,
+    1,
   ),
   fundingReconciliationBatchSize: parsePositiveInt(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_BATCH_SIZE"),
@@ -109,6 +109,10 @@ export const env = {
   ),
   fundingReconciliationPollSec: parsePositiveInt(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_POLL_SEC"),
+    2,
+  ),
+  fundingReconciliationIdlePollSec: parsePositiveInt(
+    readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_IDLE_POLL_SEC"),
     15,
   ),
   fundingReconciliationRetrySec: parsePositiveInt(

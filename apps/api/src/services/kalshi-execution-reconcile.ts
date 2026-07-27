@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { isRpcRateLimit } from "@hunch/shared";
 
 import {
   fetchFulfilledKalshiTradeExecutionsMissingFeeEvent,
@@ -195,6 +196,7 @@ export async function reconcileKalshiExecutions(
     errors: 0,
     dryRun: options.dryRun,
   };
+  let rpcRateLimited = false;
 
   for (const row of rows) {
     try {
@@ -215,6 +217,18 @@ export async function reconcileKalshiExecutions(
       }
     } catch (error) {
       summary.errors += 1;
+      if (isRpcRateLimit(error)) {
+        rpcRateLimited = true;
+        options.logger?.warn?.(
+          {
+            error,
+            executionId: row.id,
+            txSignature: row.tx_signature,
+          },
+          "Kalshi execution reconcile deferred after RPC rate limit",
+        );
+        break;
+      }
       options.logger?.error?.(
         {
           error,
@@ -226,7 +240,7 @@ export async function reconcileKalshiExecutions(
     }
   }
 
-  for (const row of feeBackfillRows) {
+  for (const row of rpcRateLimited ? [] : feeBackfillRows) {
     try {
       if (options.dryRun) {
         summary.feeBackfilled += 1;
@@ -246,6 +260,17 @@ export async function reconcileKalshiExecutions(
       }
     } catch (error) {
       summary.errors += 1;
+      if (isRpcRateLimit(error)) {
+        options.logger?.warn?.(
+          {
+            error,
+            executionId: row.id,
+            txSignature: row.tx_signature,
+          },
+          "Kalshi fee backfill reconcile deferred after RPC rate limit",
+        );
+        break;
+      }
       options.logger?.error?.(
         {
           error,

@@ -253,6 +253,17 @@ export function deriveTargetState(
       target: isValidFundingOperationState(recovery) ? recovery : current,
     };
   }
+  if (
+    current.status === "completed" ||
+    current.status === "refunded" ||
+    current.status === "failed" ||
+    current.status === "cancelled"
+  ) {
+    return {
+      reorgBlockedByTerminalState: false,
+      target: current,
+    };
+  }
 
   if (steps.some((step) => step.state === "recovery_required")) {
     return {
@@ -1075,6 +1086,7 @@ export type FundingReconciliationBatchOptions = Readonly<{
   leaseSeconds?: number;
   retryDelayMs?: number;
   pollDelayMs?: number;
+  idlePollDelayMs?: number;
   maxAttempts?: number;
   now?: Date;
   providerPoll?: (
@@ -1118,13 +1130,25 @@ function summarizeError(error: unknown): Readonly<{
   };
 }
 
+export function fundingReconciliationPollDelayMs(
+  state: FundingOperationState,
+  input: Readonly<{
+    activePollDelayMs: number;
+    idlePollDelayMs: number;
+  }>,
+): number {
+  return state.status === "in_progress" || state.status === "reconcile_required"
+    ? input.activePollDelayMs
+    : input.idlePollDelayMs;
+}
+
 async function processLease(
   pool: Pool,
   lease: FundingReconciliationLease,
   options: Required<
     Pick<
       FundingReconciliationBatchOptions,
-      "maxAttempts" | "pollDelayMs" | "retryDelayMs"
+      "maxAttempts" | "pollDelayMs" | "idlePollDelayMs" | "retryDelayMs"
     >
   > &
     Readonly<{ now: Date }>,
@@ -1158,7 +1182,13 @@ async function processLease(
       leaseToken: lease.leaseToken,
       result: {
         kind: "requeue",
-        dueAt: new Date(options.now.getTime() + options.pollDelayMs),
+        dueAt: new Date(
+          options.now.getTime() +
+            fundingReconciliationPollDelayMs(reduction.finalState, {
+              activePollDelayMs: options.pollDelayMs,
+              idlePollDelayMs: options.idlePollDelayMs,
+            }),
+        ),
       },
       now: options.now,
     });
@@ -1207,6 +1237,7 @@ export async function runFundingReconciliationBatch(
       {
         maxAttempts: options.maxAttempts ?? 20,
         pollDelayMs: options.pollDelayMs ?? 15_000,
+        idlePollDelayMs: options.idlePollDelayMs ?? 15_000,
         retryDelayMs: options.retryDelayMs ?? 30_000,
         now,
       },
